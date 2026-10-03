@@ -246,6 +246,7 @@ function handsSource(
   overrides: Parameters<typeof createReleaseSource>[1] = {},
 ) {
   return createReleaseSource("https://legacy.invalid/computer", {
+    backend: "hands",
     handsApiOrigin: "https://hands.example",
     handsAppSlug: "raft-computer",
     channelProvider: () => "alpha",
@@ -292,6 +293,7 @@ test("CLI target resolution shares Hands authority for latest, alpha, and pinned
   let identityReads = 0;
   let legacyFetches = 0;
   const deps: Parameters<typeof resolveComputerUpgradeTargetVersion>[3] = {
+    backend: "hands",
     fetchFn: async () => {
       legacyFetches += 1;
       throw new Error("legacy CDN must not run");
@@ -347,6 +349,7 @@ test("CLI target resolution fails closed on Hands target or cohort identity drif
       CTX,
       "https://legacy.invalid/computer",
       {
+        backend: "hands",
         getHandsDeviceIdFn: async () => DEVICE_ID,
         createHandsUpdaterFn: () => ({
           checkUpdate: async () => ({ kind: "update", candidate }),
@@ -368,6 +371,7 @@ test("Hands default deps resolve the production app slug raft-computer-cli end t
   // (the old "raft-computer") stayed green. This test binds the default.
   const options: HandsUpdaterOptions[] = [];
   const source = createReleaseSource("https://legacy.invalid/computer", {
+    backend: "hands",
     channelProvider: () => "alpha",
     getHandsDeviceIdFn: async () => DEVICE_ID,
     createHandsUpdaterFn: (opts) => {
@@ -400,6 +404,7 @@ test("Hands default deps resolve the production app slug raft-computer-cli end t
   // The candidate identity check must bind the same default: an echo of any
   // other app slug is drift, not a resolvable release.
   const drifted = createReleaseSource("https://legacy.invalid/computer", {
+    backend: "hands",
     channelProvider: () => "alpha",
     getHandsDeviceIdFn: async () => DEVICE_ID,
     createHandsUpdaterFn: () => ({
@@ -528,6 +533,7 @@ test("default published Hands identity uses OS-aware user state and is reused", 
   const inputs: UpdateCheckInput[] = [];
   try {
     const source = createReleaseSource("https://legacy.invalid/computer", {
+      backend: "hands",
       handsApiOrigin: "https://hands.example",
       handsAppSlug: "raft-computer",
       channelProvider: () => "alpha",

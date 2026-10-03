@@ -1,7 +1,14 @@
 import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
 
-/** Public CDN root for published Computer SEA binaries. */
-export const DEFAULT_UPGRADE_BASE_URL = "https://cdn.raft.build/computer";
+/** This distribution updates from the fork, never the upstream release channel. */
+export const DEFAULT_UPGRADE_BASE_URL = "https://github.com/Mellonta/raft-source/releases/download";
+
+export function latestManifestUrl(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, "");
+  return base === DEFAULT_UPGRADE_BASE_URL
+    ? "https://github.com/Mellonta/raft-source/releases/latest/download/manifest.json"
+    : `${base}/manifest.json`;
+}
 
 /** Test/staging override for the Computer release source. */
 export const UPGRADE_BASE_URL_ENV = "RAFT_COMPUTER_UPGRADE_BASE_URL";
@@ -22,7 +29,7 @@ export async function fetchCdnLatestVersionResult(
   baseUrl: string,
   fetchFn: typeof fetch = fetch,
 ): Promise<ComputerLatestVersionResolveResult> {
-  const url = `${baseUrl.replace(/\/$/, "")}/manifest.json`;
+  const url = latestManifestUrl(baseUrl);
   const controller = new AbortController();
   const timeoutId = setClockTimeout(() => controller.abort(), 10_000);
   try {
