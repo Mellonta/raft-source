@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { Tracer } from "@botiverse/raft-shared";
+import { DISTRIBUTION_POLICY, type Tracer } from "@botiverse/raft-shared";
 import { uploadWithSignedCapability } from "./directUploadCapability.js";
 import { bucketDelayMs, computeTraceJitter, NO_JITTER, type TraceJitter } from "@botiverse/raft-trace-client";
 
@@ -85,6 +85,7 @@ export class DaemonTraceBundleUploader {
   }
 
   start(): void {
+    if (!DISTRIBUTION_POLICY.diagnosticUploads) return;
     if (this.stopped) return;
     if (this.initialDelayTimer || this.intervalTimer) return;
 
@@ -114,6 +115,7 @@ export class DaemonTraceBundleUploader {
    * we can distinguish startup drain vs steady-state ticks in ScopeDB.
    */
   async uploadOnce(trigger: UploadTrigger = "manual"): Promise<{ attempted: number; uploaded: number }> {
+    if (!DISTRIBUTION_POLICY.diagnosticUploads) return { attempted: 0, uploaded: 0 };
     const files = await this.findUploadCandidates();
     let uploaded = 0;
     for (const file of files.slice(0, this.options.maxFilesPerRun ?? DEFAULT_MAX_FILES_PER_RUN)) {

@@ -1,3 +1,11 @@
+import { vi } from "vitest";
+// Retain the upstream mechanism tests with its policy enabled in this test only.
+// mellontaPrivacy.test.ts exercises the actual shipped, disabled policy.
+vi.mock("@botiverse/raft-shared", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@botiverse/raft-shared")>(),
+  DISTRIBUTION_POLICY: { managedMcp: true, diagnosticUploads: true },
+}));
+
 // Byte-pin tests for the DiagnosticsPushService (V0 Sync diagnostics).
 //
 // task #102 (#wg-raft-computer:a87e1bdb) fixed the shipped b2 defect: the

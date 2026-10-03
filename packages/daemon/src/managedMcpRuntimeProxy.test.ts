@@ -3,7 +3,7 @@ import { vi } from "vitest";
 // mellontaPrivacy.test.ts exercises the actual shipped, disabled policy.
 vi.mock("@botiverse/raft-shared", async (importOriginal) => ({
   ...await importOriginal<typeof import("@botiverse/raft-shared")>(),
-  DISTRIBUTION_POLICY: { managedMcp: true },
+  DISTRIBUTION_POLICY: { managedMcp: true, diagnosticUploads: true },
 }));
 
 import assert from "node:assert/strict";
