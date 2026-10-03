@@ -28,6 +28,18 @@ jobs:
         run: bash scripts/mellonta/setup-ubuntu.sh --no-start --allowed-hosts portal.example.test
       - name: Verify generated runtime and launcher behavior
         run: |
+          set -E
+          report_failure() {
+            python3 - "$1" "$RUNNER_TEMP/setup-check.log" <<'PY'
+          import pathlib, sys
+          output = pathlib.Path(sys.argv[2]).read_text(errors="replace")
+          message = "Failed command: " + sys.argv[1] + "\n" + "\n".join(output.splitlines()[-100:])
+          message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print("::error title=Ubuntu setup verification failed::" + message)
+          PY
+          }
+          exec > >(tee "$RUNNER_TEMP/setup-check.log") 2>&1
+          trap 'report_failure "$BASH_COMMAND"' ERR
           source /data/.raft-config/runtime.sh
           cd /data/raft
           test "$(node --version)" = "v$(cat .node-version)"
