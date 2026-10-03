@@ -138,6 +138,7 @@ const pwaManifestNamePlugin = () => ({
 });
 
 export default defineConfig({
+  ...(process.env.VITE_DEV_CACHE_DIR ? { cacheDir: process.env.VITE_DEV_CACHE_DIR } : {}),
   define: {
     ...remotePreviewDefines,
     ...createFrontendReleaseIdentityDefines(frontendReleaseIdentity),

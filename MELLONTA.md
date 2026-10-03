@@ -63,6 +63,58 @@ The value is read when the web process starts. Setting it in another shell
 does not change an already-running process. This is a server checkout setting;
 updating the Computer binary is not required.
 
+## Ubuntu server setup
+
+With the data disk mounted at `/data` and Docker already working for your Linux
+account, run the setup script as that account. It uses sudo only for missing apt
+packages and creating directories; it does not configure, migrate, restart, or
+reinstall Docker, or change Docker group membership. Your existing `/dockerroot`
+configuration is retained.
+
+```bash
+bash scripts/mellonta/setup-ubuntu.sh --allowed-hosts a.b.com
+```
+
+The script can also run from a downloaded copy outside the checkout: it clones
+the public fork to `/data/raft` if necessary. It reuses existing nvm, or installs
+[nvm v0.40.8](https://github.com/nvm-sh/nvm/tree/v0.40.8) in `/data/.nvm`; selects
+Node from `.node-version` (npm is included); installs the pinned pnpm and missing
+Ubuntu tools; and installs server, web, and daemon dependencies. It starts
+`raftdev` unless `--no-start` is passed. AI provider CLIs and credentials are
+configured separately.
+
+| Path | Contents |
+| --- | --- |
+| `/data/raft` | Source, dependencies, and build outputs |
+| `/data/.raftdev/<name>` | PostgreSQL, Redis, object storage, launcher state, local traces |
+| `/data/.raftdev/.dev-env-<name>.json` | Seed credentials |
+| `/data/.raft` | Daemon/agent state and workspaces |
+| `/data/.raft-config` | Runtime settings and launch scripts |
+| `/data/.nvm` | Newly installed nvm, Node, npm, and pnpm |
+| `/data/.npm`, `/data/.pnpm`, `/data/.pnpm-store`, `/data/.cache`, `/data/.tmp` | Package caches, Vite cache, and temporary files |
+
+After setup, the one-line startup command is:
+
+```bash
+bash /data/.raft-config/start.sh
+```
+
+The default environment name is `raft`; `--name NAME` selects another name at
+setup. Use the generated launcher for other commands so they use the same state:
+`bash /data/.raft-config/raftdev status` or `bash /data/.raft-config/raftdev logs raft`.
+Launch-time `VITE_DEV_ALLOWED_HOSTS` overrides the saved default. Change other
+defaults in `/data/.raft-config/settings.sh`; setup preserves that file on reruns.
+New setup defaults disable public tunnels, trace worker/collector services,
+artificial latency, and idle auto-stop. The web portal still runs in dev mode.
+
+PostgreSQL, Redis, and object storage use persistent bind mounts under `/data`.
+Stopping the dev environment removes its containers and seed credentials but
+retains those data directories. Rerunning setup leaves an existing tmux session
+running and reports status. It does not silently migrate in-checkout state or
+reuse containers mounted to a different data location; those require a deliberate
+data migration. Existing source is retained unless `--update` is supplied, which
+allows only a clean fast-forward of `main`.
+
 ## Build and publish another Linux release
 
 Use Node from `.node-version` and pnpm 10.29.3. Bump the Computer package version

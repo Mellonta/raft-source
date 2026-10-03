@@ -1,0 +1,44 @@
+name: Mellonta Ubuntu setup checks
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/mellonta/setup-ubuntu*'
+      - 'scripts/dev/raftdev*'
+      - 'packages/web/vite.config.ts'
+      - '.github/workflows/mellonta-setup-checks.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Prepare isolated data mount and record existing Docker
+        run: |
+          mkdir -p "$RUNNER_TEMP/raft-data"
+          sudo mkdir -p /data
+          sudo mount --bind "$RUNNER_TEMP/raft-data" /data
+          docker info --format '{{.DockerRootDir}}' > "$RUNNER_TEMP/docker-root-before"
+          git clone "$GITHUB_WORKSPACE" /data/raft
+          git -C /data/raft remote set-url origin https://github.com/Mellonta/raft-source.git
+      - name: Bootstrap without launching the application
+        run: bash scripts/mellonta/setup-ubuntu.sh --no-start --allowed-hosts portal.example.test
+      - name: Verify generated runtime and launcher behavior
+        run: |
+          source /data/.raft-config/runtime.sh
+          cd /data/raft
+          test "$(node --version)" = "v$(cat .node-version)"
+          npm --version
+          pnpm --version
+          test "$RAFTDEV_STATE_DIR" = /data/.raftdev
+          test "$SLOCK_HOME" = /data/.raft
+          test "$VITE_DEV_ALLOWED_HOSTS" = portal.example.test
+          docker info --format '{{.DockerRootDir}}' > "$RUNNER_TEMP/docker-root-after"
+          cmp "$RUNNER_TEMP/docker-root-before" "$RUNNER_TEMP/docker-root-after"
+          bash /data/.raft-config/raftdev ports raft
+          node --test scripts/mellonta/setup-ubuntu.test.mjs
+          env -u RAFTDEV_STATE_DIR -u RAFTDEV_PERSISTENT_DATA -u RAFTDEV_SHELL_INIT -u SLOCKDEV_HOME -u VITE_DEV_ALLOWED_HOSTS node --import tsx --test scripts/dev/raftdev-entry.test.ts scripts/dev/raftdev-paths.test.ts scripts/dev/raftdev-state.test.ts scripts/dev/raftdev-risingwave.test.ts scripts/dev/raftdev-trace.test.ts
+          pnpm typecheck:raftdev
