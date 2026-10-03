@@ -64,6 +64,7 @@ export interface TraceReadResult {
 
 export interface RunTraceCliOptions {
   projectDir: string;
+  stateRoot?: string;
   defaultEnvName: string;
   stdout?: (value: string) => void;
   stderr?: (value: string) => void;
@@ -1147,7 +1148,7 @@ export async function runTraceCli(args: string[], options: RunTraceCliOptions): 
     writeErr("WARNING: --raw prints unredacted local trace attributes and service names; output may contain sensitive payload data.");
   }
 
-  const environmentDir = join(options.projectDir, ".slockdev", parsed.envName);
+  const environmentDir = join(options.stateRoot ?? join(options.projectDir, ".slockdev"), parsed.envName);
   const sourcePath = join(environmentDir, "traces", "otlp.json");
   const readerStatePath = join(environmentDir, "traces", "reader-state.json");
   const startedAt = Date.now();

@@ -166,6 +166,9 @@ function writeFakeStartTools(bin: string): void {
     join(bin, "docker"),
     `#!/bin/sh
 state="$RAFTDEV_FAKE_DOCKER_STATE"
+if [ -n "\${RAFTDEV_FAKE_DOCKER_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$RAFTDEV_FAKE_DOCKER_LOG"
+fi
 has() { grep -qx "$1" "$state" 2>/dev/null; }
 add() { has "$1" || printf '%s\n' "$1" >> "$state"; }
 remove() { grep -vx "$1" "$state" > "$state.next" 2>/dev/null || true; mv "$state.next" "$state"; }
@@ -908,6 +911,79 @@ for (const allowedHosts of ["a.b.com, .example.net", "", undefined]) {
     });
   });
 }
+
+test("external persistent state survives stop and is discovered outside the checkout", () => {
+  withFakeBin((root, bin) => {
+    const environmentName = "external-state-tooth";
+    const stateRoot = join(root, "external state");
+    const dockerState = join(root, "docker.state");
+    const dockerLog = join(root, "docker.log");
+    const tmuxState = join(root, "tmux.state");
+    writeFileSync(dockerState, "");
+    writeFileSync(tmuxState, "");
+    writeFakeStartTools(bin);
+    const env = {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH ?? ""}`,
+      RAFTDEV_FAKE_DOCKER_STATE: dockerState,
+      RAFTDEV_FAKE_DOCKER_LOG: dockerLog,
+      RAFTDEV_FAKE_TMUX_STATE: tmuxState,
+      RAFTDEV_STATE_DIR: stateRoot,
+      RAFTDEV_PERSISTENT_DATA: "1",
+      SLOCKDEV_HOME: join(root, "agent home"),
+      SLOCKDEV_TRACE_WORKER: "0", SLOCKDEV_TUNNEL: "0", SLOCKDEV_IDLE_TTL_SECONDS: "0",
+    };
+    const start = spawnSync(raftdev, ["start", environmentName], { cwd: projectDir, encoding: "utf8", env });
+    assert.equal(start.status, 0, `${start.stdout}\n${start.stderr}`);
+    assert.ok(existsSync(join(stateRoot, `.dev-env-${environmentName}.json`)));
+    assert.equal(existsSync(join(projectDir, `.dev-env-${environmentName}.json`)), false);
+    assert.equal(existsSync(join(projectDir, ".slockdev", environmentName)), false);
+    const calls = readFileSync(dockerLog, "utf8");
+    for (const [name, destination] of [["postgres", "/var/lib/postgresql/data"], ["redis", "/data"], ["rustfs", "/data"]]) {
+      const dataDir = join(stateRoot, environmentName, name);
+      assert.ok(calls.includes(`${dataDir}:${destination}`), calls);
+      writeFileSync(join(dataDir, "keep.txt"), "persistent application data");
+    }
+    assert.match(calls, /redis-server --appendonly yes/);
+    // With neither Docker nor tmux discovery, status must still find the seed.
+    writeFileSync(dockerState, "");
+    writeFileSync(tmuxState, "");
+    const status = spawnSync(raftdev, ["status"], { cwd: projectDir, encoding: "utf8", env });
+    assert.equal(status.status, 0, status.stderr);
+    assert.ok(status.stdout.includes(`Environment '${environmentName}'`), status.stdout);
+    assert.ok(status.stdout.includes(join(root, "agent home")), status.stdout);
+    const stop = spawnSync(raftdev, ["stop", environmentName], { cwd: projectDir, encoding: "utf8", env });
+    assert.equal(stop.status, 0, `${stop.stdout}\n${stop.stderr}`);
+    assert.equal(existsSync(join(stateRoot, `.dev-env-${environmentName}.json`)), false);
+    for (const name of ["postgres", "redis", "rustfs"]) {
+      assert.equal(readFileSync(join(stateRoot, environmentName, name, "keep.txt"), "utf8"), "persistent application data");
+    }
+  });
+});
+
+test("persistent startup refuses an existing container with a different data mount before changes", () => {
+  withFakeBin((root, bin) => {
+    const environmentName = "old-mount-tooth";
+    const dockerState = join(root, "docker.state");
+    const dockerLog = join(root, "docker.log");
+    writeFileSync(dockerState, `C:slock-dev-${environmentName}-pg\n`);
+    writeFakeStartTools(bin);
+    const child = spawnSync(raftdev, ["start", environmentName], {
+      cwd: projectDir, encoding: "utf8",
+      env: {
+        ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`,
+        RAFTDEV_FAKE_DOCKER_STATE: dockerState, RAFTDEV_FAKE_DOCKER_LOG: dockerLog,
+        RAFTDEV_STATE_DIR: join(root, "new-state"), RAFTDEV_PERSISTENT_DATA: "1",
+        SLOCKDEV_TRACE_WORKER: "0", SLOCKDEV_TUNNEL: "0", SLOCKDEV_IDLE_TTL_SECONDS: "0",
+      },
+    });
+    assert.equal(child.status, 1, `${child.stdout}\n${child.stderr}`);
+    assert.match(child.stdout, /does not use the requested persistent directory/);
+    assert.doesNotMatch(readFileSync(dockerLog, "utf8"), /^(run|rm|start|volume create) /m);
+    assert.equal(existsSync(join(root, "new-state")), false);
+    assert.equal(readFileSync(dockerState, "utf8"), `C:slock-dev-${environmentName}-pg\n`);
+  });
+});
 
 test("a required tmux launch failure is not reported as running and is cleaned", () => {
   withFakeBin((root, bin) => {

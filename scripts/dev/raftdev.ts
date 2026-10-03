@@ -46,6 +46,7 @@ import { basename, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseReaderStartedAtMs, runTraceCli, traceBannerLines } from "./raftdev-trace.js";
+import { raftdevStoragePaths } from "./raftdev-paths.js";
 
 export const PROJECT_DIR = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 
@@ -87,6 +88,7 @@ interface Env {
   RISINGWAVE_CONTAINER: string;
   RISINGWAVE_NETWORK: string;
   RUSTFS_VOLUME: string; TMUX_SESSION: string; SEED_FILE: string;
+  POSTGRES_DATA_DIR?: string; REDIS_DATA_DIR?: string; RUSTFS_DATA_DIR?: string;
   SLOCKDEV_DIR: string; SLOCK_HOME: string; ACTIVITY_FILE: string; IDLE_TTL_FILE: string;
   RISINGWAVE_DSN_FILE: string; RISINGWAVE_STATE_FILE: string;
   POSTGRES_PASSWORD: string; JWT_SECRET: string;
@@ -341,6 +343,7 @@ export interface PostgresDockerEnv {
   PG_PORT: number;
   POSTGRES_PASSWORD: string;
   RISINGWAVE_NETWORK: string;
+  POSTGRES_DATA_DIR?: string;
 }
 
 export type RisingWaveReadinessResult = "ready" | "container-exited" | "timeout";
@@ -390,6 +393,7 @@ export function postgresDockerRunArgs(e: PostgresDockerEnv, cdcEnabled = false):
     "-e", "POSTGRES_USER=postgres",
     "-e", `POSTGRES_PASSWORD=${e.POSTGRES_PASSWORD}`,
     "-p", `${e.PG_PORT}:5432`,
+    ...(e.POSTGRES_DATA_DIR ? ["-v", `${e.POSTGRES_DATA_DIR}:/var/lib/postgresql/data`] : []),
     "postgres:16-alpine",
     ...(cdcEnabled ? [
       "-c", "wal_level=logical",
@@ -444,7 +448,7 @@ export function validateEnvironmentName(name: string): string {
   return name;
 }
 
-function setupEnv(name: string): Env {
+export function setupEnv(name: string): Env {
   validateEnvironmentName(name);
   const bucket = sanitizeBucketComponent(name);
   const o = computeOffset(name);
@@ -452,7 +456,9 @@ function setupEnv(name: string): Env {
   const REDIS_PORT = 16379 + o;
   const RUSTFS_PORT = 19000 + o;
   const POSTGRES_PASSWORD = `slock-dev-${name}`;
-  const SLOCKDEV_DIR = join(PROJECT_DIR, ".slockdev", name);
+  const storage = raftdevStoragePaths(PROJECT_DIR);
+  const SLOCKDEV_DIR = join(storage.stateRoot, name);
+  const persistent = process.env.RAFTDEV_PERSISTENT_DATA === "1";
   return {
     name, OFFSET: o,
     PG_PORT, REDIS_PORT, RUSTFS_PORT,
@@ -486,7 +492,12 @@ function setupEnv(name: string): Env {
     RISINGWAVE_NETWORK: `slock-dev-${name}-risingwave-net`,
     RUSTFS_VOLUME: `slock-dev-${name}-rustfs-data`,
     TMUX_SESSION: `slock-${name}`,
-    SEED_FILE: join(PROJECT_DIR, `.dev-env-${name}.json`),
+    SEED_FILE: join(storage.seedRoot, `.dev-env-${name}.json`),
+    ...(persistent ? {
+      POSTGRES_DATA_DIR: join(SLOCKDEV_DIR, "postgres"),
+      REDIS_DATA_DIR: join(SLOCKDEV_DIR, "redis"),
+      RUSTFS_DATA_DIR: join(SLOCKDEV_DIR, "rustfs"),
+    } : {}),
     SLOCKDEV_DIR,
     SLOCK_HOME: process.env.SLOCKDEV_HOME || join(SLOCKDEV_DIR, "home"),
     ACTIVITY_FILE: join(SLOCKDEV_DIR, "last-activity"),
@@ -702,8 +713,9 @@ function formatTimestamp(seconds: number | null): string {
 // Wraps a command so tmux window prints its exit status then drops into a
 // login shell — identical contract to bash slockdev's run_tmux_shell_command.
 function runTmuxShellCommand(cmd: string): string {
+  const init = process.env.RAFTDEV_SHELL_INIT?.trim();
   const wrapped =
-    `${cmd}; status=$?; echo; echo "[raftdev] command exited with status $status"; ` +
+    `${init ? `source ${shellQuote(init)} && ` : ""}${cmd}; status=$?; echo; echo "[raftdev] command exited with status $status"; ` +
     `exec "${process.env.SHELL || "/bin/zsh"}" -l`;
   return `bash -lc ${shellQuote(wrapped)}`;
 }
@@ -999,6 +1011,9 @@ Name defaults to the directory basename (e.g., "slock").
 Different names get different ports, so multiple environments can coexist.
 
 Optional:
+  RAFTDEV_STATE_DIR moves environment state and seed credentials outside the
+  checkout. RAFTDEV_PERSISTENT_DATA=1 additionally stores PostgreSQL, Redis,
+  and object data there using bind mounts; stop/nuke retain these data files.
   VITE_DEV_ALLOWED_HOSTS provides comma-separated hostnames accepted by the
   web server, in addition to the built-in local and tunnel hosts. Use hostnames
   without a scheme or port; a leading dot also allows subdomains.
@@ -1138,11 +1153,11 @@ function cmdStatus(): void {
   out(sessionNames.length > 0 ? sessionNames.map((session) => `  ${session}`).join("\n") : "  (none)");
   out("");
   const environmentNames = new Set<string>();
-  for (const f of (existsSync(PROJECT_DIR) ? readdirSync(PROJECT_DIR) : []).sort()) {
+  const { stateRoot: environmentsRoot, seedRoot } = raftdevStoragePaths(PROJECT_DIR);
+  for (const f of (existsSync(seedRoot) ? readdirSync(seedRoot) : []).sort()) {
     const m = f.match(/^\.dev-env-(.*)\.json$/);
     if (m) environmentNames.add(m[1]);
   }
-  const environmentsRoot = join(PROJECT_DIR, ".slockdev");
   for (const entry of (existsSync(environmentsRoot)
     ? readdirSync(environmentsRoot, { withFileTypes: true })
     : [])) {
@@ -1262,7 +1277,7 @@ function cmdStatus(): void {
     out(`  RustFS     : http://localhost:${19000 + o} (console: http://localhost:${19100 + o})`);
     out(`  Server     : localhost:${13001 + o}`);
     out(`  Web        : http://localhost:${15173 + o}`);
-    out(`  SLOCK_HOME : ${join(PROJECT_DIR, ".slockdev", en, "home")}`);
+    out(`  SLOCK_HOME : ${e.SLOCK_HOME}`);
     out(`  Trace worker: localhost:${18787 + o} (web + daemon traces, feedback reports; set SLOCKDEV_TRACE_WORKER=0 to disable)`);
     out(`  Trace observe: otelcol OTLP http://127.0.0.1:${17417 + o} (grpc ${17317 + o}); server direct + Worker-forwarded web/daemon`);
     const lastActivity = readIntegerFile(e.ACTIVITY_FILE);
@@ -1746,7 +1761,7 @@ function cmdStop(name: string): void {
 function cmdNuke(): void {
   out("=== Nuking ALL slock dev environments ===");
   out("");
-  const environmentsRoot = join(PROJECT_DIR, ".slockdev");
+  const { stateRoot: environmentsRoot, seedRoot } = raftdevStoragePaths(PROJECT_DIR);
   const externalRisingWaveContainers = new Set<string>();
   const externalRisingWaveNetworks = new Set<string>();
   const legacyManagedContainers = new Set<string>();
@@ -1763,7 +1778,7 @@ function cmdNuke(): void {
 
   // Seed files and validated state files are the migration proof for resources
   // created by pre-label raftdev versions. Names alone are never ownership.
-  for (const file of (existsSync(PROJECT_DIR) ? readdirSync(PROJECT_DIR) : [])) {
+  for (const file of (existsSync(seedRoot) ? readdirSync(seedRoot) : [])) {
     const match = file.match(/^\.dev-env-(.*)\.json$/);
     if (!match) continue;
     try {
@@ -1919,9 +1934,9 @@ function cmdNuke(): void {
     out(`Removed ${removedRisingWaveStateFiles} RisingWave state file(s).`);
   }
   let cleaned = 0;
-  for (const f of (existsSync(PROJECT_DIR) ? readdirSync(PROJECT_DIR) : [])) {
+  for (const f of (existsSync(seedRoot) ? readdirSync(seedRoot) : [])) {
     if (/^\.dev-env-.*\.json$/.test(f)) {
-      rmSync(join(PROJECT_DIR, f), { force: true });
+      rmSync(join(seedRoot, f), { force: true });
       cleaned++;
     }
   }
@@ -2325,6 +2340,30 @@ function cmdStart(args: string[]): void {
     process.exit(1);
   }
   validateStartTooling();
+  if (e.POSTGRES_DATA_DIR && risingWaveNeedsBootstrap(risingWave)) {
+    out("ERROR: Persistent data cannot be combined with the destructive full RisingWave profile.");
+    process.exit(1);
+  }
+  // Never silently switch an existing database/object container to an empty
+  // bind mount. Existing installations require an explicit data migration.
+  for (const [container, dataDir, destination] of [
+    [e.CONTAINER, e.POSTGRES_DATA_DIR, "/var/lib/postgresql/data"],
+    [e.REDIS_CONTAINER, e.REDIS_DATA_DIR, "/data"],
+    [e.RUSTFS_CONTAINER, e.RUSTFS_DATA_DIR, "/data"],
+  ]) {
+    if (!dataDir || !container || !dockerNameExists(container)) continue;
+    const mounts = sh("docker", ["inspect", "--format", "{{json .Mounts}}", container], { quiet: true });
+    let matches = false;
+    try {
+      matches = mounts.code === 0 && JSON.parse(mounts.stdout).some((mount: { Type: string; Source: string; Destination: string }) =>
+        mount.Type === "bind" && mount.Source === dataDir && mount.Destination === destination);
+    } catch { /* An unreadable mount list is not evidence of a safe reuse. */ }
+    if (!matches) {
+      out(`ERROR: Existing container '${container}' does not use the requested persistent directory '${dataDir}'.`);
+      out("Migrate the existing data before changing its storage layout. No containers were modified.");
+      process.exit(1);
+    }
+  }
   // Validate latency early — malformed values should fail before we touch
   // docker / tmux. Unset → undefined → proxy never spawns, slockdev start
   // is byte-for-byte unchanged.
@@ -2500,6 +2539,9 @@ function cmdStart(args: string[]): void {
       previousRisingWaveState.profile === "full",
   });
   const risingWaveFull = risingWaveNeedsBootstrap(risingWave);
+  for (const dataDir of [e.POSTGRES_DATA_DIR, e.REDIS_DATA_DIR, e.RUSTFS_DATA_DIR]) {
+    if (dataDir) mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  }
   if (risingWaveFull) {
     // Full mode is intentionally ephemeral/destructive. Recreate both database
     // containers and their bridge so a process-only residue cannot silently
@@ -2581,7 +2623,9 @@ function cmdStart(args: string[]): void {
       "run", "-d", "--name", e.REDIS_CONTAINER,
       "--label", RAFTDEV_MANAGED_LABEL_ARG,
       "-p", `${e.REDIS_PORT}:6379`,
+      ...(e.REDIS_DATA_DIR ? ["-v", `${e.REDIS_DATA_DIR}:/data`] : []),
       "redis:7-alpine",
+      ...(e.REDIS_DATA_DIR ? ["redis-server", "--appendonly", "yes"] : []),
     ], { quiet: true });
   }
 
@@ -2638,11 +2682,12 @@ function cmdStart(args: string[]): void {
   }
 
   // RustFS
-  sh("docker", [
+  const rustfsStorage = e.RUSTFS_DATA_DIR ?? e.RUSTFS_VOLUME;
+  if (!e.RUSTFS_DATA_DIR) sh("docker", [
     "volume", "create", "--label", RAFTDEV_MANAGED_LABEL_ARG, e.RUSTFS_VOLUME,
   ], { quiet: true });
   sh("docker", [
-    "run", "--rm", "-v", `${e.RUSTFS_VOLUME}:/data`,
+    "run", "--rm", "-v", `${rustfsStorage}:/data`,
     "postgres:16-alpine", "sh", "-c", "chown -R 10001:10001 /data",
   ], { quiet: true });
   if (dockerNameExists(e.RUSTFS_CONTAINER)) {
@@ -2659,7 +2704,7 @@ function cmdStart(args: string[]): void {
       "-e", "RUSTFS_CONSOLE_ENABLE=true",
       "-p", `${e.RUSTFS_PORT}:9000`,
       "-p", `${e.RUSTFS_CONSOLE_PORT}:9001`,
-      "-v", `${e.RUSTFS_VOLUME}:/data`,
+      "-v", `${rustfsStorage}:/data`,
       "mirror.gcr.io/rustfs/rustfs:latest",
       "/data",
     ], { quiet: true });
@@ -3074,7 +3119,7 @@ function cmdStart(args: string[]): void {
   }
 
   if (idleTtlSeconds > 0) {
-    const janitorCmd = `node --import tsx scripts/dev/raftdev.ts janitor ${shellQuote(name)} ${String(idleTtlSeconds)}`;
+    const janitorCmd = `${passthrough("RAFTDEV_STATE_DIR")} ${passthrough("RAFTDEV_PERSISTENT_DATA")} ${passthrough("SLOCKDEV_HOME")} node --import tsx scripts/dev/raftdev.ts janitor ${shellQuote(name)} ${String(idleTtlSeconds)}`;
     runRequiredTmux(
       ["new-window", "-t", e.TMUX_SESSION, "-n", "janitor", "-c", PROJECT_DIR, runTmuxShellCommand(janitorCmd)],
       "janitor",
@@ -3214,6 +3259,7 @@ async function main(argv: string[]): Promise<number | void> {
     case "ports":  cmdPorts(envName); break;
     case "trace":  return runTraceCli(argv.slice(1), {
       projectDir: PROJECT_DIR,
+      stateRoot: raftdevStoragePaths(PROJECT_DIR).stateRoot,
       defaultEnvName: basename(PROJECT_DIR),
     });
     case "nuke":   cmdNuke(); break;
