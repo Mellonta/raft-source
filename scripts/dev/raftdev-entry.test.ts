@@ -1094,6 +1094,7 @@ while :; do sleep 1; done
           RAFTDEV_FAKE_DOCKER_LABELS: "0",
           RAFTDEV_FAKE_TMUX_KILL_PARENT: "1",
           RAFTDEV_FAKE_TUNNEL_STOPPED: tunnelStopped,
+          SLOCKDEV_TUNNEL: "1",
           SLOCKDEV_TRACE_WORKER: "0",
           SLOCKDEV_IDLE_TTL_SECONDS: "0",
         },
