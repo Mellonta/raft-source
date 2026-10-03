@@ -29,11 +29,12 @@ const desktopManifestContract = createDesktopManifestContractAdapter(process.env
 // accept. Use this when exposing the local dev server through a tunnel
 // (cloudflared / ngrok / tailscale serve) for a remote preview reviewer.
 // Vite supports leading-dot wildcards (e.g. `.trycloudflare.com`). Leave
-// unset for the standard local-only behavior.
+// unset to keep the built-in local and tunnel hosts.
 const extraAllowedHosts = (process.env.VITE_DEV_ALLOWED_HOSTS ?? "")
   .split(",")
   .map((h) => h.trim())
   .filter(Boolean);
+const allowedHosts = [".trycloudflare.com", ".loca.lt", ...extraAllowedHosts];
 
 // Serve/ship the canonical pixel-avatar JSON at a stable public URL
 // (/config/pixelAvatars.json) without a committed duplicate: the single
@@ -153,7 +154,7 @@ export default defineConfig({
   ],
   server: {
     host: true,
-    allowedHosts: [".trycloudflare.com", ".loca.lt"],
+    allowedHosts,
     port: devPort,
     // Per-commit previews expose this Vite dev server through quick tunnels
     // such as trycloudflare/localtunnel. Pre-transform the main shell so the
@@ -172,7 +173,6 @@ export default defineConfig({
         "./src/api/socket.ts",
       ],
     },
-    ...(extraAllowedHosts.length > 0 ? { allowedHosts: extraAllowedHosts } : {}),
     proxy: {
       "/api": {
         target: serverTarget,
@@ -204,7 +204,7 @@ export default defineConfig({
   // change targets.
   preview: {
     port: devPort,
-    allowedHosts: [".trycloudflare.com", ".loca.lt"],
+    allowedHosts,
     proxy: {
       "/api": { target: serverTarget, changeOrigin: true, xfwd: true },
       "/internal": { target: serverTarget, changeOrigin: true, xfwd: true },

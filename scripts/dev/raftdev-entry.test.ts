@@ -280,6 +280,13 @@ case "$1" in
     fi
     exit "$status"
     ;;
+  new-window)
+    if [ "$(arg_after -n "$@")" = "web" ] && [ -n "\${RAFTDEV_FAKE_WEB_COMMAND:-}" ]; then
+      for last_arg do :; done
+      printf '%s' "$last_arg" > "$RAFTDEV_FAKE_WEB_COMMAND"
+    fi
+    exit 0
+    ;;
   list-windows)
     [ -n "$state" ] || exit 1
     has "$(arg_after -t "$@")" || exit 1
@@ -849,6 +856,58 @@ test("start forwards the managed MCP credential key to the server process", () =
     }
   });
 });
+
+for (const allowedHosts of ["a.b.com, .example.net", "", undefined]) {
+  test(`start forwards allowed hosts into a web process with stale tmux environment: ${JSON.stringify(allowedHosts)}`, () => {
+    withFakeBin((root, bin) => {
+      const dockerState = join(root, "docker.state");
+      const webCommand = join(root, "web.command");
+      const webEnv = join(root, "web.env");
+      const environmentName = "allowed-hosts-tooth";
+      const environmentDir = join(projectDir, ".slockdev", environmentName);
+      const seedFile = join(projectDir, `.dev-env-${environmentName}.json`);
+      writeFileSync(dockerState, "");
+      writeFakeStartTools(bin);
+      try {
+        const child = spawnSync(raftdev, ["start", environmentName], {
+          cwd: projectDir,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH ?? ""}`,
+            SHELL: "/usr/bin/true",
+            RAFTDEV_FAKE_DOCKER_STATE: dockerState,
+            RAFTDEV_FAKE_WEB_COMMAND: webCommand,
+            VITE_DEV_ALLOWED_HOSTS: allowedHosts,
+            SLOCKDEV_TRACE_WORKER: "0",
+            SLOCKDEV_TUNNEL: "0",
+            SLOCKDEV_IDLE_TTL_SECONDS: "0",
+          },
+        });
+        assert.equal(child.status, 0, `${child.stdout}\n${child.stderr}`);
+        // Execute the captured web launch with a fake pnpm. Skip login profiles
+        // so the test never loads the machine owner's shell configuration.
+        writeExecutable(join(bin, "pnpm"), '#!/bin/sh\nprintf "%s" "$VITE_DEV_ALLOWED_HOSTS" > "$RAFTDEV_FAKE_WEB_ENV"\n');
+        const command = readFileSync(webCommand, "utf8")
+          .replace(/^bash -lc /, "/bin/bash --noprofile --norc -c ");
+        const web = spawnSync("/bin/sh", ["-c", command], {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH ?? ""}`,
+            RAFTDEV_FAKE_WEB_ENV: webEnv,
+            VITE_DEV_ALLOWED_HOSTS: "stale.example.org",
+          },
+        });
+        assert.equal(web.status, 0, `${web.stdout}\n${web.stderr}`);
+        assert.equal(readFileSync(webEnv, "utf8"), allowedHosts ?? "");
+      } finally {
+        rmSync(environmentDir, { recursive: true, force: true });
+        rmSync(seedFile, { force: true });
+      }
+    });
+  });
+}
 
 test("a required tmux launch failure is not reported as running and is cleaned", () => {
   withFakeBin((root, bin) => {

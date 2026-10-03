@@ -44,6 +44,25 @@ To opt into updates from this fork, use `raft-computer channel set latest`.
 Remove any old `RAFT_COMPUTER_RELEASE_BACKEND=hands` or upstream
 `RAFT_COMPUTER_UPGRADE_BASE_URL` override if you previously configured one.
 
+## Access the raftdev portal through your hostname
+
+Set the allowed hostnames when launching the server checkout:
+
+```bash
+VITE_DEV_ALLOWED_HOSTS=a.b.com ./raftdev start
+```
+
+For multiple hosts, use `VITE_DEV_ALLOWED_HOSTS=a.b.com,other.example.com`.
+Use hostnames without `http://`, `https://`, ports, or paths. A leading dot, such
+as `.example.com`, also allows subdomains. The setting reaches the web process
+even when tmux is already running; an unset or empty value clears a stale list.
+The built-in local and tunnel hosts remain allowed. The same variable works
+with `pnpm --filter @botiverse/raft-web dev` and `preview`.
+
+The value is read when the web process starts. Setting it in another shell
+does not change an already-running process. This is a server checkout setting;
+updating the Computer binary is not required.
+
 ## Build and publish another Linux release
 
 Use Node from `.node-version` and pnpm 10.29.3. Bump the Computer package version

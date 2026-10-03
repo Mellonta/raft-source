@@ -999,6 +999,10 @@ Name defaults to the directory basename (e.g., "slock").
 Different names get different ports, so multiple environments can coexist.
 
 Optional:
+  VITE_DEV_ALLOWED_HOSTS provides comma-separated hostnames accepted by the
+  web server, in addition to the built-in local and tunnel hosts. Use hostnames
+  without a scheme or port; a leading dot also allows subdomains.
+  Example: VITE_DEV_ALLOWED_HOSTS=a.b.com,.example.net ./raftdev start
   --description <text> on start labels what this preview environment is for.
   It is shown in the web Dev tools panel. SLOCKDEV_PREVIEW_DESCRIPTION can
   also provide the same value.
@@ -2929,6 +2933,9 @@ function cmdStart(args: string[]): void {
   webCmd += `${envAssign("SLOCK_HOME", e.SLOCK_HOME)} `;
   webCmd += `${envAssign("SLOCK_SERVER_PORT", String(webServerPort))} `;
   webCmd += `${envAssign("VITE_DEV_PORT", String(e.WEB_PORT))} `;
+  // Existing tmux servers retain their own environment. Set this explicitly,
+  // including empty when unset, so each launch uses the caller's host list.
+  webCmd += `${passthrough("VITE_DEV_ALLOWED_HOSTS")} `;
   webCmd += `${envAssign("VITE_DEPLOYMENT_ENV", "slockdev")} `;
   webCmd += `${envAssign("VITE_SLOCKDEV_ENV_NAME", name)} `;
   webCmd += `${envAssign("VITE_SLOCKDEV_PREVIEW_DESCRIPTION", previewDescription)} `;
