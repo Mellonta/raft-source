@@ -18,6 +18,7 @@ import type {
 } from "./apps/reminder/protocol.js";
 
 export { formatUtcTimestamp } from "./utcTimestamp.js";
+export { DISTRIBUTION_POLICY } from "./distributionPolicy.js";
 
 export {
   joinRaftChannelByTarget,
