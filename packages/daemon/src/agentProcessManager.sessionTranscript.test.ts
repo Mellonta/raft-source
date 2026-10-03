@@ -1,3 +1,11 @@
+import { vi } from "vitest";
+// Retain the upstream mechanism tests with its policy enabled in this test only.
+// mellontaPrivacy.test.ts exercises the actual shipped, disabled policy.
+vi.mock("@botiverse/raft-shared", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@botiverse/raft-shared")>(),
+  DISTRIBUTION_POLICY: { managedMcp: true, diagnosticUploads: true },
+}));
+
 import { asAxSurfaceText, type AxSurfaceText } from "@botiverse/raft-shared";
 // Regression tests for daemon session transcript diagnostic security.
 //

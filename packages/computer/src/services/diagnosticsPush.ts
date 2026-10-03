@@ -38,7 +38,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import path from "node:path";
-import { currentDate } from "@botiverse/raft-shared";
+import { currentDate, DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 
 import {
   computerDir,
@@ -652,7 +652,7 @@ export async function diagnosticsPush(
   // If the tracer is disabled, the menu-bar's altKey-revealed action has
   // nothing to attach to anyway. Honest closed-reason instead of writing
   // a marker that will sit on disk forever.
-  if (process.env.RAFT_COMPUTER_LOCAL_TRACE === "0") {
+  if (!DISTRIBUTION_POLICY.diagnosticUploads || process.env.RAFT_COMPUTER_LOCAL_TRACE === "0") {
     return { status: "failed", reason: "UPLOAD_DISABLED" };
   }
 

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
+  DISTRIBUTION_POLICY,
   createTraceScopeTracer,
   AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
   AGENT_MIGRATION_RESUMABLE_PROTOCOL,
@@ -1540,7 +1541,8 @@ export class DaemonCore {
     let connection!: DaemonConnection;
 
     this.agentsDataDir = options.dataDir ?? resolveRaftHomePath("agents", this.slockHome);
-    const traceUploadDisabled = process.env.SLOCK_DAEMON_TRACE_UPLOAD_DISABLED === "1";
+    const traceUploadDisabled = !DISTRIBUTION_POLICY.diagnosticUploads
+      || process.env.SLOCK_DAEMON_TRACE_UPLOAD_DISABLED === "1";
     const agentManagerOptions = {
       dataDir: this.agentsDataDir,
       serverUrl: options.serverUrl,
@@ -1673,6 +1675,7 @@ export class DaemonCore {
   }
 
   private installTraceBundleUploader(machineDir: string): void {
+    if (!DISTRIBUTION_POLICY.diagnosticUploads) return;
     if (!this.shouldEnableLocalTrace()) return;
     if (this.traceBundleUploader) return;
 

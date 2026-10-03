@@ -12,6 +12,7 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 import path from "node:path";
 import {
+  DISTRIBUTION_POLICY,
   type ManagedMcpCallRequest,
   type ManagedMcpCallResult,
   type ManagedMcpRuntimeSnapshot,
@@ -516,6 +517,8 @@ export async function prepareManagedMcpRuntimeProxy(input: {
   agentCredentialKey?: string | null;
   onWarning?: (message: string) => void;
 }): Promise<{ name: string; url: string } | null> {
+  // Skip discovery as well as injection into user-managed runtimes.
+  if (!DISTRIBUTION_POLICY.managedMcp) return null;
   if (!input.serverUrl) {
     emitManagedMcpDiscoveryWarning(input, "missing_server_url");
     return null;

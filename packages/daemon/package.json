@@ -1,6 +1,6 @@
 {
   "name": "@botiverse/raft-daemon",
-  "version": "1.0.25",
+  "version": "1.0.25-mellonta.1",
   "license": "FSL-1.1-ALv2",
   "type": "module",
   "bin": {

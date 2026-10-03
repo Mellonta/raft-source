@@ -1,5 +1,6 @@
 import { executeJsonRequest, executeResponseRequest, DEFAULT_CHAT_BRIDGE_TOOL_TIMEOUT_MS } from "./chatBridgeRequest.js";
 import { daemonFetch } from "./daemonFetch.js";
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -74,6 +75,9 @@ export async function requestDaemonScopeAttestation({
   fetchImpl = daemonFetch,
   timeoutMs = DEFAULT_CHAT_BRIDGE_TOOL_TIMEOUT_MS,
 }: RequestDaemonScopeAttestationOptions): Promise<DaemonScopeAttestation> {
+  if (!DISTRIBUTION_POLICY.diagnosticUploads && scope === "daemon-trace-bundle:create") {
+    throw new Error("Diagnostic uploads are disabled in this self-hosted build");
+  }
   const { response, data } = await executeJsonRequest<DaemonScopeAttestation>(
     joinUrl(serverUrl, "/internal/machine/scope-attestation"),
     {

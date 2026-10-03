@@ -37,6 +37,7 @@ import { ComputerServiceError } from "./services/errors.js";
 import { readChannel, type Channel } from "./lib/channelState.js";
 import { resolveRaftHome } from "./paths.js";
 import { HANDS_API_ORIGIN, HANDS_COMPUTER_APP_SLUG } from "./releaseAuthority.js";
+import { latestManifestUrl } from "./computerRelease.js";
 
 export { HANDS_API_ORIGIN, HANDS_COMPUTER_APP_SLUG } from "./releaseAuthority.js";
 
@@ -50,7 +51,7 @@ export interface KReleaseSourceDeps {
   fetchFn?: typeof fetch;
   /** Per-request deadline; the release authority answers in ms or is broken. */
   timeoutMs?: number;
-  /** Legacy CDN is opt-in; Hands is the production default. */
+  /** The manifest backend is the fork's default; Hands requires explicit opt-in. */
   backend?: "hands" | "legacy-cdn";
   handsApiOrigin?: string;
   handsAppSlug?: string;
@@ -62,7 +63,7 @@ export interface KReleaseSourceDeps {
 export const RELEASE_BACKEND_ENV = "RAFT_COMPUTER_RELEASE_BACKEND";
 
 function resolveBackend(deps: KReleaseSourceDeps): "hands" | "legacy-cdn" {
-  const configured = deps.backend ?? process.env[RELEASE_BACKEND_ENV] ?? "hands";
+  const configured = deps.backend ?? process.env[RELEASE_BACKEND_ENV] ?? "legacy-cdn";
   if (configured === "hands" || configured === "legacy-cdn") return configured;
   throw new ComputerServiceError(
     "K_SOURCE_BACKEND_INVALID",
@@ -285,7 +286,8 @@ function createLegacyComputerReleaseSource(
 
   return {
     async checkForUpdate(ctx) {
-      const data = await fetchJson(`${base}/manifest.json`, resolved);
+      const pointerUrl = latestManifestUrl(base);
+      const data = await fetchJson(pointerUrl, resolved);
       const latest =
         typeof data === "object" && data !== null
           ? (data as { version?: unknown }).version
@@ -293,7 +295,7 @@ function createLegacyComputerReleaseSource(
       if (typeof latest !== "string" || latest.length === 0) {
         throw new ComputerServiceError(
           "K_SOURCE_UNAVAILABLE",
-          `K_SOURCE_UNAVAILABLE: ${base}/manifest.json has no version pointer (still publishing?)`,
+          `K_SOURCE_UNAVAILABLE: ${pointerUrl} has no version pointer (still publishing?)`,
         );
       }
       if (latest === ctx.currentVersion) return null;
