@@ -66,7 +66,7 @@ test "$RAFT_COMPUTER_FORCE" = 1
 test "$RAFT_COMPUTER_NO_MODIFY_PATH" = 1
 test "$RAFT_COMPUTER_INSTALL_CHANNEL" = "pinned:$RAFT_COMPUTER_VERSION"
 test "$1" = --version && test "$2" = "$RAFT_COMPUTER_VERSION"
-test "$3" = --channel && test "$4" = "pinned:$RAFT_COMPUTER_VERSION"
+test "$#" = 2
 printf '%s\\n' installer >> "$MOCK_DOWNLOADS"
 test -z "$MOCK_INSTALL_FAIL"
 mkdir -p "$RAFT_COMPUTER_INSTALL_DIR" "$RAFT_HOME/computer/k-quarantine"

@@ -172,7 +172,8 @@ main() {
   fi
   # Use the release installer for binary/WASM verification and K updater cleanup.
   # A failed download does not erase the existing home.
-  sh "$client_setup_tmp/install.sh" --version "$version" --channel "pinned:$version"
+  # Its --channel flag accepts only main/alpha; exact pins use the environment.
+  sh "$client_setup_tmp/install.sh" --version "$version"
   "$install_dir/raft-computer" stop
   assert_stopped
 
