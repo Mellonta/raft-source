@@ -1,0 +1,65 @@
+name: Mellonta client setup checks
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/mellonta/setup-client*'
+      - '.github/workflows/mellonta-client-checks.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  client:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Check argument handling, state protection, and saved launchers
+        run: |
+          bash -n scripts/mellonta/setup-client.sh
+          node --test scripts/mellonta/setup-client.test.mjs
+      - name: Install the published Linux release and exercise clean reset
+        shell: bash
+        run: |
+          set -E
+          report_failure() {
+            python3 - "$1" "$RUNNER_TEMP/client-check.log" <<'PY'
+          import pathlib, sys
+          output = pathlib.Path(sys.argv[2]).read_text(errors="replace")
+          message = "Failed command: " + sys.argv[1] + "\n" + "\n".join(output.splitlines()[-45:])
+          message = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print("::error title=Client installation failed::" + message)
+          PY
+          }
+          exec > >(tee "$RUNNER_TEMP/client-check.log") 2>&1
+          trap 'report_failure "$BASH_COMMAND"' ERR
+          export HOME="$RUNNER_TEMP/client-user"
+          mkdir -p "$HOME/.claude"
+          printf 'preserve provider login\n' > "$HOME/.claude/credentials-test"
+          client_home="$HOME/client state"
+          client_bin="$client_home/bin"
+          export RAFT_COMPUTER_RELEASE_BACKEND=hands
+          export RAFT_COMPUTER_UPGRADE_BASE_URL=https://invalid.example
+          export RAFT_COMPUTER_RELEASE_BASE=https://invalid.example
+          bash scripts/mellonta/setup-client.sh --server-url http://raft.example.test:8080 \
+            --workspace smoke-test --home "$client_home" --install-dir "$client_bin" --install-only
+          version=$(bash "$client_home/mellonta/raft-computer" --version)
+          test "$(cat "$client_home/computer/channel")" = "pinned:$version"
+          test -s "$client_bin/photon_rs_bg.wasm"
+          test ! -e "$HOME/.bashrc"
+          printf 'remove old login\n' > "$client_home/computer/reset-test"
+          # Reuse the environment and auto-detect the nested binary as the old
+          # web installer did. Exact-version mode must work as well as latest.
+          RAFT_HOME="$client_home" bash scripts/mellonta/setup-client.sh \
+            --server-url http://raft.example.test:8080 --workspace smoke-test \
+            --version "$version" --reset --install-only
+          test ! -e "$client_home/computer/reset-test"
+          test ! -e "$client_home/computer/k-quarantine"
+          test "$(cat "$HOME/.claude/credentials-test")" = 'preserve provider login'
+          test "$(bash "$client_home/mellonta/raft-computer" --version)" = "$version"
+          test "$(cat "$client_home/computer/channel")" = "pinned:$version"
+          test -s "$client_bin/photon_rs_bg.wasm"
+          bash "$client_home/mellonta/raft-computer" status

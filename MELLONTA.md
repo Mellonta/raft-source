@@ -20,6 +20,56 @@ on the machine where you install it. Your agent runtime is still installed separ
 
 ## Install or replace the upstream client
 
+For guided setup on each Linux x86-64 client machine, run as the account that
+will run agents. First create your account and workspace in your own portal.
+Install and authenticate the agent runtime (Claude Code, Codex, etc.) separately.
+The client includes Node; it does not need Node, npm, Docker, or a source checkout.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Mellonta/raft-source/main/scripts/mellonta/setup-client.sh -o /tmp/raft-setup-client.sh
+bash /tmp/raft-setup-client.sh --server-url http://a.b.com:8080 --workspace YOUR_SLUG --home "$HOME/.slock" --reset
+```
+
+Replace `YOUR_SLUG` with the workspace slug in your portal URL, not its UUID.
+`--home` must name the home of the old client you want to replace. The upstream
+portal command may have used `$HOME/.raft-computer-YOUR_SLUG` instead of `.slock`.
+If it installed a binary in that home's `bin` directory, setup detects it;
+otherwise the default is `~/.local/bin`. `--install-dir PATH` overrides this.
+Without `--home`, setup uses `RAFT_HOME`, then `SLOCK_HOME`, then `~/.slock`.
+
+**`--reset` deletes all data in that one client home**, including credentials,
+attachments, agent workspaces, local logs, and updater archives. It stops the
+old Computer, installs verified release files, checks that Computer has stopped,
+then erases state. It keeps no backup and performs no migration. Other client
+homes and provider credentials outside that home are untouched. Omit `--reset`
+to keep existing attachments and credentials. Active agent sessions are interrupted.
+
+Setup resolves the latest published **Mellonta GitHub release**, displays its
+version, verifies the installer checksum, and uses the release installer to
+verify the executable and WASM. `--version X.Y.Z-mellonta.N` selects an exact
+release. The installed version is pinned; rerun setup to install a newer release.
+New deployment-script commits do not require a new Computer binary release.
+
+Setup then runs interactive login, workspace attachment, and startup. Open the
+printed login URL on your Mac and approve the device in your own portal. In a
+non-interactive session, add `--install-only`, then run `connect.sh` in a terminal.
+For the `.slock` home in the example, subsequent commands are:
+
+```bash
+bash "$HOME/.slock/mellonta/connect.sh"       # Login/attach if setup was install-only
+bash "$HOME/.slock/mellonta/start.sh"         # One-line startup
+bash "$HOME/.slock/mellonta/raft-computer" status
+bash "$HOME/.slock/mellonta/raft-computer" restart
+bash "$HOME/.slock/mellonta/raft-computer" stop
+```
+
+These launchers save the state path, binary path, and fork update source without
+editing `.bashrc`. Use them to avoid another upstream binary or stale environment
+settings. Computer logs are in `<home>/computer/run/service.log`. If using a
+source checkout, the same script is `scripts/mellonta/setup-client.sh`.
+
+### Install only with the release's lower-level installer
+
 Run as the same Linux user that runs your current Computer. Preserve your current
 `RAFT_HOME` / `SLOCK_HOME` if you use a custom data directory. The installer uses
 `~/.local/bin` by default, verifies checksums, includes the required WASM resource,
