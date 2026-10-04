@@ -22,7 +22,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/raft-data"
           sudo mkdir -p /data
           sudo mount --bind "$RUNNER_TEMP/raft-data" /data
-          git clone "$GITHUB_WORKSPACE" /data/raft
+          (umask 077; git clone "$GITHUB_WORKSPACE" /data/raft)
           git -C /data/raft remote set-url origin https://github.com/Mellonta/raft-source.git
           docker info --format '{{.DockerRootDir}}' > "$RUNNER_TEMP/docker-root-before"
       - name: Build, migrate, and exercise production

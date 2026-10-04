@@ -18,6 +18,9 @@ COPY packages/server/ packages/server/
 COPY packages/web/ packages/web/
 COPY packages/visual-testing/shared/ packages/visual-testing/shared/
 COPY manual/ manual/
+# Setup uses umask 077. Image code must remain readable when the API runs as
+# the host account's UID, which need not equal the image's node UID.
+RUN chmod -R a+rX /app
 
 FROM source AS server
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -41,6 +44,7 @@ RUN pnpm --filter @botiverse/raft-web build
 FROM nginx:1.28-alpine AS web
 COPY --from=web-build /app/packages/web/dist /usr/share/nginx/html
 COPY scripts/mellonta/prod-nginx.conf /etc/nginx/conf.d/default.conf
+COPY scripts/mellonta/prod-security-headers.conf /etc/nginx/raft-security-headers.conf
 RUN manifest_sha="$(sha256sum /usr/share/nginx/html/desktop-manifest.json | cut -d' ' -f1)" \
     && printf 'add_header ETag "\\"sha256-%s\\"" always;\n' "$manifest_sha" \
       > /etc/nginx/desktop-manifest-etag.conf
