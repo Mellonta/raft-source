@@ -4,8 +4,10 @@ import base64
 import http.client
 import json
 import os
+from pathlib import Path
 import re
-from urllib.request import urlopen
+import secrets
+from urllib.request import Request, urlopen
 
 origin = "http://127.0.0.1:8080"
 with urlopen(origin + "/health") as response:
@@ -32,4 +34,35 @@ connection.request("GET", "/socket.io/?EIO=4&transport=websocket", headers={
 })
 assert connection.getresponse().status == 101, "WebSocket upgrade failed"
 connection.close()
-print("Production health, static assets, manifest, and WebSocket checks passed.")
+
+# On the disposable CI runner, verify real account/session tables as well as
+# health's SELECT 1. Reuse the account and old JWT after stop/start/redeployment.
+if os.environ.get("GITHUB_ACTIONS") == "true":
+    saved = Path(os.environ["RUNNER_TEMP"]) / "raft-production-test-account.json"
+
+    def api(path, body=None, token=None):
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        request = Request(origin + "/api/auth/" + path, headers=headers,
+                          data=json.dumps(body).encode() if body else None)
+        with urlopen(request) as response:
+            return json.load(response)
+
+    if saved.exists():
+        account = json.loads(saved.read_text())
+        assert api("me", token=account["token"])["email"] == account["email"]
+    else:
+        account = {"email": f"deploy-{secrets.token_hex(6)}@example.invalid", "password": secrets.token_hex(24)}
+        legal = (Path(__file__).parents[2] / "packages/shared/src/legalAcceptance.ts").read_text()
+        registration = api("register", {
+            **account, "acceptTerms": True,
+            "termsVersion": re.search(r'CURRENT_TERMS_VERSION = "([^"]+)"', legal)[1],
+            "privacyVersion": re.search(r'CURRENT_PRIVACY_VERSION = "([^"]+)"', legal)[1],
+        })
+        account["token"] = registration["accessToken"]
+        saved.write_text(json.dumps(account))
+        saved.chmod(0o600)
+    login = api("login", {"email": account["email"], "password": account["password"]})
+    assert login["accessToken"]
+print("Production health, assets, manifest, WebSocket, and CI authentication checks passed.")
