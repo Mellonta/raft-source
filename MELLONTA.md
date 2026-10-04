@@ -115,6 +115,84 @@ reuse containers mounted to a different data location; those require a deliberat
 data migration. Existing source is retained unless `--update` is supplied, which
 allows only a clean fast-forward of `main`.
 
+## Production server deployment
+
+For the production web build and an API without a development watcher, run from
+the updated fork checkout on your Linux server:
+
+```bash
+bash scripts/mellonta/deploy-prod.sh --url http://a.b.com:8080
+```
+
+Replace the URL with the exact origin your Mac and Computer clients will use.
+The script uses your existing Docker daemon and Compose v2 plugin. Node and pnpm
+are installed inside the build images; no host Node installation is needed.
+It retains an existing `/data/raft` checkout or clones the fork there. Updating
+source remains explicit: pull your changes before rerunning `deploy-prod.sh`.
+
+The frontend is built with Vite's production build and served by nginx, including
+API and WebSocket proxying. The server uses the upstream Docker runtime approach:
+Node with `tsx` loading TypeScript once, without `watch`; the server package's
+`tsc` configuration does not emit a standalone JavaScript build. Both run with
+production settings. This deployment does not use `raftdev` or tmux.
+
+By default nginx publishes HTTP on all interfaces at port 8080. `--port` changes
+the port; for a direct HTTP URL, include that port in `--url` as appropriate.
+For an existing local TLS reverse proxy, forward to `127.0.0.1:8080`, including
+WebSocket upgrades and `X-Forwarded-Proto`, then deploy with:
+
+```bash
+bash scripts/mellonta/deploy-prod.sh --url https://a.b.com --bind 127.0.0.1
+```
+
+The script does not provision TLS certificates. `--url` and the saved settings
+are baked into the web build; rerun deployment to change them.
+
+All application data is separate from dev state:
+
+| Path | Contents |
+| --- | --- |
+| `/data/.raft-prod/postgres` | Production PostgreSQL data |
+| `/data/.raft-prod/redis` | Redis append-only persistence |
+| `/data/.raft-prod/uploads` | Attachments and other stored files, using Raft's local disk backend |
+| `/data/.raft-prod/settings.json` | Generated secrets and public URL/port configuration; preserve this file |
+| `/data/.raft-prod/server-extra.env` | Optional server settings such as email delivery credentials |
+| `/data/.raft-prod/backups` | Database dumps plus files/config snapshots taken before migrations |
+
+PostgreSQL, Redis, and the API are accessible inside the Compose network; only
+nginx publishes a host port. Containers restart after a Docker restart unless
+you explicitly stopped them. Logs use Docker's rotated local log storage.
+
+Builds finish before the previous application is stopped. Deployment then takes
+a database dump and uploads/config archive, applies the repository's journaled
+migrations with its production preflight, and waits for database/API/web health.
+It never runs dev seeding or `drizzle-kit push --force`. A migration failure leaves
+the app stopped and the backup available; no automatic database rollback occurs.
+Backups are on the same disk, so copy them elsewhere if you need disk-failure recovery.
+
+Subsequent commands are:
+
+```bash
+bash /data/.raft-prod/start.sh
+bash /data/.raft-prod/raftprod restart
+bash /data/.raft-prod/raftprod status
+bash /data/.raft-prod/raftprod logs
+bash /data/.raft-prod/raftprod stop
+```
+
+`restart` reloads `server-extra.env`; `deploy` rebuilds and migrates. `logs` follows
+server logs; append `web`, `postgres`, or `redis` to select another service.
+Register your account in the portal. Without `RESEND_API_KEY`, verification emails
+are printed in server logs; alternatively configure email delivery in
+`server-extra.env` and restart. No default test account is created.
+
+This is a fresh production database. Existing raftdev data is not automatically
+converted or copied, and raftdev keeps running until you stop it. Agent execution
+still uses your separately installed custom Computer client; use this fork's
+GitHub installer above, because the portal's install command still points upstream.
+Web analytics, web trace uploads, and server trace exports are off by default in
+these images; this is not a guarantee of zero outbound network traffic.
+
 ## Build and publish another Linux release
 
 Use Node from `.node-version` and pnpm 10.29.3. Bump the Computer package version

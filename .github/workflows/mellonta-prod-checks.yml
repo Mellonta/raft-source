@@ -1,0 +1,64 @@
+name: Mellonta production deployment checks
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/mellonta/prod*'
+      - 'scripts/mellonta/deploy-prod.sh'
+      - '.github/workflows/mellonta-prod-checks.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  deployment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Prepare isolated deployment
+        run: |
+          python3 scripts/mellonta/prod-config.test.py
+          bash -n scripts/mellonta/deploy-prod.sh
+          mkdir -p "$RUNNER_TEMP/raft-data"
+          sudo mkdir -p /data
+          sudo mount --bind "$RUNNER_TEMP/raft-data" /data
+          git clone "$GITHUB_WORKSPACE" /data/raft
+          git -C /data/raft remote set-url origin https://github.com/Mellonta/raft-source.git
+          docker info --format '{{.DockerRootDir}}' > "$RUNNER_TEMP/docker-root-before"
+      - name: Build, migrate, and exercise production
+        run: |
+          set -E
+          report_failure() {
+            python3 - "$1" "$RUNNER_TEMP/prod-check.log" <<'PY'
+          import pathlib, re, sys
+          output = pathlib.Path(sys.argv[2]).read_text(errors="replace")
+          # CI uses disposable generated secrets; still redact them from diagnostics.
+          output = re.sub(r'postgresql://[^\s]+', '[database URL]', output)
+          message = "Failed command: " + sys.argv[1] + "\n" + "\n".join(output.splitlines()[-35:])
+          print("::error title=Production deployment failed::" + message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+          PY
+          }
+          exec > >(tee "$RUNNER_TEMP/prod-check.log") 2>&1
+          trap 'report_failure "$BASH_COMMAND"' ERR
+          cd /data/raft
+          bash scripts/mellonta/deploy-prod.sh --url http://127.0.0.1:8080 --bind 127.0.0.1
+          python3 scripts/mellonta/prod-smoke.py
+          compose=(docker compose -p raft-prod -f /data/.raft-prod/compose.json)
+          "${compose[@]}" exec -T postgres psql -U raft -d raft -c 'CREATE TABLE mellonta_deploy_probe (value text); INSERT INTO mellonta_deploy_probe VALUES ($$retained$$);'
+          printf retained > /data/.raft-prod/uploads/persistence-probe
+          sha256sum /data/.raft-prod/settings.json > "$RUNNER_TEMP/settings-before"
+          bash scripts/mellonta/deploy-prod.sh stop
+          bash /data/.raft-prod/start.sh
+          bash scripts/mellonta/deploy-prod.sh
+          python3 scripts/mellonta/prod-smoke.py
+          "${compose[@]}" exec -T postgres psql -U raft -d raft -Atc 'SELECT value FROM mellonta_deploy_probe' | grep -qx retained
+          test "$(cat /data/.raft-prod/uploads/persistence-probe)" = retained
+          sha256sum --check "$RUNNER_TEMP/settings-before"
+          docker info --format '{{.DockerRootDir}}' > "$RUNNER_TEMP/docker-root-after"
+          cmp "$RUNNER_TEMP/docker-root-before" "$RUNNER_TEMP/docker-root-after"
+      - name: Clean up test containers
+        if: always()
+        run: |
+          if test -f /data/.raft-prod/compose.json; then
+            docker compose -p raft-prod -f /data/.raft-prod/compose.json down
+          fi
