@@ -205,7 +205,7 @@ async function bootstrap() {
   startMetricsServer();
 
   // Start server
-  server.listen(PORT, () => {
+  server.listen({ port: PORT, host: process.env.HOST || undefined }, () => {
     slackBridge?.start();
     console.log(`[Slock] Server listening on http://localhost:${PORT}`);
   });

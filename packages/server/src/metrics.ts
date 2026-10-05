@@ -347,7 +347,7 @@ export function startMetricsServer() {
     }
   });
 
-  app.listen(METRICS_PORT, "0.0.0.0", () => {
+  app.listen(METRICS_PORT, process.env.METRICS_HOST || "0.0.0.0", () => {
     console.log(`[Metrics] Prometheus endpoint on :${METRICS_PORT}/metrics`);
   });
 }
