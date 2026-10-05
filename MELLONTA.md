@@ -113,7 +113,109 @@ The value is read when the web process starts. Setting it in another shell
 does not change an already-running process. This is a server checkout setting;
 updating the Computer binary is not required.
 
-## Ubuntu server setup
+## Enroot server setup without sudo
+
+For a cluster account with Enroot already installed, use the Enroot production
+deployment. All host files default to `~/park`; this setup never invokes sudo,
+apt, Docker, or systemd on the cluster. It needs Linux x86-64, Python 3.9+, and a
+working Enroot 3.5+ installation. Git is needed only to obtain this checkout.
+
+```bash
+mkdir -p "$HOME/park"
+git clone https://github.com/Mellonta/raft-source.git "$HOME/park/raft"
+bash "$HOME/park/raft/scripts/mellonta/setup-enroot.sh" --url http://a.b.com:8080
+```
+
+Use your actual portal origin in `--url`. If the fork checkout already exists,
+update it with `git -C "$HOME/park/raft" pull --ff-only` instead of cloning again.
+There is no host nvm/Node/npm installation: the verified image contains Node,
+the Raft API, the production web build, nginx, PostgreSQL 16, and Redis. The
+frontend uses the portal's own origin, so changing the URL needs no web rebuild.
+The image runs as your ordinary host user, without Enroot root remapping.
+
+Setup downloads the latest **Enroot server** release, verifies its SHA-256,
+extracts it, generates private settings, initializes/migrates the database, and
+waits for the portal to become healthy. `--release enroot-server-COMMIT` pins an
+exact published build. `--image /path/raft-server-linux-x64.sqsh --manifest
+/path/enroot-manifest.json` installs previously downloaded artifacts offline.
+Server images have separate releases and do not change the Computer installer's
+`releases/latest` pointer or require a new Computer version.
+
+| Path | Contents |
+| --- | --- |
+| `~/park/raft` | Fork checkout and deployment tools |
+| `~/park/.raft-prod/settings.json` | Saved public URL, ports, and generated secrets |
+| `~/park/.raft-prod/postgres`, `redis`, `uploads` | Persistent database, cache, and uploaded files |
+| `~/park/.raft-prod/server-extra.env` | Optional API environment, such as email delivery settings |
+| `~/park/.raft-prod/logs` | Service logs, rotated at 10 MiB with three retained rotations |
+| `~/park/.raft-prod/images` | Verified SquashFS downloads |
+| `~/park/.raft-prod/backups` | Database/files/settings snapshots before changing the migration revision |
+| `~/park/.enroot` | Extracted container filesystems, Enroot cache, runtime files, and temporary files |
+
+`--root PATH` changes the `~/park` root. The directory must be writable by your
+user, persistent between jobs, and on storage suitable for PostgreSQL (including
+working file locks). Enroot mount paths cannot contain whitespace or colons.
+This creates a fresh deployment; it does not import or erase old `/data` or
+raftdev state. Preserve `settings.json` with the database: setup will not silently
+regenerate credentials if a database exists without its settings.
+
+After setup, start with one command:
+
+```bash
+bash "$HOME/park/.raft-prod/start.sh"
+```
+
+Other commands use the saved state and image:
+
+```bash
+bash "$HOME/park/.raft-prod/raftprod" status
+bash "$HOME/park/.raft-prod/raftprod" logs                 # API logs, including email links
+bash "$HOME/park/.raft-prod/raftprod" logs --service migrate
+bash "$HOME/park/.raft-prod/raftprod" restart
+bash "$HOME/park/.raft-prod/raftprod" stop
+```
+
+Run setup again to download a newer image. It finishes downloading/extracting
+before stopping the previous instance. Secrets, database files, and uploads are
+retained. Startup runs journaled migrations on a changed image revision, making
+a backup if the database already exists. Failed initialization/migrations leave
+the service stopped; logs explain the failure. The supervisor shuts all services
+down if one fails; use `restart` after resolving the failure. It does not install
+an automatic boot service. Old images remain available under `.enroot/data` and
+`.raft-prod/images`; setup does not erase them or roll back database migrations.
+
+For a scheduler allocation, keep the supervisor in the foreground:
+
+```bash
+bash "$HOME/park/.raft-prod/start.sh" --foreground
+```
+
+To prepare files before submitting a job, add `--no-start` to setup; the first
+`start.sh --foreground` inside the allocation initializes the database. Enroot
+does not extend a Slurm time limit or make a compute node reachable outside the
+cluster. Run on a node/allocation where persistent services are permitted. Only
+one instance may use a given data directory at a time.
+
+Enroot shares host networking. The portal listens on `0.0.0.0:8080` by default;
+`--bind 127.0.0.1` is suitable for a local TLS proxy or SSH tunnel. PostgreSQL,
+Redis, the API, and metrics listen on loopback. PostgreSQL and Redis require
+generated passwords. All five ports are configurable to avoid conflicts on
+shared nodes: `--port 8080 --api-port 3001 --metrics-port 9090 --postgres-port
+5432 --redis-port 6379`. A configured public URL must include the appropriate
+portal port unless an existing reverse proxy provides it. No certificates or
+cluster firewall changes are installed.
+
+Register your account and workspace in the portal, then connect your separately
+installed Computer client. Without email delivery configuration, verification
+links appear in the API logs. Continue to use this fork's client setup script;
+the portal's upstream CDN installation link has not been replaced.
+
+The `Mellonta Enroot server release` workflow builds images in CI, tests actual
+unprivileged Enroot deployment with host sudo/Docker/apt commands blocked, checks
+account/session and file persistence, then publishes the image and manifest.
+Docker and sudo are used only to prepare the disposable CI builder.
+
+## Ubuntu server setup with Docker (development)
 
 With the data disk mounted at `/data` and Docker already working for your Linux
 account, run the setup script as that account. It uses sudo only for missing apt
@@ -165,7 +267,7 @@ reuse containers mounted to a different data location; those require a deliberat
 data migration. Existing source is retained unless `--update` is supplied, which
 allows only a clean fast-forward of `main`.
 
-## Production server deployment
+## Production server deployment with Docker
 
 For the production web build and an API without a development watcher, run from
 the updated fork checkout on your Linux server:
