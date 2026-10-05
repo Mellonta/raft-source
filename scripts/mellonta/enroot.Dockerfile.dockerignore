@@ -3,6 +3,8 @@
 !package.json
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
+!LICENSE
+!MELLONTA.md
 !patches/**
 !packages/
 !packages/sync-core/**

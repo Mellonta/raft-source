@@ -93,5 +93,5 @@ jobs:
           See MELLONTA.md for storage, ports, lifecycle commands, and update instructions.
           EOF
           gh release create "$tag" --target "$GITHUB_SHA" --draft --title "Raft Enroot server ${GITHUB_SHA:0:12}" --notes-file "$RUNNER_TEMP/enroot-notes.md"
-          gh release upload "$tag" "$RUNNER_TEMP/enroot-release/raft-server-linux-x64.sqsh" "$RUNNER_TEMP/enroot-release/enroot-manifest.json"
+          gh release upload "$tag" "$RUNNER_TEMP/enroot-release/raft-server-linux-x64.sqsh" "$RUNNER_TEMP/enroot-release/enroot-manifest.json" LICENSE MELLONTA.md
           gh release edit "$tag" --draft=false --latest=false

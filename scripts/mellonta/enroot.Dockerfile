@@ -34,6 +34,7 @@ COPY --from=build /usr/local/ /usr/local/
 COPY --from=build /app /app
 COPY scripts/mellonta/enroot-runtime.py scripts/mellonta/enroot-nginx.conf /opt/raft/
 COPY scripts/mellonta/prod-security-headers.conf /opt/raft/security-headers.conf
+COPY LICENSE MELLONTA.md /opt/raft/
 ARG RELEASE_SHA
 RUN printf '%s\n' "$RELEASE_SHA" > /opt/raft/revision \
     && mkdir -p /raft/state && chmod -R a+rX /opt/raft
