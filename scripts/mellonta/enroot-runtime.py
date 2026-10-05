@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 from urllib.request import urlopen
@@ -109,7 +110,14 @@ class Supervisor:
         for name, child in reversed(self.children):
             if child.poll() is not None:
                 continue
-            os.killpg(child.pid, signal.SIGINT if name == 'postgres' else signal.SIGTERM)
+            try:
+                if name == 'postgres':
+                    # The postmaster owns orderly shutdown of its backends.
+                    child.send_signal(signal.SIGINT)
+                else:
+                    os.killpg(child.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
             try:
                 child.wait(timeout=40)
             except subprocess.TimeoutExpired:
@@ -130,7 +138,7 @@ def main():
         own_identity = identity()
         write(STATE / 'run/runtime.json', json.dumps(own_identity))
         (STATE / 'run/ready.json').unlink(missing_ok=True)
-        env = {'PATH': PG_BIN + ':/usr/local/bin:/usr/bin:/bin', 'LANG': 'C.UTF-8',
+        env = {'PATH': PG_BIN + ':/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8',
                'HOME': str(STATE / 'home'), 'TMPDIR': str(STATE / 'tmp'),
                'XDG_CACHE_HOME': str(STATE / 'cache')}
         env.update(extra_environment(STATE / 'server-extra.env'))
@@ -159,12 +167,17 @@ def main():
             if initialized and (pg / 'PG_VERSION').read_text().strip() != '16':
                 raise RuntimeError('Existing database is not PostgreSQL 16; refusing an implicit major-version migration.')
             if not initialized:
+                if any(pg.iterdir()):
+                    raise RuntimeError('PostgreSQL directory is nonempty but uninitialized; inspect it before retrying.')
+                # An interrupted initdb never becomes the active data directory.
+                initializing = Path(tempfile.mkdtemp(prefix='postgres-init-', dir=STATE))
                 password_file = STATE / 'run/pg-password'
                 write(password_file, settings['postgres_password'] + '\n')
                 try:
-                    supervisor.run('initdb', [PG_BIN + 'initdb', '-D', str(pg), '-U', 'raft',
+                    supervisor.run('initdb', [PG_BIN + 'initdb', '-D', str(initializing), '-U', 'raft',
                                              '--auth-host=scram-sha-256', '--auth-local=peer',
                                              '--encoding=UTF8', '--locale=C.UTF-8', '--pwfile=' + str(password_file)])
+                    initializing.replace(pg)
                 finally:
                     password_file.unlink(missing_ok=True)
             supervisor.spawn('postgres', [PG_BIN + 'postgres', '-D', str(pg), '-h', '127.0.0.1',
