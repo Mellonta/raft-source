@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import socket
 from pathlib import Path
 import tempfile
 import unittest
@@ -102,6 +103,21 @@ class ConfigurationTests(unittest.TestCase):
         with patch.object(control.os, 'kill') as kill:
             control.stop(self.root)
             kill.assert_not_called()
+
+    def test_port_preflight_rejects_listeners_but_accepts_recently_closed_connections(self):
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+            listener.listen()
+            with self.assertRaises(OSError):
+                control.probe_port('127.0.0.1', port)
+            with socket.create_connection(('127.0.0.1', port)) as client:
+                connection, _ = listener.accept()
+                with connection:
+                    connection.shutdown(socket.SHUT_WR)
+                    self.assertEqual(client.recv(1), b'')
+        control.probe_port('127.0.0.1', port)
 
 
 if __name__ == '__main__':

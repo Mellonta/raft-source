@@ -185,6 +185,14 @@ def enroot_env(root):
     return result
 
 
+def probe_port(address, port):
+    with socket.socket() as probe:
+        # Match the real services: TIME_WAIT connections from a clean stop do
+        # not occupy a listening port, but another live listener still does.
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind((address, port))
+
+
 def start(root, state, foreground=False, operation_lock=None):
     if live(state) or live(state, 'launcher'):
         print('Raft is already running. Use restart to reload settings.')
@@ -193,11 +201,10 @@ def start(root, state, foreground=False, operation_lock=None):
     settings = json.loads((state / 'settings.json').read_text())
     for key in ['port', 'api_port', 'metrics_port', 'postgres_port', 'redis_port']:
         address = settings['bind'] if key == 'port' else '127.0.0.1'
-        with socket.socket() as probe:
-            try:
-                probe.bind((address, settings[key]))
-            except OSError as error:
-                raise RuntimeError(f'{key} {settings[key]} is unavailable on {address}; rerun setup with a different --{key.replace("_", "-")}') from error
+        try:
+            probe_port(address, settings[key])
+        except OSError as error:
+            raise RuntimeError(f'{key} {settings[key]} is unavailable on {address}; rerun setup with a different --{key.replace("_", "-")}') from error
     env = enroot_env(root)
     command = ['enroot', 'start', '--conf', str(state / 'enroot.conf'),
                '--mount', str(state) + ':/raft/state', installation['container'],

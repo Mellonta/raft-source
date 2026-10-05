@@ -77,9 +77,11 @@ try:
     print('Enroot installation, private listeners, account/session persistence, redeployment, and foreground shutdown passed.')
 except Exception:
     # Surface actionable diagnostics through the public Actions check annotation.
-    for log in sorted((state / 'logs').glob('*.log')):
+    logs = sorted((state / 'logs').glob('*.log'), key=lambda p: (p.name == 'bootstrap.log', p.name))
+    for log in logs:
         print(str(log), flush=True)
-        print('\n'.join(log.read_text(errors='replace').splitlines()[-8:]), flush=True)
+        lines = log.read_text(errors='replace').splitlines()[-(12 if log.name == 'bootstrap.log' else 3):]
+        print('\n'.join(line[:300] for line in lines), flush=True)
     raise
 finally:
     if (state / 'raftprod').exists():
