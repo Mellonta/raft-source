@@ -105,7 +105,7 @@ def configure(source, root, public_url=None, port=None, bind=None):
         "migrate": {"image": server["image"], "profiles": ["tools"], "init": True,
                     "environment": {**environment, "DATABASE_URL": database_url + "?options=-c%20statement_timeout%3D60000",
                                     "SERVER_MIGRATION_EXPECTED_STATEMENT_TIMEOUT_MS": "60000"},
-                    "command": ["pnpm", "--filter", "@botiverse/raft-server", "db:migrate:deploy"]},
+                    "command": ["pnpm", "--filter", "@botiverse/raft-server", "db:migrate:mellonta"]},
         "web": {**common, "image": "mellonta-raft-web:local", "build": {**build, "target": "web"},
                 "ports": [{"target": 80, "published": str(settings["port"]), "host_ip": settings["bind"]}],
                 "depends_on": {"server": {"condition": "service_healthy"}},
