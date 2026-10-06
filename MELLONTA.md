@@ -114,15 +114,15 @@ RAFT_COMPUTER_FORCE=1 sh /tmp/raft-mellonta-install.sh
 ~/.local/bin/raft-computer --version
 ```
 
-`RAFT_COMPUTER_FORCE=1` permits switching from upstream 1.0.40 to this fork's
-1.0.28-mellonta.1. It does not bypass checksum verification. Fresh installations
+`RAFT_COMPUTER_FORCE=1` permits an intentional downgrade, including from an
+upstream version newer than this fork's 1.0.43-mellonta.1. It does not bypass checksum verification. Fresh installations
 can omit it. Set `RAFT_COMPUTER_INSTALL_DIR` if your existing binary is installed
 elsewhere. Ensure that this binary is first on PATH, and restart existing agent
 sessions after replacement so they receive the patched runtime configuration.
 
-The installer pins the installed release by default. An existing pin is preserved;
-use `raft-computer channel set pinned:1.0.28-mellonta.1` to change it to this release.
-To opt into updates from this fork, use `raft-computer channel set latest`.
+The installer updates the saved pin to the installed release.
+To select the newest fork release for the next manual upgrade, use
+`raft-computer channel set latest`, then `raft-computer upgrade`.
 Remove any old `RAFT_COMPUTER_RELEASE_BACKEND=hands` or upstream
 `RAFT_COMPUTER_UPGRADE_BASE_URL` override if you previously configured one.
 
@@ -316,7 +316,7 @@ source remains explicit: pull your changes before rerunning `deploy-prod.sh`.
 
 The frontend is built with Vite's production build and served by nginx, including
 API and WebSocket proxying. The server uses the upstream Docker runtime approach:
-Node with `tsx` loading TypeScript once, without `watch`; the server package's
+Node with `@oxc-node/core/register` loading TypeScript once, without `watch`; the server package's
 `tsc` configuration does not emit a standalone JavaScript build. Both run with
 production settings. This deployment does not use `raftdev` or tmux.
 
@@ -380,7 +380,7 @@ these images; this is not a guarantee of zero outbound network traffic.
 ## Build and publish another Linux release
 
 Use Node from `.node-version` and pnpm 10.29.3. Bump the Computer package version
-to the next `1.0.28-mellonta.N`, update these installation notes, commit, and push
+to the next `1.0.43-mellonta.N`, update these installation notes, commit, and push
 a tag exactly matching that version. The `Mellonta Linux release` workflow tests
 the privacy/update policy, builds the executable and manifest, smoke-tests the
 installer on Ubuntu, then publishes the assets. One release covers Linux x64
