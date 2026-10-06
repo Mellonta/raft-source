@@ -6,32 +6,148 @@
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./feature-flag-admin-privileges": {
+      "types": "./feature-flag-admin-privileges.ts",
+      "default": "./feature-flag-admin-privileges.ts"
+    },
+    "./feature-flag-client-rules": {
+      "types": "./feature-flag-client-rules.ts",
+      "default": "./feature-flag-client-rules.ts"
+    },
+    "./feature-flag-taxonomy": {
+      "types": "./feature-flag-taxonomy.ts",
+      "default": "./feature-flag-taxonomy.ts"
+    },
+    "./feature-flag-taxonomy-internal": {
+      "types": "./feature-flag-taxonomy-internal.ts",
+      "default": "./feature-flag-taxonomy-internal.ts"
+    },
+    "./src/agentApiChannelJoin": {
+      "types": "./src/agentApiChannelJoin.ts",
+      "default": "./src/agentApiChannelJoin.ts"
+    },
+    "./src/agentApiClient": {
+      "types": "./src/agentApiClient.ts",
+      "default": "./src/agentApiClient.ts"
+    },
+    "./src/agentApiContract": {
+      "types": "./src/agentApiContract.ts",
+      "default": "./src/agentApiContract.ts"
+    },
+    "./src/agentApiMessageContract": {
+      "types": "./src/agentApiMessageContract.ts",
+      "default": "./src/agentApiMessageContract.ts"
+    },
+    "./src/agentApiMessages": {
+      "types": "./src/agentApiMessages.ts",
+      "default": "./src/agentApiMessages.ts"
+    },
+    "./src/agentApiRawClient": {
+      "types": "./src/agentApiRawClient.ts",
+      "default": "./src/agentApiRawClient.ts"
+    },
+    "./src/agentApiRouteMeta": {
+      "types": "./src/agentApiRouteMeta.ts",
+      "default": "./src/agentApiRouteMeta.ts"
+    },
+    "./src/agentMessageText": {
+      "types": "./src/agentMessageText.ts",
+      "default": "./src/agentMessageText.ts"
+    },
+    "./src/agentOps/hint.testkit": {
+      "types": "./src/agentOps/hint.testkit.ts",
+      "default": "./src/agentOps/hint.testkit.ts"
+    },
+    "./src/agentOps/index": {
+      "types": "./src/agentOps/index.ts",
+      "default": "./src/agentOps/index.ts"
+    },
+    "./src/agentOps/seenPolicy/index": {
+      "types": "./src/agentOps/seenPolicy/index.ts",
+      "default": "./src/agentOps/seenPolicy/index.ts"
+    },
+    "./src/agentText/index": {
+      "types": "./src/agentText/index.ts",
+      "default": "./src/agentText/index.ts"
+    },
+    "./src/generated/agentApiRoutes": {
+      "types": "./src/generated/agentApiRoutes.ts",
+      "default": "./src/generated/agentApiRoutes.ts"
+    },
+    "./src/appConfigTransport": {
+      "types": "./src/appConfigTransport.ts",
+      "default": "./src/appConfigTransport.ts"
+    },
+    "./src/appRuntimeTrace": {
+      "types": "./src/appRuntimeTrace.ts",
+      "default": "./src/appRuntimeTrace.ts"
+    },
+    "./src/apps/cleaner/configProtocol": {
+      "types": "./src/apps/cleaner/configProtocol.ts",
+      "default": "./src/apps/cleaner/configProtocol.ts"
+    },
+    "./src/apps/reminder/protocol": {
+      "types": "./src/apps/reminder/protocol.ts",
+      "default": "./src/apps/reminder/protocol.ts"
+    },
+    "./src/attachmentUploadContract": {
+      "types": "./src/attachmentUploadContract.ts",
+      "default": "./src/attachmentUploadContract.ts"
+    },
+    "./unread-activity-diagnostic": {
+      "types": "./src/unreadActivityDiagnostic.ts",
+      "default": "./src/unreadActivityDiagnostic.ts"
+    },
+    "./src/clock": {
+      "types": "./src/clock.ts",
+      "default": "./src/clock.ts"
+    },
+    "./src/unreadActivityDiagnostic": {
+      "types": "./src/unreadActivityDiagnostic.ts",
+      "default": "./src/unreadActivityDiagnostic.ts"
+    },
+    "./src/generated/openapi": {
+      "types": "./src/generated/openapi.ts",
+      "default": "./src/generated/openapi.ts"
+    },
+    "./src/testVectors/messageRepliesDiscussionGraph.vectors.json": "./src/testVectors/messageRepliesDiscussionGraph.vectors.json",
+    "./src/testVectors/threadRepliesReadModel.vectors.json": "./src/testVectors/threadRepliesReadModel.vectors.json",
+    "./package.json": "./package.json"
+  },
   "scripts": {
-    "generate:openapi": "tsx scripts/generate-openapi.ts",
+    "generate:openapi": "node --import @oxc-node/core/register scripts/generate-openapi.ts",
     "check:openapi-fresh": "pnpm generate:openapi && git diff --exit-code openapi/openapi.json src/generated/openapi.ts",
-    "check:openapi-deterministic": "tsx scripts/check-openapi-determinism.ts",
+    "check:openapi-deterministic": "node --import @oxc-node/core/register scripts/check-openapi-determinism.ts",
     "lint:openapi": "redocly lint openapi/openapi.json --extends=minimal --format=stylish",
     "check:openapi-consumer": "tsc --noEmit --project tsconfig.openapi.json",
-    "test:attachment-upload-contract": "node --import tsx --test src/attachmentUploadContract.test.ts",
+    "test:attachment-upload-contract": "vitest run src/attachmentUploadContract.test.ts",
     "check:openapi": "pnpm check:openapi-fresh && pnpm check:openapi-deterministic && pnpm lint:openapi && pnpm check:openapi-consumer && pnpm test:attachment-upload-contract",
-    "generate:runtime-provider-display-names": "tsx scripts/generate-runtime-provider-display-names.ts",
+    "generate:runtime-provider-display-names": "node --import @oxc-node/core/register scripts/generate-runtime-provider-display-names.ts",
     "check:runtime-provider-display-names-fresh": "pnpm generate:runtime-provider-display-names && git diff --exit-code src/generated/runtimeProviderDisplayNames.ts",
-    "generate:agent-api-routes": "tsx scripts/generate-agent-api-routes.ts",
+    "generate:agent-api-routes": "node --import @oxc-node/core/register scripts/generate-agent-api-routes.ts",
     "check:agent-api-routes-fresh": "pnpm generate:agent-api-routes && git diff --exit-code src/generated/agentApiRoutes.ts",
+    "generate:agent-api-description": "node --import @oxc-node/core/register scripts/generate-agent-api-description.ts",
+    "check:agent-api-description-fresh": "pnpm generate:agent-api-description && git diff --exit-code agent-api/agent-api.v1.json",
     "typecheck": "tsc --noEmit",
     "test:message-lockstep": "node scripts/check-agent-api-message-lockstep.mjs",
-    "test": "pnpm run test:message-lockstep && node --import tsx --test 'src/**/*.test.ts'"
+    "test": "pnpm run test:message-lockstep && vitest run"
   },
   "dependencies": {
     "@botiverse/raft-sync-core": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@oxc-node/core": "^0.1.3",
     "@redocly/cli": "2.40.0",
     "@types/node": "^25.5.0",
     "openapi-typescript": "7.13.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.2",
     "zod-openapi": "6.0.0"
   }
 }

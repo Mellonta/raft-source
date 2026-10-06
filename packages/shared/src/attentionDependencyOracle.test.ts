@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   ATTENTION_HINT_COPY_VERSION,
   ATTENTION_HINT_DEFAULT_K,
   ATTENTION_HINT_SCHEMA,
   evaluateAttentionDependencyOracle,
-} from "./attentionDependencyOracle.js";
+} from "./attentionDependencyOracle";
 
 test("D(t) oracle shows M2 only when dependencies are provably empty and participation is passive", () => {
   const verdict = evaluateAttentionDependencyOracle({

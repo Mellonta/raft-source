@@ -1,4 +1,4 @@
-import type { DatabaseTransaction } from "../db/index.js";
+import type { DatabaseTransaction } from "../db/index";
 
 export type ExternalReactionAggregateTransition = Readonly<{
   tx: DatabaseTransaction;

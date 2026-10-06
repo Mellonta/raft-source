@@ -70,8 +70,6 @@ export default function ServerSetupComputerRuntimePreviewPage() {
             serverSlug="launch"
             setupCommand="raft-computer setup /cindys-pricing-team"
             computerInstallCommand="curl -fsSL https://cdn.raft.build/computer/install.sh | sh"
-            macLinuxDaemonCommand="npx @botiverse/raft-daemon@latest --server-url https://api.raft.build --api-key sk_machine_preview0000000000000000"
-            windowsDaemonCommand="npx.cmd @botiverse/raft-daemon@latest --server-url https://api.raft.build --api-key sk_machine_preview0000000000000000"
             onCopyInstallCommand={() => undefined}
             onOpenApiKeySettings={() => undefined}
             onNext={() => {

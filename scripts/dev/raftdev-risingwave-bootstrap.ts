@@ -1,32 +1,43 @@
 /**
- * Pure, Docker-free contract for raftdev's managed RisingWave bootstrap.
+ * Pure, Docker-free contract for the managed RisingWave bootstrap used by
+ * raftdev (`--risingwave`) and the `risingwave-real` CI job.
  *
  * Runtime orchestration lives in packages/server/scripts/bootstrap-risingwave-local.ts,
  * where the server package's pg dependency is available. Keeping the manifest and
  * SQL selection here lets the fast raftdev suite prove the production-artifact
  * dependency order without starting Postgres or RisingWave.
+ *
+ * The bootstrap builds exactly the relations the server reads today (see
+ * RISINGWAVE_SERVER_READ_RELATIONS, which mirrors UNIFIED_CHAIN_VIEWS /
+ * CONVERSATION_UNREAD_VIEW in packages/server/src/db/risingwave.ts plus the
+ * direct rw_* reads in packages/server/src/services) and their transitive
+ * dependencies, taken statement-by-statement from the production artifacts in
+ * infra/risingwave/sql. Superseded generations in those files are skipped.
  */
 
 export const RISINGWAVE_LOCAL_SOURCE = "slockdev_pg_cdc";
 export const RISINGWAVE_LOCAL_PUBLICATION = "slockdev_rw_publication";
 export const RISINGWAVE_LOCAL_SLOT = "slockdev_rw_slot";
+/** The production CDC source name the artifacts are written against. */
+export const RISINGWAVE_PRODUCTION_SOURCE = "slock_neon_cdc";
 
 export const RISINGWAVE_PUBLICATION_TABLES = [
   "channels",
   "messages",
   "channel_humans",
+  "channel_agents",
   "user_channel_read_cursors",
-  "read_mutation_authorities",
+  "agent_channel_read_cursors",
   "user_channel_inbox_states",
   "thread_follows",
-  "tasks",
   "message_mentions",
   "server_members",
   "joint_channels",
   "joint_channel_servers",
   "inbox_suppression_states",
   "inbox_target_mute_states",
-  "inbox_notification_facts",
+  "servers",
+  "tasks",
 ] as const;
 
 export interface RisingWaveCdcTable {
@@ -37,9 +48,10 @@ export interface RisingWaveCdcTable {
 }
 
 /**
- * Deliberately narrow CDC projections. In particular, messages.search_vector
- * is a generated tsvector and is outside RisingWave's documented PostgreSQL
- * CDC mapping. UUIDs are represented as varchar, matching that mapping.
+ * Deliberately narrow CDC projections: exactly the columns the selected views
+ * and server reads use. messages.search_vector is a generated tsvector and is
+ * outside RisingWave's documented PostgreSQL CDC mapping. UUIDs are represented
+ * as varchar, matching that mapping.
  */
 export const RISINGWAVE_CDC_TABLES: readonly RisingWaveCdcTable[] = [
   {
@@ -68,20 +80,30 @@ export const RISINGWAVE_CDC_TABLES: readonly RisingWaveCdcTable[] = [
       "sender_id varchar",
       "content varchar",
       "created_at timestamptz",
+      // RFC-063 send-verdict columns (rw_message_target_v3 and the unread arms).
+      "message_type varchar",
+      "causal_actor_type varchar",
+      "causal_actor_id varchar",
+      "system_subtype varchar",
+      // Task badge columns (rw_message_preview_v1).
+      "task_status varchar",
+      "task_number int",
+      "task_assignee_type varchar",
+      "task_assignee_id varchar",
     ],
     primaryKey: ["id"],
   },
   {
     upstream: "channel_humans",
     name: "rw_channel_humans",
-    columns: ["channel_id varchar", "user_id varchar"],
+    columns: ["channel_id varchar", "user_id varchar", "joined_at timestamptz"],
     primaryKey: ["channel_id", "user_id"],
   },
   {
-    upstream: "user_channel_read_cursors",
-    name: "rw_user_channel_read_cursors",
-    columns: ["user_id varchar", "channel_id varchar", "last_read_seq int"],
-    primaryKey: ["user_id", "channel_id"],
+    upstream: "channel_agents",
+    name: "rw_channel_agents",
+    columns: ["channel_id varchar", "agent_id varchar", "added_at timestamptz"],
+    primaryKey: ["channel_id", "agent_id"],
   },
   {
     upstream: "user_channel_read_cursors",
@@ -96,14 +118,16 @@ export const RISINGWAVE_CDC_TABLES: readonly RisingWaveCdcTable[] = [
     primaryKey: ["user_id", "channel_id"],
   },
   {
-    upstream: "read_mutation_authorities",
-    name: "rw_read_mutation_authorities_v1",
+    upstream: "agent_channel_read_cursors",
+    name: "rw_agent_channel_read_cursors",
     columns: [
-      "server_id varchar",
-      "principal_id varchar",
-      "last_terminal_authority_seq bigint",
+      "agent_id varchar",
+      "channel_id varchar",
+      "last_read_seq int",
+      "last_read_seq8 bigint",
+      "read_state_version int",
     ],
-    primaryKey: ["server_id", "principal_id"],
+    primaryKey: ["agent_id", "channel_id"],
   },
   {
     upstream: "user_channel_inbox_states",
@@ -118,37 +142,11 @@ export const RISINGWAVE_CDC_TABLES: readonly RisingWaveCdcTable[] = [
       "thread_channel_id varchar",
       "follower_type varchar",
       "follower_id varchar",
+      "created_at timestamptz",
       "done_at timestamptz",
       "unfollowed_at timestamptz",
     ],
     primaryKey: ["thread_channel_id", "follower_type", "follower_id"],
-  },
-  {
-    upstream: "tasks",
-    name: "rw_tasks",
-    columns: [
-      "id varchar",
-      "message_id varchar",
-      "task_number int",
-      "status varchar",
-      "claimed_by_type varchar",
-      "claimed_by_id varchar",
-    ],
-    primaryKey: ["id"],
-  },
-  {
-    upstream: "message_mentions",
-    name: "rw_message_mentions",
-    columns: [
-      "id varchar",
-      "message_seq bigint",
-      "channel_id varchar",
-      "target_type varchar",
-      "target_id varchar",
-      "notifiable_at_send boolean",
-      "notified_at timestamptz",
-    ],
-    primaryKey: ["id"],
   },
   {
     upstream: "message_mentions",
@@ -205,57 +203,154 @@ export const RISINGWAVE_CDC_TABLES: readonly RisingWaveCdcTable[] = [
     primaryKey: ["receiver_type", "receiver_id", "target_kind", "target_channel_id"],
   },
   {
-    upstream: "inbox_notification_facts",
-    name: "rw_inbox_notification_facts_v1",
+    // The parent message's task in rw_followed_threads_v4 (072). Production
+    // carries the full table as `rw_tasks (*)`; this is the slice 072 reads.
+    upstream: "tasks",
+    name: "rw_tasks",
     columns: [
       "id varchar",
-      "receiver_type varchar",
-      "receiver_id varchar",
-      "server_id varchar",
-      "kind varchar",
-      "source_channel_id varchar",
       "message_id varchar",
-      "message_seq bigint",
-      "activity_at timestamptz",
-      "personal_mention boolean",
-      "unread_eligible boolean",
-      "created_at timestamptz",
+      "task_number int",
+      "status varchar",
+      "claimed_by_type varchar",
+      "claimed_by_id varchar",
     ],
     primaryKey: ["id"],
   },
 ] as const;
 
-export const RISINGWAVE_V3_VISIBILITY_ORDER = [
-  "rw_inbox_visibility_channel_targets_v3",
-  "rw_inbox_visibility_followed_thread_parent_resolution_v3",
-  "rw_inbox_visibility_followed_thread_parent_visibility_v3",
-  "rw_inbox_visibility_followed_thread_targets_v3",
-  "rw_inbox_visibility_public_channel_mention_targets_v3",
-  "rw_inbox_visibility_public_thread_mention_parent_resolution_v3",
-  "rw_inbox_visibility_public_thread_mention_parent_visibility_v3",
-  "rw_inbox_visibility_public_thread_mention_targets_v3",
-  "rw_inbox_visibility_facts_v3",
+/**
+ * CDC tables whose DDL is owned by an artifact (061) rather than by the explicit
+ * projections above. The orchestrator waits for their count parity too.
+ */
+export const RISINGWAVE_ARTIFACT_CDC_TABLES = [
+  { upstream: "inbox_target_mute_states", name: "rw_inbox_target_mute_states_v2" },
+  { upstream: "servers", name: "rw_servers" },
+] as const satisfies readonly { upstream: (typeof RISINGWAVE_PUBLICATION_TABLES)[number]; name: string }[];
+
+/**
+ * Every relation the server reads from RisingWave today. The serving views
+ * mirror UNIFIED_CHAIN_VIEWS / CONVERSATION_UNREAD_VIEW in
+ * packages/server/src/db/risingwave.ts; the rest are direct reads in
+ * channelService (followed-thread stats, the sidebar public arm, the read-cursor
+ * join on the Activity page) and the CDC integrity checker's windowed tables.
+ */
+export const RISINGWAVE_SERVER_READ_RELATIONS = [
+  "rw_inbox_serving_v6",
+  "rw_activity_totals_v4",
+  "rw_agent_inbox_v5",
+  "rw_conversation_unread_v2",
+  "rw_followed_threads_v4",
+  "rw_target_latest_v4",
+  "rw_target_eligible_v1",
+  "rw_channels",
+  "rw_channel_humans",
+  "rw_user_channel_read_cursors_v2",
+  "rw_messages",
+  "rw_message_mentions_v2",
 ] as const;
 
-export const RISINGWAVE_REQUIRED_RELATIONS = [
-  ...RISINGWAVE_CDC_TABLES.map((table) => table.name),
-  "rw_inbox_target_mute_states_v2",
-  "rw_followed_thread_stats_v1",
-  "rw_sidebar_unread_summary_v1",
-  "rw_channel_unread_counts_v2",
-  "rw_inbox_visibility_facts_v3",
-  "rw_inbox_suppression_facts_v3_2",
-  "rw_inbox_mute_facts_v3_2",
-  "rw_inbox_mute_allowed_activity_v3_2",
-  "rw_inbox_cloak_decisions_v3_2",
-  "rw_inbox_items_v2_suppressed_v3_2",
-  "rw_inbox_notification_facts_v1",
-  "rw_inbox_items_v2_suppressed_v3_3",
-  "rw_inbox_fact_visibility_targets_v1",
-  "rw_inbox_items_v2_suppressed_v3_4",
-  "rw_inbox_items_v3_2",
-  "rw_inbox_read_authorities_v1",
+export interface RisingWaveBootstrapArtifact {
+  /** Repo-relative path of the production SQL artifact. */
+  file: string;
+  /**
+   * CREATE TABLE / CREATE MATERIALIZED VIEW names to take from the file, in
+   * file order. Every other relation in the file is a superseded generation
+   * and is skipped. Indexes are taken iff their base relation is built.
+   */
+  relations: readonly string[];
+}
+
+/**
+ * Application order. This is dependency order, not file-number order:
+ * 063-unified-inbox-chain.sql (the v4 chain base) precedes 063-chain-v5.sql,
+ * which reads rw_target_eligible_v1 / rw_receiver_cursors_v1 /
+ * rw_message_target_v3 from it.
+ *
+ * Deliberately NOT applied, because every relation in them is superseded and no
+ * server path reads it: 063-agent-inbox.sql (rw_agent_inbox_v1),
+ * 064-agent-inbox-v3.sql (rw_agent_inbox_v3), 065-agent-inbox-v4.sql
+ * (rw_agent_inbox_v4); all replaced by rw_agent_inbox_v5 in 068.
+ */
+export const RISINGWAVE_BOOTSTRAP_ARTIFACTS: readonly RisingWaveBootstrapArtifact[] = [
+  {
+    // No MV from 024 is read any more: rw_followed_thread_stats_v1 is superseded
+    // by v3 (070) and the rest is the retired sidebar/unread generation. Applied
+    // only for its production indexes on the CDC tables (rw_messages,
+    // rw_message_mentions_v2), which ride with their already-created base.
+    file: "infra/risingwave/sql/024-risingwave-unread-inbox-full-materialized.sql",
+    relations: [],
+  },
+  {
+    // Two CDC tables (production source name rewritten) plus the shared
+    // message/thread-parent helpers; the v3 inbox chain in this file is retired.
+    file: "infra/risingwave/sql/061-inbox-derivation-chain.sql",
+    relations: [
+      "rw_inbox_target_mute_states_v2",
+      "rw_servers",
+      "rw_message_channel_slim_v1",
+      "rw_message_preview_v1",
+      "rw_thread_parent_v3",
+    ],
+  },
+  {
+    // v4 chain base. The v4 mention/watermark/items/serving/totals are superseded
+    // by 063-chain-v5 + 067 + 068.
+    file: "infra/risingwave/sql/063-unified-inbox-chain.sql",
+    relations: [
+      "rw_message_target_v3",
+      "rw_target_latest_v4",
+      "rw_target_eligible_v1",
+      "rw_receiver_cursors_v1",
+      "rw_subs_v2",
+      "rw_inbox_normal_v4",
+    ],
+  },
+  {
+    // Mute-at-admission arms and the per-(receiver, server) watermark. Items v9,
+    // serving v5, totals v3 and agent inbox v2 are superseded by 068.
+    file: "infra/risingwave/sql/063-chain-v5.sql",
+    relations: ["rw_muted_subs_v1", "rw_inbox_muted_prefix_v1", "rw_activity_watermark_v5"],
+  },
+  {
+    // rw_conversation_unread_v1 is superseded by v2 in 068.
+    file: "infra/risingwave/sql/066-conversation-unread-v1.sql",
+    relations: ["rw_inbox_muted_full_v1"],
+  },
+  {
+    file: "infra/risingwave/sql/067-mention-v6.sql",
+    relations: ["rw_inbox_mention_v6"],
+  },
+  {
+    file: "infra/risingwave/sql/068-chain-mention-v6-consumers.sql",
+    relations: [
+      "rw_inbox_items_v10",
+      "rw_inbox_serving_v6",
+      "rw_activity_totals_v4",
+      "rw_agent_inbox_v5",
+      "rw_conversation_unread_v2",
+    ],
+  },
+  {
+    // Index-only: the sidebar unread public arm's indexes on rw_channels,
+    // rw_channel_humans and rw_target_eligible_v1 (063). Like 024, the indexes
+    // ride with their already-created base relations.
+    file: "infra/risingwave/sql/071-unread-summary-public-arm-indexes.sql",
+    relations: [],
+  },
+  {
+    // The active followed-threads list in one row per thread: v3's stats plus
+    // the parent message and its task (rw_tasks). Reads rw_receiver_cursors_v1 (063).
+    file: "infra/risingwave/sql/072-followed-threads-v4.sql",
+    relations: ["rw_followed_threads_v4"],
+  },
 ] as const;
+
+/** Every table/MV the bootstrap creates, in creation order. */
+export const RISINGWAVE_REQUIRED_RELATIONS: readonly string[] = [
+  ...RISINGWAVE_CDC_TABLES.map((table) => table.name),
+  ...RISINGWAVE_BOOTSTRAP_ARTIFACTS.flatMap((artifact) => artifact.relations),
+];
 
 export function createCdcTableStatement(table: RisingWaveCdcTable): string {
   const columns = [...table.columns, `PRIMARY KEY (${table.primaryKey.join(", ")})`]
@@ -376,221 +471,164 @@ export function createdRelationName(statement: string): string | null {
   return match?.[1] ?? null;
 }
 
-function forceLocalDdlSettings(statement: string): string {
-  const bodyStart = leadingSqlBodyStart(statement);
-  const prefix = statement.slice(0, bodyStart);
-  const body = statement.slice(bodyStart);
-  if (/^SET\s+BACKGROUND_DDL\s*=/i.test(body)) {
-    return prefix + body.replace(
-      /^SET\s+BACKGROUND_DDL\s*=\s*\S+/i,
-      "SET BACKGROUND_DDL = false",
-    );
-  }
-  if (/^SET\s+STREAMING_PARALLELISM\s*=/i.test(body)) {
-    return prefix + body.replace(
-      /^SET\s+STREAMING_PARALLELISM\s*=\s*\S+/i,
-      "SET STREAMING_PARALLELISM = 1",
-    );
-  }
-  return statement;
+/** Base relation of a `CREATE [UNIQUE] INDEX name ON relation (...)` statement. */
+export function createdIndexTarget(statement: string): string | null {
+  const match = sqlStatementBody(statement).match(
+    /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+[a-zA-Z_][a-zA-Z0-9_]*\s+ON\s+([a-zA-Z_][a-zA-Z0-9_]*)\b/i,
+  );
+  return match?.[1]?.toLowerCase() ?? null;
 }
 
-function assertArtifactStatementShape(
-  label: string,
-  statements: readonly string[],
-  settings: "required" | "forbidden",
-): void {
-  let backgroundSettings = 0;
-  let parallelismSettings = 0;
-  for (const statement of statements) {
-    const body = sqlStatementBody(statement);
-    if (body === "") continue;
-    if (/^SET\s+BACKGROUND_DDL\s*=/i.test(body)) {
-      backgroundSettings++;
+function isCreateRelation(statement: string): boolean {
+  return /^CREATE\s+(?:MATERIALIZED\s+VIEW|TABLE)\b/i.test(sqlStatementBody(statement));
+}
+
+/** Statement text with comments and string literals blanked, for identifier scans. */
+function codeOnly(statement: string): string {
+  let out = "";
+  for (let i = 0; i < statement.length; i++) {
+    const ch = statement[i];
+    const next = statement[i + 1];
+    if (ch === "-" && next === "-") {
+      const newline = statement.indexOf("\n", i);
+      i = newline === -1 ? statement.length : newline;
+      out += " ";
       continue;
     }
-    if (/^SET\s+STREAMING_PARALLELISM\s*=/i.test(body)) {
-      parallelismSettings++;
+    if (ch === "/" && next === "*") {
+      const close = statement.indexOf("*/", i + 2);
+      i = close === -1 ? statement.length : close + 1;
+      out += " ";
       continue;
     }
-    if (createdRelationName(statement) !== null) continue;
-    throw new Error(
-      `${label} artifact contains an unsupported executable statement: ${body.replace(/\s+/g, " ").slice(0, 96)}`,
-    );
+    if (ch === "'") {
+      let j = i + 1;
+      while (j < statement.length) {
+        if (statement[j] === "'" && statement[j + 1] === "'") { j += 2; continue; }
+        if (statement[j] === "'") break;
+        j++;
+      }
+      i = j;
+      out += "''";
+      continue;
+    }
+    out += ch;
   }
-  const expected = settings === "required" ? 1 : 0;
-  if (backgroundSettings !== expected || parallelismSettings !== expected) {
-    throw new Error(
-      `${label} artifact must contain ${expected} BACKGROUND_DDL and ${expected} STREAMING_PARALLELISM setting(s); ` +
-      `found ${backgroundSettings} and ${parallelismSettings}`,
-    );
-  }
+  return out;
 }
 
-function assertUniqueCreatedRelations(label: string, statements: readonly string[]): void {
-  const seen = new Set<string>();
-  for (const statement of statements) {
-    const name = createdRelationName(statement);
-    if (!name) continue;
-    // These artifact names are deliberately unquoted, so RisingWave folds them
-    // case-insensitively even though JavaScript's Set does not.
-    const normalized = name.toLowerCase();
-    if (seen.has(normalized)) throw new Error(`${label} creates ${name} more than once`);
-    seen.add(normalized);
+/** rw_* relations a statement reads (its own created name excluded). */
+export function referencedRelations(statement: string): string[] {
+  const own = (createdRelationName(statement) ?? "").toLowerCase();
+  const names = new Set<string>();
+  for (const match of codeOnly(statement).matchAll(/\brw_[a-z0-9_]+\b/gi)) {
+    const name = match[0].toLowerCase();
+    if (name !== own) names.add(name);
   }
+  return [...names];
 }
 
-export interface RisingWaveBootstrapArtifacts {
-  base: string;
-  productionV3: string;
-  muteV32: string;
-  bornReadV33: string;
-  factVisibilityV34: string;
-  readFrontierV1: string;
+function isDdlSetting(body: string): boolean {
+  return /^SET\s+(?:BACKGROUND_DDL|STREAMING_PARALLELISM)\s*=/i.test(body);
 }
 
 /**
- * Select and order the canonical repo artifacts. Required-relation, setting,
- * and uniqueness guards make a future artifact rewrite fail loudly instead of
- * silently applying a partial, unsafe, or duplicate graph.
+ * Select, rewrite, and order the canonical repo artifacts.
+ *
+ * `artifacts` maps each RISINGWAVE_BOOTSTRAP_ARTIFACTS file to its contents.
+ * Guards make a future artifact rewrite fail loudly instead of silently
+ * applying a partial, unsafe, duplicate, or out-of-order graph:
+ *   - an artifact may contain only CREATE TABLE / MATERIALIZED VIEW / INDEX and
+ *     the two DDL settings (which are dropped: the prelude pins foreground DDL);
+ *   - every selected relation exists exactly once in its artifact;
+ *   - leading comments are dropped (history notes may quote superseded settings);
+ *   - the production CDC source name is rewritten to the local source, and no
+ *     other source reference survives;
+ *   - every rw_* relation a selected statement reads was created earlier;
+ *   - every server-read relation is created, and every CDC table feeds something.
  */
 export function buildRisingWaveBootstrapStatements(
-  artifacts: RisingWaveBootstrapArtifacts,
+  artifacts: Readonly<Record<string, string>>,
 ): string[] {
-  const baseRaw = splitSqlStatements(artifacts.base);
-  assertArtifactStatementShape("RFC024", baseRaw, "required");
-  assertUniqueCreatedRelations("RFC024 artifact", baseRaw);
-  const base = baseRaw.map(forceLocalDdlSettings);
-  const baseNames = base.map(createdRelationName).filter((name): name is string => name !== null);
-  for (const required of [
-    "rw_followed_thread_stats_v1",
-    "rw_sidebar_unread_summary_v1",
-    "rw_channel_unread_counts_v2",
-    "rw_inbox_items_v2",
-  ]) {
-    if (baseNames.filter((name) => name === required).length !== 1) {
-      throw new Error(`RFC024 artifact must create ${required} exactly once`);
-    }
-  }
-
-  const productionV3 = splitSqlStatements(artifacts.productionV3);
-  assertArtifactStatementShape("v3 SHOW CREATE", productionV3, "forbidden");
-  assertUniqueCreatedRelations("v3 SHOW CREATE artifact", productionV3);
-  const v3ByName = new Map<string, string>();
-  for (const statement of productionV3) {
-    const name = createdRelationName(statement);
-    if (name) {
-      v3ByName.set(name, statement);
-    }
-  }
-  const v3 = RISINGWAVE_V3_VISIBILITY_ORDER.map((name) => {
-    const statement = v3ByName.get(name);
-    if (!statement) throw new Error(`v3 artifact is missing ${name}`);
-    return statement;
-  });
-  for (const duplicate of ["rw_inbox_items_v2", "rw_inbox_items_v3", "rw_inbox_cloak_decisions_v3"]) {
-    if (v3.some((statement) => createdRelationName(statement) === duplicate)) {
-      throw new Error(`v3 selection must exclude duplicate terminal ${duplicate}`);
-    }
-  }
-
-  const sourceMatches = artifacts.muteV32.match(/\bslock_neon_cdc\b/g)?.length ?? 0;
-  if (sourceMatches !== 1) {
-    throw new Error(`RFC039 v3.2 artifact must reference slock_neon_cdc exactly once; found ${sourceMatches}`);
-  }
-  const muteV32Raw = splitSqlStatements(
-    artifacts.muteV32.replace(/\bslock_neon_cdc\b/, RISINGWAVE_LOCAL_SOURCE),
-  );
-  assertArtifactStatementShape("RFC039 v3.2", muteV32Raw, "required");
-  assertUniqueCreatedRelations("RFC039 v3.2 artifact", muteV32Raw);
-  const muteV32 = muteV32Raw.map(forceLocalDdlSettings);
-  const muteNames = muteV32.map(createdRelationName).filter((name): name is string => name !== null);
-  for (const required of [
-    "rw_inbox_target_mute_states_v2",
-    "rw_inbox_suppression_facts_v3_2",
-    "rw_inbox_mute_facts_v3_2",
-    "rw_inbox_mute_allowed_activity_v3_2",
-    "rw_inbox_cloak_decisions_v3_2",
-    "rw_inbox_items_v2_suppressed_v3_2",
-    "rw_inbox_items_v3_2",
-  ]) {
-    if (muteNames.filter((name) => name === required).length !== 1) {
-      throw new Error(`RFC039 v3.2 artifact must create ${required} exactly once`);
-    }
-  }
-
-  const bornReadSourceMatches = artifacts.bornReadV33.match(/\bslock_neon_cdc\b/g)?.length ?? 0;
-  if (bornReadSourceMatches !== 1) {
-    throw new Error(`RFC039 v3.3 artifact must reference slock_neon_cdc exactly once; found ${bornReadSourceMatches}`);
-  }
-  const bornReadV33Raw = splitSqlStatements(
-    artifacts.bornReadV33.replace(/\bslock_neon_cdc\b/, RISINGWAVE_LOCAL_SOURCE),
-  );
-  assertArtifactStatementShape("RFC039 v3.3 born-read", bornReadV33Raw, "required");
-  assertUniqueCreatedRelations("RFC039 v3.3 born-read artifact", bornReadV33Raw);
-  const bornReadTableCreates = bornReadV33Raw.filter(
-    (statement) => createdRelationName(statement) === "rw_inbox_notification_facts_v1",
-  );
-  if (bornReadTableCreates.length !== 1) {
-    throw new Error("RFC039 v3.3 born-read artifact must create rw_inbox_notification_facts_v1 exactly once");
-  }
-  const bornReadV33 = bornReadV33Raw
-    .filter((statement) => createdRelationName(statement) !== "rw_inbox_notification_facts_v1")
-    .map(forceLocalDdlSettings);
-  if (
-    bornReadV33.filter(
-      (statement) => createdRelationName(statement) === "rw_inbox_items_v2_suppressed_v3_3",
-    ).length !== 1
-  ) {
-    throw new Error("RFC039 v3.3 born-read artifact must create rw_inbox_items_v2_suppressed_v3_3 exactly once");
-  }
-
-  const factVisibilityV34Raw = splitSqlStatements(artifacts.factVisibilityV34);
-  assertArtifactStatementShape("RFC056 fact visibility v3.4", factVisibilityV34Raw, "required");
-  assertUniqueCreatedRelations("RFC056 fact visibility v3.4 artifact", factVisibilityV34Raw);
-  const factVisibilityV34 = factVisibilityV34Raw.map(forceLocalDdlSettings);
-  const factVisibilityNames = factVisibilityV34
-    .map(createdRelationName)
-    .filter((name): name is string => name !== null);
-  for (const required of [
-    "rw_inbox_fact_visibility_targets_v1",
-    "idx_rw_inbox_fact_visibility_targets_v1_lookup",
-    "rw_inbox_items_v2_suppressed_v3_4",
-    "idx_rw_inbox_items_v2_suppressed_v3_4_user_activity",
-    "idx_rw_inbox_items_v2_suppressed_v3_4_user_filter",
-  ]) {
-    if (factVisibilityNames.filter((name) => name === required).length !== 1) {
-      throw new Error(`RFC056 fact visibility v3.4 artifact must create ${required} exactly once`);
-    }
-  }
-
-  const readFrontierSourceMatches = artifacts.readFrontierV1.match(/\bslock_neon_cdc\b/g)?.length ?? 0;
-  if (readFrontierSourceMatches !== 2) {
-    throw new Error(`RFC056 read-frontier artifact must reference slock_neon_cdc exactly twice; found ${readFrontierSourceMatches}`);
-  }
-  const readFrontierRaw = splitSqlStatements(
-    artifacts.readFrontierV1.replaceAll(/\bslock_neon_cdc\b/g, RISINGWAVE_LOCAL_SOURCE),
-  );
-  assertArtifactStatementShape("RFC056 read frontier", readFrontierRaw, "required");
-  assertUniqueCreatedRelations("RFC056 read frontier", readFrontierRaw);
-  const readFrontier = readFrontierRaw
-    .filter((statement) => createdRelationName(statement) === "rw_inbox_read_authorities_v1")
-    .map(forceLocalDdlSettings);
-  if (readFrontier.length !== 1) {
-    throw new Error("RFC056 read-frontier artifact must create rw_inbox_read_authorities_v1 exactly once");
-  }
-
-  const statements = [
+  const created = new Set<string>();
+  const referenced = new Set<string>();
+  const statements: string[] = [
     "SET BACKGROUND_DDL = false",
     "SET STREAMING_PARALLELISM = 1",
-    ...RISINGWAVE_CDC_TABLES.map(createCdcTableStatement),
-    ...base,
-    ...v3,
-    ...muteV32,
-    ...bornReadV33,
-    ...factVisibilityV34,
-    ...readFrontier,
   ];
-  assertUniqueCreatedRelations("composed local RisingWave bootstrap", statements);
+  const add = (statement: string, label: string) => {
+    const name = createdRelationName(statement)?.toLowerCase() ?? null;
+    const indexTarget = createdIndexTarget(statement);
+    const deps = referencedRelations(statement).filter((dep) => dep !== indexTarget || !indexTarget);
+    for (const dep of deps) {
+      if (!created.has(dep)) {
+        throw new Error(`${label}: ${name ?? "statement"} reads ${dep}, which is not created before it`);
+      }
+      referenced.add(dep);
+    }
+    if (indexTarget) referenced.add(indexTarget);
+    if (name && isCreateRelation(statement)) {
+      if (created.has(name)) throw new Error(`${label} creates ${name} more than once`);
+      created.add(name);
+    }
+    statements.push(statement);
+  };
+
+  for (const table of RISINGWAVE_CDC_TABLES) add(createCdcTableStatement(table), "CDC projection");
+
+  for (const artifact of RISINGWAVE_BOOTSTRAP_ARTIFACTS) {
+    const raw = artifacts[artifact.file];
+    if (raw === undefined) throw new Error(`missing RisingWave artifact ${artifact.file}`);
+    const label = artifact.file.split("/").pop() ?? artifact.file;
+    const wanted = new Set(artifact.relations.map((name) => name.toLowerCase()));
+    const found = new Map<string, number>();
+    const selected: string[] = [];
+    for (const statement of splitSqlStatements(raw)) {
+      const body = sqlStatementBody(statement);
+      if (body === "" || isDdlSetting(body)) continue;
+      const name = createdRelationName(statement)?.toLowerCase();
+      if (!name) {
+        throw new Error(
+          `${label} contains an unsupported executable statement: ${body.replace(/\s+/g, " ").slice(0, 96)}`,
+        );
+      }
+      if (isCreateRelation(statement)) {
+        found.set(name, (found.get(name) ?? 0) + 1);
+        if (wanted.has(name)) selected.push(sqlStatementBody(statement));
+        continue;
+      }
+      // An index rides with its base relation: built iff that relation is.
+      const target = createdIndexTarget(statement);
+      if (target && (wanted.has(target) || created.has(target))) selected.push(sqlStatementBody(statement));
+    }
+    for (const name of wanted) {
+      const count = found.get(name) ?? 0;
+      if (count !== 1) throw new Error(`${label} must create ${name} exactly once; found ${count}`);
+    }
+    for (const original of selected) {
+      const statement = original.replaceAll(
+        new RegExp(`\\b${RISINGWAVE_PRODUCTION_SOURCE}\\b`, "g"),
+        RISINGWAVE_LOCAL_SOURCE,
+      );
+      const sources = [...codeOnly(statement).matchAll(/\bFROM\s+([a-zA-Z_][a-zA-Z0-9_]*)\s+TABLE\s*''/gi)]
+        .map((match) => match[1]);
+      for (const source of sources) {
+        if (source !== RISINGWAVE_LOCAL_SOURCE) {
+          throw new Error(`${label}: ${createdRelationName(statement)} reads unknown CDC source ${source}`);
+        }
+      }
+      add(statement, label);
+    }
+  }
+
+  for (const relation of RISINGWAVE_SERVER_READ_RELATIONS) {
+    if (!created.has(relation)) throw new Error(`bootstrap does not create server-read relation ${relation}`);
+  }
+  const serverReads = new Set<string>(RISINGWAVE_SERVER_READ_RELATIONS);
+  for (const table of RISINGWAVE_CDC_TABLES) {
+    if (!referenced.has(table.name) && !serverReads.has(table.name)) {
+      throw new Error(`CDC table ${table.name} feeds no selected relation or server read`);
+    }
+  }
   return statements;
 }

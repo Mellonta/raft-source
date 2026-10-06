@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import api from "../src/api/client";
 import { useAnnouncementStore } from "../src/store/announcementStore";
 
@@ -17,9 +16,9 @@ afterEach(() => {
   useAnnouncementStore.getState().reset();
 });
 
-test("an open announcement prevents focus recovery from refetching or clearing this tab", async (t) => {
+test("an open announcement prevents focus recovery from refetching or clearing this tab", async () => {
   let gets = 0;
-  t.mock.method(api, "get", async () => {
+  vi.spyOn(api, "get").mockImplementation(async () => {
     gets += 1;
     return { data: { announcements: [] } };
   });
@@ -31,13 +30,13 @@ test("an open announcement prevents focus recovery from refetching or clearing t
   assert.deepEqual(useAnnouncementStore.getState().pending, [announcement]);
 });
 
-test("focus and visibility recovery share one request and cannot erase a modal opened before it resolves", async (t) => {
+test("focus and visibility recovery share one request and cannot erase a modal opened before it resolves", async () => {
   let gets = 0;
   let resolveGet!: (value: { data: { announcements: never[] } }) => void;
   const response = new Promise<{ data: { announcements: never[] } }>((resolve) => {
     resolveGet = resolve;
   });
-  t.mock.method(api, "get", () => {
+  vi.spyOn(api, "get").mockImplementation(() => {
     gets += 1;
     return response;
   });
@@ -58,9 +57,9 @@ test("focus and visibility recovery share one request and cannot erase a modal o
   );
 });
 
-test("an idle focused tab still loads the current server-authoritative announcement", async (t) => {
+test("an idle focused tab still loads the current server-authoritative announcement", async () => {
   let gets = 0;
-  t.mock.method(api, "get", async () => {
+  vi.spyOn(api, "get").mockImplementation(async () => {
     gets += 1;
     return { data: { announcements: [announcement] } };
   });

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { test } from "vitest";
 
-import { program } from "./cli.js";
+import { program } from "./cli";
 
 type CommanderCommand = typeof program;
 
@@ -102,4 +102,50 @@ test("status command has zero OS-supervisor inspection or mutation calls", async
   assert.ok(start >= 0 && end > start, "status command block must remain discoverable");
   const statusBlock = source.slice(start, end);
   assert.doesNotMatch(statusBlock, /inspectOsSupervisor|mutateOsSupervisor|OS supervisor/);
+});
+
+test("doctor exposes the explicit private unread/Activity dump option without a JSON stdout mode", () => {
+  const doctor = commandByName(program, "doctor");
+  assert.ok(doctor);
+  assert.ok(optionNames(doctor).has("--unread-activity-dump"));
+  assert.ok(!optionNames(doctor).has("--json"));
+});
+
+test("doctor rejects migration details with an unread/Activity dump before creating the target", async () => {
+  const home = await mkdtemp(join(tmpdir(), "raft-computer-doctor-option-conflict-"));
+  const outputPath = join(home, "must-not-exist.json");
+  const previousExitCode = process.exitCode;
+  const previousStderrWrite = process.stderr.write;
+  const previousSlockHome = process.env.SLOCK_HOME;
+  const previousRaftHome = process.env.RAFT_HOME;
+  let stderr = "";
+  process.exitCode = undefined;
+  process.env.SLOCK_HOME = home;
+  process.env.RAFT_HOME = home;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    await program.parseAsync([
+      "node",
+      "raft-computer",
+      "doctor",
+      "--migration-details",
+      "--unread-activity-dump",
+      outputPath,
+    ]);
+    assert.equal(process.exitCode, 1);
+    assert.match(stderr, /What happened \(INVALID_ARGUMENT\)/);
+    await assert.rejects(stat(outputPath), { code: "ENOENT" });
+  } finally {
+    process.stderr.write = previousStderrWrite;
+    process.exitCode = previousExitCode;
+    if (previousSlockHome === undefined) delete process.env.SLOCK_HOME;
+    else process.env.SLOCK_HOME = previousSlockHome;
+    if (previousRaftHome === undefined) delete process.env.RAFT_HOME;
+    else process.env.RAFT_HOME = previousRaftHome;
+    await rm(home, { recursive: true, force: true });
+  }
 });

@@ -1,23 +1,31 @@
+import { respondToTaskWriteError } from "../lib/taskWriteErrorResponse";
 import { Router, type Request, type Response, type Router as RouterType } from "express";
-import * as taskService from "../services/taskService.js";
-import * as channelService from "../services/channelService.js";
-import * as messageService from "../services/messageService.js";
-import * as userService from "../services/userService.js";
-import * as agentService from "../services/agentService.js";
+import * as taskService from "../services/taskService";
+import * as channelService from "../services/channelService";
+import * as messageService from "../services/messageService";
+import * as userService from "../services/userService";
+import * as agentService from "../services/agentService";
 import type { Server as SocketServer } from "socket.io";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
 import { authorizeTaskAction, isTaskStatus, type ServerId, type TaskAction, type TaskStatus } from "@botiverse/raft-shared";
-import { UUID_RE } from "../lib/messageId.js";
-import { emitTaskCreated, emitTaskDeleted, emitTaskMessageNew, emitTaskUpdated } from "../services/taskRealtimeEvents.js";
-import { actorHasServerCapabilityInServer, getActorServerRoleInServer } from "../lib/actorPermissions.js";
+import { UUID_RE } from "../lib/messageId";
+import { guardUuidPathParams } from "../lib/uuidPathParams";
+import { emitTaskCreated, emitTaskDeleted, emitTaskMessageNew, emitTaskUpdated } from "../services/taskRealtimeEvents";
+import { actorHasServerCapabilityInServer, getActorServerRoleInServer } from "../lib/actorPermissions";
 import {
   getTaskRealtimeSurfaceTargets,
+  isHistoricalJointTaskReadOnly,
+  writeTaskSurfaceFields,
   resolveTaskChannelSurface,
   resolveTaskChannelSurfaceForStorage,
   type TaskSurfaceChannel,
-} from "../services/taskChannelSurface.js";
+} from "../services/taskChannelSurface";
 
 export const taskRouter: RouterType = Router();
+
+// Uniform 404 for non-UUID path params (task #12), before any handler runs.
+// `taskNumber` is deliberately excluded (it is an integer, not a UUID).
+guardUuidPathParams(taskRouter, { channelId: "Channel", taskId: "Task" });
 
 async function rejectIfNoTaskReadAccess(channelId: string, userId: string, serverId: ServerId, res: Response): Promise<boolean> {
   const canAccess = await channelService.canUserAccessChannel(channelId, userId, serverId);
@@ -299,12 +307,13 @@ taskRouter.post("/channel/:channelId", async (req, res) => {
         mode: "record",
         producer: "task.created_summary",
         reason: "new shared tasks are channel activity",
+        causalActor: { type: "user", id: req.userId! },
       },
-      causalActor: { type: "user", id: req.userId! },
     }).catch(() => {});
 
     res.json({ tasks: taskService.projectTasksToChannel(created, surface.localChannel) });
-  } catch {
+  } catch (error) {
+    if (respondToTaskWriteError(error, res)) return;
     res.status(500).json({ error: "Failed to create tasks" });
   }
 });
@@ -346,6 +355,7 @@ interface ResolvedTask {
    * second, wrong implementation.
    */
   owner: taskService.TaskOwner;
+  jointSurface: Awaited<ReturnType<typeof resolveTaskChannelSurfaceForStorage>>;
 }
 
 /** Reject mutations on archived channels. Returns true if blocked (response already sent). */
@@ -424,6 +434,10 @@ async function rejectIfNoChannelWriteAccess(
     }
     return false;
   }
+  if (task.jointSurface && isHistoricalJointTaskReadOnly(task.jointSurface, task.raw.createdAt)) {
+    res.status(403).json({ error: "Historical tasks are read-only from a participant workspace", code: "joint_task_read_only" });
+    return true;
+  }
   if (await rejectIfNoTaskWriteAccess(task.channelId, userId, serverId, action, res, relationship)) return true;
   if (await rejectIfArchived(task.channelId, res)) return true;
   return false;
@@ -472,6 +486,7 @@ async function requireTaskInServer(req: Request, res: Response): Promise<Resolve
     isOrphan,
     raw: row,
     owner,
+    jointSurface: surface,
   };
 }
 
@@ -493,7 +508,7 @@ async function emitTaskUpdate(req: Request, task: ResolvedTask, result: taskServ
   const surface = {
     storageChannelId: task.storageChannelId,
     localChannel: task.localChannel,
-    isJoint: task.channelId !== task.storageChannelId,
+    ...writeTaskSurfaceFields(task.jointSurface!),
   };
   for (const target of await getTaskRealtimeSurfaceTargets(surface)) {
     const projected = taskService.projectTaskToChannel(enriched, target.localChannel);
@@ -526,7 +541,7 @@ async function emitTaskUpdate(req: Request, task: ResolvedTask, result: taskServ
 async function postTaskLifecycleToThread(
   req: Request,
   task: ResolvedTask,
-  actorUserId: string,
+  actor: { type: "user" | "agent"; id: string },
   content: string,
 ): Promise<void> {
   // Anchor on the host message, not the task id: under v1.4 those differ for
@@ -536,8 +551,8 @@ async function postTaskLifecycleToThread(
     // Soft-deleted ordinary channels cannot act as a live projection surface;
     // preserve the pre-joint orphan path for those historical tasks.
     const thread = task.localChannel.deletedAt
-      ? await channelService.getOrCreateThread(task.messageId, actorUserId, "user")
-      : await channelService.getOrCreateThreadForChannel(task.localChannel.id, task.messageId, actorUserId, "user");
+      ? await channelService.getOrCreateThread(task.messageId, actor.id, actor.type)
+      : await channelService.getOrCreateThreadForChannel(task.localChannel.id, task.messageId, actor.id, actor.type);
     const io: SocketServer = req.app.get("io");
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
     await messageService.broadcastSystemMessageToLocalSurfaces(io, agentOrchestrator, thread.id, content, {
@@ -545,9 +560,9 @@ async function postTaskLifecycleToThread(
         mode: "record",
         producer: "task.lifecycle_thread",
         reason: "task status transitions are a collaboration signal for the thread audience",
+        causalActor: actor,
       },
-      // The user who moved the task should not see their own status change as unread.
-      causalActor: { type: "user", id: actorUserId },
+      // The actor who moved the task should not see their own status change as unread.
     });
   } catch (err) {
     console.error("Failed to post task lifecycle system message to thread:", err);
@@ -575,12 +590,13 @@ taskRouter.patch("/:taskId/claim", async (req, res) => {
     postTaskLifecycleToThread(
       req,
       task,
-      req.userId!,
+      { type: "user", id: req.userId! },
       `📌 ${enriched.claimedByName || "Someone"} claimed #${task.taskNumber} "${messageService.summarizeForSystemMessage(task.title)}"`,
-    ).catch(() => {});
+    );
 
     res.json({ task: enriched });
-  } catch {
+  } catch (error) {
+    if (respondToTaskWriteError(error, res)) return;
     res.status(500).json({ error: "Failed to claim task" });
   }
 });
@@ -610,6 +626,13 @@ taskRouter.post("/convert-message", async (req, res) => {
     if (await rejectIfNoTaskReadAccess(surface.localChannel.id, req.userId!, req.serverId!, res)) return;
     if (surface.localChannel.type === "thread") {
       res.status(409).json({ error: "Thread messages cannot be claimed as tasks" });
+      return;
+    }
+    if (isHistoricalJointTaskReadOnly(surface, msg.createdAt)) {
+      res.status(403).json({
+        error: "Historical tasks are read-only from a participant workspace",
+        code: "joint_task_read_only",
+      });
       return;
     }
     if (await rejectIfNoTaskWriteAccess(surface.localChannel.id, req.userId!, req.serverId!, "convert", res)) return;
@@ -642,12 +665,13 @@ taskRouter.post("/convert-message", async (req, res) => {
         mode: "record",
         producer: "task.converted_summary",
         reason: "newly created task is shared channel activity",
+        causalActor: { type: "user", id: req.userId! },
       },
-      causalActor: { type: "user", id: req.userId! },
     }).catch(() => {});
 
     res.json({ task: taskService.projectTaskToChannel(enriched, surface.localChannel) });
-  } catch {
+  } catch (error) {
+    if (respondToTaskWriteError(error, res)) return;
     res.status(500).json({ error: "Failed to convert message to task" });
   }
 });
@@ -673,12 +697,13 @@ taskRouter.patch("/:taskId/unclaim", async (req, res) => {
     postTaskLifecycleToThread(
       req,
       task,
-      req.userId!,
+      { type: "user", id: req.userId! },
       `🔓 ${userName} released #${task.taskNumber} "${messageService.summarizeForSystemMessage(task.title)}"`,
-    ).catch(() => {});
+    );
 
     res.json({ task: enriched });
-  } catch {
+  } catch (error) {
+    if (respondToTaskWriteError(error, res)) return;
     res.status(500).json({ error: "Failed to unclaim task" });
   }
 });
@@ -770,10 +795,11 @@ taskRouter.patch("/:taskId/assignee", async (req, res) => {
     const notice = assignee
       ? `📌 ${actorName} assigned #${task.taskNumber} "${summary}" to ${await describeAssignee(assignee)}`
       : `🔓 ${actorName} unassigned #${task.taskNumber} "${summary}"`;
-    postTaskLifecycleToThread(req, task, req.userId!, notice).catch(() => {});
+    postTaskLifecycleToThread(req, task, { type: "user", id: req.userId! }, notice);
 
     res.json({ task: enriched });
-  } catch {
+  } catch (error) {
+    if (respondToTaskWriteError(error, res)) return;
     res.status(500).json({ error: "Failed to assign task" });
   }
 });
@@ -821,19 +847,18 @@ taskRouter.patch("/:taskId/status", async (req, res) => {
     const enriched = await emitTaskUpdate(req, task, result);
     // Lifecycle notice goes to the task's own thread, not the parent channel.
     // (stdrc 2026-05-07 #proj-task:5f016c34 msg=e1c404b6)
-    const STATUS_EMOJI: Record<string, string> = { todo: "📝", in_progress: "🔄", in_review: "👀", done: "✅", closed: "🚫" };
-    const STATUS_LABEL: Record<string, string> = { todo: "Todo", in_progress: "In Progress", in_review: "In Review", done: "Done", closed: "Closed" };
     const user = await userService.getUser(req.userId!);
     const userName = user?.displayName || user?.name || "Someone";
     postTaskLifecycleToThread(
       req,
       task,
-      req.userId!,
-      `${STATUS_EMOJI[status] || "📝"} ${userName} moved #${task.taskNumber} "${messageService.summarizeForSystemMessage(task.title)}" to ${STATUS_LABEL[status] || status}`,
-    ).catch(() => {});
+      { type: "user", id: req.userId! },
+      messageService.buildTaskStatusChangeNotice(userName, task.taskNumber, task.title, status),
+    );
 
     res.json({ task: enriched });
-  } catch {
+  } catch (error) {
+    if (respondToTaskWriteError(error, res)) return;
     res.status(500).json({ error: "Failed to update task status" });
   }
 });
@@ -872,7 +897,7 @@ taskRouter.delete("/:taskId", async (req, res) => {
     const surface = {
       storageChannelId: task.storageChannelId,
       localChannel: task.localChannel,
-      isJoint: task.channelId !== task.storageChannelId,
+      ...writeTaskSurfaceFields(task.jointSurface!),
     };
     for (const target of await getTaskRealtimeSurfaceTargets(surface)) {
       emitTaskDeleted(io, target, { channelId: target.channelId, taskId: task.id });
@@ -891,7 +916,8 @@ taskRouter.delete("/:taskId", async (req, res) => {
       }).catch(() => {});
 
     res.json({ ok: true });
-  } catch {
+  } catch (error) {
+    if (respondToTaskWriteError(error, res)) return;
     res.status(500).json({ error: "Failed to delete task" });
   }
 });

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import type { ApiChannel, Channel } from "../src/store/channelStore.js";
+import type { ApiChannel, Channel } from "../src/store/channelStore";
 
 // channelStore's import chain reads `localStorage` at module load; stub it, then
 // load the store via dynamic import (static imports hoist above this stub).
@@ -14,9 +13,9 @@ const mem = new Map<string, string>();
   length: 0,
 } as Storage;
 
-const { useChannelStore, toChannel, activityFrom } = await import("../src/store/channelStore.js");
-const { triggerServerReset } = await import("../src/store/serverResetRegistry.js");
-const api = (await import("../src/api/client.js")).default;
+const { useChannelStore, toChannel, activityFrom } = await import("../src/store/channelStore");
+const { triggerServerReset } = await import("../src/store/serverResetRegistry");
+const api = (await import("../src/api/client")).default;
 
 function ch(id: string, over: Partial<Channel> = {}): Channel {
   return { id, name: id, description: null, type: "channel", createdAt: "1970-01-01T00:00:00.000Z", joined: true, ...over };
@@ -92,14 +91,14 @@ test("activityFrom extracts lastMessageAt by id (null when the API omits it)", (
   assert.deepEqual(patch, { a: "x", b: null });
 });
 
-test("openDM coalesces concurrent requests for the same agent and releases the key after success", async (t) => {
+test("openDM coalesces concurrent requests for the same agent and releases the key after success", async () => {
   useChannelStore.setState({ channels: [], dmChannels: [], channelActivity: {} });
   let requestCount = 0;
   let resolveFirst!: (value: { data: ApiChannel }) => void;
   const firstResponse = new Promise<{ data: ApiChannel }>((resolve) => {
     resolveFirst = resolve;
   });
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     requestCount += 1;
     assert.equal(url, "/channels/dm");
     assert.deepEqual(body, { agentId: "agent-1" });
@@ -139,14 +138,14 @@ test("openDM coalesces concurrent requests for the same agent and releases the k
   assert.equal(requestCount, 2, "the coalescing key must be released after success");
 });
 
-test("openUserDM coalesces concurrent requests and releases the key after failure", async (t) => {
+test("openUserDM coalesces concurrent requests and releases the key after failure", async () => {
   useChannelStore.setState({ channels: [], dmChannels: [], channelActivity: {} });
   let requestCount = 0;
   let rejectFirst!: (reason: Error) => void;
   const firstResponse = new Promise<never>((_resolve, reject) => {
     rejectFirst = reject;
   });
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     requestCount += 1;
     assert.equal(url, "/channels/dm");
     assert.deepEqual(body, { userId: "user-1" });
@@ -176,9 +175,9 @@ test("openUserDM coalesces concurrent requests and releases the key after failur
   assert.equal(requestCount, 2, "the coalescing key must be released after failure");
 });
 
-test("createChannel strips lastMessageAt off returned and stored identities while preserving activity", async (t) => {
+test("createChannel strips lastMessageAt off returned and stored identities while preserving activity", async () => {
   useChannelStore.setState({ channels: [], dmChannels: [], channelActivity: {} });
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     assert.equal(url, "/channels");
     assert.deepEqual(body, {
       name: "created",
@@ -200,7 +199,7 @@ test("createChannel strips lastMessageAt off returned and stored identities whil
   assert.equal(useChannelStore.getState().channelActivity.created, "2026-06-07T04:00:00.000Z");
 });
 
-test("joinChannel reports whether the membership mutation succeeded", async (t) => {
+test("joinChannel reports whether the membership mutation succeeded", async () => {
   useChannelStore.setState({
     channels: [ch("join-target", { joined: false })],
     dmChannels: [],
@@ -208,7 +207,7 @@ test("joinChannel reports whether the membership mutation succeeded", async (t) 
     channelLocalMembership: {},
   });
   let requestCount = 0;
-  t.mock.method(api, "post", async () => {
+  vi.spyOn(api, "post").mockImplementation(async () => {
     requestCount += 1;
     if (requestCount === 1) throw new Error("temporary join failure");
     return { data: { ok: true } };
@@ -225,9 +224,9 @@ test("joinChannel reports whether the membership mutation succeeded", async (t) 
 
 // (3) Mutation paths execute the split live (no socket involved in these two).
 
-test("updateChannel strips lastMessageAt off identity and writes it to the slice", async (t) => {
+test("updateChannel strips lastMessageAt off identity and writes it to the slice", async () => {
   useChannelStore.setState({ channels: [ch("c1", { name: "old" })], dmChannels: [], channelActivity: {} });
-  t.mock.method(api, "patch", async () => ({ data: apiCh("c1", "2026-06-07T12:00:00.000Z", { name: "new" }) }));
+  vi.spyOn(api, "patch").mockImplementation(async () => ({ data: apiCh("c1", "2026-06-07T12:00:00.000Z", { name: "new" }) }));
 
   const updated = await useChannelStore.getState().updateChannel("c1", { name: "new" });
 
@@ -237,13 +236,13 @@ test("updateChannel strips lastMessageAt off identity and writes it to the slice
   assert.equal(s.channelActivity["c1"], "2026-06-07T12:00:00.000Z");
 });
 
-test("updateChannel removes hidden #all from the local channel list", async (t) => {
+test("updateChannel removes hidden #all from the local channel list", async () => {
   useChannelStore.setState({
     channels: [ch("all-1", { name: "all" }), ch("general")],
     dmChannels: [],
     channelActivity: { "all-1": "x", general: "y" },
   });
-  t.mock.method(api, "patch", async () => ({
+  vi.spyOn(api, "patch").mockImplementation(async () => ({
     data: apiCh("all-1", "2026-06-07T12:00:00.000Z", { name: "all", type: "private" }),
   }));
 
@@ -256,13 +255,13 @@ test("updateChannel removes hidden #all from the local channel list", async (t) 
   assert.equal(s.channelActivity.general, "y");
 });
 
-test("restoreAllChannel reinserts restored #all into the local channel list", async (t) => {
+test("restoreAllChannel reinserts restored #all into the local channel list", async () => {
   useChannelStore.setState({
     channels: [ch("general")],
     dmChannels: [],
     channelActivity: { general: "y" },
   });
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     assert.equal(url, "/channels/system/all/restore");
     return {
       data: apiCh("all-1", "2026-06-07T12:00:00.000Z", { name: "all", type: "channel" }),
@@ -278,7 +277,7 @@ test("restoreAllChannel reinserts restored #all into the local channel list", as
   assert.equal(s.channelActivity.general, "y");
 });
 
-test("convertChannelToJoint replaces only the converted channel and preserves activity slices", async (t) => {
+test("convertChannelToJoint replaces only the converted channel and preserves activity slices", async () => {
   const target = ch("c1", { name: "general", type: "channel" });
   const other = ch("c2", { name: "random", type: "private" });
   useChannelStore.setState({
@@ -286,7 +285,7 @@ test("convertChannelToJoint replaces only the converted channel and preserves ac
     dmChannels: [],
     channelActivity: { c1: "old-activity", c2: "other-activity" },
   });
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     assert.equal(url, "/channels/c1/convert-to-joint");
     assert.equal(body, undefined);
     return {
@@ -314,15 +313,15 @@ test("convertChannelToJoint replaces only the converted channel and preserves ac
   assert.equal(s.channelActivity["c2"], "other-activity", "other channel activity must be preserved");
 });
 
-test("convertChannelToJoint sends task identity drop confirmation only when acknowledged", async (t) => {
+test("convertChannelToJoint forwards the typed command token", async () => {
   useChannelStore.setState({
     channels: [ch("c1", { name: "general", type: "channel" })],
     dmChannels: [],
     channelActivity: {},
   });
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     assert.equal(url, "/channels/c1/convert-to-joint");
-    assert.deepEqual(body, { confirmTaskIdentityDrop: true });
+    assert.deepEqual(body, { observeProgress: undefined, commandId: "cmd-1" });
     return {
       data: {
         channel: apiCh("c1", null, {
@@ -335,15 +334,15 @@ test("convertChannelToJoint sends task identity drop confirmation only when ackn
     };
   });
 
-  const converted = await useChannelStore.getState().convertChannelToJoint("c1", { confirmTaskIdentityDrop: true });
+  const converted = await useChannelStore.getState().convertChannelToJoint("c1", { commandId: "cmd-1" });
 
   assert.equal(converted.type, "joint");
   assert.equal(useChannelStore.getState().channels.find((c) => c.id === "c1")?.jointChannelId, "joint-c1");
 });
 
-test("archiveChannel strips lastMessageAt off identity and writes it to the slice", async (t) => {
+test("archiveChannel strips lastMessageAt off identity and writes it to the slice", async () => {
   useChannelStore.setState({ channels: [ch("c1")], dmChannels: [], channelActivity: {} });
-  t.mock.method(api, "post", async () => ({ data: apiCh("c1", "2026-06-07T13:00:00.000Z") }));
+  vi.spyOn(api, "post").mockImplementation(async () => ({ data: apiCh("c1", "2026-06-07T13:00:00.000Z") }));
 
   const archived = await useChannelStore.getState().archiveChannel("c1");
 
@@ -355,9 +354,9 @@ test("archiveChannel strips lastMessageAt off identity and writes it to the slic
 
 // (4) Removal paths clean the hot slice (no leaked stale entries).
 
-test("deleteChannel removes the channel's channelActivity entry, leaving others intact", async (t) => {
+test("deleteChannel removes the channel's channelActivity entry, leaving others intact", async () => {
   useChannelStore.setState({ channels: [ch("c1"), ch("c2")], dmChannels: [], channelActivity: { c1: "x", c2: "y" } });
-  t.mock.method(api, "delete", async () => ({ data: {} }));
+  vi.spyOn(api, "delete").mockImplementation(async () => ({ data: {} }));
 
   await useChannelStore.getState().deleteChannel("c1");
 
@@ -367,9 +366,9 @@ test("deleteChannel removes the channel's channelActivity entry, leaving others 
   assert.equal(s.channels.some((c) => c.id === "c1"), false);
 });
 
-test("disconnectJointChannel removes the channel's channelActivity entry", async (t) => {
+test("disconnectJointChannel removes the channel's channelActivity entry", async () => {
   useChannelStore.setState({ channels: [ch("j1"), ch("j2")], dmChannels: [], channelActivity: { j1: "x", j2: "y" } });
-  t.mock.method(api, "post", async () => ({ data: {} }));
+  vi.spyOn(api, "post").mockImplementation(async () => ({ data: {} }));
 
   await useChannelStore.getState().disconnectJointChannel("j1");
 

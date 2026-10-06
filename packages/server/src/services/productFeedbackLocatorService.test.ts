@@ -1,9 +1,8 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { agents, channels, productFeedbackLocators, servers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agents, channels, productFeedbackLocators, servers, users } from "../db/schema";
 import {
   FEEDBACK_LOCATOR_ARTIFACT_KIND,
   FEEDBACK_LOCATOR_EVENT_KIND,
@@ -11,7 +10,7 @@ import {
   ingestFeedbackLocator,
   parseFeedbackLocatorEnvelope,
   queryFeedbackLocators,
-} from "./productFeedbackLocatorService.js";
+} from "./productFeedbackLocatorService";
 
 
 const OWNER_ID = "00000000-0000-4000-8000-000000000001";

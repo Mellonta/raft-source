@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import {
   AGENT_MIGRATION_WORKSPACE_BACKUP_DIRECTORY,
   AGENT_MIGRATION_WORKSPACE_BACKUP_MAX_PER_AGENT,
   archiveCompletedAgentMigrationSourceWorkspace,
-} from "./agentMigrationWorkspaceArchive.js";
-import { scanWorkspaceDirectories } from "./workspaces.js";
+  quarantinePreexistingAgentWorkspace,
+} from "./agentMigrationWorkspaceArchive";
+import { scanWorkspaceDirectories } from "./workspaces";
 
 test("completed migration archives exact source bytes outside the active workspace scanner", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "migration-source-archive-"));
@@ -170,14 +170,53 @@ test("source archive fails closed for conflicting, linked, or scanner-visible pa
       /MIGRATION_WORKSPACE_ARCHIVE_ROOT_INSIDE_DATA_DIR/,
     );
 
-    await assert.rejects(
-      archiveCompletedAgentMigrationSourceWorkspace({
+    // Nothing left on the source is the archive's goal already holding.
+    assert.equal(
+      await archiveCompletedAgentMigrationSourceWorkspace({
         slockHome,
         dataDir,
         agentId: "agent-missing",
         migrationId: "migration-missing",
       }),
-      /MIGRATION_WORKSPACE_ARCHIVE_SOURCE_MISSING/,
+      "source_absent",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a preexisting target workspace is quarantined into the agent backup root instead of failing the migration", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "migration-target-quarantine-"));
+  const slockHome = path.join(root, "home");
+  const dataDir = path.join(slockHome, "agents");
+  const stale = path.join(dataDir, "agent-1");
+  try {
+    await mkdir(path.join(stale, "notes"), { recursive: true });
+    await writeFile(path.join(stale, "MEMORY.md"), "left-behind\n");
+
+    const { quarantinePath } = await quarantinePreexistingAgentWorkspace({
+      slockHome,
+      dataDir,
+      agentId: "agent-1",
+      migrationId: "migration-2",
+    });
+    assert.equal(
+      quarantinePath,
+      path.join(slockHome, AGENT_MIGRATION_WORKSPACE_BACKUP_DIRECTORY, "agent-1", "preexisting-migration-2"),
+    );
+    assert.equal(await readFile(path.join(quarantinePath, "MEMORY.md"), "utf8"), "left-behind\n");
+    await assert.rejects(readdir(stale), /ENOENT/);
+    // The quarantined copy is outside the workspace scanner, like source archives.
+    assert.deepEqual(await scanWorkspaceDirectories(dataDir), []);
+
+    await mkdir(stale, { recursive: true });
+    await assert.rejects(
+      quarantinePreexistingAgentWorkspace({ slockHome, dataDir, agentId: "agent-1", migrationId: "migration-2" }),
+      /MIGRATION_WORKSPACE_QUARANTINE_CONFLICT/,
+    );
+    await assert.rejects(
+      quarantinePreexistingAgentWorkspace({ slockHome, dataDir, agentId: "agent-2", migrationId: "migration-3" }),
+      /ENOENT|MIGRATION_WORKSPACE_QUARANTINE_SOURCE_INVALID/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });

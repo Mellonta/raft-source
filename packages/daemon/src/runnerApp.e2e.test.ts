@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { test } from "vitest";
 
 import {
   registerAgentCredentialProxy,
   type AgentProxyFreshnessDecision,
   type AgentProxyInboxCoordinator,
   type AgentProxyVisibleMessage,
-} from "./agentCredentialProxy.js";
+} from "./agentCredentialProxy";
 
 type UpstreamObservation = {
   sendCount: number;

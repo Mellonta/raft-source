@@ -6,7 +6,8 @@ import { useServerStore } from "../../store/serverStore";
 import type { Server } from "../../store/serverStore";
 import { useAuthStore } from "../../store/authStore";
 import Banner from "../ui/Banner";
-import Button from "../ui/Button";
+import TextLink from "../ui/TextLink";
+import { Card, Input, Button } from "raft-ui";
 import CenteredCardFrame from "./CenteredCardFrame";
 import { AuthPageIntro } from "./AuthPageFrame";
 import FormField from "../ui/FormField";
@@ -107,13 +108,13 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
         >
           <>
             <div>
-              <div className="font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-black/50">
+              <div className="font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-foreground-muted theme-brutal:text-black/50">
                 {title}
               </div>
-              <h1 className="mt-2 text-2xl font-bold leading-tight text-black">
+              <h1 className="mt-2 text-2xl font-bold leading-tight text-foreground-strong theme-brutal:text-black">
                 {formatMessage({ id: "pages.serverSelector.nameTheServer" })}
               </h1>
-              <p className="mt-2 text-sm leading-5 text-black/65">
+              <p className="mt-2 text-sm leading-5 text-foreground-muted theme-brutal:text-black/65">
                 {formatMessage({ id: "pages.serverSelector.serverIsWorkspace" })}
               </p>
             </div>
@@ -129,7 +130,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
                 hint={formatMessage({ id: "pages.serverSelector.serverNameHelp" })}
                 htmlFor="server-create-name"
               >
-                <input
+                <Input
                   id="server-create-name"
                   type="text"
                   value={name}
@@ -137,7 +138,6 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
                     setName(e.target.value);
                     if (!slugTouched) setSlug(toSlug(e.target.value));
                   }}
-                  className="input-brutal w-full p-2"
                   placeholder={formatMessage({ id: "pages.serverSelector.serverNamePlaceholder" })}
                   autoFocus
                   required
@@ -167,7 +167,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
               <Button
                 type="submit"
                 size="lg"
-                tone="pink"
+                variant="accent"
                 className="w-full"
               >
                 {formatMessage({ id: "pages.serverSelector.createServerAction" })}
@@ -195,14 +195,13 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
               </Banner>
             )}
             <FormField label={formatMessage({ id: "pages.serverSelector.serverNameLabel" })} labelStyle="plain">
-              <input
+              <Input
                 type="text"
                 value={name}
                 onChange={(e) => {
                   setName(e.target.value);
                   if (!slugTouched) setSlug(toSlug(e.target.value));
                 }}
-                className="input-brutal w-full p-2"
                 placeholder={formatMessage({ id: "pages.serverSelector.serverNamePlaceholderTeam" })}
                 autoFocus
                 required
@@ -222,8 +221,11 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
             </FormField>
             <div className="flex gap-2 pt-1">
               {hasServers && (
-                <button
+                <Button
                   type="button"
+                  variant="outline"
+                  size="lg"
+                  className="flex-1"
                   onClick={() => {
                     setView("choose");
                     setName("");
@@ -231,15 +233,14 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
                     setSlugTouched(false);
                     setError("");
                   }}
-                  className="btn-brutal flex-1 bg-white px-4 py-2 text-sm font-bold"
                 >
                   {formatMessage({ id: "pages.serverSelector.cancel" })}
-                </button>
+                </Button>
               )}
               <Button
                 type="submit"
                 size="lg"
-                tone="pink"
+                variant="accent"
                 className="flex-1"
               >
                 {formatMessage({ id: "pages.serverSelector.createServerAction" })}
@@ -267,15 +268,16 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
             className="mb-6 space-y-2"
           >
             {servers.map((server) => (
-              <button
+              <Card
                 key={server.id}
-                onClick={() => handleSelect(server)}
-                disabled={switchPending}
-                className="w-full border-2 border-black bg-white p-3 text-left font-bold shadow-brutal-sm transition-all duration-100 hover:-translate-y-[1px] hover:shadow-brutal active:translate-x-[2px] active:translate-y-[2px] active:shadow-brutal-active"
+                variant="option"
+                render={<button type="button" onClick={() => handleSelect(server)} disabled={switchPending} className="w-full text-left" />}
+                className="gap-0 p-3"
+                data-testid="server-selector-option"
               >
-                <div>{server.name}</div>
-                <div className="text-sm font-normal text-black/40">/{server.slug}</div>
-              </button>
+                <div className="font-bold text-foreground-strong">{server.name}</div>
+                <div className="text-sm font-normal text-foreground-muted">/{server.slug}</div>
+              </Card>
             ))}
           </div>
         )}
@@ -289,18 +291,15 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
         <Button
           onClick={() => setView("create")}
           size="lg"
-          tone="pink"
+          variant="accent"
           className="w-full"
         >
           {formatMessage({ id: "pages.serverSelector.createNewServerAction" })}
         </Button>
         <div className="mt-3 text-center">
-          <button
-            onClick={() => logout()}
-            className="text-sm font-bold text-black/50 underline hover:text-black"
-          >
+          <TextLink className="text-sm font-bold" onClick={() => logout()}>
             {formatMessage({ id: "pages.serverSelector.logOut" })}
-          </button>
+          </TextLink>
         </div>
       </div>
     </CenteredCardFrame>

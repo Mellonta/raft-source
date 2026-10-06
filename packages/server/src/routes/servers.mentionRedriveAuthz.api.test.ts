@@ -1,14 +1,14 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import argon2 from "argon2";
 
-import { getDb } from "../db/index.js";
-import { serverMembers, users } from "../db/schema.js";
-import { assignMachine, createAgent } from "../services/agentService.js";
-import { registerMachine } from "../services/machineService.js";
-import { createServer } from "../services/serverService.js";
+import { getDb } from "../db/index";
+import { serverMembers, users } from "../db/schema";
+import { assignMachine, createAgent } from "../services/agentService";
+import { registerMachine } from "../services/machineService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

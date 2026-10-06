@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { SERVER_VERSION, readBuildIdentityStatus, readServerVersion } from "./version.js";
+import { SERVER_VERSION, readBuildIdentityStatus, readServerVersion } from "./version";
 
 // SERVER_VERSION must match `packages/server/package.json` so traces and any
 // future API responses report the version actually shipped. The constant is

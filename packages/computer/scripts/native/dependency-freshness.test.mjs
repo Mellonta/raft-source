@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
 import { assertBuildOutputFresh } from "./dependency-freshness.mjs";
 

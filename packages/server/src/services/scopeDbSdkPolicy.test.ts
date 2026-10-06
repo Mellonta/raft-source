@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { scopeDbReadOptionsFor } from "./scopeDbSdkPolicy.js";
+import { scopeDbReadOptionsFor } from "./scopeDbSdkPolicy";
 
 test("ScopeDB bounded counts opt into JSON-safe number conversion", () => {
   assert.deepEqual(scopeDbReadOptionsFor("bounded_count"), { integerMode: "number" });

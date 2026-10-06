@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import type { ComponentProps } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -50,7 +49,8 @@ test("SelectModeToolbar renders selected-message chrome from the zh-cn catalog",
 
   const more = screen.getByTestId("select-mode-more");
   assert.equal(more.getAttribute("aria-label"), "更多已选消息操作");
-  assert.equal(more.getAttribute("title"), "更多");
+  assert.equal(more.getAttribute("title"), null);
+  assert.ok(more.hasAttribute("data-base-ui-tooltip-trigger"), "more-actions hint now rides the RUI tooltip trigger");
   fireEvent.click(more);
   assert.equal(screen.getByTestId("select-mode-share-open").textContent?.trim(), "生成图片");
   assert.equal(screen.getByTestId("select-mode-copy-md").textContent?.trim(), "复制 Markdown");

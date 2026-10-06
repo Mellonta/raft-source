@@ -1,6 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
 import assert from "node:assert/strict";
-import test from "node:test";
 import { spawn } from "node:child_process";
 
 const SECRET = "scope-secret-for-node-tests";
@@ -11,7 +10,7 @@ test("Node trace upload service resolves https from comma-list x-forwarded-proto
     process.execPath,
     [
       "--import",
-      "tsx",
+      "@oxc-node/core/register",
       "src/node.ts",
     ],
     {
@@ -70,7 +69,7 @@ test("Node trace upload service treats http-first comma-list x-forwarded-proto a
     process.execPath,
     [
       "--import",
-      "tsx",
+      "@oxc-node/core/register",
       "src/node.ts",
     ],
     {
@@ -126,7 +125,7 @@ test("Node trace upload service uses forwarded HTTPS proto when returning signed
     process.execPath,
     [
       "--import",
-      "tsx",
+      "@oxc-node/core/register",
       "src/node.ts",
     ],
     {

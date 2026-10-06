@@ -1,4 +1,4 @@
-ARG NODE_VERSION=24.15.0
+ARG NODE_VERSION=24.21.0
 FROM node:${NODE_VERSION}-bookworm-slim
 
 RUN corepack enable
@@ -22,6 +22,8 @@ RUN apt-get update \
 ARG RAFT_RELEASE_SHA=""
 ARG RAFT_BUILD_AT=""
 ARG RAFT_RELEASE_BRANCH=""
+# Repository the image was built from; passed by the build scripts.
+ARG RAFT_IMAGE_SOURCE=""
 ARG SLOCK_RELEASE_SHA=""
 ARG SLOCK_BUILD_AT=""
 ARG SLOCK_RELEASE_BRANCH=""
@@ -37,22 +39,31 @@ WORKDIR /app
 
 # Copy workspace root files
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY patches/ patches/
 
 # Copy package manifests
 COPY packages/sync-core/package.json packages/sync-core/
+COPY packages/runtime-form/package.json packages/runtime-form/
 COPY packages/shared/package.json packages/shared/
+COPY packages/trace-client/package.json packages/trace-client/
 COPY packages/server/package.json packages/server/
 
-# Install all dependencies (tsx needed to run TypeScript source)
+# Install all dependencies (@oxc-node/core loads TypeScript source at runtime)
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 RUN pnpm install --frozen-lockfile
 
 # Copy source
 COPY packages/sync-core/ packages/sync-core/
+COPY packages/runtime-form/ packages/runtime-form/
 COPY packages/shared/ packages/shared/
+COPY packages/trace-client/ packages/trace-client/
 COPY packages/server/ packages/server/
 COPY manual/ manual/
+
+LABEL org.opencontainers.image.title="slock-server" \
+  org.opencontainers.image.source="${RAFT_IMAGE_SOURCE}" \
+  org.opencontainers.image.revision="${RAFT_RELEASE_SHA}" \
+  org.opencontainers.image.created="${RAFT_BUILD_AT}" \
+  org.opencontainers.image.version="${RAFT_RELEASE_BRANCH}"
 
 EXPOSE 3001
 

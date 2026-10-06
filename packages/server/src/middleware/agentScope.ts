@@ -26,9 +26,11 @@ import {
   type AgentScope,
   type AgentScopeDenyReason,
 } from "@botiverse/raft-shared";
-import { loadAgentScopes, AgentScopesNotFoundError } from "../services/agentScopesService.js";
-import * as agentService from "../services/agentService.js";
-import { AGENT_CREDENTIAL_BRIDGE_MACHINE_ID } from "./agentCredentialBridge.js";
+import { loadAgentScopes, AgentScopesNotFoundError } from "../services/agentScopesService";
+import * as agentService from "../services/agentService";
+import { AGENT_CREDENTIAL_BRIDGE_MACHINE_ID } from "./agentCredentialBridge";
+import { runWithTraceAttrs } from "../tracing/semanticTrace";
+import { agentIdHashAttrs, serverIdHashAttrs } from "../tracing/traceIdentity";
 
 declare global {
   namespace Express {
@@ -40,6 +42,9 @@ declare global {
       /** The scope literal the route required; populated alongside
        *  scopeDenyReason on deny. */
       scopeRequired?: AgentScope | null;
+      /** The agent a machine-authenticated `/internal/agent/:id/*` call acts
+       *  for, set once the scope check passes. Traces carry only its hash. */
+      traceAgentId?: string;
     }
   }
 }
@@ -99,7 +104,14 @@ export function requireAgentScope(scope: AgentScope): RequestHandler<any> {
       if (hasScope(set, scope)) {
         // Authorized — continue. Leave scopeDenyReason untouched (null /
         // undefined) so downstream observability emits no deny event.
-        next();
+        // Managed agents reach the server here (machine key + :id), so tag
+        // the rest of the request with the agent's keyed hash.
+        req.traceAgentId = agentId;
+        const agentHash = agentIdHashAttrs(agentId);
+        runWithTraceAttrs({
+          ...(agentHash.agent_id_hash ? { ...agentHash, agent_id_present: true } : {}),
+          ...serverIdHashAttrs(req.serverId),
+        }, next);
         return;
       }
       denyReason = "missing_scope";

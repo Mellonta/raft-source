@@ -28,9 +28,12 @@ caller is **not a "just import it" change** — re-evaluate scope first:
 Server-side tracing has its own path (`packages/server/src/tracing/serverTracer.ts`)
 and does NOT route through this client. Web also does not import this node
 package: its browser producer uploads trace batches directly to the
-trace-upload Worker. Current browser trace IDs are minted independently from
-server HTTP request trace IDs, so local readers must not infer web-to-server
-continuity. If you find yourself wanting to import this from a new package,
+trace-upload Worker. Web HTTP client spans (`web.http.client`,
+`packages/web/src/utils/webHttpClientTrace.ts`) propagate W3C `traceparent`,
+and the server adopts it as the parent of `server.http.request`, so one API
+request is one trace across web and server. Other browser trace events
+(`emitWebTrace`) still mint their own trace IDs and are not parented to HTTP
+spans; correlate them by tab ID, not trace ID. If you find yourself wanting to import this from a new package,
 open an RFC / discussion before adding the import.
 
 The package is `private: true` and consumed as TS source via

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 import {
+  Badge,
   Select,
   SelectContent,
   SelectIcon,
@@ -170,15 +171,15 @@ export function ChannelSlackBridgeField({
   if (!editor.available) return null;
 
   return (
-    <section className="space-y-3 border-t-2 border-black pt-4" data-testid="channel-slack-bridge-field">
+    <section className="space-y-3 border-t border-line-muted pt-4 theme-brutal:border-t-2 theme-brutal:border-black" data-testid="channel-slack-bridge-field">
       <div>
-        <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-black/65">
-          <span className="border border-black bg-brutal-lavender px-1.5 py-0.5 text-[10px] text-black">
+        <div className="flex items-center gap-2 text-xs font-bold text-foreground-muted theme-brutal:uppercase theme-brutal:tracking-wide theme-brutal:text-black/65">
+          <Badge appearance="soft" variant="muted" data-testid="channel-slack-bridge-provider-badge">
             {formatMessage({ id: "settings.slackBridge.providerBadge" })}
-          </span>
+          </Badge>
           {formatMessage({ id: "channel.bridge.fieldTitle" })}
         </div>
-        <p className="mt-1 text-xs text-black/60">{formatMessage({ id: "channel.bridge.fieldDescription" })}</p>
+        <p className="mt-1 text-xs text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "channel.bridge.fieldDescription" })}</p>
       </div>
       <FormField label={formatMessage({ id: "channel.bridge.slackChannel" })}>
         <Select

@@ -1,5 +1,5 @@
 {
-  "id": "8b5f072c-6423-4647-832a-144dc8f6639f",
+  "id": "7e1e38a3-995d-4fc7-8120-e11522cd1656",
   "prevId": "1b271aff-7b88-44a5-85f6-74bba83ea62a",
   "version": "7",
   "dialect": "postgresql",
@@ -66,6 +66,50 @@
         "result": {
           "name": "result",
           "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "conversion_job_id": {
+          "name": "conversion_job_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "conversion_source_channel_id": {
+          "name": "conversion_source_channel_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "conversion_epoch": {
+          "name": "conversion_epoch",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "freeze_state": {
+          "name": "freeze_state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'ready'"
+        },
+        "confirmation_version": {
+          "name": "confirmation_version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 1
+        },
+        "reconfirmed_at": {
+          "name": "reconfirmed_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "reconfirmed_by_user_id": {
+          "name": "reconfirmed_by_user_id",
+          "type": "uuid",
           "primaryKey": false,
           "notNull": false
         },
@@ -141,6 +185,27 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "idx_action_cards_conversion_job": {
+          "name": "idx_action_cards_conversion_job",
+          "columns": [
+            {
+              "expression": "conversion_job_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "freeze_state",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -195,12 +260,56 @@
           ],
           "onDelete": "set null",
           "onUpdate": "no action"
+        },
+        "action_cards_conversion_job_id_channel_conversion_jobs_id_fk": {
+          "name": "action_cards_conversion_job_id_channel_conversion_jobs_id_fk",
+          "tableFrom": "action_cards",
+          "tableTo": "channel_conversion_jobs",
+          "columnsFrom": [
+            "conversion_job_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "action_cards_conversion_source_channel_id_channels_id_fk": {
+          "name": "action_cards_conversion_source_channel_id_channels_id_fk",
+          "tableFrom": "action_cards",
+          "tableTo": "channels",
+          "columnsFrom": [
+            "conversion_source_channel_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        },
+        "action_cards_reconfirmed_by_user_id_users_id_fk": {
+          "name": "action_cards_reconfirmed_by_user_id_users_id_fk",
+          "tableFrom": "action_cards",
+          "tableTo": "users",
+          "columnsFrom": [
+            "reconfirmed_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "action_cards_freeze_state_check": {
+          "name": "action_cards_freeze_state_check",
+          "value": "\"action_cards\".\"freeze_state\" IN ('ready', 'frozen', 'reconfirm_required')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.activity_sync_changes": {
@@ -7291,6 +7400,366 @@
       },
       "isRLSEnabled": false
     },
+    "public.channel_conversion_commands": {
+      "name": "channel_conversion_commands",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "server_id": {
+          "name": "server_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_channel_id": {
+          "name": "source_channel_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requested_by_user_id": {
+          "name": "requested_by_user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'pending'"
+        },
+        "job_id": {
+          "name": "job_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "error_code": {
+          "name": "error_code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_channel_conversion_commands_source": {
+          "name": "idx_channel_conversion_commands_source",
+          "columns": [
+            {
+              "expression": "server_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "source_channel_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_channel_conversion_commands_pending": {
+          "name": "idx_channel_conversion_commands_pending",
+          "columns": [
+            {
+              "expression": "status",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "channel_conversion_commands_server_id_servers_id_fk": {
+          "name": "channel_conversion_commands_server_id_servers_id_fk",
+          "tableFrom": "channel_conversion_commands",
+          "tableTo": "servers",
+          "columnsFrom": [
+            "server_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "channel_conversion_commands_source_channel_id_channels_id_fk": {
+          "name": "channel_conversion_commands_source_channel_id_channels_id_fk",
+          "tableFrom": "channel_conversion_commands",
+          "tableTo": "channels",
+          "columnsFrom": [
+            "source_channel_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "channel_conversion_commands_requested_by_user_id_users_id_fk": {
+          "name": "channel_conversion_commands_requested_by_user_id_users_id_fk",
+          "tableFrom": "channel_conversion_commands",
+          "tableTo": "users",
+          "columnsFrom": [
+            "requested_by_user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "channel_conversion_commands_job_id_channel_conversion_jobs_id_fk": {
+          "name": "channel_conversion_commands_job_id_channel_conversion_jobs_id_fk",
+          "tableFrom": "channel_conversion_commands",
+          "tableTo": "channel_conversion_jobs",
+          "columnsFrom": [
+            "job_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.channel_conversion_fences": {
+      "name": "channel_conversion_fences",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "job_id": {
+          "name": "job_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "server_id": {
+          "name": "server_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "source_channel_id": {
+          "name": "source_channel_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "conversion_epoch": {
+          "name": "conversion_epoch",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'active'"
+        },
+        "reason": {
+          "name": "reason",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "acquired_at": {
+          "name": "acquired_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "released_at": {
+          "name": "released_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_channel_conversion_fences_job_epoch": {
+          "name": "idx_channel_conversion_fences_job_epoch",
+          "columns": [
+            {
+              "expression": "job_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "conversion_epoch",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_channel_conversion_fences_active_source": {
+          "name": "idx_channel_conversion_fences_active_source",
+          "columns": [
+            {
+              "expression": "source_channel_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "status = 'active'",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_channel_conversion_fences_epoch": {
+          "name": "idx_channel_conversion_fences_epoch",
+          "columns": [
+            {
+              "expression": "conversion_epoch",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "channel_conversion_fences_job_id_channel_conversion_jobs_id_fk": {
+          "name": "channel_conversion_fences_job_id_channel_conversion_jobs_id_fk",
+          "tableFrom": "channel_conversion_fences",
+          "tableTo": "channel_conversion_jobs",
+          "columnsFrom": [
+            "job_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "channel_conversion_fences_server_id_servers_id_fk": {
+          "name": "channel_conversion_fences_server_id_servers_id_fk",
+          "tableFrom": "channel_conversion_fences",
+          "tableTo": "servers",
+          "columnsFrom": [
+            "server_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "channel_conversion_fences_source_channel_id_channels_id_fk": {
+          "name": "channel_conversion_fences_source_channel_id_channels_id_fk",
+          "tableFrom": "channel_conversion_fences",
+          "tableTo": "channels",
+          "columnsFrom": [
+            "source_channel_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.channel_conversion_jobs": {
       "name": "channel_conversion_jobs",
       "schema": "",
@@ -7325,6 +7794,20 @@
           "primaryKey": false,
           "notNull": true,
           "default": "'joint'"
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'prepared'"
+        },
+        "conversion_epoch": {
+          "name": "conversion_epoch",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "gen_random_uuid()"
         },
         "status": {
           "name": "status",
@@ -7471,6 +7954,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "idx_channel_conversion_jobs_epoch": {
+          "name": "idx_channel_conversion_jobs_epoch",
+          "columns": [
+            {
+              "expression": "conversion_epoch",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -7537,6 +8035,173 @@
             "id"
           ],
           "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.channel_conversion_phase_ledger": {
+      "name": "channel_conversion_phase_ledger",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "job_id": {
+          "name": "job_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "conversion_epoch": {
+          "name": "conversion_epoch",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "phase": {
+          "name": "phase",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "batch_key": {
+          "name": "batch_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'all'"
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'started'"
+        },
+        "source_count": {
+          "name": "source_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "target_count": {
+          "name": "target_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "checksum": {
+          "name": "checksum",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "error": {
+          "name": "error",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "retry_count": {
+          "name": "retry_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "idx_channel_conversion_phase_ledger_idempotency": {
+          "name": "idx_channel_conversion_phase_ledger_idempotency",
+          "columns": [
+            {
+              "expression": "job_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "conversion_epoch",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_channel_conversion_phase_ledger_job_phase": {
+          "name": "idx_channel_conversion_phase_ledger_job_phase",
+          "columns": [
+            {
+              "expression": "job_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "phase",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "channel_conversion_phase_ledger_job_id_channel_conversion_jobs_id_fk": {
+          "name": "channel_conversion_phase_ledger_job_id_channel_conversion_jobs_id_fk",
+          "tableFrom": "channel_conversion_phase_ledger",
+          "tableTo": "channel_conversion_jobs",
+          "columnsFrom": [
+            "job_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -29033,13 +29698,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "role": {
-          "name": "role",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'member'"
-        },
         "token_hash": {
           "name": "token_hash",
           "type": "text",
@@ -29065,6 +29723,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'member'"
         }
       },
       "indexes": {
@@ -30537,13 +31202,6 @@
           "notNull": true,
           "default": false
         },
-        "publicly_visible": {
-          "name": "publicly_visible",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
         "plan": {
           "name": "plan",
           "type": "text",
@@ -30583,6 +31241,13 @@
           "primaryKey": false,
           "notNull": true,
           "default": "now()"
+        },
+        "publicly_visible": {
+          "name": "publicly_visible",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         }
       },
       "indexes": {},
@@ -30892,92 +31557,6 @@
           "tableTo": "sessions",
           "columnsFrom": [
             "successor_session_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.session_token_predecessors": {
-      "name": "session_token_predecessors",
-      "schema": "",
-      "columns": {
-        "token_hash": {
-          "name": "token_hash",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "session_id": {
-          "name": "session_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "family_id": {
-          "name": "family_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "expires_at": {
-          "name": "expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {
-        "idx_session_token_predecessors_expiry": {
-          "name": "idx_session_token_predecessors_expiry",
-          "columns": [
-            {
-              "expression": "expires_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "session_token_predecessors_user_id_users_id_fk": {
-          "name": "session_token_predecessors_user_id_users_id_fk",
-          "tableFrom": "session_token_predecessors",
-          "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "session_token_predecessors_family_id_session_families_id_fk": {
-          "name": "session_token_predecessors_family_id_session_families_id_fk",
-          "tableFrom": "session_token_predecessors",
-          "tableTo": "session_families",
-          "columnsFrom": [
-            "family_id"
           ],
           "columnsTo": [
             "id"

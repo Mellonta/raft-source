@@ -2,8 +2,8 @@
 //
 // Default stderr is for humans: what happened, the next command, local-state
 // guarantee, and support link.
-import { isComputerError } from "./lib/errors.js";
-import { formatRaftHomeForDisplay, resolveRaftHome } from "./paths.js";
+import { isComputerError } from "./lib/errors";
+import { formatRaftHomeForDisplay, resolveRaftHome } from "./paths";
 
 const SUPPORT_URL = "https://app.raft.build/s/community/";
 

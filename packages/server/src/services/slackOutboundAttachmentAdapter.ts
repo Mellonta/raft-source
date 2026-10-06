@@ -5,8 +5,8 @@ import type {
   ExternalAttachmentProviderFailure,
   ExternalAttachmentUploadRequest,
   ExternalOutboundAttachmentProviderAdapter,
-} from "./externalAttachmentProviderAdapter.js";
-import { validateExternalAttachmentCapabilityManifest } from "./externalAttachmentProviderAdapter.js";
+} from "./externalAttachmentProviderAdapter";
+import { validateExternalAttachmentCapabilityManifest } from "./externalAttachmentProviderAdapter";
 
 export class SlackOutboundAttachmentError extends Error {
   constructor(readonly failure: ExternalAttachmentProviderFailure) {

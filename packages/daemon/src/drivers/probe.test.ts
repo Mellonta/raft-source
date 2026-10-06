@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import type { execFileSync } from "node:child_process";
-import { test } from "vitest";
 
 import {
   readCommandVersion,
   resolveCommandOnPath,
   withWindowsUserEnvironment,
-} from "./probe.js";
+} from "./probe";
 
 const noWindowsEnvironment = () => null;
 
@@ -101,6 +100,52 @@ test("Windows environment reader leaves non-Windows environments untouched", () 
   assert.equal(result, env);
   assert.equal(executed, false);
   assert.equal(warned, false);
+});
+
+test("resolveCommandOnPath falls back to user-local bin dirs when a minimal service PATH misses them", () => {
+  const whichMisses: typeof execFileSync = (() => {
+    throw new Error("not on path");
+  }) as typeof execFileSync;
+  const deps = {
+    platform: "linux" as const,
+    env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/home/tester" },
+    execFileSyncFn: whichMisses,
+  };
+
+  assert.equal(
+    resolveCommandOnPath("claude", { ...deps, existsSyncFn: (p) => p === "/home/tester/.local/bin/claude" }),
+    "/home/tester/.local/bin/claude",
+  );
+  assert.equal(
+    resolveCommandOnPath("kimi", { ...deps, existsSyncFn: (p) => p === "/home/tester/.kimi-code/bin/kimi" }),
+    "/home/tester/.kimi-code/bin/kimi",
+  );
+  assert.equal(resolveCommandOnPath("claude", { ...deps, existsSyncFn: () => false }), null);
+  assert.equal(
+    resolveCommandOnPath("claude", { ...deps, env: { PATH: "/usr/bin" }, existsSyncFn: () => true }),
+    null,
+  );
+});
+
+test("resolveCommandOnPath builds POSIX fallback paths from the injected platform on every host", () => {
+  const candidates: string[] = [];
+  const resolved = resolveCommandOnPath("claude", {
+    platform: "linux",
+    env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/home/tester" },
+    execFileSyncFn: (() => {
+      throw new Error("not on path");
+    }) as typeof execFileSync,
+    existsSyncFn: (candidate) => {
+      candidates.push(candidate);
+      return false;
+    },
+  });
+
+  assert.equal(resolved, null);
+  assert.deepEqual(candidates, [
+    "/home/tester/.local/bin/claude",
+    "/home/tester/.kimi-code/bin/claude",
+  ]);
 });
 
 test("resolveCommandOnPath passes the runtime name directly to powershell on Windows", () => {

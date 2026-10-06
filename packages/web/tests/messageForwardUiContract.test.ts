@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const read = (path: string) => readFileSync(resolve(repoRoot, path), "utf8");
 
-test("forward entrypoints remain fail-closed behind the server feature gate", () => {
+test("forward entrypoints stay available after the rollout flag is retired", () => {
   const toolbar = read("src/components/message/SelectModeToolbar.tsx");
   const chatPanel = read("src/components/message/ChatPanel.tsx");
   const threadPanel = read("src/components/message/ThreadPanel.tsx");
@@ -14,20 +13,13 @@ test("forward entrypoints remain fail-closed behind the server feature gate", ()
   const forwardSelection = read("src/components/message/forwardSelectionUtils.ts");
   if ([toolbar, chatPanel, threadPanel, messageItem, forwardSelection].some((source) => source.includes("__stryker__"))) return;
 
-  const gateCallStart = chatPanel.indexOf("/messages/forward/enabled");
-  const gateCall = chatPanel.slice(Math.max(0, gateCallStart - 180), gateCallStart + 850);
-  const gateCatchStart = chatPanel.indexOf(".catch", gateCallStart);
-  const gateCatch = chatPanel.slice(gateCatchStart, gateCatchStart + 350);
-
   assert.match(toolbar, /data-testid="select-mode-forward"/);
   assert.match(toolbar, /data-testid="select-mode-copy-link"/);
-  assert.match(chatPanel, /useState\(false\)/);
-  assert.match(gateCall, /api\.get/);
-  assert.match(gateCall, /setServerMessageForwardingEnabled/);
-  assert.match(gateCall, /res\.data\.enabled/);
-  assert.match(gateCatch, /\.catch/);
-  assert.match(chatPanel, /messageForwardingEnabled/);
+  assert.doesNotMatch(chatPanel, /messages\/forward\/enabled|messageForwardingEnabled|serverMessageForwardingEnabled/);
+  assert.match(chatPanel, /const showForwardAction = !isGuest && canForwardFromSource\(channel\)/);
   assert.match(chatPanel, /onForward=\{showForwardAction \? openForwardComposer : undefined\}/);
+  assert.doesNotMatch(threadPanel, /messages\/forward\/enabled|serverMessageForwardingEnabled|applyServerMessageForwardingEnabled/);
+  assert.match(threadPanel, /const showForwardAction = !isGuest && canForwardFromSource\(parentChannel\)/);
   assert.match(threadPanel, /onForward=\{showForwardAction \? openForwardComposer : undefined\}/);
   assert.match(threadPanel, /canForwardFromSource\(parentChannel\)/);
   assert.match(forwardSelection, /meta\?\.kind === "forwarded-bundle"/);
@@ -80,7 +72,8 @@ test("multi-target composer is split into bounded modules and preserves batch se
   assert.match(mobile, /data-testid="forward-mobile-note-layout"/);
   assert.match(mobile, /data-testid="forward-mobile-note-scroll"/);
   assert.match(mobile, /data-testid="forward-mobile-preview-actions"/);
-  assert.match(mobile, /className="shrink-0 border-t-2/);
+  // Footer separator rides the semantic hairline (Brutal re-adds its 2px rule).
+  assert.match(mobile, /className="shrink-0 border-t border-line-hairline/);
   assert.match(mobile, /onOpenAttachment=\{onOpenAttachment\}/);
   assert.match(desktop, /<MessageInput/);
   assert.match(mobile, /<MessageInput/);

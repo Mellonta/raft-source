@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { createElement } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -30,22 +29,22 @@ Object.defineProperty(globalThis, "sessionStorage", {
   configurable: true,
 });
 
-const { useInboxStore } = await import("../src/store/inboxStore.js");
-const { useThreadStore } = await import("../src/store/threadStore.js");
-const { useProfileStore } = await import("../src/store/profileStore.js");
-const { useAgentStore } = await import("../src/store/agentStore.js");
-const { useAuthStore } = await import("../src/store/authStore.js");
-const { useChannelStore } = await import("../src/store/channelStore.js");
-const { useServerStore } = await import("../src/store/serverStore.js");
+const { useInboxStore } = await import("../src/store/inboxStore");
+const { useThreadStore } = await import("../src/store/threadStore");
+const { useProfileStore } = await import("../src/store/profileStore");
+const { useAgentStore } = await import("../src/store/agentStore");
+const { useAuthStore } = await import("../src/store/authStore");
+const { useChannelStore } = await import("../src/store/channelStore");
+const { useServerStore } = await import("../src/store/serverStore");
 const { postReadAllCoalesced } = await import(
-  "../src/store/transport/inboxTransport.js"
+  "../src/store/transport/inboxTransport"
 );
-const { default: api } = await import("../src/api/client.js");
+const { default: api } = await import("../src/api/client");
 const originalGet = api.get.bind(api);
 const originalPost = api.post.bind(api);
 
 type ThreadItem = Extract<
-  import("../src/store/inboxStore.js").InboxItem,
+  import("../src/store/inboxStore").InboxItem,
   { kind: "thread" }
 >;
 

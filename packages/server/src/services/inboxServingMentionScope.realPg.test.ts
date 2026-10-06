@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { test } from "vitest";
 import pg from "pg";
 
 const REAL_PG_URL_ENV = "INBOX_SERVING_MENTION_SCOPE_REAL_PG_URL";

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { createSyncCore } from "@botiverse/raft-shared";
 import type { SyncCore, SyncDomainConfig, SyncFrame } from "@botiverse/raft-shared";
 import {
@@ -11,15 +10,15 @@ import {
   resetNotificationPrefsSyncCoreForTests,
   scopeIdForNotificationPrefsUpdate,
   __setNotificationPrefsSyncCoreForTests,
-} from "../src/store/notificationPrefsSyncDomain.js";
+} from "../src/store/notificationPrefsSyncDomain";
 import type {
   NotificationPrefsDomainEvent,
-} from "../src/store/notificationPrefsSyncDomain.js";
-import { __setStateTransitionEmitterForTest } from "../src/utils/stateTransitionTrace.js";
+} from "../src/store/notificationPrefsSyncDomain";
+import { __setStateTransitionEmitterForTest } from "../src/utils/stateTransitionTrace";
 import {
   __resetStateViolationCoalescerForTest,
   __setStateViolationEmitterForTest,
-} from "../src/utils/stateViolationTrace.js";
+} from "../src/utils/stateViolationTrace";
 
 const channelId = "channel-notification-prefs";
 const serverId = "server-notification-prefs";

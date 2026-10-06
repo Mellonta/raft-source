@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { logger, subscribeDaemonLogs } from "./logger.js";
+import { logger, subscribeDaemonLogs } from "./logger";
 
 test("daemon log subscribers receive structured events and can unsubscribe", () => {
   const events: Array<{ level: string; line: string; message: string }> = [];

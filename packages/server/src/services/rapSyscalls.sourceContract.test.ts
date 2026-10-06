@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -112,7 +111,7 @@ function bindCanonical(
      * 🔴 The resolved symbol must be DECLARED IN the canonical module.
      *
      * `deAlias` deliberately follows re-exports, so without this check a line
-     * like `export { resolveConversation } from "./rapRegistryStore.js"` would
+     * like `export { resolveConversation } from "./rapRegistryStore"` would
      * bind the internal registry-store primitive -- which never consults
      * `manifestPermitsSyscall` -- and this arm would sign it as an execution
      * surface, thenable and green. That is the exact error this gate exists to

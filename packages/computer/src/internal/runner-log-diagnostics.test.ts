@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { readRunnerLogDiagnosticText, readRunnerLogTail } from "./runner-log-diagnostics.js";
+import {
+  readRunnerLogDiagnosticText,
+  readRunnerLogTail,
+  RUNNER_LOG_SCAN_BYTES,
+} from "./runner-log-diagnostics";
 
 async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "raft-runner-log-diag-"));
@@ -44,6 +47,58 @@ test("readRunnerLogDiagnosticText reads only the bounded suffix after child spaw
     );
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "readRunnerLogDiagnosticText never allocates the size of a 5.5 GiB sparse log",
+  async () => {
+    await withTmp(async (dir) => {
+      const log = join(dir, "runner.log");
+      const fileSize = 5.5 * 1024 * 1024 * 1024;
+      const marker = Buffer.from("bounded-tail-marker\n", "utf8");
+      const file = await open(log, "w", 0o600);
+      try {
+        await file.truncate(fileSize);
+        await file.write(marker, 0, marker.byteLength, fileSize - marker.byteLength);
+      } finally {
+        await file.close();
+      }
+
+      const originalAllocUnsafe = Buffer.allocUnsafe;
+      const allocationSizes: number[] = [];
+      Buffer.allocUnsafe = ((size: number) => {
+        allocationSizes.push(size);
+        assert.ok(size <= RUNNER_LOG_SCAN_BYTES, `attempted an unbounded ${size}-byte allocation`);
+        return originalAllocUnsafe(size);
+      }) as typeof Buffer.allocUnsafe;
+      try {
+        const diagnostic = await readRunnerLogDiagnosticText(log, 0);
+        assert.match(diagnostic, /bounded-tail-marker/);
+        assert.deepEqual(allocationSizes, [RUNNER_LOG_SCAN_BYTES]);
+        assert.ok(Buffer.byteLength(diagnostic, "utf8") <= RUNNER_LOG_SCAN_BYTES);
+      } finally {
+        Buffer.allocUnsafe = originalAllocUnsafe;
+      }
+    });
+  },
+);
+
+test.skipIf(process.platform === "win32")(
+  "readRunnerLogDiagnosticText does not discover a renamed giant sibling",
+  async () => {
+    await withTmp(async (dir) => {
+      const active = join(dir, "runner.log");
+      const runaway = join(dir, "runner.log.runaway-1.0.16-20260915T163202Z");
+      const file = await open(runaway, "w", 0o600);
+      try {
+        await file.truncate(5.5 * 1024 * 1024 * 1024);
+      } finally {
+        await file.close();
+      }
+
+      assert.equal(await readRunnerLogDiagnosticText(active, 0), "");
+    });
+  },
+);
 
 test("readRunnerLogTail concatenates bounded existing tails and ignores missing logs", async () => {
   await withTmp(async (dir) => {

@@ -1,18 +1,27 @@
 import { and, eq, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
-import { currentDate, type AgentMessage } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { mentionDeliveryOccurrences } from "../db/schema.js";
+import {
+  currentDate,
+  MENTION_DELIVERY_TERMINAL_ERROR_CODES,
+  type AgentMessage,
+  type MentionDeliveryTerminalErrorCode,
+  type MentionDeliveryTerminalDecision,
+} from "@botiverse/raft-shared";
+import { getDb } from "../db/index";
+import { mentionDeliveryOccurrences } from "../db/schema";
 
-export const MENTION_DELIVERY_TERMINAL_ERROR_CODES = [
-  "IDENTITY_UNKNOWN",
-  "IDENTITY_DRIFT",
-  "QUOTA_LIMITED",
-  "DELIVERY_REJECTED",
-  "UNSUPPORTED_DELIVERY_PATH",
-  "INSTRUMENT_FAILED",
-] as const;
+// task #154: the canonical definitions live in @botiverse/raft-shared (the
+// wire contract); this module re-exports them so existing importers keep
+// working. Do NOT re-introduce a local copy — a test pins reference identity.
+export { MENTION_DELIVERY_TERMINAL_ERROR_CODES, type MentionDeliveryTerminalErrorCode };
 
-export type MentionDeliveryTerminalErrorCode = typeof MENTION_DELIVERY_TERMINAL_ERROR_CODES[number];
+/**
+ * task #285: automatic recovery rounds allowed for an occurrence the daemon already holds
+ * (daemon_received / daemon_pending) but never terminalised. The orchestrator claims a round
+ * only when it starts a new ack-retry cycle, never for a trigger inside a running cycle, so
+ * this bounds the loop, not the item's age or the number of session events.
+ */
+export const MENTION_DELIVERY_MAX_RECOVERY_ROUNDS = 3;
+
 export type MentionDeliveryTransitionStage = "daemon_received" | "daemon_pending" | "daemon_drained";
 export type MentionDeliveryState = typeof mentionDeliveryOccurrences.$inferSelect.state;
 export type MentionDeliveryOccurrenceRow = typeof mentionDeliveryOccurrences.$inferSelect;
@@ -35,7 +44,7 @@ export type MentionDeliveryLookupResult =
   | { status: "NOT_JOINABLE" }
   | { status: "INSTRUMENT_FAILED"; occurrenceId: string; missingReceipt: MentionDeliveryBrokenHop | "MENTION_RECORDED" | "UNRECOGNISED_STATE"; version: number }
   | { status: "BROKEN_HOP"; occurrenceId: string; hop: MentionDeliveryBrokenHop; version: number }
-  | { status: "TERMINAL_ERROR"; occurrenceId: string; code: MentionDeliveryTerminalErrorCode; version: number }
+  | { status: "TERMINAL_ERROR"; occurrenceId: string; code: MentionDeliveryTerminalErrorCode; decision?: MentionDeliveryTerminalDecision; version: number }
   | { status: "ACKED"; occurrenceId: string; version: number };
 
 const STATE_RANK: Record<MentionDeliveryState, number> = {
@@ -133,7 +142,7 @@ export function evaluateMentionDeliveryOccurrence(row: MentionDeliveryOccurrence
     // Its fallback also reused "INSTRUMENT_FAILED", which is simultaneously a `status` value and
     // a terminal error CODE — one word answering two questions.
     const code = row.terminalErrorCode as MentionDeliveryTerminalErrorCode;
-    return { status: "TERMINAL_ERROR", occurrenceId: row.occurrenceId, code, version: row.version };
+    return { status: "TERMINAL_ERROR", occurrenceId: row.occurrenceId, code, ...(row.terminalDecision ? { decision: row.terminalDecision } : {}), version: row.version };
   }
   if (!row.daemonReceivedAt) {
     return missingReceiptIsInstrumentationFailure(row, "DAEMON_RECEIVE", 2)
@@ -313,6 +322,7 @@ export async function abandonMentionDeliveryWithoutInstrumentation(input: {
     state: "terminal_error" as const,
     terminalErrorAt: now,
     terminalErrorCode: "INSTRUMENT_FAILED" satisfies MentionDeliveryTerminalErrorCode,
+    terminalDecision: { layer: "server", stage: "instrumentation_fallback", originalDaemonCode: null },
     version: sql`${mentionDeliveryOccurrences.version} + 1`,
     updatedAt: now,
   }).where(and(
@@ -337,6 +347,7 @@ export async function recordMentionDeliveryTerminalError(input: {
     state: "terminal_error",
     terminalErrorAt: now,
     terminalErrorCode: input.code,
+    terminalDecision: { layer: "daemon", stage: "terminal_receipt", originalDaemonCode: input.code },
     version: sql`${mentionDeliveryOccurrences.version} + 1`,
     updatedAt: now,
   }).where(and(
@@ -352,6 +363,28 @@ export async function lookupMentionDeliveryOccurrence(messageId: string, agentId
     eq(mentionDeliveryOccurrences.agentId, agentId),
   )).limit(1);
   return row ? evaluateMentionDeliveryOccurrence(row) : { status: "NOT_JOINABLE" };
+}
+
+/**
+ * task #153 — the SENDER-side read: one message, every target.
+ *
+ * Deliberately a sibling of `lookupMentionDeliveryOccurrence` rather than a
+ * relaxation of it. That one is keyed `(messageId, agentId=receiver)` and answers
+ * "what happened to me"; this is keyed on the message alone and answers "what
+ * happened to each of my targets". Shape (1 row vs N), authority ("I am that
+ * receiver" vs "I authored it") and meaning all differ, and this file already
+ * records what happens when one token carries several meanings.
+ *
+ * Authority is NOT checked here: the caller must prove authorship first, so that
+ * a non-author receives the same not-found shape as a non-participant and this
+ * never becomes an existence oracle for other people's messages.
+ */
+export async function listMentionDeliveryOccurrencesForMessage(
+  messageId: string,
+): Promise<MentionDeliveryOccurrenceRow[]> {
+  return getDb().select().from(mentionDeliveryOccurrences).where(
+    eq(mentionDeliveryOccurrences.messageId, messageId),
+  );
 }
 
 export async function listRecoverableMentionDeliveries(machineId: string): Promise<MentionDeliveryOccurrenceRow[]> {
@@ -381,12 +414,14 @@ export async function listRecoverableMentionDeliveriesForAgent(
 
 export async function recordMentionDeliveryIdentityDrift(
   occurrenceId: string,
+  stage: "recovery" | "retry" | "redrive",
 ): Promise<MentionDeliveryOccurrenceRow | null> {
   const now = currentDate();
   const [updated] = await getDb().update(mentionDeliveryOccurrences).set({
     state: "terminal_error",
     terminalErrorAt: now,
     terminalErrorCode: "IDENTITY_DRIFT",
+    terminalDecision: { layer: "server", stage, originalDaemonCode: null },
     version: sql`${mentionDeliveryOccurrences.version} + 1`,
     updatedAt: now,
   }).where(and(
@@ -408,12 +443,15 @@ export async function recordMentionDeliveryIdentityDriftForIdentity(input: {
   agentId: string;
   messageId: string;
   identity: MentionDeliveryIdentity;
+  stage: "stage_receipt" | "terminal_receipt" | "ack_receipt";
+  originalDaemonCode?: MentionDeliveryTerminalErrorCode;
 }): Promise<MentionDeliveryOccurrenceRow | null> {
   const now = currentDate();
   const [updated] = await getDb().update(mentionDeliveryOccurrences).set({
     state: "terminal_error",
     terminalErrorAt: now,
     terminalErrorCode: "IDENTITY_DRIFT",
+    terminalDecision: { layer: "server", stage: input.stage, originalDaemonCode: input.originalDaemonCode ?? null },
     version: sql`${mentionDeliveryOccurrences.version} + 1`,
     updatedAt: now,
   }).where(and(
@@ -457,6 +495,62 @@ export async function claimMentionDeliveryRedrive(input: {
     ne(mentionDeliveryOccurrences.state, "terminal_error"),
   )).returning();
   return claimed ?? null;
+}
+
+export type MentionDeliveryRecoveryClaim =
+  | { status: "claimed"; row: MentionDeliveryOccurrenceRow }
+  | { status: "exhausted"; row: MentionDeliveryOccurrenceRow | null }
+  | { status: "stale" };
+
+/**
+ * task #285: gate one automatic recovery round. Rows the daemon never received keep
+ * recovering without limit (the agent may simply have been offline). Rows the daemon
+ * already holds count a round each; past the budget the occurrence is written terminal
+ * (`REDELIVERY_EXHAUSTED`) so no recovery listing returns it again.
+ */
+export async function claimMentionDeliveryRecovery(input: {
+  occurrenceId: string;
+  expectedVersion: number;
+  maxRounds?: number;
+}): Promise<MentionDeliveryRecoveryClaim> {
+  const maxRounds = input.maxRounds ?? MENTION_DELIVERY_MAX_RECOVERY_ROUNDS;
+  const now = currentDate();
+  const daemonHeld = inArray(mentionDeliveryOccurrences.state, ["daemon_received", "daemon_pending"]);
+  const live = and(
+    eq(mentionDeliveryOccurrences.occurrenceId, input.occurrenceId),
+    eq(mentionDeliveryOccurrences.version, input.expectedVersion),
+    isNull(mentionDeliveryOccurrences.ackedAt),
+    isNull(mentionDeliveryOccurrences.terminalErrorAt),
+  );
+  const [claimed] = await getDb().update(mentionDeliveryOccurrences).set({
+    recoveryCount: sql`${mentionDeliveryOccurrences.recoveryCount} + 1`,
+    version: sql`${mentionDeliveryOccurrences.version} + 1`,
+    updatedAt: now,
+  }).where(and(
+    live,
+    daemonHeld,
+    sql`${mentionDeliveryOccurrences.recoveryCount} < ${maxRounds}`,
+  )).returning();
+  if (claimed) return { status: "claimed", row: claimed };
+
+  const [exhausted] = await getDb().update(mentionDeliveryOccurrences).set({
+    state: "terminal_error",
+    terminalErrorAt: now,
+    terminalErrorCode: "REDELIVERY_EXHAUSTED",
+    terminalDecision: { layer: "server", stage: "recovery_exhausted", originalDaemonCode: null },
+    version: sql`${mentionDeliveryOccurrences.version} + 1`,
+    updatedAt: now,
+  }).where(and(
+    live,
+    daemonHeld,
+    sql`${mentionDeliveryOccurrences.recoveryCount} >= ${maxRounds}`,
+  )).returning();
+  if (exhausted) return { status: "exhausted", row: exhausted };
+
+  const [current] = await getDb().select().from(mentionDeliveryOccurrences).where(live).limit(1);
+  // Still live but not daemon-held: never reached the daemon, so recovery is unbounded here.
+  if (current) return { status: "claimed", row: current };
+  return { status: "stale" };
 }
 
 export async function getMentionDeliveryOccurrenceById(occurrenceId: string): Promise<MentionDeliveryOccurrenceRow | null> {

@@ -1,9 +1,10 @@
 import type { MachineToServerMessage } from "@botiverse/raft-shared";
-import { appSourceTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace.js";
-import type { BuiltInMachineMessageContext } from "../../registry.manifest.js";
-import { isReminderCatchup } from "./fireTiming.js";
-import * as reminderService from "./service.js";
-import { selectReminderDueProtocol } from "./protocolTransition.js";
+import { appSourceTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace";
+import type { BuiltInMachineMessageContext } from "../../registry.manifest";
+import { isReminderCatchup } from "./fireTiming";
+import * as reminderService from "./service";
+import { selectReminderDueProtocol } from "./protocolTransition";
+import { errorClassOf } from "../../tracing/semanticTrace";
 
 type LegacyFireAttempt = Extract<MachineToServerMessage, { type: "reminder.fire_attempt" }>;
 
@@ -32,7 +33,7 @@ export async function handleLegacyReminderFireAttempt(
     capabilities: context.capabilities,
   });
   if (protocol !== "legacy_fire_attempt") {
-    context.trace("server.app_source.receipt", {
+    context.setReceiptOutcome({
       ...attrs,
       machine_id: context.machineId,
       receipt_type: message.type,
@@ -45,7 +46,7 @@ export async function handleLegacyReminderFireAttempt(
   try {
     const existing = await reminderService.getReminderById(message.reminderId);
     if (!existing || existing.serverId !== context.agent.serverId) {
-      context.trace("server.app_source.receipt", {
+      context.setReceiptOutcome({
         ...attrs,
         machine_id: context.machineId,
         receipt_type: message.type,
@@ -55,7 +56,7 @@ export async function handleLegacyReminderFireAttempt(
       return;
     }
     if (existing.ownerAgentId !== message.agentId) {
-      context.trace("server.app_source.receipt", {
+      context.setReceiptOutcome({
         ...attrs,
         machine_id: context.machineId,
         receipt_type: message.type,
@@ -68,7 +69,7 @@ export async function handleLegacyReminderFireAttempt(
       existing.version !== message.version
       || existing.status !== "scheduled"
     ) {
-      context.trace("server.app_source.receipt", {
+      context.setReceiptOutcome({
         ...attrs,
         machine_id: context.machineId,
         receipt_type: message.type,
@@ -88,7 +89,7 @@ export async function handleLegacyReminderFireAttempt(
       const rearmed = result.reason === "premature_fire"
         ? await context.host.pushReminderUpsert(existing.ownerAgentId, existing)
         : false;
-      context.trace("server.app_source.receipt", {
+      context.setReceiptOutcome({
         ...attrs,
         machine_id: context.machineId,
         receipt_type: message.type,
@@ -119,7 +120,7 @@ export async function handleLegacyReminderFireAttempt(
     const transported = result.nextFireAt
       ? await context.host.pushReminderUpsert(fired.ownerAgentId, fired)
       : await context.host.pushReminderCancel(fired.ownerAgentId, fired.id, fired.version);
-    context.trace("server.app_source.receipt", {
+    context.setReceiptOutcome({
       ...attrs,
       machine_id: context.machineId,
       receipt_type: message.type,
@@ -129,11 +130,13 @@ export async function handleLegacyReminderFireAttempt(
       catchup: result.catchup,
     }, (result.fired && !woke) || !transported ? "error" : "ok");
   } catch (error) {
-    context.trace("server.app_source.receipt", {
+    context.setReceiptOutcome({
       ...attrs,
       machine_id: context.machineId,
       receipt_type: message.type,
       outcome: "legacy_convergence_failed",
+      reason: "convergence_threw",
+      error_class: errorClassOf(error),
     }, "error");
     console.error(
       `[Machine ${context.machineId}] Failed to converge legacy reminder attempt ${message.reminderId}:`,

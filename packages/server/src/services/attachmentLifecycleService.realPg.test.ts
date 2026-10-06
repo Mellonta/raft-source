@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
-import * as schema from "../db/schema.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
+import * as schema from "../db/schema";
 import {
   attachmentObjects,
   attachmentUploadReservations,
@@ -15,14 +14,14 @@ import {
   messages,
   servers,
   users,
-} from "../db/schema.js";
-import { expireAttachmentReservation } from "./attachmentLifecycleService.js";
-import { createPendingAttachmentProjectionWithExecutor } from "./attachmentProjectionWriterService.js";
+} from "../db/schema";
+import { expireAttachmentReservation } from "./attachmentLifecycleService";
+import { createPendingAttachmentProjectionWithExecutor } from "./attachmentProjectionWriterService";
 import {
   buildAttachmentTransferArtifactPlan,
   createAttachmentTransferIntent,
-} from "./attachmentTransferIntentService.js";
-import { AttachmentLinkError, linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService.js";
+} from "./attachmentTransferIntentService";
+import { AttachmentLinkError, linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService";
 
 const REAL_PG_URL_ENV = "ATTACHMENT_LIFECYCLE_REAL_PG_URL";
 const REAL_PG_URL = process.env[REAL_PG_URL_ENV];

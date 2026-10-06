@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   AUTH_REFRESH_REQUEST_TIMEOUT_MS,
   AUTH_REFRESH_ROTATED_REPLAY_GRACE_MS,
@@ -8,7 +7,7 @@ import {
   AUTH_REFRESH_ROTATION_LOSER_WORST_CHAIN_MS,
   AUTH_REFRESH_ROTATION_REPLAY_GRACE_MARGIN_MS,
   AUTH_REFRESH_ROTATION_RETRY_RTT_BUDGET_MS,
-} from "./authRefreshTiming.js";
+} from "./authRefreshTiming";
 
 test("auth refresh loser timing remains inside server replay grace", () => {
   assert.equal(

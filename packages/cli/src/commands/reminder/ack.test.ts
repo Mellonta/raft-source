@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import type { CliIo } from "../../core/io.js";
-import { reminderAckCommand, reminderDismissCommand } from "../../apps/reminder/ack.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import type { CliIo } from "../../core/io";
+import {
+  reminderAckCommand,
+  reminderDismissCommand,
+  reminderSealCommand,
+  reminderUnsealCommand,
+} from "../../apps/reminder/ack";
 
 const reminderId = "12345678-1234-4123-8123-123456789abc";
 const otherReminderId = "12345678-9999-4999-8999-999999999999";
@@ -41,6 +45,7 @@ function dueItem(overrides: {
   retention?: "until_source_read" | "until_explicit_ack";
   commandId?: string;
   actionCli?: string;
+  seal?: { owner: string; until: string; sealedAtMs: number };
 }) {
   const id = overrides.id ?? reminderId;
   return {
@@ -52,8 +57,222 @@ function dueItem(overrides: {
     primaryAction: { kind: "run_command", commandId: overrides.commandId ?? "reminder.ack" },
     actionCli: overrides.actionCli ?? `raft reminder ack --id ${id.slice(0, 8)} --revision ${overrides.revision}`,
     retention: overrides.retention ?? "until_explicit_ack",
+    ...(overrides.seal ? { seal: overrides.seal } : {}),
   };
 }
+
+test("ack rejects a sealed exact reminder before posting the item", async () => {
+  const { io } = memoryIo();
+  const requests: Array<{ method: string; path: string }> = [];
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (method: string, path: string): Promise<ApiResponse<unknown>> => {
+        requests.push({ method, path });
+          return ok({
+            rows: [],
+            items: [dueItem({
+              revision: "7",
+              seal: { owner: "@Stone", until: "production contains fix", sealedAtMs: 1_000 },
+            })],
+            seals: [{
+              appId: "system.reminder",
+              notificationClass: "due",
+              sourceRef: { kind: "reminder", id: reminderId, revision: "7" },
+              owner: "@Stone",
+              until: "production contains fix",
+              sealedAtMs: 1_000,
+            }],
+            acknowledged_app_sources: [],
+          });
+      },
+    }) as never,
+  });
+
+  await assert.rejects(
+    async () => reminderAckCommand.handler(ctx, { id: reminderId, revision: "7" }),
+    /sealed \(registered revision 7\) by @Stone until production contains fix/,
+  );
+  assert.deepEqual(requests, [{ method: "GET", path: "/internal/agent-api/inbox" }]);
+});
+
+test("seal and unseal all-pending use exact local item identities", async () => {
+  const { io, stdout } = memoryIo();
+  let sealed = false;
+  const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (method: string, path: string, body?: unknown): Promise<ApiResponse<unknown>> => {
+        requests.push({ method, path, body });
+        if (path === "/internal/agent-api/inbox" && method === "GET") {
+          return ok({
+            rows: [],
+            items: ["7", "8"].map((revision) => dueItem({
+              revision,
+              ...(sealed ? { seal: { owner: "@Stone", until: "deploy", sealedAtMs: 1_000 } } : {}),
+            })),
+            seals: sealed ? ["7", "8"].map((revision) => ({
+              appId: "system.reminder",
+              notificationClass: "due",
+              sourceRef: { kind: "reminder", id: reminderId, revision },
+              owner: "@Stone",
+              until: "deploy",
+              sealedAtMs: 1_000,
+            })) : [],
+          });
+        }
+        if (path === "/internal/agent-api/inbox/seal" && method === "POST") {
+          sealed = true;
+          return ok({ ok: true, affected: 2 });
+        }
+        if (path === "/internal/agent-api/inbox/unseal" && method === "POST") {
+          sealed = false;
+          return ok({ ok: true, affected: 2 });
+        }
+        throw new Error(`unexpected request ${method} ${path}`);
+      },
+    }) as never,
+  });
+
+  await reminderSealCommand.handler(ctx, {
+    id: "12345678",
+    allPending: true,
+    owner: "@Stone",
+    until: "deploy",
+  });
+  await reminderUnsealCommand.handler(ctx, { id: "12345678", allPending: true });
+
+  assert.deepEqual(requests.filter((request) => request.method === "POST").map((request) => request.body), [
+    {
+      sources: ["7", "8"].map((revision) => ({
+        appId: "system.reminder",
+        notificationClass: "due",
+        sourceRef: { kind: "reminder", id: reminderId, revision },
+      })),
+      owner: "@Stone",
+      until: "deploy",
+    },
+    {
+      sources: ["7", "8"].map((revision) => ({
+        appId: "system.reminder",
+        notificationClass: "due",
+        sourceRef: { kind: "reminder", id: reminderId, revision },
+      })),
+    },
+  ]);
+  assert.match(stdout.join(""), /Sealed 2/);
+  assert.match(stdout.join(""), /Unsealed 2/);
+});
+
+test("seal can register an exact full reminder identity after its Inbox item is gone", async () => {
+  const { io } = memoryIo();
+  const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (method: string, path: string, body?: unknown): Promise<ApiResponse<unknown>> => {
+        requests.push({ method, path, body });
+        if (method === "GET" && path === "/internal/agent-api/inbox") {
+          return ok({ rows: [], items: [], seals: [] });
+        }
+        if (method === "POST" && path === "/internal/agent-api/inbox/seal") {
+          return ok({ ok: true, affected: 1 });
+        }
+        throw new Error(`unexpected request ${method} ${path}`);
+      },
+    }) as never,
+  });
+
+  await reminderSealCommand.handler(ctx, {
+    id: reminderId,
+    revision: "7",
+    owner: "@Stone",
+    until: "explicit release",
+  });
+
+  assert.deepEqual(requests[1]?.body, {
+    sources: [{
+      appId: "system.reminder",
+      notificationClass: "due",
+      sourceRef: { kind: "reminder", id: reminderId, revision: "7" },
+    }],
+    owner: "@Stone",
+    until: "explicit release",
+  });
+});
+
+test("seal can register a detached reminder-id-only protection entry", async () => {
+  const { io } = memoryIo();
+  const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (method: string, path: string, body?: unknown): Promise<ApiResponse<unknown>> => {
+        requests.push({ method, path, body });
+        if (method === "GET" && path === "/internal/agent-api/inbox") return ok({ rows: [], items: [], seals: [] });
+        if (method === "POST" && path === "/internal/agent-api/inbox/seal") return ok({ ok: true, affected: 1 });
+        throw new Error(`unexpected request ${method} ${path}`);
+      },
+    }) as never,
+  });
+
+  await reminderSealCommand.handler(ctx, {
+    id: reminderId,
+    owner: "@Stone",
+    until: "explicit release",
+  });
+
+  assert.deepEqual(requests[1]?.body, {
+    sources: [{
+      appId: "system.reminder",
+      notificationClass: "due",
+      sourceRef: { kind: "reminder", id: reminderId },
+    }],
+    owner: "@Stone",
+    until: "explicit release",
+  });
+});
+
+test("ack rejects a later revision when an earlier tuple for the reminder id is sealed", async () => {
+  const { io } = memoryIo();
+  const requests: Array<{ method: string; path: string }> = [];
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (method: string, path: string): Promise<ApiResponse<unknown>> => {
+        requests.push({ method, path });
+        if (method === "GET" && path === "/internal/agent-api/inbox") {
+          return ok({
+            rows: [],
+            items: [dueItem({ revision: "8" })],
+            seals: [{
+              appId: "system.reminder",
+              notificationClass: "due",
+              sourceRef: { kind: "reminder", id: reminderId, revision: "7" },
+              owner: "@Stone",
+              until: "explicit release",
+              sealedAtMs: 1_000,
+            }],
+            acknowledged_app_sources: [],
+          });
+        }
+        throw new Error(`ack escaped local id-level seal guard: ${method} ${path}`);
+      },
+    }) as never,
+  });
+
+  await assert.rejects(
+    async () => reminderAckCommand.handler(ctx, { id: reminderId, revision: "8" }),
+    /registered revision 7/,
+  );
+  assert.deepEqual(requests, [{ method: "GET", path: "/internal/agent-api/inbox" }]);
+});
 
 function acknowledgedSource(overrides: { id?: string; revision: string }) {
   const id = overrides.id ?? reminderId;
@@ -86,6 +305,7 @@ test("ack retires the exact active fired item, including legacy persisted remind
                 commandId: "reminder.log",
                 actionCli: "raft reminder log --id 12345678",
               }),
+              dueItem({ revision: "8" }),
             ],
             acknowledged_app_sources: [],
           });
@@ -95,7 +315,7 @@ test("ack retires the exact active fired item, including legacy persisted remind
           return ok({
             ok: true,
             itemId: `reminder:${reminderId}:7`,
-            remaining_app_items: 0,
+            remaining_app_items: 1,
           });
         }
         throw new Error(`unexpected request ${method} ${path}`);
@@ -274,8 +494,8 @@ test("ack does not treat absence as idempotency without an exact tombstone", asy
   );
 });
 
-test("ack of N fails closed after the same reminder advances to active N+1", async () => {
-  const { io } = memoryIo();
+test("repeat ack of N stays idempotent after the same reminder advances to active N+1", async () => {
+  const { io, stdout } = memoryIo();
   const requests: Array<{ method: string; path: string }> = [];
   const ctx = createCommandContext({
     io,
@@ -295,13 +515,9 @@ test("ack of N fails closed after the same reminder advances to active N+1", asy
     }) as never,
   });
 
-  await assert.rejects(
-    async () => { await Promise.resolve(reminderAckCommand.handler(ctx, { id: reminderId, revision: "7" })); },
-    (error: unknown) => {
-      assert.equal((error as { code?: string }).code, "ACK_FAILED");
-      return true;
-    },
-  );
+  await reminderAckCommand.handler(ctx, { id: reminderId, revision: "7" });
+
+  assert.match(stdout.join(""), /was already acknowledged for this fired item/);
   assert.deepEqual(requests, [
     { method: "GET", path: "/internal/agent-api/inbox" },
   ]);

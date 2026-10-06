@@ -1,10 +1,10 @@
 import type { Request } from "express";
-import type { Server as SocketServer } from "socket.io";
 
-import type { DatabaseExecutor } from "../../db/index.js";
-import type { AgentOrchestrator } from "../../services/agentOrchestrator.js";
-import * as reminderCrud from "./crud.js";
-import * as reminderService from "./service.js";
+import type { DatabaseExecutor } from "../../db/index";
+import type { AgentOrchestrator } from "../../services/agentOrchestrator";
+import * as reminderCrud from "./crud";
+import { publishReminderEvent } from "./realtime";
+import * as reminderService from "./service";
 
 type CreateTaskResourceExpiryInput = {
   id: string;
@@ -54,6 +54,5 @@ export async function publishTaskResourceExpiryFollowup(
 
   if (!emitScheduled) return;
   const [summary] = await reminderService.toReminderSummaries([row], serverId);
-  const io = req.app.get("io") as SocketServer;
-  io?.to(`server:${row.serverId}`).emit("reminder:scheduled", { reminder: summary });
+  await publishReminderEvent(req.app.get("io"), row, { type: "reminder:scheduled", reminder: summary });
 }

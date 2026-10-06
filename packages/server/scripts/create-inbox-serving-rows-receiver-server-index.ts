@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import "dotenv/config";
 import { pathToFileURL } from "node:url";
 import {
@@ -12,7 +12,7 @@ import {
   INBOX_SERVING_ROWS_INDEX_STATEMENT_TIMEOUT_MS,
   INBOX_SERVING_ROWS_RECEIVER_SERVER_INDEX_NAME,
   readInboxServingRowsIndexStatus,
-} from "./inbox-serving-rows-receiver-server-index.js";
+} from "./inbox-serving-rows-receiver-server-index";
 
 export type InboxServingRowsIndexCreationDependencies = {
   createPool: typeof createIndexCreationPool;

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { configureMetricsDeploymentIdentity, register } from "./metrics.js";
+import { configureMetricsDeploymentIdentity, register } from "./metrics";
 
 test("application metrics include privacy-safe deployment identity labels", async () => {
   configureMetricsDeploymentIdentity({

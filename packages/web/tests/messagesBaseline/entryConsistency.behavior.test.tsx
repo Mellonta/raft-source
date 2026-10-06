@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "../helpers/domSetup";
 import { Profiler } from "react";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
@@ -47,7 +47,7 @@ import { createMessageWindowHarness } from "../messageWindowHarness";
 
 type TestFn = (t: unknown) => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn as never);
+  nodeTest(name,  fn as never);
 
 const originalGet = api.get.bind(api);
 const originalPost = api.post.bind(api);
@@ -1444,7 +1444,7 @@ test("an absent thread adopts the first remote thread update, then merges fetch,
   }) as typeof api.post;
   api.get = (async (url: string) => {
     if (url === `/channels/${parentChannelId}/threads/${parentMessageId}`) {
-      throw Object.assign(new Error("thread not found"), { response: { status: 404 } });
+      throw Object.assign(new Error("thread not found"), { response: { status: 404, data: { code: "THREAD_NOT_FOUND", error: "No thread found for this message" } } });
     }
     if (url === "/messages/forward/enabled") return { data: { enabled: false } };
     if (url === `/messages/channel/${threadChannelId}?limit=50`) {

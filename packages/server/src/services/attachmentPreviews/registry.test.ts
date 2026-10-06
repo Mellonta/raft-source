@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { attachmentPreviewProviders, isAttachmentPreviewTruncated } from "./registry.js";
+import { attachmentPreviewProviders, isAttachmentPreviewTruncated } from "./registry";
 
 test("attachment preview providers are ordered and declare resource/trust contract", () => {
   assert.deepEqual(attachmentPreviewProviders.map((provider) => provider.kind), ["diff", "csv", "xlsx", "markdown", "pdf", "text"]);

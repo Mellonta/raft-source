@@ -1,5 +1,5 @@
-import { tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -9,8 +9,8 @@ import {
   BasicTracer,
   MemoryTraceSink
 } from "@botiverse/raft-shared";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
 import {
   servers as serversTable,
   serverMembers,
@@ -19,22 +19,23 @@ import {
   messageReactions,
   messageMentions,
   attachments,
-  threadFollows, userChannelReadCursors, inboxServingRows, inboxNotificationFacts,
+  threadFollows, userChannelReadCursors, inboxNotificationFacts,
   inboxSuppressionStates, jointChannels,
   jointChannelServers,
   jointChannelInvites
-} from "../db/schema.js";
-import { addMember } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { MAX_JOINT_CHANNEL_INVITED_PEOPLE_PER_TARGET, createChannel, getOrCreateThread, addHuman, addAgent, removeHuman, isChannelHuman, resolveChannelAccess, getChannel, markRead, listJointActivityProjectionChannelIdsForAgent, recordThreadFollow } from "../services/channelService.js";
+} from "../db/schema";
+import { addMember } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { MAX_JOINT_CHANNEL_INVITED_PEOPLE_PER_TARGET, createChannel, getOrCreateThread, addHuman, addAgent, removeHuman, isChannelHuman, resolveChannelAccess, getChannel, markRead, listJointActivityProjectionChannelIdsForAgent, recordThreadFollow } from "../services/channelService";
 import {
   createMessage
-} from "../services/messageService.js";
+} from "../services/messageService";
 import {
-  rebuildInboxServingRowsForReceiverTargets
-} from "../services/inboxNotificationService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { createServer, installFakeIo, enableThreadAgentFollowerManagementForServer, recordTestInboxFact, seedThreadFixture, headers, seedUser, fetchInboxAll } from "./channels.api.fixtures.js";
+} from "../services/inboxNotificationService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { createServer, installFakeIo, recordTestInboxFact, seedThreadFixture, headers, seedUser, fetchInboxAll } from "./channels.api.fixtures";
+import { emitJointLimitStateChange } from "./channels";
+import { onJointLimitStateChanged, reconcileJointsForServer } from "../services/jointChannelLimitService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -225,415 +226,6 @@ test("ordinary add-member API lands a joint add on the addressed projection with
 });
 
 
-test("inbox mention hot-path rewrite preserves rows and derived values across joint projection changes", async ({ app }) => {
-  const db = getDb();
-  const f = await seedThreadFixture(app.baseUrl);
-  const serverB = await createServer("Mention Scope B", `mention-scope-b-${randomUUID()}`, f.ownerId);
-  const serverC = await createServer("Mention Scope C", `mention-scope-c-${randomUUID()}`, f.ownerId);
-  const channelA = await createChannel(f.serverId, `mention-scope-a-${randomUUID()}`, undefined, "joint");
-  const channelB = await createChannel(serverB.id, `mention-scope-b-${randomUUID()}`, undefined, "joint");
-  const channelC = await createChannel(serverC.id, `mention-scope-c-${randomUUID()}`, undefined, "joint");
-  await addHuman(channelA.id, f.ownerId);
-
-  const baseline = await createMessage(channelA.id, "user", f.memberBId, "A serving-row baseline");
-  await recordTestInboxFact({
-    serverId: f.serverId,
-    receiverId: f.ownerId,
-    kind: "channel",
-    sourceChannelId: channelA.id,
-    message: baseline,
-  });
-
-  const a1 = await createMessage(channelA.id, "user", f.ownerId, "A first mention");
-  const b1 = await createMessage(channelB.id, "user", f.ownerId, "B first mention");
-  const a2 = await createMessage(channelA.id, "user", f.ownerId, "A second mention");
-  const c1 = await createMessage(channelC.id, "user", f.ownerId, "C mention");
-  const b2 = await createMessage(channelB.id, "user", f.ownerId, "B second mention");
-  const quiet = await createMessage(channelB.id, "user", f.ownerId, "B non-notifiable mention");
-  const mentionValue = (
-    message: typeof messages.$inferSelect,
-    channelId: string,
-    serverId: string,
-  ): typeof messageMentions.$inferInsert => ({
-    messageId: message.id,
-    messageSeq: message.seq,
-    serverId,
-    channelId,
-    targetType: "user",
-    targetId: f.ownerId,
-    handleAtSendTime: "Owner",
-  });
-  await db.insert(messageMentions).values([
-    mentionValue(a1, channelA.id, f.serverId),
-    mentionValue(b1, channelB.id, serverB.id),
-    mentionValue(a2, channelA.id, f.serverId),
-    mentionValue(c1, channelC.id, serverC.id),
-    mentionValue(b2, channelB.id, serverB.id),
-  ]);
-  await db.insert(messageMentions).values({
-    messageId: quiet.id,
-    messageSeq: quiet.seq,
-    serverId: serverB.id,
-    channelId: channelB.id,
-    targetType: "user",
-    targetId: f.ownerId,
-    handleAtSendTime: "Owner",
-    notifiableAtSend: false,
-  });
-  await db.insert(userChannelReadCursors).values([
-    { userId: f.ownerId, channelId: channelA.id, lastReadSeq: b1.seq },
-    { userId: f.ownerId, channelId: channelB.id, lastReadSeq: a1.seq },
-    { userId: f.ownerId, channelId: channelC.id, lastReadSeq: a2.seq },
-  ]);
-
-  type MentionProjectionRow = {
-    channel_id: string;
-    latest_message_id: string | null;
-    latest_message_seq: number | null;
-    unread_mention_count: number;
-    first_unread_message_id: string | null;
-  };
-  const oldProjection = async (): Promise<MentionProjectionRow[]> => {
-    const result = await db.execute(sql`
-      SELECT
-        c.id AS channel_id,
-        live_mention.message_id AS latest_message_id,
-        live_mention.message_seq AS latest_message_seq,
-        live_unread_mention.unread_mention_count,
-        live_first_unread_mention.message_id AS first_unread_message_id
-      FROM channels c
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = c.id
-       AND rc.user_id = ${f.ownerId}
-      LEFT JOIN LATERAL (
-        SELECT mm.message_id, mm.message_seq
-        FROM message_mentions mm
-        WHERE mm.target_type = 'user'
-          AND mm.target_id = ${f.ownerId}::uuid
-          AND (mm.notifiable_at_send OR mm.notified_at IS NOT NULL)
-          AND (
-            mm.channel_id = c.id
-            OR EXISTS (
-              SELECT 1
-              FROM joint_channel_servers base_projection
-              INNER JOIN joint_channel_servers sibling_projection
-                ON sibling_projection.joint_channel_id = base_projection.joint_channel_id
-               AND sibling_projection.status = 'active'
-              WHERE base_projection.local_channel_id = c.id
-                AND base_projection.status = 'active'
-                AND sibling_projection.local_channel_id = mm.channel_id
-            )
-          )
-        ORDER BY mm.message_seq DESC
-        LIMIT 1
-      ) live_mention ON true
-      LEFT JOIN LATERAL (
-        SELECT count(*)::int AS unread_mention_count
-        FROM message_mentions mm
-        WHERE mm.target_type = 'user'
-          AND mm.target_id = ${f.ownerId}::uuid
-          AND (mm.notifiable_at_send OR mm.notified_at IS NOT NULL)
-          AND (
-            mm.channel_id = c.id
-            OR EXISTS (
-              SELECT 1
-              FROM joint_channel_servers base_projection
-              INNER JOIN joint_channel_servers sibling_projection
-                ON sibling_projection.joint_channel_id = base_projection.joint_channel_id
-               AND sibling_projection.status = 'active'
-              WHERE base_projection.local_channel_id = c.id
-                AND base_projection.status = 'active'
-                AND sibling_projection.local_channel_id = mm.channel_id
-            )
-          )
-          AND mm.message_seq > COALESCE(rc.last_read_seq, 0)
-      ) live_unread_mention ON true
-      LEFT JOIN LATERAL (
-        SELECT mm.message_id
-        FROM message_mentions mm
-        WHERE mm.target_type = 'user'
-          AND mm.target_id = ${f.ownerId}::uuid
-          AND (mm.notifiable_at_send OR mm.notified_at IS NOT NULL)
-          AND (
-            mm.channel_id = c.id
-            OR EXISTS (
-              SELECT 1
-              FROM joint_channel_servers base_projection
-              INNER JOIN joint_channel_servers sibling_projection
-                ON sibling_projection.joint_channel_id = base_projection.joint_channel_id
-               AND sibling_projection.status = 'active'
-              WHERE base_projection.local_channel_id = c.id
-                AND base_projection.status = 'active'
-                AND sibling_projection.local_channel_id = mm.channel_id
-            )
-          )
-          AND mm.message_seq > COALESCE(rc.last_read_seq, 0)
-        ORDER BY mm.message_seq ASC
-        LIMIT 1
-      ) live_first_unread_mention ON true
-      WHERE c.id IN (${channelA.id}::uuid, ${channelB.id}::uuid, ${channelC.id}::uuid)
-      ORDER BY c.id
-    `);
-    return result.rows as MentionProjectionRow[];
-  };
-  const newProjection = async (): Promise<MentionProjectionRow[]> => {
-    const result = await db.execute(sql`
-      SELECT
-        c.id AS channel_id,
-        live_mentions.latest_message_id,
-        live_mentions.latest_message_seq,
-        live_mentions.unread_mention_count,
-        live_mentions.first_unread_message_id
-      FROM channels c
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = c.id
-       AND rc.user_id = ${f.ownerId}
-      CROSS JOIN LATERAL (
-        SELECT array_agg(DISTINCT scoped_channel.local_channel_id)::uuid[] AS channel_ids
-        FROM (
-          SELECT c.id AS local_channel_id
-          UNION ALL
-          SELECT sibling_projection.local_channel_id
-          FROM joint_channel_servers base_projection
-          INNER JOIN joint_channel_servers sibling_projection
-            ON sibling_projection.joint_channel_id = base_projection.joint_channel_id
-           AND sibling_projection.status = 'active'
-          WHERE base_projection.local_channel_id = c.id
-            AND base_projection.status = 'active'
-        ) scoped_channel
-      ) mention_scope
-      LEFT JOIN LATERAL (
-        SELECT
-          (array_agg(mm.message_id ORDER BY mm.message_seq DESC, mm.message_id DESC))[1] AS latest_message_id,
-          max(mm.message_seq) AS latest_message_seq,
-          (count(*) FILTER (
-            WHERE mm.message_seq > COALESCE(rc.last_read_seq, 0)
-          ))::int AS unread_mention_count,
-          (array_agg(mm.message_id ORDER BY mm.message_seq ASC, mm.message_id ASC) FILTER (
-            WHERE mm.message_seq > COALESCE(rc.last_read_seq, 0)
-          ))[1] AS first_unread_message_id
-        FROM message_mentions mm
-        WHERE mm.target_type = 'user'
-          AND mm.target_id = ${f.ownerId}::uuid
-          AND (mm.notifiable_at_send OR mm.notified_at IS NOT NULL)
-          AND mm.channel_id = ANY(mention_scope.channel_ids)
-      ) live_mentions ON true
-      WHERE c.id IN (${channelA.id}::uuid, ${channelB.id}::uuid, ${channelC.id}::uuid)
-      ORDER BY c.id
-    `);
-    return result.rows as MentionProjectionRow[];
-  };
-  const assertEquivalent = async (phase: string) => {
-    const oldRows = await oldProjection();
-    const newRows = await newProjection();
-    assert.equal(oldRows.length, 3, `${phase}: old projection must retain every input channel`);
-    assert.equal(newRows.length, 3, `${phase}: new projection must retain every input channel`);
-    assert.deepEqual(newRows, oldRows, `${phase}: row set and all mention-derived values must match`);
-  };
-  const assertCurrentQueryFirstMention = async (expectedMessageId: string | null, phase: string) => {
-    const items = await fetchInboxAll(app.baseUrl, f.ownerToken, f.serverId);
-    const item = items.find((candidate) => candidate.kind === "channel" && candidate.channelId === channelA.id);
-    assert.ok(item?.kind === "channel", `${phase}: current pg_serving query must retain the local joint row`);
-    assert.equal(
-      item.firstMentionMessageId,
-      expectedMessageId,
-      `${phase}: current receiver_rows -> mention_scope -> live_mentions query must honor active siblings and the local read cursor`,
-    );
-  };
-
-  await assertEquivalent("local/no-mapping");
-  await assertCurrentQueryFirstMention(a2.id, "local/no-mapping");
-
-  const [jointAB] = await db.insert(jointChannels).values({
-    canonicalChannelId: channelA.id,
-    createdByServerId: f.serverId,
-    createdByUserId: f.ownerId,
-  }).returning();
-  await db.insert(jointChannelServers).values([
-    {
-      jointChannelId: jointAB.id,
-      serverId: f.serverId,
-      localChannelId: channelA.id,
-      role: "host",
-      joinedByUserId: f.ownerId,
-    },
-    {
-      jointChannelId: jointAB.id,
-      serverId: serverB.id,
-      localChannelId: channelB.id,
-      role: "participant",
-      joinedByUserId: f.ownerId,
-    },
-  ]);
-  await assertEquivalent("joint-add-A-B");
-  await markRead(f.ownerId, channelA.id, a2.seq);
-  await assertCurrentQueryFirstMention(b2.id, "joint-add-A-B after local cursor advances");
-  await db.delete(messageMentions).where(eq(messageMentions.channelId, channelA.id));
-  await db.update(inboxServingRows)
-    .set({ hasAnyMention: false })
-    .where(and(
-      eq(inboxServingRows.receiverId, f.ownerId),
-      eq(inboxServingRows.sourceChannelId, channelA.id),
-    ));
-  await removeHuman(channelA.id, f.ownerId);
-  await assertCurrentQueryFirstMention(
-    b2.id,
-    "joint-add-A-B mention-only sibling without local membership",
-  );
-  await addHuman(channelA.id, f.ownerId);
-
-  await db.update(jointChannelServers)
-    .set({ status: "disconnected", disconnectedAt: new Date() })
-    .where(eq(jointChannelServers.localChannelId, channelB.id));
-  await assertEquivalent("joint-remove-B");
-  await assertCurrentQueryFirstMention(null, "joint-remove-B");
-
-  const [jointAC] = await db.insert(jointChannels).values({
-    canonicalChannelId: channelC.id,
-    createdByServerId: serverC.id,
-    createdByUserId: f.ownerId,
-  }).returning();
-  await db.update(jointChannelServers)
-    .set({ jointChannelId: jointAC.id })
-    .where(eq(jointChannelServers.localChannelId, channelA.id));
-  await db.insert(jointChannelServers).values({
-    jointChannelId: jointAC.id,
-    serverId: serverC.id,
-    localChannelId: channelC.id,
-    role: "participant",
-    joinedByUserId: f.ownerId,
-  });
-  await assertEquivalent("joint-switch-A-B-to-A-C");
-  await assertCurrentQueryFirstMention(c1.id, "joint-switch-A-B-to-A-C");
-});
-
-
-test("inbox serving-row high-cardinality path scopes mention work to receiver joints and the current server", () => {
-  const source = readFileSync(new URL("../services/channelService.ts", import.meta.url), "utf8");
-  const receiverRowsStart = source.indexOf("receiver_scope_ids AS MATERIALIZED (");
-  const baseRowsEnd = source.indexOf("visible_rows AS (", receiverRowsStart);
-  const servingQueryEnd = source.indexOf("const allPagePrefixLimit", receiverRowsStart);
-  assert.ok(receiverRowsStart >= 0 && baseRowsEnd > receiverRowsStart, "expected serving-row v3 scoped SQL");
-  assert.ok(servingQueryEnd > baseRowsEnd, "expected serving-row v3 query end");
-  const scopedSql = source.slice(receiverRowsStart, baseRowsEnd);
-  const servingSql = source.slice(receiverRowsStart, servingQueryEnd);
-  const fallbackFunctionSql = source.slice(
-    source.indexOf("async function getInboxItemsFromServingRows("),
-    source.indexOf("export interface ActivityUnreadTotalsBatchInput"),
-  );
-
-  assert.match(
-    scopedSql,
-    /receiver_scope_ids AS MATERIALIZED \([\s\S]*?FROM inbox_serving_rows source_row[\s\S]*?source_row\.receiver_id = \$\{userId\}::uuid[\s\S]*?source_row\.server_id = \$\{serverId\}::uuid/,
-  );
-  assert.match(scopedSql, /FROM receiver_scope_ids scope[\s\S]*?INNER JOIN inbox_serving_rows r[\s\S]*?r\.source_channel_id = scope\.source_channel_id/);
-  assert.doesNotMatch(
-    scopedSql,
-    /sourceChannelIdArray|unnest\(|source_channel_id = ANY\(/,
-    "the heavy main statement must materialize its receiver scope from PostgreSQL without an embedded UUID array",
-  );
-  assert.doesNotMatch(source, /buildServingRowsQuery\(sourceChannelIds\)/);
-  assert.match(source, /const splitAllPageEnrichment = opts\.filter === "all";/);
-  assert.match(
-    fallbackFunctionSql,
-    /const splitAllMetadata = splitAllPageEnrichment && opts\.channelId == null;/,
-    "the unfaceted all route must split page selection from totals and group metadata",
-  );
-  assert.match(
-    fallbackFunctionSql,
-    /const buildAllPageServingKeysQuery[\s\S]*?WITH serving_prefix AS MATERIALIZED[\s\S]*?FROM inbox_serving_rows r[\s\S]*?r\.receiver_id = \$\{userId\}::uuid[\s\S]*?OR r\.has_any_mention[\s\S]*?ORDER BY r\.last_activity_at[\s\S]*?\$\{boundedKeyPrefixLimit\}[\s\S]*?serving_page_rows AS MATERIALIZED[\s\S]*?FROM serving_prefix prefix[\s\S]*?LEFT JOIN joint_channel_servers[\s\S]*?\$\{allPageKeyProjection\}/,
-    "the serving producer must stop at an authority-filtered ordered receiver prefix before Joint/read-cursor hydration",
-  );
-  assert.match(
-    source,
-    /const buildAllPageMentionKeysQuery[\s\S]*?receiver_mention_source_ids AS MATERIALIZED[\s\S]*?FROM server_target_mentions mention[\s\S]*?FROM message_mentions sibling_mention[\s\S]*?receiver_projection\.local_channel_id[\s\S]*?receiver_mention_prefix AS MATERIALIZED[\s\S]*?ORDER BY r\.last_activity_at[\s\S]*?\$\{boundedKeyPrefixLimit\}[\s\S]*?receiver_mention_rows AS[\s\S]*?FROM receiver_mention_prefix prefix[\s\S]*?mention_channel_rows AS[\s\S]*?grouped_mention[\s\S]*?ORDER BY prefix_message\.created_at[\s\S]*?\$\{boundedKeyPrefixLimit\}[\s\S]*?mention_thread_rows AS[\s\S]*?grouped_mention[\s\S]*?ORDER BY prefix_message\.created_at[\s\S]*?\$\{boundedKeyPrefixLimit\}[\s\S]*?\$\{allPageKeyProjection\}/,
-    "the mention producer must bound receiver, channel, and thread candidates before their projection hydration",
-  );
-  assert.match(
-    source,
-    /function mergeInboxAllPageKeyRows[\s\S]*?rowsByIdentity[\s\S]*?if \(!rowsByIdentity\.has\(identity\)\)[\s\S]*?activityTime\(left\._lastActivityAt\)[\s\S]*?\.slice\(offset, offset \+ limit \+ 1\)[\s\S]*?_pageOrdinal: pageOrdinal[\s\S]*?const mergeAllPageKeyRows[\s\S]*?mergeInboxAllPageKeyRows/,
-    "the two ordered prefixes must dedupe with serving-row precedence, stable-sort, then page in service memory",
-  );
-  assert.match(
-    source,
-    /const buildAllPageHydrationQuery[\s\S]*?FROM jsonb_to_recordset\(\$\{JSON\.stringify\(pageInput\)\}::jsonb\)[\s\S]*?page_mention_scope AS MATERIALIZED[\s\S]*?INNER JOIN message_mentions server_mention[\s\S]*?server_mention\.channel_id = scope\.mention_channel_id[\s\S]*?FROM page_effective p/,
-    "page row and exact-mention hydration must use only the selected page JSON recordset",
-  );
-  assert.match(
-    source,
-    /const servingPageResult = splitAllMetadata[\s\S]*?buildAllPageServingKeysQuery[\s\S]*?const mentionPageResult = splitAllMetadata[\s\S]*?buildAllPageMentionKeysQuery[\s\S]*?mergeAllPageKeyRows\([\s\S]*?servingPageResult\.rows,[\s\S]*?mentionPageResult\.rows[\s\S]*?buildServingRowsQuery\("metadata"\)[\s\S]*?buildAllPageHydrationQuery\(mainResult\.rows\)/,
-    "serving keys, mention keys, metadata, and hydration must execute as separately capped statements before merging",
-  );
-  assert.match(
-    source,
-    /const pageEnrichmentJoins = splitAllPageEnrichment[\s\S]*?\? sql``[\s\S]*?: sql`[\s\S]*?LEFT JOIN messages latest_message/,
-    "all must keep page enrichment joins out of the high-complexity main statement",
-  );
-  assert.match(
-    source,
-    /const mainResult =[\s\S]*?servingPageResult && mentionPageResult[\s\S]*?: await executor\.execute\(buildServingRowsQuery\(\)\);[\s\S]*?if \(!splitAllPageEnrichment\) return mainResult;[\s\S]*?buildAllPageEnrichmentQuery\(pageRows\)/,
-    "all must execute page enrichment as a separately capped statement",
-  );
-  assert.match(source, /FROM jsonb_to_recordset\(\$\{JSON\.stringify\(pageInput\)\}::jsonb\)/);
-  assert.match(scopedSql, /mention_scope AS MATERIALIZED \(/);
-  assert.match(scopedSql, /server_target_mentions AS MATERIALIZED \(/);
-  assert.match(scopedSql, /scoped_mentions AS MATERIALIZED \(/);
-  assert.match(scopedSql, /\$\{mentionAggregationCtes\}/);
-  assert.match(source, /const mentionAggregationCtes = isAllFilter/);
-  assert.match(scopedSql, /FROM message_mentions server_mention[\s\S]*?server_mention\.server_id = \$\{serverId\}::uuid/);
-  assert.match(scopedSql, /INNER JOIN message_mentions sibling_mention[\s\S]*?sibling_mention\.channel_id = scope\.mention_channel_id[\s\S]*?sibling_mention\.server_id <> \$\{serverId\}::uuid/);
-  assert.match(source, /FROM scoped_mentions mention/);
-  assert.doesNotMatch(scopedSql, /\n    target_mentions AS MATERIALIZED/);
-  assert.doesNotMatch(scopedSql, /JOIN LATERAL/);
-  assert.equal(
-    scopedSql.match(/FROM message_mentions server_mention/g)?.length,
-    1,
-    "current-server mentions must be materialized once for member and fallback rows",
-  );
-  assert.equal(
-    servingSql.match(/FROM server_target_mentions mm/g)?.length,
-    2,
-    "channel and thread mention-only fallbacks must reuse the single server-scoped target materialization",
-  );
-  assert.equal(servingSql.match(/WHERE mention_channel\.server_id = \$\{serverId\}/g)?.length, 1);
-  assert.equal(servingSql.match(/WHERE thread_channel\.server_id = \$\{serverId\}/g)?.length, 1);
-  assert.equal(
-    servingSql.match(/server_mention\.server_id = \$\{serverId\}::uuid/g)?.length,
-    1,
-    "all current-server mention consumers must share one denormalized target/server index prefix",
-  );
-  const nonThreadFacetsStart = servingSql.indexOf("non_thread_facets AS (");
-  const threadFacetsStart = servingSql.indexOf("\n    thread_facets AS (", nonThreadFacetsStart);
-  const facetedStart = servingSql.indexOf("\n    faceted AS (", threadFacetsStart);
-  assert.ok(
-    nonThreadFacetsStart >= 0 && threadFacetsStart > nonThreadFacetsStart && facetedStart > threadFacetsStart,
-    "expected separate non-thread and thread facet paths before their UNION ALL",
-  );
-  const nonThreadFacetsSql = servingSql.slice(nonThreadFacetsStart, threadFacetsStart);
-  const threadFacetsSql = servingSql.slice(threadFacetsStart, facetedStart);
-  assert.match(nonThreadFacetsSql, /WHERE filtered\.kind <> 'thread'/);
-  assert.doesNotMatch(
-    nonThreadFacetsSql,
-    /JOIN (?:channels|messages|joint_channel_servers|joint_channels)/,
-    "non-thread facet rows must not traverse the thread/Joint parent lookup chain",
-  );
-  assert.match(threadFacetsSql, /INNER JOIN channels thread_channel/);
-  assert.match(threadFacetsSql, /WHERE filtered\.kind = 'thread'/);
-  assert.match(servingSql.slice(facetedStart), /SELECT \* FROM non_thread_facets[\s\S]*?UNION ALL[\s\S]*?SELECT \* FROM thread_facets/);
-  assert.doesNotMatch(
-    fallbackFunctionSql,
-    /const receiverScopeQuery = sql`/,
-    "the fix must not add a full receiver pre-count ahead of the bounded key producers",
-  );
-  assert.match(
-    fallbackFunctionSql,
-    /receiver_scope_stats\.receiver_scope_row_count AS "__receiverScopeRowCount"[\s\S]*?const receiverScopeRowCountTraceAttrs[\s\S]*?unavailable_query_failed[\s\S]*?const metadataResult[\s\S]*?metadataRow\?\.__receiverScopeRowCount/,
-    "receiver scope must be measured by the metadata statement and remain explicitly unavailable if an earlier statement fails",
-  );
-  assert.match(source, /page AS MATERIALIZED \([\s\S]*?LIMIT \$\{opts\.limit \+ 1\}[\s\S]*?page_enriched AS \(/);
-});
-
-
 test("POST /channels/inbox/done requires storage identity and fixes the incident-shaped joint split", async ({ app }) => {
   const f = await seedThreadFixture(app.baseUrl);
   const db = getDb();
@@ -679,21 +271,22 @@ test("POST /channels/inbox/done requires storage identity and fixes the incident
     messageSeq: localMessage.seq,
     activityAt: localMessage.createdAt,
   });
-  await rebuildInboxServingRowsForReceiverTargets([{
-    receiverType: "user",
-    receiverId: f.ownerId,
-    sourceChannelId: local.id,
-  }]);
 
   const activeItem = (await fetchInboxAll(app.baseUrl, f.ownerToken, f.serverId))
     .find((item) => item.kind === "channel" && item.channelId === local.id) as
     | { latestActivitySeq?: string; doneFrontierSeq?: string }
     | undefined;
-  assert.equal(activeItem?.latestActivitySeq, "11429659");
+  // 2026-09-21 teardown: both surviving read surfaces (the RW derivation
+  // chain and the canonical inline SQL) see joint activity exclusively
+  // through canonical storage. The stray local-projection message this
+  // fixture plants (the facts-era incident accommodation that used to
+  // surface as the display frontier) is invisible by design now — display
+  // and guard frontiers coincide in the storage space.
+  assert.equal(activeItem?.latestActivitySeq, "11426997");
   assert.equal(
     activeItem?.doneFrontierSeq,
     "11426997",
-    "the active API must carry display and guard frontiers in their own spaces",
+    "the active API carries the storage-space frontier",
   );
 
   const requestHeaders = headers(f.ownerToken, f.serverId);
@@ -790,6 +383,7 @@ test("POST /channels/threads/done requires storage identity before the strict jo
     },
     { serverId: f.serverId, name: "api-thread-space-local", type: "thread" },
   ]).returning();
+  await db.update(messages).set({ threadId: canonicalThread.id }).where(eq(messages.id, parentMessage.id));
   const [threadJoint] = await db.insert(jointChannels).values({
     canonicalChannelId: canonicalThread.id,
     createdByServerId: f.serverId,
@@ -985,13 +579,14 @@ test("GET /channels/inbox includes top-level joint channel activity through loca
   const unreadSummaryAfterRead = await unreadSummaryAfterReadRes.json() as {
     channels: Record<string, { unreadCount: number; hasMention: boolean; hasAnyMention: boolean }>;
   };
+  // A fully read conversation with no mention row may be absent from the summary.
   assert.equal(
-    unreadSummaryAfterRead.channels[projection.id]?.unreadCount,
+    unreadSummaryAfterRead.channels[projection.id]?.unreadCount ?? 0,
     0,
     "sidebar unread summary must compare participant joint reads in the canonical seq domain",
   );
   assert.equal(
-    unreadSummaryAfterRead.channels[projection.id]?.hasMention,
+    unreadSummaryAfterRead.channels[projection.id]?.hasMention ?? false,
     false,
     "sidebar @mention summary must not re-light a read joint local projection",
   );
@@ -1363,8 +958,12 @@ test("joint channel create uses directed person invites and target invitee accep
     "accepting a joint invite must not broadcast full joint channel metadata to every target-server member",
   );
   assert.ok(
-    events.some((event) => event.room === `user:${targetOwner.id}` && event.event === "channel:updated"),
+    events.some((event) => event.room === `user:${targetOwner.id}:server:${targetServer.id}` && event.event === "channel:updated"),
     "accepting invitee should receive the new joint channel metadata directly",
+  );
+  assert.ok(
+    !events.some((event) => event.room === `user:${targetOwner.id}` && event.event === "channel:updated"),
+    "the target projection must not reach the invitee's sockets on their other servers (duplicate sidebar rows)",
   );
 
   const secondAcceptRes = await fetch(`${app.baseUrl}/api/channels/joint-invites/${secondInvite.id}/accept`, {
@@ -1805,35 +1404,30 @@ test("joint channel create can invite multiple target servers in the initial req
 });
 
 
-test("joint channel create rejects more than three total servers", async ({ app }) => {
+test("joint channel create rejects more than thirty total servers", async ({ app }) => {
   const hostOwner = await seedUser("joint-create-limit-host@slock.test", "joint-create-limit-host");
-  const targetOwner = await seedUser("joint-create-limit-target@slock.test", "joint-create-limit-target");
-  const thirdOwner = await seedUser("joint-create-limit-third@slock.test", "joint-create-limit-third");
-  const fourthOwner = await seedUser("joint-create-limit-fourth@slock.test", "joint-create-limit-fourth");
   const hostServer = await createServer("Joint Create Limit Host", "botiverse", hostOwner.id);
-  const targetServer = await createServer("Joint Create Limit Target", "joint-create-limit-target", targetOwner.id);
-  const thirdServer = await createServer("Joint Create Limit Third", "joint-create-limit-third", thirdOwner.id);
-  const fourthServer = await createServer("Joint Create Limit Fourth", "joint-create-limit-fourth", fourthOwner.id);
   const hostToken = await tokenForHuman(hostOwner.email);
 
+  // Contract v0.3 §18.6: 30 servers including the host, so 30 invite targets
+  // is one too many. Parsing rejects before any target is resolved.
   const createRes = await fetch(`${app.baseUrl}/api/channels`, {
     method: "POST",
     headers: headers(hostToken, hostServer.id),
     body: JSON.stringify({
       name: "too-many-initial-servers",
       visibility: "joint",
-      jointInvites: [
-        { targetServerSlug: targetServer.slug, invitedPeople: [`@${targetOwner.name}`] },
-        { targetServerSlug: thirdServer.slug, invitedPeople: [`@${thirdOwner.name}`] },
-        { targetServerSlug: fourthServer.slug, invitedPeople: [`@${fourthOwner.name}`] },
-      ],
+      jointInvites: Array.from({ length: 30 }, (_, index) => ({
+        targetServerSlug: `joint-limit-target-${index}`,
+        invitedPeople: [`owner-${index}@slock.test`],
+      })),
     }),
   });
   assert.equal(createRes.status, 400);
-  const body = await createRes.json() as { error: string };
-  assert.match(body.error, /maximum of 3 servers/);
+  const body = await createRes.json() as { error: string; code?: string };
+  assert.match(body.error, /maximum of 30 servers/);
+  assert.equal(body.code, "joint_invite_limit_exceeded");
 });
-
 
 test("joint channel create rejects oversized directed invitee arrays", async ({ app }) => {
   const hostOwner = await seedUser("joint-create-invitee-cap-host@slock.test", "joint-create-invitee-cap-host");
@@ -1853,8 +1447,9 @@ test("joint channel create rejects oversized directed invitee arrays", async ({ 
     }),
   });
   assert.equal(createRes.status, 400);
-  const body = await createRes.json() as { error: string };
+  const body = await createRes.json() as { error: string; code?: string };
   assert.match(body.error, /maximum of 20 invited people/);
+  assert.equal(body.code, "joint_invite_limit_exceeded");
 });
 
 
@@ -2185,8 +1780,17 @@ test("joint storage migration converts host-server canonical storage rows", asyn
   ]);
 
   const migrationSql = readFileSync(new URL("../../drizzle/0102_joint_storage_host_namespace_convert.sql", import.meta.url), "utf8");
-  for (const statement of migrationSql.split("--> statement-breakpoint").map((part) => part.trim()).filter(Boolean)) {
-    await db.execute(sql.raw(statement));
+  // 0102 is the one historic write that moved channels between servers; 0310
+  // later made channels.server_id immutable (message_server_timeline copies it).
+  // Replaying 0102 against today's schema needs that guard off. This test does
+  // not read the timeline, so its rows for moved channels are left as they are.
+  await db.execute(sql`ALTER TABLE channels DISABLE TRIGGER channels_server_id_immutable`);
+  try {
+    for (const statement of migrationSql.split("--> statement-breakpoint").map((part) => part.trim()).filter(Boolean)) {
+      await db.execute(sql.raw(statement));
+    }
+  } finally {
+    await db.execute(sql`ALTER TABLE channels ENABLE TRIGGER channels_server_id_immutable`);
   }
 
   const [migratedLegacyJoint] = await db.select().from(jointChannels).where(eq(jointChannels.id, legacyJoint.id));
@@ -2606,7 +2210,6 @@ test("joint channel threads use per-server local thread projections over canonic
     );
 
     await recordThreadFollow("agent", hostAgent.id, createdThread.threadChannelId, parent.id, "manual");
-    await enableThreadAgentFollowerManagementForServer(hostServer.id);
     const hostManagedRoster = await fetch(
       `${app.baseUrl}/api/channels/threads/followers?threadChannelIds=${createdThread.threadChannelId}`,
       { headers: headers(hostToken, hostServer.id) },
@@ -3342,9 +2945,9 @@ test("joint channel invites can add a third active server to the shared canonica
       invitedPeople: [`@${fourthOwner.name}`],
     }),
   });
-  assert.equal(inviteFourthRes.status, 400);
-  const inviteFourthBody = await inviteFourthRes.json() as { error: string };
-  assert.match(inviteFourthBody.error, /maximum of 3 servers/);
+  // Contract v0.3 §18.6: up to 30 servers; these fixture servers are paid,
+  // so a fourth server is now admitted.
+  assert.equal(inviteFourthRes.status, 200);
 
   const thirdMessage = await fetch(`${app.baseUrl}/api/messages`, {
     method: "POST",
@@ -3408,7 +3011,54 @@ test("joint channel create requires at least one invited person", async ({ app }
 });
 
 
+test("joint channel create rejects missing target invitees before writing joint rows", async ({ app }) => {
+  const db = getDb();
+  const hostOwner = await seedUser("joint-missing-invitee-host@slock.test", "joint-missing-invitee-host");
+  const targetOwner = await seedUser("joint-missing-invitee-target@slock.test", "joint-missing-invitee-target");
+  const hostServer = await createServer("Joint Missing Invitee Host", "joint-missing-invitee-host", hostOwner.id);
+  const targetServer = await createServer("Joint Missing Invitee Target", "joint-missing-invitee-target", targetOwner.id);
+  const hostToken = await tokenForHuman(hostOwner.email);
+
+  const createRes = await fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: headers(hostToken, hostServer.id),
+    body: JSON.stringify({
+      name: "missing-invitee-blocked",
+      visibility: "joint",
+      targetServerSlug: targetServer.slug,
+      invitedPeople: ["wrong-email@slock.test"],
+    }),
+  });
+  assert.equal(createRes.status, 400);
+  const body = await createRes.json() as { error: string; code?: string; targetServerSlug?: string; inviteeIndex?: number };
+  assert.equal(body.code, "joint_invitee_not_found");
+  assert.match(body.error, /Invited person not found/);
+  assert.equal(body.targetServerSlug, targetServer.slug);
+  assert.equal(body.inviteeIndex, 0);
+  assert.equal(
+    (await db.select({ id: channels.id }).from(channels).where(and(
+      eq(channels.serverId, hostServer.id),
+      eq(channels.name, "missing-invitee-blocked"),
+      isNull(channels.deletedAt),
+    ))).length,
+    0,
+    "validation failure must not create the host projection",
+  );
+  assert.equal(
+    (await db.select({ id: jointChannels.id }).from(jointChannels).where(eq(jointChannels.createdByServerId, hostServer.id))).length,
+    0,
+    "validation failure must not create joint authority rows",
+  );
+  assert.equal(
+    (await db.select({ id: jointChannelInvites.id }).from(jointChannelInvites).where(eq(jointChannelInvites.fromServerId, hostServer.id))).length,
+    0,
+    "validation failure must not create pending invite rows",
+  );
+});
+
+
 test("joint channel create only allows target server admins as invited people", async ({ app }) => {
+  const db = getDb();
   const hostOwner = await seedUser("joint-admin-only-host@slock.test", "joint-admin-only-host");
   const targetOwner = await seedUser("joint-admin-only-target-owner@slock.test", "joint-admin-only-target-owner");
   const targetMember = await seedUser("joint-admin-only-target-member@slock.test", "joint-admin-only-target-member");
@@ -3428,8 +3078,53 @@ test("joint channel create only allows target server admins as invited people", 
     }),
   });
   assert.equal(createRes.status, 400);
-  const body = await createRes.json() as { error: string };
+  const body = await createRes.json() as { error: string; code?: string; targetServerSlug?: string; inviteeIndex?: number };
+  assert.equal(body.code, "joint_invitee_not_admin");
   assert.match(body.error, /target server admin/);
+  assert.equal(body.targetServerSlug, targetServer.slug);
+  assert.equal(body.inviteeIndex, 0);
+  assert.equal(
+    (await db.select({ id: channels.id }).from(channels).where(and(
+      eq(channels.serverId, hostServer.id),
+      eq(channels.name, "member-invite-blocked"),
+      isNull(channels.deletedAt),
+    ))).length,
+    0,
+    "non-admin validation failure must not create the host projection",
+  );
+  assert.equal(
+    (await db.select({ id: jointChannels.id }).from(jointChannels).where(eq(jointChannels.createdByServerId, hostServer.id))).length,
+    0,
+    "non-admin validation failure must not create joint authority rows",
+  );
+  assert.equal(
+    (await db.select({ id: jointChannelInvites.id }).from(jointChannelInvites).where(eq(jointChannelInvites.fromServerId, hostServer.id))).length,
+    0,
+    "non-admin validation failure must not create pending invite rows",
+  );
+});
+
+
+test("joint channel create rejects invalid target servers with a stable code", async ({ app }) => {
+  const hostOwner = await seedUser("joint-invalid-target-host@slock.test", "joint-invalid-target-host");
+  const hostServer = await createServer("Joint Invalid Target Host", "joint-invalid-target-host", hostOwner.id);
+  const hostToken = await tokenForHuman(hostOwner.email);
+
+  const createRes = await fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: headers(hostToken, hostServer.id),
+    body: JSON.stringify({
+      name: "invalid-target-blocked",
+      visibility: "joint",
+      targetServerSlug: "missing-target-server",
+      invitedPeople: ["admin@slock.test"],
+    }),
+  });
+  assert.equal(createRes.status, 400);
+  const body = await createRes.json() as { error: string; code?: string; targetServerSlug?: string };
+  assert.equal(body.code, "joint_target_server_invalid");
+  assert.equal(body.error, "Target server not found");
+  assert.equal(body.targetServerSlug, "missing-target-server");
 });
 
 
@@ -3475,37 +3170,62 @@ test("joint channel create permanently allows one Free channel and Pro channels 
 });
 
 
-test("concurrent Joint Channel creates permanently allow one Free success and one localized limit code", async () => {
+test("concurrent invites from two participant servers cannot push a joint past two free servers", async () => {
   const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false, clock: { now: () => new Date("2040-01-01T00:00:00Z") } });
   try {
-    const hostOwner = await seedUser("joint-free-host@slock.test", "joint-free-host");
-    const targetOwner = await seedUser("joint-free-target@slock.test", "joint-free-target");
-    const hostServer = await createServer("Joint Free Host", "joint-free-host", hostOwner.id);
-    const targetServer = await createServer("Joint Free Target", "joint-free-target", targetOwner.id);
-    await getDb().update(serversTable).set({ plan: "free" }).where(eq(serversTable.id, hostServer.id));
+    const hostOwner = await seedUser("joint-race-host@slock.test", "joint-race-host");
+    const paidOwner = await seedUser("joint-race-paid@slock.test", "joint-race-paid");
+    const freeXOwner = await seedUser("joint-race-free-x@slock.test", "joint-race-free-x");
+    const freeYOwner = await seedUser("joint-race-free-y@slock.test", "joint-race-free-y");
+    const hostServer = await createServer("Joint Race Host", "joint-race-host", hostOwner.id);
+    const paidServer = await createServer("Joint Race Paid", "joint-race-paid", paidOwner.id);
+    const freeXServer = await createServer("Joint Race Free X", "joint-race-free-x", freeXOwner.id);
+    const freeYServer = await createServer("Joint Race Free Y", "joint-race-free-y", freeYOwner.id);
+    for (const serverId of [hostServer.id, freeXServer.id, freeYServer.id]) {
+      await getDb().update(serversTable).set({ plan: "free" }).where(eq(serversTable.id, serverId));
+    }
+    await getDb().update(serversTable).set({ plan: "founder" }).where(eq(serversTable.id, paidServer.id));
     const hostToken = await tokenForHuman(hostOwner.email);
-    const create = (name: string) => fetch(`${app.baseUrl}/api/channels`, {
+    const paidToken = await tokenForHuman(paidOwner.email);
+
+    const createRes = await fetch(`${app.baseUrl}/api/channels`, {
       method: "POST",
       headers: headers(hostToken, hostServer.id),
       body: JSON.stringify({
-        name,
+        name: "joint-race-room",
         visibility: "joint",
-        targetServerSlug: targetServer.slug,
-        invitedPeople: [targetOwner.email],
+        targetServerSlug: paidServer.slug,
+        invitedPeople: [paidOwner.email],
       }),
     });
+    assert.equal(createRes.status, 200);
+    const hostProjection = await createRes.json() as { id: string; jointInvite: { id: string } };
+    const acceptRes = await fetch(`${app.baseUrl}/api/channels/joint-invites/${hostProjection.jointInvite.id}/accept`, {
+      method: "POST",
+      headers: headers(paidToken, paidServer.id),
+    });
+    assert.equal(acceptRes.status, 200);
+    const paidProjection = await acceptRes.json() as { id: string };
 
+    // One free server (the host) so far. Each invite alone fits; together
+    // they would make three. The parent joint row lock serializes them even
+    // though they come from different participant servers (§18.7).
     const responses = await Promise.all([
-      create("free-joint-a"),
-      create("free-joint-b"),
+      fetch(`${app.baseUrl}/api/channels/${hostProjection.id}/joint-invites`, {
+        method: "POST",
+        headers: headers(hostToken, hostServer.id),
+        body: JSON.stringify({ targetServerSlug: freeXServer.slug, invitedPeople: [freeXOwner.email] }),
+      }),
+      fetch(`${app.baseUrl}/api/channels/${paidProjection.id}/joint-invites`, {
+        method: "POST",
+        headers: headers(paidToken, paidServer.id),
+        body: JSON.stringify({ targetServerSlug: freeYServer.slug, invitedPeople: [freeYOwner.email] }),
+      }),
     ]);
     assert.deepEqual(responses.map((response) => response.status).sort(), [200, 403]);
-    const second = responses.find((response) => response.status === 403);
-    assert.ok(second);
-    assert.deepEqual(await second.json(), {
-      error: "Creating a second Joint Channel requires the Pro plan.",
-      code: "joint_channel_free_limit_reached",
-    });
+    const rejected = responses.find((response) => response.status === 403);
+    assert.ok(rejected);
+    assert.equal((await rejected.json() as { code?: string }).code, "joint_free_server_limit");
   } finally {
     await app.close();
   }
@@ -3544,6 +3264,13 @@ test("accepting a Pro-hosted Joint Channel does not consume a Free target's perm
       headers: headers(targetToken, targetServer.id),
     });
     assert.equal(acceptRes.status, 200);
+    // Settings shows each server's plan chip from the same free/paid decision
+    // the free-server cap uses.
+    const accepted = await acceptRes.json() as { jointServers: Array<{ serverId: string; plan?: string }> };
+    assert.deepEqual(
+      Object.fromEntries(accepted.jointServers.map((server) => [server.serverId, server.plan])),
+      { [hostServer.id]: "paid", [targetServer.id]: "free" },
+    );
 
     const targetCreateRes = await fetch(`${app.baseUrl}/api/channels`, {
       method: "POST",
@@ -3617,4 +3344,135 @@ test("joint projection delivers the addChannelMembers capability to its members"
 
   assert.equal(jointRow!.channelCapabilities?.addChannelMembers, true);
   assert.equal(ordinaryRow!.channelCapabilities?.addChannelMembers, true);
+});
+
+test("joint channel create and invite accept existing server slugs shorter than the create-time minimum", async ({ app }) => {
+  const hostOwner = await seedUser("joint-short-slug-host@slock.test", "joint-short-slug-host");
+  const targetOwner = await seedUser("joint-short-slug-target@slock.test", "joint-short-slug-target");
+  const thirdOwner = await seedUser("joint-short-slug-third@slock.test", "joint-short-slug-third");
+  const hostServer = await createServer("Joint Short Slug Host", "botiverse", hostOwner.id);
+  // Historical servers may predate the 5-character creation floor.
+  const targetServer = await createServer("Joint Short Slug Target", "tiny", targetOwner.id);
+  const thirdServer = await createServer("Joint Short Slug Third", "ab", thirdOwner.id);
+  const hostToken = await tokenForHuman(hostOwner.email);
+  const targetToken = await tokenForHuman(targetOwner.email);
+
+  const createRes = await fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: headers(hostToken, hostServer.id),
+    body: JSON.stringify({
+      name: "short-slug-room",
+      visibility: "joint",
+      targetServerSlug: "tiny",
+      invitedPeople: [`@${targetOwner.name}`],
+    }),
+  });
+  assert.equal(createRes.status, 200);
+  const hostProjection = await createRes.json() as { id: string; jointInvite: { id: string; toServerId: string } };
+  assert.equal(hostProjection.jointInvite.toServerId, targetServer.id);
+
+  const acceptRes = await fetch(`${app.baseUrl}/api/channels/joint-invites/${hostProjection.jointInvite.id}/accept`, {
+    method: "POST",
+    headers: headers(targetToken, targetServer.id),
+  });
+  assert.equal(acceptRes.status, 200);
+
+  const inviteRes = await fetch(`${app.baseUrl}/api/channels/${hostProjection.id}/joint-invites`, {
+    method: "POST",
+    headers: headers(hostToken, hostServer.id),
+    body: JSON.stringify({
+      targetServerSlug: "ab",
+      invitedPeople: [`@${thirdOwner.name}`],
+    }),
+  });
+  assert.equal(inviteRes.status, 200);
+  const invited = await inviteRes.json() as { jointInvite: { toServerId: string } };
+  assert.equal(invited.jointInvite.toServerId, thirdServer.id);
+});
+
+
+test("every route that changes a joint channel notifies every active participant", async ({ app }) => {
+  // One list of routes that change shared joint state. Adding a route that
+  // skips emitJointProjectionUpdates / emitJointLimitStateChange makes its step
+  // fail here, instead of being found by hand on staging.
+  const owners = await Promise.all(["host", "second", "third", "fourth"].map((label) =>
+    seedUser(`joint-notify-${label}@slock.test`, `joint-notify-${label}`)));
+  const [hostOwner, secondOwner, thirdOwner, fourthOwner] = owners;
+  const [hostServer, secondServer, thirdServer, fourthServer] = await Promise.all([
+    createServer("Notify Host", "joint-notify-host", hostOwner.id),
+    createServer("Notify Second", "joint-notify-second", secondOwner.id),
+    createServer("Notify Third", "joint-notify-third", thirdOwner.id),
+    createServer("Notify Fourth", "joint-notify-fourth", fourthOwner.id),
+  ]);
+  // The fixture pins servers to founder (paid). Host and second are free; third
+  // and fourth stay paid so a later downgrade of third takes the joint over.
+  for (const server of [hostServer, secondServer]) {
+    await getDb().update(serversTable).set({ plan: "free" }).where(eq(serversTable.id, server.id));
+  }
+  const [hostToken, secondToken, thirdToken, fourthToken] = await Promise.all(owners.map((owner) => tokenForHuman(owner.email)));
+  const events = installFakeIo(app.app);
+
+  const post = async (path: string, token: string, serverId: string, body?: unknown, method = "POST") => {
+    const res = await fetch(`${app.baseUrl}/api/channels${path}`, {
+      method,
+      headers: headers(token, serverId),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    assert.equal(res.status, 200, `${method} ${path} should succeed`);
+    return res.json() as Promise<{ id: string; jointInvite?: { id: string } }>;
+  };
+  const notified = (projectionIds: string[], step: string) => {
+    const updated = new Set(events.splice(0)
+      .filter((event) => event.event === "channel:updated")
+      .map((event) => {
+        const payload = event.payload as { channel?: { id?: string }; channelId?: string };
+        return payload.channel?.id ?? payload.channelId;
+      }));
+    for (const id of projectionIds) assert.ok(updated.has(id), `${step}: projection ${id} was not sent channel:updated`);
+  };
+
+  const host = await post("", hostToken, hostServer.id, {
+    name: "notify-room", visibility: "joint", targetServerSlug: secondServer.slug, invitedPeople: [`@${secondOwner.name}`],
+  });
+  notified([host.id], "create");
+
+  const second = await post(`/joint-invites/${host.jointInvite!.id}/accept`, secondToken, secondServer.id);
+  notified([host.id, second.id], "accept");
+
+  const thirdInvite = await post(`/${host.id}/joint-invites`, hostToken, hostServer.id, {
+    targetServerSlug: thirdServer.slug, invitedPeople: [`@${thirdOwner.name}`],
+  });
+  notified([host.id, second.id], "invite");
+  const third = await post(`/joint-invites/${thirdInvite.jointInvite!.id}/accept`, thirdToken, thirdServer.id);
+  const all = [host.id, second.id, third.id];
+  notified(all, "accept third");
+
+  await post(`/${second.id}`, secondToken, secondServer.id, { name: "notify-room-renamed" }, "PATCH");
+  notified(all, "rename");
+  await post(`/${third.id}/archive`, thirdToken, thirdServer.id);
+  notified(all, "archive");
+  await post(`/${host.id}/unarchive`, hostToken, hostServer.id);
+  notified(all, "unarchive");
+
+  // Limit change from a background observer (billing sync here; the sweep uses
+  // the same listener). server.ts wires the listener the same way.
+  onJointLimitStateChanged((parentJointId) => emitJointLimitStateChange(app.app.get("io"), parentJointId));
+  try {
+    const fourthInvite = await post(`/${host.id}/joint-invites`, hostToken, hostServer.id, {
+      targetServerSlug: fourthServer.slug, invitedPeople: [`@${fourthOwner.name}`],
+    });
+    const fourth = await post(`/joint-invites/${fourthInvite.jointInvite!.id}/accept`, fourthToken, fourthServer.id);
+    events.splice(0);
+    await getDb().update(serversTable).set({ plan: "free" }).where(eq(serversTable.id, thirdServer.id));
+    await reconcileJointsForServer(thirdServer.id);
+    notified([...all, fourth.id], "going over the limit");
+
+    // Disconnecting the extra free server brings the joint back within the
+    // limit; the servers that stay must hear about it (peng,
+    // #proj-joint-channel:a17703a2 cf2427a8).
+    await post(`/${third.id}/disconnect`, thirdToken, thirdServer.id);
+    notified([host.id, second.id, fourth.id], "disconnect");
+  } finally {
+    onJointLimitStateChanged(null);
+  }
 });

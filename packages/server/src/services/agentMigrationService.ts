@@ -1,17 +1,21 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { and, asc, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import {
   AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
   AGENT_MIGRATION_COMMIT_MARKER_PATH,
   AGENT_MIGRATION_CONTROL_SCHEMA_VERSION,
+  AGENT_MIGRATION_DEFAULT_CHUNK_BYTES,
   AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES,
   AGENT_MIGRATION_MAX_CHUNKS,
   AGENT_MIGRATION_MAX_CONTROL_MANIFEST_BYTES,
   AGENT_MIGRATION_MIN_CHUNK_BYTES,
-  AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
+  AGENT_MIGRATION_CAPABILITY,
   AGENT_MIGRATION_RESUMABLE_PROTOCOL,
+  AGENT_MIGRATION_SOURCE_BUILD_PHASES,
   MAX_AGENT_MIGRATION_TRANSPORT_BYTES,
+  agentMigrationSourceBuildProgressReportSchema,
   agentMigrationTransferSummarySchema,
   currentDate,
   type AgentMigrationControlManifest,
@@ -21,7 +25,9 @@ import {
   type AgentMigrationUpdatedPayload,
   type ServerToMachineMessage,
 } from "@botiverse/raft-shared";
-import { getDb, isDatabaseInitialized, type DatabaseExecutor } from "../db/index.js";
+import { getDb, isDatabaseInitialized, type DatabaseExecutor } from "../db/index";
+import { FencedAuthorizationDeniedError, lockActorMembershipRow } from "../lib/actorMembershipFence";
+import { userCanActOnAgentResource } from "../lib/actorPermissions";
 import {
   agentMigrationChunkReceipts,
   agentMigrationReceiptChannels,
@@ -31,15 +37,16 @@ import {
   channelAgents,
   channels,
   machines,
-} from "../db/schema.js";
-import { createAgentLifecycleEvent, type AgentLifecycleEvent, type AgentLifecycleEventType, type AgentLifecycleReason } from "./agentLifecycleEvents.js";
+} from "../db/schema";
+import { createAgentLifecycleEvent, type AgentLifecycleEvent } from "./agentLifecycleEvents";
 import {
   enqueueAgentMigrationCanceledReceipt,
   enqueueAgentMigrationCompletedReceipt,
+  enqueueAgentMigrationAbortedReceipt,
   enqueueAgentMigrationFailedReceipt,
   type AgentMigrationReceiptEnqueueHooks,
-} from "./agentMigrationReceiptService.js";
-import { getStorage, type StorageBackend } from "./storageService.js";
+} from "./agentMigrationReceiptService";
+import { getStorage, type StorageBackend } from "./storageService";
 
 export type AgentMigrationRow = typeof agentMigrations.$inferSelect;
 export type AgentMigrationState = AgentMigrationRow["state"];
@@ -70,21 +77,18 @@ export interface AgentMigrationCancellationRequestResult {
   disposition: AgentMigrationCancelDisposition;
   dispatch: "required" | "none";
 }
-export type AgentMigrationCancelCleanupExecutor = "server" | "healthy_steward";
-export type AgentMigrationAutoStartFailureStage = "orchestrator" | "start_agent" | "legacy";
+export type AgentMigrationAutoStartFailureStage = "orchestrator" | "start_agent";
 export type AgentMigrationAutoStartFailureCode =
   | "orchestrator_unavailable"
   | "start_not_dispatched"
-  | "start_threw"
-  | "legacy_auto_start_failed";
+  | "start_threw";
 export interface AgentMigrationCancellationCleanupClaim {
   migration: AgentMigrationRow;
   dispatch: "required" | "none";
   leaseId: string | null;
   deliveries: Array<{ machineId: string; message: AgentMigrationCancelMessage }>;
 }
-export type AgentMigrationAutoStartRemediationExecutor = "server" | "healthy_steward";
-export type AgentMigrationAutoStartRemediationCandidateVariant = "typed_failed" | "orphaned_dispatch";
+export type AgentMigrationAutoStartRemediationCandidateVariant = "typed_failed" | "orphaned_dispatch" | "orphaned_arrival";
 export interface AgentMigrationAutoStartRemediationClaim {
   migration: AgentMigrationRow;
   action: "dispatch" | "terminal";
@@ -96,10 +100,17 @@ export const AGENT_MIGRATION_CANCEL_ATTENTION_WINDOW_MS = 2 * 60 * 1000;
 export const AGENT_MIGRATION_CANCEL_CLEANUP_LEASE_MS = 30_000;
 export const AGENT_MIGRATION_AUTO_START_MAX_RETRY_ATTEMPTS = 3;
 export const AGENT_MIGRATION_AUTO_START_REMEDIATION_WINDOW_MS = 2 * 60 * 1000;
+// `starting` has no deadline of its own. If the `/arrived` request dies after
+// writing `starting` but before it records an auto-start outcome, nothing else
+// would ever pick the row up and the agent stays wake-gated. After this grace
+// (well past the daemon's 30s `/arrived` reclaim) remediation adopts the row.
+export const AGENT_MIGRATION_ORPHANED_ARRIVAL_GRACE_MS = 5 * 60 * 1000;
 export const AGENT_MIGRATION_AUTO_START_REMEDIATION_LEASE_MS = 30_000;
 export const DEFAULT_AGENT_MIGRATION_TRANSPORT_MAX_BYTES = MAX_AGENT_MIGRATION_TRANSPORT_BYTES;
 export const AGENT_MIGRATION_AUTO_START_LEASE_MS = 30_000;
-const DEFAULT_AGENT_MIGRATION_TRANSPORT_LEASE_MS = 60 * 60 * 1000;
+// The lease (tokens and presigned URLs) must outlive the longest migration;
+// the deadlines, not the lease, stop a stalled one.
+const DEFAULT_AGENT_MIGRATION_TRANSPORT_LEASE_MS = 6 * 60 * 60 * 1000;
 const AGENT_MIGRATION_CHUNK_URL_BATCH_LIMIT = 64;
 
 export interface AgentMigrationDeadlines {
@@ -108,10 +119,21 @@ export interface AgentMigrationDeadlines {
   arrivalDeadlineAt: Date;
 }
 
+/**
+ * Task #93 line C: the acting human a migration write re-authorizes under row locks inside its own transaction. Only the
+ * human routes pass it; the Computer route and the remediation worker have no human actor and stay unfenced.
+ */
+export interface AgentMigrationActorFence {
+  serverId: string;
+  userId: string;
+  capability: "migrateAgents" | "controlAgentRuntime";
+}
+
 export interface BeginAgentMigrationInput {
   agentId: string;
   targetMachineId: string;
   initiatedByUserId?: string | null;
+  actorFence?: AgentMigrationActorFence;
   now?: Date;
   prepDeadlineMs?: number;
   transferDeadlineMs?: number;
@@ -119,9 +141,7 @@ export interface BeginAgentMigrationInput {
 }
 
 export interface BeginAgentMigrationProvisioningInput extends BeginAgentMigrationInput {
-  transportProvider?: "object_store" | "tunnel";
-  sourceTransferUrl: string;
-  targetTransferUrl: string;
+  transportProvider?: "object_store";
   transportSessionId?: string;
   transportLeaseMs?: number;
   transportMaxBytes?: number;
@@ -144,18 +164,15 @@ export interface AgentMigrationProvisioningResult {
 export interface AgentMigrationObjectStoreTransferProvision {
   provider: "object_store";
   sessionId: string;
-  sourceTransferUrl: string;
-  targetTransferUrl: string;
   leaseMs: number;
   maxBytes: number;
-  storageKey: string;
 }
 
 export interface AgentMigrationTransferLeaseState {
-  provider?: "object_store" | "tunnel" | null;
+  provider?: AgentMigrationTransportLeaseMessage["provider"] | null;
   role?: "source" | "target" | null;
-  transferKind?: "upload" | "download" | "exposed_endpoint" | "peer_endpoint" | null;
-  leaseSource?: "server" | "env" | null;
+  transferKind?: AgentMigrationTransportLeaseMessage["transferKind"] | null;
+  leaseSource?: AgentMigrationTransportLeaseMessage["leaseSource"] | null;
   migrationId?: string | null;
   migrationGeneration?: string | null;
   sessionId?: string | null;
@@ -184,23 +201,16 @@ export type AgentMigrationTransferLeaseReadyVerdict =
     };
 
 export type ZenMigratingDeliveryDecision =
-  | { action: "deliver"; reason: "no-active-migration" | "migration-protocol" | "owner-pierce" | "target-starting" }
+  | { action: "deliver"; reason: "no-active-migration" | "target-starting" }
   | { action: "queue"; reason: "zen-migrating" }
   | { action: "deadline-expired"; reason: "prep-deadline" | "transfer-deadline" | "arrival-deadline" };
 
-export type AgentMigrationLifecycleEventType = Extract<
-  AgentLifecycleEventType,
-  "migration_started" | "migration_completed" | "migration_aborted"
->;
-
 export interface AgentMigrationGateStatus {
   migration: AgentMigrationRow | null;
-  expiredLifecycleEvent?: AgentLifecycleEvent;
 }
 
 export interface AgentMigrationTargetImportView {
   migrationId: string;
-  grantKey: string;
   migrationRef: string;
   migrationGeneration: string;
   state: AgentMigrationState;
@@ -236,9 +246,19 @@ export interface AgentMigrationChunkTransferPlan {
 }
 
 const DEFAULT_PREP_DEADLINE_MS = 10 * 60 * 1000;
+// Between the source quiesce and the control registration the source daemon
+// builds the whole bundle locally and reports nothing. Large workspaces or slow
+// disks need more than one idle window for that (prod: 4/4 attempts from one
+// machine aborted at prep-deadline before registering control).
+const SOURCE_BUNDLE_BUILD_WINDOW_MS = 30 * 60 * 1000;
 const DEFAULT_TRANSFER_DEADLINE_MS = 60 * 60 * 1000;
+// Progress slides the transfer deadline to at least this far ahead.
+const TRANSFER_IDLE_WINDOW_MS = 30 * 60 * 1000;
+/** However steadily it progresses, no migration runs past this from creation. */
+export const AGENT_MIGRATION_MAX_DURATION_MS = 6 * 60 * 60 * 1000;
+// States whose deadlines progress can slide; arrival and later keep theirs.
+const PROGRESS_DEADLINE_STATES = ["provisioning", "prep", "ready", "in_transit"] as const;
 const DEFAULT_ARRIVAL_DEADLINE_MS = 10 * 60 * 1000;
-const AGENT_MIGRATION_OBJECT_STORE_CONTENT_TYPE = AGENT_MIGRATION_BUNDLE_CONTENT_TYPE;
 
 function addMs(now: Date, ms: number): Date {
   return new Date(now.getTime() + ms);
@@ -264,14 +284,6 @@ function createMigrationCancelGeneration(): string {
   return `migration_cancel_${randomBytes(24).toString("base64url")}`;
 }
 
-function normalizeTransferUrl(url: string): string {
-  const parsed = new URL(url);
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new Error("MIGRATION_TRANSPORT_URL_INVALID");
-  }
-  return parsed.toString();
-}
-
 function parseLeaseExpiry(value: string | Date | null | undefined): number | null {
   if (value instanceof Date) {
     const time = value.getTime();
@@ -282,16 +294,8 @@ function parseLeaseExpiry(value: string | Date | null | undefined): number | nul
   return Number.isFinite(time) ? time : null;
 }
 
-function transferKindForRole(
-  provider: AgentMigrationTransportLeaseMessage["provider"],
-  role: "source" | "target",
-): AgentMigrationTransportLeaseMessage["transferKind"] {
-  if (provider === "object_store") return role === "source" ? "upload" : "download";
-  return role === "source" ? "exposed_endpoint" : "peer_endpoint";
-}
-
-function objectStoreKey(sessionId: string): string {
-  return `agent-migrations/${sessionId}/bundle`;
+function transferKindForRole(role: "source" | "target"): AgentMigrationTransportLeaseMessage["transferKind"] {
+  return role === "source" ? "upload" : "download";
 }
 
 function storagePresignExpiresInSeconds(leaseMs: number): number {
@@ -312,18 +316,6 @@ function isTransferActiveState(
   return (TRANSFER_ACTIVE_AGENT_MIGRATION_STATES as readonly string[]).includes(state);
 }
 
-function migrationLifecycleReason(eventType: AgentMigrationLifecycleEventType): AgentLifecycleReason {
-  if (eventType === "migration_started") return "migration_prepare";
-  if (eventType === "migration_completed") return "migration_arrived";
-  return "migration_abort";
-}
-
-function migrationLifecycleMachineId(row: AgentMigrationRow, eventType: AgentMigrationLifecycleEventType): string {
-  if (eventType === "migration_completed") return row.targetMachineId;
-  if (eventType === "migration_aborted" && row.flippedAt) return row.targetMachineId;
-  return row.sourceMachineId;
-}
-
 export function agentMigrationGeneration(row: Pick<AgentMigrationRow, "id" | "revision">): string {
   return `agent_migration:${row.id}:${row.revision}`;
 }
@@ -341,31 +333,14 @@ export async function provisionAgentMigrationObjectStoreTransfer(input: {
   const sessionId = input.sessionId ?? randomUUID();
   const leaseMs = input.leaseMs ?? DEFAULT_AGENT_MIGRATION_TRANSPORT_LEASE_MS;
   const maxBytes = input.maxBytes ?? DEFAULT_AGENT_MIGRATION_TRANSPORT_MAX_BYTES;
-  const storageKey = objectStoreKey(sessionId);
-  const expiresIn = storagePresignExpiresInSeconds(leaseMs);
-  const [sourceTransferUrl, targetTransferUrl] = await Promise.all([
-    storage.getPresignedPutUrl(storageKey, { expiresIn }),
-    storage.getPresignedUrl(storageKey, {
-      expiresIn,
-      responseContentDisposition: `attachment; filename="agent-migration-${sessionId}.bundle"`,
-      responseContentType: AGENT_MIGRATION_OBJECT_STORE_CONTENT_TYPE,
-    }),
-  ]);
-  return {
-    provider: "object_store",
-    sessionId,
-    sourceTransferUrl,
-    targetTransferUrl,
-    leaseMs,
-    maxBytes,
-    storageKey,
-  };
+  // Chunks are presigned per transfer; this only checks the backend can presign.
+  return { provider: "object_store", sessionId, leaseMs, maxBytes };
 }
 
 export function evaluateAgentMigrationTransferLeaseReady(input: {
   migration: Pick<
     AgentMigrationRow,
-    "id" | "revision" | "transportProvider" | "transportSessionId" | "transportLeaseSource" | "transportMaxBytes"
+    "id" | "revision" | "transportSessionId" | "transportLeaseSource" | "transportMaxBytes"
   >;
   lease: AgentMigrationTransferLeaseState | null | undefined;
   role: "source" | "target";
@@ -373,14 +348,13 @@ export function evaluateAgentMigrationTransferLeaseReady(input: {
 }): AgentMigrationTransferLeaseReadyVerdict {
   const { migration, lease, role } = input;
   if (!lease) return { ready: false, code: "MIGRATION_TRANSPORT_NOT_PROVISIONED", reason: "missing" };
-  const provider = migration.transportProvider === "tunnel" ? "tunnel" : "object_store";
-  if (lease.provider !== provider) {
+  if (lease.provider !== "object_store") {
     return { ready: false, code: "MIGRATION_TRANSPORT_NOT_PROVISIONED", reason: "provider_mismatch" };
   }
   if (lease.role !== role) {
     return { ready: false, code: "MIGRATION_TRANSPORT_NOT_PROVISIONED", reason: "role_mismatch" };
   }
-  if (lease.transferKind !== transferKindForRole(provider, role)) {
+  if (lease.transferKind !== transferKindForRole(role)) {
     return { ready: false, code: "MIGRATION_TRANSPORT_NOT_PROVISIONED", reason: "transfer_kind_mismatch" };
   }
   if (lease.leaseSource !== "server" || migration.transportLeaseSource !== "server") {
@@ -466,8 +440,80 @@ export async function recordAgentMigrationSourceQuiesced(input: {
       .where(and(eq(agentMigrations.id, row.id), eq(agentMigrations.revision, row.revision)))
       .returning();
     if (!updated) throw new Error("MIGRATION_CONCURRENT_UPDATE");
-    return updated;
+    return await extendDeadlinesOnProgress(tx, updated, now, SOURCE_BUNDLE_BUILD_WINDOW_MS);
   });
+}
+
+/**
+ * Bundle-build progress from the source between quiesce and control
+ * registration. Only a report that moved forward (a later phase, or more files
+ * or bytes in the same phase) is stored and slides the prep deadline by one
+ * idle window; a repeated or stale report is accepted but changes nothing, so a
+ * daemon stuck in a loop that keeps reporting still times out. Outside that
+ * window (not yet quiesced, already registered, or terminal) reports are
+ * ignored. Does not bump `revision`.
+ */
+export async function recordAgentMigrationSourceBuildProgress(input: {
+  migrationId: string;
+  serverId: string;
+  sourceMachineId: string;
+  transportToken: string;
+  report: unknown;
+  now?: Date;
+}): Promise<{ migration: AgentMigrationRow; advanced: boolean }> {
+  const parsed = agentMigrationSourceBuildProgressReportSchema.safeParse(input.report);
+  if (!parsed.success) throw new Error("MIGRATION_SOURCE_PROGRESS_INVALID");
+  const report = parsed.data;
+  const db = getDb();
+  const now = input.now ?? currentDate();
+  return await db.transaction(async (tx) => {
+    const [row] = await tx.select().from(agentMigrations)
+      .where(eq(agentMigrations.id, input.migrationId))
+      .limit(1)
+      .for("update");
+    assertResumableMigrationActor(row, {
+      serverId: input.serverId,
+      machineId: input.sourceMachineId,
+      role: "source",
+      transportToken: input.transportToken,
+    });
+    if (report.migrationGeneration !== row.transportGeneration) {
+      throw new Error("MIGRATION_GENERATION_STALE");
+    }
+    if (
+      (row.state !== "provisioning" && row.state !== "prep")
+      || !row.sourceQuiescedAt
+      || row.transportControlRegisteredAt
+    ) {
+      return { migration: row, advanced: false };
+    }
+    if (!sourceBuildProgressAdvanced(row.sourceBuildProgress, report)) {
+      return { migration: row, advanced: false };
+    }
+    const [updated] = await tx.update(agentMigrations)
+      .set({
+        sourceBuildProgress: {
+          phase: report.phase,
+          files: report.files,
+          bytes: report.bytes,
+          reportedAt: now.toISOString(),
+        },
+      })
+      .where(eq(agentMigrations.id, row.id))
+      .returning();
+    return { migration: await extendDeadlinesOnProgress(tx, updated, now), advanced: true };
+  });
+}
+
+function sourceBuildProgressAdvanced(
+  previous: AgentMigrationRow["sourceBuildProgress"],
+  report: { phase: (typeof AGENT_MIGRATION_SOURCE_BUILD_PHASES)[number]; files: number; bytes: number },
+): boolean {
+  if (!previous) return true;
+  const previousPhase = AGENT_MIGRATION_SOURCE_BUILD_PHASES.indexOf(previous.phase);
+  const reportPhase = AGENT_MIGRATION_SOURCE_BUILD_PHASES.indexOf(report.phase);
+  if (reportPhase !== previousPhase) return reportPhase > previousPhase;
+  return report.files > previous.files || report.bytes > previous.bytes;
 }
 
 export async function registerAgentMigrationControlManifest(input: {
@@ -524,6 +570,8 @@ export async function registerAgentMigrationControlManifest(input: {
           updatedAt: now,
         })))
         .onConflictDoNothing();
+      // Bundling the whole workspace is the slowest source step; count it as progress.
+      await extendDeadlinesOnProgress(tx, updated, now);
     }
     const receipts = await tx.select().from(agentMigrationChunkReceipts)
       .where(and(
@@ -641,6 +689,159 @@ export async function planAgentMigrationChunkTransfers(input: {
   };
 }
 
+/**
+ * Streamed bundles: the source uploads each chunk as soon as it is packed,
+ * before the control manifest (which needs the whole bundle) exists. This
+ * records the chunk's size and digest as its receipt row and returns an upload
+ * URL; the source then reports the receipt and registers the control as usual,
+ * which must match these rows exactly. A chunk already recorded with the same
+ * digest is reused; a different digest for the same index is refused.
+ */
+export async function prepareAgentMigrationStreamedChunk(input: {
+  migrationId: string;
+  serverId: string;
+  sourceMachineId: string;
+  transportToken: string;
+  migrationGeneration: string;
+  leaseId: string;
+  chunkIndex: number;
+  sizeBytes: number;
+  sha256: string;
+  now?: Date;
+  storage?: StorageBackend | null;
+}): Promise<{ uploaded: boolean; url: string | null }> {
+  if (
+    !Number.isSafeInteger(input.chunkIndex)
+    || input.chunkIndex < 0
+    || input.chunkIndex >= AGENT_MIGRATION_MAX_CHUNKS
+    || !Number.isSafeInteger(input.sizeBytes)
+    || input.sizeBytes <= 0
+    // Streaming sources cut fixed default-size chunks; the chunk-count cap bounds the total.
+    || input.sizeBytes > AGENT_MIGRATION_DEFAULT_CHUNK_BYTES
+    || !/^[0-9a-f]{64}$/.test(input.sha256)
+  ) {
+    throw new Error("MIGRATION_STREAMED_CHUNK_INVALID");
+  }
+  const storage = input.storage ?? getStorage();
+  if (!storage?.getPresignedPutUrl) {
+    throw new Error("MIGRATION_TRANSPORT_PROVISION_FAILED");
+  }
+  const db = getDb();
+  const now = input.now ?? currentDate();
+  const { row, receipt } = await db.transaction(async (tx) => {
+    const [row] = await tx.select().from(agentMigrations)
+      .where(eq(agentMigrations.id, input.migrationId))
+      .limit(1)
+      .for("update");
+    assertResumableMigrationActor(row, {
+      serverId: input.serverId,
+      machineId: input.sourceMachineId,
+      role: "source",
+      transportToken: input.transportToken,
+    });
+    if (
+      input.migrationGeneration !== row.transportGeneration
+      || input.leaseId !== row.transportLeaseId
+    ) {
+      throw new Error("MIGRATION_GENERATION_STALE");
+    }
+    if (!row.transportSessionId) throw new Error("MIGRATION_RESUMABLE_PROTOCOL_REQUIRED");
+    if (!row.sourceQuiesceReceipt || !row.sourceQuiescedAt) {
+      throw new Error("MIGRATION_SOURCE_NOT_QUIESCED");
+    }
+    // Once the control is registered its chunk set is fixed.
+    if (!row.transportControlSha256) {
+      await tx.insert(agentMigrationChunkReceipts)
+        .values({
+          migrationId: row.id,
+          transportGeneration: input.migrationGeneration,
+          leaseId: input.leaseId,
+          chunkIndex: input.chunkIndex,
+          sizeBytes: input.sizeBytes,
+          sha256: input.sha256,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoNothing();
+    }
+    const [receipt] = await tx.select().from(agentMigrationChunkReceipts)
+      .where(and(
+        eq(agentMigrationChunkReceipts.migrationId, row.id),
+        eq(agentMigrationChunkReceipts.transportGeneration, input.migrationGeneration),
+        eq(agentMigrationChunkReceipts.chunkIndex, input.chunkIndex),
+      ))
+      .limit(1);
+    if (
+      !receipt
+      || receipt.leaseId !== input.leaseId
+      || receipt.sizeBytes !== input.sizeBytes
+      || receipt.sha256 !== input.sha256
+    ) {
+      throw new Error("MIGRATION_CHUNK_RECEIPT_MISMATCH");
+    }
+    return { row, receipt };
+  });
+  if (receipt.sourceReceiptAt) return { uploaded: true, url: null };
+  const expiresIn = storagePresignExpiresInSeconds(
+    Math.max(1_000, row.transportExpiresAt!.getTime() - currentDate().getTime()),
+  );
+  return {
+    uploaded: false,
+    url: await storage.getPresignedPutUrl(
+      resumableChunkStorageKey(row.transportSessionId!, row.transportGeneration!, input.chunkIndex),
+      { expiresIn, contentType: "application/octet-stream" },
+    ),
+  };
+}
+
+/**
+ * The prep window used to be a fixed 10 minutes from creation, covering stop,
+ * bundle, and the whole chunked upload; large workspaces or slow links hit it
+ * while still making progress (prod: most September failures). Each unit of
+ * source progress (control registered, a new chunk receipt) now slides the
+ * window forward by the default prep idle time, never past the transfer
+ * deadline. The source quiesce slides it by the longer bundle-build window.
+ *
+ * The transfer deadline (a fixed hour from creation) slides the same way on
+ * source or target progress, by one transfer idle window, with the arrival
+ * deadline keeping its distance; neither goes past
+ * AGENT_MIGRATION_MAX_DURATION_MS after creation, so a migration that keeps
+ * creeping forward still cannot keep the agent stopped for a day. A stalled
+ * migration still aborts after one idle window. Does not bump `revision`: it
+ * changes no state and must not race the step writers.
+ */
+async function extendDeadlinesOnProgress(
+  tx: DatabaseExecutor,
+  row: AgentMigrationRow,
+  now: Date,
+  prepWindowMs: number = DEFAULT_PREP_DEADLINE_MS,
+): Promise<AgentMigrationRow> {
+  if (!(PROGRESS_DEADLINE_STATES as readonly string[]).includes(row.state)) return row;
+  // Provisioning starts in the same write that creates the migration.
+  const startedAt = row.transportProvisioningStartedAt ?? row.createdAt;
+  const hardCapMs = startedAt.getTime() + AGENT_MIGRATION_MAX_DURATION_MS;
+  const transferMs = Math.max(
+    row.transferDeadlineAt.getTime(),
+    Math.min(now.getTime() + TRANSFER_IDLE_WINDOW_MS, hardCapMs),
+  );
+  const prepMs = row.state === "provisioning" || row.state === "prep"
+    ? Math.max(row.prepDeadlineAt.getTime(), Math.min(now.getTime() + prepWindowMs, transferMs))
+    : row.prepDeadlineAt.getTime();
+  if (transferMs === row.transferDeadlineAt.getTime() && prepMs === row.prepDeadlineAt.getTime()) return row;
+  // GREATEST: a concurrent writer holding older values can only move a deadline later.
+  const later = (column: AnyPgColumn, ms: number) =>
+    sql`GREATEST(${column}, ${new Date(ms).toISOString()}::timestamptz)`;
+  const [extended] = await tx.update(agentMigrations)
+    .set({
+      prepDeadlineAt: later(agentMigrations.prepDeadlineAt, prepMs),
+      transferDeadlineAt: later(agentMigrations.transferDeadlineAt, transferMs),
+      arrivalDeadlineAt: later(agentMigrations.arrivalDeadlineAt, transferMs + arrivalWindowMs(row)),
+    })
+    .where(and(eq(agentMigrations.id, row.id), eq(agentMigrations.state, row.state)))
+    .returning();
+  return extended ?? row;
+}
+
 export async function recordAgentMigrationChunkReceipt(input: {
   migrationId: string;
   serverId: string;
@@ -698,6 +899,7 @@ export async function recordAgentMigrationChunkReceipt(input: {
         eq(agentMigrationChunkReceipts.transportGeneration, input.migrationGeneration),
         eq(agentMigrationChunkReceipts.chunkIndex, input.chunkIndex),
       ));
+    await extendDeadlinesOnProgress(tx, row, now);
     return { outcome: "recorded" };
   });
 }
@@ -843,9 +1045,9 @@ function validateControlManifestForMigration(
     || control.bundle.chunkSizeBytes < AGENT_MIGRATION_MIN_CHUNK_BYTES
     || control.bundle.chunks.length === 0
     || control.bundle.chunks.length > AGENT_MIGRATION_MAX_CHUNKS
-    || control.capability.required.length !== AGENT_MIGRATION_RESUMABLE_CAPABILITIES.length
-    || !AGENT_MIGRATION_RESUMABLE_CAPABILITIES.every((capability) =>
-      control.capability.required.includes(capability))
+    || !Array.isArray(control.capability?.required)
+    || control.capability.required.length !== 1
+    || control.capability.required[0] !== AGENT_MIGRATION_CAPABILITY
     || control.archive.format !== "tar+gzip"
     || control.archive.allowedEntryTypes.length !== 2
     || control.archive.allowedEntryTypes[0] !== "file"
@@ -954,7 +1156,6 @@ function sortJsonValue(value: unknown): unknown {
 function targetImportView(row: AgentMigrationRow): AgentMigrationTargetImportView {
   return {
     migrationId: row.id,
-    grantKey: row.grantKey,
     migrationRef: row.supportRef,
     migrationGeneration: agentMigrationGeneration(row),
     state: row.state,
@@ -1090,18 +1291,18 @@ async function finalizeRuntimeProfileProjection(
 
 export function createAgentMigrationLifecycleEvent(input: {
   migration: AgentMigrationRow;
-  eventType: AgentMigrationLifecycleEventType;
   occurredAt?: Date | string;
 }): AgentLifecycleEvent {
-  const { migration, eventType } = input;
+  const { migration } = input;
+  const eventType = "migration_aborted";
   return createAgentLifecycleEvent({
     serverId: migration.serverId,
     agentId: migration.agentId,
-    machineId: migrationLifecycleMachineId(migration, eventType),
+    machineId: migration.flippedAt ? migration.targetMachineId : migration.sourceMachineId,
     eventType,
     actor: "server",
     source: "server",
-    reason: migrationLifecycleReason(eventType),
+    reason: "migration_abort",
     correlationId: `agent_migration:${migration.supportRef}`,
     idempotencyKey: `agent_migration:${migration.supportRef}:${eventType}:${migration.revision}`,
     occurredAt: input.occurredAt,
@@ -1129,8 +1330,6 @@ function deadlineForState(row: Pick<AgentMigrationRow, "state" | "prepDeadlineAt
 export function planZenMigratingDelivery(input: {
   migration: Pick<AgentMigrationRow, "state" | "prepDeadlineAt" | "transferDeadlineAt" | "arrivalDeadlineAt"> | null;
   now?: Date;
-  migrationProtocol?: boolean;
-  ownerPierce?: boolean;
 }): ZenMigratingDeliveryDecision {
   if (!input.migration || !isActiveState(input.migration.state)) {
     return { action: "deliver", reason: "no-active-migration" };
@@ -1143,8 +1342,6 @@ export function planZenMigratingDelivery(input: {
   if (now.getTime() > deadline.getTime()) {
     return { action: "deadline-expired", reason };
   }
-  if (input.migrationProtocol) return { action: "deliver", reason: "migration-protocol" };
-  if (input.ownerPierce) return { action: "deliver", reason: "owner-pierce" };
   return { action: "queue", reason: "zen-migrating" };
 }
 
@@ -1154,15 +1351,47 @@ async function abortElapsedDeadlineMigration(
   now: Date,
   executor: DatabaseExecutor,
 ): Promise<AgentMigrationRow | null> {
+  return await executor.transaction(async (tx) => {
+    const aborted = await abortElapsedDeadlineMigrationRow(migration, deadlineReason, now, tx);
+    if (!aborted) return null;
+    // Tell the agent, best-effort: a missing receipt surface (legacy rows) must
+    // never keep an expired migration active. The savepoint keeps a receipt
+    // failure from rolling back the abort itself.
+    try {
+      await tx.transaction(async (savepoint) => {
+        await enqueueAgentMigrationAbortedReceipt(savepoint, aborted, now);
+      });
+    } catch (error) {
+      console.warn(`[AgentMigration] Aborted receipt skipped for ${aborted.id}:`, error instanceof Error ? error.message : error);
+    }
+    return aborted;
+  });
+}
+
+/** The columns the deadline sweep writes when it aborts `migration`; reads project the same values without writing. */
+function elapsedDeadlineAbortValues(
+  migration: Pick<AgentMigrationRow, "revision">,
+  deadlineReason: Extract<ZenMigratingDeliveryDecision, { action: "deadline-expired" }>["reason"],
+  now: Date,
+) {
+  return {
+    state: "aborted",
+    abortReason: deadlineReason,
+    abortedAt: now,
+    transportTeardownAt: now,
+    revision: migration.revision + 1,
+    updatedAt: now,
+  } as const satisfies Partial<AgentMigrationRow>;
+}
+
+async function abortElapsedDeadlineMigrationRow(
+  migration: AgentMigrationRow,
+  deadlineReason: Extract<ZenMigratingDeliveryDecision, { action: "deadline-expired" }>["reason"],
+  now: Date,
+  executor: DatabaseExecutor,
+): Promise<AgentMigrationRow | null> {
   const [updated] = await executor.update(agentMigrations)
-    .set({
-      state: "aborted",
-      abortReason: deadlineReason,
-      abortedAt: now,
-      transportTeardownAt: now,
-      revision: migration.revision + 1,
-      updatedAt: now,
-    })
+    .set(elapsedDeadlineAbortValues(migration, deadlineReason, now))
     .where(and(
       eq(agentMigrations.id, migration.id),
       eq(agentMigrations.revision, migration.revision),
@@ -1172,13 +1401,56 @@ async function abortElapsedDeadlineMigration(
   return updated ?? null;
 }
 
-export async function getAgentMigrationGateStatus(
+/**
+ * The only writer of deadline aborts. Reads (the delivery gate, the status API)
+ * never write: they treat an expired row as not gating and report it as aborted
+ * until this sweep persists the abort. The remediation worker calls this every
+ * tick to abort one expired pre-start row. `starting` is excluded: it has no
+ * deadline and is handled by auto-start remediation (see
+ * AGENT_MIGRATION_ORPHANED_ARRIVAL_GRACE_MS).
+ */
+export async function sweepElapsedAgentMigrationDeadline(input: {
+  now?: Date;
+} = {}): Promise<AgentMigrationRow | null> {
+  const db = getDb();
+  const now = input.now ?? currentDate();
+  return await db.transaction(async (tx) => {
+    const [candidate] = await tx.select()
+      .from(agentMigrations)
+      .where(or(
+        and(
+          inArray(agentMigrations.state, ["provisioning", "prep"]),
+          lt(agentMigrations.prepDeadlineAt, now),
+        ),
+        and(
+          inArray(agentMigrations.state, ["ready", "in_transit"]),
+          lt(agentMigrations.transferDeadlineAt, now),
+        ),
+        and(
+          eq(agentMigrations.state, "arriving"),
+          lt(agentMigrations.arrivalDeadlineAt, now),
+        ),
+      ))
+      .orderBy(asc(agentMigrations.updatedAt))
+      .for("update", { skipLocked: true })
+      .limit(1);
+    if (!candidate) return null;
+    const decision = planZenMigratingDelivery({ migration: candidate, now });
+    if (decision.action !== "deadline-expired") return null;
+    return await abortElapsedDeadlineMigration(candidate, decision.reason, now, tx);
+  });
+}
+
+/**
+ * The agent's non-terminal migration as of `now`, without writing. A row whose
+ * deadline has elapsed is returned as the deadline sweep will persist it
+ * (`aborted`), so readers see the same answer before and after the sweep runs.
+ */
+async function readActiveAgentMigration(
+  db: DatabaseExecutor,
   agentId: string,
-  executor?: DatabaseExecutor,
-  now: Date = currentDate(),
-): Promise<AgentMigrationGateStatus> {
-  if (!executor && !isDatabaseInitialized()) return { migration: null };
-  const db = executor ?? getDb();
+  now: Date,
+): Promise<{ active: AgentMigrationRow | null; expired: AgentMigrationRow | null }> {
   const [row] = await db.select()
     .from(agentMigrations)
     .where(and(
@@ -1186,24 +1458,28 @@ export async function getAgentMigrationGateStatus(
       inArray(agentMigrations.state, [...ACTIVE_AGENT_MIGRATION_STATES]),
     ))
     .limit(1);
-  if (!row) return { migration: null };
+  if (!row) return { active: null, expired: null };
   const decision = planZenMigratingDelivery({ migration: row, now });
   if (decision.action === "deadline-expired") {
-    const aborted = await abortElapsedDeadlineMigration(row, decision.reason, now, db);
-    return {
-      migration: null,
-      ...(aborted
-        ? {
-            expiredLifecycleEvent: createAgentMigrationLifecycleEvent({
-              migration: aborted,
-              eventType: "migration_aborted",
-              occurredAt: now,
-            }),
-          }
-        : {}),
-    };
+    return { active: null, expired: { ...row, ...elapsedDeadlineAbortValues(row, decision.reason, now) } };
   }
-  return { migration: row };
+  return { active: row, expired: null };
+}
+
+/**
+ * Delivery gate. Pure read: a migration past its deadline no longer gates, so
+ * delivery proceeds to wherever the agent row points (the source before the
+ * flip, the target after it) exactly as it would after the abort. The abort
+ * itself is left to sweepElapsedAgentMigrationDeadline.
+ */
+export async function getAgentMigrationGateStatus(
+  agentId: string,
+  executor?: DatabaseExecutor,
+  now: Date = currentDate(),
+): Promise<AgentMigrationGateStatus> {
+  if (!executor && !isDatabaseInitialized()) return { migration: null };
+  const { active } = await readActiveAgentMigration(executor ?? getDb(), agentId, now);
+  return { migration: active };
 }
 
 export async function getActiveAgentMigration(
@@ -1220,8 +1496,9 @@ export async function getLatestAgentMigration(
   now: Date = currentDate(),
 ): Promise<AgentMigrationRow | null> {
   const db = executor ?? getDb();
-  const active = await getAgentMigrationGateStatus(agentId, db, now);
-  if (active.migration) return active.migration;
+  const { active, expired } = await readActiveAgentMigration(db, agentId, now);
+  if (active) return active;
+  if (expired) return expired;
   const [row] = await db.select()
     .from(agentMigrations)
     .where(eq(agentMigrations.agentId, agentId))
@@ -1230,25 +1507,39 @@ export async function getLatestAgentMigration(
   return row ?? null;
 }
 
-export async function getAgentMigrationHistory(
+/**
+ * Task #93 line C lock acquisition for a human-initiated migration write, taken first in that write's transaction.
+ *
+ * Order, compatible with transitionMemberRole and owner promotion (`servers` FOR UPDATE, then member rows) and with the
+ * migration writers in this file, which all write `agents` before `agent_migrations`:
+ *   1. `servers` row FOR SHARE. Every migration write inserts rows whose foreign key references `servers`, which takes a
+ *      key-share lock at insert time. Without this lock first, a role transition holding `servers` and waiting on the
+ *      actor's member row deadlocks with this write holding that row and waiting on `servers`.
+ *   2. The actor's `server_members` row FOR SHARE. A missing row throws ServerMembershipRevokedError before any write.
+ *   3. The Agent row FOR UPDATE, then the capability-or-creator decision on the locked role and creator.
+ * The caller's resource rows (`machines`, `agent_migrations`) come after.
+ */
+async function lockAgentMigrationActorAuthority(
+  executor: DatabaseExecutor,
   agentId: string,
-  limit = 10,
-  executor?: DatabaseExecutor,
-  now: Date = currentDate(),
-): Promise<AgentMigrationRow[]> {
-  const db = executor ?? getDb();
-  const boundedLimit = Math.max(1, Math.min(25, Math.floor(limit)));
-  await getAgentMigrationGateStatus(agentId, db, now);
-  return db.select()
-    .from(agentMigrations)
-    .where(eq(agentMigrations.agentId, agentId))
-    .orderBy(desc(agentMigrations.updatedAt), desc(agentMigrations.createdAt), desc(agentMigrations.id))
-    .limit(boundedLimit);
-}
-
-export async function isAgentZenMigrating(agentId: string, executor?: DatabaseExecutor, now: Date = currentDate()): Promise<boolean> {
-  const migration = await getActiveAgentMigration(agentId, executor, now);
-  return migration !== null && planZenMigratingDelivery({ migration, now }).action === "queue";
+  fence: AgentMigrationActorFence,
+): Promise<void> {
+  await executor.execute(sql`
+    SELECT id
+    FROM servers
+    WHERE id = ${fence.serverId}
+    FOR SHARE
+  `);
+  const role = await lockActorMembershipRow(executor, fence.serverId, fence.userId, "share");
+  const [agent] = await executor
+    .select({ serverId: agents.serverId, creatorType: agents.creatorType, creatorId: agents.creatorId })
+    .from(agents)
+    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)))
+    .for("update");
+  if (!agent || agent.serverId !== fence.serverId) throw new FencedAuthorizationDeniedError("not_found");
+  if (!userCanActOnAgentResource(role, fence.userId, agent, fence.capability)) {
+    throw new FencedAuthorizationDeniedError("forbidden");
+  }
 }
 
 async function insertAgentMigration(
@@ -1256,6 +1547,7 @@ async function insertAgentMigration(
   executor: DatabaseExecutor,
   supportRefFactory: () => string = createMigrationSupportRef,
 ): Promise<AgentMigrationRow> {
+  if (input.actorFence) await lockAgentMigrationActorAuthority(executor, input.agentId, input.actorFence);
   const now = input.now ?? currentDate();
   const transferDeadlineAt = addMs(now, input.transferDeadlineMs ?? DEFAULT_TRANSFER_DEADLINE_MS);
   const deadlines: AgentMigrationDeadlines = {
@@ -1303,6 +1595,7 @@ async function insertAgentMigration(
         receiptChannelId: null,
         supportRef: supportRefFactory(),
         contractVersion: 2,
+        // grant_key is NOT NULL UNIQUE but no longer read; the schema migration (phase C) drops it.
         grantKey: `agent_migration:${randomUUID()}`,
         initiatedByUserId: input.initiatedByUserId ?? null,
         prepDeadlineAt: deadlines.prepDeadlineAt,
@@ -1323,6 +1616,7 @@ async function insertAgentMigration(
         type: "dm",
         createdAt: now,
       });
+      // read-position: new conversation, no history before this join (no row = position 0)
       await executor.insert(channelAgents).values({
         channelId: receiptChannelId,
         agentId: row.agentId,
@@ -1355,9 +1649,14 @@ function buildTransportLeaseDelivery(input: {
   token: string;
 }): AgentMigrationTransportLeaseDelivery {
   const { migration, role, token } = input;
-  const provider = migration.transportProvider === "tunnel" ? "tunnel" : "object_store";
-  const url = role === "source" ? migration.sourceTransportUrl : migration.targetTransportUrl;
-  if (!url || !migration.transportSessionId || !migration.transportExpiresAt || !migration.transportMaxBytes) {
+  if (
+    !migration.transportSessionId
+    || !migration.transportExpiresAt
+    || !migration.transportMaxBytes
+    || !migration.transportGeneration
+    || !migration.transportLeaseId
+    || migration.transportExpectedMigrationRevision === null
+  ) {
     throw new Error("MIGRATION_TRANSPORT_NOT_PROVISIONED");
   }
   return {
@@ -1371,28 +1670,18 @@ function buildTransportLeaseDelivery(input: {
       migrationGeneration: agentMigrationGeneration(migration),
       sessionId: migration.transportSessionId,
       role,
-      provider,
-      transferKind: transferKindForRole(provider, role),
-      url,
+      provider: "object_store",
+      transferKind: transferKindForRole(role),
       leaseSource: "server",
       bearerToken: token,
       expiresAt: migration.transportExpiresAt.toISOString(),
       maxBytes: migration.transportMaxBytes,
-      ...(migration.transportProtocol === AGENT_MIGRATION_RESUMABLE_PROTOCOL
-        && migration.transportGeneration
-        && migration.transportLeaseId
-        && migration.transportExpectedMigrationRevision !== null
-        ? {
-            protocol: AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-            capabilities: [...AGENT_MIGRATION_RESUMABLE_CAPABILITIES],
-            controlUrl: `/internal/computer/agent-migrations/by-id/${encodeURIComponent(migration.id)}/resumable`,
-            leaseId: migration.transportLeaseId,
-            transportGeneration: migration.transportGeneration,
-            sourceMachineId: migration.sourceMachineId,
-            targetMachineId: migration.targetMachineId,
-            expectedMigrationRevision: migration.transportExpectedMigrationRevision,
-          }
-        : {}),
+      controlUrl: `/internal/computer/agent-migrations/by-id/${encodeURIComponent(migration.id)}/resumable`,
+      leaseId: migration.transportLeaseId,
+      transportGeneration: migration.transportGeneration,
+      sourceMachineId: migration.sourceMachineId,
+      targetMachineId: migration.targetMachineId,
+      expectedMigrationRevision: migration.transportExpectedMigrationRevision,
     },
   };
 }
@@ -1412,11 +1701,11 @@ async function insertAgentMigrationProvisioning(
       state: "provisioning",
       transportSessionId,
       transportProvider: input.transportProvider ?? "object_store",
-      sourceTransportUrl: normalizeTransferUrl(input.sourceTransferUrl),
-      targetTransportUrl: normalizeTransferUrl(input.targetTransferUrl),
       transportLeaseSource: "server",
       transportExpiresAt: addMs(now, input.transportLeaseMs ?? DEFAULT_AGENT_MIGRATION_TRANSPORT_LEASE_MS),
       transportMaxBytes: input.transportMaxBytes ?? DEFAULT_AGENT_MIGRATION_TRANSPORT_MAX_BYTES,
+      // Informational only (phase C drops it); every migration uses AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES.
+      transportMaxArchiveEntries: AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES,
       sourceTransportTokenHash: sha256(sourceToken),
       targetTransportTokenHash: sha256(targetToken),
       transportProvisioningStartedAt: now,
@@ -1437,14 +1726,158 @@ async function insertAgentMigrationProvisioning(
   };
 }
 
-export async function beginAgentMigration(
-  input: BeginAgentMigrationInput,
-  executor: DatabaseExecutor = getDb(),
-): Promise<AgentMigrationRow> {
-  if ("transaction" in executor) {
-    return await executor.transaction(async (tx) => insertAgentMigration(input, tx));
+/** Minimum age of a transport lease before a reconnect may replace it (the first lease may still be in flight). */
+export const AGENT_MIGRATION_LEASE_REPROVISION_MIN_AGE_MS = 30_000;
+
+/**
+ * A source or target daemon restarted before the flip and lost its in-memory
+ * transfer run; the server only keeps token hashes, so the old lease cannot be
+ * re-sent. Rotate to a new transport generation (fresh tokens, session, object
+ * key, receipts scope) and hand both daemons new leases. Everything bound to
+ * the old generation (control manifest, quiesce receipt, upload completion,
+ * transfer summary) is reset so the source re-quiesces and re-uploads; a
+ * still-running old run is rejected as stale and exits. Pre-flip only: after
+ * the flip the target's step retry and orphaned-arrival remediation apply.
+ */
+export async function reprovisionAgentMigrationTransport(input: {
+  migrationId: string;
+  expectedTransportGeneration: string;
+  provision: AgentMigrationObjectStoreTransferProvision;
+  now?: Date;
+}): Promise<AgentMigrationProvisioningResult | null> {
+  const now = input.now ?? currentDate();
+  return await getDb().transaction(async (tx) => {
+    const [row] = await tx.select().from(agentMigrations)
+      .where(eq(agentMigrations.id, input.migrationId))
+      .for("update")
+      .limit(1);
+    if (
+      !row
+      || (row.state !== "provisioning" && row.state !== "prep")
+      || row.transportProtocol !== AGENT_MIGRATION_RESUMABLE_PROTOCOL
+      || row.transportGeneration !== input.expectedTransportGeneration
+      || (row.transportProvisioningStartedAt
+        && now.getTime() - row.transportProvisioningStartedAt.getTime() < AGENT_MIGRATION_LEASE_REPROVISION_MIN_AGE_MS)
+    ) {
+      return null;
+    }
+    const sourceToken = createTransportToken();
+    const targetToken = createTransportToken();
+    const [updated] = await tx.update(agentMigrations)
+      .set({
+        transportSessionId: input.provision.sessionId,
+        transportExpiresAt: addMs(now, input.provision.leaseMs),
+        transportMaxBytes: input.provision.maxBytes,
+        sourceTransportTokenHash: sha256(sourceToken),
+        targetTransportTokenHash: sha256(targetToken),
+        transportProvisioningStartedAt: now,
+        transportGeneration: `agent_migration_transport:${randomUUID()}`,
+        transportLeaseId: input.provision.sessionId,
+        transportExpectedMigrationRevision: row.revision + 1,
+        transportControlManifest: null,
+        transportControlSha256: null,
+        transportControlRegisteredAt: null,
+        transportUploadCompletedAt: null,
+        sourceQuiesceReceipt: null,
+        sourceQuiescedAt: null,
+        transferSummary: null,
+        revision: row.revision + 1,
+        updatedAt: now,
+      })
+      .where(and(eq(agentMigrations.id, row.id), eq(agentMigrations.revision, row.revision)))
+      .returning();
+    if (!updated) return null;
+    return {
+      migration: updated,
+      source: buildTransportLeaseDelivery({ migration: updated, role: "source", token: sourceToken }),
+      target: buildTransportLeaseDelivery({ migration: updated, role: "target", token: targetToken }),
+    };
+  });
+}
+
+/**
+ * The target daemon restarted before the flip. Its download is resumable from
+ * the chunks already on its disk, and the upload may be complete, so keep the
+ * transport generation and only re-issue the target's lease with a fresh token
+ * (the old token is only stored hashed). Covers every pre-flip state, including
+ * `ready`/`in_transit`. Bookkeeping only: no revision bump, so the source's
+ * in-flight steps are unaffected.
+ */
+export async function reissueAgentMigrationTargetLease(input: {
+  migrationId: string;
+  expectedTransportGeneration: string;
+  now?: Date;
+}): Promise<AgentMigrationTransportLeaseDelivery | null> {
+  const now = input.now ?? currentDate();
+  return await getDb().transaction(async (tx) => {
+    const [row] = await tx.select().from(agentMigrations)
+      .where(eq(agentMigrations.id, input.migrationId))
+      .for("update")
+      .limit(1);
+    if (
+      !row
+      || !AGENT_MIGRATION_TARGET_LEASE_REISSUE_STATES.includes(row.state)
+      || row.transportProtocol !== AGENT_MIGRATION_RESUMABLE_PROTOCOL
+      || row.transportGeneration !== input.expectedTransportGeneration
+      || !row.transportExpiresAt
+      || row.transportExpiresAt.getTime() <= now.getTime()
+      || (row.transportProvisioningStartedAt
+        && now.getTime() - row.transportProvisioningStartedAt.getTime() < AGENT_MIGRATION_LEASE_REPROVISION_MIN_AGE_MS)
+    ) {
+      return null;
+    }
+    const targetToken = createTransportToken();
+    const [updated] = await tx.update(agentMigrations)
+      .set({ targetTransportTokenHash: sha256(targetToken), updatedAt: now })
+      .where(and(
+        eq(agentMigrations.id, row.id),
+        eq(agentMigrations.revision, row.revision),
+        eq(agentMigrations.transportGeneration, input.expectedTransportGeneration),
+      ))
+      .returning();
+    if (!updated) return null;
+    return buildTransportLeaseDelivery({ migration: updated, role: "target", token: targetToken });
+  });
+}
+
+const AGENT_MIGRATION_TARGET_LEASE_REISSUE_STATES: readonly AgentMigrationRow["state"][] = [
+  "provisioning",
+  "prep",
+  "ready",
+  "in_transit",
+];
+
+/**
+ * Whether a lost run on `role` may be recovered for this row right now; lets
+ * callers skip provisioning an object-store session for ineligible rows.
+ */
+export function agentMigrationLostRunRecovery(
+  row: AgentMigrationRow,
+  role: "source" | "target",
+  now: Date = currentDate(),
+): "rotate_generation" | "reissue_target_lease" | null {
+  if (row.transportProtocol !== AGENT_MIGRATION_RESUMABLE_PROTOCOL || !row.transportGeneration) return null;
+  if (
+    row.transportProvisioningStartedAt
+    && now.getTime() - row.transportProvisioningStartedAt.getTime() < AGENT_MIGRATION_LEASE_REPROVISION_MIN_AGE_MS
+  ) {
+    return null;
   }
-  return await insertAgentMigration(input, executor);
+  if (role === "target") {
+    return AGENT_MIGRATION_TARGET_LEASE_REISSUE_STATES.includes(row.state) ? "reissue_target_lease" : null;
+  }
+  // The source only matters until its upload completed (`ready`).
+  return row.state === "provisioning" || row.state === "prep" ? "rotate_generation" : null;
+}
+
+/** Pre-flip resumable migrations in which this machine is the source or target. */
+export async function listAgentMigrationsAwaitingTransportOnMachine(machineId: string): Promise<AgentMigrationRow[]> {
+  return await getDb().select().from(agentMigrations)
+    .where(and(
+      inArray(agentMigrations.state, ["provisioning", "prep", "ready", "in_transit"]),
+      eq(agentMigrations.transportProtocol, AGENT_MIGRATION_RESUMABLE_PROTOCOL),
+      or(eq(agentMigrations.sourceMachineId, machineId), eq(agentMigrations.targetMachineId, machineId)),
+    ));
 }
 
 export async function beginAgentMigrationProvisioning(
@@ -1455,32 +1888,6 @@ export async function beginAgentMigrationProvisioning(
     return await executor.transaction(async (tx) => insertAgentMigrationProvisioning(input, tx));
   }
   return await insertAgentMigrationProvisioning(input, executor);
-}
-
-export async function markAgentMigrationTransportProvisioned(input: {
-  migrationId: string;
-  now?: Date;
-}): Promise<AgentMigrationRow> {
-  const db = getDb();
-  const now = input.now ?? currentDate();
-  return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.id, input.migrationId)).limit(1);
-    if (!row) throw new Error("MIGRATION_NOT_FOUND");
-    if (row.state !== "provisioning") throw new Error("MIGRATION_NOT_PROVISIONING");
-    const [updated] = await tx.update(agentMigrations)
-      .set({
-        state: "prep",
-        transportProvisionedAt: now,
-        transportErrorCode: null,
-        transportErrorMessage: null,
-        revision: row.revision + 1,
-        updatedAt: now,
-      })
-      .where(and(eq(agentMigrations.id, row.id), eq(agentMigrations.revision, row.revision)))
-      .returning();
-    if (!updated) throw new Error("MIGRATION_CONCURRENT_UPDATE");
-    return updated;
-  });
 }
 
 export async function markAgentMigrationTransportProvisionFailed(input: {
@@ -1512,41 +1919,15 @@ export async function markAgentMigrationTransportProvisionFailed(input: {
   });
 }
 
-export async function markAgentMigrationTransportLost(input: {
-  migrationId: string;
-  message?: string | null;
-  now?: Date;
-}): Promise<AgentMigrationRow | null> {
-  const db = getDb();
-  const now = input.now ?? currentDate();
-  return await db.transaction(async (tx) => {
-    const [updated] = await tx.update(agentMigrations)
-      .set({
-        state: "failed",
-        failureReason: "MIGRATION_TRANSPORT_LOST",
-        transportLostAt: now,
-        transportTeardownAt: now,
-        transportErrorCode: "MIGRATION_TRANSPORT_LOST",
-        transportErrorMessage: input.message ?? null,
-        revision: sql`${agentMigrations.revision} + 1`,
-        updatedAt: now,
-      })
-      .where(and(
-        eq(agentMigrations.id, input.migrationId),
-        inArray(agentMigrations.state, [...TRANSFER_ACTIVE_AGENT_MIGRATION_STATES]),
-      ))
-      .returning();
-    if (!updated) return null;
-    await enqueueAgentMigrationFailedReceipt(tx, updated, now);
-    return updated;
-  });
-}
-
 export async function markAgentMigrationTransportLostForComputer(input: {
   migrationId: string;
   serverId: string;
   machineId: string;
   code?: AgentMigrationTransportFailureCode;
+  /** Unfiltered daemon cause; `failureReason` stays within the known code set. */
+  detailCode?: string | null;
+  /** Transport generation of the reporting run (newer daemons); stale runs must not fail a re-provisioned migration. */
+  transportGeneration?: string | null;
   message?: string | null;
   now?: Date;
 }): Promise<AgentMigrationRow> {
@@ -1562,7 +1943,11 @@ export async function markAgentMigrationTransportLostForComputer(input: {
       throw new Error("MIGRATION_NOT_FOUND");
     }
     const code = input.code ?? "MIGRATION_TRANSPORT_LOST";
-    if (row.state === "failed" && row.transportErrorCode === code) {
+    if (row.state === "failed" && row.failureReason === code) {
+      return row;
+    }
+    if (input.transportGeneration && row.transportGeneration && input.transportGeneration !== row.transportGeneration) {
+      // A run from a replaced generation; the current generation is unaffected.
       return row;
     }
     if (!isTransferActiveState(row.state)) {
@@ -1575,7 +1960,7 @@ export async function markAgentMigrationTransportLostForComputer(input: {
         failureReason: code,
         transportLostAt: now,
         transportTeardownAt: now,
-        transportErrorCode: code,
+        transportErrorCode: input.detailCode ?? code,
         transportErrorMessage: input.message ?? null,
         revision: row.revision + 1,
         updatedAt: now,
@@ -1588,95 +1973,7 @@ export async function markAgentMigrationTransportLostForComputer(input: {
   });
 }
 
-export async function markAgentMigrationSourceReadyForComputer(input: {
-  migrationId: string;
-  serverId: string;
-  sourceMachineId: string;
-  manifestPath: string;
-  manifestSha256?: string | null;
-  transferSummary: AgentMigrationTransferSummary;
-  now?: Date;
-}): Promise<AgentMigrationRow> {
-  const db = getDb();
-  const now = input.now ?? currentDate();
-  return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.id, input.migrationId)).limit(1);
-    if (!row || row.serverId !== input.serverId || row.sourceMachineId !== input.sourceMachineId) {
-      throw new Error("MIGRATION_NOT_FOUND");
-    }
-    const transferSummary = agentMigrationTransferSummarySchema.parse(input.transferSummary);
-    if (
-      row.state === "ready"
-      && row.manifestPath === input.manifestPath
-      && row.manifestSha256 === (input.manifestSha256 ?? null)
-      && isDeepStrictEqual(row.transferSummary, transferSummary)
-    ) {
-      return row;
-    }
-    if (row.state !== "provisioning" && row.state !== "prep") throw new Error("MIGRATION_NOT_IN_PREP");
-    if (now.getTime() > row.prepDeadlineAt.getTime()) throw new Error("MIGRATION_PREP_DEADLINE_EXPIRED");
-
-    const [updated] = await tx.update(agentMigrations)
-      .set({
-        state: "ready",
-        manifestPath: input.manifestPath,
-        manifestSha256: input.manifestSha256 ?? null,
-        transferSummary,
-        transportProvisionedAt: row.transportProvisionedAt ?? now,
-        transportErrorCode: null,
-        transportErrorMessage: null,
-        readyAt: now,
-        revision: row.revision + 1,
-        updatedAt: now,
-      })
-      .where(and(eq(agentMigrations.id, row.id), eq(agentMigrations.revision, row.revision)))
-      .returning();
-    if (!updated) throw new Error("MIGRATION_CONCURRENT_UPDATE");
-    return updated;
-  });
-}
-
-export async function markAgentMigrationReady(input: {
-  grantKey: string;
-  manifestPath: string;
-  manifestSha256?: string | null;
-  now?: Date;
-}): Promise<AgentMigrationRow> {
-  const db = getDb();
-  const now = input.now ?? currentDate();
-  return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey)).limit(1);
-    if (!row) throw new Error("MIGRATION_NOT_FOUND");
-    if (row.state !== "prep") throw new Error("MIGRATION_NOT_IN_PREP");
-    if (now.getTime() > row.prepDeadlineAt.getTime()) throw new Error("MIGRATION_PREP_DEADLINE_EXPIRED");
-
-    const [updated] = await tx.update(agentMigrations)
-      .set({
-        state: "ready",
-        manifestPath: input.manifestPath,
-        manifestSha256: input.manifestSha256 ?? null,
-        readyAt: now,
-        revision: row.revision + 1,
-        updatedAt: now,
-      })
-      .where(and(eq(agentMigrations.id, row.id), eq(agentMigrations.revision, row.revision)))
-      .returning();
-    if (!updated) throw new Error("MIGRATION_CONCURRENT_UPDATE");
-    return updated;
-  });
-}
-
 export async function getAgentMigrationTargetImport(input: {
-  grantKey: string;
-  serverId: string;
-  targetMachineId: string;
-}): Promise<AgentMigrationTargetImportView> {
-  const db = getDb();
-  const [row] = await db.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey)).limit(1);
-  return targetImportView(assertTargetImportRow({ row, serverId: input.serverId, targetMachineId: input.targetMachineId }));
-}
-
-export async function getAgentMigrationTargetImportById(input: {
   migrationId: string;
   serverId: string;
   targetMachineId: string;
@@ -1687,7 +1984,7 @@ export async function getAgentMigrationTargetImportById(input: {
 }
 
 export async function assertAgentMigrationTargetArrivalArchivable(input: {
-  grantKey: string;
+  migrationId: string;
   migrationGeneration: string;
   serverId: string;
   targetMachineId: string;
@@ -1696,11 +1993,14 @@ export async function assertAgentMigrationTargetArrivalArchivable(input: {
   const db = getDb();
   const now = input.now ?? currentDate();
   return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey)).limit(1);
+    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.id, input.migrationId)).limit(1);
     const migration = assertTargetImportRow({ row, serverId: input.serverId, targetMachineId: input.targetMachineId });
     const archivableState = migration.state === "arriving"
       || migration.state === "starting"
       || migration.state === "completed";
+    // Without an archive receipt, a replay must present the current generation:
+    // stale authority must never trigger another source archive request (the
+    // background retry owns failed archives, behind its agent-moved guards).
     if (
       archivableState
       && migration.sourceWorkspaceArchivedAt
@@ -1722,7 +2022,7 @@ export async function assertAgentMigrationTargetArrivalArchivable(input: {
 }
 
 export async function recordAgentMigrationSourceWorkspaceArchived(input: {
-  grantKey: string;
+  migrationId: string;
   migrationGeneration: string;
   serverId: string;
   targetMachineId: string;
@@ -1731,7 +2031,7 @@ export async function recordAgentMigrationSourceWorkspaceArchived(input: {
   const db = getDb();
   const now = input.now ?? currentDate();
   return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey)).limit(1);
+    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.id, input.migrationId)).limit(1);
     const migration = assertTargetImportRow({ row, serverId: input.serverId, targetMachineId: input.targetMachineId });
     if (
       migration.sourceWorkspaceArchivedAt
@@ -1772,8 +2072,146 @@ export async function recordAgentMigrationSourceWorkspaceArchived(input: {
   });
 }
 
+export const AGENT_MIGRATION_SOURCE_ARCHIVE_MAX_ATTEMPTS = 12;
+export const AGENT_MIGRATION_SOURCE_ARCHIVE_CLAIM_LEASE_MS = 2 * 60 * 1000;
+const AGENT_MIGRATION_SOURCE_ARCHIVE_BASE_BACKOFF_MS = 60 * 1000;
+const AGENT_MIGRATION_SOURCE_ARCHIVE_MAX_BACKOFF_MS = 6 * 60 * 60 * 1000;
+const SOURCE_ARCHIVE_ERROR_CODE_PATTERN = /^[A-Za-z0-9_:.-]{1,160}$/;
+const SOURCE_ARCHIVE_AGENT_MOVED_CODES: ReadonlySet<string> = new Set([
+  "MIGRATION_WORKSPACE_ARCHIVE_AGENT_RUNNING",
+  "MIGRATION_WORKSPACE_ARCHIVE_NEWER_OWNER",
+]);
+
+function sourceArchiveBackoffMs(attempts: number): number {
+  return Math.min(
+    AGENT_MIGRATION_SOURCE_ARCHIVE_BASE_BACKOFF_MS * 2 ** Math.max(0, attempts - 1),
+    AGENT_MIGRATION_SOURCE_ARCHIVE_MAX_BACKOFF_MS,
+  );
+}
+
+// The source-archive bookkeeping below deliberately does not bump `revision`:
+// it is independent of the transfer/auto-start state machine, whose writers
+// are revision-guarded and must not lose a race to a background cleanup.
+
+/** Record a failed source-archive attempt; schedules a retry or abandons after the cap. */
+export async function recordAgentMigrationSourceArchiveAttemptFailed(input: {
+  migrationId: string;
+  errorCode?: string | null;
+  now?: Date;
+}): Promise<AgentMigrationRow | null> {
+  const now = input.now ?? currentDate();
+  const errorCode = input.errorCode && SOURCE_ARCHIVE_ERROR_CODE_PATTERN.test(input.errorCode)
+    ? input.errorCode
+    : "MIGRATION_SOURCE_WORKSPACE_ARCHIVE_FAILED";
+  return await getDb().transaction(async (tx) => {
+    const [row] = await tx.select().from(agentMigrations)
+      .where(eq(agentMigrations.id, input.migrationId))
+      .for("update")
+      .limit(1);
+    if (!row || row.sourceWorkspaceArchivedAt || row.sourceWorkspaceArchiveAbandonedAt) return row ?? null;
+    const attempts = row.sourceWorkspaceArchiveAttempts + 1;
+    // The source daemon refused because the workspace is live again (the agent
+    // runs there, or a newer migration committed it): retrying cannot succeed.
+    const agentMoved = SOURCE_ARCHIVE_AGENT_MOVED_CODES.has(errorCode);
+    const exhausted = agentMoved || attempts >= AGENT_MIGRATION_SOURCE_ARCHIVE_MAX_ATTEMPTS;
+    const [updated] = await tx.update(agentMigrations)
+      .set({
+        sourceWorkspaceArchiveAttempts: attempts,
+        sourceWorkspaceArchiveLastError: agentMoved ? "agent_moved" : errorCode,
+        sourceWorkspaceArchiveRetryAt: exhausted ? null : new Date(now.getTime() + sourceArchiveBackoffMs(attempts)),
+        sourceWorkspaceArchiveAbandonedAt: exhausted ? now : null,
+        updatedAt: now,
+      })
+      .where(eq(agentMigrations.id, row.id))
+      .returning();
+    return updated ?? null;
+  });
+}
+
+export type AgentMigrationSourceArchiveRetryClaim =
+  | { action: "archive"; migration: AgentMigrationRow }
+  | { action: "abandoned"; migration: AgentMigrationRow; reason: "agent_moved" };
+
+/**
+ * Claim one completed/starting migration whose source archive failed and is
+ * due for a retry. Guards against archiving a live workspace: if the agent no
+ * longer runs on this migration's target, or a newer migration of the agent
+ * exists, the pending archive is abandoned instead (task #4's target-side
+ * quarantine handles any leftover directory on a later move back).
+ */
+export async function claimAgentMigrationSourceArchiveRetry(input: {
+  now?: Date;
+  leaseMs?: number;
+} = {}): Promise<AgentMigrationSourceArchiveRetryClaim | null> {
+  const now = input.now ?? currentDate();
+  const leaseMs = input.leaseMs ?? AGENT_MIGRATION_SOURCE_ARCHIVE_CLAIM_LEASE_MS;
+  return await getDb().transaction(async (tx) => {
+    const [candidate] = await tx.select()
+      .from(agentMigrations)
+      .where(and(
+        inArray(agentMigrations.state, ["starting", "completed"]),
+        isNull(agentMigrations.sourceWorkspaceArchivedAt),
+        isNull(agentMigrations.sourceWorkspaceArchiveAbandonedAt),
+        // Only rows whose archive was attempted and failed under this policy;
+        // historical rows are never silently swept or backfilled.
+        gt(agentMigrations.sourceWorkspaceArchiveAttempts, 0),
+        lte(agentMigrations.sourceWorkspaceArchiveRetryAt, now),
+      ))
+      .orderBy(asc(agentMigrations.sourceWorkspaceArchiveRetryAt))
+      .for("update", { skipLocked: true })
+      .limit(1);
+    if (!candidate) return null;
+
+    const [newer] = await tx.select({ id: agentMigrations.id })
+      .from(agentMigrations)
+      .where(and(
+        eq(agentMigrations.agentId, candidate.agentId),
+        gt(agentMigrations.createdAt, candidate.createdAt),
+      ))
+      .limit(1);
+    if (newer || !await isAgentHeldByTarget(tx, candidate)) {
+      const [abandoned] = await tx.update(agentMigrations)
+        .set({
+          sourceWorkspaceArchiveAbandonedAt: now,
+          sourceWorkspaceArchiveRetryAt: null,
+          sourceWorkspaceArchiveLastError: "agent_moved",
+          updatedAt: now,
+        })
+        .where(eq(agentMigrations.id, candidate.id))
+        .returning();
+      return abandoned ? { action: "abandoned", migration: abandoned, reason: "agent_moved" } : null;
+    }
+
+    const [claimed] = await tx.update(agentMigrations)
+      .set({ sourceWorkspaceArchiveRetryAt: new Date(now.getTime() + leaseMs) })
+      .where(eq(agentMigrations.id, candidate.id))
+      .returning();
+    return claimed ? { action: "archive", migration: claimed } : null;
+  });
+}
+
+/** Background counterpart of recordAgentMigrationSourceWorkspaceArchived (no daemon generation). */
+export async function recordAgentMigrationSourceWorkspaceArchivedById(input: {
+  migrationId: string;
+  now?: Date;
+}): Promise<AgentMigrationRow | null> {
+  const now = input.now ?? currentDate();
+  const [updated] = await getDb().update(agentMigrations)
+    .set({
+      sourceWorkspaceArchivedAt: now,
+      sourceWorkspaceArchiveRetryAt: null,
+      updatedAt: now,
+    })
+    .where(and(
+      eq(agentMigrations.id, input.migrationId),
+      isNull(agentMigrations.sourceWorkspaceArchivedAt),
+    ))
+    .returning();
+  return updated ?? null;
+}
+
 export async function startAgentMigrationTargetImport(input: {
-  grantKey: string;
+  migrationId: string;
   migrationGeneration: string;
   serverId: string;
   targetMachineId: string;
@@ -1782,7 +2220,7 @@ export async function startAgentMigrationTargetImport(input: {
   const db = getDb();
   const now = input.now ?? currentDate();
   return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey)).limit(1);
+    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.id, input.migrationId)).limit(1);
     const migration = assertTargetImportRow({ row, serverId: input.serverId, targetMachineId: input.targetMachineId });
     assertMigrationGeneration(migration, input.migrationGeneration);
     if (migration.state !== "ready") throw new Error("MIGRATION_NOT_READY");
@@ -1798,7 +2236,7 @@ export async function startAgentMigrationTargetImport(input: {
 }
 
 export async function flipAgentMigrationTargetImport(input: {
-  grantKey: string;
+  migrationId: string;
   migrationGeneration: string;
   serverId: string;
   targetMachineId: string;
@@ -1807,7 +2245,7 @@ export async function flipAgentMigrationTargetImport(input: {
   const db = getDb();
   const now = input.now ?? currentDate();
   return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey)).limit(1);
+    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.id, input.migrationId)).limit(1);
     const migration = assertTargetImportRow({ row, serverId: input.serverId, targetMachineId: input.targetMachineId });
     if ((migration.state === "arriving" || migration.state === "completed") && await isAgentHeldByTarget(tx, migration)) {
       return targetImportView(migration);
@@ -1860,7 +2298,7 @@ export async function flipAgentMigrationTargetImport(input: {
 }
 
 export async function markAgentMigrationTargetImportArrived(input: {
-  grantKey: string;
+  migrationId: string;
   migrationGeneration: string;
   serverId: string;
   targetMachineId: string;
@@ -1871,7 +2309,7 @@ export async function markAgentMigrationTargetImportArrived(input: {
   const db = getDb();
   const now = input.now ?? currentDate();
   return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey)).limit(1);
+    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.id, input.migrationId)).limit(1);
     const migration = assertTargetImportRow({ row, serverId: input.serverId, targetMachineId: input.targetMachineId });
     if (migration.state === "completed" && await isAgentHeldByTarget(tx, migration)) {
       return { migration: targetImportView(migration), autoStart: "none" };
@@ -1970,22 +2408,23 @@ export async function markAgentMigrationTargetImportArrived(input: {
 }
 
 export async function completeAgentMigrationAutoStart(input: {
-  grantKey: string;
+  migrationId: string;
   agentId: string;
   targetMachineId: string;
   remediationLeaseId?: string | null;
   now?: Date;
+  actorFence?: AgentMigrationActorFence;
 }, receiptHooks: AgentMigrationReceiptEnqueueHooks = {}): Promise<AgentMigrationRow> {
   const db = getDb();
   const now = input.now ?? currentDate();
   return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey)).limit(1);
+    if (input.actorFence) await lockAgentMigrationActorAuthority(tx, input.agentId, input.actorFence);
+    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.id, input.migrationId)).limit(1);
     if (!row || row.agentId !== input.agentId || row.targetMachineId !== input.targetMachineId) {
       throw new Error("MIGRATION_NOT_FOUND");
     }
-    if (!row.sourceWorkspaceArchivedAt) {
-      throw new Error("MIGRATION_SOURCE_WORKSPACE_ARCHIVE_PENDING");
-    }
+    // Completion means the agent runs on the target. Source cleanup is tracked
+    // separately (source_workspace_archive_*) and retried in the background.
     if (row.state === "completed" && await isAgentHeldByTarget(tx, row)) return row;
     if (row.state !== "starting") throw new Error("MIGRATION_NOT_STARTING");
     if (!await isAgentHeldByTarget(tx, row)) throw new Error("MIGRATION_SOURCE_MACHINE_MISMATCH");
@@ -2030,7 +2469,7 @@ export async function completeAgentMigrationAutoStart(input: {
 }
 
 export async function recordAgentMigrationAutoStartFailure(input: {
-  grantKey: string;
+  migrationId: string;
   agentId: string;
   targetMachineId: string;
   stage: AgentMigrationAutoStartFailureStage;
@@ -2041,7 +2480,7 @@ export async function recordAgentMigrationAutoStartFailure(input: {
   const db = getDb();
   const now = input.now ?? currentDate();
   return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey)).limit(1);
+    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.id, input.migrationId)).limit(1);
     if (!row || row.agentId !== input.agentId || row.targetMachineId !== input.targetMachineId) {
       throw new Error("MIGRATION_NOT_FOUND");
     }
@@ -2082,14 +2521,10 @@ export async function recordAgentMigrationAutoStartFailure(input: {
 }
 
 export async function claimAgentMigrationAutoStartRemediation(input: {
-  executor: AgentMigrationAutoStartRemediationExecutor;
   workerId: string;
   now?: Date;
   leaseMs?: number;
 }): Promise<AgentMigrationAutoStartRemediationClaim | null> {
-  if (input.executor !== "server" && input.executor !== "healthy_steward") {
-    throw new Error("MIGRATION_AUTO_START_REMEDIATION_EXECUTOR_INVALID");
-  }
   const db = getDb();
   const now = input.now ?? currentDate();
   const leaseMs = input.leaseMs ?? AGENT_MIGRATION_AUTO_START_REMEDIATION_LEASE_MS;
@@ -2108,11 +2543,20 @@ export async function claimAgentMigrationAutoStartRemediation(input: {
       sql`${agentMigrations.autoStartRemediationLeaseId} IS NOT NULL`,
       lte(agentMigrations.autoStartRemediationLeaseExpiresAt, now),
     );
+    const orphanedArrivalPredicate = and(
+      isNull(agentMigrations.failureReason),
+      isNull(agentMigrations.autoStartFailureStage),
+      isNull(agentMigrations.autoStartFailureCode),
+      // No lease-id filter: a remediation claim that crashed before recording an
+      // outcome leaves an expired lease on this same shape (the outer lease
+      // predicate below admits it again).
+      lte(agentMigrations.arrivedAt, new Date(now.getTime() - AGENT_MIGRATION_ORPHANED_ARRIVAL_GRACE_MS)),
+    );
     const [candidate] = await tx.select()
       .from(agentMigrations)
       .where(and(
         eq(agentMigrations.state, "starting"),
-        or(typedFailedPredicate, orphanedDispatchPredicate),
+        or(typedFailedPredicate, orphanedDispatchPredicate, orphanedArrivalPredicate),
         or(
           isNull(agentMigrations.autoStartRemediationLeaseExpiresAt),
           lte(agentMigrations.autoStartRemediationLeaseExpiresAt, now),
@@ -2123,10 +2567,16 @@ export async function claimAgentMigrationAutoStartRemediation(input: {
       .limit(1);
     if (!candidate) return null;
     const candidateVariant: AgentMigrationAutoStartRemediationCandidateVariant =
-      candidate.failureReason === "auto_start_failed" ? "typed_failed" : "orphaned_dispatch";
+      candidate.failureReason === "auto_start_failed"
+        ? "typed_failed"
+        : candidate.autoStartFailureStage === null
+          ? "orphaned_arrival"
+          : "orphaned_dispatch";
     const candidateVariantPredicate = candidateVariant === "typed_failed"
       ? typedFailedPredicate
-      : orphanedDispatchPredicate;
+      : candidateVariant === "orphaned_arrival"
+        ? orphanedArrivalPredicate
+        : orphanedDispatchPredicate;
     const candidateLeasePredicate = candidate.autoStartRemediationLeaseId
       ? and(
           eq(agentMigrations.autoStartRemediationLeaseId, candidate.autoStartRemediationLeaseId),
@@ -2191,75 +2641,6 @@ export async function claimAgentMigrationAutoStartRemediation(input: {
       .returning();
     if (!claimed) return null;
     return { migration: claimed, action: "dispatch", leaseId, candidateVariant };
-  });
-}
-
-export async function startAgentMigrationTransfer(grantKey: string, now = currentDate()): Promise<AgentMigrationRow> {
-  const db = getDb();
-  return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, grantKey)).limit(1);
-    if (!row) throw new Error("MIGRATION_NOT_FOUND");
-    if (row.state !== "ready") throw new Error("MIGRATION_NOT_READY");
-    if (now.getTime() > row.transferDeadlineAt.getTime()) throw new Error("MIGRATION_TRANSFER_DEADLINE_EXPIRED");
-
-    const [updated] = await tx.update(agentMigrations)
-      .set({ state: "in_transit", revision: row.revision + 1, updatedAt: now })
-      .where(and(eq(agentMigrations.id, row.id), eq(agentMigrations.revision, row.revision)))
-      .returning();
-    if (!updated) throw new Error("MIGRATION_CONCURRENT_UPDATE");
-    return updated;
-  });
-}
-
-export async function flipAgentMigrationMachine(grantKey: string, now = currentDate()): Promise<AgentMigrationRow> {
-  const db = getDb();
-  return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, grantKey)).limit(1);
-    if (!row) throw new Error("MIGRATION_NOT_FOUND");
-    if ((row.state === "arriving" || row.state === "completed") && await isAgentHeldByTarget(tx, row)) return row;
-    if (row.state !== "in_transit") throw new Error("MIGRATION_NOT_FLIPPABLE");
-    if (now.getTime() > row.transferDeadlineAt.getTime()) throw new Error("MIGRATION_TRANSFER_DEADLINE_EXPIRED");
-    const nextArrivalDeadlineAt = addMs(now, arrivalWindowMs(row));
-
-    const [updatedAgent] = await tx.update(agents)
-      .set({ machineId: row.targetMachineId, updatedAt: now })
-      .where(and(
-        eq(agents.id, row.agentId),
-        eq(agents.machineId, row.sourceMachineId),
-        isNull(agents.deletedAt),
-        sql`EXISTS (
-          SELECT 1
-          FROM ${agentMigrations}
-          WHERE ${agentMigrations.id} = ${row.id}
-            AND ${agentMigrations.revision} = ${row.revision}
-            AND ${agentMigrations.state} = 'in_transit'
-        )`,
-      ))
-      .returning({ id: agents.id });
-    if (!updatedAgent) {
-      const [current] = await tx.select().from(agentMigrations).where(eq(agentMigrations.id, row.id)).limit(1);
-      if (current && (current.state === "arriving" || current.state === "completed") && await isAgentHeldByTarget(tx, current)) {
-        return current;
-      }
-      throw new Error("MIGRATION_SOURCE_MACHINE_MISMATCH");
-    }
-
-    const [updated] = await tx.update(agentMigrations)
-      .set({
-        state: "arriving",
-        flippedAt: now,
-        arrivalDeadlineAt: nextArrivalDeadlineAt,
-        revision: row.revision + 1,
-        updatedAt: now,
-      })
-      .where(and(
-        eq(agentMigrations.id, row.id),
-        eq(agentMigrations.revision, row.revision),
-        eq(agentMigrations.state, "in_transit"),
-      ))
-      .returning();
-    if (!updated) throw new Error("MIGRATION_CONCURRENT_UPDATE");
-    return updated;
   });
 }
 
@@ -2382,10 +2763,12 @@ export async function requestAgentMigrationCancellation(input: {
   initiatedByUserId: string;
   reason: string;
   now?: Date;
+  actorFence?: AgentMigrationActorFence;
 }): Promise<AgentMigrationCancellationRequestResult> {
   const db = getDb();
   const now = input.now ?? currentDate();
   return await db.transaction(async (tx) => {
+    if (input.actorFence) await lockAgentMigrationActorAuthority(tx, input.agentId, input.actorFence);
     const [row] = await tx.select()
       .from(agentMigrations)
       .where(and(
@@ -2588,14 +2971,10 @@ export async function acknowledgeAgentMigrationCancellation(input: {
 }
 
 export async function claimAgentMigrationCancellationCleanup(input: {
-  executor: AgentMigrationCancelCleanupExecutor;
   workerId: string;
   now?: Date;
   leaseMs?: number;
 }): Promise<AgentMigrationCancellationCleanupClaim | null> {
-  if (input.executor !== "server" && input.executor !== "healthy_steward") {
-    throw new Error("MIGRATION_CANCEL_CLEANUP_EXECUTOR_INVALID");
-  }
   const db = getDb();
   const now = input.now ?? currentDate();
   const leaseMs = input.leaseMs ?? AGENT_MIGRATION_CANCEL_CLEANUP_LEASE_MS;
@@ -2666,44 +3045,5 @@ export async function claimAgentMigrationCancellationCleanup(input: {
       leaseId,
       deliveries: buildAgentMigrationCancellationDeliveries(claimed),
     };
-  });
-}
-
-export async function abortAgentMigration(input: {
-  grantKey: string;
-  reason: string;
-  rollbackArrivingMachine?: boolean;
-  now?: Date;
-}): Promise<AgentMigrationRow> {
-  const db = getDb();
-  const now = input.now ?? currentDate();
-  return await db.transaction(async (tx) => {
-    const [row] = await tx.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey)).limit(1);
-    if (!row) throw new Error("MIGRATION_NOT_FOUND");
-    if (!isTransferActiveState(row.state)) throw new Error("MIGRATION_NOT_ACTIVE");
-
-    if (row.state === "arriving" && input.rollbackArrivingMachine) {
-      await tx.update(agents)
-        .set({ machineId: row.sourceMachineId, updatedAt: now })
-        .where(and(
-          eq(agents.id, row.agentId),
-          eq(agents.machineId, row.targetMachineId),
-          isNull(agents.deletedAt),
-        ));
-    }
-
-    const [updated] = await tx.update(agentMigrations)
-      .set({
-        state: "aborted",
-        abortReason: input.reason,
-        abortedAt: now,
-        transportTeardownAt: now,
-        revision: row.revision + 1,
-        updatedAt: now,
-      })
-      .where(and(eq(agentMigrations.id, row.id), eq(agentMigrations.revision, row.revision)))
-      .returning();
-    if (!updated) throw new Error("MIGRATION_CONCURRENT_UPDATE");
-    return updated;
   });
 }

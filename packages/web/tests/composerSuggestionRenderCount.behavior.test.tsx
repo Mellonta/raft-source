@@ -17,7 +17,6 @@
  */
 
 import { strict as assert } from "node:assert";
-import test from "node:test";
 import { useState } from "react";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";

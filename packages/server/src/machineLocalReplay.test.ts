@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { test } from "vitest";
 import { BasicTracer, MemoryTraceSink, parseTraceparent } from "@botiverse/raft-shared";
 import type { Request, Response } from "express";
 
 import {
   buildReplayHeaders,
+  buildReplayTargetUrl,
   handleMachineLocalRouting,
   isMachineLocalReplayAllowed,
   type MachineLocalRoutingDeps,
-} from "./machineLocalReplay.js";
-import { normalizeReplicaReplayEndpoint } from "./replicaRouter.js";
-import { runWithTraceSpan } from "./tracing/semanticTrace.js";
+} from "./machineLocalReplay";
+import { normalizeReplicaReplayEndpoint } from "./replicaRouter";
+import { runWithTraceSpan } from "./tracing/semanticTrace";
 
 test("machine-local replay allowlist is limited to daemon-affinity routes", () => {
   assert.equal(isMachineLocalReplayAllowed("GET", "/api/agents/agent-1/skills"), true);
@@ -34,8 +34,12 @@ test("machine-local replay allowlist is limited to daemon-affinity routes", () =
   assert.equal(
     isMachineLocalReplayAllowed(
       "GET",
-      "/api/servers/server-1/machines/machine-1/runtime-form-definitions/builtin/option-sources/model?schemaVersion=builtin-pi.create.v2",
+      "/api/servers/server-1/machines/machine-1/runtime-form-definitions/builtin/option-sources/model?schemaVersion=builtin-pi.create.v3",
     ),
+    true,
+  );
+  assert.equal(
+    isMachineLocalReplayAllowed("GET", "/api/servers/server-1/machines/machine-1/runtime-forms/v2/builtin/option-sources/model"),
     true,
   );
   assert.equal(isMachineLocalReplayAllowed("POST", "/api/servers/server-1/machines/machine-1/computer/restart"), true);
@@ -744,4 +748,15 @@ test("business 409 is forwarded without clearing machine ownership", async () =>
 
   assert.equal(clearCount, 0);
   assert.equal(response.statusCode, 409);
+});
+
+test("replay target keeps the owner replica's host whatever the incoming request line says", () => {
+  const endpoint = "http://10.0.1.5:3001";
+  assert.equal(buildReplayTargetUrl("/api/agents/agent-1/skills?x=1", endpoint).href, "http://10.0.1.5:3001/api/agents/agent-1/skills?x=1");
+  // absolute-form request line
+  assert.equal(buildReplayTargetUrl("http://169.254.169.254/api/agents/agent-1/skills", endpoint).host, "10.0.1.5:3001");
+  // protocol-relative path
+  const protocolRelative = buildReplayTargetUrl("//internal.example/api/agents/agent-1/skills", endpoint);
+  assert.equal(protocolRelative.host, "10.0.1.5:3001");
+  assert.equal(protocolRelative.pathname, "/api/agents/agent-1/skills");
 });

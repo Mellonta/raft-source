@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach, beforeEach } from "node:test";
 import {
   buildMainLayoutSocketBindings,
 } from "../src/store/socketBridge";
@@ -109,7 +108,6 @@ function resetStores() {
   } as never);
   useMachineStore.setState({
     machines: [makeMachine()],
-    latestDaemonVersion: null,
     latestComputerVersion: null,
     loading: false,
     computerOperationProgress: {},

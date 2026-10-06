@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { normalizeRuntimeProfileReportSource } from "./agentOrchestrator.js";
+import { normalizeRuntimeProfileReportSource } from "./agentOrchestrator";
 
 // The daemon->server `agent:runtime_profile.source` is an untrusted wire value (no runtime schema
 // on the WS parse). The ingest span must only ever record an allowlisted source or "unknown",

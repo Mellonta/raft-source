@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -214,4 +213,17 @@ test("primary composer eligibility suppresses every excluded host state", () => 
   assert.equal(isNotificationActivationComposerEligible({ ...base, jointLocked: true }), false);
   assert.equal(isNotificationActivationComposerEligible({ ...base, quotaReadOnly: true }), false);
   assert.equal(isNotificationActivationComposerEligible({ ...base, selectMode: true }), false);
+});
+
+
+test("desktop prompt and dismissal retain gutters outside the RUI full-width banner", () => {
+  renderBanner();
+  const banner = screen.getByTestId("notification-activation-banner-desktop");
+  assert.ok(banner.classList.contains("mx-3"));
+  assert.ok(banner.classList.contains("w-auto"));
+  assert.ok(!banner.classList.contains("w-full"));
+  fireEvent.click(screen.getByRole("button", { name: "Hide notification reminder for this session" }));
+  const confirmation = screen.getByTestId("notification-activation-dismiss-confirm");
+  assert.ok(confirmation.classList.contains("w-auto"));
+  assert.ok(confirmation.classList.contains("mx-3"));
 });

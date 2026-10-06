@@ -16,10 +16,10 @@
  * zero-enumeration failures.
  */
 import { Router, type Router as RouterType } from "express";
-import { requireAuth } from "../middleware/auth.js";
-import { attachComputer } from "../services/computerCredentialService.js";
-import { enqueueComputerMobileAppEmailJourney } from "../services/computerMobileAppEmailJourneyService.js";
-import { isDeviceAuthSurfaceEnabled } from "../services/deviceAuthService.js";
+import { requireAuth } from "../middleware/auth";
+import { attachComputer } from "../services/computerCredentialService";
+import { isDeviceAuthSurfaceEnabled } from "../services/deviceAuthService";
+import { sendJsonServerError } from "./errorResponse";
 
 export const computerAttachRouter: RouterType = Router();
 
@@ -69,17 +69,6 @@ computerAttachRouter.post("/attach", requireAuth, async (req, res) => {
       res.status(403).json({ error, code: result.error });
       return;
     }
-    try {
-      await enqueueComputerMobileAppEmailJourney({
-        userId,
-        computerId: result.serverMachineId,
-      });
-    } catch {
-      // Computer attachment is the primary user action. A lifecycle-email
-      // control-plane failure must not turn a successful credential issue into
-      // a failed/ambiguous attach response.
-      console.warn("api.computer.attach mobile lifecycle email enqueue failed");
-    }
     res.status(201).json({
       apiKey: result.apiKey, // raw sk_computer_* — returned exactly once
       serverMachineId: result.serverMachineId,
@@ -95,7 +84,10 @@ computerAttachRouter.post("/attach", requireAuth, async (req, res) => {
       resumed: result.resumed,
     });
   } catch (err) {
-    console.error("api.computer.attach error:", err);
-    res.status(500).json({ error: "Failed to attach Computer" });
+    sendJsonServerError(req, res, {
+      error: "Failed to attach Computer",
+      logPrefix: "api.computer.attach error:",
+      err,
+    });
   }
 });

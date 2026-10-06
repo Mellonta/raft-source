@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   ACTION_CARD_ACTION_TYPES,
   actionCardActionSchema,
   buildActionCardPresentation,
-} from "./actionCards.js";
+} from "./actionCards";
 
 test("action cards: migration export is not an action-card operation", () => {
   assert.equal((ACTION_CARD_ACTION_TYPES as readonly string[]).includes("migration:export"), false);

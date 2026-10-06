@@ -1,22 +1,22 @@
 import { spawn } from "node:child_process";
 import type { AgentConfig, AxSurfaceText } from "@botiverse/raft-shared";
-import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProbeResult } from "./types.js";
-import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport.js";
-import { ClaudeEventNormalizer } from "./claudeEventNormalizer.js";
-import { assertClaudeStartupPayloadWithinBudget } from "./claudeInputBudget.js";
-import { buildClaudeArgs, buildClaudeManagedMcpConfig, buildClaudeSpawnSpec, probeClaude, probeClaudeLaunch, resolveClaudeLaunchCommand, writeClaudeSystemPromptFile } from "./claudeLaunch.js";
+import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProbeResult } from "./types";
+import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
+import { ClaudeEventNormalizer } from "./claudeEventNormalizer";
+import { assertClaudeStartupPayloadWithinBudget } from "./claudeInputBudget";
+import { buildClaudeArgs, buildClaudeManagedMcpConfig, buildClaudeSpawnSpec, probeClaude, probeClaudeLaunch, resolveClaudeLaunchCommand, writeClaudeSystemPromptFile } from "./claudeLaunch";
 import {
   buildClaudeProviderIsolationEnv,
   isClaudeCustomProviderConfig,
   LEGACY_CLAUDE_PROVIDER_CONFIG_DIR,
   shouldWarnLegacyClaudeProviderConfigDir,
-} from "./claudeProviderIsolation.js";
-import { logger } from "../logger.js";
-import { resolveRaftHome } from "../raftHome.js";
+} from "./claudeProviderIsolation";
+import { logger } from "../logger";
+import { resolveRaftHome } from "../raftHome";
 import {
   prepareManagedMcpRuntimeProxy,
   writeManagedMcpRuntimeConfigFile,
-} from "../managedMcpRuntimeProxy.js";
+} from "../managedMcpRuntimeProxy";
 
 export {
   buildClaudeArgs,
@@ -27,8 +27,8 @@ export {
   probeClaude,
   resolveClaudeCommand,
   resolveClaudeLaunchCommand,
-} from "./claudeLaunch.js";
-export { buildClaudeProviderIsolationEnv } from "./claudeProviderIsolation.js";
+} from "./claudeLaunch";
+export { buildClaudeProviderIsolationEnv } from "./claudeProviderIsolation";
 
 export class ClaudeDriver implements RuntimeDriver {
   readonly id = "claude";
@@ -183,6 +183,8 @@ export class ClaudeDriver implements RuntimeDriver {
   buildSystemPrompt(config: AgentConfig, _agentId: string): AxSurfaceText {
     return buildCliTransportSystemPrompt(config, {
       extraCriticalRules: [],
+      // Claude Code's `Agent` tool is not in CLAUDE_DISALLOWED_TOOLS.
+      supportsSubagents: true,
     });
   }
 

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { requestProviderConnectionLaunch } from "./providerConnectionLaunch.js";
-import { installDaemonFetchMockForTests } from "./daemonFetch.js";
+import { requestProviderConnectionLaunch } from "./providerConnectionLaunch";
+import { installDaemonFetchMockForTests } from "./daemonFetch";
 
 const request = {
   serverUrl: "http://localhost:3001",

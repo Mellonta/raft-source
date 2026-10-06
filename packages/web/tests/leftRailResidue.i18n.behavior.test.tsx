@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -41,12 +40,10 @@ afterEach(() => {
 test("catalog pins left-rail residue MessageIds with Chinese", () => {
   assert.equal(en["layout.leftRail.tabSaved"], "Saved");
   assert.equal(en["layout.leftRail.tabHumans"], "Humans");
-  assert.equal(en["layout.leftRail.tabWiki"], "Wiki");
   assert.equal(en["layout.leftRail.enterWorkspace"], "Enter Workspace");
   assert.equal(en["layout.leftRail.exitWorkspace"], "Exit Workspace");
   assert.equal(zh["layout.leftRail.tabSaved"], "已保存");
   assert.equal(zh["layout.leftRail.tabHumans"], "人类");
-  assert.equal(zh["layout.leftRail.tabWiki"], "Wiki");
   assert.equal(zh["layout.leftRail.enterWorkspace"], "进入工作空间");
   assert.equal(zh["layout.leftRail.exitWorkspace"], "退出工作空间");
   assert.match(zh["layout.leftRail.enterWorkspace"], /\p{Script=Han}/u);
@@ -121,7 +118,7 @@ test("LeftRail residue tabs and workspace toggle render Chinese under zh-cn", ()
   );
 
   assert.ok(screen.getByRole("button", { name: "进入工作空间" }));
-  assert.ok(screen.getByRole("button", { name: "Wiki" }));
+  assert.ok(screen.queryByRole("button", { name: "Wiki" }) === null);
   assert.equal(screen.queryByRole("button", { name: "Enter Workspace" }), null);
   assert.deepEqual(
     Array.from(first.container.querySelectorAll<HTMLElement>('[data-testid^="left-rail-tab-"]'))
@@ -131,11 +128,10 @@ test("LeftRail residue tabs and workspace toggle render Chinese under zh-cn", ()
       "left-rail-tab-chat",
       "left-rail-tab-activity",
       "left-rail-tab-tasks",
-      "left-rail-tab-wiki",
       "left-rail-tab-members",
       "left-rail-tab-computers",
     ],
-    "classic rail keeps gated Wiki between Tasks and Members",
+    "classic rail omits retired Wiki even when its old flag is enabled",
   );
 
   first.unmount();
@@ -144,11 +140,11 @@ test("LeftRail residue tabs and workspace toggle render Chinese under zh-cn", ()
       active: true,
       enabled: true,
       railMode: "saved",
-      railLayout: { left: ["saved", "humans", "wiki"], right: [] },
+      railLayout: { left: ["saved", "humans"], right: [] },
     });
   });
   const workspace = render(
-    <MemoryRouter initialEntries={["/s/server/wiki"]}>
+    <MemoryRouter initialEntries={["/s/server"]}>
       <TestIntlProvider locale="zh-cn">
         <LeftRail workspaceModeAvailable />
         <LocationProbe />
@@ -156,13 +152,13 @@ test("LeftRail residue tabs and workspace toggle render Chinese under zh-cn", ()
     </MemoryRouter>,
   );
 
-  for (const label of ["已保存", "人类", "Wiki", "退出工作空间"]) {
+  for (const label of ["已保存", "人类", "退出工作空间"]) {
     assert.ok(screen.getByRole("button", { name: label }), label);
   }
   for (const label of ["Saved", "Humans", "Exit Workspace"]) {
     assert.equal(screen.queryByRole("button", { name: label }), null, label);
   }
-  assert.equal(screen.getByTestId("rail-route").textContent, "/s/server/wiki");
+  assert.equal(screen.getByTestId("rail-route").textContent, "/s/server");
   fireEvent.click(screen.getByRole("button", { name: "已保存" }));
   assert.equal(screen.getByTestId("rail-route").textContent, "/s/server");
   assert.equal(useWorkspaceGridNavigationStore.getState().sidebars.left.activeItem, "saved");
@@ -190,7 +186,7 @@ test("LeftRail residue tabs and workspace toggle render Chinese under zh-cn", ()
       </TestIntlProvider>
     </MemoryRouter>,
   );
-  assert.equal(screen.queryByRole("button", { name: "Wiki" }), null);
+  assert.ok(screen.queryByRole("button", { name: "Wiki" }) === null);
   assert.deepEqual(
     Array.from(gated.container.querySelectorAll<HTMLElement>("[data-workspace-rail-item]"))
       .map((element) => element.dataset.workspaceRailItem),

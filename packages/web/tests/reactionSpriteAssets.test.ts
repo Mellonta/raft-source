@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { QUICK_REACTION_EMOJIS } from "../src/components/message/reactionConstants";
 import { REACTION_SPRITE_ITEMS, REACTION_SPRITE_MANIFEST } from "../src/generated/reactionSpriteManifest";

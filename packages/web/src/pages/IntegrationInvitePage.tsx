@@ -11,11 +11,10 @@ import {
   SelectItemText,
   SelectList,
   SelectTrigger,
-  SelectValue,
+  SelectValue, Button
 } from "raft-ui";
 import api from "../api/client";
 import Banner from "../components/ui/Banner";
-import Button from "../components/ui/Button";
 import RequestedScopeConsent from "../components/oauth/RequestedScopeConsent";
 import SectionEyebrow from "../components/ui/SectionEyebrow";
 import { DEFAULT_DECLARED_OAUTH_SCOPES } from "../lib/oauthScopePresentation";
@@ -127,23 +126,23 @@ export default function IntegrationInvitePage() {
 
   return (
     <div
-      className="h-full min-h-0 overflow-y-auto bg-brutal-cream font-display text-black safe-top safe-bottom"
+      className="h-full min-h-0 overflow-y-auto bg-layer-canvas-muted font-display text-foreground-strong safe-top safe-bottom theme-brutal:bg-brutal-cream theme-brutal:text-black"
       data-testid="integration-invite-page"
     >
       <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col justify-center px-4 py-8">
-        <div className="border-2 border-black bg-white p-5 shadow-brutal">
-          <div className="flex items-start justify-between gap-4 border-b-2 border-black pb-4">
+        <div className="rounded-lg border border-line-muted bg-layer-panel p-5 shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal">
+          <div className="flex items-start justify-between gap-4 border-b border-line-hairline pb-4 theme-brutal:border-b-2 theme-brutal:border-black">
             <div>
               <SectionEyebrow as="div">{formatMessage({ id: "pages.integrationInvite.eyebrow" })}</SectionEyebrow>
               <h1 className="mt-2 text-2xl font-black">{formatMessage({ id: "pages.integrationInvite.title" })}</h1>
             </div>
-            <div className="flex size-12 items-center justify-center border-2 border-black bg-brutal-cyan shadow-brutal-sm">
+            <div className="flex size-12 items-center justify-center rounded-md border border-line-muted bg-info text-info-foreground shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cyan theme-brutal:text-black theme-brutal:shadow-brutal-sm">
               <Link2 size={22} />
             </div>
           </div>
 
           {loading ? (
-            <div className="py-12 text-center text-sm font-bold text-black/55">{formatMessage({ id: "pages.integrationInvite.loading" })}</div>
+            <div className="py-12 text-center text-sm font-bold text-foreground-muted">{formatMessage({ id: "pages.integrationInvite.loading" })}</div>
           ) : error && !invite ? (
             <Banner intent="warning" className="mt-4 font-bold">{error}</Banner>
           ) : invite ? (
@@ -155,29 +154,29 @@ export default function IntegrationInvitePage() {
                 </Banner>
               )}
 
-              <div className="border-2 border-black bg-brutal-cream p-4">
+              <div className="rounded-md border border-line-muted bg-layer-inset p-4 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream">
                 <div className="text-xl font-black">{invite.client.name}</div>
-                <div className="mt-1 text-xs font-bold text-black/55">
+                <div className="mt-1 text-xs font-bold text-foreground-muted">
                   {formatMessage({ id: "pages.integrationInvite.sharedByPrefix" })} {invite.client.publisherName ?? formatMessage({ id: "pages.integrationInvite.sharedByPublisherFallback" })} {formatMessage({ id: "pages.integrationInvite.sharedByServerMid" })} {invite.client.sourceServerName ?? formatMessage({ id: "pages.integrationInvite.sharedByServerFallback" })}
                 </div>
                 {invite.client.description && (
-                  <p className="mt-3 text-sm leading-relaxed text-black/70">{invite.client.description}</p>
+                  <p className="mt-3 text-sm leading-relaxed text-foreground-muted">{invite.client.description}</p>
                 )}
                 <div className="mt-4 grid gap-3 text-xs sm:grid-cols-2">
                   <div>
-                    <div className="font-bold text-black/45">{formatMessage({ id: "pages.integrationInvite.clientIdLabel" })}</div>
+                    <div className="font-bold text-foreground-hint">{formatMessage({ id: "pages.integrationInvite.clientIdLabel" })}</div>
                     <div className="break-all font-mono font-bold">{invite.client.clientId}</div>
                   </div>
                   <div>
-                    <div className="font-bold text-black/45">{formatMessage({ id: "pages.integrationInvite.homepageLabel" })}</div>
+                    <div className="font-bold text-foreground-hint">{formatMessage({ id: "pages.integrationInvite.homepageLabel" })}</div>
                     <div className="break-all font-mono font-bold">{getDomain(invite.client.homepageUrl, formatMessage({ id: "pages.integrationInvite.notConfigured" }))}</div>
                   </div>
                   <div>
-                    <div className="font-bold text-black/45">{formatMessage({ id: "pages.integrationInvite.callbackLabel" })}</div>
+                    <div className="font-bold text-foreground-hint">{formatMessage({ id: "pages.integrationInvite.callbackLabel" })}</div>
                     <div className="break-all font-mono font-bold">{getDomain(invite.client.returnUrl, formatMessage({ id: "pages.integrationInvite.notConfigured" }))}</div>
                   </div>
                   <div>
-                    <div className="font-bold text-black/45">{formatMessage({ id: "pages.integrationInvite.inviteExpiryLabel" })}</div>
+                    <div className="font-bold text-foreground-hint">{formatMessage({ id: "pages.integrationInvite.inviteExpiryLabel" })}</div>
                     <div className="font-bold">{invite.link.expiresAt ? formatDate(invite.link.expiresAt) : formatMessage({ id: "pages.integrationInvite.noExpiry" })}</div>
                   </div>
                 </div>
@@ -185,7 +184,7 @@ export default function IntegrationInvitePage() {
 
               <RequestedScopeConsent
                 scopes={invite.client.allowedScopes?.length ? invite.client.allowedScopes : DEFAULT_DECLARED_OAUTH_SCOPES}
-                className="border-2 border-black bg-brutal-cream p-4"
+                className="rounded-md border border-line-muted bg-layer-inset p-4 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream"
               />
 
               {invite.manageableServers.length === 0 ? (
@@ -193,7 +192,7 @@ export default function IntegrationInvitePage() {
                   {formatMessage({ id: "pages.integrationInvite.needAdmin" })}
                 </Banner>
               ) : (
-                <div className="border-2 border-black bg-white p-4 shadow-brutal-sm">
+                <div className="rounded-md border border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
                   <SectionEyebrow as="div">{formatMessage({ id: "pages.integrationInvite.installTargetLabel" })}</SectionEyebrow>
                   <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
                     <div className="min-w-0">
@@ -215,12 +214,12 @@ export default function IntegrationInvitePage() {
                       </Select>
                     </div>
                     {selectedServer?.installedAt ? (
-                      <Button type="button" onClick={() => navigate(`/s/${selectedServer.slug}/settings`)} size="lg" shape="iconText" className="w-full md:w-auto">
+                      <Button type="button" onClick={() => navigate(`/s/${selectedServer.slug}/settings`)} size="lg" className="w-full md:w-auto">
                         <ExternalLink size={14} />
                         {formatMessage({ id: "pages.integrationInvite.openSettings" })}
                       </Button>
                     ) : (
-                      <Button type="button" onClick={() => void install()} disabled={installing || !selectedServerId} size="lg" tone="pink" shape="iconText" className="w-full md:w-auto">
+                      <Button type="button" onClick={() => void install()} disabled={installing || !selectedServerId} size="lg" variant="accent" className="w-full md:w-auto">
                         <Check size={14} />
                         {installing ? formatMessage({ id: "pages.integrationInvite.installing" }) : formatMessage({ id: "pages.integrationInvite.installApp" })}
                       </Button>

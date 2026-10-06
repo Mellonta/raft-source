@@ -2,14 +2,17 @@ import {
   BasicTracer,
   type ActiveSpan,
   type CompletedTraceSpan,
+  type EmitEventOptions,
   type EndSpanOptions,
   type StartSpanOptions,
   type TraceAttributes,
   type TraceEvent,
+  type TraceLogEvent,
   type TraceSink,
   type TraceStatus,
   type Tracer,
 } from "@botiverse/raft-shared";
+import { getActiveTraceContext } from "./activeSpan";
 
 /**
  * Discriminator for the emitting process. Force-injected as `source` attr
@@ -71,6 +74,10 @@ export interface TraceClientEndSpanOptions extends Omit<EndSpanOptions, "attrs">
   attrs?: TraceClientAttrs;
 }
 
+export interface TraceClientEmitEventOptions extends Omit<EmitEventOptions, "attrs"> {
+  attrs?: TraceClientAttrs;
+}
+
 /**
  * Type-tightened `ActiveSpan` for trace-client callers. `end()` rejects
  * caller-supplied `source` at compile time. Note: `addEvent` keeps the
@@ -94,6 +101,7 @@ export interface TraceClientActiveSpan extends Omit<ActiveSpan, "end"> {
  */
 export interface TraceClient {
   startSpan(name: string, options: TraceClientStartSpanOptions): TraceClientActiveSpan;
+  emitEvent(name: string, options: TraceClientEmitEventOptions): void;
 }
 
 /**
@@ -114,6 +122,16 @@ export class MultiSink implements TraceSink {
     for (const sink of this.sinks) {
       try {
         sink.record(span);
+      } catch (err) {
+        this.onSinkError?.(sink, err);
+      }
+    }
+  }
+
+  recordLogEvent(event: TraceLogEvent): void {
+    for (const sink of this.sinks) {
+      try {
+        sink.recordLogEvent?.(event);
       } catch (err) {
         this.onSinkError?.(sink, err);
       }
@@ -177,6 +195,14 @@ class SourceForcingTracer implements TraceClient {
     const innerSpan = this.inner.startSpan(name, { ...options, attrs });
     // Wrap to also lock `source` against end-time override.
     return new SourceForcingActiveSpan(innerSpan);
+  }
+
+  emitEvent(name: string, options: TraceClientEmitEventOptions): void {
+    // Same `source` rule as spans. When the caller gives no parent, attach
+    // the event to the span that is active right now, if any.
+    const attrs: TraceAttributes = { ...options.attrs, source: this.source };
+    const parent = options.parent === undefined ? getActiveTraceContext() : options.parent;
+    this.inner.emitEvent(name, { ...options, attrs, parent });
   }
 }
 

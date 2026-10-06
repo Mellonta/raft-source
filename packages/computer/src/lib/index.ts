@@ -82,15 +82,15 @@
 //   is the publishing-side gate; `lint:boundaries` is the in-repo
 //   sibling gate.
 
-export { ComputerError, isComputerError } from "./errors.js";
-export { createComputerApi } from "./api.js";
+export { ComputerError, isComputerError } from "./errors";
+export { createComputerApi } from "./api";
 export {
   convergeAppHostLifecycle,
   convergeCliHostLifecycle,
   readHostLifecycleMarker,
   removeHostLifecycle,
   resolveStableDispatcherPath,
-} from "../macosLoginCarrier.js";
+} from "../macosLoginCarrier";
 export type {
   AppHostLifecycleDeps,
   HostLifecycleConvergenceResult,
@@ -99,50 +99,15 @@ export type {
   HostLifecycleRemovalDeps,
   HostLifecycleRemovalResult,
   MacosHostLifecycleDeps,
-} from "../macosLoginCarrier.js";
-export { createComputerTracer } from "./computerTracer.js";
-export type { ComputerApi, ListWorkspacesResult, WorkspaceEntry } from "./api.js";
-export {
-  COMPUTER_DIAGNOSTICS_REVIEW_DETAIL,
-  deriveComputerAffordances,
-  deriveTrayHealth,
-  deriveWorkspaceAffordanceState,
-  getComputerActionConfirmation,
-  semverGreater as semverGreaterForComputerAffordances,
-} from "./affordances.js";
-export type {
-  ComputerAccountAffordance,
-  ComputerActionConfirmation,
-  ComputerAffordanceInput,
-  ComputerAffordanceRisk,
-  ComputerAffordances,
-  ComputerBlockedAffordance,
-  ComputerSurfaceAction,
-  ComputerTrayHealth,
-  ComputerUrlHint,
-  WorkspaceAffordance,
-  WorkspaceAffordanceState,
-} from "./affordances.js";
-export {
-  COMPUTER_ACTION_DESCRIPTORS,
-  COMPUTER_ACTION_IDS,
-  getComputerActionAvailability,
-  getComputerActionAvailabilityMap,
-} from "./actions.js";
-export type {
-  ComputerActionAvailability,
-  ComputerActionAvailabilityInput,
-  ComputerActionDescriptor,
-  ComputerActionId,
-  ComputerActionRoute,
-  ComputerActionUnavailableReason,
-} from "./actions.js";
+} from "../macosLoginCarrier";
+export { createComputerTracer } from "./computerTracer";
+export type { ComputerApi, ListWorkspacesResult, WorkspaceEntry } from "./api";
 export {
   ensureUsableUserSession,
   hasUnexpiredUserSessionShape,
   refreshUserSession,
-} from "./userSession.js";
-export type { UsableUserSession } from "./userSession.js";
+} from "./userSession";
+export type { UsableUserSession } from "./userSession";
 export type {
   ComputerActiveSpan,
   ComputerEndSpanOptions,
@@ -154,12 +119,12 @@ export type {
   ComputerTraceSpanKind,
   ComputerTraceStatus,
   ComputerTraceSurface,
-} from "./traceTypes.js";
+} from "./traceTypes";
 // The unified interactive-command event sink (login/attach/start/stop
 // typed steps + setup/upgrade `log.line` prose). Downstream presenters (CLI
 // `present()`, the menu-bar app) switch on `event.kind` to render — it is part
 // of the public library contract, not CLI text.
-export type { ComputerApiEvent } from "./events.js";
+export type { ComputerApiEvent } from "./events";
 
 export {
   IPC_ERROR_CODES,
@@ -169,7 +134,7 @@ export {
   ServiceClientError,
   STATE_READER_ERROR_CODES,
   StateReaderError,
-} from "./types.js";
+} from "./types";
 export type {
   ComputerStatusReport,
   ConnectService,
@@ -198,39 +163,37 @@ export type {
   ServiceEvent,
   ServiceStatusResult,
   StateReaderErrorCode,
-  UpgradeCompletedEvent,
-  UpgradeProgressEvent,
   UpgradeStartParams,
   UpgradeStartResult,
-} from "./types.js";
+} from "./types";
 
-export { adjudicate, collectDetectionEvidence, detectLegacyMigration } from "./migration.js";
-export type { LegacyMachineRosterClient, LegacyMachineRosterClientFactory, MigrationDetectionEvidence } from "./migration.js";
-export { LegacyMachinesClient } from "../apiClient.js";
-export type { LegacyMachineRosterEntry, LegacyMachineRosterResult } from "../apiClient.js";
-export { ServersClient } from "../apiClient.js";
-export type { UserServerEntry, UserServersResult } from "../apiClient.js";
+export { adjudicate, collectDetectionEvidence, detectLegacyMigration } from "./migration";
+export type { LegacyMachineRosterClient, LegacyMachineRosterClientFactory, MigrationDetectionEvidence } from "./migration";
+export { LegacyMachinesClient } from "../apiClient";
+export type { LegacyMachineRosterEntry, LegacyMachineRosterResult } from "../apiClient";
+export { ServersClient } from "../apiClient";
+export type { UserServerEntry, UserServersResult } from "../apiClient";
 export {
   MIGRATION_FRESH_TRIGGERS,
   pickMigrationCandidateFromInput,
-} from "../setup.js";
-export type { MigrationFreshTrigger, PickerSelection } from "../setup.js";
-export { listRunners, readRunnerStatus, readServiceStatus } from "./readers.js";
+} from "../setup";
+export type { MigrationFreshTrigger, PickerSelection } from "../setup";
+export { listRunners, readRunnerStatus, readServiceStatus } from "./readers";
 
 export {
   RUNNER_STATE_VALUES,
   SERVICE_STATE_VALUES,
   isRunnerState,
   isServiceState,
-} from "./state.js";
-export type { RunnerState, ServiceState } from "./state.js";
+} from "./state";
+export type { RunnerState, ServiceState } from "./state";
 
 // §4 IPC transport — `connectService(installRoot)` opens a typed-RPC client
 // to the running Computer service. With the §3/§4 service-side seam wired
 // in `service.ts`, this is the canonical entry point for downstream
 // consumers (Electron app, future SDKs) that want the same lib-pure
 // handlers the CLI hits — no execFile shell-out.
-export { connectService } from "./ipc-client.js";
+export { connectService } from "./ipc-client";
 
 // Domain service primitives — the lower-level service entry points
 // (`login` / `attach` / etc.) hang off `createComputerApi(slockHome)` now
@@ -242,29 +205,29 @@ export { connectService } from "./ipc-client.js";
 // We keep the input / result types re-exported so consumers can name the
 // method's argument / return shapes statically (e.g. for typed UI form
 // state) without dynamic-importing a deep path.
-export type { LoginInput, LoginResult } from "../services/login.js";
-export type { AttachInput, AttachResult } from "../services/attach.js";
+export type { LoginInput, LoginResult } from "../services/login";
+export type { AttachInput, AttachResult } from "../services/attach";
 export type {
   DiagnosticsPushFailReason,
   DiagnosticsPushInput,
   DiagnosticsPushResult,
-} from "../services/diagnosticsPush.js";
-export { ComputerServiceError } from "../services/errors.js";
+} from "../services/diagnosticsPush";
+export { ComputerServiceError } from "../services/errors";
 
 // Path helpers shared by CLI and GUI adapters. `resolveRaftHome` is the
 // canonical home resolver; consumers must not fork env precedence / `~`
 // expansion or CLI and app can end up controlling different supervisors.
 // `userSessionPath` is exposed so consumers that need to read the session
 // directly don't have to reconstruct the path.
-export { resolveRaftHome, userSessionPath } from "../paths.js";
-export { withComputerMutationLock } from "../concurrency.js";
-export { resolveServerUrl, resolveServerUrlEnv } from "../serverUrl.js";
+export { resolveRaftHome, userSessionPath } from "../paths";
+export { withComputerMutationLock } from "../concurrency";
+export { resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
 
 // Local computer version — bake-time injected via an otherwise-absent bundler
 // identifier, falling back to the package.json version. Same value the daemon reports
 // upstream as `computerVersion`. Surface so menubar/other clients can
 // display the running version next to a CDN-resolved "latest" check.
-export { COMPUTER_VERSION } from "../version.js";
+export { COMPUTER_VERSION } from "../version";
 
 // CDN base + latest-version probe. The default base is what install.sh and
 // the upgrade pipeline use; consumers wanting to surface a "v X.Y.Z (Update
@@ -272,7 +235,7 @@ export { COMPUTER_VERSION } from "../version.js";
 // and compare against `COMPUTER_VERSION`. Returns null on any failure
 // (network, bad JSON, missing field) — caller decides whether to surface
 // "no update info" silently.
-export { DEFAULT_UPGRADE_BASE_URL, fetchCdnLatestVersion } from "../computerRelease.js";
+export { DEFAULT_UPGRADE_BASE_URL, fetchCdnLatestVersion } from "../computerRelease";
 
 // Resident service entry points — the same `runService` / `runResident` the
 // CLI's `__service` / `__run` hidden commands dispatch to. Exposed so any
@@ -283,4 +246,7 @@ export { DEFAULT_UPGRADE_BASE_URL, fetchCdnLatestVersion } from "../computerRele
 // (e.g. Electron, where argv[1] is `main.js` and `__service` is ignored)
 // silently re-launch the GUI instead of starting the supervisor.
 // (#wg-raft-computer:f2a02081 BUG 5.)
-export { runService, runResident } from "../service.js";
+export { runService, runResident } from "../service";
+
+// Shared bootstrap launcher for standalone Computer consumers.
+export { installerArgs, installerCommand } from "../externalInstaller";

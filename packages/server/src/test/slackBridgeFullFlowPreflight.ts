@@ -24,7 +24,6 @@ export type SlackBridgeFullFlowPreflightGate =
   | "binding"
   | "membership"
   | "oracle"
-  | "author_policy"
   | "flags"
   | "baseline"
   | "network_fence";
@@ -128,7 +127,6 @@ export interface SlackBridgeFullFlowPreflightInput {
     bindingEpoch: number;
     privacyClass: string;
     providerConversationId: string;
-    consentRevision: number;
   };
   membership: {
     registrationId: string;
@@ -153,18 +151,6 @@ export interface SlackBridgeFullFlowPreflightInput {
     inboundGreen: boolean;
     outboundGreen: boolean;
     expiresAt: string;
-  };
-  authorPolicy: {
-    serverId: string;
-    provider: string;
-    registrationId: string;
-    installId: string;
-    bindingId: string;
-    bindingEpoch: number;
-    authorId: string;
-    displayName: string;
-    consentRevision: number;
-    state: string;
   };
   flags: {
     configRevision: number;
@@ -315,7 +301,6 @@ export function runSlackBridgeFullFlowPreflight(input: SlackBridgeFullFlowPrefli
     || input.binding.bindingEpoch <= 0
     || input.binding.privacyClass !== "public"
     || !input.binding.providerConversationId
-    || input.binding.consentRevision <= 0
   ) fail("binding");
   if (
     input.membership.registrationId !== input.registration.id
@@ -341,18 +326,6 @@ export function runSlackBridgeFullFlowPreflight(input: SlackBridgeFullFlowPrefli
     || !input.oracle.outboundGreen
     || !isFutureBeyondMargin(input.oracle.expiresAt, capturedAtMs)
   ) fail("oracle");
-  if (
-    input.authorPolicy.serverId !== input.audience.serverId
-    || input.authorPolicy.provider !== "slack"
-    || input.authorPolicy.registrationId !== input.registration.id
-    || input.authorPolicy.installId !== input.install.id
-    || input.authorPolicy.bindingId !== input.binding.id
-    || input.authorPolicy.bindingEpoch !== input.binding.bindingEpoch
-    || input.authorPolicy.authorId !== input.identity.userId
-    || input.authorPolicy.displayName !== input.identity.displayName
-    || input.authorPolicy.consentRevision !== input.binding.consentRevision
-    || input.authorPolicy.state !== "granted"
-  ) fail("author_policy");
   if (
     input.flags.configRevision <= 0
     || REQUIRED_FLAGS.some((key) => input.flags.enabled[key] !== true)

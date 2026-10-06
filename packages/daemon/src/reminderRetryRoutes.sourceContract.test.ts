@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { test } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -271,12 +270,24 @@ test("Reminder App Inbox routes remain a closed set with caught failure boundari
     "#appInboxForAgent",
   );
   const managerCallNames = managerCalls.map(functionName).sort();
-  for (const required of ["drainAppInboxAfterIdleTransition", "notifyAgentAppInbox", "startAgentNow"]) {
+  for (const required of [
+    "drainAppInboxAfterIdleTransition",
+    "notifyAgentAppInbox",
+    "spawnAgentProcess",
+    "takeAppInboxNoticeForStartInput",
+    "wakeForAppInboxNoticeAfterTurn",
+  ]) {
     assert.equal(managerCallNames.includes(required), true, `HARNESS-BROKEN: ${required} App Inbox route disappeared`);
   }
   assert.deepEqual(
     managerCallNames,
-    ["drainAppInboxAfterIdleTransition", "notifyAgentAppInbox", "startAgentNow"],
+    [
+      "drainAppInboxAfterIdleTransition",
+      "notifyAgentAppInbox",
+      "spawnAgentProcess",
+      "takeAppInboxNoticeForStartInput",
+      "wakeForAppInboxNoticeAfterTurn",
+    ],
     "all AgentProcessManager App Inbox calls must remain in the enumerated caught routes",
   );
   assert.deepEqual(
@@ -295,6 +306,10 @@ test("Reminder App Inbox routes remain a closed set with caught failure boundari
     const owner = functionName(call);
     if (owner === "drainAppInboxAfterIdleTransition") {
       assert.equal(isInsideTryBlock(call), true, "idle runtime-event App Inbox read must stay inside its catch boundary");
+    } else if (owner === "takeAppInboxNoticeForStartInput" || owner === "wakeForAppInboxNoticeAfterTurn") {
+      // Sync reads on the start path and in process-exit handling: a store
+      // failure must neither fail the agent's start nor escape exit handling.
+      assert.equal(isInsideTryBlock(call), true, `${owner} App Inbox read must stay inside its catch boundary`);
     } else {
       assert.equal(isAsyncFunction(call), true, `${owner} App Inbox failure must project as a caught Promise rejection`);
     }
@@ -305,7 +320,7 @@ test("Reminder App Inbox routes remain a closed set with caught failure boundari
   assert.equal(reminderCalls.length >= 1, true, "HARNESS-BROKEN: Reminder Inbox materialization route disappeared");
   assert.deepEqual(
     reminderCalls.map(functionName),
-    ["materializeFire"],
+    ["presentFire"],
     "Reminder Inbox materialization must remain on the one budgeted async route",
   );
   assert.equal(

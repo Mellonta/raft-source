@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import type { ReactElement } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -174,7 +173,7 @@ test("notifications.muted threads {serverName} after saving a server mute", asyn
     `Stops web push notifications from ${SERVER_NAME} for your account. Other servers are unchanged.`,
   )).closest("label") as HTMLElement;
   const checkbox = within(muteLabel).getByRole("checkbox");
-  await waitFor(() => assert.equal((checkbox as HTMLInputElement).disabled, false));
+  await waitFor(() => assert.equal(checkbox.hasAttribute("data-disabled"), false));
 
   fireEvent.click(checkbox); // check → serverPushMuted true, enables Save
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -195,8 +194,8 @@ test("notifications.unmuted threads {serverName} after clearing a server mute", 
   const muteLabel = (await screen.findByText(
     `Stops web push notifications from ${SERVER_NAME} for your account. Other servers are unchanged.`,
   )).closest("label") as HTMLElement;
-  const checkbox = within(muteLabel).getByRole("checkbox") as HTMLInputElement;
-  await waitFor(() => assert.equal(checkbox.checked, true));
+  const checkbox = within(muteLabel).getByRole("checkbox");
+  await waitFor(() => assert.equal(checkbox.getAttribute("aria-checked"), "true"));
 
   fireEvent.click(checkbox); // uncheck → serverPushMuted false, enables Save
   fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -309,7 +308,7 @@ test("connectedApps.byLine threads {category},{developer} in list + detail modal
 
   // Occurrence 2 — marketplace listing detail modal.
   fireEvent.click(screen.getByText(APP_NAME));
-  const modal = (await screen.findByText("Profile")).closest(".card-brutal") as HTMLElement;
+  const modal = (await screen.findByText("Profile")).closest('[data-slot="card"]') as HTMLElement;
   const modalByLine = within(modal).getByText(byLine);
   assertResolved(modalByLine.textContent, {
     contains: [APP_CATEGORY, APP_DEVELOPER],

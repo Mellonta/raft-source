@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { program } from "./cli.js";
+import { program } from "./cli";
 
 function visibleCommands(command = program): typeof program[] {
   return command.commands

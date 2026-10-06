@@ -1,8 +1,7 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 import type { Response } from "express";
 import { asMachineId, asServerId } from "@botiverse/raft-shared";
-import { parseBrandedUuidFromBody } from "./brandedParse.js";
+import { parseBrandedUuidFromBody } from "./brandedParse";
 
 function fakeRes(): { res: Response; calls: { status?: number; json?: unknown } } {
   const calls: { status?: number; json?: unknown } = {};

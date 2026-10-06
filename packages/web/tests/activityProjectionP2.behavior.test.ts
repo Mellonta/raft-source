@@ -18,7 +18,6 @@
  *   so bypassing the canonical narrow or choosing arbitrary metadata is red.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
 import type { ActivityWindowAuthority } from "../src/store/activityPanel/windowAuthority";
 import {
   buildActivityPanelWindowBundle,

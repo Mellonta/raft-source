@@ -2,12 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   FeedbackProvider,
   FeedbackWorkspace,
-} from "@botiverse/hands-feedback-react/source";
+} from "@botiverse/hands-feedback-react";
 import type {
   FeedbackWorkspaceNavigationOptions,
   FeedbackWorkspaceRoute,
-} from "@botiverse/hands-feedback-react/source";
-import { Download, X } from "lucide-react";
+} from "@botiverse/hands-feedback-react";
+import { Download, MessageSquare, X } from "lucide-react";
 import {
   Button,
   Lightbox,
@@ -18,6 +18,7 @@ import {
   LightboxStage,
   LightboxTitle,
   LightboxToolbar,
+  useThemeFamily,
 } from "raft-ui";
 import { useIntl } from "react-intl";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -27,6 +28,8 @@ import { useMediaQuery } from "../../hooks/effectPrimitives";
 import { useMobileBack } from "../../hooks/useAppNavigate";
 import { useLocale } from "../../i18n/LocaleProvider";
 import Banner from "../ui/Banner";
+import PanelHeader from "../ui/PanelHeader";
+import Tooltip from "../ui/Tooltip";
 
 const FEEDBACK_SETTINGS_SEGMENT = "/settings/feedback";
 
@@ -101,6 +104,7 @@ function attachmentFilename(headers: unknown, fallback: string): string {
 export default function AboutFeedbackPanel() {
   const { locale } = useLocale();
   const { formatMessage } = useIntl();
+  const themeFamily = useThemeFamily();
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useMediaQuery("(max-width: 767px)");
@@ -108,11 +112,16 @@ export default function AboutFeedbackPanel() {
     () => feedbackWorkspaceBasePath(location.pathname),
     [location.pathname],
   );
+  const settingsBackPath = useMemo(
+    () => feedbackBasePath.replace(/\/settings\/feedback$/, "/settings"),
+    [feedbackBasePath],
+  );
   const pathRoute = useMemo(
     () => feedbackWorkspaceRouteFromPath(location.pathname),
     [location.pathname],
   );
-  const onMobileBack = useMobileBack(feedbackBasePath);
+  const onSettingsBack = useMobileBack(settingsBackPath);
+  const onWorkspaceBack = useMobileBack(feedbackBasePath);
   const controlledRoute =
     isMobile || pathRoute.view !== "inbox" ? pathRoute : undefined;
   const [attachmentError, setAttachmentError] = useState(false);
@@ -189,16 +198,32 @@ export default function AboutFeedbackPanel() {
   ) => {
     if (nextRoute.view === "inbox") {
       if (feedbackWorkspaceRouteFromPath(location.pathname).view !== "inbox")
-        onMobileBack();
+        onWorkspaceBack();
       return;
     }
     navigate(feedbackWorkspacePath(feedbackBasePath, nextRoute), {
       replace: options?.replace,
     });
-  }, [feedbackBasePath, location.pathname, navigate, onMobileBack]);
+  }, [feedbackBasePath, location.pathname, navigate, onWorkspaceBack]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-layer-primary">
+    <div className="slock-feedback-panel flex h-full min-h-0 flex-col bg-layer-primary">
+      <PanelHeader
+        title={formatMessage({ id: "settings.about.feedbackTitle" })}
+        icon={<MessageSquare size={18} />}
+        iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
+        containerProps={{
+          "data-testid": "settings-feedback-panel-header",
+          "data-slock-settings-tab": "feedback",
+        }}
+        onMobileBack={pathRoute.view === "inbox" ? onSettingsBack : undefined}
+        mobileBackProps={pathRoute.view === "inbox"
+          ? {
+              "data-testid": "settings-feedback-mobile-back",
+              title: formatMessage({ id: "settings.tabs.back" }),
+            }
+          : undefined}
+      />
       {attachmentError && (
         <Banner intent="warning" density="sm" className="mx-4 mt-3" role="alert">
           {formatMessage({ id: "settings.about.feedbackAttachmentOpenError" })}
@@ -207,11 +232,12 @@ export default function AboutFeedbackPanel() {
       <div className="min-h-0 flex-1">
         <FeedbackProvider
           transport={handsFeedbackTransport}
-          theme="brutal"
+          theme={themeFamily === "brutal" ? "brutal" : "elegant"}
           locale={locale === "zh-cn" ? "zh-CN" : "en"}
         >
           <FeedbackWorkspace
             enablePullToRefresh={isMobile}
+            hideHeaderTitle
             {...(controlledRoute
               ? {
                   route: controlledRoute,
@@ -234,21 +260,25 @@ export default function AboutFeedbackPanel() {
             <LightboxToolbar>
               <LightboxTitle>{attachmentPreview.filename}</LightboxTitle>
               <LightboxActions>
+                <Tooltip content={formatMessage({ id: "common.lightbox.download" })}>
                 <Button
                   aria-label={formatMessage({ id: "common.lightbox.download" })}
-                  title={formatMessage({ id: "common.lightbox.download" })}
+                  data-slot="button"
                   size="icon-md"
                   variant="outline"
                   onClick={downloadAttachment}
                 >
                   <Download aria-hidden="true" size={16} />
                 </Button>
+                </Tooltip>
+                <Tooltip content={formatMessage({ id: "common.lightbox.close" })}>
                 <LightboxClose
                   aria-label={formatMessage({ id: "common.lightbox.close" })}
-                  title={formatMessage({ id: "common.lightbox.close" })}
+                  data-slot="lightbox-close"
                 >
                   <X aria-hidden="true" size={16} />
                 </LightboxClose>
+                </Tooltip>
               </LightboxActions>
             </LightboxToolbar>
             <LightboxStage>

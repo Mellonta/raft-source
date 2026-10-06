@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import test from "node:test";
 
 import * as presentation from "../src/lib/oauthScopePresentation";
 import { OAUTH_SCOPE_PRESENTATION, scopeGroupLabelId } from "../src/lib/oauthScopePresentation";

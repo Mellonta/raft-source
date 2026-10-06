@@ -5,14 +5,18 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { test } from "vitest";
 import WebSocket from "ws";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import { classifyDaemonConnectionTraceEvent, DaemonConnection } from "./connection.js";
-import type { Clock } from "./connection.js";
-import type { MachineToServerMessage, ServerToMachineMessage, TraceStatus } from "@botiverse/raft-shared";
-import { FakeClock } from "./testing/drydock.js";
-import { subscribeDaemonLogs } from "./logger.js";
+import { classifyDaemonConnectionTraceEvent, DaemonConnection } from "./connection";
+import type { Clock } from "./connection";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
+import { createTraceClient, LocalRotatingTraceSink } from "@botiverse/raft-trace-client";
+import type { MachineToServerMessage, ServerToMachineMessage, Tracer, TraceStatus } from "@botiverse/raft-shared";
+import { FakeClock } from "./testing/drydock";
+import { subscribeDaemonLogs } from "./logger";
 
 type WebSocketOptions = import("ws").ClientOptions;
 
@@ -71,6 +75,7 @@ function makeConnection(opts: {
   proxyEnv?: NodeJS.ProcessEnv;
   clock?: Clock;
   autoOpen?: boolean;
+  tracer?: Tracer;
 } = {}): {
   conn: DaemonConnection;
   getWs: () => FakeWebSocket;
@@ -84,12 +89,14 @@ function makeConnection(opts: {
   let currentWsUrl: string | undefined;
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: opts.serverUrl ?? "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: opts.onMessage ?? (() => {}),
     onConnect: opts.onConnect ?? (() => {}),
     onDisconnect: opts.onDisconnect ?? (() => {}),
     onTraceEvent: opts.onTraceEvent,
+    tracer: opts.tracer,
     inboundWatchdogMs: opts.inboundWatchdogMs ?? 50,
     connectTimeoutMs: opts.connectTimeoutMs,
     minReconnectDelayMs: opts.minReconnectDelayMs ?? 1000,
@@ -114,6 +121,11 @@ function makeConnection(opts: {
     getWsOptions: () => currentWsOptions,
     getWsUrl: () => currentWsUrl,
   };
+}
+
+/** Send `ready` the way DaemonCore does; status/activity replay waits for it (RFC 069 §8). */
+function sendReady(conn: DaemonConnection) {
+  conn.send({ type: "ready", capabilities: [], runtimes: [], runningAgents: [] } as unknown as MachineToServerMessage);
 }
 
 /** Wait for the open event to have fired (i.e., the watchdog to have started). */
@@ -251,8 +263,10 @@ test("DaemonConnection connect timeout is cleared on open and disconnect", () =>
 
 test("DaemonConnection emits diagnostic trace events for connect drops and reconnect", async () => {
   const traceEvents: Array<{ name: string; attrs?: Record<string, unknown>; status?: TraceStatus }> = [];
+  const sink = new MemoryTraceSink();
   const { conn, getWs } = makeConnection({
     onTraceEvent: (name, attrs, status) => traceEvents.push({ name, attrs, status }),
+    tracer: new BasicTracer({ sink }),
     inboundWatchdogMs: 60,
   });
 
@@ -265,20 +279,22 @@ test("DaemonConnection emits diagnostic trace events for connect drops and recon
     traceEvents.map((event) => event.name),
     [
       "daemon.connection.outbound_dropped",
-      "daemon.connection.connecting",
-      "daemon.connection.connected",
       "daemon.connection.disconnected",
       "daemon.connection.reconnect_scheduled",
     ],
   );
   assert.equal(traceEvents[0].attrs?.outbound_message_kind, "pong");
-  assert.equal(traceEvents[1].attrs?.server_url_present, true);
-  assert.equal(traceEvents[2].attrs?.reconnect_attempt, 0);
-  assert.equal(traceEvents[3].attrs?.close_code, 1006);
-  assert.equal(traceEvents[3].attrs?.reconnecting, true);
-  assert.equal(traceEvents[3].status, "cancelled");
-  assert.equal(traceEvents[4].attrs?.reconnect_attempt, 1);
-  const reconnectClassification = classifyDaemonConnectionTraceEvent(traceEvents[4].name, traceEvents[4].attrs);
+  assert.equal(traceEvents[0].attrs?.reason, "not_replayable");
+  const [connectSpan] = sink.getAllSpans().filter((span) => span.name === "daemon.connection.connect");
+  assert.equal(connectSpan?.status, "ok");
+  assert.equal(connectSpan?.attrs?.server_url_present, true);
+  assert.equal(connectSpan?.attrs?.reconnect_attempt, 0);
+  assert.equal(connectSpan?.attrs?.outcome, "connected");
+  assert.equal(traceEvents[1].attrs?.close_code, 1006);
+  assert.equal(traceEvents[1].attrs?.reconnecting, true);
+  assert.equal(traceEvents[1].status, "cancelled");
+  assert.equal(traceEvents[2].attrs?.reconnect_attempt, 1);
+  const reconnectClassification = classifyDaemonConnectionTraceEvent(traceEvents[2].name, traceEvents[2].attrs);
   assert.equal(reconnectClassification?.eventClass, "control_plane_reconnect");
   assert.equal(reconnectClassification?.shouldAffectRuntimeState, false);
 
@@ -286,9 +302,9 @@ test("DaemonConnection emits diagnostic trace events for connect drops and recon
 });
 
 test("DaemonConnection records non-ping inbound messages with closed message kind", async () => {
-  const traceEvents: Array<{ name: string; attrs?: Record<string, unknown>; status?: TraceStatus }> = [];
+  const sink = new MemoryTraceSink();
   const { conn, getWs } = makeConnection({
-    onTraceEvent: (name, attrs, status) => traceEvents.push({ name, attrs, status }),
+    tracer: new BasicTracer({ sink }),
     inboundWatchdogMs: 60,
   });
 
@@ -296,12 +312,55 @@ test("DaemonConnection records non-ping inbound messages with closed message kin
   await waitForOpen();
   getWs().receiveMessage({ type: "agent:start" } as unknown as ServerToMachineMessage);
 
-  const inbound = traceEvents.find((event) => event.name === "daemon.connection.inbound_received");
+  const inbound = sink.getAllSpans().find((span) => span.name === "daemon.connection.inbound");
+  assert.equal(inbound?.status, "ok");
+  assert.equal(inbound?.kind, "consumer");
   assert.equal(inbound?.attrs?.inbound_message_kind, "agent:start");
-  assert.equal(inbound?.attrs?.last_inbound_age_ms_bucket, "0");
   assert.equal(Object.hasOwn(inbound?.attrs ?? {}, "message_type"), false);
 
   conn.disconnect();
+});
+
+test("the daemon fact id never reaches the local trace file through daemon.agent.activity.sent (task #423)", async () => {
+  // Real LocalRotatingTraceSink + JSONL read-back: the fact id is scrubbed as
+  // producer_fact_id by the sink, so the only way it can land is under another
+  // allowed key. Before this fix it did, as correlation_id.
+  const machineDir = await mkdtemp(path.join(os.tmpdir(), "slock-daemon-sent-correlation-"));
+  try {
+    const tracer = createTraceClient({
+      source: "daemon",
+      sinks: [new LocalRotatingTraceSink({ machineDir, maxFileBytes: 1024 * 1024, maxFiles: 4 })],
+    });
+    const { conn } = makeConnection({
+      // Same wiring as DaemonCore.recordDaemonEvent.
+      onTraceEvent: (name, attrs, status) => tracer.emitEvent(name, { surface: "daemon", attrs: { ...attrs, status } }),
+      inboundWatchdogMs: 60,
+    });
+    const factId = "daemon_activity:agent-1:launch-1:7";
+    conn.connect();
+    await waitForOpen();
+    sendReady(conn);
+    conn.send({
+      type: "agent:activity",
+      agentId: "agent-1",
+      activity: "working",
+      detail: "",
+      launchId: "launch-1",
+      clientSeq: 7,
+      producerFactId: factId,
+    });
+    conn.disconnect();
+
+    const dir = path.join(machineDir, "traces");
+    const raw = (await Promise.all((await readdir(dir)).map((file) => readFile(path.join(dir, file), "utf8")))).join("\n");
+    const sent = raw.split("\n").filter(Boolean).map((line) => JSON.parse(line) as { name?: string; attrs?: Record<string, unknown> })
+      .filter((record) => record.name === "daemon.agent.activity.sent");
+    assert.equal(sent.length, 1, "the sent span must reach the file (positive control)");
+    assert.equal(sent[0]!.attrs?.correlation_id, "agent:agent-1:daemonActivity:launch-1:7");
+    assert.equal(raw.includes(factId), false, "the fact id must not appear anywhere in the trace file");
+  } finally {
+    await rm(machineDir, { recursive: true, force: true });
+  }
 });
 
 test("DaemonConnection traces agent:activity sent spans with emit-side join keys", async () => {
@@ -324,6 +383,7 @@ test("DaemonConnection traces agent:activity sent spans with emit-side join keys
 
   conn.connect();
   await waitForOpen();
+  sendReady(conn);
   conn.send(activity);
 
   const sent = traceEvents.find((event) => event.name === "daemon.agent.activity.sent");
@@ -333,9 +393,18 @@ test("DaemonConnection traces agent:activity sent spans with emit-side join keys
   assert.equal(sent.attrs?.launch_id_present, true);
   assert.equal(sent.attrs?.client_seq, 7);
   assert.equal(sent.attrs?.client_seq_present, true);
-  assert.equal(sent.attrs?.producer_fact_id, "daemon_activity:agent-1:launch-1:7");
-  assert.equal(sent.attrs?.producer_fact_id_present, true);
-  assert.equal(sent.attrs?.correlation_id, "daemon_activity:agent-1:launch-1:7");
+  // #422 item 3: neither the fact id nor a flag about it is emitted any more.
+  // The wire message still carries it (see `activity` above), so this asserts
+  // the emit site drops it rather than the fixture simply not supplying it.
+  assert.ok(!("producer_fact_id" in (sent.attrs ?? {})), "the fact id is a banned join key (#460)");
+  assert.ok(!("producerFactId" in (sent.attrs ?? {})), "…in either spelling");
+  assert.ok(
+    !("producer_fact_id_present" in (sent.attrs ?? {})),
+    "and a flag for a scrubbed value would claim a field the record does not carry",
+  );
+  // The fact id is a banned join key (#460): correlation_id must never carry
+  // it, whatever the wire message holds (task #423).
+  assert.equal(sent.attrs?.correlation_id, "agent:agent-1:daemonActivity:launch-1:7");
   assert.equal(sent.attrs?.entry_kinds, "tool_start");
   assert.equal(sent.attrs?.send_path, "websocket_open");
 
@@ -371,6 +440,7 @@ test("DaemonConnection logs Slock-Reason for rejected WebSocket handshakes", asy
 
   try {
     const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
       serverUrl: "http://localhost:9999",
       apiKey: "sk_machine_secret_should_not_log",
       onMessage: () => {},
@@ -445,6 +515,7 @@ test("DaemonConnection stops retrying a migrated legacy key and prints setup rec
   }
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_migrated",
     onMessage: () => {},
@@ -543,6 +614,7 @@ test("watchdog reconnect path is deterministic with FakeClock", async () => {
   let disconnectCount = 0;
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -593,6 +665,7 @@ test("watchdog timeout traces last inbound message kind and age", async () => {
   const traceEvents: Array<{ name: string; attrs?: Record<string, unknown>; status?: TraceStatus }> = [];
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -646,6 +719,7 @@ test("message just before watchdog deadline extends the window deterministically
   const sockets: FakeWebSocket[] = [];
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -687,6 +761,7 @@ test("answered watchdog probe keeps an otherwise idle connection alive", async (
   const sockets: FakeWebSocket[] = [];
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -725,6 +800,7 @@ test("outbound-only traffic does not mask an inbound black-hole", async () => {
   const sockets: FakeWebSocket[] = [];
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -777,6 +853,7 @@ test("replacement socket can stabilize after a watchdog reconnect once inbound t
   const sockets: FakeWebSocket[] = [];
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -822,6 +899,7 @@ test("disconnect cancels a scheduled reconnect deterministically", async () => {
   const sockets: FakeWebSocket[] = [];
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -851,6 +929,7 @@ test("reconnect backoff doubles after consecutive failures and resets after a su
   const sockets: FakeWebSocket[] = [];
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -899,6 +978,7 @@ test("connect() is idempotent while already connecting, connected, or waiting to
   const sockets: FakeWebSocket[] = [];
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -938,6 +1018,7 @@ test("late close from a stale socket does not disturb the active replacement con
   let disconnectCount = 0;
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -976,6 +1057,7 @@ test("late message from a stale socket does not reset the active socket watchdog
   const sockets: FakeWebSocket[] = [];
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -1016,6 +1098,7 @@ test("reconnect backoff caps at the maximum delay deterministically", async () =
   const sockets: FakeWebSocket[] = [];
 
   const conn = new DaemonConnection({
+    reconnectDelayFor: (backoffMs: number) => backoffMs,
     serverUrl: "http://localhost:9999",
     apiKey: "sk_machine_test",
     onMessage: () => {},
@@ -1265,6 +1348,67 @@ test("does not replay an old-launch invalidation after a newer launch reuses the
   conn.disconnect();
 });
 
+test("replays each agent's latest status and activity only after ready, in client-sequence order (RFC 069 §8)", async () => {
+  const { conn, getWs } = makeConnection({});
+
+  conn.send({ type: "agent:status", agentId: "agent-1", status: "active", launchId: "launch-1", daemonInstanceId: "d-1", clientSeq: 1 });
+  conn.send({ type: "agent:activity", agentId: "agent-1", activity: "working", detail: "Running", launchId: "launch-1", clientSeq: 2 });
+  // The runtime exits while disconnected: this status is the one that must survive.
+  conn.send({ type: "agent:status", agentId: "agent-1", status: "inactive", launchId: "launch-1", daemonInstanceId: "d-1", clientSeq: 3 });
+  conn.send({ type: "agent:status", agentId: "agent-2", status: "active", launchId: "launch-2", daemonInstanceId: "d-1", clientSeq: 1 });
+
+  conn.connect();
+  await waitForOpen();
+  // The server pins this connection's daemon instance id from `ready`; a
+  // status that reached it first would be classified as unsequenced.
+  conn.send({ type: "agent:status", agentId: "agent-2", status: "inactive", launchId: "launch-2", daemonInstanceId: "d-1", clientSeq: 2 });
+  // Activity waits too: before `ready` the server lets it drive agent state.
+  conn.send({ type: "agent:activity", agentId: "agent-3", activity: "working", detail: "Running", launchId: "launch-3", clientSeq: 1 });
+  assert.deepEqual(getWs().sent, []);
+
+  sendReady(conn);
+  conn.send({ type: "agent:status", agentId: "agent-1", status: "active", launchId: "launch-1b", daemonInstanceId: "d-1", clientSeq: 4 });
+
+  const sent = getWs().sent.map((payload) => JSON.parse(payload) as { type: string; agentId?: string; status?: string; clientSeq?: number });
+  assert.deepEqual(
+    sent.map((msg) => [msg.type, msg.agentId ?? null, msg.status ?? null, msg.clientSeq ?? null]),
+    [
+      ["ready", null, null, null],
+      ["agent:activity", "agent-1", null, 2],
+      ["agent:status", "agent-1", "inactive", 3],
+      ["agent:activity", "agent-3", null, 1],
+      ["agent:status", "agent-2", "inactive", 2],
+      ["agent:status", "agent-1", "active", 4],
+    ],
+  );
+});
+
+test("holds status again on a new socket until that socket's ready (RFC 069 §8)", async () => {
+  const { conn, getWs } = makeConnection({});
+
+  conn.connect();
+  await waitForOpen();
+  sendReady(conn);
+  conn.send({ type: "agent:status", agentId: "agent-1", status: "active", launchId: "launch-1", daemonInstanceId: "d-1", clientSeq: 1 });
+  assert.deepEqual(getWs().sent.map((payload) => (JSON.parse(payload) as { type: string }).type), ["ready", "agent:status"]);
+
+  conn.disconnect();
+  conn.connect();
+  await waitForOpen();
+  conn.send({ type: "agent:status", agentId: "agent-1", status: "inactive", launchId: "launch-1", daemonInstanceId: "d-1", clientSeq: 2 });
+  assert.deepEqual(getWs().sent, []);
+
+  sendReady(conn);
+  assert.deepEqual(
+    getWs().sent.map((payload) => {
+      const msg = JSON.parse(payload) as { type: string; status?: string };
+      return [msg.type, msg.status ?? null];
+    }),
+    [["ready", null], ["agent:status", "inactive"]],
+  );
+  conn.disconnect();
+});
+
 test("replays latest dropped agent activity per agent after reconnect", async () => {
   const traceEvents: Array<{ name: string; attrs?: Record<string, unknown>; status?: TraceStatus }> = [];
   const { conn, getWs } = makeConnection({
@@ -1301,16 +1445,24 @@ test("replays latest dropped agent activity per agent after reconnect", async ()
 
   conn.connect();
   await waitForOpen();
+  sendReady(conn);
 
-  const replayed = getWs().sent.map((payload) => JSON.parse(payload) as { type: string; agentId?: string; activity?: string; detail?: string; launchId?: string; clientSeq?: number; producerFactId?: string });
+  const replayed = getWs().sent.slice(1).map((payload) => JSON.parse(payload) as { type: string; agentId?: string; activity?: string; detail?: string; launchId?: string; clientSeq?: number; producerFactId?: string });
   assert.deepEqual(replayed, [
     { type: "agent:activity", agentId: "agent-1", activity: "error", detail: "Startup timed out", launchId: "launch-1", clientSeq: 2, producerFactId: "daemon_activity:agent-1:launch-1:2" },
     { type: "agent:activity", agentId: "agent-2", activity: "offline", detail: "Stopped", launchId: "launch-2", clientSeq: 1, producerFactId: "daemon_activity:agent-2:launch-2:1" },
   ]);
   assert.equal(
     traceEvents.filter((event) => event.name === "daemon.connection.outbound_dropped").length,
-    3,
-    "each disconnected send should still be traced as dropped",
+    0,
+    "a replayable activity frame is queued, not dropped",
+  );
+  const queuedTraces = traceEvents.filter((event) => event.name === "daemon.connection.outbound_queued");
+  assert.equal(queuedTraces.length, 3, "each disconnected activity send is traced as queued");
+  assert.deepEqual(
+    queuedTraces.map((event) => [event.attrs?.agentId, event.attrs?.replaced_pending, event.attrs?.launch_id_present]),
+    [["agent-1", false, true], ["agent-1", true, true], ["agent-2", false, true]],
+    "the second agent-1 frame replaces the pending one (latest per agent kept)",
   );
   const replayTrace = traceEvents.find((event) => event.name === "daemon.connection.outbound_replayed");
   assert.equal(replayTrace?.attrs?.outbound_message_kind, "agent:activity");
@@ -1322,7 +1474,6 @@ test("replays latest dropped agent activity per agent after reconnect", async ()
       agentId: event.attrs?.agent_id,
       launchId: event.attrs?.launch_id,
       clientSeq: event.attrs?.client_seq,
-      producerFactId: event.attrs?.producer_fact_id,
       sendPath: event.attrs?.send_path,
     })),
     [
@@ -1330,14 +1481,12 @@ test("replays latest dropped agent activity per agent after reconnect", async ()
         agentId: "agent-1",
         launchId: "launch-1",
         clientSeq: 2,
-        producerFactId: "daemon_activity:agent-1:launch-1:2",
         sendPath: "replay",
       },
       {
         agentId: "agent-2",
         launchId: "launch-2",
         clientSeq: 1,
-        producerFactId: "daemon_activity:agent-2:launch-2:1",
         sendPath: "replay",
       },
     ],
@@ -1372,9 +1521,15 @@ test("drops pending activity when disconnected lifecycle observes a new launch",
 
   assert.deepEqual(getWs().sent, [], "superseded old-launch activity should not replay on reconnect");
   assert.equal(
-    traceEvents.filter((event) => event.name === "daemon.connection.outbound_dropped").length,
-    2,
-    "both disconnected sends should still be traced as dropped",
+    traceEvents.filter((event) => event.name === "daemon.connection.outbound_queued").length,
+    1,
+    "the activity frame was queued at send time",
+  );
+  const dropped = traceEvents.filter((event) => event.name === "daemon.connection.outbound_dropped");
+  assert.deepEqual(
+    dropped.map((event) => [event.attrs?.outbound_message_kind, event.attrs?.reason]),
+    [["agent:session", "not_replayable"]],
+    "only the non-replayable session message is traced as dropped",
   );
   const invalidated = traceEvents.find((event) => event.name === "daemon.connection.pending_activity_invalidated");
   assert.equal(invalidated?.attrs?.reason, "launch_changed");
@@ -1387,4 +1542,22 @@ test("drops pending activity when disconnected lifecycle observes a new launch",
   );
 
   conn.disconnect();
+});
+
+// task #1129: a queued activity frame must not be logged as "Dropping" — that
+// wording sent an investigation after lost evidence that was in fact replayed.
+test("disconnected activity send logs as queued for replay, not as dropped", async () => {
+  const logs: string[] = [];
+  const unsubscribe = subscribeDaemonLogs((event) => logs.push(event.message));
+  try {
+    const { conn } = makeConnection({});
+    conn.send({ type: "agent:activity", agentId: "agent-1", activity: "working", detail: "x", launchId: "launch-1", clientSeq: 1 });
+    conn.send({ type: "pong" });
+    assert.ok(logs.some((line) => line.includes("Queued outbound agent:activity for replay while disconnected")), logs.join("\n"));
+    assert.ok(!logs.some((line) => line.includes("Dropping outbound message while disconnected") && line.includes("agent:activity")), logs.join("\n"));
+    assert.ok(logs.some((line) => line.includes("Dropping outbound message while disconnected (no replay path): pong")), logs.join("\n"));
+    conn.disconnect();
+  } finally {
+    unsubscribe();
+  }
 });

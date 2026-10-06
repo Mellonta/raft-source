@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { RuntimeProgressState } from "./runtimeProgressState.js";
+import { RuntimeProgressState } from "./runtimeProgressState";
 
 test("runtime progress state records runtime events and clears stale latch", () => {
   const state = new RuntimeProgressState(100);
@@ -38,4 +37,17 @@ test("runtime progress state computes age from last event", () => {
   const state = new RuntimeProgressState(100);
 
   assert.equal(state.ageMs(350), 250);
+});
+
+test("runtime progress state: stall age anchors on turn start, last-event age does not", () => {
+  const state = new RuntimeProgressState(0);
+  state.noteRuntimeEvent("turn_end", 1_000);
+  state.noteTurnStarted(100_000);
+
+  assert.equal(state.ageMs(100_500), 500, "stall age counts from the later turn start");
+  assert.equal(state.lastEventAgeMs(100_500), 99_500, "last_event_age_* telemetry keeps its literal meaning");
+
+  state.noteRuntimeEvent("tool_output", 200_000);
+  assert.equal(state.ageMs(200_100), 100, "a newer runtime event wins over an older turn start");
+  assert.equal(state.lastEventAgeMs(200_100), 100);
 });

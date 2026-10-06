@@ -1,10 +1,9 @@
 // Snapshot-style tests for agent-facing server info output format.
 // Pins the exact text shape matching MCP list_server output.
 
-import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { formatChannelMembers, formatServerInfo } from "./_format.js";
+import { formatChannelMembers, formatServerInfo } from "./_format";
 
 test("formatServerInfo: full server with channels, agents, humans", () => {
   const out = formatServerInfo({
@@ -34,6 +33,7 @@ test("formatServerInfo: full server with channels, agents, humans", () => {
       { name: "general", type: "channel", joined: true, activityMuted: true, description: "General discussion" },
       { name: "engineering", type: "private", joined: true, muted: false },
       { name: "random", type: "channel", joined: false, description: "Off-topic" },
+      { name: "partners", type: "joint", joined: true, description: "Shared with another server" },
       { name: "system.reminder", type: "dm", joined: true, description: "Reminder app" },
     ],
     agents: [
@@ -75,6 +75,7 @@ test("formatServerInfo: full server with channels, agents, humans", () => {
   assert.match(out, /#general \[public, joined, muted\] — General discussion/);
   assert.match(out, /#engineering \[private, joined, not muted\]/);
   assert.match(out, /#random \[public, not joined\] — Off-topic/);
+  assert.match(out, /#partners \[joint, joined\] — Shared with another server/);
   assert.match(out, /dm:@system\.reminder \[private, joined\] — Reminder app/);
   assert.match(out, /### Agents/);
   assert.match(out, /@akko \(online\) \(admin\) — runtime IC/);

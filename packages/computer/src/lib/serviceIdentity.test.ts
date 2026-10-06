@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 
-import { servicePidPath, serviceVersionPath } from "../paths.js";
-import { publishServiceIdentityAfterIpcBind } from "./serviceIdentity.js";
+import { servicePidPath, serviceVersionPath } from "../paths";
+import { publishServiceIdentityAfterIpcBind } from "./serviceIdentity";
 
 async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "raft-service-identity-"));

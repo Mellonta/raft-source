@@ -1,11 +1,10 @@
 // Executed only by lifecycle.contract.test.ts with its own Vitest config.
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
-import { afterEach } from "vitest";
 import { sql } from "drizzle-orm";
-import { apiTest } from "./apiTest.js";
-import { isDatabaseInitialized, registerDatabaseCloseHookForTests } from "../../db/index.js";
-import { openTestDatabase } from "./database.js";
+import { apiTest } from "./apiTest";
+import { isDatabaseInitialized, registerDatabaseCloseHookForTests } from "../../db/index";
+import { openTestDatabase } from "./database";
 
 const mode = process.env.INTEGRATION_PROBE;
 let previousApp: { server: { listening: boolean } } | undefined;
@@ -52,7 +51,6 @@ apiTest("successor", async ({ db }) => {
 });
 
 // Uses ordinary Vitest afterAll because a poisoned integration scope refuses entry.
-import { afterAll } from "vitest";
 afterAll(() => {
   assert.equal(isDatabaseInitialized(), false);
   assert.equal(previousApp?.server.listening, false);

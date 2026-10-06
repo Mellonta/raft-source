@@ -1,4 +1,4 @@
-import { logger } from "./logger.js";
+import { logger } from "./logger";
 
 export const DEFAULT_CHAT_BRIDGE_TOOL_TIMEOUT_MS = Number.parseInt(
   process.env.SLOCK_CHAT_BRIDGE_TOOL_TIMEOUT_MS || "",
@@ -19,6 +19,39 @@ export class ChatBridgeToolTimeoutError extends Error {
     this.timeoutMs = timeoutMs;
     this.durationMs = durationMs;
   }
+}
+
+/**
+ * A non-2xx answer from a JSON endpoint. Raised from the STATUS, before the
+ * body is parsed: proxies and body parsers answer with HTML error pages, and
+ * parsing those first turned e.g. a 413 into "Unexpected token '<'".
+ */
+export class HttpStatusError extends Error {
+  readonly status: number;
+  readonly toolName: string;
+  /** The `error` string of a JSON error body, when there was one. */
+  readonly serverError: string | null;
+
+  constructor(toolName: string, status: number, serverError: string | null) {
+    super(`${toolName} failed with HTTP ${status}${serverError ? `: ${serverError}` : ""}`);
+    this.name = "HttpStatusError";
+    this.status = status;
+    this.toolName = toolName;
+    this.serverError = serverError;
+  }
+}
+
+async function readErrorBodyMessage(response: Response): Promise<string | null> {
+  try {
+    const text = await response.text();
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && typeof (parsed as { error?: unknown }).error === "string") {
+      return (parsed as { error: string }).error.slice(0, 300);
+    }
+  } catch {
+    // Not JSON (an HTML error page, an empty body): the status says it all.
+  }
+  return null;
 }
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -63,6 +96,9 @@ export async function executeJsonRequest<T>(
 
   try {
     const response = await fetchImpl(url, { ...init, signal });
+    if (!response.ok) {
+      throw new HttpStatusError(toolName, response.status, await readErrorBodyMessage(response));
+    }
     const data = await response.json() as T;
     return { response, data, durationMs: now() - startedAt };
   } catch (err) {

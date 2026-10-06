@@ -40,6 +40,7 @@ export type TransportRouteFamily =
   | "tasks"
   | "tasks/claim"
   | "tasks/update"
+  | "threads"
   | "threads/unfollow"
   | "unknown";
 
@@ -102,7 +103,7 @@ export function routeFamilyForPath(pathname: string): TransportRouteFamily {
   if (normalized === "/internal/agent-api/send") return "agent-api/send";
   if (normalized === "/internal/agent-api/activity") return "agent-api/activity";
   if (normalized === "/internal/agent-api/events") return "agent-api/events";
-  if (normalized === "/internal/agent-api/inbox") return "agent-api/inbox";
+  if (normalized === "/internal/agent-api/inbox" || normalized.startsWith("/internal/agent-api/inbox/")) return "agent-api/inbox";
   if (normalized === "/internal/agent-api/tasks/claim") return "tasks/claim";
   if (normalized === "/internal/agent-api/tasks/update-status") return "tasks/update";
   if (normalized === "/internal/agent-api/tasks" || normalized.startsWith("/internal/agent-api/tasks/")) {
@@ -127,6 +128,7 @@ export function routeFamilyForPath(pathname: string): TransportRouteFamily {
   if (normalized === "/internal/agent-api/integrations" || normalized.startsWith("/internal/agent-api/integrations/")) return "integrations";
   if (normalized === "/internal/agent-api/upload") return "attachments/upload";
   if (normalized === "/internal/agent-api/resolve-channel") return "resolve-channel";
+  if (normalized === "/internal/agent-api/threads") return "threads";
   if (normalized === "/internal/agent-api/threads/unfollow") return "threads/unfollow";
   if (normalized === "/internal/agent-api/prepare-action") return "action/prepare";
   if (normalized === "/internal/agent-api/reminders" || normalized.startsWith("/internal/agent-api/reminders/")) return "reminders";
@@ -150,7 +152,9 @@ export function routeFamilyForPath(pathname: string): TransportRouteFamily {
     if (firstAfterAgentId === "integrations") return "integrations";
     if (firstAfterAgentId === "upload") return "attachments/upload";
     if (firstAfterAgentId === "resolve-channel") return "resolve-channel";
-    if (firstAfterAgentId === "threads") return "threads/unfollow";
+    if (firstAfterAgentId === "threads") {
+      return normalized.endsWith("/threads/unfollow") ? "threads/unfollow" : "threads";
+    }
     if (firstAfterAgentId === "prepare-action") return "action/prepare";
     if (firstAfterAgentId === "tasks") {
       if (normalized.endsWith("/tasks/claim")) return "tasks/claim";

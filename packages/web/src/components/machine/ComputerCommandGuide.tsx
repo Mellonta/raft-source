@@ -1,6 +1,7 @@
+import Tooltip from "../ui/Tooltip";
+import { Badge, SegmentedControl, SegmentedControlItem, SegmentedControlLabel, CopyableCodeRoot, CopyableCode, CopyableCodeAction } from "raft-ui";
 import { useState } from "react";
-import { Check, Copy, Terminal } from "lucide-react";
-import { Badge, SegmentedControl, SegmentedControlItem, SegmentedControlLabel } from "raft-ui";
+import { Terminal } from "lucide-react";
 import { useIntl } from "react-intl";
 import type { ComputerCommandPlatform } from "../../utils/computerSetupCommand";
 import SectionEyebrow from "../ui/SectionEyebrow";
@@ -11,32 +12,18 @@ interface ComputerCommandGuideProps {
   windowsComputerCommand?: string | null;
   windowsComputerInstallCommand?: string | null;
   className?: string;
-  macLinuxDaemonCommand: string;
-  windowsDaemonCommand: string;
   onPlatformChange?: (platform: ComputerCommandPlatform) => void;
-  onRequestWindowsDaemonCommand?: () => void;
-  windowsDaemonCommandPending?: boolean;
-  /**
-   * Offer the legacy Daemon path alongside the Computer one. Default true, because the
-   * Computers page still has legitimate reasons to reach it.
-   *
-   * FRESH ONBOARDING PASSES FALSE (#5254 / task #197). A legacy daemon connect creates only a
-   * raw `machines` row, which can never satisfy the managed `computers` attachment the setup
-   * projection requires — so during onboarding it is not an alternative route, it is a
-   * guaranteed dead end that leaves the person unable to finish setup. Removing it there stops
-   * new arrivals walking into it; it does not repair anyone already in that state (Computer
-   * tasks #399/#400 own the terminal failure signal and the raw-machine recovery).
-   */
-  showLegacyDaemon?: boolean;
 }
+
+// Raft Computer is the only connect path. The standalone daemon connect
+// command is retired: the daemon is no longer published on its own and this
+// guide never offers it (docs/operations/computer-release-version.md).
 
 type CopyTarget =
   | "mac-linux-install"
   | "mac-linux-setup"
   | "windows-install"
-  | "windows-setup"
-  | "mac-linux-daemon"
-  | "windows-daemon";
+  | "windows-setup";
 
 interface CommandStep {
   target: CopyTarget;
@@ -82,27 +69,27 @@ function CommandRows({
 }: {
   steps: readonly CommandStep[];
   copiedCommand: CopyTarget | null;
-  onCopy: (target: CopyTarget, command: string) => void;
+  onCopy: (target: CopyTarget) => void;
 }) {
   return (
     <div className="space-y-3">
-      {steps.map(({ target, label, command, copyCommand, copyAriaLabel }) => (
+      {steps.map(({ target, label, command, copyAriaLabel }) => (
         <div key={target}>
-          {label ? <div className="mb-1 text-xs font-bold text-black/60">{label}</div> : null}
-          <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 border-2 border-black bg-black px-3 py-2 font-mono text-xs text-brutal-lime shadow-brutal-sm break-all">
+          {label ? <div className="mb-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{label}</div> : null}
+          <CopyableCodeRoot
+            copied={copiedCommand === target}
+            onCopy={() => onCopy(target)}
+          >
+            <CopyableCode className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all">
               {command}
-            </code>
-            <button
-              type="button"
-              onClick={() => onCopy(target, copyCommand ?? command)}
-              className="btn-brutal-sm shrink-0 bg-white px-2 py-1.5"
-              title={copyAriaLabel}
-              aria-label={copyAriaLabel}
-            >
-              {copiedCommand === target ? <Check size={14} /> : <Copy size={14} />}
-            </button>
-          </div>
+            </CopyableCode>
+            <Tooltip content={copyAriaLabel}>
+              <CopyableCodeAction
+                aria-label={copyAriaLabel}
+                className="shrink-0"
+              />
+            </Tooltip>
+          </CopyableCodeRoot>
         </div>
       ))}
     </div>
@@ -115,12 +102,7 @@ export default function ComputerCommandGuide({
   windowsComputerCommand = null,
   windowsComputerInstallCommand = null,
   className = "",
-  macLinuxDaemonCommand,
-  windowsDaemonCommand,
   onPlatformChange,
-  onRequestWindowsDaemonCommand,
-  windowsDaemonCommandPending = false,
-  showLegacyDaemon = true,
 }: ComputerCommandGuideProps) {
   const { formatMessage } = useIntl();
   const [platform, setPlatform] = useState<ComputerCommandPlatform>("mac-linux");
@@ -149,37 +131,19 @@ export default function ComputerCommandGuide({
       copyAriaLabel: formatMessage({ id: "machine.commandGuide.copyComputerCliCommand" }),
     }]
     : selectedComputerSteps;
-  const selectedDaemonCommand = platform === "windows" ? windowsDaemonCommand : macLinuxDaemonCommand;
-  const displayDaemonCommand = selectedDaemonCommand.replace(
-    /--api-key\s+(sk_machine_\S+)/,
-    (_, key: string) => `--api-key ${key.slice(0, 14)}••••${key.slice(-4)}`,
-  );
-  const daemonCopyTarget: CopyTarget = platform === "windows" ? "windows-daemon" : "mac-linux-daemon";
 
-  const handleCopy = async (target: CopyTarget, command: string) => {
-    await navigator.clipboard.writeText(command);
+  const handleCopy = (target: CopyTarget) => {
     setCopiedCommand(target);
     setTimeout(() => {
       setCopiedCommand((current) => (current === target ? null : current));
     }, 2000);
   };
 
-  const requestWindowsDaemonCommand = () => onRequestWindowsDaemonCommand?.();
-
-  const selectedDaemonStep: CommandStep = {
-    target: daemonCopyTarget,
-    command: displayDaemonCommand,
-    copyCommand: selectedDaemonCommand,
-    copyAriaLabel: platform === "windows"
-      ? formatMessage({ id: "machine.commandGuide.copyWindowsDaemonCommand" })
-      : formatMessage({ id: "machine.commandGuide.copyDaemonCommand" }),
-  };
-
   return (
     <div className={className}>
       <div className="mb-2 flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
         <div className="flex items-center gap-2">
-          <Terminal size={16} className="text-black" />
+          <Terminal size={16} className="text-foreground-strong theme-brutal:text-black" />
           <SectionEyebrow as="div">{formatMessage({ id: "machine.commandGuide.connectCommand" })}</SectionEyebrow>
         </div>
         <SegmentedControl<ComputerCommandPlatform>
@@ -204,71 +168,31 @@ export default function ComputerCommandGuide({
         </SegmentedControl>
       </div>
 
-      <p className="mb-2 text-xs leading-5 text-black/60">
-        {isComputerGuide
-          ? platform === "windows"
-            ? formatMessage({ id: "machine.commandGuide.windowsComputerDescription" })
-            : computerCommand
+      <p className="mb-2 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+        {isComputerGuide && platform === "windows"
+          ? formatMessage({ id: "machine.commandGuide.windowsComputerDescription" })
+          : isComputerGuide && computerCommand
             ? formatMessage({ id: "machine.commandGuide.macLinuxComputerDescription" })
-            : formatMessage({ id: "machine.commandGuide.generateFreshConnect" })
-          : platform === "windows"
-            ? formatMessage({ id: "machine.commandGuide.windowsDaemonDescription" })
-            : formatMessage({ id: "machine.commandGuide.macLinuxDaemonDescription" })}
+            : formatMessage({ id: "machine.commandGuide.generateFreshConnect" })}
       </p>
 
       {isComputerGuide && platform === "windows" ? (
-        <div className="space-y-4">
-          <div className="space-y-3" data-testid="windows-computer-command-block">
+        <div className="space-y-3" data-testid="windows-computer-command-block">
             <div className="flex flex-wrap items-center gap-2">
-              <div className="text-xs font-bold uppercase tracking-wide text-black/70">
+              <div className="text-xs font-bold uppercase tracking-wide text-foreground-muted theme-brutal:text-black/70">
                 {formatMessage({ id: "machine.commandGuide.raftComputerWindowsX64" })}
               </div>
               <Badge.Experimental />
             </div>
-            {displayedComputerSteps.length > 0 ? (
-              <CommandRows
-                steps={displayedComputerSteps}
-                copiedCommand={copiedCommand}
-                onCopy={(target, command) => void handleCopy(target, command)}
-              />
-            ) : (
-              <div className="border-2 border-black/30 bg-white px-3 py-2 text-xs font-bold text-black/50">
-                {formatMessage({ id: "machine.commandGuide.generateFreshComputerConnect" })}
-              </div>
-            )}
-          </div>
-
-          {!showLegacyDaemon ? null : (
-            <div className="border-t-2 border-black/20 pt-3" data-testid="windows-daemon-command-block">
-              <div className="mb-1 text-xs font-bold uppercase tracking-wide text-black/70">
-                {formatMessage({ id: "machine.commandGuide.daemonLegacy" })}
-              </div>
-              <p className="mb-2 text-xs leading-5 text-black/55">
-                {formatMessage({ id: "machine.commandGuide.daemonLegacyDescription" })}
-              </p>
-              {windowsDaemonCommand ? (
-                <CommandRows
-                  steps={[selectedDaemonStep]}
-                  copiedCommand={copiedCommand}
-                  onCopy={(target, command) => void handleCopy(target, command)}
-                />
-              ) : onRequestWindowsDaemonCommand ? (
-                <button
-                  type="button"
-                  onClick={requestWindowsDaemonCommand}
-                  disabled={windowsDaemonCommandPending}
-                  className="btn-brutal-sm bg-white px-3 py-1.5 disabled:cursor-wait disabled:opacity-60"
-                  data-testid="computer-windows-daemon-request"
-                >
-                  {windowsDaemonCommandPending
-                    ? formatMessage({ id: "machine.commandGuide.preparing" })
-                    : formatMessage({ id: "machine.commandGuide.showLegacyDaemonCommand" })}
-                </button>
-              ) : (
-                <div className="border-2 border-black/30 bg-white px-3 py-2 text-xs font-bold text-black/50">
-                  {formatMessage({ id: "machine.commandGuide.generateFreshDaemonConnect" })}
-                </div>
-              )}
+          {displayedComputerSteps.length > 0 ? (
+            <CommandRows
+              steps={displayedComputerSteps}
+              copiedCommand={copiedCommand}
+              onCopy={(target) => handleCopy(target)}
+            />
+          ) : (
+            <div className="border-2 border-line-muted theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white px-3 py-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/50">
+              {formatMessage({ id: "machine.commandGuide.generateFreshComputerConnect" })}
             </div>
           )}
         </div>
@@ -276,28 +200,10 @@ export default function ComputerCommandGuide({
         <CommandRows
           steps={displayedComputerSteps}
           copiedCommand={copiedCommand}
-          onCopy={(target, command) => void handleCopy(target, command)}
+          onCopy={(target) => handleCopy(target)}
         />
-      ) : selectedDaemonCommand && showLegacyDaemon ? (
-        <CommandRows
-          steps={[selectedDaemonStep]}
-          copiedCommand={copiedCommand}
-          onCopy={(target, command) => void handleCopy(target, command)}
-        />
-      ) : platform === "windows" && onRequestWindowsDaemonCommand && showLegacyDaemon ? (
-        <button
-          type="button"
-          onClick={requestWindowsDaemonCommand}
-          disabled={windowsDaemonCommandPending}
-          className="btn-brutal-sm bg-white px-3 py-1.5 disabled:cursor-wait disabled:opacity-60"
-          data-testid="computer-windows-daemon-request"
-        >
-          {windowsDaemonCommandPending
-            ? formatMessage({ id: "machine.commandGuide.preparing" })
-            : formatMessage({ id: "machine.commandGuide.generateLegacyDaemonCommand" })}
-        </button>
       ) : (
-        <div className="border-2 border-black/30 bg-white px-3 py-2 text-xs font-bold text-black/50">
+        <div className="border-2 border-line-muted theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white px-3 py-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/50">
           {formatMessage({ id: "machine.commandGuide.generateFreshConnect" })}
         </div>
       )}

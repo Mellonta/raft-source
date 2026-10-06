@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildOpenCodeConfig, buildOpenCodeLaunchOptions, detectOpenCodeModelSource, detectOpenCodeModels, isSupportedOpenCodeVersion, MIN_SUPPORTED_OPENCODE_VERSION, OpenCodeDriver, parseOpenCodeModelsOutput, requiresAgentCliFlag, resolveOpenCodeSpawn, runOpenCodeModelsCommand, unsupportedOpenCodeVersionMessage } from "./opencode.js";
-import type { SpawnContext } from "./types.js";
+import { buildOpenCodeConfig, buildOpenCodeLaunchOptions, detectOpenCodeModelSource, detectOpenCodeModels, isSupportedOpenCodeVersion, MIN_SUPPORTED_OPENCODE_VERSION, OpenCodeDriver, parseOpenCodeModelsOutput, requiresAgentCliFlag, resolveOpenCodeSpawn, runOpenCodeModelsCommand, unsupportedOpenCodeVersionMessage } from "./opencode";
+import type { SpawnContext } from "./types";
 
 function withTempDir(cb: (dir: string) => void) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "slock-opencode-"));

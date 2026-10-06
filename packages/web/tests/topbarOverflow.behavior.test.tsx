@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { createElement } from "react";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor, within } from "@testing-library/react";
@@ -7,6 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import api from "../src/api/client";
 import ChannelMembers from "../src/components/agent/ChannelMembers";
 import ChatPanel from "../src/components/message/ChatPanel";
+import { settleFirstPageLoadMessages } from "./helpers/firstPageStub";
 import EditChannelDialog from "../src/components/channel/EditChannelDialog";
 import AgentDetailPanel from "../src/components/agent/AgentDetailPanel";
 import AgentProfileOverflowMenu from "../src/components/agent/AgentProfileOverflowMenu";
@@ -218,7 +218,7 @@ function seedBaseStores(channel: Channel, role: Server["role"] = "owner") {
     transientFocusRequest: null,
     unreadCounts: {},
     drafts: {},
-    loadMessages: async () => {},
+    loadMessages: settleFirstPageLoadMessages,
     loadMessageContext: async () => {},
     loadMessageWindowSilent: async () => {},
     loadOlderMessages: async () => {},
@@ -234,7 +234,7 @@ function mockApis({
   failBatchAdd = false,
   jointInviteError,
 }: {
-  flagEnabled: boolean;
+  flagEnabled?: boolean;
   roleActionsEnabled?: boolean;
   failBatchAdd?: boolean;
   jointInviteError?: string;
@@ -251,8 +251,9 @@ function mockApis({
   api.post = (async (url: string, body?: unknown) => {
     postCalls.push({ url, body });
     if (url === "/feature-flags/evaluate") {
+      assert.ok(!(body as { keys: string[] }).keys.includes(FLAG_KEY), "retired key must not be requested");
       return { data: { evaluations: [
-        { key: FLAG_KEY, enabled: flagEnabled },
+        ...(flagEnabled === undefined ? [] : [{ key: FLAG_KEY, enabled: flagEnabled }]),
         { key: CHANNEL_MANAGER_ROLE_ACTIONS_FLAG_KEY, enabled: roleActionsEnabled },
       ] } };
     }
@@ -322,42 +323,22 @@ afterEach(() => {
   useAuthStore.setState(useAuthStore.getInitialState(), true);
 });
 
-test("flag off keeps the legacy header action row and hides the overflow trigger", async () => {
-  const channel = makeChannel();
-  seedBaseStores(channel);
-  mockApis({ flagEnabled: false });
-  renderChatPanel(channel);
+for (const flagEnabled of [undefined, false]) {
+  test(`channel topbar and preferences remain usable with retired flag ${String(flagEnabled)}`, async () => {
+    const channel = makeChannel({ activityMuteSupported: true });
+    seedBaseStores(channel);
+    mockApis({ flagEnabled });
+    renderChatPanel(channel);
 
-  await waitFor(() => {
-    assert.ok(screen.getByTitle("Search this channel"));
+    fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
+    await screen.findByTestId("channel-overflow-sheet");
+    await waitFor(() => assert.ok(getCalls.some((url) => url.endsWith("/message-display-settings"))));
+    assert.ok(screen.getByTestId("channel-settings-preferences"));
+    assert.equal(screen.queryByTestId("channel-settings-sheet"), null);
   });
-  assert.ok(!screen.queryByTestId("channel-overflow-trigger"));
-});
+}
 
-test("flag off keeps the complete legacy settings surface and never loads the new display preference", async () => {
-  const channel = makeChannel({ activityMuteSupported: true, collapseLongMessages: false });
-  seedBaseStores(channel);
-  mockApis({ flagEnabled: false });
-  renderChatPanel(channel);
-
-  const edit = await screen.findByRole("button", { name: "Channel settings" });
-  await waitFor(() => {
-    assert.ok(getCalls.some((url) => url.endsWith("/notification-settings")));
-  });
-  assert.ok(
-    !getCalls.some((url) => url.endsWith("/message-display-settings")),
-    "flag off must not load a preference that only the gated UI can change",
-  );
-
-  fireEvent.click(edit);
-  await screen.findByTestId("channel-settings-sheet");
-  assert.equal(screen.queryByTestId("channel-settings-panel"), null);
-  assert.equal(screen.queryByTestId("channel-settings-preferences"), null);
-  assert.equal(screen.queryByTestId("channel-settings-save-inline"), null);
-  assert.equal(screen.queryByTestId("channel-settings-joint-invite-form"), null);
-});
-
-test("channel-manager role-action gate also hides promote in the legacy member surface", async () => {
+test("channel-manager role-action gate still hides promote after topbar retirement", async () => {
   const channel = makeChannel({
     channelRole: "admin",
     channelAdminBasis: "channel_role",
@@ -399,19 +380,19 @@ test("channel-manager role-action gate also hides promote in the legacy member s
   }) as typeof api.get;
   render(createElement(ChannelMembers, { channelId: channel.id }));
 
-  fireEvent.click(await screen.findByTitle("View participants"));
+  fireEvent.click(await screen.findByRole("button", { name: "View participants" }));
   await screen.findByText("peer");
   assert.ok(!screen.queryByRole("button", { name: "Make peer a channel admin" }));
   assert.ok(screen.getByRole("button", { name: "Remove peer" }));
 });
 
-test("flag on collapses channel actions into the overflow drawer", async () => {
+test("missing retired flag still collapses channel actions into the overflow drawer", async () => {
   const channel = makeChannel({ description: "Design collaboration" });
   seedBaseStores(channel);
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const searches: string[] = [];
   renderChatPanel(channel, (channelId) => searches.push(channelId));
 
@@ -455,9 +436,10 @@ test("flag on collapses channel actions into the overflow drawer", async () => {
   assert.ok(!sheet.contains(searchIcon));
   // Follow-up: Search is a sibling topbar action, not part of the Settings drawer.
   assert.equal(searchIcon.tagName, "BUTTON");
-  assert.ok(searchIcon.className.includes("btn-brutal-sm"));
+  assert.equal(searchIcon.getAttribute("data-slot"), "button");
   assert.ok(searchIcon.className.includes("size-7"));
-  assert.ok(searchIcon.className.includes("bg-white"));
+  // Topbar search/settings are outline, not primary.
+  assert.ok(!searchIcon.className.includes("bg-brutal-yellow"), "outline action is not a primary fill");
   assert.ok(searchIcon.querySelector("svg"));
   assert.ok(!searchIcon.textContent?.includes("Search this channel"));
   // The visible description shares the same identity stack as the title. If it
@@ -465,7 +447,8 @@ test("flag on collapses channel actions into the overflow drawer", async () => {
   // gap that no longer matches PanelHeader.
   const identityDescription = screen.getByTestId("channel-overflow-identity-desc");
   assert.ok(identityDescription.className.includes("font-mono"));
-  assert.ok(identityDescription.className.includes("text-black/50"));
+  assert.ok(identityDescription.className.includes("text-inherit"));
+  assert.ok(identityDescription.className.includes("opacity-85"));
   assert.ok(!identityDescription.className.includes("text-black/60"));
   assert.ok(!identityDescription.className.includes("mt-1"));
   const title = screen.getByTestId("overflow-sheet-title");
@@ -503,19 +486,19 @@ test("flag on collapses channel actions into the overflow drawer", async () => {
   // one medium-weight treatment. The required star stays intact.
   const membersHeading = screen.getByTestId("channel-overflow-members-heading");
   assert.equal(membersHeading.textContent, "Members");
-  assert.equal(membersHeading.className, "text-base font-bold text-black");
+  assert.equal(membersHeading.className, "text-base font-bold text-foreground-strong theme-brutal:text-black");
   const manageHeading = screen.getByTestId("channel-settings-manage-group");
   assert.equal(manageHeading.textContent?.trim(), "Info");
   assert.ok(manageHeading.className.includes("text-base"));
   assert.ok(manageHeading.className.includes("font-bold"));
-  assert.ok(manageHeading.className.includes("text-black"));
-  assert.ok(!manageHeading.className.includes("text-black/55"));
+  assert.ok(manageHeading.className.includes("text-foreground-strong"));
+  assert.ok(!manageHeading.className.includes("text-black"));
   const preferencesHeading = preferences.querySelector(":scope > h3")!;
   const lifecycleHeading = lifecycleGroup.querySelector(":scope > h3")!;
   assert.equal(preferencesHeading.textContent?.trim(), "Preferences");
   assert.equal(lifecycleHeading.textContent?.trim(), "Actions");
   for (const sectionHeading of [preferencesHeading, lifecycleHeading]) {
-    assert.equal(sectionHeading.className, "text-base font-bold text-black");
+    assert.equal(sectionHeading.className, "text-base font-bold text-foreground-strong");
   }
   assert.equal(screen.queryByTestId("channel-settings-info-title"), null);
   const infoDescription = screen.getByTestId("channel-settings-info-description");
@@ -524,16 +507,19 @@ test("flag on collapses channel actions into the overflow drawer", async () => {
   const nameLabel = screen.getByText("Name", { selector: "label" });
   assert.ok(nameLabel.parentElement?.className.includes("[&>label]:!font-medium"));
   assert.equal(nameLabel.querySelector("span")?.textContent, "*");
-  assert.ok(nameLabel.querySelector("span")?.className.includes("text-brutal-pink"));
+  assert.ok(nameLabel.querySelector("[data-slot=label-asterisk]")?.className.includes("text-accent-400"));
   const optionalMarker = screen.getByText("(optional)");
-  assert.ok(optionalMarker.className.includes("font-normal"));
-  assert.ok(optionalMarker.className.includes("text-black/40"));
+  assert.equal(optionalMarker.getAttribute("data-slot"), "label-optional");
+  assert.ok(optionalMarker.className.includes("normal-case"));
   // The inline information-form actions share the same compact 28px
   // primitive as the rest of Channel Settings; raw `.btn-brutal` padding
   // made this pair visibly taller than adjacent controls.
   for (const testId of ["channel-settings-discard-draft", "channel-settings-save-inline"]) {
     const button = screen.getByTestId(testId);
-    assert.ok(button.classList.contains("btn-brutal-sm"));
+    assert.equal(button.getAttribute("data-slot"), "button");
+    // The shell's data-shape went with it; both actions are RUI buttons now and
+    // the compact geometry below is what this contract actually guards.
+    assert.equal(button.tagName, "BUTTON");
     assert.ok(button.classList.contains("h-7"));
     assert.ok(button.classList.contains("text-xs"));
     assert.ok(!button.classList.contains("btn-brutal"));
@@ -546,7 +532,7 @@ test("flag on collapses channel actions into the overflow drawer", async () => {
     const label = document.getElementById(labelId)!;
     assert.ok(label.className.includes("text-sm"));
     assert.ok(label.className.includes("font-medium"));
-    assert.ok(label.className.includes("text-black"));
+    assert.ok(label.className.includes("text-foreground-strong"));
     assert.ok(!label.className.includes("font-bold"));
   }
   // Artea 2026-08-06: Channel info (management group) leads the panel,
@@ -629,7 +615,7 @@ test("flag on collapses channel actions into the overflow drawer", async () => {
 test("channel overflow header joins the panel height contract when no description is shown", async () => {
   const channel = makeChannel({ description: null });
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -652,7 +638,7 @@ test("long channel overflow titles truncate the name without clipping the visibi
     description: "Long description stays on its own subtitle row while the badge remains visible.",
   });
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -676,7 +662,7 @@ test("ordinary members can enter the add-members flow from the avatar strip", as
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "member", role: "member" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -695,7 +681,7 @@ test("#all owner cannot see or enter the add-members flow from the avatar strip"
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -706,6 +692,32 @@ test("#all owner cannot see or enter the add-members flow from the avatar strip"
   await screen.findByTestId("member-page");
   assert.equal(screen.queryByTestId("member-page-add"), null);
   assert.equal(screen.queryByTestId("add-member-confirm"), null);
+});
+
+test("joint channel settings show each server's plan and the server-limit rule", async () => {
+  const channel = makeChannel({
+    type: "joint",
+    jointServers: [
+      { serverId: "server-1", serverName: "Design", serverSlug: "design", role: "host", status: "active", isCurrentServer: true, plan: "free" },
+      { serverId: "server-2", serverName: "Partner Workspace", serverSlug: "partner", role: "participant", status: "active", plan: "paid" },
+      // Older servers send no plan: show no chip rather than guess.
+      { serverId: "server-3", serverName: "Legacy", serverSlug: "legacy", role: "participant", status: "active" },
+    ],
+  });
+  seedBaseStores(channel);
+  mockApis({});
+  renderChatPanel(channel);
+
+  fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
+  await screen.findByTestId("channel-overflow-sheet");
+
+  const rows = screen.getAllByTestId("channel-settings-joint-server-row");
+  assert.deepEqual(
+    rows.map((row) => within(row).queryByTestId("channel-settings-joint-server-plan")?.textContent ?? null),
+    // Pro, Founder and Partner all count as paid for the cap: one "Paid" chip.
+    ["Free", "Paid", null],
+  );
+  assert.ok(screen.getByRole("button", { name: "Each Joint Channel can have up to 30 servers, with 2 free-server slots" }));
 });
 
 test("joint channel settings reuse the flat channel drawer hierarchy", async () => {
@@ -739,7 +751,7 @@ test("joint channel settings reuse the flat channel drawer hierarchy", async () 
     }],
   });
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true, jointInviteError: "Target server not found" });
+  mockApis({ jointInviteError: "Target server not found" });
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -748,10 +760,12 @@ test("joint channel settings reuse the flat channel drawer hierarchy", async () 
   assert.equal(screen.getByTestId("channel-overflow-visibility-badge").textContent, "Joint Channel");
   const infoSection = screen.getByTestId("channel-settings-save-inline").closest("section");
   assert.ok(infoSection);
-  assert.match(infoSection.className, /border-b border-black\/10/);
+  assert.match(infoSection.className, /border-b border-line-muted\b/);
+  assert.match(infoSection.className, /theme-brutal:border-black\/10/);
   assert.doesNotMatch(infoSection.className, /border-b-2/);
   const jointSection = screen.getByTestId("channel-settings-joint-section");
-  assert.match(jointSection.className, /border-b border-black\/10/);
+  assert.match(jointSection.className, /border-b border-line-muted\b/);
+  assert.match(jointSection.className, /theme-brutal:border-black\/10/);
   assert.doesNotMatch(jointSection.className, /border-b-2/);
 
   const serverList = screen.getByTestId("channel-settings-joint-servers");
@@ -768,7 +782,8 @@ test("joint channel settings reuse the flat channel drawer hierarchy", async () 
   assert.ok(within(resendRow).getByRole("button", { name: "Resend Invite" }));
 
   const invite = screen.getByTestId("channel-settings-joint-invite");
-  assert.match(invite.className, /border-t border-black\/10/);
+  assert.match(invite.className, /border-t border-line-muted\b/);
+  assert.match(invite.className, /theme-brutal:border-black\/10/);
   assert.doesNotMatch(invite.className, /border-t-2/);
   const inviteForm = screen.getByTestId("channel-settings-joint-invite-form");
   assert.equal(inviteForm.tagName, "FORM");
@@ -789,8 +804,14 @@ test("joint channel settings reuse the flat channel drawer hierarchy", async () 
   assert.equal(slugInput.getAttribute("aria-invalid"), "true");
   assert.equal((sendInvite as HTMLButtonElement).disabled, true);
 
+  // Existing servers may have slugs shorter than the create-time minimum;
+  // referencing one in an invite must not be rejected client-side.
   fireEvent.change(slugInput, { target: { value: "team" } });
-  assert.ok(within(inviteForm).getByText("Server slug must be at least 5 characters"));
+  assert.ok(within(inviteForm).queryByText(/Server slug must be at least/) === null);
+  assert.ok(within(inviteForm).queryByText("Invite server slug is required") === null);
+  assert.equal(slugInput.getAttribute("aria-invalid"), null);
+
+  fireEvent.change(slugInput, { target: { value: "1team" } });
   assert.equal(slugInput.getAttribute("aria-invalid"), "true");
 
   fireEvent.blur(peopleInput);
@@ -866,7 +887,7 @@ test("joint invite resend keeps drawer geometry stable across busy and success s
     }],
   });
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const basePost = api.post;
   let resolveResend: ((value: { data: { resentCount: number } }) => void) | null = null;
   const resendResponse = new Promise<{ data: { resentCount: number } }>((resolve) => {
@@ -919,7 +940,7 @@ test("joint invite resend keeps drawer geometry stable across busy and success s
   assert.equal(status.getAttribute("aria-live"), "polite");
   assert.ok(status.classList.contains("sr-only"));
   assert.equal(status.textContent, "Invite email resent.");
-  assert.ok(resendButton.classList.contains("bg-brutal-lime"));
+  assert.ok(resendButton.className.includes("bg-brutal-lime"));
   assert.equal(screen.queryByText("Invite email resent.", { selector: "p" }), null);
 
   await act(async () => {
@@ -927,13 +948,13 @@ test("joint invite resend keeps drawer geometry stable across busy and success s
   });
   assert.equal(screen.queryByTestId("channel-settings-joint-resend-status"), null);
   assert.equal(screen.getByTestId("channel-settings-joint-resend-label").textContent, "Resend Invite");
-  assert.ok(resendButton.classList.contains("bg-white"));
+  assert.ok(!resendButton.className.includes("bg-brutal"));
 });
 
 test("channel info save reports durable success and keeps failures visible", async () => {
   const channel = makeChannel({ description: "Original description" });
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const patchCalls: Array<{ url: string; body: unknown }> = [];
   api.patch = (async (url: string, body?: unknown) => {
     patchCalls.push({ url, body });
@@ -980,14 +1001,14 @@ test("channel info save reports durable success and keeps failures visible", asy
   const saveButton = screen.getByTestId("channel-settings-save-inline") as HTMLButtonElement;
   assert.equal(saveButton.disabled, true);
   assert.equal(saveButton.textContent?.trim(), "Changes saved");
-  assert.ok(saveButton.classList.contains("bg-brutal-lime"));
+  assert.ok(saveButton.className.includes("bg-brutal-lime"));
 
   await act(async () => {
     await new Promise((resolve) => window.setTimeout(resolve, 1600));
   });
   assert.equal(screen.queryByTestId("channel-settings-save-status"), null);
-  assert.equal(saveButton.textContent?.trim(), "Save Changes");
-  assert.ok(saveButton.classList.contains("bg-brutal-pink"));
+  assert.equal(saveButton.textContent?.trim(), "Save");
+  assert.ok(saveButton.className.includes("bg-brutal-pink"));
 
   api.patch = (async () => {
     throw new Error("network unavailable");
@@ -1005,7 +1026,7 @@ test("channel info save reports durable success and keeps failures visible", asy
 test("ordinary member sees runtime stop plus lifecycle Leave and personal Mute", async () => {
   const channel = makeChannel();
   seedBaseStores(channel, "member");
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -1026,7 +1047,7 @@ test("channel drawer has no unread row; activity mute lives in the preferences g
   const channel = makeChannel();
   seedBaseStores(channel);
   useMessageStore.setState({ unreadCounts: { [channel.id]: 3 } });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -1053,8 +1074,8 @@ test("channel drawer has no unread row; activity mute lives in the preferences g
   // Preferences; do not duplicate that state as an icon in its header.
   assert.ok(!screen.queryByTestId("channel-overflow-muted-pill"));
 
-  // final7: under the flag the title-adjacent muted badge is icon-only —
-  // no text label, no frame (flag off keeps the framed "Muted" badge).
+  // final7: the title-adjacent muted badge is icon-only —
+  // no text label or frame.
   const badge = await screen.findByTestId("activity-muted-badge");
   assert.equal(badge.textContent?.trim(), "");
   assert.ok(badge.querySelector("svg"));
@@ -1063,7 +1084,7 @@ test("channel drawer has no unread row; activity mute lives in the preferences g
 test("collapse long messages switch lives in the preferences group and drives the display prefs PATCH", async () => {
   const channel = makeChannel();
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const patchCalls: Array<{ url: string; body: unknown }> = [];
   const basePatch = api.patch;
   api.patch = (async (url: string, body?: unknown) => {
@@ -1102,10 +1123,10 @@ test("collapse long messages switch lives in the preferences group and drives th
   });
 });
 
-test("legacy settings sheet renders the collapse switch in the preferences group when the pref is provided", async () => {
+test("standalone settings sheet renders the collapse switch in the preferences group when the pref is provided", async () => {
   const channel = makeChannel();
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const toggles: boolean[] = [];
   render(
     createElement(
@@ -1137,7 +1158,7 @@ test("legacy settings sheet renders the collapse switch in the preferences group
 test("lifecycle Leave row asks for confirmation and leaves the channel", async () => {
   const channel = makeChannel();
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -1175,7 +1196,7 @@ test("multi-select add flow stages candidates and commits on confirm — inside 
     agents: [makeAgent({ id: "agent-candidate", name: "agent-candidate", displayName: "Candidate Agent" })],
     agentActivities: {},
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   // The drawer carries only the members ENTRY row; the staged add flow
@@ -1269,7 +1290,7 @@ test("atomic add failure keeps every selected row available for retry", async ()
     agents: [makeAgent({ id: "agent-candidate", name: "agent-candidate", displayName: "Candidate Agent" })],
     agentActivities: {},
   });
-  mockApis({ flagEnabled: true, failBatchAdd: true });
+  mockApis({ failBatchAdd: true });
   renderChatPanel(channel);
 
   await openMembersPageInDrawer();
@@ -1284,22 +1305,28 @@ test("atomic add failure keeps every selected row available for retry", async ()
   await screen.findByTestId("add-member-error");
   const humanRow = await screen.findByTestId("add-candidate-human-human-candidate");
   assert.equal(humanRow.getAttribute("aria-pressed"), "true");
-  assert.match(humanRow.className, /bg-brutal-red\/15/);
+  assert.match(humanRow.className, /bg-brutal-orange\/15/);
+  assert.equal(humanRow.getAttribute("aria-describedby"), "add-member-failed-human:human-candidate");
   const humanChip = screen.getByTestId("add-member-selected-chip-human:human-candidate");
-  assert.ok(humanChip.className.includes("bg-brutal-red/25"));
+  assert.ok(humanChip.className.includes("bg-brutal-orange/25"));
+  assert.equal(humanChip.getAttribute("data-member-status"), "failed");
+  assert.ok(within(humanChip).getByText("Failed to add"));
   assert.ok(!humanChip.className.includes("bg-brutal-lavender"));
   const agentRow = screen.getByTestId("add-candidate-agent-agent-candidate");
   assert.equal(agentRow.getAttribute("aria-pressed"), "true");
-  assert.match(agentRow.className, /bg-brutal-red\/15/);
+  assert.match(agentRow.className, /bg-brutal-orange\/15/);
+  assert.equal(agentRow.getAttribute("aria-describedby"), "add-member-failed-agent:agent-candidate");
   const agentChip = screen.getByTestId("add-member-selected-chip-agent:agent-candidate");
-  assert.ok(agentChip.className.includes("bg-brutal-red/25"));
+  assert.ok(agentChip.className.includes("bg-brutal-orange/25"));
+  assert.equal(agentChip.getAttribute("data-member-status"), "failed");
+  assert.ok(within(agentChip).getByText("Failed to add"));
   assert.ok(!agentChip.className.includes("bg-brutal-cyan"));
 });
 
 test("channel settings pin switch drives sidebar pinned refs", async () => {
   const channel = makeChannel();
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const pinnedUpdates: Array<unknown> = [];
   useServerStore.setState({
     updateSidebarOrder: async (updates) => {
@@ -1329,12 +1356,11 @@ test("channel settings pin switch drives sidebar pinned refs", async () => {
 });
 
 test("thread vertical-ellipsis opens the Raft UI action menu without a drawer or invented unread action", async () => {
-  mockApis({ flagEnabled: true });
+  mockApis({});
   useThreadStore.setState({ followedThreads: [] });
   useMessageStore.setState({ unreadCounts: {} });
   const searches: number[] = [];
   const viewInChannelActions: number[] = [];
-  const openInNewTabActions: number[] = [];
 
   render(
     createElement(ThreadOverflowMenu, {
@@ -1342,7 +1368,6 @@ test("thread vertical-ellipsis opens the Raft UI action menu without a drawer or
       parentMessageId: "parent-message-1",
       viewInChannelLabel: "View in channel",
       onViewInChannel: () => viewInChannelActions.push(1),
-      onOpenInNewTab: () => openInNewTabActions.push(1),
       onSearch: () => searches.push(1),
     }),
   );
@@ -1358,7 +1383,6 @@ test("thread vertical-ellipsis opens the Raft UI action menu without a drawer or
   const actions = screen.getAllByRole("menuitem");
   assert.deepEqual(actions.map((action) => action.textContent), [
     "Search in thread",
-    "Open in New Tab",
     "View in channel",
     "Follow Thread",
   ]);
@@ -1368,12 +1392,6 @@ test("thread vertical-ellipsis opens the Raft UI action menu without a drawer or
   fireEvent.click(search);
   assert.deepEqual(searches, [1]);
   await waitFor(() => assert.equal(screen.queryByTestId("thread-overflow-menu"), null));
-
-  fireEvent.click(trigger);
-  const openInNewTab = await screen.findByTestId("thread-overflow-open-new-tab");
-  assert.match(openInNewTab.querySelector("svg")?.getAttribute("class") ?? "", /lucide-external-link/);
-  fireEvent.click(openInNewTab);
-  assert.deepEqual(openInNewTabActions, [1]);
 
   fireEvent.click(trigger);
   const viewInChannel = await screen.findByTestId("thread-overflow-view-in-channel");
@@ -1443,9 +1461,15 @@ test("agent profile vertical-ellipsis groups immediate commands in the Raft UI m
     "Stop Agent",
     "Restart / Reset",
   ]);
+  // Since raft-ui 0.5.18 the DM affordance renders the package-owned
+  // DirectMessageIcon (18x18 conversation icon), not a lucide stand-in.
+  assert.equal(
+    screen.getByTestId("agent-profile-overflow-message").querySelector("svg")?.getAttribute("viewBox"),
+    "0 0 18 18",
+  );
   assert.match(
-    screen.getByTestId("agent-profile-overflow-message").querySelector("svg")?.getAttribute("class") ?? "",
-    /lucide-message-square/,
+    screen.getByTestId("agent-profile-overflow-message").querySelector("path")?.getAttribute("d") ?? "",
+    /^M16\.25 5V4\.25/,
   );
   assert.match(
     screen.getByTestId("agent-profile-overflow-start-stop").querySelector("svg")?.getAttribute("class") ?? "",
@@ -1513,21 +1537,21 @@ test("responsive agent profile actions keep inline commands wired while retainin
   assert.ok(screen.getByTestId("agent-profile-inline-actions"));
   assert.ok(screen.getByTestId("agent-profile-overflow-trigger"));
   assert.equal(screen.getByTestId("agent-profile-inline-message").getAttribute("title"), null);
-  assert.equal(screen.getByTestId("agent-profile-inline-message").getAttribute("data-slot"), "tooltip-trigger");
+  assert.equal(screen.getByTestId("agent-profile-inline-message").getAttribute("data-slot"), "button");
   assert.equal(screen.getByTestId("agent-profile-overflow-trigger").getAttribute("title"), null);
-  assert.equal(screen.getByTestId("agent-profile-overflow-trigger").getAttribute("data-slot"), "tooltip-trigger");
+  assert.equal(screen.getByTestId("agent-profile-overflow-trigger").getAttribute("data-slot"), "button");
   fireEvent.click(screen.getByTestId("agent-profile-inline-message"));
   fireEvent.click(screen.getByTestId("agent-profile-inline-start-stop"));
   fireEvent.click(screen.getByTestId("agent-profile-inline-restart-reset"));
   assert.deepEqual(calls, ["message", "start", "restart"]);
 });
 
-test("agent profile header adopts the vertical-ellipsis under the topbar flag and keeps Close structural", async () => {
+test("agent profile header uses the vertical-ellipsis and keeps Close structural", async () => {
   const channel = makeChannel();
   const agent = makeAgent({});
   seedBaseStores(channel);
   useAgentStore.setState({ agents: [agent], agentActivities: {} });
-  mockApis({ flagEnabled: true });
+  mockApis({});
 
   render(
     createElement(
@@ -1559,7 +1583,7 @@ test("human members get exactly Restart Model and Reset Model without destructiv
   const agent = makeAgent({ creatorType: "user", creatorId: "different-user" });
   seedBaseStores(channel, "member");
   useAgentStore.setState({ agents: [agent], agentActivities: {} });
-  mockApis({ flagEnabled: true });
+  mockApis({});
 
   render(
     createElement(
@@ -1587,7 +1611,7 @@ test("human members get exactly Restart Model and Reset Model without destructiv
   assert.equal(screen.queryByRole("button", { name: "Delete Agent" }), null);
 });
 
-test("agent profile flag off keeps the legacy separate header actions", async () => {
+test("agent profile keeps its menu when the retired flag is disabled", async () => {
   const channel = makeChannel();
   const agent = makeAgent({});
   seedBaseStores(channel);
@@ -1602,10 +1626,9 @@ test("agent profile flag off keeps the legacy separate header actions", async ()
     ),
   );
 
-  await waitFor(() => assert.ok(screen.getByTitle("Messages")));
-  assert.equal(screen.queryByTestId("agent-profile-overflow-trigger"), null);
-  assert.ok(screen.getByTitle("Stop Agent"));
-  assert.ok(screen.getByTitle("Restart / Reset"));
+  fireEvent.click(await screen.findByTestId("agent-profile-overflow-trigger"));
+  await screen.findByTestId("agent-profile-overflow-start-stop");
+  assert.ok(screen.getByTestId("agent-profile-overflow-restart-reset"));
   assert.ok(screen.getByTitle("Close"));
 });
 
@@ -1614,7 +1637,7 @@ test("agent profile confirmation chrome follows the active Chinese locale", asyn
   const agent = makeAgent({});
   seedBaseStores(channel);
   useAgentStore.setState({ agents: [agent], agentActivities: {} });
-  mockApis({ flagEnabled: true });
+  mockApis({});
 
   renderWithIntl(
     createElement(
@@ -1649,17 +1672,17 @@ test("agent profile confirmation chrome follows the active Chinese locale", asyn
 test("archived channel unarchive link opens the overflow drawer instead of the legacy sheet", async () => {
   const channel = makeChannel({ archivedAt: "2026-08-01T00:00:00.000Z" });
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByText("Unarchive"));
 
   await screen.findByTestId("channel-overflow-sheet");
-  // The legacy side sheet must NOT appear under the overflow flag.
+  // The archived banner shares the header drawer.
   assert.ok(!screen.queryByTestId("channel-settings-sheet"));
 });
 
-test("flag off archived channel unarchive link still opens the legacy sheet", async () => {
+test("archived channel still opens the current drawer with a disabled retired flag", async () => {
   const channel = makeChannel({ archivedAt: "2026-08-01T00:00:00.000Z" });
   seedBaseStores(channel);
   mockApis({ flagEnabled: false });
@@ -1667,14 +1690,14 @@ test("flag off archived channel unarchive link still opens the legacy sheet", as
 
   fireEvent.click(await screen.findByText("Unarchive"));
 
-  await screen.findByTestId("channel-settings-sheet");
-  assert.ok(!screen.queryByTestId("channel-overflow-sheet"));
+  await screen.findByTestId("channel-overflow-sheet");
+  assert.ok(!screen.queryByTestId("channel-settings-sheet"));
 });
 
 test("dirty settings draft routes close attempts through the unsaved prompt", async () => {
   const channel = makeChannel();
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -1711,7 +1734,7 @@ test("dirty settings draft routes close attempts through the unsaved prompt", as
 test("dirty settings draft guards Search until the user explicitly discards it", async () => {
   const channel = makeChannel();
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const searches: string[] = [];
   renderChatPanel(channel, (channelId) => searches.push(channelId));
 
@@ -1753,7 +1776,7 @@ test("unsent Joint invite draft cannot be save-and-closed before Search", async 
     }],
   });
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const searches: string[] = [];
   renderChatPanel(channel, (channelId) => searches.push(channelId));
 
@@ -1820,7 +1843,7 @@ test("unsent Joint invite draft prompt explains the unavailable save action in C
     }],
   });
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel, undefined, "zh-cn");
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -1847,7 +1870,7 @@ test("unsent Joint invite draft prompt explains the unavailable save action in C
 test("dirty Search runs only after save-and-close successfully persists the rename", async () => {
   const channel = makeChannel();
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const patchCalls: Array<{ url: string; body: unknown }> = [];
   const searches: string[] = [];
   const basePatch = api.patch;
@@ -1896,7 +1919,7 @@ test("dirty Search runs only after save-and-close successfully persists the rena
 test("clean settings state allows outside-press dismissal of the overflow drawer", async () => {
   const channel = makeChannel();
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -1922,7 +1945,7 @@ test("members strip dashed add tile lands directly in the add flow — inside th
     agents: [makeAgent({ id: "agent-candidate", name: "agent-candidate", displayName: "Candidate Agent" })],
     agentActivities: {},
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -1949,7 +1972,7 @@ test("members entry row shows the human/agent split count", async () => {
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   let memberRequestCount = 0;
   api.get = (async (url: string) => {
@@ -2023,7 +2046,7 @@ test("members page stays in loading state until the prefetched roster is settled
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   let memberRequestCount = 0;
   let resolveMembers!: (value: {
@@ -2088,7 +2111,7 @@ test("members strip fills at most three responsive rows and keeps +N plus Add vi
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   const humans = Array.from({ length: 20 }, (_, index) => ({
     ...makeHuman({
@@ -2144,7 +2167,7 @@ test("members entry swaps the drawer into the members page — same size, root s
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -2163,9 +2186,9 @@ test("members entry swaps the drawer into the members page — same size, root s
   for (const headerButton of [
     screen.getByTestId("member-page-back"),
   ]) {
-    assert.ok(headerButton.className.includes("btn-brutal-sm"));
+    assert.equal(headerButton.getAttribute("data-slot"), "button");
     assert.ok(headerButton.className.includes("size-7"));
-    assert.ok(headerButton.className.includes("bg-white"));
+    assert.ok(!headerButton.className.includes("bg-brutal"));
   }
   // Root content stays mounted but hidden (draft survival).
   const settingsPanel = screen.getByTestId("channel-settings-panel");
@@ -2202,7 +2225,7 @@ test("members page keeps its roster state under an in-drawer profile page; Back 
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   api.get = (async (url: string) => {
     if (url === `/channels/${channel.id}/members`) {
@@ -2321,7 +2344,7 @@ test("members page search filters both sections live", async () => {
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   api.get = (async (url: string) => {
     if (url === `/channels/${channel.id}/members`) {
@@ -2364,7 +2387,7 @@ test("members can add channel members but cannot remove them", async () => {
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "ordinary", role: "member" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   api.get = (async (url: string) => {
     if (url === `/channels/${channel.id}/members`) {
@@ -2405,7 +2428,7 @@ test("channel admin sees minimal Admin state and can promote an eligible member"
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "local-admin", role: "member" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   api.get = (async (url: string) => {
     if (url === `/channels/${channel.id}/members`) {
@@ -2462,7 +2485,7 @@ test("channel-manager role-action gate hides promote and demote without removing
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "local-admin", role: "member" })],
   });
-  mockApis({ flagEnabled: true, roleActionsEnabled: false });
+  mockApis({ roleActionsEnabled: false });
   const mockedGet = api.get;
   api.get = (async (url: string) => {
     if (url === `/channels/${channel.id}/members`) {
@@ -2524,7 +2547,7 @@ test("channel role failure state renders the member role error banner", async ()
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "local-admin", role: "member" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   render(createElement(
     MemoryRouter,
     { initialEntries: [`/s/design/channel/${channel.id}`] },
@@ -2580,7 +2603,7 @@ test("server owner/admin rows expose Demote but explain inherited authority inst
       makeHuman({ userId: "server-admin-1", name: "server-admin", role: "admin" }),
     ],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   api.get = (async (url: string) => {
     if (url === `/channels/${channel.id}/members`) {
@@ -2627,7 +2650,7 @@ test("members page remove control runs the same confirm flow as the old drawer l
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   api.get = (async (url: string) => {
     if (url === `/channels/${channel.id}/members`) {
@@ -2693,7 +2716,7 @@ test("members page removal dialog is one complete Chinese surface", async () => 
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   api.get = (async (url: string) => {
     if (url === `/channels/${channel.id}/members`) {
@@ -2736,7 +2759,7 @@ test("members page joint-channel rows badge remote members and skip their remove
   useServerStore.setState({
     members: [makeHuman({ userId: "owner-1", name: "owner", role: "owner" })],
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   const mockedGet = api.get;
   api.get = (async (url: string) => {
     if (url === `/channels/${channel.id}/members`) {
@@ -2775,7 +2798,7 @@ test("#all with hidden humans has no members entry row in the drawer", async () 
   useServerStore.setState({
     current: { ...makeServer("member"), hideHumansFromMembers: true },
   });
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));
@@ -2787,7 +2810,7 @@ test("#all with hidden humans has no members entry row in the drawer", async () 
 test("channel overflow keeps the mobile back arrow while desktop X is removed", async () => {
   const channel = makeChannel();
   seedBaseStores(channel);
-  mockApis({ flagEnabled: true });
+  mockApis({});
   renderChatPanel(channel);
 
   fireEvent.click(await screen.findByTestId("channel-overflow-trigger"));

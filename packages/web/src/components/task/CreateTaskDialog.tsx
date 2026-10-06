@@ -1,3 +1,4 @@
+import { Input, Button } from "raft-ui";
 import { useState } from "react";
 import { useIntl } from "react-intl";
 import { Plus, Trash2 } from "lucide-react";
@@ -66,47 +67,51 @@ export default function CreateTaskDialog({
           <div>
             {titles.map((title, i) => (
               <div key={i} className="flex items-center gap-1 mb-1">
-                <input
+                <Input
                   type="text"
                   value={title}
                   onChange={(e) => updateTitle(i, e.target.value)}
-                  className="input-brutal w-full"
+                  className="w-full"
                   placeholder={formatMessage({ id: "task.create.titlePlaceholder" }, { n: i + 1 })}
                   autoFocus={i === 0}
                 />
                 {titles.length > 1 && (
-                  <button
+                  <Button size="sm"
+                    variant="danger"
                     type="button"
                     onClick={() => removeRow(i)}
-                    className="btn-brutal-sm p-1 bg-white"
+                    className="p-1"
                   >
                     <Trash2 size={14} />
-                  </button>
+                  </Button>
                 )}
               </div>
             ))}
-            <button
+            <Button size="sm"
+              variant="outline"
               type="button"
               onClick={addRow}
-              className="btn-brutal-sm px-2 py-1 text-xs font-bold flex items-center gap-1 bg-white mt-3"
+              className="px-2 py-1 text-xs font-bold flex items-center gap-1 mt-3"
             >
               <Plus size={12} />
               {formatMessage({ id: "task.create.addAnother" })}
-            </button>
+            </Button>
           </div>
 
           <div className="flex justify-end gap-3">
-            <button
+            <Button size="sm"
+              variant="outline"
               type="button"
               onClick={onClose}
-              className="btn-brutal bg-white px-4 py-2 text-sm"
+              className="px-4 py-2 text-sm"
             >
               {formatMessage({ id: "common.confirm.cancel" })}
-            </button>
-            <button
+            </Button>
+            <Button size="sm"
+              variant="accent"
               type="submit"
               disabled={submitting}
-              className="btn-brutal bg-brutal-pink px-4 py-2 text-sm"
+              className="px-4 py-2 text-sm"
             >
               {submitting
                 ? formatMessage({ id: "task.create.submitting" })
@@ -114,7 +119,7 @@ export default function CreateTaskDialog({
                   { id: "task.create.submit" },
                   { count: isBatch ? titles.filter((t) => t.trim()).length : 1 },
                 )}
-            </button>
+            </Button>
           </div>
         </form>
     </DialogCard>

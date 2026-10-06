@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { resolveComputerConnectionProgress } from "../src/utils/computerConnectionProgress";
 import type { AddMachineConnectionBaseline } from "../src/utils/addMachineConnection";
 

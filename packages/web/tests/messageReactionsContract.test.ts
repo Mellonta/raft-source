@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 
 import { QUICK_REACTION_EMOJIS } from "../src/components/message/reactionConstants";
 import type { Message } from "../src/store/messageStore";

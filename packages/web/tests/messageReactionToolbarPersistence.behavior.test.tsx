@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach, beforeEach } from "node:test";
 import { useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render as rtlRender } from "@testing-library/react";
@@ -149,13 +148,12 @@ test("opening the reaction picker pins the message toolbar visible outside row h
   assert.ok(toolbar);
   assert.ok(reactionButton);
   assert.equal(toolbar.classList.contains("hidden"), false, "resting toolbar stays mounted for stable hover clicks");
-  assert.equal(toolbar.classList.contains("pointer-events-none"), false);
   assert.equal(toolbar.classList.contains("opacity-0"), true);
 
   fireEvent.click(reactionButton);
 
   assert.equal(reactionButton.getAttribute("aria-expanded"), "true");
-  assert.equal(toolbar.classList.contains("opacity-100"), true);
+  assert.equal(toolbar.classList.contains("opacity-100") || toolbar.classList.contains("!opacity-100"), true);
   assert.equal(toolbar.classList.contains("flex"), true);
 });
 
@@ -205,10 +203,12 @@ test("opening the reaction picker keeps the message row's outer frame active", a
 
   assert.ok(document.querySelector("[data-message-affordance='reaction-picker']"));
   assert.equal(
-    row.classList.contains("border-black"),
+    row.getAttribute("data-popup-open") !== null || row.className.includes("ring-info"),
     true,
     "the message frame must stay active while the pointer can move through the portaled picker",
   );
-  assert.equal(row.classList.contains("border-transparent"), false);
-  assert.equal(row.classList.contains("bg-white"), true);
+  // Active = rui's data-popup-open state (row tint + toolbar kept visible).
+  // Only Brutal also draws a frame; Elegant stays frameless (task #694).
+  assert.equal(row.getAttribute("data-popup-open") !== null, true);
+  assert.match(row.className, /theme-brutal:border-black/);
 });

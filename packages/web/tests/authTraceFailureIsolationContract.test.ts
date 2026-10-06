@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 /**
  * Auth trace failure-isolation contract (Auth Session Contract, #2494

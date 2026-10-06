@@ -1,10 +1,10 @@
 import {
   selectChannelWindowMeta,
-} from "../src/store/messageStore.js";
+} from "../src/store/messageStore";
 import type {
   Message,
-} from "../src/store/messageStore.js";
-import type { ThreadSummary } from "../src/store/threadStore.js";
+} from "../src/store/messageStore";
+import type { ThreadSummary } from "../src/store/threadStore";
 
 class MemoryStorage {
   private readonly map = new Map<string, string>();
@@ -40,8 +40,8 @@ if (!("sessionStorage" in globalThis) || typeof globalThis.sessionStorage?.getIt
   });
 }
 
-const api = (await import("../src/api/client.js")).default;
-const { useMessageStore } = await import("../src/store/messageStore.js");
+const api = (await import("../src/api/client")).default;
+const { useMessageStore } = await import("../src/store/messageStore");
 
 const originalGet = api.get.bind(api);
 const originalPost = api.post.bind(api);

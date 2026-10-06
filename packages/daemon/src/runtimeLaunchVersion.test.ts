@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import type { AgentConfig } from "@botiverse/raft-shared";
-import type { RuntimeDriver, RuntimeProbeResult } from "./drivers/types.js";
+import type { RuntimeDriver, RuntimeProbeResult } from "./drivers/types";
 import {
   evaluateRuntimeLaunchVersion,
   RuntimeVersionTooOldError,
-} from "./runtimeLaunchVersion.js";
+} from "./runtimeLaunchVersion";
 
 const config = { runtime: "claude" } as AgentConfig;
 const context = { workingDirectory: "/tmp/agent-workspace" };

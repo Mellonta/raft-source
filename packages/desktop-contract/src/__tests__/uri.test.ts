@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { parseRaftUri } from "../uri.js";
+import { parseRaftUri } from "../uri";
 
 interface UriVector {
   name: string;

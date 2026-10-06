@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, mock, test } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { getSetupRuntimeOptions } from "@botiverse/raft-shared";
@@ -64,10 +63,7 @@ function renderStep({
   computerInstallCommand = "",
   windowsComputerInstallCommand = "",
   windowsComputerSetupCommand = null,
-  windowsDaemonCommand = "npx.cmd @botiverse/raft-daemon@latest --server-url https://api.raft.build --api-key sk_machine_abc",
   setupCommand = "curl install && raft-computer setup /launch",
-  onRequestWindowsDaemonCommand,
-  windowsDaemonCommandPending = false,
   canReset = false,
   onStartOver,
 }: {
@@ -83,10 +79,7 @@ function renderStep({
   computerInstallCommand?: string;
   windowsComputerInstallCommand?: string;
   windowsComputerSetupCommand?: string | null;
-  windowsDaemonCommand?: string;
   setupCommand?: string;
-  onRequestWindowsDaemonCommand?: () => void;
-  windowsDaemonCommandPending?: boolean;
   /** The exits the SERVER allows. `defer` bypasses an unfinished setup; `reset` rolls it back. */
   canReset?: boolean;
   onStartOver?: () => void;
@@ -105,10 +98,6 @@ function renderStep({
       windowsComputerInstallCommand={windowsComputerInstallCommand}
       windowsComputerSetupCommand={windowsComputerSetupCommand}
       setupCommand={setupCommand}
-      macLinuxDaemonCommand="npx @botiverse/raft-daemon@latest --server-url https://api.raft.build --api-key sk_machine_abc"
-      windowsDaemonCommand={windowsDaemonCommand}
-      onRequestWindowsDaemonCommand={onRequestWindowsDaemonCommand}
-      windowsDaemonCommandPending={windowsDaemonCommandPending}
       onCopyInstallCommand={noop}
       onOpenApiKeySettings={noop}
       onNext={noop}
@@ -380,18 +369,10 @@ test("the server's verdict enables Next even when the store has not caught up", 
  * signalling and raw-machine repair are Computer tasks #399/#400, not this change.
  */
 test("first connect on Windows offers Computer only — no Legacy entrance, and no way to mint a legacy key", async () => {
-  const secret = "sk_machine_windows_real_secret_1234";
-  const daemonCommand = `npx.cmd @botiverse/raft-daemon@latest --server-url https://api.raft.build --api-key ${secret}`;
-  const onRequestWindowsDaemonCommand = mock.fn();
-
   renderStep({
     connected: false,
     windowsComputerInstallCommand: "irm https://cdn.raft.build/computer/install.ps1 | iex",
     windowsComputerSetupCommand: "raft-computer setup /launch",
-    // Supplied on purpose: even when the caller HAS a legacy command in hand, first connect
-    // must not surface it. Hiding must not depend on the command being absent.
-    windowsDaemonCommand: daemonCommand,
-    onRequestWindowsDaemonCommand,
   });
 
   assert.ok(screen.getByRole("radio", { name: "macOS / Linux" }));
@@ -418,15 +399,12 @@ test("first connect on Windows offers Computer only — no Legacy entrance, and 
     "no button offering to generate a legacy daemon command",
   );
 
-  // And nothing minted a credential on the way. This is the property that matters most: the
-  // entrance is closed at the credential boundary, not merely hidden behind CSS.
-  assert.equal(onRequestWindowsDaemonCommand.mock.callCount(), 0);
-  assert.equal(document.body.innerHTML.includes(secret), false);
+  // And no credential exists to leak: the step no longer takes a daemon command at all.
+  assert.equal(document.body.innerHTML.includes("sk_machine_"), false);
 
   // mac/Linux first connect is closed too — the legacy npx line was never Windows-only.
   fireEvent.click(screen.getByRole("radio", { name: "macOS / Linux" }));
   assert.equal(screen.queryByText(/npx @botiverse\/raft-daemon/), null, "no Legacy block at first connect on mac/Linux");
-  assert.equal(onRequestWindowsDaemonCommand.mock.callCount(), 0);
 });
 
 
@@ -470,7 +448,7 @@ test("someone who has never connected a computer still gets the install + setup 
 // dead machines behind, and hands back the same install command they already could not run.
 // It is "throw this away and start again" — the rollback, offered right here.
 test("a computer that will never come back offers Start over — not another install command", async () => {
-  const startOver = mock.fn();
+  const startOver = vi.fn();
   renderStep({
     connected: true,
     status: "offline",
@@ -484,25 +462,31 @@ test("a computer that will never come back offers Start over — not another ins
   await act(async () => {
     fireEvent.click(screen.getByTestId("onboarding-recovery-start-over"));
   });
-  assert.equal(startOver.mock.callCount(), 1);
+  assert.equal(startOver.mock.calls.length, 1);
 });
 
 
-// Existing Windows daemon rows still have no Computer binary until the user migrates them.
-// Machine Detail keys this off `isComputer`; so do we. Handing a legacy row
-// `raft-computer start` would still be an action guaranteed to do nothing.
-test("a legacy daemon machine (Windows) gets its daemon command back, not raft-computer start", () => {
+// Rows connected with the retired standalone daemon have no Computer binary until the user
+// migrates them. Machine Detail keys this off `isComputer`; so do we. Handing such a row
+// `raft-computer start` would be an action guaranteed to do nothing, and its old daemon
+// connect command no longer exists — so it gets the Computer install + setup commands.
+test("a machine connected with the retired daemon gets Computer install + setup, not raft-computer start", () => {
   renderStep({
     connected: true,
     status: "offline",
     hasConnectedComputer: true,
     isComputer: false,
     runtimeStatus: "unknown",
+    computerInstallCommand: "curl -fsSL https://cdn.raft.build/computer/install.sh | sh",
+    setupCommand: "raft-computer setup /launch",
   });
 
   assert.ok(screen.getByTestId("onboarding-recovery-legacy-daemon"));
   assert.equal(screen.queryByTestId("onboarding-recovery-start-command"), null, "no raft-computer start on a machine that never had the binary");
-  assert.ok(screen.getByText(/legacy daemon/i));
+  assert.ok(screen.getByText(/retired standalone daemon/i));
+  assert.ok(screen.getByText("curl -fsSL https://cdn.raft.build/computer/install.sh | sh"));
+  assert.ok(screen.getByText("raft-computer setup /launch"));
+  assert.equal(document.body.innerHTML.includes("raft-daemon"), false);
 });
 
 // Mirroring Machine Detail means mirroring ALL of it: the diagnostics are how a user finds

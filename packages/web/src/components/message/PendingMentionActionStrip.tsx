@@ -1,6 +1,8 @@
 import { BellRing, Check, UserPlus, UserX } from "lucide-react";
 import { useIntl } from "react-intl";
 import type { PendingMentionAction } from "../../store/messageStore";
+import AvatarSlot from "../ui/AvatarSlot";
+import { Button } from "raft-ui";
 import { AgentAvatar } from "../agent/PixelAvatar";
 
 export type PendingMentionActionLocalState = "notified" | "added";
@@ -39,22 +41,26 @@ function pendingMentionTargetInitial(action: PendingMentionAction): string {
 
 function PendingMentionTargetAvatar({ action }: { action: PendingMentionAction }) {
   if ((action.targetType === "agent" || action.targetType === "user") && action.targetAvatarUrl) {
-    const fallbackBg = action.targetType === "agent" ? "bg-brutal-cyan" : "bg-brutal-lavender";
     return (
       <span data-testid="pending-mention-target-avatar">
-        <span className={`flex size-5 shrink-0 items-center justify-center overflow-hidden border border-black ${fallbackBg}`}>
+        <AvatarSlot
+          context="compact-list"
+          type={action.targetType === "agent" ? "agent" : "human"}
+          agentAvatarUrl={action.targetAvatarUrl}
+          humanAvatarUrl={action.targetAvatarUrl}
+        >
           <AgentAvatar avatarUrl={action.targetAvatarUrl} size={18} className="!h-full !w-full" />
-        </span>
+        </AvatarSlot>
       </span>
     );
   }
 
   return (
     <span
-      className="absolute left-0 top-0 flex size-5 items-center justify-center border-2 border-black bg-white text-[10px] font-black leading-none text-black shadow-brutal-sm"
+      className="absolute left-0 top-0"
       data-testid="pending-mention-target-initial"
     >
-      {pendingMentionTargetInitial(action)}
+      <AvatarSlot context="compact-list" type="app" appInitials={pendingMentionTargetInitial(action)} />
     </span>
   );
 }
@@ -86,7 +92,7 @@ export function PendingMentionActionStrip({
 
   return (
     <div
-      className="mb-2 w-full border-2 border-black bg-brutal-cream px-3 py-2 shadow-brutal-sm"
+      className="mb-2 w-full rounded-lg border border-line-muted bg-layer-panel px-3 py-2 shadow-raft-xs theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream theme-brutal:shadow-brutal-sm"
       data-testid="pending-mention-action-strip"
     >
       <div className="flex flex-col gap-2" data-testid="pending-mention-action-rows">
@@ -118,14 +124,14 @@ export function PendingMentionActionStrip({
               className={`flex min-w-0 flex-col items-stretch gap-2 transition-opacity duration-300 sm:flex-row sm:flex-wrap sm:items-center ${isRemoving ? "opacity-0" : "opacity-100"}`}
             >
               <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto sm:flex-1">
-                <UserX size={14} className="shrink-0 text-black/55" />
+                <UserX size={14} className="shrink-0 text-foreground-hint" />
                 <div className="relative h-5 w-5 shrink-0" aria-hidden="true">
                   <PendingMentionTargetAvatar action={action} />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs font-bold text-black">{targetLabel}</div>
+                  <div className="truncate text-xs font-bold text-foreground-strong">{targetLabel}</div>
                   <div
-                    className="line-clamp-2 text-[11px] leading-4 text-black/60 sm:line-clamp-none sm:truncate"
+                    className="line-clamp-2 text-[11px] leading-4 text-foreground-muted sm:line-clamp-none sm:truncate"
                     data-testid="pending-mention-action-status"
                   >
                     {statusCopy}
@@ -137,44 +143,47 @@ export function PendingMentionActionStrip({
                 data-testid="pending-mention-action-buttons"
               >
                 {localState === "added" ? (
-                  <span className="inline-flex items-center gap-1 border-2 border-black/20 bg-black/[0.04] px-2 py-0.5 text-[12px] font-bold text-black/40 cursor-default">
+                  <span className="inline-flex items-center gap-1 rounded-md border border-line-hairline bg-fill-muted px-2 py-0.5 text-[12px] font-bold text-foreground-hint cursor-default theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/20 theme-brutal:bg-black/[0.04] theme-brutal:text-black/40">
                     <Check size={12} strokeWidth={3} />
                     {formatMessage({ id: "message.pendingMention.added" })}
                   </span>
                 ) : canAdd ? (
-                  <button
+                  <Button
                     type="button"
-                    className="btn-brutal-sm inline-flex items-center gap-1 bg-brutal-pink px-2 py-0.5 text-[12px] font-bold text-black"
+                    variant="accent"
+                    size="sm"
                     disabled={Boolean(executingState)}
                     onClick={() => onMarkAction(action.resolutionId, "added")}
                   >
                     <UserPlus size={12} />
                     {formatMessage({ id: "message.pendingMention.add" })}
-                  </button>
+                  </Button>
                 ) : null}
                 {localState === "notified" ? (
-                  <span className="inline-flex items-center gap-1 border-2 border-black/20 bg-black/[0.04] px-2 py-0.5 text-[12px] font-bold text-black/40 cursor-default">
+                  <span className="inline-flex items-center gap-1 rounded-md border border-line-hairline bg-fill-muted px-2 py-0.5 text-[12px] font-bold text-foreground-hint cursor-default theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/20 theme-brutal:bg-black/[0.04] theme-brutal:text-black/40">
                     <Check size={12} strokeWidth={3} />
                     {formatMessage({ id: "message.pendingMention.queued" })}
                   </span>
                 ) : canNotify ? (
-                  <button
+                  <Button
                     type="button"
-                    className="btn-brutal-sm inline-flex items-center gap-1 bg-white px-2 py-0.5 text-[12px] font-bold text-black"
+                    variant="outline"
+                    size="sm"
                     disabled={Boolean(executingState)}
                     onClick={() => onMarkAction(action.resolutionId, "notified")}
                   >
                     <BellRing size={12} />
                     {formatMessage({ id: "message.pendingMention.notify" })}
-                  </button>
+                  </Button>
                 ) : null}
-                <button
+                <Button
                   type="button"
-                  className="px-1.5 py-0.5 text-[12px] font-bold text-black/45 hover:text-black/75"
+                  variant="muted"
+                  size="sm"
                   onClick={() => onDismissAction(action.resolutionId)}
                 >
                   {formatMessage({ id: "message.pendingMention.dismiss" })}
-                </button>
+                </Button>
               </div>
             </div>
           );
@@ -182,18 +191,19 @@ export function PendingMentionActionStrip({
       </div>
       {showAddAll && (
         <div
-          className="mt-2 flex justify-end border-t-2 border-black/15 pt-2"
+          className="mt-2 flex justify-end border-t border-line-hairline pt-2"
           data-testid="pending-mention-action-footer"
         >
-          <button
+          <Button
             type="button"
-            className="btn-brutal-sm inline-flex items-center gap-1 bg-brutal-pink px-2.5 py-1 text-[12px] font-black text-black"
+            variant="accent"
+            size="sm"
             disabled={isAddingAll}
             onClick={() => onAddAllActions(addableResolutionIds)}
           >
             <UserPlus size={12} />
             {formatMessage({ id: "message.pendingMention.addAll" })}
-          </button>
+          </Button>
         </div>
       )}
     </div>

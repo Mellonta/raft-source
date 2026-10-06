@@ -1,15 +1,13 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   resolvePreflightConfig,
   classifyAdmission,
-  evaluateEffectiveTimeout,
   pgSqlState,
   type ManifestEntry,
-} from "./migrationPreflight.js";
+} from "./migrationPreflight";
 
 const serverRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const scriptPath = path.join(serverRoot, "scripts", "migration-preflight.ts");
@@ -50,11 +48,15 @@ test("tooth 1: head==target + 15s -> ADMIT no-op (timeout moot at target)", () =
   assert.equal(classifyAdmission(MANIFEST, { hash: h("c"), createdAt: "3000" }, "15000", REQUIRED).admit, true);
 });
 
-test("tooth 2: behind + 15s -> REJECT (real migration under wrong timeout)", () => {
-  const v = classifyAdmission(MANIFEST, { hash: h("a"), createdAt: 1000 }, "15000", REQUIRED);
-  assert.equal(v.admit, false);
-  assert.equal(v.code, "EFFECTIVE_MISMATCH");
-  assert.match(v.detail!, /expected=60000 actual=15000/);
+test("behind at any effective timeout -> ADMIT (the timeout is no longer a gate)", () => {
+  // The effective-timeout equality check was removed on the owner's instruction.
+  // The timeout is still requested by the migration DSN, but a value that
+  // differs from the pinned expectation no longer blocks the release.
+  for (const eff of ["15000", "60000", "1", null]) {
+    const v = classifyAdmission(MANIFEST, { hash: h("a"), createdAt: 1000 }, eff, REQUIRED);
+    assert.equal(v.admit, true, `effective=${eff} must admit`);
+    assert.equal(v.code, "BEHIND_MIGRATE");
+  }
 });
 
 test("tooth 3: behind + 60s -> ADMIT (canonical migrate up to target)", () => {
@@ -63,9 +65,9 @@ test("tooth 3: behind + 60s -> ADMIT (canonical migrate up to target)", () => {
   assert.equal(v.code, "BEHIND_MIGRATE");
 });
 
-test("tooth 3 (fresh db): dbHead null is behind — 60s admits, 15s rejects", () => {
+test("tooth 3 (fresh db): dbHead null is behind — admits regardless of effective timeout", () => {
   assert.equal(classifyAdmission(MANIFEST, null, "60000", REQUIRED).admit, true);
-  assert.equal(classifyAdmission(MANIFEST, null, "15000", REQUIRED).code, "EFFECTIVE_MISMATCH");
+  assert.equal(classifyAdmission(MANIFEST, null, "15000", REQUIRED).code, "BEHIND_MIGRATE");
 });
 
 test("tooth 4: ahead / diverged / malformed / empty -> REJECT", () => {
@@ -83,14 +85,12 @@ test("tooth 4: ahead / diverged / malformed / empty -> REJECT", () => {
   assert.equal(classifyAdmission([], null, "60000", REQUIRED).code, "MANIFEST_EMPTY");
 });
 
-test("behind + effective missing/non-numeric -> REJECT (fail closed)", () => {
-  assert.equal(classifyAdmission(MANIFEST, { hash: h("a"), createdAt: 1000 }, null, REQUIRED).code, "EFFECTIVE_MISSING");
-  assert.equal(classifyAdmission(MANIFEST, { hash: h("a"), createdAt: 1000 }, "1min", REQUIRED).code, "EFFECTIVE_NON_NUMERIC");
+test("behind + effective missing/non-numeric -> still ADMIT (timeout is informational now)", () => {
+  assert.equal(classifyAdmission(MANIFEST, { hash: h("a"), createdAt: 1000 }, null, REQUIRED).code, "BEHIND_MIGRATE");
+  assert.equal(classifyAdmission(MANIFEST, { hash: h("a"), createdAt: 1000 }, "1min", REQUIRED).code, "BEHIND_MIGRATE");
 });
 
-test("evaluateEffectiveTimeout + pgSqlState seams", () => {
-  assert.equal(evaluateEffectiveTimeout("60000", 60000).ok, true);
-  assert.equal(evaluateEffectiveTimeout("15000", 60000).code, "EFFECTIVE_MISMATCH");
+test("pgSqlState seam", () => {
   assert.equal(pgSqlState({ code: "42P01" }), "42P01");
   assert.equal(pgSqlState({ cause: { code: "3F000" } }), "3F000");
   assert.equal(pgSqlState(new Error("x")), undefined);
@@ -106,7 +106,7 @@ function runScript(overrides: Record<string, string | undefined>) {
     if (v === undefined) delete env[k];
     else env[k] = v;
   }
-  return spawnSync(process.execPath, ["--import", "tsx", scriptPath], { cwd: serverRoot, env, encoding: "utf8" });
+  return spawnSync(process.execPath, ["--import", "@oxc-node/core/register", scriptPath], { cwd: serverRoot, env, encoding: "utf8" });
 }
 
 test("subprocess: missing DATABASE_URL -> exit 2, MISSING_DATABASE_URL", () => {

@@ -3,12 +3,12 @@
 // (advancing the ledger is itself part of gate B, via the plain transition
 // function run under the migration/operator identity that owns it).
 //
-// Usage: DATABASE_URL=... tsx scripts/read-cursor-widen-backfill.ts [--batch-size N] [--sleep-ms N]
+// Usage: DATABASE_URL=... node --import @oxc-node/core/register scripts/read-cursor-widen-backfill.ts [--batch-size N] [--sleep-ms N]
 // Output: deterministic plain text; the final REPORT line is the gate evidence
 // (phase, epoch, per-table counts, convergence with LSN/timestamps).
 import "dotenv/config";
 import pg from "pg";
-import { runReadCursorWidenBackfill } from "../src/services/readCursorWidenBackfill.js";
+import { runReadCursorWidenBackfill } from "../src/services/readCursorWidenBackfill";
 
 function intFlag(name: string, fallback: number): number {
   const idx = process.argv.indexOf(name);

@@ -22,7 +22,7 @@ import {
   type AgentKnowledgeDoc,
   type AgentKnowledgeSearchResult,
   type AgentKnowledgeSource,
-} from "../services/agentKnowledgeService.js";
+} from "../services/agentKnowledgeService";
 
 export interface AgentKnowledgeActor {
   agentId: string;

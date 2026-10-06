@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import {
   cleanup,
   fireEvent,
@@ -243,7 +242,11 @@ test("human profile Message action stays icon-only at desktop widths", () => {
     "",
     "visible Message copy must not return at a responsive breakpoint",
   );
-  assert.equal(messageButton.getAttribute("title"), "Message");
+  assert.equal(messageButton.getAttribute("title"), null);
+  assert.ok(
+    messageButton.hasAttribute("data-base-ui-tooltip-trigger"),
+    "Message tooltip must use the RUI Tooltip trigger",
+  );
   assert.ok(
     messageButton.querySelector("svg"),
     "the icon remains the visible affordance",

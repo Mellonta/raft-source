@@ -1,9 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { RefObject } from "react";
-import { X } from "lucide-react";
-import { useIntl } from "react-intl";
-import type { IntlShape } from "react-intl";
-import {
+import { Card,
   Banner,
   BannerAction,
   BannerDescription,
@@ -18,30 +13,50 @@ import {
   SelectItemText,
   SelectList,
   SelectValue,
-  Textarea,
-} from "raft-ui";
+  Checkbox,
+  Textarea } from "raft-ui";
+import CloseButton from "../ui/CloseButton";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { RefObject } from "react";
+import { X } from "lucide-react";
+import { useIntl } from "react-intl";
+import type { IntlShape } from "react-intl";
 import { useAgentStore } from "../../store/agentStore";
 import { useChannelStore } from "../../store/channelStore";
 import { useMachineStore } from "../../store/machineStore";
 import type { Machine } from "../../store/machineStore";
 import { useServerStore } from "../../store/serverStore";
+import { catalogModelLabel } from "../../store/modelLabelCatalogStore";
 import api from "../../api/client";
 import { bothComputerVersionsKnown, isDaemonOutdated, validateAgentNameReason, getCreatableRuntimeOptions, runtimeAvailabilitySuffix, getDefaultModel, REASONING_EFFORT_RUNTIMES, PLAN_CONFIG, getBillingCapacityLimitLabel, getBillingCapacityLimitState, getBillingUsage, getEffectiveLimits } from "@botiverse/raft-shared";
 import { formatAgentNameValidationError } from "../../i18n/nameValidation";
 import { formatRuntimeConfigBuildError } from "../../utils/runtimeConfigBuildErrorPresentation";
-import type { ResolvedAgentCreateFormDefinition, RuntimeConfig, RuntimeReasoningEffort, RuntimeFormDefinitionRef, RuntimeModelInfo, RuntimeSelectionOption, ServerPlan } from "@botiverse/raft-shared";
+import type { ProviderConnectionSummary, ResolvedAgentCreateFormDefinition, RuntimeConfig, RuntimeReasoningEffort, RuntimeFormDefinitionRef, RuntimeModelInfo, RuntimeSelectionOption, ServerPlan } from "@botiverse/raft-shared";
 import { formatRuntimeAvailabilitySuffix, formatRuntimeLabelWithStatus } from "../../utils/runtimeAvailabilityLabel";
 import { runtimeModelSelectionIsRunnable, useRuntimeModels } from "../../hooks/useRuntimeModels";
 import type { RuntimeModelSourceState } from "../../hooks/useRuntimeModels";
 
 import { useNewAgentRuntimeOptions } from "../../hooks/useRuntimeSelectionCatalog";
 import { runtimeFormDefinitionRefKey, useRuntimeFormDefinitionCatalog } from "../../hooks/useRuntimeFormDefinition";
+import { useRuntimeFormV2 } from "../../hooks/useRuntimeFormV2";
+import { RUNTIME_FORM_V2_WEB_FLAG_KEY, useServerFeatureFlag } from "../../store/serverFeatureFlags";
+import {
+  applyRuntimeFormV2Change,
+  initialRuntimeFormV2Values,
+  runtimeFormV2Submission,
+  validateRuntimeFormV2,
+} from "@botiverse/raft-runtime-form";
+import type { RuntimeFormV2Value, RuntimeFormV2Values } from "@botiverse/raft-runtime-form";
 import { useProviderConnections } from "../../hooks/useProviderConnections";
+import { useAgentRuntimeProvider } from "../../hooks/useAgentRuntimeProvider";
+import { useServerPermissions } from "../../hooks/useServerPermissions";
 import { useAppNavigate } from "../../hooks/useAppNavigate";
 import Modal from "../Modal";
 import DialogCard from "../ui/DialogCard";
-import PixelAvatar, { AVATAR_KEYS } from "./PixelAvatar";
+import { AVATAR_KEYS } from "./PixelAvatar";
+import AvatarSlot from "../ui/AvatarSlot";
 import RuntimeConfigFields from "./RuntimeConfigFields";
+import EditProviderConnectionModal from "../settings/EditProviderConnectionModal";
 import StableField, { FieldSelectTrigger } from "./StableField";
 import TextLink from "../ui/TextLink";
 import SetupSessionFooter from "../onboarding/SetupSessionFooter";
@@ -53,6 +68,7 @@ import {
   builtInProviderDefaultModel,
   isBuiltInGatewayProviderMode,
   piBuiltinProviderDefaultModel,
+  reconcileBuiltInProviderModelSelection,
   runtimeIgnoresModel,
   supportsRuntimeApiUrl,
   supportsRuntimeBuiltInProvider,
@@ -180,7 +196,9 @@ function OnboardingCreateCindyRuntimePanel({
   builtInProviderBaseUrl,
   onBuiltInProviderBaseUrlChange,
   builtInProviderSupportsImageInput,
+  loadLocalPlugins,
   onBuiltInProviderSupportsImageInputChange,
+  onLoadLocalPluginsChange,
   piProviderMode,
   onPiProviderModeChange,
   piProviderApiKey,
@@ -226,6 +244,8 @@ function OnboardingCreateCindyRuntimePanel({
   builtInProviderBaseUrl: string;
   onBuiltInProviderBaseUrlChange: (value: string) => void;
   builtInProviderSupportsImageInput: boolean;
+  loadLocalPlugins: boolean;
+  onLoadLocalPluginsChange: (enabled: boolean) => void;
   onBuiltInProviderSupportsImageInputChange: (enabled: boolean) => void;
   piProviderMode: PiProviderMode;
   onPiProviderModeChange: (mode: PiProviderMode) => void;
@@ -288,6 +308,8 @@ function OnboardingCreateCindyRuntimePanel({
         onBuiltInProviderApiKeyChange={onBuiltInProviderApiKeyChange}
         builtInProviderBaseUrl={builtInProviderBaseUrl}
         onBuiltInProviderBaseUrlChange={onBuiltInProviderBaseUrlChange}
+        loadLocalPlugins={loadLocalPlugins}
+        onLoadLocalPluginsChange={onLoadLocalPluginsChange}
         builtInProviderSupportsImageInput={builtInProviderSupportsImageInput}
         onBuiltInProviderSupportsImageInputChange={onBuiltInProviderSupportsImageInputChange}
         piProviderMode={piProviderMode}
@@ -343,6 +365,8 @@ export default function CreateAgentDialog({
   onOnboardingStartOver,
   onSubmitStart,
   onSubmitError,
+  actionCardMessageId,
+  actionCardConfirmationVersion,
   fromActionCard = false,
   stayOnCreate = false,
   external = false,
@@ -428,6 +452,8 @@ export default function CreateAgentDialog({
    * mapping to a low-cardinality `error_class`.
    */
   onSubmitError?: (err: unknown) => void;
+  actionCardMessageId?: string;
+  actionCardConfirmationVersion?: number;
   /** Opens the dedicated external-agent create flow. External agents have no Computer. */
   external?: boolean;
   /** Dev fixture mode: render the real form but never create an agent or finish setup. */
@@ -453,6 +479,11 @@ export default function CreateAgentDialog({
   // content so the Runs on / Model popovers open within the modal's stacking
   // context instead of behind it. See OnboardingCreateCindyRuntimePanel.
   const cindyRuntimeSelectPortalRef = useRef<HTMLElement>(null);
+  // Keep the regular Create Agent popovers in the dialog's own layer too.
+  // This matters when the shared dialog is opened from another modal surface,
+  // such as Channel Settings: a body-level popup otherwise lands behind the
+  // surrounding modal layer and its options cannot be selected.
+  const createAgentSelectPortalRef = useRef<HTMLFormElement>(null);
 
   const [name, setName] = useState(
     prefilledName ?? (onboarding ? "Cindy" : ""),
@@ -590,7 +621,9 @@ export default function CreateAgentDialog({
   const [builtInProviderApiKey, setBuiltInProviderApiKey] = useState("");
   const [builtInProviderBaseUrl, setBuiltInProviderBaseUrl] = useState("");
   const [builtInProviderSupportsImageInput, setBuiltInProviderSupportsImageInput] = useState(false);
+  const [loadLocalPlugins, setLoadLocalPlugins] = useState(false);
   const [providerConnectionId, setProviderConnectionId] = useState("");
+  const [editingProviderConnection, setEditingProviderConnection] = useState<ProviderConnectionSummary | null>(null);
   const [piProviderMode, setPiProviderMode] = useState<PiProviderMode>(PI_PROVIDER_CONFIGURED);
   const [piProviderApiKey, setPiProviderApiKey] = useState("");
   const [fastMode, setFastMode] = useState(false);
@@ -618,13 +651,56 @@ export default function CreateAgentDialog({
     () => !onboarding && !!prefilledName && validateAgentNameReason(prefilledName) !== null,
   );
   const createAgent = useAgentStore((s) => s.createAgent);
+  const { capabilities } = useServerPermissions();
   const channels = useChannelStore((s) => s.channels);
   const allAgents = useAgentStore((s) => s.agents);
   const agents = allAgents.filter((a) => !a.deletedAt);
   const nav = useAppNavigate();
   const providerConnectionCatalog = useProviderConnections(!previewOnly && runtime === "builtin");
-  const availableProviderConnections = providerConnectionCatalog.connections.filter((connection) => connection.enabled && connection.status === "ready");
+  // Hosted runtime (antiproton): offered only for external agents when the server's flag is on and the deployment is configured.
+  const hostedRuntimeProvider = useAgentRuntimeProvider("antiproton", external && !previewOnly);
+  const [runOnHostedRuntime, setRunOnHostedRuntime] = useState(false);
+  const availableProviderConnections = providerConnectionCatalog.connections.filter(
+    (connection) => connection.enabled && connection.hasCredential,
+  );
   const selectedProviderConnection = availableProviderConnections.find((connection) => connection.id === providerConnectionId) ?? null;
+  // Protocol v2 (server-described form, rendered by field kind, submitted as
+  // field values). Behind a flag; managed provider connections and onboarding
+  // stay on v1 for now. A runtime opts in with its own `runtimeFormV2` marker,
+  // independent of the v1 `formDefinitionRef`; a v2 form that needs client
+  // capabilities this build lacks falls back to the legacy/v1 form.
+  const runtimeFormV2Flag = useServerFeatureFlag(RUNTIME_FORM_V2_WEB_FLAG_KEY).enabled;
+  const v2Eligible = runtimeFormV2Flag
+    && selectedRuntimeAdmission?.runtimeFormV2?.protocolVersion === 2
+    // Builtin stays on the schema (v1) path: the saved Provider select — the
+    // unified saved/direct picker — only exists there. A v2 form would hide
+    // it, so a provider connection could never be chosen in create.
+    && runtime !== "builtin"
+    && !selectedProviderConnection && !onboarding && !previewOnly;
+  const runtimeFormV2 = useRuntimeFormV2(v2Eligible ? selectedMachineId : null, v2Eligible ? runtime : null);
+  const v2Active = v2Eligible && runtimeFormV2.status !== "unsupported";
+  const runtimeFormV2Key = runtimeFormV2.status === "ready" ? `${selectedMachineId}\0${runtime}` : "";
+  const [v2Draft, setV2Draft] = useState<{ key: string; values: RuntimeFormV2Values } | null>(null);
+  const [v2ServerErrors, setV2ServerErrors] = useState<Record<string, string>>({});
+  const v2Values = runtimeFormV2.status === "ready"
+    ? v2Draft?.key === runtimeFormV2Key
+      ? v2Draft.values
+      : initialRuntimeFormV2Values(runtimeFormV2.form, runtimeFormV2.sources)
+    : null;
+  const v2Errors = runtimeFormV2.status === "ready" && v2Values
+    ? validateRuntimeFormV2(runtimeFormV2.form, runtimeFormV2.sources, v2Values)
+    : {};
+  // A required field whose option source is unavailable blocks like an empty one (option_source.status).
+  const v2MissingRequired = Object.values(v2Errors).some((code) => code === "required" || code === "source_unavailable");
+  const v2Malformed = Object.values(v2Errors).some((code) => code !== "required" && code !== "source_unavailable");
+  const changeV2Value = (key: string, value: RuntimeFormV2Value) => {
+    if (runtimeFormV2.status !== "ready" || !v2Values) return;
+    setV2ServerErrors({});
+    setV2Draft({
+      key: runtimeFormV2Key,
+      values: applyRuntimeFormV2Change(runtimeFormV2.form, runtimeFormV2.sources, v2Values, key, value),
+    });
+  };
 
   // The definition's option sources, not client constants, own provider/model
   // defaults for schema-backed rows. Reconcile once the version-pinned
@@ -731,6 +807,7 @@ export default function CreateAgentDialog({
   const modelSourceAllowsSubmit = schemaBacked
     ? schemaModelAllowsSubmit || runtimeFormDefinition.definition?.runtimeId === "builtin"
     : (runtime === "codex" && !schemaBacked) || runtimeModelSelectionIsRunnable({
+    runtime,
     source: runtimeModels.source,
     model,
     modelIgnored: runtimeIgnoresModel(runtime),
@@ -750,7 +827,7 @@ export default function CreateAgentDialog({
         }]
       : [];
   });
-  const modelOptions = runtimeModels.models.map((m) => ({ value: m.id, label: m.label }));
+  const modelOptions = runtimeModels.models.map((m) => ({ value: m.id, label: catalogModelLabel(useServerStore.getState().current?.id, selectedMachineId, runtimeModelSourceRuntime, m.id) ?? m.label }));
 
   // Change the selected model and reconcile reasoning against the new model's
   // declared supportedReasoningEfforts: keep a still-valid value, otherwise fall
@@ -773,6 +850,29 @@ export default function CreateAgentDialog({
       prev as import("@botiverse/raft-shared").ReasoningEffort | null,
       runtimeModels.models,
     ));
+  };
+
+  const changeProviderConnection = (connection: ProviderConnectionSummary | null) => {
+    setProviderConnectionId(connection?.id ?? "");
+    if (!connection) {
+      if (providerConnectionId) {
+        setBuiltInProviderApiKey("");
+        setBuiltInProviderBaseUrl("");
+        setBuiltInProviderSupportsImageInput(false);
+      }
+      return;
+    }
+    setBuiltInProviderApiKey("");
+    setBuiltInProviderBaseUrl(connection.endpointUrl ?? "");
+    setBuiltInProviderSupportsImageInput(connection.supportsImageInput === true);
+    setBuiltInProviderMode(connection.providerId);
+    const nextModel = reconcileBuiltInProviderModelSelection({
+      definition: runtimeFormDefinition.definition,
+      providerId: connection.providerId,
+      currentModel: model,
+    });
+    setModel(nextModel.model);
+    setCustomModelMode(nextModel.customModelMode);
   };
 
   // One-shot prefill waiter: when the dialog opens with a `prefilledMachineId`
@@ -850,6 +950,8 @@ export default function CreateAgentDialog({
     setBuiltInProviderBaseUrl("");
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change, react-doctor/no-chain-state-updates -- reset the gateway-only capability with the dialog lifecycle.
     setBuiltInProviderSupportsImageInput(false);
+    // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change, react-doctor/no-chain-state-updates -- reset the per-agent opt-in when the create dialog is initialized.
+    setLoadLocalPlugins(false);
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change, react-doctor/no-chain-state-updates -- YMNNE-family: pre-existing non-bug site grandfathered; rule now gates new code (see docs/frontend/render-cost-contract.md)
     setFastMode(false);
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change, react-doctor/no-chain-state-updates -- YMNNE-family: pre-existing non-bug site grandfathered; rule now gates new code (see docs/frontend/render-cost-contract.md)
@@ -943,7 +1045,7 @@ export default function CreateAgentDialog({
   // "Create Agent 那个也可以编辑了").
   const nameLocked = onboarding;
   const descriptionLocked = onboarding;
-  const lockedFieldClass = "bg-gray-100 text-black/50 cursor-not-allowed";
+  const lockedFieldClass = "bg-fill-muted text-foreground-muted cursor-not-allowed";
   /**
    * One validator, two questions: "is this name usable?" and "should we say so
    * yet?" — previously conflated, which is why the empty case was unreachable.
@@ -982,7 +1084,9 @@ export default function CreateAgentDialog({
    * returns on this flag before any create call.
    */
   const fieldValidationBlocked = Boolean(nameValidationError) || (!isExternalMode && (
-    providerApiUrlInvalid || builtInBaseUrlInvalid || schemaReasoningInvalid
+    v2Active
+      ? v2Malformed
+      : providerApiUrlInvalid || builtInBaseUrlInvalid || schemaReasoningInvalid
   ));
 
   const createDisabled =
@@ -996,9 +1100,11 @@ export default function CreateAgentDialog({
       !availableRuntimes.includes(runtime) ||
       selectedMachine?.status !== "online" ||
       !selectedMachineMeetsDaemonRequirement ||
-      (schemaBacked && !runtimeFormDefinition.definition) ||
+      (v2Active
+        ? runtimeFormV2.status !== "ready" || v2MissingRequired
+        : schemaBacked && !runtimeFormDefinition.definition) ||
       (Boolean(providerConnectionId) && !selectedProviderConnection) ||
-      !modelSourceAllowsSubmit ||
+      (!v2Active && !modelSourceAllowsSubmit) ||
       // Mandatory-but-EMPTY. Not an error message — the button simply stays
       // disabled until the field has a value, and only then can its content be
       // judged. Malformed values are deliberately absent from this list: they
@@ -1006,10 +1112,10 @@ export default function CreateAgentDialog({
       !name.trim() ||
       providerApiUrlMissing ||
       providerApiKeyInvalid ||
-      builtInApiKeyInvalid ||
-      builtInBaseUrlMissing ||
+      (!v2Active && builtInApiKeyInvalid) ||
+      (!v2Active && builtInBaseUrlMissing) ||
       piApiKeyInvalid ||
-      ((customModelMode || builtInGatewayModelRequired) && !model.trim())
+      (!v2Active && (customModelMode || builtInGatewayModelRequired) && !model.trim())
     ));
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -1047,7 +1153,7 @@ export default function CreateAgentDialog({
       setSubmitting(false);
       return;
     }
-    if (!isExternalMode && !modelSourceAllowsSubmit) {
+    if (!isExternalMode && !v2Active && !modelSourceAllowsSubmit) {
       setError(formatMessage({ id: "agent.create.modelSourceInvalid" }));
       setSubmitting(false);
       return;
@@ -1075,6 +1181,21 @@ export default function CreateAgentDialog({
             description: description.trim() || undefined,
             avatarUrl: `pixel:${avatarKey}`,
             external: true,
+            ...(runOnHostedRuntime && hostedRuntimeProvider.available ? { provider: "antiproton" as const } : {}),
+            actionCardMessageId,
+            actionCardConfirmationVersion,
+          })
+        : v2Active && runtimeFormV2.status === "ready" && v2Values
+        ? await createAgent(name.trim(), {
+            description: description.trim() || undefined,
+            runtime,
+            formDefinitionRef: { protocolVersion: 2, runtimeId: runtime },
+            formValues: runtimeFormV2Submission(runtimeFormV2.form, v2Values, runtimeFormV2.sources),
+            machineId: selectedMachineId,
+            avatarUrl: `pixel:${avatarKey}`,
+            onboarding,
+            actionCardMessageId,
+            actionCardConfirmationVersion,
           })
         : await (async () => {
             // Build envVars object from entries (skip empty keys)
@@ -1094,6 +1215,7 @@ export default function CreateAgentDialog({
                 : selectedProviderConnection
                 ? buildConnectionDrivenBuiltInConfig({
                     definition: runtimeFormDefinition.definition,
+                    loadLocalPlugins,
                     connectionId: selectedProviderConnection.id,
                     providerId: selectedProviderConnection.providerId,
                     model,
@@ -1105,6 +1227,7 @@ export default function CreateAgentDialog({
                   apiKey: builtInProviderApiKey,
                   baseUrl: builtInProviderBaseUrl,
                   supportsImageInput: builtInProviderSupportsImageInput,
+                  loadLocalPlugins,
                   model,
                   envVars: Object.keys(envVars).length > 0 ? envVars : null,
                 })
@@ -1120,6 +1243,7 @@ export default function CreateAgentDialog({
                   builtInProviderApiKey,
                   builtInProviderBaseUrl,
                   builtInProviderSupportsImageInput,
+                  loadLocalPlugins,
                   piProviderMode,
                   piProviderApiKey,
                   fastMode,
@@ -1150,6 +1274,8 @@ export default function CreateAgentDialog({
               envVars: schemaBacked ? undefined : Object.keys(envVars).length > 0 ? envVars : undefined,
               avatarUrl: `pixel:${avatarKey}`,
               onboarding,
+              actionCardMessageId,
+              actionCardConfirmationVersion,
             });
           })());
       if (remembersLastConfig && currentServer) {
@@ -1201,7 +1327,7 @@ export default function CreateAgentDialog({
       //     of looking at an empty Sidebar+Add surface
       //   - fallback (no #all channel resolvable) → stay
       if (stayOnCreate) {
-        // Orchestrator flows (e.g. Wiki setup) keep the parent dialog in place
+        // Parent-managed flows keep the parent dialog in place
         // and use onCreated to capture the new agent.
       } else if (isExternalMode) {
         try {
@@ -1222,7 +1348,16 @@ export default function CreateAgentDialog({
       }
       onClose();
     } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { error?: string } } };
+      const axiosErr = err as { response?: { data?: { error?: string; issues?: Array<{ code?: string; pointer?: string }> } } };
+      if (v2Active) {
+        // v2 issues point at /formValues/<field>: show them beside the field.
+        const fieldErrors: Record<string, string> = {};
+        for (const issue of axiosErr.response?.data?.issues ?? []) {
+          const key = issue.pointer?.startsWith("/formValues/") ? issue.pointer.slice("/formValues/".length) : "";
+          if (key) fieldErrors[key] = axiosErr.response?.data?.error ?? issue.code ?? "";
+        }
+        setV2ServerErrors(fieldErrors);
+      }
       setError(
         err instanceof RuntimeConfigBuildError
           ? formatRuntimeConfigBuildError(err, formatMessage)
@@ -1246,14 +1381,14 @@ export default function CreateAgentDialog({
   if (onboarding) {
     const formId = "create-cindy-onboarding-form";
     const content = (
-      <section ref={cindyRuntimeSelectPortalRef} className="flex w-full max-w-[960px] flex-col border-2 border-black bg-white shadow-brutal md:h-[min(720px,calc(100dvh-2rem))] md:min-h-0 md:overflow-hidden" data-testid="create-cindy-screen-c">
-        <header className="flex shrink-0 items-start justify-between gap-3 border-b-2 border-black px-6 pb-4 pt-6 sm:px-9">
+      <section ref={cindyRuntimeSelectPortalRef} className="flex w-full max-w-[calc(100vw-1rem)] flex-col border border-line-muted bg-layer-panel text-foreground-strong shadow-raft-md theme-brutal:border-2 theme-brutal:border-line-strong theme-brutal:rounded-none theme-brutal:shadow-brutal md:max-w-[960px] md:h-[min(720px,calc(100dvh-2rem))] md:min-h-0 md:overflow-hidden" data-testid="create-cindy-screen-c">
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b-2 border-line-muted theme-brutal:border-black px-6 pb-4 pt-6 sm:px-9">
           <div className="min-w-0">
-            <div className="font-mono text-[10px] font-bold uppercase tracking-wide text-black/55">
+            <div className="font-mono text-[10px] font-bold uppercase tracking-wide text-foreground-muted">
               {formatMessage({ id: "agent.create.setupServer" })}
             </div>
             <h1 className="mt-2 text-xl font-bold">{formatMessage({ id: "agent.create.meetCindy" })}</h1>
-            <p className="mt-1 text-xs leading-5 text-black/60">
+            <p className="mt-1 text-xs leading-5 text-foreground-muted">
               {formatMessage({ id: "agent.create.cindyDescription" })}
             </p>
           </div>
@@ -1270,36 +1405,36 @@ export default function CreateAgentDialog({
               worse, it implies the path is live. Whether this branch should exist
               at all is a separate question (@cindyz, 2026-08-29). */}
           {onboardingShell !== "modal" ? null : (
-            <Button
+            <CloseButton
               type="button"
               onClick={onClose}
-              variant="default"
-              size="icon-md"
+
+
               className="shrink-0"
               aria-label={formatMessage({ id: "common.close" })}
             >
               <X size={20} />
-            </Button>
+            </CloseButton>
           )}
         </header>
 
         <form id={formId} noValidate onSubmit={handleSubmit} className="flex flex-col md:min-h-0 md:flex-1 md:overflow-hidden">
           <div className="flex flex-col gap-0 md:grid md:grid-cols-[0.95fr_1.05fr] md:min-h-0 md:flex-1 md:overflow-hidden">
-            <div className="flex flex-col border-b-2 border-black bg-soft-pink px-8 py-5 md:min-h-0 md:justify-center md:border-b-0 md:border-r-2 md:py-8">
+            <div className="flex flex-col border-b-2 border-line-muted theme-brutal:border-black bg-soft-pink px-8 py-5 md:min-h-0 md:justify-center md:border-b-0 md:border-r-2 md:py-8">
               <div className="mx-auto flex max-w-[360px] flex-col items-center text-center">
                 <div className="relative mb-3 md:mb-5" data-testid="cindy-avatar-entrance">
-                  <span className="onboarding-cindy-pop-mark absolute -right-5 top-1 size-3 rotate-12 border-2 border-black bg-brutal-lime" aria-hidden="true" />
-                  <span className="onboarding-cindy-pop-mark absolute -left-5 top-8 size-2.5 -rotate-12 border-2 border-black bg-soft-signal [animation-delay:70ms]" aria-hidden="true" />
+                  <span className="onboarding-cindy-pop-mark absolute -right-5 top-1 size-3 rotate-12 border-2 border-line-muted theme-brutal:border-black bg-brutal-lime" aria-hidden="true" />
+                  <span className="onboarding-cindy-pop-mark absolute -left-5 top-8 size-2.5 -rotate-12 border-2 border-line-muted theme-brutal:border-black bg-primary-soft theme-brutal:bg-soft-signal [animation-delay:70ms]" aria-hidden="true" />
                   {/* Every avatar frame in the app carries the black border (see
                       AvatarSlot); this hero was the one that did not. */}
-                  <PixelAvatar avatarKey="mug" size={132} className="onboarding-cindy-entrance relative z-10 !size-[88px] border-2 border-black shadow-brutal-lg md:!size-[132px]" />
+                  <AvatarSlot context="profile-tile" type="agent" agentAvatarUrl="pixel:mug" className="onboarding-cindy-entrance relative z-10 !size-[88px] theme-brutal:shadow-brutal-lg md:!size-[132px]" />
                 </div>
                 <h2 className="text-2xl font-black tracking-normal md:text-4xl">
                   {formatMessage({ id: "agent.create.cindyName" })}
                 </h2>
                 {/* The old "Onboarding assistant" badge spent a line restating
                     what the name and blurb already say. Say what she does for you. */}
-                <p className="mt-2 text-sm font-medium leading-relaxed text-black/70 md:mt-3 md:text-base">
+                <p className="mt-2 text-sm font-medium leading-relaxed text-foreground-muted md:mt-3 md:text-base">
                   {formatMessage({ id: "agent.create.cindyHeroDescription" })}
                 </p>
               </div>
@@ -1307,8 +1442,8 @@ export default function CreateAgentDialog({
 
             <div className="max-h-[min(70dvh,calc(100dvh-12rem))] overflow-y-auto px-6 py-6 md:max-h-none md:min-h-0 md:px-8">
               {atLimit && (
-                <Banner status="warning" className="mb-4">
-                  <BannerDescription>
+                <Banner status="warning" className="mb-4 dark:bg-warning-soft dark:text-warning-strong">
+                  <BannerDescription className="dark:!text-warning-strong">
                     {formatMessage(
                       { id: "agent.create.capacityReached" },
                       {
@@ -1326,6 +1461,7 @@ export default function CreateAgentDialog({
                             }}
                             variant="link"
                             size="inline"
+                            className="dark:!text-warning-strong"
                           >
                             {chunks}
                           </Button>
@@ -1336,8 +1472,8 @@ export default function CreateAgentDialog({
                 </Banner>
               )}
               {error && !atLimit && (
-                <Banner status="warning" className="mb-4">
-                  <BannerDescription>
+                <Banner status="warning" className="mb-4 dark:bg-warning-soft dark:text-warning-strong">
+                  <BannerDescription className="dark:!text-warning-strong">
                     {error}
                   </BannerDescription>
                 </Banner>
@@ -1388,6 +1524,7 @@ export default function CreateAgentDialog({
                   setBuiltInProviderApiKey("");
                   setBuiltInProviderBaseUrl("");
                   setBuiltInProviderSupportsImageInput(false);
+                  setLoadLocalPlugins(false);
                   setPiProviderMode(PI_PROVIDER_CONFIGURED);
                   setPiProviderApiKey("");
                   setFastMode(false);
@@ -1439,6 +1576,8 @@ export default function CreateAgentDialog({
                 onBuiltInProviderApiKeyChange={setBuiltInProviderApiKey}
                 builtInProviderBaseUrl={builtInProviderBaseUrl}
                 onBuiltInProviderBaseUrlChange={setBuiltInProviderBaseUrl}
+                loadLocalPlugins={loadLocalPlugins}
+                onLoadLocalPluginsChange={setLoadLocalPlugins}
                 builtInProviderSupportsImageInput={builtInProviderSupportsImageInput}
                 onBuiltInProviderSupportsImageInputChange={setBuiltInProviderSupportsImageInput}
                 piProviderMode={piProviderMode}
@@ -1502,7 +1641,7 @@ export default function CreateAgentDialog({
               ) : null}
             </div>
           </div>
-          <footer className="flex shrink-0 flex-col-reverse gap-3 border-t-2 border-black px-5 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-9">
+          <footer className="flex shrink-0 flex-col-reverse gap-3 border-t-2 border-line-muted theme-brutal:border-black px-5 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-9">
             {onboarding ? (
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                 <SetupSessionFooter disabled={submitting} />
@@ -1524,7 +1663,7 @@ export default function CreateAgentDialog({
               disabled={createDisabled || submitting}
               variant="accent"
               size="lg"
-              className="w-full sm:w-auto"
+              className="w-full sm:w-auto dark:!text-foreground-inverse"
             >
               {submitting
                 ? (createdOnboardingAgent
@@ -1547,12 +1686,12 @@ export default function CreateAgentDialog({
   if (!isExternalMode && machines.length === 0) {
     return (
       <Modal onClose={onClose}>
-        <div className="w-full max-w-md card-brutal p-6" data-testid="create-agent-needs-computer">
+        <Card className="w-full max-w-md p-6" data-testid="create-agent-needs-computer">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-lg font-bold uppercase">{dialogTitle}</h2>
-            <Button variant="outline" size="icon-md" onClick={onClose} aria-label={formatMessage({ id: "common.close" })}>
+            <CloseButton   onClick={onClose} aria-label={formatMessage({ id: "common.close" })}>
               <X size={20} />
-            </Button>
+            </CloseButton>
           </div>
 
           <Banner status="info">
@@ -1578,13 +1717,14 @@ export default function CreateAgentDialog({
               {formatMessage({ id: "agent.create.connectComputer" })}
             </Button>
           </div>
-        </div>
+        </Card>
       </Modal>
     );
   }
 
   return (
-    <DialogCard title={dialogTitle} onClose={onClose}>
+    <>
+      <DialogCard title={dialogTitle} onClose={onClose} testId="create-agent-dialog">
         {/* `space-y-1` (4px) since 2026-09-03 (@cindyz): StableField already
             reserves a message row under every field, so the gap between fields
             is paying for space the row has already bought. The reasoning for
@@ -1600,14 +1740,14 @@ export default function CreateAgentDialog({
             RuntimeConfigFields renders its fields as direct children of this form,
             so one class governs the whole rhythm; Agent Details has its own
             container and is untouched. */}
-        <form noValidate onSubmit={handleSubmit} className="space-y-1">
+        <form ref={createAgentSelectPortalRef} noValidate onSubmit={handleSubmit} className="space-y-1">
           {/* The add-members entry promised "joins #channel after creation";
               that promise must not vanish once this dialog covers the entry
               (task #584). Plain persistent line, not a Banner — it is context,
               not a warning, and it stays until submit. */}
           {autoJoinChannelName && (
             <p
-              className="border-2 border-black bg-brutal-cyan/60 px-3 py-2 text-xs font-bold text-black"
+              className="border-2 border-line-muted theme-brutal:border-black bg-info-soft theme-brutal:bg-brutal-cyan/60 px-3 py-2 text-xs font-bold text-foreground-strong theme-brutal:text-black"
               data-testid="create-agent-channel-context"
             >
               {formatMessage(
@@ -1637,8 +1777,8 @@ export default function CreateAgentDialog({
             * anything else about Banner is fixed in raft-ui, not at callsites.
             */}
           {atLimit && (
-            <Banner status="warning">
-              <BannerDescription>
+            <Banner status="warning" className="dark:bg-warning-soft dark:text-warning-strong">
+              <BannerDescription className="dark:!text-warning-strong">
                 {formatMessage(
                   { id: "agent.create.capacityReached" },
                   {
@@ -1656,6 +1796,7 @@ export default function CreateAgentDialog({
                         }}
                         variant="link"
                             size="inline"
+                            className="dark:!text-warning-strong"
                       >
                         {chunks}
                       </Button>
@@ -1709,6 +1850,7 @@ export default function CreateAgentDialog({
                     setBuiltInProviderApiKey("");
                     setBuiltInProviderBaseUrl("");
                     setBuiltInProviderSupportsImageInput(false);
+                    setLoadLocalPlugins(false);
                     setPiProviderMode(PI_PROVIDER_CONFIGURED);
                     setPiProviderApiKey("");
                     setFastMode(false);
@@ -1721,7 +1863,7 @@ export default function CreateAgentDialog({
                     <SelectValue placeholder={formatMessage({ id: "agent.create.selectPlaceholder" })} />
                     <SelectIcon />
                   </FieldSelectTrigger>
-                  <SelectContent>
+                  <SelectContent portalProps={{ container: createAgentSelectPortalRef }}>
                     <SelectList>
                       {renderSelectItems(machineOptions)}
                     </SelectList>
@@ -1729,7 +1871,7 @@ export default function CreateAgentDialog({
                 </Select>
               )}
               {minimumDaemonVersion && (
-                <p className="mt-1 text-xs font-medium text-black/60">
+                <p className="mt-1 text-xs font-medium text-foreground-muted">
                   {formatMessage(
                     { id: "agent.create.requiresDaemon" },
                     { version: minimumDaemonVersion },
@@ -1737,7 +1879,7 @@ export default function CreateAgentDialog({
                 </p>
               )}
               {prefilledMachineMode === "required" ? (
-                <p className="mt-1 text-xs text-black/50">
+                <p className="mt-1 text-xs text-foreground-muted">
                   {prefilledMachine?.name
                     ? formatMessage(
                         { id: "agent.create.requiredByActionCardNamed" },
@@ -1746,7 +1888,7 @@ export default function CreateAgentDialog({
                     : formatMessage({ id: "agent.create.requiredByActionCard" })}
                 </p>
               ) : prefilledMachineId ? (
-                <p className="mt-1 text-xs text-black/50">
+                <p className="mt-1 text-xs text-foreground-muted">
                   {prefilledMachineOnline
                     ? formatMessage({ id: "agent.create.suggestedByActionCard" })
                     : formatMessage({ id: "agent.create.suggestedComputerUnavailable" })}
@@ -1787,7 +1929,7 @@ export default function CreateAgentDialog({
               say so. The caller composes the note because only it saw the
               original search text. */}
           {prefilledNameNote && (
-            <p className="text-xs text-black/60" data-testid="create-agent-prefill-note">
+            <p className="text-xs text-foreground-muted theme-brutal:text-black/60" data-testid="create-agent-prefill-note">
               {prefilledNameNote}
             </p>
           )}
@@ -1811,73 +1953,36 @@ export default function CreateAgentDialog({
               readOnly={descriptionLocked}
             />
             {descriptionLocked ? (
-              <div className="mt-1 text-xs text-black/60">
+              <div className="mt-1 text-xs text-foreground-muted">
                 {onboarding
                   ? formatMessage({ id: "agent.create.fixedForOnboarding" })
                   : formatMessage({ id: "agent.create.prefilledByActionCard" })}
               </div>
             ) : null}
           </StableField>
-          {!isExternalMode && (
+          {isExternalMode && hostedRuntimeProvider.available && (
+            <label className="flex items-start gap-3 border border-line-muted px-3 py-2 theme-brutal:border-2 theme-brutal:border-black" data-testid="create-agent-hosted-runtime">
+              <Checkbox
+                checked={runOnHostedRuntime}
+                onCheckedChange={(checked) => setRunOnHostedRuntime(checked === true)}
+                aria-label={formatMessage({ id: "agent.create.hostedRuntime.label" })}
+              />
+              <span className="min-w-0">
+                <span className="block text-sm font-bold">{formatMessage({ id: "agent.create.hostedRuntime.label" })}</span>
+                <span className="mt-0.5 block text-xs leading-5 text-foreground-muted">{formatMessage({ id: "agent.create.hostedRuntime.hint" })}</span>
+              </span>
+            </label>
+          )}
+          {!isExternalMode && selectedMachineId && (
             <>
-            {providerConnectionCatalog.featureEnabled && runtime === "builtin" && (availableProviderConnections.length > 0 || providerConnectionId) && (
-              <StableField
-                label={formatMessage({ id: "agent.create.providerConnection" })}
-                hint={formatMessage({ id: "agent.create.providerConnectionHint" })}
-              >
-                <Select
-                  chrome="field"
-                  value={providerConnectionId || "__inline_provider_connection__"}
-                  items={[
-                    { value: "__inline_provider_connection__", label: formatMessage({ id: "agent.create.providerConnectionInline" }) },
-                    ...availableProviderConnections.map((connection) => ({ value: connection.id, label: connection.name })),
-                  ]}
-                  onValueChange={(value) => {
-                    if (value == null) return;
-                    const nextId = value === "__inline_provider_connection__" ? "" : value;
-                    setProviderConnectionId(nextId);
-                    const connection = availableProviderConnections.find((candidate) => candidate.id === nextId);
-                    if (!connection) return;
-                    setBuiltInProviderMode(connection.providerId);
-                    setBuiltInProviderApiKey("");
-                    setBuiltInProviderBaseUrl("");
-                    if (isBuiltInGatewayProviderMode(connection.providerId)) {
-                      setModel("");
-                      setCustomModelMode(true);
-                    } else {
-                      setModel(builtInProviderDefaultModel(connection.providerId) ?? "");
-                      setCustomModelMode(false);
-                    }
-                  }}
-                >
-                  <FieldSelectTrigger className="w-full" data-testid="create-agent-provider-connection">
-                    <SelectValue />
-                    <SelectIcon />
-                  </FieldSelectTrigger>
-                  <SelectContent>
-                    <SelectList>
-                      <SelectItem value="__inline_provider_connection__">
-                        <SelectItemText>{formatMessage({ id: "agent.create.providerConnectionInline" })}</SelectItemText>
-                        <SelectItemIndicator />
-                      </SelectItem>
-                      {availableProviderConnections.map((connection) => (
-                        <SelectItem key={connection.id} value={connection.id}>
-                          <SelectItemText>{connection.name}</SelectItemText>
-                          <SelectItemIndicator />
-                        </SelectItem>
-                      ))}
-                    </SelectList>
-                  </SelectContent>
-                </Select>
-                {providerConnectionId && !selectedProviderConnection && (
-                  <p className="mt-1 text-xs font-bold text-brutal-red">
-                    {formatMessage({ id: "agent.create.providerConnectionUnavailable" })}
-                  </p>
-                )}
-              </StableField>
-            )}
             <RuntimeConfigFields
               showValidationErrors={validationAttempted}
+              runtimeFormV2={v2Active ? {
+                state: runtimeFormV2,
+                values: v2Values,
+                onChange: changeV2Value,
+                serverErrors: v2ServerErrors,
+              } : undefined}
               runtime={runtime}
               onRuntimeChange={(val) => {
                 setRuntime(val);
@@ -1891,6 +1996,7 @@ export default function CreateAgentDialog({
                 setBuiltInProviderApiKey("");
                 setBuiltInProviderBaseUrl("");
                 setBuiltInProviderSupportsImageInput(false);
+                setLoadLocalPlugins(false);
                 setProviderConnectionId("");
                 setPiProviderMode(PI_PROVIDER_CONFIGURED);
                 setPiProviderApiKey("");
@@ -1931,6 +2037,8 @@ export default function CreateAgentDialog({
               onBuiltInProviderApiKeyChange={setBuiltInProviderApiKey}
               builtInProviderBaseUrl={builtInProviderBaseUrl}
               onBuiltInProviderBaseUrlChange={setBuiltInProviderBaseUrl}
+              loadLocalPlugins={loadLocalPlugins}
+              onLoadLocalPluginsChange={setLoadLocalPlugins}
               builtInProviderSupportsImageInput={builtInProviderSupportsImageInput}
               onBuiltInProviderSupportsImageInputChange={setBuiltInProviderSupportsImageInput}
               piProviderMode={piProviderMode}
@@ -1970,6 +2078,11 @@ export default function CreateAgentDialog({
               formDefinitionError={runtimeFormDefinition.error}
               formDefinitionErrorCode={runtimeFormDefinition.errorCode}
               managedConnectionActive={Boolean(selectedProviderConnection)}
+              providerConnections={providerConnectionCatalog.connections}
+              providerConnectionId={providerConnectionId}
+              onProviderConnectionChange={changeProviderConnection}
+              onEditProviderConnection={capabilities.manageExternalAuth ? setEditingProviderConnection : undefined}
+              selectPortalContainer={createAgentSelectPortalRef}
             />
             </>
           )}
@@ -1987,12 +2100,26 @@ export default function CreateAgentDialog({
               type="submit"
               disabled={createDisabled}
               variant="accent"
+              className="dark:!text-foreground-inverse"
               size="lg"
             >
               {submitLabel}
             </Button>
           </div>
         </form>
-    </DialogCard>
+      </DialogCard>
+      {editingProviderConnection && (
+        <EditProviderConnectionModal
+          key={editingProviderConnection.id}
+          connection={editingProviderConnection}
+          providerOptions={providerConnectionCatalog.providerOptions}
+          onClose={() => setEditingProviderConnection(null)}
+          onCompleted={async () => {
+            setEditingProviderConnection(null);
+            await providerConnectionCatalog.refresh();
+          }}
+        />
+      )}
+    </>
   );
 }

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { sendAuthenticatedMachineContext } from "./machineContext.js";
+import { sendAuthenticatedMachineContext } from "./machineContext";
 
 test("authenticated machine context serializes the exact accepted owner identities", () => {
   const sent: string[] = [];

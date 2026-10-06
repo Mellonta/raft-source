@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
 import {
+  isNamedReleaseChannel,
   parseChannel,
+  toHandsChannelSlug,
   readChannel,
   writeChannel,
   runChannelShow,
@@ -13,10 +14,10 @@ import {
   listChannelVersions,
   runChannelVersions,
   DEFAULT_CHANNEL,
-} from "./channel.js";
-import { channelPath } from "./paths.js";
-import { CliExit } from "./output.js";
-import { ComputerError } from "./lib/errors.js";
+} from "./channel";
+import { channelPath } from "./paths";
+import { CliExit } from "./output";
+import { ComputerError } from "./lib/errors";
 
 // PR-E §2.1 regression guard — release channel state.
 
@@ -62,6 +63,34 @@ test("parseChannel: pinned:<semver> accepted for valid semver", () => {
   assert.equal(parseChannel("pinned:0.52.2"), "pinned:0.52.2");
   assert.equal(parseChannel("pinned:1.0.0-alpha"), "pinned:1.0.0-alpha");
   assert.equal(parseChannel("pinned:1.0.0-beta.1"), "pinned:1.0.0-beta.1");
+  // task #816: feature versions carry a hyphenated prerelease identifier.
+  assert.equal(parseChannel("pinned:1.0.33-constructed-wake-context.1"), "pinned:1.0.33-constructed-wake-context.1");
+});
+
+// task #816 — named (feature-branch) release channels.
+test("parseChannel: named release channel slugs accepted and mapped 1:1 to the Hands channel", () => {
+  assert.equal(parseChannel("constructed-wake-context"), "constructed-wake-context");
+  assert.equal(parseChannel("  constructed-wake-context "), "constructed-wake-context");
+  assert.equal(parseChannel("abc"), "abc");
+  assert.equal(toHandsChannelSlug(parseChannel("constructed-wake-context")!), "constructed-wake-context");
+  assert.equal(toHandsChannelSlug("latest"), "main");
+  assert.equal(toHandsChannelSlug("alpha"), "alpha");
+  assert.equal(toHandsChannelSlug("pinned:1.0.31"), "pinned:1.0.31");
+});
+
+test("parseChannel: reserved cohort words, uppercase, underscores, dots and edge hyphens are not named channels", () => {
+  for (const reserved of ["main", "stable", "rc", "release", "staging", "production", "prod", "nightly", "preview", "pinned", "default"]) {
+    assert.equal(parseChannel(reserved), null, `${reserved} must not become a feature channel`);
+  }
+  assert.equal(parseChannel("Constructed-Wake-Context"), null);
+  assert.equal(parseChannel("constructed_wake_context"), null);
+  assert.equal(parseChannel("1.0.31"), null, "a bare version is not a channel");
+  assert.equal(parseChannel("-leading"), null);
+  assert.equal(parseChannel("trailing-"), null);
+  assert.equal(parseChannel("ab"), null, "too short");
+  assert.equal(parseChannel("a".repeat(65)), null, "too long");
+  assert.equal(isNamedReleaseChannel("constructed-wake-context"), true);
+  assert.equal(isNamedReleaseChannel("alpha"), false);
 });
 
 test("parseChannel: invalid values rejected → null", () => {
@@ -83,7 +112,7 @@ test("readChannel: missing file → returns DEFAULT_CHANNEL (latest)", async () 
 test("readChannel: corrupt content → falls back to DEFAULT_CHANNEL (lenient read)", async () => {
   await withHome(async (home) => {
     await mkdir(join(home, "computer"), { recursive: true });
-    await writeFile(channelPath(home), "garbage-value");
+    await writeFile(channelPath(home), "not a channel!");
     assert.equal(await readChannel(home), DEFAULT_CHANNEL);
   });
 });
@@ -245,6 +274,43 @@ test("listChannelVersions: maps latest to the authoritative main channel", async
   });
   assert.equal(new URL(requested).searchParams.get("channel"), "main");
   assert.deepEqual(result.versions, []);
+});
+
+// task #816 — a named release channel is queried on Hands under its own slug
+// and the response must name that same slug back.
+test("listChannelVersions: a named release channel queries Hands under its own slug", async () => {
+  let requested = "";
+  const response = versionIndexResponse({
+    channel: "constructed-wake-context",
+    target: { platform: "linux", arch: "x64" },
+    versions: [],
+  });
+  const channel = parseChannel("constructed-wake-context");
+  assert.ok(channel && channel !== "latest" && channel !== "alpha" && !channel.startsWith("pinned:"));
+  const result = await listChannelVersions(channel as Exclude<typeof channel, `pinned:${string}`>, 1, {
+    platform: "linux",
+    arch: "x64",
+    fetchFn: async (input) => {
+      requested = String(input);
+      return new Response(await response.text(), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  assert.equal(new URL(requested).searchParams.get("channel"), "constructed-wake-context");
+  assert.equal(result.channel, "constructed-wake-context");
+  assert.deepEqual(result.versions, []);
+  // A response for a different cohort is refused even when the request named the feature channel.
+  const drift = versionIndexResponse({ channel: "alpha", target: { platform: "linux", arch: "x64" }, versions: [] });
+  await assert.rejects(
+    () => listChannelVersions(channel as Exclude<typeof channel, `pinned:${string}`>, 1, {
+      platform: "linux",
+      arch: "x64",
+      fetchFn: async () => new Response(await drift.text(), { status: 200, headers: { "content-type": "application/json" } }),
+    }),
+    (error: unknown) => (error as { code?: string }).code === "CHANNEL_VERSIONS_INVALID",
+  );
 });
 
 test("listChannelVersions: rejects malformed provider identity and invalid limits", async () => {

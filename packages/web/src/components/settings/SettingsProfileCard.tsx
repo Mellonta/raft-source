@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import Tooltip from "../ui/Tooltip";
 
 type SettingsProfileCardProps = {
   avatar: ReactNode;
@@ -25,7 +26,7 @@ export default function SettingsProfileCard({
   return (
     <div
       data-testid={testId}
-      className="space-y-4 border-2 border-black bg-white p-4 shadow-brutal-sm"
+      className="space-y-4 border border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
     >
       <div className="flex items-start gap-4">
         <div className="flex size-16 shrink-0 items-center justify-center">
@@ -33,19 +34,22 @@ export default function SettingsProfileCard({
         </div>
 
         <div className="min-w-0 flex-1 pt-1">
+          <Tooltip content={title}>
           <div
-            className="min-w-0 truncate text-lg font-bold leading-tight text-black"
-            title={title}
+            className="min-w-0 truncate text-lg font-bold leading-tight text-foreground-strong theme-brutal:text-black"
           >
             {title}
           </div>
-          <div className="truncate text-sm font-mono text-black/50" title={subtitle}>
+          </Tooltip>
+          <Tooltip content={subtitle}>
+          <div className="truncate font-mono text-sm text-foreground-muted theme-brutal:text-black/50">
             {subtitle}
           </div>
+          </Tooltip>
         </div>
       </div>
 
-      <div className="space-y-3 border-t border-black/10 pt-4">
+      <div className="space-y-3 border-t border-line-muted pt-4">
         {children}
       </div>
     </div>

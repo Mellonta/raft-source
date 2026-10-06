@@ -9,7 +9,7 @@ import {
   setClockTimeout,
 } from "@botiverse/raft-shared";
 
-import type { StorageBackend } from "../services/storageService.js";
+import type { StorageBackend } from "../services/storageService";
 
 function countAgentEntries(entries: Record<string, unknown[] | undefined>): number {
   return Object.values(entries).reduce((total, values) => total + (values?.length ?? 0), 0);

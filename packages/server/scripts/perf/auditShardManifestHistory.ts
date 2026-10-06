@@ -12,7 +12,7 @@
  * script automates that check so it can run pre-refresh and on demand —
  * known-history-of-silent-debt > theoretical-risk for cluster #13 anchor 5.
  *
- * Run: pnpm --filter @botiverse/raft-server tsx scripts/perf/auditShardManifestHistory.ts
+ * Run: pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/perf/auditShardManifestHistory.ts
  *
  * Options (env vars):
  *   AUDIT_BASELINE        — path to baseline JSON (default: ./calibration-baseline.json)
@@ -29,7 +29,7 @@ import {
   loadBaseline,
   type CalibrationResult,
   type FileTiming,
-} from "./manifestCalibration.js";
+} from "./manifestCalibration";
 
 const SERVER_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const REPO_ROOT = path.resolve(SERVER_DIR, "../..");

@@ -1,13 +1,12 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 
-import { getDb } from "../db/index.js";
-import { agents, channels, messageMentions, messages, servers, users } from "../db/schema.js";
-import { AgentOrchestrator } from "./agentOrchestrator.js";
-import { ensureMentionDeliveryOccurrences } from "./mentionDeliveryOccurrenceService.js";
+import { getDb } from "../db/index";
+import { agents, channels, messageMentions, messages, servers, users } from "../db/schema";
+import { AgentOrchestrator } from "./agentOrchestrator";
+import { ensureMentionDeliveryOccurrences } from "./mentionDeliveryOccurrenceService";
 
 
 /**
@@ -163,7 +162,7 @@ async function waitFor(predicate: () => Promise<boolean>, what: string): Promise
 }
 
 async function readRow(messageId: string, agentId: string) {
-  const { getMentionDeliveryOccurrence } = await import("./mentionDeliveryOccurrenceService.js");
+  const { getMentionDeliveryOccurrence } = await import("./mentionDeliveryOccurrenceService");
   return getMentionDeliveryOccurrence(messageId, agentId);
 }
 
@@ -208,7 +207,7 @@ test("IDEMPOTENCY: a second delivery of an already-abandoned occurrence must not
 
 test("DECISION RACE: an occurrence already server-decided by another path is never terminalized or double-delivered", async () => {
   const { agent, mention, payload } = await seedTrackedMention({ agentStatus: "active" });
-  const { recordMentionDeliveryServerDecision } = await import("./mentionDeliveryOccurrenceService.js");
+  const { recordMentionDeliveryServerDecision } = await import("./mentionDeliveryOccurrenceService");
   // A session/recovery path with established identity won the race and
   // recorded the server decision before our identity-missing delivery ran.
   const decided = await recordMentionDeliveryServerDecision({

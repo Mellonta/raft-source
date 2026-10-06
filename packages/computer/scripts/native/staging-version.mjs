@@ -1,19 +1,43 @@
 // Canonical staging Computer version derivation.
 //
+// Form: `${packageVersion}-staging.${commitTime}.sha.${shortSha}`.
+// `commitTime` is the published commit's committer timestamp in UTC as
+// YYYYMMDDHHMMSS (14 digits), read from the commit object itself
+// (`git show -s --format=%cd`), so it is deterministic per commit (reruns
+// reproduce the same version) and needs no full clone. SemVer compares the
+// 14-digit identifier numerically, so staging versions of one base order by
+// commit time; the sha stays for provenance and no longer decides order (the
+// earlier `-staging.sha.${shortSha}` form ordered by a random sha).
+//
+// Honest limit: this is a clock, not a counter. Staging merges land one at a
+// time, so committer time increases in practice, but nothing here proves it:
+// a skewed committer clock, an explicitly set committer date, or two commits
+// in the same second could tie or invert the order. The version stays unique
+// (the sha differs); only recency order would be wrong. (Requiring year >=
+// 2020 also keeps the identifier free of a leading zero.)
+//
+// Transition note: under SemVer a numeric identifier orders BELOW an
+// alphanumeric one, so `X-staging.<time>.sha.*` orders below a legacy
+// `X-staging.sha.*` of the SAME base X. The new form ships with the 1.0.41
+// base bump, so every new version orders above every `1.0.40-staging.sha.*`;
+// never reintroduce the legacy form on a base that also carries the new one.
+//
 // Every publication consumer (five platform build jobs, manifest production,
 // immutable R2 namespaces, Hands registration, staging pointer) must obtain
 // the staging version from this one derivation. The previous inline
 // `${PKG_VERSION}-staging.sha.${SHORT_SHA}` template in the workflow let the
 // package version lag the released stable line: package.json said 1.0.17
 // while stable computer-v1.0.18 was already in the field, so staging produced
-// a candidate that SemVer-orders BELOW stable. Both installers skip their
-// downgrade comparison for prerelease tails, so publishing that candidate
-// could silently downgrade any alpha client. This module fails closed on that
+// a candidate that SemVer-orders BELOW stable. The installers of that time
+// skipped their downgrade comparison for prerelease tails, so publishing that
+// candidate could silently downgrade any alpha client (today's Rust installer
+// compares full SemVer and holds it as a downgrade instead — still a broken
+// alpha channel). This module fails closed on that
 // entire class: the resolved candidate must be a valid strict-SemVer
 // prerelease whose precedence is strictly greater than the stable floor.
 //
 // The comparator mirrors the runtime's compareComputerVersions
-// (packages/computer/src/kReleaseSource.ts) — strict x.y.z(-pre) only, no
+// (packages/computer/src/computerVersionOrder.ts) — strict x.y.z(-pre) only, no
 // build metadata, zero-padded numeric pre-release identifiers rejected —
 // so a version this module emits is by construction parseable by the
 // updater that later consumes it. staging-version.test.mjs pins the two
@@ -21,9 +45,12 @@
 // together or that tooth goes red.
 
 // Highest official stable Computer release at the time this floor was frozen
-// (source tag computer-v1.0.18). Raising the floor is a deliberate release
-// decision; it must move with the stable line, never ahead of it.
-export const STABLE_FLOOR = "1.0.18";
+// (source tag computer-v1.0.42, promoted to the Hands main channel on
+// 2026-10-04). Raising the floor is a deliberate release decision; it must
+// move with the stable line, never ahead of it. The publish workflow's
+// carrier-version closure gate fails closed (STABLE_FLOOR_DRIFT) when this
+// constant lags the highest published stable tag.
+export const STABLE_FLOOR = "1.0.42";
 
 const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 
@@ -67,7 +94,32 @@ export function compareSemver(a, b) {
   return pa.pre.length < pb.pre.length ? -1 : 1;
 }
 
-export function resolveStagingVersion({ packageVersion, shortSha, stableFloor = STABLE_FLOOR }) {
+// Strict UTC calendar date-time, YYYYMMDDHHMMSS, year >= 2020. Throws on
+// anything else rather than letting a malformed identifier mis-order.
+export function assertCommitTime(commitTime) {
+  const fail = (why) => {
+    throw new Error(
+      `STAGING_COMMIT_TIME_INVALID: commit time must be the commit's UTC committer time as ` +
+      `YYYYMMDDHHMMSS (${why}), got "${commitTime}"`,
+    );
+  };
+  if (typeof commitTime !== "string" || !/^\d{14}$/.test(commitTime)) fail("exactly 14 digits");
+  const [year, month, day, hour, minute, second] = [
+    commitTime.slice(0, 4), commitTime.slice(4, 6), commitTime.slice(6, 8),
+    commitTime.slice(8, 10), commitTime.slice(10, 12), commitTime.slice(12, 14),
+  ].map(Number);
+  if (year < 2020) fail("year >= 2020");
+  if (month < 1 || month > 12) fail("month 01-12");
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+  if (day < 1 || day > daysInMonth) fail(`day 01-${daysInMonth} for that month`);
+  if (hour > 23) fail("hour 00-23");
+  if (minute > 59) fail("minute 00-59");
+  if (second > 59) fail("second 00-59");
+}
+
+export function resolveStagingVersion({ packageVersion, commitTime, shortSha, stableFloor = STABLE_FLOOR }) {
+  assertCommitTime(commitTime);
   if (!/^[0-9a-f]{12}$/.test(shortSha ?? "")) {
     throw new Error(
       `STAGING_SHA_INVALID: short sha must be exactly 12 lowercase hex characters, got "${shortSha}"`,
@@ -79,7 +131,7 @@ export function resolveStagingVersion({ packageVersion, shortSha, stableFloor = 
       `STAGING_BASE_INVALID: package version "${packageVersion}" must be a stable x.y.z base`,
     );
   }
-  const candidate = `${packageVersion}-staging.sha.${shortSha}`;
+  const candidate = `${packageVersion}-staging.${commitTime}.sha.${shortSha}`;
   // An all-digit sha with a leading zero forms a zero-padded numeric
   // pre-release identifier, which strict SemVer rejects — parseSemver throws
   // here rather than letting an unorderable version reach any consumer.
@@ -106,6 +158,7 @@ async function main() {
     const key = args[i];
     const value = args[i + 1];
     if (key === "--short-sha") opts.shortSha = value;
+    else if (key === "--commit-time") opts.commitTime = value;
     else if (key === "--package-json") opts.packageJson = value;
     else if (key === "--stable-floor") opts.stableFloor = value;
     else {
@@ -116,6 +169,7 @@ async function main() {
   const pkg = JSON.parse(await readFile(opts.packageJson, "utf8"));
   const version = resolveStagingVersion({
     packageVersion: pkg.version,
+    commitTime: opts.commitTime,
     shortSha: opts.shortSha,
     stableFloor: opts.stableFloor,
   });

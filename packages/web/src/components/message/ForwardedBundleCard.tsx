@@ -163,7 +163,7 @@ function ForwardedBundleContent({ item }: { item: ForwardedBundleItem }) {
 
   return (
     <div
-      className="min-w-0 max-w-full break-words text-sm text-black"
+      className="min-w-0 max-w-full break-words text-sm text-foreground-strong"
       data-testid="forwarded-bundle-content"
     >
       <MarkdownContent source={content} density="compact" enableMermaid />
@@ -202,7 +202,7 @@ function ForwardedBundleImageTile({
   return (
     <AttachmentTooltip content={attachment.filename}>
       <div
-        className={`group/img relative aspect-square w-full min-w-0 overflow-hidden border-2 border-black bg-brutal-cream/60 text-left ${onOpen ? "hover:brightness-95" : ""}`}
+        className={`group/img relative aspect-square w-full min-w-0 overflow-hidden border border-line-muted bg-layer-inset text-left theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream/60 ${onOpen ? "hover:brightness-95" : ""}`}
         data-testid="forwarded-bundle-image"
       >
       {preview.status === "ready" ? (
@@ -216,7 +216,7 @@ function ForwardedBundleImageTile({
           onError={() => setImgFailed(true)}
         />
       ) : (
-        <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-brutal-cream/60 px-1 text-center text-black/45">
+        <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-layer-inset px-1 text-center text-foreground-hint theme-brutal:bg-brutal-cream/60 theme-brutal:text-black/45">
           {preview.status === "loading" ? <ImageIcon aria-hidden size={18} /> : <FileText aria-hidden size={18} />}
           <span className="line-clamp-2 text-[10px] font-bold leading-tight">{attachment.filename}</span>
         </div>
@@ -225,7 +225,7 @@ function ForwardedBundleImageTile({
           <button
             type="button"
             onClick={() => onOpen(attachment)}
-            className="absolute inset-0 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-black"
+            className="absolute inset-0 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-line-strong"
             data-testid="forwarded-bundle-attachment"
             aria-label={formatMessage({ id: "message.forwardedBundle.openAttachment" }, { filename: attachment.filename })}
           />
@@ -457,15 +457,15 @@ export default function ForwardedBundleCard({
 
   return (
     <div
-      className={`mt-1 border border-black/20 bg-white ${fullWidth ? "w-full max-w-none" : "max-w-[min(34rem,100%)]"}`}
+      className={`mt-1 border border-line-muted bg-layer-panel ${fullWidth ? "w-full max-w-none" : "max-w-[min(34rem,100%)]"}`}
       data-testid="forwarded-bundle-card"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/10 bg-white px-2.5 py-1.5">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line-hairline bg-layer-panel px-2.5 py-1.5">
         <div className="flex min-w-0 items-center gap-2">
-          <span className="inline-flex shrink-0 text-[11px] font-black leading-none text-black/70">
+          <span className="inline-flex shrink-0 text-[11px] font-black leading-none text-foreground-muted">
             {formatMessage({ id: "message.forward.badge" })}
           </span>
-          <span className="shrink-0 text-[11px] font-bold text-black/55">
+          <span className="shrink-0 text-[11px] font-bold text-foreground-hint">
             {formatMessage({ id: "message.forward.bundleCount" }, { count: items.length })}
           </span>
         </div>
@@ -474,7 +474,7 @@ export default function ForwardedBundleCard({
             <button
               type="button"
               onClick={() => onOpenSource(firstItem)}
-              className="min-w-0 truncate text-[11px] font-bold text-black/50 underline-offset-2 transition-colors hover:text-black hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
+              className="min-w-0 truncate text-[11px] font-bold text-foreground-muted underline-offset-2 transition-colors hover:text-foreground-strong hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-line-strong"
               data-testid="forwarded-bundle-source-label"
               aria-label={formatMessage({ id: "message.forward.openSource" })}
             >
@@ -482,7 +482,7 @@ export default function ForwardedBundleCard({
             </button>
           </AttachmentTooltip>
         ) : label ? (
-          <span className="min-w-0 truncate text-[11px] font-bold text-black/45" data-testid="forwarded-bundle-source-label">
+          <span className="min-w-0 truncate text-[11px] font-bold text-foreground-hint" data-testid="forwarded-bundle-source-label">
             {label}
           </span>
         ) : null}
@@ -494,11 +494,11 @@ export default function ForwardedBundleCard({
           return (
             <article
               key={itemKey}
-              className="bg-white px-3 py-2"
+              className="bg-layer-panel px-3 py-2"
               data-testid="forwarded-bundle-item"
             >
-              <div className="mb-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] font-mono text-black/55">
-                <span className="font-bold text-black/75">{authorLabel(item, formatMessage({ id: "message.forwardedBundle.unknownAuthor" }))}</span>
+              <div className="mb-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] font-mono text-foreground-hint">
+                <span className="font-bold text-foreground-strong">{authorLabel(item, formatMessage({ id: "message.forwardedBundle.unknownAuthor" }))}</span>
                 {timestamp && (
                   <>
                     <span aria-hidden>·</span>
@@ -513,13 +513,13 @@ export default function ForwardedBundleCard({
         })}
         {!expanded && (
           <div
-            className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-white via-white/80 to-white/0"
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-[var(--layer-panel)] via-[var(--layer-panel)]/80 to-transparent"
             data-testid="forwarded-bundle-fade"
           />
         )}
       </div>
       {canExpand && !forceExpanded && (
-        <div className="border-t border-black/10 bg-white px-3 py-1.5">
+        <div className="border-t border-line-hairline bg-layer-panel px-3 py-1.5">
           <ShowMoreToggle
             onClick={() => {
               if (!expanded && onShowAll?.()) return;

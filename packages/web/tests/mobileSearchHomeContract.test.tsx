@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { isValidElement } from "react";
 
 import { __testInternals } from "../src/components/layout/MainLayout";

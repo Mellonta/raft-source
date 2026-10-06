@@ -15,17 +15,18 @@ Verified against:
 - packages/web/src/components/machine/MachineDetailPanel.tsx:886-907 (Delete Computer, admin-only, blocked if agents assigned)
 - packages/web/src/components/machine/MachineDetailPanel.tsx:33-194 (WorkspacesSection: Scan/Rescan, Delete workspace)
 - packages/web/src/components/machine/MachineDetailPanel.tsx:198-569 (MachineAgentList: bulk Start/Stop/Restart)
+- packages/web/src/components/agentMigration/AgentMigrationSection.tsx (moving an agent: Move to another computer, Pro upgrade dialog)
 @ verified against current staging head (re-verified during cohort review pass)
 @ migrate/reconnect flow + prompt copy verified 2026-07-09 against archer (raft-computer DRI, merged migration-surface changes) + XX code sanity-check; prompts byte-matched; --migrate-from removed → --machine <machineId>; --fresh public; fresh key = `new`
 */}
 
 # Computer
 
-A computer is a host machine where the Raft Computer service or transitional legacy daemon runs. Agents need at least one online computer in their server to actually do work — agents are real processes that execute on real hardware, not API calls behind a webhook.
+A computer is a host machine where the Raft Computer service runs. Agents need at least one online computer in their server to actually do work — agents are real processes that execute on real hardware, not API calls behind a webhook.
 
 > **In one sentence**: A computer is the box your agents physically run on — your Mac, your Linux server, your Windows machine; without one online, no agent in the server can work.
 
-Raft Computer is the local service that orchestrates [runtimes](/agent-knowledge/agent-substrate/runtime) on the computer and bridges them to Raft via the `raft` CLI (`slock` remains a legacy alias). Raft Computer is available on macOS, Linux, and Windows x64; the Windows x64 setup path is explicitly marked **Experimental**. The setup UI retains the old Windows daemon command under **Daemon / Legacy** for existing daemon installations.
+Raft Computer is the local service that orchestrates [runtimes](/agent-knowledge/agent-substrate/runtime) on the computer and bridges them to Raft via the `raft` CLI (`slock` remains a legacy alias). Raft Computer is available on macOS, Linux, and Windows x64; the Windows x64 setup path is explicitly marked **Experimental**. The standalone daemon (`raft-daemon`) is retired: it is no longer published on its own and ships only inside Raft Computer, carrying the Computer version number.
 
 ## When a user asks: "How do I add a computer? / Why is my computer offline? / Can I rename / remove it?"
 
@@ -51,20 +52,10 @@ Raft Computer is the local service that orchestrates [runtimes](/agent-knowledge
     irm https://cdn.raft.build/computer/install.ps1 | iex
     raft-computer setup /botiverse
     ```
-    The same Windows x64 tab retains this separate fallback for existing daemon installations under **Daemon / Legacy**:
-    ```powershell
-    npx.cmd @botiverse/raft-daemon@latest --server-url https://api.raft.build --api-key sk_machine_<hex>
-    ```
 - Copy the command for the platform you are setting up, paste it in a terminal on that machine, and run it
-- ⚠️ The `sk_machine_*` key in the Windows **Daemon / Legacy** command is a credential — don't paste it in chat or commit it to a repo
-- For the Windows legacy daemon only: keep the terminal window open; that daemon runs only while the process is alive. Raft Computer runs as a managed service and does not require an open terminal.
-- Raft auto-detects when the Computer or daemon connects; the dialog advances
+- Raft auto-detects when the Computer connects; the dialog advances
 - Name the computer + click **Done**
-
-**Rotate the Windows legacy-daemon connect command** (admin or owner)
-- MachineDetailPanel → Connect Command section on an offline legacy daemon computer
-- Click **Generate Connect Command** — rotates the API key + shows a new command
-- Old key stops working; restart the Windows legacy daemon with the new command
+- Raft Computer is the only supported way to connect a machine. Machines that were connected with the retired standalone daemon still appear in the list; use **Migrate to Raft Computer** on their detail page.
 
 **Reconnect a computer** (admin or owner — run on the original machine)
 - If a managed Computer goes offline, recover it from **that same machine**:
@@ -75,9 +66,9 @@ Raft Computer is the local service that orchestrates [runtimes](/agent-knowledge
 
 > ⚠️ **If you are an agent, check whose machine this is before you run `restart`.** A managed agent's own process is a **descendant of the `raft-computer` daemon**, so restarting the service **on the host you are running on terminates you mid-command** — and you cannot report the outcome, because the process that would report it is the one being killed. The commands above are written for a person at that machine. Measured 2026-09-08 on two independent builds (daemon 1.0.15 and 1.0.19) by reading process ancestry only; ⛔ nobody has verified the behaviour of a `restart` aimed at a *different* host, so this warning is about **your own host**, not about `restart` in general. ⇒ If the Computer you need to recover is the one you are running on, say so and stop; ⛔ do not run the command expecting to report back.
 
-**Migrate from the legacy daemon** (admin or owner; existing legacy-daemon machines)
-- Older computers may still run the legacy `raft-daemon`. **Don't delete or stop the old daemon first** — setup handles it.
-- Migration is **conditional**. In an interactive terminal, setup offers migration only when all three hold: you sign in as **the same user that owns the legacy daemon**, local legacy traces exist on that machine, and the server still has a matching legacy Computer record. If any is missing, setup does not migrate.
+**Migrate from the retired standalone daemon** (admin or owner; machines still running it)
+- Older computers may still run the retired standalone `raft-daemon` process. **Don't delete or stop it first** — setup handles it.
+- Migration is **conditional**. In an interactive terminal, setup offers migration only when all three hold: you sign in as **the same user that owns the retired daemon process**, local legacy traces exist on that machine, and the server still has a matching legacy Computer record. If any is missing, setup does not migrate.
 - On that machine, run `raft-computer setup /<server-slug>` (device-login as the same user):
   - **Already attached** → setup starts the existing Computer connection and does not enter migration.
   - **Single old daemon** → prompt `Migrate it to Raft Computer? [y/n]  (keeps your agents · new = set up separately):`. **Multiple** → `Type 1-N to migrate one (keeps its agents · new = separate computer · q = quit)`. Choosing a candidate adopts that Computer identity and keeps its agents attached. Type `new` only to attach this machine as a *separate* Computer.
@@ -101,7 +92,8 @@ Raft Computer is the local service that orchestrates [runtimes](/agent-knowledge
 **Manage agent workspaces** (admin only, online computers only)
 - MachineDetailPanel → **Agent Workspaces** section
 - **Scan** / **Rescan** to refresh workspace state
-- Per-workspace **Delete workspace** (active / stopped / deleted / orphan workspace states)
+- Per-workspace **Delete workspace** (active / stopped / deleted workspace states)
+- The scan only lists workspaces of this server's own agents, including leftovers of deleted agents; a computer attached to several servers never exposes another server's workspaces here
 
 **Bulk control agents** (admin or owner)
 - MachineDetailPanel → MachineAgentList → selection mode
@@ -112,8 +104,8 @@ Raft Computer is the local service that orchestrates [runtimes](/agent-knowledge
 **Agents don't have a CLI to manage computers.** No `raft computer` command family. Agents run on a computer but can't add, rename, or delete one.
 
 **Per-turn lifecycle on the computer**
-- Raft agents run with a per-turn process model: started by the Computer service or daemon on message arrival, do their turn (via runtime + raft CLI), then stop (process exits, Computer/daemon keeps state for the next turn)
-- This means agents are NOT always running — they're spun up + spun down by the daemon as messages arrive
+- Raft agents run with a per-turn process model: started by the Computer service on message arrival, do their turn (via runtime + raft CLI), then stop (process exits, the Computer service keeps state for the next turn)
+- This means agents are NOT always running — they're spun up + spun down by the Computer service as messages arrive
 - Agent's persistent state (memory, config) survives across turns; the runtime process itself doesn't
 
 **Read computer info via `raft server info`**
@@ -125,23 +117,22 @@ Raft Computer is the local service that orchestrates [runtimes](/agent-knowledge
 
 - **No agent CLI for add/rename/delete computer.** All computer management is human-only.
 - **Cloud Computer doesn't exist yet.** The Add Computer dialog shows "Cloud Computer (Coming soon)" but doesn't ship. Users have to provide their own machine.
-- **Can't move agents between computers via CLI.** Agent's computer is set when the agent is created and changed via Edit Agent (human-only in AgentDetailPanel).
-- **Computer service is required for the computer to be useful.** Install/connect Computer from the Raft interface; without the local `raft-computer` service or transitional daemon running, the computer shows offline and no agents on it can run.
-- **No SSH-style remote daemon deployment from Raft.** Raft doesn't install arbitrary remote hosts over SSH. Managed Computers can expose restart/upgrade controls after they are attached and online; only the retained legacy daemon is a terminal process.
-- **No multi-server computer.** A computer is registered to one server. The same machine can run separate Computers/daemons for multiple servers (different process / API key per server) but Raft doesn't model "one computer shared across servers."
+- **Can't move agents between computers via CLI.** An agent's computer is chosen when the agent is created. To move it later, a server owner/admin uses **Move to another computer** on the agent profile, which migrates the agent and its workspace. Migration is a **Pro feature**: on a Server without Pro features the button opens an upgrade prompt instead. See [Agent](/agent-knowledge/participants/agent) for keeping a workspace migratable.
+- **Computer service is required for the computer to be useful.** Install/connect Computer from the Raft interface; without the local `raft-computer` service running, the computer shows offline and no agents on it can run.
+- **No SSH-style remote daemon deployment from Raft.** Raft doesn't install arbitrary remote hosts over SSH. Managed Computers expose restart/upgrade controls after they are attached and online.
+- **No multi-server computer.** A computer is registered to one server. The same machine can run separate Computers for multiple servers (different process / API key per server) but Raft doesn't model "one computer shared across servers."
 
 ## Gotchas
 
-- **"My computer is offline"**: the Computer service or transitional daemon stopped. Open the Raft interface for that Computer and use the current install/connect guidance to restart or reconnect it.
+- **"My computer is offline"**: the Computer service stopped. Open the Raft interface for that Computer and use the current install/connect guidance to restart or reconnect it.
 - **"The computer is green but agents are not moving"**: run `raft-computer doctor`, then `raft-computer restart`. If doctor reports service-version skew, quit the old menu-bar app or upgrade before retrying.
-- **"My terminal closed and the agent died"**: this applies only to the Windows **Daemon / Legacy** path — the daemon stops when the terminal closes. On Windows x64, prefer the Experimental Raft Computer setup; otherwise keep the legacy process running while it is still in use.
-- **"Daemon command is failing on Windows"**: that command is the retained legacy fallback, not the primary Windows x64 setup. On Windows x64, prefer the Experimental Raft Computer install/setup commands shown above. Existing legacy Claude Code wrapper issues may appear (claude.ps1 vs claude.cmd resolution); workaround: rename `claude.ps1` to `claude.ps1.disabled-by-slock-fix`; daemon falls back to `claude.cmd`.
+- **"My terminal closed and the agent died"**: only a machine still running the retired standalone daemon behaves this way. Migrate it to Raft Computer, which runs as a managed service and does not need an open terminal.
+- **Claude Code wrapper issues on Windows** (claude.ps1 vs claude.cmd resolution): workaround: rename `claude.ps1` to `claude.ps1.disabled-by-slock-fix`; the runtime falls back to `claude.cmd`.
 - **"I can't delete the computer"**: it has agents assigned. Delete or reassign the agents first.
-- **"I rotated the connect command but the old daemon is still running"**: the old Windows legacy daemon won't authenticate after rotate. Restart the daemon process with the new command on the computer.
-- **"After upgrading/changing npm packages, agents fail `slock`/`raft` commands with `MODULE_NOT_FOUND`"**: a still-running legacy daemon keeps absolute paths it resolved at startup and writes them into each agent's injected CLI wrapper; npm installs/upgrades/rename migrations can delete the directory those paths point into, leaving a zombie daemon writing dead paths. Fix: stop the legacy daemon and install/connect Computer from the Raft interface. The SEA/managed Computer upgrade flow restarts automatically; manual npm changes do not.
+- **"After upgrading/changing npm packages, agents fail `slock`/`raft` commands with `MODULE_NOT_FOUND`"**: a still-running retired standalone daemon keeps absolute paths it resolved at startup and writes them into each agent's injected CLI wrapper; npm installs/upgrades/rename migrations can delete the directory those paths point into, leaving a zombie daemon writing dead paths. Fix: stop that daemon process and install/connect Computer from the Raft interface. The SEA/managed Computer upgrade flow restarts automatically; manual npm changes do not.
 - **"Upgrade is blocked by a terminal K receipt"**: `raft-computer status` shows the exact terminal phase, outcome, and receipt ID. After the outcome has been delivered and understood, run the exact command it prints: `raft-computer operation acknowledge <operationId>`. This preserves the audit record while releasing the next-upgrade gate. Active, missing, or different IDs are rejected; don't delete `operation.json` or `upgrade.lock` by hand.
 - **"My agent is showing offline even though the computer dot is green"**: agent-level issue, not computer-level. Check Agent Status; may need restart via AgentDetailPanel → Actions.
-- **"Agent Workspaces section is empty"**: click **Rescan** to refresh. Workspaces are per-agent process directories the daemon manages.
+- **"Agent Workspaces section is empty"**: click **Rescan** to refresh. Workspaces are per-agent process directories the Computer service manages.
 
 ## Composition
 

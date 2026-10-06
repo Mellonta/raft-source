@@ -4,6 +4,8 @@
 // once the toggle is stored, the display simply follows the toggle everywhere.
 import { getModelLabel } from "@botiverse/raft-shared";
 import { useAppearanceStore } from "../store/appearanceStore";
+import { catalogModelLabel } from "../store/modelLabelCatalogStore";
+import { useServerStore } from "../store/serverStore";
 
 /**
  * The model label to render next to an agent's name, or null when there's
@@ -12,9 +14,19 @@ import { useAppearanceStore } from "../store/appearanceStore";
  * enough to call per message row without a catalog fetch.
  */
 export function agentModelLabel(
-  agent: { runtime?: string | null; model?: string | null } | null | undefined,
+  agent: { runtime?: string | null; model?: string | null; machineId?: string | null } | null | undefined,
 ): string | null {
   if (!agent?.model) return null;
+  // One shared catalog source (task #700): the name the daemon reported for
+  // this machine's runtime beats local re-derivation; the bundled table is
+  // only the fallback while a machine has not reported yet.
+  const sharedLabel = catalogModelLabel(
+    useServerStore.getState().current?.id,
+    agent.machineId,
+    agent.runtime,
+    agent.model,
+  );
+  if (sharedLabel) return sharedLabel;
   const label = getModelLabel(agent.runtime ?? "", agent.model);
   return label || agent.model || null;
 }

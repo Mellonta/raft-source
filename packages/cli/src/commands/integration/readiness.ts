@@ -4,15 +4,15 @@ import {
   CanonicalFetchTransportError,
   credentialFreeDiagnosticUrl,
   type FetchTransportCauseClass,
-} from "../../proxy.js";
-import type { RegisteredIntegrationService } from "./_format.js";
+} from "../../proxy";
+import type { RegisteredIntegrationService } from "./_format";
 import {
   AgentManifestFetchError,
   AgentManifestResponseFormatError,
   fetchAgentManifest,
   fetchAgentManifestWithWellKnownAliases,
   type AgentManifest,
-} from "./manifest.js";
+} from "./manifest";
 
 export type ManifestObservationStatus =
   | "valid"

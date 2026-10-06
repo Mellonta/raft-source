@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import "./helpers/domSetup";
 import { TestIntlProvider } from "./helpers/intl";
-import { afterEach, test } from "node:test";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ExternalSetupTabSegmentedControl } from "../src/components/agent/ExternalSetupTabSegmentedControl";
 import {

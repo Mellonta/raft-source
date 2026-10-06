@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   assertSurfaceProducerFactLineage,
   stripSurfaceProducerFactLineage,
 } from "@botiverse/raft-shared";
-import { buildFeedbackExportBundle } from "../src/utils/feedbackExportBundle.js";
+import { buildFeedbackExportBundle } from "../src/utils/feedbackExportBundle";
 
 test("feedback export v2 distinguishes ephemeral activity buffer from durable trajectory history", () => {
   const bundle = buildFeedbackExportBundle({

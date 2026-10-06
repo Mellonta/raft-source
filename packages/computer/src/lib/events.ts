@@ -68,7 +68,13 @@ export type ComputerApiEvent =
   | { kind: "start.running"; managedTargets: string[]; attachedCount: number }
   | { kind: "start.spawned"; servicePid: number; managedTargets: string[]; attachedCount: number }
   | { kind: "start.ready"; ready: Map<string, number>; managedTargets: string[] }
+  // Unscoped start left out attachments the server has unlinked.
+  | { kind: "start.skipped_unlinked"; serverIds: string[] }
   | { kind: "start.aborted"; servicePid: number; managedTargets: string[]; ready: Map<string, number> }
+
+  // Best-effort host lifecycle (macOS owner record / leftover LaunchAgent
+  // cleanup) did not finish; the start/stop carried on.
+  | { kind: "host_lifecycle.skipped"; operation: "start" | "stop"; code: string | null; message: string }
 
   // --- stop (StopService) ---
   | { kind: "stop.stopping"; pid: number | null }

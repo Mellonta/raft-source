@@ -1,15 +1,17 @@
-import { revokeSocketAccess } from "../socket/accessRevocation.js";
+import { revokeSocketAccess } from "../socket/accessRevocation";
 import { createHash } from "crypto";
 import { eq, and, asc, isNull, inArray, sql, count, ne } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { CURRENT_CONTRACT_VERSION } from "./serverSetupStateService.js";
-import { servers, serverMembers, serverMembershipDepartures, serverMemberRoleAuditEvents, serverAgentMembers, users, channels, channelHumans, messages, agents, subscriptions, threadFollows } from "../db/schema.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { CURRENT_CONTRACT_VERSION } from "./serverSetupStateService";
+import { servers, serverMembers, serverMembershipDepartures, serverMemberRoleAuditEvents, serverAgentMembers, users, channels, channelHumans, messages, agents, subscriptions, threadFollows } from "../db/schema";
 import { ALL_CHANNEL_TEAM_THRESHOLD, canTransitionServerRole, currentDate, hasServerCapability, isAdminOrOwner, isOwnerRole, type ServerRole } from "@botiverse/raft-shared";
-import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace.js";
-import * as serverAgreementService from "./serverAgreementService.js";
-import { refreshSubscriptionForServerIfStale } from "./billingService.js";
-import { assertHumanCapacityAvailable, getServerBillingEntitlement, getServerBillingUsage } from "./planService.js";
-import { evaluateFeatureFlag, ONBOARDING_OWNER_WIZARD_FEATURE_FLAG_KEY } from "./featureFlagService.js";
+import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace";
+import * as serverAgreementService from "./serverAgreementService";
+import { refreshSubscriptionForServerIfStale } from "./billingService";
+import { assertHumanCapacityAvailable, getServerBillingEntitlement, getServerBillingUsage } from "./planService";
+import { evaluateFeatureFlag, ONBOARDING_OWNER_WIZARD_FEATURE_FLAG_KEY } from "./featureFlagService";
+import { autoInstallOfficialAppsForProvisionedServer } from "./officialAppAutoInstallService";
+import { hasServerCompletedSetupForProjection } from "./serverSetupCompletionService";
 
 export interface SidebarOrderPreferences {
   channelOrder: string[];
@@ -213,11 +215,17 @@ export async function createServer(name: string, slug: string, ownerId: string) 
         description: "Your private onboarding space",
         type: "private",
       }).returning();
+      // read-position: new conversation, no history before this join (no row = position 0)
       await tx.insert(channelHumans).values({
         channelId: ownerChannel.id,
         userId: ownerId,
       });
     }
+
+    // Platform defaults are a Server-level provisioning fact. The protected
+    // policy defaults empty, so deploying this source does not itself change
+    // the live default set.
+    await autoInstallOfficialAppsForProvisionedServer(server.id, tx as ReturnType<typeof getDb>);
 
     return server;
   });
@@ -455,6 +463,27 @@ export async function getServerOnboardingSettings(serverId: string): Promise<Ser
     agentAllChannelGreetingEnabled: server.agentAllChannelGreetingEnabled !== false,
     onboardingWizardEnabled: await isOnboardingWizardEnabledForServer(serverId, db),
   };
+}
+
+/**
+ * RFC-067 workspace switch: when false, nothing about anyone's activity in
+ * this server is recorded as product analytics (productAnalyticsGate).
+ */
+export async function getServerProductAnalyticsEnabled(serverId: string): Promise<boolean | null> {
+  const [server] = await getDb()
+    .select({ enabled: servers.productAnalyticsEnabled })
+    .from(servers)
+    .where(and(eq(servers.id, serverId), isNull(servers.deletedAt)));
+  return server ? server.enabled : null;
+}
+
+export async function updateServerProductAnalyticsEnabled(serverId: string, enabled: boolean): Promise<boolean | null> {
+  const [updated] = await getDb()
+    .update(servers)
+    .set({ productAnalyticsEnabled: enabled, updatedAt: new Date() })
+    .where(and(eq(servers.id, serverId), isNull(servers.deletedAt)))
+    .returning({ enabled: servers.productAnalyticsEnabled });
+  return updated ? updated.enabled : null;
 }
 
 export async function getServerTranslationSettings(serverId: string): Promise<ServerTranslationSettings | null> {
@@ -828,9 +857,11 @@ export async function addMember(
       .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)));
     if (existing) return false;
 
-    const entitlement = await getServerBillingEntitlement(db, serverId);
-    const usage = await getServerBillingUsage(db, serverId);
-    assertHumanCapacityAvailable(entitlement, usage);
+    if (role !== "guest") {
+      const entitlement = await getServerBillingEntitlement(db, serverId);
+      const usage = await getServerBillingUsage(db, serverId);
+      assertHumanCapacityAvailable(entitlement, usage);
+    }
 
     const [inserted] = await db.insert(serverMembers).values({
       serverId,
@@ -925,6 +956,26 @@ export async function addMember(
 export async function removeMember(serverId: string, userId: string, options: RemoveMemberOptions = {}) {
   const db = getDb();
   await db.transaction(async (tx) => {
+    // Task #101: keep the global order servers -> member rows -> resource rows. The `servers` row is locked FOR SHARE
+    // first because the departure insert below takes a key-share lock on it through its foreign key, while
+    // transitionMemberRole holds `servers` FOR UPDATE and then waits on member rows. The target's member row is locked
+    // FOR UPDATE before any channel_humans / thread_follows delete, so a fenced writer holding that member row and then
+    // waiting on channel_humans (the read-state sequencer for private, DM and joint scopes) makes this removal wait
+    // instead of deadlocking. A missing member row is not an error here: the deletes below are no-ops, as before.
+    await tx.execute(sql`
+      SELECT id
+      FROM servers
+      WHERE id = ${serverId}
+      FOR SHARE
+    `);
+    await tx.execute(sql`
+      SELECT user_id
+      FROM server_members
+      WHERE server_id = ${serverId}
+        AND user_id = ${userId}
+      FOR UPDATE
+    `);
+
     const serverChannelIds = await tx
       .select({ id: channels.id })
       .from(channels)
@@ -977,21 +1028,20 @@ export async function removeMember(serverId: string, userId: string, options: Re
       eq(serverMembers.userId, userId),
     ));
   });
-  await revokeSocketAccess({ userId });
+  await revokeSocketAccess({ userId, removedFromServerId: serverId });
 }
 
 /**
- * The onboarding invariant, enforced in one place (#4883): on a server that has crossed the
- * Cindy checkpoint (`onboarding_agent_id` set — the same fact the projection reads as
- * `everHadAgent`), every `role='owner'` member row must be `complete`. Setup is owner-only, so a
- * non-complete owner row is exactly what the projection turns into a stuck, undismissable
- * "Meet Cindy" for an agent that already exists.
+ * Keep a newly-created owner row aligned with the server-wide setup state (#4883, task #240).
+ * Once any owner completed setup (or the Cindy compatibility checkpoint is set), later owners
+ * inherit `complete`; setup is not owed independently by every owner.
  *
- * The `(owner × checkpoint-crossed)` set changes through four write paths, and all four call
- * this: a member BECOMES owner (`updateMemberRole` promote, `addMember` direct add) — pass their
- * `onlyUserId`; and the checkpoint is FIRST crossed (`updateServerOnboardingAgent` and
- * `updateServerOnboardingSettings`) — omit `onlyUserId` to sweep every existing owner. Rows
- * already `complete` are never touched, so the
+ * A member BECOMES owner through `updateMemberRole` or `addMember`; pass their `onlyUserId`.
+ * The Cindy compatibility checkpoint is set through `updateServerOnboardingAgent` or
+ * `updateServerOnboardingSettings`; omit `onlyUserId` to sweep every existing owner. The
+ * projection independently derives server completion from any completed owner, so historical
+ * incomplete co-owner rows fail open without a data backfill. Rows already `complete` are never
+ * touched, so the
  * original owner's `normal` (stamped by `markServerSetupCompleteOnFirstAgent` when they created
  * Cindy) is preserved; newly-reconciled owners are `grandfathered` — they never onboarded, so
  * they are not owed the post-setup survey/handoff either.
@@ -1023,11 +1073,7 @@ export async function reconcileOwnersToSetupCheckpoint(
   serverId: string,
   opts: { onlyUserId?: string } = {},
 ): Promise<void> {
-  const [server] = await db
-    .select({ onboardingAgentId: servers.onboardingAgentId })
-    .from(servers)
-    .where(and(eq(servers.id, serverId), isNull(servers.deletedAt)));
-  if (!server?.onboardingAgentId) return;
+  if (!(await hasServerCompletedSetupForProjection(db, serverId))) return;
 
   const conditions = [
     eq(serverMembers.serverId, serverId),
@@ -1130,6 +1176,11 @@ export async function transitionMemberRole(input: {
     }
 
     const removedAllChannelIds: string[] = [];
+    if (target.role === "guest" && input.nextRole !== "guest") {
+      const entitlement = await getServerBillingEntitlement(tx, input.serverId);
+      const usage = await getServerBillingUsage(tx, input.serverId);
+      assertHumanCapacityAvailable(entitlement, usage);
+    }
     if (input.nextRole === "guest") {
       const serverChannelRows = await tx
         .select({ id: channels.id, name: channels.name })
@@ -1197,8 +1248,13 @@ export async function transitionMemberRole(input: {
   return result;
 }
 
-export async function updateAgentMemberRole(serverId: string, agentId: string, role: Extract<ServerRole, "admin" | "member">) {
-  const db = getDb();
+export async function updateAgentMemberRole(
+  serverId: string,
+  agentId: string,
+  role: Extract<ServerRole, "admin" | "member">,
+  options: { executor?: DatabaseExecutor } = {},
+) {
+  const db = options.executor ?? getDb();
   const [updated] = await db
     .update(serverAgentMembers)
     .set({ role })
@@ -2021,7 +2077,7 @@ export async function deleteServer(serverId: string) {
   // module load fails, the server is still visible and the same DELETE can be
   // retried. Stripe failures themselves are best-effort inside the helper,
   // matching the existing deletion contract.
-  const { cancelSubscriptionForDeletedServer } = await import("./billingService.js");
+  const { cancelSubscriptionForDeletedServer } = await import("./billingService");
   await cancelSubscriptionForDeletedServer(serverId);
 
   return db.transaction(async (tx) => {

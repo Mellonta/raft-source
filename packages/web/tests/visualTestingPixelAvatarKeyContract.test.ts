@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
-import test from "node:test";
 
 // task #536 / #534: the shared fixture carried `pixel:paint` for weeks. "paint" is
 // not a registry key, so web and Android each fell back differently and the

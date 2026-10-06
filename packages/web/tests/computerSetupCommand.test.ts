@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   computerInstallCommand,
   COMPUTER_CDN_BASE_PROD,
   COMPUTER_CDN_BASE_STAGING,
   DEFAULT_COMPUTER_SERVER_URL,
-  getDaemonConnectCommand,
   getComputerCommands,
   getComputerSetupCommand,
   LEGACY_DEFAULT_COMPUTER_SERVER_URL,
@@ -334,27 +332,7 @@ test("Computer setup command uses the installed Raft binary without path details
   assert.doesNotMatch(command ?? "", new RegExp(["slock", "computer setup"].join("-")));
 });
 
-test("daemon connect command uses POSIX comments only on macOS/Linux", () => {
-  assert.equal(
-    getDaemonConnectCommand({
-      apiKey: "sk_machine_test",
-      distTag: "staging",
-      platform: "mac-linux",
-      serverName: "botiverse",
-      serverUrl: "https://api.raft.build",
-    }),
-    "npx @botiverse/raft-daemon@staging --server-url https://api.raft.build --api-key sk_machine_test # botiverse",
-  );
-});
-
-test("Windows daemon connect command uses npx.cmd and no shell comment", () => {
-  assert.equal(
-    getDaemonConnectCommand({
-      apiKey: "sk_machine_test",
-      platform: "windows",
-      serverName: "botiverse",
-      serverUrl: "https://api.raft.build",
-    }),
-    "npx.cmd @botiverse/raft-daemon@latest --server-url https://api.raft.build --api-key sk_machine_test",
-  );
+test("the retired standalone daemon connect command is not exported", async () => {
+  const commands = await import("../src/utils/computerSetupCommand");
+  assert.equal("getDaemonConnectCommand" in commands, false);
 });

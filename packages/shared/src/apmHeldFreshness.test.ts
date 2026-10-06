@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import test from "node:test";
 
 import {
   buildApmFreshnessDecisionProducerFactId,
   projectApmFreshnessDecisionTrace,
   projectApmHeldFreshnessActivity,
   projectApmHeldFreshnessEnvelope,
-} from "./apmHeldFreshness.js";
+} from "./apmHeldFreshness";
 
 test("APM freshness producer fact is stable and body-free", () => {
   const input = {

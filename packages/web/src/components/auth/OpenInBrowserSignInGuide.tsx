@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useIntl } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
 import { CenteredCardBrandHeader } from "./CenteredCardFrame";
+import { Button } from "raft-ui";
 
 export default function OpenInBrowserSignInGuide({
   loginUrl,
@@ -25,35 +26,36 @@ export default function OpenInBrowserSignInGuide({
   };
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto bg-white font-display safe-top safe-bottom">
+    <div className="min-h-0 flex-1 overflow-y-auto bg-layer-canvas font-display safe-top safe-bottom">
       <div className="flex min-h-full w-full flex-col">
         <CenteredCardBrandHeader />
         <main className="flex min-h-0 flex-1 px-5 pb-10 pt-8 sm:px-8 sm:pt-12">
           <div className="w-full max-w-lg pt-[5vh] sm:pt-[4vh]">
-            <h1 className="text-[26px] font-extrabold leading-tight tracking-normal text-black sm:text-3xl">
+            <h1 className="text-[26px] font-extrabold leading-tight tracking-normal text-foreground-strong sm:text-3xl">
               {formatMessage({ id: "auth.openInBrowser.title" })}
             </h1>
-            <p className="mt-4 text-base leading-7 text-black/65">
+            <p className="mt-4 text-base leading-7 text-foreground-muted">
               {formatMessage({ id: "auth.openInBrowser.description" })}
             </p>
             <div className="mt-7 grid gap-3 sm:flex sm:items-center">
-              <a
-                href={loginUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="btn-brutal w-full bg-soft-signal px-4 py-2.5 text-center text-sm sm:w-auto"
+              <Button
+                variant="primary"
+                size="lg"
+                className="w-full sm:w-auto"
+                render={<a href={loginUrl} target="_blank" rel="noreferrer" aria-label={formatMessage({ id: "auth.openInBrowser.openBrowser" })} />}
               >
                 {formatMessage({ id: "auth.openInBrowser.openBrowser" })}
-              </a>
-              <button
-                type="button"
+              </Button>
+              <Button
+                variant="outline"
+                size="lg"
+                className="w-full sm:w-auto"
                 onClick={() => void copyLink()}
-                className="btn-brutal w-full bg-white px-4 py-2.5 text-sm sm:w-auto"
               >
                 {formatMessage({ id: "auth.openInBrowser.copyLink" })}
-              </button>
+              </Button>
             </div>
-            <p className="mt-4 text-sm leading-6 text-black/55">{formatMessage({ id: copyStatus })}</p>
+            <p className="mt-4 text-sm leading-6 text-foreground-hint">{formatMessage({ id: copyStatus })}</p>
             {onBack ? (
               <button
                 type="button"

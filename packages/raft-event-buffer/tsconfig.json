@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "types": ["node"],
+    "types": ["node", "vitest/globals"],
     "strict": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,

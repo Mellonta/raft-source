@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { test, vi } from "vitest";
-import { claudeRuntime, codexRuntime, kimiRuntime, grokRuntime } from "@botiverse/oar";
+import { claudeRuntime, codexRuntime, defineRuntime, kimiRuntime, grokRuntime } from "@botiverse/oar";
 import { runtimeAccountUsageSnapshotSchema } from "@botiverse/raft-shared";
-import { createRuntimeAccountUsageCollector } from "./collector.js";
+import { createRuntimeAccountUsageCollector } from "./collector";
 
 import type { AvailableInstallation, InstallationSnapshot, Runtime } from "@botiverse/oar";
 
-import { readOarAccountUsage } from "./collector.js";
+import { readOarAccountUsage } from "./collector";
 
 const BASE = {
   provider: "codex",
@@ -21,7 +20,7 @@ const BASE = {
  */
 function recordingRuntime(installation: InstallationSnapshot) {
   const seen: { probeCalls: number; readerGot: unknown[] } = { probeCalls: 0, readerGot: [] };
-  const runtime = {
+  const runtime = defineRuntime({
     id: "recording",
     session: (() => {
       throw new Error("session must not be started by an account-usage read");
@@ -34,7 +33,7 @@ function recordingRuntime(installation: InstallationSnapshot) {
       seen.readerGot.push(given);
       return { kind: "unsupported" } as const;
     },
-  } satisfies Runtime;
+  });
   return { runtime, seen };
 }
 
@@ -83,12 +82,12 @@ test("an unavailable installation short-circuits without calling accountUsage", 
 });
 
 test("a runtime without a probe or reader is unsupported, not an error", async () => {
-  const bare = {
+  const bare = defineRuntime({
     id: "bare",
     session: (() => {
       throw new Error("unused");
     }) as unknown as Runtime["session"],
-  } satisfies Runtime;
+  });
 
   const result = await readOarAccountUsage({ ...BASE, deps: { runtime: bare } });
   assert.equal(result.accounts[0]?.health, "unsupported");
@@ -96,7 +95,7 @@ test("a runtime without a probe or reader is unsupported, not an error", async (
 });
 
 test("a thrown read becomes an explicit error account, never a zero reading", async () => {
-  const throwing = {
+  const throwing = defineRuntime({
     id: "throwing",
     session: (() => {
       throw new Error("unused");
@@ -105,7 +104,7 @@ test("a thrown read becomes an explicit error account, never a zero reading", as
     accountUsage: async () => {
       throw new Error("app-server unreachable");
     },
-  } satisfies Runtime;
+  });
 
   const result = await readOarAccountUsage({ ...BASE, deps: { runtime: throwing } });
   assert.equal(result.accounts[0]?.health, "error");

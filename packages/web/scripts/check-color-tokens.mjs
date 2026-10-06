@@ -51,10 +51,6 @@ const INLINE_STYLE_EXEMPT = new Set([
 // review decisions governed by docs/development/review-principles.md, not evidence that a
 // source count stayed below a historical number.
 const HEX_EXEMPTIONS = new Set([
-  "src/components/agent/AgentWorkspace.tsx bg-[#07111f]",
-  "src/components/agent/AgentWorkspace.tsx text-[#f5f7ff]",
-  "src/components/markdown/MarkdownContent.tsx bg-[#07111f]",
-  "src/components/markdown/MarkdownContent.tsx text-[#f5f7ff]",
   "src/components/message/MessageItem.tsx text-[#1f883d]",
   "src/components/message/MessageItem.tsx text-[#cf222e]",
   "src/components/search/MessageSearchPage.tsx bg-[#fff4bf]",

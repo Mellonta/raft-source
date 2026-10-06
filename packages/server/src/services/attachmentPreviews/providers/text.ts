@@ -1,6 +1,6 @@
 import { TextDecoder } from "node:util";
 import { isTextPreviewCandidate, type TextAttachmentPreviewData } from "@botiverse/raft-shared";
-import type { AttachmentPreviewProvider } from "../types.js";
+import type { AttachmentPreviewProvider } from "../types";
 
 export const TEXT_PREVIEW_BYTE_LIMIT = 96 * 1024;
 export const TEXT_PREVIEW_PAYLOAD_BYTE_LIMIT = 128 * 1024;

@@ -1,7 +1,34 @@
+import type { TaskStatusId } from "raft-ui";
+import {
+  Button,
+  SegmentedControl,
+  SegmentedControlItem,
+  SegmentedControlLabel,
+  TaskBoardColumn,
+  TaskBoardColumnBadge,
+  TaskBoardColumnChevron,
+  TaskBoardColumnCount,
+  TaskBoardColumnEmpty,
+  TaskBoardColumnHeading,
+  TaskBoardColumnItems,
+  TaskBoardColumnPanel,
+  TaskBoardColumnTrigger,
+  TaskSection as RuiTaskSection,
+  TaskSectionBadge,
+  TaskSectionChevron,
+  TaskSectionCount,
+  TaskSectionEmpty,
+  TaskSectionHeading,
+  TaskSectionItems,
+  TaskSectionPanel,
+  TaskSectionTrigger,
+  TasksPanelRoot,
+  TasksPanelToolbar,
+  TasksPanelViewport,
+} from "raft-ui";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { CheckSquare, ChevronDown, Columns3, Hash, LayoutList, Plus, User as UserIcon, UserCircle2 } from "lucide-react";
-import { SegmentedControl, SegmentedControlItem, SegmentedControlLabel } from "raft-ui";
 import {
   DndContext,
   PointerSensor,
@@ -34,7 +61,6 @@ import SelectionPopover from "../ui/SelectionPopover";
 import VirtualizedTaskStack, { TaskVirtualLayout } from "./VirtualizedTaskStack";
 import { useLiveSearchParams } from "../../hooks/useLiveSearchParams";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
-import { buildLegacyTaskWindowUrl, buildThreadWindowUrl, openPanelInNewTab } from "../../utils/openPanelInNewTab";
 
 /**
  * Identity reference shape used by Creator + Assignee filters. Encoded in
@@ -104,33 +130,49 @@ function writeStoredTaskViewMode(nextView: ViewMode): void {
   }
 }
 
+const STATUS_TO_RUI_STATUS: Record<TaskStatus, TaskStatusId> = {
+  todo: "todo",
+  in_progress: "in-progress",
+  in_review: "in-review",
+  done: "done",
+  closed: "closed",
+};
+
 function TaskSection({
   status,
   tasks,
   onOpenTask,
-  onOpenTaskInNewTab,
   onDragTask,
   collapsed = false,
   onToggleCollapsed,
   showChannelName = true,
   scrollElementRef,
+  hasMore = false,
+  loadingPage = false,
+  onLoadMore,
 }: {
   status: TaskStatus;
   tasks: Task[];
   onOpenTask: (task: Task) => void;
-  onOpenTaskInNewTab?: (task: Task) => void;
   onDragTask?: (event: React.DragEvent<HTMLDivElement>, task: Task) => void;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
   showChannelName?: boolean;
   scrollElementRef: React.RefObject<HTMLDivElement | null>;
+  /** Server-mode lazy paging: more pages exist for this status lane. */
+  hasMore?: boolean;
+  loadingPage?: boolean;
+  onLoadMore?: () => void;
 }) {
   const { formatMessage } = useIntl();
+  const ruiStatus = STATUS_TO_RUI_STATUS[status];
   return (
-    <section className="space-y-2.5">
-      <button
-        type="button"
-        onClick={onToggleCollapsed}
+    <RuiTaskSection
+      open={!collapsed}
+      onOpenChange={() => onToggleCollapsed?.()}
+      className="space-y-2.5"
+    >
+      <TaskSectionTrigger
         disabled={!onToggleCollapsed}
         aria-label={formatMessage(
           { id: collapsed ? "task.status.showGroup" : "task.status.hideGroup" },
@@ -138,46 +180,67 @@ function TaskSection({
         )}
         className={`flex w-full items-center justify-between gap-3 text-left ${onToggleCollapsed ? "" : "cursor-default"}`}
       >
-        <div className="flex items-center gap-2">
-          <span className={`border border-black px-2 py-0.5 text-[10px] font-bold uppercase ${TASK_STATUS_UI[status].bg}`}>
+        <TaskSectionHeading className="flex items-center gap-2">
+          <TaskSectionBadge status={ruiStatus}>
             {formatMessage({ id: TASK_STATUS_UI[status].labelId })}
-          </span>
-          <span className="text-xs font-mono text-black/50">{tasks.length}</span>
-        </div>
+          </TaskSectionBadge>
+          <TaskSectionCount className="text-xs font-mono text-foreground-muted">{tasks.length}</TaskSectionCount>
+        </TaskSectionHeading>
         {onToggleCollapsed ? (
-          <span className="inline-flex items-center text-black/50 hover:text-black">
-            <ChevronDown size={14} className={`transition-transform ${collapsed ? "-rotate-90" : ""}`} />
-          </span>
+          <TaskSectionChevron className="inline-flex items-center text-foreground-muted hover:text-foreground-strong" />
         ) : (
           <span />
         )}
-      </button>
-      {!collapsed && tasks.length === 0 ? (
-        <div className="border-2 border-dashed border-black/20 px-3 py-5 text-sm text-black/40">
-          {formatMessage(
-            { id: "task.status.emptyGroup" },
-            { status: formatMessage({ id: TASK_STATUS_UI[status].labelId }) },
-          )}
-        </div>
-      ) : !collapsed ? (
-        <VirtualizedTaskStack
-          items={tasks}
-          scrollElementRef={scrollElementRef}
-          estimateSize={116}
-          gap={10}
-          getItemKey={(task) => task.id}
-          renderItem={(task) => (
-            <TaskCard
-              task={task}
-              onOpen={onOpenTask}
-              onOpenInNewTab={onOpenTaskInNewTab}
-              onDragStart={onDragTask}
-              showChannelName={showChannelName}
+      </TaskSectionTrigger>
+      <TaskSectionPanel>
+        {tasks.length === 0 ? (
+          loadingPage ? (
+            <SkeletonRow
+              className="gap-2 rounded border border-line-muted bg-layer-card p-3 theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-white"
+              lineWidths={["w-1/2", "w-3/4"]}
             />
-          )}
-        />
-      ) : null}
-    </section>
+          ) : (
+            <TaskSectionEmpty className="border-2 border-dashed border-line-muted px-3 py-5 text-sm text-foreground-muted">
+              {formatMessage(
+                { id: "task.status.emptyGroup" },
+                { status: formatMessage({ id: TASK_STATUS_UI[status].labelId }) },
+              )}
+            </TaskSectionEmpty>
+          )
+        ) : (
+          <TaskSectionItems>
+            <VirtualizedTaskStack
+              items={tasks}
+              scrollElementRef={scrollElementRef}
+              estimateSize={116}
+              gap={10}
+              getItemKey={(task) => task.id}
+              renderItem={(task) => (
+                <TaskCard
+                  task={task}
+                  onOpen={onOpenTask}
+                  onDragStart={onDragTask}
+                  showChannelName={showChannelName}
+                />
+              )}
+            />
+          </TaskSectionItems>
+        )}
+        {hasMore && (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={loadingPage}
+            onClick={onLoadMore}
+            className="box-border h-8 min-h-8 w-full gap-1 py-0 text-xs"
+            data-testid={`task-load-more-${status}`}
+          >
+            {loadingPage ? formatMessage({ id: "common.loading" }) : formatMessage({ id: "task.panel.loadMore" })}
+          </Button>
+        )}
+      </TaskSectionPanel>
+    </RuiTaskSection>
   );
 }
 
@@ -218,7 +281,7 @@ function DraggableTaskWrapper({
       className={`relative ${disabled ? "" : "cursor-grab touch-none will-change-transform active:cursor-grabbing"} ${isDragging ? "opacity-90" : ""}`}
     >
       {children}
-    </div>
+      </div>
   );
 }
 
@@ -232,62 +295,73 @@ function DroppableColumn({
   onToggleCollapsed,
   statusTasks,
   openTask,
-  openTaskInNewTab,
   onDragTask,
   isChannelMode,
   scrollElementRef,
   canModifyTasks,
+  hasMore = false,
+  loadingPage = false,
+  onLoadMore,
 }: {
   status: TaskStatus;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   statusTasks: Task[];
   openTask: (task: Task) => void;
-  openTaskInNewTab?: (task: Task) => void;
   onDragTask?: (event: React.DragEvent<HTMLDivElement>, task: Task) => void;
   isChannelMode: boolean;
   scrollElementRef: React.RefObject<HTMLDivElement | null>;
   canModifyTasks: boolean;
+  /** Server-mode lazy paging: more pages exist for this status lane. */
+  hasMore?: boolean;
+  loadingPage?: boolean;
+  onLoadMore?: () => void;
 }) {
   const { formatMessage } = useIntl();
   const { setNodeRef, isOver } = useDroppable({ id: status, disabled: !canModifyTasks });
+  const ruiStatus = STATUS_TO_RUI_STATUS[status];
   return (
-    <div
+    <TaskBoardColumn
       ref={setNodeRef}
-      className={`flex w-[320px] shrink-0 self-start flex-col border-2 ${
-        isOver ? "border-black bg-soft-signal/20 shadow-brutal-sm" : "border-black/20 bg-white/30"
+      open={!collapsed}
+      onOpenChange={() => onToggleCollapsed()}
+      className={`flex w-[320px] shrink-0 self-start flex-col border theme-brutal:border-2 ${
+        isOver ? "border-line-strong bg-primary-soft shadow-raft-sm theme-brutal:border-black theme-brutal:bg-soft-signal/20 theme-brutal:shadow-brutal-sm" : "border-line-muted bg-fill-muted/30 theme-brutal:border-black/20 theme-brutal:bg-white/30"
       } p-3 transition-colors`}
     >
-      <button
-        type="button"
-        onClick={onToggleCollapsed}
+      <TaskBoardColumnTrigger
         aria-label={formatMessage(
           { id: collapsed ? "task.status.showGroup" : "task.status.hideGroup" },
           { status: formatMessage({ id: TASK_STATUS_UI[status].labelId }) },
         )}
         className={`flex w-full items-center justify-between gap-3 text-left ${collapsed ? "" : "mb-3"}`}
       >
-        <div className="flex items-center gap-2">
-          <span className={`border border-black px-2 py-0.5 text-[10px] font-bold uppercase ${TASK_STATUS_UI[status].bg}`}>
+        <TaskBoardColumnHeading className="flex items-center gap-2">
+          <TaskBoardColumnBadge status={ruiStatus}>
             {formatMessage({ id: TASK_STATUS_UI[status].labelId })}
-          </span>
-          <span className="text-xs font-mono text-black/50">{statusTasks.length}</span>
-        </div>
-        <span className="inline-flex items-center text-black/50 hover:text-black">
-          <ChevronDown size={14} className={`transition-transform ${collapsed ? "-rotate-90" : ""}`} />
-        </span>
-      </button>
-      {!collapsed && (
-        <div className="space-y-2.5">
+          </TaskBoardColumnBadge>
+          <TaskBoardColumnCount className="text-xs font-mono text-foreground-muted">{statusTasks.length}</TaskBoardColumnCount>
+        </TaskBoardColumnHeading>
+        <TaskBoardColumnChevron className="inline-flex items-center text-foreground-muted hover:text-foreground-strong" />
+      </TaskBoardColumnTrigger>
+      <TaskBoardColumnPanel>
+        <TaskBoardColumnItems className="space-y-2.5">
           {statusTasks.length === 0 ? (
-            <div className={`border-2 border-dashed px-3 py-5 text-sm ${
-              isOver ? "border-black text-black/60" : "border-black/20 text-black/40"
-            }`}>
-              {formatMessage(
-                { id: isOver ? "task.status.dropToSet" : "task.status.emptyGroup" },
-                { status: formatMessage({ id: TASK_STATUS_UI[status].labelId }) },
-              )}
-            </div>
+            loadingPage ? (
+              <SkeletonRow
+                className="gap-2 rounded border border-line-muted bg-layer-card p-3 theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-white"
+                lineWidths={["w-1/2", "w-3/4"]}
+              />
+            ) : (
+              <TaskBoardColumnEmpty className={`border border-dashed px-3 py-5 text-sm theme-brutal:border-2 ${
+                isOver ? "border-line-strong text-foreground-strong theme-brutal:border-black" : "border-line-muted text-foreground-muted theme-brutal:border-black/20"
+              }`}>
+                {formatMessage(
+                  { id: isOver ? "task.status.dropToSet" : "task.status.emptyGroup" },
+                  { status: formatMessage({ id: TASK_STATUS_UI[status].labelId }) },
+                )}
+              </TaskBoardColumnEmpty>
+            )
           ) : (
             <VirtualizedTaskStack
               items={statusTasks}
@@ -300,7 +374,6 @@ function DroppableColumn({
                   <TaskCard
                     task={task}
                     onOpen={openTask}
-                    onOpenInNewTab={openTaskInNewTab}
                     onDragStart={onDragTask}
                     showChannelName={!isChannelMode}
                   />
@@ -308,9 +381,22 @@ function DroppableColumn({
               )}
             />
           )}
-        </div>
-      )}
-    </div>
+          {hasMore && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={loadingPage}
+              onClick={onLoadMore}
+              className="box-border h-8 min-h-8 w-full gap-1 py-0 text-xs"
+              data-testid={`task-load-more-${status}`}
+            >
+              {loadingPage ? formatMessage({ id: "common.loading" }) : formatMessage({ id: "task.panel.loadMore" })}
+            </Button>
+          )}
+        </TaskBoardColumnItems>
+      </TaskBoardColumnPanel>
+    </TaskBoardColumn>
   );
 }
 
@@ -466,24 +552,20 @@ function IdentityFilterChip({
 
   return (
     <div ref={containerRef} className="relative">
-      <button
+      <Button size="sm" variant={selected.length > 0 ? "primary" : "outline"}
         type="button"
         onClick={onToggleOpen}
-        className={`inline-flex items-center gap-2 border-2 px-3 py-1.5 text-xs font-bold transition-colors ${
-          selected.length > 0
-            ? "border-black bg-soft-signal text-black shadow-brutal-sm"
-            : "border-black/30 bg-white text-black/70 hover:border-black"
-        }`}
+        className="box-border h-8 min-h-8 gap-2 py-0"
       >
         {icon}
         {label}
         {selected.length > 0 && (
-          <span className="border border-black px-1 py-0.5 font-mono text-[10px] leading-none">
+          <span className="border border-line-muted px-1 py-0.5 font-mono text-[10px] leading-none theme-brutal:border-black">
             {selected.length}
           </span>
         )}
         <ChevronDown size={12} />
-      </button>
+      </Button>
 
       {isOpen && (
         <SelectionPopover
@@ -524,11 +606,10 @@ export interface TasksPanelProps {
    *  activation to open inside their own tab model instead of the global
    *  right-panel thread store. */
   onOpenTask?: (task: Task) => void;
-  onOpenTaskInNewTab?: (task: Task) => void;
   onDragTask?: (event: React.DragEvent<HTMLDivElement>, task: Task) => void;
 }
 
-export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, onDragTask }: TasksPanelProps = {}) {
+export default function TasksPanel({ channelId, onOpenTask, onDragTask }: TasksPanelProps = {}) {
   const { formatMessage } = useIntl();
   const isChannelMode = !!channelId;
 
@@ -542,7 +623,9 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
   const channelTasks = useTaskStore((s) => s.tasks);
   const serverLoading = useTaskStore((s) => s.serverLoading);
   const channelLoading = useTaskStore((s) => s.loading);
-  const loadServerTasks = useTaskStore((s) => s.loadServerTasks);
+  const loadActiveTaskSummaries = useTaskStore((s) => s.loadActiveTaskSummaries);
+  const loadServerTaskStatusPage = useTaskStore((s) => s.loadServerTaskStatusPage);
+  const serverTaskPages = useTaskStore((s) => s.serverTaskPages);
   const loadTasks = useTaskStore((s) => s.loadTasks);
   const registerServerTasksConsumer = useTaskStore((s) => s.registerServerTasksConsumer);
   const unregisterServerTasksConsumer = useTaskStore((s) => s.unregisterServerTasksConsumer);
@@ -609,9 +692,12 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
     if (isChannelMode) {
       loadTasks(channelId!);
     } else {
-      loadServerTasks();
+      // Server mode first screen loads the small active-status summary pages;
+      // done/closed lanes stay lazy (expand / "Load more"), so the panel never
+      // issues the unparameterized full-row /tasks/server load.
+      loadActiveTaskSummaries();
     }
-  }, [isChannelMode, channelId, loadTasks, loadServerTasks]);
+  }, [isChannelMode, channelId, loadTasks, loadActiveTaskSummaries]);
 
   // Register this server-Tasks view as an active consumer so a socket reconnect
   // can catch it up (see catchUpServerTasksOnReconnect). Channel mode does not
@@ -779,6 +865,23 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
     }));
   }, [sortedTasks]);
 
+  // A server with zero ACTIVE tasks still has its done/closed lanes unfetched
+  // on first screen; only show the blanket empty state once every lane has
+  // loaded, otherwise the collapsed sections must stay reachable.
+  const allServerLanesLoaded = STATUS_ORDER.every((status) => serverTaskPages[status].loaded);
+
+  // Per-lane lazy paging props (server mode only): a "Load more" affordance
+  // while the lane's walk has a next cursor.
+  const lanePagingProps = (status: TaskStatus) => {
+    if (isChannelMode) return {};
+    const lane = serverTaskPages[status];
+    return {
+      hasMore: lane.loaded && lane.nextCursor !== null,
+      loadingPage: lane.loading,
+      onLoadMore: () => void loadServerTaskStatusPage(status),
+    };
+  };
+
   const setSelectedChannels = useCallback((channelIds: string[]) => {
     setSearchParams((previous) => {
       const next = new URLSearchParams(previous);
@@ -847,8 +950,14 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
   }, [setSelectedChannels]);
 
   const toggleStatusCollapsed = useCallback((status: TaskStatus) => {
+    // Expanding a never-loaded lane (done/closed start collapsed + unloaded in
+    // server mode) lazily pulls its first summary page.
+    if (!isChannelMode && collapsedStatuses[status]) {
+      const lane = useTaskStore.getState().serverTaskPages[status];
+      if (!lane.loaded && !lane.loading) void loadServerTaskStatusPage(status);
+    }
     setCollapsedStatuses((prev) => ({ ...prev, [status]: !prev[status] }));
-  }, []);
+  }, [isChannelMode, collapsedStatuses, loadServerTaskStatusPage]);
 
   // Stable across renders so the memoized TaskCard rows don't all re-render
   // when an unrelated task updates. Deps are all zustand action refs (stable).
@@ -877,18 +986,6 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
     // Stryker restore all
   }, [closeProfile, closeThread, closeLegacyTask, onOpenTask, openLegacyTask, openThread]);
 
-  const openTaskInNewTab = useCallback((task: Task) => {
-    const current = useServerStore.getState().current;
-    if (!current?.slug) return;
-    const channel = useChannelStore.getState().channels.find((candidate) => candidate.id === task.channelId);
-    const location = { pathname: window.location.pathname, search: window.location.search, origin: window.location.origin };
-    const url = task.isLegacy
-      ? buildLegacyTaskWindowUrl(location, { serverSlug: current.slug, channelId: task.channelId, taskId: task.id, channelType: channel?.type === "dm" ? "dm" : "channel" })
-      : buildThreadWindowUrl(location, { serverSlug: current.slug, parentChannelId: task.channelId, parentMessageId: task.messageId, parentChannelType: channel?.type === "dm" ? "dm" : "channel" }, "task");
-    openPanelInNewTab(url);
-  }, []);
-  const taskNewTabHandler = onOpenTaskInNewTab ?? openTaskInNewTab;
-
   /**
    * Resolves a dnd-kit drag-end event into a task status update.
    *
@@ -913,7 +1010,7 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
   );
 
   return (
-    <div
+    <TasksPanelRoot
       className="flex min-h-0 flex-1 flex-col"
       data-testid={isChannelMode ? "channel-task-panel" : undefined}
     >
@@ -921,13 +1018,13 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
           which already shows the channel header, so a second "Tasks" title
           would be redundant — drop straight into the toolbar. */}
       {!isChannelMode && (
-        <div className="flex h-panel-header items-center gap-3 border-b-2 border-black bg-soft-signal px-5 md:bg-white">
-          <div className="hidden md:flex size-icon-header items-center justify-center border-2 border-black bg-soft-signal">
+        <div data-slot="panel-header" className="flex h-panel-header items-center gap-3 border-b border-line-muted bg-layer-panel px-5 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:md:bg-white">
+          <div className="hidden md:flex size-icon-header items-center justify-center border border-line-muted bg-primary text-primary-950 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
             <CheckSquare size={18} />
           </div>
           <div className="min-w-0 flex-1">
             <h2 className="font-bold text-base leading-tight">{formatMessage({ id: "task.panel.heading" })}</h2>
-            <p className="text-xs text-black/50 font-mono">
+            <p className="text-xs text-foreground-muted font-mono">
               {sortedTasks.length}
               {hasAnyFilter ? formatMessage({ id: "task.panel.ofTotal" }, { total: tasks.length }) : ""}
               {" "}{formatMessage({ id: "task.panel.channelTasks" })}
@@ -940,32 +1037,28 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
         </div>
       )}
 
-      <div className="shrink-0 border-b-2 border-black bg-white px-4 py-3">
+      <TasksPanelToolbar>
         <div className="flex flex-wrap items-center gap-2">
           {/* Channel filter only makes sense in server mode — channel mode
               is already scoped to one channel. */}
           {!isChannelMode && (
             <div ref={channelFilterRef} className="relative">
-              <button
+              <Button size="sm" variant={selectedChannelIds.length > 0 ? "primary" : "outline"}
                 type="button"
                 onClick={() =>
                   setOpenFilter((prev) => (prev === "channel" ? null : "channel"))
                 }
-                className={`inline-flex items-center gap-2 border-2 px-3 py-1.5 text-xs font-bold transition-colors ${
-                  selectedChannelIds.length > 0
-                    ? "border-black bg-soft-signal text-black shadow-brutal-sm"
-                    : "border-black/30 bg-white text-black/70 hover:border-black"
-                }`}
+                className="box-border h-8 min-h-8 gap-2 py-0"
               >
                 <Hash size={14} />
                 {formatMessage({ id: "task.panel.channelColumn" })}
                 {selectedChannelIds.length > 0 && (
-                  <span className="border border-black px-1 py-0.5 font-mono text-[10px] leading-none">
+                  <span className="border border-line-muted px-1 py-0.5 font-mono text-[10px] leading-none theme-brutal:border-black">
                     {selectedChannelIds.length}
                   </span>
                 )}
                 <ChevronDown size={12} />
-              </button>
+              </Button>
 
               {openFilter === "channel" && (
                 <SelectionPopover
@@ -1021,13 +1114,13 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
               #proj-task:572c5ba6 msg=58495043. */}
 
           {hasAnyFilter && (
-            <button
+            <Button size="sm" variant="outline"
               type="button"
               onClick={clearAllFilters}
-              className="inline-flex items-center gap-2 border border-black bg-white px-2.5 py-1 text-[11px] font-bold text-black/60 hover:text-black"
+              className="box-border h-8 min-h-8 gap-2 py-0"
             >
               {formatMessage({ id: "task.panel.clearAll" })}
-            </button>
+            </Button>
           )}
 
           {/* New Task button: channel mode only. Server-wide page has no
@@ -1035,50 +1128,66 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
               expose a +New CTA there — users still create from the channel
               they want the task in. */}
           {isChannelMode && canModifyTasks && (
-            <button
+            <Button
               type="button"
+              size="sm"
+              variant="outline"
               onClick={() => setShowCreateDialog(true)}
-              className="btn-brutal-sm inline-flex items-center gap-1 bg-brutal-pink px-2 py-1 text-xs font-bold"
+              className="box-border inline-flex h-8 min-h-8 items-center gap-1 py-0 text-xs font-bold"
             >
               <Plus size={12} />
               {formatMessage({ id: "task.board.newTask" })}
-            </button>
+            </Button>
           )}
 
           <SegmentedControl
             value={viewMode}
             onValueChange={setView}
             aria-label={formatMessage({ id: "task.viewAria" })}
-            className="ml-auto"
+            className="sm:ml-auto"
           >
-            <SegmentedControlItem value="board" data-testid="channel-task-view-board">
+            <SegmentedControlItem
+              value="board"
+              data-testid="channel-task-view-board"
+              render={(props) => (
+                <Button {...props} size="sm" variant={viewMode === "board" ? "primary" : "outline"} className="box-border h-8 min-h-8 gap-1.5 py-0" />
+              )}
+            >
               <Columns3 size={12} />
               <SegmentedControlLabel>{formatMessage({ id: "task.view.board" })}</SegmentedControlLabel>
             </SegmentedControlItem>
-            <SegmentedControlItem value="list" data-testid="channel-task-view-list">
+            <SegmentedControlItem
+              value="list"
+              data-testid="channel-task-view-list"
+              render={(props) => (
+                <Button {...props} size="sm" variant={viewMode === "list" ? "primary" : "outline"} className="box-border h-8 min-h-8 gap-1.5 py-0" />
+              )}
+            >
               <LayoutList size={12} />
               <SegmentedControlLabel>{formatMessage({ id: "task.view.list" })}</SegmentedControlLabel>
             </SegmentedControlItem>
           </SegmentedControl>
         </div>
-      </div>
+      </TasksPanelToolbar>
 
-      <div
+      <TasksPanelViewport
         ref={scrollContainerRef}
         data-task-virtual-scroll
-        className="flex-1 overflow-auto bg-white p-4 safe-bottom"
+        // The floating-tab-bar clearance belongs to the Tasks tab root only —
+        // channel-detail panes have no capsule above them (task #678).
+        className={`flex-1 overflow-auto bg-layer-canvas-muted p-4 safe-bottom theme-brutal:bg-white${isChannelMode ? "" : " mobile-nav-clearance"}`}
       >
         {loading ? (
           <div className="flex flex-col gap-2" aria-hidden="true">
             {Array.from({ length: 5 }, (_, i) => (
               <SkeletonRow
                 key={i}
-                className="gap-2 rounded border-2 border-black/30 p-3"
+                className="gap-2 rounded border border-line-muted bg-layer-card p-3 theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-white"
                 lineWidths={["w-1/2", "w-3/4"]}
               />
             ))}
           </div>
-        ) : sortedTasks.length === 0 ? (
+        ) : sortedTasks.length === 0 && (isChannelMode || allServerLanesLoaded) ? (
           <EmptyState
             className="flex h-full flex-col items-center justify-center"
             icon={<CheckSquare size={36} />}
@@ -1104,34 +1213,37 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
                   onToggleCollapsed={() => toggleStatusCollapsed(status)}
                   statusTasks={statusTasks}
                   openTask={openTask}
-                  openTaskInNewTab={taskNewTabHandler}
                   onDragTask={canModifyTasks ? onDragTask : undefined}
                   isChannelMode={isChannelMode}
                   scrollElementRef={scrollContainerRef}
                   canModifyTasks={canModifyTasks}
+                  {...lanePagingProps(status)}
                 />
               ))}
             </TaskVirtualLayout>
           </DndContext>
         ) : (
-          <TaskVirtualLayout scrollElementRef={scrollContainerRef} className="space-y-6">
+          <TaskVirtualLayout
+            scrollElementRef={scrollContainerRef}
+            className="space-y-6"
+          >
             {groupedTasks.map(({ status, tasks: statusTasks }) => (
               <TaskSection
                 key={status}
                 status={status}
                 tasks={statusTasks}
                 onOpenTask={openTask}
-                onOpenTaskInNewTab={taskNewTabHandler}
                 onDragTask={canModifyTasks ? onDragTask : undefined}
                 collapsed={collapsedStatuses[status]}
                 onToggleCollapsed={() => toggleStatusCollapsed(status)}
                 showChannelName={!isChannelMode}
                 scrollElementRef={scrollContainerRef}
+                {...lanePagingProps(status)}
               />
             ))}
           </TaskVirtualLayout>
         )}
-      </div>
+      </TasksPanelViewport>
 
       {showCreateDialog && channelId && (
         <CreateTaskDialog
@@ -1139,6 +1251,6 @@ export default function TasksPanel({ channelId, onOpenTask, onOpenTaskInNewTab, 
           onClose={() => setShowCreateDialog(false)}
         />
       )}
-    </div>
+    </TasksPanelRoot>
   );
 }

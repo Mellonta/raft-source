@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -31,7 +30,7 @@ test("the Worker is routed for /.well-known/*, or it never sees the request", ()
 });
 
 test("both association paths are answered before static assets are consulted", async () => {
-  const { default: handler } = await import("../public/_worker.js");
+  const { default: handler } = await import("../public/_worker");
   // If ASSETS were reached, we would get the SPA shell — so this stub throws to
   // prove the association paths never fall through.
   const env = {
@@ -96,7 +95,7 @@ test("both association paths are answered before static assets are consulted", a
 });
 
 test("change-password redirects temporarily before static assets are consulted", async () => {
-  const { default: handler } = await import("../public/_worker.js");
+  const { default: handler } = await import("../public/_worker");
   const env = {
     ASSETS: {
       fetch: () => {
@@ -116,7 +115,7 @@ test("change-password redirects temporarily before static assets are consulted",
 });
 
 test("unknown well-known paths are real empty 404s instead of the SPA shell", async () => {
-  const { default: handler } = await import("../public/_worker.js");
+  const { default: handler } = await import("../public/_worker");
   let reachedAssets = 0;
   const env = {
     ASSETS: {

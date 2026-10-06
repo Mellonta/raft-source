@@ -22,12 +22,13 @@
 
 import type { Command } from "commander";
 
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError, type CliErrorCode } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { formatManualIndexCommand, requireKnowledgeContexts } from "./context.js";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError, type CliErrorCode } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { formatAgentKnowledgeStdout } from "@botiverse/raft-shared";
+import { formatManualIndexCommand, requireKnowledgeContexts } from "./context";
 
 export interface KnowledgeGetOptions {
   intent?: string;
@@ -37,7 +38,7 @@ export interface KnowledgeGetOptions {
 }
 
 export function formatKnowledgeStdout(content: string): string {
-  return content.endsWith("\n") ? content : `${content}\n`;
+  return formatAgentKnowledgeStdout(content);
 }
 
 function toKnowledgeErrorCode(errorCode: string | null | undefined, status: number): CliErrorCode {

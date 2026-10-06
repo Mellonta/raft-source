@@ -12,8 +12,7 @@
 // independent tiny PR after #2220 merge, owned by Huaihuai, reviewed by Hao.
 
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { ClaudeEventNormalizer } from "./claudeEventNormalizer.js";
+import { ClaudeEventNormalizer } from "./claudeEventNormalizer";
 
 const normalizer = new ClaudeEventNormalizer();
 

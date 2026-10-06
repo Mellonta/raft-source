@@ -1,4 +1,3 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 import { asServerId } from "@botiverse/raft-shared";
 import {
@@ -8,7 +7,7 @@ import {
   createJointChannel,
   inviteServerToJointChannel,
   isJointChannelInviteId,
-} from "./channelService.js";
+} from "./channelService";
 
 // Regression guard for #945 (6b979b6f). canUserAccessChannel originally took
 // (channelId, userId): the active server was implicit, so "in this server"

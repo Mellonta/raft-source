@@ -23,15 +23,15 @@
  * survives; the pipe does not melt.
  */
 
-import { emitWebTrace } from "./webAuthTrace";
+import { emitWebEvent } from "./webAuthTrace";
 import { isDynamicImportFailure } from "./dynamicImportRecovery";
 
-type ClientErrorEmitter = typeof emitWebTrace;
-let emitter: ClientErrorEmitter = emitWebTrace;
+type ClientErrorEmitter = typeof emitWebEvent;
+let emitter: ClientErrorEmitter = emitWebEvent;
 
 /** Test seam: capture emitted records without coupling to the pipeline. */
 export function __setClientErrorEmitterForTest(next: ClientErrorEmitter | null): void {
-  emitter = next ?? emitWebTrace;
+  emitter = next ?? emitWebEvent;
 }
 
 export type ClientErrorCaptureSource =

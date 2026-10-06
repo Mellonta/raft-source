@@ -1,13 +1,19 @@
 // `raft user info <@name>` — narrow visible profile and channel-membership facts.
+// → GET /internal/agent-api/users/:name/channels (the SDK's users.info operation)
 
 import type { Command } from "commander";
+import {
+  AGENT_API_USER_CHANNELS_DEFAULT_LIMIT,
+  AGENT_API_USER_CHANNELS_MAX_LIMIT,
+  userInfo,
+} from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText } from "../../core/renderer.js";
-import { formatUserInfo } from "../server/_format.js";
+import { createAgentApiContractSurfaceClient, createCliOperationFailures } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText } from "../../core/renderer";
+import { formatUserInfo } from "../server/_format";
 
 interface UserInfoOpts {
   limit?: string;
@@ -59,71 +65,47 @@ export const userInfoCommand = defineCommand(
     ],
   },
   async (ctx, target: string | undefined, opts: UserInfoOpts = {}) => {
-    const name = normalizeUserName(target);
-    const limit = parsePositiveInt(opts.limit, "--limit", 50);
+    normalizeUserName(target);
+    const limit = parsePositiveInt(opts.limit, "--limit", AGENT_API_USER_CHANNELS_DEFAULT_LIMIT);
     const offset = parseNonNegativeInt(opts.offset, "--offset", 0);
+    if (limit > AGENT_API_USER_CHANNELS_MAX_LIMIT) {
+      throw new CliError({
+        code: "INVALID_ARG",
+        message: `--limit must be at most ${AGENT_API_USER_CHANNELS_MAX_LIMIT}`,
+      });
+    }
 
     const agentContext = ctx.loadAgentContext();
     const client = ctx.createApiClient(agentContext);
-    const agentApi = createAgentApiSurfaceClient(client);
-    const infoRes = await agentApi.server.info();
-    if (!infoRes.ok) {
-      throw new CliError({
-        code: infoRes.status >= 500 ? "SERVER_5XX" : "INFO_FAILED",
-        message: infoRes.error ?? `HTTP ${infoRes.status}`,
-      });
-    }
+    const api = createAgentApiContractSurfaceClient(client);
+    const failures = createCliOperationFailures();
+    // One users.channels request (server.info as well when the credential
+    // cannot read rosters); the operation is the SDK's users.info.
+    const outcome = await userInfo({
+      server: { ...api.server, info: () => failures.observe(api.server.info()) },
+      users: { ...api.users, channels: (params, query) => failures.observe(api.users.channels(params, query)) },
+    }, { name: target ?? "", offset, limit });
 
-    const agent = (infoRes.data?.agents ?? []).find((candidate) => candidate.name === name);
-    const human = (infoRes.data?.humans ?? []).find((candidate) => candidate.name === name);
-    const user = agent
-      ? { kind: "agent" as const, value: agent }
-      : human
-        ? { kind: "human" as const, value: human }
-        : null;
-    if (!user) {
-      throw new CliError({
-        code: "NOT_FOUND",
-        message: `User not found or not visible: @${name}`,
-        suggestedNextAction: "Run `raft server info --agents --query <name>` or `raft server info --humans --query <name>` to inspect visible users.",
-      });
-    }
-
-    const visibleChannels = infoRes.data?.channels ?? [];
-    const inspectedChannels = visibleChannels.slice(offset, offset + limit);
-    const memberships = [];
-    let skippedChannels = 0;
-    for (const channel of inspectedChannels) {
-      const membersRes = await agentApi.channels.members({ channel: `#${channel.name}` });
-      if (!membersRes.ok) {
-        skippedChannels += 1;
-        continue;
+    if (!outcome.ok) {
+      const failure = failures.last();
+      if (outcome.error.code === "INVALID_REQUEST") {
+        throw new CliError({ code: "INVALID_ARG", message: outcome.error.message });
       }
-      const agents = membersRes.data?.agents ?? [];
-      const humans = membersRes.data?.humans ?? [];
-      const found = user.kind === "agent"
-        ? agents.some((candidate) => candidate.name === name)
-        : humans.some((candidate) => candidate.name === name);
-      if (found) {
-        // server.info channel attention flags belong to the caller; only the
-        // roster result above is authoritative for the inspected subject.
-        memberships.push({
-          ...channel,
-          joined: true,
-          muted: undefined,
-          activityMuted: undefined,
+      if (outcome.error.code === "NOT_FOUND" && outcome.error.status === undefined) {
+        throw new CliError({
+          code: "NOT_FOUND",
+          message: outcome.error.message,
+          suggestedNextAction: outcome.error.nextAction,
         });
       }
+      throw new CliError({
+        code: (failure?.status ?? 0) >= 500 ? "SERVER_5XX" : "INFO_FAILED",
+        message: failure?.error ?? (failure ? `HTTP ${failure.status}` : outcome.error.message),
+      });
     }
 
-    writeText(ctx.io, formatUserInfo(user, memberships, {
-      total: visibleChannels.length,
-      offset,
-      limit,
-      nextCommand: offset + limit < visibleChannels.length
-        ? `raft user info @${name} --offset ${offset + limit} --limit ${limit}`
-        : undefined,
-    }, skippedChannels));
+    const { user, memberships, page, skippedChannels } = outcome.data;
+    writeText(ctx.io, formatUserInfo(user, memberships, page, skippedChannels));
   },
 );
 

@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import type { ReactElement } from "react";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import type { RenderOptions } from "@testing-library/react";
@@ -410,10 +409,10 @@ test("explicit Computer context wins while remembered runtime and model remain a
   assert.ok(await screen.findByText("Mac (mac.local)"));
   await waitFor(() => {
     assert.equal(hasSelectedValue("Claude Code"), true);
-    assert.equal(hasSelectedValue("Claude Sonnet"), false);
+    assert.equal(hasSelectedValue("Claude Sonnet"), true);
   });
   fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "Alice" } });
-  assert.equal((screen.getByRole("button", { name: "Create Agent" }) as HTMLButtonElement).disabled, true);
+  assert.equal((screen.getByRole("button", { name: "Create Agent" }) as HTMLButtonElement).disabled, false);
 
   first.unmount();
   useMachineStore.setState((state) => ({
@@ -509,7 +508,7 @@ test("selected OpenCode cannot submit after the Computer probe removes it", asyn
   assert.equal(createAttempts, 0);
 });
 
-test("Kimi missing config shows login recovery, no model options, and blocks create", async () => {
+test("Kimi missing config keeps login recovery alongside unverified model options", async () => {
   seedStores();
   useMachineStore.setState((state) => ({
     machines: state.machines.map((machine) => ({ ...machine, runtimes: ["kimi-sdk"] })),
@@ -537,15 +536,16 @@ test("Kimi missing config shows login recovery, no model options, and blocks cre
   });
   assert.ok(await screen.findByText(/Kimi is not signed in on this Computer/));
   assert.ok(screen.getByText("kimi login"));
-  assert.equal(hasSelectedValue("Kimi for Coding (default)"), false);
+  assert.equal(hasSelectedValue("Kimi for Coding (default)"), true);
 
   const modelSelect = screen.getAllByRole("combobox")[2];
-  assert.ok(modelSelect, "empty model source must render an empty model control");
+  assert.ok(modelSelect);
   fireEvent.click(modelSelect);
-  assert.equal(screen.queryByRole("option", { name: /Kimi for Coding/ }), null);
+  assert.ok(screen.getByRole("option", { name: /Kimi for Coding/ }));
+  fireEvent.keyDown(modelSelect, { key: "Escape" });
 
   fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "Alice" } });
-  assert.equal((screen.getByRole("button", { name: "Create Agent" }) as HTMLButtonElement).disabled, true);
+  assert.equal((screen.getByRole("button", { name: "Create Agent" }) as HTMLButtonElement).disabled, false);
   assert.equal(createAttempts, 0);
 
   const checksBeforeRetry = modelChecks;
@@ -611,11 +611,12 @@ test("runtime model interpolation and rescan accessibility localize in zh-cn", a
     { locale: "zh-cn" },
   );
 
-  const rescan = await screen.findByTitle("重新扫描此 Computer 上的模型");
-  assert.equal(rescan.getAttribute("aria-label"), "重新扫描此 Computer 上的模型");
+  const rescan = await screen.findByRole("button", { name: "重新扫描此 Computer 上的模型" });
+  assert.equal(rescan.getAttribute("title"), null);
+  assert.ok(rescan.hasAttribute("data-base-ui-tooltip-trigger"));
 });
 
-test("Cursor probe error cannot promote remembered bundled Auto into create options or submit", async () => {
+test("Cursor probe error offers remembered Auto as unverified and permits submission", async () => {
   seedStores();
   useMachineStore.setState((state) => ({
     machines: state.machines.map((machine) => ({
@@ -643,25 +644,27 @@ test("Cursor probe error cannot promote remembered bundled Auto into create opti
   );
 
   await waitFor(() => assert.equal(hasSelectedValue("Cursor CLI"), true));
-  assert.equal(hasSelectedValue("Auto"), false);
   assert.ok(await screen.findByText("Could not load models from this Computer."));
+  assert.equal(hasSelectedValue("Auto"), true);
+  assert.ok(screen.getByText(/not been verified/));
 
   const modelSelect = screen.getAllByRole("combobox")[2];
-  assert.ok(modelSelect, "Cursor error must render a model control without bundled presets");
+  assert.ok(modelSelect);
   fireEvent.click(modelSelect);
-  assert.equal(screen.queryByRole("option", { name: "Auto" }), null);
+  const option = screen.getByRole("option", { name: "Auto" });
+  fireEvent.pointerDown(option);
+  fireEvent.click(option);
 
   fireEvent.change(screen.getByPlaceholderText("e.g. Alice"), { target: { value: "Alice" } });
   const createButton = screen.getByRole("button", { name: "Create Agent" });
-  assert.equal((createButton as HTMLButtonElement).disabled, true);
+  assert.equal((createButton as HTMLButtonElement).disabled, false);
   const form = createButton.closest("form");
   assert.ok(form);
   fireEvent.submit(form);
-  assert.ok(await screen.findByText("Select a model reported by this computer, or enter an allowed custom model."));
-  assert.equal(createAttempts, 0);
+  await waitFor(() => assert.equal(createAttempts, 1));
 });
 
-test("Cursor non-live model validation error is localized in zh-cn", async () => {
+test("Cursor unverified model warning is localized in zh-cn", async () => {
   seedStores();
   useMachineStore.setState((state) => ({
     machines: state.machines.map((machine) => ({ ...machine, runtimes: ["cursor"] })),
@@ -683,10 +686,5 @@ test("Cursor non-live model validation error is localized in zh-cn", async () =>
 
   await waitFor(() => assert.equal(hasSelectedValue("Cursor CLI"), true));
   assert.ok(await screen.findByText("无法从此 Computer 加载模型。"));
-  fireEvent.change(screen.getByPlaceholderText("例如 Alice"), { target: { value: "Alice" } });
-  const createButton = screen.getByRole("button", { name: "创建 Agent" });
-  const form = createButton.closest("form");
-  assert.ok(form);
-  fireEvent.submit(form);
-  assert.ok(await screen.findByText("请选择此 Computer 报告的模型，或输入允许的自定义模型。"));
+  assert.ok(screen.getByText(/尚未验证/));
 });

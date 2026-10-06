@@ -7,7 +7,6 @@
  */
 import { readFileSync, readdirSync, statSync } from "fs";
 import { join } from "path";
-import test from "node:test";
 
 const SRC = join(import.meta.dirname, "../src");
 const ALLOWED = new Set([

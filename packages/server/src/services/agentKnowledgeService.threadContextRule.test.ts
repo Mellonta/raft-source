@@ -1,7 +1,6 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
-import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService.js";
+import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService";
 
 // Mirrors the canonical rule ratified by Huaihuai in #proj-aiax:55ef322f and
 // shipped to the daemon guide in PR #5638. The prompt surface (class ①, needs

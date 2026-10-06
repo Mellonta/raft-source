@@ -4,7 +4,6 @@
  * parity went GREEN — see formatjsLiteralGate.test.ts migration receipt.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   PROSE_ALLOWLIST,
   isProseAllowlisted,
@@ -64,16 +63,14 @@ test("looksLikeDisplayProse trims edges and accepts U+2026 display ellipsis labe
   assert.equal(looksLikeDisplayProse("AgentStatus"), false);
 });
 
-test("PROSE_ALLOWLIST stays narrow (generated + analytics only)", () => {
+test("PROSE_ALLOWLIST stays narrow (generated only)", () => {
   assert.deepEqual(PROSE_ALLOWLIST, [
     "src/generated/",
-    "src/analytics/flagRegistry.ts",
   ]);
   for (const entry of PROSE_ALLOWLIST) {
     assert.ok(entry !== "src/" && entry !== "src", `allowlist entry ${entry} is too broad`);
   }
   assert.equal(isProseAllowlisted("src/generated/reactionSpriteManifest.ts"), true);
-  assert.equal(isProseAllowlisted("src/analytics/flagRegistry.ts"), true);
   assert.equal(isProseAllowlisted("src/utils/activity.ts"), false);
 });
 

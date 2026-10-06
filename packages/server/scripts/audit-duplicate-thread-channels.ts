@@ -1,8 +1,8 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import pg from "pg";
-import * as schema from "../src/db/schema.js";
+import * as schema from "../src/db/schema";
 
 type CliOptions = {
   serverId?: string;
@@ -44,7 +44,7 @@ function usage() {
   console.error(
     [
       "Usage:",
-      "  DATABASE_URL=... tsx scripts/audit-duplicate-thread-channels.ts [--server-id <uuid>] [--json]",
+      "  DATABASE_URL=... node --import @oxc-node/core/register scripts/audit-duplicate-thread-channels.ts [--server-id <uuid>] [--json]",
       "",
       "Options:",
       "  --server-id <id>  Restrict audit to a single server",

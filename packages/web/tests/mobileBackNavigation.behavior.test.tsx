@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useLayoutEffect, useRef, useState } from "react";
 import { BrowserRouter, MemoryRouter, useLocation, useNavigate } from "react-router-dom";
@@ -214,8 +213,8 @@ function StoreOwnedImmediateThreadBackProbe() {
 function TaskOverlayFromThreadProbe() {
   const navigate = useNavigate();
   const location = useLocation();
-  const closeThread = useThreadStore((state) => state.closeThread);
-  const openParentMessageId = useThreadStore((state) => state.openParentMessageId);
+  const closeTaskModal = useThreadStore((state) => state.closeTaskModal);
+  const taskModalParentId = useThreadStore((state) => state.taskModal?.parentMessageId ?? null);
   const locationRef = useRef({ pathname: location.pathname, search: location.search });
   locationRef.current = { pathname: location.pathname, search: location.search };
 
@@ -229,18 +228,30 @@ function TaskOverlayFromThreadProbe() {
     });
   }), [navigate]);
 
-  const taskBack = useMobileBack(closeThread, closeThread);
+  const taskBack = useMobileBack(closeTaskModal, closeTaskModal);
   return (
     <>
       <LocationProbe />
-      <output data-testid="task-overlay-state">{openParentMessageId ?? "closed"}</output>
+      <output data-testid="task-overlay-state">{taskModalParentId ?? "closed"}</output>
       <button
         type="button"
         onClick={() => {
+          // task #699: a task opened over a side thread fills the independent
+          // modal slot; the side thread's open* identity stays put.
           useThreadStore.setState({
             openParentChannelId: "general",
-            openParentMessageId: "task-parent",
-            openIntent: "task",
+            openParentMessageId: "origin-parent",
+            openThreadChannelId: "origin-thread",
+            openIntent: "thread",
+            taskModal: {
+              parentMessageId: "task-parent",
+              parentChannelId: "general",
+              threadChannelId: "task-thread",
+              serverSlug: "dev",
+              focusedMessageId: null,
+              loading: false,
+              error: null,
+            },
           });
         }}
       >
@@ -393,7 +404,7 @@ test("task sheet opened over a thread owns a PUSH and Back restores the exact or
   await waitFor(() => {
     assert.equal(
       screen.getByTestId("location").textContent,
-      "/s/dev/channel/general?msg=origin-reply&thread=general%3Atask-parent&task=1",
+      "/s/dev/channel/general?msg=origin-reply&thread=general%3Aorigin-parent&task=general%3Atask-parent",
     );
   });
 
@@ -405,6 +416,23 @@ test("task sheet opened over a thread owns a PUSH and Back restores the exact or
     );
     assert.equal(screen.getByTestId("task-overlay-state").textContent, "closed");
   });
+
+  // Leave the same terminal store/navigation state the pre-#699 version of
+  // this test did: no side thread, one removal REPLACE recorded — the shared
+  // useAppNavigate module bookkeeping is read by later tests in this file.
+  // Wait for the Back POP to actually commit first: the close-task REPLACE
+  // and the origin entry render the SAME URL string, so a URL assertion alone
+  // cannot tell whether the POP has landed (idx 1 → 0).
+  await waitFor(() => {
+    assert.equal((window.history.state as { idx: number }).idx, 0);
+  }, { timeout: 3000 });
+  useThreadStore.getState().closeThread();
+  await waitFor(() => {
+    assert.equal(
+      screen.getByTestId("location").textContent,
+      "/s/dev/channel/general?msg=origin-reply",
+    );
+  }, { timeout: 3000 });
 });
 
 test("same-path POP cannot consume the preceding entry's synchronous REPLACE", () => {
@@ -853,4 +881,48 @@ test("callback fallback without server context still permits ordinary browser ba
     assert.equal(screen.getByTestId("location").textContent, "/s/alpha/channel/random");
     assert.deepEqual(closeCalls, []);
   });
+});
+
+// Review reproduction (slock #8378): a multi-entry POP and a multi-entry
+// Forward each arrive as ONE popstate/commit. The tracker must keep records by
+// browser entry index, not a compressed array whose positions drift.
+function MultiHopProbe() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const scopedBack = useMobileBack("/s/dev");
+  return (
+    <div>
+      <output data-testid="location">{location.pathname}{location.search}</output>
+      {["b", "c", "d", "e"].map((id) => (
+        <button key={id} type="button" onClick={() => navigate(`/s/dev/channel/${id}`)}>go {id}</button>
+      ))}
+      <button type="button" onClick={scopedBack}>scoped back</button>
+    </div>
+  );
+}
+
+test("other → b → c → d → e, go(-3), go(+3), go(-2): scoped back from c returns to b (real previous entry), not the fallback", async () => {
+  setCurrentServer("dev");
+  window.history.replaceState({ ...(window.history.state as object), idx: 0 }, "", "/s/other");
+  render(
+    <BrowserRouter>
+      <NavigationDepthTracker />
+      <MultiHopProbe />
+    </BrowserRouter>,
+  );
+  const at = async (path: string) => {
+    await waitFor(() => assert.equal(screen.getByTestId("location").textContent, path));
+  };
+  for (const id of ["b", "c", "d", "e"]) {
+    fireEvent.click(screen.getByRole("button", { name: `go ${id}` }));
+    await at(`/s/dev/channel/${id}`);
+  }
+  window.history.go(-3);
+  await at("/s/dev/channel/b");
+  window.history.go(3);
+  await at("/s/dev/channel/e");
+  window.history.go(-2);
+  await at("/s/dev/channel/c");
+  fireEvent.click(screen.getByRole("button", { name: "scoped back" }));
+  await at("/s/dev/channel/b");
 });

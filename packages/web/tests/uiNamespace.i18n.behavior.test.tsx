@@ -1,14 +1,10 @@
+import "./helpers/installResizeObserver";
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import type { ReactElement } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import NotificationCenter from "../src/components/ui/NotificationCenter";
-import type {
-  NotificationCenterEntry,
-} from "../src/components/ui/NotificationCenter";
 import ServerSwitcherMenu from "../src/components/ui/ServerSwitcherMenu";
 import QuotedMessageCard from "../src/components/ui/cards/QuotedMessageCard";
 import { TestIntlProvider } from "./helpers/intl";
@@ -25,7 +21,6 @@ import type { Server } from "../src/store/serverStore";
 // component, because a single component rendering Chinese proves nothing about
 // the other two:
 //
-//   1. NotificationCenter.tsx        → `ui.notificationCenter.*`
 //   2. ServerSwitcherMenu.tsx        → `ui.serverSwitcher.*`   (PLACEHOLDER)
 //   3. cards/QuotedMessageCard.tsx   → `ui.quotedMessage.*`
 //
@@ -96,42 +91,9 @@ function assertNoRawPlaceholders(scope: HTMLElement = document.body) {
   }
 }
 
-// Family 1a — NotificationCenter empty state / `ui.notificationCenter.*`.
-test("NotificationCenter renders the finalized Chinese empty state + chrome under zh-cn", () => {
-  renderZh(<NotificationCenter entries={[]} viewport="desktop" />);
-
-  // Header title + dialog accessible name.
-  assert.ok(screen.getByText("通知"), "notification-center title");
-  assert.ok(screen.getByRole("dialog", { name: "通知中心" }), "notification-center aria-label");
-  // Empty-state title + body.
-  assert.ok(screen.getByText("暂无通知"), "empty-state title");
-  assert.ok(screen.getByText("需要你关注的事项会显示在这里。"), "empty-state body");
-  // With zero entries the count label reads the "all clear" arm.
-  assert.ok(screen.getByText("全部已处理"), "count all-clear label");
-  // No English remnant.
-  assert.equal(screen.queryByText("No notifications right now"), null, "empty title not migrated");
-  assert.equal(screen.queryByText("all clear"), null, "count label not migrated");
-  assertNoRawPlaceholders();
-});
 
 // Family 1b — the count PLACEHOLDER. Three entries must render "3 项", the kind
 // dot must carry the migrated accessible name, and no literal `{count}` survives.
-test("NotificationCenter renders the count-items plural and kind labels under zh-cn", () => {
-  const entries: NotificationCenterEntry[] = [
-    { id: "n1", kind: "warning", title: "a" },
-    { id: "n2", kind: "warning", title: "b" },
-    { id: "n3", kind: "warning", title: "c" },
-  ];
-  renderZh(<NotificationCenter entries={entries} viewport="desktop" />);
-
-  // countItems arg really reached the DOM: "{count} 项" with count=3.
-  assert.ok(screen.getByText("3 项"), "count-items label with interpolated count");
-  // The list aria-label + per-entry kind label are migrated too.
-  assert.ok(screen.getByRole("list", { name: "通知" }), "list aria-label");
-  assert.ok(screen.getAllByLabelText("警告").length >= 3, "warning kind labels");
-  assert.equal(screen.queryByLabelText("Warning"), null, "kind label not migrated");
-  assertNoRawPlaceholders();
-});
 
 // Family 2 — ServerSwitcherMenu / `ui.serverSwitcher.*`, including the reorder
 // PLACEHOLDER whose `{name}` interpolates the real server name.

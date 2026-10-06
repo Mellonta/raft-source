@@ -4,23 +4,29 @@
 // without importing this presenter layer (decycle R0, #wg-raft-computer:18ab6541).
 // The core symbols are re-exported here verbatim for existing import sites.
 
-import { computerDir } from "./paths.js";
-import { info, present } from "./output.js";
-import { createComputerApi } from "./lib/api.js";
+import { computerDir } from "./paths";
+import { info, present } from "./output";
+import { createComputerApi } from "./lib/api";
 import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
-import { parseChannel, readChannel } from "./lib/channelState.js";
-import { ComputerError } from "./lib/errors.js";
-import { HANDS_API_ORIGIN, HANDS_COMPUTER_APP_SLUG } from "./releaseAuthority.js";
-import { COMPUTER_VERSION } from "./version.js";
+import { parseChannel, readChannel } from "./lib/channelState";
+import { ComputerError } from "./lib/errors";
+import { HANDS_API_ORIGIN, HANDS_COMPUTER_APP_SLUG } from "./releaseAuthority";
+import { COMPUTER_VERSION } from "./version";
 
 export {
   DEFAULT_CHANNEL,
   SEMVER_RE,
+  NAMED_CHANNEL_RE,
+  RESERVED_CHANNEL_WORDS,
+  isNamedReleaseChannel,
   parseChannel,
   readChannel,
+  toHandsChannelSlug,
   writeChannel,
   type Channel,
-} from "./lib/channelState.js";
+  type NamedReleaseChannel,
+} from "./lib/channelState";
+import { toHandsChannelSlug, type NamedReleaseChannel } from "./lib/channelState";
 
 // --- CLI command handlers ---
 
@@ -50,7 +56,7 @@ export async function runChannelSet(slockHome: string, raw: string): Promise<voi
   });
 }
 
-export type ListedChannel = "latest" | "alpha";
+export type ListedChannel = "latest" | "alpha" | NamedReleaseChannel;
 
 export interface ChannelVersionEntry {
   version: string;
@@ -113,13 +119,13 @@ function isStrictSemver(value: unknown): value is string {
     && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u.test(value);
 }
 
-function mapListedChannel(channel: ListedChannel): "main" | "alpha" {
-  return channel === "latest" ? "main" : "alpha";
+function mapListedChannel(channel: ListedChannel): string {
+  return toHandsChannelSlug(channel);
 }
 
 function validateVersionsResponse(
   value: unknown,
-  expected: { appSlug: string; channel: "main" | "alpha"; platform: string; arch: string },
+  expected: { appSlug: string; channel: string; platform: string; arch: string },
 ): HandsVersionsResponse {
   if (!value || typeof value !== "object") {
     throw new ComputerError("CHANNEL_VERSIONS_INVALID", "Hands returned a malformed version index.");
@@ -269,17 +275,17 @@ export async function runChannelVersions(
     if (selected === null) {
       throw new ComputerError(
         "CHANNEL_INVALID",
-        `Invalid channel "${rawChannel}". Accepted: \`latest\` or \`alpha\`.`,
+        `Invalid channel "${rawChannel}". Accepted: \`latest\`, \`alpha\`, or a named release channel (lowercase letters, digits, hyphens).`,
       );
     }
-    if (selected !== "latest" && selected !== "alpha") {
+    if (selected.startsWith("pinned:")) {
       throw new ComputerError(
         "CHANNEL_VERSIONS_PINNED",
-        "A pinned selector names one exact version, not a version channel. Pass `latest` or `alpha`.",
+        "A pinned selector names one exact version, not a version channel. Pass `latest`, `alpha`, or a named release channel.",
       );
     }
     const result = await listChannelVersions(
-      selected,
+      selected as ListedChannel,
       opts.limit ?? CHANNEL_VERSIONS_DEFAULT_LIMIT,
       deps,
     );

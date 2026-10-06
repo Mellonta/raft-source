@@ -51,16 +51,19 @@ export interface ProcessDidNotExitReceipt {
   processTree: ProcessTreeSnapshot;
 }
 
-interface RunWithWatchdogOptions {
+interface ExitWatchdogOptions {
+  shard: number;
+  timeoutMs: number;
+  killGraceMs: number;
+  emit?: (receipt: ProcessDidNotExitReceipt) => void;
+}
+
+interface RunWithWatchdogOptions extends ExitWatchdogOptions {
   command: string;
   args: string[];
   cwd: string;
   env?: NodeJS.ProcessEnv;
-  shard: number;
-  timeoutMs: number;
-  killGraceMs: number;
   stdio?: StdioOptions;
-  emit?: (receipt: ProcessDidNotExitReceipt) => void;
 }
 
 type PsRow = ProcessTreeEntry;
@@ -177,22 +180,14 @@ function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
 }
 
 /**
- * Run one process under a wall-clock exit watchdog.
- *
- * Normal zero/non-zero child exits are passed through byte-for-byte. Only a
- * child that remains live for the full budget is classified by this layer.
+ * Watch an already-started child so process startup and exit semantics can be
+ * tested independently. Production callers should use runWithExitWatchdog.
  */
-export function runWithExitWatchdog(
-  options: RunWithWatchdogOptions,
+export function watchSpawnedChildExit(
+  child: ChildProcess,
+  options: ExitWatchdogOptions,
 ): Promise<number> {
   return new Promise((resolve) => {
-    const spawnOptions: SpawnOptions = {
-      cwd: options.cwd,
-      env: options.env,
-      stdio: options.stdio ?? "inherit",
-      detached: process.platform !== "win32",
-    };
-    const child = spawn(options.command, options.args, spawnOptions);
     let settled = false;
     let timedOut = false;
 
@@ -258,6 +253,25 @@ export function runWithExitWatchdog(
   });
 }
 
+/**
+ * Run one process under a wall-clock exit watchdog.
+ *
+ * Normal zero/non-zero child exits are passed through byte-for-byte. Only a
+ * child that remains live for the full budget is classified by this layer.
+ */
+export function runWithExitWatchdog(
+  options: RunWithWatchdogOptions,
+): Promise<number> {
+  const spawnOptions: SpawnOptions = {
+    cwd: options.cwd,
+    env: options.env,
+    stdio: options.stdio ?? "inherit",
+    detached: process.platform !== "win32",
+  };
+  const child = spawn(options.command, options.args, spawnOptions);
+  return watchSpawnedChildExit(child, options);
+}
+
 const SERVER_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -270,14 +284,14 @@ async function main(): Promise<void> {
   const shard = Number(process.argv[2]);
   if (!Number.isInteger(shard) || shard < 1) {
     console.error(
-      "Usage: tsx scripts/runServerShardWithWatchdog.ts <shard-index>",
+      "Usage: node --import @oxc-node/core/register scripts/runServerShardWithWatchdog.ts <shard-index>",
     );
     process.exit(2);
   }
 
   const exitCode = await runWithExitWatchdog({
     command: process.execPath,
-    args: ["--import", "tsx", SHARD_RUNNER, String(shard)],
+    args: ["--import", "@oxc-node/core/register", SHARD_RUNNER, String(shard)],
     cwd: SERVER_DIR,
     env: { ...process.env, TZ: process.env.TZ || "Asia/Singapore" },
     shard,

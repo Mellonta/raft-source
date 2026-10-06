@@ -1,3 +1,4 @@
+import { MessageReferenceChip } from "raft-ui";
 import { createContext, useContext, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useRefNavigation } from "../../hooks/useRefNavigation";
@@ -8,7 +9,6 @@ import {
   THREAD_SHORT_ID_PATTERN,
   DM_REF_PEER_PATTERN,
 } from "../../utils/messageReferencePatterns";
-import { MSG_REF_CHIP } from "../message/messageRefChip";
 import type { MessageId } from "../../i18n/messages";
 
 // ---------------------------------------------------------------------------
@@ -73,9 +73,7 @@ function RefToken({ resolved }: { resolved: ResolvedRef }) {
   // sits inside the dim `text-xs font-mono` activity row without changing the
   // row rhythm. text-black + border + tint give it enough contrast against
   // the row's black/50 text by construction.
-  const tint = isThread
-    ? "bg-brutal-cyan/30 hover:bg-brutal-cyan/60"
-    : "bg-brutal-pink/30 hover:bg-brutal-pink/60";
+
 
   const onClick = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -88,20 +86,21 @@ function RefToken({ resolved }: { resolved: ResolvedRef }) {
   };
 
   return (
-    <a
-      href="#"
+    <MessageReferenceChip
+      variant={isThread ? "link" : "accent"}
+      render={
+        <a href="#" >
+          {resolved.label}
+        </a>}
       role="link"
       aria-busy={busy}
       onClick={onClick}
       // In-message refs are the explicit arrow-cursor exception to the app's
       // link-hand control contract. Busy state = dim + non-interactive, no
       // spinner in the mono row (locked with @Bugen).
-      className={`${MSG_REF_CHIP} cursor-default text-black ${tint} ${
-        busy ? "pointer-events-none opacity-60" : ""
-      }`}
-    >
-      {resolved.label}
-    </a>
+      className={`cursor-default ${busy ? "pointer-events-none opacity-60" : ""
+        }`}
+    />
   );
 }
 

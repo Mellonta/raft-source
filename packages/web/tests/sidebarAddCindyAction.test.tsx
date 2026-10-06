@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import api from "../src/api/client";
-import Sidebar from "../src/components/layout/Sidebar.js";
+import Sidebar from "../src/components/layout/Sidebar";
 import { TestIntlProvider } from "./helpers/intl";
 import { WORKSPACE_GRID_OPEN_DM_EVENT } from "../src/components/workspace/workspaceGridOpenEvents";
 import { useWorkspaceGridNavigationStore } from "../src/components/workspace/workspaceGridNavigationStore";
@@ -201,7 +200,7 @@ test("the add-agent menu routes managed and external creation to distinct dialog
   seedSidebar([]);
   renderSidebar();
 
-  fireEvent.click(screen.getByTitle("Add agent"));
+  fireEvent.click(screen.getByRole("button", { name: "Add agent" }));
   const labels = screen.getAllByRole("menuitem").map((item) => item.textContent?.trim());
 
   assert.equal(labels.includes("Create Cindy"), false);
@@ -215,7 +214,7 @@ test("the add-agent menu routes managed and external creation to distinct dialog
   );
   useAgentStore.setState({ showCreateAgent: false });
 
-  fireEvent.click(screen.getByTitle("Add agent"));
+  fireEvent.click(screen.getByRole("button", { name: "Add agent" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Create External Agent" }));
   assert.ok(await screen.findByRole("heading", { name: "Create External Agent" }));
 });
@@ -261,9 +260,9 @@ test("classic Members agent menu opens the Stop and Restart / Reset confirmation
   fireEvent.click(await screen.findByRole("menuitem", { name: "Restart / Reset" }));
   assert.equal(resetCalls, 0, "opening the chooser must not directly reset the agent");
   assert.ok(await screen.findByRole("heading", { name: "Restart Helper" }));
-  assert.ok(screen.getAllByRole("button", { name: /^Restart/ }).length >= 1);
-  assert.ok(screen.getByRole("button", { name: /Reset Session & Restart/ }));
-  assert.ok(screen.getByRole("button", { name: /Full Reset & Restart/ }));
+  assert.ok(screen.getAllByRole("radio", { name: /^Restart/ }).length >= 1);
+  assert.ok(screen.getByRole("radio", { name: /^Reset Session & Restart/ }));
+  assert.ok(screen.getByRole("radio", { name: /^Full Reset & Restart/ }));
 });
 
 test("classic Members agent menu gives a member exactly Restart Model and Reset Model", async () => {

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import test from "node:test";
-import { SLOCK_CLI_TRANSPORT_DIR_ENV } from "./auth/managedTransport.js";
-import { readCliVersion } from "./version.js";
+import { SLOCK_CLI_TRANSPORT_DIR_ENV } from "./auth/managedTransport";
+import { readCliVersion } from "./version";
 
 interface CliRunResult {
   exitCode: number | null;
@@ -26,7 +25,7 @@ function repositoryCliEnv(parentEnv: NodeJS.ProcessEnv = process.env): NodeJS.Pr
 }
 
 function runCli(args: string[], parentEnv: NodeJS.ProcessEnv = process.env): CliRunResult {
-  const result = spawnSync(process.execPath, ["--import", "tsx", "src/index.ts", ...args], {
+  const result = spawnSync(process.execPath, ["--import", "@oxc-node/core/register", "src/index.ts", ...args], {
     cwd: process.cwd(),
     encoding: "utf8",
     env: repositoryCliEnv(parentEnv),
@@ -78,8 +77,6 @@ Commands:
   integration           Third-party service integration operations
   reminder              Reminder operations
   app                   Built-in RAP App operations
-  wiki                  Canonical Wiki manifest operations
-  migrate               Agent migration operations
   action                Action card operations (B-mode quick-commit shortcuts)
   help [command]        display help for command
 `);

@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 // Behavioral tests for task #137 — approval returns the initial secret once
 // through a private transient owner wake, while owner-scoped rotate remains
 // the durable recovery path. These run against the real PGlite-backed DB
@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import argon2 from "argon2";
 import { and, eq, isNotNull, isNull } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   actionCards,
   agents,
@@ -30,20 +30,20 @@ import {
   oauthGrants,
   serverAgentMembers,
   users,
-} from "../db/schema.js";
-import { asServerId } from "@botiverse/raft-shared";
-import { createAgent } from "../services/agentService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { addAgent, addHuman, createChannel } from "../services/channelService.js";
-import { bindMarketplaceAppName, executeActionCard, prepareActionCard } from "../services/actionCardsService.js";
+} from "../db/schema";
+import { asServerId, INTEGRATION_INVITE_PATH_PREFIX } from "@botiverse/raft-shared";
+import { createAgent } from "../services/agentService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { addAgent, addHuman, createChannel } from "../services/channelService";
+import { bindMarketplaceAppName, executeActionCard, prepareActionCard } from "../services/actionCardsService";
 import {
   authenticateOAuthClient,
   createOAuthClient,
   rotateClientSecretForAgent,
   transferClientOwnershipForAgent,
   updateOAuthClientForAgent,
-} from "../services/oauthService.js";
-import { createServer } from "../services/serverService.js";
+} from "../services/oauthService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -699,7 +699,12 @@ test("agent app management matches human fields and distribution lifecycle with 
   const createShare = await manage(adminKey, { action: "share_link_create", expiresInDays: 7 });
   assert.equal(createShare.status, 200, "current server admin can create a private share link");
   const createShareBody = await createShare.json() as { shareUrl: string; link: { id: string } };
-  assert.match(createShareBody.shareUrl, /\/integration-invite\/raft_share_[0-9a-f]{64}$/);
+  assert.match(createShareBody.shareUrl, /\/integration-invites\/raft_share_[0-9a-f]{64}$/);
+  assert.match(
+    new URL(createShareBody.shareUrl).pathname,
+    new RegExp(`^${INTEGRATION_INVITE_PATH_PREFIX}/raft_share_[0-9a-f]{64}$`),
+    "agent-created share links must use the canonical plural web route",
+  );
   assert.ok(createShareBody.link.id);
 
   const [install] = await getDb().select().from(oauthClientInstalls)

@@ -31,6 +31,19 @@ export function socketUserServerRoom(userId: string, serverId: string): string {
   return `user:${userId}:server:${serverId}`;
 }
 
+/** Guest connections of a server. Guests stay out of `server:<id>` because that
+ * room carries metadata they may not read; per-socket authorized publication
+ * addresses both rooms to reach every connection of the server. */
+export function socketServerGuestsRoom(serverId: string): string {
+  return `server:${serverId}:guests`;
+}
+
+/** Every connection attached to a server: members plus guests. Pass to a single
+ * `in()` call (an array is one union target, not a chained target). */
+export function socketServerAllRooms(serverId: string): string[] {
+  return [`server:${serverId}`, socketServerGuestsRoom(serverId)];
+}
+
 export function getSocketEventPlatformScope(event: string): SocketEventPlatformScope | null {
   return SOCKET_EVENT_PLATFORM_SCOPES[event] ?? null;
 }

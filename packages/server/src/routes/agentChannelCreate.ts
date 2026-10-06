@@ -1,9 +1,9 @@
-import { publishChannelUpdate } from "../services/channelRealtimeEvents.js";
+import { publishChannelUpdate } from "../services/channelRealtimeEvents";
 import { validateName } from "@botiverse/raft-shared";
 import type { Server as SocketServer } from "socket.io";
-import * as channelService from "../services/channelService.js";
-import { actorHasServerCapabilityInServer } from "../lib/actorPermissions.js";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
+import * as channelService from "../services/channelService";
+import { actorHasServerCapabilityInServer } from "../lib/actorPermissions";
+import { addTraceEvent, errorClassOf } from "../tracing/semanticTrace";
 
 export interface AgentChannelCreateActor {
   id: string;
@@ -160,7 +160,7 @@ export async function createChannelForAgent(input: {
     addTraceEvent("agent_channel_create.request.failed", {
       reason: "unexpected_error",
       status_code: 500,
-      error_class: err instanceof Error ? err.name : typeof err,
+      error_class: errorClassOf(err),
     });
     return { status: 500, body: { error: "Failed to create channel" } };
   }

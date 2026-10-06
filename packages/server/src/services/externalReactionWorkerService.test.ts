@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
-import { afterEach, beforeEach, test } from "vitest";
 import { eq } from "drizzle-orm";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
 import {
   channels,
   externalAppInstalls,
+  externalAppInstallServerGrants,
   externalAppRegistrations,
   externalAppServerGrants,
   externalChannelBindings,
@@ -21,21 +21,21 @@ import {
   oauthClients,
   servers,
   users,
-} from "../db/schema.js";
-import { enqueueSlackReactionAggregateTransition } from "./externalReactionSyncService.js";
+} from "../db/schema";
+import { enqueueSlackReactionAggregateTransition } from "./externalReactionSyncService";
 import {
   __resetExternalReactionCommandHandlerForTests,
   installExternalReactionCommandHandler,
-} from "./externalReactionCommandRuntime.js";
-import { updateFeatureFlag } from "./featureFlagService.js";
-import { processExternalReactionCommandOnce } from "./externalReactionWorkerService.js";
-import { mutateMessageReaction } from "./messageReactionService.js";
-import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime.js";
+} from "./externalReactionCommandRuntime";
+import { updateFeatureFlag } from "./featureFlagService";
+import { processExternalReactionCommandOnce } from "./externalReactionWorkerService";
+import { mutateMessageReaction } from "./messageReactionService";
+import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime";
 import {
   SLACK_BRIDGE_CREDENTIAL_LEASE_SCHEMA,
   type SlackWebApiRequest,
   type SlackWebApiTransportResult,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
 
 const NOW = new Date("2026-09-05T05:00:00.000Z");
 
@@ -45,7 +45,7 @@ afterEach(async () => {
   await closeDatabase();
 });
 
-async function fixture() {
+async function fixture(options: { withAssociation?: boolean } = {}) {
   const db = getDb();
   const [owner] = await db.insert(users).values({
     email: `reaction-worker-${randomUUID()}@raft.test`,
@@ -107,6 +107,18 @@ async function fixture() {
     botUserId: "U_BOT",
     providerBotId: "B_BOT",
   }).returning();
+  if (options.withAssociation !== false) {
+    await db.insert(externalAppInstallServerGrants).values({
+      installId: install.id,
+      serverId: server.id,
+      registrationId: registration.id,
+      serverGrantId: grant.id,
+      grantEpoch: grant.grantEpoch,
+      state: "active",
+      authorizedByType: "human",
+      authorizedById: owner.id,
+    });
+  }
   const [binding] = await db.insert(externalChannelBindings).values({
     serverId: server.id,
     registrationId: registration.id,
@@ -163,7 +175,7 @@ async function fixture() {
     desiredPresent: true,
     now: NOW,
   }));
-  return { db, owner, install, binding, link };
+  return { db, owner, server, registration, grant, channel, install, binding, link };
 }
 
 function provider(outcomes: SlackWebApiTransportResult[]) {
@@ -215,6 +227,44 @@ test("aggregate transition creates one command and successful add closes one exa
   const [attempt] = await state.db.select().from(externalReactionCommandAttempts);
   assert.equal(command.state, "accepted");
   assert.equal(attempt.outcome, "accepted");
+});
+
+test("missing install-server association revokes the reaction command before credential or provider I/O", async () => {
+  const state = await fixture({ withAssociation: false });
+  const p = provider([{
+    kind: "response", status: 200, headers: {}, body: { ok: true },
+    observedAuthority: { providerAppId: "A_REACTION", providerAuthorityId: "T_REACTION" },
+  }]);
+  const result = await processExternalReactionCommandOnce({
+    db: state.db, provider: p.runtime, leaseOwner: "reaction-worker", now: () => NOW,
+  });
+  assert.deepEqual(result, {
+    kind: "blocked",
+    commandId: (await state.db.select().from(externalReactionCommands))[0]!.id,
+    reason: "reaction_authority_revoked",
+  });
+  assert.equal(p.calls.length, 0);
+  const [command] = await state.db.select().from(externalReactionCommands);
+  assert.equal(command.state, "revoked");
+  assert.equal(command.lastErrorClass, "reaction_authority_revoked");
+});
+
+test("current server-grant epoch drift revokes the reaction command before credential or provider I/O", async () => {
+  const state = await fixture();
+  await state.db.update(externalAppServerGrants).set({ grantEpoch: 2 })
+    .where(eq(externalAppServerGrants.id, state.grant.id));
+  const p = provider([{
+    kind: "response", status: 200, headers: {}, body: { ok: true },
+    observedAuthority: { providerAppId: "A_REACTION", providerAuthorityId: "T_REACTION" },
+  }]);
+  const result = await processExternalReactionCommandOnce({
+    db: state.db, provider: p.runtime, leaseOwner: "reaction-worker", now: () => NOW,
+  });
+  assert.equal(result.kind, "blocked");
+  assert.equal(result.kind === "blocked" ? result.reason : null, "reaction_authority_revoked");
+  assert.equal(p.calls.length, 0);
+  const [command] = await state.db.select().from(externalReactionCommands);
+  assert.equal(command.state, "revoked");
 });
 
 test("after-send ambiguity never repeats add and authenticated bot presence reconciles it", async () => {
@@ -283,10 +333,10 @@ test("local aggregate emits only 0-to-1 add and 1-to-0 remove commands", async (
     passwordHash: "test",
   }).returning();
   const second = secondUser.id;
-  await mutateMessageReaction({ messageId: state.link.raftMessageId, emoji: "👍", actor: { kind: "user", id: first }, operation: "add" });
-  await mutateMessageReaction({ messageId: state.link.raftMessageId, emoji: "👍", actor: { kind: "user", id: second }, operation: "add" });
-  await mutateMessageReaction({ messageId: state.link.raftMessageId, emoji: "👍", actor: { kind: "user", id: first }, operation: "remove" });
-  await mutateMessageReaction({ messageId: state.link.raftMessageId, emoji: "👍", actor: { kind: "user", id: second }, operation: "remove" });
+  await mutateMessageReaction({ channelId: state.channel.id, messageId: state.link.raftMessageId, emoji: "👍", actor: { kind: "user", id: first }, operation: "add" });
+  await mutateMessageReaction({ channelId: state.channel.id, messageId: state.link.raftMessageId, emoji: "👍", actor: { kind: "user", id: second }, operation: "add" });
+  await mutateMessageReaction({ channelId: state.channel.id, messageId: state.link.raftMessageId, emoji: "👍", actor: { kind: "user", id: first }, operation: "remove" });
+  await mutateMessageReaction({ channelId: state.channel.id, messageId: state.link.raftMessageId, emoji: "👍", actor: { kind: "user", id: second }, operation: "remove" });
   const commands = await state.db.select().from(externalReactionCommands)
     .orderBy(externalReactionCommands.desiredRevision);
   assert.deepEqual(commands.map((command) => ({

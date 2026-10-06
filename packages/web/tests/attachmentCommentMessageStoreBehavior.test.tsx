@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-const { useMessageStore } = await import("../src/store/messageStore.js");
+const { useMessageStore } = await import("../src/store/messageStore");
 
-type Message = import("../src/store/messageStore.js").Message;
+type Message = import("../src/store/messageStore").Message;
 
 const existingCommentRef: NonNullable<Message["commentRef"]> = {
   commentId: "comment-1",

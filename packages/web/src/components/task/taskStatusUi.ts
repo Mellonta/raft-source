@@ -92,6 +92,29 @@ export const TASK_STATUS_UI: Record<TaskStatus, TaskStatusUi> = {
 export const STATUS_STYLES: Record<TaskStatus, { bg: string; labelId: MessageId }> = TASK_STATUS_UI;
 
 /**
+ * The status surfaces are shared by task cards, inline editors, board headers,
+ * and message-attached task chips.  Keep the foreground paired with the
+ * background here as well as the background token itself: a light foreground
+ * on the dark theme's saturated solid state colors is effectively unreadable.
+ * These pairings mirror the Raft UI solid Badge/TaskStatus recipes, while the
+ * Brutal overrides preserve the product's hard-label treatment.
+ */
+export function getTaskStatusBadgeClassName(status: TaskStatus): string {
+  switch (status) {
+    case "todo":
+      return "bg-warning-soft text-warning-strong dark:bg-warning-soft dark:text-warning-strong theme-brutal:bg-brutal-orange theme-brutal:text-black";
+    case "in_progress":
+      return "bg-info-soft text-info-strong dark:bg-info-soft dark:text-info-strong theme-brutal:bg-brutal-cyan theme-brutal:text-black";
+    case "in_review":
+      return "bg-accent-soft text-accent-strong dark:bg-accent-soft dark:text-accent-strong theme-brutal:bg-brutal-lavender theme-brutal:text-black";
+    case "done":
+      return "bg-success-soft text-success-strong dark:bg-success-soft dark:text-success-strong theme-brutal:bg-brutal-lime theme-brutal:text-black";
+    case "closed":
+      return "bg-fill-muted text-foreground-strong theme-brutal:bg-brutal-stone theme-brutal:text-black";
+  }
+}
+
+/**
  * Shared per-status badge config for the message-side task badge in MessageItem.
  * Both the header (inline) and below-content (thread-root) variants render off
  * TASK_STATUS_UI so adding a new status — or recoloring an existing one — only
@@ -150,12 +173,12 @@ const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
  * `canManageServer` is kept: admins additionally bypass transition validity.
  */
 export function canEditTaskStatus(
-  _task: Task,
+  task: Task,
   _currentUserId: string | undefined,
   _canManageServer: boolean,
   serverRole?: ServerRole | null,
 ): boolean {
-  return serverRole !== "guest";
+  return !task.readOnlyReason && serverRole !== "guest";
 }
 
 export function getTaskStatusOptions(task: Task, _currentUserId: string | undefined, canManageServer: boolean) {

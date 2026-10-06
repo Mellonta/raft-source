@@ -2,16 +2,20 @@ import { createHash } from "node:crypto";
 import { makeIsMember, type ServerId } from "@botiverse/raft-shared";
 import type { Server as SocketServer } from "socket.io";
 import { eq, inArray, sql, asc } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { attachmentCommentRefs, attachments, messages, messageReactions, users, agents } from "../db/schema.js";
-import * as channelService from "./channelService.js";
-import * as messageService from "./messageService.js";
-import { renderAgentCommentScopeLine, renderAnchorLabel } from "./attachmentCommentAnchorLabel.js";
-import { normalizeAttachmentFilename } from "../routes/attachments.js";
-import { isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "./planService.js";
-import type { AgentOrchestrator } from "./agentOrchestrator.js";
-import { ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY, evaluateFeatureFlag } from "./featureFlagService.js";
-import { resolveReadableAttachmentAuthorityContext } from "./attachmentAuthorityService.js";
+import { getDb } from "../db/index";
+import { attachmentCommentRefs, attachments, messages, messageReactions, users, agents } from "../db/schema";
+import * as channelService from "./channelService";
+import * as messageService from "./messageService";
+import {
+  projectAgentCommentScope,
+  renderAgentCommentScopeBlock,
+  renderAnchorLabel,
+} from "./attachmentCommentAnchorLabel";
+import { normalizeAttachmentFilename } from "../routes/attachments";
+import { isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "./planService";
+import type { AgentOrchestrator } from "./agentOrchestrator";
+import { ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY, evaluateFeatureFlag } from "./featureFlagService";
+import { resolveReadableAttachmentAuthorityContext } from "./attachmentAuthorityService";
 
 // Attachment comments — service layer (attachment-comments MVP spec §4).
 //
@@ -256,22 +260,20 @@ export async function createAttachmentComment(
   if (!attachment) {
     throw new AttachmentCommentError(404, "attachment_not_found", "Attachment not found");
   }
-  if (attachment.objectId) {
-    const readable = await resolveReadableAttachmentAuthorityContext({
-      projectionId: attachment.id,
-      requestServerId: opts.serverId as ServerId,
-      principal: { type: opts.senderType, id: opts.senderId },
-    });
-    if (!readable) {
-      throw new AttachmentCommentError(404, "attachment_not_found", "Attachment not found");
-    }
+  const readable = attachment.objectId ? await resolveReadableAttachmentAuthorityContext({
+    projectionId: attachment.id,
+    requestServerId: opts.serverId as ServerId,
+    principal: { type: opts.senderType, id: opts.senderId },
+  }) : null;
+  if (attachment.objectId && !readable) {
+    throw new AttachmentCommentError(404, "attachment_not_found", "Attachment not found");
   }
 
   // Server-scope boundary FIRST (before any state-revealing branch): a
   // cross-server attachment UUID must be indistinguishable from a nonexistent
   // one, matching the existing attachment routes. The attachment's own
   // channelId is the anchor here because unlinked attachments have no message.
-  const attachmentChannel = await channelService.getChannel(attachment.channelId);
+  const attachmentChannel = readable?.localHostChannel ?? await channelService.getChannel(attachment.channelId);
   if (!attachmentChannel || attachmentChannel.serverId !== opts.serverId) {
     throw new AttachmentCommentError(404, "attachment_not_found", "Attachment not found");
   }
@@ -294,23 +296,23 @@ export async function createAttachmentComment(
     throw new AttachmentCommentError(404, "parent_message_not_found", "Parent message not found");
   }
 
-  const parentChannel = await channelService.getChannel(parentMessage.channelId);
+  const parentChannel = readable?.localHostChannel ?? await channelService.getChannel(parentMessage.channelId);
   if (!parentChannel || parentChannel.serverId !== opts.serverId) {
     throw new AttachmentCommentError(404, "attachment_not_found", "Attachment not found");
   }
   if (parentChannel.archivedAt) {
     throw new AttachmentCommentError(409, "channel_archived", "This channel is archived");
   }
-  if (await isChannelReadOnlyByBillingFeature(parentMessage.channelId, opts.serverId)) {
+  if (await isChannelReadOnlyByBillingFeature(parentChannel.id, opts.serverId)) {
     throw new AttachmentCommentError(
       403,
       "channel_read_only",
-      "Joint Channels require the Pro plan. Upgrade to continue.",
+      "This joint channel is read-only because it has more than 2 free servers. It becomes writable again when a server upgrades or a free server leaves.",
     );
   }
   // Plan gates live in the shared pipeline so user and agent transports cannot
   // diverge (PR3 review parity gate).
-  if (await isChannelReadOnlyByQuota(parentMessage.channelId, opts.serverId)) {
+  if (await isChannelReadOnlyByQuota(parentChannel.id, opts.serverId)) {
     throw new AttachmentCommentError(
       403,
       "channel_read_only",
@@ -318,7 +320,7 @@ export async function createAttachmentComment(
     );
   }
 
-  await opts.authorize(parentMessage.channelId);
+  await opts.authorize(parentChannel.id);
 
   // Review conversation resolution (spec v3.4, "attachment host message"):
   // - host on a normal channel message -> the host message's thread
@@ -329,7 +331,7 @@ export async function createAttachmentComment(
   const reviewChannelId = parentChannel.type === "thread"
     ? parentChannel.id
     : (await channelService.getOrCreateThreadForChannel(
-        parentMessage.channelId,
+        parentChannel.id,
         parentMessage.id,
         opts.senderId,
         opts.senderType,
@@ -347,11 +349,11 @@ export async function createAttachmentComment(
     // scope line they cannot tell WHAT it annotates (task #37, huxijin). The
     // anchor is passed directly because the ref row is inserted only after
     // delivery (honest two-step, §3) — first delivery must not lose scope.
-    agentContentPrefix: renderAgentCommentScopeLine(
+    agentContentPrefix: renderAgentCommentScopeBlock(projectAgentCommentScope(
       normalizeAttachmentFilename(attachment.filename),
       anchor?.type ?? null,
       anchor?.data ?? null,
-    ),
+    )),
   });
 
   const commentMessageId = (enriched as { id?: string }).id;

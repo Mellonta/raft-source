@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createIntl } from "react-intl";

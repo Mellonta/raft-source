@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import test from "node:test";
 
 import { en as enMessages } from "../src/i18n/messages/en";
 import { zhCn as zhMessages } from "../src/i18n/messages/zh-cn";

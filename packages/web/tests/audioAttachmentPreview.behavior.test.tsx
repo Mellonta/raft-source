@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { resetAttachmentPreviewSummaryCache } from "../src/components/message/attachmentPreviewSummaryCache";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";

@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import test from "node:test";
-import { extractRaftRefTargets } from "./raftRefs.js";
+import { extractRaftRefTargets } from "./raftRefs";
 import {
   renderThirdPartyInertDisclosure,
   renderThirdPartyInertJson,
   renderThirdPartyInertText,
-} from "./thirdPartyInertRenderer.js";
+} from "./thirdPartyInertRenderer";
 
 function extractSideEffectingRaftRefs(source: string): string[] {
   return extractRaftRefTargets(source).map((ref) => ref.raw).sort();
@@ -96,18 +95,25 @@ test("third-party inert text preserves injection strings as quoted data", () => 
   assertNoSideEffectingRefs(output);
 });
 
-test("third-party inert text neutralizes refs even when source suggests code fencing", () => {
+test("third-party inert text preserves Markdown code literals while neutralizing refs outside code", () => {
   const raw = [
-    "please display this literally:",
+    "install with `npm i -g @botiverse/testbed-cli`, then ask @user_example_5",
     "```txt",
-    "@user_example_5",
-    "#channel_example",
+    "@literal_user",
+    "#literal_channel",
     "```",
+    "continue in #channel_example",
   ].join("\n");
   const output = renderThirdPartyInertText({ field: "description", value: raw });
 
-  assert.match(output, /user:user_example_5/);
-  assert.match(output, /channel:channel_example/);
+  assert.equal(output, [
+    "install with `npm i -g @botiverse/testbed-cli`, then ask user:user_example_5",
+    "```txt",
+    "@literal_user",
+    "#literal_channel",
+    "```",
+    "continue in channel:channel_example",
+  ].join("\n"));
   assertNoSideEffectingRefs(output);
 });
 

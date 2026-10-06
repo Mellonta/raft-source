@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { normalizeTranslationLanguageCode } from "./translationLanguages.js";
+import { normalizeTranslationLanguageCode } from "./translationLanguages";
 
 test("normalizeTranslationLanguageCode canonicalizes browser locales to supported targets", () => {
   assert.equal(normalizeTranslationLanguageCode("en-US"), "en");

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { AzureTranslationProvider } from "./azure.js";
-import { TranslationPlaceholderValidationError, TranslationProviderError } from "../errors.js";
-import { createRegexPlaceholderPolicy } from "../placeholderPolicy.js";
+import { AzureTranslationProvider } from "./azure";
+import { TranslationPlaceholderValidationError, TranslationProviderError } from "../errors";
+import { createRegexPlaceholderPolicy } from "../placeholderPolicy";
 
 const placeholderPolicy = createRegexPlaceholderPolicy({
   name: "brace-placeholder-v1",

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { useRef } from "react";
 import type { RefObject } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -247,7 +246,7 @@ test("a batch prepend beyond overscan preserves the shared visible keyed anchor"
   );
 });
 
-test("late row measurement converges through the RAF settle pass", async (t) => {
+test("late row measurement converges through the RAF settle pass", async () => {
   const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
   const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
   let nextFrameId = 1;
@@ -260,7 +259,7 @@ test("late row measurement converges through the RAF settle pass", async (t) => 
   globalThis.cancelAnimationFrame = (id) => {
     queuedFrames.delete(id);
   };
-  t.after(() => {
+  onTestFinished(() => {
     globalThis.requestAnimationFrame = originalRequestAnimationFrame;
     globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
   });
@@ -305,7 +304,7 @@ test("late row measurement converges through the RAF settle pass", async (t) => 
     }
     return originalGetBoundingClientRect.call(this);
   };
-  t.after(() => {
+  onTestFinished(() => {
     HTMLElement.prototype.getBoundingClientRect = originalGetBoundingClientRect;
   });
 
@@ -329,7 +328,7 @@ test("late row measurement converges through the RAF settle pass", async (t) => 
   );
 });
 
-test("wheel and pointer input cancel a pending settle before it can pull the user back", async (t) => {
+test("wheel and pointer input cancel a pending settle before it can pull the user back", async () => {
   const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
   const originalCancelAnimationFrame = globalThis.cancelAnimationFrame;
   let nextFrameId = 1;
@@ -342,7 +341,7 @@ test("wheel and pointer input cancel a pending settle before it can pull the use
   globalThis.cancelAnimationFrame = (id) => {
     queuedFrames.delete(id);
   };
-  t.after(() => {
+  onTestFinished(() => {
     globalThis.requestAnimationFrame = originalRequestAnimationFrame;
     globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
   });
@@ -380,7 +379,7 @@ test("wheel and pointer input cancel a pending settle before it can pull the use
     }
     return originalGetBoundingClientRect.call(this);
   };
-  t.after(() => {
+  onTestFinished(() => {
     HTMLElement.prototype.getBoundingClientRect = originalGetBoundingClientRect;
   });
 
@@ -422,7 +421,7 @@ test("wheel and pointer input cancel a pending settle before it can pull the use
   }
 });
 
-test("a departed key cannot mask the surviving anchor through a transient empty settle frame", async (t) => {
+test("a departed key cannot mask the surviving anchor through a transient empty settle frame", async () => {
   function MutableStackHarness({ items }: { items: typeof tasks }) {
     const scrollElementRef = useRef<HTMLDivElement>(null);
     return (
@@ -458,7 +457,7 @@ test("a departed key cannot mask the surviving anchor through a transient empty 
     }
     return originalGetBoundingClientRect.call(this);
   };
-  t.after(() => {
+  onTestFinished(() => {
     HTMLElement.prototype.getBoundingClientRect = originalGetBoundingClientRect;
   });
 

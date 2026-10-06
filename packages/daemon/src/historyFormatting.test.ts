@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { formatHistoryMessageLine } from "./historyFormatting.js";
+import { formatHistoryMessageLine } from "./historyFormatting";
 
 test("formatHistoryMessageLine includes thread metadata when present", () => {
   const line = formatHistoryMessageLine({

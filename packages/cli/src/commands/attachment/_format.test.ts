@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { formatAttachmentComments, formatAttachmentDownloaded, formatAttachmentUploaded } from "./_format.js";
+import { formatAttachmentComments, formatAttachmentDownloaded, formatAttachmentUploaded } from "./_format";
 
 // Byte pins: expected strings below are copied from the PRE-MOVE inline
 // literals in upload.ts/view.ts/comments.ts (print-seam S2), not from the new

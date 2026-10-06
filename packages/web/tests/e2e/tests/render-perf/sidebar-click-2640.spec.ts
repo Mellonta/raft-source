@@ -87,14 +87,11 @@ interface ProbeState {
 
 interface DomNodeRowMetric {
   selector: string;
+  rowId: string | null;
   matched: boolean;
   componentName: string | null;
   renderCount: number;
   parentCascade: boolean;
-}
-
-interface SidebarRowMetricWithId extends DomNodeRowMetric {
-  channelId: string | null;
 }
 
 declare global {
@@ -194,29 +191,17 @@ test.describe("render-perf v0 — sidebar click sibling-cascade gate (PR #2640 b
     console.log(
       "[render-perf] sidebar row metrics after click:",
       rowMetrics
-        .map((m, i) => `[${i}] matched=${m.matched} ${m.componentName ?? "—"} count=${m.renderCount} cascade=${m.parentCascade}`)
+        .map((m, i) => `[${i}] row=${m.rowId ?? "—"} matched=${m.matched} ${m.componentName ?? "—"} count=${m.renderCount} cascade=${m.parentCascade}`)
         .join(" | "),
     );
 
-    // Match each metric back to its DOM channelId so we can split clicked-row
-    // vs sibling-rows (queryDomRows returns in document order, so we re-query
-    // ids in the same order to align).
-    const rowIds = await page.locator("[data-sidebar-channel-id]").evaluateAll(
-      (els) => els.map((el) => el.getAttribute("data-sidebar-channel-id")),
-    );
-    expect(
-      rowMetrics.length,
-      "queryDomRows + locator must return the same set of sidebar rows",
-    ).toBe(rowIds.length);
-
-    const metricsWithIds: SidebarRowMetricWithId[] = rowMetrics.map((metric, i) => ({
-      ...metric,
-      channelId: rowIds[i] ?? null,
-    }));
-
-    const byRowId = new Map<string, SidebarRowMetricWithId>();
-    for (const metric of metricsWithIds) {
-      if (metric.channelId) byRowId.set(metric.channelId, metric);
+    // Identity and the fiber metric come from the same DOM node in the same
+    // queryDomRows traversal. A neighboring spec may add an external row at
+    // any time; a second DOM query here would make that legitimate arrival
+    // look like a probe cardinality failure.
+    const byRowId = new Map<string, DomNodeRowMetric>();
+    for (const metric of rowMetrics) {
+      if (metric.rowId) byRowId.set(metric.rowId, metric);
     }
 
     // Three-class row classification per Aiden msg=82b8707b, scoped to rows
@@ -232,13 +217,13 @@ test.describe("render-perf v0 — sidebar click sibling-cascade gate (PR #2640 b
     const previousActiveMetric = byRowId.get(activeChannelId);
     const unrelatedMetrics = controlledSiblingIds
       .map((id) => byRowId.get(id))
-      .filter((metric): metric is SidebarRowMetricWithId => !!metric);
+      .filter((metric): metric is DomNodeRowMetric => !!metric);
     const missingControlledIds = [clickedRowId, ...controlledSiblingIds]
       .filter((id) => !byRowId.has(id));
-    const noisyExternal = metricsWithIds.filter(
+    const noisyExternal = rowMetrics.filter(
       (m) =>
-        m.channelId &&
-        ![activeChannelId, clickedRowId, ...controlledSiblingIds].includes(m.channelId) &&
+        m.rowId &&
+        ![activeChannelId, clickedRowId, ...controlledSiblingIds].includes(m.rowId) &&
         m.matched &&
         m.renderCount > 0,
     );
@@ -247,7 +232,7 @@ test.describe("render-perf v0 — sidebar click sibling-cascade gate (PR #2640 b
       `[render-perf] row classification: clicked=${clickedMetric?.renderCount ?? "?"} `
       + `previousActive=${previousActiveMetric?.renderCount ?? "?"} `
       + `controlledUnrelated[${unrelatedMetrics.length}]=${unrelatedMetrics.map((m) => m.renderCount).join(",")} `
-      + `externalNoisy[${noisyExternal.length}]=${noisyExternal.map((m) => `${m.channelId}:${m.renderCount}`).join(",")}`,
+      + `externalNoisy[${noisyExternal.length}]=${noisyExternal.map((m) => `${m.rowId}:${m.renderCount}`).join(",")}`,
     );
 
     expect(
@@ -275,13 +260,13 @@ test.describe("render-perf v0 — sidebar click sibling-cascade gate (PR #2640 b
     if (noisyUnrelated.length > 0) {
       console.error(
         "[render-perf] TEST-OWNED unrelated sibling rows re-rendered:",
-        noisyUnrelated.map((m) => `${m.channelId}:${m.componentName}(count=${m.renderCount},cascade=${m.parentCascade})`).join(", "),
+        noisyUnrelated.map((m) => `${m.rowId}:${m.componentName}(count=${m.renderCount},cascade=${m.parentCascade})`).join(", "),
       );
     }
     if (noisyExternal.length > 0) {
       console.warn(
         "[render-perf] external sidebar rows rendered during click window (diagnostic, not gated):",
-        noisyExternal.map((m) => `${m.channelId}:${m.componentName}(count=${m.renderCount},cascade=${m.parentCascade})`).join(", "),
+        noisyExternal.map((m) => `${m.rowId}:${m.componentName}(count=${m.renderCount},cascade=${m.parentCascade})`).join(", "),
       );
     }
     expect(
@@ -294,8 +279,8 @@ test.describe("render-perf v0 — sidebar click sibling-cascade gate (PR #2640 b
 
     // Preserve a broad diagnostic signal for neighboring full-shard rows
     // without letting their own async setup/patches create false positives.
-    const allNoisyUnrelated = metricsWithIds.filter(
-      (m) => m.channelId !== clickedRowId && m.channelId !== activeChannelId && m.matched && m.renderCount > 0,
+    const allNoisyUnrelated = rowMetrics.filter(
+      (m) => m.rowId !== clickedRowId && m.rowId !== activeChannelId && m.matched && m.renderCount > 0,
     );
     console.log(
       `[render-perf] diagnostic all-unrelated noisy rows: ${allNoisyUnrelated.length}`,

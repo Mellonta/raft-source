@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import {
   DEFAULT_SIDEBAR_COLLAPSED_SECTIONS,
   readSidebarAgentMachineGroupCollapsed,

@@ -1,6 +1,6 @@
 import { Registry, Counter, Gauge, Histogram, collectDefaultMetrics } from "prom-client";
 import express from "express";
-import type { TraceDeploymentIdentity } from "./tracing/traceDeploymentIdentity.js";
+import type { TraceDeploymentIdentity } from "./tracing/traceDeploymentIdentity";
 
 // Dedicated registry (avoids polluting the global default)
 export const register = new Registry();
@@ -101,12 +101,67 @@ export const httpRequestsTotal = new Counter({
 /**
  * End-to-end request duration for the main Express app.
  * Uses the same low-cardinality labels as request totals.
+ * The 2 s bucket is the SLO v1 latency threshold (task #431): "share of /api
+ * requests done within 2 s" reads le="2" directly.
  */
 export const httpRequestDuration = new Histogram({
   name: "slock_http_request_duration_seconds",
   help: "End-to-end HTTP request duration for the main app",
   labelNames: ["route_pattern", "method", "status_bucket"] as const,
-  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 2.5, 5, 10],
+  registers: [register],
+});
+
+/**
+ * SLO v1 SLI 4 (task #431): a message reaches the daemon within 60 s.
+ * Counted per pending ack record (one per agent:deliver until it settles), not
+ * per send, so 5 s ack retries do not inflate the denominator.
+ * online_at_first_attempt: the target machine's socket was open on the
+ * tracking replica when the record was created. SLI 4 uses "true" only; a
+ * record created after a failed first send ("false") is an offline delivery.
+ * Records live in replica memory: one that vanishes in a drain has no outcome,
+ * so read SLI 4 as acked-within-60s / tracked, never acked / settled.
+ */
+export const agentDeliveryTrackedTotal = new Counter({
+  name: "slock_agent_delivery_tracked_total",
+  help: "Agent deliveries that started waiting for a daemon ack",
+  labelNames: ["online_at_first_attempt"] as const,
+  registers: [register],
+});
+
+/** First send to daemon ack, measured from the record's first attempt. */
+export const agentDeliveryAckSeconds = new Histogram({
+  name: "slock_agent_delivery_ack_seconds",
+  help: "Time from first agent:deliver attempt to the daemon ack",
+  labelNames: ["online_at_first_attempt"] as const,
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300],
+  registers: [register],
+});
+
+/**
+ * How each pending ack record ended: acked, gave_up (ack retries exhausted),
+ * dropped (retry gate), routed (handed to the owning replica, which tracks it
+ * again), terminal (mention terminal error or identity drift), agent_stopped,
+ * converted_to_wake (daemon rejected delivery, server started the agent),
+ * replica_shutdown.
+ */
+export const agentDeliveryOutcomesTotal = new Counter({
+  name: "slock_agent_delivery_outcomes_total",
+  help: "Outcomes of agent deliveries waiting for a daemon ack",
+  labelNames: ["outcome", "online_at_first_attempt"] as const,
+  registers: [register],
+});
+
+/**
+ * Machine websocket connections refused by this replica. A refusal never
+ * becomes an HTTP request, so it is invisible to the request metrics above.
+ * reason="draining": a connection that arrived after the drain started
+ * (task #268). Post-deploy readouts report it beside SLO v1 SLI 3.
+ */
+export const machineConnectionsRefusedTotal = new Counter({
+  name: "slock_machine_connections_refused_total",
+  help: "Machine websocket connections refused by this replica",
+  labelNames: ["reason"] as const,
   registers: [register],
 });
 
@@ -351,3 +406,32 @@ export function startMetricsServer() {
     console.log(`[Metrics] Prometheus endpoint on :${METRICS_PORT}/metrics`);
   });
 }
+
+/**
+ * RFC-067 client product events by outcome: written | gated (user or workspace
+ * controls) | unconfigured (no product store) | lost (store accepted fewer) |
+ * rejected_<reason> (registry, timestamp, malformed body). decision_support:
+ * counts are lower bounds.
+ */
+export const productEventIngestTotal = new Counter({
+  name: "slock_product_event_ingest_total",
+  help: "RFC-067 client product events by ingest outcome",
+  labelNames: ["outcome"] as const,
+  registers: [register],
+});
+
+/** RFC 073 durable tasks: lifecycle events per kind (created, succeeded, retry, needs_attention, fenced). */
+export const durableTasksTotal = new Counter({
+  name: "slock_durable_tasks_total",
+  help: "Durable task lifecycle events by kind and closed outcome",
+  labelNames: ["kind", "outcome"] as const,
+  registers: [register],
+});
+
+/** Open durable tasks per kind, and how many of them are overdue (lease expired, not yet recovered). */
+export const durableTasksOpenGauge = new Gauge({
+  name: "slock_durable_tasks_open",
+  help: "Open durable tasks per kind by lease status",
+  labelNames: ["kind", "lease"] as const, // lease: active | overdue
+  registers: [register],
+});

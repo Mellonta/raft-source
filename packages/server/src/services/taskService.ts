@@ -1,6 +1,8 @@
+import { conversionReadChannelIdsQuery, conversionReadChannelPredicate } from "./channelConversionReadScope";
+import { withChannelWriterFence, assertChannelWritableInTransaction } from "./channelConversionFenceService";
 import { randomUUID } from "node:crypto";
-import { eq, and, gt, inArray, sql, asc, isNotNull, isNull, or, type SQL } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { eq, and, inArray, sql, asc, isNotNull, isNull, or, type SQL } from "drizzle-orm";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   messages,
   users,
@@ -16,7 +18,7 @@ import {
   userChannelInboxStates,
   jointChannels,
   jointChannelServers,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   currentDate,
   failpoints,
@@ -24,19 +26,42 @@ import {
   type ServerId,
   type TaskResourceReceipt,
   type TaskStatus,
+  type TaskReadOnlyReason,
   TASK_CLAIM_REASON_ALREADY_CLAIMED_BY_YOU,
 } from "@botiverse/raft-shared";
-import { isMessageShortId, messageIdShortPrefixConditions, UUID_RE } from "../lib/messageId.js";
-import { buildSearchText } from "./searchService.js";
+import { isMessageShortId, messageIdShortPrefixConditions, UUID_RE } from "../lib/messageId";
+import { buildSearchText } from "./searchService";
 import {
-  canUserAccessChannel,
+  filterUserAccessibleChannelIds,
   getActiveJointChannelProjectionsByLocalChannel,
   type JointChannelProjection,
-} from "./channelService.js";
-import { resolveTaskChannelSurface } from "./taskChannelSurface.js";
-import { loadTaskCurrentProjectionsByTaskId } from "./messageTaskProjection.js";
+} from "./channelService";
+import { getTaskReadOnlyReason, resolveTaskChannelSurfaces, type TaskChannelSurface } from "./taskChannelSurface";
+import { loadTaskCurrentProjectionsByTaskId } from "./messageTaskProjection";
 
 type MessageRow = typeof messages.$inferSelect;
+
+export class TaskMutationConflictError extends Error {
+  readonly status = 409;
+  readonly code = "task_channel_changed";
+  constructor() { super("The task changed while this request was waiting. Refresh and retry."); }
+}
+
+async function withTaskWriter<T>(observed: TaskRow, work: (tx: DatabaseExecutor) => Promise<T>): Promise<T> {
+  return withChannelWriterFence(observed.channelId, async (tx) => {
+    const [current] = await tx.select({ channelId: tasks.channelId }).from(tasks).where(eq(tasks.id, observed.id)).limit(1);
+    if (current && current.channelId !== observed.channelId) throw new TaskMutationConflictError();
+    return work(tx);
+  });
+}
+
+async function withTaskChannelWriter<T>(channelId: string, work: (tx: DatabaseExecutor) => Promise<T>, executor?: DatabaseExecutor): Promise<T> {
+  if (executor) {
+    await assertChannelWritableInTransaction(executor, channelId);
+    return work(executor);
+  }
+  return withChannelWriterFence(channelId, work);
+}
 
 function nextClaimedAt(previous: Date | null): Date {
   const now = currentDate();
@@ -503,7 +528,7 @@ async function lockTaskAssigneeEligibility(
 /** Allocate the next task number for a channel, accounting for both messages and legacy tasks. */
 export async function allocateTaskNumber(channelId: string): Promise<{ taskStatus: "todo"; taskNumber: number }> {
   const db = getDb();
-  return db.transaction(async (tx) => {
+  return withTaskChannelWriter(channelId, async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${channelId}))`);
 
     const [{ maxMsgNum }] = await tx
@@ -656,7 +681,7 @@ async function enrichWithNames(rows: MessageRow[], executor: DatabaseExecutor = 
 export async function listTasks(channelId: string, statusFilter?: TaskStatus) {
   const db = getDb();
 
-  const taskConditions = [eq(tasks.channelId, channelId)];
+  const taskConditions = [conversionReadChannelPredicate(tasks.channelId, channelId)];
   if (statusFilter) taskConditions.push(eq(tasks.status, statusFilter));
 
   let taskRows: (typeof tasks.$inferSelect)[] = [];
@@ -695,8 +720,15 @@ export async function listTasksAssignedToAgent(
   const db = getDb();
   if (visibleChannelIds.length === 0) return [];
 
+  // Keep authorization inputs, namespace equivalence and the response surface
+  // in one SQL snapshot. The first caller-supplied id is the local surface;
+  // canonical ids are never discovered by inspecting unauthorized Task rows.
+  const readSurface = db.select({
+    channelId: sql<string>`requested.id`.as("read_channel_id"),
+  }).from(sql`unnest(ARRAY[${sql.join(visibleChannelIds.map(id => sql`${id}::uuid`), sql`, `)}]) WITH ORDINALITY AS requested(id, position)`)
+    .where(conversionReadChannelPredicate(tasks.channelId, sql`requested.id`))
+    .orderBy(sql`requested.position`).limit(1).as("authorized_task_surface");
   const conditions: SQL[] = [
-    inArray(tasks.channelId, visibleChannelIds),
     eq(tasks.claimedByType, "agent"),
     eq(tasks.claimedById, agentId),
   ];
@@ -707,17 +739,21 @@ export async function listTasksAssignedToAgent(
   }
 
   const rows = await db
-    .select()
+    .select({ task: tasks, readChannelId: readSurface.channelId })
     .from(tasks)
+    .innerJoinLateral(readSurface, sql`true`)
     .where(and(...conditions))
     .orderBy(asc(tasks.channelId), asc(tasks.taskNumber), asc(tasks.id));
-  return enrichTaskRows(rows);
+  const enriched = await enrichTaskRows(rows.map(row => row.task));
+  const surfaceByTask = new Map(rows.map(row => [row.task.id, row.readChannelId]));
+  return enriched.map(task => ({ ...task, channelId: surfaceByTask.get(task.id)! }));
 }
 
 type TaskProjectionChannel = {
   id: string;
   name?: string | null;
   type: "channel" | "private" | "joint" | "dm" | "thread";
+  taskReadOnlyBefore?: Date | null;
 };
 
 /** Project one canonical task fact into a requester's local channel surface. */
@@ -725,12 +761,14 @@ export function projectTasksToChannel<T extends {
   channelId: string;
   channelName?: string | null;
   channelType?: "channel" | "private" | "joint" | "dm" | "thread";
-}>(taskRows: T[], channel: TaskProjectionChannel): T[] {
+  createdAt?: Date | string;
+}>(taskRows: T[], channel: TaskProjectionChannel): Array<T & { readOnlyReason: TaskReadOnlyReason | null }> {
   return taskRows.map((task) => ({
     ...task,
     channelId: channel.id,
     channelName: channel.name ?? task.channelName ?? null,
     channelType: channel.type,
+    readOnlyReason: getTaskReadOnlyReason(channel, task.createdAt),
   }));
 }
 
@@ -738,7 +776,7 @@ export function projectTaskToChannel<T extends {
   channelId: string;
   channelName?: string | null;
   channelType?: "channel" | "private" | "joint" | "dm" | "thread";
-}>(task: T, channel: TaskProjectionChannel): T {
+}>(task: T, channel: TaskProjectionChannel): T & { readOnlyReason: TaskReadOnlyReason | null } {
   return projectTasksToChannel([task], channel)[0]!;
 }
 
@@ -778,14 +816,73 @@ export async function listServerTasks(serverId: string, statusFilter: TaskStatus
     .orderBy(asc(channels.name));
 
   if (serverChannels.length === 0) return [];
-  const taskLists = await Promise.all(serverChannels.map(async (channel) => {
-    if (!await canUserAccessChannel(channel.id, userId, serverId as ServerId)) return [];
-    const surface = await resolveTaskChannelSurface(serverId, channel.id);
-    if (!surface) return [];
-    const rows = await listTasks(surface.storageChannelId, statusFilter);
-    return projectTasksToChannel(rows, surface.localChannel);
-  }));
-  return taskLists.flat();
+  const surfaces = await resolveVisibleServerTaskSurfaces(serverId, userId, serverChannels.map((channel) => channel.id));
+  // A failed read surfaces as an error: an empty board would claim the server has no tasks.
+  const rows = await selectServerTaskRows(surfaces, statusFilter);
+  return projectServerTaskRows(surfaces, rows);
+}
+
+type ServerTaskSurfaceRow = { position: number; task: TaskRow };
+
+/**
+ * The visible task surfaces among `orderedChannelIds`, in that order: the
+ * batched equivalent of running `canUserAccessChannel` and then
+ * `resolveTaskChannelSurface` for each id, in a constant number of queries.
+ */
+async function resolveVisibleServerTaskSurfaces(
+  serverId: string,
+  userId: string,
+  orderedChannelIds: string[],
+): Promise<TaskChannelSurface[]> {
+  const accessible = await filterUserAccessibleChannelIds(orderedChannelIds, userId, serverId as ServerId);
+  const accessibleIds = orderedChannelIds.filter((id) => accessible.has(id));
+  const surfaceById = await resolveTaskChannelSurfaces(serverId, accessibleIds);
+  return accessibleIds.flatMap((id) => {
+    const surface = surfaceById.get(id);
+    return surface ? [surface] : [];
+  });
+}
+
+/**
+ * ONE tasks query over every surface's conversion-read equivalence set.
+ * Each row is tagged with the 0-based index of the surface it was read
+ * through, so a task whose channel sits in two surfaces' equivalence sets is
+ * returned once per surface -- exactly what per-surface `listTasks` calls
+ * produced. Ordered by (surface index, taskNumber); `after` resumes strictly
+ * after a keyset position and `limit` bounds the row count.
+ */
+async function selectServerTaskRows(
+  surfaces: TaskChannelSurface[],
+  statusFilter: TaskStatus | undefined,
+  page?: { after?: { position: number; taskNumber: number } | null; limit?: number },
+): Promise<ServerTaskSurfaceRow[]> {
+  if (surfaces.length === 0) return [];
+  const storageIds = sql.join(surfaces.map((surface) => sql`${surface.storageChannelId}::uuid`), sql`, `);
+  // WITH ORDINALITY is 1-based; positions exposed to callers are 0-based.
+  const position = sql<string>`(surface.position - 1)`;
+  const conditions: SQL[] = [];
+  if (statusFilter) conditions.push(eq(tasks.status, statusFilter));
+  if (page?.after) {
+    conditions.push(sql`(${position} > ${page.after.position} OR (${position} = ${page.after.position} AND ${tasks.taskNumber} > ${page.after.taskNumber}))`);
+  }
+  const query = getDb()
+    .select({ position, task: tasks })
+    .from(sql`unnest(ARRAY[${storageIds}]) WITH ORDINALITY AS surface(storage_id, position)
+      CROSS JOIN LATERAL (${conversionReadChannelIdsQuery(sql`surface.storage_id`)}) AS read_scope(id)`)
+    .innerJoin(tasks, eq(tasks.channelId, sql`read_scope.id`))
+    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .orderBy(sql`surface.position`, asc(tasks.taskNumber), asc(tasks.id));
+  const rows = page?.limit != null ? await query.limit(page.limit) : await query;
+  return rows.map((row) => ({ position: Number(row.position), task: row.task }));
+}
+
+/** Enrich all rows once (enrichment is per-row keyed) and project each onto its surface. */
+async function projectServerTaskRows(surfaces: TaskChannelSurface[], rows: ServerTaskSurfaceRow[]) {
+  const uniqueRows = [...new Map(rows.map((row) => [row.task.id, row.task])).values()];
+  const enrichedById = new Map(
+    (await enrichTaskRows(uniqueRows, getDb(), { includeCurrentProjection: false })).map((task) => [task.id, task]),
+  );
+  return rows.map((row) => projectTaskToChannel(enrichedById.get(row.task.id)!, surfaces[row.position]!.localChannel));
 }
 
 /** One item of `listServerTasks`' return type (the enriched, projected row). */
@@ -814,6 +911,7 @@ export interface ServerTasksPageCursor {
  */
 export interface ServerTaskSummary {
   id: string;
+  readOnlyReason: TaskReadOnlyReason | null;
   messageId: string;
   channelId: string;
   channelName: string | null;
@@ -842,6 +940,7 @@ function toServerTaskSummary(task: ServerTaskListItem): ServerTaskSummary {
   const descriptionBytes = task.description ? Buffer.byteLength(task.description, "utf8") : 0;
   return {
     id: task.id,
+    readOnlyReason: task.readOnlyReason,
     messageId: task.messageId,
     channelId: task.channelId,
     channelName: task.channelName ?? null,
@@ -874,8 +973,8 @@ function toServerTaskSummary(task: ServerTaskListItem): ServerTaskSummary {
  * is a subset of what the legacy read returns, in the same order.
  *
  * Differences from the legacy read, all opt-in from the route:
- * - `limit` bounds the page; one extra row per channel is fetched as the
- *   page-boundary witness whose existence (not a count query) sets nextCursor.
+ * - `limit` bounds the page; one extra row (limit + 1 in the single tasks
+ *   query) is the page-boundary witness whose existence sets nextCursor.
  * - `cursor` resumes strictly after a previous page's last item. A cursor
  *   naming a channel that has fallen out of the visible set (archived,
  *   deleted, access revoked) cannot be positioned in the total order, so the
@@ -904,49 +1003,32 @@ export async function listServerTasksPage(
     ))
     .orderBy(asc(channels.name), asc(channels.id));
 
-  let startIndex = 0;
-  let afterTaskNumber: number | null = null;
+  // A cursor naming a channel outside the candidate set can be refused
+  // before any visibility work.
+  if (options.cursor && !serverChannels.some((channel) => channel.id === options.cursor!.channelId)) {
+    return "invalid cursor";
+  }
+  const surfaces = await resolveVisibleServerTaskSurfaces(serverId, userId, serverChannels.map((channel) => channel.id));
+
+  let after: { position: number; taskNumber: number } | null = null;
   if (options.cursor) {
-    startIndex = serverChannels.findIndex((channel) => channel.id === options.cursor!.channelId);
-    if (startIndex === -1) return "invalid cursor";
-    afterTaskNumber = options.cursor.taskNumber;
+    // Visible surfaces keep the candidate order, so the cursor channel's index
+    // among them is its position in the total order. Not visible (access
+    // revoked, no task surface) => unknowable position => refuse.
+    const position = surfaces.findIndex((surface) => surface.localChannel.id === options.cursor!.channelId);
+    if (position === -1) return "invalid cursor";
+    after = { position, taskNumber: options.cursor.taskNumber };
   }
 
   const limit = options.limit;
-  const items: ServerTaskListItem[] = [];
-  let hasMore = false;
-
-  outer:
-  for (let i = startIndex; i < serverChannels.length; i++) {
-    const channel = serverChannels[i]!;
-    if (!await canUserAccessChannel(channel.id, userId, serverId as ServerId)) continue;
-    const surface = await resolveTaskChannelSurface(serverId, channel.id);
-    if (!surface) continue;
-
-    const conditions = [eq(tasks.channelId, surface.storageChannelId)];
-    if (statusFilter) conditions.push(eq(tasks.status, statusFilter));
-    if (i === startIndex && afterTaskNumber != null) {
-      conditions.push(gt(tasks.taskNumber, afterTaskNumber));
-    }
-    const query = db
-      .select()
-      .from(tasks)
-      .where(and(...conditions))
-      .orderBy(asc(tasks.taskNumber));
-    // `limit - items.length + 1` is >= 1 by the loop invariant; the +1 row is
-    // the witness for "another page exists" and is never emitted on this page.
-    const rows = limit != null
-      ? await query.limit(limit - items.length + 1)
-      : await query;
-    const projected = projectTasksToChannel(await enrichTaskRows(rows), surface.localChannel);
-    for (const task of projected) {
-      if (limit != null && items.length >= limit) {
-        hasMore = true;
-        break outer;
-      }
-      items.push(task);
-    }
-  }
+  // `limit + 1`: the extra row is the witness for "another page exists" and
+  // is never emitted on this page.
+  const rows = await selectServerTaskRows(surfaces, statusFilter, {
+    after,
+    limit: limit != null ? limit + 1 : undefined,
+  });
+  const hasMore = limit != null && rows.length > limit;
+  const items = await projectServerTaskRows(surfaces, hasMore ? rows.slice(0, limit) : rows);
 
   // The cursor resumes against `serverChannels`, whose ids are this server's
   // local channel ids — the same ids projection puts on the items — so the
@@ -976,6 +1058,7 @@ export async function listServerTasksPage(
 async function enrichTaskRows(
   rows: (typeof tasks.$inferSelect)[],
   executor: DatabaseExecutor = getDb(),
+  options: { includeCurrentProjection?: boolean } = {},
 ) {
   if (rows.length === 0) return [];
   // Callers inside a transaction MUST pass `tx`: the assigned-create path holds
@@ -1179,7 +1262,13 @@ async function enrichTaskRows(
       : "removed";
   };
 
-  const currentProjections = await loadTaskCurrentProjectionsByTaskId(rows, db);
+  // Server-wide task lists omit the current-text projection: it duplicates
+  // title/description (and costs a task_events scan) and no list consumer
+  // reads it. Single-channel boards and task payloads keep it.
+  const includeCurrentProjection = options.includeCurrentProjection ?? true;
+  const currentProjections = includeCurrentProjection
+    ? await loadTaskCurrentProjectionsByTaskId(rows, db)
+    : new Map<string, never>();
 
   return rows.map((t) => ({
     id: t.id,
@@ -1208,7 +1297,7 @@ async function enrichTaskRows(
     createdAt: t.createdAt.toISOString(),
     updatedAt: t.updatedAt.toISOString(),
     revision: t.revision,
-    taskCurrentProjection: currentProjections.get(t.id),
+    ...(includeCurrentProjection ? { taskCurrentProjection: currentProjections.get(t.id) } : {}),
     isLegacy: t.messageId == null,
   }));
 }
@@ -1257,7 +1346,7 @@ export async function resolveTaskByNumber(
   taskNumber: number,
 ): Promise<TaskOwner | null> {
   const canonical = await selectCanonicalTask(
-    and(eq(tasks.channelId, channelId), eq(tasks.taskNumber, taskNumber)),
+    and(conversionReadChannelPredicate(tasks.channelId, channelId), eq(tasks.taskNumber, taskNumber)),
   );
   return canonical ? { source: "tasks", row: canonical } : null;
 }
@@ -1271,12 +1360,7 @@ export async function resolveTaskByMessageId(messageId: string): Promise<TaskOwn
 
 /** Get a single message-task by ID (message ID where taskStatus is not null). */
 export async function getTask(taskId: string) {
-  const db = getDb();
-  const [row] = await db
-    .select()
-    .from(messages)
-    .where(and(eq(messages.id, taskId), isNotNull(messages.taskStatus)));
-  return row || null;
+  return (await resolveTaskById(taskId))?.row ?? null;
 }
 
 /**
@@ -1314,7 +1398,7 @@ export async function getTaskByNumber(channelId: string, taskNumber: number) {
 
 /** Get a canonical `tasks` row by channel ID + task number. */
 export async function getLegacyTaskByNumber(channelId: string, taskNumber: number) {
-  return selectCanonicalTask(and(eq(tasks.channelId, channelId), eq(tasks.taskNumber, taskNumber)));
+  return selectCanonicalTask(and(conversionReadChannelPredicate(tasks.channelId, channelId), eq(tasks.taskNumber, taskNumber)));
 }
 
 /**
@@ -1447,7 +1531,7 @@ export async function amendTask(
     observedRevision: observed.revision,
   });
 
-  return getDb().transaction(async (tx) => {
+  return withTaskWriter(observed, async (tx) => {
     // Membership is the explicit collaboration boundary. Re-lock it inside
     // the write transaction so a member removed after the optimistic read
     // cannot amend with stale authority. Free-text @mentions never grant it.
@@ -1547,12 +1631,23 @@ export async function createTasks(
   createdByType: "user" | "agent",
   createdById: string,
   items: { title: string; description?: string; createsResource?: boolean }[],
+  opts: {
+    /**
+     * Runs on the creating transaction after every row is written and before
+     * it commits (keyed Agent API writes record their idempotency ledger row
+     * here). A rejection rolls the whole creation back.
+     */
+    beforeCommit?: (
+      executor: DatabaseExecutor,
+      result: { tasks: Awaited<ReturnType<typeof enrichTaskRows>>; hostMessages: MessageRow[] },
+    ) => Promise<void>;
+  } = {},
 ) {
   if (items.length === 0) return { tasks: [], hostMessages: [] };
   const db = getDb();
 
   // Use a transaction with advisory lock on channel to prevent task number collisions
-  const created = await db.transaction(async (tx) => {
+  const created = await withTaskChannelWriter(channelId, async (tx) => {
     // Advisory lock keyed on channel UUID to serialize task number allocation
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${channelId}))`);
 
@@ -1629,10 +1724,15 @@ export async function createTasks(
       taskRows.push(taskRow);
     }
 
-    return { hostMessages, taskRows };
+    if (opts.beforeCommit) {
+      const enrichedInTransaction = await enrichTaskRows(taskRows, tx);
+      await opts.beforeCommit(tx, { tasks: enrichedInTransaction, hostMessages });
+      return { hostMessages, taskRows, enrichedInTransaction };
+    }
+    return { hostMessages, taskRows, enrichedInTransaction: null };
   });
 
-  const { recordInboxFactsForPersistedMessages } = await import("./messageService.js");
+  const { recordInboxFactsForPersistedMessages } = await import("./messageService");
   await recordInboxFactsForPersistedMessages(created.hostMessages, {
     inboxFactPolicy: {
       mode: "record",
@@ -1642,7 +1742,7 @@ export async function createTasks(
     dedupeLogicalReceiverAcrossJointProjections: true,
   });
 
-  const enrichedTasks = await enrichTaskRows(created.taskRows);
+  const enrichedTasks = created.enrichedInTransaction ?? await enrichTaskRows(created.taskRows);
   return { tasks: enrichedTasks, hostMessages: created.hostMessages };
 }
 
@@ -1665,7 +1765,22 @@ export async function createTasksWithAssignmentReceipt(
   items: { title: string; description?: string; createsResource?: boolean }[],
   assignee: TaskCreationAssignee,
   receiptRequest: TaskAssignmentReceiptRequest,
-  opts: { initiatingLocalChannelId?: string } = {},
+  opts: {
+    initiatingLocalChannelId?: string;
+    /**
+     * Runs on the creating transaction after the tasks and the assignment
+     * receipt are written and before it commits. A rejection rolls the whole
+     * creation back.
+     */
+    beforeCommit?: (
+      executor: DatabaseExecutor,
+      result: {
+        tasks: Awaited<ReturnType<typeof enrichTaskRows>>;
+        hostMessages: MessageRow[];
+        assignmentReceipt: TaskAssignmentReceipt;
+      },
+    ) => Promise<void>;
+  } = {},
 ): Promise<{
   tasks: Awaited<ReturnType<typeof enrichTaskRows>>;
   hostMessages: MessageRow[];
@@ -1674,7 +1789,7 @@ export async function createTasksWithAssignmentReceipt(
   if (items.length === 0) throw new Error("Assigned task creation requires at least one task");
   const db = getDb();
 
-  return db.transaction(async (tx) => {
+  return withTaskChannelWriter(channelId, async (tx) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${channelId}))`);
 
     // Establish the immutable server/type lookup without taking the channel
@@ -1801,7 +1916,7 @@ export async function createTasksWithAssignmentReceipt(
         isNotNull(userChannelInboxStates.doneAt),
       ));
 
-    const messageService = await import("./messageService.js");
+    const messageService = await import("./messageService");
     await messageService.recordInboxFactsForPersistedMessages(created, {
       inboxFactPolicy: {
         mode: "record",
@@ -1836,6 +1951,12 @@ export async function createTasksWithAssignmentReceipt(
       messageType: "system",
       content: receiptContent,
       searchText: buildSearchText(receiptContent),
+      // born-read causal actor = the task creator (createdBy). "started" is the
+      // self-start case (assignee === creator), "assigned" is the assigner; both
+      // resolve to createdBy, matching the inbox-fact causal actor below.
+      causalActorType: createdByType,
+      causalActorId: createdById,
+      systemSubtype: "task.assignment_receipt",
     }).returning();
     if (!receiptMessage) throw new Error("Failed to persist task assignment receipt");
 
@@ -1857,23 +1978,24 @@ export async function createTasksWithAssignmentReceipt(
       notifiableAtSend: true,
     });
 
-    await messageService.recordInboxFactsForPersistedMessages([receiptMessage], {
-      inboxFactPolicy: {
-        mode: "record",
-        producer: "task.assignment_receipt",
-        reason: "a task assignment is durable directed attention for its assignee",
-      },
-      executor: tx,
-      channel,
-      ...(jointRouting && {
-        jointProjections: jointRouting.projections,
-        recordJointLocalFace: true,
-        dedupeLogicalReceiverAcrossJointProjections: true,
-      }),
-      causalActorByMessageId: new Map([[receiptMessage.id, { type: createdByType, id: createdById }]]),
-      targetVisibleMentionsByMessageId: new Map([[
-        receiptMessage.id,
-        [{ type: assignee.type, id: assignee.id, name: receiptRequest.assigneeName }],
+    await messageService.recordInboxFactsForPersistedMessages(
+      [{ message: receiptMessage, causalActor: { type: createdByType, id: createdById } }],
+      {
+        inboxFactPolicy: {
+          mode: "record",
+          producer: "task.assignment_receipt",
+          reason: "a task assignment is durable directed attention for its assignee",
+        },
+        executor: tx,
+        channel,
+        ...(jointRouting && {
+          jointProjections: jointRouting.projections,
+          recordJointLocalFace: true,
+          dedupeLogicalReceiverAcrossJointProjections: true,
+        }),
+        targetVisibleMentionsByMessageId: new Map([[
+          receiptMessage.id,
+          [{ type: assignee.type, id: assignee.id, name: receiptRequest.assigneeName }],
       ]]),
     });
     await failpoints.hit("server.task.assignedCreate.afterReceiptFacts", {
@@ -1883,7 +2005,7 @@ export async function createTasksWithAssignmentReceipt(
     }, async () => undefined);
 
     const enriched = await enrichTaskRows(taskRows, tx);
-    return {
+    const result = {
       tasks: enriched,
       hostMessages: created,
       assignmentReceipt: {
@@ -1893,6 +2015,8 @@ export async function createTasksWithAssignmentReceipt(
         state,
       },
     };
+    if (opts.beforeCommit) await opts.beforeCommit(tx, result);
+    return result;
   });
 }
 
@@ -1911,7 +2035,7 @@ export async function claimTaskDetailed(
 ): Promise<TaskClaimOutcome> {
   const owner = await resolveTaskById(taskId);
   if (!owner) return { result: "task not found" };
-  const written = await writeCanonicalClaim(getDb(), owner.row, claimedByType, claimedById);
+  const written = await withTaskWriter(owner.row, (tx) => writeCanonicalClaim(tx, owner.row, claimedByType, claimedById));
   if (isTaskClaimRejection(written)) {
     // Deterministic seam for the temporal-congruence tooth: state may change
     // here (between the writer forming its rejection and this function
@@ -1959,6 +2083,7 @@ export async function batchClaimTasks(
   taskNumbers: number[],
   claimedByType: "user" | "agent",
   claimedById: string,
+  localChannel: Pick<TaskProjectionChannel, "taskReadOnlyBefore"> = {},
 ): Promise<{
   taskNumber: number;
   success: boolean;
@@ -1969,7 +2094,7 @@ export async function batchClaimTasks(
   const db = getDb();
   const results: Awaited<ReturnType<typeof batchClaimTasks>> = [];
 
-  await db.transaction(async (tx) => {
+  await withTaskChannelWriter(channelId, async (tx) => {
     for (const num of taskNumbers) {
       // Canonical first: if a `tasks` row owns this number, the message-task
       // columns are a stale shadow and must not be claimed instead.
@@ -1980,6 +2105,10 @@ export async function batchClaimTasks(
         .for("update");
 
       if (canonical) {
+        if (getTaskReadOnlyReason(localChannel, canonical.createdAt)) {
+          results.push({ taskNumber: num, success: false, reason: "Historical tasks are read-only from a participant workspace" });
+          continue;
+        }
         // Orphans stay unreachable from the agent surface — same reason and
         // same wording as `getTaskByNumber`. Before v1.4 this query ran against
         // `messages` alone, so an orphan produced exactly this result.
@@ -2022,7 +2151,7 @@ export async function unclaimTask(
 ): Promise<TaskMutationResult> {
   const owner = await resolveTaskById(taskId);
   if (!owner) return "task not found";
-  return wrapCanonical(await writeCanonicalUnclaim(getDb(), owner.row, requesterType, requesterId));
+  return wrapCanonical(await withTaskWriter(owner.row, (tx) => writeCanonicalUnclaim(tx, owner.row, requesterType, requesterId)));
 }
 
 /**
@@ -2075,7 +2204,7 @@ export async function assignTask(
     : observed.claimedById === null;
   if (sameAssignee) return wrapCanonical(observed);
 
-  return wrapCanonical(await getDb().transaction(async (tx) => {
+  return wrapCanonical(await withTaskWriter(observed, async (tx) => {
     const [channel] = await tx
       .select()
       .from(channels)
@@ -2147,7 +2276,7 @@ export async function updateTaskStatus(
   const owner = await resolveTaskById(taskId);
   if (!owner) return "task not found";
   return wrapCanonical(
-    await writeCanonicalStatus(getDb(), owner.row, newStatus, { requesterId, requesterType }),
+    await writeCanonicalStatus(owner.row, newStatus, { requesterId, requesterType }),
   );
 }
 
@@ -2174,7 +2303,7 @@ export async function forceUpdateTaskStatus(
 ): Promise<TaskMutationResult> {
   const owner = await resolveTaskById(taskId);
   if (!owner) return "task not found";
-  return wrapCanonical(await writeCanonicalStatus(getDb(), owner.row, newStatus, {
+  return wrapCanonical(await writeCanonicalStatus(owner.row, newStatus, {
     force: true,
     requesterType: actorType,
     requesterId: actorId,
@@ -2197,8 +2326,9 @@ export async function convertMessageToTask(
   convertedByType: "user" | "agent",
   convertedById: string,
   expectedChannelId?: string,
+  executor?: DatabaseExecutor,
 ): Promise<TaskRow | string> {
-  const db = getDb();
+  const db = executor ?? getDb();
 
   // Look up the message
   const [msg] = await db.select().from(messages).where(eq(messages.id, messageId));
@@ -2227,7 +2357,9 @@ export async function convertMessageToTask(
 
   // v1.4 (tasks-table-canonical): create a canonical tasks row linked to the
   // message; the message itself stays a plain message (task_status untouched).
-  const created = await db.transaction(async (tx) => {
+  const created = await withTaskChannelWriter(msg.channelId, async (tx) => {
+    const [fresh] = await tx.select({ channelId: messages.channelId }).from(messages).where(eq(messages.id, messageId)).limit(1);
+    if (fresh && fresh.channelId !== msg.channelId) throw new TaskMutationConflictError();
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${msg.channelId}))`);
 
     // Check both messages and tasks tables to avoid number collisions
@@ -2269,7 +2401,7 @@ export async function convertMessageToTask(
       convertedFromMessage: true,
     });
     return row;
-  });
+  }, executor);
 
   if (!created) return "already converted";
   return created;
@@ -2294,12 +2426,13 @@ export async function ensureTaskForMessage(
   messageId: string,
   createdByType: "user" | "agent",
   createdById: string,
+  executor?: DatabaseExecutor,
 ): Promise<TaskRow | null> {
-  const created = await convertMessageToTask(messageId, createdByType, createdById);
+  const created = await convertMessageToTask(messageId, createdByType, createdById, undefined, executor);
   if (typeof created !== "string") return created;
   if (created === "already converted") {
-    const owner = await resolveTaskByMessageId(messageId);
-    return owner?.row ?? null;
+    const [row] = await (executor ?? getDb()).select().from(tasks).where(eq(tasks.messageId, messageId)).limit(1);
+    return row ?? null;
   }
   console.error(`[taskService] ensureTaskForMessage(${messageId}) failed: ${created}`);
   return null;
@@ -2341,8 +2474,10 @@ export async function resolveMessageInChannel(channelId: string, idOrPrefix: str
  * `messages.task_*` directly and would otherwise list a task the user deleted.
  */
 export async function deleteTaskByOwner(owner: TaskOwner) {
-  if (owner.row.messageId) await deleteTask(owner.row.messageId);
-  await deleteLegacyTask(owner.row.id);
+  await withTaskWriter(owner.row, async (tx) => {
+    if (owner.row.messageId) await clearTaskShadow(tx, owner.row.messageId);
+    await tx.delete(tasks).where(and(eq(tasks.id, owner.row.id), eq(tasks.channelId, owner.row.channelId)));
+  });
 }
 
 /** Delete a message-task — clears task fields (does NOT delete the message). */
@@ -2376,8 +2511,13 @@ export async function deleteTaskByOwner(owner: TaskOwner) {
  * rollback ledger is tracking.
  */
 export async function deleteTask(taskId: string) {
-  const db = getDb();
-  await db
+  const [message] = await getDb().select({ channelId: messages.channelId }).from(messages).where(eq(messages.id, taskId)).limit(1);
+  if (!message) return;
+  await withTaskChannelWriter(message.channelId, (tx) => clearTaskShadow(tx, taskId));
+}
+
+async function clearTaskShadow(executor: DatabaseExecutor, taskId: string): Promise<void> {
+  await executor
     .update(messages)
     .set({
       taskStatus: null,
@@ -2423,7 +2563,7 @@ function canonicalClaimShape(row: TaskRow): Pick<
  * simply not touching `revision`.
  */
 function canonicalRevisionCas(row: TaskRow) {
-  return and(eq(tasks.id, row.id), eq(tasks.revision, row.revision));
+  return and(eq(tasks.id, row.id), eq(tasks.channelId, row.channelId), eq(tasks.revision, row.revision));
 }
 
 /** Claimable-by-this-actor predicate, mirroring taskClaimCasPredicate. */
@@ -2599,7 +2739,6 @@ async function writeCanonicalUnclaim(
  * message side.
  */
 async function writeCanonicalStatus(
-  executor: DatabaseExecutor,
   observed: TaskRow,
   newStatus: TaskStatus,
   opts: { requesterId?: string; requesterType?: "user" | "agent"; force?: boolean },
@@ -2622,8 +2761,18 @@ async function writeCanonicalStatus(
       return "task start state changed concurrently";
     }
   } else {
+    // Assigned create deliberately treats assigning yourself as "start now",
+    // but a mistaken self-start must be reversible without admin help. Keep
+    // this narrower than the member-level status transition table: adding
+    // `in_progress -> todo` there would let any channel member demote someone
+    // else's active work. The current assignee alone may undo their own start;
+    // the write keeps the reservation and clears its start epoch below.
+    const assigneeUndoingOwnStart = previousStatus === "in_progress"
+      && newStatus === "todo"
+      && observed.claimedByType === opts.requesterType
+      && observed.claimedById === opts.requesterId;
     const transitionError = getTaskStatusTransitionError(previousStatus, newStatus);
-    if (transitionError) return transitionError;
+    if (transitionError && !assigneeUndoingOwnStart) return transitionError;
     // No assignee check. @stdrc ruled that status is a member-level action:
     // "status 应该也是，人都可以做。你想象一个正常的 to-do list 管理软件，
     //  它没理由是只有 admin 能操作的。" Only DELETE stays creator/admin-only.
@@ -2666,6 +2815,9 @@ async function writeCanonicalStatus(
     // assignee check plus the revision CAS keep a stale owner from reviving it.
     setFields.claimedAt = nextClaimedAt(observed.claimedAt);
   }
+  if (previousStatus === "in_progress" && newStatus === "todo") {
+    setFields.claimedAt = null;
+  }
   if (newStatus === "done") setFields.completedAt = new Date();
   else if (previousStatus === "done") setFields.completedAt = null;
 
@@ -2681,6 +2833,7 @@ async function writeCanonicalStatus(
     setFields.closedById = null;
   }
 
+  return withTaskWriter(observed, async (executor) => {
   const [updated] = await executor
     .update(tasks)
     .set(setFields)
@@ -2732,6 +2885,7 @@ async function writeCanonicalStatus(
     forced: force,
   });
   return updated;
+  });
 }
 
 const TASK_RESOURCE_RECEIPT_FIELDS = [
@@ -2837,8 +2991,9 @@ export async function recordTaskResourceReceipt(
   const normalized = normalizeTaskResourceReceipt(input.receipt);
   if (typeof normalized === "string") return normalized;
 
-  const db = getDb();
-  return db.transaction(async (tx) => {
+  const owner = await resolveTaskById(input.taskId);
+  if (!owner) return "task not found";
+  return withTaskWriter(owner.row, async (tx) => {
     const [observed] = await tx
       .select()
       .from(tasks)
@@ -2924,8 +3079,11 @@ export async function getLegacyTask(taskId: string) {
 
 /** Delete a canonical task row (task_events cascade with it). */
 export async function deleteLegacyTask(taskId: string) {
-  const db = getDb();
-  await db.delete(tasks).where(eq(tasks.id, taskId));
+  const owner = await resolveTaskById(taskId);
+  if (!owner) return;
+  await withTaskWriter(owner.row, async (tx) => {
+    await tx.delete(tasks).where(and(eq(tasks.id, taskId), eq(tasks.channelId, owner.row.channelId)));
+  });
 }
 
 /** Enrich a single canonical task row with names (for socket event emission). */

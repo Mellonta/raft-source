@@ -1,4 +1,5 @@
-export const CHINESE_COMMUNITY_QR_CONFIG_PATH = "/community/chinese-qr.json";
+export const CHINESE_COMMUNITY_QR_CONFIG_URL = "https://static.raft.build/community/chinese-qr.json";
+export const CHINESE_COMMUNITY_QR_FALLBACK_CONFIG_PATH = "/community/chinese-qr.json";
 
 export interface ChineseCommunityQrConfig {
   imageUrl: string;
@@ -14,8 +15,8 @@ declare global {
 }
 
 export function getChineseCommunityQrConfigUrl() {
-  if (typeof window === "undefined") return CHINESE_COMMUNITY_QR_CONFIG_PATH;
-  return window.__RAFT_CHINESE_COMMUNITY_QR_CONFIG_URL__ || CHINESE_COMMUNITY_QR_CONFIG_PATH;
+  if (typeof window === "undefined") return CHINESE_COMMUNITY_QR_CONFIG_URL;
+  return window.__RAFT_CHINESE_COMMUNITY_QR_CONFIG_URL__ || CHINESE_COMMUNITY_QR_CONFIG_URL;
 }
 
 export function normalizeChineseCommunityQrConfig(value: unknown): ChineseCommunityQrConfig | null {
@@ -34,6 +35,36 @@ export function normalizeChineseCommunityQrConfig(value: unknown): ChineseCommun
       ? record.fallbackContact.trim()
       : undefined,
   };
+}
+
+export function resolveChineseCommunityQrConfig(
+  value: unknown,
+  configUrl: string,
+): ChineseCommunityQrConfig | null {
+  const config = normalizeChineseCommunityQrConfig(value);
+  if (!config) return null;
+
+  try {
+    const documentUrl = typeof window === "undefined" ? "https://app.raft.build/" : window.location.href;
+    const resolvedConfigUrl = new URL(configUrl, documentUrl);
+    const resolvedImageUrl = new URL(config.imageUrl, resolvedConfigUrl);
+    const isRemoteConfig = /^[a-z][a-z\d+.-]*:/i.test(configUrl);
+    if (
+      (isRemoteConfig && resolvedConfigUrl.protocol !== "https:")
+      || resolvedImageUrl.origin !== resolvedConfigUrl.origin
+      || !resolvedImageUrl.pathname.startsWith("/community/")
+      || resolvedImageUrl.username
+      || resolvedImageUrl.password
+      || resolvedImageUrl.search
+      || resolvedImageUrl.hash
+    ) {
+      return null;
+    }
+
+    return { ...config, imageUrl: resolvedImageUrl.toString() };
+  } catch {
+    return null;
+  }
 }
 
 export function isChineseCommunityQrExpired(expiresAt: string | undefined, now = new Date()) {

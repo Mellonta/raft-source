@@ -1,12 +1,10 @@
 import { strict as assert } from "node:assert";
-import { test } from "vitest";
 import { BasicTracer, MemoryTraceSink, traceEventRowsForSpan } from "@botiverse/raft-shared";
-import { createTraceDbQueryTracer, runWithTraceSpan } from "./semanticTrace.js";
+import { createTraceDbQueryTracer, runWithTraceSpan } from "./semanticTrace";
 import {
   recordRisingWaveInboxBackendFailed,
-  recordRisingWaveInboxFallbackCompleted,
   risingWaveInboxFailureAttrs,
-} from "./risingWaveInboxTrace.js";
+} from "./risingWaveInboxTrace";
 
 const TRACE_EVENT_ROW_TEST_RESOURCE = {
   serviceName: "slock-server",
@@ -68,6 +66,9 @@ test("RW inbox failure producer emits typed row fields without raw sensitive det
   assert.doesNotMatch(serializedAttrs, /secret/);
   assert.doesNotMatch(serializedAttrs, /SELECT \*/);
   assert.doesNotMatch(serializedAttrs, /postgres:\/\//);
+  // Policy (2026-09-20): the failure REASON is carried; endpoint, credentials,
+  // and query text are scrubbed out of it, not the whole message dropped.
+  assert.equal(event.attrs?.error_message, "connect failed for <redacted-url> while running");
 
   const [row] = traceEventRowsForSpan(recorded, TRACE_EVENT_ROW_TEST_RESOURCE);
   assert.equal(row.db_system, "risingwave");
@@ -103,7 +104,7 @@ test("RW inbox classification distinguishes acquire timeout from query SQLSTATE"
   assert.equal(queryAttrs.error_kind, "rw_query_error");
   assert.equal(queryAttrs.rw_failure_stage, "query");
   assert.equal(queryAttrs.sqlstate, "42P01");
-  assert.equal(JSON.stringify(queryAttrs).includes("private table name"), false);
+  assert.equal(queryAttrs.error_message, "relation does not exist: private table name");
 });
 
 test("RW inbox classification does not infer connect stage from in-flight reset errors", () => {
@@ -115,7 +116,7 @@ test("RW inbox classification does not infer connect stage from in-flight reset 
   assert.equal(resetAttrs.error_kind, "rw_connect_error");
   assert.equal(resetAttrs.rw_failure_stage, "unknown");
   assert.equal(resetAttrs.driver_code, "ECONNRESET");
-  assert.equal(JSON.stringify(resetAttrs).includes("query was running"), false);
+  assert.equal(resetAttrs.error_message, "read ECONNRESET while query was running");
 
   const refusedAttrs = risingWaveInboxFailureAttrs({
     route: "unread",
@@ -135,49 +136,7 @@ test("RW inbox classification does not infer connect stage from socket message t
   assert.equal(attrs.error_kind, "rw_connect_error");
   assert.equal(attrs.rw_failure_stage, "unknown");
   assert.equal(attrs.driver_code, "RW_DRIVER_UNKNOWN");
-  assert.equal(JSON.stringify(attrs).includes("socket terminated"), false);
-});
-
-test("fallback completion is a separate event emitted only after PG fallback returns", () => {
-  const sink = new MemoryTraceSink();
-  const tracer = new BasicTracer({
-    sink,
-    traceIdGenerator: () => "c".repeat(32),
-    spanIdGenerator: () => "d".repeat(16),
-  });
-  const span = tracer.startSpan("server.http.request", {
-    surface: "server",
-    kind: "server",
-  });
-
-  runWithTraceSpan(span, () => {
-    recordRisingWaveInboxBackendFailed({
-      route: "sidebar_summary",
-      error: codedError("read ECONNRESET from rw.internal.example", "ECONNRESET"),
-      contractVersion: 1,
-    });
-    recordRisingWaveInboxFallbackCompleted({
-      route: "sidebar_summary",
-      error: codedError("read ECONNRESET from rw.internal.example", "ECONNRESET"),
-      contractVersion: 1,
-      fallbackOutcome: "success",
-      fallbackLatencyMs: 37,
-    });
-  });
-  span.end("ok");
-
-  const [recorded] = sink.getAllSpans();
-  assert.ok(recorded);
-  assert.deepEqual(recorded.events.map((event) => event.name), [
-    "inbox.backend.failed",
-    "inbox.backend.fallback_completed",
-  ]);
-  const [, fallbackRow] = traceEventRowsForSpan(recorded, TRACE_EVENT_ROW_TEST_RESOURCE);
-  assert.equal(fallbackRow.event_name, "inbox.backend.fallback_completed");
-  assert.equal(fallbackRow.fallback_target, "pg_fallback");
-  assert.equal(fallbackRow.fallback_outcome, "success");
-  assert.equal(fallbackRow.fallback_latency_ms, 37);
-  assert.equal(fallbackRow.terminal_status, null);
+  assert.equal(attrs.error_message, "socket terminated while query was running");
 });
 
 test("generic db query failures are labeled postgresql and never receive RW-only fields", async () => {

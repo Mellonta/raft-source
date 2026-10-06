@@ -1,9 +1,9 @@
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { CURRENT_SCHEMA_VERSION, userSessionPath } from "../paths.js";
-import { computerFetch } from "../proxy.js";
-import { canonicalizeServerUrl, resolveServerUrl, resolveServerUrlEnv } from "../serverUrl.js";
+import { CURRENT_SCHEMA_VERSION, userSessionPath } from "../paths";
+import { computerFetch } from "../proxy";
+import { canonicalizeServerUrl, resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
 
 const USER_SESSION_EXPIRY_LEEWAY_MS = 30_000;
 const refreshUserSessionInflight = new Map<string, Promise<boolean>>();

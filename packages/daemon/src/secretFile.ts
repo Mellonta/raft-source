@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { SpawnContext } from "./drivers/types.js";
+import type { SpawnContext } from "./drivers/types";
 
 function safePathPart(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 96) || "unknown";

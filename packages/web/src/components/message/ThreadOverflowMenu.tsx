@@ -2,7 +2,6 @@ import { useState } from "react";
 import { useIntl } from "react-intl";
 import {
   EllipsisVertical,
-  ExternalLink,
   MapPin,
   MessageCircleOff,
   MessageCirclePlus,
@@ -12,14 +11,13 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger,
+  DropdownMenuTrigger, Button
 } from "raft-ui";
 import { useThreadStore } from "../../store/threadStore";
-import Button from "../ui/Button";
+import Tooltip from "../ui/Tooltip";
 
 /**
- * Thread topbar vertical-ellipsis action menu (task #187, gated by
- * `topbar_overflow_v0`).
+ * Thread topbar vertical-ellipsis action menu.
  *
  * A Thread only has a few immediate commands, so a full settings drawer is
  * too heavy. Raft UI's DropdownMenu supplies the correct command-menu
@@ -36,7 +34,6 @@ export interface ThreadOverflowMenuProps {
   parentMessageId: string | null;
   viewInChannelLabel: string;
   onViewInChannel: () => void;
-  onOpenInNewTab?: () => void;
   onSearch: () => void;
 }
 
@@ -45,7 +42,6 @@ export default function ThreadOverflowMenu({
   parentMessageId,
   viewInChannelLabel,
   onViewInChannel,
-  onOpenInNewTab,
   onSearch,
 }: ThreadOverflowMenuProps) {
   const { formatMessage } = useIntl();
@@ -71,18 +67,20 @@ export default function ThreadOverflowMenu({
   };
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger
-        render={(
-          <Button
-            shape="icon"
-            title={formatMessage({ id: "message.threadPanel.overflow.open" })}
-            aria-label={formatMessage({ id: "message.threadPanel.overflow.open" })}
-            data-testid="thread-overflow-trigger"
-          >
-            <EllipsisVertical size={14} />
-          </Button>
-        )}
-      />
+      <Tooltip content={formatMessage({ id: "message.threadPanel.overflow.open" })}>
+        <DropdownMenuTrigger
+          render={(
+            <Button
+              size="icon-sm"
+              variant="outline"
+              aria-label={formatMessage({ id: "message.threadPanel.overflow.open" })}
+              data-testid="thread-overflow-trigger"
+            >
+              <EllipsisVertical size={14} />
+            </Button>
+          )}
+        />
+      </Tooltip>
       <DropdownMenuContent
         side="bottom"
         align="end"
@@ -94,15 +92,6 @@ export default function ThreadOverflowMenu({
           <Search />
           {formatMessage({ id: "message.threadPanel.searchInThread" })}
         </DropdownMenuItem>
-        {parentMessageId && onOpenInNewTab && (
-          <DropdownMenuItem
-            onClick={onOpenInNewTab}
-            data-testid="thread-overflow-open-new-tab"
-          >
-            <ExternalLink />
-            {formatMessage({ id: "message.threadPanel.openInNewTab" })}
-          </DropdownMenuItem>
-        )}
         {parentMessageId && (
           <DropdownMenuItem
             onClick={onViewInChannel}

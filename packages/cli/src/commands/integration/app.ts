@@ -14,11 +14,11 @@ import {
   type OAuthClientCategory,
 } from "@botiverse/raft-shared";
 
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandContext, CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeJson, writeText, NL, adoptCliReplyText } from "../../core/renderer.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandContext, CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeJson, writeText, NL, adoptCliReplyText } from "../../core/renderer";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import {
   projectActionPrepareReceipt,
   projectAppListReceipt,
@@ -29,12 +29,12 @@ import {
   projectAppStatusReceipt,
   projectAppTransferOwnerReceipt,
   projectAppUpdateReceipt,
-} from "./appReceipts.js";
+} from "./appReceipts";
 import {
   closePrivateSecretSink,
   preparePrivateSecretSink,
   writePrivateSecretSink,
-} from "./privateSecretSink.js";
+} from "./privateSecretSink";
 
 const MAX_APP_LOGO_BYTES = 5 * 1024 * 1024;
 const APP_LOGO_MIME_BY_EXTENSION: Record<string, string> = {
@@ -281,6 +281,7 @@ interface AppUpdateOptions {
   client: string;
   name?: string;
   description?: string;
+  whenToUse?: string;
   category?: string;
   homepageUrl?: string;
   redirectUrl?: string;
@@ -306,6 +307,7 @@ async function updateApp(ctx: CommandContext, opts: AppUpdateOptions): Promise<v
     clientKey,
     name: opts.name === undefined ? undefined : opts.name.trim(),
     description: opts.description === undefined ? undefined : opts.description.trim(),
+    whenToUse: opts.whenToUse === undefined ? undefined : opts.whenToUse.trim(),
     category,
     homepageUrl: opts.homepageUrl === undefined ? undefined : opts.homepageUrl.trim(),
     returnUrl: opts.redirectUrl === undefined ? undefined : opts.redirectUrl.trim(),
@@ -337,6 +339,7 @@ export const integrationAppUpdateCommand = defineCommand(
       { flags: "--client <key>", description: "App client key / OAuth client_id" },
       { flags: "--name <name>", description: "New app display name" },
       { flags: "--description <text>", description: "New description; pass an empty value to clear" },
+      { flags: "--when-to-use <text>", description: "When agents should use this app (one line, ≤160 chars); pass an empty value to clear" },
       {
         flags: "--category <category>",
         description: `New Connected App category: ${OAUTH_CLIENT_CATEGORIES.join(", ")}`,
@@ -552,6 +555,7 @@ function formatAppStatus(app: AgentApiOwnedIntegrationApp): string {
     `description: ${app.description ?? "-"}`,
     `app type: ${app.appType ?? "-"}`,
     `enabled: ${app.enabled === null || app.enabled === undefined ? "-" : app.enabled ? "yes" : "no"}`,
+    ...(app.installationId !== undefined ? [`installation ID: ${app.installationId ?? "-"}`] : []),
     ...(app.card ? [`card: ${app.card}`] : []),
     ...(app.clientKey ? [`client key: ${app.clientKey}`] : []),
     `created: ${app.createdAt}`,

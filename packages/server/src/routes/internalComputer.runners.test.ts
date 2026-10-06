@@ -1,22 +1,30 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
 
 import { PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY, RUNTIME_CONFIG_VERSION } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { computers, users, agents, featureFlagRules, providerConnections } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent, updateAgent } from "../services/agentService.js";
-import { registerMachine } from "../services/machineService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { generateComputerApiKeyMaterial } from "../services/computerCredentialService.js";
+import { getDb } from "../db/index";
+import {
+  computers,
+  users,
+  agents,
+  featureFlagRules,
+  providerConnections,
+  providerProbeIntents,
+  providerProbeReceipts,
+} from "../db/schema";
+import { createServer } from "../services/serverService";
+import { createAgent, updateAgent } from "../services/agentService";
+import { registerMachine } from "../services/machineService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { generateComputerApiKeyMaterial } from "../services/computerCredentialService";
 import {
   createProviderConnection,
   resolveProviderConnectionSelection,
-} from "../services/providerConnectionService.js";
+} from "../services/providerConnectionService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -156,6 +164,57 @@ test("provider materialization is Computer/Agent-bound and the ordinary launch c
       priority: -100,
       decision: "allow",
       values: [f.serverId],
+    });
+
+    // Launch materialization does not require a fresh Computer verification receipt;
+    // an enabled connection with valid credentials materializes directly.
+    const initialLaunch = await fetch(
+      `${app.baseUrl}/internal/computer/runners/${f.agentId}/provider-connection`,
+      {
+        method: "POST",
+        headers: authHeaders(f.computerApiKey),
+        body: JSON.stringify({ connectionId: connection.id }),
+      },
+    );
+    assert.equal(initialLaunch.status, 200);
+    assert.deepEqual(await initialLaunch.json(), {
+      envVars: { DEEPSEEK_API_KEY: "provider-materialization-secret" },
+      providerConnection: {
+        providerId: "deepseek",
+        endpointUrl: null,
+        supportsImageInput: false,
+      },
+    });
+
+    const probeId = randomUUID();
+    await getDb().insert(providerProbeIntents).values({
+      id: probeId,
+      serverId: f.serverId,
+      connectionId: connection.id,
+      configVersion: selection.configVersion,
+      credentialVersion: selection.credentialVersion,
+      computerId: f.machineId,
+      runtime: "claude",
+      model: "deepseek/deepseek-v4-pro",
+      probeKind: "canary",
+      probeRequestId: `probe-req-${probeId}`,
+      requestDigest: `digest-${probeId}`,
+      intentDigest: `intent-${probeId}`,
+      expiresAt: new Date(Date.now() + 60_000),
+      dispatchedAt: new Date(),
+      closeReason: "receipt",
+      closedAt: new Date(),
+    });
+    await getDb().insert(providerProbeReceipts).values({
+      probeId,
+      serverId: f.serverId,
+      outcome: "success",
+      latencyMs: 12,
+      responseSha256: "a".repeat(64),
+      responseBytes: 42,
+      resultDigest: `result-${probeId}`,
+      intentDigest: `intent-${probeId}`,
+      authorityIdentity: "runners-test-authority",
     });
 
     const response = await fetch(

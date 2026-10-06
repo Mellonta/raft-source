@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -130,6 +129,7 @@ test("catalog pins computer residue MessageIds", () => {
   assert.equal(en["machine.detail.computer"], "Computer");
   assert.equal(en["machine.detail.macLinux"], "macOS / Linux");
   assert.equal(en["machine.detail.osLabel"], "OS");
+  // zh stays 计算机: "Computer" already renders as 计算机 on every other surface (catalogConsistencyRatchet).
   assert.equal(zh["machine.detail.computer"], "计算机");
   assert.equal(zh["machine.detail.macLinux"], "macOS / Linux");
   assert.equal(zh["machine.detail.osLabel"], "OS");
@@ -143,8 +143,6 @@ test("mounted ComputerCommandGuide keeps the macOS / Linux runtime label under z
         computerInstallCommand="curl -fsSL https://downloads.raft.build/computer/install.sh | sh"
         windowsComputerCommand="raft-computer setup /launch"
         windowsComputerInstallCommand="irm https://cdn.raft.build/computer/install.ps1 | iex"
-        macLinuxDaemonCommand="npx @botiverse/raft-daemon@latest --server-url https://api.raft.build --api-key sk_machine_abc"
-        windowsDaemonCommand="npx.cmd @botiverse/raft-daemon@latest --server-url https://api.raft.build --api-key sk_machine_abc"
       />
     </TestIntlProvider>,
   );
@@ -185,11 +183,12 @@ test("online Computer keeps restart available while its version is still syncing
   const actions = screen.getByTestId("computer-service-actions");
   const restart = within(actions).getByRole("button", { name: en["machine.detail.restart"] });
   assert.equal(restart.hasAttribute("disabled"), false);
-  assert.equal(
-    within(actions).getByRole("button", { name: en["machine.detail.upgrade"] }).hasAttribute("disabled"),
-    true,
+  // One next step: no greyed Upgrade button while the version is unknown.
+  assert.deepEqual(
+    within(within(actions).getByTestId("computer-upgrade-actions")).getAllByRole("button").map((b) => b.textContent),
+    [en["machine.detail.restart"]],
   );
-  assert.ok(within(actions).getByText(en["machine.detail.versionStillSyncing"]));
+  assert.ok(within(actions).getByText(en["machine.detail.upgradeStatus.readingVersion"]));
 });
 
 test("mounted MachineDetail selection rows expose live yellow markers and clear/cancel controls", () => {
@@ -201,16 +200,16 @@ test("mounted MachineDetail selection rows expose live yellow markers and clear/
   const offline = screen.getByRole("button", { name: "Select Offline Agent" });
   const marker = offline.querySelector(".check-marker-brutal");
   assert.ok(marker);
-  assert.match(marker.className, /bg-white text-transparent/);
+  assert.match(marker.className, /bg-layer-panel text-transparent/);
 
   fireEvent.click(offline);
-  assert.match(marker.className, /bg-soft-signal text-black/);
+  assert.match(marker.className, /bg-primary text-primary-950/);
   assert.equal(screen.getByText("1 selected").textContent, "1 selected");
   assert.ok(screen.getByRole("button", { name: "Deselect Offline Agent" }));
 
   fireEvent.click(screen.getByRole("button", { name: en["machine.detail.selectAll"] }));
   assert.equal(screen.getByText("2 selected").textContent, "2 selected");
-  assert.equal(view.container.querySelectorAll(".check-marker-brutal.bg-soft-signal").length, 2);
+  assert.equal(view.container.querySelectorAll(".check-marker-brutal.bg-primary").length, 2);
 
   fireEvent.click(screen.getByRole("button", { name: en["machine.detail.clearAll"] }));
   assert.equal(screen.queryByText("2 selected"), null);
@@ -242,7 +241,8 @@ test("mounted MachineDetail bulk actions target offline, online, and all selecte
 
   enterSelectionAndChooseBoth();
   fireEvent.click(screen.getByRole("button", { name: en["machine.detail.restartReset"] }));
-  const resetDialog = screen.getByText("Restart 2 Agents").closest(".card-brutal");
+  const resetDialog = screen.getByText("Restart 2 Agents").closest('[data-slot="card"]')
+    ?? screen.getByText("Restart 2 Agents").closest(".card-brutal");
   assert.ok(resetDialog);
   const restartButtons = within(resetDialog as HTMLElement).getAllByRole("button", { name: en["machine.detail.bulkRestart"] });
   fireEvent.click(restartButtons.at(-1)!);

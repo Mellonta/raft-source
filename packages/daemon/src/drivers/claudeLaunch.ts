@@ -1,9 +1,9 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig } from "@botiverse/raft-shared";
-import { isClaudeCustomProviderConfig } from "./claudeProviderIsolation.js";
-import type { RuntimeProbeResult } from "./types.js";
-import { firstExistingPath, readCommandVersion, resolveCommandOnPath, resolveHomePath, type ProbeDeps } from "./probe.js";
+import { isClaudeCustomProviderConfig } from "./claudeProviderIsolation";
+import type { RuntimeProbeResult } from "./types";
+import { firstExistingPath, readCommandVersion, resolveCommandOnPath, resolveHomePath, type ProbeDeps } from "./probe";
 
 export const CLAUDE_DESKTOP_CLI_RELATIVE_PATH = path.join("Applications", "Claude Code URL Handler.app", "Contents", "MacOS", "claude");
 export const CLAUDE_DESKTOP_CLI_SYSTEM_PATH = "/Applications/Claude Code URL Handler.app/Contents/MacOS/claude";

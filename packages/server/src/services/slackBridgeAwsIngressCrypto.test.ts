@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import type { ExternalInboundPayloadAad } from "./externalAppIngressService.js";
+import type { ExternalInboundPayloadAad } from "./externalAppIngressService";
 import {
   createSlackKmsInboundPayloadCrypto,
   createSlackSigningSecretManagerResolver,
-} from "./slackBridgeAwsIngressCrypto.js";
+} from "./slackBridgeAwsIngressCrypto";
 
 const SECRET_ARN = "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:slack-signing-AbCdEf";
 const KEY_ARN = "arn:aws:kms:ap-southeast-1:123456789012:key/11111111-2222-3333-4444-555555555555";

@@ -9,6 +9,7 @@ import {
   EXTERNAL_AGENT_ACTIVITY_TEXT_LIMIT,
   EXTERNAL_AGENT_ACTIVITY_TOOL_NAME_LIMIT,
   EXTERNAL_AGENT_WAKE_EVENT_SCHEMA,
+  errorClassOf,
   validateExternalAgentWakeEventEnvelope,
   type ExternalAgentActivityDrainResponse,
   type ExternalAgentActivityEvent,
@@ -16,10 +17,13 @@ import {
   type ExternalAgentWakeAdapter,
   type ExternalAgentWakeAttemptInput,
   type ExternalAgentWakeEventEnvelope,
+  RAFT_AGENT_STATUS_DETAIL_LIMIT,
+  isExternalAgentActivityLegacyStatus,
+  isRaftAgentStatus,
 } from "@botiverse/raft-shared";
 
-import type { AgentContext } from "../auth/env.js";
-import { resolveProfileDir } from "../auth/env.js";
+import type { AgentContext } from "../auth/env";
+import { resolveProfileDir } from "../auth/env";
 
 export const AGENT_COMMS_PROTOCOL_VERSION = "agent-comms-core.v1";
 export const AGENT_PROOF_SCHEMA_VERSION = "agent-proof.v1";
@@ -51,7 +55,7 @@ export interface AgentCommsWakeHint {
   message_id?: string | null;
   seq?: number;
   id?: string;
-  target?: string;
+  target?: string | null;
   targetType?: string;
   target_type?: string;
   reason?: string;
@@ -507,7 +511,7 @@ async function drainAndForwardActivity(input: {
       forwardedCount: 0,
       rejectedCount: 0,
       droppedCount: 0,
-      errorClass: err instanceof Error ? err.name : typeof err,
+      errorClass: errorClassOf(err),
       errorMessage: errorMessage(err),
     });
   }
@@ -550,7 +554,7 @@ async function drainAndForwardActivity(input: {
       forwardedCount: 0,
       rejectedCount: sanitized.rejectedCount,
       droppedCount: normalizeNonNegativeInteger(drained.dropped),
-      errorClass: err instanceof Error ? err.name : typeof err,
+      errorClass: errorClassOf(err),
       errorMessage: errorMessage(err),
     });
   }
@@ -572,7 +576,12 @@ export function sanitizeExternalAgentActivityEvents(
   let rejectedCount = 0;
   for (const raw of rawEvents) {
     const hookEventName = stringField(raw.hookEventName ?? raw.hook_event_name, 80);
-    if (!hookEventName) {
+    // raft-agent-status.v1: an event may report the agent's status with or
+    // without a hook. Unknown status strings are dropped rather than forwarded
+    // (the server rejects the whole batch on an invalid status).
+    const rawStatus = stringField(raw.status, 40);
+    const agentStatus = isRaftAgentStatus(rawStatus) ? rawStatus : undefined;
+    if (!hookEventName && !agentStatus) {
       rejectedCount += 1;
       continue;
     }
@@ -580,7 +589,8 @@ export function sanitizeExternalAgentActivityEvents(
     const eventId = stringField(raw.eventId ?? raw.event_id, 160) ?? `event_${randomUUID()}`;
     const sessionId = stringField(raw.sessionId ?? raw.session_id, 200);
     const toolName = stringField(raw.toolName ?? raw.tool_name, EXTERNAL_AGENT_ACTIVITY_TOOL_NAME_LIMIT);
-    const status = stringField(raw.status, 40);
+    const status = agentStatus ?? (isExternalAgentActivityLegacyStatus(rawStatus) ? rawStatus : undefined);
+    const detail = agentStatus ? stringField(raw.detail, RAFT_AGENT_STATUS_DETAIL_LIMIT) : undefined;
     const errorClass = stringField(raw.errorClass ?? raw.error_class, 120);
     const occurredAt = validIsoDate(raw.occurredAt ?? raw.occurred_at) ?? now().toISOString();
     const durationMs = normalizeNonNegativeInteger(raw.durationMs ?? raw.duration_ms);
@@ -597,9 +607,10 @@ export function sanitizeExternalAgentActivityEvents(
       schema: EXTERNAL_AGENT_ACTIVITY_EVENT_SCHEMA,
       eventId,
       ...(sessionId ? { sessionId } : {}),
-      hookEventName,
+      ...(hookEventName ? { hookEventName } : {}),
       ...(toolName ? { toolName } : {}),
-      ...(status ? { status } : {}),
+      ...(status ? { status: status as ExternalAgentActivityEvent["status"] } : {}),
+      ...(detail ? { detail } : {}),
       occurredAt,
       ...(durationMs > 0 ? { durationMs } : {}),
       ...(errorClass ? { errorClass } : {}),

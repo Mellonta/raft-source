@@ -120,7 +120,6 @@ function ColorRow({ color }: { color: typeof COLORS[number] }) {
         <div className="flex items-center gap-1">
           <div
             className="w-16 h-16 border-2 border-black flex items-center justify-center text-[10px] font-mono text-black/60"
-            title="100%"
             style={{ backgroundColor: `var(--color-${color.name})` }}
           >
             100
@@ -129,7 +128,6 @@ function ColorRow({ color }: { color: typeof COLORS[number] }) {
             <div
               key={t}
               className="w-16 h-16 border-2 border-black flex items-center justify-center text-[10px] font-mono text-black/60"
-              title={`${t}%`}
               style={{ backgroundColor: `color-mix(in srgb, var(--color-${color.name}) ${t}%, transparent)` }}
             >
               /{t}
@@ -227,9 +225,9 @@ function realComponentsFor(
           </Sample>
 
           {/* from getActivityDotClass — thinking/working dot is FIXED status
-              yellow + animate-pulse (status lights never re-skin) */}
+              yellow, static (status lights never re-skin; never loop — task #136) */}
           <Sample source="utils/activity.ts:11 — thinking/working dot">
-            <span className="size-2.5 rounded-full border border-black bg-status-busy animate-pulse" />
+            <span className="size-2.5 rounded-full border border-black bg-status-busy" />
             <span className="text-sm text-black/60 font-mono">thinking…</span>
           </Sample>
         </>
@@ -341,7 +339,7 @@ function realComponentsFor(
       return (
         <>
           {/* from getActivityDotClass — error dot only.
-              NOTE: thinking/working dots are YELLOW (animate-pulse), not orange.
+              NOTE: thinking/working dots are YELLOW (static), not orange.
               See yellow row above for the live thinking dot. */}
           <Sample source="utils/activity.ts:14 — error dot (orange)">
             <span className="size-2.5 rounded-full border border-black bg-brutal-orange" />

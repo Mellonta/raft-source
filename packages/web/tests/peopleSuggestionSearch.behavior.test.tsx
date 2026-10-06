@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, render } from "@testing-library/react";
 import { usePeopleSuggestionSearch } from "../src/hooks/usePeopleSuggestionSearch";
 import type { PeopleSuggestionCandidate } from "../src/utils/peopleSuggestionSearch";

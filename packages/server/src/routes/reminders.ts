@@ -5,10 +5,11 @@
 // agent from the human UI is deliberately out of scope until v1.
 import { Router, type Router as RouterType } from "express";
 import { isReminderStatus, type ReminderStatus } from "@botiverse/raft-shared";
-import { listAppReminders } from "../apps/reminder/crud.js";
-import * as reminderService from "../apps/reminder/service.js";
-import * as agentService from "../services/agentService.js";
-import { canInspectAgentPrivateSurfaces } from "./agents.js";
+import { listAppReminders } from "../apps/reminder/crud";
+import * as reminderService from "../apps/reminder/service";
+import * as agentService from "../services/agentService";
+import { canInspectAgentPrivateSurfaces } from "./agents";
+import { sendJsonServerError } from "./errorResponse";
 
 export const reminderRouter: RouterType = Router();
 
@@ -23,6 +24,28 @@ function parseStatusParam(raw: unknown): ReminderStatus[] | null | "invalid" {
     validated.push(p);
   }
   return validated;
+}
+
+/**
+ * Reminders are a private surface of their owner agent, so an unfiltered
+ * listing may only show the owners the caller could also list one by one.
+ * The rule is evaluated once per distinct owner, not per reminder.
+ */
+async function keepRemindersOfInspectableOwners<T extends { ownerAgentId: string }>(
+  rows: T[],
+  serverId: string,
+  userId: string,
+): Promise<T[]> {
+  const inspectable = new Map<string, boolean>();
+  for (const ownerAgentId of new Set(rows.map((row) => row.ownerAgentId))) {
+    const agent = await agentService.getAgent(ownerAgentId);
+    inspectable.set(
+      ownerAgentId,
+      agent !== null && agent.serverId === serverId
+        && await canInspectAgentPrivateSurfaces(serverId, userId, agent),
+    );
+  }
+  return rows.filter((row) => inspectable.get(row.ownerAgentId) === true);
 }
 
 // GET /api/reminders?ownerAgentId=...&status=scheduled,fired
@@ -52,10 +75,16 @@ reminderRouter.get("/", async (req, res) => {
       ownerAgentId,
       status: parsedStatus ?? undefined,
     });
-    const reminders = await reminderService.toReminderSummaries(rows, req.serverId!);
+    const visibleRows = ownerAgentId
+      ? rows
+      : await keepRemindersOfInspectableOwners(rows, req.serverId!, req.userId!);
+    const reminders = await reminderService.toReminderSummaries(visibleRows, req.serverId!);
     res.json({ reminders });
   } catch (err) {
-    console.error("[reminders] list failed:", err);
-    res.status(500).json({ error: "Failed to list reminders" });
+    sendJsonServerError(req, res, {
+      error: "Failed to list reminders",
+      logPrefix: "[reminders] list failed:",
+      err,
+    });
   }
 });

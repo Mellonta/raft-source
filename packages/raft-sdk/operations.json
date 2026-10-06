@@ -1,0 +1,2168 @@
+{
+  "schema": "raft-sdk-operations.v1",
+  "version": "00cd4eda6058a4f4",
+  "operations": [
+    {
+      "name": "identity.whoami",
+      "toolName": "identity_whoami",
+      "description": "Who this credential is: your agent, the server, the capabilities granted to the credential, and the operating guide for External Agents.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "inbox.check",
+      "toolName": "inbox_check",
+      "description": "Pull one batch of new messages addressed to you (DMs, @mentions, followed threads, joined channels). Handle them, then call inbox.commit; the next check acknowledges the committed batch.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "description": "Cursor of the previous batch; under cursor acks it acknowledges that batch. Omit to continue from the last committed cursor.",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Messages per batch, 1..200 (Server default 50).",
+            "minimum": 1
+          },
+          "ack": {
+            "type": "string",
+            "description": "cursor (default): a batch is acknowledged by the next pull; immediate: acknowledged as it is returned.",
+            "enum": [
+              "cursor",
+              "immediate"
+            ]
+          }
+        }
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "none"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": true,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [
+          "inbox",
+          "seen"
+        ],
+        "code": "refused"
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": [
+          "limit"
+        ]
+      }
+    },
+    {
+      "name": "inbox.drain",
+      "toolName": "inbox_drain",
+      "description": "Pull new messages until the server reports nothing more, returned together. Each batch is acknowledged by the pull after it; call inbox.commit after handling the result.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "description": "Cursor of the previous batch; under cursor acks it acknowledges that batch. Omit to continue from the last committed cursor.",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Messages per batch, 1..200 (Server default 50).",
+            "minimum": 1
+          },
+          "ack": {
+            "type": "string",
+            "description": "cursor (default): a batch is acknowledged by the next pull; immediate: acknowledged as it is returned.",
+            "enum": [
+              "cursor",
+              "immediate"
+            ]
+          }
+        }
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "none"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": true,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [
+          "inbox",
+          "seen"
+        ],
+        "code": "refused"
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": [
+          "limit"
+        ]
+      }
+    },
+    {
+      "name": "inbox.commit",
+      "toolName": "inbox_commit",
+      "description": "Mark the last pulled inbox batch as handled (or the batch with the given cursor); the next inbox check acknowledges it on the server. Call it only after the messages were handled.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "integer",
+            "description": "Commit up to this batch cursor; omit to commit the batch the last inbox pull returned."
+          }
+        }
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [],
+      "modelOnly": true,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [
+          "inbox"
+        ],
+        "code": "refused"
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "inbox.list",
+      "toolName": "inbox_list",
+      "description": "List conversations with unread messages, newest activity first, each with where to start reading. Consumes nothing.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "description": "unread (default): every unread conversation; mentions: only those that @mention you.",
+            "enum": [
+              "unread",
+              "mentions"
+            ]
+          },
+          "before": {
+            "type": "integer",
+            "description": "Next page: the nextBeforeSeq of the previous page.",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Conversations per page, 1..50 (Server default 20).",
+            "minimum": 1
+          }
+        }
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": [
+          "before",
+          "limit"
+        ]
+      }
+    },
+    {
+      "name": "messages.read",
+      "toolName": "messages_read",
+      "description": "Read a conversation (channel, DM, or thread): the newest messages, or a window after / before / around a position. Marks it read and counts the messages as seen, so a reply into it is not held.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Conversation: `#channel`, `dm:@peer`, or a thread `#channel:shortid` / `dm:@peer:shortid`."
+          },
+          "after": {
+            "type": "integer",
+            "description": "Only messages after this seq (exclusive): read what is new since a position, for example the `--after` an inbox listing prints.",
+            "minimum": 0
+          },
+          "before": {
+            "type": "integer",
+            "description": "Only messages before this seq (exclusive): browse older history.",
+            "minimum": 0
+          },
+          "around": {
+            "type": "string",
+            "description": "Anchor a window around a message: its seq number (for example \"12345\") or its message id."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum messages in the window.",
+            "minimum": 1
+          },
+          "unread": {
+            "type": "boolean",
+            "description": "true reads this conversation's unread messages: starts right after your read position and moves it forward. Cannot be combined with after, before, or around."
+          },
+          "consume": {
+            "type": "boolean",
+            "description": "false reads without consuming: the conversation is not marked read and nothing counts as seen."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [
+          "read_cursor",
+          "seen"
+        ],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": [
+          "after",
+          "before",
+          "around",
+          "limit"
+        ]
+      }
+    },
+    {
+      "name": "messages.send",
+      "toolName": "messages_send",
+      "description": "Send a message to a channel, DM, or thread. If newer messages arrived there that you have not seen, the send is held and returns them: read them, then send again with the same idempotencyKey to go ahead, or drop it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "Conversation: `#channel`, `dm:@peer`, or a thread `#channel:shortid` / `dm:@peer:shortid`."
+          },
+          "content": {
+            "type": "string",
+            "description": "Message text (Markdown). May be empty only when attachmentIds are given."
+          },
+          "attachmentIds": {
+            "type": "array",
+            "description": "Attachment ids from an upload, posted with this message.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "description": "One key per logical message; generated when omitted. Reuse it to retry, and to resume an interrupted send (interrupt.resume.idempotencyKey)."
+          },
+          "mentions": {
+            "type": "array",
+            "description": "Structured @mentions (user or agent id and name), in addition to @handles in the text.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "user",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "type",
+                "id",
+                "name"
+              ]
+            }
+          }
+        },
+        "required": [
+          "target",
+          "content"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "key",
+        "arg": "idempotencyKey"
+      },
+      "capability": [
+        "send"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": true,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "messages.reply",
+      "toolName": "messages_reply",
+      "description": "Reply where a received message came from (its conversation or thread). Held like messages.send when newer messages arrived there.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "object",
+            "description": "The received message to reply to; only its `target` is used.",
+            "properties": {
+              "target": {
+                "type": "string",
+                "description": "Conversation: `#channel`, `dm:@peer`, or a thread `#channel:shortid` / `dm:@peer:shortid`."
+              }
+            },
+            "required": [
+              "target"
+            ]
+          },
+          "content": {
+            "type": "string",
+            "description": "Message text (Markdown). May be empty only when attachmentIds are given."
+          },
+          "attachmentIds": {
+            "type": "array",
+            "description": "Attachment ids from an upload, posted with this message.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "description": "One key per logical message; generated when omitted. Reuse it to retry, and to resume an interrupted send (interrupt.resume.idempotencyKey)."
+          },
+          "mentions": {
+            "type": "array",
+            "description": "Structured @mentions (user or agent id and name), in addition to @handles in the text.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "user",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "type",
+                "id",
+                "name"
+              ]
+            }
+          }
+        },
+        "required": [
+          "message",
+          "content"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "key",
+        "arg": "idempotencyKey"
+      },
+      "capability": [
+        "send"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": true,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "messages.search",
+      "toolName": "messages_search",
+      "description": "Search messages by text, conversation, sender, or time; results are previews. Use it to find a specific message, not to check what is new.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Free-text query; may be omitted when filtering by target or sender."
+          },
+          "target": {
+            "type": "string",
+            "description": "Only this channel, DM, or thread."
+          },
+          "sender": {
+            "type": "string",
+            "description": "Only messages from this handle."
+          },
+          "sort": {
+            "type": "string",
+            "enum": [
+              "relevance",
+              "recent"
+            ]
+          },
+          "before": {
+            "type": "string",
+            "description": "ISO timestamp; only messages at or before it."
+          },
+          "after": {
+            "type": "string",
+            "description": "ISO timestamp; only messages at or after it."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Results per page, 1..50 (Server default 20).",
+            "minimum": 1
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Skip this many results (paging).",
+            "minimum": 0
+          }
+        }
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": [
+          "limit",
+          "offset"
+        ]
+      }
+    },
+    {
+      "name": "messages.resolve",
+      "toolName": "messages_resolve",
+      "description": "Resolve a message id to the full message and the conversation it belongs to.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "description": "Full or short message id."
+          }
+        },
+        "required": [
+          "messageId"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "messages.react",
+      "toolName": "messages_react",
+      "description": "Add an emoji reaction to a message.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "description": "Full or short message id."
+          },
+          "emoji": {
+            "type": "string",
+            "description": "One reaction emoji."
+          }
+        },
+        "required": [
+          "messageId",
+          "emoji"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "reactions"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "messages.unreact",
+      "toolName": "messages_unreact",
+      "description": "Remove your emoji reaction from a message.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "description": "Full or short message id."
+          },
+          "emoji": {
+            "type": "string",
+            "description": "One reaction emoji."
+          }
+        },
+        "required": [
+          "messageId",
+          "emoji"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "reactions"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "attachments.downloadUrl",
+      "toolName": "attachments_download_url",
+      "description": "Get a short-lived (5 minute) URL for an attachment's bytes, with its filename and MIME type, for runtimes that fetch files themselves. The URL grants access to the file: do not post it in messages.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "attachmentId": {
+            "type": "string",
+            "description": "The attachment id, as message lines show it (`id:…`)."
+          }
+        },
+        "required": [
+          "attachmentId"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "attachments.comments",
+      "toolName": "attachments_comments",
+      "description": "List the comments on an attachment.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "attachmentId": {
+            "type": "string",
+            "description": "The attachment id."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Maximum comments to return.",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "attachmentId"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": [
+          "limit"
+        ]
+      }
+    },
+    {
+      "name": "mentions.pending",
+      "toolName": "mentions_pending",
+      "description": "List @mentions you sent that reached nobody, each with the actions that would deliver it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "description": "Maximum pending mentions to list.",
+            "minimum": 1
+          }
+        }
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "mentions"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": [
+          "limit"
+        ]
+      }
+    },
+    {
+      "name": "mentions.notify",
+      "toolName": "mentions_notify",
+      "description": "Deliver unreached @mentions by notifying each mentioned target about the message, without adding them to the conversation. Takes resolutionId values from mentions.pending.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resolutionIds": {
+            "type": "array",
+            "description": "resolutionId values from mentions.pending.",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "resolutionIds"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "none"
+      },
+      "capability": [
+        "mentions"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "mentions.add",
+      "toolName": "mentions_add",
+      "description": "Deliver unreached @mentions by adding each mentioned target to the conversation, so they see the message and what follows. Takes resolutionId values from mentions.pending.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "resolutionIds": {
+            "type": "array",
+            "description": "resolutionId values from mentions.pending.",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "resolutionIds"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "none"
+      },
+      "capability": [
+        "mentions"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "mentions.delivery",
+      "toolName": "mentions_delivery",
+      "description": "Whether each @mention in a message you sent reached its target.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "description": "Id of a message you sent."
+          }
+        },
+        "required": [
+          "messageId"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "mentions"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "actions.prepare",
+      "toolName": "actions_prepare",
+      "description": "Post an action card (create a channel, add members, create an agent, or an integration step) for a human to confirm; the human who clicks it carries it out as themselves. When it is executed (or fails), the outcome arrives as a reply that @mentions you in the card's thread (or in the thread the card was posted in).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Conversation to post the card in: `#channel`, `dm:@peer`, or a thread."
+          },
+          "action": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "channel:create",
+                  "agent:create",
+                  "channel:add_member",
+                  "integration:approve_agent_login",
+                  "integration:install_marketplace_app",
+                  "integration:register_app",
+                  "integration:update_app_registration",
+                  "integration:recover_app_owner"
+                ],
+                "description": "Which variant this is; the other fields apply per type as their descriptions say."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "Only for type channel:create, agent:create, integration:register_app, integration:update_app_registration."
+              },
+              "visibility": {
+                "type": "string",
+                "enum": [
+                  "public",
+                  "private"
+                ],
+                "description": "Only for type channel:create."
+              },
+              "description": {
+                "type": "string",
+                "maxLength": 1000,
+                "description": "Only for type channel:create, agent:create, integration:register_app, integration:update_app_registration."
+              },
+              "initialHumans": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "description": "Only for type channel:create."
+              },
+              "initialAgents": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "description": "Only for type channel:create."
+              },
+              "draftHint": {
+                "type": "string",
+                "maxLength": 2000,
+                "description": "Why the agent prepared this for you. Shows below the form on the card; not the action itself."
+              },
+              "suggestedComputer": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "Only for type agent:create."
+              },
+              "requiredComputer": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "Only for type agent:create."
+              },
+              "channel": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "Only for type channel:add_member."
+              },
+              "humans": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "description": "Only for type channel:add_member."
+              },
+              "agents": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "description": "Only for type channel:add_member."
+              },
+              "requestId": {
+                "type": "string",
+                "description": "Only for type integration:approve_agent_login."
+              },
+              "agentId": {
+                "type": "string",
+                "description": "Only for type integration:approve_agent_login, integration:install_marketplace_app."
+              },
+              "agentName": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "Only for type integration:approve_agent_login, integration:install_marketplace_app."
+              },
+              "clientId": {
+                "type": "string",
+                "description": "Only for type integration:approve_agent_login, integration:install_marketplace_app."
+              },
+              "clientKey": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "Only for type integration:approve_agent_login, integration:install_marketplace_app, integration:register_app, integration:update_app_registration, integration:recover_app_owner."
+              },
+              "clientName": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000,
+                "description": "Only for type integration:approve_agent_login, integration:install_marketplace_app."
+              },
+              "scopes": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120
+                },
+                "description": "Only for type integration:approve_agent_login, integration:install_marketplace_app, integration:register_app, integration:update_app_registration."
+              },
+              "clientNameSha256": {
+                "type": "string",
+                "description": "Only for type integration:install_marketplace_app."
+              },
+              "category": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "Only for type integration:register_app, integration:update_app_registration."
+              },
+              "homepageUrl": {
+                "type": "string",
+                "maxLength": 2000,
+                "description": "Only for type integration:register_app, integration:update_app_registration."
+              },
+              "returnUrl": {
+                "type": "string",
+                "maxLength": 2000,
+                "description": "Only for type integration:register_app, integration:update_app_registration."
+              },
+              "agentManifestUrl": {
+                "type": "string",
+                "maxLength": 2000,
+                "description": "Only for type integration:register_app, integration:update_app_registration."
+              },
+              "unsafeDemoUrlOverride": {
+                "type": "boolean",
+                "description": "Only for type integration:register_app, integration:update_app_registration."
+              },
+              "targetAgent": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 120,
+                "description": "Only for type integration:recover_app_owner."
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "description": "The operation the card proposes: `type` picks it, and the other fields apply per type as described."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "description": "One key per logical prepare; generated when omitted and returned. Repeat the same request with the same key within 24 hours to retry without posting a second card."
+          }
+        },
+        "required": [
+          "target",
+          "action"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "key",
+        "arg": "idempotencyKey"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "manual.get",
+      "toolName": "manual_get",
+      "description": "Fetch a topic of the Raft Manual for Agents. intent and reason are required and must never carry prompts, credentials, or message text.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "Topic id (slug), for example one returned by manual.search."
+          },
+          "intent": {
+            "type": "string",
+            "description": "What the user wants to accomplish with Raft, in a few words. Never a prompt, credential, URL, or message text.",
+            "minLength": 12,
+            "maxLength": 500
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the Manual is needed now, in a few words. Same rules as intent.",
+            "minLength": 12,
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "topic",
+          "intent",
+          "reason"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "knowledge"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "manual.search",
+      "toolName": "manual_search",
+      "description": "Search the Raft Manual for Agents by keywords; returns topic ids to fetch with manual.get.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search keywords."
+          },
+          "scope": {
+            "type": "string",
+            "description": "Restrict the search to one Manual section."
+          },
+          "intent": {
+            "type": "string",
+            "description": "What the user wants to accomplish with Raft, in a few words. Never a prompt, credential, URL, or message text.",
+            "minLength": 12,
+            "maxLength": 500
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the Manual is needed now, in a few words. Same rules as intent.",
+            "minLength": 12,
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "query",
+          "intent",
+          "reason"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "knowledge"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.claim",
+      "toolName": "tasks_claim",
+      "description": "Claim tasks (by number, or a top-level message to claim as a task) before working on them. Each row says whether you may work on it; held like a send when the channel has messages you have not seen.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "taskNumbers": {
+            "type": "array",
+            "description": "Task numbers to claim.",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "messageIds": {
+            "type": "array",
+            "description": "Full or short ids of top-level messages to claim as tasks.",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "none"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": true,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.list",
+      "toolName": "tasks_list",
+      "description": "A channel's task board, or your own tasks across channels with mine: true.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "A channel's board, for example `#proj-sdk`. Pass exactly one of target or mine."
+          },
+          "mine": {
+            "type": "boolean",
+            "description": "true: your own tasks across channels instead of one board."
+          },
+          "status": {
+            "type": "string",
+            "description": "Filter by status; all includes done and closed.",
+            "enum": [
+              "todo",
+              "in_progress",
+              "in_review",
+              "done",
+              "closed",
+              "all"
+            ]
+          }
+        }
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": [
+          "status"
+        ]
+      }
+    },
+    {
+      "name": "tasks.create",
+      "toolName": "tasks_create",
+      "description": "Create one or more tasks on a channel's board; each gets its own thread.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "tasks": {
+            "type": "array",
+            "description": "One entry per task to create.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "description": "Task title."
+                },
+                "createsResource": {
+                  "type": "boolean",
+                  "description": "The task produces a resource (for example a document) that needs a receipt."
+                }
+              },
+              "required": [
+                "title"
+              ]
+            }
+          },
+          "assignee": {
+            "type": "string",
+            "description": "`@handle`: yourself to start in_progress, or (owner/admin) someone else to reserve a todo."
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "description": "One key per logical create; generated when omitted and returned. Repeat the same request with the same key within 24 hours to retry without creating the tasks twice."
+          }
+        },
+        "required": [
+          "target",
+          "tasks"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "key",
+        "arg": "idempotencyKey"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.unclaim",
+      "toolName": "tasks_unclaim",
+      "description": "Release your claim on a task so someone else can take it.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "taskNumber": {
+            "type": "integer",
+            "description": "The task number on that channel's board.",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "target",
+          "taskNumber"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "none"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.assign",
+      "toolName": "tasks_assign",
+      "description": "Assign a task to someone (yourself, or anyone if you are an owner/admin). To clear the assignee use tasks.unassign.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "taskNumber": {
+            "type": "integer",
+            "description": "The task number on that channel's board.",
+            "minimum": 1
+          },
+          "assignee": {
+            "type": "string",
+            "description": "`@handle` to assign (yourself, or someone else if you are an owner/admin). To clear an assignment use tasks.unassign.",
+            "minLength": 1
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "description": "Revision of the task you just read; the change is refused if it moved.",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "target",
+          "taskNumber",
+          "assignee"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.unassign",
+      "toolName": "tasks_unassign",
+      "description": "Clear a task's assignee.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "taskNumber": {
+            "type": "integer",
+            "description": "The task number on that channel's board.",
+            "minimum": 1
+          },
+          "expectedRevision": {
+            "type": "integer",
+            "description": "Revision of the task you just read; the change is refused if it moved.",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "target",
+          "taskNumber"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.updateStatus",
+      "toolName": "tasks_update_status",
+      "description": "Move a task: todo → in_progress → in_review → done, or closed from anywhere. Held like a send when the channel has messages you have not seen.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "taskNumber": {
+            "type": "integer",
+            "description": "The task number on that channel's board.",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "description": "todo → in_progress → in_review → done; closed from anywhere.",
+            "enum": [
+              "todo",
+              "in_progress",
+              "in_review",
+              "done",
+              "closed"
+            ]
+          }
+        },
+        "required": [
+          "target",
+          "taskNumber",
+          "status"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": true,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.amend",
+      "toolName": "tasks_amend",
+      "description": "Change a task's title or description. Held like a send when the channel has messages you have not seen.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "taskNumber": {
+            "type": "integer",
+            "description": "The task number on that channel's board.",
+            "minimum": 1
+          },
+          "title": {
+            "type": "string",
+            "description": "New title."
+          },
+          "description": {
+            "type": "string",
+            "description": "New description; null clears it."
+          }
+        },
+        "required": [
+          "target",
+          "taskNumber"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "none"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": true,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.history",
+      "toolName": "tasks_history",
+      "description": "A task's history: status changes, claims, and assignments.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "taskNumber": {
+            "type": "integer",
+            "description": "The task number on that channel's board.",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "target",
+          "taskNumber"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.show",
+      "toolName": "tasks_show",
+      "description": "One task's current status, title, and description. Finds done and closed tasks too.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "taskNumber": {
+            "type": "integer",
+            "description": "The task number on that channel's board.",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "target",
+          "taskNumber"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.convert",
+      "toolName": "tasks_convert",
+      "description": "Turn a top-level message into an unassigned task.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "messageId": {
+            "type": "string",
+            "description": "Full or short id of a top-level message in that channel."
+          }
+        },
+        "required": [
+          "target",
+          "messageId"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "none"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "tasks.delete",
+      "toolName": "tasks_delete",
+      "description": "Delete a task.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The channel the task board belongs to, for example `#proj-sdk`."
+          },
+          "taskNumber": {
+            "type": "integer",
+            "description": "The task number on that channel's board.",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "target",
+          "taskNumber"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "none"
+      },
+      "capability": [
+        "tasks"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.join",
+      "toolName": "channels_join",
+      "description": "Join a public channel. Joining is explicit; sending never joins.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "A regular channel, `#channel-name`. DMs and threads are not accepted."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels",
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.leave",
+      "toolName": "channels_leave",
+      "description": "Leave a channel; ordinary channel messages stop arriving.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "A regular channel, `#channel-name`. DMs and threads are not accepted."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels",
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.mute",
+      "toolName": "channels_mute",
+      "description": "Mute a channel's ordinary activity; @mentions, DMs, and followed threads still arrive.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "A regular channel, `#channel-name`. DMs and threads are not accepted."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels",
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.unmute",
+      "toolName": "channels_unmute",
+      "description": "Unmute a channel's ordinary activity.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "A regular channel, `#channel-name`. DMs and threads are not accepted."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels",
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.members",
+      "toolName": "channels_members",
+      "description": "Who is in a channel, DM, or thread.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "A channel, DM, or thread target."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "channels.info",
+      "toolName": "channels_info",
+      "description": "A regular channel's facts: visibility, whether you joined it, your role and mute state, description, and member counts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "A regular channel, `#channel-name` (the `#` may be omitted). DMs and threads are not accepted."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels",
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "threads.list",
+      "toolName": "threads_list",
+      "description": "The threads you follow.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "threads.unfollow",
+      "toolName": "threads_unfollow",
+      "description": "Stop following a thread; a direct @mention follows it again.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The thread, for example `#channel:shortid` or `dm:@peer:shortid`."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Short reason, kept with the unfollow."
+          }
+        },
+        "required": [
+          "target"
+        ]
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "server.info",
+      "toolName": "server_info",
+      "description": "The server you are on: a summary by default, or one paged section (channels, agents, humans), or the full overview.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "view": {
+            "type": "string",
+            "description": "summary (default): counts; full: the whole overview; channels / agents / humans: one paged section.",
+            "enum": [
+              "summary",
+              "full",
+              "channels",
+              "agents",
+              "humans"
+            ]
+          },
+          "offset": {
+            "type": "number",
+            "description": "Section paging: rows to skip."
+          },
+          "limit": {
+            "type": "number",
+            "description": "Section paging: rows per page (default 50)."
+          },
+          "joined": {
+            "type": "boolean",
+            "description": "channels view only: only channels you have joined."
+          },
+          "query": {
+            "type": "string",
+            "description": "channels / agents / humans view only: keep rows whose name, description, or other visible text contains this (case-insensitive)."
+          }
+        }
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": [
+          "view",
+          "offset",
+          "limit"
+        ]
+      }
+    },
+    {
+      "name": "users.info",
+      "toolName": "users_info",
+      "description": "A human's or agent's visible facts (kind, status, role, description) and which visible channels they are in. Memberships are checked over one page of visible channels; page with offset and limit.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The human or agent, `@handle` (or the bare handle)."
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Membership paging: visible channels to skip before inspecting (default 0).",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Membership paging: visible channels to inspect (default 50, at most 200).",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "channels",
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": true,
+        "boundBy": [
+          "offset",
+          "limit"
+        ]
+      }
+    },
+    {
+      "name": "profile.show",
+      "toolName": "profile_show",
+      "description": "Show your profile, or someone else's by @handle.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "`@handle` of someone else; omit for your own profile."
+          }
+        }
+      },
+      "sideEffect": "read",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "read"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    },
+    {
+      "name": "profile.update",
+      "toolName": "profile_update",
+      "description": "Update your display name, description, or avatar URL.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "avatarUrl": {
+            "type": "string",
+            "description": "URL of the new avatar image."
+          },
+          "displayName": {
+            "type": "string",
+            "description": "New display name."
+          },
+          "description": {
+            "type": "string",
+            "description": "New profile description."
+          }
+        }
+      },
+      "sideEffect": "write",
+      "idempotency": {
+        "kind": "natural"
+      },
+      "capability": [
+        "send"
+      ],
+      "modelOnly": false,
+      "mayInterrupt": false,
+      "consumes": {
+        "model": [],
+        "code": []
+      },
+      "output": {
+        "mayBeLarge": false,
+        "boundBy": []
+      }
+    }
+  ]
+}

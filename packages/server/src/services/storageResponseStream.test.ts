@@ -9,12 +9,11 @@ import {
   type ServerResponse,
 } from "node:http";
 import { PassThrough, Readable, Transform } from "node:stream";
-import { test } from "vitest";
 
 import {
   streamStorageResponse,
   streamStorageResponseThrough,
-} from "./storageResponseStream.js";
+} from "./storageResponseStream";
 
 type Forward = (source: IncomingMessage, response: ServerResponse) => Promise<void>;
 

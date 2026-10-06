@@ -1,9 +1,8 @@
 import { strict as assert } from "node:assert";
-import { test } from "vitest";
 import {
   getRisingWaveConnectionTimeoutMillis,
   getRisingWaveInboxRfc056ServingMode,
-} from "./risingwave.js";
+} from "./risingwave";
 
 test("RisingWave connection timeout defaults to a bounded fail-soft value", () => {
   assert.equal(getRisingWaveConnectionTimeoutMillis({}), 1_000);

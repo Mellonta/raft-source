@@ -1,10 +1,10 @@
-import { tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
-import { seedPlaywrightScenario } from "../test/seedPlaywrightScenario.js";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
+import { seedPlaywrightScenario } from "../test/seedPlaywrightScenario";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -72,6 +72,27 @@ test("POST /feedback/:reportId/transcript rejects malformed report-window timest
     },
   );
   assert.equal(res.status, 400);
+});
+
+test("POST /feedback/:reportId/transcript refuses a report id that is not a UUID before reaching the daemon", async ({ app }) => {
+  const seed = await seedPlaywrightScenario();
+  const token = await tokenForHuman(seed.user.email);
+  for (const reportId of ["report-1", encodeURIComponent("../x")]) {
+    const res = await fetch(
+      `${app.baseUrl}/api/servers/${seed.server.id}/machines/${seed.machine.id}/agents/${seed.agent.id}/feedback/${reportId}/transcript`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "X-Server-Id": seed.server.id,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      },
+    );
+    // guardUuidPathParams answers a uniform 404 for non-UUID path params.
+    assert.equal(res.status, 404, `${reportId}: ${res.status} ${await res.text()}`);
+  }
 });
 
 test("POST /feedback/:reportId/transcript rejects non-admin/non-creator members", async ({ app }) => {

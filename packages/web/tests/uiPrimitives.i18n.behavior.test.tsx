@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
+import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import DialogCard from "../src/components/ui/DialogCard";
 import ProgressBar from "../src/components/ui/ProgressBar";
-import Spinner from "../src/components/ui/Spinner";
 import { en as enMessages } from "../src/i18n/messages/en";
 import { zhCn as zhMessages } from "../src/i18n/messages/zh-cn";
 import { TestIntlProvider } from "./helpers/intl";
@@ -39,14 +40,25 @@ test("ProgressBar default aria-label uses zh-cn catalog", () => {
   assert.equal(screen.queryByRole("progressbar", { name: "Progress" }), null);
 });
 
-test("Spinner default aria-label uses zh-cn catalog", () => {
-  render(
-    <TestIntlProvider locale="zh-cn">
-      <Spinner />
-    </TestIntlProvider>,
-  );
-  assert.ok(screen.getByRole("status", { name: zh["common.loadingLabel"] }));
-  assert.equal(screen.queryByRole("status", { name: "Loading" }), null);
+test("spinner call sites always announce with a localized label", () => {
+  // The primitive is RUI's Spinner now (its own default is the English
+  // "Loading"); each call site therefore carries either an explicit
+  // aria-label from our catalogs or is marked decorative.
+  const srcRoot = resolve(import.meta.dirname, "..", "src");
+  const files = execSync(
+    `grep -rl "<Spinner" ${srcRoot} --include=*.tsx`,
+    { encoding: "utf8" },
+  ).trim().split("\n").filter(Boolean);
+  assert.ok(files.length > 0);
+  for (const file of files) {
+    const src = readFileSync(file, "utf8");
+    for (const tag of src.matchAll(/<Spinner\b[\s\S]{0,320}?\/>/g)) {
+      assert.ok(
+        /aria-label=|aria-hidden="true"/.test(tag[0]),
+        `${file}: every Spinner needs an aria-label or aria-hidden`,
+      );
+    }
+  }
 });
 
 test("DialogCard renders and executes its zh-cn close control", () => {

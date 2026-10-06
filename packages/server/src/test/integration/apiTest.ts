@@ -1,7 +1,7 @@
-import { dbTest } from "./dbTest.js";
-import type { TestAppOptions, createTestApp } from "./app.js";
+import { dbTest } from "./dbTest";
+import type { TestAppOptions, createTestApp } from "./app";
 
-import type { createHttpClient } from "./http.js";
+import type { createHttpClient } from "./http";
 
 interface ApiFixtures {
   appOptions: TestAppOptions;
@@ -16,14 +16,14 @@ export function createApiTest(options: TestAppOptions = {}) {
   return dbTest.extend<ApiFixtures>({
     appOptions: options,
     http: async ({ app }, use) => {
-      const { createHttpClient } = await import("./http.js");
+      const { createHttpClient } = await import("./http");
       await use(createHttpClient(app.baseUrl));
     },
     app: async ({ db, appOptions, lifecycle }, use) => {
       void db;
       // DB-only tests do not import the entire Express/Socket.io dependency graph.
       const app = await lifecycle.measure("app", async () => {
-        const { createTestApp } = await import("./app.js");
+        const { createTestApp } = await import("./app");
         return createTestApp(0, appOptions);
       });
       await use(app);

@@ -2,13 +2,13 @@ import {
   type AgentProxyFreshnessDecision,
   type AgentProxyInboxCoordinator,
   type AgentProxyVisibleMessage,
-} from "./agentCredentialProxy.js";
-import { inboxProjectionTraceAttrs } from "./agentRuntimeInput.js";
+} from "./agentCredentialProxy";
+import { inboxProjectionTraceAttrs } from "./agentRuntimeInput";
 import {
   buildApmFreshnessDecisionProducerFactId,
   projectApmFreshnessDecisionTrace,
-} from "./apmStateMachine.js";
-import { daemonProxyFailureTraceAttrs, daemonTransportErrorExcerpt } from "./proxyFailureTrace.js";
+} from "./apmStateMachine";
+import { daemonProxyFailureTraceAttrs, daemonTransportErrorExcerpt } from "./proxyFailureTrace";
 
 type TraceRecorder = (
   name: string,
@@ -24,6 +24,7 @@ export function buildAgentProxyInboxCoordinator(input: {
   getBoundary: AgentProxyInboxCoordinator["getBoundary"];
   getPendingMessages: AgentProxyInboxCoordinator["getPendingMessages"];
   isMessageModelSeen: NonNullable<AgentProxyInboxCoordinator["isMessageModelSeen"]>;
+  getExactSeenSeqs?: AgentProxyInboxCoordinator["getExactSeenSeqs"];
   getAllPendingMessages: NonNullable<AgentProxyInboxCoordinator["getAllPendingMessages"]>;
   consumeVisibleMessages: AgentProxyInboxCoordinator["consumeVisibleMessages"];
   recordTrace: TraceRecorder;
@@ -33,6 +34,7 @@ export function buildAgentProxyInboxCoordinator(input: {
     getBoundary: input.getBoundary,
     getPendingMessages: input.getPendingMessages,
     isMessageModelSeen: input.isMessageModelSeen,
+    getExactSeenSeqs: input.getExactSeenSeqs,
     getAllPendingMessages: input.getAllPendingMessages,
     consumeVisibleMessages: input.consumeVisibleMessages,
     recordInboxSnapshot: (projection) => input.recordTrace("daemon.agent.inbox_projection.snapshot", {

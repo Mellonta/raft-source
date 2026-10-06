@@ -5,13 +5,13 @@ import {
   enqueueLifecycleOperation,
   hasPendingLifecycleAction,
   type ComputerLifecycleTrigger,
-} from "./lifecycleOperations.js";
-import { readServerAttachment, type ServerAttachment } from "./serverState.js";
+} from "./lifecycleOperations";
+import { readServerAttachment, type ServerAttachment } from "./serverState";
 import {
   ensureUsableUserSession,
   type UsableUserSession,
-} from "./lib/userSession.js";
-import { computerFetch } from "./proxy.js";
+} from "./lib/userSession";
+import { computerFetch } from "./proxy";
 
 export type ComputerLifecycleIntentResult =
   | { status: "accepted"; operationId: string }
@@ -33,7 +33,6 @@ type ComputerLifecycleIntentInput = ComputerLifecycleIntentIdentity & (
   | {
       action: "upgrade";
       targetVersion: string;
-      completionMode?: "legacy_k_promoted";
     }
   | {
       action: Exclude<ComputerLifecycleAction, "upgrade">;
@@ -66,7 +65,6 @@ export class ComputerLifecycleClient {
           ...(input.action === "upgrade"
             ? {
                 targetVersion: input.targetVersion,
-                ...(input.completionMode ? { completionMode: input.completionMode } : {}),
               }
             : {}),
         }),
@@ -271,7 +269,6 @@ export async function prepareExactLocalUpgradeLifecycleOperationResult(
     parentOperationId: operationId,
     action: "upgrade",
     targetVersion,
-    completionMode: "legacy_k_promoted",
   });
   if (result.status === "rejected") {
     if (result.code === "computer_offline"

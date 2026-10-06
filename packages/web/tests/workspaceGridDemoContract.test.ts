@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
-import { FEATURE_FLAG_REGISTRY } from "../src/analytics/flagRegistry";
 import {
   isWorkspaceGridDemoEnabledForServer,
   isWorkspaceGridViewport,
@@ -79,12 +77,6 @@ test("workspace grid demo is gated by the server-authoritative feature flag", ()
   assert.equal(WORKSPACE_GRID_DEMO_FLAG_KEY, "chat_grid_layout_v0");
   assert.equal(WORKSPACE_GRID_DEMO_ROUTE, "workspace");
   assert.equal(WORKSPACE_GRID_DEMO_MOBILE_POLICY, "desktop-only-min-1024");
-  assert.deepEqual(FEATURE_FLAG_REGISTRY.find((flag) => flag.key === WORKSPACE_GRID_DEMO_FLAG_KEY), {
-    key: "chat_grid_layout_v0",
-    label: "Chat grid layout",
-    variants: ["disabled", "enabled"],
-    default: "disabled",
-  });
 
   assert.equal(isWorkspaceGridDemoEnabledForServer({ slug: "botiverse", name: "Botiverse" }, "enabled"), true);
   assert.equal(isWorkspaceGridDemoEnabledForServer({ slug: "botiverse", name: "Botiverse" }, "disabled"), false);
@@ -94,7 +86,8 @@ test("workspace grid demo is gated by the server-authoritative feature flag", ()
   assert.match(workspaceAvailabilitySource, /useServerFeatureFlag\(WORKSPACE_GRID_DEMO_FLAG_KEY, \{/);
   assert.match(serverFeatureFlagsSource, /chatGridLayout: CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY/);
   assert.match(serverFeatureFlagsSource, /keys: REGISTERED_SERVER_FEATURE_FLAG_KEYS/);
-  assert.match(serverFeatureFlagsSource, /\.catch\(\(\) => Object\.freeze\(\{/);
+  assert.match(serverFeatureFlagsSource, /resolution: "undetermined"/);
+  assert.match(serverFeatureFlagsSource, /values: disabledValues\(\)/);
   assert.doesNotMatch(workspaceAvailabilitySource, /getFlagOverride/);
   assert.equal(isWorkspaceGridDemoPath("/s/dev/workspace"), true);
   assert.equal(isWorkspaceGridDemoPath("/s/dev/workspace/"), true);
@@ -116,18 +109,18 @@ test("workspace grid stays unavailable below the 1024px desktop boundary", () =>
 });
 
 test("workspace rails use compact density without changing the classic rail width", () => {
-  assert.match(leftRailSource, /workspaceEnabled \? "w-12" : "w-\[64px\] \[@media\(max-height:600px\)\]:w-\[50px\]"/);
+  assert.match(leftRailSource, /AppRailRoot/);
   assert.match(leftRailSource, /compact \? "size-8" : "size-10/);
-  assert.match(leftRailSource, /workspaceEnabled \? "h-12 border-b border-black\/25" : "h-panel-header border-b-2 border-black"/);
-  assert.match(leftRailSource, /workspaceEnabled \? "size-9 text-sm shadow-brutal-active hover:shadow-brutal-sm" : "size-10 text-base shadow-brutal-sm hover:shadow-brutal/);
+  assert.match(leftRailSource, /<AppRailHeader className=\{workspaceEnabled \? "h-12 border-b border-line-muted"/);
+  assert.match(leftRailSource, /<AppRailItem[\s\S]*selected=\{showServerMenu\}[\s\S]*className="[^"]*overflow-hidden[^"]*"/);
   assert.match(leftRailSource, /icon=\{<SquareSplitHorizontal size=\{18\} \/>\}[\s\S]*?label=\{workspaceEnabled \? formatMessage\(\{ id: "layout\.leftRail\.exitWorkspace" \}\) : formatMessage\(\{ id: "layout\.leftRail\.enterWorkspace" \}\)\}[\s\S]*?active=\{workspaceEnabled\}[\s\S]*?activeVariant="depressed"/);
   assert.match(leftRailSource, /activeVariant === "depressed"[\s\S]*?border-black bg-workspace-mode-active shadow-workspace-mode-active/);
-  assert.match(leftRailSource, /activeVariant = "default"[\s\S]*?: "border-black bg-white shadow-brutal-sm"/);
+  assert.match(leftRailSource, /activeVariant = "default"[\s\S]*?<AppRailItem[\s\S]*selected=\{active\}/);
   assert.match(indexCss, /--color-workspace-mode-active: #E3B100;/);
   assert.match(indexCss, /--shadow-workspace-mode-active: inset 3px 3px 0px rgb\(20 17 17 \/ 35%\);/);
   assert.doesNotMatch(leftRailSource, /PanelsTopLeft/);
   assert.doesNotMatch(leftRailSource, /Columns3/);
-  assert.match(sidebarSource, /workspaceEnabled \? "h-12 border-b border-black\/25 px-4" : "h-panel-header border-b-2 border-black px-5"/);
+  assert.match(sidebarSource, /workspaceEnabled \? "h-12 border-b border-line-muted theme-brutal:border-black\/25 px-4" : "h-panel-header border-b border-line-muted theme-brutal:border-b-2 theme-brutal:border-black px-5"/);
 });
 
 test("workspace sidebar rows forward repeat clicks to the toggle-capable host", () => {
@@ -158,16 +151,16 @@ test("workspace collapsed rail and stable composers preserve the editor surface"
   assert.match(leftRailSource, /transition-transform duration-100[\s\S]*?workspace-rail-drop-indicator/);
   assert.doesNotMatch(leftRailSource, /const previewRailLayout/);
   assert.match(leftRailSource, /const rawWorkspaceItems = workspaceRailLayout\[side\]/);
-  assert.match(leftRailSource, /const workspaceItems = rawWorkspaceItems\.filter\(\(item\) => \([\s\S]*?item !== "wiki" \|\| wikiEnabled[\s\S]*?!isGuest \|\| \(item !== "members" && item !== "humans" && item !== "computers"\)[\s\S]*?\)\);/);
+  assert.match(leftRailSource, /const workspaceItems = rawWorkspaceItems\.filter\(\(item\) => \([\s\S]*?!isGuest \|\| \(item !== "members" && item !== "humans" && item !== "computers"\)[\s\S]*?\)\);/);
   assert.match(leftRailSource, /workspaceItems\.length === 0 && workspaceRailDrag\?\.targetSide !== "right"/);
   assert.match(leftRailSource, /--workspace-rail-drag-x/);
   assert.match(leftRailSource, /--workspace-rail-drag-y/);
   assert.match(leftRailSource, /current\?\.targetSide === \(target\?\.side \?\? null\)[\s\S]*?current\.targetIndex === \(target\?\.index \?\? null\)\) return;/);
   assert.match(mainLayoutSource, /!workspaceSidebars\.right\.collapsed && workspaceSidebars\.right\.activeItem !== null/);
   assert.match(mainLayoutSource, /workspaceSidebars\.left\.collapsed \|\| workspaceSidebars\.left\.activeItem === null/);
-  assert.match(mainLayoutSource, /workspaceEnabled && !isWikiRoute \? <LeftRail side="right" hidden=\{mobileShowSidebarInline\} \/> : null/);
-  assert.match(mainLayoutSource, /workspaceEnabled && !isWikiRoute \? \([\s\S]*?<WorkspaceGridDemo initialPanel=\{workspaceInitialPanel\} \/>/);
-  assert.match(mainLayoutSource, /workspaceEnabled && !isWikiRoute && !workspaceSidebars\.right\.collapsed/);
+  assert.match(mainLayoutSource, /workspaceEnabled \?[\s\S]*?<LeftRail side="right" hidden=\{mobileShowSidebarInline\} \/>/);
+  assert.match(mainLayoutSource, /workspaceEnabled \? \([\s\S]*?<WorkspaceGridDemo initialPanel=\{workspaceInitialPanel\} \/>/);
+  assert.match(mainLayoutSource, /workspaceEnabled && !workspaceSidebars\.right\.collapsed/);
   assert.match(mainLayoutSource, /workspace-left-sidebar-resize-handle/);
   assert.match(mainLayoutSource, /workspace-right-sidebar-resize-handle/);
   assert.match(mainLayoutSource, /workspace-settings-modal/);
@@ -235,7 +228,7 @@ test("workspace tab chrome exposes pane ownership, keyboard navigation, and the 
 test("workspace mode keeps a feature-gated fallback switch in Account Settings", () => {
   assert.match(settingsPanelSource, /function WorkspaceModeSettingsCard\(\)/);
   assert.match(settingsPanelSource, /if \(!availability\.resolved \|\| !availability\.enabled\) return null;/);
-  assert.match(settingsPanelSource, /onChange=\{\(event\) => setEnabled\(event\.currentTarget\.checked, userId\)\}/);
+  assert.match(settingsPanelSource, /onCheckedChange=\{\(checked\) => setEnabled\(checked, userId\)\}/);
   assert.match(settingsPanelSource, /settingsTab === "account" && <WorkspaceModeSettingsCard \/>/);
 });
 

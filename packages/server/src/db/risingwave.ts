@@ -1,8 +1,50 @@
 import pg from "pg";
+import { attachPoolClientErrorHandler } from "./pgPoolErrorHandler";
 import { performance } from "node:perf_hooks";
+import { recordExternalSinkInsideTransaction } from "./ambientTransaction";
 
 export const RISINGWAVE_UNREAD_INBOX_CONTRACT_VERSION = 2;
-export type RisingWaveInboxItemsServingVersion = 1 | 2 | 3;
+/**
+ * The unified chain's reader-facing views. Every reader of one request-path -- the
+ * Activity list, the Activity badge, the mobile push badge, agent recovery and the
+ * sidebar -- takes its views from this ONE set, so no two of them can count by
+ * different rules. There is no generation switch: rolling back is a deploy revert.
+ *
+ * The totals are stacked ON the serving view on purpose (tygg's ruling
+ * 2026-09-20): they inherit every serving predicate (mention-only zeroing, target
+ * kinds, watermark, free-tier cutoff) by construction, so a badge is
+ * definitionally the sum of what its list shows. Rebuild scripts must carry this
+ * dependent.
+ *
+ * The set is the chain on mention v6 (infra/risingwave/sql/067-mention-v6.sql and
+ * 068-chain-mention-v6-consumers.sql), carrying the v5 semantics
+ * (infra/risingwave/sql/063-chain-v5.sql: mute acts at admission, the watermark is
+ * per (receiver, server), every (user, server) membership has a totals row).
+ * message_mentions.channel_id of a joint conversation is the SENDER's local
+ * projection while the message lives in canonical storage; rw_inbox_mention_v5
+ * keyed mentions by that raw id and dropped every one of them. rw_inbox_mention_v6
+ * maps a projection id to its canonical storage first, then fans out to local
+ * targets (projected targets are membership-gated). Every older reader view sits
+ * on the dropping arm.
+ *
+ * agentInbox (rw_agent_inbox_v5) owns the offer rules (offered rows only, thread
+ * deliverability, a mention beyond the admitted stream pierces a mute,
+ * offered_unread / activity_seq), and the app reads its columns without
+ * re-deriving them.
+ *
+ * conversationUnread (rw_conversation_unread_v2; rw_inbox_muted_full_v1 in
+ * infra/risingwave/sql/066-conversation-unread-v1.sql) is the sidebar's unread
+ * source -- GET /channels/unread (bare and summary) and the per-server pink badge
+ * (GET /servers/unread-summary).
+ */
+export const CONVERSATION_UNREAD_VIEW = "rw_conversation_unread_v2";
+export const UNIFIED_CHAIN_VIEWS = {
+  serving: "rw_inbox_serving_v6",
+  totals: "rw_activity_totals_v4",
+  agentInbox: "rw_agent_inbox_v5",
+  conversationUnread: CONVERSATION_UNREAD_VIEW,
+} as const;
+export type RisingWaveInboxItemsServingVersion = 2 | 3;
 export type RisingWaveInboxRfc056ServingMode = "off" | "shadow" | "on";
 export const RISINGWAVE_UNREAD_INBOX_SERVING_VERSION: RisingWaveInboxItemsServingVersion = 2;
 const DEFAULT_RISINGWAVE_CONNECTION_TIMEOUT_MS = 1_000;
@@ -47,9 +89,16 @@ export function isRisingWaveConfigured(env: NodeJS.ProcessEnv = process.env): bo
   return Boolean(getRisingWaveDatabaseUrl(env));
 }
 
-export function isRisingWaveFollowedThreadStatsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  // Default-on once RisingWave is configured; set the version to "0" only for emergency rollback.
-  return env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION !== "0" && isRisingWaveConfigured(env);
+/**
+ * RisingWave is a hard dependency of the server: the Activity, followed-thread
+ * and sidebar unread reads are served from it only. With no RisingWave
+ * configured those reads fail with this error; there is no Postgres fallback.
+ */
+export class RisingWaveNotConfiguredError extends Error {
+  constructor(surface: string) {
+    super(`RisingWave is not configured (RISINGWAVE_DATABASE_URL is unset); cannot serve ${surface}`);
+    this.name = "RisingWaveNotConfiguredError";
+  }
 }
 
 export function getRisingWaveConnectionTimeoutMillis(env: NodeJS.ProcessEnv = process.env): number {
@@ -68,6 +117,11 @@ export async function queryRisingWave<T extends pg.QueryResultRow = any>(
   queryText: string,
   values?: unknown[],
 ): Promise<RisingWaveQueryRead<T>> {
+  // A RisingWave read is an external round-trip; if it runs while a Postgres
+  // transaction is open, that transaction sits idle holding a connection waiting
+  // on RisingWave. Report it to the audit file (when enabled) so the test suite
+  // can surface any such call site at any depth.
+  recordExternalSinkInsideTransaction("risingwave");
   const acquireStartedAt = performance.now();
   const client = await pool.connect();
   const acquireWaitMs = performance.now() - acquireStartedAt;
@@ -107,6 +161,10 @@ export function getRisingWavePool(): pg.Pool | null {
   _risingWavePool.on("error", (err) => {
     console.error("[risingwave] unexpected pool error:", err.message);
   });
+  // Same crash guard as the primary pool (task #269): pg-pool detaches its
+  // idle 'error' listener from checked-out clients, so a dropped connection
+  // between queries would otherwise take the process down.
+  attachPoolClientErrorHandler(_risingWavePool, "risingwave");
   return _risingWavePool;
 }
 

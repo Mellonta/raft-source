@@ -9,7 +9,7 @@
  * definitions + normalizers + builders.
  */
 
-import { currentTimeMs } from "./clock.js";
+import { currentTimeMs } from "./clock";
 
 /** Closed set of primary action kinds. App payloads cannot invent shell commands. */
 export type AgentInboxPrimaryActionKind = "open_target" | "run_command" | "none";
@@ -43,6 +43,19 @@ export type AgentInboxSourceRef = {
   revision?: string;
 };
 
+/** Local, owner-labelled hold on one exact app source identity. */
+export type AgentInboxItemSeal = {
+  owner: string;
+  until: string;
+  sealedAtMs: number;
+};
+
+export type AgentInboxSourceSeal = AgentInboxItemSeal & {
+  appId: string;
+  notificationClass: string;
+  sourceRef: AgentInboxSourceRef;
+};
+
 export type AgentInboxAppItem = {
   source: "app";
   itemId: string;
@@ -61,6 +74,8 @@ export type AgentInboxAppItem = {
   title?: string;
   summary?: string;
   createdAtMs?: number;
+  /** Read projection only; the daemon persists seals separately from app items. */
+  seal?: AgentInboxItemSeal;
 };
 
 /** Preview (title/summary) bounds — OS mint fail-closed; prevents multi-line action forgery. */
@@ -70,7 +85,7 @@ export const AGENT_INBOX_PREVIEW_MAX_CHARS = 120;
 export type AgentInboxMessageTargetItem = {
   source: "message_target";
   /** Legacy content-free target row — byte-compatible with existing renderers. */
-  row: import("./agentInbox.js").AgentInboxTargetRow;
+  row: import("./agentInbox").AgentInboxTargetRow;
 };
 
 export type AgentInboxItem = AgentInboxMessageTargetItem | AgentInboxAppItem;
@@ -110,8 +125,12 @@ export function formatAgentInboxAppItem(item: AgentInboxAppItem): string {
     `item=${shortId(item.itemId)}`,
     `retention=${item.retention}`,
     `sourceRef=${formatAgentInboxSourceRef(item.sourceRef)}`,
-    `action=${item.actionCli}`,
   ];
+  if (item.seal) {
+    parts.push(`sealed owner=${item.seal.owner}`, `unseal_when=${item.seal.until}`);
+  } else {
+    parts.push(`action=${item.actionCli}`);
+  }
   if (item.title) parts.push(`title=${item.title}`);
   if (item.summary) parts.push(`summary=${item.summary}`);
   return parts.join(" · ");
@@ -133,9 +152,9 @@ export function formatAgentInboxAppItems(items: readonly AgentInboxAppItem[]): s
  * byte-for-byte (no app section, no header drift).
  */
 export function formatAgentInboxFullSnapshot(input: {
-  messageRows: readonly import("./agentInbox.js").AgentInboxTargetRow[];
+  messageRows: readonly import("./agentInbox").AgentInboxTargetRow[];
   appItems?: readonly AgentInboxAppItem[];
-  formatMessageRows: (rows: readonly import("./agentInbox.js").AgentInboxTargetRow[]) => string;
+  formatMessageRows: (rows: readonly import("./agentInbox").AgentInboxTargetRow[]) => string;
 }): string {
   const messagePart = input.formatMessageRows(input.messageRows);
   const apps = input.appItems ?? [];

@@ -1,7 +1,6 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
-import { planRoutedOwnershipAction } from "./agentOrchestrator.js";
+import { planRoutedOwnershipAction } from "./agentOrchestrator";
 
 test("planRoutedOwnershipAction handles locally when the machine is local", () => {
   assert.equal(

@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { describe, it } from "vitest";
 import {
   decryptProductFeedbackRouteSubject,
   deriveProductFeedbackRouteMaterial,
   feedbackRouteTuple,
   mintProductFeedbackRouteSubject,
-} from "./productFeedbackRouteSubject.js";
+} from "./productFeedbackRouteSubject";
 
 describe("product feedback route subject", () => {
   const root = Buffer.from("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "hex");

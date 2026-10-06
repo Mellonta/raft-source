@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { rankComposerSuggestions } from "../src/utils/composerSuggestionSearch.js";
+import { rankComposerSuggestions } from "../src/utils/composerSuggestionSearch";
 import {
   createPeopleSuggestionSearchEntries,
-} from "../src/utils/peopleSuggestionSearch.js";
+} from "../src/utils/peopleSuggestionSearch";
 import type {
   PeopleSuggestionCandidate,
-} from "../src/utils/peopleSuggestionSearch.js";
+} from "../src/utils/peopleSuggestionSearch";
 
 interface Person {
   id: string;

@@ -1,14 +1,65 @@
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig } from "@botiverse/raft-shared";
-import type { SpawnContext } from "./types.js";
-import { buildCliSystemPrompt, type SystemPromptOptions } from "./systemPrompt.js";
+import { hydrateRuntimeConfig, kPromotedSlotPath, resolveLiveExecutablePath, runtimeConfigToLaunchFields, type AgentConfig } from "@botiverse/raft-shared";
+import type { SpawnContext } from "./types";
+import { buildCliSystemPrompt, type SystemPromptOptions } from "./systemPrompt";
 import type { AxSurfaceText } from "@botiverse/raft-shared";
-import { SLOCK_HOME_ENV, resolveRaftHome } from "../raftHome.js";
-import { registerAgentCredentialProxy } from "../agentCredentialProxy.js";
-import { LOOPBACK_NO_PROXY, applyLoopbackNoProxyEnv } from "../loopbackNoProxy.js";
-import { detectNodeHostKind, resolveNodeHostLaunch, type NodeHostKind } from "./nodeHostLaunch.js";
+import { SLOCK_HOME_ENV, resolveRaftHome } from "../raftHome";
+import { registerAgentCredentialProxy } from "../agentCredentialProxy";
+import { configPassiveAx, publishSpawnContextGeneration } from "../contextGeneration";
+import { LOOPBACK_NO_PROXY, applyLoopbackNoProxyEnv } from "../loopbackNoProxy";
+import { detectNodeHostKind, resolveNodeHostLaunch, type NodeHostKind } from "./nodeHostLaunch";
+
+/** `dev:ino` of a file, or null when the platform cannot report one. */
+export function executableFileIdentity(path: string): string | null {
+  try {
+    const stat = statSync(path);
+    return stat.ino > 0 ? `${stat.dev}:${stat.ino}` : null;
+  } catch {
+    return null;
+  }
+}
+
+let readProcSelfExeForHost: () => string | null = () => {
+  try {
+    return readlinkSync("/proc/self/exe");
+  } catch {
+    return null;
+  }
+};
+
+/** Test seam: a test that fakes process.execPath cannot fake /proc/self/exe. */
+export function setProcSelfExeReaderForTests(reader: (() => string | null) | null): void {
+  readProcSelfExeForHost = reader ?? (() => {
+    try {
+      return readlinkSync("/proc/self/exe");
+    } catch {
+      return null;
+    }
+  });
+}
+
+// Captured at module load, i.e. before any later K promotion or staging can
+// rename or replace the file behind process.execPath.
+const STARTUP_EXECUTABLE_IDENTITY = executableFileIdentity(process.execPath);
+
+/**
+ * The running binary's re-execable path for a SEA / unrecognised host. A K
+ * upgrade promotes the experiment slot to stable by renaming it under the
+ * running process, so the startup `process.execPath` can name a path that no
+ * longer exists; see liveExecutablePath in shared.
+ */
+export function liveHostExecutablePath(execPath: string = process.execPath): string {
+  return resolveLiveExecutablePath({
+    execPath,
+    platform: process.platform,
+    exists: existsSync,
+    readProcSelfExe: readProcSelfExeForHost,
+    identityOf: executableFileIdentity,
+    startupIdentity: STARTUP_EXECUTABLE_IDENTITY,
+  });
+}
 
 const shellSingleQuote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 const powershellSingleQuote = (value: string) => `'${value.replace(/'/g, "''")}'`;
@@ -54,6 +105,7 @@ const AGENT_CLI_TRANSPORT_WRAPPER_NAMES = [
   "raft.cmd",
   "raft.ps1",
 ] as const;
+const LAUNCH_CREATED_AT_FILENAME = ".slock-launch-created-at";
 
 function buildPosixLaunchForwardingGuard(ownSlockDir: string): string {
   // The selector passed via SLOCK_AGENT_LAUNCH_DIR is a single launch-directory
@@ -70,16 +122,50 @@ function buildPosixLaunchForwardingGuard(ownSlockDir: string): string {
     `# ${DAEMON_GENERATED_MARKER}`,
     `SLOCK_AGENT_ROOT=${shellSingleQuote(agentRoot)}`,
     `SLOCK_OWN_LAUNCH_DIR=${shellSingleQuote(ownLaunchPart)}`,
+    `SLOCK_LAUNCH_CREATED_AT_FILE=${shellSingleQuote(LAUNCH_CREATED_AT_FILENAME)}`,
+    'SLOCK_LAUNCH_CREATED_AT_RE=\'^[0-9]{13}$\'',
     'if [ -n "${SLOCK_AGENT_LAUNCH_DIR:-}" ] && [ "$SLOCK_AGENT_LAUNCH_DIR" != "$SLOCK_OWN_LAUNCH_DIR" ]; then',
+    '  SLOCK_LAUNCH_FORWARD_SKIP_REASON=invalid_selector',
     '  if [ "$SLOCK_AGENT_LAUNCH_DIR" != "." ] && [ "$SLOCK_AGENT_LAUNCH_DIR" != ".." ] && [[ ! "$SLOCK_AGENT_LAUNCH_DIR" =~ [/\\] ]]; then',
     '    SLOCK_FORWARD_DIR="$SLOCK_AGENT_ROOT/$SLOCK_AGENT_LAUNCH_DIR"',
+    '    SLOCK_LAUNCH_FORWARD_SKIP_REASON=selected_dir_missing',
     '    if [ -d "$SLOCK_FORWARD_DIR" ] && [ ! -L "$SLOCK_FORWARD_DIR" ]; then',
     '      SLOCK_FORWARD_WRAPPER="$SLOCK_FORWARD_DIR/$(basename "$0")"',
+    '      SLOCK_LAUNCH_FORWARD_SKIP_REASON=selected_wrapper_missing',
     '      if [ -f "$SLOCK_FORWARD_WRAPPER" ] && [ ! -L "$SLOCK_FORWARD_WRAPPER" ]; then',
-    '        exec "$SLOCK_FORWARD_WRAPPER" "$@"',
+    '        SLOCK_FORWARD_MARKER="$SLOCK_FORWARD_DIR/$SLOCK_LAUNCH_CREATED_AT_FILE"',
+    '        SLOCK_OWN_MARKER="$SLOCK_AGENT_ROOT/$SLOCK_OWN_LAUNCH_DIR/$SLOCK_LAUNCH_CREATED_AT_FILE"',
+    '        SLOCK_LAUNCH_FORWARD_SKIP_REASON=selected_marker_missing',
+    '        if [ -f "$SLOCK_FORWARD_MARKER" ] && [ ! -L "$SLOCK_FORWARD_MARKER" ]; then',
+    '          SLOCK_FORWARD_CREATED_AT=""',
+    '          IFS= read -r SLOCK_FORWARD_CREATED_AT < "$SLOCK_FORWARD_MARKER"',
+    '          SLOCK_OWN_CREATED_AT=""',
+    '          SLOCK_OWN_MARKER_PRESENT=""',
+    '          SLOCK_OWN_MARKER_VALID=""',
+    '          if [ -f "$SLOCK_OWN_MARKER" ] && [ ! -L "$SLOCK_OWN_MARKER" ]; then',
+    '            SLOCK_OWN_MARKER_PRESENT=1',
+    '            IFS= read -r SLOCK_OWN_CREATED_AT < "$SLOCK_OWN_MARKER"',
+    '            if [[ "$SLOCK_OWN_CREATED_AT" =~ $SLOCK_LAUNCH_CREATED_AT_RE ]]; then',
+    '              SLOCK_OWN_MARKER_VALID=1',
+    '            fi',
+    '          fi',
+    '          SLOCK_LAUNCH_FORWARD_SKIP_REASON=selected_marker_invalid',
+    '          if [[ "$SLOCK_FORWARD_CREATED_AT" =~ $SLOCK_LAUNCH_CREATED_AT_RE ]]; then',
+    '            SLOCK_LAUNCH_FORWARD_SKIP_REASON=own_marker_invalid',
+    '            if [ -z "$SLOCK_OWN_MARKER_PRESENT" ]; then',
+    '              exec "$SLOCK_FORWARD_WRAPPER" "$@"',
+    '            elif [ "$SLOCK_OWN_MARKER_VALID" = "1" ]; then',
+    '              SLOCK_LAUNCH_FORWARD_SKIP_REASON=selected_not_newer',
+    '              if [ "$SLOCK_FORWARD_CREATED_AT" \\> "$SLOCK_OWN_CREATED_AT" ]; then',
+    '                exec "$SLOCK_FORWARD_WRAPPER" "$@"',
+    '              fi',
+    '            fi',
+    '          fi',
+    '        fi',
     '      fi',
     '    fi',
     '  fi',
+    '  printf \'[cliTransport] launch-forwarding skipped reason=%s\\n\' "$SLOCK_LAUNCH_FORWARD_SKIP_REASON" >&2',
     'fi',
   ].join("\n");
 }
@@ -88,9 +174,11 @@ function buildCmdLaunchForwardingGuard(ownSlockDir: string): string {
   // The selector is a single launch-directory basename. The wrapper bakes its
   // own agent root and launch part so it can only forward to a sibling launch
   // dir under the same agent. Reject empty, ".", "..", or any selector
-  // containing "/" or "\\". The forward call and exit must stay inside the
-  // same setlocal/delayed-expansion scope so the resolved wrapper path and the
-  // called command's exit code are not lost across `endlocal`.
+  // containing "/" or "\\". The nested IF block only computes the target. The
+  // actual .cmd handoff uses the same undefined-goto pattern as cmd-shim so the
+  // target wrapper is the final command observed by cmd.exe /c. The normal path
+  // jumps to the current wrapper body, leaving its node invocation as the last
+  // command just like pre-forwarding wrappers.
   const agentRoot = path.dirname(ownSlockDir);
   const ownLaunchPart = path.basename(ownSlockDir);
   return [
@@ -98,8 +186,11 @@ function buildCmdLaunchForwardingGuard(ownSlockDir: string): string {
     "setlocal enabledelayedexpansion",
     `set "SLOCK_AGENT_ROOT=${agentRoot}"`,
     `set "SLOCK_OWN_LAUNCH_DIR=${ownLaunchPart}"`,
+    `set "SLOCK_LAUNCH_CREATED_AT_FILE=${LAUNCH_CREATED_AT_FILENAME}"`,
+    'set "SLOCK_FORWARD_TARGET="',
     "if defined SLOCK_AGENT_LAUNCH_DIR (",
     '  if /I not "!SLOCK_AGENT_LAUNCH_DIR!"=="!SLOCK_OWN_LAUNCH_DIR!" (',
+    '    set "SLOCK_LAUNCH_FORWARD_SKIP_REASON=invalid_selector"',
     '    set "SLOCK_SEL=!SLOCK_AGENT_LAUNCH_DIR!"',
     '    set "SLOCK_INVALID="',
     '    if "!SLOCK_SEL!"=="" set SLOCK_INVALID=1',
@@ -109,20 +200,59 @@ function buildCmdLaunchForwardingGuard(ownSlockDir: string): string {
     '    if not "!SLOCK_SEL:\\=!"=="!SLOCK_SEL!" set SLOCK_INVALID=1',
     '    if not defined SLOCK_INVALID (',
     '      set "SLOCK_FORWARD_DIR=!SLOCK_AGENT_ROOT!\\!SLOCK_SEL!"',
+    '      set "SLOCK_LAUNCH_FORWARD_SKIP_REASON=selected_dir_missing"',
     '      if exist "!SLOCK_FORWARD_DIR!\\" (',
     '        fsutil reparsepoint query "!SLOCK_FORWARD_DIR!" >nul 2>&1',
     '        if errorlevel 1 (',
     '          set "SLOCK_FORWARD_WRAPPER=!SLOCK_FORWARD_DIR!\\%~nx0"',
+    '          set "SLOCK_LAUNCH_FORWARD_SKIP_REASON=selected_wrapper_missing"',
     '          if exist "!SLOCK_FORWARD_WRAPPER!" if not exist "!SLOCK_FORWARD_WRAPPER!\\" (',
-    '            call "!SLOCK_FORWARD_WRAPPER!" %*',
-    '            exit /b !errorlevel!',
+    '            set "SLOCK_FORWARD_MARKER=!SLOCK_FORWARD_DIR!\\!SLOCK_LAUNCH_CREATED_AT_FILE!"',
+    '            set "SLOCK_OWN_MARKER=!SLOCK_AGENT_ROOT!\\!SLOCK_OWN_LAUNCH_DIR!\\!SLOCK_LAUNCH_CREATED_AT_FILE!"',
+    '            set "SLOCK_LAUNCH_FORWARD_SKIP_REASON=selected_marker_missing"',
+    '            if exist "!SLOCK_FORWARD_MARKER!" if not exist "!SLOCK_FORWARD_MARKER!\\" (',
+    '              set "SLOCK_FORWARD_CREATED_AT="',
+    '              set /p SLOCK_FORWARD_CREATED_AT=<"!SLOCK_FORWARD_MARKER!"',
+    '              set "SLOCK_LAUNCH_FORWARD_SKIP_REASON=selected_marker_invalid"',
+    '              set "SLOCK_FORWARD_MARKER_VALID="',
+    '              set "SLOCK_FORWARD_DIGITS=!SLOCK_FORWARD_CREATED_AT!"',
+    '              for %%D in (0 1 2 3 4 5 6 7 8 9) do set "SLOCK_FORWARD_DIGITS=!SLOCK_FORWARD_DIGITS:%%D=!"',
+    '              if "!SLOCK_FORWARD_DIGITS!"=="" if not "!SLOCK_FORWARD_CREATED_AT:~12,1!"=="" if "!SLOCK_FORWARD_CREATED_AT:~13!"=="" set "SLOCK_FORWARD_MARKER_VALID=1"',
+    '              set "SLOCK_OWN_CREATED_AT="',
+    '              set "SLOCK_OWN_MARKER_PRESENT="',
+    '              set "SLOCK_OWN_MARKER_VALID="',
+    '              if exist "!SLOCK_OWN_MARKER!" if not exist "!SLOCK_OWN_MARKER!\\" (',
+    '                set "SLOCK_OWN_MARKER_PRESENT=1"',
+    '                set /p SLOCK_OWN_CREATED_AT=<"!SLOCK_OWN_MARKER!"',
+    '                set "SLOCK_OWN_DIGITS=!SLOCK_OWN_CREATED_AT!"',
+    '                for %%D in (0 1 2 3 4 5 6 7 8 9) do set "SLOCK_OWN_DIGITS=!SLOCK_OWN_DIGITS:%%D=!"',
+    '                if "!SLOCK_OWN_DIGITS!"=="" if not "!SLOCK_OWN_CREATED_AT:~12,1!"=="" if "!SLOCK_OWN_CREATED_AT:~13!"=="" set "SLOCK_OWN_MARKER_VALID=1"',
+    '              )',
+    '              if defined SLOCK_FORWARD_MARKER_VALID (',
+    '                set "SLOCK_LAUNCH_FORWARD_SKIP_REASON=own_marker_invalid"',
+    '                if not defined SLOCK_OWN_MARKER_PRESENT (',
+    '                  set "SLOCK_FORWARD_TARGET=!SLOCK_FORWARD_WRAPPER!"',
+    '                ) else if defined SLOCK_OWN_MARKER_VALID (',
+    '                  set "SLOCK_LAUNCH_FORWARD_SKIP_REASON=selected_not_newer"',
+    '                  if "!SLOCK_FORWARD_CREATED_AT!" GTR "!SLOCK_OWN_CREATED_AT!" (',
+    '                    set "SLOCK_FORWARD_TARGET=!SLOCK_FORWARD_WRAPPER!"',
+    '                  )',
+    '                )',
+    '              )',
+    '            )',
     '          )',
     '        )',
     '      )',
     '    )',
     '  )',
     ')',
+    'if defined SLOCK_FORWARD_TARGET goto :slock_forward',
+    'if defined SLOCK_LAUNCH_FORWARD_SKIP_REASON >&2 echo [cliTransport] launch-forwarding skipped reason=!SLOCK_LAUNCH_FORWARD_SKIP_REASON!',
     'endlocal',
+    'goto :slock_current',
+    ':slock_forward',
+    'for %%F in ("%SLOCK_FORWARD_TARGET%") do endlocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%%~fF" %*',
+    ':slock_current',
   ].join("\r\n");
 }
 
@@ -139,21 +269,49 @@ function buildPs1LaunchForwardingGuard(ownSlockDir: string): string {
     `# ${DAEMON_GENERATED_MARKER}`,
     `$SlockAgentRoot = ${powershellSingleQuote(agentRoot)}`,
     `$SlockOwnLaunchDir = ${powershellSingleQuote(ownLaunchPart)}`,
+    `$SlockLaunchCreatedAtFile = ${powershellSingleQuote(LAUNCH_CREATED_AT_FILENAME)}`,
     '$SlockLaunchDir = $env:SLOCK_AGENT_LAUNCH_DIR',
     'if ($SlockLaunchDir -and ($SlockLaunchDir -ne $SlockOwnLaunchDir)) {',
     '    $invalid = ($SlockLaunchDir -in "", ".", "..") -or ($SlockLaunchDir -match "[/\\\\]")',
     '    if (-not $invalid) {',
     '        $ForwardDir = Join-Path $SlockAgentRoot $SlockLaunchDir',
+    '        $SkipReason = "selected_dir_missing"',
     '        $dirItem = Get-Item $ForwardDir -ErrorAction SilentlyContinue',
     '        if ($dirItem -and $dirItem.PSIsContainer -and (-not $dirItem.LinkType)) {',
     '            $ForwardTarget = Join-Path $ForwardDir (Split-Path -Leaf $PSCommandPath)',
+    '            $SkipReason = "selected_wrapper_missing"',
     '            $item = Get-Item $ForwardTarget -ErrorAction SilentlyContinue',
     '            if ($item -and ($item.PSIsContainer -eq $false) -and (-not $item.LinkType)) {',
-    '                & $ForwardTarget @args',
-    '                exit $LASTEXITCODE',
+    '                $ForwardMarker = Join-Path $ForwardDir $SlockLaunchCreatedAtFile',
+    '                $SkipReason = "selected_marker_missing"',
+    '                $forwardMarkerItem = Get-Item $ForwardMarker -ErrorAction SilentlyContinue',
+    '                if ($forwardMarkerItem -and ($forwardMarkerItem.PSIsContainer -eq $false) -and (-not $forwardMarkerItem.LinkType)) {',
+    '                    $ForwardCreatedAt = Get-Content -LiteralPath $ForwardMarker -TotalCount 1 -ErrorAction SilentlyContinue',
+    '                    $OwnMarker = Join-Path (Join-Path $SlockAgentRoot $SlockOwnLaunchDir) $SlockLaunchCreatedAtFile',
+    '                    $OwnCreatedAt = $null',
+    '                    $ownMarkerItem = Get-Item $OwnMarker -ErrorAction SilentlyContinue',
+    '                    if ($ownMarkerItem -and ($ownMarkerItem.PSIsContainer -eq $false) -and (-not $ownMarkerItem.LinkType)) {',
+    '                        $OwnCreatedAt = Get-Content -LiteralPath $OwnMarker -TotalCount 1 -ErrorAction SilentlyContinue',
+    '                    }',
+    '                    $ForwardMarkerValid = $ForwardCreatedAt -match "^\\d{13}$"',
+    '                    $OwnMarkerPresent = $null -ne $ownMarkerItem',
+    '                    $OwnMarkerValid = $OwnCreatedAt -match "^\\d{13}$"',
+    '                    $SkipReason = "selected_marker_invalid"',
+    '                    if ($ForwardMarkerValid -and ((-not $OwnMarkerPresent) -or ($OwnMarkerValid -and ([string]::CompareOrdinal($ForwardCreatedAt, $OwnCreatedAt) -gt 0)))) {',
+    '                        & $ForwardTarget @args',
+    '                        exit $LASTEXITCODE',
+    '                    }',
+    '                    if ($ForwardMarkerValid) {',
+    '                        if ($OwnMarkerPresent -and $OwnMarkerValid) { $SkipReason = "selected_not_newer" }',
+    '                        elseif ($OwnMarkerPresent) { $SkipReason = "own_marker_invalid" }',
+    '                    }',
+    '                }',
     '            }',
     '        }',
+    '    } else {',
+    '        $SkipReason = "invalid_selector"',
     '    }',
+    '    if ($SkipReason) { [Console]::Error.WriteLine("[cliTransport] launch-forwarding skipped reason=$SkipReason") }',
     '}',
   ].join("\r\n");
 }
@@ -346,7 +504,8 @@ function resolveOpencliBinPath(): string | null {
   }
 }
 
-function buildCliTransportDir(slockHome: string, agentId: string, launchId?: string | null): string {
+/** The per-launch transport directory `prepareCliTransport` creates and injects as SLOCK_CLI_TRANSPORT_DIR. */
+export function buildCliTransportDir(slockHome: string, agentId: string, launchId?: string | null): string {
   return path.join(slockHome, "cli-transport", safePathPart(agentId), buildCliTransportLaunchPart(launchId));
 }
 
@@ -403,7 +562,7 @@ export function writeOpencliWrapper(
   // could not identify.
   const nodeHost = hostKind === "electron" || hostKind === "node"
     ? resolveNodeHostLaunch({ env: process.env, execIsElectron, seaProbe })
-    : { command: process.execPath, env: process.env };
+    : { command: liveHostExecutablePath(), env: process.env };
   const electronNodeMode = execIsElectron && nodeHost.env.ELECTRON_RUN_AS_NODE === "1";
   const fallbacks = deriveOpencliFallbackCandidates(opencliBinPath);
   // If the resolved path is already gone, bake the best existing fallback as
@@ -551,6 +710,29 @@ export function buildCliTransportSystemPrompt(
   return buildCliSystemPrompt(config, opts);
 }
 
+/**
+ * The env every tool an agent runs must get: an overlay that, applied on top of
+ * the daemon's own process.env, yields exactly the prepared spawnEnv. It holds
+ * every spawnEnv value plus `undefined` for daemon keys spawnEnv deleted
+ * (credentials, profile selectors, proxy vars); Node's spawn omits undefined
+ * values, so those keys are unset. Child-process runtimes get spawnEnv
+ * directly; the in-process Kimi SDK runtime executes tools from the daemon
+ * process and must layer this overlay on its tool env.
+ */
+export function toolEnvFromSpawnEnv(
+  spawnEnv: NodeJS.ProcessEnv,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = {};
+  for (const key of Object.keys(baseEnv)) {
+    if (spawnEnv[key] === undefined) env[key] = undefined;
+  }
+  for (const [key, value] of Object.entries(spawnEnv)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  return env;
+}
+
 export async function prepareCliTransport(
   ctx: SpawnContext,
   extraEnv: Record<string, string | undefined> = {},
@@ -583,7 +765,7 @@ export async function prepareCliTransport(
   const hostKind = detectNodeHostKind({ execIsElectron, seaProbe });
   const nodeHost = hostKind === "electron" || hostKind === "node"
     ? resolveNodeHostLaunch({ env: process.env, execIsElectron, seaProbe })
-    : { command: process.execPath, env: process.env };
+    : { command: liveHostExecutablePath(), env: process.env };
   const electronNodeMode = execIsElectron && nodeHost.env.ELECTRON_RUN_AS_NODE === "1";
   // slockCliPath is the path to the bundled `slock` CLI script, OR the literal
   // `__cli` sentinel for a SEA single-binary Computer (the daemon re-execs
@@ -627,6 +809,17 @@ export async function prepareCliTransport(
   cleanupWorkspaceCliTransportFiles(ctx.workingDirectory);
   const slockDir = buildCliTransportDir(slockHome, ctx.agentId, ctx.launchId);
   mkdirSync(slockDir, { recursive: true });
+  // RFC 072 §7.2: this spawn's context id (new, or the resumed session's),
+  // written before the process exists so the CLI's first invocation reads it.
+  publishSpawnContextGeneration(slockDir, {
+    runtime: ctx.config.runtime,
+    resumeSessionId: ctx.config.sessionId,
+    passiveAx: configPassiveAx(ctx.config),
+  });
+  const launchCreatedAtFile = path.join(slockDir, LAUNCH_CREATED_AT_FILENAME);
+  if (!existsSync(launchCreatedAtFile)) {
+    writeFileSync(launchCreatedAtFile, Date.now().toString().padStart(13, "0"), { mode: 0o644 });
+  }
 
   const tokenFile = path.join(slockDir, "agent-token");
 
@@ -659,6 +852,7 @@ export async function prepareCliTransport(
       tracer: ctx.tracer,
       daemonVersion: ctx.daemonVersion,
       computerVersion: ctx.computerVersion,
+      passiveAx: configPassiveAx(ctx.config),
     });
     const launchPart = buildCliTransportLaunchPart(ctx.launchId);
     const proxyTokenDir = path.join(slockHome, "agent-proxy-tokens", safePathPart(ctx.agentId));
@@ -704,8 +898,15 @@ export async function prepareCliTransport(
     ? ""
     : `if [ ! -e "$SLOCK_CLI" ]; then\n${cliFallbackCandidates.map((candidate, i) =>
       `  ${i === 0 ? "if" : "elif"} [ -e ${shellSingleQuote(candidate)} ]; then SLOCK_CLI=${shellSingleQuote(candidate)};`).join("\n")}\n  fi\nfi\n`;
+  // A wrapper written while the host still runs from K's experiment slot
+  // outlives the promotion that renames that slot to stable; let it follow.
+  const hostPromotedPath = kPromotedSlotPath(nodeHost.command);
+  const posixHostPrelude = hostPromotedPath
+    ? `RAFT_HOST=${shellSingleQuote(nodeHost.command)}\n[ -e "$RAFT_HOST" ] || RAFT_HOST=${shellSingleQuote(hostPromotedPath)}\n`
+    : "";
+  const posixHostRef = hostPromotedPath ? '"$RAFT_HOST"' : shellSingleQuote(nodeHost.command);
   const posixBody =
-    `#!/usr/bin/env bash\n${buildPosixLaunchForwardingGuard(slockDir)}\nunset RAFT_PROFILE SLOCK_PROFILE RAFT_PROFILE_DIR SLOCK_PROFILE_DIR\n${posixLoopbackNoProxyPrelude()}\nSLOCK_CLI=${shellSingleQuote(cliPath)}\n${posixCliFallbackBlock}${electronNodeMode ? "export ELECTRON_RUN_AS_NODE=1\n" : ""}${posixCredentialPrefix}exec ${shellSingleQuote(nodeHost.command)} "$SLOCK_CLI" "$@"\n`;
+    `#!/usr/bin/env bash\n${buildPosixLaunchForwardingGuard(slockDir)}\nunset RAFT_PROFILE SLOCK_PROFILE RAFT_PROFILE_DIR SLOCK_PROFILE_DIR\n${posixLoopbackNoProxyPrelude()}\nSLOCK_CLI=${shellSingleQuote(cliPath)}\n${posixCliFallbackBlock}${electronNodeMode ? "export ELECTRON_RUN_AS_NODE=1\n" : ""}${posixHostPrelude}${posixCredentialPrefix}exec ${posixHostRef} "$SLOCK_CLI" "$@"\n`;
   writeFileSync(posixWrapper, posixBody, { mode: 0o755 });
   writeFileSync(posixRaftWrapper, posixBody, { mode: 0o755 });
 
@@ -738,7 +939,9 @@ export async function prepareCliTransport(
       `set "SLOCK_CLI=${cliPath}"`,
       ...cmdCliFallbackLines,
       ...(electronNodeMode ? [`set "ELECTRON_RUN_AS_NODE=1"`] : []),
-      `"${nodeHost.command}" "%SLOCK_CLI%" %*`,
+      ...(hostPromotedPath
+        ? [`set "RAFT_HOST=${nodeHost.command}"`, `if not exist "%RAFT_HOST%" set "RAFT_HOST=${hostPromotedPath}"`, `"%RAFT_HOST%" "%SLOCK_CLI%" %*`]
+        : [`"${nodeHost.command}" "%SLOCK_CLI%" %*`]),
       "",
     ].filter((line) => line.length > 0).join("\r\n") + "\r\n";
     writeFileSync(cmdWrapper, cmdBody);
@@ -777,6 +980,7 @@ export async function prepareCliTransport(
       ...psCredentialLines,
       ...(electronNodeMode ? ["$env:ELECTRON_RUN_AS_NODE = '1'"] : []),
       `$node = ${powershellSingleQuote(nodeHost.command)}`,
+      ...(hostPromotedPath ? [`if (-not (Test-Path $node)) { $node = ${powershellSingleQuote(hostPromotedPath)} }`] : []),
       `$cli = ${powershellSingleQuote(cliPath)}`,
       ...(cliPath === "__cli" || cliFallbackCandidates.length === 0 ? [] : [
         "if (-not (Test-Path $cli)) {",
@@ -817,6 +1021,12 @@ export async function prepareCliTransport(
     : posixWrapper;
 
   const launchRuntimeFields = runtimeConfigToLaunchFields(hydrateRuntimeConfig(ctx.config));
+  // The wrapper dir goes in front of the PATH the runtime would otherwise get,
+  // with the same precedence as every other variable here: driver extraEnv, then
+  // the agent's configured env vars, then the daemon's own PATH. Prefixing
+  // process.env.PATH unconditionally discarded an agent-configured PATH — the
+  // documented workaround for a minimal service PATH (slock#8610).
+  const basePath = extraEnv.PATH ?? launchRuntimeFields.envVars?.PATH ?? process.env.PATH ?? "";
   const spawnEnv: Record<string, string | undefined> = {
     ...process.env,
     FORCE_COLOR: "0",
@@ -831,7 +1041,7 @@ export async function prepareCliTransport(
     SLOCK_SERVER_URL: ctx.config.serverUrl,
     [SLOCK_AGENT_LAUNCH_DIR_ENV]: path.basename(slockDir),
     [SLOCK_CLI_TRANSPORT_DIR_ENV]: slockDir,
-    PATH: `${slockDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    PATH: `${slockDir}${path.delimiter}${basePath}`,
   };
   delete spawnEnv.SLOCK_AGENT_TOKEN;
   // RFC §9.1 step 3 — never let raw agent credentials leak via the runtime

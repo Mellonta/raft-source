@@ -1,0 +1,1283 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`action prepare > agent:create 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "action": {
+          "description": "Drafts release notes",
+          "name": "release-bot",
+          "suggestedComputer": "build-box",
+          "type": "agent:create",
+        },
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/prepare-action",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Action card posted to #general as message 99990000-1111-4222-8333-444455556666 (short 99990000). The human can click the action verb to commit.
+",
+}
+`;
+
+exports[`action prepare > channel:add_member 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "action": {
+          "agents": [
+            "@scout",
+          ],
+          "channel": "#general",
+          "humans": [
+            "@alice",
+          ],
+          "type": "channel:add_member",
+        },
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/prepare-action",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Action card posted to #general as message 99990000-1111-4222-8333-444455556666 (short 99990000). The human can click the action verb to commit.
+",
+}
+`;
+
+exports[`action prepare > channel:add_member without members (validation failure) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [],
+  "stderr": "Error: Action failed validation: channel:add_member must include at least one human or agent
+Code: INVALID_ACTION
+",
+  "stdout": "",
+}
+`;
+
+exports[`action prepare > channel:create 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "action": {
+          "description": "Coordinate the 0.0.31 release",
+          "draftHint": "richard asked for a dedicated release channel",
+          "initialAgents": [
+            "@scout",
+          ],
+          "initialHumans": [
+            "@richard",
+          ],
+          "name": "release-war-room",
+          "type": "channel:create",
+          "visibility": "public",
+        },
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/prepare-action",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Action card posted to #general as message 99990000-1111-4222-8333-444455556666 (short 99990000). The human can click the action verb to commit.
+",
+}
+`;
+
+exports[`action prepare > integration:approve_agent_login 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "action": {
+          "agentId": "22222222-3333-4444-8555-666666666666",
+          "agentName": "scout",
+          "clientId": "33333333-4444-4555-8666-777777777777",
+          "clientKey": "linear",
+          "clientName": "Linear",
+          "requestId": "11111111-2222-4333-8444-555555555555",
+          "scopes": [
+            "issues:read",
+            "issues:write",
+          ],
+          "type": "integration:approve_agent_login",
+        },
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/prepare-action",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Action card posted to #general as message 99990000-1111-4222-8333-444455556666 (short 99990000). The human can click the action verb to commit.
+",
+}
+`;
+
+exports[`action prepare > integration:install_marketplace_app 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "action": {
+          "agentId": "22222222-3333-4444-8555-666666666666",
+          "agentName": "scout",
+          "clientId": "33333333-4444-4555-8666-777777777777",
+          "clientKey": "linear",
+          "clientName": "Linear",
+          "clientNameSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "scopes": [
+            "issues:read",
+          ],
+          "type": "integration:install_marketplace_app",
+        },
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/prepare-action",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Action card posted to #general as message 99990000-1111-4222-8333-444455556666 (short 99990000). The human can click the action verb to commit.
+",
+}
+`;
+
+exports[`action prepare > integration:recover_app_owner 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "action": {
+          "clientKey": "deploy-dashboard",
+          "targetAgent": "@scout",
+          "type": "integration:recover_app_owner",
+        },
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/prepare-action",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Action card posted to #general as message 99990000-1111-4222-8333-444455556666 (short 99990000). The human can click the action verb to commit.
+",
+}
+`;
+
+exports[`action prepare > integration:register_app 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "action": {
+          "description": "Shows deploy status",
+          "homepageUrl": "https://deploy.example",
+          "name": "Deploy Dashboard",
+          "returnUrl": "https://deploy.example/callback",
+          "scopes": [],
+          "type": "integration:register_app",
+        },
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/prepare-action",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Action card posted to #general as message 99990000-1111-4222-8333-444455556666 (short 99990000). The human can click the action verb to commit.
+",
+}
+`;
+
+exports[`action prepare > integration:update_app_registration 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "action": {
+          "clientKey": "deploy-dashboard",
+          "description": "Shows deploy and rollback status",
+          "type": "integration:update_app_registration",
+        },
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/prepare-action",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Action card posted to #general as message 99990000-1111-4222-8333-444455556666 (short 99990000). The human can click the action verb to commit.
+",
+}
+`;
+
+exports[`channel join / leave / members > raft channel join --target #general (already joined) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/server",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Already joined #general.
+",
+}
+`;
+
+exports[`channel join / leave / members > raft channel join --target #general (not yet joined) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/server",
+    },
+    {
+      "method": "POST",
+      "path": "/internal/agent-api/channels/channel-general/join",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Joined #general. You can now send messages there and receive ordinary channel delivery.
+Still arrives:
+- Personal @mentions still reach you even if you later mute ordinary channel updates.
+- Threads you started or follow stay followed even if you later mute this channel.
+",
+}
+`;
+
+exports[`channel join / leave / members > raft channel leave --target #general 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/server",
+    },
+    {
+      "method": "POST",
+      "path": "/internal/agent-api/channels/channel-general/leave",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Left #general. You can still inspect visible public channel history there, but you can no longer send or receive ordinary channel delivery until you join the public channel again or a human re-adds you to a private channel.
+Still arrives:
+- If #general is public, followed threads still notify until you unfollow them.
+Leaving a channel does not unfollow existing thread follows.
+",
+}
+`;
+
+exports[`channel join / leave / members > raft channel members #general 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/channel-members?channel=%23general",
+    },
+  ],
+  "stderr": "",
+  "stdout": "## Channel Members
+
+Channel: #general (channel)
+Members means join/post authority for this surface.
+
+### Agents
+Server and stored channel roles are shown separately when available.
+  - @agent-pin (active)
+  - @scout (inactive)
+
+### Humans
+Server and stored channel roles are shown separately when available.
+  - @richard (owner) — founder
+  - @alice
+",
+}
+`;
+
+exports[`inbox check > raft inbox check --view mentions 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/inbox/conversations?view=mentions",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Inbox: 1 conversation with unread mentions (of 7 unread conversations). Newest activity first.
+
+#general:aaaabbbb · 1 unread · mentions you · latest @scout 1h ago
+  open: raft message read --target "#general:aaaabbbb" --after 1180
+
+Next: open the first conversation above: raft message read --target "#general:aaaabbbb" --after 1180
+
+App items and reminder seals: not available for external agents.
+",
+}
+`;
+
+exports[`inbox check > raft inbox check 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/inbox/conversations",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Inbox: 7 unread conversations (1 DM, 1 with mentions). Newest activity first.
+
+dm:@richard · 3 unread · latest @richard 12m ago
+  open: raft message read --target "dm:@richard" --after 1200
+#general:aaaabbbb · 1 unread · mentions you · latest @scout 1h ago
+  open: raft message read --target "#general:aaaabbbb" --after 1180
+#engineering · 12 unread · latest @alice 18h ago
+  open: raft message read --target "#engineering" --after 900
+
+More: raft inbox check --before 1100
+Next: open the first conversation above: raft message read --target "dm:@richard" --after 1200
+
+App items and reminder seals: not available for external agents.
+",
+}
+`;
+
+exports[`manual get / search > raft manual get index --intent Learn available Raft workflows --reason Need the topic catalog now 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/knowledge?topic=index&intent=Learn+available+Raft+workflows&reason=Need+the+topic+catalog+now",
+    },
+  ],
+  "stderr": "",
+  "stdout": "# Raft manual
+
+- \`messaging\` — sending and reading
+- \`tasks\` — task lifecycle
+",
+}
+`;
+
+exports[`manual get / search > raft manual search preview before merge --intent Learn available Raft workflows --reason Need the topic catalog now 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/knowledge/search?query=preview+before+merge&intent=Learn+available+Raft+workflows&reason=Need+the+topic+catalog+now",
+    },
+  ],
+  "stderr": "",
+  "stdout": "1. review/preview — Preview before merge
+   Deploy a preview, link it in the PR, then merge.
+
+2. tasks — Tasks
+   Claim, update, and close tasks.
+",
+}
+`;
+
+exports[`message check > raft message check (channel, DM and thread reply) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/events?since=latest&ack=cursor",
+    },
+  ],
+  "stderr": "",
+  "stdout": "[target=#general msg=aaaabbbb time=2026-10-03 11:40:00Z type=human] @richard: @agent-pin can you look at the deploy failure?
+[target=dm:@richard msg=eeeeffff time=2026-10-03 11:50:00Z type=human] @richard: also, ping me when it is green
+[target=#general:aaaabbbb msg=ccccdddd time=2026-10-03 11:55:00Z type=agent] @scout: healthcheck is timing out
+No more new inbox messages.
+",
+}
+`;
+
+exports[`message check > raft message check (empty inbox) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/events?since=latest&ack=cursor",
+    },
+  ],
+  "stderr": "",
+  "stdout": "No new inbox messages.
+
+App items: not available for external agents.
+",
+}
+`;
+
+exports[`message react > raft message react --message-id aaaabbbb --emoji 👍 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "emoji": "👍",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/messages/aaaabbbb/reactions",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Reaction 👍 added to message aaaabbbb.
+",
+}
+`;
+
+exports[`message read > raft message read --target #general 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/history?channel=%23general",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Read window: 2 returned, seq 41-43, oldest to newest. No older. No newer.
+Coverage: top-level messages in this target only; thread replies are excluded and must be read from their thread targets.
+Server unread cursor before this read: seq 40. Use raft message read --target "#general" --after 40 to browse newer messages.
+
+[1/2 seq=41 msg=aaaabbbb-1111-4222-8333-444455556666 time=2026-10-03 11:40:00Z type=human replyCount=1 replyTarget=#general:aaaabbbb] @richard: Can someone look at the deploy failure on staging?
+[2/2 seq=43 msg=12345678-9abc-4def-8123-456789abcdef time=2026-10-03 11:58:00Z type=agent replyTarget=#general:12345678] @scout: Rolled back; root cause is the missing env var.
+
+End of window: 2/2 shown.
+",
+}
+`;
+
+exports[`message read > raft message read --target #general:aaaabbbb 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/history?channel=%23general%3Aaaaabbbb",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Read window: 1 returned, seq 42, oldest to newest. No older. No newer.
+Coverage: this thread target only.
+
+[1/1 seq=42 msg=ccccdddd-1111-4222-8333-444455556666 time=2026-10-03 11:45:00Z type=agent] @scout: Looking now — the healthcheck is timing out.
+
+End of window: 1/1 shown.
+",
+}
+`;
+
+exports[`message read > raft message read --target dm:@richard 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/history?channel=dm%3A%40richard",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Read window: 1 returned, seq 7, oldest to newest. No older. No newer.
+Coverage: top-level messages in this target only; thread replies are excluded and must be read from their thread targets.
+Server unread cursor before this read: seq 6. Use raft message read --target "dm:@richard" --after 6 to browse newer messages.
+
+[1/1 seq=7 msg=eeeeffff-1111-4222-8333-444455556666 time=2026-10-03 10:00:00Z type=human replyTarget=dm:@richard:eeeeffff] @richard: hey, can you help with the release notes?
+
+End of window: 1/1 shown.
+",
+}
+`;
+
+exports[`message search > raft message search --query deploy 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/search?q=deploy",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Search results for: "deploy" (2 results · truncated=false)
+
+<result ref="msg:aaaabbbb-1111-4222-8333-444455556666">
+Source: channel:general
+Sender: richard (human)
+Time: 2026-10-03 19:40:00 +08:00
+
+<preview>
+Can someone look at the <match>deploy</match> failure on staging?
+</preview>
+</result>
+
+<result ref="msg:ccccdddd-1111-4222-8333-444455556666">
+Source: thread:general:aaaabbbb
+Sender: scout (agent)
+Time: 2026-10-03 19:45:00 +08:00
+
+<preview>
+<match>deploy</match> healthcheck is timing out
+</preview>
+</result>
+
+If a result may be relevant but its preview is not enough, read the surrounding context for that result before answering.
+",
+}
+`;
+
+exports[`message search > raft message search --target #general --query deploy 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/search?q=deploy&channel=%23general",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Search results for: "deploy" (1 result · truncated=false)
+
+<result ref="msg:aaaabbbb-1111-4222-8333-444455556666">
+Source: channel:general
+Sender: richard (human)
+Time: 2026-10-03 19:40:00 +08:00
+
+<preview>
+Can someone look at the <match>deploy</match> failure on staging?
+</preview>
+</result>
+
+If a result may be relevant but its preview is not enough, read the surrounding context for that result before answering.
+",
+}
+`;
+
+exports[`message send > raft message send --target #general (held, envelopes with channel fields) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [
+    {
+      "body": {
+        "content": "hello",
+        "draftReholdCount": 0,
+        "draftReplacedExisting": false,
+        "idempotencyKey": "<uuid>",
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/v2/send",
+    },
+  ],
+  "stderr": "Error: Message held as draft; no target delivery occurred.
+Code: SEND_HELD_AS_DRAFT
+Retryable: no
+",
+  "stdout": "Held — 1 unread message in #general. Your message has been saved as a draft (kept for 10 minutes).
+
+  ├ Latest 1 ────────────────────────────
+  │ @scout 11:45  healthcheck is timing out
+  └ Previews are truncated. Full text: raft message read --target "#general"
+
+After reviewing the current state of this conversation, choose one path.
+To update the draft, send revised content normally:
+  raft message send --target "#general" <<'RAFTMSG'
+  revised message
+  RAFTMSG
+To send the current draft unchanged (within 10 minutes; after that the draft is discarded and --send-draft reports SEND_DRAFT_EXPIRED):
+  raft message send --send-draft --target "#general"
+  (this sends the stored copy — do not use it if you meant to change the content)
+You can also choose not to send anything.
+",
+}
+`;
+
+exports[`message send > raft message send --target #general (held, envelopes without channel fields) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [
+    {
+      "body": {
+        "content": "hello",
+        "draftReholdCount": 0,
+        "draftReplacedExisting": false,
+        "idempotencyKey": "<uuid>",
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/v2/send",
+    },
+  ],
+  "stderr": "Error: Message held as draft; no target delivery occurred.
+Code: SEND_HELD_AS_DRAFT
+Retryable: no
+",
+  "stdout": "Held — 2 unread messages in #general. Your message has been saved as a draft (kept for 10 minutes).
+
+  ├ Latest 2 ────────────────────────────
+  │ @scout 11:45  healthcheck is timing out
+  │ @richard 11:58  rolling back now
+  └ Previews are truncated. Full text: raft message read --target "#general"
+
+After reviewing the current state of this conversation, choose one path.
+To update the draft, send revised content normally:
+  raft message send --target "#general" <<'RAFTMSG'
+  revised message
+  RAFTMSG
+To send the current draft unchanged (within 10 minutes; after that the draft is discarded and --send-draft reports SEND_DRAFT_EXPIRED):
+  raft message send --send-draft --target "#general"
+  (this sends the stored copy — do not use it if you meant to change the content)
+You can also choose not to send anything.
+",
+}
+`;
+
+exports[`message send > raft message send --target #general (sent with unresolved mention) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [
+    {
+      "body": {
+        "content": "hello @wenyi",
+        "draftReholdCount": 0,
+        "draftReplacedExisting": false,
+        "idempotencyKey": "<uuid>",
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/v2/send",
+    },
+  ],
+  "stderr": "Error: Partial result for message 12345678-9abc-4def-8123-456789abcdef: message status=queued; 1 @mention status=not_queued.
+Code: MENTION_DELIVERY_FAILED
+Retryable: no
+Effect: message_queued
+Draft saved: no
+Next action: The message is already queued. If an unresolved token was literal prose, wrap it in code; otherwise verify the exact handle and send only a corrected follow-up mention. Do not resend the queued message.
+",
+  "stdout": "Undelivered mentions — partial result
+Message effect: status=queued. Queue acceptance is the only message proof.
+Do not rerun \`raft message send\`; the message is already queued and a retry could duplicate it.
+Each row below is bound to the literal @token from your message.
+For a literal name rather than a recipient, wrap the @handle in inline or fenced code.
+
+- @wenyi — status=not_queued
+  reason: unknown_or_not_visible
+  consequence: This @mention did not notify anyone.
+  pending action: none; no visible target resolved for this token
+  expires: n/a
+  recovery: if this was a literal name or prose, wrap it in inline/fenced code; otherwise verify the exact handle and send only a corrected follow-up mention; do not resend this message.
+
+Message queued to #general. Message ID: 12345678-9abc-4def-8123-456789abcdef (to reply in this message's thread, use target "#general:12345678")
+",
+}
+`;
+
+exports[`message send > raft message send --target #general (sent) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "content": "hello",
+        "draftReholdCount": 0,
+        "draftReplacedExisting": false,
+        "idempotencyKey": "<uuid>",
+        "target": "#general",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/v2/send",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Message sent to #general. Message ID: 12345678-9abc-4def-8123-456789abcdef (to reply in this message's thread, use target "#general:12345678")
+",
+}
+`;
+
+exports[`message send --discard-draft > raft message send --discard-draft --target #general --expected-draft-key <draft-key> (match, then again: no draft) 1`] = `
+[
+  {
+    "argv": [
+      "message",
+      "send",
+      "--discard-draft",
+      "--target",
+      "#general",
+      "--expected-draft-key",
+      "<draft-key>",
+    ],
+    "run": {
+      "exitCode": 0,
+      "requests": [],
+      "stderr": "",
+      "stdout": "Discarded the saved draft for #general. Nothing was sent.
+",
+    },
+  },
+  {
+    "argv": [
+      "message",
+      "send",
+      "--discard-draft",
+      "--target",
+      "#general",
+      "--expected-draft-key",
+      "<draft-key>",
+    ],
+    "run": {
+      "exitCode": 0,
+      "requests": [],
+      "stderr": "",
+      "stdout": "No saved draft for #general; nothing was discarded.
+",
+    },
+  },
+]
+`;
+
+exports[`message send --discard-draft > raft message send --discard-draft --target #general --expected-draft-key not-the-draft-key (mismatch: nothing discarded, then the right key) 1`] = `
+[
+  {
+    "argv": [
+      "message",
+      "send",
+      "--discard-draft",
+      "--target",
+      "#general",
+      "--expected-draft-key",
+      "not-the-draft-key",
+    ],
+    "run": {
+      "exitCode": 1,
+      "requests": [],
+      "stderr": "Error: The saved draft no longer matches the expected idempotency key. Nothing was discarded: the current draft belongs to a different logical send.
+Code: SAVED_DRAFT_IDENTITY_CHANGED
+Retryable: no
+Draft saved: yes
+Next action: Review the current draft before deciding whether to send or discard it; do not treat it as the earlier logical send.
+",
+      "stdout": "",
+    },
+  },
+  {
+    "argv": [
+      "message",
+      "send",
+      "--discard-draft",
+      "--target",
+      "#general",
+      "--expected-draft-key",
+      "<draft-key>",
+    ],
+    "run": {
+      "exitCode": 0,
+      "requests": [],
+      "stderr": "",
+      "stdout": "Discarded the saved draft for #general. Nothing was sent.
+",
+    },
+  },
+]
+`;
+
+exports[`message send --discard-draft > raft message send --discard-draft --target #general --expected-draft-key not-the-draft-key (no draft) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "No saved draft for #general; nothing was discarded.
+",
+}
+`;
+
+exports[`reminder schedule / list / cancel > raft reminder cancel --id 76d9397d 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/reminders?status=scheduled%2Cfired",
+    },
+    {
+      "method": "DELETE",
+      "path": "/internal/agent-api/reminders/76d9397d-1111-4222-8333-444455556666",
+    },
+  ],
+  "stderr": "Reminder seals: not checked (not available for external agents).
+",
+  "stdout": "Reminder canceled: #76d9397d [canceled] "check deploy status"
+",
+}
+`;
+
+exports[`reminder schedule / list / cancel > raft reminder list 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/reminders?status=scheduled%2Cfired",
+    },
+  ],
+  "stderr": "",
+  "stdout": "#76d9397d [scheduled] (one-time) next=2026-10-03T12:30:00.000Z "check deploy status" ref=#general:aaaabbbb
+#88880000 [scheduled] (recurring · daily at 09:00 Asia/Singapore) next=2026-10-04T01:00:00.000Z "daily standup summary" ref=#general:aaaabbbb
+#99990000 [fired] (one-time) fired_at=2026-10-03T11:00:00.000Z "overdue check" ref=#general:aaaabbbb
+",
+}
+`;
+
+exports[`reminder schedule / list / cancel > raft reminder schedule --title check deploy status --delay-seconds 1800 --message-id aaaabbbb 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "delaySeconds": 1800,
+        "msgId": "aaaabbbb",
+        "title": "check deploy status",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/reminders",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Reminder scheduled: #76d9397d (one-time) "check deploy status"
+Next: 2026-10-03T12:30:00.000Z
+(to modify: snooze/update/cancel; raft reminder --help)
+",
+}
+`;
+
+exports[`server error responses > raft message read --target #general:deadbeef (404 not found) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/history?channel=%23general%3Adeadbeef",
+    },
+  ],
+  "stderr": "Error: Thread not found: #general:deadbeef
+Code: NOT_FOUND
+Next action: Check the short id with raft message read --target "#general".
+",
+  "stdout": "",
+}
+`;
+
+exports[`server error responses > raft task claim --target #general --number 3 (403 forbidden) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [
+    {
+      "body": {
+        "channel": "#general",
+        "task_numbers": [
+          3,
+        ],
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/tasks/claim",
+    },
+  ],
+  "stderr": "Error: You are not a member of #general
+Code: CLAIM_FAILED
+",
+  "stdout": "",
+}
+`;
+
+exports[`server info > raft server info --channels 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/server",
+    },
+  ],
+  "stderr": "",
+  "stdout": "## Server Channels
+
+Private channels are shown only when this agent is a member. Do not disclose private-channel names or metadata outside that channel.
+#general [public, joined] — team-wide chat
+#engineering [public, not joined] — build and deploy
+#partners [joint, joined] — Shared with another server
+Showing 1-3 of 3.
+",
+}
+`;
+
+exports[`server info > raft server info --full 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/server",
+    },
+  ],
+  "stderr": "",
+  "stdout": "## Server
+
+### Current Runtime
+Authoritative context for this agent process. Do not infer computer identity from hostname or cwd when this section is present.
+- Agent ID: agent-pin
+- Runtime: claude
+- Model: claude-opus
+- Server ID: server-1
+- Computer: build-box
+- Workspace: /workspace/agent-pin
+
+### Current Agent
+- Role: member
+
+### Channels
+Visible public channels may appear even when \`joined=false\`. Private channels are shown only when you are a member; do not disclose private-channel names, membership, or content outside that channel. Use channel attention commands (\`raft channel join\`, \`leave\`, \`mute\`, \`unmute\`; \`raft thread unfollow\`) for your own delivery state. Existing channel management commands (\`raft channel create\`, \`update\`, \`archive\`, \`unarchive\`, \`add-member\`, \`remove-member\`) are authorized per channel; a channel-admin role never grants delete, visibility, federation, or server-profile actions. There is no Agent command for changing channel roles. Run any subcommand with \`--help\` for syntax.
+Server-profile changes still use raft server update and remain server-role gated.
+Mute state is shown when the server provides it; otherwise it is omitted.
+  - #general [public, joined] — team-wide chat
+  - #engineering [public, not joined] — build and deploy
+  - #partners [joint, joined] — Shared with another server
+
+### Agents
+Other AI agents in this server.
+Role labels show server-level owner/admin authority; no role label means ordinary member.
+  - @agent-pin (active; working)
+  - @scout (active; idle) — release scout
+
+### Humans
+To start a new DM: raft message send --target "dm:@name" <<'RAFTMSG' followed by the message body and RAFTMSG. To reply in an existing DM: reuse the target from received messages.
+Role labels show server-level owner/admin authority; no role label means ordinary member.
+  - @richard (owner)
+  - @alice
+",
+}
+`;
+
+exports[`server info > raft server info 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/server",
+    },
+  ],
+  "stderr": "",
+  "stdout": "## Server
+
+Channels: 3 visible (2 joined)
+Agents: 2
+Humans: 2
+
+Narrow queries:
+- raft server info --channels
+- raft server info --agents
+- raft server info --humans
+- raft channel info <name>
+- raft user info <name>
+
+Full dump: raft server info --full
+",
+}
+`;
+
+exports[`task claim > raft task claim --target #general --number 3 (claimed) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "channel": "#general",
+        "task_numbers": [
+          3,
+        ],
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/tasks/claim",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Claim results (1 claimed):
+#3 (msg:aaaabbbb): claimed
+
+Follow up in each task's thread:
+#3 → raft message send --target "#general:aaaabbbb"
+",
+}
+`;
+
+exports[`task claim > raft task claim --target #general --number 3 (freshness held) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "channel": "#general",
+        "task_numbers": [
+          3,
+        ],
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/tasks/claim",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Held — 1 unread message in #general. Your task claim was not applied.
+
+  ├ Latest 1 ────────────────────────────
+  │ @scout 11:45  I'll take #3 actually
+  └ Previews are truncated. Full text: raft message read --target "#general"
+
+After reviewing the current state of this conversation, choose one path.
+After reviewing the newer context, rerun the task claim command if it is still correct.
+",
+}
+`;
+
+exports[`task claim > raft task claim --target #general --number 3 (refused: held by another assignee) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [
+    {
+      "body": {
+        "channel": "#general",
+        "task_numbers": [
+          3,
+        ],
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/tasks/claim",
+    },
+  ],
+  "stderr": "Error: Claim refused — #3 held by @scout. This is a concurrency lock or refusal, not a tool error and not a ruling on lane ownership.
+Code: CLAIM_CONFLICT
+Next action: Do not retry the identical claim and do not start conflicting execution. If you are this lane's canonical owner, correct the routing in the original thread.
+",
+  "stdout": "Claim results (0 claimed, 1 failed):
+#3: Claim failed — @scout currently holds the implementation lock (assignment state as of 2026-10-03T12:00:00.000Z).
+  Blocked: claim.
+  Not blocked by this claim conflict (each still subject to its own authority/policy): comment in thread.
+  This is not a ruling on who owns or leads this lane. If you are its canonical owner or believe it is misrouted: correct the routing in the original thread, or file request_reassign (a request — it does not itself reassign).
+",
+}
+`;
+
+exports[`task create > raft task create --target #general --title Fix it --title Test it 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "channel": "#general",
+        "tasks": [
+          {
+            "title": "Fix it",
+          },
+          {
+            "title": "Test it",
+          },
+        ],
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/tasks",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Created 2 task(s) in #general:
+#4 [todo] assignee=unassigned claimedAt=null msg=44440000 "Fix it"
+#5 [todo] assignee=unassigned claimedAt=null msg=55550000 "Test it"
+
+To follow up in each task's thread:
+#4 → raft message send --target "#general:44440000"
+#5 → raft message send --target "#general:55550000"
+",
+}
+`;
+
+exports[`task create > raft task create --target #general --title Fix it 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "channel": "#general",
+        "tasks": [
+          {
+            "title": "Fix it",
+          },
+        ],
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/tasks",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Created 1 task(s) in #general:
+#4 [todo] assignee=unassigned claimedAt=null msg=44440000 "Fix it"
+
+To follow up in each task's thread:
+#4 → raft message send --target "#general:44440000"
+",
+}
+`;
+
+exports[`task list > raft task list --mine 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/tasks?mine=true",
+    },
+  ],
+  "stderr": "",
+  "stdout": "## My assigned tasks on this server (unfinished)
+
+Coverage: incomplete · visible types=channel|private|joint|dm · archived=included · inaccessible scope=not_asserted
+Output: showing 1 of 1 visible matches · mode=complete · truncated=false
+
+### in_progress (1)
+- #general task #2 [in_progress] by=@richard msg=ccccdddd Current title: Write release notes
+",
+}
+`;
+
+exports[`task list > raft task list --target #general 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/tasks?channel=%23general",
+    },
+  ],
+  "stderr": "",
+  "stdout": "## Task Board for #general (2 tasks)
+
+#3 [todo] (by @richard) msg=aaaabbbb rev=0 Current title: Fix the staging healthcheck
+#2 [in_progress] → @scout (by @richard) msg=ccccdddd rev=2 Current title: Write release notes
+  Current description: for 0.0.31
+",
+}
+`;
+
+exports[`task update > raft task update --target #general --number 3 --status in_review 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "channel": "#general",
+        "status": "in_review",
+        "task_number": 3,
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/tasks/update-status",
+    },
+  ],
+  "stderr": "",
+  "stdout": "#3 moved to in_review.
+",
+}
+`;
+
+exports[`thread unfollow > raft thread unfollow --target #general:aaaabbbb 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "reason": "no longer following",
+        "thread": "#general:aaaabbbb",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/threads/unfollow",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Unfollowed #general:aaaabbbb. Ordinary delivery for this thread has stopped.
+A later personal @mention arrives and re-follows you; that delivery reminds you to run: raft thread unfollow --target "#general:aaaabbbb"
+Posting in this thread re-follows you automatically.
+",
+}
+`;
+
+exports[`user info > raft user info richard 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/users/richard/channels?offset=0&limit=50",
+    },
+  ],
+  "stderr": "",
+  "stdout": "## User
+
+User: @richard
+Kind: human
+Role: owner
+
+### Visible Channel Memberships
+#general [public, joined]
+#partners [joint, joined]
+Showing 1-3 of 3.
+",
+}
+`;
+
+exports[`user info > raft user info scout 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/users/scout/channels?offset=0&limit=50",
+    },
+  ],
+  "stderr": "",
+  "stdout": "## User
+
+User: @scout
+Kind: agent
+Status: active; idle
+Description: release scout
+
+### Visible Channel Memberships
+#general [public, joined]
+#engineering [public, joined]
+Showing 1-3 of 3.
+",
+}
+`;

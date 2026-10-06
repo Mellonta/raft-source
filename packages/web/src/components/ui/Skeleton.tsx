@@ -1,4 +1,5 @@
 import type { HTMLAttributes } from "react";
+import { Skeleton as RuiSkeleton } from "raft-ui";
 
 /**
  * Skeleton — the brutal-style loading placeholder primitive.
@@ -95,22 +96,22 @@ export function SkeletonRow({
 /**
  * ConversationCardSkeleton — the loading placeholder for ConversationPreviewCard
  * list rows (Inbox + Saved panels, ~96px cards). Mirrors the real card box
- * (`border-2 border-black/30 bg-white p-3`, header line + multi-line preview) so
+ * (header line + multi-line preview) so
  * the list does not jump when items load. Shared so inbox/saved stay identical.
  */
 export function ConversationCardSkeleton({ count = 6 }: { count?: number }) {
   return (
     <div className="flex flex-col gap-2" aria-busy="true">
       {Array.from({ length: count }, (_, i) => (
-        <div key={i} className="flex w-full items-start gap-3 border-2 border-black/30 bg-white p-3">
+        <div key={i} className="flex w-full items-start gap-3 border border-line-muted bg-layer-panel p-3 theme-brutal:border-2">
           <div className="flex min-w-0 flex-1 flex-col gap-2">
             <div className="flex items-center gap-2.5">
-              <Skeleton variant="line" className="w-20" />
-              <Skeleton variant="line" className="w-16" />
-              <Skeleton variant="line" className="w-10" />
+              <RuiSkeleton variant="line" className="w-20" />
+              <RuiSkeleton variant="line" className="w-16" />
+              <RuiSkeleton variant="line" className="w-10" />
             </div>
-            <Skeleton variant="line" className="w-full" />
-            <Skeleton variant="line" className="w-3/5" />
+            <RuiSkeleton variant="line" className="w-full" />
+            <RuiSkeleton variant="line" className="w-3/5" />
           </div>
         </div>
       ))}

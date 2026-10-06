@@ -26,12 +26,13 @@ import {
   approveDeviceAuthorization,
   consumeDeviceAuthorization,
   isDeviceAuthSurfaceEnabled,
-} from "../services/deviceAuthService.js";
-import { signAccessToken, requireAuth } from "../middleware/auth.js";
-import { attachAuthTraceIdentity } from "../middleware/requestObservability.js";
-import * as sessionService from "../services/sessionService.js";
-import { getConfiguredAppUrl } from "../config/appUrl.js";
-import { recordAuthSessionIssuedTrace } from "./authRefreshTrace.js";
+} from "../services/deviceAuthService";
+import { signAccessToken, requireAuth } from "../middleware/auth";
+import { attachAuthTraceIdentity } from "../middleware/requestObservability";
+import * as sessionService from "../services/sessionService";
+import { getConfiguredAppUrl } from "../config/appUrl";
+import { recordAuthSessionIssuedTrace } from "./authRefreshTrace";
+import { sendJsonServerError } from "./errorResponse";
 
 export const deviceAuthRouter: RouterType = Router();
 const DEVICE_LOGIN_PATH = "/login/device";
@@ -93,8 +94,11 @@ deviceAuthRouter.post("/authorize", async (req, res) => {
       interval: grant.pollIntervalSeconds,
     });
   } catch (err) {
-    console.error("api.auth.device.authorize error:", err);
-    res.status(500).json({ error: "Failed to start device authorization" });
+    sendJsonServerError(req, res, {
+      error: "Failed to start device authorization",
+      logPrefix: "api.auth.device.authorize error:",
+      err,
+    });
   }
 });
 
@@ -122,8 +126,11 @@ deviceAuthRouter.post("/approve", requireAuth, async (req, res) => {
     }
     res.status(200).json({ ok: true, action: approve ? "approved" : "denied" });
   } catch (err) {
-    console.error("api.auth.device.approve error:", err);
-    res.status(500).json({ error: "Failed to update device authorization" });
+    sendJsonServerError(req, res, {
+      error: "Failed to update device authorization",
+      logPrefix: "api.auth.device.approve error:",
+      err,
+    });
   }
 });
 
@@ -159,7 +166,10 @@ deviceAuthRouter.post("/token", async (req, res) => {
     recordAuthSessionIssuedTrace({ flow: "device_auth", userId: result.approvedByUserId, sessionId });
     res.status(200).json({ accessToken, refreshToken, userId: result.approvedByUserId });
   } catch (err) {
-    console.error("api.auth.device.token error:", err);
-    res.status(500).json({ error: "Failed to complete device authorization" });
+    sendJsonServerError(req, res, {
+      error: "Failed to complete device authorization",
+      logPrefix: "api.auth.device.token error:",
+      err,
+    });
   }
 });

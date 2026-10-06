@@ -29,6 +29,7 @@ export const STATE_TRANSITION_META_FIELDS = [
   "epoch",
   "seq",
   "timestamp",
+  "arrival_to_applied_ms",
 ] as const;
 
 export const STATE_TRANSITION_JOIN_FIELDS = ["clientEventId"] as const;
@@ -48,6 +49,9 @@ export interface StateTransitionTraceMeta {
   readonly epoch?: string | number;
   readonly seq?: string | number;
   readonly timestamp?: string | number;
+  // Milliseconds from the socket event arriving in this client to the
+  // reducer applying it. Present only when the producer recorded the arrival.
+  readonly arrival_to_applied_ms?: number;
 }
 
 export interface StateTransitionTraceJoin {
@@ -72,6 +76,7 @@ export interface StateTransitionTraceInput {
   readonly epoch?: string | number;
   readonly seq?: string | number;
   readonly timestamp?: string | number;
+  readonly arrivalToAppliedMs?: number;
   readonly join?: StateTransitionTraceJoin;
 }
 
@@ -98,6 +103,7 @@ export function buildStateTransitionTraceAttrs(input: StateTransitionTraceInput)
       epoch: input.epoch,
       seq: input.seq,
       timestamp: input.timestamp,
+      arrival_to_applied_ms: input.arrivalToAppliedMs,
     }),
     join: buildJoin(input.join),
   });

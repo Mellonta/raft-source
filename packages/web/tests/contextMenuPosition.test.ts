@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { CONTEXT_MENU_VIEWPORT_MARGIN, placeContextMenu } from "../src/components/ui/contextMenuPosition";
 

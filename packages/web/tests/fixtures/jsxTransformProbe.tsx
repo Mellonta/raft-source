@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 
 function ProbeElement() {
   return <span data-probe="tsx-jsx" />;

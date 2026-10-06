@@ -10,7 +10,7 @@ Verified against:
 - packages/server/src/routes/channels.ts:1262-1272 (server permits DM participants to add members)
 - packages/server/src/routes/channels.ts:1390 (server allows self-removal from DM)
 - packages/web/src/components/message/ChatPanel.tsx:655 (Leave button hidden for DMs in current UI)
-- packages/web/src/components/agent/ChannelMembers.tsx:162 (Add Member gated by canManageChannel = capabilities.manageChannels — server-wide admin, not DM-only)
+- packages/web/src/components/agent/ChannelMembers.tsx:318 (Add Member gated by the channel-scoped `channelCapabilities.addChannelMembers`, not by any server-wide capability; canAddChannelMembers in packages/shared is the rule for regular channels and returns false for a DM, so the DM path is the route above, not that function)
 - packages/cli/src/commands/message/send.ts (--target dm:@handle)
 @ verified against current staging head (re-verified during cohort review pass)
 */}

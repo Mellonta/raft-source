@@ -13,13 +13,13 @@
  * its manifest declaration in the same commit that brings its own envelope
  * and slot.
  */
-import type { AppConfigSchema, AppId, HookName, SyscallName } from "./rapRegistry.js";
+import type { AppConfigSchema, AppId, HookName, SyscallName } from "./rapRegistry";
 import {
   BUILT_IN_MEMORY_CLEANER_APP,
   BUILT_IN_SIZE_MONITOR_CONFIG_PROJECTOR,
-} from "../apps/cleaner/definition.js";
-import { BUILT_IN_REMINDER_APP } from "../apps/reminder/definition.js";
-import type { AppConfigWireSnapshot } from "@botiverse/raft-shared/src/appConfigTransport.js";
+} from "../apps/cleaner/definition";
+import { BUILT_IN_REMINDER_APP } from "../apps/reminder/definition";
+import type { AppConfigWireSnapshot } from "@botiverse/raft-shared/src/appConfigTransport";
 
 /**
  * A built-in's PURE projection from durable config to the Computer wire

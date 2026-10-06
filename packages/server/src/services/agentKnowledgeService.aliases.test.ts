@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { resolveAgentKnowledgeDoc, buildAgentKnowledgeNotFoundGuidance } from "./agentKnowledgeService.js";
+import { resolveAgentKnowledgeDoc, buildAgentKnowledgeNotFoundGuidance } from "./agentKnowledgeService";
 
 test("inbox variant aliases resolve to the inbox doc", async () => {
   for (const alias of ["inbox notice", "agent-inbox"]) {
@@ -134,5 +133,23 @@ test("generic skill vocabulary stays off the EXACT alias layer", async () => {
   // them, and exact-alias conservatism is preserved.
   for (const miss of ["skill", "skills", "skill discovery", "bobcut skill"]) {
     assert.equal(await resolveAgentKnowledgeDoc(miss), null, `${miss} must not be an exact alias`);
+  }
+});
+
+test("plural attachment observed miss shape resolves to the attachment doc", async () => {
+  // meichen's reason-request digest 2026-09-16 (task #182): exact `attachments`, two natural
+  // `get` misses on two Agents / two servers. Delete the `attachment` entry in
+  // EXTRA_AGENT_KNOWLEDGE_ALIASES_BY_DOC_ID and this goes red.
+  for (const alias of ["attachments", "attach"]) {
+    const doc = await resolveAgentKnowledgeDoc(alias);
+    assert.ok(doc, `${alias} must resolve`);
+    assert.equal(doc.docId, "attachment");
+  }
+});
+
+test("attachment alias does not shadow near-miss shapes outside the telemetry set", async () => {
+  // Same set the alias comment declares unaliased, plus one two-word neighbour.
+  for (const miss of ["upload", "file", "files", "attachment size"]) {
+    assert.equal(await resolveAgentKnowledgeDoc(miss), null, `${miss} must not resolve (no shadow)`);
   }
 });

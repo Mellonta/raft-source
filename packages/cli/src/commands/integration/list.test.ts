@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   AGENT_LOGIN_INTEGRATION_INVENTORY_PROJECTION,
   AGENT_LOGIN_INTEGRATION_INVENTORY_SCOPE,
   projectAgentLoginIntegrationInventory,
 } from "@botiverse/raft-shared";
 
-import type { AgentContext } from "../../auth/env.js";
-import type { ApiResponse } from "../../client.js";
-import { createCommandContext } from "../../core/context.js";
-import type { CliIo } from "../../core/io.js";
-import { integrationListCommand, integrationListJsonResponse } from "./list.js";
+import { setCanonicalFetchImplForTests } from "../../proxy";
+
+import type { AgentContext } from "../../auth/env";
+import type { ApiResponse } from "../../client";
+import { createCommandContext } from "../../core/context";
+import type { CliIo } from "../../core/io";
+import { integrationListCommand, integrationListJsonResponse } from "./list";
 
 function memoryIo(): { io: CliIo; stdout: string[] } {
   const stdout: string[] = [];
@@ -101,12 +102,11 @@ function context(io: CliIo) {
 }
 
 test("integration list reports only registry and login facts without external fan-out", async () => {
-  const previousFetch = globalThis.fetch;
   let fetches = 0;
-  globalThis.fetch = (async () => {
+  const previousFetch = setCanonicalFetchImplForTests((async () => {
     fetches += 1;
     throw new Error("list must not probe external manifests");
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     const { io, stdout } = memoryIo();
     await integrationListCommand.handler(context(io), {});
@@ -116,18 +116,17 @@ test("integration list reports only registry and login facts without external fa
     assert.ok(output.startsWith(AGENT_LOGIN_INTEGRATION_INVENTORY_PROJECTION.copy.heading));
     assert.ok(output.includes(AGENT_LOGIN_INTEGRATION_INVENTORY_PROJECTION.copy.exclusion));
     assert.ok(output.includes(AGENT_LOGIN_INTEGRATION_INVENTORY_PROJECTION.copy.boundary));
-    assert.match(output, /Raft Survey[\s\S]*session: active login/);
-    assert.match(output, /Raft Survey[\s\S]*agent behavior manifest: https:\/\/survey\.example/);
+    assert.doesNotMatch(output, /Raft Survey|slock-survey|survey-id/);
     assert.match(output, /Web Only[\s\S]*session: not logged in/);
     assert.doesNotMatch(output, /manifest status:/);
     assert.doesNotMatch(output, /action surface:/);
     assert.doesNotMatch(output, /evidence ceiling:/);
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 });
 
-test("integration list JSON preserves the registry response without synthesized readiness", async () => {
+test("integration list JSON removes retired services without synthesized readiness", async () => {
   const { io, stdout } = memoryIo();
   await integrationListCommand.handler(context(io), { json: true });
   const body = JSON.parse(stdout.join("")) as {
@@ -136,17 +135,19 @@ test("integration list JSON preserves the registry response without synthesized 
   };
   assert.deepEqual(Object.keys(body.data ?? {}).sort(), ["activeLogins", "services"]);
   assert.equal("manifestObservations" in (body.data ?? {}), false);
+  assert.deepEqual((body.data as { services: Array<{ clientId: string }> }).services.map((service) => service.clientId), ["web-only"]);
+  assert.deepEqual((body.data as { activeLogins: unknown[] }).activeLogins, []);
   assert.deepEqual(body.observationScope, AGENT_LOGIN_INTEGRATION_INVENTORY_SCOPE);
 });
 
 test("integration list JSON projects a structured scope mutation into its machine receipt", () => {
   const projection = projectAgentLoginIntegrationInventory({
     ...AGENT_LOGIN_INTEGRATION_INVENTORY_SCOPE,
-    includes: ["built_in_raft_apps", "registered_services"],
+    includes: ["registered_services"],
   });
   const data = response().data as Parameters<typeof integrationListJsonResponse>[0];
   const body = integrationListJsonResponse(data, projection);
 
   assert.equal(body.observationScope, projection.observationScope);
-  assert.deepEqual(body.observationScope.includes, ["built_in_raft_apps", "registered_services"]);
+  assert.deepEqual(body.observationScope.includes, ["registered_services"]);
 });

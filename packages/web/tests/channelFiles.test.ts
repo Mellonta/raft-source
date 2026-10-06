@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { formatChannelFileSize, getChannelFileType } from "../src/utils/channelFiles";
 import type { ChannelFileLike } from "../src/utils/channelFiles";
 import { en } from "../src/i18n/messages/en";

@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from "node:crypto";
 import { and, asc, eq, inArray, isNotNull } from "drizzle-orm";
 import { currentDate } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   attachmentObjects,
   attachments,
@@ -12,8 +12,9 @@ import {
   messages,
   serverMembers,
   userChannelInboxStates,
-} from "../db/schema.js";
-import { buildSearchText } from "./searchService.js";
+} from "../db/schema";
+import { buildSearchText } from "./searchService";
+import { withChannelWriterFence } from "./channelConversionFenceService";
 
 type InternalForwardAttachmentSnapshot = {
   sourceProjectionId: string;
@@ -85,7 +86,7 @@ export async function persistForwardBundle(input: {
     content: input.content,
   });
 
-  return getDb().transaction(async (tx) => {
+  return withChannelWriterFence(input.destinationRequestChannelId, async (tx) => {
     const [existing] = await tx.select().from(messages).where(and(
       eq(messages.senderType, "user"),
       eq(messages.senderId, input.senderId),

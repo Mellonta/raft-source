@@ -1,5 +1,5 @@
-import type { messages } from "../db/schema.js";
-import * as messageService from "./messageService.js";
+import type { messages } from "../db/schema";
+import * as messageService from "./messageService";
 
 /**
  * Closed registry of every `message:new` / `message:updated` producer surface
@@ -25,7 +25,7 @@ type TypeEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends
 type AssertTrue<T extends true> = T;
 type ArrayKeys<T extends readonly string[]> = T[number];
 type MessageRowKeys = Extract<keyof typeof messages.$inferSelect, string>;
-type StorageOnlyMessageSocketKey = "agentSendKey" | "searchText" | "searchVector" | "senderHandle";
+type StorageOnlyMessageSocketKey = "agentSendKey" | "searchText" | "searchVector" | "senderHandle" | "serverId" | "causalActorType" | "causalActorId" | "systemSubtype";
 type HydratedMessageContextPayload =
   Omit<NonNullable<Awaited<ReturnType<typeof messageService.getMessageContext>>>["messages"][number], StorageOnlyMessageSocketKey>;
 type HydratedMessageContextKeys = Extract<keyof HydratedMessageContextPayload, string>;

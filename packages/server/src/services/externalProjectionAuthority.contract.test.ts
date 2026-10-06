@@ -1,4 +1,3 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { relative, resolve } from "node:path";

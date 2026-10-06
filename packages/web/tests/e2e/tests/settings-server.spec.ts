@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import type { APIRequestContext, Browser } from "@playwright/test";
+import type { APIRequestContext, Browser, Page, Request } from "@playwright/test";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 import { assertApiOk } from "../fixtures/apiResponse";
 import { loginViaApi, loginViaApiWithCredentials } from "../fixtures/auth";
@@ -32,6 +32,7 @@ async function openAsUser(
   seedState: PlaywrightSeedState,
   login: Login,
   path: string,
+  beforeGoto?: (page: Page) => Promise<void>,
 ) {
   const context = await browser.newContext({ storageState: undefined });
   const page = await context.newPage();
@@ -54,6 +55,7 @@ async function openAsUser(
       body: JSON.stringify({ announcements: [] }),
     });
   });
+  await beforeGoto?.(page);
   await page.goto(path);
   const waitForRoomsJoined = () =>
     page
@@ -112,14 +114,22 @@ async function registerEphemeralMember(
   });
   await assertApiOk(completeProfileResponse, "POST /api/auth/me/complete-profile (ephemeral member)");
 
-  const addMemberResponse = await request.post(`${seedState.urls.api}/api/servers/${seedState.server.id}/members`, {
+  // Join the way a real member does: the owner mints a single-use join link
+  // and the new account accepts it.
+  const joinLinkResponse = await request.post(`${seedState.urls.api}/api/servers/${seedState.server.id}/join-links`, {
     headers: {
       Authorization: `Bearer ${ownerAccessToken}`,
       "X-Server-Id": seedState.server.id,
     },
-    data: { userId: registered.user.id, role: "member" },
+    data: { maxUses: 1 },
   });
-  await assertApiOk(addMemberResponse, "POST /api/servers/:id/members (ephemeral member)");
+  await assertApiOk(joinLinkResponse, "POST /api/servers/:id/join-links (ephemeral member)");
+  const { token: joinToken } = await joinLinkResponse.json() as { token: string };
+  const acceptResponse = await request.post(`${seedState.urls.api}/api/auth/accept-invite`, {
+    headers: { Authorization: `Bearer ${registered.accessToken}` },
+    data: { token: joinToken },
+  });
+  await assertApiOk(acceptResponse, "POST /api/auth/accept-invite (ephemeral member)");
 
   return {
     userId: registered.user.id,
@@ -298,19 +308,33 @@ test.describe.serial("Settings › Server tab", () => {
     const category = page.getByRole("combobox", { name: "Filter connected apps by category" });
     const viewToggle = page.getByTestId("connected-apps-view-toggle");
 
-    const boxes = await Promise.all([
-      search.boundingBox(),
-      category.boundingBox(),
-      viewToggle.boundingBox(),
-    ]);
+    // The #7444 decision was row alignment, not the absolute 40px: the filter
+    // row must read as one row with no dangling gap. Post-RUI the search input
+    // and category select are full-height fields that must share height and
+    // bottom edge; the view toggle is a compact (h-8) ToggleGroup that the app
+    // deliberately centers inside its h-10 slot, so pin symmetric centering
+    // instead of equal height.
+    const searchBox = await search.boundingBox();
+    const categoryBox = await category.boundingBox();
+    const toggleBox = await viewToggle.boundingBox();
+    expect(searchBox).not.toBeNull();
+    expect(categoryBox).not.toBeNull();
+    expect(toggleBox).not.toBeNull();
 
-    for (const box of boxes) {
-      expect(box).not.toBeNull();
-      expect(Math.round(box!.height)).toBe(40);
-    }
+    // The two full-height fields share a height and an aligned bottom edge.
+    expect(Math.round(searchBox!.height)).toBe(Math.round(categoryBox!.height));
+    expect(Math.round(searchBox!.y + searchBox!.height)).toBe(
+      Math.round(categoryBox!.y + categoryBox!.height),
+    );
 
-    const bottoms = boxes.map((box) => Math.round(box!.y + box!.height));
-    expect(new Set(bottoms).size).toBe(1);
+    // The compact toggle is centered within the fields' vertical span, leaving
+    // no dangling gap at either edge.
+    const fieldTop = searchBox!.y;
+    const fieldBottom = searchBox!.y + searchBox!.height;
+    const topGap = toggleBox!.y - fieldTop;
+    const bottomGap = fieldBottom - (toggleBox!.y + toggleBox!.height);
+    expect(Math.abs(topGap - bottomGap)).toBeLessThanOrEqual(1);
+    expect(topGap).toBeGreaterThanOrEqual(0);
   });
 
   test("owner: delete dialog gates submit on exact slug match", async ({ page, request }) => {
@@ -435,20 +459,58 @@ test.describe.serial("Settings › Server tab", () => {
     );
     await dismissAnnouncementForUser(request, seedState, memberLogin);
 
+    // Before the removal, the member's server list still contains the server.
+    // Server-list reads the page starts between "joined" and the DELETE are
+    // held and then answered with this list, as a read that raced the removal
+    // would be. That removes the incidental rescue, where such a read happened
+    // to return the post-removal list and showed the selector (task #674).
+    const staleListRes = await request.get(`${seedState.urls.api}/api/servers`, {
+      headers: { Authorization: `Bearer ${memberLogin.accessToken}` },
+    });
+    await assertApiOk(staleListRes, "GET /api/servers (pre-removal member list)");
+    const staleServerList: unknown = await staleListRes.json();
+    let serverListPhase: "live" | "held" | "removed" = "live";
+    const liveServerListReads = new Set<Request>();
+    let releaseHeldReads!: () => void;
+    const removalCommitted = new Promise<void>((resolve) => {
+      releaseHeldReads = resolve;
+    });
+
     const { context, page, waitForRoomsJoined } = await openAsUser(
       browser,
       seedState,
       memberLogin,
       `/s/${seedState.server.slug}`,
+      (target) =>
+        target.route("**/api/servers", async (route) => {
+          const req = route.request();
+          if (req.method() !== "GET" || serverListPhase === "removed") return route.fallback();
+          if (serverListPhase === "held") {
+            await removalCommitted;
+            return route.fulfill({ json: staleServerList });
+          }
+          liveServerListReads.add(req);
+          try {
+            const response = await route.fetch();
+            await route.fulfill({ response });
+          } finally {
+            liveServerListReads.delete(req);
+          }
+        }),
     );
 
     try {
       await expect(page).toHaveURL(new RegExp(`/s/${seedState.server.slug}(/|$)`));
-      // The redirect path is server -> socket emit to `user:<id>` room ->
-      // frontend handler. The room is joined inside socket.io's connection
-      // handler; if we DELETE before that, the emit lands in an empty room
-      // and is lost (no room buffer). Block until the join completes.
+      // Removal revokes socket access before the route emits
+      // server:membership-removed, so that event never reaches this page. The
+      // redirect comes from the reconnect being rejected as "not a member".
+      // Wait for the socket to be fully joined so the DELETE revokes a live
+      // connection rather than racing the handshake.
       await waitForRoomsJoined();
+      // From here new reads are held; reads already passing through can only
+      // finish, so this settles.
+      serverListPhase = "held";
+      await expect.poll(() => liveServerListReads.size).toBe(0);
 
       const removeRes = await request.delete(
         `${seedState.urls.api}/api/servers/${seedState.server.id}/members/${memberUserId}`,
@@ -460,6 +522,8 @@ test.describe.serial("Settings › Server tab", () => {
         },
       );
       await assertApiOk(removeRes, `DELETE /api/servers/${seedState.server.id}/members/${memberUserId}`);
+      serverListPhase = "removed";
+      releaseHeldReads();
 
       await expect(page.getByRole("heading", { name: "Name the server where your agents will work." })).toBeVisible();
       await expect(page.getByText("Server not found")).toHaveCount(0);

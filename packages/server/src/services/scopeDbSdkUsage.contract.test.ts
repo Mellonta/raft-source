@@ -2,15 +2,14 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import { Client } from "scopedb";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 const PACKAGE_SRC_ROOT = path.join(REPO_ROOT, "packages");
 const APPROVED_SDK_ADAPTERS = new Set([
-  "packages/server/src/services/agentO11yScopeDbWriter.ts",
+  "packages/server/src/services/productEventScopeDbWriter.ts",
   "packages/server/src/tracing/scopeDbTraceEventSink.ts",
-  "packages/trace-upload-worker/src/traceEventProjector.ts",
+  "packages/trace-upload-worker/src/traces/traceEventProjector.ts",
 ]);
 
 async function productionSourceFiles(root: string): Promise<string[]> {
@@ -53,25 +52,19 @@ test("ScopeDB SDK calls stay inside classified adapters with no buffered path", 
         }
       }
     }
-    if (
-      relative !== "packages/daemon/src/agentO11yClient.ts"
-      && /new\s+AgentO11yDaemonClient\s*\(/.test(source)
-    ) {
-      violations.push(`${relative}: wiring accepted-count consumption requires persistence-tier reclassification`);
-    }
   }
 
   assert.deepEqual(violations, []);
 });
 
 test("approved ScopeDB adapters declare their decision-support tier", async () => {
-  const [agentWriter, traceSink, traceProjector] = await Promise.all([
-    readFile(path.join(REPO_ROOT, "packages/server/src/services/agentO11yScopeDbWriter.ts"), "utf8"),
+  const [productEventWriter, traceSink, traceProjector] = await Promise.all([
+    readFile(path.join(REPO_ROOT, "packages/server/src/services/productEventScopeDbWriter.ts"), "utf8"),
     readFile(path.join(REPO_ROOT, "packages/server/src/tracing/scopeDbTraceEventSink.ts"), "utf8"),
-    readFile(path.join(REPO_ROOT, "packages/trace-upload-worker/src/traceEventProjector.ts"), "utf8"),
+    readFile(path.join(REPO_ROOT, "packages/trace-upload-worker/src/traces/traceEventProjector.ts"), "utf8"),
   ]);
 
-  assert.match(agentWriter, /AGENT_O11Y_SCOPEDB_PERSISTENCE_TIER[^=]*= "decision_support"/);
+  assert.match(productEventWriter, /PRODUCT_EVENTS_SCOPEDB_PERSISTENCE_TIER[^=]*= "decision_support"/);
   assert.match(traceSink, /TRACE_EVENT_SCOPEDB_PERSISTENCE_TIER[^=]*= "decision_support"/);
   assert.match(traceProjector, /TRACE_UPLOAD_SCOPEDB_PERSISTENCE_TIER[^=]*= "decision_support"/);
 });

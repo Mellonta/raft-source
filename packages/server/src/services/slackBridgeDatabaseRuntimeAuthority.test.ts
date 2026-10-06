@@ -1,64 +1,105 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import express from "express";
 import sharp from "sharp";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
+  agents,
   channels,
   externalProjectionAvatarArtifacts,
   externalActorProjections,
   externalAddressabilityProjections,
   externalAppCredentials,
   externalAppInstallGrantReceipts,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalAppManifestReceipts,
   externalAppRegistrations,
   externalAppRegistrationSecrets,
   externalAppServerGrants,
-  externalAuthorPolicies,
   externalBindingAudienceSnapshots,
   externalChannelBindings,
+  externalDeliveryAttempts,
+  externalDeliveryPartitions,
+  externalOutboundDeliveries,
   externalHumanIdentityLinks,
+  externalInboundEvents,
   featureFlags,
   jointChannels,
   jointChannelServers,
+  messages,
   oauthClientInstalls,
   oauthClients,
   users,
-} from "../db/schema.js";
-import { resolveExternalBindingAuthority } from "./externalAppControlPlaneService.js";
+} from "../db/schema";
+import { resolveExternalBindingAuthority } from "./externalAppControlPlaneService";
 import {
   createSlackBridgeDatabaseOutboundRuntime,
   resolveCurrentOutboundAuthority,
-} from "./slackBridgeDatabaseOutboundRuntime.js";
-import type { SlackBridgeRenderSnapshot } from "./externalDeliveryOutboxService.js";
-import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime.js";
-import { createFeatureFlagRule, deleteFeatureFlagRule, updateFeatureFlag } from "./featureFlagService.js";
-import { createServer } from "./serverService.js";
+} from "./slackBridgeDatabaseOutboundRuntime";
 import {
-  createSlackDatabaseAuthorPolicyAuthorityResolver,
+  processExternalDeliveryPartitionHead,
+  type ActiveExternalDeliveryRuntime,
+} from "./externalDeliveryWorkerService";
+import {
+  enqueueSlackBridgeOutboundDelivery,
+  type SlackBridgeRenderSnapshot,
+} from "./externalDeliveryOutboxService";
+import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime";
+import { createFeatureFlagRule, deleteFeatureFlagRule, updateFeatureFlag } from "./featureFlagService";
+import { createServer } from "./serverService";
+import {
   createSlackDatabaseAudienceIdentityAuthority,
   createSlackDatabaseInboundWorkerRuntimeResolver,
   createSlackDatabaseIngressRuntimeResolver,
   slackBridgeDatabaseRuntimeRevision,
-} from "./slackBridgeDatabaseRuntimeAuthority.js";
-import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "./slackBridgeProductionAppContract.js";
-import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService.js";
+} from "./slackBridgeDatabaseRuntimeAuthority";
+import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "./slackBridgeProductionAppContract";
+import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService";
 
-import { refreshSlackPublicConversationAuthority, type SlackBridgeAvatarMaterializer } from "./slackBridgeProvisioningControlPlane.js";
-import { materializeExternalProjectionAvatar } from "./externalAvatarMaterializerService.js";
-import { __setCdnStorageForTests, resetStorageForTests, type StorageBackend } from "./storageService.js";
-import { externalAvatarPublicRouter } from "../routes/externalAvatars.js";
+import { refreshSlackPublicConversationAuthority, type SlackBridgeAvatarMaterializer } from "./slackBridgeProvisioningControlPlane";
+import { materializeExternalProjectionAvatar } from "./externalAvatarMaterializerService";
+import { __setCdnStorageForTests, resetStorageForTests, type StorageBackend } from "./storageService";
+import { externalAvatarPublicRouter } from "../routes/externalAvatars";
 
 const NOW = new Date("2026-08-11T08:00:00.000Z");
 const EXPIRES = new Date("2027-08-11T08:00:00.000Z");
+
+function legacyRuntimeRevisionV1(
+  authority: Parameters<typeof slackBridgeDatabaseRuntimeRevision>[0],
+  installGrantReceiptRevision: number,
+): string {
+  return createHash("sha256").update(JSON.stringify({
+    schema: "slack-bridge-database-runtime-authority.v1",
+    authority: {
+      provider: authority.provider,
+      environment: authority.environment,
+      registrationId: authority.registrationId,
+      serverId: authority.serverId,
+      serverGrantId: authority.serverGrantId,
+      grantEpoch: authority.grantEpoch,
+      installId: authority.installId,
+      providerAppId: authority.providerAppId,
+      connectionEpoch: authority.connectionEpoch,
+      scopeRevision: authority.scopeRevision,
+      credentialRevision: authority.credentialRevision,
+      bindingId: authority.bindingId,
+      bindingEpoch: authority.bindingEpoch,
+      privacyClass: authority.privacyClass,
+      channelId: authority.channelId,
+      providerAuthorityId: authority.providerAuthorityId,
+      providerConversationId: authority.providerConversationId,
+      installGrantReceiptRevision,
+      audienceRevision: authority.audienceRevision,
+    },
+  }), "utf8").digest("hex");
+}
 
 afterEach(async () => {
   resetStorageForTests();
@@ -165,6 +206,16 @@ async function fixture(privacyClass: "public" | "private" = "private") {
     providerBotId: "B_RUNTIME_BOT",
     lastVerifiedAt: NOW,
   }).returning();
+  await db.insert(externalAppInstallServerGrants).values({
+    installId: install.id,
+    serverId: server.id,
+    registrationId: registration.id,
+    serverGrantId: grant.id,
+    grantEpoch: grant.grantEpoch,
+    state: "active",
+    authorizedByType: "human",
+    authorizedById: owner.id,
+  });
   await db.insert(externalAppCredentials).values({
     installId: install.id,
     state: "active",
@@ -304,6 +355,117 @@ async function fixture(privacyClass: "public" | "private" = "private") {
   };
 }
 
+test("bound channels authorize current Human and Agent subjects without per-author policy", async () => {
+  const surface = await fixture("public");
+  const [agent] = await surface.db.insert(agents).values({
+    serverId: surface.server.id,
+    name: "default-slack-agent",
+    displayName: "Default Slack Agent",
+    runtime: "codex",
+  }).returning();
+  const human = await resolveCurrentOutboundAuthority({
+    executor: surface.db,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: surface.binding.connectionEpoch,
+    expectedBindingEpoch: surface.binding.bindingEpoch,
+    senderType: "user",
+    senderId: surface.owner.id,
+    now: NOW,
+    registrationId: surface.registration.id,
+  });
+  const agentAuthority = await resolveCurrentOutboundAuthority({
+    executor: surface.db,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: surface.binding.connectionEpoch,
+    expectedBindingEpoch: surface.binding.bindingEpoch,
+    senderType: "agent",
+    senderId: agent.id,
+    now: NOW,
+    registrationId: surface.registration.id,
+  });
+  assert.ok(human);
+  assert.ok(agentAuthority);
+
+  await surface.db.update(users).set({ displayName: "Renamed Runtime Human" })
+    .where(eq(users.id, surface.owner.id));
+  await surface.db.update(agents).set({ displayName: "Renamed Default Slack Agent" })
+    .where(eq(agents.id, agent.id));
+  for (const renamed of [{
+    senderType: "user" as const,
+    senderId: surface.owner.id,
+    authorName: "Renamed Runtime Human",
+  }, {
+    senderType: "agent" as const,
+    senderId: agent.id,
+    authorName: "Renamed Default Slack Agent",
+  }]) {
+    const authority = await resolveCurrentOutboundAuthority({
+      executor: surface.db,
+      bindingId: surface.binding.id,
+      expectedConnectionEpoch: surface.binding.connectionEpoch,
+      expectedBindingEpoch: surface.binding.bindingEpoch,
+      senderType: renamed.senderType,
+      senderId: renamed.senderId,
+      now: new Date(NOW.getTime() + 1_000),
+      registrationId: surface.registration.id,
+    });
+    assert.ok(authority);
+    const enqueued = await surface.db.transaction(async (executor) => {
+      const [message] = await executor.insert(messages).values({
+        channelId: surface.channel.id,
+        senderType: renamed.senderType,
+        senderId: renamed.senderId,
+        content: `${renamed.senderType} renamed source`,
+      }).returning();
+      return enqueueSlackBridgeOutboundDelivery({
+        executor,
+        message,
+        activeRuntime: {
+          level: "top_level",
+          authorityConversationId: surface.channel.id,
+          runtimePredicateRevision: authority.runtimeRevision,
+          attachmentTransferEnabled: authority.attachmentTransferEnabled,
+          bindingAuthority: authority.neutral,
+        },
+        canonicalConversationId: surface.channel.id,
+        senderType: renamed.senderType,
+        senderId: renamed.senderId,
+        authorName: renamed.authorName,
+        sanitizedText: message.content,
+        mintReconciliationMarker: () => (
+          renamed.senderType === "user" ? "U".repeat(43) : "A".repeat(43)
+        ),
+      });
+    });
+    const snapshot = enqueued.delivery.renderSnapshot as unknown as SlackBridgeRenderSnapshot;
+    assert.equal(snapshot.authorName, renamed.authorName);
+    assert.equal(snapshot.authorPresentation.displayName, renamed.authorName);
+  }
+
+  const outsider = randomUUID();
+  assert.equal(await resolveCurrentOutboundAuthority({
+    executor: surface.db,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: surface.binding.connectionEpoch,
+    expectedBindingEpoch: surface.binding.bindingEpoch,
+    senderType: "user",
+    senderId: outsider,
+    now: NOW,
+    registrationId: surface.registration.id,
+  }), null, "a user outside the current Server is not an outbound subject");
+  await surface.db.update(agents).set({ deletedAt: NOW }).where(eq(agents.id, agent.id));
+  assert.equal(await resolveCurrentOutboundAuthority({
+    executor: surface.db,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: surface.binding.connectionEpoch,
+    expectedBindingEpoch: surface.binding.bindingEpoch,
+    senderType: "agent",
+    senderId: agent.id,
+    now: NOW,
+    registrationId: surface.registration.id,
+  }), null, "a deleted Agent is not an outbound subject");
+});
+
 test("database runtime resolvers bind current control-plane, actor, addressability, and worker authority", async () => {
   const surface = await fixture();
   const ingress = createSlackDatabaseIngressRuntimeResolver(surface.db);
@@ -396,42 +558,161 @@ test("database runtime resolvers bind current control-plane, actor, addressabili
   };
   const resolveWorker = createSlackDatabaseInboundWorkerRuntimeResolver(surface.db);
   assert.deepEqual(await resolveWorker({ eventId: "event-runtime", frozenAuthority: frozen }), frozen);
+
+  const legacyEventId = randomUUID();
+  const legacyFrozen = {
+    ...frozen,
+    runtimeRevision: legacyRuntimeRevisionV1(surface.authority, 1),
+  };
+  await surface.db.insert(externalInboundEvents).values({
+    id: legacyEventId,
+    provider: "slack",
+    environment: "test",
+    appRegistrationId: surface.registration.id,
+    installId: surface.install.id,
+    workspaceId: surface.authority.providerAuthorityId,
+    providerAuthorityId: surface.authority.providerAuthorityId,
+    providerConversationId: surface.authority.providerConversationId,
+    providerEventId: "Ev_LEGACY_RUNTIME_RENEWAL",
+    bindingId: surface.binding.id,
+    bindingEpoch: surface.binding.bindingEpoch,
+    connectionEpoch: surface.binding.connectionEpoch,
+    runtimeRevision: legacyFrozen.runtimeRevision,
+    raftChannelId: surface.channel.id,
+    privacyClass: surface.authority.privacyClass,
+    normalizedPayloadDigest: "e".repeat(64),
+    encryptedPayload: "sealed-legacy-runtime-payload",
+    envelopeKeyId: "runtime-envelope-1",
+    payloadSchemaVersion: 2,
+    payloadExpiresAt: EXPIRES,
+    receivedAt: new Date(NOW.getTime() + 500),
+    updatedAt: new Date(NOW.getTime() + 500),
+  });
+
+  await surface.db.insert(externalAppInstallGrantReceipts).values({
+    registrationId: surface.registration.id,
+    installId: surface.install.id,
+    receiptRevision: 2,
+    connectionEpoch: surface.install.connectionEpoch,
+    scopeRevision: surface.install.scopeRevision,
+    credentialRevision: surface.install.credentialRevision,
+    providerAppId: surface.install.providerAppId,
+    providerAuthorityId: surface.install.providerAuthorityId,
+    botUserId: surface.install.botUserId!,
+    providerBotId: surface.install.providerBotId!,
+    grantedScopes: surface.install.installedScopes,
+    grantHash: slackBridgeInstallGrantHash({
+      providerAppId: surface.install.providerAppId,
+      providerAuthorityId: surface.install.providerAuthorityId,
+      botUserId: surface.install.botUserId!,
+      providerBotId: surface.install.providerBotId!,
+      grantedScopes: surface.install.installedScopes,
+    }),
+    observationSource: "token_introspection",
+    status: "valid",
+    observedAt: new Date(NOW.getTime() + 1_000),
+    expiresAt: EXPIRES,
+  });
+  const renewedAuthority = await resolveExternalBindingAuthority({
+    serverId: surface.server.id,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: surface.binding.connectionEpoch,
+    expectedBindingEpoch: surface.binding.bindingEpoch,
+    now: new Date(NOW.getTime() + 2_000),
+  }, surface.db);
+  assert.equal(renewedAuthority.active, true);
+  if (!renewedAuthority.active) throw new Error("renewed authority must stay active");
+  assert.equal(renewedAuthority.fact.installGrantReceiptRevision, 2);
+  assert.equal(
+    slackBridgeDatabaseRuntimeRevision(renewedAuthority.fact),
+    frozen.runtimeRevision,
+    "freshness-only install-grant renewal must not poison queued work",
+  );
+  assert.deepEqual(
+    await resolveWorker({ eventId: "event-after-grant-renewal", frozenAuthority: frozen }),
+    frozen,
+    "worker accepts the same grant content after a receipt-only renewal",
+  );
+  assert.deepEqual(
+    await resolveWorker({ eventId: legacyEventId, frozenAuthority: legacyFrozen }),
+    legacyFrozen,
+    "v2 worker accepts an exact queued v1 event across a receipt-only renewal",
+  );
   assert.equal(await resolveWorker({
     eventId: "event-runtime",
     frozenAuthority: { ...frozen, workspaceId: "T_SUBSTITUTED" },
   }), null, "workspace identity is independent frozen authority");
 
-  const resolveAuthor = createSlackDatabaseAuthorPolicyAuthorityResolver(surface.db);
-  assert.deepEqual(await resolveAuthor({
+  assert.deepEqual(await resolveWorker({
+    eventId: "event-attachment-fresh",
+    frozenAuthority: frozen,
+    requiredCapabilities: ["attachment_transfer"],
+  }), frozen, "fresh attachment authority reaches its consumer");
+  assert.deepEqual(await resolveWorker({
+    eventId: "event-reaction-fresh",
+    frozenAuthority: frozen,
+    requiredCapabilities: ["reaction_sync"],
+  }), frozen, "fresh reaction authority reaches its consumer");
+
+  const [bindingBeforePrivacyExpiry] = await surface.db.select()
+    .from(externalChannelBindings)
+    .where(eq(externalChannelBindings.id, surface.binding.id));
+  await surface.db.update(externalChannelBindings).set({ privacyFreshUntil: NOW })
+    .where(eq(externalChannelBindings.id, surface.binding.id));
+  assert.deepEqual(await resolveExternalBindingAuthority({
     serverId: surface.server.id,
     bindingId: surface.binding.id,
+    expectedConnectionEpoch: 2,
+    expectedBindingEpoch: 3,
     now: NOW,
-  }), {
-    provider: "slack",
-    registrationId: surface.authority.registrationId,
-    installId: surface.authority.installId,
-    bindingId: surface.authority.bindingId,
-    bindingEpoch: 3,
-    consentRevision: 3,
-  });
+  }, surface.db), { active: false, reason: "privacy_stale" },
+  "the shared authority names privacy expiry before any consumer I/O");
+  assert.equal(await resolveCurrentOutboundAuthority({
+    executor: surface.db,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: 2,
+    expectedBindingEpoch: 3,
+    expectedAudienceRevision: 1,
+    senderType: "user",
+    senderId: surface.owner.id,
+    now: NOW,
+    registrationId: surface.registration.id,
+  }), null, "expired outbound authority stops before render or provider dispatch");
+  assert.equal(await ingress.resolveCurrentRuntime({
+    authority: surface.authority,
+    projectionId: surface.projection.id,
+    actorProjectionRevision: 4,
+    externalActorId: "U_RUNTIME_HUMAN",
+    memberRevision: 5,
+    contextRevision: 6,
+    now: NOW,
+  }), null, "expired inbound authority stops before message projection");
+  assert.equal(await ingress.resolveCurrentRuntime({
+    authority: surface.authority,
+    projectionId: surface.projection.id,
+    actorProjectionRevision: 4,
+    externalActorId: "U_RUNTIME_HUMAN",
+    memberRevision: 5,
+    contextRevision: 6,
+    requiredCapabilities: ["attachment_transfer"],
+    now: NOW,
+  }), null, "expired attachment ingress stops before provider or business writes");
+  assert.equal(await resolveWorker({
+    eventId: "event-reaction-expired",
+    frozenAuthority: frozen,
+    requiredCapabilities: ["reaction_sync"],
+  }), null, "expired reaction worker stops before provider or business writes");
+  const [bindingAfterPrivacyExpiry] = await surface.db.select()
+    .from(externalChannelBindings)
+    .where(eq(externalChannelBindings.id, surface.binding.id));
+  assert.deepEqual(bindingAfterPrivacyExpiry, {
+    ...bindingBeforePrivacyExpiry,
+    privacyFreshUntil: NOW,
+  }, "consumer denial changes only the test-owned expiry and performs no recovery write");
 });
 
 test("outbound worker keeps the frozen matched audience revision across a newer refresh", async () => {
   const surface = await fixture("private");
-  await surface.db.insert(externalAuthorPolicies).values({
-    serverId: surface.server.id,
-    provider: "slack",
-    appRegistrationId: surface.registration.id,
-    installId: surface.install.id,
-    bindingId: surface.binding.id,
-    bindingEpoch: surface.binding.bindingEpoch,
-    authorType: "user",
-    authorId: surface.owner.id,
-    displayName: "Slack Runtime Owner",
-    fallbackKind: "human",
-    consentRevision: 1,
-    state: "granted",
-  });
 
   const frozen = await resolveCurrentOutboundAuthority({
     executor: surface.db,
@@ -495,6 +776,36 @@ test("outbound worker keeps the frozen matched audience revision across a newer 
   assert.equal(stillCurrentFrozen.runtimeRevision, frozen.runtimeRevision);
   assert.deepEqual(stillCurrentFrozen.neutral, frozen.neutral);
 
+  // Credential/scope rotation changes the runtime fingerprint without
+  // changing the bound destination. The outbound resolver must expose the
+  // refreshed runtime instead of treating the old enqueue fingerprint as a
+  // hard authority fence.
+  await surface.db.update(externalAppInstalls).set({
+    scopeRevision: 2,
+    credentialRevision: 2,
+  }).where(eq(externalAppInstalls.id, surface.install.id));
+  await surface.db.update(externalAppCredentials).set({
+    credentialRevision: 2,
+  }).where(eq(externalAppCredentials.installId, surface.install.id));
+  await surface.db.update(externalAppInstallGrantReceipts).set({
+    scopeRevision: 2,
+    credentialRevision: 2,
+  }).where(eq(externalAppInstallGrantReceipts.installId, surface.install.id));
+  const refreshedRuntime = await resolveCurrentOutboundAuthority({
+    executor: surface.db,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: surface.binding.connectionEpoch,
+    expectedBindingEpoch: surface.binding.bindingEpoch,
+    expectedAudienceRevision: frozen.neutral.memberRevision,
+    senderType: "user",
+    senderId: surface.owner.id,
+    now: new Date(NOW.getTime() + 2_000),
+    registrationId: surface.registration.id,
+  });
+  assert.ok(refreshedRuntime);
+  assert.notEqual(refreshedRuntime.runtimeRevision, frozen.runtimeRevision);
+  assert.deepEqual(refreshedRuntime.neutral, frozen.neutral);
+
   let resolveWorker!: (value: unknown) => void;
   const workerResolution = new Promise<unknown>((resolve) => {
     resolveWorker = resolve;
@@ -516,7 +827,7 @@ test("outbound worker keeps the frozen matched audience revision across a newer 
     async runWorkerOnce(input) {
       assert.ok(input.dependencies);
       const frozenSnapshot: SlackBridgeRenderSnapshot = {
-        schema: "slack-bridge-render-snapshot.v2",
+        schema: "slack-bridge-render-snapshot.v4",
         sourceMessageId: randomUUID(),
         sourceMessageSeq: 1,
         canonicalConversationId: surface.channel.id,
@@ -526,11 +837,7 @@ test("outbound worker keeps the frozen matched audience revision across a newer 
         senderType: "user",
         senderId: surface.owner.id,
         authorName: "Slack Runtime Owner",
-        authorAvatarDigest: null,
-        authorPolicy: {
-          policyId: randomUUID(),
-          serverId: surface.server.id,
-          consentRevision: 1,
+        authorPresentation: {
           displayName: "Slack Runtime Owner",
           fallbackKind: "human",
           avatar: null,
@@ -558,7 +865,7 @@ test("outbound worker keeps the frozen matched audience revision across a newer 
   ]);
   await runtime.stop();
   assert.deepEqual(resolvedThroughWorker, {
-    runtimeRevision: frozen.runtimeRevision,
+    runtimeRevision: refreshedRuntime.runtimeRevision,
     bindingAuthority: frozen.neutral,
     attachmentTransferEnabled: false,
   });
@@ -574,6 +881,248 @@ test("outbound worker keeps the frozen matched audience revision across a newer 
     now: new Date(NOW.getTime() + 4_000),
     registrationId: surface.registration.id,
   }), null, "a newer refresh must not substitute for the expired frozen audience revision");
+});
+
+test("public outbound delivery survives a matched audience refresh without substituting a mismatched snapshot", async () => {
+  const surface = await fixture("public");
+
+  const frozen = await resolveCurrentOutboundAuthority({
+    executor: surface.db,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: surface.binding.connectionEpoch,
+    expectedBindingEpoch: surface.binding.bindingEpoch,
+    senderType: "user",
+    senderId: surface.owner.id,
+    now: NOW,
+    registrationId: surface.registration.id,
+  });
+  assert.ok(frozen);
+  assert.equal(frozen.neutral.memberRevision, 1);
+
+  await surface.db.update(externalBindingAudienceSnapshots).set({
+    expiresAt: new Date(NOW.getTime() + 1_000),
+  }).where(eq(externalBindingAudienceSnapshots.bindingId, surface.binding.id));
+  await surface.db.insert(externalBindingAudienceSnapshots).values({
+    bindingId: surface.binding.id,
+    bindingEpoch: surface.binding.bindingEpoch,
+    audienceRevision: 2,
+    externalMemberCount: 1,
+    externalAudienceDigest: "public-audience-refresh",
+    raftMemberCount: 1,
+    raftAudienceDigest: "public-audience-refresh",
+    status: "matched",
+    observedAt: new Date(NOW.getTime() + 1_000),
+    expiresAt: EXPIRES,
+  });
+
+  const refreshed = await resolveCurrentOutboundAuthority({
+    executor: surface.db,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: surface.binding.connectionEpoch,
+    expectedBindingEpoch: surface.binding.bindingEpoch,
+    expectedAudienceRevision: frozen.neutral.memberRevision,
+    senderType: "user",
+    senderId: surface.owner.id,
+    now: new Date(NOW.getTime() + 2_000),
+    registrationId: surface.registration.id,
+  });
+  assert.ok(refreshed, "a current matched public snapshot should keep the frozen delivery dispatchable");
+  assert.deepEqual(refreshed.neutral, frozen.neutral);
+  assert.equal(refreshed.runtimeRevision, frozen.runtimeRevision);
+
+  await surface.db.insert(externalBindingAudienceSnapshots).values({
+    bindingId: surface.binding.id,
+    bindingEpoch: surface.binding.bindingEpoch,
+    audienceRevision: 3,
+    externalMemberCount: 0,
+    externalAudienceDigest: "public-audience-mismatch",
+    raftMemberCount: 1,
+    raftAudienceDigest: "public-audience-mismatch",
+    status: "mismatch",
+    observedAt: new Date(NOW.getTime() + 3_000),
+    expiresAt: EXPIRES,
+  });
+  assert.equal(await resolveCurrentOutboundAuthority({
+    executor: surface.db,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: surface.binding.connectionEpoch,
+    expectedBindingEpoch: surface.binding.bindingEpoch,
+    expectedAudienceRevision: frozen.neutral.memberRevision,
+    senderType: "user",
+    senderId: surface.owner.id,
+    now: new Date(NOW.getTime() + 4_000),
+    registrationId: surface.registration.id,
+  }), null, "a newest mismatched public snapshot must still fail closed");
+});
+
+test("public outbound worker sends a frozen 19766 snapshot when live audience revision is null", async () => {
+  const surface = await fixture("public");
+  const frozen = await resolveCurrentOutboundAuthority({
+    executor: surface.db,
+    bindingId: surface.binding.id,
+    expectedConnectionEpoch: surface.binding.connectionEpoch,
+    expectedBindingEpoch: surface.binding.bindingEpoch,
+    expectedAudienceRevision: 19_766,
+    senderType: "user",
+    senderId: surface.owner.id,
+    now: NOW,
+    registrationId: surface.registration.id,
+  });
+  assert.ok(frozen);
+  assert.equal(frozen.neutral.memberRevision, 19_766);
+  assert.equal(surface.binding.audienceRevision, null);
+
+  const [message] = await surface.db.insert(messages).values({
+    channelId: surface.channel.id,
+    senderType: "user",
+    senderId: surface.owner.id,
+    content: "public mutable authority regression",
+  }).returning();
+  const enqueued = await surface.db.transaction((executor) => enqueueSlackBridgeOutboundDelivery({
+    executor,
+    message,
+    activeRuntime: {
+      level: "top_level",
+      authorityConversationId: surface.channel.id,
+      runtimePredicateRevision: frozen.runtimeRevision,
+      bindingAuthority: frozen.neutral,
+    },
+    canonicalConversationId: surface.channel.id,
+    senderType: "user",
+    senderId: surface.owner.id,
+    authorName: surface.owner.name,
+    sanitizedText: message.content,
+    mintReconciliationMarker: () => "P".repeat(43),
+  }));
+  const [secondMessage] = await surface.db.insert(messages).values({
+    channelId: surface.channel.id,
+    senderType: "user",
+    senderId: surface.owner.id,
+    content: "public mutable authority following row",
+  }).returning();
+  const secondEnqueued = await surface.db.transaction((executor) => enqueueSlackBridgeOutboundDelivery({
+    executor,
+    message: secondMessage,
+    activeRuntime: {
+      level: "top_level",
+      authorityConversationId: surface.channel.id,
+      runtimePredicateRevision: frozen.runtimeRevision,
+      bindingAuthority: frozen.neutral,
+    },
+    canonicalConversationId: surface.channel.id,
+    senderType: "user",
+    senderId: surface.owner.id,
+    authorName: surface.owner.name,
+    sanitizedText: secondMessage.content,
+    mintReconciliationMarker: () => "Q".repeat(43),
+  }));
+
+  await surface.db.update(externalAppInstalls).set({
+    scopeRevision: 2,
+    credentialRevision: 2,
+  }).where(eq(externalAppInstalls.id, surface.install.id));
+  await surface.db.update(externalAppCredentials).set({
+    credentialRevision: 2,
+  }).where(eq(externalAppCredentials.installId, surface.install.id));
+  await surface.db.update(externalAppInstallGrantReceipts).set({
+    scopeRevision: 2,
+    credentialRevision: 2,
+  }).where(eq(externalAppInstallGrantReceipts.installId, surface.install.id));
+
+  let workerResult!: unknown;
+  let providerCalls = 0;
+  let resolveWorker!: (value: unknown) => void;
+  const workerResolution = new Promise<unknown>((resolve) => {
+    resolveWorker = resolve;
+  });
+  const provider = {
+    transport: {},
+    quarantineSink: {},
+    credentialResolver: { resolve: async () => ({}) },
+    createOutboundAttachmentTransport: async () => null,
+    releaseCredential: async () => {},
+  } as unknown as SlackBridgeProviderRuntime;
+  const runtime = createSlackBridgeDatabaseOutboundRuntime({
+    db: surface.db,
+    provider,
+    reconciliationKey: "public-mutable-authority-regression",
+    registrationId: surface.registration.id,
+    now: () => new Date(NOW.getTime() + 1_000),
+    workerIntervalMs: 60_000,
+    onError(error) {
+      resolveWorker({ error });
+    },
+    async runWorkerOnce(input) {
+      const current = input.dependencies!;
+      const workerDependencies = {
+        ...current,
+        prepareProvider: undefined,
+        leaseCredential: async ({ runtime: currentRuntime }: {
+          runtime: ActiveExternalDeliveryRuntime;
+        }) => ({
+          handle: {},
+          credentialRevision: 2,
+          runtimeRevision: currentRuntime.runtimeRevision,
+          provider: currentRuntime.bindingAuthority.provider,
+          installId: currentRuntime.bindingAuthority.installId,
+          providerAuthorityId: currentRuntime.bindingAuthority.providerAuthorityId,
+          providerConversationId: currentRuntime.bindingAuthority.providerConversationId,
+          connectionEpoch: currentRuntime.bindingAuthority.connectionEpoch,
+          bindingId: currentRuntime.bindingAuthority.bindingId,
+          bindingEpoch: currentRuntime.bindingAuthority.bindingEpoch,
+        }),
+        dispatchProvider: async () => {
+          providerCalls += 1;
+          return {
+            kind: "accepted" as const,
+            providerMessageId: `public-mutable-authority-provider-message-${providerCalls}`,
+          };
+        },
+        now: () => new Date(NOW.getTime() + 1_000),
+        jitterUnit: () => 0.5,
+      };
+      const firstResult = await processExternalDeliveryPartitionHead({
+        ...input,
+        dependencies: workerDependencies,
+      });
+      const secondResult = await processExternalDeliveryPartitionHead({
+        ...input,
+        dependencies: workerDependencies,
+      });
+      workerResult = { firstResult, secondResult };
+      resolveWorker(workerResult);
+      return secondResult;
+    },
+  });
+  runtime.start();
+  const result = await Promise.race([
+    workerResolution,
+    new Promise<never>((_, reject) => setTimeout(
+      () => reject(new Error("public mutable authority worker did not resolve")),
+      2_000,
+    )),
+  ]);
+  await runtime.stop();
+
+  const results = result as {
+    firstResult: { kind?: string };
+    secondResult: { kind?: string };
+  };
+  assert.equal(results.firstResult.kind, "attempted");
+  assert.equal(results.secondResult.kind, "attempted");
+  assert.equal(providerCalls, 2);
+  const [delivery] = await surface.db.select().from(externalOutboundDeliveries)
+    .where(eq(externalOutboundDeliveries.id, enqueued.delivery.id));
+  assert.equal(delivery?.state, "accepted");
+  const [attempt] = await surface.db.select().from(externalDeliveryAttempts)
+    .where(eq(externalDeliveryAttempts.deliveryId, enqueued.delivery.id));
+  assert.equal(attempt?.runtimeRevision === frozen.runtimeRevision, false);
+  const [secondDelivery] = await surface.db.select().from(externalOutboundDeliveries)
+    .where(eq(externalOutboundDeliveries.id, secondEnqueued.delivery.id));
+  assert.equal(secondDelivery?.state, "accepted");
+  const [partition] = await surface.db.select().from(externalDeliveryPartitions)
+    .where(eq(externalDeliveryPartitions.bindingId, surface.binding.id));
+  assert.equal(partition?.cursorPosition, 2);
 });
 
 test("database ingress and inbound worker current-runtime checks follow master gate ON to OFF to ON", async () => {
@@ -764,11 +1313,6 @@ test("database runtime resolvers fail closed on expired addressability and revok
   assert.equal(await createSlackDatabaseInboundWorkerRuntimeResolver(surface.db)({
     eventId: "event-revoked",
     frozenAuthority: frozen,
-  }), null);
-  assert.equal(await createSlackDatabaseAuthorPolicyAuthorityResolver(surface.db)({
-    serverId: surface.server.id,
-    bindingId: surface.binding.id,
-    now: NOW,
   }), null);
 });
 

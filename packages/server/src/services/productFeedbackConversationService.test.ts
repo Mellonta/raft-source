@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { createHmac } from "node:crypto";
 import {
   closeProductFeedbackTicket,
@@ -16,7 +15,7 @@ import {
   resetProductFeedbackReporterSessionCacheForTest,
   safeProductFeedbackContentType,
   safeProductFeedbackFilename,
-} from "./productFeedbackConversationService.js";
+} from "./productFeedbackConversationService";
 
 const ENV = {
   HANDS_FEEDBACK_BASE_URL: "https://hands.example/",

@@ -17,26 +17,29 @@ function testIncludes(): string[] {
 }
 
 const domSetup = resolve(webRoot, "tests/helpers/domSetup.ts");
+const timersReset = resolve(webRoot, "tests/helpers/realTimersAfterEach.ts");
 
 export default defineConfig({
   root: webRoot,
-  resolve: {
-    alias: [{
-      find: /^node:test$/,
-      replacement: resolve(webRoot, "tests/helpers/vitestNodeTestCompat.ts"),
-    }],
-  },
   test: {
+    globals: true,
     environment: "node",
     include: testIncludes(),
     setupFiles: dom
-      ? [resolve(webRoot, "tests/helpers/compileCacheSetup.ts"), domSetup]
-      : [],
+      ? [resolve(webRoot, "tests/helpers/compileCacheSetup.ts"), timersReset, domSetup]
+      : [timersReset],
+    // node:test restored per-test mocks automatically; keep that contract for vi.spyOn.
+    restoreMocks: true,
     pool: "forks",
     isolate: true,
+    // DOM teardown can log while Vitest 5 closes its console RPC (#11153).
+    // Keep stdout/stderr visible through the fork's native streams instead;
+    // assertions and unhandled errors retain their normal failure behavior.
+    disableConsoleIntercept: dom,
     // DOM collection is memory-heavy. At the default worker count, the
     // heaviest files can starve their one-second RTL waits under host load.
-    ...(dom ? { minWorkers: 1, maxWorkers: "50%" } : {}),
+    // (Vitest 4 removed `minWorkers`; it is derived automatically outside watch mode.)
+    ...(dom ? { maxWorkers: "50%" } : {}),
     resolveSnapshotPath: (testPath) => `${testPath}.snapshot`,
     // The previous Node runner imposed no per-test or per-hook timeout. Keep
     // that contract and let the existing CI job watchdog bound hangs.

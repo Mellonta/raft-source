@@ -1,5 +1,5 @@
 import type { AttachmentPreviewData } from "@botiverse/raft-shared";
-import type { attachments } from "../../db/schema.js";
+import type { attachments } from "../../db/schema";
 
 export type AttachmentPreviewTrustLevel = "data" | "sandbox";
 

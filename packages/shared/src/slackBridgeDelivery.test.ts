@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   SLACK_BRIDGE_MAX_AUTOMATIC_PROVIDER_ATTEMPTS_AFTER_AMBIGUITY,
@@ -11,7 +10,7 @@ import {
   canAdvanceSlackBridgePartitionCursor,
   planSlackBridgePartitionWork,
   type SlackBridgeOutboundDeliverySnapshot,
-} from "./slackBridgeDelivery.js";
+} from "./slackBridgeDelivery";
 
 const NOW = new Date("2026-07-24T12:00:00.000Z");
 

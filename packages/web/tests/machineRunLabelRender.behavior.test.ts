@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -19,16 +18,16 @@ function zhRender(machine: Parameters<typeof MachineRunLabel>[0]["machine"]): st
   );
 }
 
-test("zh: offline daemon machine renders 守护进程离线, not the .text fallback", () => {
+test("zh: offline legacy machine renders 旧版离线, not the .text fallback", () => {
   const html = zhRender({ status: "offline" });
-  assert.match(html, /守护进程离线/);
-  assert.doesNotMatch(html, /daemon offline/);
+  assert.match(html, /旧版离线/);
+  assert.doesNotMatch(html, /legacy offline/);
 });
 
-test("zh: online daemon with version renders 守护进程 v{version}", () => {
+test("zh: online legacy machine with version renders 旧版 v{version}", () => {
   const html = zhRender({ status: "online", daemonVersion: "1.2.3" });
-  assert.match(html, /守护进程 v1\.2\.3/);
-  assert.doesNotMatch(html, /daemon v1\.2\.3/);
+  assert.match(html, /旧版 v1\.2\.3/);
+  assert.doesNotMatch(html, /legacy v1\.2\.3/);
 });
 
 test("zh: online computer without version renders Computer 在线 (status, not version presence)", () => {
@@ -49,5 +48,5 @@ test("en output is unchanged", () => {
       createElement(MachineRunLabel, { machine: { status: "offline" } }),
     ),
   );
-  assert.match(html, /daemon offline/);
+  assert.match(html, /legacy offline/);
 });

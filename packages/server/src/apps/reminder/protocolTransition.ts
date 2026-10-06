@@ -1,7 +1,7 @@
 import {
   REMINDER_FIRE_RECEIPT_CAPABILITY,
   REMINDER_FIRE_REQUEST_CAPABILITY,
-} from "@botiverse/raft-shared/src/apps/reminder/protocol.js";
+} from "@botiverse/raft-shared/src/apps/reminder/protocol";
 
 export interface ReminderProtocolConnectionFacts {
   daemonVersion: string | null;

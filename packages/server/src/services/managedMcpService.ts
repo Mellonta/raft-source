@@ -13,7 +13,7 @@ import {
   type ManagedMcpServerView,
   type ManagedMcpToolCatalogEntry,
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   agents,
   integrationAuditEvents,
@@ -21,12 +21,12 @@ import {
   managedMcpCredentials,
   managedMcpOAuthAttempts,
   managedMcpServers,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   decryptManagedMcpHeaders,
   encryptManagedMcpHeaders,
   normalizeManagedMcpHeaders,
-} from "./managedMcpCredentialService.js";
+} from "./managedMcpCredentialService";
 import {
   callManagedMcpTool,
   callManagedMcpOAuthTool,
@@ -34,9 +34,9 @@ import {
   listManagedMcpTools,
   ManagedMcpGatewayError,
   validateManagedMcpEndpoint,
-} from "./managedMcpGateway.js";
-import { recordIntegrationAuditEvent } from "./integrationAuditService.js";
-import { withManagedMcpOAuth } from "./managedMcpOAuthService.js";
+} from "./managedMcpGateway";
+import { recordIntegrationAuditEvent } from "./integrationAuditService";
+import { withManagedMcpOAuth } from "./managedMcpOAuthService";
 
 export class ManagedMcpServiceError extends Error {
   constructor(
@@ -131,8 +131,8 @@ function serializeServer(
   };
 }
 
-async function requireAgent(serverId: string, agentId: string) {
-  const [agent] = await getDb()
+async function requireAgent(serverId: string, agentId: string, db: DatabaseExecutor = getDb()) {
+  const [agent] = await db
     .select({ id: agents.id })
     .from(agents)
     .where(and(eq(agents.id, agentId), eq(agents.serverId, serverId)))
@@ -140,8 +140,8 @@ async function requireAgent(serverId: string, agentId: string) {
   if (!agent) throw new ManagedMcpServiceError("Agent not found", "managed_mcp_agent_not_found");
 }
 
-async function loadServer(serverId: string, mcpServerId: string): Promise<ServerRow> {
-  const [row] = await getDb()
+async function loadServer(serverId: string, mcpServerId: string, db: DatabaseExecutor = getDb()): Promise<ServerRow> {
+  const [row] = await db
     .select()
     .from(managedMcpServers)
     .where(and(eq(managedMcpServers.id, mcpServerId), eq(managedMcpServers.serverId, serverId)))
@@ -150,8 +150,8 @@ async function loadServer(serverId: string, mcpServerId: string): Promise<Server
   return row;
 }
 
-async function loadCredentials(serverId: string, mcpServerId: string): Promise<CredentialRow | null> {
-  const [row] = await getDb()
+async function loadCredentials(serverId: string, mcpServerId: string, db: DatabaseExecutor = getDb()): Promise<CredentialRow | null> {
+  const [row] = await db
     .select()
     .from(managedMcpCredentials)
     .where(and(eq(managedMcpCredentials.serverId, serverId), eq(managedMcpCredentials.mcpServerId, mcpServerId)))
@@ -605,8 +605,11 @@ export async function setManagedMcpAssignment(input: {
   mcpServerId: string;
   enabled: boolean;
   allowedTools: string[] | null;
-}): Promise<ManagedMcpServerView> {
-  const [, server] = await Promise.all([requireAgent(input.serverId, input.agentId), loadServer(input.serverId, input.mcpServerId)]);
+}, options: { executor?: DatabaseExecutor } = {}): Promise<ManagedMcpServerView> {
+  // Inside a fenced transaction every read goes through the executor: a separate getDb() read would wait on the
+  // caller's transaction on a single-connection database and needlessly take a second pool connection on Postgres.
+  const db = options.executor ?? getDb();
+  const server = await requireAgent(input.serverId, input.agentId, db).then(() => loadServer(input.serverId, input.mcpServerId, db));
   assertAssignmentCanBeEnabled(server, input.enabled);
   if (input.allowedTools !== null) {
     const catalogNames = new Set(server.toolCatalog.map((tool) => tool.name));
@@ -614,7 +617,8 @@ export async function setManagedMcpAssignment(input: {
       throw new ManagedMcpServiceError("Assignment contains a tool outside the current catalog", "managed_mcp_tool_not_allowed");
     }
   }
-  const [assignment] = await getDb().insert(managedMcpAssignments).values({
+  // The upsert is the authority write; with an executor it joins the caller's fenced transaction.
+  const [assignment] = await db.insert(managedMcpAssignments).values({
     serverId: input.serverId,
     agentId: input.agentId,
     mcpServerId: input.mcpServerId,
@@ -631,7 +635,7 @@ export async function setManagedMcpAssignment(input: {
       updatedAt: currentDate(),
     },
   }).returning();
-  return serializeServer(await loadServer(input.serverId, input.mcpServerId), assignment, await loadCredentials(input.serverId, input.mcpServerId));
+  return serializeServer(await loadServer(input.serverId, input.mcpServerId, db), assignment, await loadCredentials(input.serverId, input.mcpServerId, db));
 }
 
 export interface ManagedMcpAssignmentUpdate {
@@ -646,13 +650,29 @@ export async function applyManagedMcpAssignments(input: {
   agentId: string;
   assignments: ManagedMcpAssignmentUpdate[];
 }): Promise<ManagedMcpAgentCatalogResponse> {
-  await requireAgent(input.serverId, input.agentId);
+  await writeManagedMcpAssignments(input);
+  return listAgentManagedMcpCatalog(input.serverId, input.agentId);
+}
+
+/**
+ * Validates and upserts a bulk assignment update. With an executor the upserts join the caller's fenced transaction
+ * (task #91) as a savepoint; the caller reads the catalog back after its commit.
+ */
+export async function writeManagedMcpAssignments(input: {
+  serverId: string;
+  userId: string;
+  agentId: string;
+  assignments: ManagedMcpAssignmentUpdate[];
+}, options: { executor?: DatabaseExecutor } = {}): Promise<void> {
+  const db = options.executor ?? getDb();
+  await requireAgent(input.serverId, input.agentId, db);
   const uniqueIds = new Set(input.assignments.map((assignment) => assignment.mcpServerId));
   if (uniqueIds.size !== input.assignments.length) {
     throw new ManagedMcpServiceError("MCP assignment updates must be unique", "managed_mcp_assignment_stale");
   }
 
-  const servers = await Promise.all(input.assignments.map((assignment) => loadServer(input.serverId, assignment.mcpServerId)));
+  const servers: ServerRow[] = [];
+  for (const assignment of input.assignments) servers.push(await loadServer(input.serverId, assignment.mcpServerId, db));
   input.assignments.forEach((assignment, index) => {
     assertAssignmentCanBeEnabled(servers[index], assignment.enabled);
     if (assignment.allowedTools === null) return;
@@ -662,7 +682,9 @@ export async function applyManagedMcpAssignments(input: {
     }
   });
 
-  await getDb().transaction(async (tx) => {
+  // With an executor the caller already owns the transaction, so write on it directly rather than opening a nested
+  // savepoint; without one the upserts still commit atomically in their own transaction.
+  const writeAll = async (tx: DatabaseExecutor) => {
     for (const assignment of input.assignments) {
       await tx.insert(managedMcpAssignments).values({
         serverId: input.serverId,
@@ -682,9 +704,12 @@ export async function applyManagedMcpAssignments(input: {
         },
       });
     }
-  });
-
-  return listAgentManagedMcpCatalog(input.serverId, input.agentId);
+  };
+  if (options.executor) {
+    await writeAll(options.executor);
+  } else {
+    await getDb().transaction(writeAll);
+  }
 }
 
 export async function testManagedMcpConfiguration(input: {

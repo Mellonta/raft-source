@@ -74,6 +74,12 @@ export type ServerBoundDueReceiptMessage =
       version: number;
       requestId: string;
       firedAtClient: string;
+      /**
+       * W3C traceparent of the daemon's `daemon.app_source.fire_request` span,
+       * so the Server receipt joins the occurrence's trace. Optional: older
+       * daemons omit it and the receipt stays under the socket context.
+       */
+      traceparent?: string;
     }
   | {
       /** Transitional frame emitted by daemon 1.0.14 and 1.0.15. */

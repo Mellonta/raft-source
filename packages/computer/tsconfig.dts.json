@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@botiverse/raft-shared": ["../shared/src/index.ts"],
+      "@botiverse/raft-shared/*": ["../shared/src/*", "../shared/*"],
+      "@botiverse/raft-trace-client": ["../trace-client/src/index.ts"],
+      "@botiverse/raft-trace-client/*": ["../trace-client/src/*", "../trace-client/*"],
+      "@botiverse/raft-sync-core": ["../sync-core/src/index.ts"],
+      "@botiverse/raft-sync-core/*": ["../sync-core/src/*", "../sync-core/*"]
+    }
+  }
+}

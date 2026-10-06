@@ -1,4 +1,4 @@
-import { createApiTest } from "./test/integration/apiTest.js";
+import { createApiTest } from "./test/integration/apiTest";
 import assert from "node:assert/strict";
 
 

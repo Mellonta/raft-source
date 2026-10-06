@@ -1,16 +1,17 @@
-import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import argon2 from "argon2";
 import { eq } from "drizzle-orm";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { attachmentCommentRefs, attachments, channels, featureFlagRules, featureFlags, messageMentions, messages, serverMembers, users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { addHuman, createChannel, getOrCreateThread } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY } from "../services/featureFlagService.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { attachmentCommentRefs, attachments, channels, featureFlagRules, featureFlags, messageMentions, messages, serverMembers, users } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { addHuman, createChannel, getOrCreateThread } from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY } from "../services/featureFlagService";
+import { mintAgentCredential } from "../services/agentCredentialService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -1154,7 +1155,7 @@ test("attachment comments: structured mentions ride the shared message pipeline"
   }
 });
 
-test("attachment comments: agents receive the scope line — live delivery and enrichment (task #37)", async ({ app }) => {
+test("attachment comments: agents receive complete scope quotation across live, history, and search (tasks #37/#158)", async ({ app }) => {
 
   const { baseUrl, close } = app;
   try {
@@ -1168,9 +1169,15 @@ test("attachment comments: agents receive the scope line — live delivery and e
       profileSetupCompletedAt: new Date(),
     }).returning();
     const server = await createServer("Agent Scope Test", "botiverse", owner.id);
-    const { createAgent } = await import("../services/agentService.js");
-    const { addAgent } = await import("../services/channelService.js");
+    const { createAgent } = await import("../services/agentService");
+    const { addAgent } = await import("../services/channelService");
     const agent = await createAgent(server.id, "ScopeBot", { runtime: "claude", model: "sonnet" });
+    const agentCredential = await mintAgentCredential({
+      agentId: agent.id,
+      scopes: ["read"],
+      name: "scope-history-search",
+      createdByUserId: null,
+    });
     const channel = await createChannel(server.id, "scope-room", "channel");
     await addHuman(channel.id, owner.id);
     await addAgent(channel.id, agent.id);
@@ -1209,30 +1216,40 @@ test("attachment comments: agents receive the scope line — live delivery and e
     });
     assert.equal(bootstrap.status, 200, await bootstrap.clone().text());
     const bootstrapped = (await bootstrap.json()) as { threadChannelId: string };
-    const { recordThreadFollow } = await import("../services/channelService.js");
+    const { recordThreadFollow } = await import("../services/channelService");
     await recordThreadFollow("agent", agent.id, bootstrapped.threadChannelId, parentMessage.id, "replied");
 
     // Anchored comment: the FIRST delivery to the agent must already carry
     // the scope line (the ref row is inserted only after broadcastAndDeliver
     // — the anchor is passed straight through, never read back).
+    const firstQuoteLine = `complete-selection-${"q".repeat(120)}`;
+    const fullQuote = `${firstQuoteLine}\r\nsecond paragraph\n\nfinal line`;
+    const scopeLine = "[re: screen_text.html · § Rollout plan]";
+    const quoteBlock = `> ${firstQuoteLine}\n> second paragraph\n>\n> final line`;
+    const commentContent = "task158quote 太live了。全去了吧。";
+    const expectedScopedContent = `${scopeLine}\n${quoteBlock}\n${commentContent}`;
     const res = await fetch(`${baseUrl}/api/attachments/${attachment.id}/comments`, {
       method: "POST",
       headers,
       body: JSON.stringify({
-        content: "太live了。全去了吧。",
-        anchor: { type: "lines", data: { start: 3, end: 7, quote: "stop prompting" } },
+        content: commentContent,
+        anchor: {
+          type: "md-section",
+          data: { headingId: "rollout-plan", headingTitle: "Rollout plan", quote: fullQuote },
+        },
       }),
     });
     assert.equal(res.status, 200, await res.clone().text());
     const created = (await res.json()) as { message: { id: string }; threadChannelId: string };
 
     const agentDelivery = deliveries.find(
-      (d) => d.agentId === agent.id && d.message.content.includes("太live了"),
+      (d) => d.agentId === agent.id && d.message.content.includes("task158quote"),
     );
     assert.ok(agentDelivery, "agent in the channel receives the comment");
-    assert.ok(
-      agentDelivery!.message.content.startsWith("[re: screen_text.html · L3–L7 ·「stop prompting」]\n"),
-      `scope line leads the agent-facing content, got: ${agentDelivery!.message.content.slice(0, 90)}`,
+    assert.equal(
+      agentDelivery!.message.content,
+      expectedScopedContent,
+      "live delivery carries the compact scope line and complete quotation",
     );
 
     // The HUMAN-facing stored message stays exactly what the user typed —
@@ -1241,7 +1258,7 @@ test("attachment comments: agents receive the scope line — live delivery and e
       .select({ content: messages.content })
       .from(messages)
       .where(eq(messages.id, created.message.id));
-    assert.equal(storedRow.content, "太live了。全去了吧。");
+    assert.equal(storedRow.content, commentContent);
 
     // History path: enrichment exposes the compact anchorLabel on commentRef
     // so thread context / clients can render the same scope.
@@ -1251,8 +1268,11 @@ test("attachment comments: agents receive the scope line — live delivery and e
     )).json()) as { messages: Array<{ id: string; content: string; commentRef: { filename: string; anchorLabel: string | null } | null }> };
     const enriched = listed.messages.find((m) => m.id === created.message.id);
     assert.ok(enriched?.commentRef, "commentRef enriched");
-    assert.equal(enriched!.commentRef!.anchorLabel, "L3–L7 ·「stop prompting」");
-    assert.equal(enriched!.content, "太live了。全去了吧。", "human read path content untouched");
+    assert.equal(
+      enriched!.commentRef!.anchorLabel,
+      `§ Rollout plan ·「${fullQuote.slice(0, 80)}…」`,
+    );
+    assert.equal(enriched!.content, commentContent, "human read path content untouched");
 
     // Unanchored comment still gets the filename-only scope line — the
     // attachment scope itself was what agents never saw (huxijin report).
@@ -1268,6 +1288,80 @@ test("attachment comments: agents receive the scope line — live delivery and e
     assert.ok(
       plain!.message.content.startsWith("[re: screen_text.html]\n"),
       `filename-only scope line, got: ${plain!.message.content.slice(0, 60)}`,
+    );
+
+    // Agent history/search deliberately evaluate the attachment-comment flag
+    // at SERVER scope, matching the dedicated Agent comment APIs. A user-only
+    // deny must not erase the quotation for an Agent viewer.
+    await db.insert(featureFlagRules).values({
+      flagKey: ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
+      stage: "user",
+      decision: "deny",
+      values: [owner.id],
+    });
+    const agentHeaders = { Authorization: `Bearer ${agentCredential.apiKey}` };
+    const threadRef = `#scope-room:${parentMessage.id.slice(0, 8)}`;
+    const historyRes = await fetch(
+      `${baseUrl}/internal/agent-api/history?channel=${encodeURIComponent(threadRef)}&limit=50`,
+      { headers: agentHeaders },
+    );
+    assert.equal(historyRes.status, 200, await historyRes.clone().text());
+    const historyBody = await historyRes.json() as {
+      messages: Array<{ id: string; content: string }>;
+    };
+    assert.equal(
+      historyBody.messages.find((message) => message.id === created.message.id)?.content,
+      expectedScopedContent,
+      "history read carries the same two-line scope block as live delivery",
+    );
+
+    const searchParams = new URLSearchParams({ q: "task158quote", sort: "recent", limit: "10" });
+    const searchRes = await fetch(`${baseUrl}/internal/agent-api/search?${searchParams}`, {
+      headers: agentHeaders,
+    });
+    assert.equal(searchRes.status, 200, await searchRes.clone().text());
+    const searchBody = await searchRes.json() as {
+      results: Array<{ id: string; content: string }>;
+    };
+    assert.equal(
+      searchBody.results.find((message) => message.id === created.message.id)?.content,
+      expectedScopedContent,
+      "search carries the same two-line scope block as live delivery",
+    );
+
+    // Global flag-off must suppress the scope on BOTH retrospective Agent
+    // paths. The ordinary message remains readable, but filename and full
+    // selected text cannot leak through the projection.
+    await db
+      .update(featureFlags)
+      .set({ killSwitch: true })
+      .where(eq(featureFlags.key, ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY));
+
+    const disabledHistoryRes = await fetch(
+      `${baseUrl}/internal/agent-api/history?channel=${encodeURIComponent(threadRef)}&limit=50`,
+      { headers: agentHeaders },
+    );
+    assert.equal(disabledHistoryRes.status, 200, await disabledHistoryRes.clone().text());
+    const disabledHistory = await disabledHistoryRes.json() as {
+      messages: Array<{ id: string; content: string }>;
+    };
+    assert.equal(
+      disabledHistory.messages.find((message) => message.id === created.message.id)?.content,
+      commentContent,
+      "flag-off history keeps the ordinary message but hides its attachment scope",
+    );
+
+    const disabledSearchRes = await fetch(`${baseUrl}/internal/agent-api/search?${searchParams}`, {
+      headers: agentHeaders,
+    });
+    assert.equal(disabledSearchRes.status, 200, await disabledSearchRes.clone().text());
+    const disabledSearch = await disabledSearchRes.json() as {
+      results: Array<{ id: string; content: string }>;
+    };
+    assert.equal(
+      disabledSearch.results.find((message) => message.id === created.message.id)?.content,
+      commentContent,
+      "flag-off search keeps the ordinary message but hides its attachment scope",
     );
   } finally {
     await close();

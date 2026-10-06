@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 
-import { migratePglite } from "./pgliteMigrations.js";
+import { migratePglite } from "./pgliteMigrations";
 
 const REMOVED_TABLES = [
   "product_feedback_event_digest_conflicts",

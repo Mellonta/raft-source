@@ -1,11 +1,10 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   agents,
   channelAgents,
@@ -14,6 +13,7 @@ import {
   externalActorProjections,
   externalAddressabilityProjections,
   externalAppCredentials,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalAppRegistrations,
   externalAppServerGrants,
@@ -24,25 +24,25 @@ import {
   serverAgentMembers,
   serverMembers,
   users,
-} from "../db/schema.js";
-import { createServer } from "./serverService.js";
+} from "../db/schema";
+import { createServer } from "./serverService";
 import {
   createSlackPrivateAudienceRefresher,
   type SlackAudienceIdentityMapping,
   type SlackAudienceRefreshDependencies,
-} from "./slackAudienceRefreshService.js";
+} from "./slackAudienceRefreshService";
 import {
   startSlackBridgePersistentWorker,
   type SlackBridgeBindingRuntime,
   type SlackBridgeLifecycleExecutionReceipt,
-} from "./slackBridgeWorkerLifecycle.js";
+} from "./slackBridgeWorkerLifecycle";
 import {
   SLACK_BRIDGE_CREDENTIAL_LEASE_SCHEMA,
   type SlackBridgeCredentialHandle,
   type SlackProviderAuthorityFence,
   type SlackWebApiRequest,
   type SlackWebApiTransportResult,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
 
 
 const NOW = new Date("2026-08-11T08:00:00.000Z");
@@ -148,6 +148,16 @@ async function seedPrivateAudience(input: {
     providerAuthorityId: "T_AUDIENCE",
     botUserId: "U_BRIDGE_BOT",
   }).returning();
+  await getDb().insert(externalAppInstallServerGrants).values({
+    installId: install.id,
+    serverId: server.id,
+    registrationId: registration.id,
+    serverGrantId: grant.id,
+    grantEpoch: grant.grantEpoch,
+    state: "active",
+    authorizedByType: "human",
+    authorizedById: owner.id,
+  });
   await getDb().insert(externalAppCredentials).values({
     installId: install.id,
     state: "active",
@@ -215,6 +225,7 @@ async function seedPrivateAudience(input: {
     server,
     channel,
     registration,
+    grant,
     install,
     binding,
     identityMappings,
@@ -701,6 +712,65 @@ test("missing credential records unavailable without calling Slack", async () =>
     revision: 2,
   });
   assert.equal(calls.length, 0);
+});
+
+test("stale server-grant epoch fails closed before Slack provider I/O or audience writes", async () => {
+  const seeded = await seedPrivateAudience();
+  await getDb().update(externalAppServerGrants).set({ grantEpoch: seeded.grant.grantEpoch + 1 })
+    .where(eq(externalAppServerGrants.id, seeded.grant.id));
+  const calls: SlackWebApiRequest[] = [];
+  const refresh = refresher({
+    outcomes: [],
+    calls,
+    identityMappings: seeded.identityMappings,
+  });
+
+  assert.deepEqual(await refresh({ bindingId: seeded.binding.id }), {
+    kind: "fence_mismatch",
+    bindingId: seeded.binding.id,
+    audienceStatus: "unavailable",
+    observedAtMs: NOW.getTime(),
+    reason: "identity_mapping_unavailable",
+  });
+  assert.equal(calls.length, 0, "a stale association must not call conversations.members");
+  assert.deepEqual(await getDb().select().from(externalBindingAudienceSnapshots), []);
+});
+
+test("server-grant drift during provider I/O discards the private audience observation", async () => {
+  const seeded = await seedPrivateAudience();
+  let calls = 0;
+  const refresh = refresher({
+    identityMappings: seeded.identityMappings,
+    outcomes: [],
+    overrides: {
+      transport: {
+        evidence: "double",
+        async call() {
+          calls += 1;
+          await getDb().update(externalAppServerGrants).set({
+            grantEpoch: seeded.grant.grantEpoch + 1,
+          }).where(eq(externalAppServerGrants.id, seeded.grant.id));
+          const [driftedGrant] = await getDb().select().from(externalAppServerGrants)
+            .where(eq(externalAppServerGrants.id, seeded.grant.id));
+          assert.equal(driftedGrant.grantEpoch, seeded.grant.grantEpoch + 1);
+          return members(["U_BRIDGE_BOT", "U_A", "U_B"]);
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(await refresh({ bindingId: seeded.binding.id }), {
+    kind: "fence_mismatch",
+    bindingId: seeded.binding.id,
+    audienceStatus: "unavailable",
+    observedAtMs: NOW.getTime(),
+    reason: "identity_mapping_unavailable",
+  });
+  assert.equal(calls, 1, "the race must occur after one provider observation");
+  const [binding] = await getDb().select().from(externalChannelBindings)
+    .where(eq(externalChannelBindings.id, seeded.binding.id));
+  assert.equal(binding.audienceRevision, seeded.binding.audienceRevision);
+  assert.deepEqual(await getDb().select().from(externalBindingAudienceSnapshots), []);
 });
 
 test("credential lease failure records unavailable without calling Slack", async () => {

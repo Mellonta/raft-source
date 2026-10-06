@@ -24,9 +24,9 @@
 import { randomBytes } from "node:crypto";
 import argon2 from "argon2";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { deviceAuthorizations } from "../db/schema.js";
-import { computeTokenLookupHash } from "./agentCredentialService.js";
+import { getDb } from "../db/index";
+import { deviceAuthorizations } from "../db/schema";
+import { computeTokenLookupHash } from "./agentCredentialService";
 
 // Raw device_code entropy (base64url). user_code is a short human-typed
 // code; device_code is the long secret polled by the client.

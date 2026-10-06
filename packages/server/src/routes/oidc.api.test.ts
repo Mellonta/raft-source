@@ -1,16 +1,16 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { createHash, createPublicKey, randomUUID, verify } from "node:crypto";
 
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { oauthAccessRequests, serverMembers, users } from "../db/schema.js";
-import { createOAuthClient } from "../services/oauthService.js";
-import { decodeOidcAuthorizationCode } from "../services/oidcService.js";
-import { createServer } from "../services/serverService.js";
-import { openTestApp } from "../test/integration/app.js";
+import { getDb } from "../db/index";
+import { oauthAccessRequests, serverMembers, users } from "../db/schema";
+import { createOAuthClient } from "../services/oauthService";
+import { decodeOidcAuthorizationCode } from "../services/oidcService";
+import { createServer } from "../services/serverService";
+import { openTestApp } from "../test/integration/app";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -147,7 +147,6 @@ test("standard OIDC discovery, authorization, PKCE, ID token, JWKS, and email cl
       nonce,
       code_challenge: challenge,
       code_challenge_method: "S256",
-      server: server.slug,
     }).toString();
     const browserStart = await fetch(authorizeUrl, { redirect: "manual" });
     assert.equal(browserStart.status, 302);
@@ -162,7 +161,10 @@ test("standard OIDC discovery, authorization, PKCE, ID token, JWKS, and email cl
     assert.equal(setupUrl.searchParams.get("nonce"), nonce);
     assert.equal(setupUrl.searchParams.get("code_challenge"), challenge);
     assert.equal(setupUrl.searchParams.get("code_challenge_method"), "S256");
-    assert.equal(setupUrl.searchParams.get("server"), server.slug);
+    // task #150: this is the UNSCOPED mount, so no server scope is forwarded.
+    // Scoping now travels in the path -- see the server-scoped issuer test,
+    // which asserts the slug does reach the setup page via /oidc/<server>/.
+    assert.equal(setupUrl.searchParams.get("server"), null);
 
     const fragmentRedirectUrl = new URL(authorizeUrl);
     fragmentRedirectUrl.searchParams.set("redirect_uri", `${redirectUri}#fragment`);
@@ -279,21 +281,27 @@ test("standard OIDC discovery, authorization, PKCE, ID token, JWKS, and email cl
     const exchangeOidcCode = (
       authorizationCode: string,
       clientIdentifier: string,
-      params: Record<string, string> = {},
-    ) => fetch(`${app.baseUrl}/api/oauth/token`, {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${Buffer.from(`${clientIdentifier}:${clientSecret}`).toString("base64")}`,
-      },
-      body: new URLSearchParams({
+      params: Record<string, string | undefined> = {},
+    ) => {
+      const body = new URLSearchParams({
         grant_type: "authorization_code",
         code: authorizationCode,
         redirect_uri: redirectUri,
         code_verifier: verifier,
-        ...params,
-      }),
-    });
-    const exchange = (params: Record<string, string>) => exchangeOidcCode(code, client.clientId, params);
+      });
+      for (const [key, value] of Object.entries(params)) {
+        if (value === undefined) body.delete(key);
+        else body.set(key, value);
+      }
+      return fetch(`${app.baseUrl}/api/oauth/token`, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${clientIdentifier}:${clientSecret}`).toString("base64")}`,
+        },
+        body,
+      });
+    };
+    const exchange = (params: Record<string, string | undefined>) => exchangeOidcCode(code, client.clientId, params);
 
     const uuidExchange = await exchangeOidcCode(code, client.id);
     assert.equal(uuidExchange.status, 401);
@@ -302,6 +310,8 @@ test("standard OIDC discovery, authorization, PKCE, ID token, JWKS, and email cl
     const wrongRedirect = await exchange({ redirect_uri: "https://attacker.example.test/callback" });
     assert.equal(wrongRedirect.status, 400);
     assert.equal((await wrongRedirect.json() as { error: string }).error, "invalid_grant");
+
+    await assertInvalidGrant(await exchange({ code_verifier: undefined }));
 
     const wrongVerifier = await exchange({ code_verifier: `${verifier}x` });
     assert.equal(wrongVerifier.status, 400);
@@ -331,6 +341,94 @@ test("standard OIDC discovery, authorization, PKCE, ID token, JWKS, and email cl
     assert.equal(jwt.payload.name, "OIDC Owner");
     assert.equal(jwt.payload.preferred_username, name);
     assert.equal(jwt.payload.email, email);
+
+    // task #150: a server-scoped token endpoint only mints for its own Server.
+    // Without this, a code granted on one Server exchanged at another Server's
+    // mount would yield a token whose `iss` and `server_id` disagree.
+    const mintCode = async () => {
+      const response = await fetch(`${app.baseUrl}/api/oauth/authorize/human`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${humanAccessToken}` },
+        body: JSON.stringify({
+          clientId: client.clientId,
+          serverId: server.id,
+          returnUrl: redirectUri,
+          scopes: ["openid", "profile", "email"],
+          oidc: true,
+          nonce,
+          codeChallenge: challenge,
+          codeChallengeMethod: "S256",
+          server: server.slug,
+        }),
+      });
+      assert.equal(response.status, 200);
+      return (await response.json() as { code: string }).code;
+    };
+    const exchangeAtMount = async (mount: string) => fetch(`${app.baseUrl}${mount}/api/oauth/token`, {
+      method: "POST",
+      headers: { Authorization: `Basic ${Buffer.from(`${client.clientId}:${clientSecret}`).toString("base64")}` },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: await mintCode(),
+        redirect_uri: redirectUri,
+        code_verifier: verifier,
+      }),
+    });
+
+    const crossServer = await exchangeAtMount(`/oidc/${otherServer.slug}`);
+    assert.equal(crossServer.status, 400);
+    assert.equal((await crossServer.json() as { error: string }).error, "invalid_grant");
+
+    // Control: the identical exchange at the grant's own Server succeeds, so the
+    // 400 above came from the scope check and not from the code or credentials.
+    const sameServer = await exchangeAtMount(`/oidc/${server.slug}`);
+    assert.equal(sameServer.status, 200);
+    const sameServerBody = await sameServer.json() as { id_token: string; access_token: string };
+    const scopedJwt = parseJwt(sameServerBody.id_token);
+    assert.equal(scopedJwt.payload.iss, `https://api.raft.test/oidc/${server.slug}`);
+    assert.equal(scopedJwt.payload.server_id, server.id);
+
+    // The segment may name the Server by id as well as by slug.
+    const sameServerById = await exchangeAtMount(`/oidc/${server.id}`);
+    assert.equal(sameServerById.status, 200);
+
+    // The whole scoped family fails closed on a malformed segment -- not only
+    // the handlers that read it. JWKS in particular used to answer 200 here.
+    const badSegment = "not_a_valid_slug!";
+    const malformed = await Promise.all([
+      fetch(`${app.baseUrl}/oidc/${badSegment}/.well-known/openid-configuration`),
+      fetch(`${app.baseUrl}/oidc/${badSegment}/api/oauth/.well-known/openid-configuration`),
+      fetch(`${app.baseUrl}/oidc/${badSegment}/api/oauth/authorize?response_type=code`, { redirect: "manual" }),
+      fetch(`${app.baseUrl}/oidc/${badSegment}/api/oauth/token`, { method: "POST" }),
+      fetch(`${app.baseUrl}/oidc/${badSegment}/api/oauth/jwks`),
+      fetch(`${app.baseUrl}/oidc/${badSegment}/api/oauth/userinfo`, { headers: { Authorization: `Bearer ${sameServerBody.access_token}` } }),
+      fetch(`${app.baseUrl}/oidc/${badSegment}/api/oauth/serverinfo`, { headers: { Authorization: `Bearer ${sameServerBody.access_token}` } }),
+    ]);
+    assert.deepEqual(malformed.map((response) => response.status), [400, 400, 400, 400, 400, 400, 400]);
+
+    // Control: the same JWKS request under a valid segment still succeeds, so the
+    // 400s above come from the segment and not from the endpoints themselves.
+    assert.equal((await fetch(`${app.baseUrl}/oidc/${server.slug}/api/oauth/jwks`)).status, 200);
+
+    // Routes the scoped discovery document never advertises are not reachable
+    // under a Server prefix at all.
+    const unadvertised = await Promise.all([
+      fetch(`${app.baseUrl}/oidc/${server.slug}/api/oauth/requests/agent`, { method: "POST" }),
+      fetch(`${app.baseUrl}/oidc/${server.slug}/api/oauth/installation-token`, { method: "POST" }),
+      fetch(`${app.baseUrl}/oidc/${server.slug}/api/oauth/clients/lookup`),
+      fetch(`${app.baseUrl}/oidc/${server.slug}/api/oauth/authorize/human`, { method: "POST" }),
+    ]);
+    assert.deepEqual(unadvertised.map((response) => response.status), [404, 404, 404, 404]);
+
+    // A token issued on this Server is refused at another Server's
+    // userinfo/serverinfo, and accepted at its own.
+    const bearer = { Authorization: `Bearer ${sameServerBody.access_token}` };
+    for (const endpoint of ["userinfo", "serverinfo"]) {
+      const foreign = await fetch(`${app.baseUrl}/oidc/${otherServer.slug}/api/oauth/${endpoint}`, { headers: bearer });
+      assert.equal(foreign.status, 401, `${endpoint} under another Server`);
+      const own = await fetch(`${app.baseUrl}/oidc/${server.slug}/api/oauth/${endpoint}`, { headers: bearer });
+      assert.equal(own.status, 200, `${endpoint} under its own Server`);
+    }
     assert.equal(jwt.payload.email_verified, true);
     assert.equal(jwt.payload.server_id, server.id);
     assert.equal(jwt.payload.server_slug, server.slug);
@@ -373,7 +471,7 @@ test("standard OIDC discovery, authorization, PKCE, ID token, JWKS, and email cl
     assert.equal(authorizeWithoutEmail.status, 200);
     const noEmailCode = (await authorizeWithoutEmail.json() as { code: string }).code;
     const noEmailTokenResponse = await exchangeOidcCode(noEmailCode, client.clientId, {
-      code_verifier: "",
+      code_verifier: undefined,
     });
     assert.equal(noEmailTokenResponse.status, 200);
     const noEmailToken = await noEmailTokenResponse.json() as { access_token: string; id_token: string };
@@ -421,7 +519,7 @@ test("standard OIDC discovery, authorization, PKCE, ID token, JWKS, and email cl
       eq(oauthAccessRequests.id, expiredContext.requestId),
     );
     await assertInvalidGrant(await exchangeOidcCode(expiredCode, client.clientId, {
-      code_verifier: "",
+      code_verifier: undefined,
     }));
 
     const missingCode = await issueKeyOidcCode("missing-code-nonce");
@@ -429,7 +527,7 @@ test("standard OIDC discovery, authorization, PKCE, ID token, JWKS, and email cl
     assert.ok(missingContext);
     await getDb().delete(oauthAccessRequests).where(eq(oauthAccessRequests.id, missingContext.requestId));
     await assertInvalidGrant(await exchangeOidcCode(missingCode, client.clientId, {
-      code_verifier: "",
+      code_verifier: undefined,
     }));
 
     const membershipBoundAuthorize = await fetch(`${app.baseUrl}/api/oauth/authorize/human`, {
@@ -475,6 +573,102 @@ test("standard OIDC discovery, authorization, PKCE, ID token, JWKS, and email cl
     });
     const restoredMembershipExchange = await exchangeMembershipBoundCode();
     assert.equal(restoredMembershipExchange.status, 200);
+  } finally {
+    await app.close();
+    if (previousServerUrl === undefined) delete process.env.SERVER_URL;
+    else process.env.SERVER_URL = previousServerUrl;
+    if (previousAppUrl === undefined) delete process.env.APP_URL;
+    else process.env.APP_URL = previousAppUrl;
+  }
+});
+
+test("server-scoped OIDC issuer replaces the server query parameter", async () => {
+  const previousServerUrl = process.env.SERVER_URL;
+  const previousAppUrl = process.env.APP_URL;
+  process.env.SERVER_URL = "https://api.raft.test";
+  process.env.APP_URL = "https://app.raft.test";
+
+  const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+  try {
+    const suffix = randomUUID();
+    const [owner] = await getDb().insert(users).values({
+      email: `oidc-scoped-${suffix}@raft.test`,
+      name: `oidc-scoped-${suffix}`,
+      displayName: "Scoped OIDC Owner",
+      passwordHash: await fixturePasswordHash("password123"),
+      emailVerified: true,
+    }).returning();
+    const slug = `scoped-oidc-${suffix.slice(0, 8)}`;
+    const server = await createServer("Scoped OIDC Server", slug, owner.id);
+
+    // The scoped discovery document is what an Aliyun-style client is handed:
+    // one URL, no query component anywhere.
+    const scoped = await fetch(`${app.baseUrl}/oidc/${slug}/.well-known/openid-configuration`);
+    assert.equal(scoped.status, 200);
+    const scopedDoc = await scoped.json() as Record<string, unknown>;
+    assert.equal(scopedDoc.issuer, `https://api.raft.test/oidc/${slug}`);
+    assert.equal(scopedDoc.authorization_endpoint, `https://api.raft.test/oidc/${slug}/api/oauth/authorize`);
+    assert.equal(scopedDoc.token_endpoint, `https://api.raft.test/oidc/${slug}/api/oauth/token`);
+    assert.equal(scopedDoc.jwks_uri, `https://api.raft.test/oidc/${slug}/api/oauth/jwks`);
+    // Concrete, never a template: Azure's `common` endpoint returns a literal
+    // `{tenantid}` here and breaks client libraries that compare `iss`.
+    assert.ok(!String(scopedDoc.issuer).includes("{"));
+
+    // A server id is accepted in the same position as a slug.
+    const byId = await fetch(`${app.baseUrl}/oidc/${server.id}/.well-known/openid-configuration`);
+    assert.equal(byId.status, 200);
+    assert.equal(
+      (await byId.json() as Record<string, unknown>).issuer,
+      `https://api.raft.test/oidc/${server.id}`,
+    );
+
+    // Regression guard: the unscoped issuer is untouched, so existing
+    // integrations that validate `iss` keep working until a scheduled cutover.
+    const unscoped = await fetch(`${app.baseUrl}/.well-known/openid-configuration`);
+    assert.equal(unscoped.status, 200);
+    const unscopedDoc = await unscoped.json() as Record<string, unknown>;
+    assert.equal(unscopedDoc.issuer, "https://api.raft.test");
+    assert.equal(unscopedDoc.authorization_endpoint, "https://api.raft.test/api/oauth/authorize");
+
+    // Discrimination control: the two documents must actually differ, otherwise
+    // every assertion above would also pass against an unscoped implementation.
+    assert.notEqual(scopedDoc.issuer, unscopedDoc.issuer);
+    assert.notEqual(scopedDoc.token_endpoint, unscopedDoc.token_endpoint);
+
+    // A malformed segment is refused rather than silently widening the issuer.
+    const bad = await fetch(`${app.baseUrl}/oidc/not_a_valid_slug!/.well-known/openid-configuration`);
+    assert.equal(bad.status, 400);
+
+    // The breaking part of task #150: `?server=` no longer scopes anything, and
+    // is rejected instead of being ignored -- a client that still sends one
+    // believes it is restricting the login.
+    const authorizeUrl = new URL(`${app.baseUrl}/api/oauth/authorize`);
+    authorizeUrl.searchParams.set("response_type", "code");
+    authorizeUrl.searchParams.set("client_id", "any-client");
+    authorizeUrl.searchParams.set("redirect_uri", "https://client.example.test/cb");
+    authorizeUrl.searchParams.set("scope", "openid profile");
+    authorizeUrl.searchParams.set("server", slug);
+    const rejected = await fetch(authorizeUrl, { redirect: "manual" });
+    assert.equal(rejected.status, 400);
+    const rejectedBody = await rejected.json() as Record<string, unknown>;
+    assert.equal(rejectedBody.error, "invalid_request");
+    assert.match(String(rejectedBody.error_description), /no longer supported/);
+
+    // Control for the line above: the identical request without `server=`
+    // still redirects, proving the 400 came from that parameter and not from
+    // some unrelated validation failure.
+    const acceptedUrl = new URL(authorizeUrl);
+    acceptedUrl.searchParams.delete("server");
+    const accepted = await fetch(acceptedUrl, { redirect: "manual" });
+    assert.equal(accepted.status, 302);
+
+    // The scoped mount carries the scope without any query parameter.
+    const scopedAuthorize = new URL(`${app.baseUrl}/oidc/${slug}/api/oauth/authorize`);
+    scopedAuthorize.search = acceptedUrl.search;
+    const scopedRedirect = await fetch(scopedAuthorize, { redirect: "manual" });
+    assert.equal(scopedRedirect.status, 302);
+    const location = new URL(scopedRedirect.headers.get("location") ?? "");
+    assert.equal(location.searchParams.get("server"), slug);
   } finally {
     await app.close();
     if (previousServerUrl === undefined) delete process.env.SERVER_URL;

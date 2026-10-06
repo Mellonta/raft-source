@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   getToolActivityLabel,
   getToolLogLabel,
@@ -7,7 +6,7 @@ import {
   resolveToolSemantic,
   shouldHideToolStartInActivityLog,
   summarizeToolInput,
-} from "./toolDisplay.js";
+} from "./toolDisplay";
 
 test("resolveToolSemantic normalizes chat prefixes and aliases", () => {
   assert.equal(resolveToolSemantic("mcp__chat__join_channel"), "join_channel");

@@ -1,34 +1,34 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach } from "vitest";
 
 import {
   BasicTracer,
   MemoryTraceSink,
   type ServerToMachineMessage,
 } from "@botiverse/raft-shared";
-import { appInboxItemTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace.js";
-import { REMINDER_FIRE_REQUEST_CAPABILITY } from "@botiverse/raft-shared/src/apps/reminder/protocol.js";
+import { appInboxItemTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace";
+import { REMINDER_FIRE_REQUEST_CAPABILITY } from "@botiverse/raft-shared/src/apps/reminder/protocol";
 
-import { createAgentAppInboxStore } from "../../../daemon/src/agentAppInbox.js";
-import { REMINDER_AGENT_INBOX_REGISTRY } from "../../../daemon/src/apps/reminder/inboxDefinition.js";
-import { createReminderRuntime } from "../../../daemon/src/apps/reminder/runtime.js";
-import { createScopedAppStorageFactory } from "../../../daemon/src/scopedAppStorage.js";
-import { FakeClock } from "../../../daemon/src/testing/fakeClock.js";
+import { createAgentAppInboxStore } from "../../../daemon/src/agentAppInbox";
+import { REMINDER_AGENT_INBOX_REGISTRY } from "../../../daemon/src/apps/reminder/inboxDefinition";
+import { createReminderRuntime } from "../../../daemon/src/apps/reminder/runtime";
+import { createScopedAppStorageFactory } from "../../../daemon/src/scopedAppStorage";
+import { FakeClock } from "../../../daemon/src/testing/fakeClock";
+import { traceRows } from "../../../daemon/src/testing/traceRows";
 import {
   createReminder,
   getReminderById,
-} from "../apps/reminder/service.js";
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { AgentOrchestrator } from "./agentOrchestrator.js";
-import { createAgent } from "./agentService.js";
-import { registerMachine } from "./machineService.js";
-import { createServer } from "./serverService.js";
+} from "../apps/reminder/service";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { AgentOrchestrator } from "./agentOrchestrator";
+import { createAgent } from "./agentService";
+import { registerMachine } from "./machineService";
+import { createServer } from "./serverService";
 
 
 afterEach(async () => {
@@ -93,7 +93,7 @@ test("real Server authority refuses an early Computer request, then commits befo
     send: (message) => {
       pendingIngress.push(orchestrator.handleMachineMessage(machine.id, message));
     },
-    trace: recordDaemonTrace,
+    tracer,
   });
   const storageFactory = createScopedAppStorageFactory({
     slockHome: root,
@@ -198,6 +198,17 @@ test("real Server authority refuses an early Computer request, then commits befo
     );
     assert.equal(requests.filter((span) => span.attrs?.outcome === "premature").length, 1);
     assert.equal(requests.filter((span) => span.attrs?.outcome === "accepted").length, 1);
+    // Each Server receipt hangs off the daemon fire request that carried its
+    // traceparent, so the refusal, the retry and the fire read as one trace.
+    const requestSpanIds = new Set(
+      sink.getAllSpans()
+        .filter((span) => span.name === "daemon.app_source.fire_request")
+        .map((span) => span.context.spanId),
+    );
+    assert.equal(requestSpanIds.size, 2);
+    for (const receipt of requests) {
+      assert.ok(receipt.context.parentSpanId && requestSpanIds.has(receipt.context.parentSpanId));
+    }
     assert.equal(inbox.ack(item.itemId), true);
 
     const expectedCorrelation =
@@ -209,10 +220,18 @@ test("real Server authority refuses an early Computer request, then commits befo
       "daemon.app_inbox.mint",
       "daemon.agent.app_inbox_notice",
       "daemon.app_source.receipt",
-      "daemon.app_source.fire",
+      // `daemon.app_source.fire` is deliberately absent. Since #8322 it is a
+      // span owned by the fire body, opened only after the fail-closed
+      // authority gate in `materializeFire` passes. The refusal on this path
+      // returns before that gate, so no fire span is created — and none should
+      // be expected here. The refusal stays observable through
+      // `daemon.app_source.retry` (retryStage `fire_request`), which is in
+      // OBSERVED_FAILURE_SPANS.
       "daemon.app_inbox.ack",
     ];
-    const stages = sink.getAllSpans().filter((span) =>
+    // The reminder runtime records its stages as point events under the active
+    // span; the inbox store and the server still record spans. Read both.
+    const stages = traceRows(sink).filter((span) =>
       stageNames.includes(span.name)
       && span.attrs?.app_correlation_id === expectedCorrelation
     );

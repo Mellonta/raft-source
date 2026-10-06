@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { readFileSync } from "node:fs";
@@ -7,11 +7,12 @@ import argon2 from "argon2";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { and, eq, sql } from "drizzle-orm";
-import { COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY, WIKI_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { migratePglite } from "../db/pgliteMigrations.js";
-import * as dbSchema from "../db/schema.js";
+import { CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY, COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
+import { openTestApp } from "../test/integration/app";
+import { openTestApp as startTestApp } from "../test/integration/app";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { migratePglite } from "../db/pgliteMigrations";
+import * as dbSchema from "../db/schema";
 import {
   featureFlagRules,
   featureFlagAudienceMembers,
@@ -23,20 +24,17 @@ import {
   serverLabEnrollments,
   servers,
   users,
-} from "../db/schema.js";
-import { createServer } from "./serverService.js";
+} from "../db/schema";
+import { createServer } from "./serverService";
 import {
-  ACTIVITY_V2_FEATURE_FLAG_KEY,
   AGENT_MIGRATION_FEATURE_FLAG_KEY,
   LLM_TRANSLATION_FEATURE_FLAG_KEY,
   APPLE_WEB_LOGIN_FEATURE_FLAG_KEY,
   ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
   ATTACHMENT_DIRECT_UPLOAD_FEATURE_FLAG_KEY,
+  ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY,
   CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY,
   GROK_RUNTIME_FEATURE_FLAG_KEY,
-  HUMAN_ACTIVITY_MUTE_FEATURE_FLAG_KEY,
-  INBOX_VISIBILITY_V3_FEATURE_FLAG_KEY,
-  MESSAGE_FORWARDING_FEATURE_FLAG_KEY,
   SERVER_LABS_UI_FEATURE_FLAG_KEY,
   bumpFeatureFlagConfigVersion,
   computeFeatureFlagBucket,
@@ -50,8 +48,37 @@ import {
   listFeatureFlagRules,
   updateFeatureFlag,
   updateFeatureFlagRule,
-} from "./featureFlagService.js";
+} from "./featureFlagService";
 
+function splitSqlTuple(tuple: string): string[] {
+  const values: string[] = [];
+  let start = 0;
+  let quote = false;
+  for (let index = 0; index < tuple.length; index += 1) {
+    const char = tuple[index];
+    if (char === "'") {
+      if (quote && tuple[index + 1] === "'") {
+        index += 1;
+      } else {
+        quote = !quote;
+      }
+    } else if (char === "," && !quote) {
+      values.push(tuple.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  values.push(tuple.slice(start).trim());
+  return values;
+}
+
+function parseChannelJointMigration(sqlText: string): Record<string, string> {
+  const match = sqlText.match(/INSERT\s+INTO\s+"feature_flags"\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)/is);
+  assert.ok(match, "channel conversion migration must contain a feature_flags INSERT");
+  const columns = splitSqlTuple(match[1]).map((column) => column.replaceAll('"', "").trim());
+  const values = splitSqlTuple(match[2]);
+  assert.equal(columns.length, values.length, "migration INSERT columns and VALUES must stay positionally aligned");
+  return Object.fromEntries(columns.map((column, index) => [column, values[index]]));
+}
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
 function causedByConstraint(name: string) {
@@ -60,33 +87,6 @@ function causedByConstraint(name: string) {
     return cause instanceof Error && cause.message.includes(name);
   };
 }
-
-test("feature flags: seeded Wiki gate allows only the initial Botiverse server", async () => {
-  const { close } = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
-  try {
-    const botiverseServerId = "95f993fa-2a68-4797-b8ae-7beb7d984ada";
-    const otherServerId = "00000000-0000-4000-8000-00000000ff00";
-
-    assert.deepEqual(await evaluateFeatureFlag({
-      key: WIKI_FEATURE_FLAG_KEY,
-      serverId: botiverseServerId,
-    }), {
-      key: WIKI_FEATURE_FLAG_KEY,
-      enabled: true,
-      reason: "server_rule",
-    });
-    assert.deepEqual(await evaluateFeatureFlag({
-      key: WIKI_FEATURE_FLAG_KEY,
-      serverId: otherServerId,
-    }), {
-      key: WIKI_FEATURE_FLAG_KEY,
-      enabled: false,
-      reason: "default",
-    });
-  } finally {
-    await close();
-  }
-});
 
 test("feature flags: reusable audiences match user OR server while direct rules retain precedence", async () => {
   const { close } = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
@@ -187,14 +187,45 @@ test("feature flags: seeded attachment comments flag is default-on and global ki
   }
 });
 
+test("feature flags: attachment original storage v2 is default-on and immediately killable", async () => {
+  const { close } = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+  try {
+    const serverId = "00000000-0000-4000-8000-00000000ff11";
+    assert.deepEqual(await evaluateFeatureFlag({
+      key: ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY,
+      serverId,
+    }), {
+      key: ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY,
+      enabled: true,
+      reason: "default",
+    });
+
+    await getDb()
+      .update(featureFlags)
+      .set({ killSwitch: true })
+      .where(eq(featureFlags.key, ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY));
+
+    assert.deepEqual(await evaluateFeatureFlag({
+      key: ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY,
+      serverId,
+    }), {
+      key: ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY,
+      enabled: false,
+      reason: "kill_switch",
+    });
+  } finally {
+    await close();
+  }
+});
+
 test("feature flags: seeded human Activity mute gate is default-off", async () => {
   const { close } = await openTestApp("pglite://", 0, { onboardingOpenerFlagDefaultEnabled: false, humanActivityMuteFlagDefaultEnabled: false });
   try {
     assert.deepEqual(await evaluateFeatureFlag({
-      key: HUMAN_ACTIVITY_MUTE_FEATURE_FLAG_KEY,
+      key: "human_activity_mute_v0",
       serverId: "00000000-0000-4000-8000-00000000ff11",
     }), {
-      key: HUMAN_ACTIVITY_MUTE_FEATURE_FLAG_KEY,
+      key: "human_activity_mute_v0",
       enabled: false,
       reason: "default",
     });
@@ -242,14 +273,14 @@ test("feature flags: config version cursor bumps on service writes", async () =>
   }
 });
 
-test("feature flags: seeded message forwarding gate is default-off", async () => {
+test("feature flags: historical message forwarding row remains default-off", async () => {
   const { close } = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
   try {
     assert.deepEqual(await evaluateFeatureFlag({
-      key: MESSAGE_FORWARDING_FEATURE_FLAG_KEY,
+      key: "message_forwarding_v0",
       serverId: "00000000-0000-4000-8000-00000000ff21",
     }), {
-      key: MESSAGE_FORWARDING_FEATURE_FLAG_KEY,
+      key: "message_forwarding_v0",
       enabled: false,
       reason: "default",
     });
@@ -330,13 +361,39 @@ test("feature flags: chat grid layout seed allowlists botiverse only", () => {
   assert.doesNotMatch(sql, /'community-cn'/);
 });
 
+test("feature flags: channel-to-joint conversion is default-off without slug allowlists", () => {
+  const migration = readFileSync(
+    resolve(import.meta.dirname, "../../drizzle/0266_channel_joint_conversion.sql"),
+    "utf8",
+  );
+
+  assert.match(migration, new RegExp(`'${CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY}'`));
+  assert.match(migration, /'server'/);
+  const mapped = parseChannelJointMigration(migration);
+  assert.equal(mapped.key, `'${CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY}'`);
+  assert.equal(mapped.default_enabled, "false", "channel conversion must be disabled by default");
+  assert.equal(mapped.randomization_unit, "'server'");
+  assert.doesNotMatch(migration, /INSERT INTO "feature_flag_rules"/);
+  assert.doesNotMatch(migration, /botiverse/);
+});
+
+test("feature flags: channel-to-joint default-off assertion detects a default_enabled-only mutation", () => {
+  const migrationPath = resolve(import.meta.dirname, "../../drizzle/0266_channel_joint_conversion.sql");
+  const migration = readFileSync(migrationPath, "utf8");
+  const mutated = migration.replace(/('server',\s*)false,/, "$1true,");
+  assert.notEqual(mutated, migration, "mutation oracle must change only the default_enabled literal");
+  assert.throws(
+    () => assert.equal(parseChannelJointMigration(mutated).default_enabled, "false"),
+  );
+});
+
 test("feature flags: Activity v2 seed is globally default-off and allowlists slock-android", () => {
   const sql = readFileSync(
     resolve(import.meta.dirname, "../../drizzle/0206_activity_v2_feature_flag.sql"),
     "utf8",
   );
 
-  assert.match(sql, new RegExp(`'${ACTIVITY_V2_FEATURE_FLAG_KEY}'`));
+  assert.match(sql, /'activity_v2'/);
   assert.match(sql, /'server'/);
   assert.match(sql, /false/);
   assert.match(sql, /"slug" IN \('slock-android'\)/);
@@ -472,15 +529,15 @@ test("feature flags: Grok runtime seed allowlists botiverse only", () => {
   assert.doesNotMatch(sql, /'community-cn'/);
 });
 
-test("feature flags: inbox visibility v3 gate is absent-safe default-off", async () => {
+test("feature flags: an absent flag key evaluates default-off with missing_flag", async () => {
   const { close } = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
   try {
     assert.deepEqual(await evaluateFeatureFlag({
-      key: INBOX_VISIBILITY_V3_FEATURE_FLAG_KEY,
+      key: "test_absent_flag_gate_v0",
       serverId: "00000000-0000-4000-8000-00000000ff31",
       userId: "00000000-0000-4000-8000-00000000aa31",
     }), {
-      key: INBOX_VISIBILITY_V3_FEATURE_FLAG_KEY,
+      key: "test_absent_flag_gate_v0",
       enabled: false,
       reason: "missing_flag",
     });
@@ -1310,6 +1367,35 @@ test("feature flags: llm_translation_v0 is enabled for pro and for the comp plan
       { key: LLM_TRANSLATION_FEATURE_FLAG_KEY, enabled: false, reason: "default" },
       "free stays outside the paid gate",
     );
+  } finally {
+    await close();
+  }
+});
+
+// Regression for the RFC-063 Stage 3 gate. evaluateFeatureFlags used to collapse
+// a batch by key and answer each key from whichever input came first, so a batch
+// that spans servers (the Activity totals read) got the first server's answer for
+// every server. Both orderings are asserted because the bug is invisible in one
+// of them: with the ramped server first, the wrong implementation looks right.
+test("feature flags: a batch spanning servers answers each server on its own identity", async () => {
+  const { close } = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+  try {
+    const key = "server_ramp_batch_identity_v0";
+    const rampedServerId = "00000000-0000-4000-8000-00000000ee01";
+    const otherServerId = "00000000-0000-4000-8000-00000000ee02";
+    await createFeatureFlag({ key, randomizationUnit: "server", defaultEnabled: false, salt: "server-ramp-batch-identity" });
+    await createFeatureFlagRule({ flagKey: key, stage: "server", decision: "allow", values: [rampedServerId] });
+
+    for (const order of [[rampedServerId, otherServerId], [otherServerId, rampedServerId]]) {
+      const evaluations = await evaluateFeatureFlags(order.map((serverId) => ({ key, serverId })));
+      assert.equal(evaluations.length, order.length, "one evaluation per input, not per distinct key");
+      assert.deepEqual(
+        order.map((serverId, index) => [serverId === rampedServerId, evaluations[index].enabled]),
+        order.map((serverId) => [serverId === rampedServerId, serverId === rampedServerId]),
+        `each server must be answered on its own identity, ramped server at position ${order.indexOf(rampedServerId)}`,
+      );
+      assert.equal(evaluations[order.indexOf(rampedServerId)].reason, "server_rule");
+    }
   } finally {
     await close();
   }

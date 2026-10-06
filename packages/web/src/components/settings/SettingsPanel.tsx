@@ -1,3 +1,25 @@
+import { Progress, ProgressTrack, ProgressIndicator, Status, ToggleGroup, ToggleGroupItem, Checkbox, Textarea, TextareaCounter, Skeleton,
+  Badge,
+  Button,
+  Card,
+  Input,
+  Select,
+  SelectContent,
+  SelectIcon,
+  SelectItem,
+  SelectItemIndicator,
+  SelectItemText,
+  SelectList,
+  SelectTrigger,
+  SelectValue,
+  SegmentedControl,
+  SegmentedControlItem,
+  SegmentedControlLabel,
+  Switch,
+  Panel,
+  useThemeFamily } from "raft-ui";
+import CloseButton from "../ui/CloseButton";
+import Tooltip from "../ui/Tooltip";
 import { useState, useEffect, useMemo, useReducer, useRef } from "react";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
@@ -51,14 +73,15 @@ import {
   PRO_SEAT_MONTHLY_USD,
   PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY,
   PUBLIC_SERVER_FEATURE_FLAG_KEY,
+  SERVER_GUEST_FEATURE_FLAG_KEY,
   SERVER_LABS_UI_FEATURE_FLAG_KEY,
   SLACK_BRIDGE_FEATURE_FLAG_KEYS,
-  WIKI_FEATURE_FLAG_KEY,
   formatProAgentSeatFraction,
   getEffectiveLimits,
   getFinitePlanLimitExcess,
   isTrialActive,
   renderThirdPartyInertText,
+  buildIntegrationInviteUrl,
 } from "@botiverse/raft-shared";
 import type {
   BillingInterval,
@@ -84,7 +107,8 @@ import ConfirmDialog from "../ConfirmDialog";
 import Modal from "../Modal";
 import Banner from "../ui/Banner";
 import api from "../../api/client";
-import { useIntl } from "react-intl";
+import { shareableWebOrigin } from "../../utils/desktopShell";
+import { FormattedMessage, useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
 import { useLocale } from "../../i18n/LocaleProvider";
@@ -101,13 +125,14 @@ import {
   isPushSubscribed,
   sendTestPushNotification,
 } from "../../utils/pushNotifications";
-import Checkbox from "../ui/Checkbox";
-import Textarea from "../ui/Textarea";
+import { resolveNotificationChannel } from "../../utils/notificationChannel";
+import type { NotificationChannel, NotificationUnsupportedReason } from "../../utils/notificationChannel";
+import { isDesktopNativeNotificationsAvailable, showDesktopTestNotification } from "../../utils/desktopNativeNotifications";
 import { avatarUploadApiErrorMessage, isAvatarFileTooLarge, isAvatarTooLargeError, PROFILE_AVATAR_ACCEPT } from "../../utils/avatarUpload";
 import PanelHeader from "../ui/PanelHeader";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import SectionHeader from "../ui/SectionHeader";
-import Button from "../ui/Button";
+import { UsageDataSettingsCard, WorkspaceProductAnalyticsSection } from "./UsageDataSettings";
 import CopyButton from "../ui/CopyButton";
 import FormField from "../ui/FormField";
 import AvatarSlot from "../ui/AvatarSlot";
@@ -115,9 +140,9 @@ import AvatarListRow from "../ui/AvatarListRow";
 import SelectionPopover from "../ui/SelectionPopover";
 import SurfaceListItem from "../ui/SurfaceListItem";
 import SlugInput, { PrefixedInput } from "../ui/SlugInput";
-import Skeleton from "../ui/Skeleton";
 import {
   AGENT_INBOUND_NEGATIVE_CAPABILITY_ID,
+  AGENT_DIRECTORY_OAUTH_SCOPES,
   AGENT_INBOUND_OAUTH_SCOPES,
   DEFAULT_DECLARED_OAUTH_SCOPES,
   IDENTITY_OAUTH_SCOPES,
@@ -138,8 +163,7 @@ import ArchivedChannelsSection from "./ArchivedChannelsSection";
 import IMBridgesSettingsSection from "./IMBridgesSettingsSection";
 import { isSlackBridgeSurfaceEnabled } from "./slackBridgeVisibility";
 import { useAuthProviders } from "../../hooks/useAuthProviders";
-import type { AuthProvider } from "../../hooks/useAuthProviders";
-import type { SocialAuthProviderId } from "../../hooks/useAuthProviders";
+import type { AuthProvider, SocialAuthProviderId } from "../../hooks/useAuthProviders";
 import type { Message } from "../../store/messageStore";
 import type { Agent } from "../../store/agentStore";
 import { useChannelStore } from "../../store/channelStore";
@@ -206,22 +230,6 @@ import {
 import { useWorkspaceGridAvailability } from "../workspace/workspaceGridAvailability";
 import { useWorkspaceGridNavigationStore } from "../workspace/workspaceGridNavigationStore";
 import {
-  Badge,
-  Select,
-  SelectContent,
-  SelectIcon,
-  SelectItem,
-  SelectItemIndicator,
-  SelectItemText,
-  SelectList,
-  SelectTrigger,
-  SelectValue,
-  SegmentedControl,
-  SegmentedControlItem,
-  SegmentedControlLabel,
-  Switch,
-} from "raft-ui";
-import {
   BillingIntervalSegmentedControl,
   ConnectedAppsTabSegmentedControl,
   MessageBodyFontSizeSegmentedControl,
@@ -245,8 +253,9 @@ import {
 import SettingsProfileCard from "./SettingsProfileCard";
 import { LazyAboutFeedbackPanel } from "./LazyAboutFeedbackDialog";
 import { AgentMcpTab } from "../agent/AgentMcpTab";
+import AppearanceThemePicker from "./AppearanceThemePicker";
+import { useOptionalAppTheme } from "../../hooks/useAppTheme";
 import ProviderConnectionsSettings from "./ProviderConnectionsSettings";
-import WikiSettingsSection from "./WikiSettingsSection";
 import {
   AppNotificationRequestSummary,
   DeveloperAppNotifications,
@@ -341,13 +350,13 @@ function SocialProviderIcon({ providerId }: { providerId: SocialAuthProviderId }
   }
   if (providerId === "apple") {
     return (
-      <span className="inline-flex size-[18px] shrink-0 items-center justify-center text-black">
+      <span className="inline-flex size-[18px] shrink-0 items-center justify-center text-foreground-strong theme-brutal:text-black">
         <AppleLogo className="size-4" />
       </span>
     );
   }
   return (
-    <span className="inline-flex size-[18px] shrink-0 items-center justify-center text-black">
+    <span className="inline-flex size-[18px] shrink-0 items-center justify-center text-foreground-strong theme-brutal:text-black">
       <GitHubLogo className="size-4" />
     </span>
   );
@@ -368,6 +377,7 @@ export function AccountSection({
   const updateProfile = useAuthStore((s) => s.updateProfile);
   const uploadAvatar = useAuthStore((s) => s.uploadAvatar);
   const { providers } = useAuthProviders();
+  const themeFamily = useThemeFamily();
 
   const [displayName, setDisplayName] = useState(user?.displayName || "");
   const [savedDisplayName, setSavedDisplayName] = useState(user?.displayName || "");
@@ -595,11 +605,11 @@ export function AccountSection({
           title={user?.displayName || user?.name || formatMessage({ id: "settings.account.sectionLabel" })}
           subtitle={user?.name ? `@${user.name}` : ""}
           avatar={
+            <Tooltip content={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}>
             <label
               className={`group relative flex size-16 shrink-0 items-center justify-center ${
-                avatarSaving ? "cursor-not-allowed opacity-70" : ""
-              }`}
-              title={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}
+ avatarSaving ? "cursor-not-allowed opacity-70" : ""
+ }`}
               aria-label={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}
             >
               <AvatarSlot context="profile-tile" type="human" humanAvatarUrl={user?.avatarUrl} email={user?.email} />
@@ -618,6 +628,7 @@ export function AccountSection({
                 }}
               />
             </label>
+            </Tooltip>
           }
         >
           {avatarError ? (
@@ -625,63 +636,65 @@ export function AccountSection({
           ) : null}
           {/* Profile form */}
           <form onSubmit={handleSaveProfile} className="space-y-3">
-          <FormField label={formatMessage({ id: "settings.account.displayNameLabel" })} labelStyle="plain" size="compact">
-            <input
-              data-testid="account-profile-display-name-input"
-              type="text"
-              value={displayName}
-              onChange={(e) => {
-                setDisplayName(e.target.value);
-                setSaved(false);
-              }}
-              className="w-full border-2 border-black p-2 text-sm shadow-brutal-sm focus:shadow-brutal focus:outline-none"
-            />
-          </FormField>
-          <FormField label={formatMessage({ id: "settings.account.usernameLabel" })} labelStyle="plain" size="compact">
-            <PrefixedInput
-              data-testid="account-profile-username-input"
-              type="text"
-              value={user?.name ?? ""}
-              readOnly
-              aria-readonly="true"
-              tabIndex={-1}
-              prefix="@"
-              className="border-black/30 bg-gray-50 shadow-none focus-within:shadow-none"
-              inputClassName="cursor-default text-sm text-black/60"
-            />
-          </FormField>
-          <FormField label={formatMessage({ id: "settings.account.emailLabel" })} labelStyle="plain" size="compact">
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-sm">{user?.email}</span>
-              {user?.emailVerified ? (
-                <span className="inline-flex items-center gap-1 border border-black bg-brutal-lime px-1.5 text-[10px] font-bold uppercase">
-                  <Shield size={10} /> {formatMessage({ id: "settings.account.verified" })}
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 border border-black bg-brutal-orange/30 px-1.5 text-[10px] font-bold uppercase">
-                  {formatMessage({ id: "settings.account.unverified" })}
-                </span>
-              )}
-            </div>
-          </FormField>
+            <FormField label={formatMessage({ id: "settings.account.displayNameLabel" })} labelStyle="plain" size="compact">
+              <Input
+                data-testid="account-profile-display-name-input"
+                type="text"
+                value={displayName}
+                onChange={(e) => {
+                  setDisplayName(e.target.value);
+                  setSaved(false);
+                }}
+                className={themeFamily === "brutal" ? "p-2 text-sm" : "text-sm"}
+              />
+            </FormField>
+            <FormField label={formatMessage({ id: "settings.account.usernameLabel" })} labelStyle="plain" size="compact">
+              <PrefixedInput
+                data-testid="account-profile-username-input"
+                type="text"
+                value={user?.name ?? ""}
+                readOnly
+                aria-readonly="true"
+                tabIndex={-1}
+                prefix="@"
+                className="border-line-muted bg-fill-muted shadow-none focus-within:shadow-none"
+                inputClassName="cursor-default text-sm text-foreground-muted"
+              />
+            </FormField>
+            <FormField label={formatMessage({ id: "settings.account.emailLabel" })} labelStyle="plain" size="compact">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-sm">{user?.email}</span>
+                {user?.emailVerified ? (
+                  <Badge variant="success" appearance="soft" uppercase>
+                    <Shield size={10} /> {formatMessage({ id: "settings.account.verified" })}
+                  </Badge>
+                ) : (
+                  <Badge variant="warning" appearance="soft" uppercase>
+                    {formatMessage({ id: "settings.account.unverified" })}
+                  </Badge>
+                )}
+              </div>
+            </FormField>
 
           {error && (
             <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
           )}
 
-          <button
-            type="submit"
-            disabled={!profileDirty || saving}
-            className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {saving ? formatMessage({ id: "settings.common.saving" }) : saved ? (
-              <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
-            ) : formatMessage({ id: "settings.account.saveProfile" })}
-          </button>
+            <Button
+              type="submit"
+              disabled={!profileDirty || saving}
+              size="sm"
+              variant="outline"
+              className="flex items-center gap-1.5 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {saving ? formatMessage({ id: "settings.common.saving" }) : saved ? (
+                <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
+              ) : formatMessage({ id: "settings.account.saveProfile" })}
+            </Button>
           </form>
 
         {/* Divider */}
-        <div className="border-t-2 border-black" />
+        <div className="border-t-2 border-line-muted theme-brutal:border-black" />
 
         {visibleProviders.length > 0 && (
           <>
@@ -695,31 +708,33 @@ export function AccountSection({
                       key={provider.id}
                       role="group"
                       aria-label={formatMessage({ id: "settings.account.providerAccountAria" }, { label: provider.label })}
-                      className="relative flex items-start justify-between gap-3 border-2 border-black/30 bg-white p-3 text-left transition-colors hover:border-black hover:shadow-brutal-sm"
+                      className="relative flex items-start justify-between gap-3 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white p-3 text-left transition-colors hover:border-line-strong hover:shadow-raft-sm theme-brutal:hover:border-black theme-brutal:hover:shadow-brutal-sm"
                     >
                       <div className="min-w-0 flex-1">
                         <div className="mb-1 flex items-center gap-2 text-xs">
                           <SocialProviderIcon providerId={provider.id} />
-                          <span className="font-bold text-black">{provider.label}</span>
+                          <span className="font-bold text-foreground-strong theme-brutal:text-black">{provider.label}</span>
                         </div>
-                        <div className="truncate text-xs text-black/50">
+                        <div className="truncate text-xs text-foreground-muted theme-brutal:text-black/50">
                           {identity?.providerEmail
                             ? formatMessage({ id: "settings.account.connectedAs" }, { email: identity.providerEmail })
                             : formatMessage({ id: "settings.account.notConnected" })}
                         </div>
                       </div>
                       {!identity && (
-                        <button
+                        <Button
+                          variant="outline" size="sm"
                           type="button"
                           onClick={() => handleConnectProvider(provider)}
                           disabled={linkingProviderId === provider.id}
-                          className="btn-brutal-sm shrink-0 bg-white px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+                          className="shrink-0"
                         >
                           {linkingProviderId === provider.id ? formatMessage({ id: "settings.account.connecting" }) : formatMessage({ id: "settings.account.connect" })}
-                        </button>
+                        </Button>
                       )}
                       {identity && (
-                        <button
+                        <Button
+                          variant="outline" size="sm"
                           type="button"
                           onClick={() => {
                             setPasswordSetupError("");
@@ -727,10 +742,10 @@ export function AccountSection({
                             setPendingDisconnectProvider(provider);
                           }}
                           aria-label={formatMessage({ id: "settings.account.disconnectAria" }, { label: provider.label })}
-                          className="btn-brutal-sm shrink-0 bg-white px-3 py-1.5 text-xs"
+                          className="shrink-0"
                         >
                           {formatMessage({ id: "settings.account.disconnect" })}
-                        </button>
+                        </Button>
                       )}
                     </div>
                   );
@@ -746,14 +761,14 @@ export function AccountSection({
               )}
             </div>
 
-            <div className="border-t-2 border-black" />
+            <div className="border-t-2 border-line-muted theme-brutal:border-black" />
           </>
         )}
 
         {/* Password credential */}
         <div>
           {passwordChangeIntent && passwordConfigured === null ? (
-            <p className="text-xs text-black/60" role="status">
+            <p className="text-xs text-foreground-muted theme-brutal:text-black/60" role="status">
               {formatMessage({ id: "settings.account.loadingSignInMethods" })}
             </p>
           ) : passwordChangeIntent && passwordConfigured === false ? (
@@ -761,7 +776,7 @@ export function AccountSection({
               <div className="text-sm font-bold">
                 {formatMessage({ id: "settings.account.passwordManagedTitle" })}
               </div>
-              <p className="text-xs text-black/60">
+              <p className="text-xs text-foreground-muted theme-brutal:text-black/60">
                 {formatMessage(
                   { id: "settings.account.passwordManagedDescription" },
                   {
@@ -775,7 +790,7 @@ export function AccountSection({
             <div className="space-y-3">
               <div>
                 <div className="text-sm font-bold">{formatMessage({ id: "settings.account.setPassword" })}</div>
-                <p className="mt-1 text-xs text-black/60">
+                <p className="mt-1 text-xs text-foreground-muted theme-brutal:text-black/60">
                   {formatMessage({ id: "settings.account.setPasswordDescription" })}
                 </p>
               </div>
@@ -787,16 +802,16 @@ export function AccountSection({
                   {formatMessage({ id: "settings.account.passwordSetupEmailSent" })}
                 </Banner>
               )}
-              <button
+              <Button
+                variant="accent" size="sm"
                 type="button"
                 onClick={() => void handleSendPasswordSetup()}
                 disabled={passwordSetupLoading}
-                className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {passwordSetupLoading
                   ? formatMessage({ id: "settings.account.sendingSetupEmail" })
                   : formatMessage({ id: "settings.account.setPasswordByEmail" })}
-              </button>
+              </Button>
             </div>
           ) : (
             <button
@@ -815,39 +830,39 @@ export function AccountSection({
           {(!passwordChangeIntent || passwordConfigured === true) && passwordFormOpen && (
             <form onSubmit={handleChangePassword} className="mt-3 space-y-3">
               <FormField label={formatMessage({ id: "settings.account.currentPassword" })} labelStyle="plain" size="compact">
-                <input
+                <Input
                   type="password"
                   name="current-password"
                   autoComplete="current-password"
                   aria-label={formatMessage({ id: "settings.account.currentPassword" })}
                   value={currentPassword}
                   onChange={(e) => setCurrentPassword(e.target.value)}
-                  className="w-full border-2 border-black p-2 text-sm shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+                  className="w-full text-sm"
                   required
                 />
               </FormField>
               <FormField label={formatMessage({ id: "settings.account.newPassword" })} labelStyle="plain" size="compact">
-                <input
+                <Input
                   type="password"
                   name="new-password"
                   autoComplete="new-password"
                   aria-label={formatMessage({ id: "settings.account.newPassword" })}
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
-                  className="w-full border-2 border-black p-2 text-sm shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+                  className="w-full text-sm"
                   placeholder={formatMessage({ id: "settings.account.minCharsPlaceholder" })}
                   required
                 />
               </FormField>
               <FormField label={formatMessage({ id: "settings.account.confirmPassword" })} labelStyle="plain" size="compact">
-                <input
+                <Input
                   type="password"
                   name="confirm-password"
                   autoComplete="new-password"
                   aria-label={formatMessage({ id: "settings.account.confirmPassword" })}
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="w-full border-2 border-black p-2 text-sm shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+                  className="w-full text-sm"
                   required
                 />
               </FormField>
@@ -857,16 +872,17 @@ export function AccountSection({
               )}
 
               {passwordSaved && (
-                <div className="border-2 border-black bg-brutal-lime/30 p-2 text-xs font-bold">{formatMessage({ id: "settings.account.passwordUpdated" })}</div>
+                <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-brutal-lime/30 p-2 text-xs font-bold">{formatMessage({ id: "settings.account.passwordUpdated" })}</div>
               )}
 
-              <button
+              <Button
+
+                variant="accent" size="sm"
                 type="submit"
                 disabled={saving}
-                className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs"
               >
                 {saving ? formatMessage({ id: "settings.account.updating" }) : formatMessage({ id: "settings.account.changePassword" })}
-              </button>
+              </Button>
             </form>
           )}
         </div>
@@ -932,24 +948,25 @@ function AccountSignOutSection() {
         label={formatMessage({ id: "settings.session.sectionLabel" })}
       />
 
-      <div className="border-2 border-black bg-white shadow-brutal-sm p-4">
+      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-sm font-bold text-black">
+            <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
               {formatMessage({ id: "settings.session.logOutTitle" })}
             </div>
-            <p className="text-xs text-black/60 mt-0.5">
+            <p className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
               {formatMessage({ id: "settings.session.logOutDescription" })}
             </p>
           </div>
-          <button
+          <Button
+            variant="warning" size="md"
             type="button"
             onClick={() => setShowConfirm(true)}
             data-testid="account-logout"
-            className="btn-brutal bg-brutal-orange px-4 py-2 [@media(max-height:600px)]:py-1 text-sm font-bold flex items-center gap-1.5 shrink-0 ml-4"
+            className="[@media(max-height:600px)]:py-1 flex items-center gap-1.5 shrink-0 ml-4"
           >
             {formatMessage({ id: "settings.session.logOutAction" })}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -1161,13 +1178,13 @@ function LanguageRegionSection() {
           label={formatMessage({ id: "settings.language.sectionLabel" })}
         />
 
-        <form onSubmit={handleSaveLanguageRegion} className="border-2 border-black bg-white shadow-brutal-sm p-4 space-y-4">
+        <form onSubmit={handleSaveLanguageRegion} className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-4">
           <div className="space-y-3">
             <div>
-              <div className="text-sm font-bold text-black">
+              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
                 {formatMessage({ id: "settings.language.displayLanguageTitle" })}
               </div>
-              <div className="text-xs text-black/60 mt-0.5">
+              <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
                 {formatMessage({ id: "settings.language.displayLanguageDescription" })}
               </div>
             </div>
@@ -1196,17 +1213,33 @@ function LanguageRegionSection() {
                 some pages may still be English while zh-cn is active. en never
                 shows this. Removed once all namespaces are migrated. */}
             {locale === "zh-cn" ? (
-              <div className="text-xs text-black/60 mt-0.5" data-testid="zh-coverage-notice">
+              <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5" data-testid="zh-coverage-notice">
                 {formatMessage({ id: "settings.language.zhCoverageNotice" })}
               </div>
             ) : null}
           </div>
           <div className="space-y-3">
             <div>
-              <div className="text-sm font-bold text-black">{formatMessage({ id: "settings.language.translationMode" })}</div>
-              <div className="text-xs text-black/60 mt-0.5">
+              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.language.translationMode" })}</div>
+              <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
                 {formatMessage({ id: "settings.language.translationModeDesc" })}
               </div>
+              {/* The menu action needs the server gate AND a configured provider;
+                  without this line the mode control silently does nothing. */}
+              {!settingsLoading && !settings.available ? (
+                <div
+                  className="mt-1 text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange"
+                  data-testid="translation-unavailable-notice"
+                >
+                  {formatMessage({
+                    id: !settings.serverTranslationEnabled
+                      ? settings.canManageServerTranslation
+                        ? "settings.language.translationServerOffAdmin"
+                        : "settings.language.translationServerOff"
+                      : "settings.language.translationProviderMissing",
+                  })}
+                </div>
+              ) : null}
             </div>
             <SegmentedControl<PreferredTranslationMode>
               value={translationMode}
@@ -1233,8 +1266,8 @@ function LanguageRegionSection() {
           {translationMode !== "off" ? (
             <div className="space-y-3">
               <div>
-                <div className="text-sm font-bold text-black">{formatMessage({ id: "settings.language.translationTarget" })}</div>
-                <div className="text-xs text-black/60 mt-0.5">
+                <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.language.translationTarget" })}</div>
+                <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
                   {formatMessage({ id: "settings.language.translationTargetDesc" }, { language: settings.effectiveLanguage?.toUpperCase() ?? "English" })}
                 </div>
               </div>
@@ -1265,8 +1298,8 @@ function LanguageRegionSection() {
           {translationMode !== "off" ? (
             <div className="space-y-3">
               <div>
-                <div className="text-sm font-bold text-black">{formatMessage({ id: "settings.language.defaultView" })}</div>
-                <div className="text-xs text-black/60 mt-0.5">
+                <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.language.defaultView" })}</div>
+                <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
                   {formatMessage({ id: "settings.language.defaultViewDesc" })}
                 </div>
               </div>
@@ -1298,15 +1331,16 @@ function LanguageRegionSection() {
               {translationDisplayError || languageError || settingsError}
             </Banner>
           )}
-          <button
+          <Button
+            variant="accent" size="sm"
             type="submit"
             disabled={!languageRegionDirty || savingLanguageRegion || settingsLoading}
-            className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5"
           >
             {savingLanguageRegion ? formatMessage({ id: "settings.common.saving" }) : languageRegionSaved ? (
               <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
             ) : formatMessage({ id: "settings.common.save" })}
-          </button>
+          </Button>
         </form>
       </div>
 
@@ -1317,11 +1351,11 @@ function LanguageRegionSection() {
           label={formatMessage({ id: "settings.dateTime.sectionLabel" })}
         />
 
-        <form onSubmit={handleSaveDateTime} className="border-2 border-black bg-white shadow-brutal-sm p-4 space-y-4">
+        <form onSubmit={handleSaveDateTime} className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-4">
           <div className="space-y-3">
             <div>
-              <div className="text-sm font-bold text-black">{formatMessage({ id: "settings.dateTime.timezone" })}</div>
-              <div className="text-xs text-black/60 mt-0.5">
+              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.dateTime.timezone" })}</div>
+              <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
                 {formatMessage({ id: "settings.dateTime.timezoneDesc" })}
               </div>
             </div>
@@ -1347,8 +1381,8 @@ function LanguageRegionSection() {
               </SelectContent>
             </Select>
             <div>
-              <div className="text-sm font-bold text-black">{formatMessage({ id: "settings.dateTime.timeFormat" })}</div>
-              <div className="text-xs text-black/60 mt-0.5">
+              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.dateTime.timeFormat" })}</div>
+              <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
                 {formatMessage({ id: "settings.dateTime.timeFormatDesc" })}
               </div>
             </div>
@@ -1376,22 +1410,109 @@ function LanguageRegionSection() {
               {timezoneError || timeFormatError || settingsError}
             </Banner>
           )}
-          <button
+          <Button
+            variant="accent" size="sm"
             type="submit"
             disabled={!dateTimeDirty || savingDateTime || settingsLoading}
-            className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5"
           >
             {savingDateTime ? formatMessage({ id: "settings.common.saving" }) : dateTimeSaved ? (
               <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
             ) : formatMessage({ id: "settings.common.save" })}
-          </button>
+          </Button>
         </form>
       </div>
     </>
   );
 }
 
+// Which card the Notifications tab shows is a property of the RUNTIME, not of
+// the user: the desktop delivers OS notifications natively, a browser needs Web
+// Push, and some browsers can do neither. Deciding this once, synchronously, is
+// what keeps the tab from ever sitting on "Checking…" (task #93).
+const UNSUPPORTED_REASON_MESSAGE: Record<NotificationUnsupportedReason, MessageId> = {
+  "no-window": "settings.notifications.unsupportedHint",
+  "no-notification-api": "settings.notifications.unsupportedReason.noNotificationApi",
+  "insecure-context": "settings.notifications.unsupportedReason.insecureContext",
+  "no-service-worker": "settings.notifications.unsupportedReason.noServiceWorker",
+  "no-push-manager": "settings.notifications.unsupportedReason.noPushManager",
+};
+
 function NotificationsSection() {
+  const channel = useMemo(() => resolveNotificationChannel(), []);
+  if (channel.kind === "desktop-native") return <DesktopNativeNotificationsCard />;
+  return <WebPushNotificationsCard channel={channel} />;
+}
+
+function DesktopNativeNotificationsCard() {
+  const { formatMessage } = useIntl();
+  // The shell grants the Chromium notification permission outright, so there is
+  // no readable "enabled/blocked" state here (see desktopNativeNotifications.ts);
+  // the card reports that the OS owns the switch and offers the one real check.
+  const available = isDesktopNativeNotificationsAvailable();
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const handleTest = () => {
+    setError("");
+    setMessage("");
+    const posted = showDesktopTestNotification({
+      title: formatMessage({ id: "settings.notifications.desktop.testTitle" }),
+      body: formatMessage({ id: "settings.notifications.desktop.testBody" }),
+    });
+    if (posted) setMessage(formatMessage({ id: "settings.notifications.desktop.testSent" }));
+    else setError(formatMessage({ id: "settings.notifications.desktop.errTestFailed" }));
+  };
+
+  return (
+    <div>
+      <SectionHeader
+        className="mb-3"
+        icon={<Bell size={16} />}
+        label={formatMessage({ id: "settings.notifications.desktop.sectionLabel" })}
+      />
+
+      <div className="border border-line-muted bg-layer-card p-4 space-y-3 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm" data-testid="desktop-notifications-card">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.notifications.desktop.title" })}</div>
+            <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+              {formatMessage({ id: "settings.notifications.desktop.description" })}
+            </div>
+          </div>
+          <span className="inline-flex shrink-0 border border-line-strong bg-primary px-2 py-1 text-[10px] font-bold uppercase text-primary-950 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
+            {formatMessage({ id: available ? "settings.notifications.desktop.statusSystemManaged" : "settings.notifications.desktop.statusUnavailable" })}
+          </span>
+        </div>
+
+        <div className="text-xs text-foreground-muted theme-brutal:text-black/60">
+          {formatMessage({ id: available ? "settings.notifications.desktop.systemHint" : "settings.notifications.desktop.unavailableHint" })}
+        </div>
+
+        {error && (
+          <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
+        )}
+        {message && (
+          <div className="border border-line-muted bg-success-soft p-2 text-xs font-bold text-success-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-lime/30 theme-brutal:text-black">{message}</div>
+        )}
+
+        <div className="flex gap-2">
+          <Button
+            variant="success"
+            size="sm"
+            type="button"
+            onClick={handleTest}
+            disabled={!available}
+          >
+            {formatMessage({ id: "settings.notifications.desktop.sendTest" })}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationChannel, { kind: "desktop-native" }> }) {
   const { formatMessage } = useIntl();
   const currentServer = useServerStore((s) => s.current);
   const currentServerId = currentServer?.id;
@@ -1413,13 +1534,22 @@ function NotificationsSection() {
     const serverId = currentServerId;
     setLoading(true);
     setPermission(getPushPermissionState());
-    const [configured, currentSubscribed, notificationSettings] = await Promise.all([
-      isPushServerConfigured(),
-      isPushSubscribed(),
-      serverId
-        ? api.get(`/servers/${serverId}/notification-settings`).then((res) => res.data as { serverPushMuted: boolean; prefsVersion?: number }).catch(() => null)
-        : Promise.resolve(null),
-    ]);
+    // Every probe must settle: if any of them threw, `loading` stayed true
+    // forever ("Checking…") and the enable button stayed disabled (task #93).
+    let configured = false;
+    let currentSubscribed = false;
+    let notificationSettings: { serverPushMuted: boolean; prefsVersion?: number } | null = null;
+    try {
+      [configured, currentSubscribed, notificationSettings] = await Promise.all([
+        isPushServerConfigured(),
+        isPushSubscribed(),
+        serverId
+          ? api.get(`/servers/${serverId}/notification-settings`).then((res) => res.data as { serverPushMuted: boolean; prefsVersion?: number }).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+    } catch (err) {
+      console.error("[Push] Failed to refresh notification state:", err);
+    }
     if (serverId !== useServerStore.getState().current?.id) return;
     setServerConfigured(configured);
     setSubscribed(currentSubscribed);
@@ -1574,33 +1704,33 @@ function NotificationsSection() {
         label={formatMessage({ id: "settings.notifications.sectionLabel" })}
       />
 
-      <div className="border-2 border-black bg-white shadow-brutal-sm p-4 space-y-3">
+      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-3">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <div className="text-sm font-bold text-black">{formatMessage({ id: "settings.notifications.mainTitle" })}</div>
-            <div className="text-xs text-black/60 mt-0.5">
+            <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.notifications.mainTitle" })}</div>
+            <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
               {formatMessage({ id: "settings.notifications.mainDescription" })}
             </div>
           </div>
-          <span className="inline-flex shrink-0 border-2 border-black bg-soft-signal px-2 py-1 text-[10px] font-bold uppercase">
+          <Badge variant="muted" uppercase>
             {statusLabel}
-          </span>
+          </Badge>
         </div>
 
         {permission === "unsupported" && (
-          <div className="text-xs text-black/60">
-            {formatMessage({ id: "settings.notifications.unsupportedHint" })}
+          <div className="text-xs text-foreground-muted theme-brutal:text-black/60">
+            {formatMessage({ id: channel.kind === "unsupported" ? UNSUPPORTED_REASON_MESSAGE[channel.reason] : "settings.notifications.unsupportedHint" })}
           </div>
         )}
 
         {permission !== "unsupported" && !serverConfigured && !loading && (
-          <div className="text-xs text-black/60">
+          <div className="text-xs text-foreground-muted theme-brutal:text-black/60">
             {formatMessage({ id: "settings.notifications.notConfiguredHint" })}
           </div>
         )}
 
         {permission === "denied" && (
-          <div className="text-xs text-black/60">
+          <div className="text-xs text-foreground-muted theme-brutal:text-black/60">
             {formatMessage({ id: "settings.notifications.deniedHint" })}
           </div>
         )}
@@ -1610,68 +1740,69 @@ function NotificationsSection() {
         )}
 
         {message && (
-          <div className="border-2 border-black bg-brutal-lime/30 p-2 text-xs font-bold">{message}</div>
+          <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-brutal-lime/30 p-2 text-xs font-bold">{message}</div>
         )}
 
         <div className="flex gap-2">
           {subscribed ? (
             <>
-              <button
+              <Button
+                variant="outline" size="sm" type="button"
                 onClick={handleDisable}
                 disabled={busy || testing}
-                className="btn-brutal bg-white px-3 py-1.5 text-xs"
               >
                 {busy ? formatMessage({ id: "settings.notifications.disabling" }) : formatMessage({ id: "settings.notifications.disable" })}
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="success" size="sm" type="button"
                 onClick={handleSendTest}
                 disabled={busy || testing || permission === "unsupported" || !serverConfigured}
-                className="btn-brutal bg-brutal-lime px-3 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {testing ? formatMessage({ id: "settings.notifications.sending" }) : formatMessage({ id: "settings.notifications.sendTest" })}
-              </button>
+              </Button>
             </>
           ) : (
-            <button
+            <Button
+              variant="outline"
+              size="sm"
               onClick={handleEnable}
               disabled={busy || testing || permission === "unsupported" || !serverConfigured}
-              className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {busy ? formatMessage({ id: "settings.notifications.enabling" }) : formatMessage({ id: "settings.notifications.enable" })}
-            </button>
+            </Button>
           )}
         </div>
 
         {currentServer && (
-          <div className="border-t-2 border-black/20 pt-3">
+          <div className="border-t-2 border-line-muted theme-brutal:border-black/20 pt-3">
             <form onSubmit={handleSaveServerMute} className="space-y-3">
               <label className={`flex items-start gap-3 ${loading || busy || testing || muting ? "opacity-60" : ""}`}>
                 <Checkbox
                   size="md"
                   checked={serverPushMuted}
                   disabled={loading || busy || testing || muting}
-                  onChange={(event) => {
-                    setServerPushMuted(event.currentTarget.checked);
+                  onCheckedChange={(checked) => {
+                    setServerPushMuted(checked);
                     setMessage("");
                     setError("");
                   }}
                   className="mt-0.5"
                 />
                 <span className="min-w-0">
-                  <span className="block text-sm font-bold text-black">{formatMessage({ id: "settings.notifications.muteServerTitle" })}</span>
-                  <span className="block text-xs text-black/60 mt-0.5">
+                  <span className="block text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.notifications.muteServerTitle" })}</span>
+                  <span className="block text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
                     {formatMessage({ id: "settings.notifications.muteServerDescription" }, { serverName: currentServer.name })}
                   </span>
                 </span>
               </label>
               <div className="flex justify-end">
-                <button
+                <Button
+                  variant="accent" size="sm"
                   type="submit"
                   disabled={serverPushMuted === savedServerPushMuted || loading || busy || testing || muting}
-                  className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {muting ? formatMessage({ id: "settings.common.saving" }) : formatMessage({ id: "settings.common.save" })}
-                </button>
+                </Button>
               </div>
             </form>
           </div>
@@ -1703,13 +1834,14 @@ interface OAuthClientRecord {
   id: string;
   serverId: string;
   clientId: string;
-  appType: "server_local" | "slock_builtin" | "third_party_global";
+  appType: "server_local" | "third_party_global";
   publishStatus: "private" | "publish_requested" | "in_review" | "published" | "rejected" | "unpublish_requested";
   category: OAuthClientCategory;
   dataAccessSummary: string | null;
   publishRejectionReason: string | null;
   name: string;
   description: string | null;
+  whenToUse: string | null;
   homepageUrl: string | null;
   returnUrl: string | null;
   agentManifestUrl: string | null;
@@ -1721,21 +1853,9 @@ interface OAuthClientRecord {
   updatedAt: string;
 }
 
-interface BuiltInOAuthClientRecord {
-  id: string;
-  clientId: string;
-  appType: "slock_builtin";
-  name: string;
-  description: string | null;
-  homepageUrl: string | null;
-  agentManifestUrl: string | null;
-  allowedScopes: string[] | null;
-  humanMarketplaceVisible: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
 interface MarketplaceOAuthClientRecord extends OAuthClientRecord {
+  official: boolean;
+  purpose: string;
   installedAt: string | null;
   marketplaceInstallBadge: MarketplaceInstallBadge;
   publisherName: string | null;
@@ -1849,9 +1969,9 @@ function ProfileSection() {
         subtitle={`/${server.slug}`}
         avatar={
           canEdit ? (
+            <Tooltip content={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}>
             <label
               className={`group relative flex size-16 shrink-0 items-center justify-center ${avatarSaving ? "cursor-not-allowed opacity-70" : ""}`}
-              title={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}
               aria-label={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}
             >
               <AvatarSlot context="profile-tile" type="server" serverAvatarUrl={server.avatarUrl} serverInitial={serverInitial} />
@@ -1870,8 +1990,9 @@ function ProfileSection() {
                 }}
               />
             </label>
+            </Tooltip>
           ) : (
-            <AvatarSlot context="profile-tile" type="server" serverAvatarUrl={server.avatarUrl} serverInitial={serverInitial} className="border-black/30" />
+            <AvatarSlot context="profile-tile" type="server" serverAvatarUrl={server.avatarUrl} serverInitial={serverInitial} className="border-line-strong theme-brutal:border-black/30" />
           )
         }
       >
@@ -1881,18 +2002,18 @@ function ProfileSection() {
         <form onSubmit={handleSave} className="space-y-3">
           <FormField label={formatMessage({ id: "settings.serverProfile.nameLabel" })} labelStyle="plain" size="compact">
             {canEdit ? (
-              <input
+              <Input
                 data-testid="server-profile-name-input"
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 maxLength={100}
-                className="w-full border-2 border-black p-2 text-sm shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+                className="w-full text-sm"
               />
             ) : (
               <div
                 data-testid="server-profile-name-readonly"
-                className="w-full border-2 border-black/30 bg-gray-50 p-2 text-sm font-mono text-black/60"
+                className="w-full border border-line-muted bg-layer-inset p-2 text-sm font-mono text-foreground-muted theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-gray-50 theme-brutal:text-black/60"
               >
                 {server.name}
               </div>
@@ -1906,8 +2027,8 @@ function ProfileSection() {
               readOnly
               aria-readonly="true"
               tabIndex={-1}
-              className="border-black/30 bg-gray-50 shadow-none focus-within:shadow-none"
-              inputClassName="cursor-default text-sm text-black/60"
+              className="border-line-strong bg-layer-inset shadow-none focus-within:shadow-none theme-brutal:border-black/30 theme-brutal:bg-gray-50"
+              inputClassName="cursor-default text-sm text-foreground-muted theme-brutal:text-black/60"
             />
           </FormField>
 
@@ -1916,17 +2037,18 @@ function ProfileSection() {
           )}
 
           {canEdit && (
-            <button
+            <Button
+              variant="accent" size="sm"
               data-testid="server-profile-save-button"
               data-save-state={saving ? "saving" : saved ? "saved" : dirty ? "dirty" : "pristine"}
               type="submit"
               disabled={!dirty || saving}
-              className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-1.5"
             >
               {saving ? formatMessage({ id: "settings.common.saving" }) : saved ? (
                 <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
               ) : formatMessage({ id: "settings.serverProfile.saveProfile" })}
-            </button>
+            </Button>
           )}
         </form>
       </SettingsProfileCard>
@@ -1936,6 +2058,7 @@ function ProfileSection() {
 
 interface PublicVisibilityReadback {
   publiclyVisible: boolean;
+  publicGuestJoinEnabled: boolean;
   slug: string;
   exposedChannels: Array<{ id: string; name: string; description: string | null }>;
 }
@@ -1953,7 +2076,8 @@ type PublicVisibilityUiAction =
   | { type: "loaded"; readback: PublicVisibilityReadback }
   | { type: "failed"; error: string }
   | { type: "saving" }
-  | { type: "saved"; publiclyVisible: boolean }
+  | { type: "saved"; publiclyVisible: boolean; publicGuestJoinEnabled: boolean }
+  | { type: "guestJoinSaved"; publicGuestJoinEnabled: boolean }
   | { type: "confirm"; open: boolean };
 
 function publicVisibilityUiReducer(state: PublicVisibilityUiState, action: PublicVisibilityUiAction): PublicVisibilityUiState {
@@ -1965,7 +2089,16 @@ function publicVisibilityUiReducer(state: PublicVisibilityUiState, action: Publi
     case "saved": return {
       ...state,
       saving: false,
-      readback: state.readback ? { ...state.readback, publiclyVisible: action.publiclyVisible } : null,
+      readback: state.readback ? {
+        ...state.readback,
+        publiclyVisible: action.publiclyVisible,
+        publicGuestJoinEnabled: action.publicGuestJoinEnabled,
+      } : null,
+    };
+    case "guestJoinSaved": return {
+      ...state,
+      saving: false,
+      readback: state.readback ? { ...state.readback, publicGuestJoinEnabled: action.publicGuestJoinEnabled } : null,
     };
     case "confirm": return { ...state, confirmOpen: action.open };
   }
@@ -1980,21 +2113,21 @@ function PublicChannelList({ channels }: { channels: PublicVisibilityReadback["e
   const scrollFrameClass = "max-h-[7.5rem] overflow-y-scroll";
   if (channels.length === 0) {
     return (
-      <div className={`border-2 border-dashed border-black/25 bg-gray-50 px-3 py-4 text-center text-xs text-black/55 ${scrollFrameClass}`}>
+      <div className={`rounded-md border border-dashed border-line-muted bg-fill-muted/40 px-3 py-4 text-center text-xs text-foreground-muted theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/25 theme-brutal:bg-gray-50 theme-brutal:text-black/55 ${scrollFrameClass}`}>
         {formatMessage({ id: "settings.publicVisibility.emptyChannels" })}
       </div>
     );
   }
   return (
-    <ul className={`divide-y divide-black/10 border-2 border-black bg-white ${scrollFrameClass}`} data-testid="public-visibility-channel-list">
+    <ul className={`divide-y divide-line-hairline rounded-md border border-line-muted bg-layer-panel theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white ${scrollFrameClass}`} data-testid="public-visibility-channel-list">
       {channels.map((channel) => (
         <li key={channel.id} className="flex h-[3.625rem] items-start gap-3 px-3 py-2.5">
-          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center border border-black bg-brutal-cream" aria-hidden="true">
+          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md border border-line-muted bg-layer-inset text-foreground-strong theme-brutal:rounded-none theme-brutal:border-black theme-brutal:bg-brutal-cream" aria-hidden="true">
             <Hash size={14} strokeWidth={2.5} />
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-sm font-bold text-black">{channel.name}</span>
-            {channel.description ? <span className="mt-0.5 block truncate text-xs text-black/55">{channel.description}</span> : null}
+            <span className="block truncate text-sm font-bold text-foreground-strong">{channel.name}</span>
+            {channel.description ? <span className="mt-0.5 block truncate text-xs text-foreground-muted">{channel.description}</span> : null}
           </span>
         </li>
       ))}
@@ -2007,6 +2140,7 @@ export function PublicVisibilitySection() {
   const server = useServerStore((s) => s.current);
   const { role } = useServerPermissions();
   const publicServerEnabled = useServerFeatureFlag(PUBLIC_SERVER_FEATURE_FLAG_KEY).enabled;
+  const serverGuestEnabled = useServerFeatureFlag(SERVER_GUEST_FEATURE_FLAG_KEY).enabled;
   const [ui, dispatch] = useReducer(publicVisibilityUiReducer, {
     readback: null,
     loading: false,
@@ -2040,9 +2174,9 @@ export function PublicVisibilitySection() {
   const updateVisibility = async (publiclyVisible: boolean) => {
     dispatch({ type: "saving" });
     try {
-      const { data } = await api.patch<{ publiclyVisible: boolean }>(`/servers/${server.id}/public-visibility`, { publiclyVisible });
+      const { data } = await api.patch<{ publiclyVisible: boolean; publicGuestJoinEnabled: boolean }>(`/servers/${server.id}/public-visibility`, { publiclyVisible });
       if (useServerStore.getState().current?.id !== server.id) return;
-      dispatch({ type: "saved", publiclyVisible: data.publiclyVisible });
+      dispatch({ type: "saved", publiclyVisible: data.publiclyVisible, publicGuestJoinEnabled: data.publicGuestJoinEnabled });
     } catch (err: unknown) {
       if (useServerStore.getState().current?.id !== server.id) return;
       const response = getApiErrorResponse(err);
@@ -2051,9 +2185,26 @@ export function PublicVisibilitySection() {
     }
   };
 
+  const updateGuestJoin = async (publicGuestJoinEnabled: boolean) => {
+    dispatch({ type: "saving" });
+    try {
+      const { data } = await api.patch<{ publicGuestJoinEnabled: boolean }>(
+        `/servers/${server.id}/public-guest-join`,
+        { publicGuestJoinEnabled },
+      );
+      if (useServerStore.getState().current?.id !== server.id) return;
+      dispatch({ type: "guestJoinSaved", publicGuestJoinEnabled: data.publicGuestJoinEnabled });
+    } catch (err: unknown) {
+      if (useServerStore.getState().current?.id !== server.id) return;
+      const response = getApiErrorResponse(err);
+      dispatch({ type: "failed", error: response?.error || formatMessage({ id: "settings.publicVisibility.failedGuestJoinUpdate" }) });
+      throw err;
+    }
+  };
+
   const channels = readback?.exposedChannels ?? [];
   const publicUrl = readback?.publiclyVisible
-    ? `${window.location.origin}/s/${readback.slug}`
+    ? `${shareableWebOrigin()}/s/${readback.slug}`
     : "";
 
   return (
@@ -2063,13 +2214,13 @@ export function PublicVisibilitySection() {
         icon={<Globe2 size={16} />}
         label={formatMessage({ id: "settings.publicVisibility.sectionLabel" })}
       />
-      <div className="space-y-4 border-2 border-black bg-white p-4 shadow-brutal-sm">
+      <div className="space-y-4 rounded-lg border border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h3 id="public-visibility-label" className="text-sm font-bold text-black">
+            <h3 id="public-visibility-label" className="text-sm font-bold text-foreground-strong">
               {formatMessage({ id: "settings.publicVisibility.title" })}
             </h3>
-            <p className="mt-1 text-xs leading-relaxed text-black/60">
+            <p className="mt-1 text-xs leading-relaxed text-foreground-muted">
               {formatMessage({ id: "settings.publicVisibility.description" })}
             </p>
           </div>
@@ -2090,7 +2241,7 @@ export function PublicVisibilitySection() {
           <div data-testid="public-visibility-url">
             <label
               htmlFor="public-visibility-url-input"
-              className="mb-1 block text-xs font-bold uppercase tracking-wide text-black/60"
+              className="mb-1 block text-xs font-bold uppercase tracking-wide text-foreground-muted"
             >
               {formatMessage({ id: "settings.publicVisibility.publicUrl" })}
             </label>
@@ -2113,8 +2264,8 @@ export function PublicVisibilitySection() {
                 {({ copied, disabled, onClick, onMouseDown }) => (
                   <Button
                     size="lg"
-                    shape="iconText"
-                    tone="white"
+                    
+                    variant="outline"
                     className="shrink-0"
                     disabled={disabled}
                     onMouseDown={onMouseDown}
@@ -2134,12 +2285,33 @@ export function PublicVisibilitySection() {
           </div>
         ) : null}
 
+        {serverGuestEnabled ? (
+          <div className="flex items-start justify-between gap-4 border-t border-line-hairline pt-4">
+            <div className="min-w-0">
+              <h3 id="public-guest-join-label" className="text-sm font-bold text-foreground-strong">
+                {formatMessage({ id: "settings.publicVisibility.allowGuestJoin" })}
+              </h3>
+              <p className="mt-1 text-xs leading-relaxed text-foreground-muted">
+                {formatMessage({ id: "settings.publicVisibility.allowGuestJoinDescription" })}
+              </p>
+            </div>
+            <Switch
+              size="md"
+              checked={readback?.publicGuestJoinEnabled === true}
+              disabled={loading || saving || !readback || !readback.publiclyVisible}
+              onCheckedChange={(checked) => void updateGuestJoin(checked).catch(() => {})}
+              aria-labelledby="public-guest-join-label"
+              data-testid="public-guest-join-switch"
+            />
+          </div>
+        ) : null}
+
         <div>
-          <p className="mb-2 text-xs font-bold uppercase tracking-wide text-black/60">
+          <p className="mb-2 text-xs font-bold uppercase tracking-wide text-foreground-muted">
             {formatMessage({ id: "settings.publicVisibility.channelListLabel" })}
           </p>
           {loading ? (
-            <div className="h-16 animate-pulse border-2 border-black/15 bg-gray-100" data-testid="public-visibility-loading" />
+            <div className="h-16 animate-pulse rounded-md border border-line-muted bg-fill-muted/50 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/15 theme-brutal:bg-gray-100" data-testid="public-visibility-loading" />
           ) : <PublicChannelList channels={channels} />}
         </div>
 
@@ -2151,11 +2323,11 @@ export function PublicVisibilitySection() {
           title={formatMessage({ id: "settings.publicVisibility.confirmTitle" })}
           message={(
             <div className="space-y-4">
-              <p className="text-sm leading-relaxed text-black/75">
+              <p className="text-sm leading-relaxed text-foreground-strong">
                 {formatMessage({ id: "settings.publicVisibility.confirmDescription" })}
               </p>
               <PublicChannelList channels={channels} />
-              <p className="text-xs leading-relaxed text-black/60">
+              <p className="text-xs leading-relaxed text-foreground-muted">
                 {formatMessage({ id: "settings.publicVisibility.confirmAudienceChange" })}
               </p>
             </div>
@@ -2281,7 +2453,7 @@ function LabsSection() {
         count={activeReadback?.labs.length}
       />
 
-      <div className="border-2 border-black bg-white p-4 shadow-brutal-sm">
+      <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm">
         {loading ? (
           <div className="space-y-3">
             <Skeleton className="h-10 w-full" />
@@ -2289,20 +2461,20 @@ function LabsSection() {
             <Skeleton className="h-16 w-full" />
           </div>
         ) : unavailable ? (
-          <div className="flex items-start gap-3 text-sm text-black/60">
-            <AlertTriangle size={16} className="mt-0.5 shrink-0 text-black/50" />
+          <div className="flex items-start gap-3 text-sm text-foreground-muted theme-brutal:text-black/60">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0 text-foreground-muted theme-brutal:text-black/50" />
             <div>
-              <div className="font-bold text-black">{formatMessage({ id: "settings.labs.unavailableTitle" })}</div>
+              <div className="font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.labs.unavailableTitle" })}</div>
               <div className="mt-1 text-xs leading-5">{formatMessage({ id: "settings.labs.unavailableDescription" })}</div>
             </div>
           </div>
         ) : activeReadback ? (
           <div className="space-y-4">
-            <div className="flex items-start justify-between gap-4 border-b-2 border-black pb-4">
+            <div className="flex items-start justify-between gap-4 border-b-2 border-line-muted theme-brutal:border-black pb-4">
               <div className="min-w-0">
-                <div className="text-sm font-bold text-black">{formatMessage({ id: "settings.labs.masterTitle" })}</div>
+                <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.labs.masterTitle" })}</div>
                 {!authority.canSetMasterAccess && (
-                  <div className="mt-1 text-xs font-mono text-black/45">
+                  <div className="mt-1 text-xs font-mono text-foreground-muted theme-brutal:text-black/45">
                     {formatMessage({ id: "settings.labs.masterOwnerOnly" })}
                   </div>
                 )}
@@ -2318,7 +2490,7 @@ function LabsSection() {
             </div>
 
             {activeReadback.labs.length === 0 ? (
-              <div className="text-xs text-black/40 italic">{formatMessage({ id: "settings.labs.emptyState" })}</div>
+              <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">{formatMessage({ id: "settings.labs.emptyState" })}</div>
             ) : (
               <div className="divide-y-2 divide-black/10" data-testid="server-labs-list">
                 {activeReadback.labs.map((lab) => {
@@ -2337,22 +2509,35 @@ function LabsSection() {
                     >
                       <div className="min-w-0">
                         <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <span className="min-w-0 truncate text-sm font-bold text-black">{lab.name}</span>
+                          <span className="min-w-0 truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{lab.name}</span>
                         </div>
-                        <div className="mt-1 text-xs leading-5 text-black/60">{description}</div>
+                        <div className="mt-1 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">{description}</div>
                         {disabledReason && (
-                          <div className="mt-1 text-xs font-mono text-black/45">{disabledReason}</div>
+                          <div className="mt-1 text-xs font-mono text-foreground-muted theme-brutal:text-black/45">{disabledReason}</div>
                         )}
                       </div>
-                      <Switch
-                        size="md"
-                        checked={checked}
-                        disabled={!editable || activeSavingTarget != null}
-                        onCheckedChange={(enabled) => handleEnrollmentChange(lab.key, enabled)}
-                        aria-label={formatMessage({ id: "settings.labs.enrollmentAria" }, { name: lab.name })}
-                        className="mt-0.5 justify-self-end"
-                        title={disabledReason || undefined}
-                      />
+                      {disabledReason ? (
+                        <Tooltip content={disabledReason}>
+                          <Switch
+                            size="md"
+                            checked={checked}
+                            disabled={!editable || activeSavingTarget != null}
+                            onCheckedChange={(enabled) => handleEnrollmentChange(lab.key, enabled)}
+                            aria-label={formatMessage({ id: "settings.labs.enrollmentAria" }, { name: lab.name })}
+                            className="mt-0.5 justify-self-end"
+                            data-slot="switch"
+                          />
+                        </Tooltip>
+                      ) : (
+                        <Switch
+                          size="md"
+                          checked={checked}
+                          disabled={!editable || activeSavingTarget != null}
+                          onCheckedChange={(enabled) => handleEnrollmentChange(lab.key, enabled)}
+                          aria-label={formatMessage({ id: "settings.labs.enrollmentAria" }, { name: lab.name })}
+                          className="mt-0.5 justify-self-end"
+                        />
+                      )}
                       {saving && (
                         <span className="sr-only">
                           {formatMessage({ id: "settings.labs.savingEnrollment" }, { name: lab.name })}
@@ -2575,9 +2760,9 @@ function AdminsSection() {
         count={admins.length}
       />
 
-      <div className="border-2 border-black bg-white shadow-brutal-sm p-4 space-y-4">
+      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-4">
         <div>
-          <div className="mb-2 text-xs font-bold text-black/60">{formatMessage({ id: "settings.admins.addLabel" })}</div>
+          <div className="mb-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "settings.admins.addLabel" })}</div>
           <div className="flex flex-col gap-2 sm:flex-row">
             <div ref={pickerRef} className="relative min-w-0 sm:flex-[1_1_0%]">
               <button
@@ -2585,9 +2770,9 @@ function AdminsSection() {
                 data-testid="admin-principal-picker"
                 onClick={() => setPrincipalPickerOpen((open) => !open)}
                 disabled={candidates.length === 0 || savingPrincipalKey != null}
-                className="flex h-10 w-full min-w-0 items-center justify-between gap-2 border-2 border-black bg-white px-3 text-left text-xs font-bold shadow-brutal-sm transition-colors hover:bg-soft-signal/30 disabled:cursor-not-allowed disabled:opacity-50"
+                className="flex h-10 w-full min-w-0 items-center justify-between gap-2 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white px-3 text-left text-xs font-bold shadow-raft-sm theme-brutal:shadow-brutal-sm transition-colors hover:bg-primary-soft theme-brutal:hover:bg-soft-signal/30 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <span className={`truncate ${selectedCandidate ? "text-black" : "text-black/45"}`}>
+                <span className={`truncate ${selectedCandidate ? "text-foreground-strong theme-brutal:text-black" : "text-foreground-muted theme-brutal:text-black/45"}`}>
                   {selectedCandidate
                     ? selectedCandidate.kind === "human" && selectedCandidate.email
                       ? `${getAdminPrincipalLabel(selectedCandidate, formatMessage)} · ${selectedCandidate.email}`
@@ -2635,18 +2820,19 @@ function AdminsSection() {
                 </SelectContent>
               </Select>
             </div>
-            <button
+            <Button
+              variant="accent" size="sm"
               type="button"
               onClick={handlePromote}
               disabled={!selectedCandidate || selectedRoleOptions.length === 0 || savingPrincipalKey != null}
-              className="btn-brutal bg-brutal-pink px-3 py-2 [@media(max-height:600px)]:py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed sm:shrink-0"
+              className="[@media(max-height:600px)]:py-1 sm:shrink-0"
             >
               {selectedCandidate && savingPrincipalKey === getAdminPrincipalKey(selectedCandidate) ? formatMessage({ id: "settings.common.saving" }) : formatMessage({ id: "settings.admins.updateRole" })}
-            </button>
+            </Button>
           </div>
         </div>
 
-        <div className="border-t-2 border-black pt-4">
+        <div className="border-t-2 border-line-muted theme-brutal:border-black pt-4">
           {admins.length > 0 ? (
             <div className="space-y-2">
               {admins.map((admin) => {
@@ -2669,16 +2855,17 @@ function AdminsSection() {
                     subtitle={getPrincipalSubtitle(admin)}
                     rightContent={
                       canRemove ? (
-                        <button
+                        <Button
+                          variant="outline" size="sm"
                           type="button"
                           onClick={() => handleDemote(admin)}
                           disabled={savingPrincipalKey != null}
-                          className="btn-brutal-sm shrink-0 bg-white px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                          className="shrink-0"
                         >
                           {savingPrincipalKey === key ? formatMessage({ id: "settings.common.saving" }) : admin.role === "owner" ? formatMessage({ id: "settings.admins.removeOwner" }) : formatMessage({ id: "settings.admins.removeAdmin" })}
-                        </button>
+                        </Button>
                       ) : (
-                        <span className="shrink-0 text-[10px] font-mono text-black/40">
+                        <span className="shrink-0 text-[10px] font-mono text-foreground-muted theme-brutal:text-black/40">
                           {admin.role === "owner" && ownerCount <= 1 ? formatMessage({ id: "settings.admins.lastOwner" }) : formatMessage({ id: "settings.admins.ownerOnly" })}
                         </span>
                       )
@@ -2688,7 +2875,7 @@ function AdminsSection() {
               })}
             </div>
           ) : (
-            <div className="text-xs text-black/40 italic">
+            <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">
               {formatMessage({ id: "settings.admins.emptyState" })}
             </div>
           )}
@@ -2756,35 +2943,39 @@ function InvitesSection() {
         count={invites.length > 0 ? invites.length : null}
       />
 
-      <div className="border-2 border-black bg-white shadow-brutal-sm p-4">
+      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4">
         {invites.length > 0 ? (
           <div className="space-y-1.5">
             {invites.map((invite) => (
               <div
                 key={invite.id}
-                className="flex items-center gap-2 border-2 border-black/30 px-3 py-2"
+                className="flex items-center gap-2 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 px-3 py-2"
               >
-                <span className="flex-1 font-mono text-xs text-black truncate">
+                <span className="flex-1 font-mono text-xs text-foreground-strong theme-brutal:text-black truncate">
                   {invite.invitedEmail}
                 </span>
-                <span className="text-[10px] text-black/40 font-mono shrink-0">
+                <span className="text-[10px] text-foreground-muted theme-brutal:text-black/40 font-mono shrink-0">
                   {formatDate(invite.createdAt, {
                     month: "short",
                     day: "numeric",
                   })}
                 </span>
-                <button
+                <Tooltip content={formatMessage({ id: "settings.invites.revokeInviteTitle" })}>
+                <Button
+                  variant="outline" size="icon-sm" type="button"
                   onClick={() => setRevokeTarget(invite)}
-                  className="shrink-0 btn-brutal-sm bg-white p-1"
-                  title={formatMessage({ id: "settings.invites.revokeInviteTitle" })}
+                  className="shrink-0"
+                  aria-label={formatMessage({ id: "settings.invites.revokeInviteTitle" })}
+                  data-slot="button"
                 >
                   <X size={12} />
-                </button>
+                </Button>
+                </Tooltip>
               </div>
             ))}
           </div>
         ) : !loading ? (
-          <div className="text-xs text-black/40 italic">
+          <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">
             {formatMessage({ id: "settings.invites.emptyState" })}
           </div>
         ) : null}
@@ -2860,7 +3051,9 @@ function JoinLinksSection() {
     }
   };
 
-  const buildJoinLinkUrl = (token: string) => `${window.location.origin}/join/${token}`;
+  // Shareable web origin, not window.location.origin: the desktop shell's origin
+  // is `app://raft`, which produces an unopenable invite link. Web is unchanged.
+  const buildJoinLinkUrl = (token: string) => `${shareableWebOrigin()}/join/${token}`;
 
   const handleCopy = async (linkId: string, token: string) => {
     await navigator.clipboard.writeText(buildJoinLinkUrl(token));
@@ -2889,28 +3082,28 @@ function JoinLinksSection() {
         count={links.length > 0 ? links.length : null}
       />
 
-      <div className="border-2 border-black bg-white shadow-brutal-sm p-4">
+      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4">
         <form onSubmit={handleCreate} className="space-y-3">
           <div className="grid gap-3 md:grid-cols-2">
             <FormField label={formatMessage({ id: "settings.joinLinks.maxUses" })} labelStyle="plain" size="compact" htmlFor="join-link-max-uses">
-              <input
+              <Input
                 id="join-link-max-uses"
                 type="number"
                 min="1"
                 value={maxUses}
                 onChange={(e) => setMaxUses(e.target.value)}
                 placeholder={formatMessage({ id: "settings.joinLinks.unlimited" })}
-                className="w-full border-2 border-black p-2 text-sm shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+                className="w-full text-sm"
               />
             </FormField>
 
             <FormField label={formatMessage({ id: "settings.joinLinks.expiresAt" })} labelStyle="plain" size="compact" htmlFor="join-link-expires-at">
-              <input
+              <Input
                 id="join-link-expires-at"
                 type="datetime-local"
                 value={expiresAt}
                 onChange={(e) => setExpiresAt(e.target.value)}
-                className="w-full border-2 border-black p-2 text-sm shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+                className="w-full text-sm"
               />
             </FormField>
           </div>
@@ -2921,44 +3114,54 @@ function JoinLinksSection() {
             </Banner>
           )}
 
-          <button
+          <Button
+
+            variant="accent" size="sm"
             type="submit"
             disabled={creating}
-            className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs flex items-center gap-1.5"
+            className="flex items-center gap-1.5"
           >
             <Plus size={14} />
             {creating ? formatMessage({ id: "settings.joinLinks.creating" }) : formatMessage({ id: "settings.joinLinks.createLink" })}
-          </button>
+          </Button>
         </form>
 
-        <div className="mt-4 border-t-2 border-black pt-4">
+        <div className="mt-4 border-t-2 border-line-muted theme-brutal:border-black pt-4">
           {links.length > 0 ? (
             <div className="space-y-2">
               {links.map((link) => (
                 <div
                   key={link.id}
-                  className="border-2 border-black/30 px-3 py-2.5 space-y-1.5"
+                  className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 px-3 py-2.5 space-y-1.5"
                 >
                   <div className="flex items-center gap-2">
-                    <div className="min-w-0 flex-1 border-2 border-black bg-white px-2 py-1 font-mono text-[11px] truncate select-all">
+                    <div className="min-w-0 flex-1 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white px-2 py-1 font-mono text-[11px] truncate select-all">
                       {buildJoinLinkUrl(link.token)}
                     </div>
-                    <button
+                    <Tooltip content={formatMessage({ id: "settings.joinLinks.copyLink" })}>
+                    <Button
+                      variant="outline" size="icon-sm" type="button"
                       onClick={() => handleCopy(link.id, link.token)}
-                      className="btn-brutal-sm shrink-0 bg-white p-1.5"
-                      title={formatMessage({ id: "settings.joinLinks.copyLink" })}
+                      className="shrink-0"
+                      aria-label={formatMessage({ id: "settings.joinLinks.copyLink" })}
+                      data-slot="button"
                     >
                       {copiedLinkId === link.id ? <Check size={14} /> : <Copy size={14} />}
-                    </button>
-                    <button
+                    </Button>
+                    </Tooltip>
+                    <Tooltip content={formatMessage({ id: "settings.joinLinks.revokeLink" })}>
+                    <Button
+                      variant="outline" size="icon-sm" type="button"
                       onClick={() => setRevokeTarget(link)}
-                      className="btn-brutal-sm shrink-0 bg-white p-1.5"
-                      title={formatMessage({ id: "settings.joinLinks.revokeLink" })}
+                      className="shrink-0"
+                      aria-label={formatMessage({ id: "settings.joinLinks.revokeLink" })}
+                      data-slot="button"
                     >
                       <X size={14} />
-                    </button>
+                    </Button>
+                    </Tooltip>
                   </div>
-                  <div className="text-[11px] text-black/50 font-mono">
+                  <div className="text-[11px] text-foreground-muted theme-brutal:text-black/50 font-mono">
                     {link.maxUses != null
                       ? formatMessage({ id: "settings.joinLinks.usesWithMax" }, { used: link.useCount, max: link.maxUses })
                       : formatMessage({ id: "settings.joinLinks.uses" }, { used: link.useCount })}
@@ -2971,7 +3174,7 @@ function JoinLinksSection() {
               ))}
             </div>
           ) : !loading ? (
-            <div className="text-xs text-black/40 italic">
+            <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">
               {formatMessage({ id: "settings.joinLinks.emptyState" })}
             </div>
           ) : null}
@@ -3119,14 +3322,14 @@ function OnboardingAgentSection() {
         label={formatMessage({ id: "settings.onboarding.sectionLabel" })}
       />
 
-      <div className="border-2 border-black bg-white shadow-brutal-sm p-4">
+      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4">
         <div className="space-y-4">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 pr-0 sm:pr-4">
-              <div className="text-sm font-bold text-black">
+              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
                 {formatMessage({ id: "settings.onboarding.humanAgentTitle" })}
               </div>
-              <div className="mt-0.5 text-xs text-black/60">
+              <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/60">
                 {formatMessage({ id: "settings.onboarding.humanAgentDescription" })}
               </div>
             </div>
@@ -3156,10 +3359,10 @@ function OnboardingAgentSection() {
 
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 pr-0 sm:pr-4">
-              <div className="text-sm font-bold text-black">
+              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
                 {formatMessage({ id: "settings.onboarding.greetingTitle" })}
               </div>
-              <div className="mt-0.5 text-xs text-black/60">
+              <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/60">
                 {formatMessage({ id: "settings.onboarding.greetingDescription" })}
               </div>
             </div>
@@ -3196,16 +3399,16 @@ function OnboardingAgentSection() {
 
         <div className="mt-2 flex items-center justify-between">
           {!canManageLinks && (
-            <div className="text-[11px] text-black/50">{formatMessage({ id: "settings.onboarding.adminOnly" })}</div>
+            <div className="text-[11px] text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.onboarding.adminOnly" })}</div>
           )}
-          <button
+          <Button
+            variant="accent" size="sm"
             type="button"
             onClick={handleSave}
             disabled={!canManageLinks || !dirty || saving || loading}
-            className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? formatMessage({ id: "settings.common.saving" }) : saved ? formatMessage({ id: "settings.common.saved" }) : formatMessage({ id: "settings.common.save" })}
-          </button>
+          </Button>
         </div>
 
         {/* Who may see the setup flow is the SERVER's answer, in one place: a non-owner's
@@ -3213,21 +3416,22 @@ function OnboardingAgentSection() {
             role would be a second opinion that can drift — hide it in one surface, leak it in
             another (@Jianwei's point). The projection alone decides. */}
         {setupProjection && setupProjection.phase !== "complete" && setupProjection.surface !== "none" ? (
-          <div className="mt-4 flex items-center justify-between border-t-2 border-black pt-3">
+          <div className="mt-4 flex items-center justify-between border-t-2 border-line-muted theme-brutal:border-black pt-3">
             <div>
               <div className="text-xs font-bold">{formatMessage({ id: "settings.onboarding.serverSetupTitle" })}</div>
-              <div className="text-[11px] text-black/50">{formatMessage({ id: "settings.onboarding.serverSetupDescription" })}</div>
+              <div className="text-[11px] text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.onboarding.serverSetupDescription" })}</div>
             </div>
-            <button
+            <Button
+              variant="outline" size="sm"
               type="button"
               onClick={() => void handleFinishSetup()}
               disabled={reopeningSetup}
-              className="btn-brutal inline-flex items-center gap-1.5 bg-white px-3 py-1.5 text-xs disabled:opacity-50"
+              className="inline-flex items-center gap-1.5"
               data-testid="finish-server-setup"
             >
               {formatMessage({ id: reopeningSetup ? "settings.onboarding.openingSetup" : "settings.onboarding.finishSetup" })}
               {!reopeningSetup && <ChevronRight size={14} />}
-            </button>
+            </Button>
           </div>
         ) : null}
       </div>
@@ -3286,18 +3490,18 @@ function MemberPermissionsSection() {
         label={formatMessage({ id: "settings.memberPermissions.sectionLabel" })}
       />
 
-      <form onSubmit={handleSave} className="border-2 border-black bg-white shadow-brutal-sm p-4 space-y-3">
+      <form onSubmit={handleSave} className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-3">
         <label className={`flex items-start gap-3 ${canEdit ? "" : "opacity-60"}`}>
           <Checkbox
             size="md"
             checked={hideHumansFromMembers}
             disabled={!canEdit || saving}
-            onChange={(event) => setHideHumansFromMembers(event.currentTarget.checked)}
+            onCheckedChange={(checked) => setHideHumansFromMembers(checked)}
             className="mt-0.5"
           />
           <span className="min-w-0">
-            <span className="block text-sm font-bold text-black">{formatMessage({ id: "settings.memberPermissions.hideHumansTitle" })}</span>
-            <span className="block text-xs text-black/60 mt-0.5">
+            <span className="block text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.memberPermissions.hideHumansTitle" })}</span>
+            <span className="block text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
               {formatMessage({ id: "settings.memberPermissions.hideHumansDescription" })}
             </span>
           </span>
@@ -3308,15 +3512,16 @@ function MemberPermissionsSection() {
         )}
 
         {canEdit && (
-          <button
+          <Button
+            variant="accent" size="sm"
             type="submit"
             disabled={!dirty || saving}
-            className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5"
           >
             {saving ? formatMessage({ id: "settings.common.saving" }) : saved ? (
               <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
             ) : formatMessage({ id: "settings.common.save" })}
-          </button>
+          </Button>
         )}
       </form>
     </div>
@@ -3384,21 +3589,21 @@ function SystemChannelsSection() {
         label={formatMessage({ id: "settings.systemChannels.sectionLabel" })}
       />
 
-      <form onSubmit={handleSave} className="border-2 border-black bg-white shadow-brutal-sm p-4 space-y-3">
+      <form onSubmit={handleSave} className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-3">
         <label className={`flex items-start gap-3 ${saving ? "opacity-60" : ""}`}>
           <Checkbox
             size="md"
             checked={allChannelHidden}
             disabled={saving}
-            onChange={(event) => {
-              setAllChannelHidden(event.currentTarget.checked);
+            onCheckedChange={(checked) => {
+              setAllChannelHidden(checked);
               setSaved(false);
             }}
             className="mt-0.5"
           />
           <span className="min-w-0">
-            <span className="block text-sm font-bold text-black">{formatMessage({ id: "settings.systemChannels.hideAllTitle" })}</span>
-            <span className="block text-xs text-black/60 mt-0.5">
+            <span className="block text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.systemChannels.hideAllTitle" })}</span>
+            <span className="block text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
               {formatMessage({ id: "settings.systemChannels.hideAllDescription" })}
             </span>
           </span>
@@ -3408,15 +3613,17 @@ function SystemChannelsSection() {
           <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
         )}
 
-        <button
+        <Button
+
+          variant="accent" size="sm"
           type="submit"
           disabled={!dirty || saving}
-          className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="flex items-center gap-1.5"
         >
           {saving ? formatMessage({ id: "settings.common.saving" }) : saved ? (
             <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
           ) : formatMessage({ id: "settings.common.save" })}
-        </button>
+        </Button>
       </form>
     </div>
   );
@@ -3480,18 +3687,18 @@ function ServerTranslationSection() {
         label={formatMessage({ id: "settings.serverTranslation.sectionLabel" })}
       />
 
-      <form onSubmit={handleSave} className="border-2 border-black bg-white shadow-brutal-sm p-4 space-y-3">
+      <form onSubmit={handleSave} className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-3">
         <label className={`flex items-start gap-3 ${settingsLoading || !settings.canManageServerTranslation ? "opacity-60" : ""}`}>
           <Checkbox
             size="md"
             checked={enabled}
             disabled={saving || settingsLoading || !settings.canManageServerTranslation}
-            onChange={(event) => setEnabled(event.currentTarget.checked)}
+            onCheckedChange={(checked) => setEnabled(checked)}
             className="mt-0.5"
           />
           <span className="min-w-0">
-            <span className="block text-sm font-bold text-black">{formatMessage({ id: "settings.serverTranslation.enableTitle" })}</span>
-            <span className="block text-xs text-black/60 mt-0.5">
+            <span className="block text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.serverTranslation.enableTitle" })}</span>
+            <span className="block text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
               {formatMessage({ id: "settings.serverTranslation.enableDescription" })}
             </span>
           </span>
@@ -3508,15 +3715,16 @@ function ServerTranslationSection() {
         )}
 
         {settings.canManageServerTranslation && (
-          <button
+          <Button
+            variant="accent" size="sm"
             type="submit"
             disabled={!dirty || saving || settingsLoading}
-            className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5"
           >
             {saving ? formatMessage({ id: "settings.common.saving" }) : saved ? (
               <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
             ) : formatMessage({ id: "settings.common.save" })}
-          </button>
+          </Button>
         )}
       </form>
     </div>
@@ -3534,8 +3742,10 @@ function PlanBillingLoadingSection() {
         icon={<CreditCard size={16} />}
         label={formatMessage({ id: "billing.planBilling" })}
       />
-      <div className="mb-6 border-2 border-black bg-white shadow-brutal-sm">
-        <div className="border-b-2 border-black bg-brutal-cream px-4 py-4">
+      <div
+        className="mb-6 border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
+      >
+        <div className="border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-4 py-4">
           <Skeleton variant="line" className="mb-2 h-5 w-32" />
           <Skeleton variant="line" className="h-4 w-64 max-w-full" />
         </div>
@@ -3547,7 +3757,7 @@ function PlanBillingLoadingSection() {
               <div className="space-y-3">
                 {[0, 1, 2].map((row) => (
                   <div key={row} className="flex items-start gap-3">
-                    <Skeleton variant="block" className="mt-0.5 h-4 w-4 border-2 border-black/20" />
+                    <Skeleton variant="block" className="mt-0.5 h-4 w-4 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20" />
                     <Skeleton variant="line" className={row === 2 ? "w-3/5" : row === 1 ? "w-4/5" : "w-full"} />
                   </div>
                 ))}
@@ -3556,20 +3766,20 @@ function PlanBillingLoadingSection() {
           ))}
         </div>
 
-        <div className="border-t-2 border-black/10 px-4 py-4">
+        <div className="border-t-2 border-line-muted theme-brutal:border-black/10 px-4 py-4">
           <div className="grid gap-3 sm:grid-cols-2">
             {(["billing.seat", "billing.messageHistory", "billing.fileUploads"] as const).map((label) => (
               <div key={label} className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-black/45">{formatMessage({ id: label })}</span>
+                <span className="text-xs font-bold text-foreground-muted theme-brutal:text-black/45">{formatMessage({ id: label })}</span>
                 <Skeleton variant="line" className="w-20" />
               </div>
             ))}
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t-2 border-black/10 px-4 py-4">
-          <Skeleton variant="block" className="h-8 w-28 border-2 border-black/20" />
-          <Skeleton variant="block" className="h-8 w-44 border-2 border-black/20" />
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t-2 border-line-muted theme-brutal:border-black/10 px-4 py-4">
+          <Skeleton variant="block" className="h-8 w-28 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20" />
+          <Skeleton variant="block" className="h-8 w-44 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20" />
         </div>
       </div>
 
@@ -3578,17 +3788,17 @@ function PlanBillingLoadingSection() {
         icon={<Plus size={16} />}
         label={formatMessage({ id: "billing.managePlan" })}
       />
-      <div className="mb-6 grid gap-4 border-2 border-black bg-white p-4 shadow-brutal-sm lg:grid-cols-[minmax(0,1fr)_280px]">
+      <div className="mb-6 grid gap-4 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm lg:grid-cols-[minmax(0,1fr)_280px]">
         <div>
           <Skeleton variant="line" className="mb-3 h-4 w-56 max-w-full" />
           <div className="flex flex-wrap items-center gap-3">
-            <Skeleton variant="block" className="h-8 w-24 border-2 border-black/20" />
+            <Skeleton variant="block" className="h-8 w-24 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20" />
             <Skeleton variant="line" className="w-48 max-w-full" />
           </div>
-          <Skeleton variant="block" className="mt-4 h-8 w-32 border-2 border-black/20" />
+          <Skeleton variant="block" className="mt-4 h-8 w-32 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20" />
         </div>
 
-        <div className="border-2 border-black bg-brutal-cream p-4 shadow-brutal-sm">
+        <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm">
           <Skeleton variant="line" className="mb-4 h-3 w-32" />
           <div className="space-y-3">
             {[0, 1, 2].map((row) => (
@@ -3627,27 +3837,27 @@ function DowngradeWarningCard({ server, usage }: { server: { planDowngradedAt: s
   const excessChannels = getFinitePlanLimitExcess(channelCount, limits.maxChannels);
 
   return (
-    <div className="mb-4 border-2 border-black bg-brutal-orange/20 shadow-brutal-sm p-4">
+    <div className="mb-4 border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-brutal-orange/20 shadow-raft-sm theme-brutal:shadow-brutal-sm p-4">
       <div className="flex items-center gap-2 mb-2">
-        <AlertTriangle size={16} className="text-black" />
+        <AlertTriangle size={16} className="text-foreground-strong theme-brutal:text-black" />
         <span className="text-sm font-bold">
           {graceExpired ? formatMessage({ id: "billing.gracePeriodExpired" }) : formatMessage({ id: "billing.planDowngraded" })}
         </span>
       </div>
       {graceExpired ? (
-        <p className="text-xs text-black/60 font-mono">
+        <p className="text-xs text-foreground-muted theme-brutal:text-black/60 font-mono">
           {formatMessage({ id: "billing.theGracePeriodHasEndedExcessAgentsHaveBeenSt" })}
         </p>
       ) : (
         <>
-                <p className="text-xs text-black/60 font-mono mb-2">
+                <p className="text-xs text-foreground-muted theme-brutal:text-black/60 font-mono mb-2">
                   {formatMessage(
                     {
                       id: excessAgents === 0 && excessMachines === 0 && excessChannels === 0
                         ? "billing.graceAllWithinLimits"
                         : "billing.graceExcessWillStop",
                     },
-                    { days: daysLeft, b: (chunks) => <span key="b" className="font-bold text-black">{chunks}</span> },
+                    { days: daysLeft, b: (chunks) => <span key="b" className="font-bold text-foreground-strong theme-brutal:text-black">{chunks}</span> },
                   )}
                 </p>
           {(excessAgents > 0 || excessMachines > 0 || excessChannels > 0) && (
@@ -4095,11 +4305,11 @@ export function PlanSection() {
 
       {/* Free trial notice */}
       {plan === "free" && finalTrialActive && (
-        <div className="mb-4 border-2 border-black bg-soft-signal/30 shadow-brutal-sm p-4">
+        <div className="mb-4 border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-primary-soft theme-brutal:bg-soft-signal/30 shadow-raft-sm theme-brutal:shadow-brutal-sm p-4">
           <div className="flex items-center gap-2 mb-1">
             <span className="text-sm font-bold">{formatMessage({ id: "billing.finalTrialPeriod" })}</span>
           </div>
-          <p className="text-xs text-black/60 font-mono">
+          <p className="text-xs text-foreground-muted theme-brutal:text-black/60 font-mono">
                   {formatMessage(
                     { id: "billing.trialActiveThrough" },
                     {
@@ -4110,12 +4320,15 @@ export function PlanSection() {
         </div>
       )}
 
-      <div className="mb-6 border-2 border-black bg-white shadow-brutal-sm">
-        <div className="border-b-2 border-black bg-brutal-cream px-4 py-4">
+      <div
+        className="mb-6 border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
+        data-testid="billing-current-plan-card"
+      >
+        <div className="border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-4 py-4">
           <div className="flex flex-wrap items-center gap-3">
             <div className="min-w-0">
-              <div className="text-lg font-bold text-black">{currentPlanDisplayName}</div>
-              <div className="text-sm text-black/60">
+              <div className="text-lg font-bold text-foreground-strong theme-brutal:text-black">{currentPlanDisplayName}</div>
+              <div className="text-sm text-foreground-muted theme-brutal:text-black/60">
                 {currentPlanDescription}
               </div>
             </div>
@@ -4124,10 +4337,10 @@ export function PlanSection() {
 
         <div className={`grid gap-4 p-4 ${hasNotIncludedFeatures ? "lg:grid-cols-2" : ""}`}>
           <div>
-            <div className="mb-3 text-sm font-bold text-black">{formatMessage({ id: "billing.included" })}</div>
+            <div className="mb-3 text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.included" })}</div>
             <div className="space-y-3">
               {currentIncludedFeatures.map((feature) => (
-                <div key={feature} className="flex items-start gap-3 text-sm text-black">
+                <div key={feature} className="flex items-start gap-3 text-sm text-foreground-strong theme-brutal:text-black">
                   <Check size={16} className="mt-0.5 shrink-0 text-green-700" />
                   <span>{feature}</span>
                 </div>
@@ -4137,10 +4350,10 @@ export function PlanSection() {
 
           {hasNotIncludedFeatures && (
             <div>
-              <div className="mb-3 text-sm font-bold text-black/60">{formatMessage({ id: "billing.notIncluded" })}</div>
+              <div className="mb-3 text-sm font-bold text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "billing.notIncluded" })}</div>
               <div className="space-y-3">
                 {currentNotIncludedFeatures.map((feature) => (
-                  <div key={feature} className="flex items-start gap-3 text-sm text-black">
+                  <div key={feature} className="flex items-start gap-3 text-sm text-foreground-strong theme-brutal:text-black">
                     <X size={16} className="mt-0.5 shrink-0 text-brutal-red" />
                     <span>{feature}</span>
                   </div>
@@ -4150,55 +4363,61 @@ export function PlanSection() {
           )}
         </div>
 
-        <div className="border-t-2 border-black/10 px-4 py-4">
+        <div className="border-t-2 border-line-muted theme-brutal:border-black/10 px-4 py-4">
           {showSeatUsage && usesUniversalSeats && (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-black">{formatMessage({ id: "billing.seat" })}</span>
-                <span className="text-xs font-mono text-black/60">
+                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.seat" })}</span>
+                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
                   {formatSeatUsageNumber(usedUniversalSeats)} / {formatLimit(universalSeatLimit)} {formatMessage({ id: "billing.used" })}
                 </span>
               </div>
-              <div className="flex h-4 w-full overflow-hidden border-2 border-black bg-white">
+              <Progress value={Math.min(100, humanSeatUsagePercent + agentSeatUsagePercent)} aria-label={formatMessage({ id: "billing.seat" })}>
+              <ProgressTrack className="flex !overflow-hidden">
                 {humanSeatUsagePercent > 0 && (
-                  <div
-                    className="h-full bg-soft-signal"
+                  <Tooltip content={formatMessage(
+                    { id: "billing.humansUsingSeats" },
+                    {
+                      people: humanCount ?? 0,
+                      seatsText: formatSeatUsageNumber(usedHumanUniversalSeats),
+                      seatCount: usedHumanUniversalSeats,
+                    },
+                  )}>
+                  <ProgressIndicator
+                    className="rounded-none h-full bg-primary-400 theme-brutal:bg-soft-signal"
                     style={{ width: `${humanSeatUsagePercent}%` }}
-                    title={formatMessage(
-                      { id: "billing.humansUsingSeats" },
-                      {
-                        people: humanCount ?? 0,
-                        seatsText: formatSeatUsageNumber(usedHumanUniversalSeats),
-                        seatCount: usedHumanUniversalSeats,
-                      },
-                    )}
+                    data-slot="progress-indicator"
                   />
+                  </Tooltip>
                 )}
                 {agentSeatUsagePercent > 0 && (
-                  <div
-                    className="h-full bg-brutal-pink"
+                  <Tooltip content={formatMessage(
+                    { id: "billing.agentsUsingSeats" },
+                    {
+                      people: agentCount,
+                      seatsText: formatSeatUsageNumber(usedAgentUniversalSeats),
+                      seatCount: usedAgentUniversalSeats,
+                    },
+                  )}>
+                  <ProgressIndicator
+                    className="rounded-none h-full bg-accent-400 theme-brutal:bg-brutal-pink"
                     style={{ width: `${agentSeatUsagePercent}%` }}
-                    title={formatMessage(
-                      { id: "billing.agentsUsingSeats" },
-                      {
-                        people: agentCount,
-                        seatsText: formatSeatUsageNumber(usedAgentUniversalSeats),
-                        seatCount: usedAgentUniversalSeats,
-                      },
-                    )}
+                    data-slot="progress-indicator"
                   />
+                  </Tooltip>
                 )}
-              </div>
+              </ProgressTrack>
+              </Progress>
               <div className="flex flex-wrap items-center gap-4 text-xs">
                 <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-2 font-bold text-black">
-                    <span className="size-2 border border-black bg-soft-signal" />
+                  <span className="flex items-center gap-2 font-bold text-foreground-strong">
+                    <Status variant="primary" size="sm" />
                     {formatMessage({ id: "billing.humans" })}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-2 font-bold text-black">
-                    <span className="size-2 border border-black bg-brutal-pink" />
+                  <span className="flex items-center gap-2 font-bold text-foreground-strong">
+                    <Status variant="accent" size="sm" />
                     {formatMessage({ id: "billing.agents" })}
                   </span>
                 </div>
@@ -4209,15 +4428,15 @@ export function PlanSection() {
             <div className="grid gap-3 sm:grid-cols-2">
               {humanCount != null && (
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-bold text-black">{formatMessage({ id: "billing.humans" })}</span>
-                  <span className="text-xs font-mono text-black/60">
+                  <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.humans" })}</span>
+                  <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
                     {humanCount} / {formatLimit(capacity?.maxHumans)}
                   </span>
                 </div>
               )}
               <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-black">{formatMessage({ id: "billing.agents" })}</span>
-                <span className="text-xs font-mono text-black/60">
+                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.agents" })}</span>
+                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
                   {agentCount} / {formatLimit(capacity?.maxAgents ?? limits.maxAgents)}
                 </span>
               </div>
@@ -4226,16 +4445,16 @@ export function PlanSection() {
           <div className="grid gap-3 sm:grid-cols-2">
             {plan === "free" && (
               <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-black">{formatMessage({ id: "billing.messageHistory" })}</span>
-                <span className="text-xs font-mono text-black/60">
+                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.messageHistory" })}</span>
+                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
                   {pricedLimits.messageHistoryDays === -1 ? formatMessage({ id: "billing.unlimited" }) : `${pricedLimits.messageHistoryDays} ${formatMessage({ id: "billing.days" })}`}
                 </span>
               </div>
             )}
             {plan === "free" && billing?.fileUploadQuota && (
               <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-black">{formatMessage({ id: "billing.fileUploads" })}</span>
-                <span className="text-xs font-mono text-black/60">
+                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.fileUploads" })}</span>
+                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
                   {billing.fileUploadQuota.limited
                     ? `${formatBytes(billing.fileUploadQuota.usedBytes)} / ${formatBytes(billing.fileUploadQuota.limitBytes)} ${formatMessage({ id: "billing.thisMonth" })}`
                     : pricedFileUploadLimitLabel}
@@ -4244,41 +4463,47 @@ export function PlanSection() {
             )}
           </div>
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t-2 border-black/10 px-4 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t-2 border-line-muted theme-brutal:border-black/10 px-4 py-4">
           {billingControlsState.canOpenPortal ? (
             <div className="flex min-w-0 flex-wrap gap-2">
               <div className="flex flex-wrap gap-2">
-                <button
+                <Tooltip content={billingControlsDisabledReason ?? formatMessage({ id: "billing.openStripeBillingPortal" })}>
+                <Button
+                  variant="outline" size="sm"
                   type="button"
-                  className="btn-brutal-sm bg-white px-3 py-1.5 text-xs disabled:opacity-50"
                   disabled={!!billingControlsDisabledReason || billingAction != null}
                   onClick={handlePortal}
-                  title={billingControlsDisabledReason ?? formatMessage({ id: "billing.openStripeBillingPortal" })}
+                  data-slot="button"
                 >
                   {billingAction === "portal" ? formatMessage({ id: "billing.opening" }) : formatMessage({ id: "billing.billingPortal" })}
-                </button>
+                </Button>
+                </Tooltip>
                 {!isCancelScheduled && (
-                  <button
+                  <Tooltip content={billingControlsDisabledReason ?? formatMessage({ id: "billing.cancelTheWholeProSubscriptionAtPeriodEnd" })}>
+                  <Button
+                    variant="outline" size="sm"
                     type="button"
-                    className="btn-brutal-sm bg-white px-3 py-1.5 text-xs disabled:opacity-50"
                     disabled={!!billingControlsDisabledReason || billingAction != null}
                     onClick={() => setShowCancelSubscriptionConfirm(true)}
-                    title={billingControlsDisabledReason ?? formatMessage({ id: "billing.cancelTheWholeProSubscriptionAtPeriodEnd" })}
+                    data-slot="button"
                   >
                     {formatMessage({ id: "billing.cancelSubscription2" })}
-                  </button>
+                  </Button>
+                  </Tooltip>
                 )}
               </div>
             </div>
           ) : (
             <span />
           )}
-          <a
-            href={comparePlansHref}
-            className="btn-brutal-sm cursor-default bg-white px-3 py-1.5 text-xs"
+          <Button
+            render={<a href={comparePlansHref} aria-label={formatMessage({ id: "billing.seeAllFeaturesAndComparePlans" })} />}
+            nativeButton={false}
+            size="sm"
+            variant="outline"
           >
-            {formatMessage({ id: "billing.seeAllFeaturesAndComparePlans" })}
-          </a>
+            <FormattedMessage id="billing.seeAllFeaturesAndComparePlans" />
+          </Button>
         </div>
       </div>
 
@@ -4290,11 +4515,11 @@ export function PlanSection() {
             label={managePlanTitle}
           />
 
-          <div className="mb-6 grid gap-4 border-2 border-black bg-white p-4 shadow-brutal-sm lg:grid-cols-[minmax(0,1fr)_280px]">
+          <div className="mb-6 grid gap-4 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm lg:grid-cols-[minmax(0,1fr)_280px]">
             <div>
               {isCheckoutMode && (
                 <div className="mb-4">
-                  <div className="mb-2 text-sm font-bold text-black">{formatMessage({ id: "billing.howOftenDoYouWantToBeBilled" })}</div>
+                  <div className="mb-2 text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.howOftenDoYouWantToBeBilled" })}</div>
                   <BillingIntervalSegmentedControl
                     value={billingInterval}
                     onValueChange={setBillingInterval}
@@ -4304,7 +4529,7 @@ export function PlanSection() {
               )}
 
               {billing?.subscription && (
-                <div className="mb-4 text-xs font-mono text-black/60">
+                <div className="mb-4 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
                   {formatMessage({ id: "billing.billingInterval" })}: {isCancelScheduled
                     ? formatMessage(
                         { id: "billing.intervalWithCancellationScheduled" },
@@ -4315,14 +4540,14 @@ export function PlanSection() {
               )}
 
               <div className="flex min-w-0 flex-col gap-3">
-                <span className="text-sm font-bold text-black">
+                <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
                   {managePlanInputPrompt}
                 </span>
                 <div className="flex flex-wrap items-end gap-3">
                   <label className="flex flex-col gap-1">
-                    <span className="text-xs font-bold text-black/60">{localizedBillingSeatCopyLabels.seatQuantityLabel}</span>
-                    <input
-                      className="w-28 border-2 border-black bg-white px-2 py-1 text-sm font-mono"
+                    <span className="text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{localizedBillingSeatCopyLabels.seatQuantityLabel}</span>
+                    <Input
+                      className="w-28 text-sm font-mono"
                       type="text"
                       inputMode="numeric"
                       pattern="[0-9]*"
@@ -4337,9 +4562,9 @@ export function PlanSection() {
                   </label>
                   {isManageSeatMode && seatDelta > 0 && (
                     <label className="flex w-64 max-w-full flex-col gap-1">
-                      <span className="text-xs font-bold text-black/60">{formatMessage({ id: "billing.promotionCodeOptional" })}</span>
-                      <input
-                        className="w-full border-2 border-black bg-white px-2 py-1 text-sm font-mono uppercase"
+                      <span className="text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "billing.promotionCodeOptional" })}</span>
+                      <Input
+                        className="w-full text-sm font-mono uppercase"
                         type="text"
                         autoComplete="off"
                         aria-label={formatMessage({ id: "billing.promotionCodeOptional" })}
@@ -4354,11 +4579,11 @@ export function PlanSection() {
                   )}
                 </div>
                 {isManageSeatMode && seatDelta > 0 && (
-                  <span className="text-[11px] font-mono text-black/50">
+                  <span className="text-[11px] font-mono text-foreground-muted theme-brutal:text-black/50">
                     {formatMessage({ id: "billing.enterACodeApprovedForExistingSeatUpdate" })}
                   </span>
                 )}
-                <span className="text-xs font-mono text-black/60">
+                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
                     {localizedBillingSeatCopyLabels.quantityHelpLabel} {formatMessage(
                       { id: "billing.seatCoverageHelp" },
                       { min: minimumUsageSeatQuantity, price: PRO_SEAT_MONTHLY_USD },
@@ -4373,63 +4598,71 @@ export function PlanSection() {
 
               <div className="mt-4 flex flex-wrap gap-2">
                 {isCheckoutMode && (
-                  <button
+                  <Tooltip content={billingControlsDisabledReason ?? billingSeatDraftError ?? formatMessage(
+                    { id: "billing.startCheckoutTitle" },
+                    {
+                      interval: formatMessage({
+                        id: billingInterval === "annual" ? "billing.yearly" : "billing.monthly",
+                      }),
+                      seats: requestedSeatQuantity,
+                    },
+                  )}>
+                  <Button
+                    variant="accent" size="sm"
                     type="button"
-                    className="btn-brutal-sm bg-brutal-pink px-3 py-1.5 text-xs disabled:opacity-50"
                     disabled={!!billingControlsDisabledReason || !!billingSeatDraftError || billingAction != null}
                     onClick={openCheckoutConfirm}
-                      title={billingControlsDisabledReason ?? billingSeatDraftError ?? formatMessage(
-                        { id: "billing.startCheckoutTitle" },
-                        {
-                          interval: formatMessage({
-                            id: billingInterval === "annual" ? "billing.yearly" : "billing.monthly",
-                          }),
-                          seats: requestedSeatQuantity,
-                        },
-                      )}
+                    data-slot="button"
                   >
                     {billingAction === "checkout" ? formatMessage({ id: "billing.opening" }) : formatMessage({ id: "billing.upgradeToPro" })}
-                  </button>
+                  </Button>
+                  </Tooltip>
                 )}
                 {billingControlsState.canUpdatePacks && (
-                  <button
+                  <Tooltip content={updateSeatButtonTitle}>
+                  <Button
+                    variant="accent" size="sm"
                     type="button"
-                    className="btn-brutal-sm bg-brutal-pink px-3 py-1.5 text-xs disabled:opacity-50"
                     disabled={updateSeatButtonDisabled}
                     onClick={openSeatUpdateConfirm}
-                    title={updateSeatButtonTitle}
+                    data-slot="button"
                   >
                     {billingAction === "update" || billingAction === "preview" ? updateSeatButtonBusyLabel : updateSeatButtonLabel}
-                  </button>
+                  </Button>
+                  </Tooltip>
                 )}
               </div>
               {billingControlsDisabledReason && (
-                <p className="mt-2 text-xs font-mono text-black/60">{billingControlsDisabledReason}</p>
+                <p className="mt-2 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">{billingControlsDisabledReason}</p>
               )}
               {billingNotice && (
-                <p className="mt-2 text-xs font-mono text-black/60">{billingNotice}</p>
+                <p className="mt-2 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">{billingNotice}</p>
               )}
               {billingError && (
                 <p className="mt-2 text-xs font-mono text-brutal-red">{billingError}</p>
               )}
             </div>
 
-            <div className="border-2 border-black bg-brutal-cream p-4 shadow-brutal-sm">
-              <div className="mb-3 text-xs font-bold uppercase tracking-widest text-black/50">
+            <Card
+              variant="option"
+              data-testid="billing-summary-card"
+              className="bg-layer-canvas-muted p-4 theme-brutal:border-black theme-brutal:bg-brutal-cream"
+            >
+              <div className="mb-3 text-xs font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">
                 {isCheckoutMode ? formatMessage({ id: "billing.checkoutSummary" }) : isManageSeatMode ? (formatMessage({ id: "billing.manageSeatsSummary" })) : formatMessage({ id: "billing.subscriptionSummary" })}
               </div>
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-bold text-black">{localizedBillingSeatCopyLabels.seatSummaryLabel}</span>
-                  <span className="text-sm font-mono text-black/60">{seatSummaryValue}</span>
+                  <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingSeatCopyLabels.seatSummaryLabel}</span>
+                  <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{seatSummaryValue}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-bold text-black">{localizedBillingSeatCopyLabels.billableSeatsSummaryLabel}</span>
-                  <span className="text-sm font-mono text-black/60">{draftSeatQuantity}</span>
+                  <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingSeatCopyLabels.billableSeatsSummaryLabel}</span>
+                  <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{draftSeatQuantity}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-bold text-black">{localizedBillingSeatCopyLabels.capacitySummaryLabel}</span>
-                  <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-black/60">
+                  <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingSeatCopyLabels.capacitySummaryLabel}</span>
+                  <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
                     <span>{formatHumanCapacityLabel(draftSeatQuantity)}</span>
                     <span>{formatAgentCapacityLabel(draftProvisionedAgentSeats)}</span>
                   </span>
@@ -4437,10 +4670,10 @@ export function PlanSection() {
                 {isCheckoutMode ? (
                   <>
                     <div className="flex items-center justify-between gap-3">
-                      <span className="text-sm font-bold text-black">{localizedBillingTotalSummaryLabels.totalLabel}</span>
-                      <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-black/60">
+                      <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingTotalSummaryLabels.totalLabel}</span>
+                      <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
                         {localizedSelectedTotalLabels.originalLabel && (
-                          <span className="text-black/40 line-through">{localizedSelectedTotalLabels.originalLabel}</span>
+                          <span className="text-foreground-muted theme-brutal:text-black/40 line-through">{localizedSelectedTotalLabels.originalLabel}</span>
                         )}
                         <span>{localizedSelectedTotalLabels.totalLabel}</span>
                       </span>
@@ -4450,14 +4683,14 @@ export function PlanSection() {
                   <>
                     {isManageSeatMode && (
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-black">{formatMessage({ id: "billing.currentSeats" })}</span>
-                        <span className="text-sm font-mono text-black/60">{currentSeatQuantity}</span>
+                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.currentSeats" })}</span>
+                        <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{currentSeatQuantity}</span>
                       </div>
                     )}
                     {isManageSeatMode && seatDelta !== 0 && (
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-black">{seatDelta > 0 ? formatMessage({ id: "billing.addedCapacity" }) : formatMessage({ id: "billing.removedCapacity" })}</span>
-                        <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-black/60">
+                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{seatDelta > 0 ? formatMessage({ id: "billing.addedCapacity" }) : formatMessage({ id: "billing.removedCapacity" })}</span>
+                        <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
                           <span>{formatHumanCapacityLabel(Math.abs(seatDelta))}</span>
                           <span>{formatAgentCapacityLabel(Math.abs(seatDelta) * PRO_AGENT_SEAT_BLOCK_SIZE)}</span>
                         </span>
@@ -4465,28 +4698,28 @@ export function PlanSection() {
                     )}
                     {isManageSeatMode && localizedCurrentTotalLabel && localizedBillingTotalSummaryLabels.currentTotalLabel && (
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-black">{localizedBillingTotalSummaryLabels.currentTotalLabel}</span>
-                        <span className="text-sm font-mono text-black/60">{localizedCurrentTotalLabel}</span>
+                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingTotalSummaryLabels.currentTotalLabel}</span>
+                        <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{localizedCurrentTotalLabel}</span>
                       </div>
                     )}
                     {isManageSeatMode && (
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-black">{localizedBillingTotalSummaryLabels.totalLabel}</span>
-                        <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-black/60">
+                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingTotalSummaryLabels.totalLabel}</span>
+                        <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
                           {localizedSelectedTotalLabels.originalLabel && (
-                            <span className="text-black/40 line-through">{localizedSelectedTotalLabels.originalLabel}</span>
+                            <span className="text-foreground-muted theme-brutal:text-black/40 line-through">{localizedSelectedTotalLabels.originalLabel}</span>
                           )}
                           <span>{localizedSelectedTotalLabels.totalLabel}</span>
                         </span>
                       </div>
                     )}
-                    <div className="border-t-2 border-black pt-3 text-xs font-mono text-black/60">
+                    <div className="border-t-2 border-line-muted theme-brutal:border-black pt-3 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
                       {formatMessage({ id: "billing.seatIncreasesMayBillImmediatelyAfterStripeConf" })}
                     </div>
                   </>
                 )}
               </div>
-            </div>
+            </Card>
           </div>
         </>
       )}
@@ -4618,17 +4851,17 @@ function DangerActionCard({
   actionTestId?: string;
 }) {
   return (
-    <div data-testid={testId} className="border-2 border-black bg-white p-4 shadow-brutal-sm">
+    <div data-testid={testId} className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <div className="text-sm font-bold text-black">{title}</div>
-          <p className="mt-0.5 text-xs text-black/60">{description}</p>
+          <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{title}</div>
+          <p className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/60">{description}</p>
         </div>
         <Button
           type="button"
           size={actionSize}
-          shape="iconText"
-          tone="red"
+          
+          variant="danger"
           onClick={onAction}
           className="sm:ml-4"
           data-testid={actionTestId}
@@ -4675,21 +4908,22 @@ function DangerZoneSection() {
       />
 
       {canLeave && (
-        <div className="border-2 border-black bg-white shadow-brutal-sm p-4 mb-3">
+        <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 mb-3">
           <div className="flex items-center justify-between">
             <div>
-              <div className="text-sm font-bold text-black">{formatMessage({ id: "settings.dangerZone.leaveServerTitle" })}</div>
-              <p className="text-xs text-black/60 mt-0.5">
+              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.dangerZone.leaveServerTitle" })}</div>
+              <p className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
                 {formatMessage({ id: "settings.dangerZone.leaveServerDescription" })}
               </p>
             </div>
-            <button
+            <Button
+              variant="warning" size="md" type="button"
               data-testid="server-danger-leave-button"
               onClick={() => setShowLeaveConfirm(true)}
-              className="btn-brutal bg-brutal-orange px-4 py-2 [@media(max-height:600px)]:py-1 text-sm font-bold flex items-center gap-1.5 shrink-0 ml-4"
+              className="[@media(max-height:600px)]:py-1 flex items-center gap-1.5 shrink-0 ml-4"
             >
               {formatMessage({ id: "settings.dangerZone.leaveServer" })}
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -4733,8 +4967,8 @@ function DangerZoneSection() {
                 {formatMessage({ id: "settings.dangerZone.deleteWarningPrefix" })}<span className="font-bold">{server.name}</span>{formatMessage({ id: "settings.dangerZone.deleteWarningSuffix" })}
               </p>
               <div>
-                <p className="text-sm text-black/60 mb-2">
-                  {formatMessage({ id: "settings.dangerZone.typeToConfirmPrefix" })}<span className="font-mono font-bold text-black">{server.slug}</span>{formatMessage({ id: "settings.dangerZone.typeToConfirmSuffix" })}
+                <p className="text-sm text-foreground-muted theme-brutal:text-black/60 mb-2">
+                  {formatMessage({ id: "settings.dangerZone.typeToConfirmPrefix" })}<span className="font-mono font-bold text-foreground-strong theme-brutal:text-black">{server.slug}</span>{formatMessage({ id: "settings.dangerZone.typeToConfirmSuffix" })}
                 </p>
                 <SlugInput
                   data-testid="server-delete-slug-input"
@@ -4842,33 +5076,27 @@ function ConnectedAppsViewToggle({
   const gridLabel = formatMessage({ id: "settings.connectedApps.gridView" });
   const listLabel = formatMessage({ id: "settings.connectedApps.listView" });
   return (
-    <div
-      className="box-border flex h-10 min-h-10 shrink-0 items-stretch border-2 border-black bg-white shadow-brutal-sm"
-      role="group"
+    <ToggleGroup
+      value={[value]}
+      onValueChange={(values) => {
+        const next = values[0];
+        if (next === "grid" || next === "list") onValueChange(next);
+      }}
       aria-label={formatMessage({ id: "settings.connectedApps.viewMode" })}
+      className="box-border shrink-0"
       data-testid="connected-apps-view-toggle"
     >
-      <button
-        type="button"
-        onClick={() => onValueChange("grid")}
-        aria-label={gridLabel}
-        title={gridLabel}
-        aria-pressed={value === "grid"}
-        className={`flex w-10 items-center justify-center border-r-2 border-black transition-colors ${value === "grid" ? "bg-soft-signal" : "bg-white hover:bg-brutal-cream"}`}
-      >
+      <Tooltip content={gridLabel}>
+      <ToggleGroupItem value="grid" aria-label={gridLabel} className="h-8 w-8 p-0" data-slot="toggle-group-item">
         <LayoutGrid size={16} />
-      </button>
-      <button
-        type="button"
-        onClick={() => onValueChange("list")}
-        aria-label={listLabel}
-        title={listLabel}
-        aria-pressed={value === "list"}
-        className={`flex w-10 items-center justify-center transition-colors ${value === "list" ? "bg-soft-signal" : "bg-white hover:bg-brutal-cream"}`}
-      >
+      </ToggleGroupItem>
+      </Tooltip>
+      <Tooltip content={listLabel}>
+      <ToggleGroupItem value="list" aria-label={listLabel} className="h-8 w-8 p-0" data-slot="toggle-group-item">
         <List size={17} />
-      </button>
-    </div>
+      </ToggleGroupItem>
+      </Tooltip>
+    </ToggleGroup>
   );
 }
 
@@ -4907,22 +5135,23 @@ function ConnectedAppEditorSection({
   children: ReactNode;
 }) {
   return (
-    <section
+    <Card
+      render={<section />}
       id={`connected-app-editor-${sectionId}`}
       data-testid={`connected-app-editor-section-${sectionId}`}
-      className={`scroll-mt-4 border-2 border-black ${tone === "warning" ? "bg-brutal-pink/15" : "bg-brutal-cream/35"}`}
+      className={`scroll-mt-4 ${tone === "warning" ? "bg-warning-soft theme-brutal:bg-brutal-pink/15" : "bg-layer-canvas-muted theme-brutal:bg-brutal-cream/35"}`}
     >
-      <div className="flex flex-col gap-2 border-b-2 border-black bg-brutal-cream px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
+      <div className="flex flex-col gap-2 border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <h3 className="flex flex-wrap items-center gap-2 text-base font-black text-black">{title}</h3>
-          <p className="mt-0.5 text-xs leading-relaxed text-black/60">{description}</p>
+          <h3 className="flex flex-wrap items-center gap-2 text-base font-black text-foreground-strong theme-brutal:text-black">{title}</h3>
+          <p className="mt-0.5 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">{description}</p>
         </div>
-        <span className="w-fit shrink-0 border-2 border-black bg-white px-2 py-1 font-mono text-[10px] font-black uppercase text-black">
+        <span className="w-fit shrink-0 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white px-2 py-1 font-mono text-[10px] font-black uppercase text-foreground-strong theme-brutal:text-black">
           {status}
         </span>
       </div>
-      <div className="space-y-4 bg-white p-4">{children}</div>
-    </section>
+      <div className="space-y-4 bg-layer-panel theme-brutal:bg-white p-4">{children}</div>
+    </Card>
   );
 }
 
@@ -4941,24 +5170,12 @@ type ConnectedAppListing = {
   logoUrl: string | null;
   defaultLogoSeed: string;
   installed: boolean;
+  official: boolean;
   marketplaceInstallBadge: MarketplaceInstallBadge;
   allowedScopes: string[] | null;
   appNotificationGroups: AppNotificationSelection["groups"];
   appNotificationEvents: AppNotificationSelection["events"];
   appNotificationReviewPending: boolean;
-};
-
-type BuiltInConnectedApp = {
-  id: string;
-  clientId: string;
-  name: string;
-  description: string | null;
-  homepageUrl: string | null;
-  homepageDomain: string | null;
-  agentManifestUrl: string | null;
-  logoUrl: string | null;
-  defaultLogoSeed: string;
-  allowedScopes: string[] | null;
 };
 
 type InstalledConnectedApp = {
@@ -4975,6 +5192,7 @@ type InstalledConnectedApp = {
   origin: "marketplace" | "private";
   privateShared: boolean;
   editable: boolean;
+  official: boolean;
   allowedScopes: string[] | null;
   grantedScopes: string[];
   sourceClientId?: string;
@@ -5055,9 +5273,11 @@ function ConnectedAppSummary({ description }: { description?: string | null }) {
   const text = description?.trim();
   if (!text) return null;
   return (
-    <div className="mt-1 line-clamp-2 break-words text-sm leading-snug text-black/65" title={text}>
+    <Tooltip content={text}>
+    <div className="mt-1 line-clamp-2 break-words text-sm leading-snug text-foreground-muted theme-brutal:text-black/65">
       {text}
     </div>
+    </Tooltip>
   );
 }
 
@@ -5090,7 +5310,7 @@ function ConnectedAppLogo({ name, logoUrl, seed, size = "md" }: { name: string; 
       type="app"
       appAvatarUrl={logoUrl}
       appInitials={initialsForApp(name || seed)}
-      className="shadow-brutal-sm"
+      className="shadow-raft-sm theme-brutal:shadow-brutal-sm"
     />
   );
 }
@@ -5100,24 +5320,25 @@ function ConnectedAppUrlLink({ url, label, className = "" }: { url?: string | nu
   if (!href) return null;
   const visibleLabel = label?.trim() || href;
   return (
+    <Tooltip content={href}>
     <a
       href={href}
       target="_blank"
       rel="noreferrer"
       onClick={(event) => event.stopPropagation()}
-      title={href}
-      className={`inline-flex max-w-full min-w-0 items-center gap-1.5 text-xs font-mono font-bold text-black/55 underline decoration-2 underline-offset-2 hover:text-black ${className}`.trim()}
+      className={`inline-flex max-w-full min-w-0 items-center gap-1.5 text-xs font-mono font-bold text-foreground-muted underline decoration-2 underline-offset-2 hover:text-foreground-strong theme-brutal:text-black/55 theme-brutal:hover:text-black ${className}`.trim()}
     >
       <ExternalLink size={12} className="shrink-0" />
       <span className="min-w-0 truncate">{visibleLabel}</span>
     </a>
+    </Tooltip>
   );
 }
 
 function OAuthScopeNegativeCapabilityBlock({ className = "" }: { className?: string }) {
   const { formatMessage } = useIntl();
   return (
-    <div className={`border-2 border-black bg-soft-signal/25 p-3 text-xs font-bold leading-relaxed text-black shadow-brutal-sm ${className}`.trim()}>
+    <div className={`border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-warning-soft theme-brutal:bg-soft-signal/25 p-3 text-xs font-bold leading-relaxed text-foreground-strong theme-brutal:text-black shadow-raft-sm theme-brutal:shadow-brutal-sm ${className}`.trim()}>
       {formatMessage({ id: AGENT_INBOUND_NEGATIVE_CAPABILITY_ID })}
     </div>
   );
@@ -5138,13 +5359,14 @@ export function OAuthScopeList({
   const visibleScopes = defaultToDeclared ? normalizeDeclaredOAuthScopes(scopes) : normalizeDeclaredOAuthScopes(scopes).filter((scope) => scopes?.includes(scope));
   const grouped: Record<OAuthScopeTier, RaftOAuthScopeId[]> = {
     identity: visibleScopes.filter((scope) => OAUTH_SCOPE_PRESENTATION[scope].tier === "identity"),
+    agent_directory: visibleScopes.filter((scope) => OAUTH_SCOPE_PRESENTATION[scope].tier === "agent_directory"),
     agent_messaging: visibleScopes.filter((scope) => OAUTH_SCOPE_PRESENTATION[scope].tier === "agent_messaging"),
   };
 
   return (
     <div className="space-y-3" data-testid="oauth-scope-list">
       {visibleScopes.length === 0 && (
-        <div className="border-2 border-black/15 bg-white p-2 text-xs font-bold text-black/55">
+        <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-panel theme-brutal:bg-white p-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/55">
           {formatMessage({ id: "settings.connectedApps.noGrantScopes" })}
         </div>
       )}
@@ -5153,31 +5375,31 @@ export function OAuthScopeList({
           {visibleScopes.map((scope) => {
             const detail = OAUTH_SCOPE_PRESENTATION[scope];
             return (
+              <Tooltip key={scope} content={formatMessage({ id: detail.copyId })}>
               <span
-                key={scope}
-                title={formatMessage({ id: detail.copyId })}
-                className={`inline-flex items-center border border-black/20 bg-white px-2 py-1 text-[11px] font-bold text-black/70 ${detail.requiresResource ? "bg-soft-signal/20" : ""}`}
+                className={`inline-flex items-center border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1 text-[11px] font-bold text-foreground-muted theme-brutal:text-black/70 ${detail.requiresResource ? "bg-accent-soft/30 theme-brutal:bg-soft-signal/20" : ""}`}
               >
                 {scope}
               </span>
+              </Tooltip>
             );
           })}
         </div>
       ) : (
         <>
-          {(["identity", "agent_messaging"] as OAuthScopeTier[]).map((tier) => {
+          {(["identity", "agent_directory", "agent_messaging"] as OAuthScopeTier[]).map((tier) => {
             const tierScopes = grouped[tier];
             if (tierScopes.length === 0) return null;
             return (
               <div key={tier} className="space-y-2">
-                <div className="text-[10px] font-black uppercase tracking-widest text-black/50">{formatMessage({ id: scopeGroupLabelId(tier) })}</div>
+                <div className="text-[10px] font-black uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: scopeGroupLabelId(tier) })}</div>
                 <div className="space-y-2">
                   {tierScopes.map((scope) => {
                     const detail = OAUTH_SCOPE_PRESENTATION[scope];
                     return (
-                      <div key={scope} className="border-2 border-black/15 bg-white p-2">
+                      <div key={scope} className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-panel theme-brutal:bg-white p-2">
                         <div className="flex flex-wrap items-center gap-2">
-                          <code className="break-all text-[11px] font-bold text-black/70">{scope}</code>
+                          <code className="break-all text-[11px] font-bold text-foreground-muted theme-brutal:text-black/70">{scope}</code>
                           {detail.requiresResource && <Badge appearance="outline">{formatMessage({ id: "settings.connectedApps.scopeRequiresResource" })}</Badge>}
                         </div>
                       </div>
@@ -5213,9 +5435,9 @@ function OAuthScopeSummaryPanel({
   return (
     <div className="space-y-2">
       <SectionEyebrow as="div">{title}</SectionEyebrow>
-      {description && <div className="mt-2 text-xs leading-relaxed text-black/60">{description}</div>}
-      <details open={defaultOpen} className="border-2 border-black/15 bg-brutal-cream p-2">
-        <summary className="text-xs font-black text-black">{formatMessage({ id: "settings.connectedApps.detail.declaredAccess" })}</summary>
+      {description && <div className="mt-2 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">{description}</div>}
+      <details open={defaultOpen} className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-2">
+        <summary className="text-xs font-black text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.connectedApps.detail.declaredAccess" })}</summary>
         <div className="mt-2">
           <OAuthScopeList scopes={scopes} compact={compact} defaultToDeclared={defaultToDeclared} />
         </div>
@@ -5236,9 +5458,9 @@ function ConnectedAppDetailSection({
   tone?: "white" | "cream";
 }) {
   return (
-    <section className={`border-2 border-black p-3 shadow-brutal-sm ${tone === "cream" ? "bg-brutal-cream" : "bg-white"}`}>
+    <section className={`border border-line-muted theme-brutal:border-2 theme-brutal:border-black p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm ${tone === "cream" ? "bg-layer-canvas-muted theme-brutal:bg-brutal-cream" : "bg-layer-panel theme-brutal:bg-white"}`}>
       <SectionEyebrow as="div">{title}</SectionEyebrow>
-      {description && <div className="mt-1 text-xs leading-relaxed text-black/60">{description}</div>}
+      {description && <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">{description}</div>}
       <div className="mt-3">{children}</div>
     </section>
   );
@@ -5253,8 +5475,8 @@ function ConnectedAppDetailRow({
 }) {
   return (
     <div className="flex flex-col gap-1 py-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
-      <span className="shrink-0 text-black/55">{label}</span>
-      <div className="min-w-0 text-left font-bold text-black sm:text-right">{children}</div>
+      <span className="shrink-0 text-foreground-muted theme-brutal:text-black/55">{label}</span>
+      <div className="min-w-0 text-left font-bold text-foreground-strong theme-brutal:text-black sm:text-right">{children}</div>
     </div>
   );
 }
@@ -5277,66 +5499,81 @@ export function DeclaredScopesPicker({
     onChange([
       ...IDENTITY_OAUTH_SCOPES,
       ...OPTIONAL_IDENTITY_OAUTH_SCOPES.filter((item) => next.has(item)),
+      ...AGENT_DIRECTORY_OAUTH_SCOPES.filter((item) => next.has(item)),
       ...AGENT_INBOUND_OAUTH_SCOPES.filter((item) => next.has(item)),
     ]);
   };
 
   return (
-    <div className="border-2 border-black bg-white p-3 shadow-brutal-sm" data-testid="connected-app-declared-scopes">
+    <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm" data-testid="connected-app-declared-scopes">
       <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.declaredScopesTitle" })}</SectionEyebrow>
-      <div className="mt-1 text-xs leading-relaxed text-black/60">
+      <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
         {formatMessage({ id: "settings.connectedApps.declaredScopesDescription" })}
       </div>
       <div className="mt-3 space-y-2">
-        <details className="border-2 border-black/15 bg-brutal-cream p-2">
-          <summary className="text-xs font-black text-black">
+        <details className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-2">
+          <summary className="text-xs font-black text-foreground-strong theme-brutal:text-black">
             {formatMessage({ id: "settings.connectedApps.identitySection" })}
           </summary>
           <div className="mt-2 flex flex-wrap gap-1.5">
             {IDENTITY_OAUTH_SCOPES.map((scope) => {
               const detail = OAUTH_SCOPE_PRESENTATION[scope];
               return (
-                <span key={scope} title={formatMessage({ id: detail.copyId })} className="inline-flex items-center border border-black/20 bg-white px-2 py-1 text-[11px] font-bold text-black/70">
+                <Tooltip key={scope} content={formatMessage({ id: detail.copyId })}>
+                <span className="inline-flex items-center border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1 text-[11px] font-bold text-foreground-muted theme-brutal:text-black/70">
                   {scope}
                 </span>
+                </Tooltip>
               );
             })}
             {OPTIONAL_IDENTITY_OAUTH_SCOPES.map((scope) => {
               const detail = OAUTH_SCOPE_PRESENTATION[scope];
               return (
-                <label key={scope} title={formatMessage({ id: detail.copyId })} className="inline-flex items-center gap-2 border border-black/20 bg-white px-2 py-1 text-[11px] font-bold text-black/70">
+                <Tooltip key={scope} content={formatMessage({ id: detail.copyId })}>
+                <label className="inline-flex items-center gap-2 border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1 text-[11px] font-bold text-foreground-muted theme-brutal:text-black/70">
                   <Checkbox
                     size="sm"
                     checked={selected.has(scope)}
-                    onChange={(event) => updateScope(scope, event.currentTarget.checked)}
+                    onCheckedChange={(checked) => updateScope(scope, checked)}
                   />
                   <span>{scope}</span>
                 </label>
+                </Tooltip>
               );
             })}
           </div>
         </details>
-        <details open className="border-2 border-black/15 bg-brutal-cream p-2">
-          <summary className="text-xs font-black text-black">
+        <section className="border border-line-muted bg-layer-canvas-muted p-2 theme-brutal:border-2 theme-brutal:border-black/15 theme-brutal:bg-brutal-cream" data-testid="agent-directory-permission">
+          <label className="flex items-center gap-2 text-xs font-black text-foreground-strong">
+            <Checkbox size="sm" checked={selected.has("agent:read")} onCheckedChange={(checked) => updateScope("agent:read", checked)} />
+            <span>{formatMessage({ id: "oauth.scopeGroup.agentDirectory" })}</span>
+          </label>
+          <p className="mt-2 text-xs leading-relaxed text-foreground-muted">{formatMessage({ id: "oauth.scope.agentRead.copy" })}</p>
+          <p className="mt-1 text-xs leading-relaxed text-foreground-muted">{formatMessage({ id: "settings.connectedApps.agentDirectoryIndependent" })}</p>
+        </section>
+        <details open className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-2">
+          <summary className="text-xs font-black text-foreground-strong theme-brutal:text-black">
             {formatMessage({ id: "settings.connectedApps.agentMessagingSection" })}
           </summary>
           <div className="mt-2 flex flex-wrap gap-2">
             {AGENT_INBOUND_OAUTH_SCOPES.map((scope) => {
               const detail = OAUTH_SCOPE_PRESENTATION[scope];
               return (
-                <label key={scope} title={formatMessage({ id: detail.copyId })} className="inline-flex items-center gap-2 border border-black/20 bg-white px-2 py-1.5 text-xs font-bold text-black/70">
+                <Tooltip key={scope} content={formatMessage({ id: detail.copyId })}>
+                <label className="inline-flex items-center gap-2 border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1.5 text-xs font-bold text-foreground-muted theme-brutal:text-black/70">
                   <Checkbox
                     size="sm"
                     checked={selected.has(scope)}
-                    onChange={(event) => updateScope(scope, event.currentTarget.checked)}
+                    onCheckedChange={(checked) => updateScope(scope, checked)}
                   />
                   <span>{scope}</span>
                 </label>
+                </Tooltip>
               );
             })}
           </div>
           {hasAgentInboundOAuthScope(value) && (
-            <div className="mt-2 text-xs font-bold text-black/55">
+            <div className="mt-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/55">
               {formatMessage({ id: "settings.connectedApps.scopeRequiresResourceDetail" })}
             </div>
           )}
@@ -5369,26 +5606,12 @@ function mapClientToMarketplaceApp(
     logoUrl: client.logoUrl,
     defaultLogoSeed: client.clientId,
     installed: !!client.installedAt,
+    official: client.official,
     marketplaceInstallBadge: client.marketplaceInstallBadge ?? { kind: "none" },
     allowedScopes: client.allowedScopes,
     appNotificationGroups: client.appNotificationGroups ?? [],
     appNotificationEvents: client.appNotificationEvents ?? [],
     appNotificationReviewPending: client.appNotificationReviewPending ?? false,
-  };
-}
-
-function mapClientToBuiltInApp(client: BuiltInOAuthClientRecord): BuiltInConnectedApp {
-  return {
-    id: client.id,
-    clientId: client.clientId,
-    name: client.name,
-    description: client.description,
-    homepageUrl: client.homepageUrl,
-    homepageDomain: getDomainFromUrl(client.homepageUrl),
-    agentManifestUrl: client.agentManifestUrl,
-    logoUrl: null,
-    defaultLogoSeed: client.clientId,
-    allowedScopes: client.allowedScopes,
   };
 }
 
@@ -5413,10 +5636,8 @@ export function IntegrationsSection() {
   const [connectedAppsCategory, setConnectedAppsCategory] = useState<ConnectedAppCategory | "all">("all");
   const [connectedAppsViewMode, setConnectedAppsViewMode] = useState<ConnectedAppsViewMode>(getInitialConnectedAppsViewMode);
   const [selectedListing, setSelectedListing] = useState<ConnectedAppListing | null>(null);
-  const [selectedBuiltInApp, setSelectedBuiltInApp] = useState<BuiltInConnectedApp | null>(null);
   const [selectedInstalledApp, setSelectedInstalledApp] = useState<InstalledConnectedApp | null>(null);
   const [marketplaceClients, setMarketplaceClients] = useState<MarketplaceOAuthClientRecord[]>([]);
-  const [builtInClients, setBuiltInClients] = useState<BuiltInOAuthClientRecord[]>([]);
   const [clients, setClients] = useState<OAuthClientRecord[]>([]);
   const [integrationOverview, setIntegrationOverview] = useState<IntegrationOverviewItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -5438,6 +5659,7 @@ export function IntegrationsSection() {
   const [clientName, setClientName] = useState("");
   const [clientId, setClientId] = useState("");
   const [clientDescription, setClientDescription] = useState("");
+  const [clientWhenToUse, setClientWhenToUse] = useState("");
   const [clientHomepageUrl, setClientHomepageUrl] = useState("");
   const [clientReturnUrl, setClientReturnUrl] = useState("");
   const [clientAgentManifestUrl, setClientAgentManifestUrl] = useState("");
@@ -5462,14 +5684,12 @@ export function IntegrationsSection() {
     setLoading(true);
     setError("");
     try {
-      const [clientsRes, builtInRes, marketplaceRes, overviewRes] = await Promise.all([
+      const [clientsRes, marketplaceRes, overviewRes] = await Promise.all([
         api.get("/integrations/clients"),
-        api.get("/integrations/built-in"),
         api.get("/integrations/marketplace"),
         api.get("/integrations/overview"),
       ]);
       setClients(clientsRes.data);
-      setBuiltInClients(builtInRes.data);
       const nextMarketplaceClients = marketplaceRes.data as MarketplaceOAuthClientRecord[];
       setMarketplaceClients(nextMarketplaceClients);
       const requestedMarketplaceId = new URLSearchParams(window.location.search).get("marketplace_app")?.trim();
@@ -5516,6 +5736,7 @@ export function IntegrationsSection() {
     setClientName("");
     setClientId("");
     setClientDescription("");
+    setClientWhenToUse("");
     setClientHomepageUrl("");
     setClientReturnUrl("");
     setClientAgentManifestUrl("");
@@ -5594,6 +5815,7 @@ export function IntegrationsSection() {
     setClientName(client.name);
     setClientId(client.clientId);
     setClientDescription(client.description ?? "");
+    setClientWhenToUse(client.whenToUse ?? "");
     setClientHomepageUrl(client.homepageUrl ?? "");
     setClientReturnUrl(client.returnUrl ?? "");
     setClientAgentManifestUrl(client.agentManifestUrl ?? "");
@@ -5665,6 +5887,7 @@ export function IntegrationsSection() {
         const { data } = await api.patch(`/integrations/clients/${editingClient.id}`, {
           name: clientName,
           description: clientDescription || null,
+          whenToUse: clientWhenToUse || null,
           homepageUrl: clientHomepageUrl || null,
           returnUrl: clientReturnUrl || null,
           agentManifestUrl: clientAgentManifestUrl || null,
@@ -5681,6 +5904,7 @@ export function IntegrationsSection() {
           name: clientName,
           clientId: clientId || undefined,
           description: clientDescription || undefined,
+          whenToUse: clientWhenToUse || undefined,
           homepageUrl: clientHomepageUrl || undefined,
           returnUrl: clientReturnUrl || undefined,
           agentManifestUrl: clientAgentManifestUrl || undefined,
@@ -5754,7 +5978,7 @@ export function IntegrationsSection() {
       const { data } = await api.post(`/integrations/clients/${editingClient.id}/share-link`);
       applyUpdatedClient(data.client);
       setShareLink(data.link);
-      setShareUrl(`${window.location.origin}/integration-invites/${encodeURIComponent(data.token)}`);
+      setShareUrl(buildIntegrationInviteUrl(shareableWebOrigin(), data.token));
       setShareCopied(false);
     } catch (err: any) {
       setError(err.response?.data?.error || formatMessage({ id: "settings.connectedApps.failedCreateShare" }));
@@ -5842,6 +6066,7 @@ export function IntegrationsSection() {
       await api.patch(`/integrations/clients/${client.id}`, {
         name: clientName,
         description: clientDescription || null,
+        whenToUse: clientWhenToUse || null,
         homepageUrl: clientHomepageUrl || null,
         returnUrl: clientReturnUrl || null,
         agentManifestUrl: clientAgentManifestUrl || null,
@@ -5901,12 +6126,6 @@ export function IntegrationsSection() {
     }
   };
 
-  const openBuiltInApp = (app: BuiltInConnectedApp) => {
-    if (!app.homepageUrl) return;
-    window.open(app.homepageUrl, "_blank", "noopener,noreferrer");
-  };
-
-  const builtInApps = builtInClients.map(mapClientToBuiltInApp);
   const registeredApps = clients.map(mapClientToRegisteredApp);
   const grantedScopesByClientId = integrationOverview
     .filter((item) => item.type === "active" && !item.revokedAt)
@@ -5935,6 +6154,7 @@ export function IntegrationsSection() {
       origin: "marketplace" as const,
       privateShared: app.privateShared,
       editable: false,
+      official: app.official,
       category: app.category,
       publishStatus: app.publishStatus ?? null,
       allowedScopes: app.allowedScopes,
@@ -5954,6 +6174,7 @@ export function IntegrationsSection() {
       origin: "private" as const,
       privateShared: false,
       editable: true,
+      official: false,
       category: app.category,
       publishStatus: app.status,
       allowedScopes: app.allowedScopes,
@@ -5971,7 +6192,7 @@ export function IntegrationsSection() {
     .filter((app) => matchesConnectedAppFilter(app, normalizedSearch, connectedAppsCategory));
   const filteredRegisteredApps = registeredApps
     .filter((app) => matchesConnectedAppFilter(app, normalizedSearch, connectedAppsCategory));
-  const marketplaceCount = builtInApps.length + publicMarketplaceClients.length;
+  const marketplaceCount = publicMarketplaceClients.length;
   const connectedAppsTabOptions = [
     { value: "marketplace" as const, label: formatMessage({ id: "settings.connectedApps.tabMarketplace" }), count: marketplaceCount, testId: "connected-apps-tab-marketplace" },
     { value: "installed" as const, label: formatMessage({ id: "settings.connectedApps.installed" }), count: installedApps.length, testId: "connected-apps-tab-installed" },
@@ -5980,7 +6201,6 @@ export function IntegrationsSection() {
   const connectedAppsErrorSurface = getConnectedAppsErrorSurface(
     error,
     selectedListing,
-    selectedBuiltInApp,
     showRegisterDrawer,
     deleteClientTarget,
     offlineRequestTarget,
@@ -5998,22 +6218,25 @@ export function IntegrationsSection() {
   const renderClientSecretReveal = () => {
     if (!createdSecret) return null;
     return (
-      <div className="border-2 border-black bg-brutal-lime/20 p-3 space-y-2">
+      <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-brutal-lime/20 p-3 space-y-2">
         <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.clientSecret" })}</SectionEyebrow>
-        <div className="text-sm text-black">{formatMessage({ id: "settings.connectedApps.secretOnce" })}</div>
+        <div className="text-sm text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.connectedApps.secretOnce" })}</div>
         <div className="flex items-center gap-2">
-          <div className="flex-1 border-2 border-black bg-white p-2 font-mono text-xs break-all">{createdSecret}</div>
-          <button
+          <div className="flex-1 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-2 font-mono text-xs break-all">{createdSecret}</div>
+          <Tooltip content={secretCopied ? formatMessage({ id: "settings.connectedApps.copiedSecret" }) : formatMessage({ id: "settings.connectedApps.copySecret" })}>
+          <Button
+            variant="outline" size="icon-sm"
             type="button"
             onClick={() => void handleCopyCreatedSecret()}
-            className="btn-brutal-sm shrink-0 bg-white p-2"
+            className="shrink-0"
             data-testid="connected-app-secret-copy-button"
+            data-slot="button"
             aria-live="polite"
             aria-label={secretCopied ? formatMessage({ id: "settings.connectedApps.copiedSecret" }) : formatMessage({ id: "settings.connectedApps.copySecret" })}
-            title={secretCopied ? formatMessage({ id: "settings.connectedApps.copiedSecret" }) : formatMessage({ id: "settings.connectedApps.copySecret" })}
           >
             {secretCopied ? <Check size={14} /> : <Copy size={14} />}
-          </button>
+          </Button>
+          </Tooltip>
         </div>
       </div>
     );
@@ -6087,18 +6310,19 @@ export function IntegrationsSection() {
         icon={<Link2 size={16} />}
         label={connectedAppsLabel}
         action={canManage ? (
-          <button type="button" onClick={openRegisterDrawer} className="btn-brutal inline-flex items-center gap-1.5 bg-brutal-pink px-3 py-1.5 text-xs">
+          <Button
+            variant="accent" size="sm" type="button" onClick={openRegisterDrawer} className="inline-flex items-center gap-1.5">
             <Plus size={14} />
             {formatMessage({ id: "settings.connectedApps.registerApp" })}
-          </button>
+          </Button>
         ) : undefined}
       />
 
-      <div className="border-2 border-black bg-white p-4 shadow-brutal-sm">
+      <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm">
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
-            <div className="text-sm font-bold text-black">{formatMessage({ id: "settings.connectedApps.title" })}</div>
-            <div className="mt-1 max-w-2xl text-xs leading-relaxed text-black/60">
+            <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.connectedApps.title" })}</div>
+            <div className="mt-1 max-w-2xl text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
               {formatMessage({
                 id: canManage
                   ? "settings.connectedApps.sectionDescriptionManage"
@@ -6106,12 +6330,12 @@ export function IntegrationsSection() {
               })}
             </div>
             {!canManage && (
-              <div className="mt-1 text-xs leading-relaxed text-black/60">
+              <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
                 {formatMessage({ id: "settings.connectedApps.adminOnlyNote" })}
               </div>
             )}
           </div>
-          {loading && <div className="text-xs font-bold text-black/50">{formatMessage({ id: "settings.common.loading" })}</div>}
+          {loading && <div className="text-xs font-bold text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.common.loading" })}</div>}
         </div>
         <ConnectedAppsTabSegmentedControl
           value={activeTab}
@@ -6123,13 +6347,13 @@ export function IntegrationsSection() {
 
       <div className="grid items-stretch gap-2 sm:grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(0,1fr)_220px_auto]" data-testid="connected-apps-filters">
         <div className="relative h-10 min-h-10">
-          <input
+          <Input
             type="search"
             value={connectedAppsSearch}
             onChange={(event) => setConnectedAppsSearch(event.target.value)}
             placeholder={formatMessage({ id: "settings.connectedApps.searchApps" })}
             aria-label={formatMessage({ id: "settings.connectedApps.searchAppsAriaLabel" })}
-            className="input-brutal box-border h-10 min-h-10 w-full text-sm"
+            className="box-border h-10 min-h-10 w-full text-sm"
             data-testid="connected-apps-search"
           />
         </div>
@@ -6157,7 +6381,7 @@ export function IntegrationsSection() {
             </SelectContent>
           </Select>
         </div>
-        <div className="flex h-10 min-h-10 justify-end sm:col-start-2 sm:row-start-1 md:col-start-3">
+        <div className="flex h-10 min-h-10 items-center justify-end sm:col-start-2 sm:row-start-1 md:col-start-3">
           <ConnectedAppsViewToggle value={connectedAppsViewMode} onValueChange={updateConnectedAppsViewMode} />
         </div>
       </div>
@@ -6168,49 +6392,6 @@ export function IntegrationsSection() {
 
       {activeTab === "marketplace" && (
         <div className="space-y-3" data-testid="connected-apps-marketplace-tab">
-          {builtInApps.length > 0 && (
-            <div className="border-2 border-black bg-brutal-cream p-3 shadow-brutal-sm" data-testid="connected-apps-built-in-band">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.builtIn" })}</SectionEyebrow>
-                  <div className="mt-1 text-sm font-bold text-black">{formatMessage({ id: "settings.connectedApps.builtInAvailable" })}</div>
-                </div>
-              </div>
-              <div
-                className={`mt-3 ${connectedAppsCollectionClassName(connectedAppsViewMode)}`}
-                data-testid="connected-apps-built-in-collection"
-                data-view={connectedAppsViewMode}
-              >
-                {builtInApps.map((app) => (
-                  <button
-                    key={app.id}
-                    type="button"
-                    onClick={() => setSelectedBuiltInApp(app)}
-                    className={`w-full border-2 border-black bg-white p-3 text-left shadow-brutal-sm transition-shadow hover:shadow-brutal ${
-                      connectedAppsViewMode === "grid" ? "flex h-full flex-col" : "flex items-center gap-3"
-                    }`}
-                  >
-                    <div className="flex items-start gap-3">
-                      <ConnectedAppLogo name={app.name} logoUrl={app.logoUrl} seed={app.defaultLogoSeed} />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="font-bold text-black">{app.name}</div>
-                          <Badge variant="success" uppercase>{formatMessage({ id: "settings.connectedApps.builtIn" })}</Badge>
-                        </div>
-                        <div className="mt-0.5 text-xs text-black/55">{formatMessage({ id: "settings.connectedApps.availableAll" })}</div>
-                        {connectedAppsViewMode === "list" && (
-                          <ConnectedAppSummary description={app.description} />
-                        )}
-                      </div>
-                    </div>
-                    <div className={`${connectedAppsViewMode === "grid" ? "mt-auto pt-3" : "ml-auto"} flex items-center justify-end`}>
-                      <span className="btn-brutal-sm bg-brutal-pink px-2.5 py-1 text-xs">{formatMessage({ id: "settings.connectedApps.open" })}</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
           <div
             className={connectedAppsCollectionClassName(connectedAppsViewMode)}
             data-testid="connected-apps-marketplace-collection"
@@ -6221,18 +6402,18 @@ export function IntegrationsSection() {
                 key={app.id}
                 type="button"
                 onClick={() => setSelectedListing(app)}
-                className={`w-full border-2 border-black bg-white p-3 text-left shadow-brutal-sm transition-shadow hover:shadow-brutal ${
-                  connectedAppsViewMode === "grid" ? "flex h-full flex-col" : "flex items-center gap-3"
-                }`}
+                className={`w-full border border-line-muted bg-layer-panel p-3 text-left shadow-raft-sm transition-shadow hover:shadow-raft-md theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm theme-brutal:hover:shadow-brutal ${
+ connectedAppsViewMode === "grid" ? "flex h-full flex-col" : "flex items-center gap-3"
+ }`}
               >
                 <div className="flex items-start gap-3">
                   <ConnectedAppLogo name={app.name} logoUrl={app.logoUrl} seed={app.defaultLogoSeed} />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <div className="font-bold text-black">{app.name}</div>
+                      <div className="font-bold text-foreground-strong theme-brutal:text-black">{app.name}</div>
                       <ConnectedAppMarketplaceInstallBadge badge={app.marketplaceInstallBadge} />
                     </div>
-                    <div className="mt-0.5 text-xs text-black/55">{formatMessage({ id: "settings.connectedApps.byLine" }, { category: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[app.category] ?? "settings.connectedApps.categoryOther" }), developer: app.developer })}</div>
+                    <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/55">{formatMessage({ id: "settings.connectedApps.byLine" }, { category: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[app.category] ?? "settings.connectedApps.categoryOther" }), developer: app.developer })}</div>
                     {connectedAppsViewMode === "list" && (
                       <ConnectedAppSummary description={app.description} />
                     )}
@@ -6242,7 +6423,7 @@ export function IntegrationsSection() {
                   {app.installed ? (
                     <Badge variant="success" uppercase>{formatMessage({ id: "settings.connectedApps.installed" })}</Badge>
                   ) : canManage ? (
-                    <span className="btn-brutal-sm bg-brutal-pink px-2.5 py-1 text-xs">{formatMessage({ id: "settings.connectedApps.install" })}</span>
+                    <span className="rounded-sm bg-accent-400 px-2.5 py-1 text-xs text-accent-950 theme-brutal:rounded-none btn-brutal-sm theme-brutal:bg-brutal-pink theme-brutal:text-black">{formatMessage({ id: "settings.connectedApps.install" })}</span>
                   ) : (
                     <Badge appearance="outline" uppercase>{formatMessage({ id: "settings.connectedApps.available" })}</Badge>
                   )}
@@ -6251,11 +6432,11 @@ export function IntegrationsSection() {
             ))}
           </div>
           {marketplaceApps.length === 0 && (
-            <div className="border-2 border-black bg-white p-6 text-center text-sm text-black/60 shadow-brutal-sm">
+            <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-6 text-center text-sm text-foreground-muted theme-brutal:text-black/60 shadow-raft-sm theme-brutal:shadow-brutal-sm">
               {formatMessage({ id: "settings.connectedApps.noMarketplaceMatch" })}
             </div>
           )}
-          <div className="text-center text-xs text-black/55">
+          <div className="text-center text-xs text-foreground-muted theme-brutal:text-black/55">
             {formatMessage({ id: "settings.connectedApps.reviewNote" })}
           </div>
         </div>
@@ -6273,14 +6454,14 @@ export function IntegrationsSection() {
               key={`${app.origin}-${app.id}`}
               interactive={false}
               className={connectedAppsViewMode === "grid"
-                ? "flex min-h-[184px] w-full flex-col gap-3"
-                : "flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"}
+ ? "flex min-h-[184px] w-full flex-col gap-3"
+ : "flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"}
             >
               <div className="flex min-w-0 flex-1 items-start gap-3">
                 <ConnectedAppLogo name={app.name} logoUrl={app.logoUrl} seed={app.defaultLogoSeed} size="sm" />
                 <div className="min-w-0 flex-1">
                   {app.editable ? (
-                    <div className="min-w-0 break-words font-bold text-black">{app.name}</div>
+                    <div className="min-w-0 break-words font-bold text-foreground-strong theme-brutal:text-black">{app.name}</div>
                   ) : (
                     <div
                       role="button"
@@ -6296,12 +6477,12 @@ export function IntegrationsSection() {
                         setError("");
                         setSelectedInstalledApp(app);
                       }}
-                      className="w-fit max-w-full break-words font-bold text-black underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
+                      className="w-fit max-w-full break-words font-bold text-foreground-strong theme-brutal:text-black underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground-strong theme-brutal:focus-visible:outline-black"
                     >
                       {app.name}
                     </div>
                   )}
-                  <div className="mt-0.5 text-xs text-black/50">
+                  <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/50">
                     <span>{formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[app.category] ?? "settings.connectedApps.categoryOther" })}</span>
                     <span aria-hidden="true"> · </span>
                     <span>{app.developer}</span>
@@ -6319,20 +6500,21 @@ export function IntegrationsSection() {
                 </div>
               </div>
               {canManage && (app.editable ? (
-                <button
+                <Button size="sm" variant="outline"
                   type="button"
                   onClick={() => {
                     const match = clients.find((client) => client.id === (app.sourceClientId ?? app.id));
                     if (match) beginEditClient(match);
                   }}
-                  className={`btn-brutal-sm inline-flex w-fit items-center justify-center gap-1.5 bg-white px-2.5 py-1 text-xs ${connectedAppsViewMode === "grid" ? "mt-auto self-end" : "self-end sm:self-auto"}`}
+                  className={` inline-flex w-fit items-center justify-center gap-1.5 bg-layer-panel theme-brutal:bg-white px-2.5 py-1 text-xs ${connectedAppsViewMode === "grid" ? "mt-auto self-end" : "self-end sm:self-auto"}`}
                 >
                   <Pencil size={14} />
                   {formatMessage({ id: "settings.connectedApps.edit" })}
-                </button>
+                </Button>
               ) : (
                 <div className={`flex w-full flex-wrap justify-end gap-2 sm:w-auto ${connectedAppsViewMode === "grid" ? "mt-auto self-end" : "self-end sm:self-auto"}`}>
-                  <button
+                  <Button
+                    variant="outline" size="sm"
                     type="button"
                     onClick={(event) => {
                       event.stopPropagation();
@@ -6340,17 +6522,17 @@ export function IntegrationsSection() {
                       setMarketplaceUninstallTarget(app);
                     }}
                     disabled={savingClientId === app.id}
-                    className="btn-brutal-sm inline-flex items-center justify-center gap-1.5 bg-white px-2.5 py-1 text-xs disabled:opacity-50"
+                    className="inline-flex items-center justify-center gap-1.5"
                   >
                     {savingClientId === app.id ? formatMessage({ id: "settings.connectedApps.uninstalling" }) : formatMessage({ id: "settings.connectedApps.uninstall" })}
-                  </button>
+                  </Button>
                 </div>
               ))}
             </SurfaceListItem>
           ))}
           </div>
           {filteredInstalledApps.length === 0 && (
-            <div className="border-2 border-black bg-white p-6 text-center text-sm text-black/60 shadow-brutal-sm">
+            <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-6 text-center text-sm text-foreground-muted theme-brutal:text-black/60 shadow-raft-sm theme-brutal:shadow-brutal-sm">
               {formatMessage({ id: "settings.connectedApps.noInstalledAppsMatch" })}
             </div>
           )}
@@ -6359,13 +6541,13 @@ export function IntegrationsSection() {
 
       {activeTab === "myapps" && (
         <div className="space-y-3" data-testid="connected-apps-my-apps-tab">
-          <div className="text-xs leading-relaxed text-black/60">
+          <div className="text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
             {canManage
               ? formatMessage({ id: "settings.connectedApps.myAppsIntro" })
               : formatMessage({ id: "settings.connectedApps.myAppsReadOnlyIntro" })}
           </div>
           {filteredRegisteredApps.length === 0 ? (
-            <div className="border-2 border-black bg-white p-6 text-center text-sm text-black/60 shadow-brutal-sm">
+            <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-6 text-center text-sm text-foreground-muted theme-brutal:text-black/60 shadow-raft-sm theme-brutal:shadow-brutal-sm">
               {registeredApps.length === 0
                 ? formatMessage({ id: "settings.connectedApps.noRegisteredApps" })
                 : formatMessage({ id: "settings.connectedApps.noRegisteredAppsMatch" })}
@@ -6381,14 +6563,14 @@ export function IntegrationsSection() {
                   key={app.id}
                   interactive={false}
                   className={connectedAppsViewMode === "grid"
-                    ? "flex min-h-[184px] w-full flex-col gap-3"
-                    : "flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"}
+ ? "flex min-h-[184px] w-full flex-col gap-3"
+ : "flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"}
                 >
                   <div className="flex min-w-0 flex-1 items-start gap-3">
                     <ConnectedAppLogo name={app.name} logoUrl={app.logoUrl} seed={app.defaultLogoSeed} size="sm" />
                     <div className="min-w-0 flex-1">
-                      <div className="min-w-0 break-words font-bold text-black">{app.name}</div>
-                      <div className="mt-0.5 text-xs text-black/50">{formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[app.category] ?? "settings.connectedApps.categoryOther" })}</div>
+                      <div className="min-w-0 break-words font-bold text-foreground-strong theme-brutal:text-black">{app.name}</div>
+                      <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[app.category] ?? "settings.connectedApps.categoryOther" })}</div>
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
                         <ConnectedAppDistributionBadge status={app.status} />
                       </div>
@@ -6398,9 +6580,11 @@ export function IntegrationsSection() {
                       {connectedAppsViewMode === "grid" && (
                         <>
                           {sourceOwnedConnectedAppStatusHint(app.status) && (
-                            <div className="mt-1 line-clamp-2 text-xs leading-relaxed text-black/55" title={formatMessage({ id: sourceOwnedConnectedAppStatusHint(app.status)! })}>
+                            <Tooltip content={formatMessage({ id: sourceOwnedConnectedAppStatusHint(app.status)! })}>
+                            <div className="mt-1 line-clamp-2 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/55">
                               {formatMessage({ id: sourceOwnedConnectedAppStatusHint(app.status)! })}
                             </div>
+                            </Tooltip>
                           )}
                           <ConnectedAppUrlLink url={app.homepageUrl} label={getDomainFromUrl(app.homepageUrl)} className="mt-1" />
                         </>
@@ -6410,10 +6594,11 @@ export function IntegrationsSection() {
                   {canManage && (
                     <div className={`flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto ${connectedAppsViewMode === "grid" ? "mt-auto" : ""}`}>
                       {canEditSourceOwnedConnectedApp(app.status) && (
-                        <button type="button" onClick={() => beginEditClient(app)} className="btn-brutal-sm inline-flex items-center justify-center gap-1.5 bg-white px-2.5 py-1 text-xs">
+                        <Button
+                          variant="outline" size="sm" type="button" onClick={() => beginEditClient(app)} className="inline-flex items-center justify-center gap-1.5">
                           <Pencil size={14} />
                           {formatMessage({ id: "settings.connectedApps.edit" })}
-                        </button>
+                        </Button>
                       )}
                     </div>
                   )}
@@ -6426,19 +6611,20 @@ export function IntegrationsSection() {
 
       {selectedInstalledApp && (
         <Modal onClose={() => setSelectedInstalledApp(null)}>
-          <div className="w-full max-w-2xl card-brutal space-y-4 p-5">
+          <Card className="w-full max-w-2xl space-y-4 p-5">
             <div className="flex items-start justify-between gap-3">
               <div className="flex min-w-0 items-start gap-3">
                 <ConnectedAppLogo name={selectedInstalledApp.name} logoUrl={selectedInstalledApp.logoUrl} seed={selectedInstalledApp.defaultLogoSeed} size="lg" />
                 <div className="min-w-0">
                   <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.installedAppEyebrow" })}</SectionEyebrow>
-                  <div className="mt-1 break-words text-xl font-bold text-black">{selectedInstalledApp.name}</div>
-                  <div className="mt-0.5 text-xs text-black/55">{selectedInstalledApp.developer}</div>
+                  <div className="mt-1 break-words text-xl font-bold text-foreground-strong theme-brutal:text-black">{selectedInstalledApp.name}</div>
+                  <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/55">{selectedInstalledApp.developer}</div>
                 </div>
               </div>
-              <Button type="button" onClick={() => setSelectedInstalledApp(null)} shape="icon" aria-label={formatMessage({ id: "settings.connectedApps.closeInstalledAppDetail" })}>
+              <CloseButton
+                type="button" onClick={() => setSelectedInstalledApp(null)}  aria-label={formatMessage({ id: "settings.connectedApps.closeInstalledAppDetail" })}>
                 <X size={14} />
-              </Button>
+              </CloseButton>
             </div>
             {error ? <Banner intent="warning" density="sm" className="font-bold">{error}</Banner> : null}
             <OAuthScopeSummaryPanel
@@ -6452,35 +6638,37 @@ export function IntegrationsSection() {
               canManage={canManage}
               onError={setError}
             />
-            <div className="flex justify-end border-t-2 border-black pt-4">
-              <Button type="button" onClick={() => setSelectedInstalledApp(null)} size="md">{formatMessage({ id: "settings.common.close" })}</Button>
+            <div className="flex justify-end border-t-2 border-line-muted theme-brutal:border-black pt-4">
+              <Button
+                type="button" onClick={() => setSelectedInstalledApp(null)} size="md">{formatMessage({ id: "settings.common.close" })}</Button>
             </div>
-          </div>
+          </Card>
         </Modal>
       )}
 
       {selectedListing && (
         <Modal onClose={() => setSelectedListing(null)}>
-          <div className="w-full max-w-2xl card-brutal space-y-4 p-5" aria-labelledby="connected-app-detail-title">
+          <Card className="w-full max-w-2xl space-y-4 p-5" aria-labelledby="connected-app-detail-title">
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-start gap-3">
                 <ConnectedAppLogo name={selectedListing.name} logoUrl={selectedListing.logoUrl} seed={selectedListing.defaultLogoSeed} size="lg" />
                 <div>
                   <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.appDetail" })}</SectionEyebrow>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <h2 id="connected-app-detail-title" className="text-xl font-bold text-black">{selectedListing.name}</h2>
+                    <h2 id="connected-app-detail-title" className="text-xl font-bold text-foreground-strong theme-brutal:text-black">{selectedListing.name}</h2>
                     <ConnectedAppMarketplaceInstallBadge badge={selectedListing.marketplaceInstallBadge} />
                   </div>
-                  <div className="mt-0.5 text-xs text-black/55">{formatMessage({ id: "settings.connectedApps.byLine" }, { category: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[selectedListing.category] ?? "settings.connectedApps.categoryOther" }), developer: selectedListing.developer })}</div>
+                  <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/55">{formatMessage({ id: "settings.connectedApps.byLine" }, { category: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[selectedListing.category] ?? "settings.connectedApps.categoryOther" }), developer: selectedListing.developer })}</div>
                 </div>
               </div>
-              <Button type="button" onClick={() => setSelectedListing(null)} shape="icon" aria-label={formatMessage({ id: "settings.connectedApps.closeAppDetail" })}>
+              <CloseButton
+                type="button" onClick={() => setSelectedListing(null)}  aria-label={formatMessage({ id: "settings.connectedApps.closeAppDetail" })}>
                 <X size={14} />
-              </Button>
+              </CloseButton>
             </div>
             <ConnectedAppsErrorBanner surface={connectedAppsErrorSurface} target={CONNECTED_APPS_ERROR_LISTING} error={error} />
             <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.profile" })}>
-              <p className="mb-2 text-sm leading-relaxed text-black/70">{selectedListing.description}</p>
+              <p className="mb-2 text-sm leading-relaxed text-foreground-muted theme-brutal:text-black/70">{selectedListing.description}</p>
               <div className="divide-y-2 divide-black/10 text-sm">
                 <ConnectedAppDetailRow label={formatMessage({ id: "settings.connectedApps.publisher" })}>
                   {selectedListing.developer}
@@ -6489,11 +6677,11 @@ export function IntegrationsSection() {
                   {selectedListing.homepageUrl ? (
                     <ConnectedAppUrlLink url={selectedListing.homepageUrl} />
                   ) : (
-                    <span className="break-all font-mono text-xs font-bold text-black">{selectedListing.homepageDomain}</span>
+                    <span className="break-all font-mono text-xs font-bold text-foreground-strong theme-brutal:text-black">{selectedListing.homepageDomain}</span>
                   )}
                 </ConnectedAppDetailRow>
                 <ConnectedAppDetailRow label={formatMessage({ id: "settings.connectedApps.redirectCallback" })}>
-                  <span className="break-all font-mono text-xs font-bold text-black">{selectedListing.callbackDomain}</span>
+                  <span className="break-all font-mono text-xs font-bold text-foreground-strong theme-brutal:text-black">{selectedListing.callbackDomain}</span>
                 </ConnectedAppDetailRow>
               </div>
             </ConnectedAppDetailSection>
@@ -6515,14 +6703,14 @@ export function IntegrationsSection() {
               />
             </ConnectedAppDetailSection>
             <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.distribution" })} tone="cream">
-              <div className="text-xs leading-relaxed text-black/70">
+              <div className="text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/70">
                 {formatMessage({ id: "settings.connectedApps.listingReviewNote" })}
               </div>
             </ConnectedAppDetailSection>
             {canManage && selectedListing.installed && (
               <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.dangerZone" })}>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="text-xs leading-relaxed text-black/60">
+                  <div className="text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
                     {formatMessage({ id: "settings.connectedApps.detail.removeInstalledDescription" })}
                   </div>
                   <Button
@@ -6532,7 +6720,7 @@ export function IntegrationsSection() {
                       setError("");
                       setMarketplaceUninstallTarget(selectedListing);
                     }}
-                    tone="red"
+                    variant="danger"
                     size="md"
                   >
                     {savingClientId === selectedListing.id ? formatMessage({ id: "settings.connectedApps.uninstalling" }) : formatMessage({ id: "settings.connectedApps.uninstallFromServer" })}
@@ -6540,8 +6728,9 @@ export function IntegrationsSection() {
                 </div>
               </ConnectedAppDetailSection>
             )}
-            <div className="flex items-center justify-end gap-2 border-t-2 border-black pt-4">
-              <Button type="button" onClick={() => setSelectedListing(null)} size="md">
+            <div className="flex items-center justify-end gap-2 border-t-2 border-line-muted theme-brutal:border-black pt-4">
+              <Button
+                type="button" onClick={() => setSelectedListing(null)} size="md">
                 {canManage ? formatMessage({ id: "settings.common.cancel" }) : formatMessage({ id: "settings.common.close" })}
               </Button>
               {canManage && !selectedListing.installed && (
@@ -6549,90 +6738,27 @@ export function IntegrationsSection() {
                   type="button"
                   disabled={savingClientId === selectedListing.id}
                   onClick={() => void handleInstallMarketplaceApp(selectedListing)}
-                  tone="pink"
+                  variant="accent"
                   size="md"
                 >
                   {savingClientId === selectedListing.id ? formatMessage({ id: "settings.connectedApps.installing" }) : formatMessage({ id: "settings.connectedApps.installToServer" })}
                 </Button>
               )}
             </div>
-          </div>
-        </Modal>
-      )}
-
-      {selectedBuiltInApp && (
-        <Modal onClose={() => setSelectedBuiltInApp(null)}>
-          <div className="w-full max-w-2xl card-brutal space-y-4 p-5" aria-labelledby="connected-built-in-app-detail-title">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex items-start gap-3">
-                <ConnectedAppLogo name={selectedBuiltInApp.name} logoUrl={selectedBuiltInApp.logoUrl} seed={selectedBuiltInApp.defaultLogoSeed} size="lg" />
-                <div>
-                  <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.builtInApp" })}</SectionEyebrow>
-                  <h2 id="connected-built-in-app-detail-title" className="mt-1 text-xl font-bold text-black">{selectedBuiltInApp.name}</h2>
-                  <div className="mt-0.5 text-xs text-black/55">{formatMessage({ id: "settings.connectedApps.builtInAvailableNoInstall" })}</div>
-                </div>
-              </div>
-              <Button type="button" onClick={() => setSelectedBuiltInApp(null)} shape="icon" aria-label={formatMessage({ id: "settings.connectedApps.closeBuiltInDetail" })}>
-                <X size={14} />
-              </Button>
-            </div>
-            <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.profile" })}>
-              {selectedBuiltInApp.description && (
-                <p className="mb-2 text-sm leading-relaxed text-black/70">{selectedBuiltInApp.description}</p>
-              )}
-              <div className="divide-y-2 divide-black/10 text-sm">
-                <ConnectedAppDetailRow label={formatMessage({ id: "settings.connectedApps.publisher" })}>
-                  {formatMessage({ id: "brand.productName" })}
-                </ConnectedAppDetailRow>
-                <ConnectedAppDetailRow label={formatMessage({ id: "settings.connectedApps.homepageUrlLabel" })}>
-                  {selectedBuiltInApp.homepageUrl ? (
-                    <ConnectedAppUrlLink url={selectedBuiltInApp.homepageUrl} />
-                  ) : (
-                    <span className="break-all font-mono text-xs font-bold text-black">{selectedBuiltInApp.homepageDomain ?? formatMessage({ id: "settings.connectedApps.notConfigured" })}</span>
-                  )}
-                </ConnectedAppDetailRow>
-              </div>
-            </ConnectedAppDetailSection>
-            <ConnectedAppDetailSection
-              title={formatMessage({ id: "settings.connectedApps.section.loginWithRaft" })}
-              description={formatMessage({ id: "settings.connectedApps.detail.builtInLoginDescription" })}
-              tone="cream"
-            >
-              <OAuthScopeSummaryPanel
-                title={formatMessage({ id: "settings.connectedApps.detail.requestableDeclared" })}
-                scopes={selectedBuiltInApp.allowedScopes}
-              />
-            </ConnectedAppDetailSection>
-            <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.distribution" })} tone="cream">
-              <div className="text-xs leading-relaxed text-black/70">
-                {formatMessage({ id: "settings.connectedApps.builtInFirstParty" })}
-              </div>
-            </ConnectedAppDetailSection>
-            <div className="flex items-center justify-end gap-2 border-t-2 border-black pt-4">
-              <Button type="button" onClick={() => setSelectedBuiltInApp(null)} size="md">{formatMessage({ id: "settings.common.close" })}</Button>
-              <Button
-                type="button"
-                disabled={!selectedBuiltInApp.homepageUrl}
-                onClick={() => openBuiltInApp(selectedBuiltInApp)}
-                tone="pink"
-                size="md"
-              >
-                {formatMessage({ id: "settings.connectedApps.open" })}
-              </Button>
-            </div>
-          </div>
+          </Card>
         </Modal>
       )}
 
       {canManage && showRegisterDrawer && (
         <Modal onClose={closeRegisterDrawer}>
-          <form
+          <Card
+            render={<form />}
             onSubmit={handleSaveClient}
-            className="card-brutal flex h-[min(52rem,calc(100dvh-2rem))] max-h-[calc(100dvh-2rem)] w-full max-w-5xl flex-col overflow-hidden bg-white"
+            className="flex max-h-[min(52rem,calc(100dvh-2rem))] w-full max-w-5xl flex-col overflow-hidden bg-layer-panel theme-brutal:bg-white"
             aria-labelledby="connected-app-form-title"
             data-testid="connected-app-editor"
           >
-            <div className="flex flex-col gap-3 border-b-2 border-black bg-brutal-cream px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-col gap-3 border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex min-w-0 items-center gap-3">
                 <ConnectedAppLogo
                   name={clientName || editingClient?.name || "App"}
@@ -6641,29 +6767,30 @@ export function IntegrationsSection() {
                 />
                 <div className="min-w-0">
                   <SectionEyebrow as="div">{editingClient ? formatMessage({ id: "settings.connectedApps.editApp" }) : formatMessage({ id: "settings.connectedApps.registerApp" })}</SectionEyebrow>
-                  <h2 id="connected-app-form-title" className="mt-0.5 truncate text-xl font-black text-black">
+                  <h2 id="connected-app-form-title" className="mt-0.5 truncate text-xl font-black text-foreground-strong theme-brutal:text-black">
                     {editingClient ? editingClient.name : formatMessage({ id: "settings.connectedApps.newConnectedApp" })}
                   </h2>
-                  <p className="mt-0.5 text-xs text-black/55">{formatMessage({ id: "settings.connectedApps.editor.headerDescription" })}</p>
+                  <p className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/55">{formatMessage({ id: "settings.connectedApps.editor.headerDescription" })}</p>
                 </div>
               </div>
               <div className="flex shrink-0 items-center justify-end gap-2">
-                <Button
+                <CloseButton
                   type="button"
                   onClick={closeRegisterDrawer}
-                  size="sm"
-                  shape="icon"
+
+
                   aria-label={formatMessage({ id: "settings.connectedApps.closeAppForm" })}
                 >
                   <X size={16} />
-                </Button>
-                <Button type="submit" disabled={submitting || appNotificationLoading || savingClientId === editingClient?.id} tone="pink" size="sm">
+                </CloseButton>
+                <Button
+                  type="submit" disabled={submitting || appNotificationLoading || savingClientId === editingClient?.id} variant="accent" size="sm">
                   {submitting ? formatMessage({ id: "settings.common.saving" }) : editingClient ? formatMessage({ id: "settings.common.save" }) : formatMessage({ id: "settings.connectedApps.registerApp" })}
                 </Button>
               </div>
             </div>
             {(error || createdSecret) && (
-              <div className="space-y-2 border-b-2 border-black bg-white px-4 py-3">
+              <div className="space-y-2 border-b-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-4 py-3">
                 <ConnectedAppsErrorBanner surface={connectedAppsErrorSurface} target={CONNECTED_APPS_ERROR_FORM} error={error} />
                 {renderClientSecretReveal()}
               </div>
@@ -6672,33 +6799,37 @@ export function IntegrationsSection() {
             <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[220px_minmax(0,1fr)] md:grid-rows-1">
               <nav
                 ref={appEditorRailRef}
-                className="flex gap-2 overflow-x-auto border-b-2 border-black bg-brutal-cream p-3 md:block md:space-y-2 md:overflow-y-auto md:border-b-0 md:border-r-2"
+                className="flex gap-2 overflow-x-auto border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-3 md:block md:space-y-2 md:overflow-y-auto md:border-b-0 md:border-r-2"
                 aria-label={formatMessage({ id: "settings.connectedApps.appEditorSectionsAriaLabel" })}
                 data-testid="connected-app-editor-rail"
               >
                 {appEditorSections.map((section) => (
-                  <button
-                    key={section.id}
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     type="button"
+                    key={section.id}
                     data-app-editor-section={section.id}
                     onClick={() => scrollToAppEditorSection(section.id)}
                     aria-current={appEditorSection === section.id ? "true" : undefined}
-                    className={`min-w-[155px] border-2 border-black px-3 py-2 text-left md:min-w-0 md:w-full ${
-                      appEditorSection === section.id ? "bg-soft-signal shadow-brutal-sm" : "bg-white"
-                    }`}
+                    className={`h-auto min-w-[155px] flex-col items-start justify-start gap-0 border border-line-muted px-3 py-2 text-left shadow-raft-sm hover:shadow-raft-md md:min-w-0 md:w-full theme-brutal:border-2 theme-brutal:border-black theme-brutal:shadow-brutal-sm ${
+ appEditorSection === section.id ? "bg-primary-soft theme-brutal:bg-soft-signal theme-brutal:shadow-brutal-sm" : "bg-layer-panel theme-brutal:bg-white"
+ }`}
                   >
-                    <span className="flex items-center gap-2 text-xs font-black text-black">
-                      {section.icon}
-                      {section.label}
+                    <span className="flex min-w-0 flex-col items-start">
+                      <span className="flex items-center gap-2 text-xs font-black text-foreground-strong theme-brutal:text-black">
+                        {section.icon}
+                        {section.label}
+                      </span>
+                      <span className="mt-1 block truncate text-[10px] font-bold text-foreground-muted theme-brutal:text-black/50">{section.status}</span>
                     </span>
-                    <span className="mt-1 block truncate text-[10px] font-bold text-black/50">{section.status}</span>
-                  </button>
+                  </Button>
                 ))}
               </nav>
               <div
                 ref={appEditorContentRef}
                 onScroll={syncAppEditorSectionFromScroll}
-                className="min-h-0 space-y-4 overflow-y-auto bg-white p-4"
+                className="min-h-0 space-y-4 overflow-y-auto bg-layer-panel theme-brutal:bg-white p-4"
                 data-testid="connected-app-editor-content"
               >
 
@@ -6717,7 +6848,7 @@ export function IntegrationsSection() {
                   hint={editingClient ? formatMessage({ id: "settings.connectedApps.logoHintEdit" }) : formatMessage({ id: "settings.connectedApps.logoHintNew" })}
                 >
                   <div className="space-y-2">
-                    <div className="flex h-[120px] w-[120px] items-center justify-center border-2 border-dashed border-black bg-brutal-cream">
+                    <div className="flex h-[120px] w-[120px] items-center justify-center border-2 border-dashed border-line-strong theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream">
                       <ConnectedAppLogo
                         name={clientName || editingClient?.name || "App"}
                         logoUrl={editingClient?.logoUrl}
@@ -6739,7 +6870,7 @@ export function IntegrationsSection() {
                           onClick={() => logoInputRef.current?.click()}
                           disabled={logoUploading}
                           size="sm"
-                          shape="iconText"
+                          
                         >
                           <Upload size={14} />
                           {logoUploading ? formatMessage({ id: "settings.connectedApps.uploading" }) : editingClient.logoUrl ? formatMessage({ id: "settings.connectedApps.change" }) : formatMessage({ id: "settings.connectedApps.upload" })}
@@ -6761,22 +6892,22 @@ export function IntegrationsSection() {
               </div>
               <div className="space-y-3">
                 <FormField label={formatMessage({ id: "settings.connectedApps.appNameLabel" })} labelStyle="plain" size="compact">
-                  <input
+                  <Input
                     type="text"
                     value={clientName}
                     onChange={(event) => setClientName(event.target.value)}
-                    className="input-brutal w-full text-sm"
+                    className="w-full text-sm"
                     placeholder={formatMessage({ id: "settings.connectedApps.appNamePlaceholder" })}
                     required
                   />
                 </FormField>
                 <FormField label={formatMessage({ id: "settings.connectedApps.homepageUrlFieldLabel" })} labelStyle="plain" size="compact">
-                  <input
+                  <Input
                     type="url"
                     value={clientHomepageUrl}
                     onChange={(event) => setClientHomepageUrl(event.target.value)}
-                    className="input-brutal w-full text-sm"
-                    placeholder="https://example.com"
+                    className="w-full text-sm"
+                    render={<input placeholder="https://example.com" />}
                   />
                 </FormField>
                 <FormField label={formatMessage({ id: "settings.connectedApps.categoryLabel" })} labelStyle="plain" size="compact">
@@ -6814,6 +6945,15 @@ export function IntegrationsSection() {
                 className="resize-none"
               />
             </FormField>
+            <FormField label={formatMessage({ id: "settings.connectedApps.whenToUseLabel" })} labelStyle="plain" size="compact" hint={formatMessage({ id: "settings.connectedApps.whenToUseHint" })} optional>
+              <Input
+                type="text"
+                value={clientWhenToUse}
+                onChange={(event) => setClientWhenToUse(event.target.value)}
+                className="w-full text-sm"
+                render={<input maxLength={160} placeholder={formatMessage({ id: "settings.connectedApps.whenToUsePlaceholder" })} />}
+              />
+            </FormField>
             </ConnectedAppEditorSection>
 
             <ConnectedAppEditorSection
@@ -6823,31 +6963,31 @@ export function IntegrationsSection() {
               status={loginStatus}
             >
             <FormField label={formatMessage({ id: "settings.connectedApps.clientIdLabel" })} labelStyle="plain" size="compact" hint={formatMessage({ id: "settings.connectedApps.clientIdHint" })} optional>
-              <input
+              <Input
                 type="text"
                 value={clientId}
                 onChange={(event) => setClientId(event.target.value)}
-                className="input-brutal w-full font-mono text-sm disabled:bg-black/5 disabled:text-black/45"
+                className="w-full font-mono text-sm disabled:bg-fill-muted disabled:text-foreground-muted theme-brutal:disabled:bg-black/5 theme-brutal:disabled:text-black/45"
                 placeholder={formatMessage({ id: "settings.connectedApps.clientIdPlaceholder" })}
                 disabled={!!editingClient}
               />
             </FormField>
             <FormField label={formatMessage({ id: "settings.connectedApps.returnUrlLabel" })} labelStyle="plain" size="compact">
-              <input
+              <Input
                 type="url"
                 value={clientReturnUrl}
                 onChange={(event) => setClientReturnUrl(event.target.value)}
-                className="input-brutal w-full text-sm"
-                placeholder="https://example.com/login/callback"
+                className="w-full text-sm"
+                render={<input placeholder="https://example.com/login/callback" />}
               />
             </FormField>
             <FormField label={formatMessage({ id: "settings.connectedApps.agentManifestLabel" })} labelStyle="plain" size="compact" optional>
-              <input
+              <Input
                 type="url"
                 value={clientAgentManifestUrl}
                 onChange={(event) => setClientAgentManifestUrl(event.target.value)}
-                className="input-brutal w-full text-sm"
-                placeholder="https://example.com/.well-known/raft-agent-manifest.json"
+                className="w-full text-sm"
+                render={<input placeholder="https://example.com/.well-known/raft-agent-manifest.json" />}
               />
             </FormField>
             <DeclaredScopesPicker value={clientAllowedScopes} onChange={setClientAllowedScopes} />
@@ -6881,35 +7021,37 @@ export function IntegrationsSection() {
               status={distributionStatus}
             >
             {!editingClient ? (
-              <div className="border-l-4 border-black/30 bg-brutal-cream px-3 py-2 text-xs font-bold text-black/60">
+              <div className="border-l-4 border-line-muted theme-brutal:border-black/30 bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-3 py-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">
                 {formatMessage({ id: "settings.connectedApps.saveBeforeShareOrReview" })}
               </div>
             ) : null}
             {editingClient && sourceOwnedConnectedAppStatusHint(editingClient.publishStatus) ? (
-              <div className="border-l-4 border-soft-signal bg-soft-signal/20 px-3 py-2 text-xs leading-relaxed text-black/70">
+              <div className="border-l-4 border-warning bg-warning-soft px-3 py-2 text-xs leading-relaxed text-foreground-muted theme-brutal:border-soft-signal theme-brutal:bg-soft-signal/20 theme-brutal:text-black/70">
                 {formatMessage({ id: sourceOwnedConnectedAppStatusHint(editingClient.publishStatus)! })}
               </div>
             ) : null}
             {editingClient && (editingClient.publishStatus === "private" || editingClient.publishStatus === "rejected") && (
-              <div className="border-2 border-black bg-white p-3 shadow-brutal-sm" data-testid="connected-app-private-share-card">
+              <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm" data-testid="connected-app-private-share-card">
                 <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                   <div>
                     <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.privateShareTitle" })}</SectionEyebrow>
-                    <div className="mt-1 text-xs leading-relaxed text-black/60">
+                    <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
                       {formatMessage({ id: "settings.connectedApps.privateShareDesc" })}
                     </div>
                     {shareLink && (
-                      <div className="mt-2 text-xs text-black/55">
+                      <div className="mt-2 text-xs text-foreground-muted theme-brutal:text-black/55">
                         {formatMessage({ id: "settings.connectedApps.activeLinkExpires" }, { when: shareLink.expiresAt ? formatDate(shareLink.expiresAt) : formatMessage({ id: "settings.connectedApps.never" }) })}
                       </div>
                     )}
                   </div>
                   <div className="flex flex-wrap justify-end gap-2">
-                    <Button type="button" size="sm" onClick={() => void handleCreateShareLink()} disabled={shareLoading}>
+                    <Button
+                      type="button" size="sm" onClick={() => void handleCreateShareLink()} disabled={shareLoading}>
                       {shareLoading ? formatMessage({ id: "settings.connectedApps.working" }) : shareLink ? formatMessage({ id: "settings.connectedApps.regenerate" }) : formatMessage({ id: "settings.connectedApps.createLink" })}
                     </Button>
                     {shareLink && (
-                      <Button type="button" size="sm" onClick={() => void handleRevokeShareLink()} disabled={shareLoading}>
+                      <Button
+                        type="button" size="sm" onClick={() => void handleRevokeShareLink()} disabled={shareLoading}>
                         {formatMessage({ id: "settings.connectedApps.revoke" })}
                       </Button>
                     )}
@@ -6917,14 +7059,15 @@ export function IntegrationsSection() {
                 </div>
                 {shareUrl && (
                   <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-                    <input
+                    <Input
                       type="text"
                       readOnly
                       value={shareUrl}
-                      className="input-brutal min-w-0 flex-1 font-mono text-xs"
+                      className="min-w-0 flex-1 font-mono text-xs"
                       aria-label={formatMessage({ id: "settings.connectedApps.privateShareUrlAria" })}
                     />
-                    <Button type="button" size="sm" shape="iconText" onClick={() => void handleCopyShareUrl()}>
+                    <Button
+                      type="button" size="sm"  onClick={() => void handleCopyShareUrl()}>
                       {shareCopied ? <Check size={14} /> : <Copy size={14} />}
                       {shareCopied ? formatMessage({ id: "settings.connectedApps.copied" }) : formatMessage({ id: "settings.connectedApps.copy" })}
                     </Button>
@@ -6933,9 +7076,9 @@ export function IntegrationsSection() {
               </div>
             )}
             {editingClient && (editingClient.publishStatus === "private" || editingClient.publishStatus === "rejected") && (
-              <div className="border-2 border-black bg-brutal-cream p-3 shadow-brutal-sm">
+              <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm">
                 <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.publishRequestTitle" })}</SectionEyebrow>
-                <div className="mt-1 text-xs leading-relaxed text-black/60">
+                <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
                   {formatMessage({ id: "settings.connectedApps.distributionMetadataNote" })}
                 </div>
                 <div className="mt-3 flex justify-end">
@@ -6943,7 +7086,7 @@ export function IntegrationsSection() {
                     type="button"
                     onClick={() => void handleRequestPublish(mapClientToRegisteredApp(editingClient))}
                     disabled={savingClientId === editingClient.id}
-                    tone="pink"
+                    variant="accent"
                     size="sm"
                   >
                     {savingClientId === editingClient.id ? formatMessage({ id: "settings.connectedApps.requesting" }) : formatMessage({ id: "settings.connectedApps.requestPublish" })}
@@ -6952,7 +7095,7 @@ export function IntegrationsSection() {
               </div>
             )}
             {editingClient?.publishStatus === "published" ? (
-              <div className="border-l-4 border-brutal-lime bg-brutal-lime/15 px-3 py-2 text-xs leading-relaxed text-black/70">
+              <div className="border-l-4 border-brutal-lime bg-brutal-lime/15 px-3 py-2 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/70">
                 {formatMessage({ id: "settings.connectedApps.publishedMarketplaceNote" })}
               </div>
             ) : null}
@@ -6968,20 +7111,20 @@ export function IntegrationsSection() {
               tone="warning"
             >
               {!editingClient ? (
-                <div className="text-xs font-bold leading-relaxed text-black/55">{formatMessage({ id: "settings.connectedApps.editor.saveBeforeLifecycle" })}</div>
+                <div className="text-xs font-bold leading-relaxed text-foreground-muted theme-brutal:text-black/55">{formatMessage({ id: "settings.connectedApps.editor.saveBeforeLifecycle" })}</div>
               ) : (
                 <>
-                  <div className="flex flex-col gap-3 border-2 border-black/20 bg-white p-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="flex flex-col gap-3 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white p-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
                       <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.editor.clientSecretTitle" })}</SectionEyebrow>
-                      <div className="mt-1 text-xs leading-relaxed text-black/60">
+                      <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
                         {formatMessage({ id: "settings.connectedApps.editor.clientSecretDescription" })}
                       </div>
                     </div>
                     <Button
                       type="button"
                       size="sm"
-                      tone="yellow"
+                      variant="primary"
                       onClick={() => setRegenerateSecretTarget(editingClient)}
                       disabled={submitting || regeneratingClientId === editingClient.id}
                       data-testid="connected-app-regenerate-secret-button"
@@ -6992,12 +7135,13 @@ export function IntegrationsSection() {
                     </Button>
                   </div>
                   {canRequestOfflineSourceOwnedConnectedApp(editingClient.publishStatus) ? (
-                    <div className="flex flex-col gap-3 border-2 border-black/20 bg-white p-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex flex-col gap-3 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white p-3 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.editor.marketplaceLifecycleTitle" })}</SectionEyebrow>
-                        <div className="mt-1 text-xs leading-relaxed text-black/60">{formatMessage({ id: "settings.connectedApps.editor.marketplaceLifecycleDescription" })}</div>
+                        <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "settings.connectedApps.editor.marketplaceLifecycleDescription" })}</div>
                       </div>
-                      <Button type="button" size="sm" onClick={() => setOfflineRequestTarget(mapClientToRegisteredApp(editingClient))}>
+                      <Button
+                        type="button" size="sm" onClick={() => setOfflineRequestTarget(mapClientToRegisteredApp(editingClient))}>
                         {formatMessage({ id: "settings.connectedApps.editor.requestOffline" })}
                       </Button>
                     </div>
@@ -7018,7 +7162,7 @@ export function IntegrationsSection() {
             </ConnectedAppEditorSection>
               </div>
             </div>
-          </form>
+          </Card>
         </Modal>
       )}
 
@@ -7059,7 +7203,7 @@ export function IntegrationsSection() {
           confirmLabel={formatMessage({ id: "settings.connectedApps.editor.regenerateSecretConfirmLabel" })}
           loadingLabel={formatMessage({ id: "settings.connectedApps.editor.regeneratingClientSecret" })}
           confirmIcon={<AlertTriangle size={14} />}
-          confirmColor="bg-soft-signal"
+          confirmVariant="primary"
           confirmTestId="connected-app-regenerate-secret-confirm-button"
           layer={1}
           onClose={() => setRegenerateSecretTarget(null)}
@@ -7098,6 +7242,9 @@ export function IntegrationsSection() {
               {formatMessage({ id: "settings.connectedApps.uninstallMessagePrefix" })}
               <code className="font-mono font-bold">{marketplaceUninstallTarget.clientId}</code>
               {formatMessage({ id: "settings.connectedApps.uninstallMessageSuffix" })}
+              {marketplaceUninstallTarget.official && (
+                <> {formatMessage({ id: "settings.connectedApps.uninstallOfficialOptOut" })}</>
+              )}
             </>
           )}
           confirmLabel={formatMessage({ id: "settings.connectedApps.uninstallApp" })}
@@ -7218,21 +7365,21 @@ function PreJoinAgreementSection() {
         label={formatMessage({ id: "settings.preJoinAgreement.sectionLabel" })}
       />
 
-      <div className="border-2 border-black bg-white shadow-brutal-sm p-4 space-y-4">
+      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-4">
         <label className={`flex items-start gap-3 ${saving || loading ? "opacity-60" : ""}`}>
           <Checkbox
             size="md"
             checked={enabled}
             disabled={saving || loading}
-            onChange={(event) => {
-              setEnabled(event.currentTarget.checked);
+            onCheckedChange={(checked) => {
+              setEnabled(checked);
               setSaved(false);
             }}
             className="mt-0.5"
           />
           <span className="min-w-0">
-            <span className="block text-sm font-bold text-black">{formatMessage({ id: "settings.preJoinAgreement.requireTitle" })}</span>
-            <span className="block text-xs text-black/60 mt-0.5">
+            <span className="block text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.preJoinAgreement.requireTitle" })}</span>
+            <span className="block text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
               {formatMessage({ id: "settings.preJoinAgreement.requireDescription" })}
             </span>
           </span>
@@ -7241,7 +7388,7 @@ function PreJoinAgreementSection() {
         {enabled && (
           <>
             <FormField label={formatMessage({ id: "settings.preJoinAgreement.titleLabel" })} labelStyle="plain" size="compact">
-              <input
+              <Input
                 value={title}
                 onChange={(event) => {
                   setTitle(event.target.value);
@@ -7249,7 +7396,7 @@ function PreJoinAgreementSection() {
                 }}
                 maxLength={160}
                 disabled={saving || loading}
-                className="w-full border-2 border-black p-2 text-sm shadow-brutal-sm focus:shadow-brutal focus:outline-none disabled:opacity-60"
+                className="w-full text-sm disabled:opacity-60"
               />
             </FormField>
             <FormField label={formatMessage({ id: "settings.preJoinAgreement.bodyLabel" })} labelStyle="plain" size="compact">
@@ -7260,15 +7407,25 @@ function PreJoinAgreementSection() {
                   setSaved(false);
                 }}
                 rows={7}
-                limit={PRE_JOIN_AGREEMENT_BODY_MAX_LENGTH}
-                showCounter
-                error={bodyMarkdownError}
+                maxLength={PRE_JOIN_AGREEMENT_BODY_MAX_LENGTH}
+                aria-invalid={bodyMarkdownError ? true : undefined}
+                aria-describedby={bodyMarkdownError ? "pre-join-agreement-error" : "pre-join-agreement-counter"}
                 disabled={saving || loading}
                 className="resize-y font-mono text-xs disabled:opacity-60"
               />
+              <div className="mt-1 flex items-start justify-between gap-3">
+                {bodyMarkdownError ? (
+                  <p id="pre-join-agreement-error" role="alert" className="text-xs text-danger theme-brutal:text-brutal-red">
+                    {bodyMarkdownError}
+                  </p>
+                ) : (
+                  <span />
+                )}
+                <TextareaCounter id="pre-join-agreement-counter" value={bodyMarkdown} limit={PRE_JOIN_AGREEMENT_BODY_MAX_LENGTH} />
+              </div>
             </FormField>
-            <div className="border-2 border-black/30 bg-brutal-cream p-3">
-              <div className="mb-2 text-[11px] font-bold uppercase tracking-widest text-black/50">{formatMessage({ id: "settings.preJoinAgreement.preview" })}</div>
+            <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-3">
+              <div className="mb-2 text-[11px] font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.preJoinAgreement.preview" })}</div>
               <div className="text-sm">
                 <AgreementBody source={bodyMarkdown} />
               </div>
@@ -7283,17 +7440,17 @@ function PreJoinAgreementSection() {
         )}
 
         <div className="flex flex-col items-start gap-2">
-          <div className="text-[11px] text-black/50">
+          <div className="text-[11px] text-foreground-muted theme-brutal:text-black/50">
             {formatMessage({ id: "settings.preJoinAgreement.versionNote" })}
           </div>
-          <button
+          <Button
+            variant="accent" size="sm"
             type="button"
             onClick={handleSave}
             disabled={!dirty || bodyMarkdownTooLong || saving || loading}
-            className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving ? formatMessage({ id: "settings.common.saving" }) : saved ? formatMessage({ id: "settings.common.saved" }) : formatMessage({ id: "settings.common.save" })}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -7334,7 +7491,7 @@ function BillingTabContent() {
           icon={<CreditCard size={16} />}
           label={formatMessage({ id: "billing.billing" })}
         />
-        <div className="border-2 border-black bg-white p-4 text-sm text-black/60 shadow-brutal-sm">
+        <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 text-sm text-foreground-muted theme-brutal:text-black/60 shadow-raft-sm theme-brutal:shadow-brutal-sm">
           {formatMessage({ id: "billing.onlyServerOwnersAndAdminsCanViewBilling" })}
         </div>
       </div>
@@ -7358,6 +7515,7 @@ function AdministrationTabContent() {
       {capabilities.editServerSettings && <PreJoinAgreementSection />}
       <OnboardingAgentSection />
       <ServerTranslationSection />
+      {capabilities.editServerSettings && <WorkspaceProductAnalyticsSection />}
       <MemberPermissionsSection />
     </>
   );
@@ -7378,8 +7536,33 @@ export const ADMINISTRATION_VISUAL_SECTIONS = {
   "pre-join-agreement": PreJoinAgreementSection,
   onboarding: OnboardingAgentSection,
   translation: ServerTranslationSection,
+  "product-analytics": WorkspaceProductAnalyticsSection,
   "member-permissions": MemberPermissionsSection,
 } as const;
+
+export function AppearanceThemeSettingsControl() {
+  const theme = useOptionalAppTheme();
+  if (!theme) return null;
+  const {
+    preset,
+    preferences,
+    resolvedMode,
+    setPreset,
+    setMode,
+    setThemeForMode,
+  } = theme;
+
+  return (
+    <AppearanceThemePicker
+      preset={preset}
+      onChange={setPreset}
+      preferences={preferences}
+      resolvedMode={resolvedMode}
+      onModeChange={setMode}
+      onThemeForModeChange={setThemeForMode}
+    />
+  );
+}
 
 function AppearanceSection() {
   const { formatMessage } = useIntl();
@@ -7389,6 +7572,8 @@ function AppearanceSection() {
   const setShowLiveAgentActivityBar = useAppearanceStore((s) => s.setShowLiveAgentActivityBar);
   const showAgentModelName = useAppearanceStore((s) => s.showAgentModelName);
   const setShowAgentModelName = useAppearanceStore((s) => s.setShowAgentModelName);
+  const hideEmptySidebarSections = useAppearanceStore((s) => s.hideEmptySidebarSections);
+  const setHideEmptySidebarSections = useAppearanceStore((s) => s.setHideEmptySidebarSections);
   const previewMessage = useMemo<Message>(() => ({
     id: "appearance-preview-message",
     channelId: APPEARANCE_PREVIEW_CHANNEL.id,
@@ -7404,17 +7589,24 @@ function AppearanceSection() {
 
   return (
     <div className="mb-6">
+      <Card className="mb-4 border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
+        <div className="mb-3">
+          <div className="text-sm font-bold text-foreground-strong">{formatMessage({ id: "settings.appearance.themeTitle" })}</div>
+          <p className="mt-1 text-xs text-foreground-muted">{formatMessage({ id: "settings.appearance.themeDescription" })}</p>
+        </div>
+        <AppearanceThemeSettingsControl />
+      </Card>
       <div className="flex items-center gap-2 mb-3">
-        <Type size={16} className="text-black/60" />
-        <span className="text-xs font-bold uppercase text-black/60 tracking-widest">
+        <Type size={16} className="text-foreground-muted" />
+        <span className="text-xs font-bold uppercase text-foreground-muted tracking-widest">
           {formatMessage({ id: "settings.appearance.sectionLabel" })}
         </span>
       </div>
 
-      <div className="border-2 border-black bg-white shadow-brutal-sm p-4 space-y-4">
+      <Card className="border-line-muted bg-layer-panel shadow-raft-sm p-4 space-y-4 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
         <div>
-          <div className="text-sm font-bold text-black">{formatMessage({ id: "settings.appearance.messageFontSizeTitle" })}</div>
-          <p className="mt-1 text-xs text-black/55">
+          <div className="text-sm font-bold text-foreground-strong">{formatMessage({ id: "settings.appearance.messageFontSizeTitle" })}</div>
+          <p className="mt-1 text-xs text-foreground-muted">
             {formatMessage({ id: "settings.appearance.messageFontSizeDescription" })}
           </p>
         </div>
@@ -7424,12 +7616,12 @@ function AppearanceSection() {
           onValueChange={setMessageBodyFontSize}
         />
 
-        <div className="text-[11px] font-bold text-black/45">
+        <div className="text-[11px] font-bold text-foreground-muted">
           {formatMessage({ id: "settings.appearance.savedOnDevice" })}
         </div>
 
         <div className="space-y-2">
-          <div className="text-[10px] font-bold uppercase tracking-widest text-black/50">
+          <div className="text-[10px] font-bold uppercase tracking-widest text-foreground-muted">
             {formatMessage({ id: "settings.appearance.preview" })}
           </div>
           <div className="pointer-events-none -mx-2" aria-label={formatMessage({ id: "settings.appearance.fontSizePreviewAria" })}>
@@ -7442,18 +7634,18 @@ function AppearanceSection() {
             />
           </div>
         </div>
-      </div>
+      </Card>
 
-      <div className="mt-4 border-2 border-black bg-white p-4 shadow-brutal-sm">
+      <Card className="mt-4 border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
         <div className="flex items-start justify-between gap-4">
           <span className="min-w-0">
-            <span id="live-agent-activity-setting-label" className="block text-sm font-bold text-black">
+            <span id="live-agent-activity-setting-label" className="block text-sm font-bold text-foreground-strong">
               {formatMessage({ id: "settings.appearance.liveAgentActivityTitle" })}
             </span>
-            <span id="live-agent-activity-setting-description" className="mt-0.5 block text-xs leading-5 text-black/60">
+            <span id="live-agent-activity-setting-description" className="mt-0.5 block text-xs leading-5 text-foreground-muted">
               {formatMessage({ id: "settings.appearance.liveAgentActivityDescription" })}
             </span>
-            <span className="mt-2 block text-[11px] font-bold text-black/45">
+            <span className="mt-2 block text-[11px] font-bold text-foreground-muted">
               {formatMessage({ id: "settings.appearance.savedOnDevice" })}
             </span>
           </span>
@@ -7466,18 +7658,18 @@ function AppearanceSection() {
             className="mt-0.5 shrink-0"
           />
         </div>
-      </div>
+      </Card>
 
-      <div className="mt-4 border-2 border-black bg-white p-4 shadow-brutal-sm">
+      <Card className="mt-4 border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
         <div className="flex items-start justify-between gap-4">
           <span className="min-w-0">
-            <span id="agent-model-name-setting-label" className="block text-sm font-bold text-black">
+            <span id="agent-model-name-setting-label" className="block text-sm font-bold text-foreground-strong">
               {formatMessage({ id: "settings.appearance.showAgentModelNameTitle" })}
             </span>
-            <span id="agent-model-name-setting-description" className="mt-0.5 block text-xs leading-5 text-black/60">
+            <span id="agent-model-name-setting-description" className="mt-0.5 block text-xs leading-5 text-foreground-muted">
               {formatMessage({ id: "settings.appearance.showAgentModelNameDescription" })}
             </span>
-            <span className="mt-2 block text-[11px] font-bold text-black/45">
+            <span className="mt-2 block text-[11px] font-bold text-foreground-muted">
               {formatMessage({ id: "settings.appearance.savedOnDevice" })}
             </span>
           </span>
@@ -7490,8 +7682,31 @@ function AppearanceSection() {
             className="mt-0.5 shrink-0"
           />
         </div>
-      </div>
+      </Card>
 
+      <Card className="mt-4 border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
+        <div className="flex items-start justify-between gap-4">
+          <span className="min-w-0">
+            <span id="hide-empty-sidebar-sections-setting-label" className="block text-sm font-bold text-foreground-strong">
+              {formatMessage({ id: "settings.appearance.hideEmptySidebarSectionsTitle" })}
+            </span>
+            <span id="hide-empty-sidebar-sections-setting-description" className="mt-0.5 block text-xs leading-5 text-foreground-muted">
+              {formatMessage({ id: "settings.appearance.hideEmptySidebarSectionsDescription" })}
+            </span>
+            <span className="mt-2 block text-[11px] font-bold text-foreground-muted">
+              {formatMessage({ id: "settings.appearance.savedOnDevice" })}
+            </span>
+          </span>
+          <Switch
+            size="md"
+            checked={hideEmptySidebarSections}
+            onCheckedChange={setHideEmptySidebarSections}
+            aria-labelledby="hide-empty-sidebar-sections-setting-label"
+            aria-describedby="hide-empty-sidebar-sections-setting-description"
+            className="mt-0.5 shrink-0"
+          />
+        </div>
+      </Card>
     </div>
   );
 }
@@ -7500,7 +7715,13 @@ function AppearanceSection() {
 // zh teeth exercise the real component without mounting the full SettingsPanel
 // (whose account tab reads the Vite-only `import.meta.env` graph). Same precedent
 // as the exported `AccountSection` used by sub-batch A.
-export function AboutSection({ appVersion = WEB_APP_VERSION }: { appVersion?: string } = {}) {
+export function AboutSection({
+  appVersion = WEB_APP_VERSION,
+  showWorkspace = true,
+}: {
+  appVersion?: string;
+  showWorkspace?: boolean;
+} = {}) {
   const { formatMessage } = useIntl();
   const currentServer = useServerStore((s) => s.current);
   // Absolute, because the phone scanning this is not on our origin — a relative
@@ -7516,7 +7737,7 @@ export function AboutSection({ appVersion = WEB_APP_VERSION }: { appVersion?: st
   // the API origin can never open the app, however correct the native side is
   // (@Mahua). The chooser at /download is public and does the platform split,
   // so nothing is lost for someone who does not have the app.
-  const mobileDownloadQrUrl = `${typeof window === "undefined" ? "" : window.location.origin}${MOBILE_DOWNLOAD_CHOOSER_PATH}`;
+  const mobileDownloadQrUrl = `${typeof window === "undefined" ? "" : shareableWebOrigin()}${MOBILE_DOWNLOAD_CHOOSER_PATH}`;
 
   return (
     <div className="space-y-4">
@@ -7524,8 +7745,8 @@ export function AboutSection({ appVersion = WEB_APP_VERSION }: { appVersion?: st
         <SectionHeader label={formatMessage({ id: "settings.about.versionSectionLabel" })} icon={<Tag size={16} />} />
         <SurfaceListItem interactive={false} className="space-y-1">
           {/* Product wordmark — catalog brand id; locale values may match. */}
-          <div className="text-sm font-bold text-black">{formatMessage({ id: "brand.productName" })}</div>
-          <div className="text-xs text-black/60">{appVersion}</div>
+          <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "brand.productName" })}</div>
+          <div className="text-xs text-foreground-muted theme-brutal:text-black/60">{appVersion}</div>
         </SurfaceListItem>
       </section>
 
@@ -7540,34 +7761,48 @@ export function AboutSection({ appVersion = WEB_APP_VERSION }: { appVersion?: st
         <SectionHeader label={formatMessage({ id: "settings.mobileApp.sectionLabel" })} icon={<Smartphone size={16} />} />
         <SurfaceListItem interactive={false}>
           <div className="min-w-0 space-y-3">
-            <div className="text-xs text-black/60">{formatMessage({ id: "settings.mobileApp.description" })}</div>
+            <div className="text-xs text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "settings.mobileApp.description" })}</div>
             {/* Both buttons are peers, deliberately. A primary/secondary pair
                 reads as a recommendation, and we have no basis for one: the
                 person's phone is not the device rendering this, so we cannot
                 know which applies to them. Styling Android as the CTA sent
                 iPhone users looking for the "real" button (@wenyi). */}
             <div className="flex flex-wrap gap-2">
-              <a
-                className="btn-brutal-sm bg-white px-3 py-1.5 text-sm font-bold"
-                href={mobileDownloadUrl("android")}
-                data-testid="mobile-download-android"
+              <Button
+                render={(
+                  <a
+                    href={mobileDownloadUrl("android")}
+                    aria-label={formatMessage({ id: "settings.mobileApp.android" })}
+                    data-testid="mobile-download-android"
+                  />
+                )}
+                nativeButton={false}
+                size="sm"
+                variant="outline"
               >
                 {formatMessage({ id: "settings.mobileApp.android" })}
-              </a>
+              </Button>
               {/* New tab, because this one LEAVES Raft: our route 302s to
                   testflight.apple.com. Android deliberately does NOT get this —
                   it resolves to a file download, and a download in a fresh tab
                   strands an empty tab behind it. The asymmetry is the point
                   (@wenyi). */}
-              <a
-                className="btn-brutal-sm bg-white px-3 py-1.5 text-sm font-bold"
-                href={mobileDownloadUrl("ios")}
-                target="_blank"
-                rel="noopener noreferrer"
-                data-testid="mobile-download-ios"
+              <Button
+                render={(
+                  <a
+                    href={mobileDownloadUrl("ios")}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={formatMessage({ id: "settings.mobileApp.ios" })}
+                    data-testid="mobile-download-ios"
+                  />
+                )}
+                nativeButton={false}
+                size="sm"
+                variant="outline"
               >
                 {formatMessage({ id: "settings.mobileApp.ios" })}
-              </a>
+              </Button>
             </div>
             {/* Left-aligned with the rest of the card rather than pinned to the
                 far edge: on a wide settings panel the right edge is a long way
@@ -7582,13 +7817,13 @@ export function AboutSection({ appVersion = WEB_APP_VERSION }: { appVersion?: st
         </SurfaceListItem>
       </section>
 
-      <section className="space-y-2">
+      {showWorkspace ? <section className="space-y-2" data-testid="settings-about-workspace">
         <SectionHeader label={formatMessage({ id: "settings.about.workspaceSectionLabel" })} icon={<Building2 size={16} />} />
         <SurfaceListItem interactive={false} className="space-y-1">
-          <div className="text-sm font-bold text-black">{currentServer?.name ?? formatMessage({ id: "settings.about.workspaceNameFallback" })}</div>
-          <div className="text-xs text-black/60">{currentServer?.slug ? `/${currentServer.slug}` : formatMessage({ id: "settings.about.workspaceDetailsFallback" })}</div>
+          <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{currentServer?.name ?? formatMessage({ id: "settings.about.workspaceNameFallback" })}</div>
+          <div className="text-xs text-foreground-muted theme-brutal:text-black/60">{currentServer?.slug ? `/${currentServer.slug}` : formatMessage({ id: "settings.about.workspaceDetailsFallback" })}</div>
         </SurfaceListItem>
-      </section>
+      </section> : null}
     </div>
   );
 }
@@ -7617,16 +7852,15 @@ function WorkspaceModeSettingsCard() {
   if (!availability.resolved || !availability.enabled) return null;
 
   return (
-    <label className="mb-4 flex items-center justify-between gap-4 border-2 border-black bg-brutal-cream p-4 shadow-brutal-sm">
+    <label className="mb-4 flex items-center justify-between gap-4 border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm">
       <span className="min-w-0">
         <span className="block text-sm font-bold">{formatMessage({ id: "settings.workspaceMode.title" })}</span>
-        <span className="mt-1 block text-xs leading-5 text-black/60">{formatMessage({ id: "settings.workspaceMode.description" })}</span>
+        <span className="mt-1 block text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "settings.workspaceMode.description" })}</span>
       </span>
-      <input
-        type="checkbox"
+      <Checkbox
         checked={enabled}
-        onChange={(event) => setEnabled(event.currentTarget.checked, userId)}
-        className="size-5 shrink-0 accent-black"
+        onCheckedChange={(checked) => setEnabled(checked, userId)}
+        aria-label={formatMessage({ id: "settings.workspaceMode.title" })}
       />
     </label>
   );
@@ -7636,24 +7870,23 @@ export default function SettingsPanel({
   tab: tabProp,
   accountInitialError,
   accountPasswordChangeIntent = false,
+  showAboutWorkspace = true,
 }: {
   tab?: string;
   accountInitialError?: string;
   accountPasswordChangeIntent?: boolean;
+  showAboutWorkspace?: boolean;
 }) {
   const { formatMessage } = useIntl();
   const requestedSettingsTab = normalizeSettingsTab(tabProp);
   const providerConnectionsEnabled = useServerFeatureFlag(PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY).enabled;
   const slackBridgeGate = useServerFeatureFlag(SLACK_BRIDGE_FEATURE_FLAG_KEYS.master);
   const slackBridgeEnabled = isSlackBridgeSurfaceEnabled(slackBridgeGate);
-  const wikiEnabled = useServerFeatureFlag(WIKI_FEATURE_FLAG_KEY).enabled;
   const { capabilities, role } = useServerPermissions();
   const settingsTab = (
     (requestedSettingsTab === "providers" && (!providerConnectionsEnabled || !capabilities.manageExternalAuth))
     || (requestedSettingsTab === "im-bridges" && !slackBridgeEnabled)
   )
-    ? "account"
-    : requestedSettingsTab === "wiki" && (!wikiEnabled || !capabilities.editServerSettings)
     ? "account"
     : !canOpenSettingsTab(requestedSettingsTab, capabilities, role)
     ? "account"
@@ -7676,12 +7909,12 @@ export default function SettingsPanel({
   const embedded = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("embed") === "1";
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <Panel edge="attached" className="flex min-h-0 flex-1 flex-col bg-layer-canvas-muted text-foreground-strong">
       {!embedded && settingsTab !== "feedback" && (
         <PanelHeader
           title={activeLabel}
           icon={<ActiveIcon size={18} />}
-          iconBg="bg-soft-signal text-black"
+          iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
           containerProps={{
             "data-testid": "settings-panel-header",
             "data-slock-settings-tab": settingsTab,
@@ -7693,8 +7926,8 @@ export default function SettingsPanel({
 
       {/* Content */}
       <div className={settingsTab === "feedback"
-        ? "min-h-0 flex-1 bg-white"
-        : "flex-1 overflow-y-auto bg-white px-5 py-4"}
+ ? "min-h-0 flex-1 bg-layer-panel dark:bg-layer-card theme-brutal:bg-white"
+ : "flex-1 overflow-y-auto bg-layer-panel px-5 py-4 text-foreground-strong mobile-nav-clearance theme-brutal:bg-white theme-brutal:text-black"}
       >
         {settingsTab === "account" && <WorkspaceModeSettingsCard />}
         {settingsTab === "account" && (
@@ -7703,11 +7936,11 @@ export default function SettingsPanel({
             passwordChangeIntent={accountPasswordChangeIntent}
           />
         )}
+        {settingsTab === "account" && <UsageDataSettingsCard />}
         {settingsTab === "language-region" && <LanguageRegionSection />}
         {settingsTab === "appearance" && <AppearanceSection />}
         {settingsTab === "notifications" && <NotificationsTabContent />}
         {settingsTab === "server" && <ServerTabContent />}
-        {settingsTab === "wiki" && <WikiSettingsSection />}
         {settingsTab === "mcp" && <McpSettingsSection />}
         {settingsTab === "providers" && <ProviderConnectionsSettings />}
         {settingsTab === "labs" && <LabsTabContent />}
@@ -7715,9 +7948,9 @@ export default function SettingsPanel({
         {settingsTab === "administration" && <AdministrationTabContent />}
         {settingsTab === "im-bridges" && <IMBridgesSettingsSection />}
         {settingsTab === "integrations" && <IntegrationsSection />}
-        {settingsTab === "about" && <AboutSection />}
+        {settingsTab === "about" && <AboutSection showWorkspace={showAboutWorkspace} />}
         {settingsTab === "feedback" && <LazyAboutFeedbackPanel />}
       </div>
-    </div>
+    </Panel>
   );
 }

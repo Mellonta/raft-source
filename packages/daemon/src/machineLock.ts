@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { resolveRaftHomePath } from "./raftHome.js";
+import { resolveRaftHomePath } from "./raftHome";
 
 const INCOMPLETE_LOCK_STALE_MS = 30_000;
 

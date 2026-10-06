@@ -65,13 +65,13 @@ export default function MobileDownloadQr({ url }: { url: string }) {
           captioning it, so it has to be read first. `w-28` (the code's width)
           broke "Or, Scan with your phone" across two lines, which made a
           one-line aside look like a heading (@wenyi). */}
-      <div className="mb-1 whitespace-nowrap text-[11px] leading-tight text-black/50">
+      <div className="mb-1 whitespace-nowrap text-[11px] leading-tight text-foreground-muted theme-brutal:text-black/50">
         {formatMessage({ id: "settings.mobileApp.qrCaption" })}
       </div>
       <svg
         aria-hidden="true"
         viewBox={`0 0 ${code.size} ${code.size}`}
-        className="h-28 w-28 border-2 border-black bg-white p-1"
+        className="h-28 w-28 border-2 border-black bg-white text-black p-1"
         shapeRendering="crispEdges"
       >
         <path d={code.path} fill="currentColor" />

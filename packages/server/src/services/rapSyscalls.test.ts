@@ -1,23 +1,22 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { agents, servers, users } from "../db/schema.js";
-import { BUILT_IN_RAP_APPS } from "./rapBuiltinAppManifests.js";
-import { parseManifest, SYSCALLS, type AppId } from "./rapRegistry.js";
+import { getDb } from "../db/index";
+import { agents, servers, users } from "../db/schema";
+import { BUILT_IN_RAP_APPS } from "./rapBuiltinAppManifests";
+import { parseManifest, SYSCALLS, type AppId } from "./rapRegistry";
 // Namespace import on purpose: the declarable<=>callable tooth below must look
 // up exports BY THE CANONICAL NAME rather than importing a hand-written set,
 // otherwise the check is a third copy of the list it is meant to protect.
-import * as rapSyscallSurface from "./rapSyscalls.js";
-import * as storeSurface from "./rapRegistryStore.js";
-import { runWithMintedRapEvent } from "./rapInvocationContext.js";
+import * as rapSyscallSurface from "./rapSyscalls";
+import * as storeSurface from "./rapRegistryStore";
+import { runWithMintedRapEvent } from "./rapInvocationContext";
 import {
   createRapRegistryForTests,
   raiseDueEvent,
   registerHookHandlers,
   type RapCatalogEntry
-} from "./rapRegistryStore.js";
+} from "./rapRegistryStore";
 import {
   createRapTimersForTests,
   createNotifyForTests,
@@ -26,7 +25,7 @@ import {
   notify,
   type DeliverySeam,
   type NotifyOutcome,
-} from "./rapSyscalls.js";
+} from "./rapSyscalls";
 
 
 const ALPHA = "x.alpha" as AppId;

@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import sharp from "sharp";
 
-import { getCdnStorage, getStorage } from "./storageService.js";
-import type { StorageBackend } from "./storageService.js";
+import { getCdnStorage, getStorage } from "./storageService";
+import type { StorageBackend } from "./storageService";
 import type { Express } from "express";
 import type { Request } from "express";
 import multer from "multer";
-import { getThumbnailUrl } from "../routes/attachments.js";
+import { getThumbnailUrl } from "../routes/attachments";
 
 export const MAX_PROFILE_AVATAR_BYTES = 5 * 1024 * 1024;
 export const PROFILE_AVATAR_MAX_SIZE_LABEL = "5 MB";
@@ -37,6 +37,17 @@ export function isStoredUserAvatarUrl(avatarUrl: string | null | undefined): boo
   if (!avatarUrl) return false;
   const pathname = avatarPathname(avatarUrl);
   return pathname ? STORED_USER_AVATAR_PATH_PATTERN.test(pathname) : false;
+}
+
+export function isStoredServerScopedAvatarUrl(
+  avatarUrl: string | null | undefined,
+  serverId: string,
+): boolean {
+  if (!avatarUrl) return false;
+  const pathname = avatarPathname(avatarUrl);
+  if (!pathname) return false;
+  const escapedServerId = serverId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^/(?:api/)?avatars/${escapedServerId}/[0-9a-f]{32}\\.webp$`, "i").test(pathname);
 }
 
 async function readBoundedAvatarResponse(response: Response): Promise<Buffer> {

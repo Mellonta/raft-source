@@ -1,10 +1,9 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   computers,
   machines,
@@ -12,14 +11,16 @@ import {
   onboardingEmailJourneys,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   enqueueComputerMobileAppEmailJourney,
   resetComputerMobileAppEmailJourneyTestOverrides,
   setComputerMobileAppEmailJourneyConfigForTest,
   suppressScheduledComputerMobileAppEmailJourneys,
-} from "./computerMobileAppEmailJourneyService.js";
+} from "./computerMobileAppEmailJourneyService";
+import { verifyMobileAppEmailUnsubscribeToken } from "./mobileAppEmailUnsubscribeToken";
 
+const ORIGINAL_UNSUBSCRIBE_SECRET = process.env.MOBILE_APP_EMAIL_UNSUBSCRIBE_SECRET;
 
 async function seedUserAndComputer(input: {
   email: string;
@@ -68,7 +69,16 @@ async function getJourney(userId: string) {
 
 afterEach(async () => {
   resetComputerMobileAppEmailJourneyTestOverrides();
+  if (ORIGINAL_UNSUBSCRIBE_SECRET === undefined) {
+    delete process.env.MOBILE_APP_EMAIL_UNSUBSCRIBE_SECRET;
+  } else {
+    process.env.MOBILE_APP_EMAIL_UNSUBSCRIBE_SECRET = ORIGINAL_UNSUBSCRIBE_SECRET;
+  }
   await closeTestDatabase().catch(() => {});
+});
+
+beforeEach(() => {
+  process.env.MOBILE_APP_EMAIL_UNSUBSCRIBE_SECRET = "computer-mobile-email-journey-test-secret";
 });
 
 test("first Computer schedules one mobile-app email exactly 48 hours later", async ({ db }) => {
@@ -349,6 +359,7 @@ test("suppression racing failed compensation cannot be committed before the prov
 test("the journey passes the user's display locale to the mobile email renderer", async ({ db }) => {
 
   const observedLocales: Array<string | null | undefined> = [];
+  const observedUnsubscribeUrls: string[] = [];
   const chinese = await seedUserAndComputer({
     email: "localized-mobile@example.com",
     connectedAt: new Date("2026-08-22T00:00:00.000Z"),
@@ -358,6 +369,7 @@ test("the journey passes the user's display locale to the mobile email renderer"
     mode: "all",
     sendEmail: async (_email, options) => {
       observedLocales.push(options?.locale);
+      observedUnsubscribeUrls.push(options?.unsubscribeUrl ?? "");
       return "localized-email";
     },
   });
@@ -370,6 +382,16 @@ test("the journey passes the user's display locale to the mobile email renderer"
     { status: "scheduled" },
   );
   assert.deepEqual(observedLocales, ["zh-cn"]);
+  const unsubscribeUrl = new URL(observedUnsubscribeUrls[0]!);
+  assert.equal(unsubscribeUrl.pathname, "/api/email/mobile-app/unsubscribe");
+  assert.equal(
+    verifyMobileAppEmailUnsubscribeToken(unsubscribeUrl.searchParams.get("token"))?.userId,
+    chinese.user.id,
+  );
+  assert.equal(
+    verifyMobileAppEmailUnsubscribeToken(unsubscribeUrl.searchParams.get("token"))?.locale,
+    "zh-cn",
+  );
 });
 
 test("unverified users and non-allowlisted users are not scheduled", async ({ db }) => {

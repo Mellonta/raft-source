@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 //
 // Read-only inventory of live Computer attachments whose attaching user does
 // NOT currently hold the manageMachines capability (owner/admin) on the
@@ -14,7 +14,7 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import pg from "pg";
-import * as schema from "../src/db/schema.js";
+import * as schema from "../src/db/schema";
 
 type CliOptions = {
   serverId?: string;
@@ -56,7 +56,7 @@ function usage() {
   console.error(
     [
       "Usage:",
-      "  DATABASE_URL=... tsx scripts/audit-nonadmin-computer-attachments.ts [--server-id <uuid>] [--json]",
+      "  DATABASE_URL=... node --import @oxc-node/core/register scripts/audit-nonadmin-computer-attachments.ts [--server-id <uuid>] [--json]",
       "",
       "Lists live (non-revoked) Computer attachments whose attaching user is",
       "currently a plain member (or no longer a member) of the attachment's",

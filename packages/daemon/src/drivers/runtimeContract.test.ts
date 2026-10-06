@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
-import { getDriver } from "./index.js";
+import { getDriver } from "./index";
 
 const runtimeIds = ["builtin", "claude", "codex", "grok", "kimi", "cursor", "gemini", "copilot", "opencode", "pi"] as const;
 const stdinSteerablePersistentRuntimeIds = ["claude", "codex", "grok", "kimi"] as const;
@@ -227,7 +226,7 @@ test("daemon orphan reaper is the shutdown process-tree signal boundary", () => 
   const reaperSource = readFileSync(new URL("../daemonOrphanReaper.ts", import.meta.url), "utf8");
 
   assert.match(apmSource, /reapOrphanProcesses\(/);
-  assert.match(apmSource, /daemonOrphanReaper\.js/);
+  assert.match(apmSource, /daemonOrphanReaper["']/);
 
   assert.match(reaperSource, /process\.kill\(pid,\s*0\)/);
   assert.match(reaperSource, /process\.kill\(pid,\s*"SIGKILL"\)/);

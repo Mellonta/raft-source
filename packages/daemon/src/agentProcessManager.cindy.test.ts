@@ -3,13 +3,12 @@ import type { ChildProcess } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { expect, test, vi } from "vitest";
 import { asAxSurfaceText } from "@botiverse/raft-shared";
-import { AgentProcessManager } from "./agentProcessManager.js";
-import { setDaemonFetchImplForTests } from "./daemonFetch.js";
-import type { RuntimeDriver } from "./drivers/index.js";
-import { promptConfig } from "./testing/promptFixture.js";
-import { buildCindyMemoryMd, buildOnboardingPlaybookMd, buildOnboardingKnowledgeFaqMd, buildOnboardingObjectivesMd } from "./cindy.js";
+import { AgentProcessManager } from "./agentProcessManager";
+import { setDaemonFetchImplForTests } from "./daemonFetch";
+import type { RuntimeDriver } from "./drivers/index";
+import { promptConfig } from "./testing/promptFixture";
+import { buildCindyMemoryMd, buildOnboardingPlaybookMd, buildOnboardingKnowledgeFaqMd, buildOnboardingObjectivesMd } from "./cindy";
 
 class CindyChild extends EventEmitter {
   exitCode: number | null = null;

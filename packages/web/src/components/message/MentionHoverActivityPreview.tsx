@@ -6,6 +6,7 @@ import type { TrajectoryLogEntry } from "../../store/agentStore";
 import { getToolLogLabel, shouldHideToolStartInActivityLog } from "@botiverse/raft-shared";
 import type { AgentActivity } from "@botiverse/raft-shared";
 import StatusDot from "../ui/StatusDot";
+import Tooltip from "../ui/Tooltip";
 
 const MAX_RECENT_ACTIVITY_ROWS = 5;
 
@@ -105,7 +106,7 @@ export default function MentionHoverActivityPreview({ entries, formatTimestamp, 
   const recentEntries = getRecentActivityPreviewRows(entries, formatMessage);
   if (recentEntries.length === 0) return null;
   return (
-    <div className="border-t-2 border-black px-3 py-2">
+    <div className="border-t-2 border-line-muted theme-brutal:border-black px-3 py-2">
       {/* The heading itself is the link, which is what the request asked for.
           It therefore drops `uppercase`: `clickableCaseContract` requires
           clickable labels to be Title Case and reserves UPPERCASE for static
@@ -116,13 +117,13 @@ export default function MentionHoverActivityPreview({ entries, formatTimestamp, 
           type="button"
           onClick={onOpenActivity}
           data-testid="mention-hover-activity-open"
-          className="mb-1.5 flex items-center gap-0.5 text-[10px] font-bold tracking-wide text-black/50 hover:text-black hover:underline"
+          className="mb-1.5 flex items-center gap-0.5 text-[10px] font-bold tracking-wide text-foreground-muted hover:text-foreground-strong hover:underline theme-brutal:text-black/50 theme-brutal:hover:text-black"
         >
           {formatMessage({ id: "activity.preview.recentActivity" })}
           <ChevronRight size={10} className="shrink-0" aria-hidden="true" />
         </button>
       ) : (
-        <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-black/50">
+        <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-foreground-muted theme-brutal:text-black/50">
           {formatMessage({ id: "activity.preview.recentActivity" })}
         </div>
       )}
@@ -133,13 +134,15 @@ export default function MentionHoverActivityPreview({ entries, formatTimestamp, 
             data-testid="mention-hover-activity-row"
             className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs"
           >
-            <span className="shrink-0 whitespace-nowrap font-mono text-[10px] text-black/40">
+            <span className="shrink-0 whitespace-nowrap font-mono text-[10px] text-foreground-placeholder theme-brutal:text-black/40">
               {formatTimestamp(entry.timestamp)}
             </span>
             <StatusDot activity={entry.activity} size="sm" className="shrink-0" />
-            <span className="min-w-0 flex-1 truncate text-black/70" title={entry.text}>
-              {entry.text}
-            </span>
+            <Tooltip content={entry.text}>
+              <span className="min-w-0 flex-1 truncate text-foreground-muted theme-brutal:text-black/70">
+                {entry.text}
+              </span>
+            </Tooltip>
           </div>
         ))}
       </div>

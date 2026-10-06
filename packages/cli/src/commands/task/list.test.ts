@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import type { CliIo } from "../../core/io.js";
-import { taskListCommand } from "./list.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import { CliError } from "../../core/errors";
+import type { CliIo } from "../../core/io";
+import { taskListCommand } from "./list";
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -75,9 +74,9 @@ test("task list command uses injected ApiClient and writes canonical text", asyn
     [
       "## Task Board for #proj-runtime (1 tasks)",
       "",
-      "#7 [in_progress] migrate CLI command → @HaoHao (by @xxchan) msg=abcd1234 rev=4",
-      "  details: field assertion",
-      "           rendering assertion",
+      "#7 [in_progress] → @HaoHao (by @xxchan) msg=abcd1234 rev=4 Current title: migrate CLI command",
+      "  Current description: field assertion",
+      "                       rendering assertion",
       "",
     ].join("\n"),
   );
@@ -141,9 +140,9 @@ test("task list --mine requests the bound-agent scope and renders grouped comple
       "Output: showing 2 of 2 visible matches · mode=complete · truncated=false",
       "",
       "### todo (1)",
-      "- dm:@alice task #2 [todo] inspect DM task",
+      "- dm:@alice task #2 [todo] Current title: inspect DM task",
       "### in_progress (1)",
-      "- #proj-runtime task #7 [in_progress] by=@xxchan msg=abcd1234 migrate CLI command",
+      "- #proj-runtime task #7 [in_progress] by=@xxchan msg=abcd1234 Current title: migrate CLI command",
       "",
     ].join("\n"),
   );

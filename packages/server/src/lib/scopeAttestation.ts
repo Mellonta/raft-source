@@ -1,4 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { SCOPE_ATTESTATION_MAX_CHARS } from "@botiverse/raft-shared";
 
 export interface ScopeAttestationClaims {
   v: 1;
@@ -6,6 +7,8 @@ export interface ScopeAttestationClaims {
   scope: string;
   sub: string;
   actorType?: "user" | "machine";
+  /** users.trace_user_id; the trace-upload worker writes this, never `sub`, into traces. */
+  traceUserId?: string | null;
   email?: string | null;
   machineId?: string | null;
   serverId: string;
@@ -26,12 +29,34 @@ function getScopeAttestationSecret() {
   return secret;
 }
 
+/** The token would exceed the worker's shared attestation length gate. */
+export class ScopeAttestationOverBudgetError extends Error {
+  readonly attestationChars: number;
+  readonly maxChars: number;
+
+  constructor(attestationChars: number, maxChars: number) {
+    super(`scope attestation of ${attestationChars} chars exceeds the ${maxChars}-char budget`);
+    this.name = "ScopeAttestationOverBudgetError";
+    this.attestationChars = attestationChars;
+    this.maxChars = maxChars;
+  }
+}
+
+/**
+ * Sign claims. Refuses (throws ScopeAttestationOverBudgetError) to mint a
+ * token longer than SCOPE_ATTESTATION_MAX_CHARS: the worker rejects such a
+ * token before verifying it, so signing it would only move the failure.
+ */
 export function createScopeAttestation(claims: ScopeAttestationClaims) {
   const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
   const signature = createHmac("sha256", getScopeAttestationSecret())
     .update(payload)
     .digest("base64url");
-  return `${payload}.${signature}`;
+  const token = `${payload}.${signature}`;
+  if (token.length > SCOPE_ATTESTATION_MAX_CHARS) {
+    throw new ScopeAttestationOverBudgetError(token.length, SCOPE_ATTESTATION_MAX_CHARS);
+  }
+  return token;
 }
 
 export function verifyScopeAttestation(token: string): ScopeAttestationClaims | null {

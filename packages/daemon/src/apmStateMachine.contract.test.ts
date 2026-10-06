@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   APM_STATUS_TRANSITION_CONTRACT,
   type ApmStatusTransitionContractId,
   type ApmStatusTransitionContractRow,
   type ApmUserVisibleStatus,
   getApmStatusTransitionContract,
-} from "./apmStateMachineContract.js";
+} from "./apmStateMachineContract";
 import {
   type ApmControlPlaneEventReduction,
   type ApmStalledRecoveryTerminationReduction,
@@ -22,9 +21,9 @@ import {
   reduceApmToolUse,
   reduceApmStalledRecoveryTermination,
   reduceApmStartupTimeoutTermination,
-} from "./apmStateMachine.js";
-import { classifyDaemonConnectionTraceEvent } from "./connection.js";
-import { classifyCodexResumeError, type CodexResumeErrorClassification } from "./drivers/codex.js";
+} from "./apmStateMachine";
+import { classifyDaemonConnectionTraceEvent } from "./connection";
+import { classifyCodexResumeError, type CodexResumeErrorClassification } from "./drivers/codex";
 
 const EXECUTABLE_REDUCER_ROW_IDS = [
   "direct-stdin-tool-output-stale-queued-message",

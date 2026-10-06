@@ -31,7 +31,7 @@
  */
 import { Children, createContext, isValidElement, useContext, useId, useMemo } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { Field, FieldControl, FieldLabel, SelectTrigger } from "raft-ui";
+import { Field, FieldControl, FieldLabel, LabelAsterisk, SelectTrigger } from "raft-ui";
 
 /**
  * required XOR optional, mirroring raft-ui's own `LabelMarker`. The shared
@@ -113,7 +113,7 @@ export function FieldSelectTrigger({ children, ...props }: React.ComponentProps<
   );
 }
 
-const LABEL_CLS = "text-sm font-bold text-black uppercase tracking-wide";
+const LABEL_CLS = "text-sm font-bold text-foreground-strong uppercase tracking-wide";
 
 export default function StableField({
   label, required, optional, hint, error, counter, labelAccessory, belowControl, adopt = true, layout = "stacked", htmlFor, className, children,
@@ -236,11 +236,11 @@ export default function StableField({
       <div className={layout === "row" ? "flex items-center justify-between gap-3" : "contents"}>
       {labelAccessory ? (
         <div className="flex items-center gap-2">
-          <FieldLabel {...(optional ? { optional } : { required })} className={LABEL_CLS} htmlFor={htmlFor}>{label}</FieldLabel>
+          <FieldLabel {...(optional ? { optional } : {})} className={LABEL_CLS} htmlFor={htmlFor}>{label}{required ? <LabelAsterisk className="ml-1 text-danger-strong theme-brutal:text-black" /> : null}</FieldLabel>
           {labelAccessory}
         </div>
       ) : (
-        <FieldLabel {...(optional ? { optional } : { required })} className={LABEL_CLS} htmlFor={htmlFor}>{label}</FieldLabel>
+        <FieldLabel {...(optional ? { optional } : {})} className={LABEL_CLS} htmlFor={htmlFor}>{label}{required ? <LabelAsterisk className="ml-1 text-danger-strong theme-brutal:text-black" /> : null}</FieldLabel>
       )}
 
       {control ? (
@@ -263,24 +263,26 @@ export default function StableField({
             * one control, and the eight field errors in RuntimeConfigFields had
             * no equivalent at all.
             */}
-          <FieldControl
-            {...(error ? { "data-invalid": "true" } : {})}
-            /* Always, not only when there is a message. The row is reserved
-               and always rendered, so this matches what FieldDescription did:
-               with nothing to say it resolves to empty text and announces
-               nothing. Making it conditional dropped the association from every
-               quiet field, which is what `createAgentFieldContract` pins as
-               "still wired". */
-            aria-describedby={messageId}
-            render={control as ReactElement}
-          />
-          {/* Non-control children (notices, action-card hints, status lines) still
-              render, after the control. Rendering only the adopted control silently
-              dropped them — the Computer field's "Required by the action card" text
-              disappeared with no error, which is the same failure shape as the
-              `belowControl` prop being swallowed on the FormField path. Adopting one
-              child must not mean discarding its siblings. */}
-          {allChildren.filter((c) => c !== control)}
+          {/* Siblings (notices, action-card hints, status lines, a mode Select
+              next to its value Input) render in their ORIGINAL order, with the
+              adopted control wrapped in place. Rendering the adopted control
+              first moved a custom-model Input above the Select that reveals it
+              (artin 2026-09-28); dropping the siblings instead silently lost the
+              Computer field's "Required by the action card" text. */}
+          {allChildren.map((child) => (child === control ? (
+            <FieldControl
+              key="field-control"
+              {...(error ? { "data-invalid": "true" } : {})}
+              /* Always, not only when there is a message. The row is reserved
+                 and always rendered, so this matches what FieldDescription did:
+                 with nothing to say it resolves to empty text and announces
+                 nothing. Making it conditional dropped the association from every
+                 quiet field, which is what `createAgentFieldContract` pins as
+                 "still wired". */
+              aria-describedby={messageId}
+              render={control as ReactElement}
+            />
+          ) : child))}
         </>
       ) : (
         children
@@ -297,7 +299,7 @@ export default function StableField({
             lines of empty space on every field to keep the height pinned. */}
         <span className="flex min-h-4 items-start gap-2">
           <span
-            className={`flex-1 ${message ? "" : "invisible"} ${error ? "font-bold text-brutal-red" : "text-black/50"}`}
+            className={`flex-1 ${message ? "" : "invisible"} ${error ? "font-bold text-danger-strong theme-brutal:text-brutal-red" : "text-foreground-muted theme-brutal:text-black/50"}`}
             role={error ? "alert" : undefined}
           >
             {/* Holds the line box open when empty, so the row keeps its height
@@ -305,7 +307,7 @@ export default function StableField({
             {message ?? " "}
           </span>
           {counter ? (
-            <span className="shrink-0 font-mono tabular-nums text-black/50">{counter}</span>
+            <span className="shrink-0 font-mono tabular-nums text-foreground-muted theme-brutal:text-black/50">{counter}</span>
           ) : null}
         </span>
       </div>

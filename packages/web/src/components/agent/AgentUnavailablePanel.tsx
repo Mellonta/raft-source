@@ -1,9 +1,11 @@
+import CloseButton from "../ui/CloseButton";
 import { Bot, TriangleAlert, X } from "lucide-react";
 import { useIntl } from "react-intl";
 import { useMobileBack } from "../../hooks/useAppNavigate";
 import { useServerStore } from "../../store/serverStore";
 import EmptyState from "../ui/EmptyState";
 import PanelHeader from "../ui/PanelHeader";
+import Tooltip from "../ui/Tooltip";
 
 export default function AgentUnavailablePanel({ onClose }: { onClose?: () => void }) {
   const { formatMessage } = useIntl();
@@ -11,7 +13,7 @@ export default function AgentUnavailablePanel({ onClose }: { onClose?: () => voi
   const onMobileBack = useMobileBack(onClose ?? (slug ? `/s/${slug}/members` : "/"));
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-white">
+    <div className="flex min-h-0 flex-1 flex-col bg-layer-panel theme-brutal:bg-white">
       <PanelHeader
         title={formatMessage({ id: "agent.detail.unavailableTitle" })}
         onMobileBack={onMobileBack}
@@ -20,16 +22,17 @@ export default function AgentUnavailablePanel({ onClose }: { onClose?: () => voi
           title: formatMessage({ id: "common.announcement.back" }),
         }}
         icon={<Bot size={18} />}
-        iconBg="bg-gray-200"
+        iconBg="bg-fill-muted text-foreground-strong theme-brutal:bg-gray-200 theme-brutal:text-black"
         actions={onClose ? (
-          <button
-            type="button"
-            onClick={onClose}
-            className="btn-brutal-sm hidden size-7 items-center justify-center bg-white md:flex"
-            title={formatMessage({ id: "common.close" })}
-          >
-            <X size={14} />
-          </button>
+          <Tooltip content={formatMessage({ id: "common.close" })}>
+            <CloseButton
+              type="button"
+              onClick={onClose}
+              className=" hidden size-7 items-center justify-center md:flex"
+            >
+              <X size={14} />
+            </CloseButton>
+          </Tooltip>
         ) : null}
       />
       <EmptyState

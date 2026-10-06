@@ -1,22 +1,22 @@
-import { revokeSocketAccess } from "../socket/accessRevocation.js";
-import { serializeErrorForLog } from "../tracing/safeErrorLog.js";
+import { revokeSocketAccess } from "../socket/accessRevocation";
+import { serializeErrorForLog } from "../tracing/safeErrorLog";
 import { eq, and, asc, gt, isNull, sql } from "drizzle-orm";
 import argon2 from "argon2";
 import { createHash, randomBytes } from "node:crypto";
-import { getDb } from "../db/index.js";
-import type { DatabaseExecutor } from "../db/index.js";
-import { users, emailVerifications, passwordResets, userAuthIdentities, sessionFamilies, sessions, userRetirementReceipts } from "../db/schema.js";
-import { sendVerificationEmail, sendPasswordResetEmail } from "./emailService.js";
-import { normalizeEmail } from "./emailNormalization.js";
-import { syncNewsletterSignup } from "./newsletterService.js";
-import { enqueueOnboardingEmailJourneyForUser } from "./onboardingEmailJourneyService.js";
-import { assertRegistrationEnabled } from "./registrationPolicy.js";
-import type { SocialAuthProfile, SocialAuthProvider } from "./socialAuthService.js";
-import * as legalAcceptanceService from "./legalAcceptanceService.js";
+import { getDb } from "../db/index";
+import type { DatabaseExecutor } from "../db/index";
+import { users, emailVerifications, passwordResets, userAuthIdentities, sessionFamilies, sessions, userRetirementReceipts } from "../db/schema";
+import { sendVerificationEmail, sendPasswordResetEmail } from "./emailService";
+import { normalizeEmail } from "./emailNormalization";
+import { syncNewsletterSignup } from "./newsletterService";
+import { enqueueOnboardingEmailJourneyForUser } from "./onboardingEmailJourneyService";
+import { assertRegistrationEnabled } from "./registrationPolicy";
+import type { SocialAuthProfile, SocialAuthProvider } from "./socialAuthService";
+import * as legalAcceptanceService from "./legalAcceptanceService";
 import { currentDate, isReservedAgentName, validateName } from "@botiverse/raft-shared";
-import { requestExternalAuthorAvatarSync } from "./externalAuthorAvatarSyncRuntime.js";
-import { createSession, revokeAllUserSessionsInTransaction } from "./sessionService.js";
-import { isStoredUserAvatarUrl, materializeUserProviderAvatar } from "./avatarService.js";
+import { createSession, revokeAllUserSessionsInTransaction } from "./sessionService";
+import { isStoredUserAvatarUrl, materializeUserProviderAvatar } from "./avatarService";
+import { forgetTraceUserId } from "../tracing/traceUserId";
 
 export const PROFILE_SETUP_PLACEHOLDER_PREFIX = "pending_";
 const PROFILE_SETUP_PLACEHOLDER_RANDOM_BYTES = 10;
@@ -45,6 +45,7 @@ function toPublicUser(user: {
   preferredTranslationDisplay?: "translated" | "original" | "bilingual" | null;
   preferredTimeFormat?: "12h" | "24h" | null;
   preferredMessageBodyFontSize?: "sm" | "md" | "lg" | null;
+  shareUsageData?: boolean | null;
   referralSource?: string | null;
   referralSourceOther?: string | null;
   referralSourceSkippedAt?: Date | null;
@@ -81,6 +82,8 @@ function toPublicUser(user: {
     preferredTranslationDisplay: user.preferredTranslationDisplay ?? "translated",
     preferredTimeFormat: user.preferredTimeFormat ?? null,
     preferredMessageBodyFontSize: user.preferredMessageBodyFontSize ?? null,
+    // RFC-067 "Share usage data"; null = not chosen yet.
+    shareUsageData: user.shareUsageData ?? null,
     referralSource: user.referralSource ?? null,
     referralSourceOther: user.referralSourceOther ?? null,
     referralSourceSkippedAt: user.referralSourceSkippedAt ?? null,
@@ -463,8 +466,11 @@ export async function retireStagingSelfAccount(userId: string, actorUserId: stri
       return receipt ?? null;
     }
     const now = currentDate();
-    const [updated] = await tx.update(users).set({ retiredAt: now, retiredReason: "staging_self_account" })
+    // Rotating trace_user_id unlinks the account from its traces (kept indefinitely).
+    const [updated] = await tx.update(users)
+      .set({ retiredAt: now, retiredReason: "staging_self_account", traceUserId: sql`gen_random_uuid()` })
       .where(and(eq(users.id, userId), isNull(users.retiredAt))).returning({ id: users.id });
+    forgetTraceUserId(userId);
     if (!updated) {
       const [raceReceipt] = await tx.select().from(userRetirementReceipts)
         .where(eq(userRetirementReceipts.userId, userId)).limit(1);
@@ -504,6 +510,7 @@ export async function getUser(userId: string) {
     lastObservedTimezone: users.lastObservedTimezone,
     lastObservedTimezoneAt: users.lastObservedTimezoneAt,
     autoTranslationEnabled: users.autoTranslationEnabled,
+    shareUsageData: users.shareUsageData,
     preferredTranslationMode: users.preferredTranslationMode,
     preferredTranslationDisplay: users.preferredTranslationDisplay,
     preferredTimeFormat: users.preferredTimeFormat,
@@ -541,6 +548,7 @@ export async function getUserByEmail(email: string) {
     lastObservedTimezone: users.lastObservedTimezone,
     lastObservedTimezoneAt: users.lastObservedTimezoneAt,
     autoTranslationEnabled: users.autoTranslationEnabled,
+    shareUsageData: users.shareUsageData,
     preferredTranslationMode: users.preferredTranslationMode,
     preferredTranslationDisplay: users.preferredTranslationDisplay,
     preferredTimeFormat: users.preferredTimeFormat,
@@ -572,6 +580,7 @@ export async function updateUser(userId: string, fields: {
   preferredTranslationDisplay?: "translated" | "original" | "bilingual";
   preferredTimeFormat?: "12h" | "24h" | null;
   preferredMessageBodyFontSize?: "sm" | "md" | "lg" | null;
+  shareUsageData?: boolean | null;
   referralSource?: string | null;
   referralSourceOther?: string | null;
   referralSourceSkippedAt?: Date | null;
@@ -584,9 +593,6 @@ export async function updateUser(userId: string, fields: {
     updatedAt: new Date(),
   }).where(eq(users.id, userId));
   const user = await getUser(userId);
-  if (fields.avatarUrl !== undefined && user) {
-    await requestExternalAuthorAvatarSync({ authorType: "user", authorId: userId });
-  }
   return user;
 }
 
@@ -706,6 +712,7 @@ async function getPublicUserByIdTx(database: DatabaseExecutor, userId: string) {
     lastObservedTimezone: users.lastObservedTimezone,
     lastObservedTimezoneAt: users.lastObservedTimezoneAt,
     autoTranslationEnabled: users.autoTranslationEnabled,
+    shareUsageData: users.shareUsageData,
     preferredTranslationMode: users.preferredTranslationMode,
     preferredTranslationDisplay: users.preferredTranslationDisplay,
     preferredTimeFormat: users.preferredTimeFormat,
@@ -855,7 +862,6 @@ export async function findExistingSocialLoginUser(profile: SocialAuthProfile): P
         avatarUrl: nextAvatarUrl,
         updatedAt: new Date(),
       }).where(eq(users.id, existingIdentity.userId));
-      await requestExternalAuthorAvatarSync({ authorType: "user", authorId: existingIdentity.userId });
       linkedUser = await getPublicUserByIdTx(db, existingIdentity.userId);
       if (!linkedUser) {
         throw new Error("Linked user not found");
@@ -1205,4 +1211,11 @@ export async function changePassword(userId: string, currentPassword: string, ne
     await revokeAllUserSessionsInTransaction(tx, userId);
   });
   await revokeSocketAccessAfterCredentialChange(userId);
+}
+
+/** users.trace_user_id, the only user identifier written to traces. */
+export async function getTraceUserId(userId: string): Promise<string | null> {
+  const [user] = await getDb().select({ traceUserId: users.traceUserId })
+    .from(users).where(eq(users.id, userId)).limit(1);
+  return user?.traceUserId ?? null;
 }

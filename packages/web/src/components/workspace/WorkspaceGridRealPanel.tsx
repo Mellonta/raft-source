@@ -42,11 +42,11 @@ const ChatPanel = memo(
 );
 
 const PANEL_TONE: Record<WorkspacePanelConfig["accent"], string> = {
-  yellow: "bg-soft-signal",
-  cyan: "bg-brutal-cyan",
-  lavender: "bg-brutal-lavender",
-  pink: "bg-brutal-pink",
-  lime: "bg-brutal-lime",
+  yellow: "bg-primary-soft theme-brutal:bg-soft-signal",
+  cyan: "bg-info theme-brutal:bg-brutal-cyan",
+  lavender: "bg-secondary-400 theme-brutal:bg-brutal-lavender",
+  pink: "bg-accent-400 theme-brutal:bg-brutal-pink",
+  lime: "bg-success theme-brutal:bg-brutal-lime",
 };
 
 const PANEL_ICON: Record<WorkspacePanelKind, typeof MessageSquare> = {
@@ -63,7 +63,7 @@ const PANEL_ICON: Record<WorkspacePanelKind, typeof MessageSquare> = {
 function PanelFallback() {
   const { formatMessage } = useIntl();
   return (
-    <div className="flex h-full min-h-0 flex-1 items-center justify-center bg-white text-black/40 font-display text-lg font-bold">
+    <div className="flex h-full min-h-0 flex-1 items-center justify-center bg-layer-canvas text-foreground-hint font-display text-lg font-bold">
       {formatMessage({ id: "layout.main.loading" })}
     </div>
   );
@@ -94,32 +94,32 @@ export function MockPanel({ config }: { config: WorkspacePanelConfig }) {
   const { formatMessage } = useIntl();
   const Icon = PANEL_ICON[config.kind];
   return (
-    <div className="flex h-full min-h-0 flex-col bg-white text-black" data-testid={`workspace-grid-panel-${config.kind}`}>
-      <div className="flex h-12 shrink-0 items-center gap-3 border-b-2 border-black px-4">
-        <div className={`flex size-8 shrink-0 items-center justify-center border-2 border-black ${PANEL_TONE[config.accent]}`}>
+    <div className="flex h-full min-h-0 flex-col bg-layer-canvas text-foreground-strong" data-testid={`workspace-grid-panel-${config.kind}`}>
+      <div className="flex h-12 shrink-0 items-center gap-3 border-b border-line-hairline px-4 theme-brutal:border-b-2 theme-brutal:border-black">
+        <div className={`flex size-8 shrink-0 items-center justify-center rounded-md border border-line-muted text-foreground-strong theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black ${PANEL_TONE[config.accent]}`}>
           <Icon size={16} />
         </div>
         <div className="min-w-0 flex-1">
           <div className="truncate text-sm font-bold">{config.title}</div>
-          <div className="truncate font-mono text-[11px] text-black/50">{config.subtitle}</div>
+          <div className="truncate font-mono text-[11px] text-foreground-hint">{config.subtitle}</div>
         </div>
         {config.pinned ? (
-          <div className="flex shrink-0 items-center gap-1 border-2 border-black bg-brutal-cream px-2 py-1 text-[11px] font-bold uppercase">
+          <div className="flex shrink-0 items-center gap-1 rounded-md border border-line-muted bg-layer-inset px-2 py-1 text-[11px] font-bold uppercase text-foreground-strong theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream">
             <Pin size={12} />
             {formatMessage({ id: "workspace.grid.mock.pinnedBadge" })}
           </div>
         ) : null}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
-        <p className="max-w-[56ch] text-sm leading-6 text-black/75">{config.summary}</p>
+        <p className="max-w-[56ch] text-sm leading-6 text-foreground-strong">{config.summary}</p>
         <div className="mt-4 grid gap-2 text-xs md:grid-cols-2">
-          <div className="border-2 border-black bg-brutal-cream p-3">
+          <div className="rounded-md border border-line-muted bg-layer-inset p-3 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream">
             <div className="font-bold uppercase">{formatMessage({ id: "workspace.grid.mock.panelKindLabel" })}</div>
-            <div className="mt-1 font-mono text-black/60">{config.kind}</div>
+            <div className="mt-1 font-mono text-foreground-muted">{config.kind}</div>
           </div>
-          <div className="border-2 border-black bg-brutal-cream p-3">
+          <div className="rounded-md border border-line-muted bg-layer-inset p-3 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream">
             <div className="font-bold uppercase">{formatMessage({ id: "workspace.grid.mock.replacementRuleLabel" })}</div>
-            <div className="mt-1 font-mono text-black/60">
+            <div className="mt-1 font-mono text-foreground-muted">
               {config.pinned
                 ? formatMessage(
                     { id: "workspace.grid.mock.lockedBy" },
@@ -137,15 +137,15 @@ export function MockPanel({ config }: { config: WorkspacePanelConfig }) {
 function UnresolvedPanel({ config, reason }: { config: WorkspacePanelConfig; reason: string }) {
   const { formatMessage } = useIntl();
   return (
-    <div className="flex h-full min-h-0 flex-col bg-white text-black" data-testid={`workspace-grid-panel-${config.kind}`}>
-      <div className="border-b-2 border-black bg-brutal-cream px-4 py-3 text-sm font-bold">
+    <div className="flex h-full min-h-0 flex-col bg-layer-canvas text-foreground-strong" data-testid={`workspace-grid-panel-${config.kind}`}>
+      <div className="border-b border-line-hairline bg-layer-inset px-4 py-3 text-sm font-bold text-foreground-strong theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-brutal-cream">
         {config.title}
       </div>
       <div className="flex min-h-0 flex-1 items-center justify-center p-4">
-        <div className="max-w-[420px] border-2 border-black bg-white p-4 shadow-brutal-sm">
+        <div className="max-w-[420px] rounded-md border border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
           <div className="text-sm font-bold uppercase">{formatMessage({ id: "workspace.panel.realUnavailable" })}</div>
-          <p className="mt-2 text-sm leading-6 text-black/70">{reason}</p>
-          <p className="mt-3 text-xs leading-5 text-black/50">{config.summary}</p>
+          <p className="mt-2 text-sm leading-6 text-foreground-muted">{reason}</p>
+          <p className="mt-3 text-xs leading-5 text-foreground-hint">{config.summary}</p>
         </div>
       </div>
     </div>

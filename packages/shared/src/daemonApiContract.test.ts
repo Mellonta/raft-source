@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { daemonApiKnownInboxFlagSchema, parseDaemonApiResponse } from "./daemonApiContract.js";
+import { daemonApiKnownInboxFlagSchema, parseDaemonApiResponse } from "./daemonApiContract";
 
 // 2026-09-06 incident: the daemon emitted a flag the wire contract did not accept, so an
 // inbox snapshot containing it was rejected WHOLE -- every pending target and every app
@@ -53,4 +52,14 @@ test("the wire contract's known-flag set IS the authoritative list, not a copy o
     [...RENDERER_FLAGS].sort(),
     "daemonApiContract must derive its flags from AGENT_INBOX_FLAGS, never restate them",
   );
+});
+
+test("wake hints accept a canonical target and a null one (no conversation name to derive it from)", () => {
+  const parsed = parseDaemonApiResponse("wakeHintsFetch", {
+    wake_hints: [
+      { event_id: "wake-hint:a", seq: 1, target: "#general:1a2b3c4d", wake_reason: "message_pending" },
+      { event_id: "wake-hint:b", seq: 2, target: null, wake_reason: "message_pending" },
+    ],
+  });
+  assert.deepEqual(parsed.wake_hints?.map((hint) => hint.target), ["#general:1a2b3c4d", null]);
 });

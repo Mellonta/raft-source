@@ -5,29 +5,29 @@ import {
   setClockTimeout,
   type ManagedMcpToolCatalogEntry,
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { actorHasServerCapabilityInServer } from "../lib/actorPermissions.js";
+import { getDb } from "../db/index";
+import { actorHasServerCapabilityInServer } from "../lib/actorPermissions";
 import {
   managedMcpCredentials,
   managedMcpOAuthAttempts,
   managedMcpServers,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   decryptManagedMcpSecret,
   encryptManagedMcpSecret,
   ManagedMcpCredentialError,
-} from "./managedMcpCredentialService.js";
+} from "./managedMcpCredentialService";
 import {
   completeManagedMcpOAuth,
   listManagedMcpOAuthTools,
   ManagedMcpGatewayError,
   startManagedMcpOAuth,
   validateManagedMcpEndpoint,
-} from "./managedMcpGateway.js";
+} from "./managedMcpGateway";
 import {
   ManagedMcpOAuthProvider,
   type ManagedMcpOAuthStorage,
-} from "./managedMcpOAuthProvider.js";
+} from "./managedMcpOAuthProvider";
 
 const OAUTH_ATTEMPT_TTL_MS = 10 * 60_000;
 const OAUTH_LEASE_TTL_MS = 60_000;

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   isAppId,
   manifestDeclaresHook,
@@ -10,7 +9,7 @@ import {
   HOOKS,
   SYSCALLS,
   type AppId,
-} from "./rapRegistry.js";
+} from "./rapRegistry";
 
 // ⚠️ No app names anywhere in this file either -- the ids below are synthetic
 // (`x.alpha`, `x.beta`). Naming a real app in a test would put the name in an

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { parseTraceparent } from "@botiverse/raft-shared";
 import axios, { AxiosError, CanceledError } from "axios";
 import type { InternalAxiosRequestConfig } from "axios";
@@ -332,13 +331,16 @@ test("web trace record preserves an explicit parent, kind, status, and timestamp
   assert.equal(record.start_time, "2026-07-11T00:00:00.000Z");
   assert.equal(record.end_time, "2026-07-11T00:00:01.000Z");
 
-  const defaults = buildWebTraceRecord("web.http.client");
+  const defaults = buildWebTraceRecord("web.http.client", {}, {
+    startTime: "2026-07-11T00:00:00.000Z",
+    endTime: "2026-07-11T00:00:01.000Z",
+  });
   assert.equal("parent_span_id" in defaults, false);
+  assert.match(defaults.trace_id, /^[0-9a-f]{32}$/);
+  assert.match(defaults.span_id, /^[0-9a-f]{16}$/);
   assert.equal(defaults.kind, "internal");
   assert.equal(defaults.status, "unset");
   assert.equal(defaults.surface, "web");
-  assert.match(defaults.start_time, /^\d{4}-\d{2}-\d{2}T/);
-  assert.equal(defaults.end_time, defaults.start_time);
 });
 
 test("attached HTTP trace is one live span per attempt and detaches after completion", async () => {

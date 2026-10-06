@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import "dotenv/config";
 import {
   assertInboxServingRowsIndexReady,
@@ -6,7 +6,7 @@ import {
   createPool,
   describeInboxServingRowsIndexStatus,
   readInboxServingRowsIndexStatus,
-} from "./inbox-serving-rows-receiver-server-index.js";
+} from "./inbox-serving-rows-receiver-server-index";
 
 async function main(): Promise<void> {
   const pool = createPool();

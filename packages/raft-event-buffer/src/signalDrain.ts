@@ -1,4 +1,4 @@
-import { EventBuffer, type EventBufferDrainReceipt } from "./core.js";
+import { EventBuffer, type EventBufferDrainReceipt } from "./core";
 
 type DrainSignal = "SIGTERM" | "SIGINT";
 

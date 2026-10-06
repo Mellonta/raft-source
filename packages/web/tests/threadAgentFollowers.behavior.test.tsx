@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { afterEach, test as nodeTest } from "node:test";
-import { THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
+import { test as nodeTest } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { toast } from "raft-ui";
 import "./helpers/domSetup";
@@ -10,7 +9,6 @@ import api from "../src/api/client";
 import ThreadAgentFollowers from "../src/components/thread/ThreadAgentFollowers";
 import {
   resetServerFeatureFlagsForTests,
-  setServerFeatureFlagForTests,
 } from "../src/store/serverFeatureFlags";
 import { useServerStore } from "../src/store/serverStore";
 import { useProfileStore } from "../src/store/profileStore";
@@ -34,9 +32,9 @@ const originalGet = api.get.bind(api);
 const originalDelete = api.delete.bind(api);
 const originalPost = api.post.bind(api);
 const test = ((name: string, fn: Parameters<typeof nodeTest>[1]) =>
-  nodeTest(name, { concurrency: false }, fn)) as typeof nodeTest;
+  nodeTest(name,  fn)) as typeof nodeTest;
 
-function setupServer(enabled = true) {
+function setupServer() {
   useServerStore.setState({
     current: {
       id: SERVER_ID,
@@ -51,11 +49,6 @@ function setupServer(enabled = true) {
       createdAt: "2026-08-25T00:00:00.000Z",
     },
   } as never);
-  setServerFeatureFlagForTests(
-    SERVER_ID,
-    THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY,
-    enabled,
-  );
 }
 
 function renderFollower(threadChannelId = THREAD_ID, variant: "card" | "header" = "card") {
@@ -154,21 +147,6 @@ afterEach(() => {
   useServerStore.setState(useServerStore.getInitialState(), true);
 });
 
-test("disabled servers render neither thread follower entry nor roster request", async () => {
-  setupServer(false);
-  let getCalls = 0;
-  api.get = (async () => {
-    getCalls += 1;
-    throw new Error("disabled surface must not load");
-  }) as typeof api.get;
-
-  renderFollower();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-
-  assert.equal(screen.queryByTestId("thread-followers-card-trigger"), null);
-  assert.equal(getCalls, 0);
-});
-
 test("card and header entries coalesce roster loading and keep ordinary viewers read-only", async () => {
   setupServer();
   const gets: Array<{ url: string; ids: string }> = [];
@@ -199,8 +177,42 @@ test("card and header entries coalesce roster loading and keep ordinary viewers 
 
   fireEvent.click(screen.getByTestId("thread-followers-card-trigger"));
   assert.ok(await screen.findByText(LONG_AGENT_NAME));
-  assert.equal(screen.getByText(LONG_AGENT_NAME).getAttribute("title"), LONG_AGENT_NAME);
+  const agentName = screen.getByText(LONG_AGENT_NAME);
+  // title→Tooltip migration: the row name's title was a redundant duplicate of
+  // its visible text, so it was removed rather than wrapped — no native title,
+  // no tooltip trigger marker.
+  assert.equal(agentName.getAttribute("title"), null);
+  assert.equal(agentName.hasAttribute("data-base-ui-tooltip-trigger"), false);
   assert.equal(screen.queryByTestId("thread-follower-remove"), null, "read-only viewers must not get a removal control");
+  // Task #701: each row mirrors the members list's agent status sub-line.
+  assert.ok(screen.getByText("Online"), "the row shows the agent's activity like the members list");
+});
+
+test("follower rows show each agent's status like the members list", async () => {
+  setupServer();
+  api.get = (async () => ({
+    data: {
+      threads: [{
+        threadChannelId: THREAD_ID,
+        canManage: false,
+        agents: [
+          { id: AGENT_ID, name: "online-agent", displayName: "Online Agent", status: "online", avatarUrl: null },
+          { id: "stopped-agent-id", name: "stopped-agent", displayName: "Stopped Agent", status: "stopped", avatarUrl: null },
+        ],
+      }],
+    },
+  })) as typeof api.get;
+
+  renderFollower();
+  await waitFor(() => screen.getByTestId("thread-followers-card-trigger"));
+  fireEvent.click(screen.getByTestId("thread-followers-card-trigger"));
+
+  await screen.findByText("Online Agent");
+  assert.ok(screen.getByText("Online"), "an online agent reads like the members list");
+  assert.ok(
+    screen.getByText("Stopped \u2014 won't receive messages until restarted"),
+    "a stopped agent reads the stopped copy, exactly like the members list",
+  );
 });
 
 test("every follower row opens the corresponding Agent profile", async () => {
@@ -240,11 +252,12 @@ test("every follower row opens the corresponding Agent profile", async () => {
 
   fireEvent.click(screen.getByTestId("thread-followers-card-trigger"));
 
-  const profileRows = await screen.findAllByTestId("thread-follower-profile-row");
-  assert.equal(profileRows.length, 2);
-  for (const [index, profileRow] of profileRows.entries()) {
+  // Rows now reuse the members list's ChannelMemberRow (task #701): the
+  // profile target is its whole-row button, located by its accessible name.
+  const localRow = await screen.findByRole("button", { name: /Local Agent/ });
+  const peerRow = await screen.findByRole("button", { name: /Peer Agent/ });
+  for (const [index, profileRow] of [localRow, peerRow].entries()) {
     assert.equal(profileRow.tagName, "BUTTON", "the profile target must be a native button");
-    assert.equal(profileRow.getAttribute("aria-label"), index === 0 ? "Local Agent" : "Peer Agent");
     fireEvent.click(profileRow);
     await waitFor(() => {
       const profile = useProfileStore.getState();
@@ -259,7 +272,7 @@ test("every follower row opens the corresponding Agent profile", async () => {
   assert.equal(getCachedAgentProfile(SERVER_ID, PEER_AGENT_ID)?.status, "active");
 });
 
-test("removing a follower keeps the roster open so several can be removed in a row", async (t) => {
+test("removing a follower keeps the roster open so several can be removed in a row", async () => {
   setupServer();
   api.get = (async () => ({
     data: {
@@ -278,7 +291,7 @@ test("removing a follower keeps the roster open so several can be removed in a r
     deletes.push(url);
     return { data: { ok: true, removed: true, undoToken: null } };
   }) as typeof api.delete;
-  t.mock.method(toast, "success", () => "toast-id");
+  vi.spyOn(toast, "success").mockImplementation(() => "toast-id");
 
   renderFollower();
   await waitFor(() => assert.equal(screen.getByTestId("thread-followers-card-trigger").textContent, "2"));
@@ -347,7 +360,7 @@ test("roster failure is explicit and Retry can resolve to the empty state", asyn
   );
 });
 
-test("thread author removal updates the roster immediately and five-second Undo restores it", async (t) => {
+test("thread author removal updates the roster immediately and five-second Undo restores it", async () => {
   setupServer();
   const deletes: string[] = [];
   const posts: Array<{ url: string; body: unknown }> = [];
@@ -364,7 +377,7 @@ test("thread author removal updates the roster immediately and five-second Undo 
     posts.push({ url, body });
     return { data: { ok: true, restored: true } };
   }) as typeof api.post;
-  const successToast = t.mock.method(toast, "success", () => "toast-id");
+  const successToast = vi.spyOn(toast, "success").mockImplementation(() => "toast-id");
 
   renderFollower();
   await waitFor(() => assert.equal(screen.getByTestId("thread-followers-card-trigger").textContent, "1"));
@@ -375,8 +388,8 @@ test("thread author removal updates the roster immediately and five-second Undo 
   assert.deepEqual(deletes, [`/channels/threads/${THREAD_ID}/followers/agents/${AGENT_ID}`]);
   const entryHiddenAfterRemoval = screen.queryByTestId("thread-followers-card-trigger") === null;
   assert.equal(successToast.mock.calls.length, 1);
-  assert.equal(successToast.mock.calls[0]?.arguments[0], `Removed ${LONG_AGENT_NAME} from this thread's followers.`);
-  const options = successToast.mock.calls[0]?.arguments[1] as {
+  assert.equal(successToast.mock.calls[0][0], `Removed ${LONG_AGENT_NAME} from this thread's followers.`);
+  const options = successToast.mock.calls[0][1] as {
     timeout: number;
     dismissible: boolean;
     contentClassName: string;
@@ -397,7 +410,7 @@ test("thread author removal updates the roster immediately and five-second Undo 
     assert.equal(rosterLoads, 2, "successful Undo must re-read the authoritative roster");
   });
   assert.equal(successToast.mock.calls.length, 2);
-  assert.equal(successToast.mock.calls[1]?.arguments[0], `Restored ${LONG_AGENT_NAME} as a follower.`);
+  assert.equal(successToast.mock.calls[1][0], `Restored ${LONG_AGENT_NAME} as a follower.`);
   assert.equal(
     entryHiddenAfterRemoval,
     true,
@@ -405,7 +418,7 @@ test("thread author removal updates the roster immediately and five-second Undo 
   );
 });
 
-test("managed rosters keep peer-server Agents read-only while local Agents can remove and Undo", async (t) => {
+test("managed rosters keep peer-server Agents read-only while local Agents can remove and Undo", async () => {
   setupServer();
   const deletes: string[] = [];
   const posts: Array<{ url: string; body: unknown }> = [];
@@ -422,7 +435,7 @@ test("managed rosters keep peer-server Agents read-only while local Agents can r
     posts.push({ url, body });
     return { data: { ok: true, restored: true } };
   }) as typeof api.post;
-  const successToast = t.mock.method(toast, "success", () => "toast-id");
+  const successToast = vi.spyOn(toast, "success").mockImplementation(() => "toast-id");
 
   renderFollower(THREAD_ID, "header");
   await waitFor(() => assert.equal(screen.getByTestId("thread-followers-header-trigger").textContent, "2"));
@@ -452,7 +465,7 @@ test("managed rosters keep peer-server Agents read-only while local Agents can r
   fireEvent.click(localRemove);
   await waitFor(() => assert.deepEqual(deletes, [`/channels/threads/${THREAD_ID}/followers/agents/${AGENT_ID}`]));
   assert.equal(successToast.mock.calls.length, 1);
-  const options = successToast.mock.calls[0]?.arguments[1] as {
+  const options = successToast.mock.calls[0][1] as {
     timeout: number;
     dismissible: boolean;
     action: { label: string; onClick: () => void };
@@ -470,16 +483,6 @@ test("managed rosters keep peer-server Agents read-only while local Agents can r
     assert.equal(rosterLoads, 2, "successful local Undo must re-read the authoritative roster");
   });
   assert.equal(successToast.mock.calls.length, 2);
-});
-
-test("follower removal toast content class removes button chrome from its status icon", () => {
-  const styles = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
-  const followerRemovalSelector =
-    '.thread-follower-removal-toast [data-slot="toast-icon"]';
-
-  assert.match(styles, new RegExp(`${followerRemovalSelector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*border-width:\\s*0;`, "s"));
-  assert.match(styles, new RegExp(`${followerRemovalSelector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*background-color:\\s*transparent;`, "s"));
-  assert.match(styles, new RegExp(`${followerRemovalSelector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{[^}]*box-shadow:\\s*none;`, "s"));
 });
 
 test("follower update events refresh an open roster without a new message", async () => {

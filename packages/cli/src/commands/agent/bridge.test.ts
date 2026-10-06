@@ -3,15 +3,14 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 import { Command } from "commander";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import type { CliIo } from "../../core/io.js";
-import { getConsumedSeq } from "../message/_consumedSeqState.js";
-import { agentBridgeCommand, registerAgentBridgeCommand } from "./bridge.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import type { CliIo } from "../../core/io";
+import { getConsumedSeq } from "../message/_consumedSeqState";
+import { agentBridgeCommand, registerAgentBridgeCommand } from "./bridge";
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -545,8 +544,8 @@ test("agent bridge fails visible when the profile bridge lock is already held", 
 // Staging deploys restart the server several times a day; the loop used to
 // die on the first SERVER_5XX / transport throw, silently ending all wakes
 // until the operator restarted CC. ---
-import { classifyBridgeLoopError } from "./bridge.js";
-import { CliError } from "../../core/errors.js";
+import { classifyBridgeLoopError } from "./bridge";
+import { CliError } from "../../core/errors";
 
 test("classifyBridgeLoopError: 5xx and transport throws retry, 4xx and unknown fail closed", () => {
   assert.equal(classifyBridgeLoopError(new CliError({ code: "SERVER_5XX", message: "HTTP 503" })), "retryable");

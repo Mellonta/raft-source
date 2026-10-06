@@ -1,7 +1,159 @@
 import { expect, test } from "@playwright/test";
+import type { Page, TestInfo } from "@playwright/test";
 import { loginViaApi } from "../../fixtures/auth";
 import { waitForSeedState } from "../../fixtures/seedState";
 import { dismissOwnerOnboarding } from "../../fixtures/session";
+
+interface ThreadReadinessSample {
+  elapsedMs: number;
+  reason: "init" | "interval" | "final";
+  pathname: string;
+  search: string;
+  readyState: DocumentReadyState;
+  threadScrollerCount: number;
+  threadScrollerVisible: boolean;
+  threadParentCount: number;
+  mobileBackCount: number;
+  threadLoadingVisible: boolean;
+  threadErrorVisible: boolean;
+  threadRetryCount: number;
+  messageScrollerCount: number;
+  parentContentPresent: boolean;
+  replyPresent: boolean;
+}
+
+interface ThreadReadinessLedger {
+  schema: "thread-scroller-readiness";
+  version: 1;
+  timeOrigin: number;
+  samples: ThreadReadinessSample[];
+}
+
+interface ThreadReadinessProbe {
+  stopAndRead: () => ThreadReadinessLedger;
+}
+
+type ThreadReadinessWindow = Window & {
+  __RAFT_THREAD_READINESS__?: ThreadReadinessProbe;
+};
+
+async function installThreadReadinessProbe(
+  page: Page,
+  parentContent: string,
+  reply: string,
+) {
+  await page.evaluate(({ expectedParentContent, expectedReply }) => {
+    const maxSamples = 24;
+    const samples: ThreadReadinessSample[] = [];
+    const startedAt = performance.now();
+
+    const record = (reason: ThreadReadinessSample["reason"]) => {
+      const threadScroller = document.querySelector<HTMLElement>(
+        '[data-testid="thread-message-scroller"]',
+      );
+      const threadScrollerStyle = threadScroller ? getComputedStyle(threadScroller) : null;
+      const mobileBack = document.querySelector<HTMLElement>('[data-testid="thread-mobile-back"]');
+      const threadSurface = mobileBack?.closest(".isolate") ?? document;
+      const retry = threadSurface.querySelector<HTMLElement>('[data-testid="thread-retry"]');
+      const loading = Array.from(threadSurface.querySelectorAll<HTMLElement>("div")).find((node) => {
+        const text = node.textContent?.trim();
+        return text === "Loading…" || text === "加载中…";
+      });
+      const bodyText = document.body?.textContent ?? "";
+      const sample: ThreadReadinessSample = {
+        elapsedMs: Math.round(performance.now() - startedAt),
+        reason,
+        pathname: location.pathname,
+        search: location.search,
+        readyState: document.readyState,
+        threadScrollerCount: document.querySelectorAll(
+          '[data-testid="thread-message-scroller"]',
+        ).length,
+        threadScrollerVisible: !!threadScroller
+          && threadScroller.getClientRects().length > 0
+          && threadScrollerStyle?.display !== "none"
+          && threadScrollerStyle?.visibility !== "hidden",
+        threadParentCount: document.querySelectorAll('[data-testid="thread-panel-parent"]').length,
+        mobileBackCount: document.querySelectorAll('[data-testid="thread-mobile-back"]').length,
+        threadLoadingVisible: !!loading && loading.getClientRects().length > 0,
+        threadErrorVisible: !!retry && retry.getClientRects().length > 0,
+        threadRetryCount: document.querySelectorAll('[data-testid="thread-retry"]').length,
+        messageScrollerCount: document.querySelectorAll('[data-testid="message-scroller"]').length,
+        parentContentPresent: bodyText.includes(expectedParentContent),
+        replyPresent: bodyText.includes(expectedReply),
+      };
+      if (samples.length < maxSamples) {
+        samples.push(sample);
+      } else if (reason === "final") {
+        samples[maxSamples - 1] = sample;
+      }
+    };
+
+    const timer = window.setInterval(() => record("interval"), 250);
+    const probe: ThreadReadinessProbe = {
+      stopAndRead: () => {
+        window.clearInterval(timer);
+        record("final");
+        Reflect.deleteProperty(window, "__RAFT_THREAD_READINESS__");
+        return {
+          schema: "thread-scroller-readiness",
+          version: 1,
+          timeOrigin: performance.timeOrigin,
+          samples,
+        };
+      },
+    };
+    Object.defineProperty(window, "__RAFT_THREAD_READINESS__", {
+      configurable: true,
+      value: probe,
+    });
+    record("init");
+  }, { expectedParentContent: parentContent, expectedReply: reply });
+}
+
+async function expectThreadScrollerWithReadinessEvidence(
+  page: Page,
+  testInfo: TestInfo,
+) {
+  let assertionError: Error | null = null;
+  try {
+    await expect(page.getByTestId("thread-message-scroller")).toBeVisible();
+  } catch (error) {
+    assertionError = error instanceof Error ? error : new Error(String(error));
+  }
+
+  let evidence: ThreadReadinessLedger | null = null;
+  let captureError: Error | null = null;
+  try {
+    evidence = await page.evaluate(() =>
+      (window as ThreadReadinessWindow).__RAFT_THREAD_READINESS__?.stopAndRead() ?? null
+    );
+    if (!evidence) captureError = new Error("thread readiness probe missing after navigation");
+  } catch (error) {
+    captureError = error instanceof Error ? error : new Error(String(error));
+  }
+
+  try {
+    await testInfo.attach("thread-scroller-readiness.json", {
+      body: Buffer.from(JSON.stringify({
+        retry: testInfo.retry,
+        evidence,
+        captureError: captureError?.message ?? null,
+      }, null, 2)),
+      contentType: "application/json",
+    });
+  } catch (error) {
+    captureError ??= error instanceof Error ? error : new Error(String(error));
+  }
+
+  if (assertionError) {
+    if (captureError) {
+      console.error("[thread-readiness] diagnostic capture failed:", captureError.message);
+    }
+    throw assertionError;
+  }
+  if (captureError) throw captureError;
+}
 
 // Covers the bug Jianwei filed in #engineering task #288: on mobile, tapping
 // "View in channel" inside a DM thread routed to /channel/<dmId> instead of
@@ -11,7 +163,7 @@ test.describe("thread view-in-channel routing", () => {
   test("mobile: channel thread → /channel/<id>?msg=<parentId>", async ({
     page,
     request,
-  }) => {
+  }, testInfo) => {
     await page.setViewportSize({ width: 390, height: 844 });
 
     const seedState = await waitForSeedState();
@@ -46,13 +198,13 @@ test.describe("thread view-in-channel routing", () => {
     await page.goto(
       `/s/${seedState.server.slug}/channel/${seedState.channel.id}?thread=${seedState.channel.id}:${parentMsg.id}`,
     );
-    await expect(page.getByTestId("thread-message-scroller")).toBeVisible();
+    await installThreadReadinessProbe(page, parentContent, reply);
+    await expectThreadScrollerWithReadinessEvidence(page, testInfo);
     await expect(page.getByTestId("thread-mobile-back")).toBeVisible();
 
-    const viewInChannel = page.getByRole("button", { name: "View in channel" });
-    await expect(viewInChannel).not.toHaveAttribute("title", /.+/);
-    await viewInChannel.hover();
-    await expect(page.locator('[data-slot="tooltip-content"]')).toHaveText("View in channel");
+    await page.getByTestId("thread-overflow-trigger").click();
+    const viewInChannel = page.getByTestId("thread-overflow-view-in-channel");
+    await expect(viewInChannel).toHaveText("View in channel");
     await viewInChannel.click();
 
     await expect(page).toHaveURL(
@@ -115,7 +267,8 @@ test.describe("thread view-in-channel routing", () => {
     await expect(page.getByTestId("thread-message-scroller")).toBeVisible();
     await expect(page.getByTestId("thread-mobile-back")).toBeVisible();
 
-    await page.getByRole("button", { name: "View in channel" }).click();
+    await page.getByTestId("thread-overflow-trigger").click();
+    await page.getByTestId("thread-overflow-view-in-channel").click();
 
     // Critical: the path is /dm/, not /channel/, AND ?msg= survives (the
     // old closeThread() race wiped the query, leaving us at /dm/<id> alone).
@@ -175,7 +328,8 @@ test.describe("thread view-in-channel routing", () => {
     );
     await expect(page.getByTestId("thread-message-scroller")).toBeVisible();
 
-    await page.getByRole("button", { name: "View in channel" }).click();
+    await page.getByTestId("thread-overflow-trigger").click();
+    await page.getByTestId("thread-overflow-view-in-channel").click();
 
     await expect(page).toHaveURL(
       new RegExp(`/s/${seedState.server.slug}/dm/${dm.id}\\?msg=${parentMsg.id}$`),

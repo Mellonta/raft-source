@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import "./helpers/domSetup";
 import api from "../src/api/client";
 import { useAuthStore } from "../src/store/authStore";
@@ -46,13 +45,13 @@ test.afterEach(async () => {
   useAuthStore.setState(initialAuthState, true);
 });
 
-test("login records browser timezone once without blocking authentication", async (t) => {
+test("login records browser timezone once without blocking authentication", async () => {
   const browserTimezone = detectBrowserTimezone();
   assert.ok(browserTimezone);
   const calls: Array<{ url: string; body: unknown }> = [];
   const observedAt = "2026-07-17T07:50:00.000Z";
 
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     calls.push({ url, body });
     if (url === "/auth/login") {
       return { data: { user: user(), accessToken: "access", refreshToken: "refresh" } };
@@ -84,17 +83,17 @@ test("login records browser timezone once without blocking authentication", asyn
   assert.equal(useAuthStore.getState().user?.lastObservedTimezoneAt, observedAt);
 });
 
-test("auth restore progressively fills a missing observation", async (t) => {
+test("auth restore progressively fills a missing observation", async () => {
   const browserTimezone = detectBrowserTimezone();
   assert.ok(browserTimezone);
   const urls: string[] = [];
   useAuthStore.setState({ accessToken: "stored-access", refreshToken: "stored-refresh" });
 
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     assert.equal(url, "/auth/me");
     return { data: user() };
   });
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     urls.push(url);
     assert.deepEqual(body, { timezone: browserTimezone });
     return {
@@ -115,9 +114,9 @@ test("auth restore progressively fills a missing observation", async (t) => {
   assert.equal(useAuthStore.getState().user?.lastObservedTimezone, browserTimezone);
 });
 
-test("existing first observation still reports latest while unsupported server state does not", async (t) => {
+test("existing first observation still reports latest while unsupported server state does not", async () => {
   let observationCalls = 0;
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     if (url === "/auth/login") {
       return {
         data: {
@@ -150,10 +149,10 @@ test("existing first observation still reports latest while unsupported server s
   assert.equal(useAuthStore.getState().user?.firstObservedTimezone, "Europe/Paris");
   assert.equal(useAuthStore.getState().user?.lastObservedTimezone, "Asia/Shanghai");
 
-  t.mock.restoreAll();
+  vi.restoreAllMocks();
   useAuthStore.setState(initialAuthState, true);
   observationCalls = 0;
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     if (url === "/auth/login") {
       const olderUser = user();
       delete olderUser.firstObservedTimezone;
@@ -171,12 +170,12 @@ test("existing first observation still reports latest while unsupported server s
   assert.equal(observationCalls, 0);
 });
 
-test("first-only endpoint response from an older server does not break auth or invent last state", async (t) => {
+test("first-only endpoint response from an older server does not break auth or invent last state", async () => {
   const browserTimezone = detectBrowserTimezone();
   assert.ok(browserTimezone);
   const firstAt = "2026-07-10T07:51:00.000Z";
 
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     if (url === "/auth/login") {
       const olderUser = user({
         firstObservedTimezone: "Europe/Paris",
@@ -204,12 +203,12 @@ test("first-only endpoint response from an older server does not break auth or i
   assert.equal(useAuthStore.getState().user?.lastObservedTimezoneAt, undefined);
 });
 
-test("browser timezone detection failure does not block login or report", async (t) => {
+test("browser timezone detection failure does not block login or report", async () => {
   let observationCalls = 0;
-  t.mock.method(Intl, "DateTimeFormat", () => {
+  vi.spyOn(Intl, "DateTimeFormat").mockImplementation(() => {
     throw new Error("timezone unavailable");
   });
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     if (url === "/auth/login") {
       return { data: { user: user(), accessToken: "access", refreshToken: "refresh" } };
     }
@@ -224,12 +223,12 @@ test("browser timezone detection failure does not block login or report", async 
   assert.equal(observationCalls, 0);
 });
 
-test("missing browser timezone does not emit an observation request", async (t) => {
+test("missing browser timezone does not emit an observation request", async () => {
   let observationCalls = 0;
-  t.mock.method(Intl, "DateTimeFormat", () => ({
+  vi.spyOn(Intl, "DateTimeFormat").mockImplementation(() => ({
     resolvedOptions: () => ({ timeZone: undefined }),
   }) as Intl.DateTimeFormat);
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     if (url === "/auth/login") {
       return { data: { user: user(), accessToken: "access", refreshToken: "refresh" } };
     }
@@ -244,9 +243,9 @@ test("missing browser timezone does not emit an observation request", async (t) 
   assert.equal(observationCalls, 0);
 });
 
-test("observation failure is isolated from login and can retry on later restore", async (t) => {
+test("observation failure is isolated from login and can retry on later restore", async () => {
   let observationAttempts = 0;
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     if (url === "/auth/login") {
       return { data: { user: user(), accessToken: "access", refreshToken: "refresh" } };
     }
@@ -261,19 +260,19 @@ test("observation failure is isolated from login and can retry on later restore"
   assert.equal(useAuthStore.getState().user?.lastObservedTimezone, null);
   assert.equal(observationAttempts, 1);
 
-  t.mock.method(api, "get", async () => ({ data: user() }));
+  vi.spyOn(api, "get").mockImplementation(async () => ({ data: user() }));
   await useAuthStore.getState().loadUser();
   await settleObservation();
   assert.equal(observationAttempts, 2);
 });
 
-test("late observation response cannot restore a logged-out user", async (t) => {
+test("late observation response cannot restore a logged-out user", async () => {
   let resolveObservation!: (value: unknown) => void;
   const observation = new Promise((resolve) => {
     resolveObservation = resolve;
   });
 
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     if (url === "/auth/login") {
       return { data: { user: user(), accessToken: "access", refreshToken: "refresh" } };
     }
@@ -297,13 +296,13 @@ test("late observation response cannot restore a logged-out user", async (t) => 
   assert.equal(useAuthStore.getState().user, null);
 });
 
-test("late observation response cannot overwrite a different authenticated user", async (t) => {
+test("late observation response cannot overwrite a different authenticated user", async () => {
   let resolveObservation!: (value: unknown) => void;
   const observation = new Promise((resolve) => {
     resolveObservation = resolve;
   });
 
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     if (url === "/auth/login") {
       return { data: { user: user(), accessToken: "access", refreshToken: "refresh" } };
     }

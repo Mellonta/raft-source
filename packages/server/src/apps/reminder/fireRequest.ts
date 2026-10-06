@@ -1,9 +1,10 @@
 import type { MachineToServerMessage } from "@botiverse/raft-shared";
-import { appSourceTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace.js";
-import type { BuiltInMachineMessageContext } from "../../registry.manifest.js";
-import * as reminderService from "./service.js";
-import { isReminderCatchup } from "./fireTiming.js";
-import { selectReminderDueProtocol } from "./protocolTransition.js";
+import { appSourceTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace";
+import type { BuiltInMachineMessageContext } from "../../registry.manifest";
+import * as reminderService from "./service";
+import { isReminderCatchup } from "./fireTiming";
+import { selectReminderDueProtocol } from "./protocolTransition";
+import { errorClassOf } from "../../tracing/semanticTrace";
 
 type FireRequest = Extract<MachineToServerMessage, { type: "reminder.fire_request" }>;
 
@@ -60,7 +61,7 @@ export async function handleReminderFireRequest(
     capabilities: context.capabilities,
   });
   if (protocol !== "fire_request") {
-    context.trace("server.app_source.receipt", {
+    context.setReceiptOutcome({
       ...attrs,
       machine_id: context.machineId,
       receipt_type: message.type,
@@ -73,7 +74,7 @@ export async function handleReminderFireRequest(
 
   try {
     if (await replayAuthorizedFire(message, context)) {
-      context.trace("server.app_source.receipt", {
+      context.setReceiptOutcome({
         ...attrs,
         machine_id: context.machineId,
         receipt_type: message.type,
@@ -138,7 +139,7 @@ export async function handleReminderFireRequest(
           dueAt: dueAt.toISOString(),
           retryAfterMs,
         });
-        context.trace("server.app_source.receipt", {
+        context.setReceiptOutcome({
           ...attrs,
           machine_id: context.machineId,
           receipt_type: message.type,
@@ -174,7 +175,7 @@ export async function handleReminderFireRequest(
       ? await context.host.pushReminderUpsert(result.row.ownerAgentId, result.row)
       : await context.host.pushReminderCancel(result.row.ownerAgentId, result.row.id, result.row.version);
     const sent = await sendAccepted(message, context, result);
-    context.trace("server.app_source.receipt", {
+    context.setReceiptOutcome({
       ...attrs,
       machine_id: context.machineId,
       receipt_type: message.type,
@@ -184,12 +185,14 @@ export async function handleReminderFireRequest(
       catchup: result.catchup,
     }, sent && transported ? "ok" : "error");
   } catch (error) {
-    context.trace("server.app_source.receipt", {
+    context.setReceiptOutcome({
       ...attrs,
       machine_id: context.machineId,
       receipt_type: message.type,
       request_id: message.requestId,
       outcome: "convergence_failed",
+      reason: "convergence_threw",
+      error_class: errorClassOf(error),
     }, "error");
     console.error(`[Machine ${context.machineId}] Failed to converge due request ${message.reminderId}:`, error);
   }

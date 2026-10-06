@@ -12,9 +12,8 @@
  * cases are the ones where the two could plausibly disagree.
  */
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { parseChannelRef } from "./channelService.js";
+import { parseChannelRef } from "./channelService";
 
 test("channel and DM refs split into channel part plus optional thread short id", () => {
   assert.deepEqual(parseChannelRef("#proj-dx"), { baseRef: "#proj-dx", threadShortId: null });

@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ManagedMcpServerView } from "@botiverse/raft-shared";
 import type { Locale } from "../src/i18n/locale";
@@ -45,9 +44,9 @@ function server(input: {
 
 afterEach(cleanup);
 
-test("Agent MCP catalog does not refetch when only the locale changes", async (t) => {
+test("Agent MCP catalog does not refetch when only the locale changes", async () => {
   let catalogRequests = 0;
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     assert.equal(url, "/mcp/agents/agent-1");
     catalogRequests += 1;
     return {
@@ -78,8 +77,8 @@ test("Agent MCP catalog does not refetch when only the locale changes", async (t
   assert.equal(catalogRequests, 1);
 });
 
-test("Agent MCP renders only actual usage and exposes no assignment controls", async (t) => {
-  t.mock.method(api, "get", async (url: string) => {
+test("Agent MCP renders only actual usage and exposes no assignment controls", async () => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     assert.equal(url, "/mcp/agents/agent-1");
     return {
       data: {
@@ -110,8 +109,8 @@ test("Agent MCP renders only actual usage and exposes no assignment controls", a
   assert.equal(screen.queryByRole("button", { name: /apply/i }), null);
 });
 
-test("Agent MCP explains automatic availability before first use", async (t) => {
-  t.mock.method(api, "get", async () => ({
+test("Agent MCP explains automatic availability before first use", async () => {
+  vi.spyOn(api, "get").mockImplementation(async () => ({
     data: {
       servers: [server({ id: "unused-docs", name: "Unused docs", usage: null })],
       recommendations: [],
@@ -126,8 +125,8 @@ test("Agent MCP explains automatic availability before first use", async (t) => 
   ));
 });
 
-test("Server MCP renders accessible shared actions and opens the shared delete confirmation", async (t) => {
-  t.mock.method(api, "get", async (url: string) => {
+test("Server MCP renders accessible shared actions and opens the shared delete confirmation", async () => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     assert.equal(url, "/mcp/servers");
     return {
       data: {

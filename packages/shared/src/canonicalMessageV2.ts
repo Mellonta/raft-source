@@ -1,4 +1,4 @@
-import { CANONICAL_MESSAGE_MANIFEST_VERSION } from "./canonicalMessageManifest.js";
+import { CANONICAL_MESSAGE_MANIFEST_VERSION } from "./canonicalMessageManifest";
 import type { SyncScopeKey } from "@botiverse/raft-sync-core";
 
 /**

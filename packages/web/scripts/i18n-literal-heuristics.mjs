@@ -5,7 +5,6 @@
 
 export const PROSE_ALLOWLIST = [
   "src/generated/",              // emitted from a source manifest; fix upstream, not here
-  "src/analytics/flagRegistry.ts", // experiment names, never rendered to users
 ];
 export function isProseAllowlisted(rel) {
   return PROSE_ALLOWLIST.some((p) => rel.includes(p));

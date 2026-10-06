@@ -1,21 +1,23 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import path from "node:path";
-import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, runtimeModelSourceOutcomeFromSet, type AgentConfig, type RuntimeModelInfo, type RuntimeModelSet, type RuntimeModelSourceOutcome , type AxSurfaceText } from "@botiverse/raft-shared";
-import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./types.js";
-import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport.js";
-import { withWindowsUserEnvironment, type ProbeDeps } from "./probe.js";
+import { clearClockTimeout, CURSOR_MODEL_DETECTION_TIMEOUT_MS, hydrateRuntimeConfig, setClockTimeout, runtimeConfigToLaunchFields, runtimeModelSourceOutcomeFromSet, type AgentConfig, type RuntimeModelInfo, type RuntimeModelSet, type RuntimeModelSourceOutcome , type AxSurfaceText } from "@botiverse/raft-shared";
+import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./types";
+import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
+import { withWindowsUserEnvironment, type ProbeDeps } from "./probe";
 import {
   installManagedMcpRuntimeJsonOverlay,
   prepareManagedMcpRuntimeProxy,
-} from "../managedMcpRuntimeProxy.js";
+} from "../managedMcpRuntimeProxy";
 
 interface CursorModelsCommandResult {
   status: number | null;
   stdout?: string | Buffer | null;
   error?: Error;
+  /** The probe was killed at its deadline rather than failing on its own. */
+  timedOut?: boolean;
 }
 
-type CursorModelsCommand = () => CursorModelsCommandResult;
+type CursorModelsAsyncCommand = () => Promise<CursorModelsCommandResult>;
 
 export async function buildCursorSpawnEnv(ctx: SpawnContext, deps: ProbeDeps = {}): Promise<NodeJS.ProcessEnv> {
   const { spawnEnv } = await prepareCliTransport(ctx, { NO_COLOR: "1" });
@@ -231,17 +233,11 @@ export function parseCursorModelsOutput(output: string): RuntimeModelSet | null 
   return { models, default: defaultModel };
 }
 
-export function detectCursorModels(runCommand: CursorModelsCommand = runCursorModelsCommand): RuntimeModelSet | null {
-  const result = runCommand();
-
-  if (result.error || result.status !== 0) return null;
-  return parseCursorModelsOutput(String(result.stdout || ""));
-}
-
-export function detectCursorModelSource(
-  runCommand: CursorModelsCommand = runCursorModelsCommand,
-): RuntimeModelSourceOutcome {
-  const result = runCommand();
+export async function detectCursorModelSource(
+  runCommand: CursorModelsAsyncCommand = () => runCursorModelsCommandAsync(),
+): Promise<RuntimeModelSourceOutcome> {
+  const result = await runCommand();
+  if (result.timedOut) return { kind: "error", retryable: true, code: "detect_timeout" };
   if (result.error || result.status !== 0) {
     return { kind: "error", retryable: true };
   }
@@ -256,10 +252,94 @@ export function buildCursorModelProbeEnv(deps: ProbeDeps = {}): NodeJS.ProcessEn
   }, deps);
 }
 
-function runCursorModelsCommand(): CursorModelsCommandResult {
-  return spawnSync("cursor-agent", ["models"], {
-    env: buildCursorModelProbeEnv(),
-    encoding: "utf8",
-    timeout: 5000,
+/** Cap on probe stdout: a model listing is a few KB; spawnSync's old default was 1 MiB. */
+export const CURSOR_MODEL_PROBE_MAX_OUTPUT_BYTES = 1024 * 1024;
+
+export interface CursorModelsProbeOptions {
+  timeoutMs?: number;
+  command?: string;
+  args?: string[];
+  maxOutputBytes?: number;
+  platform?: NodeJS.Platform;
+  /** Kill the probe and every process it started. */
+  killTree?: (pid: number, platform: NodeJS.Platform) => void;
+}
+
+/**
+ * Kill a probe's whole process tree. POSIX probes run in their own process
+ * group (detached), so signalling -pid reaches a wrapper's children; Windows
+ * has no groups, so `taskkill /T` walks the tree.
+ */
+export function killCursorProbeTree(pid: number, platform: NodeJS.Platform): void {
+  try {
+    if (platform === "win32") {
+      spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", () => {});
+    } else {
+      process.kill(-pid, "SIGKILL");
+    }
+  } catch {
+    // already gone
+  }
+}
+
+/**
+ * Async `cursor-agent models`. The old spawnSync froze the whole daemon for up
+ * to its timeout. stdin is closed so a login prompt cannot wait for input,
+ * output is capped, and the deadline or the cap kills the probe's process tree
+ * (a surviving child would otherwise linger or hold stdout open).
+ */
+export function runCursorModelsCommandAsync(options: CursorModelsProbeOptions = {}): Promise<CursorModelsCommandResult> {
+  const {
+    timeoutMs = CURSOR_MODEL_DETECTION_TIMEOUT_MS,
+    command = "cursor-agent",
+    args = ["models"],
+    maxOutputBytes = CURSOR_MODEL_PROBE_MAX_OUTPUT_BYTES,
+    platform = process.platform,
+    killTree = killCursorProbeTree,
+  } = options;
+  return new Promise((resolve) => {
+    const chunks: Buffer[] = [];
+    let outputBytes = 0;
+    let settled = false;
+    let timer: unknown;
+    const output = () => Buffer.concat(chunks).toString("utf8");
+    const finish = (result: CursorModelsCommandResult) => {
+      if (settled) return;
+      settled = true;
+      clearClockTimeout(timer);
+      resolve(result);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command, args, {
+        env: buildCursorModelProbeEnv(),
+        stdio: ["ignore", "pipe", "ignore"],
+        detached: platform !== "win32",
+        windowsHide: true,
+      });
+    } catch (error) {
+      resolve({ status: null, error: error as Error });
+      return;
+    }
+    const kill = () => {
+      if (child.pid !== undefined) killTree(child.pid, platform);
+      else child.kill("SIGKILL");
+    };
+    timer = setClockTimeout(() => {
+      kill();
+      finish({ status: null, stdout: output(), timedOut: true });
+    }, timeoutMs);
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      outputBytes += chunk.length;
+      if (outputBytes > maxOutputBytes) {
+        kill();
+        finish({ status: null, error: new Error(`cursor-agent models output exceeded ${maxOutputBytes} bytes`) });
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.on("error", (error) => finish({ status: null, stdout: output(), error }));
+    child.on("close", (status) => finish({ status, stdout: output() }));
   });
 }

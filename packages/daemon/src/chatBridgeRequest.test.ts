@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   ChatBridgeToolTimeoutError,
   executeResponseRequest,
   executeJsonRequest,
-} from "./chatBridgeRequest.js";
+} from "./chatBridgeRequest";
 
 function createTimeoutDurationClock(timeoutMs: number): () => number {
   let nowMs = 1_000;
@@ -139,4 +138,40 @@ test("executeResponseRequest aborts locally and logs a structured timeout when f
   assert.match(warnings[0] || "", /tool=view_file/);
   assert.match(warnings[0] || "", /target=attachment-1/);
   assert.match(warnings[0] || "", /outcome=timeout/);
+});
+
+// A proxy or body-parser error page is HTML. The status must be read BEFORE
+// the body is parsed, so a 413 surfaces as a 413 and not as a JSON parse error.
+test("executeJsonRequest reports a non-JSON error response by its HTTP status, not as a parse error", async () => {
+  const html = "<!DOCTYPE html><html><body><pre>PayloadTooLargeError: request entity too large</pre></body></html>";
+  await assert.rejects(
+    executeJsonRequest("https://slock.test/internal/machine/scope-attestation", { method: "POST" }, {
+      toolName: "daemon_direct_upload.scope_attestation",
+      fetchImpl: async () => new Response(html, { status: 413, headers: { "Content-Type": "text/html" } }),
+      warn: () => {},
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as Error & { status?: number }).status, 413);
+      assert.match(err.message, /\b413\b/);
+      assert.doesNotMatch(err.message, /Unexpected token|JSON/);
+      return true;
+    },
+  );
+});
+
+test("executeJsonRequest keeps a JSON error body's message beside the status", async () => {
+  await assert.rejects(
+    executeJsonRequest("https://slock.test/x", { method: "POST" }, {
+      toolName: "t",
+      fetchImpl: async () => new Response(JSON.stringify({ error: "Scope attestation request body exceeds 1 MiB", code: "scope_attestation_body_too_large" }), { status: 413, headers: { "Content-Type": "application/json" } }),
+      warn: () => {},
+    }),
+    (err: unknown) => {
+      assert.equal((err as Error & { status?: number }).status, 413);
+      assert.match((err as Error).message, /413/);
+      assert.match((err as Error).message, /exceeds 1 MiB/);
+      return true;
+    },
+  );
 });

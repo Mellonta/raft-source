@@ -1,47 +1,59 @@
-# Channel Conversion Complexity Memo
+# Channel to Joint conversion
 
-## Scope
+The conversion job owns one epoch and a durable source fence. Ordinary and
+private channels, including archived channels, can convert. The source URL,
+message IDs and sequence numbers, Task identity/history, attachment objects and
+billing provenance survive. Archive state is independent of the fence.
 
-This branch implements the first v0 slice for converting an existing public or
-private local channel into the host projection of a private joint channel. The
-contract is history-preserving: newly invited servers can read pre-conversion
-parent messages and historical thread replies after they accept an invite.
+## Commit and recovery boundaries
 
-## Line Count
+Before audience cutover, cancellation or a phase failure compensates committed
+canonical writes, restores the source rows and external bindings, releases the
+fence, and unfreezes pending Action Cards. External binding admission is
+validated before command admission and again under the source lock; binding
+pause commits with the first canonical write. A restored failure retries with
+a new epoch and freshly copied source rows, including writes made after the
+failure. Cancel is idempotent and a new Convert after Cancel creates a new job.
+Routing columns in the job are not cleanup authority: the creating server and
+conversion-owned storage namespace identify the projection being removed.
+Legacy jobs already committed beyond cutover still resume forward; new jobs
+cannot persist this intermediate state.
 
-- `channelConversionService.ts`: 629 lines for the durable job state machine,
-  phase runner, conversion phases, retry handling, and identity-shape helper.
-- `channelConversionService.test.ts`: 368 lines covering route conversion,
-  invite-accept readback, phase-failure retry convergence, and task blocking.
-- `routes/channels.ts`: 55 added lines for the admin-only conversion endpoint.
-- `schema.ts`: 41 added lines for `channel_conversion_jobs`.
-- `drizzle/0136_fantastic_may_parker.sql`: 28 lines for the generated table and
-  indexes.
+Resource families move in batches of at most 128 rows. Each batch commits its
+source cursor, count and checksum with the row changes. Namespace fields change;
+the batch compares all other persisted fields before and after moving them.
+Thread projection creation preserves the original local Thread ID. Reads expand
+only a conversion's source/canonical pair and host Thread mappings, using the
+same SQL snapshot as the read. Callers still authorize the local channel surface.
 
-## Hardest Phase
+The worker reconstructs pending/running work from persisted jobs after a process
+restart. Each pass processes at most eight jobs and one batch per job. Per-source
+transaction locks serialize competing workers. Failed jobs are not automatically
+retried. Completion notification is retried until its receipt is persisted.
 
-`prepare_threads` is the riskiest phase. Existing ordinary threads already own
-the `channels.parent_message_id` unique slot, but joint-channel semantics require
-that slot to move to a canonical storage thread while the old thread id becomes
-the host local projection. The implementation clears the old local thread's
-`parent_message_id`, creates the canonical thread row, creates its
-`joint_channels` authority row, and maps the old local thread id as the host
-projection in one transaction. The later `move_thread_messages` phase then moves
-replies to canonical storage using that projection map.
+Audience cutover, residual cleanup and finalization share one transaction.
+A failure anywhere in that commit rolls back all access and personal-state
+changes before compensating the earlier copy. Only explicit channel members
+retain access; public server membership is not copied into the Joint ACL.
+Cleanup removes lost principals' serving state in bounded statements.
+Finalization releases the fence, while pending Action Cards require renewed
+confirmation. A Cancel racing with this transaction either restores the source
+first or observes Done; it cannot interleave with destructive cleanup. Settings continues showing progress
+until the job succeeds; invitations become available after dismissing completion.
 
-## Retry Oracle
+## Regression guards
 
-The test oracle creates a normal joint channel through the existing direct
-creation path, seeds the same logical parent/thread history, normalizes away ids
-and timestamps, then compares the direct joint identity shape to converted
-channels. The retry matrix injects a failure before each phase and requires the
-retried final shape to match the direct-created joint shape.
+`channelConversionService.test.ts` exercises compensating cancellation/failure
+at every committed copy boundary and rejects cancellation after Done, archive
+preservation, Task writer rejection, partial message/context/Task/board reads,
+batch interruption, full row restoration, actual API reads and successful sends with persisted-message checks,
+new-epoch retry with competing workers, worker replacement, resource
+identity, audience cleanup and pending-card behavior. `channelConversionLockArrival.realPg.test.ts`
+checks the actual PostgreSQL lock order; `channelConversionRollbackLockOrder.realPg.test.ts`
+pins rollback locking every row it deletes or re-keys up front, in read-state
+resolution order, so it cannot deadlock with read-all.
 
-## Outside V0
-
-- Background worker polling and automatic expired-lease recovery.
-- Progress UI beyond the route returning the durable job row.
-- Cancel/rollback after any data-moving phase.
-- Channels with active task messages.
-- Non-admin self-service conversion.
-- Drop-history conversion mode.
+A same-head review must also exercise a fresh disposable full-flow fixture:
+failure/reopen/cancel, cancel an unfinished upload/retry, then conversion,
+invitation and acceptance from both server views. Passing a migration or the
+backend suite alone does not establish that browser contract.

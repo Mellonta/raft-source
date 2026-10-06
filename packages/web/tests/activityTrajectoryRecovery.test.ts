@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   registerActivityTrajectoryLiveReload,
   registerActivityTrajectoryReconnectReload,
-} from "../src/utils/activityTrajectoryRecovery.js";
+} from "../src/utils/activityTrajectoryRecovery";
 import type { AgentActivityReloadPayload } from "../src/utils/activityTrajectoryRecovery";
 
 class FakeSocket {

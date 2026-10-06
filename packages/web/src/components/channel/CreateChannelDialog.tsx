@@ -1,8 +1,8 @@
+import { Input, Textarea, Card, SegmentedControl, SegmentedControlItem, SegmentedControlLabel, Button } from "raft-ui";
 import { useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { formatNameValidationError } from "../../i18n/nameValidation";
 import { Check, Search, Hash, Lock } from "lucide-react";
-import { SegmentedControl, SegmentedControlItem, SegmentedControlLabel } from "raft-ui";
 import { useAgentStore } from "../../store/agentStore";
 import { useChannelStore } from "../../store/channelStore";
 import { useServerStore } from "../../store/serverStore";
@@ -48,6 +48,8 @@ interface PrefillProps {
    * `execute_fail`. Receives the raw error so the caller can classify.
    */
   onSubmitError?: (err: unknown) => void;
+  actionCardMessageId?: string;
+  actionCardConfirmationVersion?: number;
 }
 
 export default function CreateChannelDialog({
@@ -61,6 +63,8 @@ export default function CreateChannelDialog({
   onCreated,
   onSubmitStart,
   onSubmitError,
+  actionCardMessageId,
+  actionCardConfirmationVersion,
 }: {
   onClose: () => void;
 } & PrefillProps) {
@@ -171,6 +175,8 @@ export default function CreateChannelDialog({
             visibility,
             agentIds: [...selectedAgentIds],
             userIds: [...selectedHumanIds],
+            actionCardMessageId,
+            actionCardConfirmationVersion,
           }
         );
       try {
@@ -255,7 +261,7 @@ export default function CreateChannelDialog({
                   onClose();
                   nav.toSettings("billing");
                 }}
-                className="font-bold text-black underline"
+                className="font-bold text-foreground-strong theme-brutal:text-black underline"
               >
                 {formatMessage({ id: "channel.create.upgradeForMore" })}
               </button>
@@ -282,7 +288,7 @@ export default function CreateChannelDialog({
                   },
                 )}
               </p>
-              <p className="text-xs text-black/70">
+              <p className="text-xs text-foreground-muted theme-brutal:text-black/70">
                 {formatMessage({
                   id: archivedCollision.canUnarchiveArchivedChannel
                     ? "channel.create.archivedCanManage"
@@ -291,44 +297,46 @@ export default function CreateChannelDialog({
               </p>
               <div className="flex flex-wrap gap-2">
                 {archivedCollision.canUnarchiveArchivedChannel && (
-                  <button
+                  <Button size="sm"
+                    variant="success"
                     type="button"
                     onClick={handleUnarchiveCollision}
                     disabled={unarchiving}
-                    className="btn-brutal-sm bg-brutal-lime px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {unarchiving ? formatMessage({ id: "channel.create.unarchiving" }) : formatMessage({ id: "channel.create.unarchive" })}
-                  </button>
+                  </Button>
                 )}
-                <button
+                <Button size="sm"
+                  variant="outline"
                   type="button"
                   onClick={() => {
                     setArchivedCollision(null);
                     setName("");
                   }}
-                  className="btn-brutal-sm bg-white px-2 py-1 text-xs"
+                  className="px-2 py-1 text-xs"
                 >
                   {formatMessage({ id: "channel.create.changeName" })}
-                </button>
+                </Button>
               </div>
             </Banner>
           )}
           <FormField label={formatMessage({ id: "channel.create.nameLabel" })} required>
-            <input
+            <Input
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="input-brutal w-full"
+              className="w-full"
               placeholder={formatMessage({ id: "channel.create.namePlaceholder" })}
               required
               autoFocus
             />
           </FormField>
           <FormField label={formatMessage({ id: "channel.create.descriptionLabel" })} optional>
-            <textarea
+            <Textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              className="input-brutal w-full"
+              className="w-full"
               placeholder={formatMessage({ id: "channel.create.descriptionPlaceholder" })}
               rows={2}
             />
@@ -353,21 +361,21 @@ export default function CreateChannelDialog({
             {hasMembers ? (
               <div className="space-y-2">
                 <div className="relative">
-                  <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-black/40" />
-                  <input
+                  <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-foreground-muted theme-brutal:text-black/40" />
+                  <Input
                     type="text"
                     value={memberSearch}
                     onChange={(e) => setMemberSearch(e.target.value)}
-                    className="input-brutal input-member-search w-full pl-9"
+                    className="input-member-search w-full pl-9"
                     placeholder={formatMessage({ id: "channel.create.membersSearchPlaceholder" })}
                   />
                 </div>
 
-                <div className="border-2 border-black bg-white shadow-brutal-sm max-h-48 overflow-y-auto">
+                <Card className="max-h-48 overflow-y-auto">
                   {/* Agents section */}
                   {filteredAgents.length > 0 && (
                     <>
-                      <SectionEyebrow as="div" className="px-3 py-1.5 bg-white/50">
+                      <SectionEyebrow as="div" className="px-3 py-1.5 bg-fill-muted theme-brutal:bg-white/50">
                         {formatMessage({ id: "channel.create.agents" })}
                       </SectionEyebrow>
                       {filteredAgents.map((agent) => {
@@ -377,9 +385,9 @@ export default function CreateChannelDialog({
                             key={agent.id}
                             type="button"
                             onClick={() => toggleAgent(agent.id)}
-                            className={`flex w-full items-center gap-2 px-3 py-1.5 text-sm font-medium text-black transition-colors ${
-                              selected ? "bg-brutal-pink/20" : "hover:bg-soft-signal"
-                            }`}
+                            className={`flex w-full items-center gap-2 px-3 py-1.5 text-sm font-medium text-foreground-strong theme-brutal:text-black transition-colors ${
+ selected ? "bg-accent-soft theme-brutal:bg-brutal-pink/20" : "hover:bg-primary-soft theme-brutal:hover:bg-soft-signal"
+ }`}
                           >
                             <AvatarSlot context="sidebar-list" type="agent" agentAvatarUrl={agent.avatarUrl} />
                             <span className="flex-1 text-left truncate">{agent.displayName || agent.name}</span>
@@ -393,7 +401,7 @@ export default function CreateChannelDialog({
                   {/* Humans section */}
                   {filteredHumans.length > 0 && (
                     <>
-                      <SectionEyebrow as="div" className="px-3 py-1.5 bg-white/50">
+                      <SectionEyebrow as="div" className="px-3 py-1.5 bg-fill-muted theme-brutal:bg-white/50">
                         {formatMessage({ id: "channel.create.humans" })}
                       </SectionEyebrow>
                       {filteredHumans.map((human) => {
@@ -403,9 +411,9 @@ export default function CreateChannelDialog({
                             key={human.userId}
                             type="button"
                             onClick={() => toggleHuman(human.userId)}
-                            className={`flex w-full items-center gap-2 px-3 py-1.5 text-sm font-medium text-black transition-colors ${
-                              selected ? "bg-brutal-pink/20" : "hover:bg-soft-signal"
-                            }`}
+                            className={`flex w-full items-center gap-2 px-3 py-1.5 text-sm font-medium text-foreground-strong theme-brutal:text-black transition-colors ${
+ selected ? "bg-accent-soft theme-brutal:bg-brutal-pink/20" : "hover:bg-primary-soft theme-brutal:hover:bg-soft-signal"
+ }`}
                           >
                             <AvatarSlot context="sidebar-list" type="human" humanPlaceholder />
                             <span className="flex-1 text-left truncate">{human.displayName || human.name}</span>
@@ -417,33 +425,35 @@ export default function CreateChannelDialog({
                   )}
 
                   {!hasFilteredMembers && (
-                    <div className="px-3 py-4 text-sm text-black/50 font-mono text-center">
+                    <div className="px-3 py-4 text-sm text-foreground-muted theme-brutal:text-black/50 font-mono text-center">
                       {formatMessage({ id: "channel.create.noMatchesFor" }, { query: memberSearch.trim() })}
                     </div>
                   )}
-                </div>
+                </Card>
               </div>
             ) : (
-              <div className="text-sm text-black/50 font-mono">{formatMessage({ id: "channel.create.noMembersAvailable" })}</div>
+              <div className="text-sm text-foreground-muted theme-brutal:text-black/50 font-mono">{formatMessage({ id: "channel.create.noMembersAvailable" })}</div>
             )}
           </FormField>
           <ChannelSlackBridgeField editor={bridgeEditor} visibility={visibility} disabled={submitting || !!createdChannelForBridge} />
           <div className="flex justify-end gap-3">
-            <button
+            <Button size="sm"
+              variant="outline"
               type="button"
               onClick={onClose}
               disabled={submitting}
-              className="btn-brutal bg-white px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {formatMessage({ id: "settings.common.cancel" })}
-            </button>
-            <button
+            </Button>
+            <Button size="sm"
+              variant="accent"
               type="submit"
               disabled={atLimit || submitting}
-              className="btn-brutal bg-brutal-pink px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {submitting ? formatMessage({ id: "channel.create.creating" }) : formatMessage({ id: "channel.create.title" })}
-            </button>
+            </Button>
           </div>
         </form>
     </DialogCard>

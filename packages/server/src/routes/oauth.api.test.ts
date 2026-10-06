@@ -1,16 +1,15 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { onTestFinished, vi } from "vitest";
 
 import argon2 from "argon2";
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { integrationAuditEvents, messageMentions, oauthAccessRequests, oauthAccessTokens, oauthAppPermissionRevisions, oauthClientInstalls, oauthClients, oauthGrants, serverAgentMembers, servers, thirdPartyAgentEvents, threadFollows, users } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { createServer, addMember, removeMember } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
+import { getDb } from "../db/index";
+import { externalAppRegistrations, integrationAuditEvents, messageMentions, oauthAccessRequests, oauthAccessTokens, oauthAppInstallationTokens, oauthAppPermissionRevisions, oauthClientInstalls, oauthClients, oauthGrants, serverAgentMembers, servers, thirdPartyAgentEvents, threadFollows, users } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { createServer, addMember, removeMember } from "../services/serverService";
+import { createAgent } from "../services/agentService";
 import {
   AUTHORIZATION_CODE_EXPIRED_ERROR,
   HUMAN_AUTHORIZATION_CODE_TTL_MS,
@@ -18,12 +17,13 @@ import {
   __setOAuthServiceDbForTests,
   authenticateOAuthClient,
   createOAuthClient,
-} from "../services/oauthService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { __setAppMemberRefKeyForTests } from "../services/appOutboundProjectionService.js";
-import { AgentOrchestrator } from "../services/agentOrchestrator.js";
-import { encodePixelAvatarKey, renderPixelAvatarSvg } from "../services/pixelAvatarService.js";
-import { BasicTracer, extractRaftRefTargets, MemoryTraceSink, type AgentMessage } from "@botiverse/raft-shared";
+} from "../services/oauthService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { __setAppMemberRefKeyForTests } from "../services/appOutboundProjectionService";
+import { mintAppInstallationCredential } from "../services/appInstallationCredentialService";
+import { AgentOrchestrator } from "../services/agentOrchestrator";
+import { encodePixelAvatarKey, renderPixelAvatarSvg } from "../services/pixelAvatarService";
+import { BasicTracer, extractRaftRefTargets, MemoryTraceSink, isThirdPartyEventId, type AgentMessage } from "@botiverse/raft-shared";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -56,6 +56,34 @@ async function login(baseUrl: string, email: string): Promise<string> {
 
 function hashSecret(value: string) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function seedRetiredBuiltInOAuthClient(input: {
+  serverId: string;
+  createdByUserId: string;
+  clientId: string;
+  name: string;
+  description?: string | null;
+  homepageUrl?: string | null;
+  returnUrl?: string | null;
+}) {
+  const clientSecret = `retired_secret_${randomUUID()}`;
+  const [client] = await getDb().insert(oauthClients).values({
+    serverId: input.serverId,
+    createdByUserId: input.createdByUserId,
+    clientId: input.clientId,
+    clientSecretHash: hashSecret(clientSecret),
+    clientSecret,
+    appType: "slock_builtin",
+    enabled: true,
+    publishStatus: "published",
+    humanMarketplaceVisible: true,
+    name: input.name,
+    description: input.description ?? null,
+    homepageUrl: input.homepageUrl ?? null,
+    returnUrl: input.returnUrl ?? null,
+  }).returning();
+  return { client, clientSecret };
 }
 
 test("random pixel avatar renderer matches the web PRNG fixture", () => {
@@ -195,6 +223,7 @@ test("OAuth discovery exposes public Raft scopes but hides reserved and legacy s
     "profile",
     "email",
     "identity",
+    "agent:read",
     "agent:event:write",
     "agent:notification:write",
   ]);
@@ -530,6 +559,7 @@ test("installation credentials and principal credentials are mutually rejected a
     const { client, clientSecret } = await createOAuthClient({
       serverId: server.id,
       createdByUserId: owner.id,
+      appType: "third_party_global",
       name: "OAuth Installation Boundary Client",
       clientId: `oauth-install-${suffix.slice(0, 8)}`,
     });
@@ -577,6 +607,12 @@ test("installation credentials and principal credentials are mutually rejected a
       headers: { Authorization: `Bearer ${installationToken}` },
     });
     assert.equal(principalSurface.status, 401);
+    const directorySurface = await fetch(`${app.baseUrl}/api/oauth/agents`, {
+      headers: { Authorization: `Bearer ${installationToken}` },
+    });
+    assert.equal(directorySurface.status, 401);
+    assert.equal("agents" in await directorySurface.json(), false);
+
 
     const ownerToken = await login(app.baseUrl, owner.email);
     const installationSurface = await fetch(`${app.baseUrl}/api/app-installation/server`, {
@@ -600,10 +636,218 @@ test("installation credentials and principal credentials are mutually rejected a
       headers: { Authorization: `Bearer ${installationToken}` },
     });
     assert.equal(missingGroup.status, 403);
+
+    const tokensBeforeRetirement = await getDb().select({ id: oauthAppInstallationTokens.id })
+      .from(oauthAppInstallationTokens).where(eq(oauthAppInstallationTokens.clientId, client.id));
+    const auditsBeforeRetirement = await getDb().select({ id: integrationAuditEvents.id })
+      .from(integrationAuditEvents).where(eq(integrationAuditEvents.clientId, client.id));
+    await getDb().update(oauthClients).set({ appType: "slock_builtin" }).where(eq(oauthClients.id, client.id));
+
+    const retiredProjection = await fetch(`${app.baseUrl}/api/app-installation/server`, {
+      headers: { Authorization: `Bearer ${installationToken}` },
+    });
+    assert.equal(retiredProjection.status, 401, "an already-issued installation token must die with its App class");
+    assert.equal(await mintAppInstallationCredential({
+      clientId: client.id,
+      installationId: installation.id,
+    }), null, "the mint service must reject a retired App even when called below HTTP client authentication");
+    assert.deepEqual(
+      await getDb().select({ id: oauthAppInstallationTokens.id }).from(oauthAppInstallationTokens)
+        .where(eq(oauthAppInstallationTokens.clientId, client.id)),
+      tokensBeforeRetirement,
+    );
+    assert.deepEqual(
+      await getDb().select({ id: integrationAuditEvents.id }).from(integrationAuditEvents)
+        .where(eq(integrationAuditEvents.clientId, client.id)),
+      auditsBeforeRetirement,
+    );
+
+    await getDb().update(oauthClients).set({ appType: "third_party_global" }).where(eq(oauthClients.id, client.id));
+    await getDb().insert(externalAppRegistrations).values({
+      oauthClientId: client.id,
+      provider: "slack",
+      environment: "test",
+      state: "active",
+      providerAppId: `A_${suffix}`,
+      providerOAuthClientId: `slack-client-${suffix}`,
+      capabilityManifestVersion: 1,
+      capabilityManifestHash: "a".repeat(64),
+      requiredCapabilities: ["channel_events"],
+    });
+    assert.equal(await mintAppInstallationCredential({
+      clientId: client.id,
+      installationId: installation.id,
+    }), null, "platform-managed Slack identity cannot mint a generic App installation token");
+    const platformProjection = await fetch(`${app.baseUrl}/api/app-installation/server`, {
+      headers: { Authorization: `Bearer ${installationToken}` },
+    });
+    assert.equal(platformProjection.status, 401);
   } finally {
     __setAppMemberRefKeyForTests(null);
     await app.close();
   }
+});
+
+test("App client credentials discover only their active installation on an exact Server", async ({ app }) => {
+  const suffix = randomUUID();
+  const owner = await seedUser(`oauth-discovery-owner-${suffix}@slock.test`, `oauth-discovery-owner-${suffix}`);
+  const publisherServer = await createServer("OAuth Discovery Publisher", `oauth-discovery-publisher-${suffix}`, owner.id);
+  const targetServer = await createServer("OAuth Discovery Target", `oauth-discovery-target-${suffix}`, owner.id);
+  const otherServer = await createServer("OAuth Discovery Other", `oauth-discovery-other-${suffix}`, owner.id);
+  const { client, clientSecret } = await createOAuthClient({
+    serverId: publisherServer.id,
+    createdByUserId: owner.id,
+    appType: "third_party_global",
+    name: "OAuth Installation Discovery Client",
+    clientId: `oauth-discovery-${suffix.slice(0, 8)}`,
+  });
+  const { client: otherClient, clientSecret: otherClientSecret } = await createOAuthClient({
+    serverId: publisherServer.id,
+    createdByUserId: owner.id,
+    appType: "third_party_global",
+    name: "OAuth Installation Discovery Other Client",
+    clientId: `oauth-discovery-other-${suffix.slice(0, 8)}`,
+  });
+  const { client: serverLocalClient, clientSecret: serverLocalClientSecret } = await createOAuthClient({
+    serverId: targetServer.id,
+    createdByUserId: owner.id,
+    appType: "server_local",
+    name: "OAuth Installation Discovery Disabled Local Client",
+    clientId: `oauth-discovery-local-${suffix.slice(0, 8)}`,
+  });
+  const [revision] = await getDb().insert(oauthAppPermissionRevisions).values({
+    clientId: client.id,
+    revision: 1,
+    requestedGroups: ["server"],
+    requestedEvents: [],
+    state: "active",
+    createdByType: "human",
+    createdById: owner.id,
+  }).returning();
+  await getDb().update(oauthClients).set({
+    outboundRequestRevision: 1,
+    outboundCurrentRevisionId: revision.id,
+    outboundCurrentGroups: ["server"],
+    outboundCurrentEvents: [],
+  }).where(eq(oauthClients.id, client.id));
+  const [installation] = await getDb().insert(oauthClientInstalls).values({
+    serverId: targetServer.id,
+    clientId: client.id,
+    installedByUserId: owner.id,
+    approvedRequestRevisionId: revision.id,
+    approvedGroups: ["server"],
+    grantRevision: 1,
+  }).returning();
+  await getDb().insert(oauthClientInstalls).values({
+    serverId: targetServer.id,
+    clientId: serverLocalClient.id,
+    installedByUserId: owner.id,
+  });
+
+  const lookup = async (input: {
+    clientKey: string;
+    secret: string;
+    serverId: string;
+    extra?: Record<string, unknown>;
+  }) => fetch(`${app.baseUrl}/api/oauth/installations/lookup`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Basic ${Buffer.from(`${input.clientKey}:${input.secret}`).toString("base64")}`,
+    },
+    body: JSON.stringify({ server_id: input.serverId, ...input.extra }),
+  });
+
+  const discovered = await lookup({
+    clientKey: client.clientId,
+    secret: clientSecret,
+    serverId: targetServer.id,
+  });
+  assert.equal(discovered.status, 200);
+  assert.equal(discovered.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual(await discovered.json(), {
+    installation_id: installation.id,
+    server_id: targetServer.id,
+  });
+
+  const scopedAlias = await fetch(`${app.baseUrl}/oidc/${targetServer.id}/api/oauth/installations/lookup`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Basic ${Buffer.from(`${client.clientId}:${clientSecret}`).toString("base64")}`,
+    },
+    body: JSON.stringify({ server_id: targetServer.id }),
+  });
+  assert.equal(scopedAlias.status, 404, "installation discovery must not leak into the OIDC scoped mount");
+
+  const minted = await fetch(`${app.baseUrl}/api/oauth/installation-token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_id: client.clientId,
+      client_secret: clientSecret,
+      installation_id: installation.id,
+    }),
+  });
+  assert.equal(minted.status, 200, "the discovered ID must feed the existing installation-token chain");
+
+  const crossServer = await lookup({
+    clientKey: client.clientId,
+    secret: clientSecret,
+    serverId: otherServer.id,
+  });
+  assert.equal(crossServer.status, 404);
+  assert.equal((await crossServer.json() as { error?: string }).error, "Active installation not found");
+
+  const crossClient = await lookup({
+    clientKey: otherClient.clientId,
+    secret: otherClientSecret,
+    serverId: targetServer.id,
+    extra: { client_id: client.clientId },
+  });
+  assert.equal(crossClient.status, 404, "an untrusted client_id must not override the authenticated App");
+  assert.equal((await crossClient.json() as { error?: string }).error, "Active installation not found");
+
+  await getDb().update(oauthClientInstalls).set({ status: "suspended" })
+    .where(eq(oauthClientInstalls.id, installation.id));
+  const suspended = await lookup({
+    clientKey: client.clientId,
+    secret: clientSecret,
+    serverId: targetServer.id,
+  });
+  assert.equal(suspended.status, 404);
+  assert.equal((await suspended.json() as { error?: string }).error, "Active installation not found");
+
+  await getDb().update(oauthClientInstalls).set({ status: "active" })
+    .where(eq(oauthClientInstalls.id, installation.id));
+  await getDb().update(oauthClients).set({ enabled: false }).where(eq(oauthClients.id, client.id));
+  const disabled = await lookup({
+    clientKey: client.clientId,
+    secret: clientSecret,
+    serverId: targetServer.id,
+  });
+  assert.equal(disabled.status, 401, "disabled App credentials must fail at the shared client-auth boundary");
+
+  await getDb().update(oauthClients).set({ enabled: false }).where(eq(oauthClients.id, serverLocalClient.id));
+  const disabledServerLocal = await lookup({
+    clientKey: serverLocalClient.clientId,
+    secret: serverLocalClientSecret,
+    serverId: targetServer.id,
+  });
+  assert.equal(
+    disabledServerLocal.status,
+    404,
+    "legacy server-local authentication may succeed, but discovery must still hide a disabled App installation",
+  );
+  assert.equal((await disabledServerLocal.json() as { error?: string }).error, "Active installation not found");
+
+  const malformed = await lookup({
+    clientKey: otherClient.clientId,
+    secret: otherClientSecret,
+    serverId: "not-a-server-id",
+  });
+  assert.equal(malformed.status, 400);
+  assert.equal((await malformed.json() as { error?: string }).error, "server_id must be a Server ID");
 });
 
 test("human OAuth userinfo requires the user to remain a current server member", async ({ app }) => {
@@ -1272,17 +1516,15 @@ test("Login with Slock setup client lookup returns the registered app for the se
   assert.equal(nonMemberBody.returnUrl, undefined);
 });
 
-test("built-in OAuth client lookup and human authorization are available across servers", async ({ app }) => {
+test("retired built-in client fails closed for lookup, human authorization, exchange, bearer, and installation token", async ({ app }) => {
   const suffix = randomUUID();
   const owner = await seedUser(`oauth-builtin-owner-${suffix}@slock.test`, `oauth-builtin-owner-${suffix}`);
-  const outsider = await seedUser(`oauth-builtin-outsider-${suffix}@slock.test`, `oauth-builtin-outsider-${suffix}`);
   const platformServer = await createServer("Slock Builtin Apps", `oauth-builtin-platform-${suffix}`, owner.id);
   const contextServer = await createServer("Survey Context", `oauth-builtin-context-${suffix}`, owner.id);
   const builtinClientId = `oauth-builtin-${suffix.slice(0, 8)}`;
-  const { client, clientSecret } = await createOAuthClient({
+  const { client, clientSecret } = await seedRetiredBuiltInOAuthClient({
     serverId: platformServer.id,
     createdByUserId: owner.id,
-    appType: "slock_builtin",
     name: "Slock Survey",
     clientId: builtinClientId,
     description: "Built-in survey app",
@@ -1290,31 +1532,38 @@ test("built-in OAuth client lookup and human authorization are available across 
     returnUrl: "https://survey.slock.test/login/slock/callback",
   });
   const ownerToken = await login(app.baseUrl, owner.email);
-  const outsiderToken = await login(app.baseUrl, outsider.email);
+  const now = new Date();
+  const [historicalRequest] = await getDb().insert(oauthAccessRequests).values({
+    serverId: contextServer.id,
+    principalType: "human",
+    userId: owner.id,
+    agentId: null,
+    clientId: client.id,
+    scopes: ["openid", "profile"],
+    status: "approved",
+    remember: false,
+    resolvedByUserId: owner.id,
+    resolvedAt: now,
+  }).returning();
+  const historicalBearer = `slock_at_${randomUUID().replaceAll("-", "")}`;
+  await getDb().insert(oauthAccessTokens).values({
+    serverId: contextServer.id,
+    principalType: "human",
+    userId: owner.id,
+    agentId: null,
+    clientId: client.id,
+    requestId: historicalRequest.id,
+    grantId: null,
+    tokenHash: hashSecret(historicalBearer),
+    scopes: ["openid", "profile"],
+    expiresAt: new Date(now.getTime() + 60_000),
+  });
 
   const lookup = await fetch(
     `${app.baseUrl}/api/oauth/clients/lookup?client_id=${encodeURIComponent(builtinClientId)}&server_id=${encodeURIComponent(contextServer.id)}`,
     { headers: { Authorization: `Bearer ${ownerToken}` } },
   );
-  assert.equal(lookup.status, 200, `builtin lookup failed (${lookup.status})`);
-  const lookupBody = await lookup.json() as {
-    clientId: string;
-    appType: string;
-    name: string;
-    description: string | null;
-    returnUrl: string | null;
-  };
-  assert.equal(lookupBody.clientId, client.clientId);
-  assert.equal(lookupBody.appType, "slock_builtin");
-  assert.equal(lookupBody.name, "Slock Survey");
-  assert.equal(lookupBody.description, "Built-in survey app");
-  assert.equal(lookupBody.returnUrl, "https://survey.slock.test/login/slock/callback");
-
-  const nonMember = await fetch(
-    `${app.baseUrl}/api/oauth/clients/lookup?client_id=${encodeURIComponent(builtinClientId)}&server_id=${encodeURIComponent(contextServer.id)}`,
-    { headers: { Authorization: `Bearer ${outsiderToken}` } },
-  );
-  assert.equal(nonMember.status, 404);
+  assert.equal(lookup.status, 404);
 
   const authorize = await fetch(`${app.baseUrl}/api/oauth/authorize/human`, {
     method: "POST",
@@ -1328,10 +1577,7 @@ test("built-in OAuth client lookup and human authorization are available across 
       scopes: ["openid", "profile"],
     }),
   });
-  assert.equal(authorize.status, 200, `builtin authorize failed (${authorize.status})`);
-  const authBody = await authorize.json() as { code: string; client: { appType: string }; server: { id: string } };
-  assert.equal(authBody.client.appType, "slock_builtin");
-  assert.equal(authBody.server.id, contextServer.id);
+  assert.equal(authorize.status, 404);
 
   const token = await fetch(`${app.baseUrl}/api/oauth/token`, {
     method: "POST",
@@ -1340,34 +1586,33 @@ test("built-in OAuth client lookup and human authorization are available across 
       clientId: builtinClientId,
       clientSecret,
       grantType: "authorization_code",
-      code: authBody.code,
+      code: historicalRequest.id,
     }),
   });
-  assert.equal(token.status, 200, `token exchange failed (${token.status})`);
-  const tokenBody = await token.json() as { access_token: string };
+  assert.equal(token.status, 401);
+
+  const installationToken = await fetch(`${app.baseUrl}/api/oauth/installation-token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ clientId: builtinClientId, clientSecret, installationId: randomUUID() }),
+  });
+  assert.equal(installationToken.status, 401);
+
+  const installationLookup = await fetch(`${app.baseUrl}/api/oauth/installations/lookup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ clientId: builtinClientId, clientSecret, serverId: contextServer.id }),
+  });
+  assert.equal(installationLookup.status, 401);
 
   const userinfo = await fetch(`${app.baseUrl}/api/oauth/userinfo`, {
-    headers: { Authorization: `Bearer ${tokenBody.access_token}` },
+    headers: { Authorization: `Bearer ${historicalBearer}` },
   });
-  assert.equal(userinfo.status, 200);
-  const userinfoBody = await userinfo.json() as {
-    type: string;
-    sub: string;
-    server_id: string;
-    server_slug: string;
-    client_id: string;
-    preferred_username: string;
-    name: string;
-    description: string | null;
-  };
-  assert.equal(userinfoBody.type, "human");
-  assert.equal(userinfoBody.sub, owner.id);
-  assert.equal(userinfoBody.server_id, contextServer.id);
-  assert.equal(userinfoBody.server_slug, contextServer.slug);
-  assert.equal(userinfoBody.client_id, builtinClientId);
-  assert.equal(userinfoBody.preferred_username, owner.name);
-  assert.equal(userinfoBody.name, owner.displayName);
-  assert.equal(userinfoBody.description, null);
+  assert.equal(userinfo.status, 401);
+
+  const [requestAfter] = await getDb().select().from(oauthAccessRequests)
+    .where(eq(oauthAccessRequests.id, historicalRequest.id));
+  assert.equal(requestAfter?.consumedAt, null);
 });
 
 test("public Marketplace OAuth lookup identifies an uninstalled app without disclosing private apps", async ({ app }) => {
@@ -1796,7 +2041,7 @@ test("agent OAuth request rejects non-catalog non-grandfathered scopes", async (
   assert.deepEqual(await requested.json(), { error: "invalid_scope" });
 });
 
-test("built-in OAuth client can request agent access in a different server context", async ({ app }) => {
+test("retired built-in client cannot request Agent access in any Server", async ({ app }) => {
   const suffix = randomUUID();
   const owner = await seedUser(`oauth-builtin-agent-owner-${suffix}@slock.test`, `oauth-builtin-agent-owner-${suffix}`);
   const platformServer = await createServer("Builtin Agent Platform", `oauth-builtin-agent-platform-${suffix}`, owner.id);
@@ -1805,10 +2050,9 @@ test("built-in OAuth client can request agent access in a different server conte
     runtime: "claude",
     model: "sonnet",
   });
-  const { client, clientSecret } = await createOAuthClient({
+  const { client, clientSecret } = await seedRetiredBuiltInOAuthClient({
     serverId: platformServer.id,
     createdByUserId: owner.id,
-    appType: "slock_builtin",
     clientId: `oauth-ba-${suffix.slice(0, 8)}`,
     name: "Slock Survey Agent Client",
     returnUrl: "https://survey.slock.test/login/callback",
@@ -1825,15 +2069,7 @@ test("built-in OAuth client can request agent access in a different server conte
       scopes: ["openid", "profile", "identity"],
     }),
   });
-  assert.equal(requested.status, 200, `builtin agent request failed (${requested.status})`);
-  const requestBody = await requested.json() as {
-    requestId: string;
-    client: { appType: string };
-    agent: { serverId: string; serverSlug: string };
-  };
-  assert.equal(requestBody.client.appType, "slock_builtin");
-  assert.equal(requestBody.agent.serverId, contextServer.id);
-  assert.equal(requestBody.agent.serverSlug, contextServer.slug);
+  assert.equal(requested.status, 401);
 
   const rows = await getDb()
     .select({
@@ -1848,12 +2084,8 @@ test("built-in OAuth client can request agent access in a different server conte
       eq(oauthGrants.agentId, oauthAccessRequests.agentId),
       eq(oauthGrants.clientId, oauthAccessRequests.clientId),
     ))
-    .where(eq(oauthAccessRequests.id, requestBody.requestId));
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0]?.requestServerId, contextServer.id);
-  assert.equal(rows[0]?.grantServerId, contextServer.id);
-  assert.equal(rows[0]?.requestClientId, client.id);
-  assert.equal(rows[0]?.grantClientId, client.id);
+    .where(eq(oauthAccessRequests.clientId, client.id));
+  assert.deepEqual(rows, []);
 });
 
 test("agent inbound scopes require explicit client declaration", async ({ app }) => {
@@ -2302,6 +2534,96 @@ test("managed runtime /events rebuilds cold-start third-party wake rows", async 
     .where(eq(thirdPartyAgentEvents.id, postedBody.id));
   assert.equal(afterDrain?.status, "delivered");
   assert.ok(afterDrain?.deliveredAt);
+});
+
+// Task #175: a managed daemon serves `/events` from its Local Inbox and never
+// forwards that request, so the server-side ack in `/events` never ran for
+// events the daemon handed to the runtime. The rows stayed `delivering` and the
+// next forwarded `/events` rebuilt and replayed them. The daemon now reports
+// the third-party event ids it served; the report must end the replay, be
+// idempotent by id, and touch only the reporting agent's events.
+test("managed daemon report of locally served third-party events marks them delivered and ends the /events replay", async ({ app }) => {
+  app.app.set("agentOrchestrator", new AgentOrchestrator() as any);
+  const suffix = randomUUID();
+  const { agent, accessToken } = await createAgentEventAccessToken(app, { suffix });
+  const minted = await mintAgentCredential({
+    agentId: agent.id,
+    scopes: ["read"],
+    name: "managed-third-party-event-report-test",
+    createdByUserId: null,
+  });
+  const other = await createAgentEventAccessToken(app, { suffix: randomUUID() });
+  const otherMinted = await mintAgentCredential({
+    agentId: other.agent.id,
+    scopes: ["read"],
+    name: "managed-third-party-event-report-other",
+    createdByUserId: null,
+  });
+
+  const posted = await postAgentEvent(app.baseUrl, accessToken, {
+    kind: "event",
+    summary: "Stamp: PR review requested",
+    externalEventId: "stamp-review-175",
+    payload: { pr: 175 },
+  });
+  assert.equal(posted.status, 202, `event post failed (${posted.status})`);
+  const postedBody = await posted.json() as { id: string };
+  const readRow = async () => (await getDb()
+    .select()
+    .from(thirdPartyAgentEvents)
+    .where(eq(thirdPartyAgentEvents.id, postedBody.id)))[0];
+  assert.equal((await readRow())?.status, "delivering");
+
+  const report = (apiKey: string, eventIds: unknown) => fetch(`${app.baseUrl}/internal/agent-api/third-party-events/delivered`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ eventIds }),
+  });
+
+  // Another agent cannot mark this agent's event delivered.
+  const foreign = await report(otherMinted.apiKey, [postedBody.id]);
+  assert.equal(foreign.status, 200, `foreign report failed (${foreign.status})`);
+  assert.deepEqual(await foreign.json(), { ok: true, delivered: 0 });
+  assert.equal((await readRow())?.status, "delivering");
+
+  // The daemon served the event from its Local Inbox, then reports it.
+  const reported = await report(minted.apiKey, [postedBody.id]);
+  assert.equal(reported.status, 200, `report failed (${reported.status})`);
+
+  // The next `/events` the daemon forwards (Local Inbox now empty) must not
+  // rebuild and replay the event the runtime already received.
+  const eventsRes = await fetch(`${app.baseUrl}/internal/agent-api/events?since=0`, {
+    headers: { Authorization: `Bearer ${minted.apiKey}` },
+  });
+  assert.equal(eventsRes.status, 200);
+  const eventsBody = await eventsRes.json() as { events: AgentMessage[] };
+  assert.deepEqual(eventsBody.events.map((event) => event.message_id), []);
+  const afterReport = await readRow();
+  assert.equal(afterReport?.status, "delivered");
+  assert.ok(afterReport?.deliveredAt);
+  assert.deepEqual(await reported.json(), { ok: true, delivered: 1 });
+
+  // A retried report is a no-op: status and deliveredAt are untouched.
+  const replayed = await report(minted.apiKey, [postedBody.id]);
+  assert.equal(replayed.status, 200);
+  assert.deepEqual(await replayed.json(), { ok: true, delivered: 0 });
+  assert.equal((await readRow())?.deliveredAt?.getTime(), afterReport?.deliveredAt?.getTime());
+
+  const invalid = await report(minted.apiKey, []);
+  assert.equal(invalid.status, 400);
+
+  // Task #179 (follow-up to #176): the route's rejection set is the shared
+  // contract's. Ids the shared predicate rejects are refused as a batch; an id
+  // it accepts in upper case is a valid report (no rows match, delivered: 0).
+  assert.equal(isThirdPartyEventId("not-a-third-party-event-id"), false);
+  const rejected = await report(minted.apiKey, [postedBody.id, "not-a-third-party-event-id"]);
+  assert.equal(rejected.status, 400);
+  assert.equal(((await rejected.json()) as { code?: string }).code, "event_ids_invalid");
+  const upper = "EEEEEEEE-0000-4000-8000-000000000179";
+  assert.equal(isThirdPartyEventId(upper), true);
+  const accepted = await report(minted.apiKey, [upper]);
+  assert.equal(accepted.status, 200);
+  assert.deepEqual(await accepted.json(), { ok: true, delivered: 0 });
 });
 
 test("third-party agent event concurrent duplicate requests do not 500 or double deliver", async ({ app }) => {

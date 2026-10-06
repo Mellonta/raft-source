@@ -19,8 +19,8 @@
 //   working without a backfill migration step.
 
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agentScopes, agents } from "../db/schema.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { agentScopes, agents } from "../db/schema";
 import {
   AGENT_GRANTABLE_SCOPES,
   hasScope as hasScopeShared,
@@ -92,8 +92,7 @@ export interface UpdateAgentScopesArgs {
   updatedByUserId: string;
 }
 
-async function findAgentScopeTarget(agentId: string) {
-  const db = getDb();
+async function findAgentScopeTarget(agentId: string, db: DatabaseExecutor = getDb()) {
   const agentRow = await db.query.agents.findFirst({
     where: eq(agents.id, agentId),
     columns: { id: true, serverId: true },
@@ -109,11 +108,14 @@ async function findAgentScopeTarget(agentId: string) {
  * Returns the post-write `AgentScopeSet` (callers push this verbatim
  * over the `agent:scope-updated` ws event).
  */
-export async function updateAgentScopes(args: UpdateAgentScopesArgs): Promise<AgentScopeSet> {
-  const db = getDb();
+export async function updateAgentScopes(
+  args: UpdateAgentScopesArgs,
+  options: { executor?: DatabaseExecutor } = {},
+): Promise<AgentScopeSet> {
+  const db = options.executor ?? getDb();
   const sanitized = sanitizeGrantedScopes(args.scopes);
 
-  const agentRow = await findAgentScopeTarget(args.agentId);
+  const agentRow = await findAgentScopeTarget(args.agentId, db);
 
   const existing = await db.query.agentScopes.findFirst({
     where: eq(agentScopes.agentId, args.agentId),
@@ -163,9 +165,9 @@ export async function updateAgentScopes(args: UpdateAgentScopesArgs): Promise<Ag
 export async function resetAgentScopesToDefault(args: {
   agentId: string;
   updatedByUserId: string;
-}): Promise<AgentScopeSet> {
-  const db = getDb();
-  const agentRow = await findAgentScopeTarget(args.agentId);
+}, options: { executor?: DatabaseExecutor } = {}): Promise<AgentScopeSet> {
+  const db = options.executor ?? getDb();
+  const agentRow = await findAgentScopeTarget(args.agentId, db);
   const existing = await db.query.agentScopes.findFirst({
     where: eq(agentScopes.agentId, args.agentId),
   });

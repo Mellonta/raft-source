@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, render } from "@testing-library/react";
 import type { ParsedRaftPermalink } from "@botiverse/raft-shared";
 import api from "../src/api/client";

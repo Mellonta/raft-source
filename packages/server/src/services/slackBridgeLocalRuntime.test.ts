@@ -1,27 +1,26 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { createCipheriv, randomBytes, randomUUID } from "node:crypto";
 import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channels,
   externalAppCredentials,
   externalAppIngressEndpoints,
   externalAppInstallGrantReceipts,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalAppManifestReceipts,
   externalAppRegistrations,
   externalAppRegistrationSecrets,
   externalAppServerGrants,
-  externalAuthorPolicies,
   externalChannelBindings,
   externalDeliveryPartitions,
   externalMessageLinks,
@@ -31,18 +30,19 @@ import {
   oauthClientInstalls,
   oauthClients,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   digestSlackBridgeRenderSnapshot,
   maybeEnqueueOrdinaryMessageExternalDelivery,
   type SlackBridgeRenderSnapshot,
-} from "./externalDeliveryOutboxService.js";
-import { processExternalDeliveryPartitionHead } from "./externalDeliveryWorkerService.js";
-import { updateFeatureFlag } from "./featureFlagService.js";
-import { resolveSlackBridgeBindingActive } from "./slackBridgeRuntimeService.js";
-import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService.js";
-import { createServer } from "./serverService.js";
-import { createSlackBridgeLocalRuntimeFromEnv } from "./slackBridgeLocalRuntime.js";
+} from "./externalDeliveryOutboxService";
+import { processExternalDeliveryPartitionHead } from "./externalDeliveryWorkerService";
+import { updateFeatureFlag } from "./featureFlagService";
+import { resolveSlackBridgeBindingActive } from "./slackBridgeRuntimeService";
+import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService";
+import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "./slackBridgeProductionAppContract";
+import { createServer } from "./serverService";
+import { createSlackBridgeLocalRuntimeFromEnv } from "./slackBridgeLocalRuntime";
 
 
 const NOW = new Date("2026-08-05T10:00:00.000Z");
@@ -160,7 +160,6 @@ test("local outbound config remains the OAuth completion app-origin authority", 
         bindingId: "33333333-3333-4333-8333-333333333333",
         connectionEpoch: 1,
         bindingEpoch: 1,
-        consentRevision: 1,
         level: "top_level",
         membership: {
           registrationId: "11111111-1111-4111-8111-111111111111",
@@ -377,15 +376,10 @@ test("local runtime drives current worker through one exact credential lease and
     grantedByType: "human",
     grantedById: owner.id,
   }).returning();
-  const scopes = [
-    "channels:history",
-    "channels:read",
-    "chat:write",
-    "chat:write.customize",
-    "groups:history",
-    "groups:read",
-    "users:read",
-  ];
+  // On the #8290 base the required scope set is the legacy/core 11-scope
+  // grant; the held #8293 slice is what later split that name from the
+  // optional paid-workspace usergroup scopes.
+  const scopes = [...SLACK_BRIDGE_REQUIRED_BOT_SCOPES];
   const [install] = await db.insert(externalAppInstalls).values({
     serverId: server.id,
     registrationId: registration.id,
@@ -404,6 +398,16 @@ test("local runtime drives current worker through one exact credential lease and
     providerBotId: "B_TEST",
     lastVerifiedAt: NOW,
   }).returning();
+  await db.insert(externalAppInstallServerGrants).values({
+    installId: install.id,
+    serverId: server.id,
+    registrationId: registration.id,
+    serverGrantId: grant.id,
+    grantEpoch: grant.grantEpoch,
+    state: "active",
+    authorizedByType: "human",
+    authorizedById: owner.id,
+  });
   await db.insert(externalAppCredentials).values({
     installId: install.id,
     state: "active",
@@ -478,14 +482,6 @@ test("local runtime drives current worker through one exact credential lease and
   }).returning();
   for (const key of [
     SLACK_BRIDGE_FEATURE_FLAG_KEYS.master,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.directory,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.enqueue,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.dispatch,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.customAuthorship,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.nativeMention,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.threadDelivery,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.eventIngress,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.inboundProjection,
   ]) {
     assert.ok(await updateFeatureFlag(key, { defaultEnabled: true }));
   }
@@ -540,26 +536,11 @@ test("local runtime drives current worker through one exact credential lease and
     bindingEpoch: 7,
     memberRevision: 6,
     contextRevision: 7,
-    consentRevision: 8,
     privacyClass: "public" as const,
     raftChannelId: channel.id,
     providerAuthorityId: "T_TEST",
     providerConversationId: "C_TEST",
   };
-  const [policy] = await db.insert(externalAuthorPolicies).values({
-    serverId: server.id,
-    provider: "slack",
-    appRegistrationId: registration.id,
-    installId: install.id,
-    bindingId: binding.id,
-    bindingEpoch: 7,
-    authorType: "user",
-    authorId: owner.id,
-    displayName: "Local Worker Human",
-    fallbackKind: "human",
-    consentRevision: 8,
-    state: "granted",
-  }).returning();
   const [message] = await db.insert(messages).values({
     channelId: channel.id,
     senderType: "user",
@@ -568,7 +549,7 @@ test("local runtime drives current worker through one exact credential lease and
     messageType: "chat",
   }).returning();
   const snapshot: SlackBridgeRenderSnapshot = {
-    schema: "slack-bridge-render-snapshot.v2",
+    schema: "slack-bridge-render-snapshot.v4",
     sourceMessageId: message.id,
     sourceMessageSeq: message.seq,
     canonicalConversationId: channel.id,
@@ -578,11 +559,7 @@ test("local runtime drives current worker through one exact credential lease and
     senderType: "user",
     senderId: owner.id,
     authorName: "Local Worker Human",
-    authorAvatarDigest: null,
-    authorPolicy: {
-      policyId: policy.id,
-      serverId: server.id,
-      consentRevision: 8,
+    authorPresentation: {
       displayName: "Local Worker Human",
       fallbackKind: "human",
       avatar: null,
@@ -625,7 +602,6 @@ test("local runtime drives current worker through one exact credential lease and
       bindingId: binding.id,
       connectionEpoch: 2,
       bindingEpoch: 7,
-      consentRevision: 8,
       level: "top_level",
       membership: { ...membership, expiresAt: membership.expiresAt.toISOString() },
       oracle: { ...oracle, expiresAt: oracle.expiresAt.toISOString() },

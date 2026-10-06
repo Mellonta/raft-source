@@ -4,7 +4,6 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 import {
   acknowledgeLifecycleReceipt,
   discardLifecycleOperation,
@@ -12,14 +11,14 @@ import {
   findPendingLifecycleOperation,
   readPendingLifecycleAcknowledgements,
   retireCompletedUpgradeShutdownsFromLog,
-} from "./lifecycleOperations.js";
+} from "./lifecycleOperations";
 import {
   prepareExactLocalUpgradeLifecycleOperation,
   prepareExactLocalUpgradeLifecycleOperationResult,
   prepareLocalUpgradeLifecycleOperation,
   prepareLocalLifecycleOperations,
-} from "./localLifecycleIntents.js";
-import { serverAttachmentPath, upgradeLogPath, userSessionPath } from "./paths.js";
+} from "./localLifecycleIntents";
+import { serverAttachmentPath, upgradeLogPath, userSessionPath } from "./paths";
 
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
 const SECOND_SERVER_ID = "11111111-1111-4111-8111-222222222222";
@@ -237,7 +236,6 @@ test("legacy adoption prepares the exact K id and durably replays shutdown plus 
       parentOperationId: OPERATION_ID,
       action: "upgrade",
       targetVersion: "1.0.18",
-      completionMode: "legacy_k_promoted",
     }]);
     assert.deepEqual(readPendingLifecycleAcknowledgements(home, SERVER_ID, undefined, "1.0.18"), [
       { operationId: OPERATION_ID, action: "upgrade", phase: "shutdown" },

@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
-import { acquireDaemonMachineLock, getDaemonMachineLockId, resolveDefaultMachineStateRoot } from "./machineLock.js";
+import { acquireDaemonMachineLock, getDaemonMachineLockId, resolveDefaultMachineStateRoot } from "./machineLock";
 
 test("daemon machine lock serializes one running daemon per machine key", async () => {
   const rootDir = await mkdtemp(path.join(os.tmpdir(), "slock-machine-lock-test-"));

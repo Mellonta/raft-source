@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -15,7 +15,7 @@ import {
   type ActivityDomainState,
   type SyncDomainConfig,
 } from "@botiverse/raft-sync-core";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   activitySyncChanges,
   activitySyncPrincipalAuthorities,
@@ -28,12 +28,12 @@ import {
   servers,
   users,
   userChannelReadCursors,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   markChannelInboxActive,
   markChannelInboxDone,
   markReadLatest,
-} from "./channelService.js";
+} from "./channelService";
 import {
   exactDatabaseInt8,
   getActivityDifference,
@@ -41,8 +41,8 @@ import {
   setActivityExactMutationForTest,
   setActivitySyncTestHooksForTest,
   type ActivityExactMutationForTest,
-} from "./activitySyncService.js";
-import { openTestApp } from "../test/integration/app.js";
+} from "./activitySyncService";
+import { openTestApp } from "../test/integration/app";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

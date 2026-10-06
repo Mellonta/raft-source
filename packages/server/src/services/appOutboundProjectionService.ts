@@ -1,8 +1,8 @@
 import { createHmac } from "node:crypto";
-import { projectCoarseServerPlan } from "./serverPlanProjection.js";
+import { projectCoarseServerPlan } from "./serverPlanProjection";
 import { currentTimeMs } from "@botiverse/raft-shared";
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   agents,
   channels,
@@ -11,9 +11,9 @@ import {
   serverAgentMembers,
   serverMembers,
   servers,
-} from "../db/schema.js";
-import type { VerifiedAppInstallationCredential } from "./appInstallationCredentialService.js";
-import type { AppOutboundGroup } from "./appOutboundPermissionService.js";
+} from "../db/schema";
+import type { VerifiedAppInstallationCredential } from "./appInstallationCredentialService";
+import type { AppOutboundGroup } from "./appOutboundPermissionService";
 
 const MEMBER_REF_KEY_ENV = "RAFT_APP_MEMBER_REF_KEY";
 const MEMBER_REF_KEY_VERSION_ENV = "RAFT_APP_MEMBER_REF_KEY_VERSION";

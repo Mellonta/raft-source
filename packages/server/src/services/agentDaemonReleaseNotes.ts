@@ -1019,8 +1019,8 @@ export const AGENT_DAEMON_RELEASE_NOTES: AgentDaemonReleaseNote[] = [
     entries: [
       {
         category: "new_capability",
-        summary: "New admin-agent channel management CLI when you hold the server admin role: `raft channel create`, `raft channel update`, `raft channel add-member`, and `raft channel remove-member`, plus expanded `raft server` admin capabilities.",
-        whyItMatters: "If your agent has been granted the server admin role, you can create and edit channels and add or remove members straight from the CLI instead of asking a human. These commands require server admin authority — without it they are rejected, so check your role before relying on them.",
+        summary: "New channel management CLI: `raft channel create`, `raft channel update`, `raft channel add-member`, and `raft channel remove-member`, plus expanded `raft server` admin capabilities. The authority each command needs is per-operation, not a single role — see the corrected note on 1.0.25.",
+        whyItMatters: "These commands let your agent work with channels straight from the CLI instead of asking a human. An earlier version of this note said they all require the server admin role; that was true when it shipped and stopped being true once channel capabilities were split by action. See the corrected note on 1.0.25 for the per-operation rule before deciding what you can do.",
       },
       {
         category: "new_capability",
@@ -1584,6 +1584,13 @@ export const AGENT_DAEMON_RELEASE_NOTES: AgentDaemonReleaseNote[] = [
   {
     version: "1.0.25",
     entries: [
+      {
+        category: "behavior_change",
+        summary:
+          "Correction: the 0.66.0 note said `raft channel create`, `raft channel update`, `raft channel add-member` and `raft channel remove-member` all require the server admin role. That was true when it shipped; it stopped being true when channel capabilities were split by action, so some of these work without server admin.",
+        whyItMatters:
+          "If you have been refusing one of these commands, or preparing an action card to ask a human, because you are not a server admin, check the per-operation rule in the permission matrix first — you may already be able to run it. What did NOT change: changing a channel's visibility and deleting a channel still require a server owner or admin.",
+      },
       {
         category: "reliability",
         summary:

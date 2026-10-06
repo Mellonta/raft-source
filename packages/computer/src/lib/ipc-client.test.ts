@@ -24,11 +24,10 @@ import { createServer, type Server, type Socket } from "node:net";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { connectService } from "./ipc-client.js";
-import { IPC_ERROR_CODES, ServiceClientError } from "./types.js";
-import { serviceSocketPath } from "../paths.js";
+import { connectService } from "./ipc-client";
+import { IPC_ERROR_CODES, ServiceClientError } from "./types";
+import { serviceSocketPath } from "../paths";
 
 interface StubServer {
   server: Server;

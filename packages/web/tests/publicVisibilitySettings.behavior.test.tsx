@@ -1,14 +1,13 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 
 import api from "../src/api/client";
 import { PublicVisibilitySection } from "../src/components/settings/SettingsPanel";
 import { useServerStore } from "../src/store/serverStore";
 import { renderWithIntl } from "./helpers/intl";
-import { PUBLIC_SERVER_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
+import { PUBLIC_SERVER_FEATURE_FLAG_KEY, SERVER_GUEST_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 import {
   resetServerFeatureFlagsForTests,
   setServerFeatureFlagForTests,
@@ -40,6 +39,7 @@ function seed(role: "owner" | "admin", publicServerEnabled = true) {
     serverEpoch: 1,
   } as never);
   setServerFeatureFlagForTests("server-1", PUBLIC_SERVER_FEATURE_FLAG_KEY, publicServerEnabled);
+  setServerFeatureFlagForTests("server-1", SERVER_GUEST_FEATURE_FLAG_KEY, true);
 }
 
 test("owner sees a structured exposed-channel list and must confirm the audience expansion", async () => {
@@ -54,6 +54,7 @@ test("owner sees a structured exposed-channel list and must confirm the audience
     return {
       data: {
         publiclyVisible: false,
+        publicGuestJoinEnabled: false,
         slug: "public-test",
         exposedChannels: [
           { id: "channel-1", name: "announcements", description: "Company news" },
@@ -66,7 +67,7 @@ test("owner sees a structured exposed-channel list and must confirm the audience
   const writes: Array<{ url: string; publiclyVisible: boolean }> = [];
   api.patch = (async (url: string, body: { publiclyVisible: boolean }) => {
     writes.push({ url, publiclyVisible: body.publiclyVisible });
-    return { data: { publiclyVisible: body.publiclyVisible } };
+    return { data: { publiclyVisible: body.publiclyVisible, publicGuestJoinEnabled: false } };
   }) as typeof api.patch;
 
   renderWithIntl(<PublicVisibilitySection />);
@@ -119,12 +120,12 @@ test("owner sees a structured exposed-channel list and must confirm the audience
 test("turning public access off is immediate and does not require confirmation", async () => {
   seed("owner");
   api.get = (async () => ({
-    data: { publiclyVisible: true, slug: "public-test", exposedChannels: [] },
+    data: { publiclyVisible: true, publicGuestJoinEnabled: true, slug: "public-test", exposedChannels: [] },
   })) as typeof api.get;
   const writes: boolean[] = [];
   api.patch = (async (_url: string, body: { publiclyVisible: boolean }) => {
     writes.push(body.publiclyVisible);
-    return { data: { publiclyVisible: body.publiclyVisible } };
+    return { data: { publiclyVisible: body.publiclyVisible, publicGuestJoinEnabled: false } };
   }) as typeof api.patch;
 
   renderWithIntl(<PublicVisibilitySection />, { locale: "zh-cn" });
@@ -134,6 +135,40 @@ test("turning public access off is immediate and does not require confirmation",
 
   await waitFor(() => assert.deepEqual(writes, [false]));
   assert.equal(screen.queryByRole("dialog"), null);
+});
+
+test("owner can independently enable Guest joining only while Public access is on", async () => {
+  seed("owner");
+  api.get = (async () => ({
+    data: { publiclyVisible: true, publicGuestJoinEnabled: false, slug: "public-test", exposedChannels: [] },
+  })) as typeof api.get;
+  const writes: Array<{ url: string; body: unknown }> = [];
+  api.patch = (async (url: string, body: unknown) => {
+    writes.push({ url, body });
+    return { data: { publicGuestJoinEnabled: true } };
+  }) as typeof api.patch;
+
+  renderWithIntl(<PublicVisibilitySection />);
+  const guestJoin = await screen.findByTestId("public-guest-join-switch");
+  assert.equal(guestJoin.hasAttribute("data-disabled"), false);
+  assert.match(screen.getByTestId("public-visibility-section").textContent ?? "", /Allow visitors to join as Guest/);
+  fireEvent.click(guestJoin);
+  await waitFor(() => assert.deepEqual(writes, [{
+    url: "/servers/server-1/public-guest-join",
+    body: { publicGuestJoinEnabled: true },
+  }]));
+});
+
+test("Guest joining control is disabled while Public access is off", async () => {
+  seed("owner");
+  api.get = (async () => ({
+    data: { publiclyVisible: false, publicGuestJoinEnabled: false, slug: "public-test", exposedChannels: [] },
+  })) as typeof api.get;
+  api.patch = (async () => assert.fail("disabled Guest join must not write")) as typeof api.patch;
+
+  renderWithIntl(<PublicVisibilitySection />);
+  const guestJoin = await screen.findByTestId("public-guest-join-switch");
+  assert.equal(guestJoin.hasAttribute("data-disabled"), true);
 });
 
 test("admins never receive the owner-only public visibility surface or API read", () => {

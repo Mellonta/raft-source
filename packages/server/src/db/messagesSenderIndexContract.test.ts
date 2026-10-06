@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 const SERVER_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -32,11 +31,11 @@ test("server package exposes concurrent sender index create and verify scripts",
   const packageJson = JSON.parse(await readServerFile("package.json"));
   assert.equal(
     packageJson.scripts["db:create-messages-sender-index"],
-    "tsx scripts/create-messages-sender-index.ts",
+    "node --import @oxc-node/core/register scripts/create-messages-sender-index.ts",
   );
   assert.equal(
     packageJson.scripts["db:verify-messages-sender-index"],
-    "tsx scripts/verify-messages-sender-index.ts",
+    "node --import @oxc-node/core/register scripts/verify-messages-sender-index.ts",
   );
 
   const helperScript = await readServerFile("scripts/messages-sender-index.ts");

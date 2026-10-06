@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { validateAgentManifestV1, type AgentManifestV1 } from "./manifestV1.js";
-import { buildIntegrationReadinessV1, formatIntegrationReadinessV1 } from "./readinessV1.js";
-import type { ManifestObservation } from "./readiness.js";
+import { validateAgentManifestV1, type AgentManifestV1 } from "./manifestV1";
+import { buildIntegrationReadinessV1, formatIntegrationReadinessV1 } from "./readinessV1";
+import type { ManifestObservation } from "./readiness";
 
 function observation(
   status: ManifestObservation["status"],

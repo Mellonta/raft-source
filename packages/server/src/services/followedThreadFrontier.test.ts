@@ -5,8 +5,7 @@
 // parent seq (or the reverse) would mark Done through a message the user never
 // saw. replyCount / lastReplyAt are display-only and may never substitute.
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { __testFollowedThreadFrontier } from "./channelService.js";
+import { __testFollowedThreadFrontier } from "./channelService";
 
 const { latestActivitySeqSameSource } = __testFollowedThreadFrontier;
 

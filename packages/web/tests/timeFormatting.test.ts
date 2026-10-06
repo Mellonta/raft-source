@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { resolve, relative } from "node:path";
-import test from "node:test";
 import {
   formatClock,
   formatClockWithSeconds,
@@ -10,7 +9,7 @@ import {
   formatShortDateTime,
   normalizePreferredTimeFormat,
   resolveTimeFormatPreference,
-} from "../src/utils/timeFormatting.js";
+} from "../src/utils/timeFormatting";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 

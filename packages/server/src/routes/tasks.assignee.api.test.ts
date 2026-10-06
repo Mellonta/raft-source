@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 /**
  * Assignee coverage, driven the way a real user drives it: over HTTP, with a
  * logged-in session, against a task that already exists on the board.
@@ -24,12 +24,12 @@ import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { users, serverMembers, tasks, taskEvents, messages } from "../db/schema.js";
-import { createChannel, addHuman, addAgent } from "../services/channelService.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import * as taskService from "../services/taskService.js";
+import { getDb } from "../db/index";
+import { users, serverMembers, tasks, taskEvents, messages } from "../db/schema";
+import { createChannel, addHuman, addAgent } from "../services/channelService";
+import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import * as taskService from "../services/taskService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -201,6 +201,48 @@ test("self-assign then start: the status route still moves todo -> in_progress",
   const after = await readTask(task.id);
   assert.equal(after.status, "in_progress");
   assert.ok(after.claimedAt instanceof Date, "starting the work does stamp claimedAt");
+});
+
+test("the current assignee can return active work to reserved todo, but another member cannot", async ({ app }) => {
+  const { member, server, channel, task } = await setup("assignee-undo-start");
+  const peer = await seedUser("assignee-undo-start-peer");
+  await getDb().insert(serverMembers).values({ serverId: server.id, userId: peer.id, role: "member" });
+  await addHuman(channel.id, peer.id);
+  const memberToken = await login(app.baseUrl, member.email);
+  const peerToken = await login(app.baseUrl, peer.email);
+
+  const claim = await fetch(`${app.baseUrl}/api/tasks/${task.id}/claim`, {
+    method: "PATCH",
+    headers: headers(memberToken, server.id),
+  });
+  assert.equal(claim.status, 200, await claim.clone().text());
+  const active = await readTask(task.id);
+  assert.equal(active.status, "in_progress");
+  assert.equal(active.claimedById, member.id);
+  assert.ok(active.claimedAt instanceof Date);
+
+  const otherMemberDemotion = await fetch(`${app.baseUrl}/api/tasks/${task.id}/status`, {
+    method: "PATCH",
+    headers: headers(peerToken, server.id),
+    body: JSON.stringify({ status: "todo" }),
+  });
+  assert.equal(otherMemberDemotion.status, 409, await otherMemberDemotion.clone().text());
+  const unchanged = await readTask(task.id);
+  assert.equal(unchanged.status, "in_progress");
+  assert.equal(unchanged.claimedById, member.id);
+  assert.ok(unchanged.claimedAt instanceof Date);
+
+  const selfDemotion = await fetch(`${app.baseUrl}/api/tasks/${task.id}/status`, {
+    method: "PATCH",
+    headers: headers(memberToken, server.id),
+    body: JSON.stringify({ status: "todo" }),
+  });
+  assert.equal(selfDemotion.status, 200, await selfDemotion.clone().text());
+  const reserved = await readTask(task.id);
+  assert.equal(reserved.status, "todo");
+  assert.equal(reserved.claimedByType, "user");
+  assert.equal(reserved.claimedById, member.id, "undoing start keeps the task reserved");
+  assert.equal(reserved.claimedAt, null, "todo carries no stale work-start epoch");
 });
 
 test("a member can withdraw an assignment made to someone else", async ({ app }) => {

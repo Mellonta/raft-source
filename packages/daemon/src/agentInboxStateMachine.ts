@@ -3,7 +3,7 @@ import {
   projectApmHeldFreshnessEnvelope,
   type ApmFreshnessHeldDecision,
   type ApmHeldFreshnessEnvelopeBody,
-} from "./apmStateMachine.js";
+} from "./apmStateMachine";
 
 export type AgentInboxStateMachineAction = "send" | "task_claim" | "task_update";
 
@@ -11,6 +11,8 @@ export type AgentInboxStateMachineMessage = {
   seq?: number;
   id?: string;
   message_id?: string;
+  channel_id?: string;
+  channelId?: string;
   sender_id?: string;
   senderId?: string;
   channel_type?: string;
@@ -275,6 +277,7 @@ export function normalizeInboxVisibleMessage(
     ...targetFields,
     ...message,
     message_id: message.message_id ?? message.id,
+    ...((message.channel_id ?? message.channelId) && { channel_id: message.channel_id ?? message.channelId }),
     timestamp: message.timestamp ?? message.createdAt,
     sender_type: message.sender_type ?? message.senderType,
     sender_name: message.sender_name ?? message.senderName,

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
-import type { InboxItem } from "../src/store/inboxStore.js";
-import type { Message } from "../src/store/messageStore.js";
-import type { FollowedThread, ThreadSummary } from "../src/store/threadStore.js";
+import type { InboxItem } from "../src/store/inboxStore";
+import type { Message } from "../src/store/messageStore";
+import type { FollowedThread, ThreadSummary } from "../src/store/threadStore";
 
 class MemoryStorage {
   private readonly map = new Map<string, string>();
@@ -53,9 +52,9 @@ Object.defineProperty(globalThis, "window", {
   configurable: true,
 });
 
-const api = (await import("../src/api/client.js")).default;
-const { useInboxStore, getInboxItemKey } = await import("../src/store/inboxStore.js");
-const { useMessageStore } = await import("../src/store/messageStore.js");
+const api = (await import("../src/api/client")).default;
+const { useInboxStore, getInboxItemKey } = await import("../src/store/inboxStore");
+const { useMessageStore } = await import("../src/store/messageStore");
 const {
   consumeReadStateUpdate,
   getReadStateLedgerGeneration,
@@ -63,16 +62,16 @@ const {
   normalizeReadStateUpdated,
   normalizeReadStateUpdatedBulk,
   resetReadStateSyncForTests,
-} = await import("../src/store/readStateSync.js");
+} = await import("../src/store/readStateSync");
 const {
   acceptActivityReadAllAck,
   hasActivityReadHold,
   resetActivityReadStateForTests,
-} = await import("../src/store/activityReadState.js");
-const { useServerStore } = await import("../src/store/serverStore.js");
-const { triggerServerReset } = await import("../src/store/serverResetRegistry.js");
-const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge.js");
-const { useThreadStore } = await import("../src/store/threadStore.js");
+} = await import("../src/store/activityReadState");
+const { useServerStore } = await import("../src/store/serverStore");
+const { triggerServerReset } = await import("../src/store/serverResetRegistry");
+const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge");
+const { useThreadStore } = await import("../src/store/threadStore");
 
 const originalPost = api.post.bind(api);
 const originalGet = api.get.bind(api);

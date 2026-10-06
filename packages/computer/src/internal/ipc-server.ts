@@ -66,14 +66,14 @@
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { chmod, lstat, mkdir, stat, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
-import { serviceSocketPath, serviceWindowsPipeName } from "../paths.js";
-import { FrameDecoder, encodeFrame } from "./ipc-codec.js";
+import { serviceSocketPath, serviceWindowsPipeName } from "../paths";
+import { FrameDecoder, encodeFrame } from "./ipc-codec";
 import {
   ServiceClientError,
   type IpcErrorCode,
   type RequestMethodMap,
   type ServiceEvent,
-} from "../lib/types.js";
+} from "../lib/types";
 
 const SUPPORTED_PROTOCOL_VERSIONS = [1] as const;
 const SERVICE_VERSION = "0.0.0";

@@ -1,6 +1,6 @@
 import { eq, and, asc, desc, sql, inArray } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   userSaved,
   messages,
@@ -12,7 +12,7 @@ import {
   jointChannelServers,
   externalMessageAuthorFacts,
   externalProjectionAvatarArtifacts,
-} from "../db/schema.js";
+} from "../db/schema";
 
 /** Save a message for the user. */
 export async function saveMessage(userId: string, messageId: string, serverId: string) {

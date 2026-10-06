@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useIntl } from "react-intl";
-import PixelAvatar from "../agent/PixelAvatar";
-import Button from "../ui/Button";
+import AvatarSlot from "../ui/AvatarSlot";
+import { Button } from "raft-ui";
 import { acknowledgeSetupHandoff } from "./serverSetupProjection";
 import SetupSessionFooter from "./SetupSessionFooter";
 
@@ -47,7 +47,7 @@ export default function ServerSetupHandoffStep({
   };
   return (
     <section
-      className="flex w-full max-w-[560px] flex-col overflow-hidden border-2 border-black bg-white shadow-brutal"
+      className="flex w-full max-w-[560px] flex-col overflow-hidden border border-line-muted bg-layer-panel shadow-raft-md theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal"
       data-testid="server-setup-handoff"
     >
       <div className="flex flex-col items-center px-8 pb-7 pt-9 text-center">
@@ -60,14 +60,15 @@ export default function ServerSetupHandoffStep({
             className="onboarding-cindy-pop-mark absolute -left-5 top-8 size-2.5 -rotate-12 border-2 border-black bg-soft-signal [animation-delay:70ms]"
             aria-hidden="true"
           />
-          <PixelAvatar
-            avatarKey="mug"
-            size={104}
-            className="onboarding-cindy-entrance relative z-10 border-2 border-black shadow-brutal-lg"
+          <AvatarSlot
+            context="profile-tile"
+            type="agent"
+            agentAvatarUrl="pixel:mug"
+            className="onboarding-cindy-entrance relative z-10 !size-[104px] theme-brutal:shadow-brutal-lg"
           />
         </div>
 
-        <h1 className="text-2xl font-black tracking-normal">
+        <h1 className="text-2xl font-black tracking-normal text-foreground-strong theme-brutal:text-black">
           {formatMessage({ id: "layout.onboarding.handoffTitle" }, { agentName })}
         </h1>
         {/* text-balance so the last line can never be left holding a single orphan word
@@ -75,20 +76,20 @@ export default function ServerSetupHandoffStep({
             filling greedily and dumping the remainder. Fixed here and not in the copy: the
             sentence was never wrong, and a container that only fits THIS wording would strand
             the next one (@Cat owns the copy contract; @Josh called the same fix). */}
-        <p className="mt-3 max-w-[42ch] text-balance text-base leading-relaxed text-black/70">
+        <p className="mt-3 max-w-[42ch] text-balance text-base leading-relaxed text-foreground-muted theme-brutal:text-black/70">
           {formatMessage({ id: "layout.onboarding.handoffBody" }, { agentName })}
         </p>
 
       </div>
 
-      <div className="flex flex-col-reverse gap-3 border-t-2 border-black px-8 py-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col-reverse gap-3 border-t border-line-muted px-8 py-4 sm:flex-row sm:items-center sm:justify-between theme-brutal:border-t-2 theme-brutal:border-black">
         <SetupSessionFooter disabled={handingOff} />
         <Button
           type="button"
           onClick={() => void handleDone()}
           disabled={handingOff}
           size="lg"
-          tone="pink"
+          variant="accent"
           className="w-full sm:w-auto"
           data-testid="server-setup-handoff-done"
         >

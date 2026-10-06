@@ -1,0 +1,184 @@
+{
+  "provenance": {
+    "schemaVersion": "builtin-pi.create.v3",
+    "releasedIn": "release/v1.18.3",
+    "serverCommit": "e9272b6dff24b09372f8739b4d5370c35c2593b6",
+    "capturedAt": "2026-09-28",
+    "note": "Response body of GET /api/servers/:id/machines/:machineId/runtime-form-definitions/:runtimeId as served by the released server. Frozen: never edit; see packages/runtime-form/README.md."
+  },
+  "definition": {
+    "protocolVersion": 1,
+    "runtimeId": "builtin",
+    "schemaVersion": "builtin-pi.create.v3",
+    "dataSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "apiKey",
+        "model"
+      ],
+      "properties": {
+        "providerId": {
+          "type": "string",
+          "title": "Provider",
+          "minLength": 1
+        },
+        "apiKey": {
+          "type": "string",
+          "title": "API Key",
+          "minLength": 1,
+          "writeOnly": true
+        },
+        "baseUrl": {
+          "type": "string",
+          "title": "Base URL",
+          "minLength": 1,
+          "format": "uri"
+        },
+        "supportsImageInput": {
+          "type": "boolean",
+          "title": "Image input"
+        },
+        "loadLocalPlugins": {
+          "type": "boolean",
+          "title": "Load local Pi plugins"
+        },
+        "model": {
+          "type": "string",
+          "title": "Model",
+          "minLength": 1
+        },
+        "envVars": {
+          "type": "object",
+          "title": "Environment Variables",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "uiSchema": {
+      "order": [
+        "providerId",
+        "apiKey",
+        "baseUrl",
+        "supportsImageInput",
+        "model",
+        "loadLocalPlugins",
+        "envVars"
+      ],
+      "layout": {
+        "advanced": [
+          "/loadLocalPlugins",
+          "/envVars"
+        ]
+      },
+      "visibility": [
+        {
+          "pointer": "/baseUrl",
+          "when": {
+            "pointer": "/providerId",
+            "in": [
+              "openai-compatible",
+              "anthropic-compatible"
+            ]
+          }
+        },
+        {
+          "pointer": "/supportsImageInput",
+          "when": {
+            "pointer": "/providerId",
+            "in": [
+              "openai-compatible",
+              "anthropic-compatible"
+            ]
+          }
+        }
+      ],
+      "localization": {
+        "providerId": {
+          "label": "Provider",
+          "hint": "Built-in Pi is ready to use without local runtime setup. It uses the provider key entered here."
+        },
+        "apiKey": {
+          "label": "API Key",
+          "placeholder": "sk-..."
+        },
+        "baseUrl": {
+          "label": "Base URL",
+          "placeholder": "https://gateway.example.com/v1"
+        },
+        "supportsImageInput": {
+          "label": "Supports image input",
+          "hint": "Enable only when this gateway endpoint and model accept images."
+        },
+        "model": {
+          "label": "Model",
+          "placeholder": "Model ID"
+        },
+        "loadLocalPlugins": {
+          "label": "Load local Pi extensions",
+          "hint": "Load enabled Pi extensions installed on the computer running this agent. Applying changes restarts a running agent."
+        },
+        "envVars": {
+          "label": "Environment Variables",
+          "hint": "These will be injected into the runtime command environment."
+        }
+      }
+    },
+    "capabilities": {
+      "providerKinds": [
+        "preset",
+        "gateway"
+      ],
+      "writeOnlyPointers": [
+        "/apiKey"
+      ],
+      "forbiddenPointers": [
+        "/hostUserState"
+      ]
+    },
+    "optionSources": {
+      "provider": {
+        "protocolVersion": 1,
+        "runtimeId": "builtin",
+        "schemaVersion": "builtin-pi.create.v3",
+        "sourceId": "provider",
+        "kind": "select",
+        "pointer": "/providerId"
+      },
+      "model": {
+        "protocolVersion": 1,
+        "runtimeId": "builtin",
+        "schemaVersion": "builtin-pi.create.v3",
+        "sourceId": "model",
+        "kind": "dependent_select",
+        "pointer": "/model",
+        "dependsOn": "/providerId"
+      }
+    }
+  },
+  "releasedOptionIds": {
+    "provider": [
+      "deepseek",
+      "minimax",
+      "minimax-cn",
+      "zai",
+      "zai-coding-cn",
+      "moonshotai",
+      "moonshotai-cn",
+      "kimi-coding",
+      "qwen-token-plan",
+      "qwen-token-plan-cn",
+      "openrouter",
+      "openai",
+      "anthropic",
+      "google",
+      "xai",
+      "xiaomi",
+      "openai-compatible",
+      "anthropic-compatible"
+    ]
+  }
+}

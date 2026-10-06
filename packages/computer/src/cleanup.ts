@@ -4,7 +4,7 @@
 //   1. Stale pidfile — pidfile exists but pid is dead
 //   2. Orphan child process — process running but no managed.flag + attachment
 //   3. Power-loss partial state — file present but contents invalid / inconsistent
-//   4. Tmp file cleanup — upgrade-staging/ or upgrade-snapshot.json older than 24h
+//   4. Tmp file cleanup — upgrade-staging/ older than 24h
 //   5. Stale .lock — proper-lockfile residue from crashed CLI/service
 //
 // Used by:
@@ -24,13 +24,13 @@ import {
   serverRunnerPidPath,
   serversDir,
   isValidServerId,
-} from "./paths.js";
+} from "./paths";
 import {
   listAttachedServerIds,
   listManagedServerIds,
   readServerAttachment,
-} from "./serverState.js";
-import { readPidfileAt, isProcessAlive } from "./internal/process-primitives.js";
+} from "./serverState";
+import { readPidfileAt, isProcessAlive } from "./internal/process-primitives";
 
 export interface CleanupReport {
   stalePidfiles: string[];      // absolute paths cleaned
@@ -284,7 +284,7 @@ export async function cleanupPowerLossPartialState(slockHome: string): Promise<s
 const TMP_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
 
 /**
- * Clear upgrade-staging/* dirs and upgrade-snapshot.json older than 24h.
+ * Clear upgrade-staging/* dirs older than 24h.
  * Returns absolute paths removed.
  */
 export async function cleanupTmpFiles(slockHome: string): Promise<string[]> {
@@ -318,17 +318,6 @@ export async function cleanupTmpFiles(slockHome: string): Promise<string[]> {
     /* no staging dir = nothing to do */
   }
 
-  // upgrade-snapshot.json
-  const snap = join(cdir, "upgrade-snapshot.json");
-  try {
-    const s = await stat(snap);
-    if (Date.now() - s.mtimeMs > TMP_MAX_AGE_MS) {
-      await unlink(snap);
-      removed.push(snap);
-    }
-  } catch {
-    /* not present = nothing to do */
-  }
 
   return removed;
 }

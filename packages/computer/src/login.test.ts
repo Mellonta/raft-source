@@ -3,10 +3,9 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 
-import { runLogin, runLogout } from "./login.js";
-import { serverAttachmentPath, userSessionPath } from "./paths.js";
+import { runLogin, runLogout } from "./login";
+import { serverAttachmentPath, userSessionPath } from "./paths";
 
 async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "raft-computer-login-"));

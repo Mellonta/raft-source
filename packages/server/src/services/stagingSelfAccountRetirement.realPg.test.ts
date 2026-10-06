@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { eq } from "drizzle-orm";
 import pg from "pg";
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
-import * as schema from "../db/schema.js";
-import { sessionFamilies, sessions, users } from "../db/schema.js";
-import { createSession, refreshSession, refreshSessionWithTrace } from "./sessionService.js";
-import { retireStagingSelfAccount } from "./userService.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
+import * as schema from "../db/schema";
+import { sessionFamilies, sessions, users } from "../db/schema";
+import { createSession, refreshSession, refreshSessionWithTrace } from "./sessionService";
+import { retireStagingSelfAccount } from "./userService";
 
 const URL_ENV = "STAGING_SELF_ACCOUNT_RETIREMENT_REAL_PG_URL";
 const ADMIN_URL = process.env[URL_ENV];

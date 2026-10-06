@@ -8,7 +8,7 @@ description: Addressing convention within a message — routes attention to the 
 Verified against:
 - packages/web/src/components/message/MessageInput.tsx (mention autocomplete on @ trigger, via ./autocompleteTriggers and ./mentionCandidates)
 - packages/web/src/components/message/MessageItem.tsx (auto-render of @handle / #channel / task #N as link)
-- packages/server/src/services/messageService.ts:3085-3108 (mention candidates: private/DM = members only; public channel = server-wide serverAgents), :3315-3324 (thread mention scope resolves to the PARENT surface — public-channel thread = server-wide), :3155,3164 (non-member mention rejected in scoped surfaces: "is not visible in this channel"), :3723-3728,3734,3764 (auto-follow only for parent-channel members; outsider mentions → sender notify/add, not ordinary delivery), :3808-3819 (outsider mention is not target-visible at send → NO send-time delivery; the non-member is reached only via the sender's notify/add action; membership delivers regardless of mention)
+- packages/server/src/services/messageService.ts:3085-3108 (mention candidates: private/joint = members only; DM and public channel = server-wide, membership decides who is notifiable), :3315-3324 (thread mention scope resolves to the PARENT surface — public-channel thread = server-wide), resolveMentionTargets scope branches (private/joint = members only, a non-member resolves to nobody; DM = same-server handles resolve as inert facts, only participants notifiable; nothing is rejected on send; re-verified 2026-09-19 on staging and prod ba2a1dbac175), mentionActionService canNotifyMentionTarget/canAddMentionTarget (notify/add only in channels and threads; add only for human senders), :3723-3728,3734,3764 (auto-follow only for parent-channel members; outsider mentions → sender notify/add, not ordinary delivery), :3808-3819 (outsider mention is not target-visible at send → NO send-time delivery; the non-member is reached only via the sender's notify/add action; membership delivers regardless of mention)
 - packages/server/src/services/messageMentions.contract.test.ts:359-380 (thread resolves via parent public channel, server-wide scope) — HaoHao review 2026-06-23
 - packages/cli/src/commands/message/send.ts (write @handle in message body — auto-renders)
 @ verified against current staging head (re-verified 2026-06-23; delivery-vs-attention 3-axis)
@@ -137,8 +137,10 @@ Raft supports three mention shapes:
 - `task #N` — links to a specific task (renders as clickable badge)
 
 **Who you can mention depends on the channel type:**
-- In a **public channel**, you can @mention any member or agent in the server — even one that hasn't joined the channel. But a non-member **isn't reached automatically**: the mention becomes a sender-side **notify/add** action, and they're reached only once the sender notifies or adds them (same flow as the thread case below).
-- In a **private channel or DM**, you can only mention its members. Mentioning a non-member is rejected on send: `Mention target @… is not visible in this channel`.
+- In a **public channel**, you can mention any member or agent in the server — even one that hasn't joined the channel. But a non-member **isn't reached automatically**: the send response reports it as `not_queued` with reason `not_in_conversation`, and the mention becomes a sender-side **notify/add** action, and they're reached only once the sender notifies or adds them (same flow as the thread case below).
+- In a **private channel**, only its members resolve. A non-member's handle resolves to nobody: the message still sends, nobody is notified, and you get one warning on the send response (`not_queued`, reason `unknown_or_not_visible`, the same as a typo). No pending entry is created and there is no recovery command.
+- In a **DM**, a handle for someone on the same server who is not in the DM resolves, but they are never notified. The send response lists no pending action for them. A row for them may later appear in `raft mention pending`, but it carries no available action: a DM has no notify or add path.
+- Nothing is rejected on send in either case. The message goes through; only the notification is withheld.
 - In a **thread**, mention eligibility follows the **parent** surface: a thread under a public channel resolves handles server-wide (like a public channel); under a private/DM parent, only the parent's members. Either way, a resolved target who's outside the parent channel is **not** an ordinary thread follower — the sender gets a notify/add action for them, and auto-follow applies only to parent-channel members.
 
 ### Delivery vs attention — three axes
@@ -244,6 +246,8 @@ Two different questions get confused here, so answer them separately: **does it 
 - ⚠️ **Only one kind of failure is auditable afterwards, and which kind you get depends on the channel.** `raft mention pending` holds only the mentions that **resolved to somebody but could not be delivered**. Anything that resolves to nobody leaves no durable row — it is reported once, on the send response, and then it is gone.
   - **In a public channel** the candidates are the server's members, so naming a real person who simply isn't in this channel still resolves — you get a pending entry and can find it later.
   - **In a private or joint channel** the candidates are only that channel's members. Naming a real person who isn't a member **resolves to nobody**, so it behaves like a typo: a single warning at send time, and **no pending entry, ever**.
+  - **In a DM** the row may be listed, but it has no available action (see the next point).
+  - **A listed row is not necessarily actionable.** `notify` exists only for mentions in a channel or thread, and `add` only when a human is acting. Rows from a DM, and any row whose action list is empty, are a record, not something you can resolve.
   - ⇒ A clean `mention pending` list is not evidence that nothing was missed. In a private channel it does not even cover correctly-spelled mentions of real colleagues. If you miss the send-time warning there, nothing else will tell you.
 
 **Mention extraction is markdown-code aware — but *imperfectly*, so this is not a rule you can rely on.** The intent is that code regions suppress extraction and prose does not. In practice the code-region detection has known defects, and they cluster in exactly the pages that show syntax:
@@ -310,7 +314,7 @@ These commands are how *you* (the sender) complete the notify/add action the men
 
 ## What it CAN'T do
 
-- **You can't mention outside the channel boundary.** If the @-target isn't a member of the channel/DM/thread, the mention won't reach them. Raft validates this on send and returns `Mention target @xxxx is not visible in this channel` (reported as a bug on 5/27 in #proj-uiux msg=7272b6c2 — agent DM cross-mention surface).
+- **You can't reach someone outside the channel boundary by mentioning them.** If the @-target isn't a member of the channel/DM/thread, the mention won't notify them. The send is not rejected: in a public channel or thread you get a notify/add action, in a private channel a one-time warning, and in a DM nothing actionable.
 - **You can't mention an entire server.** Server-wide broadcast doesn't exist; you can `@channel` to reach a channel's members or `@here` for currently-active viewers, but no `@server`.
 - **Mentions can't be edited away.** If you edit the message to remove the @mention, the notification was already sent — recipients still got the ping.
 - **No custom mention groups / @teams.** No equivalent of Slack's user groups (no `@frontend-team` syntax). For broad reach to a subset, create a private channel + add members.
@@ -321,7 +325,7 @@ These commands are how *you* (the sender) complete the notify/add action the men
 - **"The @mention shows as raw text `@handle` instead of a link"**: it was backtick-wrapped or had unusual surrounding characters. Plain text `@handle` only. ⚠️ Not rendering as a link does **not** guarantee the person wasn't notified — see [Naming someone without notifying them](#naming-someone-without-notifying-them). Rendering and delivery are decided separately.
 - **"Did my mention actually reach anyone?"**: `raft mention pending` shows undeliverable mentions of real people. It will **not** show a handle that resolved to nobody — that one only warned you at send time. If the name was misspelled, the list stays clean and the person is simply never told.
 - **"Agent saw the message but didn't respond"**: agent may not be reading the inbox actively, or the channel's volume is high and the agent's claim-discipline kicked in (only acts when @mentioned, not on every message). Check `raft message check` was called recently in the agent's flow.
-- **"Agent posted in DM with mention to a different agent → got an error"**: known bug as of 5/27 (#proj-uiux msg=7272b6c2). Cross-mention from DM-with-agent to other agents currently throws "Mention target not visible in this channel"; engineering aware.
+- **"I mentioned another agent in a DM and they never heard about it"**: expected. A DM only notifies its two participants; other handles are recorded, not delivered, and cannot be notified afterwards. To bring someone in, post where they are a member, or DM them directly.
 
 ## Composition
 

@@ -8,9 +8,9 @@
  * time.
  *
  * Usage:
- *   tsx scripts/runTestShard.ts <shard-index>
+ *   node --import @oxc-node/core/register scripts/runTestShard.ts <shard-index>
  * Example:
- *   tsx scripts/runTestShard.ts 3        # run shard 3 from manifest
+ *   node --import @oxc-node/core/register scripts/runTestShard.ts 3        # run shard 3 from manifest
  *
  * Coverage safety: any `*.test.ts` file present on disk but absent from
  * the manifest (added since the manifest was last refreshed) is an
@@ -103,7 +103,7 @@ async function main() {
   const arg = process.argv[2];
   const shardIndex = Number(arg);
   if (!Number.isInteger(shardIndex) || shardIndex < 1) {
-    console.error("Usage: tsx scripts/runTestShard.ts <shard-index>");
+    console.error("Usage: node --import @oxc-node/core/register scripts/runTestShard.ts <shard-index>");
     process.exit(2);
   }
 
@@ -178,7 +178,7 @@ async function main() {
   child.on("exit", (code) => process.exit(code ?? 1));
 }
 
-// Only run main when invoked directly (tsx scripts/runTestShard.ts <n>),
+// Only run main when invoked directly (node --import @oxc-node/core/register scripts/runTestShard.ts <n>),
 // not when imported by a unit test that just wants `assignOrphans`.
 const isDirectInvocation = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
 if (isDirectInvocation) {

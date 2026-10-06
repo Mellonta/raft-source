@@ -26,7 +26,7 @@
 // / schedule reconcile) and consults these functions for decisions.
 
 import type { ChildProcess } from "node:child_process";
-import type { RunnerState } from "./state.js";
+import type { RunnerState } from "./state";
 
 /** Classification of a per-server daemon child exit — the state machine's
  *  input alphabet for exit events. Lives here (not service.ts) so the pure

@@ -1,7 +1,7 @@
 /**
  * Unit tests for slockdev cluster mode (--replicas N) pure logic.
  *
- * Run: node --import tsx --test scripts/dev/slockdev-cluster.test.ts
+ * Run: pnpm exec vitest run scripts/dev/slockdev-cluster.test.ts
  *
  * Covers the port-derivation + parse helpers that decide how N server
  * replicas are laid out. The invariants under test are the ones that keep
@@ -10,7 +10,6 @@
  * concurrent envs and concurrent replicas never collide.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   parseReplicas,
@@ -19,7 +18,7 @@ import {
   replicaWindowName,
   computeOffset,
   validateEnvironmentName,
-} from "./raftdev.ts";
+} from "./raftdev";
 
 test("replica 1 keeps the canonical server port (13001+offset) for any offset", () => {
   for (const o of [0, 49, 68, 90, 99]) {

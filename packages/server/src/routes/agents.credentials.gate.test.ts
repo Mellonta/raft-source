@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 /**
  * Smoke test for `POST /api/agents/:id/credentials`.
  *

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 import {
   getDesktopServerBootstrapTarget,
   getServerSwitcherTarget,
@@ -160,7 +159,8 @@ test("rail tabs hover to opaque white, not translucent gray", () => {
     "utf8",
   );
 
-  assert.match(source, /border-transparent hover:border-black hover:bg-white"/);
+  assert.match(source, /<AppRailItem[\s\S]*className=\{`\$\{compact \? "size-8"/);
+  assert.match(source, /AppRailItem/);
   assert.doesNotMatch(source, /hover:bg-white\/70/);
 });
 
@@ -178,7 +178,9 @@ test("chat rail tab shows an icon-anchored unread dot only while inactive", () =
   // instrumentation; the runtime render tooth below owns subscription behavior.
   assert.match(source, /activityUnreadCount/);
   assert.match(source, /currentServerActivityCount/);
-  assert.match(source, /currentServerActivityCount !== undefined/);
+  assert.match(source, /hasCurrentServerActivityUnread\(\{/);
+  assert.match(source, /hasAcceptedActivityWindow/);
+  assert.match(source, /summaryUnreadCount: currentServerActivityCount/);
   // Chat attention is narrowed to joined channels and DMs; public discovery
   // rows keep gray row-level unread without lighting the global pink dot.
   assert.match(source, /selectChatAttentionChannelIds\(s\.channels, s\.dmChannels\)/);
@@ -193,9 +195,10 @@ test("chat rail tab shows an icon-anchored unread dot only while inactive", () =
   assert.match(sidebar, /activityUnreadCount > 0/);
   assert.doesNotMatch(sidebar, /inboxTotalUnreadCount/);
   assert.match(source, /dotInactiveOnly/);
-  assert.match(source, /<span className="relative inline-flex items-center justify-center">/);
+  assert.match(source, /<AppRailItemIcon className="relative">/);
+  assert.match(source, /<AppRailItemAttention[\s\S]*<AttentionDot/);
   assert.match(source, /const dotVisible = Boolean\(showDot && \(!dotInactiveOnly \|\| !active\)\)/);
-  assert.match(source, /\{dotVisible && \(/);
+  assert.match(source, /dotVisible \?/);
   // Rail-tab attention dot goes through the canonical <AttentionDot>
   // helper at `size="lg"` — the default canonical 10×10 tier. See
   // CLAUDE.md "Attention Dots": size is physical fit, not priority. The
@@ -205,5 +208,5 @@ test("chat rail tab shows an icon-anchored unread dot only while inactive", () =
   // fit axis. Don't reintroduce `size="md"` — that tier was removed in
   // PR #1709 amend (stdrc 2026-05-14, msg=6ad15567).
   assert.match(source, /import AttentionDot from "\.\.\/ui\/AttentionDot";/);
-  assert.match(source, /<AttentionDot[\s\S]{0,200}size="lg"[\s\S]{0,200}-right-1 -top-1/);
+  assert.match(source, /<AttentionDot[\s\S]{0,200}size="lg"/);
 });

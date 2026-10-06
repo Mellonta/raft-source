@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { dedupeTaskAssigneeMembers } from "../src/components/task/taskAssigneeCandidates.ts";
+import { dedupeTaskAssigneeMembers } from "../src/components/task/taskAssigneeCandidates";
 
 test("joint task assignees collapse duplicate server projections by global actor id", () => {
   const projectionA = {

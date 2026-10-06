@@ -38,7 +38,6 @@
 // in an async clearAuthAndRedirect); 铁根 = this repro/RED; Rainsky = staging/prod
 // ScopeDB pre/post readback (session_cleared with pre-clear user/server/tab).
 
-import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
@@ -47,8 +46,8 @@ import {
   setAuthTraceServerIdGetter,
   setAuthTraceFetchForTest,
   __resetAuthTraceForTest,
-} from "../src/utils/webAuthTrace.ts";
-import { clearAuthAndRedirect } from "../src/api/client.ts";
+} from "../src/utils/webAuthTrace";
+import { clearAuthAndRedirect } from "../src/api/client";
 
 type StubStore = Record<string, string>;
 function stubLocalStorage(initial: StubStore): { restore: () => void } {
@@ -337,9 +336,9 @@ test("clearAuthAndRedirect waits for terminal session_cleared trace before clear
 
     const traceCall = calls.find((call) => call.url.includes("/api/web-traces"));
     assert.ok(traceCall, "clearAuthAndRedirect should issue the terminal trace POST before redirecting");
-    assert.equal((traceCall.body as any)?.records?.[0]?.name, "slock.auth.session_cleared");
-    assert.equal((traceCall.body as any)?.records?.[0]?.attrs?.clearSessionCaller, "clearAuthAndRedirect");
-    assert.equal((traceCall.body as any)?.records?.[0]?.attrs?.logoutTrigger, "terminal_verdict");
+    assert.equal((traceCall.body as any)?.events?.[0]?.name, "slock.auth.session_cleared");
+    assert.equal((traceCall.body as any)?.events?.[0]?.attrs?.clearSessionCaller, "clearAuthAndRedirect");
+    assert.equal((traceCall.body as any)?.events?.[0]?.attrs?.logoutTrigger, "terminal_verdict");
     assert.equal(localStorage.getItem("slock_access_token"), null, "access token should be cleared after terminal trace attempt");
     assert.equal(localStorage.getItem("slock_refresh_token"), null, "refresh token should be cleared after terminal trace attempt");
     assert.equal(win.href(), "/", "clearAuthAndRedirect should redirect after terminal trace attempt");

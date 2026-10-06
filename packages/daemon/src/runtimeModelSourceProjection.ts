@@ -2,7 +2,7 @@ import type {
   MachineToServerMessage,
   RuntimeModelSourceOutcome,
 } from "@botiverse/raft-shared";
-import type { RuntimeModelVerification } from "./drivers/types.js";
+import type { RuntimeModelVerification } from "./drivers/types";
 
 type RuntimeModelSourceResultMessage = Extract<MachineToServerMessage, { type: "machine:runtime_models:result" }>;
 

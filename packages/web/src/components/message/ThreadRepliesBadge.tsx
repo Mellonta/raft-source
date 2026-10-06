@@ -28,9 +28,9 @@ export function ThreadRepliesBadge({
       data-testid="message-thread-replies-badge"
       onClick={onClick}
       uppercase={false}
-      appearance="solid"
-      variant="default"
-      className={`${hasUnreadReplies ? "bg-brutal-cyan/20" : "bg-white"} text-black transition-colors hover:bg-brutal-cyan/40`}
+      appearance={hasUnreadReplies ? "soft" : "solid"}
+      variant={hasUnreadReplies ? "information" : "default"}
+      className="transition-colors"
     >
       {hasReplies ? (
         <>
@@ -38,11 +38,11 @@ export function ThreadRepliesBadge({
           {formatMessage({ id: "message.inlineThreadReplies.replyCount" }, { count: replyCount })}
         </>
       ) : (
-        <Pencil size={12} className="shrink-0 text-black/55" />
+        <Pencil size={12} className="shrink-0" />
       )}
       {hasUnreadReplies ? (
         <>
-          <span className="text-black/45">·</span>
+          <span className="opacity-60">·</span>
           <span>
             {formatMessage({ id: "message.inlineThreadReplies.newReplyCount" }, { count: unreadCount })}
           </span>
@@ -51,12 +51,12 @@ export function ThreadRepliesBadge({
       {hasDraft ? (
         <>
           {shouldShowDraftSeparator ? (
-            <span className="text-black/45">·</span>
+            <span className="opacity-60">·</span>
           ) : null}
           {hasReplies ? (
-            <Pencil size={12} className="shrink-0 text-black/55" />
+            <Pencil size={12} className="shrink-0" />
           ) : null}
-          <span className="text-black/55">
+          <span className="opacity-80">
             {formatMessage({ id: "message.threadRepliesBadge.draft" })}
           </span>
         </>

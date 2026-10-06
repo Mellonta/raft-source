@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { asMachineId } from "@botiverse/raft-shared";
 import {
   rateLimitUserMachineOrIpKey,
@@ -7,7 +6,7 @@ import {
   shouldSkipAttachmentRateLimit,
   shouldSkipAuthRateLimit,
   shouldSkipProductFeedbackRateLimit,
-} from "./app.js";
+} from "./app";
 
 test("rate limit keys preserve authenticated principal identity before IP fallback", () => {
   assert.equal(rateLimitUserOrIpKey({ userId: "user-1", ip: "2001:db8::1" }), "user-1");

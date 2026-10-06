@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import api from "../src/api/client";
 import { useTaskStore } from "../src/store/taskStore";
 import { registerTaskRealtimeHandlers } from "../src/store/taskRealtimeSync";
@@ -23,6 +22,11 @@ import { registerTaskRealtimeHandlers } from "../src/store/taskRealtimeSync";
  *   - catch-up: invalidateServerTasks (wired to "disconnect") forces the next
  *     load to re-fetch.
  *
+ * Since task #8 the panel itself loads via the summary lanes
+ * (loadActiveTaskSummaries), so the reconnect catch-up tests below assert the
+ * summary path; loadServerTasks remains for non-panel consumers and keeps the
+ * contract above.
+ *
  * Run: `pnpm --filter @botiverse/raft-web test`.
  */
 
@@ -34,6 +38,13 @@ afterEach(() => {
     tasks: [], loading: false, currentChannelId: null,
     serverTasks: [], serverLoading: false, serverTasksLoaded: false, serverTasksGeneration: 0,
     serverTasksActiveConsumers: 0,
+    serverTaskPages: {
+      todo: { nextCursor: null, loading: false, loaded: false },
+      in_progress: { nextCursor: null, loading: false, loaded: false },
+      in_review: { nextCursor: null, loading: false, loaded: false },
+      done: { nextCursor: null, loading: false, loaded: false },
+      closed: { nextCursor: null, loading: false, loaded: false },
+    },
     taskMetadataByMessageId: {}, taskMessageIdByTaskId: {},
   });
 });
@@ -203,39 +214,57 @@ test("a task created live during the fetch is preserved when the snapshot lands 
 });
 
 test("an OPEN Tasks view catches up on reconnect (disconnect -> connect re-fetches)", async () => {
-  const calls = mockServerTasks([TASK]);
+  // The panel path is the summary lanes (task #8): catch-up must refetch
+  // those, never the legacy unbounded load.
+  const urls: string[] = [];
+  api.get = (async (url: string) => {
+    urls.push(url);
+    return { data: { tasks: [], next_cursor: null } };
+  }) as typeof api.get;
   useTaskStore.getState().registerServerTasksConsumer(); // TasksPanel mounted (server mode)
-  await useTaskStore.getState().loadServerTasks();
-  assert.equal(calls(), 1);
+  await useTaskStore.getState().loadActiveTaskSummaries();
+  assert.equal(urls.length, 3);
 
   const { handlers, cleanup } = wireSocket();
-  handlers["disconnect"](undefined);          // gap: generation bumps, loaded -> false
+  handlers["disconnect"](undefined);          // gap: generation bumps, lanes reset
   handlers["connect"](undefined);             // reconnect: active consumer -> catch up
   await flush();
-  assert.equal(calls(), 2, "an open Tasks view stayed stale after reconnect instead of catching up");
-  assert.equal(useTaskStore.getState().serverTasksLoaded, true);
+  assert.equal(urls.length, 6, "an open Tasks view stayed stale after reconnect instead of catching up");
+  assert.ok(
+    urls.every((url) => url.includes("detail=summary")),
+    "reconnect catch-up fell back to the unparameterized /tasks/server load",
+  );
   cleanup();
 });
 
 test("the initial app connect does not eager-fetch when no Tasks view is open", async () => {
-  const calls = mockServerTasks([TASK]);
+  let calls = 0;
+  api.get = (async () => {
+    calls += 1;
+    return { data: { tasks: [], next_cursor: null } };
+  }) as typeof api.get;
   const { handlers, cleanup } = wireSocket();
   // No consumer registered, generation still 0 (no prior disconnect).
   handlers["connect"](undefined);
   await flush();
-  assert.equal(calls(), 0, "initial connect eager-fetched the unbounded /tasks/server with no Tasks view open");
+  assert.equal(calls, 0, "initial connect eager-fetched with no Tasks view open");
   cleanup();
 });
 
 test("with no Tasks view open, a reconnect does not fetch; the next mount does", async () => {
-  const calls = mockServerTasks([TASK]);
+  const urls: string[] = [];
+  api.get = (async (url: string) => {
+    urls.push(url);
+    return { data: { tasks: [], next_cursor: null } };
+  }) as typeof api.get;
   const { handlers, cleanup } = wireSocket();
   handlers["disconnect"](undefined);   // generation bumps
   handlers["connect"](undefined);      // no active consumer -> no eager fetch
   await flush();
-  assert.equal(calls(), 0, "a background reconnect eager-fetched with no Tasks view open");
-  // Next TasksPanel mount loads lazily.
-  await useTaskStore.getState().loadServerTasks();
-  assert.equal(calls(), 1);
+  assert.equal(urls.length, 0, "a background reconnect eager-fetched with no Tasks view open");
+  // Next TasksPanel mount loads lazily via the summary lanes.
+  await useTaskStore.getState().loadActiveTaskSummaries();
+  assert.equal(urls.length, 3);
+  assert.ok(urls.every((url) => url.includes("detail=summary")));
   cleanup();
 });

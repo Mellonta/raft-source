@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { useMachineStore } from "../src/store/machineStore.js";
-import type { Machine } from "../src/store/machineStore.js";
+import { useMachineStore } from "../src/store/machineStore";
+import type { Machine } from "../src/store/machineStore";
 
 function seedMachine(overrides: Partial<Machine> = {}): Machine {
   return {

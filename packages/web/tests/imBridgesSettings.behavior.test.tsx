@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, screen } from "@testing-library/react";
 

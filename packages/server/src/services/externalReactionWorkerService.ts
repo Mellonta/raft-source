@@ -4,19 +4,22 @@ import {
   currentDate,
   setClockInterval,
   SLACK_BRIDGE_FEATURE_FLAG_KEYS,
+  type Tracer,
 } from "@botiverse/raft-shared";
 
-import type { Database } from "../db/index.js";
+import type { Database } from "../db/index";
+import { withTraceRoot } from "../tracing/semanticTrace";
 import {
   externalAppInstalls,
   externalChannelBindings,
   externalMessageLinks,
   externalReactionCommandAttempts,
   externalReactionCommands,
-} from "../db/schema.js";
-import { evaluateFeatureFlag } from "./featureFlagService.js";
-import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime.js";
-import type { SlackProviderAuthorityFence, SlackWebApiTransportResult } from "./slackProviderAdapter.js";
+} from "../db/schema";
+import { evaluateFeatureFlag } from "./featureFlagService";
+import { resolveExternalInstallServerGrantAuthority } from "./externalInstallServerGrantAuthority";
+import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime";
+import type { SlackProviderAuthorityFence, SlackWebApiTransportResult } from "./slackProviderAdapter";
 
 const LEASE_MS = 60_000;
 const RETRY_MS = 30_000;
@@ -124,6 +127,7 @@ export async function processExternalReactionCommandOnce(input: {
     const [binding] = await tx.select().from(externalChannelBindings).where(and(
       sql`${externalChannelBindings.id}::text = ${command.bindingId}`,
       sql`${externalChannelBindings.installId}::text = ${command.installId}`,
+      eq(externalChannelBindings.registrationId, command.appRegistrationId),
       eq(externalChannelBindings.bindingEpoch, command.bindingEpoch),
       eq(externalChannelBindings.connectionEpoch, command.connectionEpoch),
       eq(externalChannelBindings.providerConversationId, command.providerConversationId),
@@ -137,6 +141,12 @@ export async function processExternalReactionCommandOnce(input: {
       eq(externalMessageLinks.outcomeState, "accepted"),
     )).limit(1);
     if (!install?.botUserId || !binding || !link) return null;
+    const serverAuthority = await resolveExternalInstallServerGrantAuthority(tx, {
+      installId: install.id,
+      serverId: binding.serverId,
+      registrationId: binding.registrationId,
+    }, { lock: true });
+    if (!serverAuthority.current || binding.grantEpoch !== serverAuthority.grant.grantEpoch) return null;
     const master = await evaluateFeatureFlag({
       key: SLACK_BRIDGE_FEATURE_FLAG_KEYS.master,
       serverId: binding.serverId,
@@ -335,6 +345,7 @@ export function createExternalReactionWorkerRuntime(input: {
   intervalMs?: number;
   now?: () => Date;
   onError?(error: unknown): void;
+  tracer?: Tracer;
 }) {
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
@@ -342,9 +353,22 @@ export function createExternalReactionWorkerRuntime(input: {
     if (running) return;
     running = true;
     try {
-      await processExternalReactionCommandOnce(input);
-    } catch (error) {
-      input.onError?.(error);
+      // Each tick is a root span, so the onError report is tied to it.
+      await withTraceRoot(
+        input.tracer,
+        "server.slack_bridge.reaction.tick",
+        { surface: "server", kind: "internal" },
+        async () => {
+          try {
+            await processExternalReactionCommandOnce(input);
+          } catch (error) {
+            input.onError?.(error);
+            throw error;
+          }
+        },
+      );
+    } catch {
+      // Already reported through onError inside the span.
     } finally {
       running = false;
     }

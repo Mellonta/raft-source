@@ -130,7 +130,7 @@ test("removed human/agent DM context menu actions actually update state", async 
 
   const agentResponse = await request.post(`${seedState.urls.api}/api/agents`, {
     headers,
-    data: { name: agentName, runtime: "codex" },
+    data: { name: agentName, runtime: "external", model: "external" },
   });
   expect(agentResponse.ok()).toBeTruthy();
   const agent = await agentResponse.json() as { id: string; name: string };

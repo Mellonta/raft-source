@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import type { CliIo } from "../../core/io.js";
-import { formatSearchResults } from "./_format.js";
-import { messageSearchCommand } from "./search.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import { CliError } from "../../core/errors";
+import type { CliIo } from "../../core/io";
+import { formatSearchResults } from "./_format";
+import { messageSearchCommand } from "./search";
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -92,7 +91,7 @@ test("message search command uses injected ApiClient and writes canonical result
   ]);
   assert.deepEqual(stderr, []);
   const output = stdout.join("");
-  assert.match(output, /Search results for: "review" \(1 result\)/);
+  assert.match(output, /Search results for: "review" \(1 result \u00b7 truncated=false\)/);
   assert.match(output, /<result ref="msg:abcd1234-0000-0000-0000-000000000000">/);
   assert.match(output, /Source: channel:proj-runtime/);
   assert.match(output, /Sender: xxchan \(human\)/);
@@ -190,7 +189,7 @@ test("message search command supports sender-only recent timeline", async () => 
   ]);
   assert.deepEqual(stderr, []);
   const output = stdout.join("");
-  assert.match(output, /Filtered message results \(1 result\)/);
+  assert.match(output, /Filtered message results \(1 result \u00b7 truncated=false\)/);
   assert.match(output, /timeline entry without keyword match/);
   assert.doesNotMatch(output, /<match>/);
 });
@@ -425,11 +424,17 @@ test("message search command preserves QUERY_TOO_BROAD as a machine-readable rej
   });
 
   await assert.rejects(
-    async () => { await messageSearchCommand.handler(ctx, { query: "the" }); },
+    async () => { await messageSearchCommand.handler(ctx, { query: "the agent's" }); },
     (err: unknown) => {
       assert.ok(err instanceof CliError);
       assert.equal(err.code, "QUERY_TOO_BROAD");
       assert.match(err.message, /--sort recent/);
+      // The next action retries the caller's own query, shell-quoted.
+      assert.equal(
+        err.suggestedNextAction,
+        "Newest first (never rejected as too broad): raft message search --query 'the agent'\\''s' --sort recent\n"
+          + "Or narrow to one channel you are in: raft message search --query 'the agent'\\''s' --target '#<channel>'",
+      );
       return true;
     },
   );

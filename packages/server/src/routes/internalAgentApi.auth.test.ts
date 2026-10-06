@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -7,7 +7,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 
 import argon2 from "argon2";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, like } from "drizzle-orm";
 import {
   AGENT_API_ATTACHMENT_DOWNLOAD_UNAVAILABLE_RESPONSE,
   __resetFailpointsForTests,
@@ -19,33 +19,35 @@ import {
   renderThirdPartyInertText,
 } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
-import { actionCards, attachments, channelAgents, channelHumans, channels, computers, externalAppRegistrations, inboxNotificationFacts, inboxTargetMuteStates, jointChannels, jointChannelServers, messageMentions, messageReactions, messages, oauthAccessRequests, oauthClientInstalls, oauthClientMaintainers, oauthClients, oauthGrants, reminders, serverAgentMembers, serverMembers, servers as serversTable, taskEvents, tasks, threadFollows, userChannelInboxStates, users } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
-import { archiveChannel, createChannel, addAgent, addHuman, findOrCreateAgentDM, findOrCreateDM, getAgentLegacyReadCursor, getOrCreateThread, markAgentLegacyRead } from "../services/channelService.js";
-import { createMessage, getMaxSeq } from "../services/messageService.js";
-import * as taskService from "../services/taskService.js";
-import { registerMachine } from "../services/machineService.js";
-import { mintAgentCredential, type AgentCapability } from "../services/agentCredentialService.js";
-import { updateAgentScopes } from "../services/agentScopesService.js";
-import { generateComputerApiKeyMaterial } from "../services/computerCredentialService.js";
-import { createOAuthClient } from "../services/oauthService.js";
+import { getDb } from "../db/index";
+import { traceAgentIdHash, traceServerIdHash } from "../tracing/traceIdentity";
+import { actionCards, attachments, channelAgents, channelHumans, channels, computers, externalAppRegistrations, inboxNotificationFacts, inboxTargetMuteStates, jointChannels, jointChannelServers, messageMentions, messageReactions, messages, oauthAccessRequests, oauthClientInstalls, oauthClientMaintainers, oauthClients, oauthGrants, reminders, serverAgentMembers, serverMembers, servers as serversTable, taskEvents, tasks, threadFollows, userChannelInboxStates, users } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness";
+import { createServer } from "../services/serverService";
+import { createAgent, assignMachine } from "../services/agentService";
+import { archiveChannel, createChannel, addAgent, addHuman, findOrCreateAgentDM, findOrCreateDM, getAgentLegacyReadCursor, getOrCreateThread, markAgentLegacyRead } from "../services/channelService";
+import { createMessage, getMaxSeq } from "../services/messageService";
+import * as taskService from "../services/taskService";
+import { registerMachine } from "../services/machineService";
+import { mintAgentCredential, type AgentCapability } from "../services/agentCredentialService";
+import { updateAgentScopes } from "../services/agentScopesService";
+import { generateComputerApiKeyMaterial } from "../services/computerCredentialService";
+import { createOAuthClient } from "../services/oauthService";
 import {
+  ATTACHMENT_STORAGE_KEY_PREFIX,
   __setStorageForTests,
   resetStorageForTests,
   type StorageBackend,
-} from "../services/storageService.js";
-import { recordInboxNotificationFacts } from "../services/inboxNotificationService.js";
-import { buildSearchText } from "../services/searchService.js";
+} from "../services/storageService";
+import { recordInboxNotificationFacts } from "../services/inboxNotificationService";
+import { buildSearchText } from "../services/searchService";
 import type {
   AttachmentUploadSessionContext,
   AttachmentUploadSessionResult,
   AttachmentUploadSessionService,
   CreateAttachmentUploadSessionInput,
-} from "./attachmentUploadSessions.js";
+} from "./attachmentUploadSessions";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -480,6 +482,11 @@ test("agent-api server info and channel membership use the bound runner identity
   assert.equal(traceEvents.get("agent_channel_create.created")?.attrs?.creator_joined, true);
   assert.equal(traceEvents.get("agent_channel_create.broadcasted")?.attrs?.visibility, "public");
   assert.equal(createSpan.events.some((event) => Object.values(event.attrs ?? {}).includes(fixture.agentId)), false);
+  // The agent is identifiable in traces only by its keyed hash.
+  const agentHash = traceAgentIdHash(fixture.agentId);
+  assert.match(agentHash ?? "", /^[0-9a-f]{16}$/);
+  assert.equal(createSpan.attrs?.agent_id_hash, agentHash);
+  assert.equal(createSpan.attrs?.agent_id_present, true);
 
   const addMemberSpan = sink.getAllSpans().find((span) =>
     span.name === "server.http.request"
@@ -507,7 +514,26 @@ test("agent-api server info and channel membership use the bound runner identity
   assert.equal(updateChannelEvents.get("agent_channel_update.authorization.checked")?.attrs?.outcome, "allowed");
   assert.equal(updateChannelEvents.get("agent_channel_update.updated")?.attrs?.renamed, true);
   assert.equal(updateChannelEvents.get("agent_channel_update.updated")?.attrs?.visibility_changed, false);
-  assert.equal(updateChannelSpan.events.some((event) => Object.values(event.attrs ?? {}).includes(fixture.agentId)), false);
+  // Scope the no-identity-leak assertion to this route's own trace events
+  // (agent_channel_update.*), matching the add-member block above. The channel
+  // update request now also emits the message-pipeline events from broadcasting
+  // the channel.rename system message, and those legitimately carry
+  // receiver_id (an established inbox trace contract) that can include this
+  // agent's own id. The invariant we guard here is that the agent-api route's
+  // OWN events don't leak identity — not that the whole span is id-free.
+  const updateChannelTraceEvents = updateChannelSpan.events.filter((event) =>
+    event.name.startsWith("agent_channel_update."),
+  );
+  // Guard the scoping itself: `some()` over an empty array is false, so if the
+  // agent_channel_update.* event names ever change (or stop being emitted) the
+  // assertion below would pass vacuously — reporting "no identity leak" when it
+  // had nothing to inspect. Narrowing an assertion's scope and creating an empty
+  // set are the same motion; this keeps the two distinguishable.
+  assert.ok(
+    updateChannelTraceEvents.length > 0,
+    "expected agent_channel_update.* trace events to scope the identity assertion against",
+  );
+  assert.equal(updateChannelTraceEvents.some((event) => Object.values(event.attrs ?? {}).includes(fixture.agentId)), false);
 
   const removeMemberSpan = sink.getAllSpans().find((span) =>
     span.name === "server.http.request"
@@ -2266,6 +2292,109 @@ test("agent-api history advances unread cursor but not send freshness proof", as
   assert.equal(sendBody.seenUpToSeq, fresh.seq);
 });
 
+test("agent-api history with consume=false returns the page without advancing the read cursor", async ({ app }) => {
+  const fixture = await seedAuthFixture();
+  const first = await createAgentAttentionMessage(fixture, "peek first");
+  const second = await createAgentAttentionMessage(fixture, "peek second");
+
+  const channelRef = encodeURIComponent(`#${fixture.channelName}`);
+  const peek = await fetch(`${app.baseUrl}/internal/agent-api/history?channel=${channelRef}&limit=2&consume=false`, {
+    headers: jsonHeaders(fixture.readOnlyApiKey),
+  });
+  assert.equal(peek.status, 200);
+  const peekBody = await peek.json() as { messages: Array<{ id: string }>; last_read_seq: number; model_seen_up_to_seq: number | null };
+  assert.deepEqual(peekBody.messages.map((message) => message.id), [first.id, second.id]);
+  assert.equal(peekBody.last_read_seq, 0);
+  assert.equal(peekBody.model_seen_up_to_seq, null);
+  await assertLegacyReadCursorStays(fixture.agentId, fixture.channelId, 0, "consume=false must not mark the page read");
+
+  // The same read without the flag still consumes.
+  const read = await fetch(`${app.baseUrl}/internal/agent-api/history?channel=${channelRef}&limit=2`, {
+    headers: jsonHeaders(fixture.readOnlyApiKey),
+  });
+  assert.equal(read.status, 200);
+  const readBody = await read.json() as { model_seen_up_to_seq: number | null };
+  assert.equal(readBody.model_seen_up_to_seq, second.seq);
+  await waitForLegacyReadCursor(fixture.agentId, fixture.channelId, second.seq);
+
+  const invalid = await fetch(`${app.baseUrl}/internal/agent-api/history?channel=${channelRef}&consume=no`, {
+    headers: jsonHeaders(fixture.readOnlyApiKey),
+  });
+  assert.equal(invalid.status, 400);
+});
+
+test("agent-api latest history window does not consume a 51st older unread and exact-seq send still holds for it", async ({ app }) => {
+  const fixture = await seedAuthFixture();
+  const unread = [];
+  for (let index = 1; index <= 51; index += 1) {
+    unread.push(await createAgentAttentionMessage(fixture, `gapped unread ${index}`));
+  }
+
+  const channelRef = encodeURIComponent(`#${fixture.channelName}`);
+  const read = await fetch(`${app.baseUrl}/internal/agent-api/history?channel=${channelRef}`, {
+    headers: jsonHeaders(fixture.readOnlyApiKey),
+  });
+  assert.equal(read.status, 200);
+  const readBody = await read.json() as {
+    messages: Array<{ id: string; seq: number }>;
+    has_older: boolean;
+    last_read_seq: number;
+    model_seen_up_to_seq: number | null;
+  };
+  assert.equal(readBody.messages.length, 50);
+  assert.equal(readBody.has_older, true);
+  assert.equal(readBody.last_read_seq, 0);
+  assert.equal(readBody.model_seen_up_to_seq, null);
+  assert.deepEqual(
+    readBody.messages.map((message) => message.id),
+    unread.slice(1).map((message) => message.id),
+  );
+  await assertLegacyReadCursorStays(
+    fixture.agentId,
+    fixture.channelId,
+    0,
+    "a latest window with an older gap must not consume the hidden first unread",
+  );
+
+  const send = await fetch(`${app.baseUrl}/internal/agent-api/send`, {
+    method: "POST",
+    headers: jsonHeaders(fixture.agentApiKey),
+    body: JSON.stringify({
+      target: `#${fixture.channelName}`,
+      content: "send after seeing only the latest 50",
+      seenExactSeqs: readBody.messages.map((message) => message.seq),
+    }),
+  });
+  assert.equal(send.status, 200);
+  const sendBody = await send.json() as {
+    state: string;
+    newMessageCount: number;
+    heldMessages: Array<{ id: string }>;
+  };
+  assert.equal(sendBody.state, "held");
+  assert.equal(sendBody.newMessageCount, 1);
+  assert.deepEqual(sendBody.heldMessages.map((message) => message.id), [unread[0]!.id]);
+});
+
+test("agent-api send accepts an exact sparse seen seq when no other target attention is unseen", async ({ app }) => {
+  const fixture = await seedAuthFixture();
+  const seenByCheck = await createAgentAttentionMessage(fixture, "body rendered by message check");
+
+  const send = await fetch(`${app.baseUrl}/internal/agent-api/send`, {
+    method: "POST",
+    headers: jsonHeaders(fixture.agentApiKey),
+    body: JSON.stringify({
+      target: `#${fixture.channelName}`,
+      content: "reply after message check",
+      seenExactSeqs: [seenByCheck.seq],
+    }),
+  });
+  assert.equal(send.status, 200);
+  const body = await send.json() as { state: string; messageId?: string };
+  assert.equal(body.state, "sent");
+  assert.equal(typeof body.messageId, "string");
+});
+
 test("agent-api history around does not advance unread cursor", async ({ app }) => {
   const fixture = await seedAuthFixture();
   const target = await createAgentAttentionMessage(fixture, "around context should stay unread");
@@ -2698,22 +2827,34 @@ test("agent-api integration login uses service-aware defaults and closes invalid
   assert.equal(rejectedClosed?.attrs?.default_scopes_used, false);
 });
 
-test("agent-api integrations expose built-in apps without server-local installation", async ({ app }) => {
+test("agent-api inventory and login fail closed for retired built-in rows", async ({ app }) => {
   const fixture = await seedAuthFixture();
   const platformServer = await createServer("Slock Platform", `slock-platform-${randomUUID()}`, fixture.ownerId);
-  const { client } = await createOAuthClient({
+  const clientSecret = `retired_secret_${randomUUID()}`;
+  const [client] = await getDb().insert(oauthClients).values({
     serverId: platformServer.id,
     createdByUserId: fixture.ownerId,
     clientId: "slock-survey",
     appType: "slock_builtin",
+    clientSecretHash: createHash("sha256").update(clientSecret).digest("hex"),
+    clientSecret,
+    enabled: true,
+    publishStatus: "published",
     name: "Slock Survey",
     description: "Built-in survey app",
     homepageUrl: "https://survey.slock.test",
     returnUrl: "https://survey.slock.test/login/callback",
-  });
+  }).returning();
   await getDb().update(oauthClients).set({
     humanMarketplaceVisible: false,
   }).where(eq(oauthClients.id, client.id));
+  const [existingGrant] = await getDb().insert(oauthGrants).values({
+    serverId: fixture.serverId,
+    agentId: fixture.agentId,
+    clientId: client.id,
+    scopes: ["openid", "profile", "identity"],
+    grantedByUserId: fixture.ownerId,
+  }).returning();
 
   const list = await fetch(`${app.baseUrl}/internal/agent-api/integrations`, {
     headers: jsonHeaders(fixture.agentApiKey),
@@ -2723,11 +2864,7 @@ test("agent-api integrations expose built-in apps without server-local installat
     services?: Array<{ id: string; clientId: string; appType: string; name: string; returnUrl: string | null }>;
     activeLogins?: unknown[];
   };
-  assert.equal(listBody.services?.length, 1);
-  assert.equal(listBody.services?.[0]?.id, client.id);
-  assert.equal(listBody.services?.[0]?.clientId, "slock-survey");
-  assert.equal(listBody.services?.[0]?.appType, "slock_builtin");
-  assert.equal(listBody.services?.[0]?.returnUrl, "https://survey.slock.test/login/callback");
+  assert.deepEqual(listBody.services, []);
   assert.deepEqual(listBody.activeLogins, []);
 
   const login = await fetch(`${app.baseUrl}/internal/agent-api/integrations/login`, {
@@ -2735,17 +2872,7 @@ test("agent-api integrations expose built-in apps without server-local installat
     headers: jsonHeaders(fixture.agentApiKey),
     body: JSON.stringify({ service: "slock-survey" }),
   });
-  assert.equal(login.status, 200);
-  const loginBody = await login.json() as {
-    status?: string;
-    service?: { id: string; clientId: string; appType: string };
-    requestId?: string;
-  };
-  assert.equal(loginBody.status, "logged_in");
-  assert.equal(loginBody.service?.id, client.id);
-  assert.equal(loginBody.service?.clientId, "slock-survey");
-  assert.equal(loginBody.service?.appType, "slock_builtin");
-  assert.ok(loginBody.requestId);
+  assert.equal(login.status, 404);
 
   const rows = await getDb()
     .select({
@@ -2763,10 +2890,7 @@ test("agent-api integrations expose built-in apps without server-local installat
       eq(oauthAccessRequests.agentId, fixture.agentId),
       eq(oauthAccessRequests.clientId, client.id),
     ));
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0]?.requestServerId, fixture.serverId);
-  assert.equal(rows[0]?.grantServerId, fixture.serverId);
-  assert.ok(rows[0]?.grantId);
+  assert.deepEqual(rows, []);
 
   const afterLogin = await fetch(`${app.baseUrl}/internal/agent-api/integrations`, {
     headers: jsonHeaders(fixture.agentApiKey),
@@ -2775,9 +2899,9 @@ test("agent-api integrations expose built-in apps without server-local installat
   const afterLoginBody = await afterLogin.json() as {
     activeLogins?: Array<{ serviceId: string; clientId: string; returnUrl: string | null }>;
   };
-  assert.deepEqual(afterLoginBody.activeLogins?.map((login) => login.serviceId), [client.id]);
-  assert.deepEqual(afterLoginBody.activeLogins?.map((login) => login.clientId), ["slock-survey"]);
-  assert.deepEqual(afterLoginBody.activeLogins?.map((login) => login.returnUrl), ["https://survey.slock.test/login/callback"]);
+  assert.deepEqual(afterLoginBody.activeLogins, []);
+  const [grantAfter] = await getDb().select().from(oauthGrants).where(eq(oauthGrants.id, existingGrant.id));
+  assert.equal(grantAfter?.revokedAt, null, "retirement hides historical authority without mutating it");
 });
 
 test("agent-api public uninstalled app returns typed install guidance and an owner-bound idempotent install card", async ({ app }) => {
@@ -3388,7 +3512,20 @@ test("agent-api app registration returns the initial secret only through the pri
   assert.equal(containsOAuthSecret(persistedCard), false, "canonical card state must remain secret-free");
   assert.equal(containsOAuthSecret(persistedMessage), false, "message history must remain secret-free");
 
-  assert.equal(deliveries.length, 1);
+  // The durable result reply in the card thread is secret-free; only the
+  // transient owner wake may carry the show-once value.
+  for (const delivery of deliveries.filter((candidate) => candidate.options?.transient !== true)) {
+    assert.doesNotMatch(delivery.message.content, /raft_secret_/, "durable deliveries must never carry the secret");
+  }
+  const persistedReplies = await getDb().select({ content: messages.content }).from(messages).where(eq(messages.systemSubtype, "action_card.result_reply"));
+  assert.ok(persistedReplies.length >= 1, "the preparer gets a durable result reply");
+  for (const reply of persistedReplies) {
+    assert.doesNotMatch(reply.content, /raft_secret_/, "persisted result reply must remain secret-free");
+    assert.match(reply.content, /rotate-secret --client prepared-demo/);
+  }
+  const secretDeliveries = deliveries.filter((candidate) => candidate.options?.transient === true);
+  assert.equal(secretDeliveries.length, 1);
+  deliveries.splice(0, deliveries.length, ...secretDeliveries);
   assert.equal(deliveries[0].agentId, fixture.agentId);
   assert.equal(deliveries[0].options?.transient, true);
   assert.equal(deliveries[0].options?.intrinsic, true);
@@ -3518,6 +3655,164 @@ test("agent-api app list and status hide external-registration-bound clients fro
     { headers: jsonHeaders(ownerKey) },
   );
   assert.equal(ownerHiddenStatus.status, 404);
+});
+
+test("agent-api integration app exposes installationId strictly for current server and guards owner and admin boundaries", async ({ app }) => {
+  const fixture = await seedAuthFixture();
+  const db = getDb();
+
+  // Create foreign server
+  const foreignServer = await createServer("Foreign Server", `foreign-server-${randomUUID()}`, fixture.ownerId);
+
+  // Create admin agent on fixture.serverId
+  const adminAgent = await createAgent(fixture.serverId, `admin-agent-${randomUUID().slice(0, 8)}`, {
+    runtime: "claude",
+    model: "sonnet",
+  });
+  await db.update(serverAgentMembers)
+    .set({ role: "admin" })
+    .where(and(eq(serverAgentMembers.serverId, fixture.serverId), eq(serverAgentMembers.agentId, adminAgent.id)));
+  const adminApiKey = await mintAgentKey(adminAgent.id, ["read", "server"]);
+
+  // Create client on fixture.serverId
+  const { client: testClient } = await createOAuthClient({
+    serverId: fixture.serverId,
+    createdByUserId: fixture.ownerId,
+    clientId: "installed-demo-app",
+    name: "Installed Demo App",
+    returnUrl: "https://installed.example.test/callback",
+    allowedScopes: ["openid"],
+    category: "Developer Tools",
+  });
+
+  // Assign fixture.agentId as app owner
+  await db.insert(oauthClientMaintainers).values({
+    clientId: testClient.id,
+    principalType: "agent",
+    agentId: fixture.agentId,
+    role: "owner",
+    assignedByType: "system",
+  });
+
+  // Step 1: Uninstalled on any server -> both owner and admin see installationId: null
+  const uninstalledOwnerStatus = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app/status?client=installed-demo-app`,
+    { headers: jsonHeaders(fixture.agentApiKey) },
+  );
+  assert.equal(uninstalledOwnerStatus.status, 200);
+  assert.equal(((await uninstalledOwnerStatus.json()) as { app?: { installationId?: string | null } }).app?.installationId, null);
+
+  const uninstalledAdminStatus = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app/status?client=installed-demo-app`,
+    { headers: jsonHeaders(adminApiKey) },
+  );
+  assert.equal(uninstalledAdminStatus.status, 200);
+  assert.equal(((await uninstalledAdminStatus.json()) as { app?: { installationId?: string | null } }).app?.installationId, null);
+
+  const uninstalledOwnerList = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app`,
+    { headers: jsonHeaders(fixture.agentApiKey) },
+  );
+  assert.equal(uninstalledOwnerList.status, 200);
+  const uninstalledOwnerApp = (((await uninstalledOwnerList.json()) as { apps?: Array<{ clientKey?: string; installationId?: string | null }> }).apps ?? [])
+    .find((a) => a.clientKey === "installed-demo-app");
+  assert.ok(uninstalledOwnerApp);
+  assert.equal(uninstalledOwnerApp.installationId, null);
+
+  const uninstalledAdminList = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app`,
+    { headers: jsonHeaders(adminApiKey) },
+  );
+  assert.equal(uninstalledAdminList.status, 200);
+  const uninstalledAdminApp = (((await uninstalledAdminList.json()) as { apps?: Array<{ clientKey?: string; installationId?: string | null }> }).apps ?? [])
+    .find((a) => a.clientKey === "installed-demo-app");
+  assert.ok(uninstalledAdminApp);
+  assert.equal(uninstalledAdminApp.installationId, null);
+
+  // Step 2: Install ONLY on foreignServer -> MUST NOT leak foreign installation ID to owner or admin on current server
+  const [foreignInstall] = await db.insert(oauthClientInstalls).values({
+    serverId: foreignServer.id,
+    clientId: testClient.id,
+    installedByUserId: fixture.ownerId,
+    status: "active",
+  }).returning();
+
+  const foreignOnlyOwnerStatus = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app/status?client=installed-demo-app`,
+    { headers: jsonHeaders(fixture.agentApiKey) },
+  );
+  assert.equal(foreignOnlyOwnerStatus.status, 200);
+  assert.equal(((await foreignOnlyOwnerStatus.json()) as { app?: { installationId?: string | null } }).app?.installationId, null);
+
+  const foreignOnlyAdminStatus = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app/status?client=installed-demo-app`,
+    { headers: jsonHeaders(adminApiKey) },
+  );
+  assert.equal(foreignOnlyAdminStatus.status, 200);
+  assert.equal(((await foreignOnlyAdminStatus.json()) as { app?: { installationId?: string | null } }).app?.installationId, null);
+
+  const foreignOnlyOwnerList = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app`,
+    { headers: jsonHeaders(fixture.agentApiKey) },
+  );
+  assert.equal(foreignOnlyOwnerList.status, 200);
+  const foreignOnlyOwnerApp = (((await foreignOnlyOwnerList.json()) as { apps?: Array<{ clientKey?: string; installationId?: string | null }> }).apps ?? [])
+    .find((a) => a.clientKey === "installed-demo-app");
+  assert.ok(foreignOnlyOwnerApp);
+  assert.equal(foreignOnlyOwnerApp.installationId, null);
+
+  const foreignOnlyAdminList = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app`,
+    { headers: jsonHeaders(adminApiKey) },
+  );
+  assert.equal(foreignOnlyAdminList.status, 200);
+  const foreignOnlyAdminApp = (((await foreignOnlyAdminList.json()) as { apps?: Array<{ clientKey?: string; installationId?: string | null }> }).apps ?? [])
+    .find((a) => a.clientKey === "installed-demo-app");
+  assert.ok(foreignOnlyAdminApp);
+  assert.equal(foreignOnlyAdminApp.installationId, null);
+
+  // Step 3: Now install on fixture.serverId (current server) -> both owner and admin MUST receive current server installation ID, NOT foreign
+  const [currentInstall] = await db.insert(oauthClientInstalls).values({
+    serverId: fixture.serverId,
+    clientId: testClient.id,
+    installedByAgentId: fixture.agentId,
+    status: "active",
+  }).returning();
+  assert.notEqual(currentInstall.id, foreignInstall.id);
+
+  const installedOwnerStatus = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app/status?client=installed-demo-app`,
+    { headers: jsonHeaders(fixture.agentApiKey) },
+  );
+  assert.equal(installedOwnerStatus.status, 200);
+  assert.equal(((await installedOwnerStatus.json()) as { app?: { installationId?: string | null } }).app?.installationId, currentInstall.id);
+
+  const installedAdminStatus = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app/status?client=installed-demo-app`,
+    { headers: jsonHeaders(adminApiKey) },
+  );
+  assert.equal(installedAdminStatus.status, 200);
+  assert.equal(((await installedAdminStatus.json()) as { app?: { installationId?: string | null } }).app?.installationId, currentInstall.id);
+
+  const installedOwnerList = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app`,
+    { headers: jsonHeaders(fixture.agentApiKey) },
+  );
+  assert.equal(installedOwnerList.status, 200);
+  const installedOwnerApp = (((await installedOwnerList.json()) as { apps?: Array<{ clientKey?: string; installationId?: string | null }> }).apps ?? [])
+    .find((a) => a.clientKey === "installed-demo-app");
+  assert.ok(installedOwnerApp);
+  assert.equal(installedOwnerApp.installationId, currentInstall.id);
+
+  const installedAdminList = await fetch(
+    `${app.baseUrl}/internal/agent-api/integrations/app`,
+    { headers: jsonHeaders(adminApiKey) },
+  );
+  assert.equal(installedAdminList.status, 200);
+  const installedAdminApp = (((await installedAdminList.json()) as { apps?: Array<{ clientKey?: string; installationId?: string | null }> }).apps ?? [])
+    .find((a) => a.clientKey === "installed-demo-app");
+  assert.ok(installedAdminApp);
+  assert.equal(installedAdminApp.installationId, currentInstall.id);
 });
 
 test("agent-api integration app prepare register can defer client key generation", async ({ app }) => {
@@ -3709,7 +4004,8 @@ test("agent-api attachment upload uses the id-less route and bound agent identit
     assert.equal(row.channelId, fixture.channelId);
     assert.equal(row.uploaderId, fixture.agentId);
     assert.equal(row.uploaderType, "agent");
-    assert.equal(row.storageKey, `${fixture.serverId}/${body.id}.txt`);
+    assert.ok(row.storageKey.startsWith(`${ATTACHMENT_STORAGE_KEY_PREFIX}${fixture.serverId}/server/${body.id}/`));
+    assert.ok(row.storageKey.endsWith(".txt"));
     assert.equal(fs.existsSync(path.join(uploadsDir, row.storageKey)), true);
   } finally {
     await app.close();
@@ -3727,6 +4023,9 @@ test("agent-api exposes server-owned upload capability and binds direct sessions
   const uploadId = "33333333-3333-4333-8333-333333333333";
   const attachmentId = "44444444-4444-4444-8444-444444444444";
   const fake: AttachmentUploadSessionService = {
+    async listActive(_context, _channelId): Promise<AttachmentUploadSessionResult> {
+      return { status: 200, body: { sessions: [] } };
+    },
     async capabilities(context): Promise<AttachmentUploadSessionResult> {
       calls.push({ operation: "capabilities", context });
       return { status: 200, body: { directUploadEnabled: true, directUploadThresholdBytes: 1, maxBytes: 50 * 1024 * 1024, sessionExpiresInSeconds: 900 } };
@@ -4546,7 +4845,8 @@ test("computer surface revokes managed-runner credential and raw sk_agent stops 
   const mint = await fetch(`${app.baseUrl}/internal/computer/runners/${fixture.agentId}/credentials`, {
     method: "POST",
     headers: jsonHeaders(fixture.machineApiKey),
-    body: JSON.stringify({ scopes: ["server"], name: "managed-runner-test" }),
+    // GET /server (server info) is a `read` route.
+    body: JSON.stringify({ scopes: ["read"], name: "managed-runner-test" }),
   });
   assert.equal(mint.status, 201);
   const minted = await mint.json() as { apiKey?: string; credentialId?: string };
@@ -4814,7 +5114,7 @@ test("read-only agent credential is denied on mutating agent-api routes", async 
     body: JSON.stringify({ displayName: "Should Not Update" }),
   });
   assert.equal(profileUpdate.status, 403);
-  assert.equal((await profileUpdate.json() as { requiredCapability?: string }).requiredCapability, "server");
+  assert.equal((await profileUpdate.json() as { requiredCapability?: string }).requiredCapability, "send");
 
   const mute = await fetch(`${app.baseUrl}/internal/agent-api/channels/${fixture.channelId}/mute`, {
     method: "POST",
@@ -4934,7 +5234,11 @@ test("agent-api message resolve is registered and gated by read capability", asy
   assert.equal(humanAgentDmBody.message?.channel_name, fixture.ownerName);
   assert.equal(humanAgentDmBody.message?.sender_name, "AgentApiAuthBot");
 
-  await getDb().delete(channelHumans).where(eq(channelHumans.channelId, humanAgentDm.id));
+  // Remove the agent's membership so this DM is no longer resolvable for it.
+  // (The DM's peer identity — dmChannelIdentities — is durable and survives
+  // human-membership changes, so deleting channelHumans would NOT make it
+  // unresolvable; the agent's own channelAgents row is what gates its read.)
+  await getDb().delete(channelAgents).where(eq(channelAgents.channelId, humanAgentDm.id));
   const brokenHumanAgentDmResolve = await fetch(`${app.baseUrl}/internal/agent-api/messages/${agentToHumanDmMessage.id.slice(0, 8)}/resolve`, {
     headers: jsonHeaders(fixture.readOnlyApiKey),
   });
@@ -5403,32 +5707,25 @@ test("agent-api reactions add idempotently and remove for the bound runner agent
   assert.deepEqual(removeBody.reactions, []);
 });
 
-test("agent-api reactions reject a second Free-hosted joint channel locked by billing", async ({ app }) => {
+test("agent-api reactions reject a joint channel past its over-limit grace", async ({ app }) => {
   const fixture = await seedAuthFixture();
   const db = getDb();
-  const freeCanonical = await createChannel(
-    fixture.serverId,
-    `agent-api-free-joint-${randomUUID()}`,
-  );
-  await db.insert(jointChannels).values({
-    canonicalChannelId: freeCanonical.id,
-    createdByServerId: fixture.serverId,
-    createdByUserId: fixture.ownerId,
-    createdAt: new Date("2026-08-01T00:00:00Z"),
-  });
   const jointProjection = await createChannel(
     fixture.serverId,
-    `agent-api-billing-locked-joint-${randomUUID()}`,
+    `agent-api-over-limit-joint-${randomUUID()}`,
     undefined,
     "joint",
   );
   await addHuman(jointProjection.id, fixture.ownerId);
   await addAgent(jointProjection.id, fixture.agentId);
+  // Contract v0.3 §18.8: observed over the free-server cap more than 3 days ago.
+  // Same shape as the other agent-api joint fixtures: the projection doubles
+  // as the storage channel so the agent's membership check passes first.
   const [joint] = await db.insert(jointChannels).values({
     canonicalChannelId: jointProjection.id,
     createdByServerId: fixture.serverId,
     createdByUserId: fixture.ownerId,
-    createdAt: new Date("2026-08-02T00:00:00Z"),
+    overLimitSince: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000),
   }).returning();
   await db.insert(jointChannelServers).values({
     jointChannelId: joint.id,
@@ -5441,7 +5738,7 @@ test("agent-api reactions reject a second Free-hosted joint channel locked by bi
     jointProjection.id,
     "user",
     fixture.ownerId,
-    "agent-api retained joint reaction target",
+    "agent-api over-limit joint reaction target",
   );
 
   const add = await fetch(`${app.baseUrl}/internal/agent-api/messages/${message.id}/reactions`, {
@@ -5450,7 +5747,7 @@ test("agent-api reactions reject a second Free-hosted joint channel locked by bi
     body: JSON.stringify({ emoji: "👀" }),
   });
   assert.equal(add.status, 403);
-  assert.match((await add.json() as { error: string }).error, /Joint Channels require the Pro plan/);
+  assert.match((await add.json() as { error: string }).error, /read-only because it has more than 2 free servers/);
 
   const persisted = await db
     .select()
@@ -5516,6 +5813,8 @@ test("agent-api reactions reject malformed message ids without a server error", 
 
 test("agent-api search uses the bound runner identity and typed response contract", async ({ app }) => {
   const fixture = await seedAuthFixture();
+  const sink = new MemoryTraceSink();
+  app.app.set("serverTracer", new BasicTracer({ sink }));
   const marker = `agent-api-search-${randomUUID()}`;
   await createMessage(
     fixture.channelId,
@@ -5546,6 +5845,26 @@ test("agent-api search uses the bound runner identity and typed response contrac
   assert.equal(body.results[0]?.senderType, "human");
   assert.equal(body.results[0]?.channelName, fixture.channelName);
   assert.match(body.results[0]?.content ?? "", new RegExp(marker));
+
+  // Every span opened after agent auth (search's db query spans) carries the
+  // agent's keyed hash, and none carries the raw agent id.
+  const agentHash = traceAgentIdHash(fixture.agentId);
+  const requestSpan = sink.getAllSpans().find((span) =>
+    span.name === "server.http.request" && span.attrs?.route_pattern === "/internal/agent-api/search"
+  );
+  assert.ok(requestSpan, "expected agent-api search request span");
+  assert.equal(requestSpan.attrs?.agent_id_hash, agentHash);
+  const childSpans = sink.getAllSpans().filter((span) =>
+    span.context.traceId === requestSpan.context.traceId && span.name !== "server.http.request"
+  );
+  assert.ok(childSpans.some((span) => span.name === "server.db.query"), "expected search db query spans");
+  for (const span of [requestSpan, ...childSpans]) {
+    assert.equal(span.attrs?.agent_id_hash, agentHash, `${span.name} should carry agent_id_hash`);
+    assert.equal(span.attrs?.agent_id_present, true, `${span.name} should mark agent_id_present`);
+    assert.equal(span.attrs?.server_id_hash, traceServerIdHash(fixture.serverId), `${span.name} should carry server_id_hash`);
+    assert.equal(JSON.stringify(span).includes(fixture.agentId), false, `${span.name} must not carry the raw agent id`);
+    assert.equal(JSON.stringify(span).includes(fixture.serverId), false, `${span.name} must not carry the raw server id`);
+  }
 });
 
 test("agent-api history renders sender handle instead of display name", async ({ app }) => {
@@ -5709,6 +6028,117 @@ test("agent-api channel members lists members through the bound runner identity"
   assert.equal(body.humans.some((human) => human.name === fixture.ownerName), true);
 });
 
+test("agent-api thread list returns active followed threads for the bound runner identity", async ({ app }) => {
+  const fixture = await seedAuthFixture();
+  const db = getDb();
+  const activeParent = await createMessage(
+    fixture.channelId,
+    "user",
+    fixture.ownerId,
+    "agent-api followed thread parent",
+  );
+  const activeThread = await getOrCreateThread(activeParent.id, fixture.ownerId, "user");
+  const unfollowedParent = await createMessage(
+    fixture.channelId,
+    "user",
+    fixture.ownerId,
+    "agent-api unfollowed thread parent",
+  );
+  const unfollowedThread = await getOrCreateThread(unfollowedParent.id, fixture.ownerId, "user");
+  const otherAgent = await createAgent(fixture.serverId, `thread-list-other-${randomUUID().slice(0, 8)}`, {
+    runtime: "claude",
+    model: "sonnet",
+  });
+  await addAgent(fixture.channelId, otherAgent.id);
+  const otherAgentParent = await createMessage(
+    fixture.channelId,
+    "user",
+    fixture.ownerId,
+    "agent-api other agent followed thread parent",
+  );
+  const otherAgentThread = await getOrCreateThread(otherAgentParent.id, fixture.ownerId, "user");
+  const privateChannel = await createChannel(
+    fixture.serverId,
+    `agent-api-thread-list-private-${randomUUID().slice(0, 8)}`,
+    undefined,
+    "private",
+  );
+  await addHuman(privateChannel.id, fixture.ownerId);
+  const hiddenParent = await createMessage(
+    privateChannel.id,
+    "user",
+    fixture.ownerId,
+    "agent-api hidden followed thread parent",
+  );
+  const hiddenThread = await getOrCreateThread(hiddenParent.id, fixture.ownerId, "user");
+  const followedAt = new Date("2026-09-10T12:00:00.000Z");
+
+  await db.insert(threadFollows).values([
+    {
+      threadChannelId: activeThread.id,
+      followerType: "agent",
+      followerId: fixture.agentId,
+      parentMessageId: activeParent.id,
+      reason: "manual",
+      createdAt: followedAt,
+    },
+    {
+      threadChannelId: unfollowedThread.id,
+      followerType: "agent",
+      followerId: fixture.agentId,
+      parentMessageId: unfollowedParent.id,
+      reason: "mentioned",
+      createdAt: new Date("2026-09-10T11:00:00.000Z"),
+      unfollowedAt: new Date("2026-09-10T11:30:00.000Z"),
+    },
+    {
+      threadChannelId: otherAgentThread.id,
+      followerType: "agent",
+      followerId: otherAgent.id,
+      parentMessageId: otherAgentParent.id,
+      reason: "manual",
+      createdAt: new Date("2026-09-10T10:00:00.000Z"),
+    },
+    {
+      threadChannelId: hiddenThread.id,
+      followerType: "agent",
+      followerId: fixture.agentId,
+      parentMessageId: hiddenParent.id,
+      reason: "manual",
+      createdAt: new Date("2026-09-10T13:00:00.000Z"),
+    },
+  ]);
+
+  const res = await fetch(`${app.baseUrl}/internal/agent-api/threads`, {
+    headers: jsonHeaders(fixture.agentApiKey),
+  });
+  const body = await res.json() as {
+    error?: string;
+    threads: Array<{
+      target: string;
+      threadChannelId: string;
+      parentChannelRef: string;
+      parentMessageId: string;
+      parentMessageShortId: string;
+      followedAt: string;
+      reason: string;
+      doneAt: string | null;
+    }>;
+  };
+
+  assert.equal(res.status, 200, body.error);
+  assert.deepEqual(body.threads, [{
+    target: `#${fixture.channelName}:${activeParent.id.slice(0, 8)}`,
+    threadChannelId: activeThread.id,
+    parentChannelRef: `#${fixture.channelName}`,
+    parentMessageId: activeParent.id,
+    parentMessageShortId: activeParent.id.slice(0, 8),
+    followedAt: followedAt.toISOString(),
+    reason: "manual",
+    doneAt: null,
+  }]);
+});
+
 test("agent-api thread unfollow cloaks inaccessible private thread UUIDs", async ({ app }) => {
   const fixture = await seedAuthFixture();
   const privateChannel = await createChannel(fixture.serverId, "agent-api-private-thread-unfollow", undefined, "private");
@@ -5817,8 +6247,10 @@ test("agent-api denies capabilities absent from the active runner session", asyn
 // notice tells agents to confirm their identity via `profile show`, but
 // typical external credentials are minted with only send/read — and
 // GET /profile was gated server-wide. Reading YOUR OWN profile is identity
-// introspection and needs only `read`; looking up others stays `server`.
-test("agent-api own-profile read needs only read capability; target lookup stays server-gated", async ({ app }) => {
+// introspection and needs only `read`. Looking up another member's profile
+// (`raft profile show @someone`) also needs only `read`: it returns only
+// profiles the caller can already see, and member listing is already `read`.
+test("agent-api profile show needs only read capability, for own profile and target lookup", async ({ app }) => {
   const fixture = await seedAuthFixture();
 
   const own = await fetch(`${app.baseUrl}/internal/agent-api/profile`, {
@@ -5832,21 +6264,46 @@ test("agent-api own-profile read needs only read capability; target lookup stays
   const other = await fetch(`${app.baseUrl}/internal/agent-api/profile?target=${encodeURIComponent(`@${fixture.ownerName}`)}`, {
     headers: jsonHeaders(fixture.readOnlyApiKey),
   });
-  assert.equal(other.status, 403, "read-scope credential must not look up other profiles");
-  const otherBody = await other.json() as { code?: string };
-  assert.equal(otherBody.code, "capability_not_authorized");
+  assert.equal(other.status, 200, "read-scope credential can look up a visible member's profile");
+  const otherBody = await other.json() as { profile?: { name?: string } } & { name?: string };
+  assert.equal(otherBody.profile?.name ?? otherBody.name, fixture.ownerName);
+
+  const missing = await fetch(`${app.baseUrl}/internal/agent-api/profile?target=${encodeURIComponent("@no-such-member-anywhere")}`, {
+    headers: jsonHeaders(fixture.readOnlyApiKey),
+  });
+  assert.equal(missing.status, 404, "visibility resolution still applies to read-scope target lookups");
+
+  const noRead = await fetch(`${app.baseUrl}/internal/agent-api/profile?target=${encodeURIComponent(`@${fixture.ownerName}`)}`, {
+    headers: jsonHeaders(await mintAgentKey(fixture.agentId, ["send"])),
+  });
+  assert.equal(noRead.status, 403, "a credential without read cannot look up profiles");
+  assert.equal((await noRead.json() as { code?: string }).code, "capability_not_authorized");
 
   const otherWithServer = await fetch(`${app.baseUrl}/internal/agent-api/profile?target=${encodeURIComponent(`@${fixture.ownerName}`)}`, {
     headers: jsonHeaders(fixture.agentApiKey),
   });
-  assert.equal(otherWithServer.status, 200, "server-capability credential keeps target lookup");
+  assert.equal(otherWithServer.status, 200, "broader credentials keep target lookup");
 
+  const updatedPushes: Array<{ room: string; payload: unknown }> = [];
+  const originalTo = app.io.to.bind(app.io);
+  (app.io as any).to = (room: string | string[]) => {
+    const operator = originalTo(room as any) as any;
+    const originalEmit = operator.emit.bind(operator);
+    operator.emit = (event: string, ...args: unknown[]) => {
+      if (event === "agent:updated") updatedPushes.push({ room: String(room), payload: args[0] });
+      return originalEmit(event, ...args);
+    };
+    return operator;
+  };
   const update = await fetch(`${app.baseUrl}/internal/agent-api/profile`, {
     method: "POST",
     headers: jsonHeaders(fixture.agentApiKey),
     body: JSON.stringify({ displayName: "Native Profile Bot" }),
   });
   assert.equal(update.status, 200, "server-capability credential can update the bound profile");
+  assert.equal(updatedPushes.length, 1, "an agent editing its own profile tells open web clients to re-read it");
+  assert.match(updatedPushes[0]!.room, /^server:/);
+  assert.equal(typeof (updatedPushes[0]!.payload as { agentId?: unknown }).agentId, "string");
   const updateBody = await update.json() as { displayName?: string };
   assert.equal(updateBody.displayName, "Native Profile Bot");
 
@@ -5928,6 +6385,78 @@ test("agent-api taskAssign stays opaque for a public-channel outsider human", as
   const [after] = await db.select().from(tasks).where(eq(tasks.taskNumber, createdTask.taskNumber));
   assert.equal(after.claimedById, before.claimedById, "refused assign must not change the assignee");
   assert.equal(after.revision, before.revision, "refused assign must not burn a revision");
+});
+
+test("agent-api current assignee can undo an accidental start without unlocking another member's work", async ({ app }) => {
+  const fixture = await seedAuthFixture();
+  const db = getDb();
+
+  const peer = await createAgent(fixture.serverId, `task-demote-peer-${randomUUID().slice(0, 8)}`, {
+    runtime: "claude",
+    model: "sonnet",
+  });
+  await addAgent(fixture.channelId, peer.id);
+  const peerKey = await mintAgentKey(peer.id, ["tasks"]);
+
+  const created = await fetch(`${app.baseUrl}/internal/agent-api/tasks`, {
+    method: "POST",
+    headers: jsonHeaders(fixture.agentApiKey),
+    body: JSON.stringify({
+      channel: `#${fixture.channelName}`,
+      tasks: [{ title: "undo an accidental self-start" }],
+      assignee: "@AgentApiAuthBot",
+    }),
+  });
+  assert.equal(created.status, 200, await created.clone().text());
+  const { tasks: [createdTask] } = await created.json() as {
+    tasks: Array<{ taskNumber: number; status: string; claimedAt: string | null }>;
+  };
+  assert.equal(createdTask.status, "in_progress", "self-assigned create still means start work");
+  assert.ok(createdTask.claimedAt, "self-assigned create stamps its start epoch");
+
+  const setStatus = (apiKey: string, status: string) =>
+    fetch(`${app.baseUrl}/internal/agent-api/tasks/update-status`, {
+      method: "POST",
+      headers: jsonHeaders(apiKey),
+      body: JSON.stringify({ channel: `#${fixture.channelName}`, task_number: createdTask.taskNumber, status }),
+    });
+
+  const peerDemotion = await setStatus(peerKey, "todo");
+  assert.equal(peerDemotion.status, 409, `another member must not demote owned work: ${await peerDemotion.clone().text()}`);
+  assert.match((await peerDemotion.json() as { error: string }).error, /cannot transition from in_progress to todo/);
+  const [afterPeer] = await db.select().from(tasks).where(eq(tasks.taskNumber, createdTask.taskNumber));
+  assert.equal(afterPeer.status, "in_progress");
+  assert.equal(afterPeer.claimedById, fixture.agentId);
+  assert.ok(afterPeer.claimedAt);
+
+  const selfDemotion = await setStatus(fixture.agentApiKey, "todo");
+  assert.equal(selfDemotion.status, 200, await selfDemotion.clone().text());
+  const [reserved] = await db.select().from(tasks).where(eq(tasks.taskNumber, createdTask.taskNumber));
+  assert.equal(reserved.status, "todo");
+  assert.equal(reserved.claimedByType, "agent", "undoing start preserves the reservation");
+  assert.equal(reserved.claimedById, fixture.agentId, "undoing start must not unlock the task");
+  assert.equal(reserved.claimedAt, null, "todo carries no stale work-start epoch");
+
+  const events = await db
+    .select()
+    .from(taskEvents)
+    .where(eq(taskEvents.taskId, reserved.id))
+    .orderBy(taskEvents.seq);
+  const demotion = events.filter((event) => event.eventType === "status_changed").at(-1)!;
+  assert.equal(demotion.actorType, "agent");
+  assert.equal(demotion.actorId, fixture.agentId);
+  assert.deepEqual(demotion.payload, { from: "in_progress", to: "todo", forced: false });
+
+  const resumed = await fetch(`${app.baseUrl}/internal/agent-api/tasks/claim`, {
+    method: "POST",
+    headers: jsonHeaders(fixture.agentApiKey),
+    body: JSON.stringify({ channel: `#${fixture.channelName}`, task_numbers: [createdTask.taskNumber] }),
+  });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await resumed.json() as { results: Array<{ success: boolean }> }).results[0]?.success, true);
+  const [restarted] = await db.select().from(tasks).where(eq(tasks.taskNumber, createdTask.taskNumber));
+  assert.equal(restarted.status, "in_progress");
+  assert.ok(restarted.claimedAt, "claiming the reserved todo work stamps a fresh start epoch");
 });
 
 /**
@@ -6208,4 +6737,151 @@ test("agent-api forced status records the forcing agent, not system or the previ
   assert.equal(closedRow.closedByType, "agent");
   assert.equal(closedRow.closedById, fixture.agentId, "the forcer closed it, not the assignee it was taken from");
   assert.notEqual(closedRow.closedById, victim.id);
+});
+
+test("agent task status change posts a task.lifecycle_thread system message with the agent as causal actor", async ({ app, db }) => {
+  const fixture = await seedAuthFixture();
+  const channelRef = `#${fixture.channelName}`;
+
+  const create = await fetch(`${app.baseUrl}/internal/agent-api/tasks`, {
+    method: "POST",
+    headers: jsonHeaders(fixture.agentApiKey),
+    body: JSON.stringify({ channel: channelRef, tasks: [{ title: "lifecycle notice task" }] }),
+  });
+  assert.equal(create.status, 200);
+  const createBody = await create.json() as { tasks?: Array<{ taskNumber?: number }> };
+  const taskNumber = createBody.tasks?.[0]?.taskNumber;
+  assert.equal(taskNumber, 1);
+
+  const update = await fetch(`${app.baseUrl}/internal/agent-api/tasks/update-status`, {
+    method: "POST",
+    headers: jsonHeaders(fixture.agentApiKey),
+    body: JSON.stringify({ channel: channelRef, task_number: taskNumber, status: "in_progress" }),
+  });
+  assert.equal(update.status, 200);
+
+  // The lifecycle broadcast is fire-and-forget (void async), so poll with a
+  // bounded timeout rather than sleep — assert the message row actually lands.
+  const deadline = Date.now() + 5_000;
+  let lifecycleMessage: { causalActorType: string | null; causalActorId: string | null } | undefined;
+  while (Date.now() < deadline) {
+    const [row] = await db.select({ causalActorType: messages.causalActorType, causalActorId: messages.causalActorId })
+      .from(messages)
+      .where(and(
+        eq(messages.messageType, "system"),
+        eq(messages.systemSubtype, "task.lifecycle_thread"),
+        eq(messages.senderId, "system"),
+        like(messages.content, "%lifecycle notice task%"),
+      ))
+      .orderBy(desc(messages.seq))
+      .limit(1);
+    if (row) { lifecycleMessage = row; break; }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(lifecycleMessage, "task.lifecycle_thread system message must appear for an agent status change");
+  assert.equal(lifecycleMessage.causalActorType, "agent");
+  assert.equal(lifecycleMessage.causalActorId, fixture.agentId);
+});
+
+// task #319 — `whenToUse`: agent-facing "when to use this app" hint.
+// The agent write path (`integrations/app/update`) and the Web PATCH path
+// share one validator; this test pins the agent path, the list readback
+// (inert-rendered), and each rejection class.
+test("agent-api app update stores whenToUse and integration list returns it inert-rendered", async ({ app }) => {
+  const fixture = await seedAuthFixture();
+  const db = getDb();
+
+  const { client } = await createOAuthClient({
+    serverId: fixture.serverId,
+    createdByUserId: fixture.ownerId,
+    clientId: "when-to-use-demo",
+    name: "When To Use Demo",
+    description: "Demo",
+    returnUrl: "https://demo.example.test/callback",
+  });
+  await db.insert(oauthClientMaintainers).values({
+    clientId: client.id,
+    principalType: "agent",
+    agentId: fixture.agentId,
+    role: "owner",
+    assignedByType: "system",
+  });
+
+  const update = (body: Record<string, unknown>) =>
+    fetch(`${app.baseUrl}/internal/agent-api/integrations/app/update`, {
+      method: "POST",
+      headers: jsonHeaders(fixture.agentApiKey),
+      body: JSON.stringify({ clientKey: "when-to-use-demo", ...body }),
+    });
+
+  // Rejection classes must never reach the database.
+  for (const bad of [
+    "a".repeat(161),                                   // over the 160 code-point cap
+    "first line\nsecond line",                          // multi-line
+    "install @acme/metrics for usage stats",            // bare scoped package
+  ]) {
+    const res = await update({ whenToUse: bad });
+    assert.equal(res.status, 400, `expected rejection for ${JSON.stringify(bad.slice(0, 40))}`);
+    const body = await res.json() as { errorCode?: string };
+    assert.equal(body.errorCode, "INVALID_APP_METADATA");
+  }
+
+  // A valid value stores verbatim; the list readback is inert-rendered.
+  const set = await update({ whenToUse: "ping @alice via `@acme/metrics` when the queue backs up" });
+  assert.equal(set.status, 200, await set.clone().text());
+  const [stored] = await db.select({ whenToUse: oauthClients.whenToUse }).from(oauthClients).where(eq(oauthClients.id, client.id));
+  assert.equal(stored.whenToUse, "ping @alice via `@acme/metrics` when the queue backs up");
+
+  const list = await fetch(`${app.baseUrl}/internal/agent-api/integrations`, {
+    headers: jsonHeaders(fixture.agentApiKey),
+  });
+  assert.equal(list.status, 200);
+  const listBody = await list.json() as { services?: Array<{ clientId: string; whenToUse?: string | null }> };
+  const service = listBody.services?.find((s) => s.clientId === "when-to-use-demo");
+  assert.ok(service);
+  // Bare @alice neutralizes to the plain token user:alice; the backticked
+  // scoped package is inline code and survives verbatim.
+  assert.equal(service.whenToUse, "ping user:alice via `@acme/metrics` when the queue backs up");
+
+  // Clearing the field returns null and the value never leaks back.
+  const clear = await update({ whenToUse: "" });
+  assert.equal(clear.status, 200);
+  const listAfterClear = await fetch(`${app.baseUrl}/internal/agent-api/integrations`, {
+    headers: jsonHeaders(fixture.agentApiKey),
+  });
+  const clearedBody = await listAfterClear.json() as { services?: Array<{ clientId: string; whenToUse?: string | null }> };
+  assert.equal(clearedBody.services?.find((s) => s.clientId === "when-to-use-demo")?.whenToUse ?? null, null);
+});
+
+// task #319 follow-up (review): a disabled server_local app must not appear in
+// `services` — the directory feeds both the daemon system prompt and
+// `raft integration list`, and neither should surface a stopped app.
+test("agent-api integration list hides disabled server-local apps from services", async ({ app }) => {
+  const fixture = await seedAuthFixture();
+  const db = getDb();
+
+  const { client: enabledClient } = await createOAuthClient({
+    serverId: fixture.serverId,
+    createdByUserId: fixture.ownerId,
+    clientId: "enabled-local-app",
+    name: "Enabled Local App",
+    returnUrl: "https://enabled.example.test/callback",
+  });
+  const { client: disabledClient } = await createOAuthClient({
+    serverId: fixture.serverId,
+    createdByUserId: fixture.ownerId,
+    clientId: "disabled-local-app",
+    name: "Disabled Local App",
+    returnUrl: "https://disabled.example.test/callback",
+  });
+  await db.update(oauthClients).set({ enabled: false }).where(eq(oauthClients.id, disabledClient.id));
+
+  const list = await fetch(`${app.baseUrl}/internal/agent-api/integrations`, {
+    headers: jsonHeaders(fixture.agentApiKey),
+  });
+  assert.equal(list.status, 200);
+  const body = await list.json() as { services?: Array<{ clientId: string }> };
+  const serviceKeys = body.services?.map((s) => s.clientId) ?? [];
+  assert.ok(serviceKeys.includes("enabled-local-app"));
+  assert.ok(!serviceKeys.includes("disabled-local-app"), "disabled server_local app must not appear in services");
 });

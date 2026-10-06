@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   DoneFrontierAboveInt4AuthorityError,
   DoneFrontierBeyondLatestError,
   DoneFrontierRequiredError,
   parsePositiveCanonicalDecimalForTest,
-} from "./inboxSuppressionWriters.js";
+} from "./inboxSuppressionWriters";
 
 test("Done frontier parser preserves exact positive canonical decimals beyond 2^53", () => {
   assert.equal(parsePositiveCanonicalDecimalForTest("1"), 1n);

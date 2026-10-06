@@ -1,15 +1,14 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 
 import type { MachineToServerMessage } from "@botiverse/raft-shared";
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { agents, reminders, servers, users } from "../db/schema.js";
-import { createReminder, getReminderById } from "../apps/reminder/service.js";
-import { AgentOrchestrator } from "./agentOrchestrator.js";
+import { getDb } from "../db/index";
+import { agents, reminders, servers, users } from "../db/schema";
+import { createReminder, getReminderById } from "../apps/reminder/service";
+import { AgentOrchestrator } from "./agentOrchestrator";
 
 
 afterEach(async () => {

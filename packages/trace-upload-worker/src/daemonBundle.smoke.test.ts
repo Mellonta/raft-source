@@ -20,12 +20,11 @@ import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { BasicTracer, TRACE_EVENT_ROW_V2_PROJECTION_COLUMNS } from "@botiverse/raft-shared";
 import { LocalRotatingTraceSink } from "@botiverse/raft-trace-client";
 import type { Client } from "scopedb";
-import { ingestTraceBundleObject, isLocalTraceRecord, type TraceUploadWorkerEnv } from "./index.js";
+import { ingestTraceBundleObject, isLocalTraceRecord, type TraceUploadWorkerEnv } from "./index";
 
 class MockR2Bucket {
   puts: Array<{

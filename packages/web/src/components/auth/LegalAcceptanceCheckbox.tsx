@@ -2,7 +2,7 @@ import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 import { useIntl } from "react-intl";
 import type { ReactNode } from "react";
 
-import Checkbox from "../ui/Checkbox";
+import { Checkbox } from "raft-ui";
 
 export default function LegalAcceptanceCheckbox({
   checked,
@@ -20,10 +20,10 @@ export default function LegalAcceptanceCheckbox({
         size="md"
         checked={checked}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.checked)}
+        onCheckedChange={(event) => onChange(event)}
         className="mt-0.5"
       />
-      <span className="leading-5 text-black/70">
+      <span className="leading-5 text-foreground-muted">
         {formatMessage(
           { id: "auth.legalAcceptance.agreement" },
           {
@@ -33,7 +33,7 @@ export default function LegalAcceptanceCheckbox({
                 href={CURRENT_LEGAL_ACCEPTANCE.termsUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="font-bold text-black underline hover:text-brutal-pink"
+                className="font-bold text-foreground-strong underline hover:text-accent-strong theme-brutal:hover:text-brutal-pink"
               >
                 {c}
               </a>
@@ -44,7 +44,7 @@ export default function LegalAcceptanceCheckbox({
                 href={CURRENT_LEGAL_ACCEPTANCE.privacyUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="font-bold text-black underline hover:text-brutal-pink"
+                className="font-bold text-foreground-strong underline hover:text-accent-strong theme-brutal:hover:text-brutal-pink"
               >
                 {c}
               </a>

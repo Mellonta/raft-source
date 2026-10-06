@@ -1,13 +1,13 @@
-import { revokeSocketAccess } from "../socket/accessRevocation.js";
+import { revokeSocketAccess } from "../socket/accessRevocation";
 import type { Server as SocketServer } from "socket.io";
-import * as agentService from "../services/agentService.js";
-import * as channelService from "../services/channelService.js";
-import * as messageService from "../services/messageService.js";
-import * as serverService from "../services/serverService.js";
-import { getActorServerRoleInServer } from "../lib/actorPermissions.js";
-import { actorHasChannelCapability, withLockedChannelActorCapability } from "../lib/channelActorPermissions.js";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
+import * as agentService from "../services/agentService";
+import * as channelService from "../services/channelService";
+import * as messageService from "../services/messageService";
+import * as serverService from "../services/serverService";
+import { getActorServerRoleInServer } from "../lib/actorPermissions";
+import { actorHasChannelCapability, withLockedChannelActorCapability } from "../lib/channelActorPermissions";
+import { addTraceEvent, errorClassOf } from "../tracing/semanticTrace";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
 
 export interface AgentChannelMemberActor {
   id: string;
@@ -151,10 +151,10 @@ async function broadcastMembershipSystemMessage(
         mode: "record",
         producer: target.type === "agent" ? "channel.agent_membership" : "channel.human_membership",
         reason: `${target.type} membership changes are shared channel activity`,
+        causalActor: { type: "agent", id: actor.id },
       },
       // The agent that added/removed the member should not see its own action
       // as unread.
-      causalActor: { type: "agent", id: actor.id },
       targetAgentIds,
       persistedMessage,
     },
@@ -198,13 +198,16 @@ export async function addChannelMemberForAgent(input: {
     });
     return { status: 400, body: { error: "Thread membership is managed via follow/unfollow" } };
   }
-  if (channel.type !== "channel" && channel.type !== "private") {
+  // Joint channels carry ordinary membership under the same admission rules
+  // (canAddChannelMembers): candidates resolve from this server only, and the
+  // write lands on this server's projection, exactly as for a human admin.
+  if (channel.type !== "channel" && channel.type !== "private" && channel.type !== "joint") {
     addTraceEvent("agent_channel_member_add.validation.failed", { reason: "unsupported_channel_type" });
     addTraceEvent("agent_channel_member_add.request.failed", {
       reason: "unsupported_channel_type",
       status_code: 400,
     });
-    return { status: 400, body: { error: "Only regular public or private channels are supported" } };
+    return { status: 400, body: { error: "Only public, private, or joint channels are supported" } };
   }
   const canAccessChannel = await channelService.canAgentAccessChannel(channel.id, actor.id);
   const actorRole = await getActorServerRoleInServer(serverId, "agent", actor.id);
@@ -332,7 +335,7 @@ export async function addChannelMemberForAgent(input: {
     addTraceEvent("agent_channel_member_add.request.failed", {
       reason: "unexpected_error",
       status_code: 500,
-      error_class: err instanceof Error ? err.name : typeof err,
+      error_class: errorClassOf(err),
     });
     return { status: 500, body: { error: "Failed to add member" } };
   }
@@ -375,13 +378,16 @@ export async function removeChannelMemberForAgent(input: {
     });
     return { status: 400, body: { error: "Thread membership is managed via follow/unfollow" } };
   }
-  if (channel.type !== "channel" && channel.type !== "private") {
+  // Joint channels carry ordinary membership under the same admission rules
+  // (canAddChannelMembers): candidates resolve from this server only, and the
+  // write lands on this server's projection, exactly as for a human admin.
+  if (channel.type !== "channel" && channel.type !== "private" && channel.type !== "joint") {
     addTraceEvent("agent_channel_member_remove.validation.failed", { reason: "unsupported_channel_type" });
     addTraceEvent("agent_channel_member_remove.request.failed", {
       reason: "unsupported_channel_type",
       status_code: 400,
     });
-    return { status: 400, body: { error: "Only regular public or private channels are supported" } };
+    return { status: 400, body: { error: "Only public, private, or joint channels are supported" } };
   }
   if (channelService.isAllSystemChannel(channel)) {
     addTraceEvent("agent_channel_member_remove.validation.failed", { reason: "all_channel" });
@@ -503,7 +509,7 @@ export async function removeChannelMemberForAgent(input: {
     addTraceEvent("agent_channel_member_remove.request.failed", {
       reason: "unexpected_error",
       status_code: 500,
-      error_class: err instanceof Error ? err.name : typeof err,
+      error_class: errorClassOf(err),
     });
     return { status: 500, body: { error: "Failed to remove member" } };
   }

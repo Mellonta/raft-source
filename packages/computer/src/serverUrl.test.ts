@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   DEFAULT_SLOCK_SERVER_URL,
@@ -9,7 +8,7 @@ import {
   resolveServerUrl,
   resolveServerUrlEnv,
   SLOCK_SERVER_URL_ENV,
-} from "./serverUrl.js";
+} from "./serverUrl";
 
 test("resolveServerUrl falls back to the production API", () => {
   assert.equal(resolveServerUrl(undefined, "", "   "), DEFAULT_SLOCK_SERVER_URL);

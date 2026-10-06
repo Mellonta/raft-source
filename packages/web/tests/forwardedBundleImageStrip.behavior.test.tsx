@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { resetAttachmentPreviewSummaryCache } from "../src/components/message/attachmentPreviewSummaryCache";
 import { resetInlineAttachmentUrlCache } from "../src/components/message/inlineAttachmentUrlCache";
 import { readFileSync } from "node:fs";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";

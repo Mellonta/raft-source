@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { useLayoutEffect } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
@@ -185,6 +184,7 @@ async function renderSearchHome(
   storage: MemoryStorage,
   onInitialSearchValue?: (value: string) => void,
   initialState?: unknown,
+  pageProps: { activateResultsInChat?: boolean; overlayChrome?: boolean } = {},
 ) {
   Object.defineProperty(globalThis, "localStorage", {
     value: storage,
@@ -242,7 +242,7 @@ async function renderSearchHome(
 
   const renderResult = render(
     <MemoryRouter initialEntries={[{ pathname: "/s/server/search", state: initialState }]}>
-      <MessageSearchPage />
+      <MessageSearchPage {...pageProps} />
       <SearchNavigationProbe />
       {onInitialSearchValue ? <InitialSearchValueProbe onValue={onInitialSearchValue} /> : null}
     </MemoryRouter>,
@@ -336,6 +336,27 @@ test("empty search shows local history and common channels as actionable section
   assert.equal((screen.getByPlaceholderText(/Search channels/) as HTMLInputElement).value, "roadmap");
 });
 
+test("⌘K overlay: the palette's empty state lists recent conversations, and clicking one jumps to it in chat instead of the absent content slot (task #95 → #113)", async () => {
+  api.get = (async () => ({ data: { hasMore: false, results: [] } })) as typeof api.get;
+  const storage = new MemoryStorage();
+  // Frequently Used is a full-page section; the overlay lists recent
+  // conversations (visit history + activity fill) instead — task #113.
+  storage.setItem("raft:search-entity-usage:server-1:user-1", JSON.stringify({ "channel:channel-1": [Date.now()] }));
+  const { useSearchContentStore } = await renderSearchHome(storage, undefined, undefined, { activateResultsInChat: true, overlayChrome: true });
+
+  assert.equal(screen.getByTestId("search-location").textContent, "/s/server/search");
+  assert.ok(screen.queryByTestId("search-common-channel:channel-1") === null, "no Frequently Used cards in the palette");
+  assert.ok(screen.getByTestId("search-overlay-recent"));
+  const rowButton = screen.getByTestId("search-channel-result-channel-1").querySelector("button");
+  assert.ok(rowButton);
+  fireEvent.click(rowButton);
+  await waitFor(() => {
+    assert.match(screen.getByTestId("search-location").textContent ?? "", /channel-1/);
+  });
+  // The overlay has no col-3 pane: the click must NOT merely fill the content slot.
+  assert.equal(useSearchContentStore.getState().slot, null);
+});
+
 test("search results distinguish public, private, and joint channel icons", async () => {
   api.get = (async () => ({ data: { hasMore: false, results: [] } })) as typeof api.get;
   await renderSearchHome(new MemoryStorage());
@@ -379,12 +400,12 @@ test("search history renders the 15 most recent queries as wrapping tags", async
   const firstTag = tags[0];
   const firstRemove = screen.getByLabelText('Remove "query 1" from search history');
   assert.equal(firstTag.classList.contains("group"), true);
-  assert.equal(firstTag.classList.contains("hover:bg-black/[0.03]"), true);
+  assert.equal(firstTag.classList.contains("hover:bg-fill-muted"), true);
   assert.equal(firstRemove.classList.contains("opacity-0"), true);
   assert.equal(firstRemove.classList.contains("group-hover:opacity-100"), true);
   assert.equal(firstRemove.classList.contains("size-5"), true);
-  assert.equal(firstRemove.classList.contains("hover:bg-black/10"), true);
-  assert.equal(firstRemove.classList.contains("hover:text-black/70"), true);
+  assert.equal(firstRemove.classList.contains("hover:bg-fill-muted"), true);
+  assert.equal(firstRemove.classList.contains("hover:text-foreground-strong"), true);
 });
 
 test("desktop search history keeps hover removal and shows no edit toggle", async () => {
@@ -562,10 +583,14 @@ test("initial search failure renders an error card with a working retry", async 
 });
 
 test("QUERY_TOO_BROAD renders actionable rejection instead of an empty result set", async () => {
-  api.get = (async (url: string) => {
+  const searchSorts: Array<string | undefined> = [];
+  api.get = (async (url: string, config?: { params?: Record<string, unknown> }) => {
     if (url !== "/messages/search") {
       return { data: { hasMore: false, results: [] } };
     }
+    const requestSort = config?.params?.sort as string | undefined;
+    searchSorts.push(requestSort);
+    if (requestSort === "recent") return { data: { hasMore: false, results: [] } };
     throw {
       response: {
         status: 422,
@@ -585,6 +610,11 @@ test("QUERY_TOO_BROAD renders actionable rejection instead of an empty result se
   assert.match(document.body.textContent ?? "", /Add a channel, sender, or time filter, or switch the sort to Recent/);
   assert.equal(screen.queryByText("No results found"), null, "typed rejection must not render as an empty result set");
   assert.equal(screen.queryByRole("button", { name: "Retry" }), null, "retrying the same rejected query is not actionable");
+
+  // Recent sort is never rejected: the card reruns the same query newest first.
+  fireEvent.click(screen.getByRole("button", { name: "Sort by newest" }));
+  await waitFor(() => assert.equal(searchSorts.at(-1), "recent"));
+  await waitFor(() => assert.ok(screen.queryByText("Search is too broad") === null));
 });
 
 test("SEARCH_TIMEOUT renders a typed timeout state with guidance and retry instead of an empty result set", async () => {

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import type { HTMLAttributes, ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { Card } from "raft-ui";
 
 export interface BottomSheetProps
   extends Omit<HTMLAttributes<HTMLDivElement>, "children"> {
@@ -80,12 +81,12 @@ export default function BottomSheet({
           : undefined
       }
     >
-      <div
-        className={`mx-auto border-2 border-black bg-white shadow-brutal-lg ${widthClass} ${sheetClassName}`}
+      <Card
+        className={`mx-auto shadow-raft-xl ${widthClass} ${sheetClassName} theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-lg`}
         onClick={(event) => event.stopPropagation()}
       >
         {children}
-      </div>
+      </Card>
     </div>,
     document.body,
   );

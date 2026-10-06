@@ -1,17 +1,17 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { desc, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { agentKnowledgeEvents, users } from "../db/schema.js";
-import { sanitizeAgentKnowledgeContent } from "../services/agentKnowledgeService.js";
+import { getDb } from "../db/index";
+import { agentKnowledgeEvents, users } from "../db/schema";
+import { sanitizeAgentKnowledgeContent } from "../services/agentKnowledgeService";
 import { MANUAL_CONTEXT_CAPABILITY, RAFT_CLIENT_CAPABILITIES_HEADER } from "@botiverse/raft-shared";
-import { createAgent } from "../services/agentService.js";
-import { mintAgentCredential, type AgentCapability } from "../services/agentCredentialService.js";
-import { createServer } from "../services/serverService.js";
+import { createAgent } from "../services/agentService";
+import { mintAgentCredential, type AgentCapability } from "../services/agentCredentialService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

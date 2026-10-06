@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { reconcileAgentsList } from "../src/store/agentStore.js";
-import type { Agent } from "../src/store/agentStore.js";
+import { reconcileAgentsList } from "../src/store/agentStore";
+import type { Agent } from "../src/store/agentStore";
 
 // Structural sharing for the agents list. `loadAgents()` runs on a 60s periodic
 // status reconcile (#2616 / CC-006 client) + focus refetch, each time building a

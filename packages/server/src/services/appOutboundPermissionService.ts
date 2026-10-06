@@ -1,4 +1,5 @@
 import {
+  APP_AGENT_REMINDER_WRITE_GROUP,
   APP_NOTIFICATION_EVENT_GROUPS,
   APP_NOTIFICATION_GROUPS,
   appNotificationEventRequiredGroups,
@@ -7,16 +8,17 @@ import {
   type AppNotificationGroup,
 } from "@botiverse/raft-shared";
 import { and, eq, inArray, isNull, ne } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   oauthAppInstallationTokens,
   oauthAppPermissionRevisions,
   oauthClientInstalls,
   oauthClients,
-} from "../db/schema.js";
-import { ensureLocalAppSourceInstallation } from "./appSourceInstallationService.js";
-import * as integrationAuditService from "./integrationAuditService.js";
-import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy.js";
+} from "../db/schema";
+import { ensureLocalAppSourceInstallation } from "./appSourceInstallationService";
+import * as integrationAuditService from "./integrationAuditService";
+import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy";
+import { isApprovedOfficialAppClient } from "./officialAppAutoInstallService";
 
 export const APP_OUTBOUND_GROUPS = APP_NOTIFICATION_GROUPS;
 export const APP_OUTBOUND_EVENT_GROUPS = APP_NOTIFICATION_EVENT_GROUPS;
@@ -133,6 +135,12 @@ export async function createAppOutboundPermissionRevision(input: {
       .limit(1)
       .for("update");
     if (!client) return null;
+    if (
+      requested.groups.includes(APP_AGENT_REMINDER_WRITE_GROUP)
+      && !await isApprovedOfficialAppClient(client.id, tx)
+    ) {
+      throw new AppOutboundPermissionError(`Group ${APP_AGENT_REMINDER_WRITE_GROUP} is only grantable to official apps`);
+    }
 
     const priorGroups = [...client.currentGroups].sort();
     const priorEvents = [...client.currentEvents].sort();
@@ -203,6 +211,8 @@ export async function createAppOutboundPermissionRevision(input: {
         id: oauthClientInstalls.id,
         approvedGroups: oauthClientInstalls.approvedGroups,
         grantRevision: oauthClientInstalls.grantRevision,
+        subscribedEvents: oauthClientInstalls.subscribedEvents,
+        subscriptionRevision: oauthClientInstalls.subscriptionRevision,
       }).from(oauthClientInstalls).where(and(
         eq(oauthClientInstalls.clientId, client.id),
         eq(oauthClientInstalls.serverId, client.serverId),
@@ -211,10 +221,13 @@ export async function createAppOutboundPermissionRevision(input: {
       const changedSourceInstallIds: string[] = [];
       for (const installation of sourceInstalls) {
         const groupsChanged = !sameSet([...installation.approvedGroups].sort(), currentGroups);
+        const eventsChanged = !sameSet([...installation.subscribedEvents].sort(), currentEvents);
         await tx.update(oauthClientInstalls).set({
           approvedRequestRevisionId: created.id,
           approvedGroups: currentGroups,
           grantRevision: groupsChanged ? installation.grantRevision + 1 : installation.grantRevision,
+          subscribedEvents: currentEvents,
+          subscriptionRevision: eventsChanged ? installation.subscriptionRevision + 1 : installation.subscriptionRevision,
           updatedAt: now,
         }).where(eq(oauthClientInstalls.id, installation.id));
         if (groupsChanged) changedSourceInstallIds.push(installation.id);
@@ -294,6 +307,8 @@ export async function approvePendingAppOutboundPermissionRevision(input: {
       id: oauthClientInstalls.id,
       approvedGroups: oauthClientInstalls.approvedGroups,
       grantRevision: oauthClientInstalls.grantRevision,
+      subscribedEvents: oauthClientInstalls.subscribedEvents,
+      subscriptionRevision: oauthClientInstalls.subscriptionRevision,
     }).from(oauthClientInstalls).where(and(
       eq(oauthClientInstalls.clientId, client.id),
       eq(oauthClientInstalls.serverId, client.serverId),
@@ -302,10 +317,13 @@ export async function approvePendingAppOutboundPermissionRevision(input: {
     const changedSourceInstallIds: string[] = [];
     for (const installation of sourceInstalls) {
       const groupsChanged = !sameSet([...installation.approvedGroups].sort(), revision.requestedGroups);
+      const eventsChanged = !sameSet([...installation.subscribedEvents].sort(), revision.requestedEvents);
       await tx.update(oauthClientInstalls).set({
         approvedRequestRevisionId: revision.id,
         approvedGroups: revision.requestedGroups,
         grantRevision: groupsChanged ? installation.grantRevision + 1 : installation.grantRevision,
+        subscribedEvents: revision.requestedEvents,
+        subscriptionRevision: eventsChanged ? installation.subscriptionRevision + 1 : installation.subscriptionRevision,
         updatedAt: now,
       }).where(eq(oauthClientInstalls.id, installation.id));
       if (groupsChanged) changedSourceInstallIds.push(installation.id);

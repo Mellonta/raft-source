@@ -6,7 +6,7 @@ import {
   type Tracer,
   type TraceScope,
   type TraceScopeTracerOptions,
-} from "./index.js";
+} from "./index";
 
 export type TraceFieldClass = "query_axis" | "family_query_axis" | "detail" | "content_safety";
 export type TraceFieldPlacement = "span" | "event" | "span_or_event";
@@ -78,6 +78,9 @@ export const TRACE_B0_FIELD_DEFINITIONS = defineTraceFields([
   { key: "channel_id", fieldClass: "query_axis", placement: "span_or_event", valueKind: "identity", highCardinality: true },
   { key: "machine_id", fieldClass: "query_axis", placement: "span", valueKind: "identity", highCardinality: true },
   { key: "agent_id", fieldClass: "query_axis", placement: "span_or_event", valueKind: "identity", highCardinality: true },
+  { key: "agent_id_hash", fieldClass: "query_axis", placement: "span_or_event", valueKind: "identity", highCardinality: true },
+  { key: "server_id_hash", fieldClass: "query_axis", placement: "span_or_event", valueKind: "identity", highCardinality: true },
+  { key: "trace_user_id", fieldClass: "query_axis", placement: "span_or_event", valueKind: "identity", highCardinality: true },
   { key: "job_id", fieldClass: "query_axis", placement: "span_or_event", valueKind: "identity", highCardinality: true },
   { key: "launch_id", fieldClass: "query_axis", placement: "span", valueKind: "identity", highCardinality: true },
   { key: "session_id", fieldClass: "query_axis", placement: "span", valueKind: "identity", highCardinality: true },

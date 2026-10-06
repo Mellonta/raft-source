@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { spawn, type ChildProcess } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
-import { test } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -8,7 +9,8 @@ import {
   SERVER_SHARD_WATCHDOG_TIMEOUT_MS,
   runWithExitWatchdog,
   type ProcessDidNotExitReceipt,
-} from "../scripts/runServerShardWithWatchdog.js";
+  watchSpawnedChildExit,
+} from "../scripts/runServerShardWithWatchdog";
 
 const SERVER_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -18,6 +20,34 @@ const REPO_ROOT = path.resolve(SERVER_DIR, "../..");
 // Asserts on private CI/deploy files that the source-available snapshot does not
 // carry; skipped when an exported snapshot's RELEASE_SOURCE marker is present.
 const inSourceSnapshot = existsSync(path.join(REPO_ROOT, "RELEASE_SOURCE"));
+
+const FIXTURE_STARTUP_TIMEOUT_MS = 2_000;
+const EXIT_WATCHDOG_TEST_TIMEOUT_MS = 100;
+const SLOW_FIXTURE_STARTUP_MS = 150;
+
+async function spawnReadyWatchdogFixture(source: string): Promise<ChildProcess> {
+  const child = spawn(
+    process.execPath,
+    ["--input-type=module", "-e", source],
+    {
+      cwd: SERVER_DIR,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    },
+  );
+
+  try {
+    const [message] = await once(child, "message", {
+      signal: AbortSignal.timeout(FIXTURE_STARTUP_TIMEOUT_MS),
+    });
+    assert.equal(message, "ready");
+  } catch (error) {
+    child.kill("SIGKILL");
+    throw error;
+  }
+
+  return child;
+}
 
 test("passes through a child that exits cleanly", async () => {
   const exitCode = await runWithExitWatchdog({
@@ -49,23 +79,23 @@ test(
   "settles on child exit even when a descendant keeps a stdio pipe open",
   { timeout: 5_000 },
   async () => {
-    const exitCode = await runWithExitWatchdog({
-      command: process.execPath,
-      args: [
-        "--input-type=module",
-        "-e",
-        [
-          "import { spawn } from 'node:child_process';",
-          "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 400)'], { stdio: 'inherit' });",
-          "process.exit(0);",
-        ].join(""),
-      ],
-      cwd: SERVER_DIR,
+    assert.ok(SLOW_FIXTURE_STARTUP_MS > EXIT_WATCHDOG_TEST_TIMEOUT_MS);
+    const child = await spawnReadyWatchdogFixture(
+      [
+        "import { spawn } from 'node:child_process';",
+        `await new Promise((resolve) => setTimeout(resolve, ${SLOW_FIXTURE_STARTUP_MS}));`,
+        "spawn(process.execPath, ['-e', 'setTimeout(() => {}, 400)'], { stdio: 'inherit' });",
+        "process.send?.('ready');",
+        "process.on('message', (message) => { if (message === 'exit') process.exit(0); });",
+      ].join(""),
+    );
+    const exitCodePromise = watchSpawnedChildExit(child, {
       shard: 4,
-      timeoutMs: 100,
+      timeoutMs: EXIT_WATCHDOG_TEST_TIMEOUT_MS,
       killGraceMs: 25,
-      stdio: ["ignore", "pipe", "pipe"],
     });
+    child.send?.("exit");
+    const exitCode = await exitCodePromise;
     assert.equal(exitCode, 0);
   },
 );
@@ -75,21 +105,17 @@ test(
   { timeout: 5_000 },
   async () => {
     const receipts: ProcessDidNotExitReceipt[] = [];
-    const exitCode = await runWithExitWatchdog({
-      command: process.execPath,
-      args: [
-        "--input-type=module",
-        "-e",
-        [
-          "const phase = 'assertion phase completed';",
-          "setInterval(() => {}, 1000);",
-        ].join(""),
-      ],
-      cwd: SERVER_DIR,
+    const child = await spawnReadyWatchdogFixture(
+      [
+        "const phase = 'assertion phase completed';",
+        "setInterval(() => {}, 1000);",
+        "process.send?.('ready');",
+      ].join(""),
+    );
+    const exitCode = await watchSpawnedChildExit(child, {
       shard: 5,
-      timeoutMs: 100,
+      timeoutMs: EXIT_WATCHDOG_TEST_TIMEOUT_MS,
       killGraceMs: 25,
-      stdio: "ignore",
       emit: (receipt) => receipts.push(receipt),
     });
 
@@ -97,7 +123,7 @@ test(
     assert.equal(receipts.length, 1);
     assert.equal(receipts[0].classification, "PROCESS_DID_NOT_EXIT");
     assert.equal(receipts[0].shard, 5);
-    assert.equal(receipts[0].timeoutMs, 100);
+    assert.equal(receipts[0].timeoutMs, EXIT_WATCHDOG_TEST_TIMEOUT_MS);
     assert.ok(receipts[0].childPid > 0);
     if (process.platform === "linux") {
       assert.ok(
@@ -147,7 +173,7 @@ test.skipIf(inSourceSnapshot)("Hosted wiring keeps a hard job ceiling above the 
   assert.ok(25 * 60_000 > SERVER_SHARD_WATCHDOG_TIMEOUT_MS);
   assert.match(
     unitServer,
-    /pnpm exec tsx scripts\/runServerShardWithWatchdog\.ts \$\{\{ matrix\.shard \}\}/,
+    /pnpm exec node --import @oxc-node\/core\/register scripts\/runServerShardWithWatchdog\.ts \$\{\{ matrix\.shard \}\}/,
   );
   assert.doesNotMatch(unitServer, /--test-force-exit/);
 });

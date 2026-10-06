@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { computerLocalTraceDisabled } from "./computerTracer.js";
+import { computerLocalTraceDisabled } from "./computerTracer";
 
 test("computerLocalTraceDisabled uses RAFT_COMPUTER_LOCAL_TRACE", () => {
   assert.equal(computerLocalTraceDisabled({}), false);

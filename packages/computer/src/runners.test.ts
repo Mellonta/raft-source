@@ -4,11 +4,10 @@ import { createServer as createHttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { runRunnersList, runRunnersStop } from "./runners.js";
-import { serverAttachmentPath } from "./paths.js";
-import { CliExit } from "./output.js";
+import { runRunnersList, runRunnersStop } from "./runners";
+import { serverAttachmentPath } from "./paths";
+import { CliExit } from "./output";
 
 // task #30 PR-G regression — `runners list|stop` per-server scoping
 // (v4 §6: ≥2 attached → positional serverSlug required, fail-loud list

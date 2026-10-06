@@ -1,16 +1,16 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 
 import { asServerId } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { agentMigrations, machines, serverMembers, users } from "../db/schema.js";
-import { createAgent } from "./agentService.js";
-import { prepareActionCard } from "./actionCardsService.js";
-import { addAgent, addHuman, createChannel } from "./channelService.js";
-import { createServer } from "./serverService.js";
+import { getDb } from "../db/index";
+import { agentMigrations, machines, serverMembers, users } from "../db/schema";
+import { createAgent } from "./agentService";
+import { prepareActionCard } from "./actionCardsService";
+import { addAgent, addHuman, createChannel } from "./channelService";
+import { createServer } from "./serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

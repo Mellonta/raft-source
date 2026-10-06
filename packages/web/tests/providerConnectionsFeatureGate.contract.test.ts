@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 
 function readSource(path: string): string {
   return readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
@@ -13,12 +12,15 @@ test("provider connection settings and Agent selectors stay behind the server fe
   const sidebar = readSource("components/layout/Sidebar.tsx");
   const createAgent = readSource("components/agent/CreateAgentDialog.tsx");
   const agentDetail = readSource("components/agent/AgentDetailPanel.tsx");
+  const providerConnectionsHook = readSource("hooks/useProviderConnections.ts");
 
   assert.match(settingsModal, /if \(!providerConnectionsEnabled \|\| !capabilities\.manageExternalAuth\) hidden\.add\("providers"\)/);
   assert.match(settingsPanel, /requestedSettingsTab === "providers" && \(!providerConnectionsEnabled \|\| !capabilities\.manageExternalAuth\)/);
   assert.match(providerSettings, /if \(!featureEnabled\) return null/);
   assert.match(sidebar, /\.\.\.\(providerConnectionsEnabled && canManageExternalAuth\s*\? \[\{ id: "providers"/);
-  assert.match(createAgent, /providerConnectionCatalog\.featureEnabled\s*&&/);
-  assert.match(agentDetail, /providerConnectionCatalog\.featureEnabled\s*&&/);
+  assert.match(createAgent, /useProviderConnections\(!previewOnly && runtime === "builtin"\)/);
+  assert.match(agentDetail, /useProviderConnections\(canManageAgent\)/);
+  assert.match(providerConnectionsHook, /const requestEnabled = enabled && feature\.enabled/);
+  assert.match(providerConnectionsHook, /connections: requestEnabled \? connections : \[\]/);
   assert.match(agentDetail, /!providerConnectionCatalog\.featureEnabled\s*\|\|/);
 });

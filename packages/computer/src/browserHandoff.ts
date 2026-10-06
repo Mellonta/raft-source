@@ -11,23 +11,41 @@ export function canInstallEnterToOpenUrl(input: NodeJS.ReadableStream | undefine
   return Boolean(tty?.isTTY === true && typeof tty.on === "function" && typeof tty.off === "function");
 }
 
-export function openUrlInBrowser(url: string): void {
-  const platform = process.platform;
-  let command: string;
-  let args: string[];
-
-  if (platform === "darwin") {
-    command = "open";
-    args = [url];
-  } else if (platform === "win32") {
-    command = "cmd";
-    args = ["/c", "start", "", url];
-  } else {
-    command = "xdg-open";
-    args = [url];
+/**
+ * Only a parsed http(s) URL is ever handed to the OS opener, as its
+ * normalized form (no spaces or quotes survive normalization). Anything else
+ * returns null and is left for the user to copy from the printed text.
+ */
+export function normalizeBrowserUrl(url: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
   }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  if (/[\s"]/.test(parsed.href)) return null;
+  return parsed.href;
+}
 
-  const child = spawn(command, args, {
+export function browserOpenCommand(
+  url: string,
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[] } | null {
+  const href = normalizeBrowserUrl(url);
+  if (!href) return null;
+  if (platform === "darwin") return { command: "open", args: [href] };
+  // Windows: hand the URL straight to the URL protocol handler. No cmd.exe,
+  // so characters such as & or ^ in the query are never interpreted.
+  if (platform === "win32") return { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", href] };
+  return { command: "xdg-open", args: [href] };
+}
+
+export function openUrlInBrowser(url: string, spawnImpl: typeof spawn = spawn): void {
+  const opener = browserOpenCommand(url);
+  if (!opener) return;
+
+  const child = spawnImpl(opener.command, opener.args, {
     detached: true,
     stdio: "ignore",
     windowsHide: true,

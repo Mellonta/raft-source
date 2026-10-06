@@ -1,4 +1,5 @@
-import type { AgentConfig, AgentMessage } from "@botiverse/raft-shared";
+import type { AgentConfig, AgentMessage, TraceContext } from "@botiverse/raft-shared";
+import type { RecoveryGrant } from "./runtimeOutcomeOutbox";
 
 export type AgentStartQueueItem = {
   agentId: string;
@@ -11,6 +12,12 @@ export type AgentStartQueueItem = {
   unreadSummary?: Record<string, number>;
   resumePrompt?: string;
   launchId?: string;
+  // RFC 071: the recovery grant of the admitted human start this start is
+  // (bound to `launchId`); absent for every automatic start.
+  recoveryGrant?: RecoveryGrant | null;
+  // Trace parent of the request that asked for this start. The spawn span
+  // is created under it, even when the start waits in the queue.
+  traceParent?: TraceContext | null;
   resolve: () => void;
   reject: (err: unknown) => void;
 };

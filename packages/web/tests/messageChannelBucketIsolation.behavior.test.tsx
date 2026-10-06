@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act } from "react";
+import type { ReactNode } from "react";
 import { cleanup, render as rtlRender, screen } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 import { BrowserRouter, MemoryRouter, useSearchParams } from "react-router-dom";
 import api from "../src/api/client";
-import ChatPanel from "../src/components/message/ChatPanel";
+import ChatPanel, { ChatPanelMessageRenderScope } from "../src/components/message/ChatPanel";
 import { createRenderCounter } from "./helpers/renderCount";
 import type { User } from "../src/store/authStore";
 import { useAuthStore } from "../src/store/authStore";
+import { useAgentStore } from "../src/store/agentStore";
 import type { Channel } from "../src/store/channelStore";
 import { useChannelStore } from "../src/store/channelStore";
 import {
@@ -68,12 +69,14 @@ globalThis.ResizeObserver = globalThis.ResizeObserver ?? class {
 
 globalThis.CSS = globalThis.CSS ?? ({ escape: (value: string) => value } as typeof CSS);
 Element.prototype.scrollIntoView = Element.prototype.scrollIntoView ?? (() => {});
+Element.prototype.scrollTo = Element.prototype.scrollTo ?? (() => {});
 
 afterEach(() => {
   cleanup();
   api.get = originalGet as typeof api.get;
   api.post = originalPost as typeof api.post;
   useAuthStore.setState({ user: null, accessToken: null, refreshToken: null, initialized: false, loading: false });
+  useAgentStore.setState(useAgentStore.getInitialState(), true);
   useChannelStore.setState({ channels: [], dmChannels: [], channelActivity: {} });
   useMessageStore.setState(useMessageStore.getInitialState(), true);
   resetMessagesSyncCoreForTests();
@@ -94,6 +97,15 @@ function message(channelId: string, seq: number): Message {
     messageType: "chat",
     content: `${channelId} message ${seq}`,
     createdAt: new Date(2026, 6, 9, 18, 0, seq).toISOString(),
+  };
+}
+
+function agentMessage(channelId: string, seq: number, agentId: string): Message {
+  return {
+    ...message(channelId, seq),
+    senderType: "agent",
+    senderId: agentId,
+    senderName: agentId,
   };
 }
 
@@ -325,6 +337,28 @@ function messageNewHandler() {
   return binding.handler;
 }
 
+function mainLayoutSocketHandler(event: string) {
+  const socket: MainLayoutSocketBridgeSocket = {
+    connected: true,
+    emit() {},
+    on() {},
+    off() {},
+    onAny() {},
+    offAny() {},
+    disconnect() {},
+    connect() {},
+  };
+  const binding = buildMainLayoutSocketBindings(
+    socket,
+    () => {},
+    async () => {},
+    () => {},
+    () => {},
+  ).find((item) => item.event === event);
+  assert.ok(binding);
+  return binding.handler;
+}
+
 async function measureSocketMessageNewRenderCounts(flagVariant: "disabled" | "enabled") {
   resetMessagesSyncCoreForTests();
   resetSyncCoreMessagesFlagForTests();
@@ -398,6 +432,135 @@ test("flagged socket message:new keeps per-channel render isolation no worse tha
     flagOn.channelARenders <= flagOff.channelARenders,
     "flag-on socket message:new must not add target-channel render commits beyond flag-off",
   );
+});
+
+test("Activity channel detail ignores repeated agent session frames without re-rendering message rows", async () => {
+  const target = channel();
+  const existingMessages = [
+    agentMessage(target.id, 1, "agent-a"),
+    agentMessage(target.id, 2, "agent-b"),
+    message(target.id, 3),
+  ];
+  setChatPanelState(target, existingMessages, { loading: false });
+  useAgentStore.setState({
+    agents: [
+      { id: "agent-a", name: "agent-a", status: "active", sessionId: "session-a" },
+      { id: "agent-b", name: "agent-b", status: "active", sessionId: "session-b" },
+    ],
+    agentActivities: {
+      "agent-a": { activity: "online", activityDetail: "" },
+      "agent-b": { activity: "online", activityDetail: "" },
+    },
+    agentActivityTraceJoins: {},
+    agentActivityObservedAt: {},
+    agentActivityVersions: {},
+    agentActivitySeq: {},
+    agentActivityLaunchId: {},
+  } as never);
+  const rc = createRenderCounter();
+  const wrapMessage = (id: string, children: ReactNode) => (
+    <rc.Count id={id}>{children}</rc.Count>
+  );
+
+  const view = await act(async () => render(
+    <MemoryRouter>
+      <ChatPanelMessageRenderScope.Provider value={wrapMessage}>
+        <ChatPanel channel={target} readOnly />
+      </ChatPanelMessageRenderScope.Provider>
+    </MemoryRouter>,
+  ));
+
+  try {
+    rc.reset();
+    act(() => {
+      mainLayoutSocketHandler("agent:activity")({
+        agentId: "unrelated-agent",
+        activity: "working",
+        detail: "unrelated activity",
+        timestamp: Date.now(),
+      });
+    });
+    for (const existing of existingMessages) {
+      assert.equal(
+        rc.get(`message:${target.id}:${existing.id}`),
+        0,
+        `unrelated agent:activity keeps ${existing.id} quiet`,
+      );
+    }
+
+    act(() => {
+      mainLayoutSocketHandler("agent:activity")({
+        agentId: "agent-a",
+        activity: "thinking",
+        detail: "affected activity",
+        timestamp: Date.now() + 1,
+      });
+    });
+    assert.ok(
+      rc.get(`message:${target.id}:${target.id}-1`) > 0,
+      "the affected agent row updates its live status",
+    );
+    assert.equal(
+      rc.get(`message:${target.id}:${target.id}-2`),
+      0,
+      "a different agent row stays quiet",
+    );
+    assert.equal(
+      rc.get(`message:${target.id}:${target.id}-3`),
+      0,
+      "a human row stays quiet",
+    );
+    rc.reset();
+
+    const agentsBeforeRepeatedSession = useAgentStore.getState().agents;
+    act(() => {
+      mainLayoutSocketHandler("agent:session")({
+        agentId: "agent-a",
+        sessionId: "session-a",
+      });
+    });
+    for (const existing of existingMessages) {
+      assert.equal(
+        rc.get(`message:${target.id}:${existing.id}`),
+        0,
+        `same-value agent:session keeps ${existing.id} quiet`,
+      );
+    }
+    assert.equal(
+      useAgentStore.getState().agents,
+      agentsBeforeRepeatedSession,
+      "same-value agent:session preserves the agents collection identity",
+    );
+    assert.equal(
+      useAgentStore.getState().agents.find((agent) => agent.id === "agent-a")?.sessionId,
+      "session-a",
+      "same-value session frame preserves the accepted session",
+    );
+
+    rc.reset();
+    act(() => {
+      mainLayoutSocketHandler("agent:session")({
+        agentId: "agent-a",
+        sessionId: "session-a-next",
+      });
+    });
+    assert.notEqual(
+      useAgentStore.getState().agents,
+      agentsBeforeRepeatedSession,
+      "a changed session replaces the agents collection",
+    );
+    assert.equal(
+      useAgentStore.getState().agents.find((agent) => agent.id === "agent-a")?.sessionId,
+      "session-a-next",
+      "a changed session still updates the affected agent",
+    );
+    assert.ok(
+      rc.get(`message:${target.id}:${target.id}-1`) > 0,
+      "the affected agent row renders for a changed session",
+    );
+  } finally {
+    await act(async () => view.unmount());
+  }
 });
 
 test("per-channel window metadata writes do not re-render unrelated channel subscribers", () => {
@@ -511,6 +674,28 @@ test("ChatPanel keeps cached channel rows visible while a same-channel load is p
   }
 });
 
+test("ChatPanel exposes channel-description URLs through the real panel header", async () => {
+  const description = "Runbook https://docs.example.com/channel/runbook，then ask an admin.";
+  const target = channel({ description });
+  setChatPanelState(target, [], { loading: false });
+
+  const view = await act(async () => render(
+    <MemoryRouter>
+      <ChatPanel channel={target} readOnly />
+    </MemoryRouter>,
+  ));
+
+  try {
+    const link = screen.getByRole("link", { name: "https://docs.example.com/channel/runbook" });
+    assert.equal(link.getAttribute("href"), "https://docs.example.com/channel/runbook");
+    assert.equal(link.getAttribute("target"), "_blank");
+    assert.equal(link.getAttribute("rel"), "noopener noreferrer");
+    assert.equal(link.parentElement?.textContent, description);
+  } finally {
+    await act(async () => view.unmount());
+  }
+});
+
 test("ChatPanel clear-focused action preserves a same-tick thread param", async () => {
   const target = channel();
   setChatPanelState(target, [message(target.id, 1)], { loading: false, hasNewer: true });
@@ -613,6 +798,7 @@ test("ChatPanel distinguishes first-load loading from a loaded empty channel", a
   });
 
   assert.ok(screen.getByText("Loading…"));
+  assert.ok(screen.getByTestId("message-content-surface"));
   assert.equal(screen.queryByText("No messages yet"), null);
 
   cleanup();
@@ -626,6 +812,7 @@ test("ChatPanel distinguishes first-load loading from a loaded empty channel", a
   });
 
   assert.equal(screen.queryByText("Loading…"), null);
+  assert.ok(screen.getByTestId("message-content-surface"));
   assert.ok(screen.getByText("No messages yet"));
 });
 

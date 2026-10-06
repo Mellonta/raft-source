@@ -3,7 +3,9 @@ export const RAFT_REF_USER_NAME_PATTERN = RAFT_REF_CHANNEL_NAME_PATTERN;
 // Built-in app conversations use dotted peer names. Keep this a literal
 // peer-name grammar (not a path/glob): dots are the only addition to the
 // existing word/hyphen alphabet.
-export const RAFT_REF_DM_PEER_PATTERN = String.raw`[\w.-]+`;
+// A DM peer may carry an explicit kind (`skyzh~agent`, see dmPeerRef.ts) when a
+// human and an agent in one server share a name.
+export const RAFT_REF_DM_PEER_PATTERN = String.raw`[\w.-]+(?:~(?:agent|human))?(?![\w.~-])`;
 export const RAFT_REF_THREAD_SHORT_ID_PATTERN = String.raw`[\da-f]{6,8}`;
 export const RAFT_REF_MESSAGE_ID_PATTERN = String.raw`[A-Za-z0-9][A-Za-z0-9-]{1,63}`;
 export const RAFT_REF_TASK_NUMBER_PATTERN = String.raw`[1-9]\d*`;
@@ -43,6 +45,16 @@ export function createRaftDmThreadRefRegex(): RegExp {
 
 export function createRaftDmRefRegex(): RegExp {
   return new RegExp(`dm:@(${RAFT_REF_DM_PEER_PATTERN})`, "giu");
+}
+
+/**
+ * A `dm:@name~<suffix>` token whose suffix is not a known peer kind
+ * (`~bot`, `~agentXYZ`, a bare `~`). Renderers claim it as plain text so it
+ * never degrades into a link to a different target (`dm:@name` or `@name`).
+ * Run after the valid DM passes; it also matches valid refs.
+ */
+export function createRaftMalformedDmKindRefRegex(): RegExp {
+  return new RegExp(String.raw`dm:@[\w.-]+~[\w.~-]*(?::${RAFT_REF_THREAD_SHORT_ID_PATTERN})?`, "giu");
 }
 
 export function createRaftMessageRefRegex(): RegExp {
@@ -470,6 +482,9 @@ function extractRaftRefTargetsFromChunk(
       dedupe,
     );
     occupy(match);
+  }
+  for (const match of chunk.matchAll(createRaftMalformedDmKindRefRegex())) {
+    if (!isInsideOccupied(match)) occupy(match);
   }
   for (const match of chunk.matchAll(createRaftChannelThreadRefRegex())) {
     if (isInsideOccupied(match)) continue;

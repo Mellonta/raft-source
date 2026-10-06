@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 import { MemoryRouter } from "react-router-dom";
 import api from "../src/api/client";
 import ThreadsInbox from "../src/components/thread/ThreadsInbox";
@@ -17,13 +16,12 @@ import { useSearchContentStore } from "../src/store/searchContentStore";
 import { useServerStore } from "../src/store/serverStore";
 import {
   resetServerFeatureFlagsForTests,
-  setServerFeatureFlagForTests,
 } from "../src/store/serverFeatureFlags";
 import { useThreadAgentFollowerStore } from "../src/store/threadAgentFollowerStore";
 
 type TestFn = (t: unknown) => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn as never);
+  nodeTest(name,  fn as never);
 
 const originalGet = api.get.bind(api);
 
@@ -319,14 +317,14 @@ test("Activity title color distinguishes unread emphasis from the muted read sta
   assert.equal(primaryTitles.length, 3);
 
   assert.match(primaryTitles[0].className, /(?:^|\s)font-semibold(?:\s|$)/);
-  assert.match(primaryTitles[0].className, /(?:^|\s)text-black\/55(?:\s|$)/);
+  assert.match(primaryTitles[0].className, /(?:^|\s)text-foreground-muted(?:\s|$)/);
   assert.doesNotMatch(primaryTitles[0].className, /(?:^|\s)text-black(?:\s|$)/);
 
   assert.match(primaryTitles[1].className, /(?:^|\s)font-bold(?:\s|$)/);
-  assert.match(primaryTitles[1].className, /(?:^|\s)text-black(?:\s|$)/);
-  assert.doesNotMatch(primaryTitles[1].className, /(?:^|\s)text-black\/55(?:\s|$)/);
+  assert.match(primaryTitles[1].className, /(?:^|\s)text-foreground-strong(?:\s|$)/);
+  assert.doesNotMatch(primaryTitles[1].className, /(?:^|\s)text-foreground-muted(?:\s|$)/);
 
-  assert.match(primaryTitles[2].className, /(?:^|\s)text-black\/55(?:\s|$)/);
+  assert.match(primaryTitles[2].className, /(?:^|\s)text-foreground-muted(?:\s|$)/);
 });
 
 test("Activity row metadata uses square raft-ui Badge primitives for every information item", () => {
@@ -361,7 +359,6 @@ test("Activity row metadata uses square raft-ui Badge primitives for every infor
 });
 
 test("Activity thread rows omit agent follower counts and row-level roster requests", async () => {
-  setServerFeatureFlagForTests("server-1", THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY, true);
   const getCalls: string[] = [];
   renderInbox([
     makeThreadItem({
@@ -427,9 +424,9 @@ test("Activity in-review task badge uses the canonical lavender status color", (
   assert.ok(taskBadge);
   assert.equal(taskBadge.getAttribute("data-slot"), "badge");
   assert.equal(taskBadge.getAttribute("data-status"), "in_review");
-  assert.match(taskBadge.className, /(?:^|\s)bg-brutal-lavender(?:\s|$)/);
+  assert.match(taskBadge.className, /(?:^|\s)bg-accent-soft(?:\s|$)/);
+  assert.match(taskBadge.className, /(?:^|\s)theme-brutal:bg-brutal-lavender(?:\s|$)/);
   assert.doesNotMatch(taskBadge.className, /(?:^|\s)bg-accent-400(?:\s|$)/);
-  assert.equal(taskBadge.style.backgroundColor, "var(--color-brutal-lavender)");
 });
 
 test("Activity todo task badge pins the same canonical orange used by Chat", () => {
@@ -446,6 +443,6 @@ test("Activity todo task badge pins the same canonical orange used by Chat", () 
   );
   assert.ok(taskBadge);
   assert.equal(taskBadge.getAttribute("data-status"), "todo");
-  assert.match(taskBadge.className, /(?:^|\s)bg-brutal-orange(?:\s|$)/);
-  assert.equal(taskBadge.style.backgroundColor, "var(--color-brutal-orange)");
+  assert.match(taskBadge.className, /(?:^|\s)bg-warning-soft(?:\s|$)/);
+  assert.match(taskBadge.className, /(?:^|\s)theme-brutal:bg-brutal-orange(?:\s|$)/);
 });

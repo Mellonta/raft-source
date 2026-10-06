@@ -17,7 +17,8 @@ import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
 import { Check } from "lucide-react";
-import { Badge } from "raft-ui";
+import { Badge, Button } from "raft-ui";
+import { isActionCardReadOnlyInServer } from "@botiverse/raft-shared";
 import type {
   ActionCardAction,
   ActionCardMetadata,
@@ -112,26 +113,26 @@ function ActionScopeList({ scopes, agentName }: { scopes: readonly string[]; age
   const { formatMessage } = useIntl();
   const visibleScopes = normalizeVisibleOAuthScopes(scopes);
   if (visibleScopes.length === 0) {
-    return <span className="text-black/75">{scopes.length > 0 ? scopes.join(", ") : "-"}</span>;
+    return <span className="text-foreground-strong">{scopes.length > 0 ? scopes.join(", ") : "-"}</span>;
   }
   return (
     <div className="mt-1 space-y-1.5">
       {visibleScopes.map((scope) => {
         const detail = OAUTH_SCOPE_PRESENTATION[scope];
         return (
-          <div key={scope} className="border border-black/15 bg-white p-1.5">
-            <div className="break-all font-mono text-[11px] font-bold text-black/55">{scope}</div>
-            <div className="text-black/60">{formatMessage({ id: detail.copyId })}</div>
+          <div key={scope} className="border border-line-hairline bg-layer-inset p-1.5">
+            <div className="break-all font-mono text-[11px] font-bold text-foreground-muted">{scope}</div>
+            <div className="text-foreground-muted">{formatMessage({ id: detail.copyId })}</div>
           </div>
         );
       })}
       {agentName && hasAgentInboundOAuthScope(visibleScopes) ? (
-        <div className="font-bold text-black/70">
+        <div className="font-bold text-foreground-muted">
           {formatMessage({ id: "actionCard.willSendTo" }, { agent: agentName })}
         </div>
       ) : null}
       {hasAgentInboundOAuthScope(visibleScopes) ? (
-        <div className="border border-black/15 bg-soft-signal/15 p-1.5 font-bold text-black/65">
+        <div className="border border-line-hairline bg-warning-soft p-1.5 font-bold text-foreground-strong">
           {formatMessage({ id: AGENT_INBOUND_CANNOT_SUMMARY_ID })}
         </div>
       ) : null}
@@ -171,10 +172,19 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
     state.channels.find((channel) => channel.id === authorityChannelId)
       ?? state.dmChannels.find((channel) => channel.id === authorityChannelId)
   );
+  const currentServerId = useServerStore((state) => state.current?.id);
+  const sourceReadOnly = isActionCardReadOnlyInServer(metadata.sourceServerId, currentServerId);
   const currentServerRole = useServerStore((state) => state.current?.role);
   const { capabilities } = useServerPermissions();
   const action = metadata.action;
-  const blockedReason = carrierChannel?.archivedAt
+  // Joint carriers are shared with peer servers; the action always runs on
+  // the card's target server (fixed at prepare time), never the viewer's.
+  const targetServerName = metadata.targetServerName ?? null;
+  const blockedReason = sourceReadOnly
+    ? targetServerName
+      ? { id: "actionCard.blocked.targetServer" as const }
+      : { id: "actionCard.blocked.sourceWorkspace" as const }
+    : carrierChannel?.archivedAt
     ? { id: "actionCard.blocked.archived" as const }
     : currentServerRole === "guest"
       ? { id: "actionCard.blocked.guest" as const }
@@ -190,7 +200,9 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
           : null;
   const canOperateCard = blockedReason === null;
   const blockedReasonId = `action-card-blocked-${messageId}`;
-  const blockedReasonText = blockedReason?.id === "actionCard.blocked.notMember"
+  const blockedReasonText = blockedReason?.id === "actionCard.blocked.targetServer"
+    ? formatMessage({ id: blockedReason.id }, { server: targetServerName ?? "" })
+    : blockedReason?.id === "actionCard.blocked.notMember"
     ? formatMessage(
         { id: blockedReason.id },
         { channel: carrierChannel?.name ?? formatMessage({ id: "actionCard.title.channelFallback" }) },
@@ -206,6 +218,8 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
   // `useState(metadata)` mirror would freeze on first mount and then ignore
   // every subsequent prop change — the classic derived-state anti-pattern.
   const isExecuted = metadata.state === "executed";
+  const isFrozen = metadata.state === "frozen";
+  const needsReconfirmation = metadata.state === "reconfirm_required";
 
   // Best-effort: emit a product-funnel event for this card. Failures are
   // swallowed here just like on the server side — a wobbly funnel must
@@ -241,6 +255,18 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
   // cards below execute server-side because the commit itself is the action.
   function handleClick() {
     setError(null);
+    if (isFrozen || !canOperateCard) return;
+    if (needsReconfirmation) {
+      setBusy(true);
+      api.post<ActionCardMutationResponse>(`/actions/${messageId}/reconfirm`)
+        .then(({ data }) => applyActionCardMutation(data))
+        .catch((err) => {
+          const e = err as { response?: { data?: { error?: string } }; message?: string } | null;
+          setError(e?.response?.data?.error ?? e?.message ?? formatMessage({ id: "actionCard.reconfirmationFailed" }));
+        })
+        .finally(() => setBusy(false));
+      return;
+    }
     submitSucceededRef.current = false;
     if (
       action.type === "integration:approve_agent_login"
@@ -274,7 +300,7 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
     try {
       const { data } = await api.post<ActionCardMutationResponse>(
         `/actions/${messageId}/execute`,
-        { expectedState: "prepared" },
+        { expectedState: "prepared", expectedConfirmationVersion: metadata.confirmationVersion },
       );
       // Server also emits message:updated, but applying the response keeps
       // the clicked card in sync even if realtime delivery lags or is missed.
@@ -328,7 +354,7 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
     try {
       const { data } = await api.post<ActionCardMutationResponse>(
         `/actions/${messageId}/mark-executed`,
-        { result },
+        { result, expectedConfirmationVersion: metadata.confirmationVersion },
       );
       // The socket update is still useful for other tabs/clients; the local
       // response closes the stale-button window on this tab immediately.
@@ -378,7 +404,7 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
   }
 
   return (
-    <div className="action-card relative mt-1 flex w-full items-start gap-3 border-2 border-black/30 bg-white p-3 text-left">
+    <div className="action-card relative mt-1 flex w-full items-start gap-3 border-2 border-line-muted bg-layer-panel p-3 text-left">
       <div className="min-w-0 flex-1">
         {/* Bold action title with optional Done pill on the right. */}
         <div className="flex flex-wrap items-center gap-2 text-sm font-bold leading-snug">
@@ -392,23 +418,29 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
         </div>
 
         {/* Compact readonly summary of agent-prefilled fields. */}
-        <div className="mt-1 text-xs text-black/55">
+        <div className="mt-1 text-xs text-foreground-muted">
           <ActionDetail action={action} />
         </div>
 
+        {targetServerName && carrierChannel?.type === "joint" ? (
+          <div className="mt-1 text-xs text-foreground-muted">
+            {formatMessage({ id: "actionCard.targetServer" }, { server: targetServerName })}
+          </div>
+        ) : null}
+
         {action.draftHint ? (
-          <div className="mt-1 border-l-2 border-black/20 pl-2 text-xs italic text-black/55">
+          <div className="mt-1 border-l-2 border-line-hairline pl-2 text-xs italic text-foreground-muted">
             {action.draftHint}
           </div>
         ) : null}
 
         {isExecuted && metadata.executedByUserName ? (
-          <div className="mt-1 text-xs text-black/55">
+          <div className="mt-1 text-xs text-foreground-muted">
             {formatMessage(
               { id: "actionCard.committedBy" },
               {
                 user: metadata.executedByUserName,
-                n: (c: ReactNode) => <span key="n" className="font-bold text-black/70">{c}</span>,
+                n: (c: ReactNode) => <span key="n" className="font-bold text-foreground-muted">{c}</span>,
               },
             )}
             {metadata.result ? (
@@ -426,17 +458,24 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
 
         {!isExecuted ? (
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-            <button
+            <Button
               type="button"
-              className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs"
-              disabled={busy || !canOperateCard}
+              variant="accent"
+              size="sm"
+              disabled={busy || isFrozen || sourceReadOnly || !canOperateCard}
               aria-describedby={blockedReasonText ? blockedReasonId : undefined}
               onClick={handleClick}
             >
-              {busy ? "…" : formatMessage({ id: actionVerb(action) })}
-            </button>
+              {busy
+                ? "…"
+                : isFrozen
+                  ? formatMessage({ id: "actionCard.frozen" })
+                  : needsReconfirmation
+                    ? formatMessage({ id: "actionCard.reconfirm" })
+                    : formatMessage({ id: actionVerb(action) })}
+            </Button>
             {blockedReasonText ? (
-              <span id={blockedReasonId} className="text-xs text-black/70">
+              <span id={blockedReasonId} className="text-xs text-foreground-muted">
                 {blockedReasonText}
               </span>
             ) : null}
@@ -451,6 +490,8 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
           prefilledDescription={action.description}
           prefilledMachineId={action.requiredComputer ?? action.suggestedComputer}
           prefilledMachineMode={action.requiredComputer ? "required" : action.suggestedComputer ? "preferred" : undefined}
+          actionCardMessageId={messageId}
+          actionCardConfirmationVersion={metadata.confirmationVersion}
           onCreated={handleAgentCreated}
           onSubmitStart={handleSubmitStart}
           onSubmitError={handleSubmitError}
@@ -467,6 +508,8 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
           prefilledHumanIds={action.initialHumans}
           prefilledAgentIds={action.initialAgents}
           onCreated={handleChannelCreated}
+          actionCardMessageId={messageId}
+          actionCardConfirmationVersion={metadata.confirmationVersion}
           onSubmitStart={handleSubmitStart}
           onSubmitError={handleSubmitError}
         />
@@ -480,6 +523,8 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
           draftHint={action.draftHint}
           onClose={handleDialogClose(() => setAddMembersDialogOpen(false))}
           onSubmitted={handleMembersAdded}
+          actionCardMessageId={messageId}
+          actionCardConfirmationVersion={metadata.confirmationVersion}
           onSubmitStart={handleSubmitStart}
           onSubmitError={handleSubmitError}
         />
@@ -596,20 +641,20 @@ function ActionDetail({ action }: { action: ActionCardAction }) {
         <div className="space-y-0.5">
           {action.description ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.description" })}</span>{" "}
-              <span className="text-black/75">{action.description}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.description" })}</span>{" "}
+              <span className="text-foreground-strong">{action.description}</span>
             </div>
           ) : null}
           {humans.length > 0 ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.humans" })}</span>{" "}
-              <span className="text-black/75">{humans.join(", ")}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.humans" })}</span>{" "}
+              <span className="text-foreground-strong">{humans.join(", ")}</span>
             </div>
           ) : null}
           {initialAgents.length > 0 ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.agents" })}</span>{" "}
-              <span className="text-black/75">{initialAgents.join(", ")}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.agents" })}</span>{" "}
+              <span className="text-foreground-strong">{initialAgents.join(", ")}</span>
             </div>
           ) : null}
         </div>
@@ -624,20 +669,20 @@ function ActionDetail({ action }: { action: ActionCardAction }) {
         <div className="space-y-0.5">
           {action.description ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.description" })}</span>{" "}
-              <span className="text-black/75">{action.description}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.description" })}</span>{" "}
+              <span className="text-foreground-strong">{action.description}</span>
             </div>
           ) : (
-            <div className="text-black/45">{formatMessage({ id: "actionCard.noDescription" })}</div>
+            <div className="text-foreground-hint">{formatMessage({ id: "actionCard.noDescription" })}</div>
           )}
           {targetComputer ? (
             <div>
-              <span className="text-black/45">
+              <span className="text-foreground-hint">
                 {formatMessage({ id: action.requiredComputer
                   ? "actionCard.field.requiredComputer"
                   : "actionCard.field.suggestedComputer" })}
               </span>{" "}
-              <span className="text-black/75">
+              <span className="text-foreground-strong">
                 {targetMachine?.name ?? targetComputer.slice(0, 8)}
               </span>
             </div>
@@ -656,20 +701,20 @@ function ActionDetail({ action }: { action: ActionCardAction }) {
         <div className="space-y-0.5">
           {channel?.name ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.channel" })}</span>{" "}
-              <span className="text-black/75">#{channel.name}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.channel" })}</span>{" "}
+              <span className="text-foreground-strong">#{channel.name}</span>
             </div>
           ) : null}
           {humans.length > 0 ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.humans" })}</span>{" "}
-              <span className="text-black/75">{humans.join(", ")}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.humans" })}</span>{" "}
+              <span className="text-foreground-strong">{humans.join(", ")}</span>
             </div>
           ) : null}
           {addAgents.length > 0 ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.agents" })}</span>{" "}
-              <span className="text-black/75">{addAgents.join(", ")}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.agents" })}</span>{" "}
+              <span className="text-foreground-strong">{addAgents.join(", ")}</span>
             </div>
           ) : null}
         </div>
@@ -679,15 +724,15 @@ function ActionDetail({ action }: { action: ActionCardAction }) {
       return (
         <div className="space-y-0.5">
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.service" })}</span>{" "}
-            <span className="text-black/75">{action.clientName}</span>
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.service" })}</span>{" "}
+            <span className="text-foreground-strong">{action.clientName}</span>
           </div>
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.agent" })}</span>{" "}
-            <span className="text-black/75">@{action.agentName}</span>
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.agent" })}</span>{" "}
+            <span className="text-foreground-strong">@{action.agentName}</span>
           </div>
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.scopes" })}</span>{" "}
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.scopes" })}</span>{" "}
             <ActionScopeList scopes={action.scopes} agentName={action.agentName} />
           </div>
         </div>
@@ -697,17 +742,17 @@ function ActionDetail({ action }: { action: ActionCardAction }) {
       return (
         <div className="space-y-0.5">
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.service" })}</span>{" "}
-            <span className="text-black/75">{action.clientName}</span>
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.service" })}</span>{" "}
+            <span className="text-foreground-strong">{action.clientName}</span>
           </div>
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.agent" })}</span>{" "}
-            <span className="text-black/75">
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.agent" })}</span>{" "}
+            <span className="text-foreground-strong">
               {formatMessage({ id: "actionCard.agentHandle" }, { agent: action.agentName })}
             </span>
           </div>
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.scopes" })}</span>{" "}
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.scopes" })}</span>{" "}
             <ActionScopeList scopes={action.scopes} agentName={action.agentName} />
           </div>
           <div className="font-bold text-brutal-orange">
@@ -720,30 +765,30 @@ function ActionDetail({ action }: { action: ActionCardAction }) {
       return (
         <div className="space-y-0.5">
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.clientKey" })}</span>{" "}
-            <span className="text-black/75">{action.clientKey ?? formatMessage({ id: "actionCard.autoGeneratedOnCommit" })}</span>
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.clientKey" })}</span>{" "}
+            <span className="text-foreground-strong">{action.clientKey ?? formatMessage({ id: "actionCard.autoGeneratedOnCommit" })}</span>
           </div>
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.redirectUrl" })}</span>{" "}
-            <span className="text-black/75 break-all">{action.returnUrl}</span>
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.redirectUrl" })}</span>{" "}
+            <span className="text-foreground-strong break-all">{action.returnUrl}</span>
           </div>
           {action.homepageUrl ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.appUrl" })}</span>{" "}
-              <span className="text-black/75 break-all">{action.homepageUrl}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.appUrl" })}</span>{" "}
+              <span className="text-foreground-strong break-all">{action.homepageUrl}</span>
             </div>
           ) : null}
           {action.agentManifestUrl ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.agentManifest" })}</span>{" "}
-              <span className="text-black/75 break-all">{action.agentManifestUrl}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.agentManifest" })}</span>{" "}
+              <span className="text-foreground-strong break-all">{action.agentManifestUrl}</span>
             </div>
           ) : null}
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.scopes" })}</span>{" "}
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.scopes" })}</span>{" "}
             <ActionScopeList scopes={action.scopes} />
           </div>
-          <div className="font-bold text-black/75">
+          <div className="font-bold text-foreground-strong">
             {formatMessage({ id: "actionCard.registerOwnerNote" })}
           </div>
           {action.unsafeDemoUrlOverride ? (
@@ -756,36 +801,36 @@ function ActionDetail({ action }: { action: ActionCardAction }) {
       return (
         <div className="space-y-0.5">
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.clientKey" })}</span>{" "}
-            <span className="text-black/75">{action.clientKey}</span>
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.clientKey" })}</span>{" "}
+            <span className="text-foreground-strong">{action.clientKey}</span>
           </div>
           {action.name ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.name" })}</span>{" "}
-              <span className="text-black/75">{action.name}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.name" })}</span>{" "}
+              <span className="text-foreground-strong">{action.name}</span>
             </div>
           ) : null}
           {action.returnUrl ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.redirectUrl" })}</span>{" "}
-              <span className="text-black/75 break-all">{action.returnUrl}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.redirectUrl" })}</span>{" "}
+              <span className="text-foreground-strong break-all">{action.returnUrl}</span>
             </div>
           ) : null}
           {action.homepageUrl ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.appUrl" })}</span>{" "}
-              <span className="text-black/75 break-all">{action.homepageUrl}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.appUrl" })}</span>{" "}
+              <span className="text-foreground-strong break-all">{action.homepageUrl}</span>
             </div>
           ) : null}
           {action.agentManifestUrl ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.agentManifest" })}</span>{" "}
-              <span className="text-black/75 break-all">{action.agentManifestUrl}</span>
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.agentManifest" })}</span>{" "}
+              <span className="text-foreground-strong break-all">{action.agentManifestUrl}</span>
             </div>
           ) : null}
           {action.scopes ? (
             <div>
-              <span className="text-black/45">{formatMessage({ id: "actionCard.field.scopes" })}</span>{" "}
+              <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.scopes" })}</span>{" "}
               <ActionScopeList scopes={action.scopes} />
             </div>
           ) : null}
@@ -800,12 +845,12 @@ function ActionDetail({ action }: { action: ActionCardAction }) {
       return (
         <div className="space-y-0.5">
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.clientKey" })}</span>{" "}
-            <span className="text-black/75">{action.clientKey}</span>
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.clientKey" })}</span>{" "}
+            <span className="text-foreground-strong">{action.clientKey}</span>
           </div>
           <div>
-            <span className="text-black/45">{formatMessage({ id: "actionCard.field.recoveryOwner" })}</span>{" "}
-            <span className="text-black/75">@{target?.name ?? action.targetAgent.slice(0, 8)}</span>
+            <span className="text-foreground-hint">{formatMessage({ id: "actionCard.field.recoveryOwner" })}</span>{" "}
+            <span className="text-foreground-strong">@{target?.name ?? action.targetAgent.slice(0, 8)}</span>
           </div>
           <div className="font-bold text-amber-700">
             {formatMessage({ id: "actionCard.adminRecoveryOnly" })}
@@ -818,7 +863,7 @@ function ActionDetail({ action }: { action: ActionCardAction }) {
 
 function ResultLink({ result }: { result: ActionCardResult }) {
   const { formatMessage } = useIntl();
-  const cls = "font-bold text-black/70";
+  const cls = "font-bold text-foreground-muted";
   // The leading arrow is punctuation shared by every arm, so it stays in JSX
   // rather than being duplicated into seven translations.
   const arrow = (body: ReactNode) => <span className={cls}>→ {body}</span>;

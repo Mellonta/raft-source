@@ -264,24 +264,24 @@ export default function MessageSelectionShortcut() {
       role="menu"
       aria-label={formatMessage({ id: "message.selectionShortcut.actionsAria" })}
       data-message-selection-shortcut="true"
-      className="fixed z-[70] flex overflow-hidden border-2 border-black bg-white text-xs font-semibold shadow-brutal-sm select-none"
+      className="fixed z-[70] flex overflow-hidden rounded-lg border border-line-muted bg-layer-popover text-xs font-semibold text-foreground shadow-raft-sm select-none theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:text-black theme-brutal:shadow-brutal-sm"
       style={{ left: position.x, top: position.y }}
     >
       <button
         type="button"
         role="menuitem"
         onClick={handleQuote}
-        className="flex h-7 items-center gap-1.5 px-2 text-black transition-colors hover:bg-soft-signal/30"
+        className="flex h-7 items-center gap-1.5 px-2 text-foreground transition-colors hover:bg-fill-muted theme-brutal:text-black theme-brutal:hover:bg-soft-signal/30"
       >
         <TextQuote size={13} />
         {formatMessage({ id: "message.selectionShortcut.quote" })}
       </button>
-      <div className="w-px bg-black/20" aria-hidden="true" />
+      <div className="w-px bg-line-muted theme-brutal:bg-black/20" aria-hidden="true" />
       <button
         type="button"
         role="menuitem"
         onClick={handleCopy}
-        className="flex h-7 items-center gap-1.5 px-2 text-black transition-colors hover:bg-soft-signal/30"
+        className="flex h-7 items-center gap-1.5 px-2 text-foreground transition-colors hover:bg-fill-muted theme-brutal:text-black theme-brutal:hover:bg-soft-signal/30"
       >
         <Copy size={13} />
         {formatMessage({ id: "message.selectionShortcut.copy" })}

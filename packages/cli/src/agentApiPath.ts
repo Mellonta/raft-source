@@ -19,9 +19,9 @@ import {
   type AgentApiRouteKey,
 } from "@botiverse/raft-shared";
 
-import type { ApiResponse, BinaryResponse } from "./client.js";
-import { apiFailureError } from "./core/apiFailure.js";
-import { CliError } from "./core/errors.js";
+import type { ApiResponse, BinaryResponse } from "./client";
+import { apiFailureError } from "./core/apiFailure";
+import { CliError } from "./core/errors";
 
 export function buildContractAgentPath(
   agentId: string,
@@ -59,7 +59,7 @@ export function buildAgentApiRoutePath<K extends AgentApiRouteKey>(
 }
 
 interface CliAgentApiHttpClient {
-  request<T>(method: string, pathname: string, body?: unknown): Promise<ApiResponse<T>>;
+  request<T>(method: string, pathname: string, body?: unknown, options?: { signal?: AbortSignal }): Promise<ApiResponse<T>>;
   requestBinary?(method: string, pathname: string): Promise<BinaryResponse>;
   requestMultipart?<T>(method: string, pathname: string, form: FormData): Promise<ApiResponse<T>>;
 }
@@ -68,7 +68,7 @@ export function buildAgentApiEventsPath(query?: AgentApiRequestQueryByRoute["eve
   return buildAgentApiRoutePath("events", undefined, query);
 }
 
-function rawTransportForClient(client: CliAgentApiHttpClient): AgentApiRawTransport {
+function rawTransportForClient(client: CliAgentApiHttpClient, options?: { signal?: AbortSignal }): AgentApiRawTransport {
   return {
     request: async (input) => {
       const route = agentApiContract[input.routeKey];
@@ -89,7 +89,9 @@ function rawTransportForClient(client: CliAgentApiHttpClient): AgentApiRawTransp
           proxy: response.proxy,
         };
       }
-      return client.request<unknown>(input.method, input.path, input.body);
+      return options
+        ? client.request<unknown>(input.method, input.path, input.body, options)
+        : client.request<unknown>(input.method, input.path, input.body);
     },
   };
 }
@@ -216,6 +218,26 @@ function apiResponseFromClientResult<K extends AgentApiRouteKey>(
     return response;
   }
   throw cliErrorFromClientFailure(result);
+}
+
+/**
+ * The CLI's failure rules for a shared agent operation's requests (an
+ * `agentOps` function called with `createAgentApiContractSurfaceClient`):
+ * `observe` throws a transport or contract failure and a daemon-proxy 5xx
+ * exactly as `createAgentApiSurfaceClient` calls do, and hands an HTTP
+ * refusal back to the operation; `last()` is the latest refusal as the CLI's
+ * ApiResponse, for the command's own error message.
+ */
+export function createCliOperationFailures() {
+  let last: ApiResponse<unknown> | null = null;
+  return {
+    async observe<K extends AgentApiRouteKey>(request: Promise<AgentApiClientResult<K>>): Promise<AgentApiClientResult<K>> {
+      const result = await request;
+      if (!result.ok) last = apiResponseFromClientResult(result);
+      return result;
+    },
+    last: (): ApiResponse<unknown> | null => last,
+  };
 }
 
 async function rawRouteResultAsApiResponse<K extends AgentApiRouteKey>(
@@ -360,13 +382,19 @@ export function createAgentApiClient(client: CliAgentApiHttpClient, agentId: str
         requestClientAsApiResponse(agentApi.mentions.pendingActions(query ?? {})),
       executeAction: (body: AgentApiRequestBodyByRoute["mentionActionsExecute"]) =>
         requestClientAsApiResponse(agentApi.mentions.executeAction(body)),
+      senderDeliveries: (params: AgentApiRequestParamsByRoute["senderMentionDeliveries"]) =>
+        requestClientAsApiResponse(agentApi.mentions.senderDeliveries(params)),
     },
   };
 }
 
-export function createAgentApiSurfaceClient(client: CliAgentApiHttpClient) {
-  const agentApi = createSharedAgentApiClient(rawTransportForClient(client));
+export function createAgentApiSurfaceClient(client: CliAgentApiHttpClient, options?: { signal?: AbortSignal }) {
+  const agentApi = createSharedAgentApiClient(rawTransportForClient(client, options));
   return {
+    agent: {
+      context: () =>
+        requestClientAsApiResponse(agentApi.agent.context()),
+    },
     server: {
       info: () =>
         requestClientAsApiResponse(agentApi.server.info()),
@@ -386,14 +414,6 @@ export function createAgentApiSurfaceClient(client: CliAgentApiHttpClient) {
         requestClientAsApiResponse(agentApi.knowledge.get(query)),
       search: (query: AgentApiRequestQueryByRoute["knowledgeSearch"]) =>
         requestClientAsApiResponse(agentApi.knowledge.search(query)),
-    },
-    wiki: {
-      manifest: () =>
-        requestClientAsApiResponse(agentApi.wiki.manifest()),
-      read: (params: AgentApiRequestParamsByRoute["wikiArtifactRead"]) =>
-        requestClientAsApiResponse(agentApi.wiki.read(params)),
-      publish: (body: AgentApiRequestBodyByRoute["wikiManifestPublish"]) =>
-        requestClientAsApiResponse(agentApi.wiki.publish(body)),
     },
     tasks: {
       list: (query: AgentApiRequestQueryByRoute["taskList"]) =>
@@ -418,16 +438,6 @@ export function createAgentApiSurfaceClient(client: CliAgentApiHttpClient) {
         requestClientAsApiResponse(agentApi.tasks.amend(body)),
       history: (query: AgentApiRequestQueryByRoute["taskHistory"]) =>
         requestClientAsApiResponse(agentApi.tasks.history(query)),
-    },
-    migrations: {
-      begin: (body: AgentApiRequestBodyByRoute["migrationBegin"]) =>
-        requestClientAsApiResponse(agentApi.migrations.begin(body)),
-      status: () =>
-        requestClientAsApiResponse(agentApi.migrations.status()),
-      ready: (body: AgentApiRequestBodyByRoute["migrationReady"]) =>
-        requestClientAsApiResponse(agentApi.migrations.ready(body)),
-      arrived: (body: AgentApiRequestBodyByRoute["migrationArrived"]) =>
-        requestClientAsApiResponse(agentApi.migrations.arrived(body)),
     },
     reminders: {
       list: (query: AgentApiRequestQueryByRoute["reminderList"]) =>
@@ -499,7 +509,13 @@ export function createAgentApiSurfaceClient(client: CliAgentApiHttpClient) {
       resolve: (body: AgentApiRequestBodyByRoute["resolveChannel"]) =>
         requestClientAsApiResponse(agentApi.channels.resolve(body)),
     },
+    inbox: {
+      list: (query: AgentApiRequestQueryByRoute["inboxList"]) =>
+        requestClientAsApiResponse(agentApi.inbox.list(query)),
+    },
     threads: {
+      list: () =>
+        requestClientAsApiResponse(agentApi.threads.list()),
       unfollow: (body: AgentApiRequestBodyByRoute["threadUnfollow"]) =>
         requestClientAsApiResponse(agentApi.threads.unfollow(body)),
     },
@@ -512,6 +528,8 @@ export function createAgentApiSurfaceClient(client: CliAgentApiHttpClient) {
         requestMultipartContractAgentApiRoute(client, "profileAvatarUpdate", form),
     },
     integrations: {
+      token: (body: AgentApiRequestBodyByRoute["integrationToken"]) =>
+        requestClientAsApiResponse(agentApi.integrations.token(body)),
       list: () =>
         requestClientAsApiResponse(agentApi.integrations.list()),
       marketplace: (query: AgentApiRequestQueryByRoute["integrationMarketplaceSearch"]) =>
@@ -544,6 +562,8 @@ export function createAgentApiSurfaceClient(client: CliAgentApiHttpClient) {
         requestClientAsApiResponse(agentApi.mentions.pendingActions(query ?? {})),
       executeAction: (body: AgentApiRequestBodyByRoute["mentionActionsExecute"]) =>
         requestClientAsApiResponse(agentApi.mentions.executeAction(body)),
+      senderDeliveries: (params: AgentApiRequestParamsByRoute["senderMentionDeliveries"]) =>
+        requestClientAsApiResponse(agentApi.mentions.senderDeliveries(params)),
     },
     attachments: {
       upload: (form: FormData) =>

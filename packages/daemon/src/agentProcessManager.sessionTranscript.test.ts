@@ -21,12 +21,11 @@ import { EventEmitter } from "node:events";
 import { mkdtemp, mkdir, writeFile, readFile, symlink, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import { gunzipSync } from "node:zlib";
 import type { ChildProcess } from "node:child_process";
 import type { AgentConfig, MachineToServerMessage } from "@botiverse/raft-shared";
-import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./drivers/index.js";
-import { AgentProcessManager, resolveRuntimeSessionRef } from "./agentProcessManager.js";
+import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./drivers/index";
+import { AgentProcessManager, resolveRuntimeSessionRef } from "./agentProcessManager";
 
 class FakeChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -100,7 +99,9 @@ function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     serverUrl: "http://localhost:3001",
     authToken: "sk_machine_test",
     agentCredentialKey: "sk_agent_test",
-    agentCredentialId: "cred-test",
+    // No credential id by default: a stop would revoke it over the injected
+    // fetch, and tests that do not fake the server must not send anything.
+    agentCredentialId: null,
     ...overrides,
   };
 }
@@ -470,7 +471,11 @@ test("session transcript: bounds oversized files and marks truncated", async () 
 
     const result = await manager.getSessionTranscript("agent-1");
 
-    assert.equal(result.reachable, true);
+    // One 10 MB+1 record with no newline: the aligned window keeps nothing.
+    // task #1228 ①: that is an observed empty window, not a transcript.
+    assert.equal(result.reachable, false);
+    assert.equal(result.reasonCode, "window_empty");
+    assert.equal(result.sourceBytes, 10 * 1024 * 1024 + 1);
     assert.equal(result.truncated, true);
     // TOOTH-2 F3 direction-truth-value tooth: un-anchored JSONL oversized read
     // keeps the TAIL-window (reads [size-maxBytes, size)) ⇒ the HEAD was dropped.
@@ -636,7 +641,9 @@ test("collectFeedbackTranscript uploads gzipped transcript linked to feedback re
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.endsWith("/internal/machine/scope-attestation")) {
-      scopePayload = JSON.parse((init?.body as string) ?? "{}");
+      const payload = JSON.parse((init?.body as string) ?? "{}") as { metadata?: Record<string, unknown> };
+      // The machine_evidence attachment signs separately; this test pins the transcript's claims.
+      if (payload.metadata?.feedbackAttachmentKind !== "machine_evidence") scopePayload = payload;
       return new Response(
         JSON.stringify({
           attestation: "attestation-123",

@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
@@ -6,10 +6,10 @@ import { and, eq } from "drizzle-orm";
 import {
   applyDevSeedOnboardingFixture,
   devSeedOnboardingValues,
-} from "../../scripts/devSeedOnboarding.js";
-import { getDb } from "../db/index.js";
-import { serverMembers, users } from "../db/schema.js";
-import { createServer } from "./serverService.js";
+} from "../../scripts/devSeedOnboarding";
+import { getDb } from "../db/index";
+import { serverMembers, users } from "../db/schema";
+import { createServer } from "./serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

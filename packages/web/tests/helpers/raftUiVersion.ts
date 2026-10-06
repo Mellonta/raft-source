@@ -11,4 +11,4 @@
  * Bump this constant WITH the dependency. The guards exist so that a raft-ui
  * upgrade is a visible, reviewed act rather than silent lockfile drift.
  */
-export const EXPECTED_RAFT_UI_VERSION = "0.5.11";
+export const EXPECTED_RAFT_UI_VERSION = "0.5.18";

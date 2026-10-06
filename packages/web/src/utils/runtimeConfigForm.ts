@@ -15,6 +15,7 @@ import type {
   BuiltInRuntimeConfig,
   BuiltInRuntimeGatewayProviderId,
   BuiltInRuntimeProviderId,
+  ResolvedAgentCreateFormDefinition,
   ReasoningEffort,
   RuntimeConfig,
   RuntimeConfigHydrationInput,
@@ -165,6 +166,43 @@ export function builtInProviderDefaultModel(providerId: string): string | null {
   return PI_BUILTIN_PROVIDER_DEFAULT_MODELS[providerId as keyof typeof PI_BUILTIN_PROVIDER_DEFAULT_MODELS] ?? null;
 }
 
+/**
+ * Keep a still-valid model when the Provider choice changes, including when the
+ * choice is a saved Provider connection projected into the same selector.
+ *
+ * The server-owned form definition remains authoritative for schema-backed
+ * Built-in runtimes. The legacy catalog is only the rolling-compat fallback.
+ */
+export function reconcileBuiltInProviderModelSelection(input: {
+  definition?: ResolvedAgentCreateFormDefinition | null;
+  providerId: string;
+  currentModel: string;
+}): { model: string; customModelMode: boolean } {
+  const modelSource = input.definition?.runtimeId === "builtin"
+    ? input.definition.optionSources.model
+    : undefined;
+  if (modelSource?.kind === "dependent_select") {
+    const customModelMode = modelSource.customValueAllowedByValue[input.providerId] === true;
+    if (customModelMode) {
+      return { model: input.currentModel, customModelMode: true };
+    }
+    const options = modelSource.optionsByValue[input.providerId] ?? [];
+    const model = options.some((option) => option.value === input.currentModel)
+      ? input.currentModel
+      : modelSource.defaultValueByValue[input.providerId] ?? options[0]?.value ?? "";
+    return { model, customModelMode: false };
+  }
+
+  if (isBuiltInGatewayProviderMode(input.providerId)) {
+    return { model: input.currentModel, customModelMode: true };
+  }
+  const options = builtInProviderModels(input.providerId) ?? [];
+  const model = options.some((option) => option.id === input.currentModel)
+    ? input.currentModel
+    : builtInProviderDefaultModel(input.providerId) ?? options[0]?.id ?? "";
+  return { model, customModelMode: false };
+}
+
 export function supportsRuntimeApiUrl(runtime: string): boolean {
   return runtime === "claude";
 }
@@ -229,6 +267,7 @@ export function buildRuntimeConfig(input: {
   builtInProviderApiKey?: string;
   builtInProviderBaseUrl?: string;
   builtInProviderSupportsImageInput?: boolean;
+  loadLocalPlugins?: boolean;
   piProviderMode?: PiProviderMode;
   piProviderApiKey?: string;
   fastMode?: boolean;
@@ -290,6 +329,7 @@ export function buildRuntimeConfig(input: {
                 apiKey: builtInProviderApiKey,
               },
           hostUserState: "forbidden" as const,
+          ...(input.loadLocalPlugins !== undefined ? { loadLocalPlugins: input.loadLocalPlugins } : {}),
         }
       : {}),
     ...(runtime === "pi"
@@ -319,6 +359,7 @@ export function buildRuntimeConfig(input: {
 }
 
 export function buildManagedConnectionRuntimeConfig(input: {
+  loadLocalPlugins?: boolean;
   connectionId: string;
   providerId: string;
   model: string;
@@ -343,6 +384,7 @@ export function buildManagedConnectionRuntimeConfig(input: {
     reasoningEffort: null,
     envVars: input.envVars,
     hostUserState: "forbidden",
+    ...(input.loadLocalPlugins !== undefined ? { loadLocalPlugins: input.loadLocalPlugins } : {}),
   };
   const parsed = parseRuntimeConfig({ runtimeConfig });
   if (!parsed.ok || parsed.config.runtime !== "builtin") {

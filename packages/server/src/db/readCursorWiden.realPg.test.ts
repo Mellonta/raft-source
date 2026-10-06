@@ -19,7 +19,6 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
@@ -28,7 +27,7 @@ import {
   convergenceReport,
   readWidenPhase,
   runReadCursorWidenBackfill,
-} from "../services/readCursorWidenBackfill.js";
+} from "../services/readCursorWidenBackfill";
 
 const REAL_PG_URL_ENV = "READ_CURSOR_WIDEN_REAL_PG_URL";
 const REAL_PG_URL = process.env[REAL_PG_URL_ENV];

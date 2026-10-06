@@ -21,15 +21,16 @@ import {
   describeDeviceCodeLoginError,
   pollDeviceToken,
   type DeviceAuthorization,
-} from "../../agentLogin/deviceAuthClient.js";
-import { resolveProfileDir } from "../../auth/env.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandContext, CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { NL, writeDiagnostic, writeText } from "../../core/renderer.js";
+} from "../../agentLogin/deviceAuthClient";
+import { resolveProfileDir } from "../../auth/env";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandContext, CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { NL, writeDiagnostic, writeText } from "../../core/renderer";
 import {
   formatAlreadyLoggedIn,
   formatAgentTokenPrompt,
+  agentTokenStdinGuidance,
   formatAuthorizedLoginReport,
   formatCredentialRemintNotice,
   formatLoginStateMissing,
@@ -38,10 +39,10 @@ import {
   startCommandLine,
   waitCommandLine,
   type LoginProfilePaths as ProfilePaths,
-} from "./_format.js";
+} from "./_format";
 
 // Re-export for existing test imports; canonical home is agent/_format.ts.
-export { formatAuthorizedLoginReport } from "./_format.js";
+export { formatAuthorizedLoginReport } from "./_format";
 
 interface AgentCredentialResponse {
   credentialId: string;
@@ -124,6 +125,13 @@ export const agentLoginCommand = defineCommand(
   {
     name: "login",
     description: "Log in with an existing agent token (hidden prompt or stdin). No browser approval required.",
+    helpAfter: `
+Token input:
+  With a terminal, paste the token at the hidden prompt.
+  Without a TTY, pipe the token from your secret manager or redirect an existing token file:
+    raft agent login --server <url> --agent <agentId> --profile-slug <slug> < /path/to/agent-token
+  stdin supplies one token on its first line. Do not put the token in command arguments.
+`,
     options: [
       SERVER_OPTION,
       AGENT_OPTION,
@@ -175,9 +183,9 @@ export const agentLoginCommand = defineCommand(
 /** Never accept a bearer in argv or echo it, including readline's TTY redraws. */
 async function readAgentToken(ctx: CommandContext): Promise<string> {
   const input = ctx.io.stdin;
-  if (!input) throw cliError("AGENT_TOKEN_REQUIRED", "Provide an agent token through stdin or the hidden terminal prompt.");
+  if (!input) throw cliError("AGENT_TOKEN_REQUIRED", `No token input is available. ${agentTokenStdinGuidance}`);
   const terminal = Boolean((input as NodeJS.ReadStream).isTTY);
-  if (terminal) writeDiagnostic(ctx.io, formatAgentTokenPrompt());
+  writeDiagnostic(ctx.io, formatAgentTokenPrompt(terminal));
   const muted = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
   const reader = createInterface({ input, output: muted, terminal });
   const token = await new Promise<string>((resolve, reject) => {
@@ -189,6 +197,11 @@ async function readAgentToken(ctx: CommandContext): Promise<string> {
     reader.once("close", () => input.removeListener("error", onError));
   });
   if (terminal) writeDiagnostic(ctx.io, NL);
+  if (!token) {
+    throw cliError("AGENT_TOKEN_REQUIRED", terminal
+      ? "No agent token was entered. Run login again and paste the token at the hidden prompt."
+      : `No agent token was received on stdin. ${agentTokenStdinGuidance}`);
+  }
   if (!/^sk_agent_[A-Za-z0-9_-]+$/.test(token) || token.length > 4096) {
     throw cliError("INVALID_AGENT_TOKEN", "Enter a valid agent token from the External Agent setup page.");
   }
@@ -368,7 +381,32 @@ async function handleExistingCredential(
 }
 
 /**
+ * The credential id this profile already holds for the same agent + server,
+ * or null. Re-login rotates it: the server revokes it in the same
+ * transaction that mints the replacement, so a profile never leaves an
+ * orphaned active credential behind. Credentials of other profiles/devices
+ * are untouched.
+ */
+export async function readReplaceableCredentialId(
+  credentialPath: string,
+  options: { server: string; agent: string },
+): Promise<string | null> {
+  let credential: { agentId?: unknown; serverUrl?: unknown; credentialId?: unknown };
+  try {
+    credential = JSON.parse(await readFile(credentialPath, "utf-8"));
+  } catch {
+    return null;
+  }
+  if (!credential || typeof credential !== "object") return null;
+  const sameServer = typeof credential.serverUrl === "string"
+    && credential.serverUrl.replace(/\/+$/, "") === options.server.replace(/\/+$/, "");
+  if (credential.agentId !== options.agent || !sameServer) return null;
+  return typeof credential.credentialId === "string" && credential.credentialId ? credential.credentialId : null;
+}
+
+/**
  * Legacy `login wait`: mint using the approved user session, then save.
+ * Mints with the server's least-privilege default scopes.
  */
 async function mintAndPersist(
   ctx: CommandContext,
@@ -376,6 +414,7 @@ async function mintAndPersist(
   accessToken: string,
   paths: ProfilePaths,
 ): Promise<void> {
+  const replacesCredentialId = await readReplaceableCredentialId(paths.credentialPath, options);
   // No X-Server-Id header — the route derives server context from the agent
   // row (CLI resource-explicit invariant, see #proj-runtime:3d515727).
   const mintRes = await undiciFetch(
@@ -386,7 +425,7 @@ async function mintAndPersist(
         "content-type": "application/json",
         authorization: `Bearer ${accessToken}`,
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify(replacesCredentialId ? { replacesCredentialId } : {}),
     },
   );
   if (!mintRes.ok) {
@@ -586,6 +625,18 @@ export function describeMintError(code: string, serverUrl: string): MintErrorDet
           "The user you approved with has neither `issueAgentCredentials` on the agent's server nor human-creator authority for this agent, so they can't mint agent credentials.",
         suggestedNextAction:
           "Approve with the human user who created this agent, or ask a server owner or admin for access that includes `issueAgentCredentials`, then rerun login.",
+      };
+    case "agent_not_external":
+      return {
+        message:
+          "This agent is managed by Raft on a connected computer; agent credentials can only be issued for external agents.",
+        suggestedNextAction: "Create an External Agent in Raft and rerun login with its id.",
+      };
+    case "replaces_credential_invalid":
+      return {
+        message:
+          "The credential saved in this profile does not belong to this agent on this server, so it cannot be rotated.",
+        suggestedNextAction: "Rerun login with a different `--profile-slug <slug>`, or remove the stale profile first.",
       };
     case "scopes_invalid":
     case "scopes_empty":

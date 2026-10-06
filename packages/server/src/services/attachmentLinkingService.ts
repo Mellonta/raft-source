@@ -1,11 +1,12 @@
 import { asc, and, eq, inArray, isNull, sql } from "drizzle-orm";
-import type { DatabaseExecutor } from "../db/index.js";
-import { attachmentObjects, attachments } from "../db/schema.js";
+import type { DatabaseExecutor } from "../db/index";
+import { attachmentObjects, attachments } from "../db/schema";
 import {
   AttachmentLifecycleError,
   consumeAttachmentReservationsWithExecutor,
   lockAttachmentReservationsForConsumeWithExecutor,
-} from "./attachmentLifecycleService.js";
+} from "./attachmentLifecycleService";
+import { assertChannelWritableInTransaction } from "./channelConversionFenceService";
 
 export type AttachmentLinkErrorCode =
   | "attachment_duplicate"
@@ -177,10 +178,18 @@ export async function linkAttachmentsToMessageWithExecutor(
       id: attachments.id,
       uploaderId: attachments.uploaderId,
       messageId: attachments.messageId,
+      channelId: attachments.channelId,
     })
     .from(attachments)
     .where(inArray(attachments.id, attachmentIds))
     .for("update");
+
+  for (const channelId of new Set(rows.map((row) => row.channelId))) {
+    // DatabaseExecutor is the transaction contract. Keep the writer fence
+    // unconditional so production and test adapters cannot silently diverge
+    // based on runtime object shape.
+    await assertChannelWritableInTransaction(executor, channelId);
+  }
 
   const byId = new Map(rows.map((row) => [row.id, row]));
   const missingOrForeignId = attachmentIds.find((id) => byId.get(id)?.uploaderId !== uploaderId);

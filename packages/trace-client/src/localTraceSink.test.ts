@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 import { BasicTracer } from "@botiverse/raft-shared";
-import { LocalRotatingTraceSink } from "./localTraceSink.js";
+import { LocalRotatingTraceSink, selectPruneVictims } from "./localTraceSink";
 
 test("LocalRotatingTraceSink writes sanitized jsonl spans under machine traces dir", async () => {
   const machineDir = await mkdtemp(path.join(os.tmpdir(), "slock-daemon-local-trace-test-"));
@@ -622,6 +622,192 @@ test("LocalRotatingTraceSink applies maxFileAgeJitterMs to extend effective rota
 
     files = await readdir(path.join(machineDir, "traces"));
     assert.equal(files.length, 2, "should rotate after effective age (base + jitter)");
+  } finally {
+    await rm(machineDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * #proj-daemon task #308 / #proj-o11y #408.
+ *
+ * The defect: one `daemon-trace-` glob with one `maxFiles` budget, ordered
+ * lexicographically. Rotating names begin with a digit and the other producers'
+ * names begin with a letter, so rotating files sorted first and were always the
+ * eviction victims. With N non-rotating files present, surviving rotating files
+ * were `max(0, maxFiles - N)` — and since nothing ever reduced N, a registration
+ * that reached N >= maxFiles - 1 kept only the in-progress file forever. The
+ * uploader skips the file it is currently writing, so those registrations had
+ * nothing upload-eligible at all and could not recover on their own.
+ */
+
+function writeFixture(traceDir: string, name: string, mtimeMs?: number): void {
+  const full = path.join(traceDir, name);
+  writeFileSync(full, "{}\n", { mode: 0o600 });
+  if (mtimeMs !== undefined) utimesSync(full, mtimeMs / 1000, mtimeMs / 1000);
+}
+
+function familyCounts(traceDir: string): { rotating: number; cli: number; diag: number } {
+  const names = readdirSync(traceDir);
+  return {
+    rotating: names.filter((n) => /^daemon-trace-\d/.test(n)).length,
+    cli: names.filter((n) => n.startsWith("daemon-trace-cli-transport-")).length,
+    diag: names.filter((n) => n.startsWith("daemon-trace-diag-")).length,
+  };
+}
+
+/** The pre-fix algorithm verbatim, as the red-proof reference. */
+function legacyPrune(traceDir: string, maxFiles: number): void {
+  const files = readdirSync(traceDir)
+    .filter((name) => name.startsWith("daemon-trace-") && name.endsWith(".jsonl"))
+    .sort();
+  const excess = files.length - maxFiles;
+  if (excess <= 0) return;
+  for (const file of files.slice(0, excess)) rmSync(path.join(traceDir, file), { force: true });
+}
+
+function driveRotations(sink: LocalRotatingTraceSink, rotations: number): void {
+  const tracer = new BasicTracer({ sink });
+  for (let i = 0; i < rotations; i += 1) {
+    const span = tracer.startSpan("daemon.runtime.turn", {
+      surface: "daemon",
+      attrs: { runtime: "codex", seq: i, padding: "x".repeat(600) },
+    });
+    span.end("ok");
+  }
+}
+
+test("#308 rotating files keep upload-eligible completed files despite 8 cli + 8 diag files", async () => {
+  const machineDir = await mkdtemp(path.join(os.tmpdir(), "slock-trace-prune-budget-"));
+  try {
+    const traceDir = path.join(machineDir, "traces");
+    mkdirSync(traceDir, { recursive: true });
+    for (let i = 0; i < 8; i += 1) writeFixture(traceDir, `daemon-trace-cli-transport-2026-09-1${i}T00-00-00-000Z-1-a${i}.jsonl`);
+    for (let i = 0; i < 8; i += 1) writeFixture(traceDir, `daemon-trace-diag-corr${i}.jsonl`);
+
+    const sink = new LocalRotatingTraceSink({ machineDir, maxFileBytes: 1024, maxFiles: 4 });
+    driveRotations(sink, 10);
+
+    const current = sink.getCurrentFile();
+    assert.ok(current, "sink must have a current file");
+    // The operative property: at least one COMPLETED (non-current) rotating file
+    // exists, because the uploader skips the file being written.
+    const rotating = readdirSync(traceDir).filter((n) => /^daemon-trace-\d/.test(n));
+    const completed = rotating.filter((n) => n !== path.basename(current!));
+    assert.ok(completed.length >= 1, `expected >=1 completed rotating file, got ${JSON.stringify(rotating)}`);
+    assert.equal(rotating.length, 4, "rotating family keeps its own budget, including the current file");
+  } finally {
+    await rm(machineDir, { recursive: true, force: true });
+  }
+});
+
+test("#308 selectPruneVictims never returns the current file, at any excess", () => {
+  // Asserted on the DECISION, not on the directory afterwards. The pre-fix code
+  // deleted the current file and appendFileSync recreated it, so every
+  // existence/size check passed while the defect was live — a test written
+  // against the aftermath has no power here. (Measured: such a test stayed green
+  // against the pre-fix implementation.)
+  const current = "daemon-trace-2026-09-17T11-00-00-000Z-1-0005.jsonl";
+  for (const pressure of [0, 1, 7, 8, 9, 50]) {
+    const names = [current];
+    for (let i = 0; i < pressure; i += 1) names.push(`daemon-trace-2026-09-17T0${i % 10}-00-00-000Z-1-000${i}.jsonl`);
+    for (const budget of [1, 2, 4, 8]) {
+      const victims = selectPruneVictims(names, budget, current, "name", () => 0);
+      assert.equal(victims.includes(current), false, `budget=${budget} pressure=${pressure} selected the current file`);
+      assert.ok(victims.length <= names.length - 1, "cannot select more than the non-current candidates");
+    }
+  }
+});
+
+test("#308 selectPruneVictims keeps budget-1 completed files alongside the current one", () => {
+  const current = "daemon-trace-2026-09-17T11-00-00-000Z-1-0009.jsonl";
+  const names = [current];
+  for (let i = 0; i < 6; i += 1) names.push(`daemon-trace-2026-09-17T0${i}-00-00-000Z-1-000${i}.jsonl`);
+  const victims = selectPruneVictims(names, 4, current, "name", () => 0);
+  const survivors = names.filter((n) => !victims.includes(n));
+  assert.equal(survivors.length, 4, "total survivors equal the budget");
+  assert.ok(survivors.includes(current));
+  assert.equal(survivors.filter((n) => n !== current).length, 3, "budget-1 completed files remain upload-eligible");
+  // Oldest go first.
+  assert.deepEqual(victims, [
+    "daemon-trace-2026-09-17T00-00-00-000Z-1-0000.jsonl",
+    "daemon-trace-2026-09-17T01-00-00-000Z-1-0001.jsonl",
+    "daemon-trace-2026-09-17T02-00-00-000Z-1-0002.jsonl",
+  ]);
+});
+
+test("#308 a family that does not contain the current file spends its whole budget on completed files", () => {
+  const names = ["daemon-trace-diag-b.jsonl", "daemon-trace-diag-a.jsonl", "daemon-trace-diag-c.jsonl"];
+  const mtimes: Record<string, number> = {
+    "daemon-trace-diag-a.jsonl": 300,
+    "daemon-trace-diag-b.jsonl": 100,
+    "daemon-trace-diag-c.jsonl": 200,
+  };
+  const victims = selectPruneVictims(names, 2, "daemon-trace-2026-09-17T11-00-00-000Z-1-0000.jsonl", "mtime", (n) => mtimes[n]);
+  // Diag names carry no timestamp, so ordering must come from mtime: b is oldest.
+  assert.deepEqual(victims, ["daemon-trace-diag-b.jsonl"]);
+});
+
+test("#308 cli-transport and diag files are bounded, so excluding them was never an option", async () => {
+  const machineDir = await mkdtemp(path.join(os.tmpdir(), "slock-trace-prune-bounded-"));
+  try {
+    const traceDir = path.join(machineDir, "traces");
+    mkdirSync(traceDir, { recursive: true });
+    for (let i = 0; i < 40; i += 1) writeFixture(traceDir, `daemon-trace-cli-transport-2026-09-17T00-00-00-${String(i).padStart(3, "0")}Z-1-a.jsonl`);
+    for (let i = 0; i < 40; i += 1) writeFixture(traceDir, `daemon-trace-diag-corr${String(i).padStart(3, "0")}.jsonl`, Date.now() - (40 - i) * 1000);
+
+    const sink = new LocalRotatingTraceSink({
+      machineDir,
+      maxFileBytes: 1024,
+      maxFiles: 4,
+      maxCliTransportFiles: 5,
+      maxDiagFiles: 3,
+    });
+    driveRotations(sink, 6);
+
+    const counts = familyCounts(traceDir);
+    assert.equal(counts.cli, 5, "cli-transport must stay within its own budget");
+    assert.equal(counts.diag, 3, "diag must stay within its own budget");
+    // Diag names carry no timestamp, so eviction must follow mtime: the newest
+    // three by mtime are corr037..corr039.
+    const diagKept = readdirSync(traceDir).filter((n) => n.startsWith("daemon-trace-diag-")).sort();
+    assert.deepEqual(diagKept, ["daemon-trace-diag-corr037.jsonl", "daemon-trace-diag-corr038.jsonl", "daemon-trace-diag-corr039.jsonl"]);
+  } finally {
+    await rm(machineDir, { recursive: true, force: true });
+  }
+});
+
+test("#308 RED PROOF: the pre-fix shared-glob prune destroys every rotating file on the same fixture", async () => {
+  const machineDir = await mkdtemp(path.join(os.tmpdir(), "slock-trace-prune-red-"));
+  try {
+    const traceDir = path.join(machineDir, "traces");
+    mkdirSync(traceDir, { recursive: true });
+    const maxFiles = 8;
+    for (let i = 0; i < 8; i += 1) writeFixture(traceDir, `daemon-trace-cli-transport-2026-09-1${i}T00-00-00-000Z-1-a${i}.jsonl`);
+
+    // Replay the real order of operations: create the new current file, THEN prune.
+    for (let round = 0; round < 5; round += 1) {
+      writeFixture(traceDir, `daemon-trace-2026-09-17T1${round}-00-00-000Z-1-000${round}.jsonl`);
+      legacyPrune(traceDir, maxFiles);
+    }
+
+    const legacy = familyCounts(traceDir);
+    assert.equal(legacy.rotating, 0, "pre-fix behaviour: no rotating file survives, not even the new one");
+    assert.equal(legacy.cli, 8, "pre-fix behaviour: the non-rotating family is never the victim");
+
+    // Same pressure, current implementation: rotating files survive.
+    const machineDir2 = await mkdtemp(path.join(os.tmpdir(), "slock-trace-prune-green-"));
+    try {
+      const traceDir2 = path.join(machineDir2, "traces");
+      mkdirSync(traceDir2, { recursive: true });
+      for (let i = 0; i < 8; i += 1) writeFixture(traceDir2, `daemon-trace-cli-transport-2026-09-1${i}T00-00-00-000Z-1-a${i}.jsonl`);
+      const sink = new LocalRotatingTraceSink({ machineDir: machineDir2, maxFileBytes: 1024, maxFiles });
+      driveRotations(sink, 10);
+      const fixed = familyCounts(traceDir2);
+      assert.equal(fixed.rotating, maxFiles, "post-fix: the rotating family gets its full budget back");
+      assert.ok(fixed.rotating > legacy.rotating, "the fix must change the outcome on identical input");
+    } finally {
+      await rm(machineDir2, { recursive: true, force: true });
+    }
   } finally {
     await rm(machineDir, { recursive: true, force: true });
   }

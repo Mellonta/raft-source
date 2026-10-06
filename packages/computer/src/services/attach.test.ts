@@ -9,11 +9,10 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { ComputerServiceError } from "./errors.js";
-import { attach } from "./attach.js";
-import type { ComputerApiEvent } from "../lib/events.js";
+import { ComputerServiceError } from "./errors";
+import { attach } from "./attach";
+import type { ComputerApiEvent } from "../lib/events";
 
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
 

@@ -8,9 +8,10 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "isolatedModules": true,
+    "types": ["node"],
     "declaration": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "rslib.config.ts"],
+  "include": ["src/**/*.ts", "tsdown.config.ts"],
   "exclude": ["src/**/*.test.ts"]
 }

@@ -1,10 +1,10 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channelAgents,
   externalActorProjections,
@@ -13,13 +13,13 @@ import {
   serverMembers,
   tasks,
   users,
-} from "../db/schema.js";
-import { assignMachine, createAgent } from "../services/agentService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { createChannel } from "../services/channelService.js";
-import { createCanonicalExternalMessage } from "../services/externalProjectionService.js";
-import { registerMachine } from "../services/machineService.js";
-import { createServer } from "../services/serverService.js";
+} from "../db/schema";
+import { assignMachine, createAgent } from "../services/agentService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { createChannel } from "../services/channelService";
+import { createCanonicalExternalMessage } from "../services/externalProjectionService";
+import { registerMachine } from "../services/machineService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

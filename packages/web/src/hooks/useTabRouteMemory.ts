@@ -25,7 +25,6 @@ export function classifyRouteForTab(pathname: string, pathBase: string | null): 
   // the chat memory and trap the user (clicking Chat → reads "/search" back
   // out of chat memory and bounces them right back to Search).
   if (rest === "/search" || rest.startsWith("/search/")) return null;
-  if (rest === "/wiki" || rest.startsWith("/wiki/")) return "wiki";
   if (rest.startsWith("/agent/")) return "members";
   if (rest.startsWith("/human/")) return "members";
   if (rest === "/members" || rest.startsWith("/members/")) return "members";
@@ -80,7 +79,6 @@ function isServerSurfaceRoute(pathname: string, pathBase: string): boolean {
   if (rest === "/tasks" || rest.startsWith("/tasks/")) return true;
   if (rest === "/saved" || rest.startsWith("/saved/")) return true;
   if (rest === "/search" || rest.startsWith("/search/")) return true;
-  if (rest === "/wiki" || rest.startsWith("/wiki/")) return true;
   if (rest.startsWith("/agent/")) return true;
   if (rest.startsWith("/human/")) return true;
   if (rest === "/members" || rest.startsWith("/members/")) return true;

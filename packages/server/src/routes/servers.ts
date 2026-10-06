@@ -1,43 +1,42 @@
-import { Router, type Request, type Router as RouterType } from "express";
+import { Router, type Request, type RequestHandler, type Router as RouterType } from "express";
 import multer from "multer";
 import { randomUUID } from "node:crypto";
 import type { Server as SocketServer } from "socket.io";
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import * as serverService from "../services/serverService.js";
-import * as machineService from "../services/machineService.js";
-import * as agentService from "../services/agentService.js";
-import * as channelService from "../services/channelService.js";
-import * as inviteService from "../services/inviteService.js";
-import * as onboardingService from "../services/onboardingService.js";
-import * as userService from "../services/userService.js";
-import * as serverAgreementService from "../services/serverAgreementService.js";
-import { countAgents, countMachines, countChannels, getHistoryCutoff } from "../services/planService.js";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
-import { planMentionRedriveHttpStatus } from "../services/agentOrchestrator.js";
-import { buildMachineReadModel } from "../services/machineReadModel.js";
+import * as serverService from "../services/serverService";
+import * as machineService from "../services/machineService";
+import * as agentService from "../services/agentService";
+import * as channelService from "../services/channelService";
+import * as inviteService from "../services/inviteService";
+import * as onboardingService from "../services/onboardingService";
+import * as userService from "../services/userService";
+import * as serverAgreementService from "../services/serverAgreementService";
+import { countAgents, countMachines, countChannels, getHistoryCutoff, HumanSeatLimitError } from "../services/planService";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
+import { planMentionRedriveHttpStatus } from "../services/agentOrchestrator";
+import { buildMachineReadModel } from "../services/machineReadModel";
 import {
   getComputerLinkedMachineAttachers,
   getComputerLinkedMachineCreators,
   getComputerLinkedMachineIds,
-} from "../services/computerCredentialService.js";
-import { getLatestDaemonVersion } from "../services/daemonVersionService.js";
-import { getLatestComputerVersion } from "../services/computerVersionService.js";
+} from "../services/computerCredentialService";
+import { getLatestComputerReleaseNotes, getLatestComputerVersion } from "../services/computerVersionService";
 import {
   evaluateBroadcastPolicy,
   normalizeComputerPlatform,
   projectComputerBroadcastPolicyDecision,
   type ComputerBroadcastPolicyDecision,
   type ComputerSourceFact,
-} from "../services/computerBroadcastPolicyService.js";
+} from "../services/computerBroadcastPolicyService";
 import {
   buildServerSystemNotificationsResponse,
   projectMachineSystemNotifications,
-} from "../services/systemNotificationService.js";
-import { createUserComputerLifecycleOperation, markComputerLifecycleCommandSent } from "../services/computerLifecycleOperationService.js";
-import { isFeedbackReportReceiptEmailEnabled, sendFeedbackReportReceiptEmail } from "../services/emailService.js";
-import { isTranslationProviderConfigured } from "../services/messageTranslationService.js";
-import { isReceiverStatePushEnabled } from "../services/receiverStatePushService.js";
-import { getServerSettings } from "../services/serverSettingsService.js";
+} from "../services/systemNotificationService";
+import { createUserComputerLifecycleOperation, markComputerLifecycleCommandSent } from "../services/computerLifecycleOperationService";
+import { isTranslationProviderConfigured } from "../services/messageTranslationService";
+import { isReceiverStatePushEnabled } from "../services/receiverStatePushService";
+import { getServerSettings } from "../services/serverSettingsService";
+import { projectServerPublicProfile } from "../services/serverProfileProjection";
 import {
   createServerSetupStateService,
   DrizzleServerSetupStateRepository,
@@ -45,19 +44,23 @@ import {
   resetServerSetup,
   ServerSetupStateError,
   type ServerSetupAction,
-} from "../services/serverSetupStateService.js";
-import { handleMachineLocalRouting, sendMachineAffinityUnavailable } from "../machineLocalReplay.js";
-import { asMachineId, COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY, COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS, currentDate, INVALID_EMAIL_MESSAGE, PUBLIC_SERVER_FEATURE_FLAG_KEY, RUNTIME_ACCOUNT_USAGE_FEATURE_FLAG_KEY, RUNTIME_ACCOUNT_USAGE_PROVIDERS, SERVER_GUEST_FEATURE_FLAG_KEY, SERVER_SYSTEM_NOTIFICATIONS_CONTRACT_VERSION, validateEmailAddress, validateServerSlug, MANAGEABLE_SERVER_ROLES, type ManageableServerRole, type RuntimeAccountUsageProvider, type ServerCapability, type ServerPlan, type ServerRole } from "@botiverse/raft-shared";
-import { canInspectAgentPrivateSurfaces } from "./agents.js";
-import { actorRoleHasServerCapability, getActorServerRoleInServer } from "../lib/actorPermissions.js";
-import { createScopeAttestation } from "../lib/scopeAttestation.js";
-import { getDb } from "../db/index.js";
-import { agents as agentsTable, channelAgents, channelHumans, channels, computerLifecycleOperations, servers } from "../db/schema.js";
-import { requireServerMatchesParam } from "../middleware/auth.js";
-import { addTraceEvent, createTraceDbQueryTracer, tracePhase } from "../tracing/semanticTrace.js";
-import { traceRouteFailure } from "../tracing/routeFailure.js";
-import { sendJsonServerError } from "./errorResponse.js";
-import type { DbQueryTracer } from "../tracing/dbQueryTrace.js";
+} from "../services/serverSetupStateService";
+import { hasServerCompletedSetupForProjection } from "../services/serverSetupCompletionService";
+import { handleMachineLocalRouting, sendMachineAffinityUnavailable } from "../machineLocalReplay";
+import {
+  isRemoteUpgradeSupported, asMachineId, COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY, COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS, currentDate, INVALID_EMAIL_MESSAGE, PUBLIC_SERVER_FEATURE_FLAG_KEY, RUNTIME_ACCOUNT_USAGE_PROVIDERS, SERVER_GUEST_FEATURE_FLAG_KEY, SERVER_SYSTEM_NOTIFICATIONS_CONTRACT_VERSION, validateEmailAddress, validateNewServerSlug, type RuntimeAccountUsageProvider, type ServerCapability, type ServerModelLabelCatalog, type ServerPlan, type ServerRole } from "@botiverse/raft-shared";
+import { releasedRuntimeFormDefinition } from "@botiverse/raft-runtime-form";
+import { canInspectAgentPrivateSurfaces } from "./agents";
+import { actorRoleHasServerCapability, getActorServerRoleInServer } from "../lib/actorPermissions";
+import { FencedAuthorizationDeniedError, ServerMembershipRevokedError, withActorMembershipFence } from "../lib/actorMembershipFence";
+import { createScopeAttestation } from "../lib/scopeAttestation";
+import { getDb } from "../db/index";
+import { agents as agentsTable, channelAgents, channelHumans, channels, computerLifecycleOperations, machines as machinesTable, servers } from "../db/schema";
+import { requireServerMatchesParam } from "../middleware/auth";
+import { addTraceEvent, createTraceDbQueryTracer, errorClassOf, tracePhase } from "../tracing/semanticTrace";
+import { traceRouteFailure } from "../tracing/routeFailure";
+import { sendJsonServerError } from "./errorResponse";
+import type { DbQueryTracer } from "../tracing/dbQueryTrace";
 import {
   createAvatarUpload,
   MAX_PROFILE_AVATAR_BYTES,
@@ -65,41 +68,47 @@ import {
   PROFILE_AVATAR_TOO_LARGE_MESSAGE,
   runSingleAvatarUpload,
   storeServerAvatar,
-} from "../services/avatarService.js";
+} from "../services/avatarService";
 import {
   projectNewAgentRuntimeOptions,
   resolveRuntimeAdmissionPolicy,
-} from "../services/runtimeAdmissionService.js";
-import { serverLabsRouter } from "./serverLabs.js";
+} from "../services/runtimeAdmissionService";
+import { serverLabsRouter } from "./serverLabs";
+import { runtimeFormV1Entry } from "../services/runtimeFormDefinitionService";
+import { runtimeFormV2Entry } from "../services/runtimeFormV2Registry";
+import { BuiltInModelCatalogError } from "../services/builtinModelCatalogCompatibility";
+import { evaluateFeatureFlag, REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY } from "../services/featureFlagService";
 import {
-  buildBuiltInPiFormDefinition,
-  buildBuiltInPiFormOptionSource,
-  buildKimiSdkFormDefinition,
-  buildKimiSdkFormOptionSource,
-  BUILTIN_PI_FORM_SCHEMA_VERSION,
-  KIMI_SDK_FORM_SCHEMA_VERSION,
-  validateBuiltInPiDefinitionProjection,
-  validateKimiSdkDefinitionProjection,
-} from "../services/runtimeFormDefinitionService.js";
-import {
-  BuiltInModelCatalogError,
-  filterBuiltInPiFormOptionSourceForCatalog,
-  requireBuiltInCatalogCapability,
-} from "../services/builtinModelCatalogCompatibility.js";
-import { evaluateFeatureFlag } from "../services/featureFlagService.js";
-import { RouteFailureError } from "../tracing/routeFailure.js";
-import { computeActivityUnreadCounts } from "../services/activityUnreadSummaryService.js";
-import { runtimeAccountUsageCacheService } from "../services/runtimeAccountUsageCacheService.js";
-import { MachineCatalogStaleError } from "../services/machineCatalogAuthority.js";
-import * as mentionDeliveryOccurrenceService from "../services/mentionDeliveryOccurrenceService.js";
-import { listInstalledApps } from "../services/rapRegistryStore.js";
-import { getBuiltInComposerReference } from "../services/rapBuiltinAppManifests.js";
+  createComputerUpgradeRequest,
+  listLatestComputerUpgradeRequests,
+  projectComputerUpgradeRequest,
+} from "../services/computerUpgradeRequestService";
+import { RouteFailureError } from "../tracing/routeFailure";
+import { computeActivityUnreadCounts } from "../services/activityUnreadSummaryService";
+import { runtimeAccountUsageCacheService } from "../services/runtimeAccountUsageCacheService";
+import { machineRuntimeModelCatalogService } from "../services/machineRuntimeModelCatalogService";
+import { MachineCatalogStaleError } from "../services/machineCatalogAuthority";
+import * as mentionDeliveryOccurrenceService from "../services/mentionDeliveryOccurrenceService";
+import { listInstalledApps } from "../services/rapRegistryStore";
+import { getBuiltInComposerReference } from "../services/rapBuiltinAppManifests";
+import { UUID_RE } from "../lib/messageId";
+import { guardUuidPathParams } from "../lib/uuidPathParams";
 
 export const serverRouter: RouterType = Router();
+// Uniform 404 for non-UUID path params (task #12). `messageId` on the
+// diagnostic routes is deliberately excluded: those handlers answer a
+// contract-shaped {status:"NOT_JOINABLE"} body, kept intact inline.
+guardUuidPathParams(serverRouter, {
+  id: "Server",
+  inviteId: "Invite",
+  linkId: "Join link",
+  machineId: "Machine",
+  agentId: "Agent",
+  reportId: "Report",
+});
 const serverAvatarUpload = createAvatarUpload();
 
 const SCOPE_ATTESTATION_TTL_MS = 10 * 60 * 1000;
-const UUID_V4_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ONBOARDING_WIZARD_STEPS = new Set([
   "add-computer",
   "detect-runtime",
@@ -163,12 +172,12 @@ function routeServerSetupStateService(orchestrator: AgentOrchestrator) {
   return createServerSetupStateService({
     repository: new DrizzleServerSetupStateRepository(),
     resolveActorRole: (serverId, actor) => getActorServerRoleInServer(serverId, actor.type, actor.id),
+    resolveServerCompleted: (serverId) => hasServerCompletedSetupForProjection(getDb(), serverId),
     resolveLiveFacts: (serverId, userId) => resolveServerSetupLiveFacts(serverId, userId, orchestrator),
   });
 }
 
 const LOCAL_COMPUTER_LIFECYCLE_ACTIONS = new Set(["start", "stop", "restart", "upgrade"] as const);
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function canManageMachineResource(
   callerRole: ServerRole | null,
@@ -458,11 +467,10 @@ function filterOrderIds(ids: string[], allowedIds: Set<string>): string[] {
 }
 
 async function getAllowedSidebarIds(serverId: string, userId: string, opts: { traceQuery?: DbQueryTracer } = {}) {
-  const humanActivityMuteEnabled = await channelService.isHumanActivityMuteEnabled(serverId, userId);
   const [channels, agents, dms, removedPeerDmIds, durableDmPinTargets, memberIds] = await Promise.all([
-    channelService.listChannels(serverId, userId, { humanActivityMuteEnabled, traceQuery: opts.traceQuery }),
+    channelService.listChannels(serverId, userId, { traceQuery: opts.traceQuery }),
     agentService.listAgents(serverId, false, { traceQuery: opts.traceQuery }),
-    channelService.listDMChannels(serverId, userId, { humanActivityMuteEnabled, traceQuery: opts.traceQuery }),
+    channelService.listDMChannels(serverId, userId, { traceQuery: opts.traceQuery }),
     channelService.listUserDMChannelIdsIncludingRemoved(serverId, userId, { traceQuery: opts.traceQuery }),
     channelService.listUserDMPinTargetsIncludingRemoved(serverId, userId, { traceQuery: opts.traceQuery }),
     serverService.listServerMemberIds(serverId),
@@ -781,7 +789,7 @@ serverRouter.get("/unread-summary", async (req, res) => {
       };
     });
     const unreadCounts = await tracePhase(
-      () => channelService.getSidebarUnreadSummaryCounts(summaryInputs, req.userId!, {
+      () => channelService.getSidebarUnreadSummaryCounts(memberships.map((membership) => membership.id), req.userId!, {
         traceQuery: createTraceDbQueryTracer("unread_summary.loaded"),
       }),
       (_durationMs, result) => {
@@ -792,7 +800,6 @@ serverRouter.get("/unread-summary", async (req, res) => {
             servers_count: memberships.length,
             servers_with_unread_count: counts.filter((count) => count > 0).length,
             total_unread_count: counts.reduce((sum, count) => sum + count, 0),
-            history_cutoff_present_count: summaryInputs.filter((input) => Boolean(input.historyCutoff)).length,
           },
         };
       },
@@ -844,7 +851,7 @@ serverRouter.post("/", async (req, res) => {
       res.status(400).json({ error: "Name and slug are required" });
       return;
     }
-    const slugError = validateServerSlug(slug);
+    const slugError = validateNewServerSlug(slug);
     if (slugError) {
       res.status(400).json({ error: slugError });
       return;
@@ -909,8 +916,11 @@ serverRouter.post("/join-community", async (req, res) => {
     } else if (msg.includes("seat limit") || msg.includes("limit reached")) {
       res.status(403).json({ error: msg });
     } else {
-      console.error("Join community error:", err);
-      res.status(500).json({ error: "Failed to join community server" });
+      sendJsonServerError(req, res, {
+        error: "Failed to join community server",
+        logPrefix: "Join community error:",
+        err,
+      });
     }
   }
 });
@@ -936,7 +946,6 @@ const guestHiddenServerSurfaces: string[] = [
   "/:id/member-graph",
   "/:id/invites",
   "/:id/join-links",
-  "/:id/machines",
 ];
 
 // Guests retain the minimal server identity needed to enter the workspace,
@@ -1019,8 +1028,11 @@ serverRouter.put("/:id/agreement", async (req, res) => {
       res.status(400).json({ error: msg });
       return;
     }
-    console.error("Update pre-join agreement error:", err);
-    res.status(500).json({ error: "Failed to update pre-join agreement" });
+    sendJsonServerError(req, res, {
+      error: "Failed to update pre-join agreement",
+      logPrefix: "Update pre-join agreement error:",
+      err,
+    });
   }
 });
 
@@ -1155,8 +1167,11 @@ serverRouter.post("/:id/avatar", async (req, res) => {
       });
       return;
     }
-    console.error("Server avatar upload error:", err);
-    res.status(500).json({ error: "Failed to upload avatar" });
+    sendJsonServerError(req, res, {
+      error: "Failed to upload avatar",
+      logPrefix: "Server avatar upload error:",
+      err,
+    });
   }
 });
 
@@ -1195,11 +1210,11 @@ serverRouter.post("/:id/leave", async (req, res) => {
   }
 });
 
-// Get server details (requires membership)
+// Get the Server profile selected by the caller's disclosure permission.
 serverRouter.get("/:id", async (req, res) => {
   try {
-    const member = await serverService.isMember(req.params.id, req.userId!);
-    if (!member) {
+    const callerRole = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
+    if (!callerRole) {
       res.status(404).json({ error: "Server not found" });
       return;
     }
@@ -1208,15 +1223,25 @@ serverRouter.get("/:id", async (req, res) => {
       res.status(404).json({ error: "Server not found" });
       return;
     }
-    res.json(server);
+    res.json(
+      actorRoleHasServerCapability(callerRole, "viewServerProfile")
+        ? server
+        : projectServerPublicProfile(server),
+    );
   } catch {
     res.status(500).json({ error: "Failed to get server" });
   }
 });
 
-// Read-only, member-visible Server settings grouped by product surface.
+// Read-only Server settings grouped by product surface. Personal notification,
+// translation and onboarding-preference routes remain separate self-state APIs.
 serverRouter.get("/:id/settings", async (req, res) => {
   try {
+    const callerRole = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
+    if (!actorRoleHasServerCapability(callerRole, "viewServerSettings")) {
+      res.status(403).json({ error: "The `viewServerSettings` capability is required to view server settings" });
+      return;
+    }
     const payload = await getServerSettings(req.params.id, req.userId!);
     if (!payload) {
       res.status(404).json({ error: "Server not found" });
@@ -1520,6 +1545,51 @@ serverRouter.patch("/:id/onboarding-settings", async (req, res) => {
   }
 });
 
+// RFC-067: the workspace-wide product analytics switch.
+serverRouter.get("/:id/product-analytics-settings", async (req, res) => {
+  try {
+    const role = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
+    const enabled = role ? await serverService.getServerProductAnalyticsEnabled(req.params.id) : null;
+    if (!role || enabled === null) {
+      res.status(404).json({ error: "Server not found" });
+      return;
+    }
+    res.json({
+      productAnalyticsEnabled: enabled,
+      canManageProductAnalytics: actorRoleHasServerCapability(role, "editServerSettings"),
+    });
+  } catch {
+    res.status(500).json({ error: "Failed to get product analytics settings" });
+  }
+});
+
+serverRouter.patch("/:id/product-analytics-settings", async (req, res) => {
+  try {
+    const role = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
+    if (!role) {
+      res.status(404).json({ error: "Server not found" });
+      return;
+    }
+    if (!actorRoleHasServerCapability(role, "editServerSettings")) {
+      res.status(403).json({ error: "Only server owners and admins can update product analytics settings" });
+      return;
+    }
+    const raw = req.body?.productAnalyticsEnabled;
+    if (typeof raw !== "boolean") {
+      res.status(400).json({ error: "productAnalyticsEnabled must be a boolean" });
+      return;
+    }
+    const enabled = await serverService.updateServerProductAnalyticsEnabled(req.params.id, raw);
+    if (enabled === null) {
+      res.status(404).json({ error: "Server not found" });
+      return;
+    }
+    res.json({ productAnalyticsEnabled: enabled, canManageProductAnalytics: true });
+  } catch {
+    res.status(500).json({ error: "Failed to update product analytics settings" });
+  }
+});
+
 // Get translation settings for the current server.
 serverRouter.get("/:id/translation-settings", async (req, res) => {
   try {
@@ -1663,9 +1733,10 @@ serverRouter.post("/:id/scope-attestation", async (req, res) => {
       return;
     }
 
-    const [user, server] = await Promise.all([
+    const [user, server, traceUserId] = await Promise.all([
       userService.getUser(req.userId!),
       serverService.getServer(req.params.id),
+      userService.getTraceUserId(req.userId!),
     ]);
 
     if (!server) {
@@ -1680,6 +1751,7 @@ serverRouter.post("/:id/scope-attestation", async (req, res) => {
       scope,
       sub: req.userId!,
       actorType: "user",
+      traceUserId,
       email: user?.email || null,
       serverId: server.id,
       serverSlug: server.slug,
@@ -1768,11 +1840,10 @@ serverRouter.get("/:id/member-graph", async (req, res) => {
       return;
     }
 
-    const humanActivityMuteEnabled = await channelService.isHumanActivityMuteEnabled(req.params.id, req.userId!);
     const [serverMembers, serverAgents, visibleChannelRows] = await Promise.all([
       serverService.getServerMembers(req.params.id, req.userId!),
       agentService.listAgents(req.params.id, false),
-      channelService.listChannels(req.params.id, req.userId!, { humanActivityMuteEnabled }),
+      channelService.listChannels(req.params.id, req.userId!),
     ]);
     const visibleChannels = visibleChannelRows.filter((channel) => channel.type === "channel" && !channel.archivedAt);
 
@@ -1892,8 +1963,11 @@ serverRouter.get("/:id/member-graph", async (req, res) => {
       edges,
     });
   } catch (err) {
-    console.error("Failed to get member graph:", err);
-    res.status(500).json({ error: "Failed to get member graph" });
+    sendJsonServerError(req, res, {
+      error: "Failed to get member graph",
+      logPrefix: "Failed to get member graph:",
+      err,
+    });
   }
 });
 
@@ -2142,69 +2216,6 @@ serverRouter.patch("/:id/sidebar-order", async (req, res) => {
   }
 });
 
-// Add member to server (admin/owner only)
-serverRouter.post("/:id/members", async (req, res) => {
-  try {
-    const { userId, role } = req.body;
-    if (!userId) {
-      res.status(400).json({ error: "User ID is required" });
-      return;
-    }
-
-    // Only owner and admin can add members
-    const callerRole = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
-    if (!actorRoleHasServerCapability(callerRole, "inviteMembers")) {
-      res.status(403).json({ error: "Only server owners and admins can add members" });
-      return;
-    }
-
-    // Validate role if provided. Admins can add member/admin; only owners can
-    // add a member directly as another owner.
-    const targetRole = (role || "member") as string;
-    if (!MANAGEABLE_SERVER_ROLES.includes(targetRole as ManageableServerRole)) {
-      res.status(400).json({ error: "Role must be owner, admin, or member" });
-      return;
-    }
-    if (targetRole === "owner" && callerRole !== "owner") {
-      res.status(403).json({ error: "Only server owners can add another owner" });
-      return;
-    }
-    const added = await serverService.addMember(req.params.id, userId, targetRole as ServerRole, {
-      agreementAudit: {
-        actorUserId: req.userId!,
-        source: "admin-add",
-        ...getAgreementRequestMetadata(req),
-      },
-    });
-
-    if (added) {
-      const io = req.app.get("io") as SocketServer | undefined;
-      const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
-      if (io) {
-        io.to(`server:${req.params.id}`).emit("server:member-added", {
-          serverId: req.params.id,
-          userId,
-        });
-        if (agentOrchestrator) {
-          void onboardingService.triggerNewMemberOnboarding(io, agentOrchestrator, req.params.id, userId).catch((err: unknown) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            console.warn(`[Onboarding] Failed to trigger member onboarding after add-member for ${userId}: ${msg}`);
-          });
-        }
-      }
-    }
-
-    res.json({ ok: true, added });
-  } catch (err: any) {
-    const msg = err?.message || "";
-    if (msg.includes("requires the Pro plan") || msg.includes("seat limit") || msg.includes("limit reached")) {
-      res.status(403).json({ error: msg });
-      return;
-    }
-    res.status(500).json({ error: "Failed to add member" });
-  }
-});
-
 // Update a human member's role (owner/admin with role transition limits)
 serverRouter.patch("/:id/members/:memberId", async (req, res) => {
   try {
@@ -2233,6 +2244,11 @@ serverRouter.patch("/:id/members/:memberId", async (req, res) => {
     });
     if (result.changed) {
       const io = req.app.get("io") as SocketServer | undefined;
+      if (result.nextRole === "guest") {
+        // Reconnect under the new role so the socket cannot retain server or
+        // hidden-channel rooms admitted while it was a regular member.
+        io?.in(`user:${req.params.memberId}`).disconnectSockets();
+      }
       for (const channelId of result.removedAllChannelIds) {
         io?.in(`user:${req.params.memberId}`).socketsLeave(`channel:${channelId}`);
       }
@@ -2255,6 +2271,10 @@ serverRouter.patch("/:id/members/:memberId", async (req, res) => {
         return;
       }
       res.status(403).json({ error: "You are not allowed to make that role change" });
+      return;
+    }
+    if (err instanceof HumanSeatLimitError) {
+      res.status(409).json({ error: err.message, code: err.code });
       return;
     }
     res.status(500).json({ error: "Failed to update member role" });
@@ -2410,8 +2430,11 @@ serverRouter.post("/:id/invites", async (req, res) => {
     } else if (msg.includes("already")) {
       res.status(409).json({ error: msg });
     } else {
-      console.error("Create invite error:", err);
-      res.status(500).json({ error: "Failed to create invite" });
+      sendJsonServerError(req, res, {
+        error: "Failed to create invite",
+        logPrefix: "Create invite error:",
+        err,
+      });
     }
   }
 });
@@ -2482,8 +2505,11 @@ serverRouter.post("/:id/join-links", async (req, res) => {
       res.status(400).json({ error: msg });
       return;
     }
-    console.error("Create join link error:", err);
-    res.status(500).json({ error: "Failed to create join link" });
+    sendJsonServerError(req, res, {
+      error: "Failed to create join link",
+      logPrefix: "Create join link error:",
+      err,
+    });
   }
 });
 
@@ -2542,14 +2568,13 @@ serverRouter.get("/:id/system-notifications", async (req, res) => {
     }
 
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
-    const [machineRows, activeAgentCountByMachine, latestDaemonVersion, computerLinkedMachineIds] = await Promise.all([
+    const [machineRows, activeAgentCountByMachine, computerLinkedMachineIds] = await Promise.all([
       machineService.listMachines(req.params.id, {
         traceQuery: createTraceDbQueryTracer("system_notifications.machines.loaded"),
       }),
       machineService.countRunningAgentsByMachine(req.params.id, {
         traceQuery: createTraceDbQueryTracer("system_notifications.active_agents.loaded"),
       }),
-      getLatestDaemonVersion(),
       getComputerLinkedMachineIds(req.params.id),
     ]);
     const machineReadModels = await Promise.all(
@@ -2560,7 +2585,6 @@ serverRouter.get("/:id/system-notifications", async (req, res) => {
     const notifications = projectMachineSystemNotifications({
       machines: machineReadModels,
       activeAgentCountByMachine,
-      latestDaemonVersion,
       evaluatedAt: generatedAt,
     });
     addTraceEvent("system_notifications.snapshot.ready", {
@@ -2581,17 +2605,22 @@ serverRouter.get("/:id/system-notifications", async (req, res) => {
 serverRouter.get("/:id/machines", async (req, res) => {
   try {
     addTraceEvent("machines.list.started");
-    const member = await tracePhase(
-      () => serverService.isMember(req.params.id, req.userId!),
+    const callerRole = await tracePhase(
+      () => getActorServerRoleInServer(req.params.id, "user", req.userId!),
       (_durationMs, result) => ({
-        name: "server.membership.checked",
+        name: "server.machine_list_authority.checked",
         attrs: {
-          is_member: Boolean(result),
+          caller_role: result,
+          allowed: actorRoleHasServerCapability(result, "viewMachines"),
         },
       }),
     );
-    if (!member) {
+    if (!callerRole) {
       res.status(404).json({ error: "Server not found" });
+      return;
+    }
+    if (!actorRoleHasServerCapability(callerRole, "viewMachines")) {
+      res.status(403).json({ error: "The `viewMachines` capability is required to list machines" });
       return;
     }
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
@@ -2636,28 +2665,20 @@ serverRouter.get("/:id/machines", async (req, res) => {
         },
       }),
     );
-    const [latestDaemonVersion, latestComputerVersion] = await Promise.all([
-      tracePhase(
-        () => getLatestDaemonVersion(),
-        (_durationMs, result) => ({
-          name: "latest_daemon_version.loaded",
-          attrs: {
-            daemon_version_present: Boolean(result),
-          },
-        }),
-      ),
-      tracePhase(
-        () => getLatestComputerVersion(),
-        (_durationMs, result) => ({
-          name: "latest_computer_version.loaded",
-          attrs: {
-            computer_version_present: Boolean(result),
-          },
-        }),
-      ),
-    ]);
+    const latestComputerVersion = await tracePhase(
+      () => getLatestComputerVersion(),
+      (_durationMs, result) => ({
+        name: "latest_computer_version.loaded",
+        attrs: {
+          computer_version_present: Boolean(result),
+        },
+      }),
+    );
     const evaluatePolicy = computerBroadcastPolicyEvaluator(req.app);
     let policyNow: Date | null = null;
+    const latestUpgradeRequests = await listLatestComputerUpgradeRequests(
+      enriched.filter((machine) => machine.isComputer).map((machine) => machine.id),
+    );
     const machinesWithComputerUpgradeState = await Promise.all(enriched.map(async (machine) => {
       const {
         computerVersionObservedAt,
@@ -2669,6 +2690,7 @@ serverRouter.get("/:id/machines", async (req, res) => {
           ...publicMachine,
           computerUpgradeAvailable: null,
           computerBroadcastPolicy: null,
+          remoteUpgradeSupported: null,
         };
       }
       policyNow ??= new Date(agentOrchestrator.getCurrentTimeMs());
@@ -2680,26 +2702,35 @@ serverRouter.get("/:id/machines", async (req, res) => {
         },
         platform: normalizeComputerPlatform(machine.os),
         now: policyNow,
+        serverId: req.params.id,
       });
+      const upgradeRequestRow = latestUpgradeRequests.get(machine.id);
       return {
         ...publicMachine,
         computerUpgradeAvailable: decision.eligibility === "eligible",
         computerBroadcastPolicy: projectComputerBroadcastPolicyDecision(decision),
+        upgradeRequest: upgradeRequestRow ? projectComputerUpgradeRequest(upgradeRequestRow) : null,
+        remoteUpgradeSupported: isRemoteUpgradeSupported(machine.computerVersion),
       };
     }));
     addTraceEvent("response.ready", {
       machines_count: machinesWithComputerUpgradeState.length,
       online_machines_count: machinesWithComputerUpgradeState.filter((machine) => machine.status === "online").length,
       daemon_version_present_count: machinesWithComputerUpgradeState.filter((machine) => Boolean(machine.daemonVersion)).length,
-      latest_daemon_version_present: Boolean(latestDaemonVersion),
       latest_computer_version_present: Boolean(latestComputerVersion),
     });
     res.json({
       machines: machinesWithComputerUpgradeState,
-      latestDaemonVersion,
+      // Retired: the daemon is no longer published as its own release, so
+      // there is no separate "latest daemon" target. The key stays for older
+      // web clients, which treat null as "never outdated".
+      latestDaemonVersion: null,
       // Artifact availability hint only. Per-machine policy decisions are the
       // sole authority for display target/copy and dispatch admission.
       latestComputerVersion,
+      // Display-only notes for exactly `latestComputerVersion` (null when
+      // unknown). Additive: older web clients ignore it.
+      latestComputerReleaseNotes: getLatestComputerReleaseNotes(),
     });
   } catch {
     res.status(500).json({ error: "Failed to list machines" });
@@ -2723,7 +2754,9 @@ serverRouter.post("/:id/machines", async (req, res) => {
       res.status(400).json({ error: "Name is required" });
       return;
     }
-    const result = await machineService.registerMachine(req.params.id, req.userId!, name);
+    // Task #93 line G: the registration re-checks `registerMachines` under a share lock on the caller's own member row
+    // inside the machines advisory lock, so a removal or demotion that commits after the check above registers nothing.
+    const result = await machineService.registerMachine(req.params.id, req.userId!, name, { capability: "registerMachines" });
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
     const machine = await buildMachineReadModel(result.machine, agentOrchestrator);
     const io = req.app.get("io") as SocketServer | undefined;
@@ -2734,6 +2767,14 @@ serverRouter.post("/:id/machines", async (req, res) => {
     // Return the API key only once — it cannot be retrieved again
     res.json({ machine, apiKey: result.apiKey });
   } catch (err: any) {
+    if (err instanceof ServerMembershipRevokedError) {
+      res.status(404).json({ error: "Server not found" });
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      res.status(403).json({ error: "The `registerMachines` capability is required to register machines" });
+      return;
+    }
     const msg = err?.message || "";
     if (msg.includes("limit reached")) {
       res.status(400).json({ error: msg });
@@ -2785,14 +2826,40 @@ serverRouter.patch("/:id/machines/:machineId", async (req, res) => {
       res.status(400).json({ error: "Name or description is required" });
       return;
     }
-    const updated = await machineService.updateMachine(req.params.machineId, updates);
+    // Task #91: re-authorize inside the write transaction under a share lock on the caller's membership row,
+    // so a concurrent removal or demotion either waits for this write or makes it fail. Member row first,
+    // machine row second.
+    const updated = await withActorMembershipFence(req.params.id, req.userId!, async (tx, lockedRole) => {
+      const [lockedMachine] = await tx
+        .select({ id: machinesTable.id, serverId: machinesTable.serverId, userId: machinesTable.userId })
+        .from(machinesTable)
+        .where(eq(machinesTable.id, req.params.machineId))
+        .for("update");
+      if (!lockedMachine || lockedMachine.serverId !== req.params.id) throw new FencedAuthorizationDeniedError("not_found");
+      if (!canManageMachineResource(lockedRole, req.userId!, lockedMachine, "editMachines")) {
+        throw new FencedAuthorizationDeniedError("forbidden");
+      }
+      return machineService.updateMachine(req.params.machineId, updates, { executor: tx });
+    });
     const io = req.app.get("io") as SocketServer | undefined;
     io?.to(`server:${req.params.id}`).emit("machine:updated", {
       serverId: req.params.id,
       machineId: req.params.machineId,
     });
     res.json(updated);
-  } catch {
+  } catch (error) {
+    if (error instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FencedAuthorizationDeniedError) {
+      if (error.reason === "not_found") {
+        res.status(404).json({ error: "Machine not found in this server" });
+      } else {
+        res.status(403).json({ error: "The `editMachines` capability or machine creator authority is required to edit machines" });
+      }
+      return;
+    }
     res.status(500).json({ error: "Failed to update machine" });
   }
 });
@@ -2826,7 +2893,21 @@ serverRouter.delete("/:id/machines/:machineId", async (req, res) => {
       );
       if (routing === "handled") return;
     }
-    await machineService.deleteMachine(req.params.machineId);
+    // Task #91: the delete is re-authorized inside the write transaction (member row first, machine row second). The machine
+    // row is taken FOR UPDATE here because deleteMachine locks it FOR UPDATE again inside; a shared lock would need an upgrade.
+    // Disconnecting the Computer below is a runtime effect (task #93).
+    await withActorMembershipFence(req.params.id, req.userId!, async (tx, lockedRole) => {
+      const [lockedMachine] = await tx
+        .select({ id: machinesTable.id, serverId: machinesTable.serverId, userId: machinesTable.userId })
+        .from(machinesTable)
+        .where(eq(machinesTable.id, req.params.machineId))
+        .for("update");
+      if (!lockedMachine || lockedMachine.serverId !== req.params.id) throw new FencedAuthorizationDeniedError("not_found");
+      if (!canManageMachineResource(lockedRole, req.userId!, lockedMachine, "removeMachines")) {
+        throw new FencedAuthorizationDeniedError("forbidden");
+      }
+      await machineService.deleteMachine(req.params.machineId, { executor: tx });
+    });
     if (isComputerMachine) {
       await agentOrchestrator.disconnectMachineForUnlink(req.params.machineId);
     }
@@ -2837,6 +2918,18 @@ serverRouter.delete("/:id/machines/:machineId", async (req, res) => {
     });
     res.json({ ok: true });
   } catch (err) {
+    if (err instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") {
+        res.status(404).json({ error: "Machine not found in this server" });
+      } else {
+        res.status(403).json({ error: "The `removeMachines` capability or machine creator authority is required to remove machines" });
+      }
+      return;
+    }
     if (err instanceof machineService.MachineDeleteConflictError) {
       res.status(409).json({ error: err.message, code: err.code });
       return;
@@ -2867,9 +2960,35 @@ serverRouter.post("/:id/machines/:machineId/rotate-key", async (req, res) => {
       res.status(403).json({ error: "The `rotateMachineKeys` capability or machine creator authority is required to rotate machine keys" });
       return;
     }
-    const apiKey = await machineService.regenerateApiKey(req.params.machineId);
+    // Task #91: rotate under the caller's membership share lock (member row first, machine row second). The new key is
+    // returned only after commit, and the auth cache is evicted only after commit.
+    const apiKey = await withActorMembershipFence(req.params.id, req.userId!, async (tx, lockedRole) => {
+      const [lockedMachine] = await tx
+        .select({ id: machinesTable.id, serverId: machinesTable.serverId, userId: machinesTable.userId })
+        .from(machinesTable)
+        .where(eq(machinesTable.id, req.params.machineId))
+        .for("update");
+      if (!lockedMachine || lockedMachine.serverId !== req.params.id) throw new FencedAuthorizationDeniedError("not_found");
+      if (!canManageMachineResource(lockedRole, req.userId!, lockedMachine, "rotateMachineKeys")) {
+        throw new FencedAuthorizationDeniedError("forbidden");
+      }
+      return machineService.regenerateApiKey(req.params.machineId, { executor: tx });
+    });
+    machineService.clearAuthCache(req.params.machineId);
     res.json({ apiKey });
-  } catch {
+  } catch (error) {
+    if (error instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FencedAuthorizationDeniedError) {
+      if (error.reason === "not_found") {
+        res.status(404).json({ error: "Machine not found in this server" });
+      } else {
+        res.status(403).json({ error: "The `rotateMachineKeys` capability or machine creator authority is required to rotate machine keys" });
+      }
+      return;
+    }
     res.status(500).json({ error: "Failed to regenerate API key" });
   }
 });
@@ -2976,12 +3095,95 @@ serverRouter.post("/:id/machines/:machineId/computer/:action", async (req, res) 
       res.status(409).json({ error: "Computer is not online", code: "computer_offline" });
       return;
     }
-    // 0.72.0–0.72.8 are historical ingress only. Unknown higher versions are
-    // forward-compatible; only the known historical cohort maps to D=Upgrade
-    // targeting the new machine reducer in 0.72.9.
-    const sourceFact = await readComputerSourceFact(agentOrchestrator, machine.id);
-    const computerVersion = sourceFact?.version ?? null;
-    if (!computerVersion) {
+    if (action === "upgrade") {
+      // Remote upgrade v2 (task #873): resolve the exact target, record one
+      // request row, send the command. The machine's next reconnect is the only
+      // readback. Behind a flag so the web button stays greyed until switched on.
+      // The broadcast policy below reads this same flag (it is the single gate
+      // for every Server-initiated upgrade send); checking it here first just
+      // gives a clearer 403 than the policy's `broadcast_disabled` 409.
+      const gate = await evaluateFeatureFlag({
+        key: REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY,
+        userId: req.userId!,
+        serverId: req.params.id,
+      });
+      if (!gate.enabled) {
+        addTraceEvent("computer.control.rejected", {
+          action,
+          reason: "remote_upgrade_disabled",
+          server_id: req.params.id,
+          machine_id: machine.id,
+        });
+        res.status(403).json({ error: "Remote Computer upgrade is not enabled for this server", code: "remote_upgrade_disabled" });
+        return;
+      }
+      const sourceFact = await readComputerSourceFact(agentOrchestrator, machine.id);
+      // Older Computers are not driven from the web (the button is greyed and
+      // the panel shows the local upgrade hint); refuse here too so the state
+      // cannot be bypassed by a direct request.
+      if (isRemoteUpgradeSupported(sourceFact?.version) !== true) {
+        addTraceEvent("computer.control.rejected", {
+          action,
+          reason: "computer_remote_upgrade_unsupported",
+          server_id: req.params.id,
+          machine_id: machine.id,
+          computer_version: sourceFact?.version ?? "",
+        });
+        res.status(409).json({
+          error: "This Computer version cannot be upgraded from the web. Upgrade it once on the machine itself.",
+          code: "computer_remote_upgrade_unsupported",
+        });
+        return;
+      }
+      const decision = await computerBroadcastPolicyEvaluator(req.app)({
+        source: sourceFact,
+        platform: normalizeComputerPlatform(machine.os),
+        requestedTargetVersion,
+        now: new Date(agentOrchestrator.getCurrentTimeMs()),
+        serverId: req.params.id,
+      });
+      if (decision.eligibility !== "eligible" || !decision.targetVersion) {
+        addTraceEvent("computer.control.rejected", {
+          action,
+          reason: "computer_broadcast_not_eligible",
+          server_id: req.params.id,
+          machine_id: machine.id,
+        });
+        res.status(decision.reasonCode === "hands_unavailable" ? 503 : 409).json({
+          error: "This Computer source is not eligible for an upgrade right now.",
+          code: "computer_broadcast_not_eligible",
+          policy: projectComputerBroadcastPolicyDecision(decision),
+        });
+        return;
+      }
+      const { row, created } = await createComputerUpgradeRequest({
+        serverId: req.params.id,
+        machineId: machine.id,
+        targetVersion: decision.targetVersion,
+        requestedByUserId: req.userId!,
+        now: new Date(agentOrchestrator.getCurrentTimeMs()),
+      });
+      if (created) {
+        const { sent } = await agentOrchestrator.sendComputerUpgrade(machine.id, row.targetVersion, row.id);
+        if (!sent) {
+          res.status(409).json({ error: "Computer is not online", code: "computer_offline" });
+          return;
+        }
+      }
+      addTraceEvent("upgrade_request.recorded", {
+        request_id: row.id,
+        server_id: req.params.id,
+        machine_id: machine.id,
+        target_version: row.targetVersion,
+        created,
+      });
+      res.status(created ? 201 : 200).json({ upgradeRequest: projectComputerUpgradeRequest(row) });
+      return;
+    }
+    // Minimum supported Computer is the next release (xxchan 09-22): no
+    // version floors or historical-ingress remaps remain here.
+    const dispatchTargetVersion = (await readComputerSourceFact(agentOrchestrator, machine.id))?.version ?? null;
+    if (!dispatchTargetVersion) {
       addTraceEvent("computer.control.rejected", {
         action,
         reason: "computer_control_unsupported",
@@ -2989,106 +3191,45 @@ serverRouter.post("/:id/machines/:machineId/computer/:action", async (req, res) 
         machine_id: machine.id,
       });
       res.status(409).json({
-        error:
-          "Raft couldn't verify the Computer version. Reconnect the Computer, then try again.",
+        error: "Raft couldn't verify the Computer version. Reconnect the Computer, then try again.",
         code: "computer_control_unsupported",
       });
       return;
     }
-    const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(computerVersion);
-    if (!version) {
-      addTraceEvent("computer.control.rejected", {
-        action,
-        reason: "computer_version_unrecognized",
-        server_id: req.params.id,
-        machine_id: machine.id,
-        computer_version: computerVersion,
-      });
-      res.status(409).json({
-        error:
-          "Raft couldn't verify the Computer version. Install the latest Raft Computer, then try again.",
-        code: "computer_control_unsupported",
-      });
-      return;
-    }
-
-    const currentVersion = [Number(version[1]), Number(version[2]), Number(version[3])] as const;
-    const atLeast0720 = currentVersion[0] > 0
-      || (currentVersion[0] === 0 && currentVersion[1] >= 72);
-    if (!atLeast0720) {
-      addTraceEvent("computer.control.rejected", {
-        action,
-        reason: "computer_version_below_web_control_floor",
-        server_id: req.params.id,
-        machine_id: machine.id,
-        computer_version: computerVersion,
-      });
-      res.status(409).json({
-        error:
-          "This Computer version is too old for Web restart and upgrade. Install the latest Raft Computer, then try again.",
-        code: "computer_control_unsupported",
-      });
-      return;
-    }
-
-    const historicalIngress = currentVersion[0] === 0
-      && currentVersion[1] === 72
-      && currentVersion[2] <= 8;
-    const requiresBroadcastPolicy = action === "upgrade" || historicalIngress;
-    const policyDecision = requiresBroadcastPolicy
-      ? await computerBroadcastPolicyEvaluator(req.app)({
-          source: sourceFact,
-          platform: normalizeComputerPlatform(machine.os),
-          ...(action === "upgrade" ? { requestedTargetVersion } : {}),
-          now: new Date(agentOrchestrator.getCurrentTimeMs()),
-        })
-      : null;
-    if (requiresBroadcastPolicy
-      && (policyDecision?.eligibility !== "eligible" || !policyDecision.targetVersion)) {
-      addTraceEvent("computer.control.rejected", {
-        action,
-        reason: "computer_broadcast_not_eligible",
-        policy_reason: policyDecision?.eligibility === "eligible"
-          ? "policy_invalid"
-          : policyDecision?.reasonCode ?? "policy_invalid",
-        policy_revision: policyDecision?.policyRevision ?? "unknown",
-        server_id: req.params.id,
-        machine_id: machine.id,
-        computer_version: computerVersion,
-        historical_ingress: historicalIngress,
-      });
-      res.status(409).json({
-        error: "This Computer source is not eligible for an upgrade right now.",
-        code: "computer_broadcast_not_eligible",
-        policy: policyDecision
-          ? projectComputerBroadcastPolicyDecision(policyDecision)
-          : null,
-      });
-      return;
-    }
-    const dispatchTargetVersion = policyDecision?.targetVersion ?? computerVersion;
-    const dispatchAction = historicalIngress ? "upgrade" as const : action;
+    const dispatchAction = action;
     const supervisorCapable = agentOrchestrator.hasMachineCapability(
       machine.id,
       COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS,
     );
     const dispatchAdapter = supervisorCapable ? "supervisor-v1" : "runner-first-hop-v1";
-    const operation = await createUserComputerLifecycleOperation({
-      serverId: req.params.id,
-      machineId: machine.id,
-      actorUserId: req.userId!,
-      action,
-      dispatchMode: "server",
-      connectionEpochBefore: agentOrchestrator.getMachineConnectionEpoch?.(machine.id) ?? null,
-      targetVersion: dispatchTargetVersion,
-      ...(policyDecision
-        ? { broadcastPolicyDecision: snapshotComputerBroadcastPolicyDecision(policyDecision) }
-        : {}),
-      dispatch: {
-        action: dispatchAction,
+    // Task #91: the operation + dispatch admission is re-authorized inside the write transaction (member row first, machine
+    // row second, FOR SHARE: admission never updates the machine row). Sending the command and marking it sent below are the
+    // runtime effect and its bookkeeping (task #93).
+    const connectionEpochBefore = agentOrchestrator.getMachineConnectionEpoch?.(machine.id) ?? null;
+    const operation = await withActorMembershipFence(req.params.id, req.userId!, async (tx, lockedRole) => {
+      const [lockedMachine] = await tx
+        .select({ id: machinesTable.id, serverId: machinesTable.serverId, userId: machinesTable.userId })
+        .from(machinesTable)
+        .where(eq(machinesTable.id, machine.id))
+        .for("share");
+      if (!lockedMachine || lockedMachine.serverId !== req.params.id) throw new FencedAuthorizationDeniedError("not_found");
+      if (!canManageMachineResource(lockedRole, req.userId!, lockedMachine, "controlComputers")) {
+        throw new FencedAuthorizationDeniedError("forbidden");
+      }
+      return createUserComputerLifecycleOperation({
+        serverId: req.params.id,
+        machineId: machine.id,
+        actorUserId: req.userId!,
+        action,
+        dispatchMode: "server",
+        connectionEpochBefore,
         targetVersion: dispatchTargetVersion,
-        adapter: dispatchAdapter,
-      },
+        dispatch: {
+          action: dispatchAction,
+          targetVersion: dispatchTargetVersion,
+          adapter: dispatchAdapter,
+        },
+      }, { executor: tx });
     });
     if (!operation?.dispatch) {
       res.status(409).json({
@@ -3130,10 +3271,7 @@ serverRouter.post("/:id/machines/:machineId/computer/:action", async (req, res) 
       server_id: req.params.id,
       machine_id: machine.id,
       request_id: requestId,
-      computer_version: computerVersion,
-      ...(policyDecision?.policyRevision
-        ? { broadcast_policy_revision: policyDecision.policyRevision }
-        : {}),
+      computer_version: dispatchTargetVersion,
     });
     addTraceEvent("operation.command.sent", {
       operation_id: operation.operationId,
@@ -3142,15 +3280,27 @@ serverRouter.post("/:id/machines/:machineId/computer/:action", async (req, res) 
       server_id: req.params.id,
       machine_id: machine.id,
       request_id: requestId,
-      computer_version: computerVersion,
+      computer_version: dispatchTargetVersion,
     });
     res.json({ ok: true, action, requestId, operationId: operation.operationId });
   } catch (error) {
+    if (error instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FencedAuthorizationDeniedError) {
+      if (error.reason === "not_found") {
+        res.status(404).json({ error: "Machine not found in this server" });
+      } else {
+        res.status(403).json({ error: "The `controlComputers` capability or machine creator authority is required to control Computers" });
+      }
+      return;
+    }
     addTraceEvent("computer.control.failed", {
       action: req.params.action,
       server_id: req.params.id,
       machine_id: req.params.machineId,
-      error_class: error instanceof Error ? error.name : typeof error,
+      error_class: errorClassOf(error),
     });
     res.status(500).json({ error: "Failed to relay Computer control command" });
   }
@@ -3238,6 +3388,7 @@ serverRouter.post("/:id/machines/:machineId/computer-lifecycle-operations", asyn
       source: await readComputerSourceFact(orchestrator, machine.id),
       platform: normalizeComputerPlatform(machine.os),
       now: new Date(orchestrator.getCurrentTimeMs()),
+      serverId: req.params.id,
     });
     if (decision.eligibility !== "eligible" || !decision.targetVersion) {
       res.status(decision.reasonCode === "hands_unavailable" ? 503 : 409).json({
@@ -3287,7 +3438,21 @@ serverRouter.post("/:id/machines/:machineId/computer-lifecycle-operations", asyn
         sourceProvenance: source!.provenance,
       }
     : null;
-  const operation = await createUserComputerLifecycleOperation({
+  // Task #91: the operation admission is re-authorized inside the write transaction (member row first, machine row second,
+  // FOR SHARE). This handler has no outer try/catch, so only fence denials are mapped here; anything else still propagates.
+  let operation: Awaited<ReturnType<typeof createUserComputerLifecycleOperation>>;
+  try {
+    operation = await withActorMembershipFence(req.params.id, req.userId!, async (tx, lockedRole) => {
+      const [lockedMachine] = await tx
+        .select({ id: machinesTable.id, serverId: machinesTable.serverId, userId: machinesTable.userId })
+        .from(machinesTable)
+        .where(eq(machinesTable.id, machine.id))
+        .for("share");
+      if (!lockedMachine || lockedMachine.serverId !== req.params.id) throw new FencedAuthorizationDeniedError("not_found");
+      if (!canManageMachineResource(lockedRole, req.userId!, lockedMachine, "controlComputers")) {
+        throw new FencedAuthorizationDeniedError("forbidden");
+      }
+      return createUserComputerLifecycleOperation({
     operationId,
     parentOperationId,
     serverId: req.params.id,
@@ -3304,7 +3469,23 @@ serverRouter.post("/:id/machines/:machineId/computer-lifecycle-operations", asyn
             : {}),
         }
       : {}),
-  });
+      }, { executor: tx });
+    });
+  } catch (error) {
+    if (error instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FencedAuthorizationDeniedError) {
+      if (error.reason === "not_found") {
+        res.status(404).json({ error: "Machine not found in this server" });
+      } else {
+        res.status(403).json({ error: "The `controlComputers` capability or machine creator authority is required to control Computers" });
+      }
+      return;
+    }
+    throw error;
+  }
   if (!operation) {
     res.status(409).json({ error: "Lifecycle operations are only available for managed Computers", code: "not_a_computer" });
     return;
@@ -3357,28 +3538,28 @@ serverRouter.get("/:id/machines/:machineId/workspaces", async (req, res) => {
 
     const directories = await agentOrchestrator.scanMachineWorkspaces(req.params.machineId);
 
-    // Cross-reference with DB agents to determine status
-    const allAgents = await agentService.listAgents(req.params.id, true);
-    const agentMap = new Map(allAgents.map((a) => [a.id, a]));
+    // The daemon lists every workspace under the Computer's shared data root, and a
+    // Computer attached to several servers holds each server's agents there side by
+    // side under one `machines` row per server. Directory names are agent ids, so
+    // this server's own agent records -- live or soft-deleted -- are the only proof
+    // of ownership available. Anything else is another tenant's workspace or one
+    // this server cannot account for, and is not reported: labelling it "orphan"
+    // invited exactly the cross-server deletion the delete route now refuses.
+    const ownAgents = await agentService.listAgents(req.params.id, true);
+    const agentMap = new Map(ownAgents.map((a) => [a.id, a]));
 
-    const enriched = directories.map((dir) => {
+    const enriched = directories.flatMap((dir) => {
       const agent = agentMap.get(dir.directoryName);
-      let status: "active" | "stopped" | "deleted" | "orphan";
-      if (agent) {
-        if (agent.deletedAt) {
-          status = "deleted";
-        } else {
-          status = agent.status === "inactive" ? "stopped" : "active";
-        }
-      } else {
-        status = "orphan";
-      }
-      return {
+      if (!agent) return [];
+      const status: "active" | "stopped" | "deleted" = agent.deletedAt
+        ? "deleted"
+        : agent.status === "inactive" ? "stopped" : "active";
+      return [{
         ...dir,
         status,
-        agentName: agent?.displayName || agent?.name || null,
-        agentStatus: agent?.status || null,
-      };
+        agentName: agent.displayName || agent.name || null,
+        agentStatus: agent.status,
+      }];
     });
 
     res.json(enriched);
@@ -3429,16 +3610,6 @@ serverRouter.get("/:id/machines/:machineId/runtime-options", async (req, res) =>
 // identity may cross this boundary only as the schema-validated masked label.
 serverRouter.get("/:id/machines/:machineId/runtime-account-usage/:provider", async (req, res) => {
   try {
-    const gate = await evaluateFeatureFlag({
-      key: RUNTIME_ACCOUNT_USAGE_FEATURE_FLAG_KEY,
-      serverId: req.params.id,
-      userId: req.userId!,
-      platform: "web",
-    });
-    if (!gate.enabled) {
-      res.status(404).json({ error: "Runtime account usage is not available" });
-      return;
-    }
     if (!isRuntimeAccountUsageProvider(req.params.provider)) {
       res.status(404).json({ error: "Runtime account usage provider not found" });
       return;
@@ -3467,16 +3638,6 @@ serverRouter.get("/:id/machines/:machineId/runtime-account-usage/:provider", asy
 
 serverRouter.post("/:id/machines/:machineId/runtime-account-usage/:provider/refresh", async (req, res) => {
   try {
-    const gate = await evaluateFeatureFlag({
-      key: RUNTIME_ACCOUNT_USAGE_FEATURE_FLAG_KEY,
-      serverId: req.params.id,
-      userId: req.userId!,
-      platform: "web",
-    });
-    if (!gate.enabled) {
-      res.status(404).json({ error: "Runtime account usage is not available" });
-      return;
-    }
     if (!isRuntimeAccountUsageProvider(req.params.provider)) {
       res.status(404).json({ error: "Runtime account usage provider not found" });
       return;
@@ -3498,24 +3659,51 @@ serverRouter.post("/:id/machines/:machineId/runtime-account-usage/:provider/refr
       return;
     }
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
-    const sent = await agentOrchestrator.requestRuntimeAccountUsageRefresh(
-      machine.id,
-      req.params.provider,
-      reason,
-    );
-    res.status(202).json({
-      accepted: sent,
-      state: sent ? "requested" : "computer_offline",
-    });
+    if (reason !== "manual") {
+      // Background-triggered refreshes stay fire-and-forget: the snapshot
+      // arrives through the normal push path and lands in the cache.
+      const sent = await agentOrchestrator.requestRuntimeAccountUsageRefresh(
+        machine.id,
+        req.params.provider,
+        reason,
+      );
+      res.status(202).json({
+        accepted: sent,
+        state: sent ? "requested" : "computer_offline",
+      });
+      return;
+    }
+    // Manual refreshes wait for the computer's correlated snapshot through the
+    // machine response relay, so the caller renders the fresh value in place
+    // instead of polling. The cache write happens once, in the orchestrator's
+    // inbound switch, before the relay resolves this request.
+    try {
+      const reply = await agentOrchestrator.requestRuntimeAccountUsageRefreshAndAwait(
+        machine.id,
+        req.params.provider,
+      );
+      res.status(200).json({ accepted: true, state: "fresh", snapshot: reply.snapshot });
+    } catch (error) {
+      if (error instanceof RouteFailureError && error.subkind === "daemon_timeout") {
+        res.status(200).json({ accepted: true, state: "timeout" });
+        return;
+      }
+      if (error instanceof RouteFailureError && error.subkind === "daemon_offline") {
+        res.status(202).json({ accepted: false, state: "computer_offline" });
+        return;
+      }
+      throw error;
+    }
   } catch {
     res.status(500).json({ error: "Failed to refresh runtime account usage" });
   }
 });
 
-// Permission-aware, version-pinned Create Agent form definition. During the
-// migration only the admitted Built-in Pi row carries a definition ref; every
-// other runtime continues to use the legacy Web form.
-serverRouter.get("/:id/machines/:machineId/runtime-form-definitions/:runtimeId", async (req, res) => {
+// Runtime form definitions. v1 is version-pinned and served only for the
+// runtimes with a frozen v1 form (runtimeFormV1Entry); v2 is the current form of
+// any runtime in the v2 registry (runtimeFormV2Registry). Every other runtime
+// continues to use the legacy Web form.
+const handleRuntimeFormDefinition = (protocol: 1 | 2): RequestHandler<{ id: string; machineId: string; runtimeId: string }> => async (req, res) => {
   try {
     const callerRole = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
     if (!callerRole) {
@@ -3531,29 +3719,30 @@ serverRouter.get("/:id/machines/:machineId/runtime-form-definitions/:runtimeId",
       res.status(403).json({ error: "The `editMachines` capability or machine creator authority is required to inspect runtime form definitions" });
       return;
     }
-    if (req.params.runtimeId !== "builtin" && req.params.runtimeId !== "kimi-sdk") {
+    const v1 = protocol === 1 ? runtimeFormV1Entry(req.params.runtimeId) : null;
+    const v2 = protocol === 2 ? runtimeFormV2Entry(req.params.runtimeId) : null;
+    if (!v1 && !v2) {
       res.status(404).json({
         error: "Runtime form definition not found",
         issues: [{ code: "unknown_form_runtime", pointer: "/runtimeId" }],
       });
       return;
     }
-    const schemaVersion = req.params.runtimeId === "builtin"
-      ? BUILTIN_PI_FORM_SCHEMA_VERSION
-      : KIMI_SDK_FORM_SCHEMA_VERSION;
-    if (req.query.schemaVersion !== schemaVersion) {
+    // v1 clients pin a schemaVersion; v2 clients take the current form as it is.
+    if (v1 && req.query.schemaVersion !== v1.ref.schemaVersion) {
       res.status(409).json({
         error: "Runtime form schema is stale or unknown",
         issues: [{ code: "stale_form_schema", pointer: "/schemaVersion" }],
       });
       return;
     }
-    const definition = req.params.runtimeId === "builtin"
-      ? buildBuiltInPiFormDefinition()
-      : buildKimiSdkFormDefinition();
-    const projectionIssues = req.params.runtimeId === "builtin"
-      ? validateBuiltInPiDefinitionProjection()
-      : validateKimiSdkDefinitionProjection();
+    // A released version is answered from its frozen sample, never from current
+    // code, so a server change cannot break clients that already shipped it
+    // (packages/runtime-form/README.md).
+    const definition = v2
+      ? v2.buildForm()
+      : releasedRuntimeFormDefinition(v1!.ref.schemaVersion) ?? v1!.buildDefinition();
+    const projectionIssues = (v2 ?? v1!).validateProjection();
     if (projectionIssues.length > 0) {
       res.status(500).json({ error: "Runtime form projection drift", issues: projectionIssues });
       return;
@@ -3562,9 +3751,11 @@ serverRouter.get("/:id/machines/:machineId/runtime-form-definitions/:runtimeId",
   } catch {
     res.status(500).json({ error: "Failed to load runtime form definition" });
   }
-});
+};
+serverRouter.get("/:id/machines/:machineId/runtime-form-definitions/:runtimeId", handleRuntimeFormDefinition(1));
+serverRouter.get("/:id/machines/:machineId/runtime-forms/v2/:runtimeId", handleRuntimeFormDefinition(2));
 
-serverRouter.get("/:id/machines/:machineId/runtime-form-definitions/:runtimeId/option-sources/:sourceId", async (req, res) => {
+const handleRuntimeFormOptionSource = (protocol: 1 | 2): RequestHandler<{ id: string; machineId: string; runtimeId: string; sourceId: string }> => async (req, res) => {
   try {
     const callerRole = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
     if (!callerRole) {
@@ -3580,103 +3771,45 @@ serverRouter.get("/:id/machines/:machineId/runtime-form-definitions/:runtimeId/o
       res.status(403).json({ error: "The `editMachines` capability or machine creator authority is required to inspect runtime form option sources" });
       return;
     }
-    if (req.params.runtimeId !== "builtin" && req.params.runtimeId !== "kimi-sdk") {
+    // Option values are the same on both protocols; v1 serves them only for the
+    // runtimes that have a v1 form.
+    const v1 = protocol === 1 ? runtimeFormV1Entry(req.params.runtimeId) : null;
+    const entry = protocol === 2 || v1 ? runtimeFormV2Entry(req.params.runtimeId) : null;
+    if (!entry) {
       res.status(404).json({
         error: "Runtime form option source not found",
         issues: [{ code: "unknown_form_runtime", pointer: "/runtimeId" }],
       });
       return;
     }
-    const schemaVersion = req.params.runtimeId === "builtin"
-      ? BUILTIN_PI_FORM_SCHEMA_VERSION
-      : KIMI_SDK_FORM_SCHEMA_VERSION;
-    if (req.query.schemaVersion !== schemaVersion) {
+    if (v1 && req.query.schemaVersion !== v1.ref.schemaVersion) {
       res.status(409).json({
         error: "Runtime form schema is stale or unknown",
         issues: [{ code: "stale_form_schema", pointer: "/schemaVersion" }],
       });
       return;
     }
-    let source = null;
-    if (req.params.runtimeId === "builtin") {
-      const agentOrchestrator = req.app.get(
-        "agentOrchestrator",
-      ) as AgentOrchestrator;
-      const routing = await handleMachineLocalRouting(
+    const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+    const resolution = await entry.resolveOptionSource({
+      sourceId: req.params.sourceId,
+      machineId: req.params.machineId,
+      machine,
+      // A client's retry of a non-live source (`option_source.status`), v2 only.
+      refresh: protocol === 2 && req.query.refresh === "1",
+      agentOrchestrator,
+      routeToComputer: () => handleMachineLocalRouting(
         req,
         res,
         req.params.machineId,
         () => agentOrchestrator.hasMachineLocally(req.params.machineId),
-      );
-      if (routing === "handled") return;
-      if (routing !== "confirmed_local") {
-        res.status(409).json({
-          error: "The target Computer's Built-in model catalog is unavailable",
-          code: "builtin_catalog_unavailable",
-          recovery: "retry",
-        });
-        return;
-      }
-      let detection;
-      try {
-        detection =
-          await agentOrchestrator.detectMachineRuntimeModelsWithAuthority(
-            req.params.machineId,
-            "builtin",
-          );
-      } catch (error) {
-        if (!(error instanceof RouteFailureError)) throw error;
-        throw new BuiltInModelCatalogError(
-          "builtin_catalog_unavailable",
-          "The target Computer's Built-in model catalog is unavailable. Retry after the Computer reconnects.",
-          {
-            daemonVersion: machine.daemonVersion ?? null,
-            computerVersion: machine.computerVersion ?? null,
-            recovery: "retry",
-          },
-        );
-      }
-      const catalog = requireBuiltInCatalogCapability(detection.outcome, {
-        machineId: req.params.machineId,
-        daemonVersion: detection.daemonVersion,
-        computerVersion: detection.computerVersion,
-      });
-      const unfilteredSource = buildBuiltInPiFormOptionSource(req.params.sourceId);
-      source = unfilteredSource
-        ? filterBuiltInPiFormOptionSourceForCatalog(
-            unfilteredSource,
-            catalog.supportedModelIds,
-          )
-        : null;
-    } else if (req.params.runtimeId === "kimi-sdk" && req.params.sourceId === "model") {
-      const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
-      const routing = await handleMachineLocalRouting(
-        req,
-        res,
-        req.params.machineId,
-        () => agentOrchestrator.hasMachineLocally(req.params.machineId),
-      );
-      if (routing === "handled") return;
-      if (routing !== "confirmed_local") {
-        res.status(409).json({
-          error: "Computer is offline",
-          issues: [{ code: "runtime_model_source_unavailable", pointer: "/optionSources/model" }],
-        });
-        return;
-      }
-      const detected = await agentOrchestrator.detectMachineRuntimeModels(req.params.machineId, "kimi-sdk");
-      if (detected.kind !== "live") {
-        res.status(409).json({
-          error: "Kimi model source is unavailable",
-          issues: [{ code: `runtime_model_source_${detected.kind}`, pointer: "/optionSources/model" }],
-        });
-        return;
-      }
-      source = buildKimiSdkFormOptionSource({
-        models: detected.value.models,
-        defaultModel: detected.value.default,
-      });
+      ),
+    });
+    if (resolution.kind === "handled") return;
+    if (resolution.kind === "reply") {
+      res.status(resolution.status).json(resolution.body);
+      return;
     }
+    const source = resolution.source;
     if (!source) {
       res.status(404).json({
         error: "Runtime form option source not found",
@@ -3684,9 +3817,7 @@ serverRouter.get("/:id/machines/:machineId/runtime-form-definitions/:runtimeId/o
       });
       return;
     }
-    const projectionIssues = req.params.runtimeId === "builtin"
-      ? validateBuiltInPiDefinitionProjection()
-      : validateKimiSdkDefinitionProjection();
+    const projectionIssues = (v1 ?? entry).validateProjection();
     if (projectionIssues.length > 0) {
       res.status(500).json({ error: "Runtime form projection drift", issues: projectionIssues });
       return;
@@ -3713,7 +3844,15 @@ serverRouter.get("/:id/machines/:machineId/runtime-form-definitions/:runtimeId/o
     }
     res.status(500).json({ error: "Failed to load runtime form option source" });
   }
-});
+};
+serverRouter.get(
+  "/:id/machines/:machineId/runtime-form-definitions/:runtimeId/option-sources/:sourceId",
+  handleRuntimeFormOptionSource(1),
+);
+serverRouter.get(
+  "/:id/machines/:machineId/runtime-forms/v2/:runtimeId/option-sources/:sourceId",
+  handleRuntimeFormOptionSource(2),
+);
 
 // Detect runtime models on a machine on-demand (used by Create/Edit agent picker)
 // Ask the computer to re-detect its installed runtimes. The fresh list arrives
@@ -3745,6 +3884,33 @@ serverRouter.post("/:id/machines/:machineId/runtimes/rescan", async (req, res) =
   } catch {
     res.status(500).json({ error: "Failed to request a runtime rescan" });
   }
+});
+
+/**
+ * Member-readable model-label catalog (task #700). One shared source every
+ * display surface resolves model names from: the daemon reports each
+ * runtime's model list, the server stores it per machine, and the
+ * runtime-config dropdown, name rows, machine page, panel badge and profile
+ * card all read this same copy. Deliberately only ids, labels and report
+ * timestamps — nothing else from the computer.
+ */
+serverRouter.get("/:id/model-label-catalog", async (req, res) => {
+  const callerRole = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
+  if (!callerRole) {
+    res.status(404).json({ error: "Server not found" });
+    return;
+  }
+  // Any member — guests included — renders agent name rows, so any member may
+  // read the display catalog; the payload is only ids, labels and timestamps.
+  const machines = await machineService.listMachines(req.params.id);
+  const response: ServerModelLabelCatalog = { machines: {} };
+  for (const machine of machines) {
+    const catalog = await machineRuntimeModelCatalogService.read(machine.id);
+    if (Object.keys(catalog.runtimes).length > 0) {
+      response.machines[machine.id] = catalog;
+    }
+  }
+  res.json(response);
 });
 
 serverRouter.get("/:id/machines/:machineId/runtime-models/:runtime", async (req, res) => {
@@ -3802,7 +3968,7 @@ serverRouter.get("/:id/machines/:machineId/runtime-models/:runtime", async (req,
         reason: "machine_offline",
         runtime: req.params.runtime,
       });
-      res.json({ kind: "error", retryable: true });
+      res.json({ kind: "error", retryable: true, code: "computer_offline" });
       return;
     }
     addTraceEvent("machine.routing.checked", {
@@ -3845,7 +4011,14 @@ serverRouter.get("/:id/machines/:machineId/runtime-models/:runtime", async (req,
       daemon_version_present: observedDaemonVersion != null,
       ...(!observedDaemonVersion ? { daemon_version_reason: "version_unknown_no_handshake" } : {}),
     });
-    res.json({ kind: "error", retryable: true });
+    res.json({
+      kind: "error", retryable: true,
+      ...(err instanceof RouteFailureError && err.subkind === "daemon_offline"
+        ? { code: "computer_offline" }
+        : err instanceof RouteFailureError && err.subkind === "daemon_timeout"
+          ? { code: "detect_timeout" }
+          : {}),
+    });
   }
 });
 
@@ -3866,7 +4039,7 @@ async function authorizeMentionDeliveryDiagnostic(req: Request) {
 
 serverRouter.get("/:id/machines/:machineId/agents/:agentId/diagnostic/mention-delivery/:messageId", async (req, res) => {
   try {
-    if (!UUID_V4_SHAPE.test(req.params.messageId)) {
+    if (!UUID_RE.test(req.params.messageId)) {
       res.status(404).json({ status: "NOT_JOINABLE" });
       return;
     }
@@ -3891,7 +4064,7 @@ serverRouter.get("/:id/machines/:machineId/agents/:agentId/diagnostic/mention-de
 
 serverRouter.post("/:id/machines/:machineId/agents/:agentId/diagnostic/mention-delivery/:messageId/redrive", async (req, res) => {
   try {
-    if (!UUID_V4_SHAPE.test(req.params.messageId)) {
+    if (!UUID_RE.test(req.params.messageId)) {
       res.status(404).json({ status: "NOT_JOINABLE" });
       return;
     }
@@ -4052,11 +4225,29 @@ serverRouter.post("/:id/machines/:machineId/agents/:agentId/feedback/:reportId/t
     const reportTimeSource = typeof requestedReportGeneratedAt === "string"
       ? "web_report_bundle"
       : "server_request_received";
+    // Tier 2 (task #272): the machine's runner log tail is free text about
+    // every agent on that machine, so only the machine OWNER may attach it,
+    // and only by explicit opt-in per report. Checked here on the receiving
+    // side against the machine row — hiding the checkbox in the web UI is not
+    // the authorization.
+    const requestedMachineLogTail = req.body?.includeMachineLogTail;
+    if (requestedMachineLogTail !== undefined && typeof requestedMachineLogTail !== "boolean") {
+      res.status(400).json({ error: "includeMachineLogTail must be a boolean" });
+      return;
+    }
+    const includeMachineLogTail = requestedMachineLogTail === true;
+    if (includeMachineLogTail && machine.userId !== req.userId) {
+      res.status(403).json({
+        error: "Only the human who attached this machine may include its runner log tail in a report",
+        code: "machine_log_tail_owner_required",
+      });
+      return;
+    }
     // Fire-and-forget: do not await the daemon response so the HTTP call returns quickly.
     agentOrchestrator.collectFeedbackTranscript(req.params.agentId, feedbackReportId, {
       reportGeneratedAt,
       reportTimeSource,
-    }).then(
+    }, { includeMachineLogTail }).then(
       (outcome) => {
         console.info(`[FeedbackTranscript] collected for report=${feedbackReportId} agent=${req.params.agentId}`, {
           reachable: outcome.reachable,
@@ -4064,6 +4255,11 @@ serverRouter.post("/:id/machines/:machineId/agents/:agentId/feedback/:reportId/t
           fallbackReason: outcome.fallbackReason,
           error: outcome.error,
           transcriptWindow: outcome.transcriptWindow,
+          machineLogTail: outcome.machineLogTail,
+          machineEvidence: outcome.machineEvidence,
+          lookup: outcome.lookup,
+          upload: outcome.upload,
+          outcomeObject: outcome.outcomeObject,
         });
       },
       (err: unknown) => {
@@ -4082,42 +4278,6 @@ serverRouter.post("/:id/machines/:machineId/agents/:agentId/feedback/:reportId/t
   }
 });
 
-serverRouter.post("/:id/feedback/:reportId/receipt", async (req, res) => {
-  try {
-    const callerRole = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
-    if (!callerRole) {
-      res.status(404).json({ error: "Server not found" });
-      return;
-    }
-
-    const reportId = req.params.reportId;
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(reportId)) {
-      res.status(400).json({ error: "Invalid feedback report id" });
-      return;
-    }
-
-    const user = await userService.getUser(req.userId!);
-    if (!user?.email) {
-      res.status(404).json({ error: "User email not found" });
-      return;
-    }
-
-    if (!isFeedbackReportReceiptEmailEnabled()) {
-      res.json({ ok: false, skipped: "feedback_receipt_email_disabled" });
-      return;
-    }
-
-    const bodyLocale = typeof req.body?.locale === "string" ? req.body.locale : null;
-    const locale = user.preferredLanguage || bodyLocale;
-    const recipientName = user.displayName || user.name || null;
-    await sendFeedbackReportReceiptEmail(user.email, { recipientName, locale });
-    res.json({ ok: true });
-  } catch (err: unknown) {
-    console.error("[FeedbackReceipt] failed to send receipt email", err);
-    res.status(500).json({ error: "Failed to send feedback receipt email" });
-  }
-});
-
 // Delete a workspace directory on a machine (admin/owner only)
 serverRouter.delete("/:id/machines/:machineId/workspaces/:directoryName", async (req, res) => {
   try {
@@ -4133,6 +4293,18 @@ serverRouter.delete("/:id/machines/:machineId/workspaces/:directoryName", async 
     }
     if (!canManageMachineResource(callerRole, req.userId!, machine, "controlComputers")) {
       res.status(403).json({ error: "The `controlComputers` capability or machine creator authority is required to delete machine workspaces" });
+      return;
+    }
+
+    // Same shared data root as the scan above: the directory must belong to one of
+    // this server's own agents. A soft-deleted agent still qualifies, because its
+    // leftover workspace is the legitimate cleanup this route exists for. Any other
+    // name -- another server's agent on the same Computer, or nothing this server
+    // knows -- is reported as absent rather than forbidden, so the response does not
+    // confirm what lives on the host.
+    const ownAgents = await agentService.listAgents(req.params.id, true);
+    if (!ownAgents.some((agent) => agent.id === req.params.directoryName)) {
+      res.status(404).json({ error: "Workspace not found in this server" });
       return;
     }
 
@@ -4198,7 +4370,11 @@ serverRouter.get("/:id/public-visibility", async (req, res) => {
       return;
     }
     const [server] = await getDb()
-      .select({ publiclyVisible: servers.publiclyVisible, slug: servers.slug })
+      .select({
+        publiclyVisible: servers.publiclyVisible,
+        publicGuestJoinEnabled: servers.publicGuestJoinEnabled,
+        slug: servers.slug,
+      })
       .from(servers)
       .where(eq(servers.id, req.params.id))
       .limit(1);
@@ -4217,7 +4393,12 @@ serverRouter.get("/:id/public-visibility", async (req, res) => {
         isNull(channels.archivedAt),
       ))
       .orderBy(channels.name);
-    res.json({ publiclyVisible: server.publiclyVisible, slug: server.slug, exposedChannels: exposed });
+    res.json({
+      publiclyVisible: server.publiclyVisible,
+      publicGuestJoinEnabled: server.publicGuestJoinEnabled,
+      slug: server.slug,
+      exposedChannels: exposed,
+    });
   } catch {
     res.status(500).json({ error: "Failed to read public visibility" });
   }
@@ -4247,15 +4428,66 @@ serverRouter.patch("/:id/public-visibility", async (req, res) => {
     }
     const [updated] = await getDb()
       .update(servers)
-      .set({ publiclyVisible, updatedAt: new Date() })
+      .set({
+        publiclyVisible,
+        ...(publiclyVisible ? {} : { publicGuestJoinEnabled: false }),
+        updatedAt: new Date(),
+      })
       .where(eq(servers.id, req.params.id))
-      .returning({ publiclyVisible: servers.publiclyVisible });
+      .returning({
+        publiclyVisible: servers.publiclyVisible,
+        publicGuestJoinEnabled: servers.publicGuestJoinEnabled,
+      });
     if (!updated) {
       res.status(404).json({ error: "Server not found" });
       return;
     }
-    res.json({ publiclyVisible: updated.publiclyVisible });
+    res.json(updated);
   } catch {
     res.status(500).json({ error: "Failed to update public visibility" });
+  }
+});
+
+serverRouter.patch("/:id/public-guest-join", async (req, res) => {
+  try {
+    const callerRole = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
+    if (callerRole !== "owner") {
+      res.status(403).json({ error: "Only the server owner can manage public Guest admission" });
+      return;
+    }
+    const [publicGate, guestGate] = await Promise.all([
+      evaluateFeatureFlag({ key: PUBLIC_SERVER_FEATURE_FLAG_KEY, serverId: req.params.id, userId: req.userId!, platform: "web" }),
+      evaluateFeatureFlag({ key: SERVER_GUEST_FEATURE_FLAG_KEY, serverId: req.params.id, userId: req.userId!, platform: "web" }),
+    ]);
+    if (!publicGate.enabled || !guestGate.enabled) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    const { publicGuestJoinEnabled } = req.body ?? {};
+    if (typeof publicGuestJoinEnabled !== "boolean") {
+      res.status(400).json({ error: "publicGuestJoinEnabled must be a boolean" });
+      return;
+    }
+    const [updated] = await getDb().transaction(async (tx) => {
+      const [server] = await tx.select({ publiclyVisible: servers.publiclyVisible })
+        .from(servers).where(eq(servers.id, req.params.id)).limit(1).for("update");
+      if (!server) return [];
+      if (publicGuestJoinEnabled && !server.publiclyVisible) return [{ refused: true as const }];
+      return tx.update(servers)
+        .set({ publicGuestJoinEnabled, updatedAt: new Date() })
+        .where(eq(servers.id, req.params.id))
+        .returning({ publicGuestJoinEnabled: servers.publicGuestJoinEnabled });
+    });
+    if (!updated) {
+      res.status(404).json({ error: "Server not found" });
+      return;
+    }
+    if ("refused" in updated) {
+      res.status(409).json({ error: "Public access must be enabled before visitors can join as Guest" });
+      return;
+    }
+    res.json(updated);
+  } catch {
+    res.status(500).json({ error: "Failed to update public Guest admission" });
   }
 });

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { runSeaHostProbe } from "./seaHostHarness.js";
+import { runSeaHostProbe } from "./seaHostHarness";
 
 /**
  * SEPARATE SUITE, NOT PART OF THE DEFAULT DAEMON UNIT RUN.

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { findAddMachineConnectedMachine, resolveAddMachineConnectedMachine } from "../src/utils/addMachineConnection";
 
 type Machine = {

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   CHANNEL_ADMIN_CAPABILITIES,
   CHANNEL_MANAGEMENT_CAPABILITIES,
@@ -9,7 +8,7 @@ import {
   canGuestReadChannel,
   getChannelAdminBasis,
   hasEffectiveChannelCapability,
-} from "./channelPermissions.js";
+} from "./channelPermissions";
 
 test("stored channel admin grants only the closed local capability set", () => {
   for (const capability of CHANNEL_ADMIN_CAPABILITIES) {
@@ -130,7 +129,7 @@ test("channel projection includes local and server-only management capabilities"
   ]);
 });
 
-test("guest channel policy separates read, join, and post authority", () => {
+test("guest channel policy separates read and join from fixed read-only post authority", () => {
   const base = {
     gateEnabled: true,
     serverRole: "guest" as const,
@@ -145,7 +144,7 @@ test("guest channel policy separates read, join, and post authority", () => {
   assert.equal(canGuestReadChannel(base), true);
   assert.equal(canGuestJoinChannel(base), true);
   assert.equal(canGuestPostToChannel(base), false);
-  assert.equal(canGuestPostToChannel({ ...base, isChannelMember: true }), true);
+  assert.equal(canGuestPostToChannel({ ...base, isChannelMember: true }), false);
 });
 
 test("guest channel policy fails closed for rollout, shape, archive, and hidden all boundaries", () => {
@@ -169,7 +168,8 @@ test("guest channel policy fails closed for rollout, shape, archive, and hidden 
   assert.equal(canGuestReadChannel({ ...base, channelType: "private", isChannelMember: false }), false);
   assert.equal(canGuestReadChannel({ ...base, channelType: "private", isChannelMember: true }), true);
   assert.equal(canGuestReadChannel({ ...base, channelType: "dm", isChannelMember: true }), true);
-  assert.equal(canGuestPostToChannel({ ...base, channelType: "dm", isChannelMember: true }), true);
+  assert.equal(canGuestPostToChannel({ ...base, channelType: "dm", isChannelMember: true }), false);
+  assert.equal(canGuestPostToChannel({ ...base, channelType: "private", isChannelMember: true }), false);
   assert.equal(canGuestPostToChannel({ ...base, archived: true, isChannelMember: true }), false);
 });
 

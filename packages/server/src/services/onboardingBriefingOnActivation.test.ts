@@ -1,14 +1,13 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
-import { vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { createServer, updateServerOnboardingAgent } from "./serverService.js";
-import { createAgent } from "./agentService.js";
-import { startOnboardingBriefingOnActivation } from "./onboardingBriefingOnActivation.js";
-import type { AgentOrchestrator } from "./agentOrchestrator.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { createServer, updateServerOnboardingAgent } from "./serverService";
+import { createAgent } from "./agentService";
+import { startOnboardingBriefingOnActivation } from "./onboardingBriefingOnActivation";
+import type { AgentOrchestrator } from "./agentOrchestrator";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

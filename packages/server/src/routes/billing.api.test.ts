@@ -1,15 +1,15 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import type Stripe from "stripe";
 import { getEffectiveLimits, TRIAL_START_DATE } from "@botiverse/raft-shared";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { servers as serversTable, subscriptions, users } from "../db/schema.js";
-import { addMember, createServer } from "../services/serverService.js";
-import { __resetStripeForTests, __setStripeForTests } from "../services/billingService.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { servers as serversTable, subscriptions, users } from "../db/schema";
+import { addMember, createServer } from "../services/serverService";
+import { __resetStripeForTests, __setStripeForTests } from "../services/billingService";
 import { eq } from "drizzle-orm";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });

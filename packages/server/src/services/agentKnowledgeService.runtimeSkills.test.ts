@@ -1,7 +1,6 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
-import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService.js";
+import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService";
 
 const DOC = "runtime";
 

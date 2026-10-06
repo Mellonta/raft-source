@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test, { afterEach } from "node:test";
 import {
   CANONICAL_NESTED_WIRE_SHAPES,
-} from "../../shared/src/canonicalMessageManifest.js";
+} from "../../shared/src/canonicalMessageManifest";
 import {
   DISCUSSION_RELATION_REGISTRY,
   MESSAGE_REPLIES_SYNC_WINDOW_PRODUCER,
   messageRef,
   messageRepliesDiscussion,
   syncScopeWindow,
-} from "../../shared/src/discussionGraph.js";
+} from "../../shared/src/discussionGraph";
 import vectors from "@botiverse/raft-shared/src/testVectors/messageRepliesDiscussionGraph.vectors.json" with { type: "json" };
 import {
   applyThreadReplyFrame,

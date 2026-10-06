@@ -1,11 +1,10 @@
 // Agent API /events drain tests. The CLI no longer has a machine-token
 // compatibility receive/ack path.
 
-import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import type { AgentContext } from "../../auth/env.js";
-import { drainInbox } from "./_inbox.js";
+import type { AgentContext } from "../../auth/env";
+import { drainInbox } from "./_inbox";
 
 const ctx: AgentContext = {
   agentId: "agent_test",
@@ -186,4 +185,59 @@ test("drainInbox returns accumulated has_more batches in seq order", async () =>
   assert.equal(result.drainedMore, true);
   assert.equal(result.hasMore, undefined);
   assert.equal(result.drainComplete, true);
+});
+
+test("drainInbox: cursor acks pass the previous last_seen_seq until a request returns nothing", async () => {
+  const cursorEvents = (messages: Array<{ seq: number; content: string }>, lastSeenSeq: number | null) => ({
+    ...agentEvents(messages),
+    last_seen_seq: lastSeenSeq,
+    ack_mode: "cursor",
+  });
+  const { calls, restore } = installFetchMock([
+    () => jsonResponse(200, cursorEvents([{ seq: 5, content: "a" }, { seq: 7, content: "b" }], 7)),
+    () => jsonResponse(200, cursorEvents([{ seq: 9, content: "c" }], 9)),
+    () => jsonResponse(200, cursorEvents([], 9)),
+  ]);
+
+  let result;
+  try {
+    result = await drainInbox(ctx, { block: false });
+  } finally {
+    restore();
+  }
+
+  assert.deepEqual(result.messages.map((m) => m.seq), [5, 7, 9]);
+  assert.equal(result.drainComplete, true);
+  const params = calls.map((call) => new URL(call.url).searchParams);
+  assert.deepEqual(params.map((p) => [p.get("since"), p.get("ack")]), [
+    ["latest", "cursor"],
+    ["7", "cursor"],
+    ["9", "cursor"],
+  ]);
+});
+
+test("drainInbox: a server without cursor acks keeps since=latest", async () => {
+  const { calls, restore } = installFetchMock([
+    () => jsonResponse(200, agentEvents([{ seq: 5, content: "a" }], true)),
+    () => jsonResponse(200, agentEvents([{ seq: 6, content: "b" }])),
+  ]);
+  try {
+    const result = await drainInbox(ctx, { block: false });
+    assert.deepEqual(result.messages.map((m) => m.seq), [5, 6]);
+  } finally {
+    restore();
+  }
+  assert.deepEqual(calls.map((call) => new URL(call.url).searchParams.get("since")), ["latest", "latest"]);
+});
+
+test("drainInbox: managed runners do not request cursor acks", async () => {
+  const { calls, restore } = installFetchMock([
+    () => jsonResponse(200, agentEvents([{ seq: 5, content: "a" }])),
+  ]);
+  try {
+    await drainInbox({ ...ctx, clientMode: "managed-runner" }, { block: false });
+  } finally {
+    restore();
+  }
+  assert.equal(new URL(calls[0].url).searchParams.get("ack"), null);
 });

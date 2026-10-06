@@ -1,5 +1,5 @@
 import { MANUAL_INDEX_COMMAND, validateKnowledgeContext } from "@botiverse/raft-shared";
-import { CliError, type CliErrorCode } from "../../core/errors.js";
+import { CliError, type CliErrorCode } from "../../core/errors";
 
 const INTENT_GUIDANCE =
   "Retry with --intent \"Set up a multi-agent review pipeline for my team\" — describe the user's ultimate goal in Raft, not the query or topic.";

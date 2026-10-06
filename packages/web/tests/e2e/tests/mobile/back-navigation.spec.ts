@@ -130,7 +130,8 @@ test.describe("mobile back from cold-start deep URL", () => {
     // must therefore consume the single Activity→detail PUSH and return to
     // Activity in one click, without reopening the thread as an intermediate.
     await openActivityThread();
-    await page.getByRole("button", { name: "View in channel" }).click();
+    await page.getByTestId("thread-overflow-trigger").click();
+    await page.getByTestId("thread-overflow-view-in-channel").click();
     await expect(page).toHaveURL(
       new RegExp(`/channel/${seedState.channel.id}\\?msg=${parentMessage.id}$`),
     );

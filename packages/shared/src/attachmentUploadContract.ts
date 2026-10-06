@@ -1,5 +1,14 @@
-import "zod-openapi";
-
+// NOTE: do not add `import "zod-openapi"` here. This file is reachable from
+// the @botiverse/raft-shared package barrel, so zod-openapi's global
+// `declare module 'zod/v4'` augmentation would leak into the published type
+// files of every downstream package (sdk, computer/lib) and rewrite their
+// consumers' own zod typing. The `.meta()` calls below use only built-in
+// zod fields (id/description/readOnly). If a future contract genuinely
+// needs OpenAPI-specific meta fields with type checking, the import belongs
+// in `openApiContract.ts` (the document-generation end, unreachable from
+// the barrel) — and note the augmentation only applies to modules that
+// import zod from "zod/v4", so the file using those fields must import from
+// "zod/v4" too, not "zod".
 import { z } from "zod";
 
 export const ATTACHMENT_UPLOAD_MAX_SIZE_BYTES = 200 * 1024 * 1024;
@@ -40,6 +49,19 @@ export const attachmentUploadSessionSchema = z.strictObject({
   reservationState: attachmentReservationStateSchema.nullable().optional(),
 }).meta({ id: "AttachmentUploadSessionView" });
 
+export const attachmentUploadRecoverySchema = z.strictObject({
+  uploadId: attachmentUploadIdSchema,
+  filename: z.string().min(1).max(255),
+  mimeType: z.string().min(1).max(255),
+  sizeBytes: z.int().positive().max(ATTACHMENT_UPLOAD_MAX_SIZE_BYTES),
+  state: z.enum(["pending", "verifying"]),
+  expiresAt: z.iso.datetime(),
+}).meta({ id: "AttachmentUploadRecoveryView" });
+
+export const attachmentUploadRecoveryListSchema = z.strictObject({
+  uploads: z.array(attachmentUploadRecoverySchema).max(100),
+}).meta({ id: "AttachmentUploadRecoveryList" });
+
 export const attachmentUploadCapabilitiesSchema = z.strictObject({
   directUploadEnabled: z.boolean(),
   directUploadThresholdBytes: z.int().positive().max(ATTACHMENT_UPLOAD_MAX_SIZE_BYTES).nullable(),
@@ -54,6 +76,10 @@ export const createAttachmentUploadSessionRequestSchema = z.strictObject({
   sizeBytes: z.int().positive().max(ATTACHMENT_UPLOAD_MAX_SIZE_BYTES),
   clientRequestId: z.uuid(),
 }).meta({ id: "CreateAttachmentUploadSessionRequest" });
+
+export const listAttachmentUploadSessionsPathParamsSchema = z.strictObject({
+  channelId: z.uuid(),
+}).meta({ id: "ListAttachmentUploadSessionsPathParams" });
 
 export const createAttachmentUploadSessionResponseSchema = z.strictObject({
   uploadId: attachmentUploadIdSchema,
@@ -181,6 +207,18 @@ export const attachmentUploadContract = {
     summary: "Get server-authoritative attachment upload limits",
     responses: {
       200: { description: "Current upload capability", schema: attachmentUploadCapabilitiesSchema },
+    },
+  }),
+  list: defineOperation({
+    method: "get",
+    path: "/api/attachments/upload-sessions/{channelId}/active",
+    operationId: "listAttachmentUploadSessions",
+    summary: "List active attachment uploads for a channel",
+    requestParams: listAttachmentUploadSessionsPathParamsSchema,
+    responses: {
+      200: { description: "Active uploads owned by the current member", schema: attachmentUploadRecoveryListSchema },
+      400: { description: "Invalid channel id", schema: invalidUploadRequestErrorSchema },
+      403: { description: "Upload is forbidden", schema: attachmentUploadForbiddenErrorSchema },
     },
   }),
   create: defineOperation({

@@ -1,11 +1,11 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 
 import { eq } from "drizzle-orm";
 import fc from "fast-check";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channelHumans,
   channels,
@@ -22,8 +22,8 @@ import {
   userChannelReadCursors,
   userChannelInboxStates,
   users,
-} from "../db/schema.js";
-import { getInboxItems, getUnreadCounts, markRead } from "./channelService.js";
+} from "../db/schema";
+import { getInboxItems, getUnreadCounts, markRead } from "./channelService";
 import {
   applyInboxPolicyFilterPageRows,
   mapInboxPolicyRowsToItems,
@@ -36,9 +36,8 @@ import {
   type InboxPolicyModel,
   type InboxPolicyNotificationFact,
   type InboxPolicyNotificationClass,
-} from "./inboxPolicyModel.js";
-import { recordInboxNotificationFacts } from "./inboxNotificationService.js";
-import { HUMAN_ACTIVITY_MUTE_FEATURE_FLAG_KEY } from "./featureFlagService.js";
+} from "./inboxPolicyModel";
+import { recordInboxNotificationFacts } from "./inboxNotificationService";
 
 
 const USER = "user-a";
@@ -52,7 +51,7 @@ async function initCurrentPolicyDatabase() {
   await getDb()
     .update(featureFlags)
     .set({ defaultEnabled: true })
-    .where(eq(featureFlags.key, HUMAN_ACTIVITY_MUTE_FEATURE_FLAG_KEY));
+    .where(eq(featureFlags.key, "human_activity_mute_v0"));
 }
 
 function message(channelId: string, seq: number, senderId = OTHER_USER) {
@@ -1185,10 +1184,13 @@ test("PGlite differential: muted ordinary traffic has no Inbox fact while channe
       passwordHash: "x",
       emailVerified: true,
     }).returning();
+    // Paid plan: the fixture's messages are dated in the past, and the sidebar
+    // unread chain drops free-plan conversations idle for more than 30 days.
     const [server] = await db.insert(servers).values({
       name: "Muted Catchup",
       slug: "muted-catchup",
       ownerId: owner.id,
+      plan: "pro",
     }).returning();
     await db.insert(serverMembers).values([
       { serverId: server.id, userId: owner.id, role: "owner" },
@@ -1225,17 +1227,26 @@ test("PGlite differential: muted ordinary traffic has no Inbox fact while channe
       rows: [],
     });
     assert.equal((await db.select().from(inboxNotificationFacts)).length, 0, "muted ordinary message must not create Activity facts");
-    assert.equal((await getUnreadCounts(server.id, owner.id, new Date(0)))[channel.id], 1, "muted ordinary message remains channel catch-up unread");
+    assert.equal((await getUnreadCounts(server.id, owner.id))[channel.id], 1, "muted ordinary message remains channel catch-up unread");
 
+    // 2026-09-21 teardown: Activity derives live from canonical tables on
+    // both serving surfaces, so unmuting re-admits muted-window traffic to
+    // Inbox Unread (mute suppresses notification-time delivery, not history).
+    // Facts stay untouched — no write-side backfill happens on unmute.
     await db.delete(inboxTargetMuteStates);
     const afterUnmute = await getInboxItems(server.id, owner.id, { filter: "unread" });
     assert.deepEqual(inboxSummary(afterUnmute), {
-      totalCount: 0,
-      totalUnreadCount: 0,
-      rows: [],
+      totalCount: 1,
+      totalUnreadCount: 1,
+      rows: [{
+        key: `channel:${channel.id}`,
+        unreadCount: 1,
+        hasMention: false,
+        firstUnreadMessageId: mutedMessage.id,
+      }],
     });
     assert.equal((await db.select().from(inboxNotificationFacts)).length, 0, "unmute must not backfill notification facts");
-    assert.equal((await getUnreadCounts(server.id, owner.id, new Date(0)))[channel.id], 1, "unmute does not consume channel catch-up");
+    assert.equal((await getUnreadCounts(server.id, owner.id))[channel.id], 1, "unmute does not consume channel catch-up");
 
     await markRead(owner.id, channel.id, mutedMessage.seq);
     const afterRead = await getInboxItems(server.id, owner.id, { filter: "unread" });
@@ -1244,7 +1255,7 @@ test("PGlite differential: muted ordinary traffic has no Inbox fact while channe
       totalUnreadCount: 0,
       rows: [],
     });
-    assert.equal((await getUnreadCounts(server.id, owner.id, new Date(0)))[channel.id] ?? 0, 0, "real read cursor clears channel catch-up");
+    assert.equal((await getUnreadCounts(server.id, owner.id))[channel.id] ?? 0, 0, "real read cursor clears channel catch-up");
   } finally {
     await closeTestDatabase();
   }

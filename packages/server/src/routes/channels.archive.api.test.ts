@@ -1,12 +1,12 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { notificationEvents, users, serverMembers } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
+import { getDb } from "../db/index";
+import { notificationEvents, users, serverMembers } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { createAgent, assignMachine } from "../services/agentService";
 import {
   createChannel,
   addHuman,
@@ -15,9 +15,9 @@ import {
   unarchiveChannel,
   getOrCreateThread,
   setLocalChannelArchivedByAgent,
-} from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { registerMachine } from "../services/machineService.js";
+} from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { registerMachine } from "../services/machineService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

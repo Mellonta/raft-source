@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { RuntimeTurnState } from "./runtimeTurnState.js";
+import { RuntimeTurnState } from "./runtimeTurnState";
 
 test("runtime turn state allows busy steering during an active turn", () => {
   const state = new RuntimeTurnState();

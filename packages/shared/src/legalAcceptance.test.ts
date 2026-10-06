@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { CURRENT_LEGAL_ACCEPTANCE, PRIVACY_URL, TERMS_URL } from "./legalAcceptance.js";
+import { CURRENT_LEGAL_ACCEPTANCE, PRIVACY_URL, TERMS_URL } from "./legalAcceptance";
 
 test("current legal acceptance links use the Raft public domain", () => {
   assert.equal(TERMS_URL, "https://raft.build/terms");

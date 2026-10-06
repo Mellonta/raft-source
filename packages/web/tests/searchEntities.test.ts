@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   buildSearchEntityEntriesWhenQueryPresent,
   buildSearchEntityResults,
-} from "../src/components/search/searchEntities.js";
+} from "../src/components/search/searchEntities";
 
 test("skips entity entry construction until the query has non-whitespace text", () => {
   let channelScans = 0;

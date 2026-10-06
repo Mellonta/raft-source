@@ -1,10 +1,13 @@
-import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { messages } from "../db/schema.js";
-import * as channelService from "../services/channelService.js";
-import { messageIdShortPrefixConditions } from "../lib/messageId.js";
-import { isAppId } from "../services/rapRegistry.js";
-import { getBuiltInConversationChannel } from "../services/rapRegistryStore.js";
+import { parseDmPeerRef } from "@botiverse/raft-shared";
+import { DmTargetResolutionError } from "../services/dmTargetResolutionError";
+import { and, eq, gte, isNotNull, isNull, lt } from "drizzle-orm";
+import { getDb } from "../db/index";
+import { channels, messages } from "../db/schema";
+import * as channelService from "../services/channelService";
+import { messageIdShortPrefixConditions, uuidShortIdRange } from "../lib/messageId";
+import { isAppId } from "../services/rapRegistry";
+import { AGENT_REMINDERS_DM_PEER } from "../services/agentPrivateSurfaces";
+import { getBuiltInConversationChannel } from "../services/rapRegistryStore";
 
 type ParsedThreadTarget =
   | { kind: "channel"; channelName: string; shortId: string }
@@ -53,7 +56,7 @@ export function forbiddenMessageForTarget(target: string): string {
 
 export function notFoundMessageForTarget(target: string): string {
   if (isThreadTarget(target)) {
-    return `Thread target not found or not replyable: ${target}. Use #channel:<parentMsgShortId> or dm:@peer:<parentMsgShortId>; the parent message must exist and belong to that parent target.`;
+    return `Thread target not found or not replyable: ${target}. Use #channel:<id> or dm:@peer:<id> where <id> is the parent message's short id (the msg= field) or the thread's own id (the threadId= field); when a message id is given the parent message must exist and belong to that parent target.`;
   }
   return `Channel not found: ${target}`;
 }
@@ -95,7 +98,7 @@ async function resolveOrCreateThreadTarget(
   }
 
   const db = getDb();
-  const parentMsgs = await db
+  let parentMsgs = await db
     .select({ id: messages.id, channelId: messages.channelId })
     .from(messages)
     .where(and(
@@ -103,7 +106,33 @@ async function resolveOrCreateThreadTarget(
       ...messageIdShortPrefixConditions(parsed.shortId),
     ))
     .limit(2);
-  if (parentMsgs.length !== 1) return null;
+
+  if (parentMsgs.length !== 1) {
+    // The suffix may be a thread id (`threadId=` in the header, first 8 chars
+    // of the thread channel's UUID) rather than the parent message short id.
+    // Unlike the message path this never CREATES: a thread id names a thread
+    // that already exists, and the reply still lands on its parent message.
+    const bounds = uuidShortIdRange(parsed.shortId);
+    const threadCandidates = await db
+      .select({ id: channels.id, parentMessageId: channels.parentMessageId })
+      .from(channels)
+      .where(and(
+        eq(channels.serverId, serverId),
+        eq(channels.type, "thread"),
+        gte(channels.id, bounds.lower),
+        ...(bounds.upper ? [lt(channels.id, bounds.upper)] : []),
+        isNull(channels.deletedAt),
+        isNotNull(channels.parentMessageId),
+      ))
+      .limit(2);
+    if (threadCandidates.length !== 1 || !threadCandidates[0].parentMessageId) return null;
+    parentMsgs = await db
+      .select({ id: messages.id, channelId: messages.channelId })
+      .from(messages)
+      .where(eq(messages.id, threadCandidates[0].parentMessageId))
+      .limit(1);
+    if (parentMsgs.length !== 1) return null;
+  }
 
   const parentMsg = parentMsgs[0];
   const parentChannel = await channelService.getChannel(parentMsg.channelId);
@@ -116,11 +145,16 @@ async function resolveOrCreateThreadTarget(
     }
   } else {
     if (parentChannel.type !== "dm") return null;
-    const humans = await channelService.getChannelHumans(parentMsg.channelId);
-    const agents = await channelService.getChannelAgents(parentMsg.channelId);
+    // `peerName` may carry an explicit kind (`Twin~agent`); compare members
+    // against the bare name, and only members of that kind.
+    const parsedPeer = parseDmPeerRef(parsed.peerName);
+    if (!parsedPeer.ok) return null;
+    const { peerName: bareName, peerKind } = parsedPeer;
+    const humans = peerKind === "agent" ? [] : await channelService.getChannelHumans(parentMsg.channelId);
+    const agents = peerKind === "human" ? [] : await channelService.getChannelAgents(parentMsg.channelId);
     if (
-      !humans.some((human) => human.name === parsed.peerName)
-      && !agents.some((agent) => agent.name === parsed.peerName)
+      !humans.some((human) => human.name === bareName)
+      && !agents.some((agent) => agent.name === bareName && (peerKind !== "agent" || agent.id !== agentId))
       && builtInAppParentChannelId !== parentMsg.channelId
     ) {
       return null;
@@ -145,6 +179,12 @@ export async function resolveWritableAgentTarget(
   const dmPeerPart = isDmTarget ? target.slice(4) : "";
   const dmLastColon = dmPeerPart.lastIndexOf(":");
   const isDmThread = isDmTarget && dmLastColon > 0 && /^[0-9a-f]+$/i.test(dmPeerPart.slice(dmLastColon + 1));
+  const dmPeerName = isDmThread ? dmPeerPart.slice(0, dmLastColon) : dmPeerPart;
+  // `~agent` / `~human` is the --peer-kind suffix; it never makes the reserved
+  // reminders handle sendable.
+  if (isDmTarget && dmPeerName.replace(/~(agent|human)$/i, "").toLowerCase() === AGENT_REMINDERS_DM_PEER) {
+    throw DmTargetResolutionError.privateReminderSurface();
+  }
 
   if (isDmTarget && !isDmThread) {
     const peerName = dmPeerPart;
@@ -159,13 +199,23 @@ export async function resolveWritableAgentTarget(
       return canPost ? existingDm : "forbidden";
     }
 
-    const targetUserId = await channelService.resolveUserByName(serverId, peerName);
+    // resolveChannelByName above already refused an unknown peer kind.
+    const parsedPeer = parseDmPeerRef(peerName);
+    if (!parsedPeer.ok) return "peer-not-found";
+    const { peerName: bareName, peerKind } = parsedPeer;
+    const targetUserId = peerKind === "agent" ? null : await channelService.resolveUserByName(serverId, bareName);
+    const targetAgentId = peerKind === "human" ? null : await channelService.resolveAgentByName(serverId, bareName);
+    // Creating a new DM from a bare name shared by a human and an agent would
+    // silently pick the human; make the caller name the one they mean.
+    if (peerKind === null && targetUserId && targetAgentId && targetAgentId !== agentId) {
+      throw DmTargetResolutionError.ambiguous(bareName);
+    }
+
     if (targetUserId) {
       const dmChannel = await channelService.findOrCreateDM(serverId, targetUserId, agentId);
       return dmChannel ? { channelId: dmChannel.id, type: "dm" } : null;
     }
 
-    const targetAgentId = await channelService.resolveAgentByName(serverId, peerName);
     if (!targetAgentId) return "peer-not-found";
     if (targetAgentId === agentId) {
       return "self-dm";

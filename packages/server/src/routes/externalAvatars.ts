@@ -1,12 +1,12 @@
 import { Router, type Router as RouterType } from "express";
 import { and, eq, isNotNull } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { externalProjectionAvatarArtifacts } from "../db/schema.js";
-import { getCdnStorage, getStorage } from "../services/storageService.js";
+import { getDb } from "../db/index";
+import { externalProjectionAvatarArtifacts } from "../db/schema";
+import { getCdnStorage, getStorage } from "../services/storageService";
+import { streamStorageResponse } from "../services/storageResponseStream";
 
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+import { UUID_RE as UUID_PATTERN } from "../lib/messageId";
 
 export const externalAvatarPublicRouter: RouterType = Router();
 
@@ -47,7 +47,7 @@ externalAvatarPublicRouter.get("/:id.webp", async (req, res) => {
     // successfully materialized Slack avatar fail at the browser boundary and
     // silently fall back to initials.
     res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-    stream.pipe(res);
+    await streamStorageResponse(stream, res);
   } catch {
     if (!res.headersSent) res.status(404).send("Not found");
     else res.destroy();

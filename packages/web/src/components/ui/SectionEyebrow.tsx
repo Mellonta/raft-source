@@ -23,7 +23,7 @@
 
 import type { LabelHTMLAttributes, ReactNode } from "react";
 
-const BASE_CLASS = "text-xs font-bold uppercase text-black/60 tracking-widest";
+const BASE_CLASS = "text-xs font-bold uppercase text-foreground-muted tracking-widest";
 
 export type SectionEyebrowProps = {
   /** HTML element to render. Default `"span"`. Use `"div"` for block-level

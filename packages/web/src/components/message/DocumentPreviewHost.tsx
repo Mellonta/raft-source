@@ -1,3 +1,5 @@
+import { useIntl } from "react-intl";
+import { showToast } from "../toastBridge";
 import { useDocumentPreviewStore } from "../../store/documentPreviewStore";
 import { DocumentAttachmentPreviewModal } from "./attachmentPreviewSurfaces";
 import { downloadAttachmentById } from "./downloadAttachment";
@@ -12,6 +14,7 @@ import { downloadAttachmentById } from "./downloadAttachment";
  * an explicit absence rather than an accident of which surface opened it.
  */
 export default function DocumentPreviewHost() {
+  const { formatMessage } = useIntl();
   const entry = useDocumentPreviewStore((s) => s.entry);
   const close = useDocumentPreviewStore((s) => s.close);
   if (!entry) return null;
@@ -23,6 +26,9 @@ export default function DocumentPreviewHost() {
       url={entry.url}
       onClose={close}
       onDownload={() => void downloadAttachmentById(entry.attachment)}
+      // A failed copy is reported rather than swallowed; the toast bridge keeps
+      // this host renderable without a provider (its tests do exactly that).
+      onCopyError={() => showToast({ title: formatMessage({ id: "common.lightbox.copyFailed" }), type: "error" })}
       comments={entry.commentContext ? {
         attachmentId: entry.attachment.id,
         filename: entry.attachment.filename,

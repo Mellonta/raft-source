@@ -1,5 +1,5 @@
-import type { EmailLoginRejectionReason } from "../services/userService.js";
-import { addTraceEvent, getCurrentTraceContext } from "../tracing/semanticTrace.js";
+import type { EmailLoginRejectionReason } from "../services/userService";
+import { addTraceEvent, getCurrentTraceContext } from "../tracing/semanticTrace";
 
 /**
  * Records a failed email-login decision on the active HTTP request trace.

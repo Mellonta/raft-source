@@ -4,13 +4,12 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 
-import { serverAttachmentPath, serverManagedFlagPath, userSessionPath } from "../paths.js";
-import { createComputerApi } from "./api.js";
-import { ComputerError } from "./errors.js";
-import { present, CliExit, formatHumanError } from "../output.js";
-import { LEGACY_PRODUCTION_SERVER_URL } from "../serverUrl.js";
+import { serverAttachmentPath, serverManagedFlagPath, userSessionPath } from "../paths";
+import { createComputerApi } from "./api";
+import { ComputerError } from "./errors";
+import { present, CliExit, formatHumanError } from "../output";
+import { LEGACY_PRODUCTION_SERVER_URL } from "../serverUrl";
 
 async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "raft-computer-api-"));

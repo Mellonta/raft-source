@@ -1,9 +1,8 @@
-import { openTestApp } from "../test/integration/app.js";
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { openTestApp } from "../test/integration/app";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach } from "vitest";
 
 import argon2 from "argon2";
 import { desc, eq } from "drizzle-orm";
@@ -13,20 +12,22 @@ import {
   BasicTracer,
   InMemoryFailpointRegistry,
   MemoryTraceSink,
+  hasAgentMessageIdentity,
   type AgentMessage,
 } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
-import { agents as agentsTable, attachments, attestedSendEvents, channelAgents, channels, machines as machinesTable, messageMentions, messages, serverAgentMembers, serverMembers, servers as serversTable, threadFollows, users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { autoAssignMachine, createAgent } from "../services/agentService.js";
-import { AgentOrchestrator } from "../services/agentOrchestrator.js";
-import { createChannel, addAgent, addHuman, markAgentLegacyRead, getAgentLegacyReadCursor, getAgentUnreadCounts, getOrCreateThread, findOrCreateDM, removeAgent, listThreadChannelIdsForParentChannel, setInboxTargetActivityMuteState } from "../services/channelService.js";
-import { broadcastAndDeliver, createMessage, __resetMessageServiceDepsForTests, __setMessageServiceDepsForTests } from "../services/messageService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { recordInboxNotificationFacts } from "../services/inboxNotificationService.js";
-import * as attestedSendService from "../services/attestedSendService.js";
-import * as taskService from "../services/taskService.js";
+import { getDb } from "../db/index";
+import { agents as agentsTable, attachments, attestedSendEvents, channelAgents, channels, jointChannels, jointChannelServers, machines as machinesTable, messageMentions, messages, serverAgentMembers, serverMembers, servers as serversTable, threadFollows, users } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { autoAssignMachine, createAgent } from "../services/agentService";
+import { AgentOrchestrator } from "../services/agentOrchestrator";
+import { createChannel, addAgent, addHuman, markAgentLegacyRead, getAgentLegacyReadCursor, getAgentUnreadCounts, getOrCreateThread, findOrCreateDM, removeAgent, listThreadChannelIdsForParentChannel, setInboxTargetActivityMuteState } from "../services/channelService";
+import { broadcastAndDeliver, createMessage, __resetMessageServiceDepsForTests, __setExternalAgentInboxChainSelectorForTests, __setMessageServiceDepsForTests } from "../services/messageService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { recordInboxNotificationFacts } from "../services/inboxNotificationService";
+import * as attestedSendService from "../services/attestedSendService";
+import * as taskService from "../services/taskService";
+import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -370,6 +371,111 @@ test("agent-api v2 idempotent replay reads the original durable mention facts af
     );
 });
 
+test("agent-api v2 authoritatively reconciles an idempotency key without writing", async ({ app }) => {
+    const fixture = await seedFixture();
+    const target = `#${fixture.channelName}`;
+    const idempotencyKey = `reconcile-${randomUUID()}`;
+
+    const before = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target,
+      idempotencyKey,
+      reconcileOnly: true,
+    });
+    assert.deepEqual(before, {
+      status: 200,
+      body: { ok: true, state: "not_found", reconciliation: true },
+    });
+    assert.equal((await latestChannelMessages(fixture.channelId)).length, 0);
+
+    const sent = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target,
+      content: "commit once @missing_handle",
+      idempotencyKey,
+    });
+    assert.equal(sent.status, 200);
+    assert.equal(sent.body.state, "sent");
+    assert.deepEqual(sent.body.unresolvedMentionHandles, ["@missing_handle"]);
+
+    const after = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target,
+      idempotencyKey,
+      reconcileOnly: true,
+    });
+    assert.equal(after.status, 200);
+    assert.equal(after.body.state, "committed");
+    assert.equal(after.body.messageId, sent.body.messageId);
+    assert.equal(after.body.messageSeq, sent.body.messageSeq);
+    assert.equal(after.body.reconciliation, true);
+    assert.equal(after.body.receiptComplete, false);
+    assert.equal(Object.hasOwn(after.body, "unresolvedMentionHandles"), false);
+    assert.equal((await latestChannelMessages(fixture.channelId)).length, 1);
+});
+
+test("agent-api idempotent replay returns the original only when target, content and attachments match", async ({ app }) => {
+    const fixture = await seedFixture();
+    const otherChannel = await createChannel(fixture.serverId, "agent-api-send-other-room");
+    await addAgent(otherChannel.id, fixture.agentId);
+    const request = {
+      target: `#${fixture.channelName}`,
+      content: "exactly once",
+      idempotencyKey: `replay-${randomUUID()}`,
+    };
+
+    for (const send of [sendViaAgentApi, sendViaAgentApiV2]) {
+      const key = `${request.idempotencyKey}-${send.name}`;
+      const first = await send(app.baseUrl, fixture, { ...request, idempotencyKey: key });
+      assert.equal(first.status, 200);
+      assert.equal(first.body.state, "sent");
+
+      const identical = await send(app.baseUrl, fixture, { ...request, idempotencyKey: key });
+      assert.equal(identical.status, 200, "an identical replay stays a success");
+      assert.equal(identical.body.state, "sent");
+      assert.equal(identical.body.messageId, first.body.messageId);
+      assert.equal(identical.body.messageSeq, first.body.messageSeq);
+
+      const otherContent = await send(app.baseUrl, fixture, { ...request, idempotencyKey: key, content: "something else" });
+      assert.equal(otherContent.status, 409);
+      assert.equal(otherContent.body.code, "idempotency_key_reused");
+      assert.equal(otherContent.body.mismatch, "content");
+      assert.match(otherContent.body.suggestedNextAction, /new idempotencyKey/);
+      assert.equal(Object.hasOwn(otherContent.body, "messageId"), false, "must not report the original as this send");
+
+      const otherTarget = await send(app.baseUrl, fixture, { ...request, idempotencyKey: key, target: `#${otherChannel.name}` });
+      assert.equal(otherTarget.status, 409);
+      assert.equal(otherTarget.body.code, "idempotency_key_reused");
+      assert.equal(otherTarget.body.mismatch, "target");
+    }
+
+    // A different ordered attachment set is the same conflict.
+    const holder = await sendHumanMessage(fixture, "holds an attachment");
+    const [attachment] = await getDb().insert(attachments).values({
+      messageId: holder.id,
+      channelId: fixture.channelId,
+      uploaderId: fixture.agentId,
+      uploaderType: "agent",
+      filename: "replay.txt",
+      mimeType: "text/plain",
+      sizeBytes: 6,
+      storageKey: `${fixture.serverId}/replay.txt`,
+    }).returning();
+    const otherAttachments = await sendViaAgentApi(app.baseUrl, fixture, {
+      ...request,
+      idempotencyKey: `${request.idempotencyKey}-sendViaAgentApi`,
+      attachmentIds: [attachment.id],
+      seenUpToSeq: holder.seq,
+    });
+    assert.equal(otherAttachments.status, 409, JSON.stringify(otherAttachments.body));
+    assert.equal(otherAttachments.body.code, "idempotency_key_reused");
+    assert.equal(otherAttachments.body.mismatch, "attachments");
+
+    const persisted = [
+      ...await latestChannelMessages(fixture.channelId),
+      ...await latestChannelMessages(otherChannel.id),
+    ];
+    assert.equal(persisted.filter((message) => message.content === "exactly once").length, 2, "one message per key");
+    assert.equal(persisted.some((message) => message.content === "something else"), false);
+});
+
 test("agent-api first reply to a fresh channel thread creates the thread and sends", async ({ app }) => {
     const fixture = await seedFixture();
     const parent = await sendHumanMessage(fixture, "fresh thread parent");
@@ -391,6 +497,77 @@ test("agent-api first reply to a fresh channel thread creates the thread and sen
     assert.equal(sentMessage.content, "agent-api first thread reply");
     assert.equal(sentMessage.channelType, "thread");
     assert.notEqual(sentMessage.channelId, fixture.channelId);
+});
+
+test("agent-api reply accepts a threadId suffix and lands on that thread's parent", async ({ app }) => {
+    const fixture = await seedFixture();
+    const parent = await sendHumanMessage(fixture, "threadId-target parent");
+    const thread = await getOrCreateThread(parent.id, fixture.ownerId, "user");
+    // The `threadId=` header field is the first 8 chars of the thread channel's
+    // UUID — NOT the parent message's short id. Using it as the send suffix must
+    // land on the thread it names (and must not create a second thread).
+    const threadTarget = `#${fixture.channelName}:${thread.id.slice(0, 8)}`;
+
+    const sent = await sendViaAgentApi(app.baseUrl, fixture, {
+      target: threadTarget,
+      content: "agent-api reply via threadId target",
+      seenUpToSeq: parent.seq,
+    });
+
+    assert.equal(sent.status, 200);
+    assert.equal(sent.body.state, "sent");
+    assert.ok(sent.body.messageId);
+
+    const sentMessage = await getMessageChannel(sent.body.messageId);
+    assert.ok(sentMessage, "expected sent message to be persisted");
+    assert.equal(sentMessage.channelId, thread.id, "the reply must land on the thread the threadId names");
+    assert.equal(sentMessage.content, "agent-api reply via threadId target");
+});
+
+test("agent-api reply to a system-message thread does not treat the system identity as a user UUID", async ({ app }) => {
+    const fixture = await seedFixture();
+    const parent = await createMessage(
+      fixture.channelId,
+      "user",
+      "system",
+      "system thread parent",
+      "system",
+    );
+    const thread = await getOrCreateThread(parent.id, fixture.ownerId, "user");
+    await getDb().insert(threadFollows).values({
+      threadChannelId: thread.id,
+      followerType: "user",
+      followerId: fixture.ownerId,
+      parentMessageId: parent.id,
+      reason: "manual",
+    });
+    const threadTarget = `#${fixture.channelName}:${parent.id.slice(0, 8)}`;
+
+    const sent = await sendViaAgentApi(app.baseUrl, fixture, {
+      target: threadTarget,
+      content: "agent-api reply to system thread",
+      seenUpToSeq: parent.seq,
+    });
+
+    assert.equal(sent.status, 200);
+    assert.equal(sent.body.state, "sent");
+    assert.ok(sent.body.messageId);
+
+    const sentMessage = await getMessageChannel(sent.body.messageId);
+    assert.equal(sentMessage?.channelType, "thread");
+    assert.equal(sentMessage?.content, "agent-api reply to system thread");
+    const follows = await getDb()
+      .select({ followerType: threadFollows.followerType, followerId: threadFollows.followerId })
+      .from(threadFollows)
+      .where(eq(threadFollows.threadChannelId, sentMessage!.channelId));
+    assert.deepEqual(
+      follows.sort((a, b) => a.followerType.localeCompare(b.followerType)),
+      [
+        { followerType: "agent", followerId: fixture.agentId },
+        { followerType: "user", followerId: fixture.ownerId },
+      ],
+      "the pseudo user:system identity is excluded without dropping real thread followers",
+    );
 });
 
 test("agent-api channel first post returns recent-join drive-by attention once", async ({ app }) => {
@@ -646,6 +823,11 @@ test("agent-api send records route breakdown trace events", async ({ app }) => {
     assert.equal(insertSpan.attrs?.sender_type, "agent");
     assert.equal(insertSpan.attrs?.outcome, "success");
     assert.equal(JSON.stringify(insertSpan.attrs).includes("agent-api trace reply"), false);
+    // 2026-09-21 teardown: serving-row projections are retired; the send
+    // transaction's inbox work surfaces as the facts fan-out span event.
+    assert.ok(insertSpan.events.some((event) => event.name === "send.facts_fanout.finished"));
+    assert.equal(insertSpan.events.some((event) => event.name === "inbox.serving_row.increment"), false);
+    assert.equal(insertSpan.events.some((event) => event.name === "inbox.serving_row.rebuild"), false);
 
     const dbPhase = insertSpan.events.find((event) =>
       event.name === "message_pipeline.db_phase.finished"
@@ -663,7 +845,7 @@ test("agent-api send records route breakdown trace events", async ({ app }) => {
     assert.equal(typeof delivery.attrs?.delivery_count, "number");
 });
 
-test("agent-api thread send stays successful when follower projection fails after persistence", async ({ app }) => {
+test("agent-api thread send records follower fallback inside its atomic persistence", async ({ app }) => {
     const sink = new MemoryTraceSink();
     app.app.set("serverTracer", new BasicTracer({ sink }));
     const fixture = await seedFixture();
@@ -696,20 +878,21 @@ test("agent-api thread send stays successful when follower projection fails afte
       && candidate.attrs?.status_code === 200
     );
     assert.ok(span);
-    const persistedIndex = span.events.findIndex((event) => event.name === "message_pipeline.message.persisted");
-    const degraded = span.events.filter((event) => event.name === "message_pipeline.post_persist_side_effect.degraded");
-    assert.ok(persistedIndex >= 0);
+    const persistedEvent = span.events.find((event) => event.name === "message_pipeline.message.persisted");
+    const transactionEvents = sink.getAllSpans().filter(candidate => candidate.context.traceId === span.context.traceId).flatMap(candidate => candidate.events);
+    const degraded = transactionEvents.filter((event) => event.name === "message_pipeline.post_persist_side_effect.degraded");
+    assert.ok(persistedEvent);
     assert.equal(degraded.length, 1);
     for (const event of degraded) {
-      assert.ok(span.events.indexOf(event) > persistedIndex);
-      assert.equal(event.attrs?.durable_message_present, true);
-      assert.equal(event.attrs?.failure_policy, "continue_after_persist");
+      assert.equal(event.attrs?.durable_message_present, false);
+      assert.equal(event.attrs?.persistence_state, "transaction_pending");
+      assert.equal(event.attrs?.failure_policy, "continue_within_transaction");
       assert.equal(event.attrs?.query_name, "thread_follows.eligible_followers");
       assert.equal(event.attrs?.sqlstate, "57014");
     }
 });
 
-test("agent-api thread send stays successful when same-send unfollow lookup fails after persistence", async ({ app }) => {
+test("agent-api thread send records same-send unfollow fallback inside its atomic persistence", async ({ app }) => {
     const sink = new MemoryTraceSink();
     app.app.set("serverTracer", new BasicTracer({ sink }));
     const fixture = await seedFixture();
@@ -742,17 +925,17 @@ test("agent-api thread send stays successful when same-send unfollow lookup fail
       && candidate.attrs?.status_code === 200
     );
     assert.ok(span);
-    const persistedIndex = span.events.findIndex((event) => event.name === "message_pipeline.message.persisted");
-    const degraded = span.events.filter((event) =>
+    const persistedEvent = span.events.find((event) => event.name === "message_pipeline.message.persisted");
+    const transactionEvents = sink.getAllSpans().filter(candidate => candidate.context.traceId === span.context.traceId).flatMap(candidate => candidate.events);
+    const degraded = transactionEvents.filter((event) =>
       event.name === "message_pipeline.post_persist_side_effect.degraded"
       && event.attrs?.query_name === "thread_follows.same_send_candidates"
     );
-    assert.ok(persistedIndex >= 0);
+    assert.ok(persistedEvent);
     assert.equal(degraded.length, 1);
-    assert.ok(span.events.indexOf(degraded[0]!) > persistedIndex);
-    assert.equal(degraded[0]?.attrs?.durable_message_present, true);
-    assert.equal(degraded[0]?.attrs?.persistence_state, "committed");
-    assert.equal(degraded[0]?.attrs?.failure_policy, "continue_after_persist");
+    assert.equal(degraded[0]?.attrs?.durable_message_present, false);
+    assert.equal(degraded[0]?.attrs?.persistence_state, "transaction_pending");
+    assert.equal(degraded[0]?.attrs?.failure_policy, "continue_within_transaction");
     assert.equal(degraded[0]?.attrs?.sqlstate, "XX000");
     assert.equal(JSON.stringify(degraded[0]?.attrs).includes("follower_type"), false);
 });
@@ -1151,6 +1334,26 @@ test("agent-api held response returns latest bounded context with omitted count"
     assert.equal(held.body.omittedMessageCount, 2);
     assert.equal(held.body.heldMessages.length, 3);
     assert.equal(held.body.seenUpToSeq, latestUnread.seq);
+    // Two messages were omitted, never handed to the agent: the hold must not
+    // read through them (they would never be delivered otherwise).
+    assert.equal(await getAgentLegacyReadCursor(fixture.agentId, fixture.channelId), baseline.seq);
+});
+
+test("agent-api held response that shows every held message reads through to the latest", async ({ app }) => {
+    const fixture = await seedFixture();
+    const baseline = await sendHumanMessage(fixture, "baseline");
+    await markAgentLegacyRead(fixture.agentId, fixture.channelId, baseline.seq);
+    const fresh = await sendHumanMessage(fixture, "one fresh unread");
+
+    const held = await sendViaAgentApi(app.baseUrl, fixture, {
+      target: `#${fixture.channelName}`,
+      content: "agent-api draft with one unread message",
+      seenUpToSeq: baseline.seq,
+    });
+
+    assert.equal(held.body.state, "held");
+    assert.equal(held.body.omittedMessageCount, 0);
+    assert.equal(await getAgentLegacyReadCursor(fixture.agentId, fixture.channelId), fresh.seq);
 });
 
 test("agent-api direct send without freshness boundary returns bounded first-touch context", async ({ app }) => {
@@ -1442,7 +1645,7 @@ test("agent-api wake-hints are content-free and do not consume the server inbox"
         event_id: string;
         seq: number | null;
         message_id: string | null;
-        target: string;
+        target: string | null;
         wake_reason: string;
         content?: string;
       }>;
@@ -1450,7 +1653,7 @@ test("agent-api wake-hints are content-free and do not consume the server inbox"
     assert.deepEqual(firstBody.wake_hints?.map((hint) => hint.seq), [201]);
     assert.equal(firstBody.wake_hints?.[0]?.event_id, "wake-hint:wake-message-1");
     assert.equal(firstBody.wake_hints?.[0]?.message_id, "wake-message-1");
-    assert.equal(firstBody.wake_hints?.[0]?.target, `channelId:${fixture.channelId}`);
+    assert.equal(firstBody.wake_hints?.[0]?.target, `#${fixture.channelName}`);
     assert.equal(firstBody.wake_hints?.[0]?.wake_reason, "message_pending");
     assert.equal("content" in (firstBody.wake_hints?.[0] ?? {}), false);
     assert.equal(receiveCalls, 0);
@@ -1673,7 +1876,7 @@ test("agent-api events delivery ack advances compatibility checkpoint before mod
     const deliveredBody = await delivered.json() as { events?: Array<{ seq: number; content: string }> };
     assert.deepEqual(deliveredBody.events?.map((event) => event.seq), [fresh.seq]);
     assert.equal(await getAgentLegacyReadCursor(fixture.agentId, fixture.channelId), fresh.seq);
-    const unreadCounts = await getAgentUnreadCounts(fixture.agentId);
+    const unreadCounts = await getAgentUnreadCounts(fixture.agentId, await referenceAgentInboxChain(fixture.agentId));
     assert.equal(unreadCounts[`#${fixture.channelName}`], undefined);
 
     const replay = await fetch(`${app.baseUrl}/internal/agent-api/events?since=latest`, {
@@ -1725,7 +1928,7 @@ test("agent-api events delivery ack is volatile once daemon advertises model-see
       const deliveredBody = await delivered.json() as { events?: Array<{ seq: number; content: string }> };
       assert.deepEqual(deliveredBody.events?.map((event) => event.seq), [fresh.seq]);
       assert.equal(await getAgentLegacyReadCursor(fixture.agentId, fixture.channelId), baseline.seq);
-      const unreadCounts = await getAgentUnreadCounts(fixture.agentId);
+      const unreadCounts = await getAgentUnreadCounts(fixture.agentId, await referenceAgentInboxChain(fixture.agentId));
       assert.equal(unreadCounts[`#${fixture.channelName}`], 1);
     } finally {
       orchestrator.hasMachineCapability = originalHasMachineCapability;
@@ -2110,25 +2313,43 @@ test("external agent delivery feeds /wake-hints via real deliverMessage and neve
       throw new Error("external agent delivery must never start a runtime");
     };
 
-    await orchestrator.deliverMessage(external.id, {
-      channel_id: channel.id,
-      channel_name: channel.name,
-      channel_type: "channel",
-      sender_id: owner.id,
-      sender_name: owner.name,
-      sender_type: "human",
-      content: "wake the external agent via real delivery",
-      timestamp: new Date().toISOString(),
-      seq: 301,
-      message_id: `ext-wake-msg-${suffix}`,
+    // External agents receive persisted messages from their durable inbox pull
+    // (#8341), so the message must be a real row; CI has no RisingWave, so the
+    // chain read is served by the test-only reference derivation of the view.
+    const message = await createMessage(channel.id, "user", owner.id, "wake the external agent via real delivery");
+    let chainReads = 0;
+    __setExternalAgentInboxChainSelectorForTests(async (agentId: string) => {
+      chainReads += 1;
+      return { source: "chain" as const, rows: await referenceAgentInboxChain(agentId) };
     });
+    let res: Response;
+    try {
+      await orchestrator.deliverMessage(external.id, {
+        channel_id: channel.id,
+        channel_name: channel.name,
+        channel_type: "channel",
+        sender_id: owner.id,
+        sender_name: owner.name,
+        sender_type: "human",
+        content: message.content,
+        timestamp: message.createdAt.toISOString(),
+        seq: message.seq,
+        message_id: message.id,
+      });
 
-    const res = await fetch(`${app.baseUrl}/internal/agent-api/wake-hints?since=latest`, {
-      headers: { Authorization: `Bearer ${minted.apiKey}` },
-    });
+      res = await fetch(`${app.baseUrl}/internal/agent-api/wake-hints?since=latest`, {
+        headers: { Authorization: `Bearer ${minted.apiKey}` },
+      });
+    } finally {
+      __setExternalAgentInboxChainSelectorForTests(null);
+    }
     assert.equal(res.status, 200);
     const body = await res.json() as { wake_hints?: Array<{ message_id?: string; seq?: number | null }> };
-    assert.ok((body.wake_hints?.length ?? 0) >= 1, `expected at least one wake hint, got ${JSON.stringify(body)}`);
+    assert.ok(
+      body.wake_hints?.some((hint) => hint.message_id === message.id && hint.seq === message.seq),
+      `expected a wake hint for the persisted delivery, got ${JSON.stringify(body)}`,
+    );
+    assert.ok(chainReads >= 1, "wake hints must read the durable inbox chain");
 
     assert.equal(startAgentCalls, 0, "external agent delivery must never reach startAgent");
 
@@ -2279,4 +2500,235 @@ test("agent-api DM-thread hold renders with a resolved thread-top sender (uuid=t
   } finally {
     await app.close();
   }
+});
+
+function deadlockDetected(): Error {
+  // What node-postgres surfaces when PostgreSQL picks this transaction as the deadlock victim.
+  return Object.assign(new Error("deadlock detected"), { code: "40P01" });
+}
+
+test("agent-api send re-runs a deadlock-aborted send transaction once and commits exactly one message", async ({ app }) => {
+  const fixture = await seedFixture();
+  const registry = new InMemoryFailpointRegistry();
+  // Fires after the message, mentions and inbox facts are written, so the retry
+  // proves the rolled-back attempt leaves nothing behind.
+  registry.configure("server.message.newChatTransaction.afterFacts", {
+    mode: "once",
+    effect: "throw",
+    payload: deadlockDetected(),
+  });
+  __setFailpointsForTests(registry);
+  const idempotencyKey = randomUUID();
+
+  const sent = await sendViaAgentApi(app.baseUrl, fixture, {
+    target: `#${fixture.channelName}`,
+    content: "survives one deadlock",
+    idempotencyKey,
+    seenUpToSeq: 0,
+  });
+
+  assert.equal(sent.status, 200, JSON.stringify(sent.body));
+  assert.equal(sent.body.state, "sent");
+  const persisted = await getDb().select().from(messages).where(eq(messages.agentSendKey, idempotencyKey));
+  assert.equal(persisted.length, 1);
+  assert.equal(persisted[0]!.id, sent.body.messageId);
+});
+
+test("agent-api send answers 503 with retry guidance (never 500) when every attempt deadlocks", async ({ app }) => {
+  const fixture = await seedFixture();
+  const registry = new InMemoryFailpointRegistry();
+  registry.configure("server.message.newChatTransaction.afterFacts", {
+    mode: "always",
+    effect: "throw",
+    payload: deadlockDetected(),
+  });
+  __setFailpointsForTests(registry);
+  const idempotencyKey = randomUUID();
+
+  for (const send of [sendViaAgentApi, sendViaAgentApiV2]) {
+    const sent = await send(app.baseUrl, fixture, {
+      target: `#${fixture.channelName}`,
+      content: "never commits",
+      idempotencyKey,
+      seenUpToSeq: 0,
+    });
+    assert.equal(sent.status, 503);
+    assert.equal(sent.body.code, "send_transient_conflict");
+    assert.equal(sent.body.retryable, true);
+    assert.match(sent.body.suggestedNextAction, /idempotencyKey/);
+  }
+  assert.equal((await getDb().select().from(messages).where(eq(messages.agentSendKey, idempotencyKey))).length, 0);
+
+  // The client retry with the same key then commits normally.
+  __resetFailpointsForTests();
+  const retried = await sendViaAgentApi(app.baseUrl, fixture, {
+    target: `#${fixture.channelName}`,
+    content: "never commits",
+    idempotencyKey,
+    seenUpToSeq: 0,
+  });
+  assert.equal(retried.status, 200);
+});
+
+/**
+ * Held send context must name its conversation. The held envelopes are built
+ * from bare message rows; without `channel_type`/`channel_name` (and
+ * `parent_channel_name` for threads) client SDKs filter them out through
+ * hasAgentMessageIdentity, so the agent was told "N new messages" and shown 0.
+ */
+function assertHeldIdentity(
+  heldMessages: Array<Record<string, unknown>>,
+  expected: Record<string, unknown>,
+) {
+  assert.ok(heldMessages.length > 0, "expected held context");
+  for (const message of heldMessages) {
+    for (const [key, value] of Object.entries(expected)) {
+      assert.equal(message[key], value, `held envelope ${key}`);
+    }
+    assert.equal(hasAgentMessageIdentity(message), true, "held envelope must carry a conversation identity");
+  }
+}
+
+test("agent-api held context on a channel target carries the channel identity", async ({ app }) => {
+  const fixture = await seedFixture();
+  const baseline = await sendHumanMessage(fixture, "baseline");
+  await sendHumanMessage(fixture, "fresh one");
+  await sendHumanMessage(fixture, "fresh two");
+
+  const held = await sendViaAgentApi(app.baseUrl, fixture, {
+    target: `#${fixture.channelName}`,
+    content: "stale channel draft",
+    seenUpToSeq: baseline.seq,
+  });
+
+  assert.equal(held.status, 200);
+  assert.equal(held.body.state, "held");
+  assert.equal(held.body.heldMessages.length, 2);
+  assertHeldIdentity(held.body.heldMessages, {
+    channel_type: "channel",
+    channel_name: fixture.channelName,
+  });
+});
+
+test("agent-api held context on a DM target carries the agent-facing peer name", async ({ app }) => {
+  const fixture = await seedFixture();
+  const dm = await findOrCreateDM(fixture.serverId, fixture.ownerId, fixture.agentId);
+  assert.ok(dm, "expected owner-agent DM to exist");
+  const baseline = await createMessage(dm.id, "user", fixture.ownerId, "dm baseline");
+  const fresh = await createMessage(dm.id, "user", fixture.ownerId, "dm fresh the agent has not seen");
+  await recordInboxNotificationFacts([{
+    receiverType: "agent",
+    receiverId: fixture.agentId,
+    serverId: fixture.serverId,
+    kind: "dm",
+    sourceChannelId: dm.id,
+    messageId: fresh.id,
+    messageSeq: fresh.seq,
+    activityAt: fresh.createdAt,
+    personalMention: false,
+    unreadEligible: true,
+  }]);
+
+  const held = await sendViaAgentApi(app.baseUrl, fixture, {
+    target: `dm:@${fixture.ownerName}`,
+    content: "stale dm draft",
+    seenUpToSeq: baseline.seq,
+  });
+
+  assert.equal(held.status, 200);
+  assert.equal(held.body.state, "held");
+  assert.deepEqual(held.body.heldMessages.map((message: { id: string }) => message.id), [fresh.id]);
+  assertHeldIdentity(held.body.heldMessages, {
+    channel_type: "dm",
+    channel_name: fixture.ownerName,
+  });
+});
+
+test("agent-api held context on channel and DM thread targets carries the parent identity", async ({ app }) => {
+  const fixture = await seedFixture();
+  const parent = await sendHumanMessage(fixture, "channel thread parent");
+  const thread = await getOrCreateThread(parent.id, fixture.ownerId, "user");
+  await createMessage(thread.id, "user", fixture.ownerId, "channel thread reply");
+
+  const heldChannelThread = await sendViaAgentApi(app.baseUrl, fixture, {
+    target: `#${fixture.channelName}:${parent.id.slice(0, 8)}`,
+    content: "stale channel thread reply",
+    seenUpToSeq: parent.seq,
+  });
+  assert.equal(heldChannelThread.status, 200);
+  assert.equal(heldChannelThread.body.state, "held");
+  assertHeldIdentity(heldChannelThread.body.heldMessages, {
+    channel_type: "thread",
+    parent_channel_type: "channel",
+    parent_channel_name: fixture.channelName,
+  });
+
+  const dm = await findOrCreateDM(fixture.serverId, fixture.ownerId, fixture.agentId);
+  assert.ok(dm, "expected owner-agent DM to exist");
+  const dmParent = await createMessage(dm.id, "user", fixture.ownerId, "dm thread parent");
+  const dmThread = await getOrCreateThread(dmParent.id, fixture.ownerId, "user");
+  await createMessage(dmThread.id, "user", fixture.ownerId, "dm thread reply");
+
+  const heldDmThread = await sendViaAgentApi(app.baseUrl, fixture, {
+    target: `dm:@${fixture.ownerName}:${dmParent.id.slice(0, 8)}`,
+    content: "stale dm thread reply",
+    seenUpToSeq: dmParent.seq,
+  });
+  assert.equal(heldDmThread.status, 200);
+  assert.equal(heldDmThread.body.state, "held");
+  assertHeldIdentity(heldDmThread.body.heldMessages, {
+    channel_type: "thread",
+    parent_channel_type: "dm",
+    parent_channel_name: fixture.ownerName,
+  });
+});
+
+test("agent-api held context on a joint channel uses the local projection name", async ({ app }) => {
+  const fixture = await seedFixture();
+  const db = getDb();
+  const host = await createServer("Held Joint Host", `held-joint-host-${randomUUID()}`, fixture.ownerId);
+  const [canonical, hostLocal, local] = await db.insert(channels).values([
+    { serverId: host.id, name: "held-joint-canonical", type: "joint" },
+    { serverId: host.id, name: "held-joint-host", type: "joint" },
+    { serverId: fixture.serverId, name: "held-joint-local", type: "joint" },
+  ]).returning();
+  const [joint] = await db.insert(jointChannels).values({
+    canonicalChannelId: canonical!.id,
+    createdByServerId: host.id,
+    createdByUserId: fixture.ownerId,
+  }).returning();
+  await db.insert(jointChannelServers).values([
+    { jointChannelId: joint!.id, serverId: host.id, localChannelId: hostLocal!.id, role: "host", status: "active", joinedByUserId: fixture.ownerId },
+    { jointChannelId: joint!.id, serverId: fixture.serverId, localChannelId: local!.id, role: "participant", status: "active", joinedByUserId: fixture.ownerId },
+  ]);
+  await db.insert(channelAgents).values({ channelId: local!.id, agentId: fixture.agentId });
+
+  const baseline = await createMessage(canonical!.id, "user", fixture.ownerId, "joint baseline");
+  const fresh = await createMessage(canonical!.id, "user", fixture.ownerId, "joint fresh");
+  await recordInboxNotificationFacts([{
+    receiverType: "agent",
+    receiverId: fixture.agentId,
+    serverId: fixture.serverId,
+    kind: "channel",
+    sourceChannelId: local!.id,
+    messageId: fresh.id,
+    messageSeq: fresh.seq,
+    activityAt: fresh.createdAt,
+    personalMention: false,
+    unreadEligible: true,
+  }]);
+
+  const held = await sendViaAgentApi(app.baseUrl, fixture, {
+    target: `#${local!.name}`,
+    content: "stale joint draft",
+    seenUpToSeq: baseline.seq,
+  });
+
+  assert.equal(held.status, 200, JSON.stringify(held.body));
+  assert.equal(held.body.state, "held");
+  assert.deepEqual(held.body.heldMessages.map((message: { id: string }) => message.id), [fresh.id]);
+  assertHeldIdentity(held.body.heldMessages, {
+    channel_type: "channel",
+    channel_name: local!.name,
+  });
 });

@@ -7,13 +7,14 @@
 
 import type { Command } from "commander";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { formatReminderCanceled } from "./_format.js";
-import { resolveReminderId } from "./_resolve.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { formatReminderCanceled } from "./_format";
+import { resolveReminderId } from "./_resolve";
+import { assertReminderNotSealed } from "../../apps/reminder/sealGuard";
 
 interface CancelOpts {
   id: string;
@@ -32,6 +33,7 @@ export const reminderCancelCommand = defineCommand(
 
       const agentContext = ctx.loadAgentContext();
       const client = ctx.createApiClient(agentContext);
+      await assertReminderNotSealed(ctx, opts.id.trim(), "cancel");
       const fullId = await resolveReminderId(client, opts.id, {
         statuses: ["scheduled", "fired"],
         failureCode: "CANCEL_FAILED",

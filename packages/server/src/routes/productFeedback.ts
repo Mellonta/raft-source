@@ -1,11 +1,13 @@
 import { Router, type NextFunction, type Request, type Response, type Router as RouterType } from "express";
+import { UUID_RE } from "../lib/messageId";
 import multer from "multer";
-import { eq } from "drizzle-orm";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
+import { and, eq, isNull, ne } from "drizzle-orm";
+import { getDb } from "../db/index";
+import { serverMembers, servers, users } from "../db/schema";
 import {
+  asFeedbackReportId,
   ProductFeedbackConfigurationError,
   ProductFeedbackUpstreamError,
   ProductFeedbackValidationError,
@@ -13,7 +15,8 @@ import {
   normalizeProductFeedbackMetadata,
   submitProductFeedback,
   type ProductFeedbackKind,
-} from "../services/productFeedbackService.js";
+  type ProductFeedbackReporterAttribution,
+} from "../services/productFeedbackService";
 import {
   closeProductFeedbackTicket,
   commentOnProductFeedbackTicket,
@@ -23,19 +26,19 @@ import {
   listProductFeedbackTickets,
   ProductFeedbackConversationError,
   productFeedbackConversationFailureLog,
-} from "../services/productFeedbackConversationService.js";
+} from "../services/productFeedbackConversationService";
 import {
   ensureProductFeedbackRouteBinding,
   ProductFeedbackRouteBindingError,
-} from "../services/productFeedbackRouteBindingService.js";
-import { productFeedbackServerTiming } from "../services/productFeedbackTiming.js";
+} from "../services/productFeedbackRouteBindingService";
+import { productFeedbackServerTiming } from "../services/productFeedbackTiming";
+import { sendJsonServerError } from "./errorResponse";
 
 export const productFeedbackRouter: RouterType = Router();
 
 export const PRODUCT_FEEDBACK_MAX_ATTACHMENTS = 3;
 export const PRODUCT_FEEDBACK_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 const PRODUCT_FEEDBACK_MAX_MESSAGE_LENGTH = 10_000;
-const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const ALLOWED_IMAGE_TYPES = new Set(["image/gif", "image/jpeg", "image/png", "image/webp"]);
 
 function setUpstreamTiming(
@@ -100,6 +103,68 @@ function parseMetadata(value: unknown): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/**
+ * Resolve the reporter attribution block for a submission.
+ *
+ * ORDER IS LOAD-BEARING: the submitted server id is validated against the
+ * caller's membership BEFORE `server_slug` is ever looked up. Reversing this
+ * would write a server slug the caller has no access to into the ticket, which
+ * is an information-disclosure bug rather than a validation nit.
+ *
+ * Failure is deliberately non-fatal: attribution is best-effort context, and a
+ * reporter must never be blocked from submitting feedback because the context
+ * could not be derived. Returns null when there is nothing trustworthy to send.
+ */
+async function resolveReporterAttribution(input: {
+  serverId: string | null;
+  userId: string;
+  handle: string;
+}): Promise<ProductFeedbackReporterAttribution | null> {
+  const { serverId, userId, handle } = input;
+  if (!serverId) return null;
+  // 1. Validate membership FIRST — never look anything up before this passes.
+  //    Uses the same predicate as the server-scoped middleware (`requireServer`):
+  //    joint-storage pseudo-servers are excluded as well as soft-deleted ones.
+  //    `serverService.isMember` is deliberately NOT used here because it does not
+  //    filter `joint_storage`, which would let a storage pseudo-server become a
+  //    reporter attribution.
+  const [membership] = await getDb()
+    .select({ serverId: serverMembers.serverId, slug: servers.slug })
+    .from(serverMembers)
+    .innerJoin(servers, eq(serverMembers.serverId, servers.id))
+    .where(and(
+      eq(serverMembers.serverId, serverId),
+      eq(serverMembers.userId, userId),
+      ne(servers.kind, "joint_storage"),
+      isNull(servers.deletedAt),
+    ));
+  // 2. Only now read the values, and ONLY from the validated membership row.
+  //    `server_id` is taken from the row too rather than from the raw input so
+  //    that id and slug provably describe the same validated server. Sourcing
+  //    them differently would let the two fields drift apart, and a mis-recorded
+  //    attribution is worse than a missing one.
+  const validatedServerId = membership?.serverId;
+  const validatedSlug = membership?.slug;
+  if (!validatedServerId || !validatedSlug) return null;
+  return {
+    v: 1,
+    server_id: validatedServerId,
+    server_slug: validatedSlug,
+    user_id: userId,
+    handle,
+  };
+}
+
+/**
+ * Log an attribution resolution failure without leaking the submitted header
+ * value or any identifier. Attribution is optional context, so a failure here is
+ * recorded and swallowed rather than surfaced to the reporter.
+ */
+function productFeedbackAttributionFailureLog(error: unknown): void {
+  const name = error instanceof Error ? error.name : "UnknownError";
+  console.warn(`[product-feedback] reporter attribution skipped (${name})`);
 }
 
 function trustedFeedbackClientKind(req: Request): string | undefined {
@@ -362,8 +427,10 @@ productFeedbackRouter.post("/", runProductFeedbackUpload, async (req, res) => {
   const mayContact = req.body?.may_contact === "true";
   const metadata = parseMetadata(req.body?.metadata);
   const files = (req.files ?? []) as Express.Multer.File[];
+  const rawFeedbackReportId = req.body?.feedback_report_id;
+  const feedbackReportId = rawFeedbackReportId === undefined ? undefined : asFeedbackReportId(rawFeedbackReportId);
 
-  if (!kind || !message || !submissionId || !CANONICAL_UUID_RE.test(submissionId)) {
+  if (!kind || !message || !submissionId || !UUID_RE.test(submissionId) || feedbackReportId === null) {
     res.status(400).json({ error: "Invalid feedback submission", code: "feedback_invalid" });
     return;
   }
@@ -406,6 +473,31 @@ productFeedbackRouter.post("/", runProductFeedbackUpload, async (req, res) => {
     return;
   }
 
+  // Reporter attribution is optional, best-effort context. The server id arrives
+  // via the standard `X-Server-Id` header that the client already attaches; a
+  // missing header (older clients) or a failed membership check simply yields no
+  // attribution and must not block the submission itself.
+  // Attribution must never be able to fail a submission. The header is
+  // attacker-controlled, so it is shape-checked before it can reach a uuid
+  // column, and the whole resolution is additionally wrapped so that any
+  // unexpected failure degrades to "no attribution" instead of a 500 — the
+  // reporter's feedback is what matters, not the context we attach to it.
+  const rawHeaderServerId = typeof req.headers["x-server-id"] === "string"
+    ? req.headers["x-server-id"].trim()
+    : "";
+  const headerServerId = UUID_RE.test(rawHeaderServerId) ? rawHeaderServerId : null;
+  let reporterAttribution: ProductFeedbackReporterAttribution | null = null;
+  try {
+    reporterAttribution = await resolveReporterAttribution({
+      serverId: headerServerId,
+      userId,
+      handle: user.name,
+    });
+  } catch (error) {
+    productFeedbackAttributionFailureLog(error);
+  }
+  if (reporterAttribution) feedbackMetadata.reporterAttribution = reporterAttribution;
+
   try {
     if (!isProductFeedbackConfigured()) throw new ProductFeedbackConfigurationError();
     await ensureProductFeedbackRouteBinding({ userId });
@@ -418,6 +510,7 @@ productFeedbackRouter.post("/", runProductFeedbackUpload, async (req, res) => {
       contact: mayContact ? buildProductFeedbackContact(user) : null,
       userId,
       metadata: feedbackMetadata,
+      ...(feedbackReportId ? { feedbackReportId } : {}),
       attachments: files.map((file) => ({
         buffer: file.buffer,
         filename: file.originalname,
@@ -460,7 +553,6 @@ productFeedbackRouter.post("/", runProductFeedbackUpload, async (req, res) => {
       });
       return;
     }
-    console.error("[ProductFeedback] Failed to submit feedback", error);
-    res.status(500).json({ error: "Failed to submit feedback", code: "feedback_submit_failed" });
+    sendJsonServerError(req, res, { error: "Failed to submit feedback", code: "feedback_submit_failed", logPrefix: "[ProductFeedback] Failed to submit feedback", err: error });
   }
 });

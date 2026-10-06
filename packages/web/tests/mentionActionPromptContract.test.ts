@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-type Message = import("../src/store/messageStore.js").Message;
+type Message = import("../src/store/messageStore").Message;
 
 class MemoryStorage implements Storage {
   private readonly store = new Map<string, string>();
@@ -42,7 +41,7 @@ Object.defineProperty(globalThis, "sessionStorage", {
   value: new MemoryStorage(),
 });
 
-const { normalizePendingMentionActions, normalizeSendMessageResponse } = await import("../src/store/messageStore.js");
+const { normalizePendingMentionActions, normalizeSendMessageResponse } = await import("../src/store/messageStore");
 const { PendingMentionActionStrip } = await import("../src/components/message/PendingMentionActionStrip");
 const { TestIntlProvider } = await import("./helpers/intl");
 
@@ -95,6 +94,23 @@ test("send response normalizer accepts bare message and wrapped pending-actions 
     message: baseMessage,
     pendingMentionActions: [],
     unresolvedMentionHandles: ["@same_handle"],
+  });
+
+  assert.deepEqual(normalizeSendMessageResponse({
+    message: baseMessage,
+    deliveryWarnings: [
+      { targetType: "agent", targetId: "agent-1", reason: "agent_stopped" },
+      { targetType: "agent", targetId: "agent-2", reason: "other" },
+      { targetType: "user", targetId: "user-1", reason: "ignored" },
+      { targetType: "agent", targetId: "", reason: "ignored" },
+    ],
+  }), {
+    message: baseMessage,
+    pendingMentionActions: [],
+    unresolvedMentionHandles: [],
+    deliveryWarnings: [
+      { targetType: "agent", targetId: "agent-1", reason: "agent_stopped" },
+    ],
   });
 });
 

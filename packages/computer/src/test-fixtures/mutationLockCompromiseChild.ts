@@ -1,5 +1,5 @@
-import { withComputerMutationLock } from "../concurrency.js";
-import { ComputerError } from "../lib/errors.js";
+import { withComputerMutationLock } from "../concurrency";
+import { ComputerError } from "../lib/errors";
 
 const slockHome = process.argv[2];
 if (!slockHome) throw new Error("missing SLOCK_HOME fixture argument");

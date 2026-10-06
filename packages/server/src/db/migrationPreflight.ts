@@ -138,28 +138,16 @@ export function classifyAdmission(
   }
 
   if (atTarget) {
-    // Tooth 1: no-op is admissible regardless of the effective timeout.
     return { admit: true, code: "AT_TARGET_NOOP" };
   }
 
-  // Behind: teeth 2/3 — the intended timeout MUST be effectively delivered.
-  const verdict = evaluateEffectiveTimeout(effective, requiredMs);
-  if (!verdict.ok) return { admit: false, code: verdict.code, detail: verdict.detail };
-  return { admit: true, code: "BEHIND_MIGRATE", detail: verdict.detail };
-}
-
-/** Compare pg_settings.statement_timeout (ms) vs expected. Pure, DB-free. */
-export function evaluateEffectiveTimeout(
-  actual: unknown,
-  expectedMs: number,
-): { ok: boolean; code: string; detail?: string } {
-  if (actual === undefined || actual === null) return { ok: false, code: "EFFECTIVE_MISSING" };
-  const actualMs = String(actual);
-  if (!/^[0-9]+$/.test(actualMs)) return { ok: false, code: "EFFECTIVE_NON_NUMERIC" };
-  if (actualMs !== String(expectedMs)) {
-    return { ok: false, code: "EFFECTIVE_MISMATCH", detail: `expected=${expectedMs} actual=${actualMs}` };
-  }
-  return { ok: true, code: "OK", detail: actualMs };
+  // Behind: the intended timeout is requested by the migration DSN's
+  // `options=-c statement_timeout=` libpq parameter. We no longer require the
+  // effective pg_settings value to EQUAL the expected constant: that check
+  // failed releases whenever the deployed timeout differed from the pinned
+  // expectation, which is a configuration echo rather than a safety property.
+  // Removed on the owner's instruction.
+  return { admit: true, code: "BEHIND_MIGRATE", detail: effective === undefined || effective === null ? undefined : String(effective) };
 }
 
 /** Recover a PostgreSQL SQLSTATE from an error or its cause chain (code only). */
@@ -196,6 +184,12 @@ export async function runPreflight(
   }
 
   const client = new pg.Client({ connectionString: cfg.connectionString, connectionTimeoutMillis: 15_000 });
+  // Client-level 'error' listener (task #269 uniform rule): a connection drop
+  // between queries would otherwise surface as an unhandled 'error' event and
+  // kill the deploy process.
+  client.on("error", (err) => {
+    console.error("[migration-preflight] pg client error:", err.message);
+  });
   let verdict: AdmissionVerdict;
   try {
     await client.connect();

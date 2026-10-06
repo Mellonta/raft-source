@@ -11,10 +11,10 @@
  */
 import { createHash } from "node:crypto";
 import { currentDate } from "@botiverse/raft-shared";
-import { and, eq, isNull } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, channelAgents, channelHumans, channels } from "../db/schema.js";
-import { BUILT_IN_RAP_APPS } from "./rapBuiltinAppManifests.js";
+import { and, eq, isNull, sql } from "drizzle-orm";
+import { getDb } from "../db/index";
+import { agents, channelAgents, channelHumans, channels, messages } from "../db/schema";
+import { BUILT_IN_RAP_APPS } from "./rapBuiltinAppManifests";
 import {
   manifestDeclaresHook,
   mintAppPrincipal,
@@ -23,8 +23,9 @@ import {
   type AppManifest,
   type AppPrincipal,
   type HookName,
-} from "./rapRegistry.js";
-import { runWithMintedRapEvent } from "./rapInvocationContext.js";
+} from "./rapRegistry";
+import { runWithMintedRapEvent } from "./rapInvocationContext";
+import { raiseReadPositionForJoin } from "./readMutationSequencer";
 
 /**
  * THE canonical statement of which hooks the handler ABI can register, and the
@@ -301,10 +302,20 @@ async function ensureConversationChannel(
         .where(eq(channels.id, channelId));
     }
 
-    await tx
+    const joined = await tx
       .insert(channelAgents)
       .values({ channelId, agentId })
-      .onConflictDoNothing({ target: [channelAgents.channelId, channelAgents.agentId] });
+      .onConflictDoNothing({ target: [channelAgents.channelId, channelAgents.agentId] })
+      .returning({ agentId: channelAgents.agentId });
+    if (joined.length > 0) {
+      // The channel may be a restored one with history: like any join (#8292),
+      // everything already in it is read. Raise-only, so an earlier position stays.
+      const [latest] = await tx
+        .select({ seq: sql<number>`COALESCE(MAX(${messages.seq}), 0)::int` })
+        .from(messages)
+        .where(eq(messages.channelId, channelId));
+      await raiseReadPositionForJoin(tx, "agent", agentId, channelId, latest?.seq ?? 0);
+    }
 
     const [agentMembers, humanMembers] = await Promise.all([
       tx.select({ agentId: channelAgents.agentId }).from(channelAgents).where(eq(channelAgents.channelId, channelId)),

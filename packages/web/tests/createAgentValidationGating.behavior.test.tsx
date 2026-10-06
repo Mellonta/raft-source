@@ -2,7 +2,6 @@ import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { afterEach, test } from "node:test";
 import type { ReactElement } from "react";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import type { RenderOptions } from "@testing-library/react";

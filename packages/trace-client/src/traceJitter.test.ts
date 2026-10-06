@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { bucketDelayMs, computeTraceJitter, NO_JITTER } from "./traceJitter.js";
+import { bucketDelayMs, computeTraceJitter, NO_JITTER } from "./traceJitter";
 
 test("computeTraceJitter is deterministic for the same lockId", () => {
   const a = computeTraceJitter("machine-abcdef0123456789");

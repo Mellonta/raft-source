@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
-import type { Clock } from "./connection.js";
-import type { ScopedAppStorageFailureEvent } from "./scopedAppStorage.js";
+import type { Clock } from "./connection";
+import type { ScopedAppStorageFailureEvent } from "./scopedAppStorage";
 
 export const SCOPED_APP_STORAGE_OBSERVATION_FAMILIES = [
   "access_failure",

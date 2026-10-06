@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -19,27 +18,18 @@ const pixelAvatarSource = readFileSync(resolve(repoRoot, "src/components/agent/P
 const sidebarSource = readFileSync(resolve(repoRoot, "src/components/layout/Sidebar.tsx"), "utf8");
 const channelMemberListSource = readFileSync(resolve(repoRoot, "src/components/channel/ChannelMemberList.tsx"), "utf8");
 
-test("AvatarSlot carries identity-keyed placeholder bg AND real images must fill the full frame", () => {
-  // Identity-keyed bg: agent = cyan, human = lavender, app = yellow, server = black/yellow.
-  // The bg is visible only when the inner content is a placeholder/loading
-  // state; real avatar images cover it edge-to-edge.
-  assert.match(
-    avatarSlotSource,
-    /type === "agent"[\s\S]*\? "bg-brutal-cyan"[\s\S]*: type === "human"[\s\S]*\? "bg-brutal-lavender"[\s\S]*: type === "app"[\s\S]*\? "bg-soft-signal text-black font-display font-black"[\s\S]*: "bg-black text-soft-signal font-display font-bold"/,
-    "AvatarSlot should derive an identity-keyed placeholder bg (cyan agent / lavender human / yellow app / black-yellow server)",
-  );
-  assert.match(
-    avatarSlotSource,
-    /const baseClass = `relative flex shrink-0 items-center justify-center overflow-hidden \$\{spec\.size\} \$\{spec\.border\} border-black \$\{fallbackBg\}`;/,
-    "AvatarSlot should compose the role bg into the canonical black-framed container",
-  );
+test("AvatarSlot uses RUI identity frames and real images fill the themed content", () => {
+  assert.match(avatarSlotSource, /<Avatar\s/);
+  assert.match(avatarSlotSource, /type=\{type === "agent" \? "agent" : "human"\}/);
+  assert.match(avatarSlotSource, /<AvatarFallback className=\{`relative overflow-hidden [^\n]+\n\s*\{content\}\s*<\/AvatarFallback>/);
+  assert.doesNotMatch(avatarSlotSource, /const baseClass|const humanBase/);
 
   // Fill invariant — real images must cover the bg edge-to-edge or the role
   // tint leaks around the image (the regression stdrc filed in #1873; this
   // test pins both sides so neither rule can silently drop again).
   assert.match(
     avatarSlotSource,
-    /<AgentAvatar avatarUrl=\{agentAvatarUrl \?\? null\} size=\{spec\.agentPixel\} className="!w-full !h-full" \/>/,
+    /<AgentAvatar avatarUrl=\{agentAvatarUrl \?\? null\} size=\{spec\.agentPixel\} className="!h-full !w-full" \/>/,
     "agent avatars should fill the full frame edge-to-edge so role bg never leaks",
   );
   assert.match(
@@ -127,21 +117,21 @@ test("AvatarSlot removes the global badge-size override and lets raft-ui own pla
   // Named decision: #proj-uiux task #817 removes the global badge size map.
   assert.match(
     avatarSlotSource,
-    /<AvatarBadge render=\{badge\} \/>/,
-    "AvatarSlot should pass rendered badges to raft-ui without placement overrides",
+    /<AvatarBadge render=\{<span \/>\} className="flex rounded-full \[&>span\]:h-full \[&>span\]:w-full">\s*\{badge\}\s*<\/AvatarBadge>/,
+    "AvatarBadge must own a native positioning wrapper even when a custom badge drops injected props",
   );
   assert.doesNotMatch(
     avatarSlotSource,
-    /RAFT_AVATAR_BADGE_SIZE|translate-x-1\/4|translate-y-1\/4|<AvatarBadge(?=[^>]*className=)[^>]*>/,
+    /RAFT_AVATAR_BADGE_SIZE|translate-x-1\/4|translate-y-1\/4/,
     "AvatarSlot must not restore the global badge size/placement override map",
   );
 });
 
-test("Sidebar list status dots use a scoped indicator shell without changing Members modal rows", () => {
+test("Sidebar list status dots use AvatarBadge-owned placement without changing Members modal rows", () => {
   assert.match(
     sidebarSource,
-    /function SidebarAgentActivityBadge\(\{ agentId \}: \{ agentId: string \}\)[\s\S]*data-sidebar-avatar-badge-shell="true" className="absolute bottom-0 right-0 block size-0"[\s\S]*<AgentActivityDot[\s\S]*size="sm"[\s\S]*className="absolute left-1\/2 top-1\/2 -translate-x-1\/2 -translate-y-1\/2"/,
-    "chat DM and Members rail rows should keep the smaller activity-mapped status dot through a scoped shell without overriding AvatarBadge placement",
+    /function SidebarAgentActivityBadge\(\{ agentId \}: \{ agentId: string \}\)[\s\S]*<AgentActivityDot[\s\S]*size="sm"[\s\S]*data-sidebar-avatar-badge="true"/,
+    "chat DM and Members rail rows should keep the smaller activity-mapped status dot while AvatarBadge owns placement",
   );
   const sidebarBadgeSource = sidebarSource.match(
     /function SidebarAgentActivityBadge[\s\S]*?\n}\n/,
@@ -149,7 +139,7 @@ test("Sidebar list status dots use a scoped indicator shell without changing Mem
   assert.doesNotMatch(
     sidebarBadgeSource,
     /\bpulse\b/,
-    "sidebar online presence must stay static; thinking/working retain their activity-mapped pulse",
+    "sidebar presence dots are static in every state (task #136)",
   );
   assert.doesNotMatch(
     sidebarSource,
@@ -168,12 +158,17 @@ test("Sidebar list status dots use a scoped indicator shell without changing Mem
   );
   assert.doesNotMatch(
     channelMemberListSource,
-    /SidebarAgentActivityBadge|size="sm"|data-sidebar-avatar-badge-shell/,
+    /SidebarAgentActivityBadge|<AgentActivityDot[^>]*size="sm"|data-sidebar-avatar-badge-shell/,
     "ChannelMemberList must not use the smaller sidebar-only status badge",
   );
   assert.match(
     channelMemberListSource,
-    /function ChannelMemberActivityBadge\([\s\S]*data-channel-member-avatar-badge-shell="true" className="absolute bottom-0 right-0 block size-0"[\s\S]*<AgentActivityDot[\s\S]*size="md"[\s\S]*pulse[\s\S]*-translate-x-1\/2 -translate-y-1\/2/,
-    "ChannelMemberList agent rows should use a one-step-larger pulsing dot through a scoped shell",
+    /function ChannelMemberActivityBadge\([\s\S]*<AgentActivityDot[\s\S]*size="md"[\s\S]*data-channel-member-avatar-badge-shell="true"/,
+    "ChannelMemberList agent rows should pass the scoped (static) dot directly to AvatarBadge",
+  );
+  assert.doesNotMatch(
+    channelMemberListSource,
+    /data-channel-member-avatar-badge-shell="true" className="absolute bottom-0 right-0 block size-0"/,
+    "AvatarBadge must own corner geometry instead of a nested zero-size wrapper",
   );
 });

@@ -2,16 +2,15 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, readFile, rm, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 
 import {
   AWS_STAGING_SERVER_URL,
   STALE_STAGING_FLY_SERVER_URL,
   migrateKnownServerUrl,
   readServerAttachment,
-} from "./serverState.js";
-import { DEFAULT_SLOCK_SERVER_URL, LEGACY_PRODUCTION_SERVER_URL } from "./serverUrl.js";
-import { serverAttachmentPath, legacyServerAttachmentPath, CURRENT_SCHEMA_VERSION } from "./paths.js";
+} from "./serverState";
+import { DEFAULT_SLOCK_SERVER_URL, LEGACY_PRODUCTION_SERVER_URL } from "./serverUrl";
+import { serverAttachmentPath, legacyServerAttachmentPath, CURRENT_SCHEMA_VERSION } from "./paths";
 
 async function exists(path: string): Promise<boolean> {
   try {

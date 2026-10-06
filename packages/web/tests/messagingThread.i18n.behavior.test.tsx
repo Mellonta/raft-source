@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { createIntl } from "react-intl";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -73,8 +72,8 @@ test("mounted ThreadRepliesBadge renders Chinese unread/draft copy and opens the
 
   const badge = screen.getByTestId("message-thread-replies-badge");
   assert.equal(badge.tagName, "BUTTON");
-  assert.match(badge.className, /\bbg-brutal-cyan\/20\b/);
-  assert.match(badge.className, /\bhover:bg-brutal-cyan\/40\b/);
+  // The unread state rides the RUI Badge soft/information recipe now.
+  assert.equal(badge.getAttribute("data-slot"), "badge");
   assert.ok(screen.getByText(zh["message.threadRepliesBadge.draft"]));
   assert.match(badge.textContent ?? "", /\p{Script=Han}/u);
   assert.equal(screen.queryByText("draft"), null);

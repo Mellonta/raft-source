@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 
 import {
   agentMigrationRequiresUpgrade,
   isMigrationProPlanRequiredError,
   MIGRATION_PRO_PLAN_REQUIRED_CODE,
-} from "../src/utils/agentMigrationBilling";
+} from "../src/components/agentMigration/billing";
 
 test("migration paid-entry projection follows the shared trial and paid-plan policy", () => {
   const duringTrial = new Date("2026-05-01T00:00:00.000Z");

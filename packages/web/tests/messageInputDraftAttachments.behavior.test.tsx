@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act } from "react";
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactElement } from "react";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 import { MemoryRouter } from "react-router-dom";
+import { ThemeProvider } from "raft-ui";
 import api from "../src/api/client";
 import MessageInput, { clearDraftPendingFilesForTests } from "../src/components/message/MessageInput";
+import { transparentImageBackgroundClass } from "../src/utils/imagePreviewStyles";
 import { useAgentStore } from "../src/store/agentStore";
 import { useAuthStore } from "../src/store/authStore";
 import { useChannelStore } from "../src/store/channelStore";
@@ -25,6 +26,19 @@ const originalApiDelete = api.delete;
 const originalXMLHttpRequest = globalThis.XMLHttpRequest;
 const originalCreateObjectURL = URL.createObjectURL;
 const originalRevokeObjectURL = URL.revokeObjectURL;
+
+// raft-ui ThemeProvider reads prefers-color-scheme via matchMedia, which
+// jsdom does not implement — install the shared stub shape other suites use.
+window.matchMedia = window.matchMedia ?? ((query: string) => ({
+  matches: false,
+  media: query,
+  onchange: null,
+  addEventListener() {},
+  removeEventListener() {},
+  addListener() {},
+  removeListener() {},
+  dispatchEvent: () => false,
+})) as typeof window.matchMedia;
 
 type DirectUploadXhrRecord = {
   requestMethod: string;
@@ -134,8 +148,9 @@ function renderComposer(
   channelId: string,
   variant: ComponentProps<typeof MessageInput>["variant"] = "full",
   overrides: Partial<ComponentProps<typeof MessageInput>> = {},
+  wrap: (ui: ReactElement) => ReactElement = (ui) => ui,
 ) {
-  return (
+  return wrap(
     <MemoryRouter>
       <MessageInput
         channelId={channelId}
@@ -143,7 +158,7 @@ function renderComposer(
         variant={variant}
         {...overrides}
       />
-    </MemoryRouter>
+    </MemoryRouter>,
   );
 }
 
@@ -177,6 +192,7 @@ function setupComposer(
     variant?: ComponentProps<typeof MessageInput>["variant"];
     userId?: string;
     overrides?: Partial<ComponentProps<typeof MessageInput>>;
+    wrap?: (ui: ReactElement) => ReactElement;
   } = {},
 ) {
   api.get = (async (url: string) => (
@@ -250,7 +266,7 @@ function setupComposer(
   } as never);
 
   const view = render(
-    renderComposer(channelId, options.variant, options.overrides),
+    renderComposer(channelId, options.variant, options.overrides, options.wrap),
   );
   const fileInput = view.container.querySelector('input[type="file"][accept]') as HTMLInputElement | null;
   if ((options.variant ?? "full") === "full") {
@@ -750,4 +766,123 @@ test("removing an in-flight direct upload aborts PUT and cancels its session", a
   await waitFor(() => assert.deepEqual(deleted, ["/attachments/upload-sessions/upload-cancel-1"]));
   assert.equal(screen.queryByAltText("cancel.png"), null);
   assert.equal(sendMessage.calls.length, 0);
+});
+
+test("composer attachment previews switch RUI recipes across brutal, elegant light, and elegant dark", async () => {
+  // Brutal: the default theme family (no provider) keeps the production
+  // black-frame look through the RUI brutal recipe.
+  URL.createObjectURL = (() => "blob:theme-brutal") as typeof URL.createObjectURL;
+  URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
+  api.post = (async (url: string) => {
+    if (url === "/attachments/upload") {
+      return { data: { attachments: [{ id: "attachment-theme-brutal" }] } };
+    }
+    throw new Error(`unexpected POST ${url}`);
+  }) as typeof api.post;
+  const sendMessage = makeSendSpy();
+
+  const brutal = setupComposer(sendMessage);
+  await attachImage(brutal.fileInput!, "theme-brutal.png");
+  await waitFor(() => screen.getByRole("button", { name: "Preview theme-brutal.png" }));
+  const brutalList = brutal.container.querySelector('[data-slot="composer-attachments"]');
+  const brutalChip = brutal.container.querySelector('[data-slot="composer-attachment"]');
+  const brutalImage = brutal.container.querySelector('[data-slot="composer-attachment-image"]');
+  assert.ok(brutalList, "RUI attachments container renders");
+  assert.ok(brutalChip, "RUI attachment root renders");
+  assert.ok(brutalImage, "RUI image slot renders");
+  assert.match(brutalChip.className, /has-data-\[slot=composer-attachment-image\]:border-2/, "brutal recipe frames image chips in black");
+  assert.ok(brutalImage.querySelector(`img.${transparentImageBackgroundClass}`), "transparent previews keep the checkerboard");
+  const brutalRemove = screen.getByRole("button", { name: "Remove theme-brutal.png" });
+  assert.equal(brutalRemove.getAttribute("data-slot"), "composer-attachment-remove");
+  assert.match(brutalRemove.className, /\bbg-black\b/, "brutal remove keeps the black dot");
+  brutal.unmount();
+});
+
+test("composer attachment previews use semantic panel tokens in elegant light", async () => {
+  // Elegant light: the file chip switches to semantic panel/ring tokens and
+  // carries no raw brutal classes anywhere in the attachments subtree.
+  URL.createObjectURL = (() => "blob:theme-light") as typeof URL.createObjectURL;
+  URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
+  api.post = (async (url: string) => {
+    if (url === "/attachments/upload") {
+      return { data: { attachments: [{ id: "attachment-theme-light" }] } };
+    }
+    throw new Error(`unexpected POST ${url}`);
+  }) as typeof api.post;
+  const sendMessage = makeSendSpy();
+
+  const light = setupComposer(sendMessage, {
+    wrap: (ui) => <ThemeProvider theme="elegant" mode="light" syncDom={false}>{ui}</ThemeProvider>,
+  });
+  const lightFileInput = light.container.querySelector('input[type="file"]:not([accept])') as HTMLInputElement | null;
+  assert.ok(lightFileInput);
+  await act(async () => {
+    fireEvent.change(lightFileInput, { target: { files: [new File(["notes"], "theme-light.txt", { type: "text/plain" })] } });
+  });
+  await waitFor(() => screen.getByRole("button", { name: "Remove theme-light.txt" }));
+  await waitFor(() => assert.ok(light.container.querySelector('[data-slot="composer-attachment-uploading-overlay"]') === null));
+  const lightFile = light.container.querySelector('[data-slot="composer-attachment-file"]');
+  const lightTitle = light.container.querySelector('[data-slot="composer-attachment-title"]');
+  const lightMeta = light.container.querySelector('[data-slot="composer-attachment-meta"]');
+  assert.ok(lightFile, "RUI file slot renders");
+  assert.ok(lightTitle, "RUI title slot renders");
+  assert.ok(lightMeta, "RUI meta slot renders");
+  assert.match(lightFile.className, /\bbg-layer-panel\b/, "elegant file chip sits on the panel layer");
+  assert.match(lightFile.className, /\bring-ink-10\b/, "elegant file chip uses a hairline ring, not a black frame");
+  assert.match(lightTitle.className, /\btext-foreground\b/);
+  assert.doesNotMatch(lightFile.className, /\bborder-black\b|\bbg-white\b/);
+  for (const el of Array.from(light.container.querySelectorAll('[data-slot="composer-attachments"] *'))) {
+    assert.doesNotMatch(
+      el.getAttribute("class") ?? "",
+      /(?:^|\s)(?:border-black|bg-white|bg-brutal-[a-z]+|text-black)(?:\s|$|\/)/,
+      `elegant render must not carry raw brutal classes: ${el.getAttribute("data-slot") ?? el.tagName}`,
+    );
+  }
+  light.unmount();
+});
+
+test("composer attachment upload overlays use dark semantic layers in elegant dark", async () => {
+  // Elegant dark: the uploading and failed overlays switch to dark semantic
+  // layers; a billing-quota failure stays on the chip (no retry banner).
+  URL.createObjectURL = (() => "blob:theme-dark") as typeof URL.createObjectURL;
+  URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
+  const sendMessage = makeSendSpy();
+  let rejectUpload: (reason: unknown) => void = () => {};
+  api.post = (async (url: string) => {
+    if (url !== "/attachments/upload") throw new Error(`unexpected POST ${url}`);
+    return await new Promise((_resolve, reject) => {
+      rejectUpload = reject;
+    });
+  }) as typeof api.post;
+
+  const dark = setupComposer(sendMessage, {
+    wrap: (ui) => <ThemeProvider theme="elegant" mode="dark" syncDom={false}>{ui}</ThemeProvider>,
+  });
+  await attachImage(dark.fileInput!, "theme-dark.png");
+  await waitFor(() => screen.getByText("Uploading"));
+  const darkOverlay = dark.container.querySelector('[data-slot="composer-attachment-uploading-overlay"]');
+  const darkProgress = dark.container.querySelector('[data-slot="composer-attachment-upload-progress-bar"]');
+  const darkIndicator = dark.container.querySelector('[data-slot="composer-attachment-upload-progress-bar-indicator"]');
+  assert.ok(darkOverlay, "RUI uploading overlay renders");
+  assert.ok(darkProgress, "RUI upload progress bar renders");
+  assert.ok(darkIndicator, "RUI upload progress indicator renders");
+  assert.match(darkOverlay.className, /dark:bg-layer-canvas-muted\/80/, "dark elegant uploading overlay dims with the canvas layer");
+  assert.match(darkIndicator.className, /\bbg-accent-400\b/, "elegant progress uses the accent ramp");
+
+  await act(async () => {
+    rejectUpload({ response: { data: { error: "Monthly file upload quota exceeded. Free includes 100 MB of file uploads per month; upgrade to Pro for higher file upload limits." } } });
+  });
+  await waitFor(() => screen.getByText("Upload failed"));
+  const darkFailed = dark.container.querySelector('[data-slot="composer-attachment-failed-overlay"]');
+  assert.ok(darkFailed, "quota-failed chip keeps the failed overlay instead of the retry banner");
+  assert.match(darkFailed.className, /\btext-danger\b/);
+  assert.match(darkFailed.className, /dark:text-danger-strong/);
+  assert.doesNotMatch(darkFailed.className, /bg-brutal-orange/);
+  // Quota failures surface the billing upsell banner alongside the chip's
+  // failed overlay; the retry error bar ("Tap to retry") must NOT appear.
+  // screen.queryByRole("alert") hangs jsdom on this DOM (a11y-tree walk),
+  // so the no-retry-banner pin stays content-based.
+  assert.ok(dark.container.textContent?.includes("Monthly file upload quota exceeded"), "billing upsell banner renders");
+  assert.ok(screen.queryByText("Tap to retry") === null, "billing-quota failures stay on the chip, not the retry banner");
+  dark.unmount();
 });

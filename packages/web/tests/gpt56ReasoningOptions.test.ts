@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { getDefaultModel } from "@botiverse/raft-shared";
 import {
   reasoningEffortOptionsForModel,
   reconcileReasoningEffort,
-} from "../src/utils/reasoningEffortOptions.js";
+} from "../src/utils/reasoningEffortOptions";
 
 // WEB half of the Codex reasoning task: the model form reads Tenny's shared
 // RUNTIME_MODELS.codex data (supportedReasoningEfforts / defaultReasoningEffort)

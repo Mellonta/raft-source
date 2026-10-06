@@ -1,5 +1,5 @@
-import { axSurface } from "./agentRuntimeInput.js";
-import { ONBOARDING_DAY2_RECAP_PROTOCOL } from "./onboardingSeedContent.js";
+import { axSurface } from "./agentRuntimeInput";
+import { ONBOARDING_DAY2_RECAP_PROTOCOL } from "./onboardingSeedContent";
 
 export const buildOnboardingPlaybookMd = axSurface(
   "Cindy onboarding playbook, written to notes/onboarding_playbook.md on first startup.",

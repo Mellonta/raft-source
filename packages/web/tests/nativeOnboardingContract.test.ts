@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   NATIVE_ONBOARDING_CONTRACT_VERSION,
   readNativeOnboardingGeneration,

@@ -1,13 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { and, asc, eq, gt, inArray, isNotNull, lt, lte, or, sql } from "drizzle-orm";
-import { currentDate, currentTimeMs, setClockInterval, setClockTimeout } from "@botiverse/raft-shared";
+import { currentDate, currentTimeMs, noopTracer, setClockInterval, setClockTimeout, type Tracer } from "@botiverse/raft-shared";
 
-import { getDb, type DatabaseTransaction } from "../db/index.js";
+import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
+import { FencedAuthorizationDeniedError, lockActorMembershipRow, ServerMembershipRevokedError } from "../lib/actorMembershipFence";
+import { decideReadStateDelegation } from "../lib/actorPermissions";
+import { errorClassOf, getCurrentTraceContext, runWithTraceSpan, safeAddTraceEvent } from "../tracing/semanticTrace";
 import {
   readMutationWorkerDrainDuration,
   readMutationWorkerDrainsTotal,
-} from "../metrics.js";
+} from "../metrics";
 import {
   agentChannelReadCursors,
   readMutationAuthorities,
@@ -16,15 +19,14 @@ import {
   threadFollows,
   userChannelInboxStates,
   userChannelReadCursors,
-} from "../db/schema.js";
-import { rebuildInboxServingRowsForReceiverTargets } from "./inboxNotificationService.js";
+} from "../db/schema";
 import {
   assertChannelDoneFrontier,
   assertThreadDoneFrontier,
   DoneFrontierBeyondLatestError,
   writeChannelInboxSuppression,
   writeThreadDoneSuppression,
-} from "./inboxSuppressionWriters.js";
+} from "./inboxSuppressionWriters";
 
 export const READ_MUTATION_RECOVERY_HORIZON_MS = 90 * 24 * 60 * 60 * 1_000;
 const DEFAULT_LEASE_MS = 30_000;
@@ -54,12 +56,24 @@ export type ReadMutationPayload =
   | { kind: "global_read_all" }
   | { kind: "done"; targetKind: DoneTargetKind; scopeId: string; throughSeq: string };
 
+/**
+ * The human acting for an agent receiver (human -> agent read-state delegation). Human principals act for themselves,
+ * and an agent principal without an actor is the agent reading for itself.
+ */
+export type ReadMutationActor = { kind: "human"; userId: string };
+
+/** The typed refusal the task #93 line B admission fence throws; callers map it, side-effect callers swallow only it. */
+export function isReadMutationFenceRefusal(error: unknown): error is ServerMembershipRevokedError | FencedAuthorizationDeniedError {
+  return error instanceof ServerMembershipRevokedError || error instanceof FencedAuthorizationDeniedError;
+}
+
 export type ReadMutationAdmissionInput = {
   serverId: string;
   principalKind?: ReadMutationPrincipalKind;
   principalId: string;
   mutationId: string;
   mutation: ReadMutationPayload;
+  actor?: ReadMutationActor;
 };
 
 export type ReadMutationAdmissionReceipt = {
@@ -235,6 +249,63 @@ function asNumber(value: unknown): number {
   return parsed;
 }
 
+/**
+ * Task #93 line B: the `servers` row FOR SHARE, taken first by every sequencer transaction that later holds a member
+ * row and writes a row whose foreign key references `servers` (read_mutations, the authority row).
+ * transitionMemberRole holds `servers` FOR UPDATE and then waits on member rows; taking `servers` first makes the two
+ * serialize instead of deadlocking.
+ */
+async function lockReadMutationServerRow(tx: DatabaseTransaction, serverId: string): Promise<void> {
+  await tx.execute(sql`
+    SELECT id
+    FROM servers
+    WHERE id = ${serverId}::uuid
+    FOR SHARE
+  `);
+}
+
+/**
+ * Task #93 line B admission fence, taken before the authority row. Order: `servers` FOR SHARE, then the acting
+ * principal's membership row FOR SHARE, then (for delegation) the re-check on the locked role. A refusal throws before
+ * any write, so a removal or demotion that commits first leaves zero command rows.
+ * - Human principal: the human's server_members row (ServerMembershipRevokedError when gone).
+ * - Agent principal with a human actor: the human's server_members row, then the agent's server_agent_members row, then
+ *   decideReadStateDelegation on the locked role and the agent's creator.
+ * - Agent principal without an actor (the agent reading for itself): the agent's server_agent_members row.
+ */
+async function lockReadMutationAdmissionFence(
+  tx: DatabaseTransaction,
+  input: { serverId: string; principalKind: ReadMutationPrincipalKind; principalId: string; actor?: ReadMutationActor },
+): Promise<void> {
+  await lockReadMutationServerRow(tx, input.serverId);
+  if (input.principalKind === "human") {
+    await lockActorMembershipRow(tx, input.serverId, input.principalId, "share");
+    return;
+  }
+  const actorRole = input.actor
+    ? await lockActorMembershipRow(tx, input.serverId, input.actor.userId, "share")
+    : null;
+  const agentMembership = await tx.execute(sql`
+    SELECT sam.agent_id
+    FROM server_agent_members sam
+    WHERE sam.server_id = ${input.serverId}::uuid
+      AND sam.agent_id = ${input.principalId}::uuid
+    FOR SHARE
+  `);
+  if (agentMembership.rows.length !== 1) throw new FencedAuthorizationDeniedError("not_found");
+  if (!input.actor) return;
+  const agentRows = await tx.execute(sql`
+    SELECT a.creator_type AS "creatorType", a.creator_id AS "creatorId"
+    FROM agents a
+    WHERE a.id = ${input.principalId}::uuid
+      AND a.server_id = ${input.serverId}::uuid
+  `);
+  const agent = agentRows.rows[0] as { creatorType: string | null; creatorId: string | null } | undefined;
+  if (!agent) throw new FencedAuthorizationDeniedError("not_found");
+  const decision = decideReadStateDelegation({ callerServerRole: actorRole, userId: input.actor.userId, agent });
+  if (!decision.allowed) throw new FencedAuthorizationDeniedError("forbidden");
+}
+
 async function lockAuthority(
   tx: DatabaseTransaction,
   serverId: string,
@@ -265,23 +336,46 @@ async function lockAuthority(
   };
 }
 
+/**
+ * Why a caller without content access was admitted, purely to retire residue
+ * they own. Closed list: the residue boundary tests enumerate it, so a reason
+ * added here without a test cell fails the suite.
+ *
+ * - deleted_inbox: the target channel (not a DM) is soft-deleted.
+ * - lost_access: no current membership of a private, DM, or joint channel, or
+ *   of the parent of a thread (task #48). Never a content-access authority.
+ * - unavailable_thread_parent: an active thread whose parent authority is gone.
+ */
+export const READ_SCOPE_RESIDUE_REASONS = ["deleted_inbox", "lost_access", "unavailable_thread_parent"] as const;
+export type ReadScopeResidueReason = (typeof READ_SCOPE_RESIDUE_REASONS)[number];
+
+declare const liveReadScopeBrand: unique symbol;
+/**
+ * Proof that the resolver granted live content authority over one message
+ * storage scope. Only the resolver's live branch mints it (task #64). Every
+ * query that reads a channel's live frontier takes this value, so a residue
+ * scope, including one added later, cannot reach the live frontier without a
+ * type error. That is the fail-closed default: residue never defaults to live.
+ */
+export type LiveReadScope = { readonly storageScopeId: string; readonly [liveReadScopeBrand]: true };
+
+function mintLiveReadScope(storageScopeId: string): LiveReadScope {
+  return { storageScopeId } as LiveReadScope;
+}
+
+type ReadScopeAuthority =
+  | { kind: "live"; scope: LiveReadScope }
+  | { kind: "residue"; reason: ReadScopeResidueReason };
+
 type AuthorizedReadMutationScope = {
   scopeId: string;
-  storageScopeId: string;
   channelType: "channel" | "private" | "joint" | "dm" | "thread";
-  deletedInboxResidue: boolean;
-  /**
-   * Admitted with no current membership, purely to retire residue they own
-   * (task #48). Never a content-access authority -- see the branch that sets it.
-   */
-  lostAccessResidue?: boolean;
-  /**
-   * Active thread whose parent authority is unavailable, admitted only to retire
-   * receiver-owned residue. Boundary capture must use receiver-owned rows, not
-   * the thread source max, or it becomes an activity monitor after deletion.
-   */
-  unavailableThreadParentResidue?: boolean;
+  authority: ReadScopeAuthority;
 };
+
+function liveReadScopeOf(resolved: AuthorizedReadMutationScope | null): LiveReadScope | null {
+  return resolved?.authority.kind === "live" ? resolved.authority.scope : null;
+}
 
 /**
  * Receiver-owned evidence that this principal once had a relationship with this
@@ -317,13 +411,6 @@ function lostAccessResidueEvidence(
       )`;
   return sql`(
     ${cursorEvidence}
-    OR EXISTS (
-      SELECT 1 FROM inbox_serving_rows r
-      WHERE r.receiver_type = ${receiverType}
-        AND r.receiver_id = ${input.principalId}::uuid
-        AND r.server_id = ${input.serverId}::uuid
-        AND r.source_channel_id = ${accessChannelId}::uuid
-    )
     OR EXISTS (
       SELECT 1 FROM inbox_notification_facts f
       WHERE f.receiver_type = ${receiverType}
@@ -408,14 +495,6 @@ async function resolveAuthorizedReadMutationScope(
           AND (
             EXISTS (
               SELECT 1
-              FROM inbox_serving_rows stale_row
-              WHERE stale_row.receiver_type = ${receiverType}
-                AND stale_row.receiver_id = ${input.principalId}::uuid
-                AND stale_row.server_id = ${input.serverId}::uuid
-                AND stale_row.source_channel_id = c.id
-            )
-            OR EXISTS (
-              SELECT 1
               FROM inbox_notification_facts stale_fact
               WHERE stale_fact.receiver_type = ${receiverType}
                 AND stale_fact.receiver_id = ${input.principalId}::uuid
@@ -444,9 +523,8 @@ async function resolveAuthorizedReadMutationScope(
   if (local.deletedAt && local.channelType !== "dm") {
     return {
       scopeId: local.scopeId,
-      storageScopeId: local.scopeId,
       channelType: local.channelType,
-      deletedInboxResidue: true,
+      authority: { kind: "residue", reason: "deleted_inbox" },
     };
   }
 
@@ -522,10 +600,8 @@ async function resolveAuthorizedReadMutationScope(
         if (residue.rows.length === 1) {
           return {
             scopeId: local.scopeId,
-            storageScopeId,
             channelType: local.channelType,
-            deletedInboxResidue: false,
-            unavailableThreadParentResidue: true,
+            authority: { kind: "residue", reason: "unavailable_thread_parent" },
           };
         }
       }
@@ -561,27 +637,65 @@ async function resolveAuthorizedReadMutationScope(
       // channel_read_all, and only on evidence the RECEIVER owns -- rows a
       // stranger cannot manufacture, so nobody can move themselves in here.
       if (input.allowLostAccessResidue !== true) return null;
+      // Task #66. For a thread, ask about the thread's OWN rows as well as the
+      // parent's. Admission used to consult only the parent while
+      // captureResidueBoundary has always read the thread's own rows, so a
+      // receiver whose residue sits only on the thread got 404 and could never
+      // retire it. Both sides are rows the RECEIVER owns and a stranger cannot
+      // manufacture, so this widens WHO is admitted, never WHAT they may read:
+      // the boundary is unchanged, and a residue reason still cannot mint a
+      // LiveReadScope, so the live frontier stays unreachable by construction.
+      //
+      // `lost_access` deliberately covers two populations: a receiver who lost
+      // access to the parent, and one who NEVER had parent access but owns
+      // residue on the thread (being @-mentioned in it produces those rows).
+      // The name is kept for both, and the distinction is not needed: neither
+      // population is a probe -- both are residue authority bounded by
+      // receiver-owned rows.
+      const residueScopeIds = local.channelType === "thread" && local.scopeId !== accessChannelId
+        ? [accessChannelId, local.scopeId]
+        : [accessChannelId];
       const residue = await tx.execute(sql`
         SELECT 1
-        WHERE ${lostAccessResidueEvidence(input, accessChannelId)}
+        WHERE ${sql.join(residueScopeIds.map((scopeId) => lostAccessResidueEvidence(input, scopeId)), sql` OR `)}
       `);
       if (residue.rows.length !== 1) return null;
       return {
         scopeId: local.scopeId,
-        storageScopeId,
         channelType: local.channelType,
-        deletedInboxResidue: false,
-        lostAccessResidue: true,
+        authority: { kind: "residue", reason: "lost_access" },
       };
     }
   }
 
   return {
     scopeId: local.scopeId,
-    storageScopeId,
     channelType: local.channelType,
-    deletedInboxResidue: false,
+    authority: { kind: "live", scope: mintLiveReadScope(storageScopeId) },
   };
+}
+
+/**
+ * Test-only (task #64): the authority branch `channel_read_all` resolves to for
+ * one scope, with the same residue relaxations admission and boundary capture
+ * use. Boundary tests assert this first, so a green result means the intended
+ * branch actually ran instead of some other branch that happens to be bounded.
+ */
+export async function inspectChannelReadAllScopeAuthorityForTests(input: {
+  serverId: string;
+  principalKind: ReadMutationPrincipalKind;
+  principalId: string;
+  scopeId: string;
+}): Promise<"live" | ReadScopeResidueReason | null> {
+  return getDb().transaction(async (tx) => {
+    const resolved = await resolveAuthorizedReadMutationScope(tx, {
+      ...input,
+      allowDeletedInboxResidue: true,
+      allowLostAccessResidue: true,
+    });
+    if (!resolved) return null;
+    return resolved.authority.kind === "live" ? "live" : resolved.authority.reason;
+  });
 }
 
 async function resolveAuthorizedReadMutationScopes(
@@ -593,12 +707,244 @@ async function resolveAuthorizedReadMutationScopes(
     scopeIds: string[];
   },
 ): Promise<AuthorizedReadMutationScope[]> {
+  // Resolve in key order (uuid order == lowercase hex order) so the KEY SHARE
+  // locks of several scopes are taken in the same order as the batch path and
+  // conversion rollback; caller order would let two scopes lock in reverse.
+  const ordered = [...input.scopeIds].sort((a, b) => {
+    const left = a.toLowerCase();
+    const right = b.toLowerCase();
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
   const resolved: AuthorizedReadMutationScope[] = [];
-  for (const scopeId of input.scopeIds) {
+  for (const scopeId of ordered) {
     const scope = await resolveAuthorizedReadMutationScope(tx, { ...input, scopeId });
     if (scope) resolved.push(scope);
   }
   return resolved;
+}
+
+/**
+ * Batched live-scope resolution for global_read_all.
+ *
+ * The per-scope resolver (resolveAuthorizedReadMutationScope) runs 2–6
+ * statements per scope; this version resolves every candidate in TWO
+ * statements regardless of count: one for non-thread scopes (local row +
+ * joint projection + participant check) and one for thread scopes (parent
+ * chain + parent projection + parent access + participant check). Output is
+ * re-sorted into candidate order afterward because the boundary and ack feed
+ * the terminal digest.
+ *
+ * Lock order (uniform hierarchy — the refinement of Task #101's
+ * "servers → member rows → resource rows" for this resolution; every
+ * statement below orders by primary key so acquiring hundreds of KEY SHARE
+ * rows is deterministic). Retained locks: the local channels row (every
+ * scope), plus the storage-thread and parent-message rows for threads —
+ * all inner-join sides. The per-scope path additionally took KEY SHARE on
+ * projection / participant / parent-channel rows; those are LEFT-join
+ * sides, which Postgres refuses to lock in one statement ("FOR KEY SHARE
+ * cannot be applied to the nullable side of an outer join"), and the
+ * protection was defensive against the channel-conversion-rollback path —
+ * the documented known exception below — so the batch path deliberately
+ * relaxes them. The local row lock anchors every resolved scope.
+ * Channel-conversion rollback (rollbackConversionToSource) is the only path
+ * that hard-deletes or re-keys rows locked here. It locks them all up front
+ * in this same order — per thread in local-id order, then the parent joint
+ * level — before changing any, so it cannot close a cycle with this path or
+ * the per-scope resolver (pinned by
+ * channelConversionRollbackLockOrder.realPg.test.ts). Keep the two in step:
+ * a new KEY SHARE target here must be locked there in the same position.
+ * The one message -> thread write is 0297's parent_channel_id trigger: it
+ * only takes FOR NO KEY UPDATE on the thread row, which never conflicts with
+ * the KEY SHARE here (pinned by channelParentChannelIdLockOrder.realPg.test.ts).
+ *
+ * Scope contract (pinned by tests, do not widen silently): the global path
+ * resolves ONLY live authority. The residue branches
+ * (deleted_inbox / unavailable_thread_parent / lost_access) exist for
+ * channel_read_all, whose caller passes the allow*Residue flags; this
+ * function takes no such flags, and any scope the live predicates reject is
+ * dropped — matching what the plural resolver produced for global_read_all.
+ */
+async function resolveGlobalLiveReadScopes(
+  tx: DatabaseTransaction,
+  input: {
+    serverId: string;
+    principalKind: ReadMutationPrincipalKind;
+    principalId: string;
+    candidates: ReadonlyArray<{ scopeId: string; channelType: string }>;
+  },
+): Promise<AuthorizedReadMutationScope[]> {
+  const serverId = input.serverId;
+  const principalKind = input.principalKind;
+  const principalId = input.principalId;
+  const candidates = input.candidates;
+  if (candidates.length === 0) return [];
+  const seen = new Set<string>();
+  const positions = new Map<string, number>();
+  candidates.forEach((candidate, index) => {
+    if (seen.has(candidate.scopeId)) throw new Error("global scope resolution received a duplicate scope id");
+    seen.add(candidate.scopeId);
+    positions.set(candidate.scopeId, index);
+  });
+  const nonThreadIds = candidates.filter((c) => c.channelType !== "thread").map((c) => c.scopeId);
+  const threadIds = candidates.filter((c) => c.channelType === "thread").map((c) => c.scopeId);
+  if (nonThreadIds.length === 0 && threadIds.length === 0) return [];
+  const membershipTable = principalKind === "human" ? "channel_humans" : "channel_agents";
+  const membershipPrincipalColumn = principalKind === "human" ? "user_id" : "agent_id";
+
+  const resolvedByScopeId = new Map<string, AuthorizedReadMutationScope>();
+  // Authorization via membership is enforced by the dedicated lock statement
+  // below (statement 3), not by these queries: the per-scope path's
+  // participant check was an authorization lock, not a data lookup — Task
+  // #101's serverService relies on these rows staying locked (Ray's review).
+  // Maps record which membership rows each surviving scope depends on.
+  const localMembershipScopeIds: string[] = [];
+  const threadParentMembership = new Map<string, string>();
+
+  // Statement 1 — non-thread locals: local channel row and joint projection.
+  if (nonThreadIds.length > 0) {
+    const locals = await tx.execute(sql`
+      SELECT s.scope_id::text AS "scopeId",
+             c.type::text AS "channelType",
+             j.canonical_channel_id::text AS "canonicalScopeId"
+      FROM unnest(${sql.param(nonThreadIds)}::uuid[]) WITH ORDINALITY AS s(scope_id, ord)
+      JOIN channels c
+        ON c.id = s.scope_id
+       AND c.server_id = ${serverId}::uuid
+       AND (c.deleted_at IS NULL OR c.type = 'dm')
+      LEFT JOIN joint_channel_servers jps
+        ON jps.local_channel_id = c.id
+       AND jps.server_id = ${serverId}::uuid
+       AND jps.status = 'active'
+       AND c.type = 'joint'
+      LEFT JOIN joint_channels j
+        ON j.id = jps.joint_channel_id
+       AND j.status = 'active'
+      WHERE c.type <> 'thread'
+      ORDER BY s.scope_id
+      FOR KEY SHARE OF c
+    `);
+    for (const row of locals.rows as Array<{
+      scopeId: string;
+      channelType: string;
+      canonicalScopeId: string | null;
+    }>) {
+      const channelType = row.channelType as AuthorizedReadMutationScope["channelType"];
+      if (channelType === "joint" && !row.canonicalScopeId) continue;
+      // All non-thread scopes lock membership: for private/joint/dm it is the
+      // authorization check; for plain channels the row exists by construction
+      // of the candidate listing, so the lock is a fixed-cost no-op that keeps
+      // the statement count and the drop rule uniform (Ray's review).
+      localMembershipScopeIds.push(row.scopeId);
+      resolvedByScopeId.set(row.scopeId, {
+        scopeId: row.scopeId,
+        channelType,
+        authority: { kind: "live", scope: mintLiveReadScope(channelType === "joint" ? row.canonicalScopeId! : row.scopeId) },
+      });
+    }
+  }
+
+  // Statement 2 — threads: local row, canonical projection, storage thread,
+  // parent message, parent projection, parent access channel. INNER joins
+  // reproduce the per-scope "parent must exist" gate. Skipped entirely when
+  // there are no thread candidates — that skip is what the sweep-B
+  // statement-count assertion pins as the thread branch's fixed cost.
+  if (threadIds.length > 0) {
+    const threads = await tx.execute(sql`
+      SELECT s.scope_id::text AS "scopeId",
+             c.type::text AS "channelType",
+             j.canonical_channel_id::text AS "canonicalScopeId",
+             pc.id::text AS "parentAccessScopeId",
+             pc.type::text AS "parentAccessChannelType"
+      FROM unnest(${sql.param(threadIds)}::uuid[]) WITH ORDINALITY AS s(scope_id, ord)
+      JOIN channels c
+        ON c.id = s.scope_id
+       AND c.server_id = ${serverId}::uuid
+       AND (c.deleted_at IS NULL OR c.type = 'dm')
+      LEFT JOIN joint_channel_servers jps
+        ON jps.local_channel_id = c.id
+       AND jps.server_id = ${serverId}::uuid
+       AND jps.status = 'active'
+      LEFT JOIN joint_channels j
+        ON j.id = jps.joint_channel_id
+       AND j.status = 'active'
+      JOIN channels st
+        ON st.id = COALESCE(j.canonical_channel_id, c.id)
+       AND st.type = 'thread'
+       AND st.deleted_at IS NULL
+      JOIN messages pm
+        ON pm.id = st.parent_message_id
+      LEFT JOIN joint_channels pj
+        ON pj.canonical_channel_id = pm.channel_id
+       AND pj.status = 'active'
+      LEFT JOIN joint_channel_servers pps
+        ON pps.joint_channel_id = pj.id
+       AND pps.server_id = ${serverId}::uuid
+       AND pps.status = 'active'
+      LEFT JOIN channels pc
+        ON pc.id = COALESCE(pps.local_channel_id, pm.channel_id)
+       AND pc.server_id = ${serverId}::uuid
+       AND pc.deleted_at IS NULL
+      WHERE c.type = 'thread'
+      ORDER BY s.scope_id
+      FOR KEY SHARE OF c, st, pm
+    `);
+    for (const row of threads.rows as Array<{
+      scopeId: string;
+      channelType: string;
+      canonicalScopeId: string | null;
+      parentAccessScopeId: string | null;
+      parentAccessChannelType: string | null;
+    }>) {
+      if (!row.parentAccessScopeId) continue;
+      if (row.parentAccessChannelType === "thread") continue;
+      if (row.parentAccessChannelType !== "channel") {
+        threadParentMembership.set(row.scopeId, row.parentAccessScopeId);
+      }
+      resolvedByScopeId.set(row.scopeId, {
+        scopeId: row.scopeId,
+        channelType: "thread",
+        authority: { kind: "live", scope: mintLiveReadScope(row.canonicalScopeId ?? row.scopeId) },
+      });
+    }
+  }
+
+  // Statement 3 — the authorization lock: one KEY SHARE over every membership
+  // row this resolution relies on, in primary-key order. The per-scope path
+  // held these locks through its participant check; dropping them was the
+  // review's must-fix. Ids absent from the result lack membership and their
+  // scopes are dropped below — exactly the per-scope resolver returning null.
+  // Plain-channel access never required membership (the per-scope path skipped
+  // the participant check for it) so those ids are not locked.
+  const lockIdSet = new Set<string>([
+    ...localMembershipScopeIds,
+    ...threadParentMembership.values(),
+  ]);
+  if (lockIdSet.size > 0) {
+    const lockIds = [...lockIdSet].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const membership = await tx.execute(sql`
+      SELECT channel_id::text AS "channelId"
+      FROM ${sql.raw(membershipTable)}
+      WHERE ${sql.raw(membershipPrincipalColumn)} = ${principalId}::uuid
+        AND channel_id = ANY(${sql.param(lockIds)}::uuid[])
+      ORDER BY channel_id
+      FOR KEY SHARE
+    `);
+    const locked = new Set<string>((membership.rows as Array<{ channelId: string }>).map((row) => row.channelId));
+    for (const scopeId of localMembershipScopeIds) {
+      if (!locked.has(scopeId)) resolvedByScopeId.delete(scopeId);
+    }
+    for (const [scopeId, parentAccessScopeId] of threadParentMembership) {
+      if (!locked.has(parentAccessScopeId)) resolvedByScopeId.delete(scopeId);
+    }
+  }
+  // Re-assemble in candidate order: the boundary and ack feed the terminal
+  // digest, so ordering is load-bearing (asserted in tests).
+  const ordered: AuthorizedReadMutationScope[] = [];
+  for (const candidate of candidates) {
+    const scope = resolvedByScopeId.get(candidate.scopeId);
+    if (scope) ordered.push(scope);
+  }
+  return ordered;
 }
 
 function admissionReceiptFromLive(
@@ -619,6 +965,65 @@ function admissionReceiptFromLive(
   };
 }
 
+/**
+ * Stored acks are served again on exact replay and by the compatibility bridge
+ * (task #64, decision Q3). An ack stored before the fix, or while the caller
+ * still had access, may hold the channel's live frontier. When the caller lacks
+ * live authority over the scope now, every returned position is bounded by the
+ * receiver-owned residue boundary. Filtering at return time rather than
+ * rewriting rows keeps the stored acks intact: they are the evidence an audit
+ * of past exposure needs. The stored terminalDigest describes the ack AS MINTED,
+ * so a filtered ack no longer matches it.
+ *
+ * That pairing is now verified, in readMutationResidueBoundary.test.ts ("replaying an ack stored
+ * with the live frontier..."): a bounded replay must hand back the ORIGINAL digest, and must leave
+ * the stored one alone.
+ *
+ * ⚠️ It is verified by equality against the digest minted at terminalization -- NOT by recomputing
+ * it from the row. `readMutations.ack` is jsonb and PostgreSQL normalises jsonb key order, so the
+ * byte sequence this digest was taken over does not survive the round trip and cannot be rebuilt
+ * from the stored value. ⛔ Do not add a `digest(storedAck) === terminalDigest` assertion; it is
+ * unsatisfiable for reasons unrelated to the property.
+ */
+async function boundStoredChannelReadAllAck(
+  tx: DatabaseTransaction,
+  input: {
+    serverId: string;
+    principalKind: ReadMutationPrincipalKind;
+    principalId: string;
+    kind: ReadMutationKind;
+    scopeId: string | null;
+    ack: Record<string, unknown> | null;
+  },
+): Promise<Record<string, unknown> | null> {
+  if (!input.ack || input.kind !== "channel_read_all" || !input.scopeId) return input.ack;
+  const resolved = await resolveAuthorizedReadMutationScope(tx, {
+    serverId: input.serverId,
+    principalKind: input.principalKind,
+    principalId: input.principalId,
+    scopeId: input.scopeId,
+    allowDeletedInboxResidue: true,
+    allowLostAccessResidue: true,
+  });
+  if (liveReadScopeOf(resolved)) return input.ack;
+  const ceiling = await captureResidueBoundary(tx, {
+    serverId: input.serverId,
+    principalKind: input.principalKind,
+    principalId: input.principalId,
+    scopeId: input.scopeId,
+  });
+  const stored = input.ack as unknown as ReadMutationAck;
+  const bounded: ReadMutationAck = {
+    ...stored,
+    capturedBoundary: (stored.capturedBoundary ?? []).map((entry) => ({
+      scopeId: entry.scopeId,
+      throughSeq: Math.min(asNumber(entry.throughSeq), ceiling),
+    })),
+    scopes: (stored.scopes ?? []).map((scope) => residueScopeAck(scope, ceiling)),
+  };
+  return bounded as unknown as Record<string, unknown>;
+}
+
 export async function admitReadMutation(input: ReadMutationAdmissionInput): Promise<ReadMutationAdmissionReceipt> {
   if (!UUID_V4_RE.test(input.mutationId)) {
     throw new ReadMutationError("INVALID_MUTATION_ID", "mutationId must be UUIDv4");
@@ -630,6 +1035,12 @@ export async function admitReadMutation(input: ReadMutationAdmissionInput): Prom
     throw new ReadMutationError("INVALID_MUTATION_PAYLOAD", "Done mutations are human-only");
   }
   return getDb().transaction(async (tx) => {
+    await lockReadMutationAdmissionFence(tx, {
+      serverId: input.serverId,
+      principalKind,
+      principalId: input.principalId,
+      actor: input.actor,
+    });
     const authority = await lockAuthority(tx, input.serverId, principalKind, input.principalId);
     const [live] = await tx.select().from(readMutations).where(and(
       eq(readMutations.serverId, input.serverId),
@@ -644,10 +1055,21 @@ export async function admitReadMutation(input: ReadMutationAdmissionInput): Prom
           "mutationId was already used with a different payload",
         );
       }
-      return admissionReceiptFromLive(
+      const receipt = admissionReceiptFromLive(
         live,
         live.state === "applied" || live.state === "retired_no_effect" ? "ALREADY_TERMINAL" : "ALREADY_ADMITTED",
       );
+      return {
+        ...receipt,
+        ack: await boundStoredChannelReadAllAck(tx, {
+          serverId: live.serverId,
+          principalKind,
+          principalId: live.principalId,
+          kind: live.kind,
+          scopeId: live.scopeId,
+          ack: receipt.ack,
+        }),
+      };
     }
 
     const [tombstone] = await tx.select().from(readMutationTombstones).where(and(
@@ -925,13 +1347,56 @@ export async function claimNextFairReadMutation(input: {
   });
 }
 
+/**
+ * Receiver-owned residue boundary (task #64): the highest seq the receiver was
+ * notified about for this scope, from their own notification facts. The
+ * receiver's cursor is deliberately NOT consulted: the pre-fix defect wrote the
+ * channel's live frontier into cursors, so reading them back would launder that
+ * leak into "receiver-owned" data. Activity entries come from these rows, so this
+ * boundary is enough to retire them.
+ */
+async function captureResidueBoundary(
+  tx: DatabaseTransaction,
+  input: { serverId: string; principalKind: ReadMutationPrincipalKind; principalId: string; scopeId: string },
+): Promise<number> {
+  const receiverType = input.principalKind === "human" ? "user" : "agent";
+  const result = await tx.execute(sql`
+    SELECT COALESCE((
+      SELECT MAX(owned_fact.message_seq)
+      FROM inbox_notification_facts owned_fact
+      WHERE owned_fact.receiver_type = ${receiverType}
+        AND owned_fact.receiver_id = ${input.principalId}::uuid
+        AND owned_fact.server_id = ${input.serverId}::uuid
+        AND owned_fact.source_channel_id = ${input.scopeId}::uuid
+    ), 0)::int AS "throughSeq"
+  `);
+  const [row] = result.rows as Array<{ throughSeq: unknown }>;
+  return asNumber(row?.throughSeq ?? 0);
+}
+
+/** The live frontier of a storage scope. Callable only with live authority. */
+async function captureLiveFrontier(tx: DatabaseTransaction, live: LiveReadScope): Promise<number> {
+  const result = await tx.execute(sql`
+    SELECT COALESCE(MAX(m.seq), 0)::int AS "throughSeq"
+    FROM messages m
+    WHERE m.channel_id = ${live.storageScopeId}::uuid
+  `);
+  const [row] = result.rows as Array<{ throughSeq: unknown }>;
+  return asNumber(row?.throughSeq ?? 0);
+}
+
+type CapturedChannelBoundary = {
+  boundary: ReadMutationBoundary[];
+  residueScopeIds: string[];
+};
+
 async function captureChannelBoundary(
   tx: DatabaseTransaction,
   serverId: string,
   principalKind: ReadMutationPrincipalKind,
   principalId: string,
   scopeId: string,
-): Promise<ReadMutationBoundary[] | null> {
+): Promise<CapturedChannelBoundary | null> {
   const resolved = await resolveAuthorizedReadMutationScope(tx, {
     serverId,
     principalKind,
@@ -945,61 +1410,20 @@ async function captureChannelBoundary(
     allowLostAccessResidue: true,
   });
   if (!resolved) return null;
-  if (resolved.deletedInboxResidue || resolved.unavailableThreadParentResidue) {
-    const receiverType = principalKind === "human" ? "user" : "agent";
-    const deletedCursorBoundary = principalKind === "human"
-      ? sql`COALESCE((
-          SELECT MAX(stale_cursor.last_read_seq)
-          FROM user_channel_read_cursors stale_cursor
-          WHERE stale_cursor.user_id = ${principalId}::uuid
-            AND stale_cursor.channel_id = ${resolved.scopeId}::uuid
-        ), 0)`
-      : sql`COALESCE((
-          SELECT MAX(stale_cursor.last_read_seq)
-          FROM agent_channel_read_cursors stale_cursor
-          WHERE stale_cursor.agent_id = ${principalId}::uuid
-            AND stale_cursor.channel_id = ${resolved.scopeId}::uuid
-        ), 0)`;
-    const result = await tx.execute(sql`
-      SELECT GREATEST(
-        COALESCE((
-          SELECT MAX(stale_row.latest_notified_seq)
-          FROM inbox_serving_rows stale_row
-          WHERE stale_row.receiver_type = ${receiverType}
-            AND stale_row.receiver_id = ${principalId}::uuid
-            AND stale_row.server_id = ${serverId}::uuid
-            AND stale_row.source_channel_id = ${resolved.scopeId}::uuid
-        ), 0),
-        COALESCE((
-          SELECT MAX(stale_fact.message_seq)
-          FROM inbox_notification_facts stale_fact
-          WHERE stale_fact.receiver_type = ${receiverType}
-            AND stale_fact.receiver_id = ${principalId}::uuid
-            AND stale_fact.server_id = ${serverId}::uuid
-            AND stale_fact.source_channel_id = ${resolved.scopeId}::uuid
-        ), 0),
-        ${deletedCursorBoundary}
-      )::int AS "throughSeq"
-    `);
-    const [row] = result.rows as Array<{ throughSeq: unknown }>;
-    return [{ scopeId: resolved.scopeId, throughSeq: asNumber(row?.throughSeq ?? 0) }];
+  if (resolved.authority.kind === "residue") {
+    const throughSeq = await captureResidueBoundary(tx, { serverId, principalKind, principalId, scopeId: resolved.scopeId });
+    return {
+      boundary: [{ scopeId: resolved.scopeId, throughSeq }],
+      residueScopeIds: [resolved.scopeId],
+    };
   }
-  const result = await tx.execute(sql`
-    SELECT COALESCE(MAX(m.seq), 0)::int AS "throughSeq"
-    FROM messages m
-    WHERE m.channel_id = ${resolved.storageScopeId}::uuid
-  `);
-  const [row] = result.rows as Array<{ throughSeq: unknown }>;
-  return [{ scopeId: resolved.scopeId, throughSeq: asNumber(row?.throughSeq ?? 0) }];
+  const throughSeq = await captureLiveFrontier(tx, resolved.authority.scope);
+  return {
+    boundary: [{ scopeId: resolved.scopeId, throughSeq }],
+    residueScopeIds: [],
+  };
 }
 
-/**
- * Capture a bounded composite Done under the frozen lock order:
- * principal authority -> canonical content row -> Done-state row -> cursor ->
- * suppression. Message admission takes an FK KEY SHARE lock on the canonical
- * channel row, so this FOR UPDATE is the serialization seam for local and
- * joint channel/thread projections alike.
- */
 async function captureDoneBoundary(
   tx: DatabaseTransaction,
   mutation: typeof readMutations.$inferSelect,
@@ -1017,7 +1441,8 @@ async function captureDoneBoundary(
     principalId: mutation.principalId,
     scopeId: mutation.scopeId,
   });
-  if (!resolved) return { boundary: null, applyBroadDoneMarker: false };
+  const live = liveReadScopeOf(resolved);
+  if (!resolved || !live) return { boundary: null, applyBroadDoneMarker: false };
 
   const actualTargetKind: DoneTargetKind = resolved.channelType === "thread" ? "thread" : "channel";
   if (actualTargetKind !== mutation.doneTargetKind) {
@@ -1027,7 +1452,7 @@ async function captureDoneBoundary(
   const lockedContent = await tx.execute(sql`
     SELECT id
     FROM channels
-    WHERE id = ${resolved.storageScopeId}::uuid
+    WHERE id = ${live.storageScopeId}::uuid
       AND deleted_at IS NULL
     FOR UPDATE
   `);
@@ -1047,7 +1472,7 @@ async function captureDoneBoundary(
         throughActivitySeq: throughSeq,
         executor: tx,
       });
-  if (verified.target.sourceChannelId !== resolved.storageScopeId) {
+  if (verified.target.sourceChannelId !== live.storageScopeId) {
     return { boundary: null, applyBroadDoneMarker: false };
   }
   const applyBroadDoneMarker = verified.target.latestSeqExact === throughSeq;
@@ -1126,7 +1551,7 @@ async function captureGlobalBoundary(
   if (!await lockActiveReadMutationPrincipal(tx, serverId, principalKind, principalId)) return null;
   const candidates = principalKind === "human"
     ? await tx.execute(sql`
-        SELECT c.id::text AS "scopeId"
+        SELECT c.id::text AS "scopeId", c.type::text AS "channelType"
         FROM channels c
         LEFT JOIN user_channel_inbox_states inbox
           ON inbox.channel_id = c.id AND inbox.user_id = ${principalId}::uuid
@@ -1142,7 +1567,7 @@ async function captureGlobalBoundary(
               AND ch.user_id = ${principalId}::uuid
           )
         UNION
-        SELECT c.id::text AS "scopeId"
+        SELECT c.id::text AS "scopeId", c.type::text AS "channelType"
         FROM thread_follows tf
         INNER JOIN channels c
           ON c.id = tf.thread_channel_id
@@ -1156,7 +1581,7 @@ async function captureGlobalBoundary(
         ORDER BY "scopeId"
       `)
     : await tx.execute(sql`
-        SELECT c.id::text AS "scopeId"
+        SELECT c.id::text AS "scopeId", c.type::text AS "channelType"
         FROM channels c
         INNER JOIN channel_agents ca
           ON ca.channel_id = c.id
@@ -1166,7 +1591,7 @@ async function captureGlobalBoundary(
           AND c.deleted_at IS NULL
           AND c.archived_at IS NULL
         UNION
-        SELECT c.id::text AS "scopeId"
+        SELECT c.id::text AS "scopeId", c.type::text AS "channelType"
         FROM thread_follows tf
         INNER JOIN channels c
           ON c.id = tf.thread_channel_id
@@ -1179,23 +1604,66 @@ async function captureGlobalBoundary(
           AND tf.unfollowed_at IS NULL
         ORDER BY "scopeId"
       `);
-  const candidateIds = (candidates.rows as Array<{ scopeId: string }>).map((row) => row.scopeId);
-  const resolved = await resolveAuthorizedReadMutationScopes(tx, {
+  const candidateRows = candidates.rows as Array<{ scopeId: string; channelType: string }>;
+  // The active-principal lock is already held from the head of this function;
+  // the batched resolver below takes no per-scope locks at all (only row
+  // locks inside its statements, in primary-key order).
+  const resolved = await resolveGlobalLiveReadScopes(tx, {
     serverId,
     principalKind,
     principalId,
-    scopeIds: candidateIds,
+    candidates: candidateRows,
   });
-  const boundary: ReadMutationBoundary[] = [];
+  // Batch the per-channel frontier probe into one round trip: unnest + a scalar
+  // subquery per row keeps the planner's "Index Only Scan Backward ... Limit 1"
+  // shape per channel (a GROUP BY aggregate would scan every index entry of
+  // every listed channel — measured by Ray on PGlite with 200 synthetic
+  // channels / 390k messages: 795ms → 5.9ms. NULL (empty channel) is filtered
+  // below, matching the old throughSeq > 0 gate. Order follows the resolved
+  // order; the boundary feeds the terminal digest, so ordering is
+  // load-bearing. The storage-exists column separates the benign empty-channel
+  // case from the signal (concurrent removal of canonical storage) so the
+  // trace event only fires for the signal (Tenny's review: an alarm that
+  // always fires carries zero information).
+  const liveScopes: Array<{ scopeId: string; storageScopeId: string }> = [];
   for (const scope of resolved) {
-    const latest = await tx.execute(sql`
-      SELECT COALESCE(MAX(m.seq), 0)::int AS "throughSeq"
-      FROM messages m
-      WHERE m.channel_id = ${scope.storageScopeId}::uuid
-    `);
-    const [row] = latest.rows as Array<{ throughSeq: unknown }>;
-    const throughSeq = asNumber(row?.throughSeq ?? 0);
-    if (throughSeq > 0) boundary.push({ scopeId: scope.scopeId, throughSeq });
+    const live = liveReadScopeOf(scope);
+    if (live) liveScopes.push({ scopeId: scope.scopeId, storageScopeId: live.storageScopeId });
+  }
+  if (liveScopes.length === 0) return [];
+  const seenScopeIds = new Set<string>();
+  for (const { scopeId } of liveScopes) {
+    // unnest-driven ON CONFLICT paths and the digest both require uniqueness.
+    if (seenScopeIds.has(scopeId)) throw new Error("global_read_all resolved a duplicate scope id");
+    seenScopeIds.add(scopeId);
+  }
+  const frontier = await tx.execute(sql`
+    SELECT s.scope_id AS "scopeId",
+           (SELECT MAX(m.seq) FROM messages m WHERE m.channel_id = s.storage_id)::int AS "throughSeq",
+           EXISTS (SELECT 1 FROM channels stor WHERE stor.id = s.storage_id) AS "storageExists"
+    FROM unnest(
+      ${sql.param(liveScopes.map((s) => s.scopeId))}::uuid[],
+      ${sql.param(liveScopes.map((s) => s.storageScopeId))}::uuid[]
+    ) WITH ORDINALITY AS s(scope_id, storage_id, ord)
+    ORDER BY s.ord
+  `);
+  const boundary: ReadMutationBoundary[] = [];
+  for (const row of frontier.rows as Array<{ scopeId: string; throughSeq: unknown; storageExists: boolean }>) {
+    const throughSeq = asNumber(row.throughSeq ?? 0);
+    if (throughSeq > 0) {
+      boundary.push({ scopeId: row.scopeId, throughSeq });
+    } else if (row.storageExists === false) {
+      // Observable skip, signal only: the scope resolved live but its storage
+      // vanished mid-resolution (possible under the deliberately relaxed
+      // projection locking). Empty channels — the benign case — are filtered
+      // silently so this event stays a signal (Tenny's review).
+      safeAddTraceEvent("read_mutation.global_read_all.scope_skipped_at_frontier", () => ({
+        event_kind: "read_mutation",
+        outcome: "skipped",
+        reason: "storage_vanished",
+        scope_id: row.scopeId,
+      }));
+    }
   }
   return boundary;
 }
@@ -1203,9 +1671,10 @@ async function captureGlobalBoundary(
 async function captureBoundary(
   tx: DatabaseTransaction,
   mutation: typeof readMutations.$inferSelect,
-): Promise<ReadMutationBoundary[] | null> {
+): Promise<CapturedChannelBoundary | null> {
   if (mutation.kind === "global_read_all") {
-    return captureGlobalBoundary(tx, mutation.serverId, mutation.principalType, mutation.principalId);
+    const boundary = await captureGlobalBoundary(tx, mutation.serverId, mutation.principalType, mutation.principalId);
+    return boundary ? { boundary, residueScopeIds: [] } : null;
   }
   if (mutation.kind === "channel_read_all") {
     return captureChannelBoundary(
@@ -1217,15 +1686,60 @@ async function captureBoundary(
     );
   }
   if (mutation.kind === "done") {
-    return (await captureDoneBoundary(tx, mutation)).boundary;
+    const boundary = (await captureDoneBoundary(tx, mutation)).boundary;
+    return boundary ? { boundary, residueScopeIds: [] } : null;
   }
-  if (!await resolveAuthorizedReadMutationScope(tx, {
+  const resolved = await resolveAuthorizedReadMutationScope(tx, {
     serverId: mutation.serverId,
     principalKind: mutation.principalType,
     principalId: mutation.principalId,
     scopeId: mutation.scopeId!,
-  })) return null;
-  return [{ scopeId: mutation.scopeId!, throughSeq: mutation.requestedThroughSeq! }];
+  });
+  if (!resolved) return null;
+  return {
+    boundary: [{ scopeId: mutation.scopeId!, throughSeq: mutation.requestedThroughSeq! }],
+    residueScopeIds: [],
+  };
+}
+
+/**
+ * Joining a conversation (channel membership, a started or re-started thread follow)
+ * starts the member's read position at `throughSeq`: everything up to it is read.
+ *
+ * Raise-only, and the row's read_state_version moves with the value (1 on insert, +1 on
+ * a raise) so clients, which drop updates whose version does not advance, keep accepting
+ * later sequencer writes. A join is not a read mutation: it runs in the membership
+ * write's own transaction, takes no authority seq and leaves last_applied_authority_seq
+ * as it was. The conflict predicate re-checks the value at write time, like
+ * applyScopeBoundary, so a concurrent sequencer write can never be lowered.
+ */
+export async function raiseReadPositionForJoin(
+  executor: DatabaseExecutor,
+  principalKind: ReadMutationPrincipalKind,
+  principalId: string,
+  scopeId: string,
+  throughSeq: number,
+): Promise<void> {
+  if (throughSeq <= 0) return;
+  await executor.execute(principalKind === "human"
+    ? sql`
+        INSERT INTO user_channel_read_cursors (user_id, channel_id, last_read_seq, read_state_version, updated_at)
+        VALUES (${principalId}::uuid, ${scopeId}::uuid, ${throughSeq}, 1, now())
+        ON CONFLICT (user_id, channel_id) DO UPDATE SET
+          last_read_seq = EXCLUDED.last_read_seq,
+          read_state_version = user_channel_read_cursors.read_state_version + 1,
+          updated_at = now()
+        WHERE EXCLUDED.last_read_seq > user_channel_read_cursors.last_read_seq
+      `
+    : sql`
+        INSERT INTO agent_channel_read_cursors (agent_id, channel_id, last_read_seq, read_state_version, updated_at)
+        VALUES (${principalId}::uuid, ${scopeId}::uuid, ${throughSeq}, 1, now())
+        ON CONFLICT (agent_id, channel_id) DO UPDATE SET
+          last_read_seq = EXCLUDED.last_read_seq,
+          read_state_version = agent_channel_read_cursors.read_state_version + 1,
+          updated_at = now()
+        WHERE EXCLUDED.last_read_seq > agent_channel_read_cursors.last_read_seq
+      `);
 }
 
 async function applyScopeBoundary(input: {
@@ -1379,6 +1893,131 @@ async function applyScopeBoundary(input: {
   };
 }
 
+/**
+ * Batched apply for global_read_all. The per-scope loop (one FOR UPDATE + one
+ * upsert per channel) becomes three statements total: a sorted batch lock, one
+ * unnest-driven upsert, and a supplementary read for channels the upsert did
+ * not return (unchanged rows and predicate-rejected rows).
+ *
+ * Row-level equivalence with the per-scope path was verified by Ray on a
+ * 200-channel PGlite fixture: ON CONFLICT WHERE is evaluated per row, so
+ * unchanged rows do not bump read_state_version / authority / updated_at, and
+ * the ack arrays and final table contents match byte-for-byte. The
+ * supplementary read stays a separate statement: under READ COMMITTED a
+ * same-statement CTE would see the statement snapshot and could miss legacy
+ * inserts committed between the lock and the upsert (the old code's
+ * supplementary read was also a new statement).
+ */
+async function applyGlobalScopeBoundaries(input: {
+  tx: DatabaseTransaction;
+  principalKind: ReadMutationPrincipalKind;
+  principalId: string;
+  authoritySeq: number;
+  boundary: ReadMutationBoundary[];
+  afterScopeCursorLocked?: (context: { scopeId: string; index: number }) => Promise<void>;
+}): Promise<ReadMutationAck["scopes"]> {
+  const cursorTable = input.principalKind === "human" ? "user_channel_read_cursors" : "agent_channel_read_cursors";
+  const principalColumn = input.principalKind === "human" ? "user_id" : "agent_id";
+  const boundary = input.boundary;
+  const ids = boundary.map((entry) => entry.scopeId);
+  const seenIds = new Set<string>();
+  for (const id of ids) {
+    // The unnest-driven upsert requires unique input ids (ON CONFLICT cannot
+    // affect a row twice); candidates come from a UNION so they are unique,
+    // but the boundary is a load-bearing contract — assert it.
+    if (seenIds.has(id)) throw new Error("global_read_all boundary contains a duplicate scope id");
+    seenIds.add(id);
+  }
+
+  // (a) Lock every cursor row up front in ascending channel order — the same
+  // order the per-scope loop locked them in — so lock-order behavior is
+  // unchanged.
+  await input.tx.execute(sql`
+    SELECT channel_id FROM ${sql.raw(cursorTable)}
+    WHERE ${sql.raw(principalColumn)} = ${input.principalId}::uuid
+      AND channel_id = ANY(${sql.param(ids)}::uuid[])
+    ORDER BY channel_id FOR UPDATE
+  `);
+
+  for (const [index, capturedScope] of boundary.entries()) {
+    await input.afterScopeCursorLocked?.({ scopeId: capturedScope.scopeId, index });
+  }
+
+  const throughSeqOf = new Map(boundary.map((entry) => [entry.scopeId, entry.throughSeq]));
+  // (b) One upsert for every boundary channel. Forward semantics only:
+  // global_read_all always moves the cursor forward, matching the per-scope
+  // forward branch of applyScopeBoundary.
+  const upserted = await input.tx.execute(sql`
+    INSERT INTO ${sql.raw(cursorTable)} (
+      ${sql.raw(principalColumn)}, channel_id, last_read_seq, read_state_version, last_applied_authority_seq, updated_at
+    )
+    SELECT ${input.principalId}::uuid, b.channel_id, b.through_seq, 1, ${input.authoritySeq}, now()
+    FROM unnest(
+      ${sql.param(ids)}::uuid[],
+      ${sql.param(ids.map((id) => throughSeqOf.get(id)!))}::int[]
+    ) AS b(channel_id, through_seq)
+    ORDER BY b.channel_id
+    ON CONFLICT (${sql.raw(principalColumn)}, channel_id) DO UPDATE SET
+      last_read_seq = EXCLUDED.last_read_seq,
+      read_state_version = ${sql.raw(cursorTable)}.read_state_version + 1,
+      last_applied_authority_seq = EXCLUDED.last_applied_authority_seq,
+      updated_at = now()
+    WHERE EXCLUDED.last_read_seq > ${sql.raw(cursorTable)}.last_read_seq
+    RETURNING channel_id,
+              last_read_seq AS "lastReadSeq",
+              read_state_version AS "readStateVersion",
+              last_applied_authority_seq AS "lastAppliedAuthoritySeq"
+  `);
+  const updatedByScope = new Map<string, { lastReadSeq: unknown; readStateVersion: unknown; lastAppliedAuthoritySeq: unknown }>(
+    (upserted.rows as Array<{ channel_id: string; lastReadSeq: unknown; readStateVersion: unknown; lastAppliedAuthoritySeq: unknown }>)
+      .map((row) => [row.channel_id, row]),
+  );
+
+  // (c) Channels the upsert did not return: unchanged or predicate-rejected
+  // rows. Fresh statement (new snapshot), exactly like the per-scope path.
+  const missedIds = ids.filter((id) => !updatedByScope.has(id));
+  const currentByScope = new Map<string, { lastReadSeq: unknown; readStateVersion: unknown; lastAppliedAuthoritySeq: unknown }>();
+  if (missedIds.length > 0) {
+    const current = await input.tx.execute(sql`
+      SELECT channel_id,
+             last_read_seq AS "lastReadSeq",
+             read_state_version AS "readStateVersion",
+             last_applied_authority_seq AS "lastAppliedAuthoritySeq"
+      FROM ${sql.raw(cursorTable)}
+      WHERE ${sql.raw(principalColumn)} = ${input.principalId}::uuid
+        AND channel_id = ANY(${sql.param(missedIds)}::uuid[])
+    `);
+    for (const row of current.rows as Array<{ channel_id: string; lastReadSeq: unknown; readStateVersion: unknown; lastAppliedAuthoritySeq: unknown }>) {
+      currentByScope.set(row.channel_id, row);
+    }
+  }
+
+  const scopes: ReadMutationAck["scopes"] = [];
+  for (const entry of boundary) {
+    const updated = updatedByScope.get(entry.scopeId);
+    if (updated) {
+      scopes.push({
+        scopeId: entry.scopeId,
+        maxReadSeq: asNumber(updated.lastReadSeq),
+        readStateVersion: asNumber(updated.readStateVersion),
+        lastAppliedAuthoritySeq: asNumber(updated.lastAppliedAuthoritySeq),
+        changed: true,
+      });
+      continue;
+    }
+    const current = currentByScope.get(entry.scopeId);
+    if (!current) throw new Error("read mutation cursor resolution returned no row");
+    scopes.push({
+      scopeId: entry.scopeId,
+      maxReadSeq: asNumber(current.lastReadSeq),
+      readStateVersion: asNumber(current.readStateVersion),
+      lastAppliedAuthoritySeq: asNumber(current.lastAppliedAuthoritySeq),
+      changed: false,
+    });
+  }
+  return scopes;
+}
+
 function assertActiveClaim(row: typeof readMutations.$inferSelect, claim: ReadMutationClaim, now: Date): void {
   if (
     row.mutationId !== claim.mutationId
@@ -1449,6 +2088,26 @@ async function applyCompositeDoneSuppression(input: {
   });
 }
 
+/**
+ * The ack entry for a residue scope, built by naming each field (task #64). A
+ * caller without content access must never be handed a read position above the
+ * receiver-owned boundary: an existing cursor may hold a value the pre-fix
+ * defect wrote from the channel's live frontier, and echoing it would reopen the
+ * leak through the ack even with a correct boundary.
+ */
+function residueScopeAck(
+  applied: ReadMutationAck["scopes"][number],
+  residueThroughSeq: number | string,
+): ReadMutationAck["scopes"][number] {
+  return {
+    scopeId: applied.scopeId,
+    maxReadSeq: Math.min(applied.maxReadSeq, asNumber(residueThroughSeq)),
+    readStateVersion: applied.readStateVersion,
+    lastAppliedAuthoritySeq: applied.lastAppliedAuthoritySeq,
+    changed: applied.changed,
+  };
+}
+
 export async function executeReadMutationClaim(input: {
   claim: ReadMutationClaim;
   now?: Date;
@@ -1466,6 +2125,9 @@ export async function executeReadMutationClaim(input: {
   if (input.failpoint === "before_effect") throw new ReadMutationFailpointError(input.failpoint);
 
   const ack = await getDb().transaction(async (tx) => {
+    // Task #93 line B: servers first, so holding the member row and then inserting a servers-FK row (read_mutations/authority)
+    // cannot deadlock with transitionMemberRole. The authority decision below is unchanged.
+    await lockReadMutationServerRow(tx, input.claim.serverId);
     await lockAuthority(tx, input.claim.serverId, input.claim.principalKind, input.claim.principalId);
     const [minimum] = await tx.select().from(readMutations).where(and(
       eq(readMutations.serverId, input.claim.serverId),
@@ -1477,6 +2139,7 @@ export async function executeReadMutationClaim(input: {
     assertActiveClaim(minimum, input.claim, now);
 
     let captured: ReadMutationBoundary[] | null;
+    let residueScopeIds: ReadonlySet<string> = new Set();
     let applyBroadDoneMarker = false;
     let doneFrontierBeyondLatest = false;
     try {
@@ -1485,7 +2148,9 @@ export async function executeReadMutationClaim(input: {
         captured = capturedDone.boundary;
         applyBroadDoneMarker = capturedDone.applyBroadDoneMarker;
       } else {
-        captured = await captureBoundary(tx, minimum);
+        const capturedScopes = await captureBoundary(tx, minimum);
+        captured = capturedScopes?.boundary ?? null;
+        residueScopeIds = new Set(capturedScopes?.residueScopeIds ?? []);
       }
     } catch (error) {
       if (
@@ -1505,6 +2170,25 @@ export async function executeReadMutationClaim(input: {
     const boundary = captured ?? [];
     await input.afterBoundaryCaptured?.({ tx, boundary });
     const scopes: ReadMutationAck["scopes"] = [];
+    if (minimum.kind === "global_read_all" && boundary.length > 0) {
+      // Batched apply: one lock, one upsert, one supplementary read for the
+      // whole boundary instead of a per-scope loop. mid_global fires after the
+      // batch apply, before terminalize — the transaction still rolls back
+      // wholesale, so existing assertions hold.
+      scopes.push(...await applyGlobalScopeBoundaries({
+        tx,
+        principalKind: minimum.principalType,
+        principalId: minimum.principalId,
+        authoritySeq: minimum.authoritySeq,
+        boundary,
+        afterScopeCursorLocked: input.afterScopeCursorLocked
+          ? ({ scopeId, index }) => input.afterScopeCursorLocked!({ scopeId, index })
+          : undefined,
+      }));
+      if (input.failpoint === "mid_global") {
+        throw new ReadMutationFailpointError(input.failpoint);
+      }
+    } else {
     for (const [index, capturedScope] of boundary.entries()) {
       if (minimum.kind === "done") {
         if (minimum.doneTargetKind == null || typeof capturedScope.throughSeq !== "string") {
@@ -1536,7 +2220,9 @@ export async function executeReadMutationClaim(input: {
           ? () => input.afterScopeCursorLocked!({ scopeId: capturedScope.scopeId, index })
           : undefined,
       });
-      scopes.push(appliedScope);
+      scopes.push(residueScopeIds.has(capturedScope.scopeId)
+        ? residueScopeAck(appliedScope, capturedScope.throughSeq)
+        : appliedScope);
       if (minimum.kind === "done") {
         await applyCompositeDoneSuppression({
           tx,
@@ -1550,15 +2236,10 @@ export async function executeReadMutationClaim(input: {
         throw new ReadMutationFailpointError(input.failpoint);
       }
     }
+    }
 
-    const rebuildScopes = minimum.kind === "done"
-      ? scopes
-      : scopes.filter((scope) => scope.changed);
-    await rebuildInboxServingRowsForReceiverTargets(rebuildScopes.map((scope) => ({
-      receiverType: minimum.principalType === "human" ? "user" as const : "agent" as const,
-      receiverId: minimum.principalId,
-      sourceChannelId: scope.scopeId,
-    })), tx);
+    // serving_rows maintenance retired (2026-09-21 teardown): read-state is
+    // authoritative in cursors; Activity surfaces derive from them in RW.
 
     if (input.failpoint === "after_sql_before_commit") {
       throw new ReadMutationFailpointError(input.failpoint);
@@ -1594,6 +2275,12 @@ export async function executeReadMutationClaim(input: {
     };
     const terminalDigest = digestJson(ackWithoutDigest);
     const completeAck: ReadMutationAck = { ...ackWithoutDigest, terminalDigest };
+    // terminal_at records when execution FINISHED. `now` was captured before
+    // the transaction, so writing it here left terminal_at - executing_at at
+    // ~0 (just the claim-to-execute gap) and hid the execution time entirely:
+    // only the admission queue wait was measurable. A caller-pinned clock
+    // (input.now) is kept as-is so deterministic tests stay deterministic.
+    const terminalAt = input.now ?? currentDate();
     const [terminalized] = await tx.update(readMutations).set({
       state: terminalState,
       capturedBoundary: boundary,
@@ -1601,8 +2288,8 @@ export async function executeReadMutationClaim(input: {
       terminalReason,
       terminalDigest,
       leaseExpiresAt: null,
-      terminalAt: now,
-      updatedAt: now,
+      terminalAt,
+      updatedAt: terminalAt,
     }).where(and(
       eq(readMutations.serverId, minimum.serverId),
       eq(readMutations.principalType, minimum.principalType),
@@ -1654,12 +2341,22 @@ export async function resolveReadMutationUnreadBoundary(input: {
 }): Promise<{ latestUnreadEligibleSeq: number; throughSeq: number }> {
   const principalKind = input.principalKind ?? "human";
   return getDb().transaction(async (tx) => {
+    // Task #93 line B: this boundary read is a read-state entry point reached straight from the unread route, ahead of
+    // any admission. Fence Server membership first, in the global order, so a principal removed or demoted after the
+    // request-level checks is refused with the typed error the routes map to 403 — instead of falling through to the
+    // scope read, which reports the now-invisible scope as SCOPE_NOT_FOUND and surfaces as a 500.
+    await lockReadMutationAdmissionFence(tx, {
+      serverId: input.serverId,
+      principalKind,
+      principalId: input.principalId,
+    });
     const resolved = await resolveAuthorizedReadMutationScope(tx, { ...input, principalKind });
-    if (!resolved) throw new ReadMutationError("SCOPE_NOT_FOUND", "read mutation scope does not exist in this server");
+    const live = liveReadScopeOf(resolved);
+    if (!live) throw new ReadMutationError("SCOPE_NOT_FOUND", "read mutation scope does not exist in this server");
     const result = await tx.execute(sql`
       SELECT COALESCE(MAX(m.seq), 0)::int AS "latestUnreadEligibleSeq"
       FROM messages m
-      WHERE m.channel_id = ${resolved.storageScopeId}::uuid
+      WHERE m.channel_id = ${live.storageScopeId}::uuid
         AND NOT (
           m.sender_type = ${principalKind === "human" ? "user" : "agent"}
           AND m.sender_id = ${input.principalId}
@@ -1686,6 +2383,7 @@ export async function executeCompatibilityReadMutation(input: {
   principalId: string;
   mutation: ReadMutationPayload;
   timeoutMs?: number;
+  actor?: ReadMutationActor;
 }): Promise<ReadMutationAck> {
   const principalKind = input.principalKind ?? "human";
   const mutationId = randomUUID();
@@ -1695,6 +2393,7 @@ export async function executeCompatibilityReadMutation(input: {
     principalId: input.principalId,
     mutationId,
     mutation: input.mutation,
+    actor: input.actor,
   });
   const leaseOwner = `compat:${hostname()}:${process.pid}:${mutationId}`;
   const configuredTimeout = Number(process.env[READ_MUTATION_COMPATIBILITY_WAIT_MS_ENV] ?? 10_000);
@@ -1716,7 +2415,16 @@ export async function executeCompatibilityReadMutation(input: {
         eq(readMutations.mutationId, mutationId),
       )).limit(1);
       if (row && (row.state === "applied" || row.state === "retired_no_effect") && row.ack) {
-        return row.ack as unknown as ReadMutationAck;
+        const storedAck = row.ack;
+        const bounded = await getDb().transaction((tx) => boundStoredChannelReadAllAck(tx, {
+          serverId: input.serverId,
+          principalKind,
+          principalId: input.principalId,
+          kind: input.mutation.kind,
+          scopeId: "scopeId" in input.mutation ? input.mutation.scopeId ?? null : null,
+          ack: storedAck,
+        }));
+        return bounded as unknown as ReadMutationAck;
       }
 
       const processed = await processNextReadMutation({
@@ -1738,7 +2446,7 @@ export async function executeCompatibilityReadMutation(input: {
         principalId: input.principalId,
         mutationId,
         authoritySeq: admission.authoritySeq,
-        errorClass: error instanceof Error ? error.name : typeof error,
+        errorClass: errorClassOf(error),
       });
       throw new CompatibilityReadMutationPendingError(
         input.serverId,
@@ -1901,6 +2609,8 @@ export async function getReadMutationFrontier(input: {
   }
   const principalKind = input.principalKind ?? "human";
   return getDb().transaction(async (tx) => {
+    // Task #93 line B: servers first; lockAuthority below may insert the authority row (FK servers) after the member row.
+    await lockReadMutationServerRow(tx, input.serverId);
     if (!await lockActiveReadMutationPrincipal(tx, input.serverId, principalKind, input.principalId)) {
       throw new ReadMutationError("SCOPE_NOT_FOUND", "read mutation authority was not found");
     }
@@ -2057,6 +2767,12 @@ export async function drainReadMutationOutbox(input: {
   leaseMs?: number;
   batchSize?: number;
   /**
+   * Process owned tracer for the per claim spans and failure events. Claim
+   * spans nest under the active span (the worker drain root) when there is
+   * one. Untraced (default noop) keeps the console only behavior.
+   */
+  tracer?: Tracer;
+  /**
    * Test seam: a deterministic claim source. A real collision needs two
    * transactions racing and cannot be scheduled reliably, so proving the
    * contended branch is reachable -- and that old/new behavior actually
@@ -2068,6 +2784,7 @@ export async function drainReadMutationOutbox(input: {
 } = {}): Promise<{ processed: number; failed: number }> {
   const leaseOwner = input.leaseOwner ?? `${hostname()}:${process.pid}:${randomUUID()}`;
   const batchSize = Math.max(1, Math.min(input.batchSize ?? DEFAULT_WORKER_BATCH_SIZE, 500));
+  const tracer = input.tracer ?? noopTracer;
   let processed = 0;
   let failed = 0;
   // Two separate budgets, deliberately. `claims` counts real work (a
@@ -2100,8 +2817,19 @@ export async function drainReadMutationOutbox(input: {
     }
     if (!claim) break;
     claims += 1;
+    const claimSpan = tracer.startSpan("server.read_mutation_sequencer.claim", {
+      surface: "server",
+      kind: "internal",
+      parent: getCurrentTraceContext(),
+      attrs: {
+        server_id: claim.serverId,
+        principal_id: claim.principalId,
+        mutation_id: claim.mutationId,
+      },
+    });
     try {
-      await executeReadMutationClaim({ claim });
+      await runWithTraceSpan(claimSpan, () => executeReadMutationClaim({ claim }), tracer);
+      claimSpan.end("ok");
       processed += 1;
     } catch (error) {
       failed += 1;
@@ -2111,6 +2839,22 @@ export async function drainReadMutationOutbox(input: {
         mutationId: claim.mutationId,
         error,
       });
+      // Same cardinality as the console line above: one bounded event per
+      // failed claim, tied to the claim span.
+      const errorClass = errorClassOf(error);
+      tracer.emitEvent("server.read_mutation_sequencer.error", {
+        surface: "server",
+        parent: claimSpan.context,
+        attrs: {
+          outcome: "error",
+          reason: "mutation_processing_threw",
+          error_class: errorClass,
+          server_id: claim.serverId,
+          principal_id: claim.principalId,
+          mutation_id: claim.mutationId,
+        },
+      });
+      claimSpan.end("error", { attrs: { error_class: errorClass } });
     }
   }
   return { processed, failed };
@@ -2134,6 +2878,8 @@ export function startReadMutationWorker(input: {
   compactionBatchSize?: number;
   leaseOwner?: string;
   clock?: ReadMutationWorkerClock;
+  /** Used for the drain root span and forwarded to drainReadMutationOutbox. */
+  tracer?: Tracer;
 } = {}): { stop(): void } {
   const intervalMs = input.intervalMs ?? DEFAULT_WORKER_INTERVAL_MS;
   const compactionIntervalMs = input.compactionIntervalMs ?? DEFAULT_COMPACTION_INTERVAL_MS;
@@ -2144,8 +2890,16 @@ export function startReadMutationWorker(input: {
     if (running) return;
     running = true;
     const startedAtMs = currentTimeMs();
-    drainReadMutationOutbox(input)
+    const tracer = input.tracer ?? noopTracer;
+    const drainSpan = tracer.startSpan("server.read_mutation_sequencer.drain", {
+      surface: "server",
+      kind: "internal",
+    });
+    runWithTraceSpan(drainSpan, () => drainReadMutationOutbox(input), tracer)
       .then((result) => {
+        drainSpan.end(result.failed > 0 ? "error" : "ok", {
+          attrs: { processed_count: result.processed, failed_count: result.failed },
+        });
         const outcome = result.failed > 0
           ? "failed"
           : result.processed > 0
@@ -2158,6 +2912,7 @@ export function startReadMutationWorker(input: {
         );
       })
       .catch((error) => {
+        drainSpan.end("error", { attrs: { error_class: errorClassOf(error) } });
         readMutationWorkerDrainsTotal.inc({ outcome: "error" });
         readMutationWorkerDrainDuration.observe(
           { outcome: "error" },

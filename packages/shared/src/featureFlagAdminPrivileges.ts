@@ -17,11 +17,51 @@ export const REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES = [
   { kind: "column", object: "public.servers", column: "id", privilege: "SELECT" },
   { kind: "column", object: "public.servers", column: "slug", privilege: "SELECT" },
   { kind: "column", object: "public.servers", column: "deleted_at", privilege: "SELECT" },
+  { kind: "column", object: "public.servers", column: "plan", privilege: "SELECT" },
+  { kind: "column", object: "public.subscriptions", column: "server_id", privilege: "SELECT" },
+  { kind: "column", object: "public.subscriptions", column: "plan", privilege: "SELECT" },
+  { kind: "column", object: "public.subscriptions", column: "status", privilege: "SELECT" },
+  { kind: "column", object: "public.server_lab_enrollments", column: "server_id", privilege: "SELECT" },
+  { kind: "column", object: "public.server_lab_enrollments", column: "lab_key", privilege: "SELECT" },
+  { kind: "column", object: "public.server_lab_enrollments", column: "enabled", privilege: "SELECT" },
+  { kind: "column", object: "public.server_lab_access", column: "server_id", privilege: "SELECT" },
+  { kind: "column", object: "public.server_lab_access", column: "enabled", privilege: "SELECT" },
+  { kind: "column", object: "public.lab_definitions", column: "key", privilege: "SELECT" },
+  { kind: "column", object: "public.lab_definitions", column: "state", privilege: "SELECT" },
+  // Labs catalog admin (list/get/create-lab/set-lab-state), 0303: exact columns used by the Worker's Labs SQL.
+  { kind: "column", object: "public.lab_definitions", column: "name", privilege: "SELECT" },
+  { kind: "column", object: "public.lab_definitions", column: "description", privilege: "SELECT" },
+  { kind: "column", object: "public.lab_definitions", column: "created_at", privilege: "SELECT" },
+  { kind: "column", object: "public.lab_definitions", column: "updated_at", privilege: "SELECT" },
+  { kind: "column", object: "public.lab_definitions", column: "key", privilege: "INSERT" },
+  { kind: "column", object: "public.lab_definitions", column: "name", privilege: "INSERT" },
+  { kind: "column", object: "public.lab_definitions", column: "description", privilege: "INSERT" },
+  { kind: "column", object: "public.lab_definitions", column: "state", privilege: "INSERT" },
+  { kind: "column", object: "public.lab_definitions", column: "created_at", privilege: "INSERT" },
+  { kind: "column", object: "public.lab_definitions", column: "updated_at", privilege: "INSERT" },
+  { kind: "column", object: "public.lab_definitions", column: "name", privilege: "UPDATE" },
+  { kind: "column", object: "public.lab_definitions", column: "description", privilege: "UPDATE" },
+  { kind: "column", object: "public.lab_definitions", column: "state", privilege: "UPDATE" },
+  { kind: "column", object: "public.lab_definitions", column: "updated_at", privilege: "UPDATE" },
+  // Trace identity lookup (agent_id_hash / server_id_hash -> agent), 0312: the Worker HMACs agent and
+  // server ids itself, so it reads exactly these agents columns and nothing else (no name, no prompt).
+  { kind: "column", object: "public.agents", column: "id", privilege: "SELECT" },
+  { kind: "column", object: "public.agents", column: "server_id", privilege: "SELECT" },
+  { kind: "column", object: "public.agents", column: "deleted_at", privilege: "SELECT" },
 ] as const;
+
+// Column-level writes the operator may hold on lab_definitions (0303). Anything else stays unexpected.
+const FEATURE_FLAG_ADMIN_LAB_DEFINITION_INSERT_COLUMNS = ["created_at", "description", "key", "name", "state", "updated_at"] as const;
+const FEATURE_FLAG_ADMIN_LAB_DEFINITION_UPDATE_COLUMNS = ["description", "name", "state", "updated_at"] as const;
 
 export const FEATURE_FLAG_ADMIN_COLUMN_PROJECTIONS = [
   { object: "public.users", columns: ["id"] },
-  { object: "public.servers", columns: ["deleted_at", "id", "slug"] },
+  { object: "public.servers", columns: ["deleted_at", "id", "plan", "slug"] },
+  { object: "public.subscriptions", columns: ["plan", "server_id", "status"] },
+  { object: "public.server_lab_enrollments", columns: ["enabled", "lab_key", "server_id"] },
+  { object: "public.server_lab_access", columns: ["enabled", "server_id"] },
+  { object: "public.lab_definitions", columns: ["created_at", "description", "key", "name", "state", "updated_at"] },
+  { object: "public.agents", columns: ["deleted_at", "id", "server_id"] },
 ] as const;
 
 const FEATURE_FLAG_ADMIN_COLUMN_PRIVILEGE_OBJECTS = [
@@ -31,6 +71,11 @@ const FEATURE_FLAG_ADMIN_COLUMN_PRIVILEGE_OBJECTS = [
   "public.feature_flag_audience_members",
   "public.users",
   "public.servers",
+  "public.subscriptions",
+  "public.server_lab_enrollments",
+  "public.server_lab_access",
+  "public.lab_definitions",
+  "public.agents",
 ] as const;
 
 const FEATURE_FLAG_ADMIN_COLUMN_PRIVILEGES = [
@@ -61,6 +106,14 @@ function isExpectedEffectiveColumnPrivilege(
   }
   if (object === "public.feature_flag_audience_members") {
     return privilege === "SELECT" || privilege === "INSERT";
+  }
+  if (object === "public.lab_definitions") {
+    if (privilege === "INSERT") {
+      return (FEATURE_FLAG_ADMIN_LAB_DEFINITION_INSERT_COLUMNS as readonly string[]).includes(columnName);
+    }
+    if (privilege === "UPDATE") {
+      return (FEATURE_FLAG_ADMIN_LAB_DEFINITION_UPDATE_COLUMNS as readonly string[]).includes(columnName);
+    }
   }
   return FEATURE_FLAG_ADMIN_COLUMN_PROJECTIONS.some(
     (entry) => entry.object === object
@@ -101,24 +154,21 @@ export const FORBIDDEN_FEATURE_FLAG_ADMIN_PRIVILEGES = [
   { kind: "table", object: "public.feature_flag_audience_members", privilege: "TRUNCATE" },
   { kind: "table", object: "public.feature_flag_audience_members", privilege: "REFERENCES" },
   { kind: "table", object: "public.feature_flag_audience_members", privilege: "TRIGGER" },
-  { kind: "table", object: "public.users", privilege: "SELECT" },
-  { kind: "table", object: "public.users", privilege: "INSERT" },
-  { kind: "table", object: "public.users", privilege: "UPDATE" },
-  { kind: "table", object: "public.users", privilege: "DELETE" },
-  { kind: "table", object: "public.users", privilege: "TRUNCATE" },
-  { kind: "table", object: "public.users", privilege: "REFERENCES" },
-  { kind: "table", object: "public.users", privilege: "TRIGGER" },
-  { kind: "table", object: "public.servers", privilege: "SELECT" },
-  { kind: "table", object: "public.servers", privilege: "INSERT" },
-  { kind: "table", object: "public.servers", privilege: "UPDATE" },
-  { kind: "table", object: "public.servers", privilege: "DELETE" },
-  { kind: "table", object: "public.servers", privilege: "TRUNCATE" },
-  { kind: "table", object: "public.servers", privilege: "REFERENCES" },
-  { kind: "table", object: "public.servers", privilege: "TRIGGER" },
-  { kind: "column", object: "public.users", column: "id", privilege: "SELECT WITH GRANT OPTION" },
-  { kind: "column", object: "public.servers", column: "id", privilege: "SELECT WITH GRANT OPTION" },
-  { kind: "column", object: "public.servers", column: "slug", privilege: "SELECT WITH GRANT OPTION" },
-  { kind: "column", object: "public.servers", column: "deleted_at", privilege: "SELECT WITH GRANT OPTION" },
+  ...FEATURE_FLAG_ADMIN_COLUMN_PROJECTIONS.flatMap((projection) => [
+    { kind: "table" as const, object: projection.object, privilege: "SELECT" },
+    { kind: "table" as const, object: projection.object, privilege: "INSERT" },
+    { kind: "table" as const, object: projection.object, privilege: "UPDATE" },
+    { kind: "table" as const, object: projection.object, privilege: "DELETE" },
+    { kind: "table" as const, object: projection.object, privilege: "TRUNCATE" },
+    { kind: "table" as const, object: projection.object, privilege: "REFERENCES" },
+    { kind: "table" as const, object: projection.object, privilege: "TRIGGER" },
+    ...projection.columns.map((column) => ({
+      kind: "column" as const,
+      object: projection.object,
+      column,
+      privilege: "SELECT WITH GRANT OPTION" as const,
+    })),
+  ]),
 ] as const;
 
 type QueryResult = { rows: Array<Record<string, unknown>> };
@@ -126,6 +176,66 @@ export type FeatureFlagAdminPrivilegeQuery = (
   text: string,
   values?: unknown[],
 ) => Promise<QueryResult>;
+
+export type FeatureFlagAdminPrivilegeCheck =
+  | { readonly kind: "schema"; readonly object: string; readonly privilege: string }
+  | { readonly kind: "table"; readonly object: string; readonly privilege: string }
+  | {
+    readonly kind: "column";
+    readonly object: string;
+    readonly column: string;
+    readonly privilege: string;
+  };
+
+export function featureFlagAdminPrivilegeLabel(check: FeatureFlagAdminPrivilegeCheck): string {
+  return check.kind === "column"
+    ? `${check.object}:${check.column}:${check.privilege}`
+    : `${check.object}:${check.privilege}`;
+}
+
+// One round trip for the whole privilege matrix. Each row evaluates exactly the
+// same oracle the per-check loop used (has_schema_privilege / has_table_privilege
+// / has_column_privilege with the same arguments); only the number of round
+// trips changes. CASE evaluates only the branch matching `kind`, so column-only
+// arguments are never passed to the schema/table oracles. Row order is pinned by
+// WITH ORDINALITY so results line up with `checks` by index.
+const FEATURE_FLAG_ADMIN_PRIVILEGE_MATRIX_ORACLE = `SELECT
+       checks.ordinality AS idx,
+       CASE checks.kind
+         WHEN 'schema' THEN has_schema_privilege($1, checks.object, checks.privilege)
+         WHEN 'table' THEN has_table_privilege($1, checks.object, checks.privilege)
+         ELSE has_column_privilege($1, checks.object, checks.column_name, checks.privilege)
+       END AS allowed
+     FROM unnest($2::text[], $3::text[], $4::text[], $5::text[])
+       WITH ORDINALITY AS checks(kind, object, column_name, privilege, ordinality)
+     ORDER BY checks.ordinality ASC`;
+
+export async function readFeatureFlagAdminPrivilegeMatrix(
+  query: FeatureFlagAdminPrivilegeQuery,
+  checks: readonly FeatureFlagAdminPrivilegeCheck[],
+): Promise<boolean[]> {
+  if (checks.length === 0) return [];
+  const result = await query(FEATURE_FLAG_ADMIN_PRIVILEGE_MATRIX_ORACLE, [
+    FEATURE_FLAG_ADMIN_OPERATOR_ROLE,
+    checks.map((check) => check.kind),
+    checks.map((check) => check.object),
+    checks.map((check) => (check.kind === "column" ? check.column : "")),
+    checks.map((check) => check.privilege),
+  ]);
+  const byIndex = new Map<number, unknown>();
+  for (const row of result.rows) {
+    byIndex.set(Number(row.idx), row.allowed);
+  }
+  return checks.map((check, index) => {
+    const value = byIndex.get(index + 1);
+    if (typeof value !== "boolean") {
+      throw new FeatureFlagAdminPrivilegeError(
+        `unreadable:${featureFlagAdminPrivilegeLabel(check)}`,
+      );
+    }
+    return value;
+  });
+}
 
 export class FeatureFlagAdminPrivilegeError extends Error {
   constructor(public readonly reason: string) {
@@ -190,49 +300,23 @@ export async function verifyFeatureFlagAdminPrivileges(
     throw new FeatureFlagAdminPrivilegeError("role_missing");
   }
 
-  for (const expected of REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES) {
-    const oracle = expected.kind === "schema"
-      ? "SELECT has_schema_privilege($1, $2, $3) AS allowed"
-      : expected.kind === "table"
-        ? "SELECT has_table_privilege($1, $2, $3) AS allowed"
-        : "SELECT has_column_privilege($1, $2, $3, $4) AS allowed";
-    const label = expected.kind === "column"
-      ? `${expected.object}:${expected.column}:${expected.privilege}`
-      : `${expected.object}:${expected.privilege}`;
-    const result = await query(
-      oracle,
-      expected.kind === "column"
-        ? [FEATURE_FLAG_ADMIN_OPERATOR_ROLE, expected.object, expected.column, expected.privilege]
-        : [FEATURE_FLAG_ADMIN_OPERATOR_ROLE, expected.object, expected.privilege],
-    );
-    if (!readBoolean(result, label)) {
+  const required: readonly FeatureFlagAdminPrivilegeCheck[] = REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES;
+  const forbidden: readonly FeatureFlagAdminPrivilegeCheck[] = FORBIDDEN_FEATURE_FLAG_ADMIN_PRIVILEGES;
+  const allowed = await readFeatureFlagAdminPrivilegeMatrix(query, [...required, ...forbidden]);
+  required.forEach((expected, index) => {
+    if (!allowed[index]) {
       throw new FeatureFlagAdminPrivilegeError(
-        `missing:${label}`,
+        `missing:${featureFlagAdminPrivilegeLabel(expected)}`,
       );
     }
-  }
-
-  for (const forbidden of FORBIDDEN_FEATURE_FLAG_ADMIN_PRIVILEGES) {
-    const oracle = forbidden.kind === "schema"
-      ? "SELECT has_schema_privilege($1, $2, $3) AS allowed"
-      : forbidden.kind === "table"
-        ? "SELECT has_table_privilege($1, $2, $3) AS allowed"
-        : "SELECT has_column_privilege($1, $2, $3, $4) AS allowed";
-    const label = forbidden.kind === "column"
-      ? `${forbidden.object}:${forbidden.column}:${forbidden.privilege}`
-      : `${forbidden.object}:${forbidden.privilege}`;
-    const result = await query(
-      oracle,
-      forbidden.kind === "column"
-        ? [FEATURE_FLAG_ADMIN_OPERATOR_ROLE, forbidden.object, forbidden.column, forbidden.privilege]
-        : [FEATURE_FLAG_ADMIN_OPERATOR_ROLE, forbidden.object, forbidden.privilege],
-    );
-    if (readBoolean(result, label)) {
+  });
+  forbidden.forEach((check, index) => {
+    if (allowed[required.length + index]) {
       throw new FeatureFlagAdminPrivilegeError(
-        `unexpected:${label}`,
+        `unexpected:${featureFlagAdminPrivilegeLabel(check)}`,
       );
     }
-  }
+  });
 
   const effectiveColumnPrivileges = await query(
     `SELECT

@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import path from "node:path";
 import {
   CopilotDriver,
   buildCopilotArgs,
   buildCopilotManagedMcpConfig,
   buildCopilotSpawnEnv,
-} from "./copilot.js";
-import type { SpawnContext } from "./types.js";
+} from "./copilot";
+import type { SpawnContext } from "./types";
 
 function makeSpawnContext(envVars: Record<string, string> | null = null): SpawnContext {
   return {

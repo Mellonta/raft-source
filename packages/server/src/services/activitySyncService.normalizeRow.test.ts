@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   normalizeRowForTest,
   requireLatestActivitySeqForTest,
-} from "./activitySyncService.js";
-import type { InboxItem } from "./channelService.js";
+} from "./activitySyncService";
+import type { InboxItem } from "./channelService";
 
 // Gate B1 teeth: every inbox row-kind must carry latestActivityMessageId and
 // latestActivitySeq as ONE same-source tuple, the zero-reply thread must fall

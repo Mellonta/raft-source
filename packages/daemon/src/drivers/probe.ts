@@ -2,8 +2,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import { logger } from "../logger.js";
-import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv.js";
+import { logger } from "../logger";
+import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv";
 
 export interface ProbeDeps {
   platform?: NodeJS.Platform;
@@ -263,6 +263,8 @@ export function requiresWindowsShell(command: string | null | undefined, platfor
   return lower.endsWith(".cmd") || lower.endsWith(".bat");
 }
 
+const POSIX_USER_BIN_DIRS = [[".local", "bin"], [".kimi-code", "bin"]] as const;
+
 export function resolveCommandOnPath(command: string, deps: ProbeDeps = {}): string | null {
   const platform = deps.platform ?? process.platform;
   const env = withWindowsUserEnvironment(deps.env ?? process.env, deps);
@@ -279,10 +281,20 @@ export function resolveCommandOnPath(command: string, deps: ProbeDeps = {}): str
       env,
     }));
     const resolved = output.trim().split(/\r?\n/)[0];
-    return resolved || null;
+    if (resolved) return resolved;
   } catch {
-    return null;
+    // Fall through to the user-local bin directories.
   }
+  // A service started from a non-login context (installer, cron, `env -i`)
+  // inherits the system default PATH, which omits the user-local bin
+  // directories where the Claude Code, Codex, Grok and Kimi installers put
+  // their binaries.
+  const homeDir = deps.homeDir ?? env.HOME;
+  if (!homeDir) return null;
+  return firstExistingPath(
+    POSIX_USER_BIN_DIRS.map((segments) => path.posix.join(homeDir, ...segments, command)),
+    deps,
+  );
 }
 
 export function firstExistingPath(candidates: string[], deps: ProbeDeps = {}): string | null {

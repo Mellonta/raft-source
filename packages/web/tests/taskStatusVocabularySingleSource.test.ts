@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import test from "node:test";
 
 // The task-status vocabulary (Todo / In Progress / In Review / Done / Closed)
 // existed in FOUR places before it was centralised on TASK_STATUS_UI:

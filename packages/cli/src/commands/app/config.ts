@@ -7,12 +7,12 @@ import type {
   AgentApiAppConfigResponse,
 } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeText, NL, adoptCliReplyText } from "../../core/renderer.js";
-import { formatAppConfig } from "./_format.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeText, NL, adoptCliReplyText } from "../../core/renderer";
+import { formatAppConfig } from "./_format";
 
 interface AppConfigOpts {
   app?: string;

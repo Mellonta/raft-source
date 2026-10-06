@@ -1,5 +1,5 @@
 import { currentTimeMs, setClockTimeout } from "@botiverse/raft-shared";
-import type { RunnerRecord } from "./runnerStateMachine.js";
+import type { RunnerRecord } from "./runnerStateMachine";
 
 const SHUTDOWN_CHILD_WAIT_TIMEOUT_MS = 10_000;
 

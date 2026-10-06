@@ -1,4 +1,3 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
@@ -6,10 +5,10 @@ import {
   authBootBrowserBucketFromUserAgent,
   authBootLastSeenAgeBucket,
   authBootTokenPresenceBucket,
-  buildAuthTraceRecord,
+  buildWebEventRecord,
   emitAuthTrace,
   emitAuthTraceAndFlush,
-  emitWebTraceAndFlushBeforeUnload,
+  emitWebEventAndFlushBeforeUnload,
   flushAuthTraces,
   readAuthBootInitTraceAttrs,
   setAuthTracePrincipalIdGetter,
@@ -29,22 +28,22 @@ test("authStatusBucket maps to the contract closed set", () => {
   assert.equal(authStatusBucket(200), "other");
 });
 
-test("buildAuthTraceRecord produces a valid web-surface span with closed-set attrs", () => {
-  const record = buildAuthTraceRecord("slock.auth.session_cleared", {
+test("buildWebEventRecord produces a valid web-surface event with closed-set attrs", () => {
+  const record = buildWebEventRecord("slock.auth.session_cleared", {
     clearSessionCaller: "logout",
     logoutTrigger: "restore_timeout",
     statusBucket: "network_undefined",
     authVerdict: undefined, // must be dropped, not serialized
   });
 
-  assert.equal(record.type, "span");
+  assert.equal(record.type, "event");
   assert.equal(record.schema_version, 1);
   assert.equal(record.surface, "web");
   assert.equal(record.name, "slock.auth.session_cleared");
-  assert.match(record.trace_id, /^[0-9a-f]{32}$/);
-  assert.match(record.span_id, /^[0-9a-f]{16}$/);
-  assert.equal(typeof record.start_time, "string");
-  assert.equal(typeof record.end_time, "string");
+  assert.equal(typeof record.time, "string");
+  // A point in time fact has no span of its own unless the caller attaches one.
+  assert.equal("trace_id" in record, false);
+  assert.equal("span_id" in record, false);
 
   const attrs = record.attrs ?? {};
   assert.equal(attrs.clearSessionCaller, "logout");
@@ -60,7 +59,7 @@ test("buildAuthTraceRecord produces a valid web-surface span with closed-set att
   assert.equal("authVerdict" in attrs, false);
 });
 
-test("buildAuthTraceRecord includes the loaded web asset filename without a raw URL", () => {
+test("buildWebEventRecord includes the loaded web asset filename without a raw URL", () => {
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
   const fakeScript = {
     src: "https://app.slock.ai/assets/index-DSoU2CKZ.js?cache=1",
@@ -72,7 +71,7 @@ test("buildAuthTraceRecord includes the loaded web asset filename without a raw 
   });
 
   try {
-    const record = buildAuthTraceRecord("slock.auth.verdict", { authVerdict: "logout" });
+    const record = buildWebEventRecord("slock.auth.verdict", { authVerdict: "logout" });
     assert.equal(record.attrs?.webAssetId, "index-DSoU2CKZ.js");
   } finally {
     if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
@@ -81,7 +80,7 @@ test("buildAuthTraceRecord includes the loaded web asset filename without a raw 
 });
 
 test("auth boot-init includes useful raw diagnostics without exposing raw tokens", () => {
-  const record = buildAuthTraceRecord("slock.auth.boot_init", {
+  const record = buildWebEventRecord("slock.auth.boot_init", {
     routeFamily: "bootstrap",
     bootTokenPresence: "token_pair",
     bootStorageAccess: "readable_writable",
@@ -139,7 +138,7 @@ test("emitAuthTrace is fire-and-forget: never throws, even with odd input (no-op
   assert.doesNotThrow(() => emitAuthTrace("slock.auth.verdict", { authVerdict: "logout" }));
   assert.doesNotThrow(() => emitAuthTrace("slock.auth.restore", {}));
   // @ts-expect-error intentionally malformed attrs to prove isolation
-  assert.doesNotThrow(() => emitAuthTrace("slock.auth.refresh", { status: "weird" }));
+  assert.doesNotThrow(() => emitAuthTrace("slock.auth.verdict", { status: "weird" }));
 });
 
 test("flushAuthTraces never throws when disabled / empty", async () => {
@@ -162,7 +161,7 @@ test("emitAuthTraceAndFlush (immediate clear-session path) is fire-and-forget an
   setAuthTraceServerIdGetter(() => undefined);
 });
 
-test("generic before-unload transport sends an update-gate record through the urgent path", async () => {
+test("generic before-unload transport sends an update-gate event through the urgent path", async () => {
   __resetAuthTraceForTest({ traceUrl: "https://trace.example.test" });
   setAuthTraceServerIdGetter(() => "server-abc");
   setAuthTracePrincipalIdGetter(() => "user-a");
@@ -180,7 +179,7 @@ test("generic before-unload transport sends an update-gate record through the ur
         ? jsonResponse({ attestation: "urgent-att" })
         : jsonResponse({ ok: true });
     });
-    await emitWebTraceAndFlushBeforeUnload("slock.update_gate.decision", {
+    await emitWebEventAndFlushBeforeUnload("slock.update_gate.decision", {
       eventKind: "decision",
       outcome: "decided",
       action: "recovery_finished",
@@ -192,9 +191,11 @@ test("generic before-unload transport sends an update-gate record through the ur
     assert.equal(requests.length, 2);
     assert.deepEqual(requests.map((request) => request.keepalive), [true, true]);
     assert.match(requests[1]!.url, /\/api\/web-traces$/);
-    const records = (requests[1]!.body as { records: Array<{ name: string; attrs?: Record<string, unknown> }> }).records;
-    assert.equal(records[0]?.name, "slock.update_gate.decision");
-    assert.equal(records[0]?.attrs?.action, "recovery_finished");
+    const body = requests[1]!.body as { records: unknown[]; events: Array<{ type: string; name: string; attrs?: Record<string, unknown> }> };
+    assert.deepEqual(body.records, []);
+    assert.equal(body.events[0]?.type, "event");
+    assert.equal(body.events[0]?.name, "slock.update_gate.decision");
+    assert.equal(body.events[0]?.attrs?.action, "recovery_finished");
   } finally {
     ls.restore();
     setAuthTraceFetchForTest(null);
@@ -535,7 +536,7 @@ test("urgent terminal verdict is sent immediately and mirrored onto terminal ses
   const ls = stubLocalStorage({ slock_access_token: "tok-terminal-verdict" });
 
   try {
-    const tracePosts: Array<{ records?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
+    const tracePosts: Array<{ events?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
     setAuthTraceFetchForTest((input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.includes("/scope-attestation")) {
@@ -566,13 +567,13 @@ test("urgent terminal verdict is sent immediately and mirrored onto terminal ses
     });
     await waitFor(() => tracePosts.length >= 2);
 
-    const verdict = tracePosts[0]?.records?.[0];
+    const verdict = tracePosts[0]?.events?.[0];
     assert.equal(verdict?.name, "slock.auth.verdict");
     assert.equal(verdict?.attrs?.authVerdict, "logout");
     assert.equal(verdict?.attrs?.statusBucket, "auth_401_403");
     assert.equal(verdict?.attrs?.routeFamily, "auth_refresh");
 
-    const terminalClear = tracePosts[1]?.records?.[0];
+    const terminalClear = tracePosts[1]?.events?.[0];
     assert.equal(terminalClear?.name, "slock.auth.session_cleared");
     assert.equal(terminalClear?.attrs?.clearSessionCaller, "logout");
     assert.equal(terminalClear?.attrs?.logoutTrigger, "terminal_verdict");
@@ -587,7 +588,7 @@ test("urgent terminal verdict is sent immediately and mirrored onto terminal ses
       logoutTrigger: "terminal_verdict",
     });
     await waitFor(() => tracePosts.length >= 3);
-    const secondTerminalClear = tracePosts[2]?.records?.[0];
+    const secondTerminalClear = tracePosts[2]?.events?.[0];
     assert.equal(secondTerminalClear?.name, "slock.auth.session_cleared");
     assert.equal(secondTerminalClear?.attrs?.logoutTrigger, "terminal_verdict");
     assert.equal(
@@ -601,7 +602,7 @@ test("urgent terminal verdict is sent immediately and mirrored onto terminal ses
       logoutTrigger: "explicit_user_logout",
     });
     await waitFor(() => tracePosts.length >= 4);
-    const explicitClear = tracePosts[3]?.records?.[0];
+    const explicitClear = tracePosts[3]?.events?.[0];
     assert.equal(explicitClear?.name, "slock.auth.session_cleared");
     assert.equal(explicitClear?.attrs?.logoutTrigger, "explicit_user_logout");
     assert.equal(
@@ -692,8 +693,9 @@ test("scheduled flush preserves a pre-eligibility record, then sends it exactly 
         "https://trace.example.test/api/web-traces",
       ]);
       assert.deepEqual(calls.map((call) => call.keepalive), [undefined, undefined]);
-      const records = (calls[1]!.body as { records: Array<{ name: string }> }).records;
-      assert.deepEqual(records.map((record) => record.name), ["slock.auth.boot_init"]);
+      const body = calls[1]!.body as { records: unknown[]; events: Array<{ name: string }> };
+      assert.deepEqual(body.records, []);
+      assert.deepEqual(body.events.map((event) => event.name), ["slock.auth.boot_init"]);
 
       await flushAuthTraces();
       assert.equal(calls.length, 2, "eligible record must be sent exactly once");
@@ -911,6 +913,53 @@ test("scheduled eligibility retries are bounded and permanently ineligible recor
       ls2.restore();
     }
   } finally {
+    setAuthTraceFetchForTest(null);
+    setAuthTraceServerIdGetter(() => undefined);
+    setAuthTracePrincipalIdGetter(() => undefined);
+    __resetAuthTraceForTest();
+  }
+});
+
+test("a flush call that finds one in flight never starts a parallel flush (task #17 single-flight)", async () => {
+  // On staging one action produced 9-10 scope-attestation + web-traces pairs:
+  // the in-flight guard returned inside try/finally, so the bailing call's
+  // finally cleared `flushing` and the NEXT call started a parallel flush.
+  __resetAuthTraceForTest({ traceUrl: "https://trace.example.test" });
+  setAuthTraceServerIdGetter(() => "server-abc");
+  setAuthTracePrincipalIdGetter(() => "user-a");
+  const ls = stubLocalStorage({ slock_access_token: "tok" });
+  let releaseAttestation: (() => void) | undefined;
+
+  try {
+    const urls: string[] = [];
+    const attestationGate = new Promise<void>((resolve) => { releaseAttestation = resolve; });
+    setAuthTraceFetchForTest(async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      urls.push(url);
+      if (url.endsWith("/scope-attestation")) {
+        await attestationGate;
+        return jsonResponse({ attestation: "att" });
+      }
+      return jsonResponse({ ok: true });
+    });
+
+    emitAuthTrace("slock.auth.boot_init");
+    const pending = [flushAuthTraces()];
+    await Promise.resolve();
+    emitAuthTrace("slock.auth.boot_init");
+    pending.push(flushAuthTraces()); // finds the first in flight
+    await Promise.resolve();
+    pending.push(flushAuthTraces()); // must STILL find it in flight
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(
+      urls.filter((url) => url.endsWith("/scope-attestation")),
+      ["/api/servers/server-abc/scope-attestation"],
+      "only the in-flight flush may fetch an attestation",
+    );
+
+  } finally {
+    releaseAttestation?.();
+    ls.restore();
     setAuthTraceFetchForTest(null);
     setAuthTraceServerIdGetter(() => undefined);
     setAuthTracePrincipalIdGetter(() => undefined);

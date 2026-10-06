@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 
 const MIGRATION = path.resolve(import.meta.dirname, "../../drizzle/0254_workable_sally_floyd.sql");

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   createServerLabEnrollmentMutation,
   createServerLabMasterMutation,
@@ -9,19 +8,19 @@ import {
   isServerLabEffectivelyEnabled,
   isServerLabEnrollmentEditable,
   normalizeServerLabSettingsReadback,
-} from "../src/utils/serverLabsSettings.js";
+} from "../src/utils/serverLabsSettings";
 import type {
   ServerLabSettingsReadback,
-} from "../src/utils/serverLabsSettings.js";
-import { SETTINGS_TABS, normalizeSettingsTab } from "../src/components/settings/settingsNavigation.js";
+} from "../src/utils/serverLabsSettings";
+import { SETTINGS_TABS, normalizeSettingsTab } from "../src/components/settings/settingsNavigation";
 import {
   beginServerLabsMutation,
   createServerLabsStoreContext,
   getServerLabsSettingsSnapshot,
   publishServerLabsReadback,
   resetServerLabsSettingsForTests,
-} from "../src/store/serverLabsSettingsStore.js";
-import { useServerStore } from "../src/store/serverStore.js";
+} from "../src/store/serverLabsSettingsStore";
+import { useServerStore } from "../src/store/serverStore";
 
 const readback: ServerLabSettingsReadback = {
   serverId: "server-1",

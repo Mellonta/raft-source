@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act, cleanup, render as rtlRender, screen } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
@@ -126,18 +125,18 @@ test("mobile rows use one icon dot and preserve offline detail when upgrade wins
 
   const onlineDot = screen.getByTestId("computer-status-dot-managed-online");
   assert.ok(onlineDot.className.includes("bg-brutal-lime"));
-  assert.equal(onlineDot.getAttribute("title"), "Online");
+  assert.equal(onlineDot.getAttribute("title"), null);
+  assert.ok(onlineDot.hasAttribute("data-base-ui-tooltip-trigger"), "status text now rides the RUI tooltip trigger");
 
   const offlineDot = screen.getByTestId("computer-status-dot-managed-offline");
   assert.ok(offlineDot.className.includes("bg-gray-400"));
-  assert.equal(offlineDot.getAttribute("title"), "Offline");
+  assert.equal(offlineDot.getAttribute("title"), null);
+  assert.ok(offlineDot.hasAttribute("data-base-ui-tooltip-trigger"), "status text now rides the RUI tooltip trigger");
 
   const offlineUpgradeDot = screen.getByTestId("computer-status-dot-managed-offline-upgrade");
   assert.ok(offlineUpgradeDot.className.includes("bg-brutal-pink"));
-  assert.equal(
-    offlineUpgradeDot.getAttribute("title"),
-    "Computer upgrade available: v0.0.50 · Computer offline",
-  );
+  assert.equal(offlineUpgradeDot.getAttribute("title"), null);
+  assert.ok(offlineUpgradeDot.hasAttribute("data-base-ui-tooltip-trigger"), "status text now rides the RUI tooltip trigger");
   assert.match(screen.getByTestId("computer-list-item-managed-offline-upgrade").textContent ?? "", /computer offline/);
 
   assert.ok(screen.getByTestId("computer-status-dot-legacy-online").className.includes("bg-brutal-lime"));
@@ -158,6 +157,41 @@ test("mobile rows use one icon dot and preserve offline detail when upgrade wins
   }
 });
 
+test("mobile rows compare prerelease Computer versions by SemVer (staging ahead: no arrow; older staging: arrow)", () => {
+  const managed = (id: string, computerVersion: string): Machine => ({
+    ...machine,
+    id,
+    name: id,
+    isComputer: true,
+    computerVersion,
+    computerUpgradeAvailable: false,
+    computerBroadcastPolicy: {
+      eligibility: "no_broadcast",
+      targetVersion: null,
+      targetRole: null,
+      migrationClass: null,
+      policyRevision: null,
+      reasonCode: "broadcast_disabled",
+    },
+  });
+  useMachineStore.setState({
+    machines: [
+      managed("staging-ahead", "1.0.41-staging.20261003090435.sha.4f9786e3e10a"),
+      managed("staging-older", "1.0.39-staging.20260925080000.sha.89abcdef0123"),
+    ],
+    latestComputerVersion: "1.0.40",
+    loading: false,
+    loadStatus: "loaded",
+    loadError: false,
+  });
+  renderPanel();
+
+  assert.equal((screen.getByTestId("computer-list-item-staging-ahead").textContent ?? "").includes("→"), false);
+  assert.ok(screen.getByTestId("computer-status-dot-staging-ahead").className.includes("bg-brutal-lime"));
+  assert.match(screen.getByTestId("computer-list-item-staging-older").textContent ?? "", /→ v1\.0\.40/);
+  assert.ok(screen.getByTestId("computer-status-dot-staging-older").className.includes("bg-brutal-pink"));
+});
+
 test("loading transitions to the true empty state only after fetch terminal", () => {
   useMachineStore.setState({ machines: [], loading: true, loadStatus: "loading", loadError: false });
   renderPanel();
@@ -171,11 +205,11 @@ test("loading transitions to the true empty state only after fetch terminal", ()
   assert.ok(screen.getByText("No computers yet"));
 });
 
-test("current-server fetch failure renders error without exposing empty or add", async (t) => {
-  t.mock.method(api, "get", async () => {
+test("current-server fetch failure renders error without exposing empty or add", async () => {
+  vi.spyOn(api, "get").mockImplementation(async () => {
     throw new Error("network unavailable");
   });
-  t.mock.method(console, "error", () => {});
+  vi.spyOn(console, "error").mockImplementation(() => {});
   useMachineStore.setState({ machines: [], loading: true, loadStatus: "loading", loadError: false });
   renderPanel();
 
@@ -186,12 +220,12 @@ test("current-server fetch failure renders error without exposing empty or add",
   assert.equal(screen.queryByTestId("computers-add-row"), null);
 });
 
-test("stale old-server success cannot publish a terminal state into the new server", async (t) => {
+test("stale old-server success cannot publish a terminal state into the new server", async () => {
   let resolveRequest: ((value: { data: Machine[] }) => void) | undefined;
   const pending = new Promise<{ data: Machine[] }>((resolve) => {
     resolveRequest = resolve;
   });
-  t.mock.method(api, "get", async () => pending);
+  vi.spyOn(api, "get").mockImplementation(async () => pending);
   useServerStore.setState({ current: server, members: [], serverEpoch: 10 });
   useMachineStore.setState({ machines: [], loading: true, loadStatus: "loading", loadError: false });
 
@@ -208,11 +242,11 @@ test("stale old-server success cannot publish a terminal state into the new serv
   assert.deepEqual(useMachineStore.getState().machines, []);
 });
 
-test("cached rows remain usable when a current-server refresh fails", async (t) => {
-  t.mock.method(api, "get", async () => {
+test("cached rows remain usable when a current-server refresh fails", async () => {
+  vi.spyOn(api, "get").mockImplementation(async () => {
     throw new Error("refresh unavailable");
   });
-  t.mock.method(console, "error", () => {});
+  vi.spyOn(console, "error").mockImplementation(() => {});
   useMachineStore.setState({
     machines: [machine],
     loading: false,
@@ -231,13 +265,13 @@ test("cached rows remain usable when a current-server refresh fails", async (t) 
   assert.equal(useMachineStore.getState().loadError, true);
 });
 
-test("stale old-server failure cannot publish an error into the new server", async (t) => {
+test("stale old-server failure cannot publish an error into the new server", async () => {
   let rejectRequest: ((reason: Error) => void) | undefined;
   const pending = new Promise<{ data: Machine[] }>((_, reject) => {
     rejectRequest = reject;
   });
-  t.mock.method(api, "get", async () => pending);
-  t.mock.method(console, "error", () => {});
+  vi.spyOn(api, "get").mockImplementation(async () => pending);
+  vi.spyOn(console, "error").mockImplementation(() => {});
   useServerStore.setState({ current: server, members: [], serverEpoch: 20 });
   useMachineStore.setState({ machines: [], loading: true, loadStatus: "loading", loadError: false });
 

@@ -1,9 +1,10 @@
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawn } from "node:child_process";
 import { lstatSync } from "node:fs";
 import path from "node:path";
 
 export const SLOCK_CLI_TRANSPORT_DIR_ENV = "SLOCK_CLI_TRANSPORT_DIR";
 export const SLOCK_AGENT_LAUNCH_DIR_ENV = "SLOCK_AGENT_LAUNCH_DIR";
+const FORWARD_ATTEMPT_ENV = "SLOCK_CLI_MANAGED_FORWARD_ATTEMPT";
 
 export class ManagedTransportError extends Error {
   constructor(public readonly code: string, message: string) {
@@ -57,6 +58,13 @@ export function resolveManagedTransportWrapper(
     return null;
   }
 
+  if (env[FORWARD_ATTEMPT_ENV]) {
+    throw new ManagedTransportError(
+      "MANAGED_WRAPPER_FORWARD_FAILED",
+      "The managed Raft wrapper returned without providing credentials. Handoff stopped to prevent a loop; no local profile was used.",
+    );
+  }
+
   const slockHome = env.SLOCK_HOME;
   const agentId = env.SLOCK_AGENT_ID;
   const launchDir = env[SLOCK_AGENT_LAUNCH_DIR_ENV];
@@ -101,18 +109,44 @@ export function resolveManagedTransportWrapper(
   return wrapperPath;
 }
 
-export function forwardManagedTransportIfNeeded(
+export async function forwardManagedTransportIfNeeded(
   argv: string[],
   env: NodeJS.ProcessEnv,
   deps: {
     platform?: NodeJS.Platform;
-    spawnSync?: typeof spawnSync;
+    spawn?: typeof spawn;
   } = {},
-): SpawnSyncReturns<Buffer> | null {
+): Promise<{ status: number | null; signal: NodeJS.Signals | null } | null> {
   const wrapperPath = resolveManagedTransportWrapper(env, deps.platform);
   if (!wrapperPath) return null;
-  return (deps.spawnSync ?? spawnSync)(wrapperPath, argv, {
-    env,
-    stdio: "inherit",
+  return new Promise((resolve, reject) => {
+    const child = (deps.spawn ?? spawn)(wrapperPath, argv, {
+      env: { ...env, [FORWARD_ATTEMPT_ENV]: "1" },
+      stdio: "inherit",
+      shell: false,
+    });
+    // Keep the event loop available: a signal addressed only to the global CLI
+    // must also reach its wrapper/CLI child. Inherited descriptors preserve
+    // pipes and TTY behavior without buffering message bodies or credentials.
+    const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+    const handlers = signals.map((signal) => {
+      const handler = () => { child.kill(signal); };
+      process.on(signal, handler);
+      return handler;
+    });
+    const cleanup = () => {
+      signals.forEach((signal, i) => process.removeListener(signal, handlers[i]!));
+    };
+    child.once("error", () => {
+      cleanup();
+      reject(new ManagedTransportError(
+        "MANAGED_WRAPPER_FORWARD_FAILED",
+        "Could not start the current managed Raft wrapper; no local profile was used.",
+      ));
+    });
+    child.once("exit", (status, signal) => {
+      cleanup();
+      resolve({ status, signal });
+    });
   });
 }

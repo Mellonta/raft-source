@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 
 // Removal contract for the un-gated "Notification sender" External Agent
 // purpose (reverted in PR #6995). This test must fail if the deleted

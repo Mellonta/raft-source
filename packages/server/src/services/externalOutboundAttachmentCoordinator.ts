@@ -1,18 +1,18 @@
 import { currentDate } from "@botiverse/raft-shared";
 import { and, asc, eq, inArray } from "drizzle-orm";
 
-import type { Database, DatabaseTransaction } from "../db/index.js";
+import type { Database, DatabaseTransaction } from "../db/index";
 import {
   externalAttachmentAssets,
   externalAttachmentMessageFacts,
   externalAttachmentTransferJobs,
   externalMessageLinks,
-} from "../db/schema.js";
+} from "../db/schema";
 import type {
   ExternalAttachmentAuthority,
   ExternalOutboundAttachmentSnapshot,
   ExternalOutboundAttachmentProviderAdapter,
-} from "./externalAttachmentProviderAdapter.js";
+} from "./externalAttachmentProviderAdapter";
 import {
   abandonOutboundAttachmentTicketForRetry,
   advanceExternalAttachmentTransferClaim,
@@ -22,8 +22,8 @@ import {
   releaseExternalAttachmentTransferClaimForRetry,
   releaseExternalAttachmentTransferClaimQueued,
   terminalizeExternalAttachmentTransferClaim,
-} from "./externalAttachmentTransferService.js";
-import type { StorageBackend } from "./storageService.js";
+} from "./externalAttachmentTransferService";
+import type { StorageBackend } from "./storageService";
 
 const RETRY_MS = 30_000;
 const MAX_OUTBOUND_ATTACHMENT_BATCH_BYTES = 512 * 1024 * 1024;
@@ -313,9 +313,9 @@ export async function dispatchExternalOutboundAttachments(input: {
         renderedText: input.snapshot.sanitizedText,
         reconciliationMarker: input.reconciliationMarker,
         author: {
-          displayName: input.snapshot.authorPolicy.displayName,
-          avatarPublicUrl: input.snapshot.authorPolicy.avatar?.publicUrl ?? null,
-          fallbackKind: input.snapshot.authorPolicy.fallbackKind,
+          displayName: input.snapshot.authorPresentation.displayName,
+          avatarPublicUrl: null,
+          fallbackKind: input.snapshot.authorPresentation.fallbackKind,
         },
       },
       signal,

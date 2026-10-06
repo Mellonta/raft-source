@@ -1,12 +1,12 @@
 import type { Command } from "commander";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { formatReminderLog } from "../../commands/reminder/_format.js";
-import { registerReminderAckCommand } from "./ack.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { formatReminderLog } from "../../commands/reminder/_format";
+import { registerReminderAckCommand } from "./ack";
 
 interface LogOpts {
   id: string;

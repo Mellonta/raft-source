@@ -1,3 +1,4 @@
+import { MessageListDateDivider } from "raft-ui";
 import { useIntl } from "react-intl";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 
@@ -31,28 +32,16 @@ export function DateDivider({
   });
   if (!label) return null;
 
-  const chip = (
-    <span className="inline-flex items-center bg-white px-2 text-[10px] font-bold uppercase tracking-widest text-black/50">
-      {label}
-    </span>
-  );
-
   if (sticky) {
-    // Floating current-day chip for the sticky header overlay.
     return (
       <div className="pointer-events-none flex justify-center pt-1" data-testid={testId}>
-        {chip}
+        <span className="rounded-sm bg-layer-panel px-2 py-0.5 text-[10px] font-medium text-foreground-muted shadow-raft-xs theme-brutal:rounded-none theme-brutal:bg-white theme-brutal:font-bold theme-brutal:uppercase theme-brutal:tracking-widest theme-brutal:text-black/50">
+          {label}
+        </span>
       </div>
     );
   }
-
-  // Inline divider: centered chip over a full-width rule.
-  return (
-    <div className="relative flex select-none items-center justify-center px-3 py-2" data-testid={testId}>
-      <div className="absolute inset-x-3 top-1/2 border-t-2 border-black/15" aria-hidden />
-      <div className="relative bg-white">{chip}</div>
-    </div>
-  );
+  return <MessageListDateDivider data-testid={testId}>{label}</MessageListDateDivider>;
 }
 
 /** "Today" / "Yesterday" / "Monday, June 30, 2026" in the viewer's timezone. */

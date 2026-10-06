@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService.js";
+import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService";
 
 // The `app` topic was reachable only under its bare id: it was missing from
 // AGENT_KNOWLEDGE_SOURCE_PATHS, and it had no entry in the legacy group map. The

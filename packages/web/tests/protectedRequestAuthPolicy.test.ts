@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { getProtectedRequestAuthFailureAction } from "../src/utils/protectedRequestAuthPolicy.js";
+import { getProtectedRequestAuthFailureAction } from "../src/utils/protectedRequestAuthPolicy";
 import {
   __resetAuthTraceForTest,
   setAuthTraceFetchForTest,
   setAuthTraceServerIdGetter,
-} from "../src/utils/webAuthTrace.js";
+} from "../src/utils/webAuthTrace";
 
 type StubStore = Record<string, string>;
 
@@ -64,6 +63,7 @@ test("protected request keeps the session on transient refresh failure", () => {
     getProtectedRequestAuthFailureAction({
       status: 502,
       hasRefreshToken: true,
+      hasAccessToken: true,
       initialized: true,
       restoreState: "authenticated",
     }),
@@ -76,6 +76,7 @@ test("protected request logs out on refresh auth failure while auth bootstrap is
     getProtectedRequestAuthFailureAction({
       status: 401,
       hasRefreshToken: true,
+      hasAccessToken: true,
       initialized: false,
       restoreState: "booting",
     }),
@@ -86,6 +87,7 @@ test("protected request logs out on refresh auth failure while auth bootstrap is
     getProtectedRequestAuthFailureAction({
       status: 401,
       hasRefreshToken: true,
+      hasAccessToken: true,
       initialized: true,
       restoreState: "restoring_auth",
     }),
@@ -98,6 +100,7 @@ test("protected request logs out on explicit auth failure once restore is settle
     getProtectedRequestAuthFailureAction({
       status: 401,
       hasRefreshToken: true,
+      hasAccessToken: true,
       initialized: true,
       restoreState: "authenticated",
     }),
@@ -109,7 +112,7 @@ test("protected request terminal verdict carries auth refresh attempt join id", 
   __resetAuthTraceForTest({ traceUrl: "https://trace.example.test" });
   setAuthTraceServerIdGetter(() => "server-abc");
   const ls = stubLocalStorage({ slock_access_token: "tok" });
-  const tracePosts: Array<{ records?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
+  const tracePosts: Array<{ events?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
 
   try {
     setAuthTraceFetchForTest((input, init) => {
@@ -136,7 +139,7 @@ test("protected request terminal verdict carries auth refresh attempt join id", 
     );
 
     await waitFor(() => tracePosts.length >= 1);
-    const verdict = tracePosts[0]?.records?.[0];
+    const verdict = tracePosts[0]?.events?.[0];
     assert.equal(verdict?.name, "slock.auth.verdict");
     assert.equal(verdict?.attrs?.authVerdict, "logout");
     assert.equal(verdict?.attrs?.authRefreshAttemptId, "arf_deadbeef00000001");
@@ -148,14 +151,91 @@ test("protected request terminal verdict carries auth refresh attempt join id", 
   }
 });
 
-test("missing refresh token still logs out once restore is settled", () => {
+test("missing refresh token still logs out once restore is settled — a session existed", () => {
+  // task #632 split this case in two. Here the access token is present, so a
+  // session DID exist and could not be refreshed: ending it is correct.
   assert.equal(
     getProtectedRequestAuthFailureAction({
       status: undefined,
       hasRefreshToken: false,
+      hasAccessToken: true,
       initialized: true,
       restoreState: "authenticated",
     }),
     "logout",
+  );
+});
+
+test("task #632: neither token means the caller never had a session — reject, do not log out", () => {
+  // The visitor case (found via task #115 / PR #8112): someone who never signed
+  // in hits a protected request on a public page. The 401 is the ordinary answer
+  // to an unauthenticated request; treating it as a session ending cleared their
+  // storage and redirected them off the page they were reading.
+  //
+  // `signed_out` is what a visitor actually boots to (`BOOT` with
+  // `hasStoredSession: false`), and the distinction matters — see the sibling
+  // test below, where the same token inputs carry `authenticated` instead.
+  assert.equal(
+    getProtectedRequestAuthFailureAction({
+      status: 401,
+      hasRefreshToken: false,
+      hasAccessToken: false,
+      initialized: true,
+      restoreState: "signed_out",
+    }),
+    "no-session",
+  );
+});
+
+test("POSITIVE CONTROL: a tab whose sibling logged out still ends its session (@Josh's review)", () => {
+  // The second-order case Josh found: tab A logs out and clears storage, so
+  // tab B presents EXACTLY the visitor's token inputs — both absent — because
+  // a deletion does not propagate (authTokenSync emits only when both tokens
+  // are present; its channel carries `tokens-updated` only).
+  //
+  // Without the `authenticated` term, tab B would stop being redirected and
+  // would sit on a page that looks signed in while every request 401s. Its
+  // restore state is the fact the tokens no longer carry.
+  assert.equal(
+    getProtectedRequestAuthFailureAction({
+      status: 401,
+      hasRefreshToken: false,
+      hasAccessToken: false,
+      initialized: true,
+      restoreState: "authenticated",
+    }),
+    "logout",
+  );
+});
+
+test("task #632: an access token with no refresh token is still a session, even mid-restore", () => {
+  // Guards the over-correction: the new branch must key on "were there ever any
+  // tokens", not on "did the refresh fail". Anything that still holds a token
+  // keeps the old behaviour.
+  assert.equal(
+    getProtectedRequestAuthFailureAction({
+      status: 401,
+      hasRefreshToken: false,
+      hasAccessToken: true,
+      initialized: false,
+      restoreState: "booting",
+    }),
+    "logout",
+  );
+});
+
+test("task #632: a transient failure with no tokens still does not log out", () => {
+  // A visitor hitting a 502 must not be redirected either. Before the change the
+  // verdict layer answered "keep-session" here, which happened to be harmless;
+  // now the reason is stated rather than accidental.
+  assert.equal(
+    getProtectedRequestAuthFailureAction({
+      status: 502,
+      hasRefreshToken: false,
+      hasAccessToken: false,
+      initialized: true,
+      restoreState: "signed_out",
+    }),
+    "no-session",
   );
 });

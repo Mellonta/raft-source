@@ -3,10 +3,12 @@ import type { ComponentPropsWithoutRef, ReactNode } from "react";
 import { Bell } from "lucide-react";
 import { useIntl } from "react-intl";
 import {
-  NotificationCenter as RaftNotificationCenter,
+  NotificationCenter,
   PopoverTrigger,
+  Status,
+  useThemeFamily,
 } from "raft-ui";
-import NotificationCenter from "./NotificationCenter";
+import ConnectedNotificationCenter from "./NotificationCenter";
 import Tooltip from "../ui/Tooltip";
 import { useVisibleNotifications } from "./useSystemNotifications";
 import type { NotificationEntry } from "./useSystemNotifications";
@@ -38,17 +40,17 @@ export default function NotificationTrigger({
       ariaLabel={ariaLabel}
       testId={flavor === "rail-bottom" ? "notification-trigger-rail" : "notification-trigger-mobile"}
       sizeClass={flavor === "rail-bottom" ? "size-10" : "size-8"}
-      icon={<Bell size={flavor === "rail-bottom" ? 18 : 16} className="text-black" />}
+      icon={<Bell size={flavor === "rail-bottom" ? 18 : 16} className="text-foreground-muted theme-brutal:text-black" />}
     />
   );
 
   return (
-    <RaftNotificationCenter open={open} onOpenChange={setOpen}>
+    <NotificationCenter open={open} onOpenChange={setOpen}>
       <div className={`relative ${flavor === "rail-bottom" ? "flex h-11 w-full items-center justify-center" : "shrink-0"}`}>
         {flavor === "mobile-navbar" ? (
           <Tooltip
             content={formatMessage({ id: "layout.notifications.centerTooltip" })}
-            contentProps={{ side: "bottom", className: "bg-white" }}
+            contentProps={{ side: "bottom" }}
           >
             <PopoverTrigger render={button} />
           </Tooltip>
@@ -57,12 +59,12 @@ export default function NotificationTrigger({
           // NotificationCenterTrigger is a complete orange button recipe.
           <PopoverTrigger openOnHover delay={0} closeDelay={120} render={button} />
         )}
-        <NotificationCenter
+        <ConnectedNotificationCenter
           notifications={notifications}
           flavor={flavor === "rail-bottom" ? "desktop" : "mobile"}
         />
       </div>
-    </RaftNotificationCenter>
+    </NotificationCenter>
   );
 }
 
@@ -85,6 +87,7 @@ const NotificationTriggerButton = forwardRef<HTMLButtonElement, NotificationTrig
   className = "",
   ...buttonProps
 }, ref) {
+  const theme = useThemeFamily();
   return (
     <button
       {...buttonProps}
@@ -94,19 +97,22 @@ const NotificationTriggerButton = forwardRef<HTMLButtonElement, NotificationTrig
       data-state={open ? "open" : "closed"}
       data-has-unread={hasUnread ? "true" : "false"}
       data-testid={testId}
-      className={`relative inline-flex ${sizeClass} items-center justify-center border-2 transition-colors ${
+      className={`relative inline-flex ${sizeClass} items-center justify-center rounded-md border border-transparent transition-colors theme-brutal:rounded-none theme-brutal:border-2 ${
         open
-          ? "border-black bg-white shadow-brutal-sm"
-          : "border-transparent bg-transparent hover:border-black hover:bg-white"
+          ? "bg-fill-muted shadow-raft-sm theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
+          : "bg-transparent hover:bg-fill-muted theme-brutal:hover:border-black theme-brutal:hover:bg-white"
       } ${className}`}
     >
       <span className="relative inline-flex items-center justify-center">
         {icon}
         {hasUnread ? (
-          <span
-            className="pointer-events-none absolute -top-1 -end-1 size-2.5 rounded-full border border-black bg-brutal-pink"
+          <Status
+            aria-hidden
+            attention
+            size="md"
+            variant={theme === "elegant" ? "primary" : "accent"}
+            className="pointer-events-none absolute -top-1 -end-1"
             data-testid={`${testId}-unread-dot`}
-            aria-hidden="true"
           />
         ) : null}
       </span>

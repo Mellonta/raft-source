@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
-import { createApiTest } from "../test/integration/apiTest.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { oauthClients } from "../db/schema.js";
-import { createOAuthClient, updateOAuthClient } from "../services/oauthService.js";
+import { createApiTest } from "../test/integration/apiTest";
+import { signAccessToken } from "../middleware/auth";
+import { oauthClients } from "../db/schema";
+import { createOAuthClient, updateOAuthClient } from "../services/oauthService";
 
 const test = createApiTest({ onboardingOpenerFlagDefaultEnabled: false });
 

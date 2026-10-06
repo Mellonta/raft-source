@@ -15,7 +15,6 @@
 // sign-breaking mutants (e.g. `a.seq - b.seq` → `a.seq + b.seq` stays positive and
 // a 2-element `.sort()` can mask it), so the mutation-diff-gate needs the signs.
 import assert from "node:assert/strict";
-import test from "node:test";
 
 class MemoryStorage {
   private readonly map = new Map<string, string>();
@@ -26,10 +25,10 @@ class MemoryStorage {
 Object.defineProperty(globalThis, "localStorage", { value: new MemoryStorage(), configurable: true });
 Object.defineProperty(globalThis, "sessionStorage", { value: new MemoryStorage(), configurable: true });
 
-const { compareMessagesForDisplay, sortBySeq, useMessageStore } = await import("../src/store/messageStore.js");
+const { compareMessagesForDisplay, sortBySeq, useMessageStore } = await import("../src/store/messageStore");
 // `sortThreadMessages` lives in ThreadPanel and must delegate to the shared
 // comparator — importing it here pins ThreadPanel's own `[...msgs].sort(...)`.
-const { sortThreadMessages } = await import("../src/components/message/ThreadPanel.js");
+const { sortThreadMessages } = await import("../src/components/message/ThreadPanel");
 type Message = Parameters<ReturnType<typeof useMessageStore.getState>["addMessage"]>[0];
 
 function msg(over: Partial<Message> & { id: string; createdAt: string }): Message {

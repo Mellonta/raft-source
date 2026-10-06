@@ -1,9 +1,8 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import {
   planReconnectAuthRefresh,
   parseAccessTokenExp,
-} from "../src/utils/socketReconnectAuthRefresh.js";
+} from "../src/utils/socketReconnectAuthRefresh";
 
 const NOW = 1_700_000_000_000; // fixed ms epoch
 

@@ -9,37 +9,43 @@ import {
   type TraceStatus,
   type Tracer,
 } from "@botiverse/raft-shared";
-import { requireAuth } from "../middleware/auth.js";
-import { projectCoarseServerPlan } from "../services/serverPlanProjection.js";
-import * as oauthService from "../services/oauthService.js";
-import * as integrationAuditService from "../services/integrationAuditService.js";
-import { getActorServerRoleInServer } from "../lib/actorPermissions.js";
-import { encodePixelAvatarKey } from "../services/pixelAvatarService.js";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
-import { getCurrentTraceContext } from "../tracing/semanticTrace.js";
+import { requireAuth } from "../middleware/auth";
+import { projectCoarseServerPlan } from "../services/serverPlanProjection";
+import * as oauthService from "../services/oauthService";
+import * as integrationAuditService from "../services/integrationAuditService";
+import { getActorServerRoleInServer } from "../lib/actorPermissions";
+import { encodePixelAvatarKey } from "../services/pixelAvatarService";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
+import { errorClassOf, getCurrentTraceContext } from "../tracing/semanticTrace";
 import {
   APP_INSTALLATION_TOKEN_AUDIENCE,
+  discoverActiveAppInstallation,
   mintAppInstallationCredential,
-} from "../services/appInstallationCredentialService.js";
+} from "../services/appInstallationCredentialService";
 import {
   AppOutboundPermissionError,
   updateAppInstallationSubscriptions,
-} from "../services/appOutboundPermissionService.js";
-import { getAppUrl } from "../config/appUrl.js";
-import { getServer } from "../services/serverService.js";
-import { UUID_RE } from "../lib/messageId.js";
+} from "../services/appOutboundPermissionService";
+import { getAppUrl } from "../config/appUrl";
+import { getServer } from "../services/serverService";
+import { UUID_RE } from "../lib/messageId";
 import {
   decodeOidcAuthorizationCode,
   encodeOidcAuthorizationCode,
   getOidcJwks,
   oidcDiscoveryDocument,
   oidcIssuer,
+  OIDC_SERVER_SEGMENT_PATTERN,
   signOidcIdToken,
   validateOidcAuthorizationCode,
   type OidcAuthorizationContext,
-} from "../services/oidcService.js";
+} from "../services/oidcService";
+import { sendJsonServerError } from "./errorResponse";
 
-export const oauthRouter: RouterType = Router();
+// mergeParams: the OIDC endpoints are additionally mounted under
+// /oidc/:server/api/oauth, and the handlers read that segment as the
+// authoritative server scope.
+export const oauthRouter: RouterType = Router({ mergeParams: true });
 
 
 type OAuthSpanOutcome = TraceAttributes & {
@@ -100,7 +106,7 @@ function hashedOAuthRequestIdForAudit(requestId: string): string {
 }
 
 function errorClass(error: unknown): string {
-  return error instanceof Error ? error.name : typeof error;
+  return errorClassOf(error);
 }
 
 function requestedScopeCount(scopes: unknown): number {
@@ -257,11 +263,76 @@ function oidcJsonError(res: Response, error: string, description: string, status
   res.status(status).json({ error, error_description: description });
 }
 
-export function oidcDiscoveryHandler(_req: Request, res: Response) {
+/**
+ * The `:server` segment when the OIDC endpoints are reached through their
+ * server-scoped mount, else undefined. Express types route params from the
+ * path literal, so the unscoped mounts legitimately have no such key.
+ */
+function pathServerScope(req: Request): string | undefined {
+  const params = req.params as Record<string, string | undefined> | undefined;
+  const value = params?.server;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+// Only the endpoints the scoped discovery document advertises are reachable
+// under /oidc/:server/api/oauth. Mounting the whole router there would also
+// expose routes that never read the segment -- agent requests, installation
+// tokens, client lookup -- so they would answer under any Server prefix.
+const OIDC_SCOPED_ROUTES = new Set([
+  "GET /.well-known/openid-configuration",
+  "GET /authorize",
+  "POST /token",
+  "GET /userinfo",
+  "GET /jwks",
+  "GET /serverinfo",
+  "GET /agents",
+]);
+
+/**
+ * Guards the whole server-scoped OIDC mount before any handler runs: a
+ * malformed segment fails closed with 400 for every endpoint in the family, and
+ * routes the scoped discovery document does not advertise are 404. Handlers
+ * keep their own checks; this makes the path one authority for the family
+ * instead of relying on each handler remembering to validate it.
+ */
+export function oidcScopedMountGuard(req: Request, res: Response, next: () => void) {
+  const segment = pathServerScope(req);
+  if (segment === undefined || !OIDC_SERVER_SEGMENT_PATTERN.test(segment)) {
+    oidcJsonError(res, "invalid_request", "server must be a Server ID or slug");
+    return;
+  }
+  const method = req.method === "HEAD" ? "GET" : req.method;
+  const path = req.path.length > 1 ? req.path.replace(/\/+$/, "") : req.path;
+  if (!OIDC_SCOPED_ROUTES.has(`${method} ${path}`)) {
+    res.status(404).json({ error: "not_found" });
+    return;
+  }
+  next();
+}
+
+/**
+ * On a server-scoped mount, a bearer token must belong to that Server. Without
+ * this, a valid path for Server B would answer userinfo/serverinfo for a token
+ * issued on Server A. The unscoped mount has no segment and is unaffected.
+ */
+function bearerTokenMatchesPathScope(
+  req: Request,
+  token: { serverId: string; serverSlug: string | null },
+): boolean {
+  const scope = pathServerScope(req);
+  return scope === undefined || scope === token.serverId || scope === token.serverSlug;
+}
+
+export function oidcDiscoveryHandler(req: Request, res: Response) {
+  const serverSegment = pathServerScope(req);
+  if (serverSegment !== undefined && !OIDC_SERVER_SEGMENT_PATTERN.test(serverSegment)) {
+    res.status(400).json({ error: "invalid_request", error_description: "server must be a Server ID or slug" });
+    return;
+  }
   try {
     res.setHeader("Cache-Control", "public, max-age=300");
     res.json({
-      ...oidcDiscoveryDocument(),
+      ...oidcDiscoveryDocument(serverSegment),
       scopes_supported: oauthService.PUBLIC_RAFT_OAUTH_SCOPES,
     });
   } catch (error) {
@@ -293,7 +364,10 @@ oauthRouter.get("/authorize", (req, res) => {
   const codeChallenge = queryString(req, "code_challenge");
   const codeChallengeMethod = queryString(req, "code_challenge_method");
   const responseMode = queryString(req, "response_mode");
-  const serverHint = queryString(req, "server").trim();
+  // Server scope is taken from the mount path (/oidc/:server/...), never
+  // from a query parameter: clients that reject query components could not
+  // supply one. An unscoped mount leaves this undefined.
+  const serverScope = pathServerScope(req) ?? "";
 
   if (responseType !== "code") {
     oidcJsonError(res, "unsupported_response_type", "Only response_type=code is supported");
@@ -339,8 +413,20 @@ oauthRouter.get("/authorize", (req, res) => {
     oidcJsonError(res, "invalid_request", "nonce must be no longer than 512 characters");
     return;
   }
-  if (serverHint && !/^[A-Za-z0-9-]{1,128}$/.test(serverHint)) {
+  if (serverScope && !OIDC_SERVER_SEGMENT_PATTERN.test(serverScope)) {
     oidcJsonError(res, "invalid_request", "server must be a Server ID or slug");
+    return;
+  }
+  // `?server=` used to carry the scope and no longer does. Reject it loudly
+  // instead of ignoring it: a client that still sends one believes it is
+  // restricting the login, and silently honouring the wrong scope is exactly
+  // the failure this change exists to remove.
+  if (queryString(req, "server").trim()) {
+    oidcJsonError(
+      res,
+      "invalid_request",
+      "The server query parameter is no longer supported; use the server-scoped issuer at /oidc/<server>",
+    );
     return;
   }
 
@@ -353,7 +439,7 @@ oauthRouter.get("/authorize", (req, res) => {
   if (nonce) setup.searchParams.set("nonce", nonce);
   if (codeChallenge) setup.searchParams.set("code_challenge", codeChallenge);
   if (codeChallengeMethod) setup.searchParams.set("code_challenge_method", codeChallengeMethod);
-  if (serverHint) setup.searchParams.set("server", serverHint);
+  if (serverScope) setup.searchParams.set("server", serverScope);
   res.setHeader("Cache-Control", "no-store");
   res.redirect(302, setup.toString());
 });
@@ -399,8 +485,54 @@ oauthRouter.post("/installation-token", async (req, res) => {
       res.status(400).json({ error: error.message });
       return;
     }
-    console.error("Mint app installation credential error:", error);
-    res.status(500).json({ error: "Failed to mint installation credential" });
+    sendJsonServerError(req, res, {
+      error: "Failed to mint installation credential",
+      logPrefix: "Mint app installation credential error:",
+      err: error,
+    });
+  }
+});
+
+// Client-authenticated discovery for Apps installed across many Servers. The
+// authenticated client identity is the App boundary; callers never select a
+// client and a miss does not disclose another App's installation.
+oauthRouter.post("/installations/lookup", async (req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  try {
+    const client = await requireOAuthClient(req, res);
+    if (!client) return;
+    const serverId = typeof req.body?.server_id === "string"
+      ? req.body.server_id.trim()
+      : typeof req.body?.serverId === "string"
+        ? req.body.serverId.trim()
+        : "";
+    if (!serverId) {
+      res.status(400).json({ error: "server_id is required" });
+      return;
+    }
+    if (!UUID_RE.test(serverId)) {
+      res.status(400).json({ error: "server_id must be a Server ID" });
+      return;
+    }
+
+    const installation = await discoverActiveAppInstallation({
+      clientId: client.id,
+      serverId,
+    });
+    if (!installation) {
+      res.status(404).json({ error: "Active installation not found" });
+      return;
+    }
+    res.json({
+      installation_id: installation.installationId,
+      server_id: installation.serverId,
+    });
+  } catch (error) {
+    sendJsonServerError(req, res, {
+      error: "Failed to discover installation",
+      logPrefix: "Discover app installation error:",
+      err: error,
+    });
   }
 });
 
@@ -428,8 +560,11 @@ oauthRouter.put("/installations/:installationId/subscriptions", async (req, res)
       res.status(400).json({ error: error.message });
       return;
     }
-    console.error("Update app installation subscription error:", error);
-    res.status(500).json({ error: "Failed to update installation subscription" });
+    sendJsonServerError(req, res, {
+      error: "Failed to update installation subscription",
+      logPrefix: "Update app installation subscription error:",
+      err: error,
+    });
   }
 });
 
@@ -521,8 +656,11 @@ oauthRouter.get("/clients/lookup", requireAuth, async (req, res) => {
       ...(scopeValidation ? { scopeValidation } : {}),
     });
   } catch (err) {
-    console.error("Lookup OAuth client error:", err);
-    res.status(500).json({ error: "Failed to load OAuth client" });
+    sendJsonServerError(req, res, {
+      error: "Failed to load OAuth client",
+      logPrefix: "Lookup OAuth client error:",
+      err,
+    });
   }
 });
 
@@ -549,11 +687,16 @@ oauthRouter.post("/requests/agent", async (req, res) => {
   }
 
   try {
-    const { serverSlug, agentName, scopes } = req.body ?? {};
+    const { serverSlug, agentName, agentId, scopes } = req.body ?? {};
+    // `agentId` (stable across renames) wins over `agentName` when both are sent.
+    if (agentId !== undefined && (typeof agentId !== "string" || !UUID_RE.test(agentId))) {
+      throw new Error("Agent not found");
+    }
     const result = await oauthService.requestAgentAccess({
       clientId: client.id,
       serverSlug,
       agentName,
+      agentId: agentId?.toLowerCase(),
       scopes,
     });
     await recordOAuthLifecycle({
@@ -769,12 +912,23 @@ oauthRouter.post("/authorize/human", requireAuth, async (req, res) => {
       res.status(400).json({ error: message });
       return;
     }
-    console.error("Human authorization code error:", err);
-    res.status(500).json({ error: "Failed to issue Login with Raft code" });
+    sendJsonServerError(req, res, {
+      error: "Failed to issue Login with Raft code",
+      logPrefix: "Human authorization code error:",
+      err,
+    });
   }
 });
 
 oauthRouter.post("/token", async (req, res) => {
+  // The mount path decides which issuer this token claims. Validated here so a
+  // malformed segment is rejected outright rather than silently widening `iss`
+  // to the unscoped issuer.
+  const tokenServerScope = pathServerScope(req);
+  if (tokenServerScope !== undefined && !OIDC_SERVER_SEGMENT_PATTERN.test(tokenServerScope)) {
+    oidcJsonError(res, "invalid_request", "server must be a Server ID or slug");
+    return;
+  }
   const requestedGrantType = typeof req.body?.grantType === "string" ? req.body.grantType : typeof req.body?.grant_type === "string" ? req.body.grant_type : "";
   const presentedClientId = parseClientCredentials(req)?.clientId ?? "";
   const span = startOAuthSpan(req, "server.oauth.token.exchange", {
@@ -829,32 +983,31 @@ oauthRouter.post("/token", async (req, res) => {
   }
 
   let oidcContext: OidcAuthorizationContext | null = null;
-  if (grantType === "authorization_code") {
-    try {
+  try {
+    if (grantType === "authorization_code") {
       oidcContext = decodeOidcAuthorizationCode(requestId);
-      if (oidcContext) {
-        validateOidcAuthorizationCode({
-          context: oidcContext,
-          clientId: presentedClientId,
-          redirectUri: req.body?.redirect_uri,
-          codeVerifier: req.body?.code_verifier,
-        });
-        requestId = oidcContext.requestId;
-      }
-    } catch {
-      await recordOAuthLifecycle({
-        stage: "token_exchange",
-        result: "invalid_request",
-        outcome: "failure",
-        clientId: client.id,
-        clientKey: client.clientId,
-        grantType: "authorization_code",
-        principalType: "human",
-      });
-      finishOAuthSpan(span, "ok", { outcome: "invalid_grant", http_status: 400, grant_type: grantType });
-      oidcJsonError(res, "invalid_grant", "The authorization code, redirect URI, or PKCE verifier is invalid");
-      return;
     }
+    // All accepted code shapes share the downgrade check, including legacy
+    // human/Agent UUIDs and the agent_request grant, which have no challenge.
+    validateOidcAuthorizationCode({
+      context: oidcContext,
+      clientId: presentedClientId,
+      redirectUri: req.body?.redirect_uri,
+      codeVerifier: req.body?.code_verifier,
+    });
+    if (oidcContext) requestId = oidcContext.requestId;
+  } catch {
+    await recordOAuthLifecycle({
+      stage: "token_exchange",
+      result: "invalid_request",
+      outcome: "failure",
+      clientId: client.id,
+      clientKey: client.clientId,
+      grantType: grantTypeAttr(grantType),
+    });
+    finishOAuthSpan(span, "ok", { outcome: "invalid_grant", http_status: 400, grant_type: grantType });
+    oidcJsonError(res, "invalid_grant", "The authorization code, redirect URI, or PKCE verifier is invalid");
+    return;
   }
 
   // Both legacy authorization codes and agent access requests resolve to the
@@ -888,9 +1041,44 @@ oauthRouter.post("/token", async (req, res) => {
       Math.floor((exchanged.expiresAt.getTime() - currentDate().getTime()) / 1000),
     );
     const identity = exchanged.identity;
+    // A server-scoped token endpoint must only mint for a grant that belongs to
+    // that server. The path decides `iss`, so without this check a client could
+    // exchange a code at /oidc/<other>/api/oauth/token and receive a token whose
+    // issuer names one Server while `server_id` names another. The client's own
+    // `server_id` is not the right comparison: installed third-party apps
+    // authorize on servers other than the one they were registered on, so the
+    // grant's identity is the source of truth. Checked after the exchange
+    // because that is where the grant's server is known; the minted token is
+    // never returned, so rejecting here fails closed.
+    if (tokenServerScope !== undefined) {
+      const scopeMatchesGrant = identity != null
+        && (tokenServerScope === identity.serverId || tokenServerScope === identity.serverSlug);
+      if (!scopeMatchesGrant) {
+        // Lifecycle results are a closed telemetry set with no grant-mismatch
+        // member; `invalid_request` is the nearest existing value, so the
+        // contract is not widened here. The client still gets `invalid_grant`.
+        await recordOAuthLifecycle({
+          stage: "token_exchange",
+          result: "invalid_request",
+          outcome: "failure",
+          clientId: client.id,
+          clientKey: client.clientId,
+          grantType: grantTypeAttr(grantType),
+          principalType: grantType === "authorization_code" ? "human" : "agent",
+        });
+        finishOAuthSpan(span, "ok", { outcome: "invalid_grant", http_status: 400, grant_type: grantType });
+        oidcJsonError(res, "invalid_grant", "The authorization was granted for a different Server than this issuer");
+        return;
+      }
+    }
     const idToken = identity
       ? signOidcIdToken({
-          issuer: oidcIssuer(),
+          // `iss` must equal the issuer of the discovery document this client
+          // was configured from, or verification fails on their side. The mount
+          // path is exactly that signal: a token requested at
+          // /oidc/<server>/api/oauth/token gets the matching scoped issuer,
+          // and an unscoped request keeps the legacy issuer.
+          issuer: oidcIssuer(undefined, tokenServerScope),
           identity: {
             sub: identity.principalType === "human" ? identity.humanId! : identity.agentId!,
             clientId: oidcContext?.clientId ?? identity.clientKey,
@@ -1188,6 +1376,10 @@ oauthRouter.get("/userinfo", async (req, res) => {
   try {
     const token = await requireBearerIdentity(req, res);
     if (!token) return;
+    if (!bearerTokenMatchesPathScope(req, token)) {
+      res.status(401).json({ error: "Access token was issued for a different Server than this issuer" });
+      return;
+    }
 
     const common = {
       scope: (token.scopes ?? []).join(" "),
@@ -1233,8 +1425,41 @@ oauthRouter.get("/userinfo", async (req, res) => {
       description: token.agentDescription,
     });
   } catch (err) {
-    console.error("OAuth userinfo error:", err);
-    res.status(500).json({ error: "Failed to load userinfo" });
+    sendJsonServerError(req, res, {
+      error: "Failed to load userinfo",
+      logPrefix: "OAuth userinfo error:",
+      err,
+    });
+  }
+});
+
+// Directory authority is an explicit login scope, never a webhook group or
+// an installation credential. The principal's live membership is rechecked by
+// requireBearerIdentity; the Server is derived only from that identity.
+oauthRouter.get("/agents", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const token = await requireBearerIdentity(req, res);
+    if (!token) return;
+    if (!bearerTokenMatchesPathScope(req, token)) {
+      res.status(401).json({ error: "Access token was issued for a different Server than this issuer" });
+      return;
+    }
+    if (!token.clientEnabled || !oauthService.accessTokenHasScope(token, "agent:read")) {
+      res.status(403).json({ error: "agent:read permission is required from an enabled App" });
+      return;
+    }
+    const directory = await oauthService.listOAuthAgentDirectory(token.serverId);
+    res.json({ agents: directory.map((agent) => ({
+      ...agent,
+      picture: userinfoAgentPictureUrl(agent.avatar_url, req),
+    })) });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to load agent directory",
+      logPrefix: "OAuth agent directory error:",
+      err,
+    });
   }
 });
 
@@ -1242,6 +1467,10 @@ oauthRouter.get("/serverinfo", async (req, res) => {
   try {
     const token = await requireBearerIdentity(req, res);
     if (!token) return;
+    if (!bearerTokenMatchesPathScope(req, token)) {
+      res.status(401).json({ error: "Access token was issued for a different Server than this issuer" });
+      return;
+    }
 
     // Coarse paid-tier projection (xxchan 2026-08-12 product ruling, PM Tao):
     // the bearer token is already bound to this client+server, so plan is
@@ -1264,8 +1493,11 @@ oauthRouter.get("/serverinfo", async (req, res) => {
       plan_tier: tier.plan_tier,
     });
   } catch (err) {
-    console.error("OAuth serverinfo error:", err);
-    res.status(500).json({ error: "Failed to load serverinfo" });
+    sendJsonServerError(req, res, {
+      error: "Failed to load serverinfo",
+      logPrefix: "OAuth serverinfo error:",
+      err,
+    });
   }
 });
 

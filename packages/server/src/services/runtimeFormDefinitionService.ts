@@ -16,7 +16,7 @@ import {
   type RuntimeFormDefinitionRef,
 } from "@botiverse/raft-shared";
 
-export const BUILTIN_PI_FORM_SCHEMA_VERSION = "builtin-pi.create.v2";
+export const BUILTIN_PI_FORM_SCHEMA_VERSION = "builtin-pi.create.v3";
 export const BUILTIN_PI_FORM_DEFINITION_REF: RuntimeFormDefinitionRef = {
   protocolVersion: 1,
   runtimeId: "builtin",
@@ -24,11 +24,6 @@ export const BUILTIN_PI_FORM_DEFINITION_REF: RuntimeFormDefinitionRef = {
 };
 
 export { KIMI_SDK_FORM_DEFINITION_REF, KIMI_SDK_FORM_SCHEMA_VERSION };
-
-const FORM_DEFINITION_REFS = new Map<string, RuntimeFormDefinitionRef>([
-  [BUILTIN_PI_FORM_DEFINITION_REF.runtimeId, BUILTIN_PI_FORM_DEFINITION_REF],
-  [KIMI_SDK_FORM_DEFINITION_REF.runtimeId, KIMI_SDK_FORM_DEFINITION_REF],
-]);
 
 const presetProviderIds = Object.keys(BUILTIN_RUNTIME_PROVIDER_ENV_KEYS);
 const gatewayProviderIds = Object.keys(BUILTIN_RUNTIME_GATEWAY_PROVIDER_ENV_KEYS);
@@ -47,13 +42,14 @@ export function buildBuiltInPiFormDefinition(): AgentCreateFormDefinition {
         apiKey: { type: "string", title: "API Key", minLength: 1, writeOnly: true },
         baseUrl: { type: "string", title: "Base URL", minLength: 1, format: "uri" },
         supportsImageInput: { type: "boolean", title: "Image input" },
+        loadLocalPlugins: { type: "boolean", title: "Load local Pi plugins" },
         model: { type: "string", title: "Model", minLength: 1 },
         envVars: { type: "object", title: "Environment Variables", additionalProperties: { type: "string" } },
       },
     },
     uiSchema: {
-      order: ["providerId", "apiKey", "baseUrl", "supportsImageInput", "model", "envVars"],
-      layout: { advanced: ["/envVars"] },
+      order: ["providerId", "apiKey", "baseUrl", "supportsImageInput", "model", "loadLocalPlugins", "envVars"],
+      layout: { advanced: ["/loadLocalPlugins", "/envVars"] },
       visibility: [
         {
           pointer: "/baseUrl",
@@ -76,6 +72,10 @@ export function buildBuiltInPiFormDefinition(): AgentCreateFormDefinition {
           hint: "Enable only when this gateway endpoint and model accept images.",
         },
         model: { label: "Model", placeholder: "Model ID" },
+        loadLocalPlugins: {
+          label: "Load local Pi extensions",
+          hint: "Load enabled Pi extensions installed on the computer running this agent. Applying changes restarts a running agent.",
+        },
         envVars: {
           label: "Environment Variables",
           hint: "These will be injected into the runtime command environment.",
@@ -288,7 +288,7 @@ export function validateRuntimeFormDefinitionRef(value: unknown): AgentCreateFor
   if (ref.protocolVersion !== 1) {
     return [{ code: "unsupported_form_protocol", pointer: "/formDefinitionRef/protocolVersion" }];
   }
-  const registered = typeof ref.runtimeId === "string" ? FORM_DEFINITION_REFS.get(ref.runtimeId) : undefined;
+  const registered = runtimeFormV1Entry(ref.runtimeId)?.ref;
   if (!registered) {
     return [{ code: "unknown_form_runtime", pointer: "/formDefinitionRef/runtimeId" }];
   }
@@ -441,4 +441,33 @@ export function validateBuiltInPiDefinitionProjection(
     }
   }
   return issues;
+}
+
+/**
+ * The v1 (schemaVersion-pinned) form a runtime serves, if any. Only these
+ * runtimes answer the v1 definition routes and carry `formDefinitionRef` on the
+ * admission row; a runtime whose form exists only on protocol v2 lives in
+ * runtimeFormV2Registry and stays invisible to v1 clients.
+ */
+export interface RuntimeFormV1Entry {
+  ref: RuntimeFormDefinitionRef;
+  buildDefinition(): AgentCreateFormDefinition;
+  validateProjection(): AgentCreateFormIssue[];
+}
+
+const RUNTIME_FORM_V1_ENTRIES = new Map<string, RuntimeFormV1Entry>([
+  [BUILTIN_PI_FORM_DEFINITION_REF.runtimeId, {
+    ref: BUILTIN_PI_FORM_DEFINITION_REF,
+    buildDefinition: buildBuiltInPiFormDefinition,
+    validateProjection: () => validateBuiltInPiDefinitionProjection(),
+  }],
+  [KIMI_SDK_FORM_DEFINITION_REF.runtimeId, {
+    ref: KIMI_SDK_FORM_DEFINITION_REF,
+    buildDefinition: buildKimiSdkFormDefinition,
+    validateProjection: () => validateKimiSdkDefinitionProjection(),
+  }],
+]);
+
+export function runtimeFormV1Entry(runtimeId: unknown): RuntimeFormV1Entry | null {
+  return typeof runtimeId === "string" ? RUNTIME_FORM_V1_ENTRIES.get(runtimeId) ?? null : null;
 }

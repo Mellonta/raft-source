@@ -31,8 +31,10 @@ api.interceptors.request.use((config) => {
     config.headers.Authorization = `Bearer ${token}`;
   }
 
+  // A request that names its server explicitly (e.g. a top-level page acting
+  // on a server other than the current one) keeps it.
   const serverId = useServerStore.getState().current?.id;
-  if (serverId) {
+  if (serverId && !config.headers["X-Server-Id"]) {
     config.headers["X-Server-Id"] = serverId;
   }
 
@@ -94,6 +96,12 @@ api.interceptors.response.use(
         const action = getProtectedRequestAuthFailureAction({
           status,
           hasRefreshToken: !noRefreshToken,
+          // task #632: a visitor who never signed in holds neither token, and a
+          // 401 for them means "this needs a login", not "your session ended".
+          // Read at failure time, which can race a concurrent logout that has
+          // already cleared storage — but that request is redirecting anyway, so
+          // the page outcome is the same.
+          hasAccessToken: localStorage.getItem("slock_access_token") !== null,
           authRefreshAttemptId: authRefreshAttemptIdFromError(refreshError),
           ...getAuthRuntimeSnapshot(),
         });
@@ -102,6 +110,9 @@ api.interceptors.response.use(
           return;
         }
 
+        // "no-session" joins "keep-session" / "defer-to-auth-restore" here: the
+        // caller sees the 401 and decides for itself. Nothing is cleared and the
+        // page is not navigated.
         return Promise.reject(refreshError);
       }
     }

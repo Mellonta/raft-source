@@ -1,15 +1,15 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { channels, serverMembers, users } from "../db/schema.js";
-import { createChannel, addHuman } from "../services/channelService.js";
-import { createServer } from "../services/serverService.js";
-import * as taskService from "../services/taskService.js";
-import { TASKS_SERVER_RESPONSE_WARN_BYTES } from "./tasks.js";
+import { getDb } from "../db/index";
+import { channels, serverMembers, users } from "../db/schema";
+import { createChannel, addHuman } from "../services/channelService";
+import { createServer } from "../services/serverService";
+import * as taskService from "../services/taskService";
+import { TASKS_SERVER_RESPONSE_WARN_BYTES } from "./tasks";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -53,6 +53,17 @@ async function fetchAllPages(baseUrl: string, headers: Record<string, string>, q
   } while (cursor);
   return { items, pages };
 }
+
+test("GET /api/tasks/channel/:channelId answers 404, not 500, for a non-uuid channelId (task #12)", async ({ app }) => {
+  const owner = await seedUser("uuid-guard-task-owner@slock.test", "uuid-guard-task-owner");
+  const server = await createServer("Uuid Guard Tasks", "uuid-guard-tasks", owner.id);
+  const token = await tokenForHuman(owner.email);
+  const res = await fetch(`${app.baseUrl}/api/tasks/channel/not-a-uuid`, {
+    headers: authHeaders(token, server.id),
+  });
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: "Channel not found" });
+});
 
 test("GET /api/tasks/server paginates every task exactly once in stable order", async ({ app }) => {
   const owner = await seedUser("page-owner@slock.test", "page-owner");
@@ -166,13 +177,14 @@ test("GET /api/tasks/server?detail=summary omits description bodies and keeps na
     "channelId", "channelName", "channelType", "claimedAt", "claimedById",
     "claimedByName", "claimedByType", "completedAt", "createdAt", "createdById",
     "createdByName", "createdByType", "descriptionBytes", "hasDescription", "id",
-    "isLegacy", "messageId", "revision", "source", "status", "taskNumber", "title",
+    "isLegacy", "messageId", "readOnlyReason", "revision", "source", "status", "taskNumber", "title",
     "updatedAt",
   ];
   for (const item of body.tasks) {
     assert.deepEqual(Object.keys(item).sort(), expectedKeys, "summary item carries exactly the contracted keys");
     assert.equal("description" in item, false, "summary item must not carry a description body");
     assert.equal(item.source, "tasks");
+    assert.equal(item.readOnlyReason, null, "ordinary tasks remain writable");
     assert.equal(item.channelName, "summary-room");
     assert.equal(item.channelType, "channel");
     assert.equal(item.createdById, owner.id);
@@ -362,4 +374,24 @@ test("GET /api/tasks/server warns only for new-shape responses over 8 MiB; legac
 
   assert.equal(legacyRes.headers.get("x-response-bytes"), String(legacyBytes), "legacy still reports exact bytes");
   assert.ok(pagedRes.headers.get("x-response-bytes"), "paginated reports bytes too");
+});
+
+test("GET /api/tasks/server rejects a cursor for an inaccessible same-server joint channel", async ({ app }) => {
+  // A cursor names a channel. Finding that channel in the server-wide ordering
+  // set is not the same as the caller being allowed to stand there, so the
+  // cursor is revalidated against the caller's visible set before it positions
+  // the walk.
+  const owner = await seedUser("page-hidden-owner@slock.test", "page-hidden-owner");
+  const reader = await seedUser("page-hidden-reader@slock.test", "page-hidden-reader");
+  const server = await createServer("Task Hidden Cursor", "task-hidden-cursor", owner.id);
+  await getDb().insert(serverMembers).values({ serverId: server.id, userId: reader.id, role: "member" });
+  const hiddenJoint = await createChannel(server.id, "hidden-joint", undefined, "joint");
+
+  const token = await tokenForHuman(reader.email);
+  const cursor = Buffer.from(JSON.stringify({ c: hiddenJoint.id, n: 1 })).toString("base64url");
+  const res = await fetch(`${app.baseUrl}/api/tasks/server?limit=2&cursor=${cursor}`, {
+    headers: authHeaders(token, server.id),
+  });
+
+  assert.equal(res.status, 400, "a hidden channel id must not be a valid pagination position");
 });

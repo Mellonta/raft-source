@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
-import type { DatabaseExecutor } from "../src/db/index.js";
-import { serverMembers, users } from "../src/db/schema.js";
+import type { DatabaseExecutor } from "../src/db/index";
+import { serverMembers, users } from "../src/db/schema";
 
 type UserOnboardingValues = Pick<
   typeof users.$inferInsert,

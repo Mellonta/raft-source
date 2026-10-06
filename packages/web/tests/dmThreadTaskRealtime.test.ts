@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import test from "node:test";
 import { useInboxStore } from "../src/store/inboxStore";
 import type { InboxItem } from "../src/store/inboxStore";
 import { registerTaskRealtimeHandlers } from "../src/store/taskRealtimeSync";

@@ -1,4 +1,4 @@
-import type { ParsedEvent, RuntimeTurnAttribution } from "./types.js";
+import type { ParsedEvent, RuntimeTurnAttribution } from "./types";
 
 export type GrokJsonRpcId = number | string;
 

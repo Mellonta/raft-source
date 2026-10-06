@@ -1,32 +1,31 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
-import { afterEach } from "vitest";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   agents,
   channelAgents,
   channelHumans,
   channels,
   inboxNotificationFacts,
-  inboxServingRows,
   messages,
   serverAgentMembers,
   serverMembers,
   servers,
   threadFollows,
   users,
-} from "../db/schema.js";
-import { addChannelMemberForAgent } from "../routes/agentChannelMembers.js";
-import { broadcastAndDeliver, broadcastSystemMessage } from "./messageService.js";
-import { runWithTraceSpan } from "../tracing/semanticTrace.js";
+} from "../db/schema";
+import { addChannelMemberForAgent } from "../routes/agentChannelMembers";
+import { broadcastAndDeliver, broadcastSystemMessage } from "./messageService";
+import { runWithTraceSpan } from "../tracing/semanticTrace";
 import type { ActiveSpan } from "@botiverse/raft-shared";
 import {
   SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION,
   type ProductionSystemMessageProducer,
-} from "./systemMessageBornReadRegistry.js";
+  type RequiresCausalActorProducer,
+} from "./systemMessageBornReadRegistry";
 
 
 afterEach(async () => {
@@ -124,8 +123,8 @@ test("system message born-reads the human actor's own row while other members st
       mode: "record",
       producer: "test.task.created_summary",
       reason: "test born-read for a user-caused system message",
+      causalActor: { type: "user", id: owner.id },
     },
-    causalActor: { type: "user", id: owner.id },
   });
 
   const ownerFact = await factFor(system.id, "user", owner.id);
@@ -150,8 +149,8 @@ test("system message born-reads the agent actor's own row while humans stay unre
       mode: "record",
       producer: "test.agent.join_channel",
       reason: "test born-read for an agent-caused system message",
+      causalActor: { type: "agent", id: agent.id },
     },
-    causalActor: { type: "agent", id: agent.id },
   });
 
   const agentFact = await factFor(system.id, "agent", agent.id);
@@ -179,8 +178,8 @@ test("born-read matches on {type,id}: a user causalActor never born-reads an age
       mode: "record",
       producer: "test.channel.agent_membership",
       reason: "test that {type,id} discrimination prevents user/agent id collisions",
+      causalActor: { type: "user", id: agent.id },
     },
-    causalActor: { type: "user", id: agent.id },
   });
 
   const agentFact = await factFor(system.id, "agent", agent.id);
@@ -318,7 +317,7 @@ test("addChannelMemberForAgent born-reads the acting agent's own membership noti
 // it adds channel.rename, channel.archive, channel.unarchive, task.converted_summary
 // (and re-covers the already-tested ones) under one data-driven loop.
 // ---------------------------------------------------------------------------
-const CHANNEL_BORN_READ_PRODUCERS: ProductionSystemMessageProducer[] = [
+const CHANNEL_BORN_READ_PRODUCERS: readonly RequiresCausalActorProducer[] = [
   "agent.join_channel",
   "channel.agent_membership",
   "channel.human_membership",
@@ -341,8 +340,8 @@ for (const producer of CHANNEL_BORN_READ_PRODUCERS) {
         mode: "record",
         producer,
         reason: `paired born-read coverage for ${producer}`,
+        causalActor: { type: "user", id: owner.id },
       },
-      causalActor: { type: "user", id: owner.id },
     });
 
     const ownerFact = await factFor(system.id, "user", owner.id);
@@ -387,8 +386,8 @@ test("task status change born-reads the acting user's own thread row while anoth
       mode: "record",
       producer: "task.lifecycle_thread",
       reason: "task status transition is a collaboration signal",
+      causalActor: { type: "user", id: owner.id },
     },
-    causalActor: { type: "user", id: owner.id },
   });
 
   const ownerFact = await factFor(system.id, "user", owner.id);
@@ -396,45 +395,65 @@ test("task status change born-reads the acting user's own thread row while anoth
   assert.equal(ownerFact.unreadEligible, false, "the user who moved the task must be born-read on the thread");
   assert.equal(memberFact.unreadEligible, true, "another thread follower must still be unread");
 
-  const servingRows = await db
-    .select()
-    .from(inboxServingRows)
-    .where(eq(inboxServingRows.sourceChannelId, thread.id));
-  const ownerServing = servingRows.find((row) => row.receiverType === "user" && row.receiverId === owner.id);
-  const memberServing = servingRows.find((row) => row.receiverType === "user" && row.receiverId === member.id);
-  assert.ok(ownerServing, "the acting user's Activity row must remain visible in the serving projection");
-  assert.ok(memberServing, "the other follower's Activity row must remain visible in the serving projection");
-  assert.equal(ownerServing.unreadCount, 0, "the acting user's self-caused system row must project born-read");
-  assert.equal(ownerServing.firstUnreadMessageId, null, "the acting user's row must not expose a first unread message");
-  assert.equal(memberServing.unreadCount, 1, "another follower must retain the legitimate unread");
-  assert.equal(memberServing.firstUnreadMessageId, system.id, "the other follower's first unread remains the system row");
+  // 2026-09-21 teardown: the serving-rows projection is retired. The born-read
+  // verdict survives as the recorded fact above (unreadEligible); read-side
+  // suppression returns when the canonical derivation gains causal_actor
+  // columns (Stage 2 requirement) — until then the deriving surfaces count the
+  // self-caused system row like any other message.
 });
 
 // ---------------------------------------------------------------------------
-// Structural coupling guard: a producer the registry declares "born-read" MUST
-// pass causalActor. Forgetting it is a hard error, not a silent unread.
+// action_card.result_reply → born-read for the confirming human; the @mentioned
+// preparing agent (the card author, following the card thread) stays unread.
 // ---------------------------------------------------------------------------
-test("broadcastSystemMessage throws when a born-read producer omits causalActor", async ({ db }) => {
+test("action-card result reply born-reads the confirming human while the mentioned preparer stays unread", async ({ db: _database }) => {
+  const { owner, agent, channel } = await seedSurface();
+  const db = getDb();
+  const [carrier] = await db.insert(messages).values({
+    channelId: channel.id,
+    senderType: "agent",
+    senderId: agent.id,
+    content: "Create channel #x",
+    seq: 1,
+  }).returning();
+  const [thread] = await db.insert(channels).values({
+    serverId: channel.serverId,
+    name: "card-thread",
+    type: "thread",
+    parentMessageId: carrier.id,
+  }).returning();
+  await db.insert(threadFollows).values([
+    { threadChannelId: thread.id, followerType: "user", followerId: owner.id, parentMessageId: carrier.id, reason: "manual" },
+    { threadChannelId: thread.id, followerType: "agent", followerId: agent.id, parentMessageId: carrier.id, reason: "mentioned" },
+  ]);
 
-  const { channel } = await seedSurface();
-  const io = createIoStub();
+  const system = await broadcastSystemMessage(createIoStub(), agentOrchestratorStub, thread.id, `@${agent.name} your action card was executed`, {
+    inboxFactPolicy: {
+      mode: "record",
+      producer: "action_card.result_reply",
+      reason: "paired born-read coverage for action_card.result_reply",
+      causalActor: { type: "user", id: owner.id },
+    },
+    personalAttentionTargets: [{ type: "agent", id: agent.id, name: agent.name }],
+  });
 
-  await assert.rejects(
-    () =>
-      broadcastSystemMessage(io, agentOrchestratorStub, channel.id, "missing actor", {
-        inboxFactPolicy: {
-          mode: "record",
-          producer: "channel.agent_membership",
-          reason: "intentionally omit causalActor to prove the guard fires",
-        },
-        // No causalActor on purpose.
-      }),
-    /must pass causalActor/,
-    "a declared born-read producer without causalActor must throw",
-  );
+  const ownerFact = await factFor(system.id, "user", owner.id);
+  const agentFact = await factFor(system.id, "agent", agent.id);
+  assert.equal(ownerFact.unreadEligible, false, "the confirming human's own row must be born-read");
+  assert.equal(agentFact.unreadEligible, true, "the preparing agent must see the result unread");
+  assert.equal(agentFact.personalMention, true, "the result is a personal mention for the preparer");
 });
 
 // ---------------------------------------------------------------------------
+// Compile-time structural-coupling guard: a "born-read" producer REQUIRES
+// `causalActor`, and a "notify-exclude" / "skip" producer REJECTS one.
+//
+// This is now enforced by the `SystemMessageInboxFactPolicy` discriminated union
+// at TYPE level (no runtime throw). The two-way `@ts-expect-error` assertion
+// lives in systemMessageBornReadRegistry.typeproof.ts. A forgotten
+// `causalActor` is a compile error, not a runtime one.
+// ---------------------------------------------------------------------------
+
 // Completeness gate: every registry "born-read" producer must have a paired
 // suppression test in this file. A new born-read producer without coverage
 // fails here (belt to the registry's compile-time forced-declaration).
@@ -442,6 +461,7 @@ test("broadcastSystemMessage throws when a born-read producer omits causalActor"
 const COVERED_BORN_READ_PRODUCERS = new Set<ProductionSystemMessageProducer>([
   ...CHANNEL_BORN_READ_PRODUCERS,
   "task.lifecycle_thread",
+  "action_card.result_reply",
 ]);
 
 test("every registry born-read producer has paired suppression coverage in this file", () => {
@@ -488,8 +508,8 @@ test("recorded trace carries born_read_receiver_count + producer for a self-caus
         mode: "record",
         producer: "test.task.created_summary",
         reason: "trace-assert born-read observability",
+        causalActor: { type: "user", id: owner.id },
       },
-      causalActor: { type: "user", id: owner.id },
     }),
   );
 

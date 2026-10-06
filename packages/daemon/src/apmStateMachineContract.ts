@@ -2,7 +2,7 @@ import type {
   ApmExpectedTerminationReason,
   ApmStalledRecoveryBlockReason,
   ApmStartupTimeoutBlockReason,
-} from "./apmStateMachine.js";
+} from "./apmStateMachine";
 
 export type ApmUserVisibleStatus =
   | "starting"

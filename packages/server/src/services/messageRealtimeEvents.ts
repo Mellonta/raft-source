@@ -1,5 +1,5 @@
 import type { Server as SocketServer } from "socket.io";
-import type { messages } from "../db/schema.js";
+import type { messages } from "../db/schema";
 
 type MessageRow = typeof messages.$inferSelect;
 
@@ -32,15 +32,13 @@ export type MessageRealtimeTarget = {
   serverId: string;
 };
 
-type StorageOnlyMessageSocketKey = "agentSendKey" | "searchText" | "searchVector" | "senderHandle";
+type StorageOnlyMessageSocketKey = "agentSendKey" | "searchText" | "searchVector" | "senderHandle" | "serverId";
 
 type MessageAudience = {
   emit(event: "message:new" | "message:updated" | "task:created" | "task:updated" | "task:deleted", payload: unknown): unknown;
 };
 
 export function messageAudience(io: SocketServer, target: MessageRealtimeTarget): MessageAudience {
-  // Room membership is authorized; the server room also contains guests
-  // who cannot read every public channel.
   return io.to(`channel:${target.channelId}`);
 }
 
@@ -86,6 +84,7 @@ export function projectRichMessageSocketPayload<T extends Record<string, unknown
     searchText: _searchText,
     searchVector: _searchVector,
     senderHandle: _senderHandle,
+    serverId: _serverId,
     ...projected
   } = payload;
   return projected;

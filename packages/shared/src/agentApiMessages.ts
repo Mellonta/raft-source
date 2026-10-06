@@ -1,3 +1,3 @@
-export * from "./agentApiMessageClient.js";
-export * from "./agentApiMessageContract.js";
-export * from "./agentApiPaths.js";
+export * from "./agentApiMessageClient";
+export * from "./agentApiMessageContract";
+export * from "./agentApiPaths";

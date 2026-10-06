@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   FREE_MONTHLY_FILE_UPLOAD_LIMIT_BYTES,
   FREE_SINGLE_FILE_UPLOAD_LIMIT_BYTES,
@@ -29,7 +28,7 @@ import {
   getSingleFileUploadLimitBytes,
   getSingleFileUploadLimitLabel,
   isTrialActive,
-} from "./index.js";
+} from "./index";
 
 test("Pro pricing follows single seat semantics", () => {
   assert.equal(PRO_SEAT_MONTHLY_USD, 10);

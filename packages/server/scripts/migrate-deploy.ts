@@ -12,13 +12,12 @@ import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
-import { classifyAppliedCountError, readJournalTags, runDeployMigrations } from "../src/db/migrateDeploy.js";
+import { classifyAppliedCountError, runDeployMigrations } from "../src/db/migrateDeploy";
 import {
   acquireMigrationAdvisoryLock,
   resolveMigrationPhaseConfig,
-  runMigrationLockPreflight,
   runMigrationPhases,
-} from "../src/db/migrationPhases.js";
+} from "../src/db/migrationPhases";
 
 const migrationsFolder =
   process.env.MIGRATIONS_FOLDER ??
@@ -61,8 +60,7 @@ async function main(): Promise<void> {
     }
     const migrateFn = phaseContractEnabled
       ? async () => {
-          const tags = readJournalTags(migrationsFolder);
-          const phaseConfig = resolveMigrationPhaseConfig(process.env, tags);
+          const phaseConfig = resolveMigrationPhaseConfig(process.env);
           await client.query("SELECT set_config('lock_timeout', $1, false)", [
             `${phaseConfig.lockTimeoutMs}ms`,
           ]);
@@ -77,24 +75,19 @@ async function main(): Promise<void> {
             phaseConfig.advisoryLockNamespace,
             phaseConfig.advisoryLockKey,
           );
-          const preflight = () =>
-            runMigrationLockPreflight(
-              (text, values) => client.query(text, values as unknown[]),
-              phaseConfig.lockTimeoutMs,
-              phaseConfig.lockSchema,
-              phaseConfig.lockRelations,
-            );
+          // No lock preflight: the session `lock_timeout` above (set and
+          // verified effective) is the guard that bounds how long a migration
+          // can wait for a lock, and the advisory lock serialises migrators.
+          // The preflight additionally refused to *start* when an unrelated
+          // transaction was holding one of the watched relations, which failed
+          // releases for reasons unrelated to the change. Removed on the
+          // owner's instruction.
           await runMigrationPhases(
             migrationsFolder,
-            phaseConfig.boundaryTags,
             (_phase, phaseFolder) => migrate(db, { migrationsFolder: phaseFolder }),
-            preflight,
           );
         }
-      : async (opts: { migrationsFolder: string }) => {
-          const tags = readJournalTags(migrationsFolder);
-          await migrate(db, opts);
-        };
+      : async (opts: { migrationsFolder: string }) => migrate(db, opts);
 
     await runDeployMigrations(
       migrateFn,

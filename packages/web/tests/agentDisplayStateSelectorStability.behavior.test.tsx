@@ -20,7 +20,6 @@
  */
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import {
@@ -117,8 +116,20 @@ test("computeAgentDisplayState parity: managed, stopped-fallback, and external a
   const viaFallback = computeAgentDisplayState(agents, agentActivities, "ghost", { status: "active" });
   assert.equal(viaFallback.isOnline, true);
 
+  // External agents: presence comes from `lastSeenAt`, not status. Never
+  // seen → offline; seen within the online window → online.
   const external = computeAgentDisplayState(agents, agentActivities, "ghost", { status: "active", external: true });
   assert.equal(external.isExternal, true);
   assert.equal(external.isOnline, false);
-  assert.equal(external.activityText, "External");
+  assert.equal(external.activityText, "Offline");
+
+  const nowMs = Date.parse("2026-09-01T12:00:00.000Z");
+  const seen = computeAgentDisplayState(agents, agentActivities, "ghost", {
+    status: "stopped",
+    external: true,
+    lastSeenAt: "2026-09-01T11:59:30.000Z",
+  }, nowMs);
+  assert.equal(seen.isExternal, true);
+  assert.equal(seen.isOnline, true);
+  assert.equal(seen.activityText, "Online");
 });

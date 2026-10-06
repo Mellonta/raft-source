@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 import { en } from "../src/i18n/messages/en";
 
@@ -16,13 +15,19 @@ test("auth frame uses the same yellow top bar language as the mobile app", () =>
 
   assert.match(
     source,
-    /AUTH_BRAND_SHELL_CLASS =\s+"min-h-0 flex-1 overflow-y-auto bg-white font-display safe-top safe-bottom"/,
+    /AUTH_BRAND_SHELL_CLASS =\s+"min-h-0 flex-1 overflow-y-auto bg-layer-canvas font-display safe-top safe-bottom"/,
   );
   assert.match(source, /AUTH_BRAND_STACK_CLASS =\s+"flex min-h-full w-full flex-col"/);
   assert.match(source, /AUTH_BRAND_TOP_BAR_CLASS =/);
   assert.match(
     source,
-    /flex h-panel-header shrink-0 items-center border-b-2 border-black bg-soft-signal px-4/,
+    /flex h-panel-header shrink-0 items-center border-b border-line-hairline bg-layer-panel px-4/,
+  );
+  // Brutal keeps the original yellow brand bar (the top bar language the mobile
+  // app uses); the elegant themes ride the neutral panel tokens.
+  assert.match(
+    source,
+    /theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal/,
   );
   assert.match(source, /import RaftBrandLockup from "\.\/RaftBrandLockup";/);
   // #123: force-dark brand-bar mechanism (cell B, verified on real Blink). The bar
@@ -65,7 +70,10 @@ test("shared auth brand shell provides the Sign In intro primitive", () => {
 
   assert.match(source, /export function AuthBrandIntro/);
   assert.match(source, /src="\/brand\/raft-icon.svg"/);
-  assert.match(source, /className="mx-auto mb-4 size-9"/);
+  // The icon SVG is a single black fill. On Elegant Dark it measured 1.14:1
+  // against the page (task #663), so it inverts under the APP theme's dark
+  // scope -- `dark:` only matches [data-theme="elegant"].dark, never the OS.
+  assert.match(source, /className="mx-auto mb-4 size-9 dark:invert"/);
   assert.doesNotMatch(source, /prefers-color-scheme:dark/);
   assert.match(source, /<h1 className="text-xl font-bold">\{title\}<\/h1>/);
 });
@@ -76,15 +84,20 @@ test("provider logos stay matched to the fixed light auth buttons", () => {
     "utf8",
   );
 
-  assert.match(
-    source,
-    /providerGithubUrl[\s\S]*?className=\{`\$\{className\} shrink-0`\}/,
-  );
-  assert.match(
-    source,
-    /providerGoogleUrl[\s\S]*?className=\{`\$\{className\} shrink-0`\}/,
-  );
-  assert.doesNotMatch(source, /prefers-color-scheme|:invert/);
+  // Re-anchored for task #663. This used to forbid `:invert` outright, on the
+  // premise that the auth buttons are always light -- inverting a black mark on
+  // a light button would make it vanish. Elegant Dark broke the premise: rui
+  // renders these buttons dark there, and the black GitHub mark measured
+  // 1.63:1. The intent survives as three narrower rules:
+  //   - the single-colour marks (GitHub, Apple) invert ONLY under the app
+  //     theme's dark scope (`dark:` = [data-theme="elegant"].dark),
+  //   - Google is multicolour and never inverts,
+  //   - nothing here follows the OS colour scheme.
+  assert.match(source, /providerGithubUrl[\s\S]*?className=\{`\$\{className\} shrink-0 dark:invert`\}/);
+  assert.match(source, /providerAppleUrl[\s\S]*?className=\{`\$\{className\} shrink-0 dark:invert`\}/);
+  assert.match(source, /providerGoogleUrl\}[^\n]*className=\{`\$\{className\} shrink-0`\}/);
+  assert.doesNotMatch(source, /prefers-color-scheme/);
+  assert.doesNotMatch(source, /(?<!dark):invert/, "invert only ever under the app-theme dark scope");
 });
 
 test("shared Raft lockup keeps dark-mode adaptation page-scoped", () => {
@@ -137,7 +150,7 @@ test("server picker lets the shared auth shell own long-list scrolling", () => {
   assert.doesNotMatch(source, /overflow-y-auto overscroll-contain/);
   assert.match(source, /className="mb-6 space-y-2"/);
   // Primary CTA is the shared Button primitive at full-width pink (#158).
-  assert.match(source, /<Button[\s\S]*?tone="pink"[\s\S]*?className="w-full"/);
+  assert.match(source, /<Button[\s\S]*?variant="accent"[\s\S]*?className="w-full"/);
   assert.match(source, /className="mt-3 text-center"/);
 });
 
@@ -153,8 +166,11 @@ test("auth primary actions use the pink primary color", () => {
 
   // Button copy migrated to the `pages.deviceLogin.*` react-intl catalog; the
   // pink primary buttons now carry the message ids rather than inline English.
-  assert.match(deviceLogin, /className="btn-brutal block w-full bg-brutal-pink[\s\S]*?pages\.deviceLogin\.closePage/);
-  assert.match(deviceLogin, /className="btn-brutal w-full bg-brutal-pink[\s\S]*?pages\.deviceLogin\.approve/);
+  // The primary action now rides the semantic accent fill (Brutal keeps its
+  // pink through the theme-brutal override).
+  assert.match(deviceLogin, /<Button[\s\S]*?variant="accent"[\s\S]*?pages\.deviceLogin\.closePage/);
+  assert.match(deviceLogin, /<Button[\s\S]*?variant="accent"[\s\S]*?pages\.deviceLogin\.approve/);
+  assert.doesNotMatch(deviceLogin, /variant="default"/);
   assert.doesNotMatch(deviceLogin, /btn-brutal(?:[^"]*)bg-soft-signal/);
   // Re-anchored on the message id: the label migrated to
   // `pages.serverSelector.createNewServerAction`, so the literal would match
@@ -162,7 +178,7 @@ test("auth primary actions use the pink primary color", () => {
   // have gone vacuous.
   assert.match(
     serverSelector,
-    /<Button[\s\S]*?tone="pink"[\s\S]*?className="w-full"[\s\S]*?pages\.serverSelector\.createNewServerAction/,
+    /<Button[\s\S]*?variant="accent"[\s\S]*?className="w-full"[\s\S]*?pages\.serverSelector\.createNewServerAction/,
   );
 });
 
@@ -275,7 +291,7 @@ test("first-server onboarding screen uses the full-bleed shell", () => {
   assert.match(serverSelectorSource, /import OnboardingCreateShell from "\.\/OnboardingCreateShell";/);
   assert.match(serverSelectorSource, /<OnboardingCreateShell[\s\S]*preview=\{<ServerCreatePreview serverName=\{name\} serverSlug=\{slug\} \/>\}/);
   assert.match(shellSource, /ONBOARDING_CREATE_FORM_PANEL_CLASS/);
-  assert.match(shellSource, /bg-white px-6 py-10 sm:px-10 lg:border-r-2 lg:border-black/);
+  assert.match(shellSource, /bg-layer-canvas px-6 py-10 sm:px-10 lg:border-r lg:border-line-hairline theme-brutal:lg:border-r-2 theme-brutal:lg:border-black/);
   assert.match(shellSource, /ONBOARDING_CREATE_DOT_GRID_CLASS/);
   assert.doesNotMatch(serverSelectorSource, /<CenteredCardFrame maxWidthClass="max-w-\[1200px\]">/);
 });
@@ -296,7 +312,7 @@ test("onboarding shell is responsive: yellow brand bar on mobile, in-form brand 
   // which would win over a `hidden` handed to it and leak the mark onto mobile.
   assert.match(shellSource, /<div className="absolute left-6 top-8 hidden sm:left-10 lg:block">/);
   // The demo pane never renders on mobile.
-  assert.match(shellSource, /className="relative hidden overflow-hidden bg-brutal-cream lg:flex"/);
+  assert.match(shellSource, /className="relative hidden overflow-hidden bg-layer-canvas-muted lg:flex theme-brutal:bg-brutal-cream"/);
   // The shell is the single owner of the session line + log-out for the whole
   // flow, and both sit at the foot of the form on every page.
   assert.match(shellSource, /export function OnboardingSessionFooter/);
@@ -341,7 +357,9 @@ test("login page follows the modern auth layout and hides social buttons unless 
   // failure this guard work is removing. Now: the separator STRUCTURE (its
   // classes) plus the message id, so neither the styling nor the string can
   // silently disappear.
-  assert.match(source, /uppercase tracking-widest text-black\/45"/);
+  // Elegant Dark rendered this label black-on-black (1.07:1, task #663); the
+  // old value now lives behind theme-brutal: so Brutal is unchanged.
+  assert.match(source, /uppercase tracking-widest text-foreground-muted theme-brutal:text-black\/45"/);
   assert.match(source, /id: "pages\.login\.or"/);
   // The legal line migrated to `pages.login.legalAgreement` — ONE message with
   // <terms>/<privacy> rich-text chunks, instead of five concatenated JSX pieces.
@@ -352,7 +370,9 @@ test("login page follows the modern auth layout and hides social buttons unless 
   assert.match(source, /id: "pages\.login\.legalAgreement"/);
   assert.match(source, /href=\{CURRENT_LEGAL_ACCEPTANCE\.termsUrl\}/);
   assert.match(source, /href=\{CURRENT_LEGAL_ACCEPTANCE\.privacyUrl\}/);
-  assert.match(source, /className="mt-4 text-center text-xs leading-5 text-black\/60"/);
+  // The legal line was text-black/60: 1.09:1 on Elegant Dark (task #663, the
+  // original desktop report). Brutal keeps the old value behind theme-brutal:.
+  assert.match(source, /className="mt-4 text-center text-xs leading-5 text-foreground-muted theme-brutal:text-black\/60"/);
   assert.doesNotMatch(source, /SOCIAL_AUTH_PREVIEW_PROVIDERS/);
 });
 
@@ -424,7 +444,9 @@ test("legal acceptance checkbox uses the shared brutal checkbox primitive", () =
     "utf8",
   );
 
-  assert.match(source, /import Checkbox from "\.\.\/ui\/Checkbox";/);
+  // B5: the checkbox family moved onto RUI's primitive, so the shared
+  // primitive it must use is no longer the local shell.
+  assert.match(source, /import \{ Checkbox \} from "raft-ui";/);
   assert.match(source, /<Checkbox\s+size="md"/);
   assert.doesNotMatch(source, /accent-brutal-pink/);
   assert.doesNotMatch(source, /<input[\s\S]{0,120}type="checkbox"/);
@@ -441,6 +463,6 @@ test("social auth callback error recovery uses neutral sign-in language", () => 
   assert.match(source, /id: "auth\.backToSignIn\.button"/);
   assert.match(source, /isEmbeddedUserAgentProviderError/);
   assert.match(source, /<OpenInBrowserSignInGuide loginUrl=\{getExternalBrowserLoginUrl\(callbackParams\.returnTo\)\} \/>/);
-  assert.match(source, /className="btn-brutal bg-white px-4 py-2 text-sm"/);
+  assert.match(source, /<Button[\s\S]*?variant="outline"[\s\S]*?window\.location\.replace\("\/"\)/);
   assert.doesNotMatch(source, /Return to app|bg-brutal-cyan/);
 });

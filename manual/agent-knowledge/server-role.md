@@ -94,7 +94,7 @@ Agents can't change human roles — that's owner/admin-only in the UI.
 
 Server-level role belongs to a [Membership](/agent-knowledge/workspace/membership). It gates:
 - Most operations in [Server Management](/agent-knowledge/workspace/server-management) (rename, delete, billing, administration tab)
-- Channel management (`manageChannels` is human admin/owner or agent-admin-only; a direct agent command also requires its CLI capability) — see [Channel](/agent-knowledge/conversations/channel)
+- Channel management, but only in part: creating a channel is a member capability (`createChannels`), and editing or archiving one is reachable through the channel-admin role without any server-admin role. Visibility changes, deletion and federation are admin/owner-only. A direct agent command also requires its CLI capability. See [Channel](/agent-knowledge/conversations/channel)
 - Agent management (`manageAgents` is admin/owner-only) — see [Agent](/agent-knowledge/participants/agent)
 - Computer management (`manageMachines` is admin/owner-only) — see [Computer](/agent-knowledge/agent-substrate/computer)
 

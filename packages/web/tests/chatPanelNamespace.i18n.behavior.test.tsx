@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { act } from "react";
 import type { ReactNode } from "react";
@@ -10,7 +9,6 @@ import { TestIntlProvider, renderWithIntl } from "./helpers/intl";
 import api from "../src/api/client";
 import ChatPanel, {
   ActivityMutedBadge,
-  ActivityMuteToggleButton,
 } from "../src/components/message/ChatPanel";
 import HistoryTopState from "../src/components/message/HistoryTopState";
 import { mergedMessages } from "../src/i18n/messages";
@@ -19,9 +17,10 @@ import { useChannelStore } from "../src/store/channelStore";
 import { useMessageStore } from "../src/store/messageStore";
 import { useServerStore } from "../src/store/serverStore";
 import { useTaskStore } from "../src/store/taskStore";
+import { settleFirstPageLoadMessages } from "./helpers/firstPageStub";
 
 // Behavior gate for the message.chatPanel migration (ChatPanel + the exported
-// ActivityMutedBadge / ActivityMuteToggleButton, B2). Rendered under zh-cn, the
+// ActivityMutedBadge, B2). Rendered under zh-cn, the
 // panel chrome must reach the DOM with no pre-migration English leak. These are
 // real-DOM teeth on purpose: reverting the ChatPanel wiring back to English
 // literals turns them RED — a catalog-only assertion would be a false green
@@ -86,7 +85,7 @@ function seedReadOnlyChatPanel(channel: Channel) {
     highlightedMessageId: null,
     contextLoadError: null,
     transientFocusRequest: null,
-    loadMessages: async () => {},
+    loadMessages: settleFirstPageLoadMessages,
     loadMessageContext: async () => {},
     loadMessageWindowSilent: async () => {},
     loadOlderMessages: async () => {},
@@ -128,7 +127,7 @@ test("Guest visible-but-not-joinable channel renders a persistent read-only bann
   );
 
   assert.ok(screen.getByTestId("guest-readonly-channel-banner"));
-  assert.ok(screen.getByText("This channel is read-only for guests. You can read messages, but you cannot join or post."));
+  assert.ok(screen.getByText("Guest access is read-only. You can read and follow updates, but you cannot post or react."));
   assert.equal(screen.queryByRole("button", { name: `Join #${channel.name}` }), null);
   assert.equal(screen.queryByRole("textbox"), null);
 });
@@ -205,23 +204,12 @@ test("ActivityMutedBadge renders zh-cn label + tooltip", () => {
   render(<ActivityMutedBadge />, { wrapper: (props) => <TestIntlProvider locale="zh-cn" {...props} /> });
 
   const badge = screen.getByTestId("activity-muted-badge");
-  assert.equal(badge.textContent?.trim(), "已静音", "badge text renders zh");
-  assert.equal(badge.getAttribute("title"), "动态已静音。直接提及你时仍会通知。", "badge tooltip renders zh");
+  assert.equal(badge.textContent?.trim(), "", "the current badge is icon-only");
+  assert.equal(badge.getAttribute("title"), null, "native title is gone");
+  assert.ok(badge.hasAttribute("data-base-ui-tooltip-trigger"), "badge tooltip rides the RUI tooltip trigger");
   assert.doesNotMatch(document.body.textContent ?? "", /Muted/, "no English badge leak");
 });
 
-test("ActivityMuteToggleButton renders zh-cn mute/unmute channel labels", () => {
-  const { rerender } = render(
-    <ActivityMuteToggleButton activityMuted={false} disabled={false} onToggle={() => {}} />,
-    { wrapper: (props) => <TestIntlProvider locale="zh-cn" {...props} /> },
-  );
-  assert.ok(screen.getByRole("button", { name: "为此频道静音活动" }), "mute label renders zh");
-  assert.equal(screen.queryByRole("button", { name: /Mute activity/i }), null, "no English mute leak");
-
-  rerender(<ActivityMuteToggleButton activityMuted={true} disabled={false} onToggle={() => {}} />);
-  assert.ok(screen.getByRole("button", { name: "为此频道取消静音活动" }), "unmute label renders zh");
-  assert.equal(screen.queryByRole("button", { name: /Unmute activity/i }), null, "no English unmute leak");
-});
 
 test("HistoryTopState renders zh-cn message-noun history copy across states", () => {
   const wrapper = (props: { children?: ReactNode }) => <TestIntlProvider locale="zh-cn" {...props} />;

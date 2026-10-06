@@ -49,7 +49,7 @@ Run from the repository root with the repository's Node version and installed
 frozen dependencies:
 
 ```
-node --import tsx --test scripts/e2e/transportEvidence.test.ts
+pnpm exec vitest run scripts/e2e/transportEvidence.test.ts
 node scripts/ci/playwright-artifact-decision.test.mjs
 ```
 

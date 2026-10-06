@@ -1,13 +1,13 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 
 import assert from "node:assert/strict";
 import { and, eq } from "drizzle-orm";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { users, channels, channelAgents, channelHumans } from "../db/schema.js";
-import { createServer } from "./serverService.js";
-import { addMember } from "./serverService.js";
-import { createAgent } from "./agentService.js";
+import { getDb } from "../db/index";
+import { users, channels, channelAgents, channelHumans, inboxNotificationFacts } from "../db/schema";
+import { createServer } from "./serverService";
+import { addMember } from "./serverService";
+import { createAgent } from "./agentService";
 import {
   createChannel,
   addAgent,
@@ -17,9 +17,9 @@ import {
   getChannelHumans,
   getChannelMembers,
   isEnabledAllChannel,
-} from "./channelService.js";
-import { broadcastAndDeliver, broadcastSystemMessage } from "./messageService.js";
-import { withTraceRoot } from "../tracing/semanticTrace.js";
+} from "./channelService";
+import { broadcastAndDeliver, broadcastSystemMessage } from "./messageService";
+import { withTraceRoot } from "../tracing/semanticTrace";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -202,6 +202,85 @@ test("#all message delivery traces include virtual audience counts without priva
   assert.equal(systemDelivery.attrs?.target_filter_present, true);
   assert.equal(Object.values(systemDelivery.attrs ?? {}).includes(agentA.id), false);
   assert.equal(Object.values(systemDelivery.attrs ?? {}).includes(agentB.id), false);
+});
+
+// Regression (misdelivery): the two tests above look like joint coverage of
+// "Guests are excluded from #all delivery", but their intersection is empty --
+// the roster test never sends a message, and the delivery test seeds no Guest.
+// `getChannelHumans` is therefore only ever exercised directly, while the
+// transactional send paths use a module-private duplicate
+// (`getChannelHumansWithExecutor` in messageService). This test closes that gap
+// by seeding a Guest and driving the real pipeline, so it can only pass if the
+// implementation actually used for delivery filters Guests out.
+test("#all delivery excludes Guests from inbox facts and push targets", async ({ app }) => {
+  const owner = await seedUser("guest-delivery-owner");
+  const memberB = await seedUser("guest-delivery-member");
+  const guest = await seedUser("guest-delivery-guest");
+
+  const server = await createServer("Guest Delivery Server", "guest-delivery", owner.id);
+  await addMember(server.id, memberB.id);
+  await addMember(server.id, guest.id, "guest");
+
+  const allChannelId = await findAllChannel(server.id);
+  const allChannel = await getChannel(allChannelId);
+  assert.ok(allChannel && isEnabledAllChannel(allChannel), "#all must be an enabled virtual channel");
+
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({
+    sink,
+    traceIdGenerator: () => "b".repeat(32),
+    spanIdGenerator: (() => {
+      let next = 1;
+      return () => String(next++).padStart(16, "0");
+    })(),
+  });
+  const io = createNoopIo();
+  const agentOrchestrator = { deliverMessage: async () => {} } as any;
+
+  await withTraceRoot(tracer, "test.all.guest_delivery", { surface: "server", kind: "server" }, async () => {
+    await broadcastAndDeliver(io, agentOrchestrator, {
+      channelId: allChannelId,
+      senderType: "user",
+      senderId: owner.id,
+      senderName: owner.name,
+      content: "hello #all with a guest on the server",
+    });
+  });
+
+  // The Guest must not receive an inbox notification fact for a channel that
+  // `canGuestReadChannel` denies them by default. Facts are also the input to
+  // mobile push, whose payload carries the message body.
+  const guestFacts = await getDb()
+    .select({ id: inboxNotificationFacts.id })
+    .from(inboxNotificationFacts)
+    .where(and(
+      eq(inboxNotificationFacts.receiverType, "user"),
+      eq(inboxNotificationFacts.receiverId, guest.id),
+      eq(inboxNotificationFacts.sourceChannelId, allChannelId),
+    ));
+  assert.deepEqual(guestFacts, [], "Guest must not receive an inbox notification fact for #all");
+
+  // The ordinary member must -- otherwise an empty result above would pass for
+  // the wrong reason (nothing delivered at all).
+  const memberFacts = await getDb()
+    .select({ id: inboxNotificationFacts.id })
+    .from(inboxNotificationFacts)
+    .where(and(
+      eq(inboxNotificationFacts.receiverType, "user"),
+      eq(inboxNotificationFacts.receiverId, memberB.id),
+      eq(inboxNotificationFacts.sourceChannelId, allChannelId),
+    ));
+  assert.equal(memberFacts.length, 1, "ordinary member must receive exactly one inbox notification fact for #all");
+
+  // Push targeting is built from the same audience, so the Guest must not be
+  // counted there either: audience = owner + memberB, delivery = memberB.
+  const span = sink.getAllSpans().find((s) => s.name === "test.all.guest_delivery");
+  assert.ok(span, "expected delivery trace span");
+  const pushTargets = span.events.find((event) => event.name === "message_pipeline.push_targets.built");
+  assert.ok(pushTargets, "expected push target trace");
+  assert.equal(pushTargets.attrs?.is_all_channel, true);
+  assert.equal(pushTargets.attrs?.human_audience_count, 2, "#all human audience must exclude the Guest");
+  assert.equal(pushTargets.attrs?.human_delivery_count, 1, "#all human push delivery must exclude the Guest");
 });
 
 // Negative: non-#all channels keep explicit-membership semantics; the

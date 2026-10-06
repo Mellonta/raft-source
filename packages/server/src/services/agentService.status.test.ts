@@ -1,13 +1,13 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, channelAgents, machines, notificationEvents, serverAgentMembers, users } from "../db/schema.js";
-import { countActiveAgentsMissingServerMembership, createServer, getAgentMemberRole } from "./serverService.js";
-import { createAgent, deleteAgent, getAgent, invalidateAgentSessionFromSignal, resetAgentSession, updateAgent, updateAgentStatus, updateAgentStatusFromSignal } from "./agentService.js";
-import { addAgent, createChannel, findOrCreateAgentDM } from "./channelService.js";
+import { getDb } from "../db/index";
+import { agents, channelAgents, machines, notificationEvents, serverAgentMembers, users } from "../db/schema";
+import { countActiveAgentsMissingServerMembership, createServer, getAgentMemberRole } from "./serverService";
+import { clearAgentLastRuntimeError, createAgent, deleteAgent, setAgentLastRuntimeError, getAgent, invalidateAgentSessionFromSignal, resetAgentSession, updateAgent, updateAgentStatus, updateAgentStatusFromSignal } from "./agentService";
+import { addAgent, createChannel, findOrCreateAgentDM } from "./channelService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -94,6 +94,27 @@ test("updateAgentStatusFromSignal still applies when the agent is not stopped", 
   const afterInactive = await getAgent(agent.id);
   assert.equal(inactiveApplied, true);
   assert.equal(afterInactive?.status, "inactive");
+});
+
+test("clearAgentLastRuntimeError writes only when an error is set", async ({ app }) => {
+  const agent = await seedAgent("runtime-error-clear-noop");
+  const db = getDb();
+  const readRow = async () => (await db.select({ lastRuntimeError: agents.lastRuntimeError, updatedAt: agents.updatedAt })
+    .from(agents).where(eq(agents.id, agent.id)).limit(1))[0];
+
+  const before = await readRow();
+  assert.equal(before.lastRuntimeError, null);
+  assert.equal(await clearAgentLastRuntimeError(agent.id), true);
+  assert.equal((await readRow()).updatedAt.getTime(), before.updatedAt.getTime());
+
+  assert.equal(await setAgentLastRuntimeError(agent.id, { message: "boom", at: new Date().toISOString(), actionRequired: true }), true);
+  assert.equal((await readRow()).lastRuntimeError?.message, "boom");
+  assert.equal(await clearAgentLastRuntimeError(agent.id), true);
+  assert.equal((await readRow()).lastRuntimeError, null);
+
+  await deleteAgent(agent.id);
+  assert.equal(await clearAgentLastRuntimeError(agent.id), false);
+  assert.equal(await clearAgentLastRuntimeError("00000000-0000-4000-8000-000000000000"), false);
 });
 
 test("invalidateAgentSessionFromSignal clears only the exact current non-stopped session", async ({ app }) => {

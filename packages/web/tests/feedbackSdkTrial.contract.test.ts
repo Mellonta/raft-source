@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const webRoot = resolve(import.meta.dirname, "..");
 const repoRoot = resolve(webRoot, "../..");
-const handsCommit = "a091f3e2b805ab47c73159cb0d2d9d89f058011a";
-const previousHandsCommit = "af7c17752678275f931ce3fe1bec9765088dc8e3";
+const feedbackSdkVersion = "0.4.1";
 
 function read(root: string, path: string): string {
   return readFileSync(resolve(root, path), "utf8");
@@ -17,7 +15,7 @@ test("feedback visual cases render the Hands SDK workspace", () => {
   assert.match(source, /FeedbackWorkspace/);
   assert.match(
     source,
-    /import "@botiverse\/hands-feedback-react\/source\/styles\.css";/,
+    /import "@botiverse\/hands-feedback-react\/styles\.css";/,
   );
   assert.match(source, /initialTicketId: TRIAL_TICKET_ID/);
   assert.match(source, /<FeedbackProvider[\s\S]*?<FeedbackWorkspace/);
@@ -35,23 +33,40 @@ test("feedback visual cases render the Hands SDK workspace", () => {
   }
 });
 
-test("feedback SDK source pin is the reviewed Hands commit", () => {
+test("settings feedback shell owns the page title without restyling the SDK", () => {
+  const panel = read(webRoot, "src/components/settings/AboutFeedbackDialog.tsx");
+  const lazyPanel = read(webRoot, "src/components/settings/LazyAboutFeedbackDialog.tsx");
+
+  assert.match(panel, /<PanelHeader[\s\S]*settings\.about\.feedbackTitle/);
+  // The SDK hides only its inbox title and keeps its actions right-aligned;
+  // ticket and composer headers keep their own titles and back buttons.
+  assert.match(panel, /<FeedbackWorkspace[\s\S]*?hideHeaderTitle[\s\S]*?\/>/);
+  // Colors and layout come from the SDK stylesheet alone.
+  assert.doesNotMatch(lazyPanel, /feedbackTheme\.css/);
+  assert.ok(!existsSync(resolve(webRoot, "src/components/settings/feedbackTheme.css")));
+});
+
+test("feedback SDK is the published npm release, not a Hands git source pin", () => {
   const packageJson = JSON.parse(read(webRoot, "package.json")) as {
     dependencies?: Record<string, string>;
   };
   assert.equal(
     packageJson.dependencies?.["@botiverse/hands-feedback-react"],
-    `github:botiverse/hands#${handsCommit}&path:/packages/feedback-react`,
+    feedbackSdkVersion,
   );
 
   const lockfile = read(repoRoot, "pnpm-lock.yaml");
-  assert.ok(lockfile.includes(`github:botiverse/hands#${handsCommit}&path:/packages/feedback-react`));
-  assert.ok(lockfile.includes(`hands/tar.gz/${handsCommit}#path:/packages/feedback-react`));
-  assert.ok(!lockfile.includes(`${previousHandsCommit}#path:/packages/feedback-react`));
-  assert.ok(!lockfile.includes("7f59649dda3331e56948ecbf6daf220226d2b202"));
-  assert.ok(!lockfile.includes("a27ffe3634f075a2f2471caf51361668c71ceace"));
-  assert.ok(!lockfile.includes("fce7579914de11f83f2a4e69225a7674ea3c1c21"));
-  assert.ok(!lockfile.includes("a7fcbadfa4f15999d67473c7bb36c0be5cb4d26e#path:/packages/feedback-react"));
+  assert.ok(lockfile.includes(`'@botiverse/hands-feedback-react@${feedbackSdkVersion}'`));
+  assert.ok(!lockfile.includes("#path:/packages/feedback-react"));
+
+  for (const path of [
+    "src/components/settings/AboutFeedbackDialog.tsx",
+    "src/components/settings/LazyAboutFeedbackDialog.tsx",
+    "src/feedback/handsFeedbackTransport.ts",
+    "visual-testing/FeedbackSdkTrial.tsx",
+  ]) {
+    assert.doesNotMatch(read(webRoot, path), /@botiverse\/hands-feedback-react\/source/, path);
+  }
 });
 
 test("feedback conversation uses the shared Raft message composition", () => {
@@ -86,19 +101,20 @@ test("feedback list follows Raft task status and card interaction colors", () =>
     webRoot,
     "node_modules/@botiverse/hands-feedback-react/src/locale.ts",
   );
-  for (const [status, color] of [
-    ["open", "orange"],
-    ["in_progress", "cyan"],
-    ["resolved", "lime"],
-    ["closed", "stone"],
+  for (const [status, variant] of [
+    ["open", "warning"],
+    ["in_progress", "information"],
+    ["resolved", "success"],
+    ["closed", "muted"],
   ] as const) {
     assert.match(
       components,
-      new RegExp(
-        `${status}: \\{[\\s\\S]*?backgroundColor: "var\\(--color-brutal-${color}\\)"`,
-      ),
+      new RegExp(`${status}: \\{[\\s\\S]*?variant: "${variant}" as const`),
     );
   }
+  // Status colors come from the raft-ui Badge variants in every theme; the
+  // SDK no longer pins brutal colors inline.
+  assert.doesNotMatch(components, /backgroundColor: "var\(--color-brutal-/);
   assert.match(
     styles,
     /\.hands-feedback-ticket-open\s*\{[^}]*position:\s*absolute[^}]*width:\s*100%/,
@@ -130,6 +146,14 @@ test("feedback list follows Raft task status and card interaction colors", () =>
   assert.match(
     styles,
     /\.hands-feedback-close-caret\[data-popup-open\]\s*\{[^}]*box-shadow:\s*none !important[^}]*translate:\s*0 !important/,
+  );
+  assert.match(
+    styles,
+    /\.hands-feedback-close-main\s*\{[^}]*padding-left:\s*8px/,
+  );
+  assert.match(
+    styles,
+    /\.hands-feedback-close-main::before\s*\{[^}]*display:\s*none/,
   );
   assert.match(
     styles,

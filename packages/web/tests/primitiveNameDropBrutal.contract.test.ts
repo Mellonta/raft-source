@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
-import test from "node:test";
 
 // Reverse-grep contract: after #proj-theme:ac79cf20 (stdrc msg=876c1102),
 // shared primitives that have a theme-poc equivalent drop the "Brutal"

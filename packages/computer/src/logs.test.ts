@@ -2,16 +2,15 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { runLogs } from "./logs.js";
+import { runLogs } from "./logs";
 import {
   legacyServerRunnerLogPath,
   serverAttachmentPath,
   serverRunnerLogPath,
   serviceLogPath,
-} from "./paths.js";
-import { CliExit } from "./output.js";
+} from "./paths";
+import { CliExit } from "./output";
 
 // task #30 PR-G regression — per-server `logs` (v4 §7). Pins:
 // fail-closed when no log, --lines tail, SECRET REDLINE, --service

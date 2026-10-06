@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { APIRequestContext } from "@playwright/test";
 import { loginViaApi } from "../../fixtures/auth";
+import { expectCssColor } from "../../fixtures/colorAssertions";
 import { waitForSeedState } from "../../fixtures/seedState";
 import type { PlaywrightSeedState } from "../../fixtures/seedState";
 
@@ -50,7 +51,17 @@ test.describe("mobile tab bar — home ↔ members switching", () => {
     // Tap Members in the bottom tab bar.
     await page.getByRole("button", { name: "Members" }).click();
     await expect(page).toHaveURL(new RegExp(`/s/${seedState.server.slug}/members$`));
-    await expect(page.getByRole("button", { name: "Members" })).toHaveClass(/bg-soft-signal/);
+    // Selected tab is highlighted. Since #7347 the marker is the
+    // `data-selected` attribute driving RUI's `data-[selected=true]:bg-primary-400`
+    // (brutal: the same brand yellow as the old bg-soft-signal, via token).
+    const membersTab = page.getByRole("button", { name: "Members" });
+    await expect(membersTab).toHaveAttribute("data-selected", "true");
+    await expectCssColor(
+      page,
+      await membersTab.evaluate((el) => getComputedStyle(el).backgroundColor),
+      "#FFD440",
+      1,
+    );
 
     // Tap Home — sidebar must flip back to the chat surface, not stay on members.
     await page.getByRole("button", { name: "Home" }).click();
@@ -65,7 +76,16 @@ test.describe("mobile tab bar — home ↔ members switching", () => {
     await dismissOwnerOnboarding(request, seedState, login.accessToken);
 
     await page.goto(`/s/${seedState.server.slug}/members`);
-    await expect(page.getByRole("button", { name: "Members" })).toHaveClass(/bg-soft-signal/);
+    // Same selected-tab contract as the navigation test above: the marker
+    // post-#7347 is `data-selected="true"` + the primary-400 token color.
+    const membersTabCold = page.getByRole("button", { name: "Members" });
+    await expect(membersTabCold).toHaveAttribute("data-selected", "true");
+    await expectCssColor(
+      page,
+      await membersTabCold.evaluate((el) => getComputedStyle(el).backgroundColor),
+      "#FFD440",
+      1,
+    );
 
     await page.getByRole("button", { name: "Home" }).click();
     await expect(page).toHaveURL(new RegExp(`/s/${seedState.server.slug}/?$`));

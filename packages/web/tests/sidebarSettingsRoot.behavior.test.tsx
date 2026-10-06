@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import {
@@ -173,13 +172,11 @@ function renderSettingsSidebarZh(initialPath: string) {
 }
 
 function expectSelected(button: HTMLElement) {
-  assert.match(button.className, /bg-brutal-pink/);
-  assert.match(button.className, /font-bold/);
+  assert.equal(button.getAttribute("data-active"), "true");
 }
 
 function expectNotSelected(button: HTMLElement) {
-  assert.doesNotMatch(button.className, /bg-brutal-pink/);
-  assert.doesNotMatch(button.className, /font-bold/);
+  assert.notEqual(button.getAttribute("data-active"), "true");
 }
 
 for (const { path, label } of [
@@ -355,7 +352,7 @@ test("Settings About and Release Notes sidebar items navigate and select their r
   fireEvent.click(releaseNotes);
 
   await waitFor(() => expectSelected(releaseNotes));
-  assert.doesNotMatch(about.className, /bg-brutal-pink/);
+  assert.notEqual(about.getAttribute("data-active"), "true");
 });
 
 test("Settings Documentation sidebar item opens the docs safely in a new tab", async () => {

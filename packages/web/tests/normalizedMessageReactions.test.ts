@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 
 import { canonicalReactionFactsJson } from "@botiverse/raft-shared";
 
-import type { Message } from "../src/store/messageStore.js";
+import type { Message } from "../src/store/messageStore";
 import {
   applyMessageReactionsForV2Ingress,
   isMessageV2IngressSoleApplyEligible,
   isMessageV2SoleApplyEligible,
   normalizeMessageReactionsForV2,
   normalizeMessagesReactionsForV2,
-} from "../src/store/normalizedMessageReactions.js";
-import { reactionReadModelStore } from "../src/store/reactionReadModels.js";
+} from "../src/store/normalizedMessageReactions";
+import { reactionReadModelStore } from "../src/store/reactionReadModels";
 
 const rawMessage: Message = {
   id: "message-a",

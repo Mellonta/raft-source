@@ -12,9 +12,15 @@ import type {
 import { serverPersistence } from "./serverPersistenceRegistry";
 import { triggerServerReset } from "./serverResetRegistry";
 import { setAuthTraceServerIdGetter } from "../utils/webAuthTrace";
+import { setProductEventServerIdGetter } from "../analytics/track";
 import { normalizeSidebarPinnedRefs } from "../utils/sidebarPinnedRefs";
 import type { SidebarPinnedRef } from "../utils/sidebarPinnedRefs";
 import { notifyAllChannelMembersChanged } from "./channelMemberEvents";
+import {
+  parseServerUnreadSummaryRows,
+  retainServerUnreadSummary,
+} from "../utils/serverUnreadSummary";
+import type { ServerUnreadSummary } from "../utils/serverUnreadSummary";
 import {
   normalizeSidebarCustomSections,
   normalizeSidebarSectionOrder,
@@ -178,6 +184,41 @@ export interface BillingInfo {
   };
 }
 
+/**
+ * Coalesces concurrent async loaders by key: a second call while a first is
+ * still in flight awaits the same promise instead of issuing a duplicate
+ * request. Keyed per logical resource (and cleared on completion), so a later
+ * genuine refresh still fetches.
+ */
+const inFlightLoaders = new Map<string, Promise<void>>();
+export function coalesce(key: string, run: () => Promise<void>): Promise<void> {
+  const existing = inFlightLoaders.get(key);
+  if (existing) return existing;
+  const promise = run().finally(() => {
+    if (inFlightLoaders.get(key) === promise) inFlightLoaders.delete(key);
+  });
+  inFlightLoaders.set(key, promise);
+  return promise;
+}
+
+/**
+ * Drop every in-flight coalescing window.
+ *
+ * `inFlightLoaders` lives in this module rather than in store state, so it is
+ * invisible to `useServerStore.setState(reset)` and survives between tests. A
+ * test that stubs `api` with a promise that never settles therefore strands the
+ * window for every later test in the same file, which then silently reads the
+ * earlier request instead of issuing its own. Tests that stub `api` must call
+ * this in their setup so each case starts with no inherited window.
+ *
+ * Test-only seam: production has no caller, and clearing the map cannot change
+ * behaviour for a real page, where a settled window is already deleted by the
+ * `finally` above.
+ */
+export function resetInFlightLoadersForTest(): void {
+  inFlightLoaders.clear();
+}
+
 interface ServerState {
   servers: Server[];
   current: Server | null;
@@ -192,6 +233,13 @@ interface ServerState {
   loadingSettings: boolean;
   sidebarOrder: SidebarOrderPreferences;
   /**
+   * Cross-server unread summary, owned here (single source of truth) so exactly
+   * one loader fetches `/servers/unread-summary` and every consumer reads the
+   * same snapshot — previously LeftRail and Sidebar each fetched and kept their
+   * own copy, which produced duplicate requests per mount.
+   */
+  serverUnreadCounts: Record<string, ServerUnreadSummary>;
+  /**
    * Monotonic counter incremented on every setCurrent() call.
    * All server-scoped async loaders capture this epoch before their await
    * and discard the response if the epoch changed by the time it arrives.
@@ -200,7 +248,9 @@ interface ServerState {
    */
   serverEpoch: number;
 
-  loadServers: () => Promise<void>;
+  /** `fresh` skips joining a read already in flight, whose response may
+   * predate the change the caller is reacting to. */
+  loadServers: (options?: { fresh?: boolean }) => Promise<void>;
   loadSettings: (options?: { force?: boolean }) => Promise<ServerSettings | null>;
   updateServerOrder: (serverOrder: string[]) => Promise<void>;
   setCurrent: (server: Server) => void;
@@ -214,6 +264,7 @@ interface ServerState {
   applyServerPatch: (server: Pick<Server, "id"> & Partial<Server>) => void;
   handleMembershipRemoved: (serverId: string) => Promise<boolean>;
   loadMembers: () => Promise<void>;
+  loadServerUnreadSummary: (options?: { force?: boolean }) => Promise<void>;
   loadSidebarOrder: () => Promise<void>;
   updateSidebarOrder: (updates: Partial<SidebarOrderPreferences>) => Promise<void>;
   updateMemberRole: (userId: string, role: ServerRole) => Promise<void>;
@@ -357,24 +408,31 @@ export const useServerStore = create<ServerState>((set, get) => ({
   settings: null,
   loadingSettings: false,
   sidebarOrder: DEFAULT_SIDEBAR_ORDER,
+  serverUnreadCounts: {},
   serverEpoch: 0,
 
-  loadServers: async () => {
-    try {
-      const { data } = await api.get("/servers");
-      const servers = data as Server[];
+  loadServers: async (options = {}) => {
+    // Boot-time fan-in: layout bootstrap, server-list refreshers and other
+    // stores can all trigger this within the same window; coalesce concurrent
+    // calls onto one request (later genuine refreshes still fetch).
+    if (options.fresh) await inFlightLoaders.get("servers:list")?.catch(() => undefined);
+    return coalesce("servers:list", async () => {
+      try {
+        const { data } = await api.get("/servers");
+        const servers = data as Server[];
 
-      serverPersistence.clearLegacyServerId();
-      applyServerDomainEvent({ kind: "hydrate", source: "servers", servers }, set, get);
-      set({ loading: false });
+        serverPersistence.clearLegacyServerId();
+        applyServerDomainEvent({ kind: "hydrate", source: "servers", servers }, set, get);
+        set({ loading: false });
 
-      // Loaders are no-ops without a current server and capture serverEpoch
-      // themselves, so this is safe for URL-resolved and empty startup states.
-      get().loadMembers();
-      get().loadSidebarOrder();
-    } catch {
-      set({ loading: false });
-    }
+        // Loaders are no-ops without a current server and capture serverEpoch
+        // themselves, so this is safe for URL-resolved and empty startup states.
+        get().loadMembers();
+        get().loadSidebarOrder();
+      } catch {
+        set({ loading: false });
+      }
+    });
   },
 
   loadSettings: async (options = {}) => {
@@ -566,9 +624,14 @@ export const useServerStore = create<ServerState>((set, get) => ({
       return false;
     }
     const wasCurrentServer = currentServer.id === serverId;
-    await get().loadServers();
+    // A read that started before the removal committed can still be in flight
+    // and would report the server as present, leaving the user on it.
+    await get().loadServers({ fresh: true });
 
     if (!wasCurrentServer) return false;
+    // The user may have switched away while the list was loading; resetting
+    // now would tear down the server they moved to.
+    if (get().current?.id !== serverId) return false;
     const stillMember = get().servers.some((server) => server.id === serverId);
     if (stillMember) return false;
 
@@ -589,44 +652,69 @@ export const useServerStore = create<ServerState>((set, get) => ({
   },
 
   loadMembers: async () => {
-    const epoch = get().serverEpoch;
     const serverId = get().current?.id;
     if (!serverId) return;
-    set({ membersLoadError: false });
-    try {
-      const { data } = await api.get(`/servers/${serverId}/members`);
-      if (get().serverEpoch !== epoch) return;
-      set({ members: data, membersLoadError: false });
-    } catch {
-      if (get().serverEpoch !== epoch) return;
-      set({ membersLoadError: true });
-    }
+    await coalesce(`members:${serverId}`, async () => {
+      const epoch = get().serverEpoch;
+      set({ membersLoadError: false });
+      try {
+        const { data } = await api.get(`/servers/${serverId}/members`);
+        if (get().serverEpoch !== epoch) return;
+        set({ members: data, membersLoadError: false });
+      } catch {
+        if (get().serverEpoch !== epoch) return;
+        set({ membersLoadError: true });
+      }
+    });
   },
 
   loadSidebarOrder: async () => {
-    const epoch = get().serverEpoch;
     const serverId = get().current?.id;
     if (!serverId) return;
-    try {
-      const { data } = await api.get(`/servers/${serverId}/sidebar-order`);
-      if (get().serverEpoch !== epoch) return;
-      applyServerDomainEvent({
-        kind: "hydrate",
-        source: "sidebar-order",
-        serverId,
-        epoch,
-        sidebarOrder: normalizeSidebarOrderResponse(data),
-      }, set, get);
-    } catch {
-      if (get().serverEpoch !== epoch) return;
-      applyServerDomainEvent({
-        kind: "hydrate",
-        source: "sidebar-order",
-        serverId,
-        epoch,
-        sidebarOrder: DEFAULT_SIDEBAR_ORDER,
-      }, set, get);
+    await coalesce(`sidebar-order:${serverId}`, async () => {
+      const epoch = get().serverEpoch;
+      try {
+        const { data } = await api.get(`/servers/${serverId}/sidebar-order`);
+        if (get().serverEpoch !== epoch) return;
+        applyServerDomainEvent({
+          kind: "hydrate",
+          source: "sidebar-order",
+          serverId,
+          epoch,
+          sidebarOrder: normalizeSidebarOrderResponse(data),
+        }, set, get);
+      } catch {
+        if (get().serverEpoch !== epoch) return;
+        applyServerDomainEvent({
+          kind: "hydrate",
+          source: "sidebar-order",
+          serverId,
+          epoch,
+          sidebarOrder: DEFAULT_SIDEBAR_ORDER,
+        }, set, get);
+      }
+    });
+  },
+
+  loadServerUnreadSummary: async (_options = {}) => {
+    const { servers } = get();
+    if (servers.length === 0) {
+      set({ serverUnreadCounts: {} });
+      return;
     }
+    await coalesce("server-unread-summary", async () => {
+      const epoch = get().serverEpoch;
+      try {
+        const { data } = await api.get("/servers/unread-summary");
+        if (get().serverEpoch !== epoch) return;
+        const next = parseServerUnreadSummaryRows(data);
+        set((prev) => ({
+          serverUnreadCounts: retainServerUnreadSummary(prev.serverUnreadCounts, next),
+        }));
+      } catch {
+        // best-effort cross-server badges; keep the previous snapshot on failure
+      }
+    });
   },
 
   updateSidebarOrder: async (updates) => {
@@ -768,19 +856,24 @@ export const useServerStore = create<ServerState>((set, get) => ({
 
   loadBilling: async () => {
     const epoch = get().serverEpoch;
-    if (!get().current) {
+    const serverId = get().current?.id;
+    if (!serverId) {
       set({ loadingBilling: false });
       return;
     }
-    set({ loadingBilling: true });
-    try {
-      const { data } = await api.get("/billing/subscription");
-      if (get().serverEpoch !== epoch) return;
-      set({ billing: data, loadingBilling: false });
-    } catch {
-      if (get().serverEpoch !== epoch) return;
-      set({ loadingBilling: false });
-    }
+    // ChatPanel, the socket bridge and settings surfaces all ask for billing
+    // on the same boot/server switch (x2-3 concurrent on staging); share one.
+    await coalesce(`billing:${serverId}:${epoch}`, async () => {
+      set({ loadingBilling: true });
+      try {
+        const { data } = await api.get("/billing/subscription");
+        if (get().serverEpoch !== epoch) return;
+        set({ billing: data, loadingBilling: false });
+      } catch {
+        if (get().serverEpoch !== epoch) return;
+        set({ loadingBilling: false });
+      }
+    });
   },
 
 }));
@@ -788,3 +881,4 @@ export const useServerStore = create<ServerState>((set, get) => ({
 // Provide the active serverId to the L4 web auth trace producer synchronously,
 // without webAuthTrace importing this store (which would create an import cycle).
 setAuthTraceServerIdGetter(() => useServerStore.getState().current?.id);
+setProductEventServerIdGetter(() => useServerStore.getState().current?.id);

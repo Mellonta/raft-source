@@ -6,7 +6,6 @@
  */
 
 import { strict as assert } from "node:assert";
-import test from "node:test";
 import { createInboxDomain } from "../src/store/inboxDomain";
 import type { InboxTransition } from "../src/store/events/inboxEvents";
 import { installSocketBridge } from "../src/store/socketBridge";

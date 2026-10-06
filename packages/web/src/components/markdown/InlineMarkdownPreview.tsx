@@ -9,7 +9,7 @@ const INLINE_PREVIEW_CODE_CLASS =
 
 export default function InlineMarkdownPreview({
   markdown,
-  linkClassName = "text-blue-700 underline decoration-2 underline-offset-2",
+  linkClassName = "text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2",
 }: {
   markdown: string;
   linkClassName?: string;

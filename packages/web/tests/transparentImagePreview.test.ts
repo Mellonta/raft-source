@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
-import { imageGalleryBackgroundClass, transparentImageBackgroundClass } from "../src/utils/imagePreviewStyles.js";
+import { imageGalleryBackgroundClass, transparentImageBackgroundClass } from "../src/utils/imagePreviewStyles";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const srcRoot = resolve(repoRoot, "src");

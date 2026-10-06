@@ -1,0 +1,418 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Generated from packages/runtime-form/contract/runtime-form-v2.contract.json (sha256 1556344f2749e4c0). Do not edit.",
+  "$defs": {
+    "Definition": {
+      "type": "object",
+      "description": "Response of GET /api/servers/:id/machines/:machineId/runtime-forms/v2/:runtimeId (create), or of GET /api/agents/:id/runtime-form (edit, with `values`: the agent's current field values; writeOnly fields are never included).",
+      "required": [
+        "protocolVersion",
+        "runtimeId",
+        "schemaVersion",
+        "dataSchema"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "const": 2
+        },
+        "runtimeId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "type": "string"
+        },
+        "dataSchema": {
+          "$ref": "#/$defs/DataSchema"
+        },
+        "uiSchema": {
+          "$ref": "#/$defs/UiSchema"
+        },
+        "optionSources": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/OptionSourceRef"
+          }
+        },
+        "requiredClientCapabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "values": {
+          "type": "object",
+          "additionalProperties": {}
+        }
+      },
+      "additionalProperties": true
+    },
+    "DataSchema": {
+      "type": "object",
+      "required": [
+        "type",
+        "properties"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "object"
+        },
+        "required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "properties": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/FieldSchema"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "FieldSchema": {
+      "type": "object",
+      "description": "Render by `type` (with x-optionSource or x-optionsFrom), never by field name. An unknown `type` is unsupported: skip it if optional, block saving if required.",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "minLength": {
+          "type": "integer"
+        },
+        "format": {
+          "type": "string"
+        },
+        "writeOnly": {
+          "type": "boolean"
+        },
+        "x-optionSource": {
+          "type": "string"
+        },
+        "x-optionsFrom": {
+          "$ref": "#/$defs/OptionsFrom"
+        },
+        "additionalProperties": {}
+      },
+      "additionalProperties": true
+    },
+    "OptionsFrom": {
+      "type": "object",
+      "description": "Choices derived from the option currently selected in another field: that option's `attribute` (a string list) are the choices, and its `defaultAttribute` (if any) is the default. Example: Kimi reasoning effort follows the selected model.",
+      "required": [
+        "field",
+        "attribute"
+      ],
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "attribute": {
+          "type": "string"
+        },
+        "defaultAttribute": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "UiSchema": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "order": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "layout": {
+          "$ref": "#/$defs/Layout"
+        },
+        "visibility": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/VisibilityRule"
+          }
+        },
+        "localization": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/FieldCopy"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "Layout": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "advanced": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "VisibilityRule": {
+      "type": "object",
+      "description": "Show the field at `pointer` only when the field at when.pointer has one of when.in.",
+      "required": [
+        "pointer",
+        "when"
+      ],
+      "properties": {
+        "pointer": {
+          "type": "string"
+        },
+        "when": {
+          "$ref": "#/$defs/VisibilityCondition"
+        }
+      },
+      "additionalProperties": true
+    },
+    "VisibilityCondition": {
+      "type": "object",
+      "required": [
+        "pointer",
+        "in"
+      ],
+      "properties": {
+        "pointer": {
+          "type": "string"
+        },
+        "in": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "FieldCopy": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "hint": {
+          "type": "string"
+        },
+        "placeholder": {
+          "type": "string"
+        },
+        "choices": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ChoiceCopy"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "ChoiceCopy": {
+      "type": "object",
+      "description": "Copy for one choice (FieldCopy.choices, capability `choice.labels`).",
+      "required": [
+        "label"
+      ],
+      "properties": {
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "OptionSourceRef": {
+      "type": "object",
+      "description": "Choices for the field at `pointer`, loaded from .../runtime-forms/v2/:runtimeId/option-sources/:sourceId.",
+      "required": [
+        "sourceId",
+        "kind",
+        "pointer"
+      ],
+      "properties": {
+        "sourceId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "select",
+            "dependent_select"
+          ]
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "dependsOn": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "OptionSource": {
+      "type": "object",
+      "description": "Response of the option-sources endpoint. select: options + defaultValue. dependent_select: per-value lists keyed by the value of dependsOn. `customValueAllowed`, `status`, `reason` and `retryable` are sent only on the v2 endpoint and only to forms that list the matching capability (`select.custom_value`, `option_source.status`); a form without the capability gets the source exactly as before.",
+      "required": [
+        "sourceId",
+        "kind",
+        "pointer"
+      ],
+      "properties": {
+        "sourceId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "select",
+            "dependent_select"
+          ]
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "dependsOn": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Option"
+          }
+        },
+        "defaultValue": {
+          "type": "string"
+        },
+        "optionsByValue": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Option"
+            }
+          }
+        },
+        "defaultValueByValue": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "customValueAllowedByValue": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "customValueAllowed": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "live",
+            "fallback",
+            "unavailable"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "probe_timeout",
+            "probe_failed",
+            "missing_config",
+            "no_models",
+            "unsupported",
+            "machine_offline"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "Option": {
+      "type": "object",
+      "required": [
+        "value",
+        "label"
+      ],
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "providerKind": {
+          "type": "string"
+        },
+        "supportedReasoningEfforts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "defaultReasoningEffort": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "SubmitRef": {
+      "type": "object",
+      "required": [
+        "protocolVersion",
+        "runtimeId"
+      ],
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "const": 2
+        },
+        "runtimeId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "Submission": {
+      "type": "object",
+      "description": "The runtime-form part of POST /api/agents: field values keyed by dataSchema property name. The server assembles the runtimeConfig.",
+      "required": [
+        "formDefinitionRef",
+        "formValues"
+      ],
+      "properties": {
+        "formDefinitionRef": {
+          "$ref": "#/$defs/SubmitRef"
+        },
+        "formValues": {
+          "type": "object",
+          "additionalProperties": {}
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

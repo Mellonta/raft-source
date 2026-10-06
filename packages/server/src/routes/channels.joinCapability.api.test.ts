@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import type { Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -8,14 +8,14 @@ import { and, eq } from "drizzle-orm";
 import express from "express";
 import { asServerId } from "@botiverse/raft-shared";
 
-import { channelAgents, channelHumans, serverAgentMembers, serverMembers, users } from "../db/schema.js";
-import { getDb } from "../db/index.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { addAgent, addHuman, createChannel } from "../services/channelService.js";
-import { registerMachine } from "../services/machineService.js";
-import { createServer } from "../services/serverService.js";
-import { channelRouter } from "./channels.js";
+import { channelAgents, channelHumans, serverAgentMembers, serverMembers, users } from "../db/schema";
+import { getDb } from "../db/index";
+import { createAgent, assignMachine } from "../services/agentService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { addAgent, addHuman, createChannel } from "../services/channelService";
+import { registerMachine } from "../services/machineService";
+import { createServer } from "../services/serverService";
+import { channelRouter } from "./channels";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

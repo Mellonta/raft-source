@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { currentDate } from "@botiverse/raft-shared";
 import { and, asc, eq, inArray, isNull, lte, ne, or, sql } from "drizzle-orm";
 
-import type { DatabaseExecutor, DatabaseTransaction } from "../db/index.js";
+import type { DatabaseExecutor, DatabaseTransaction } from "../db/index";
 import {
   attachmentObjects,
   attachments,
@@ -12,7 +12,7 @@ import {
   externalAttachmentTransferJobs,
   externalInboundEvents,
   externalOutboundDeliveries,
-} from "../db/schema.js";
+} from "../db/schema";
 
 export const EXTERNAL_ATTACHMENT_TRANSFER_LEASE_MS = 60_000;
 

@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import type { ReactElement } from "react";
 import { cleanup, fireEvent, render as rtlRender, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";

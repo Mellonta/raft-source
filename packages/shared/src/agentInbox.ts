@@ -1,4 +1,4 @@
-import type { AttentionHint } from "./attentionDependencyOracle.js";
+import type { AttentionHint } from "./attentionDependencyOracle";
 
 const NON_MEMBER_MENTION_REPLY_GUIDANCE =
   "[Raft notice: You were notified as a non-member, so you cannot reply in that channel. If no reply is needed, no action is required. Otherwise, DM the person who mentioned you or join the channel to participate.]";

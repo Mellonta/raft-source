@@ -1,6 +1,5 @@
 import "./helpers/domSetup";
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, test } from "node:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import DraggableDevOverlay, { getDevOverlayStorageKey } from "../src/components/dev/DraggableDevOverlay";

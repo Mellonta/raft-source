@@ -1,17 +1,25 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { currentDate } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import type { AttachmentUploaderType, attachments } from "../db/schema.js";
-import { createPendingAttachmentProjectionWithExecutor } from "./attachmentProjectionWriterService.js";
+import { isAttachmentOriginalStorageV2EnabledForServer } from "../config/attachmentOriginalStorage";
+import { isPublicDerivedStorageV2EnabledForServer } from "../config/publicDerivedStorage";
+import { getDb } from "../db/index";
+import type { AttachmentUploaderType, attachments } from "../db/schema";
+import { createPendingAttachmentProjectionWithExecutor } from "./attachmentProjectionWriterService";
 import {
   buildAttachmentTransferArtifactPlan,
   buildSvgRasterTransferKey,
   createAttachmentTransferIntentWithExecutor,
   terminalizeAttachmentTransferIntent,
-} from "./attachmentTransferIntentService.js";
-import { withFileUploadQuota } from "./fileUploadQuotaService.js";
-import type { StorageBackend } from "./storageService.js";
+} from "./attachmentTransferIntentService";
+import { withFileUploadQuota } from "./fileUploadQuotaService";
+import {
+  buildAttachmentThumbnailKey,
+  buildLegacyServerAttachmentStorageKey,
+  buildServerAttachmentStorageKey,
+  isPublicContentV2WriteConfigured,
+  type StorageBackend,
+} from "./storageService";
 
 export const ATTACHMENT_TRANSFER_INTENT_TTL_MS = 15 * 60 * 1000;
 
@@ -72,14 +80,25 @@ export async function uploadAttachmentBuffers(
   let planned: PlannedUpload[] = [];
 
   return withFileUploadQuota(input.serverId, requestedBytes, async () => {
+    const useV2Storage = await isAttachmentOriginalStorageV2EnabledForServer(input.serverId);
+    // Public previews switch generation independently of originals. Missing
+    // public-content bucket or domain config keeps fresh writes on legacy keys,
+    // so no content/v2 key is persisted without a place to store and serve it.
+    const thumbnailGeneration = input.cdnStorage
+      && isPublicContentV2WriteConfigured()
+      && await isPublicDerivedStorageV2EnabledForServer(input.serverId)
+      ? "v2"
+      : "legacy";
     planned = input.files.map((file) => {
       const id = randomUUID();
       const transferIntentId = randomUUID();
       const objectId = randomUUID();
       const extension = path.extname(file.filename).toLowerCase();
-      const storageKey = `${input.serverId}/${id}${extension}`;
+      const storageKey = useV2Storage
+        ? buildServerAttachmentStorageKey(input.serverId, id, objectId, extension)
+        : buildLegacyServerAttachmentStorageKey(input.serverId, id, extension);
       const plannedThumbnailKey = input.cdnStorage && input.preview.canGenerate(file.mimeType)
-        ? `thumbs/${input.serverId}/${id}.webp`
+        ? buildAttachmentThumbnailKey(input.serverId, id, thumbnailGeneration)
         : null;
       return { transferIntentId, id, objectId, storageKey, plannedThumbnailKey, file };
     });

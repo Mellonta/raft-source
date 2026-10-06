@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { expect, test } from "vitest";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,10 +9,11 @@ import {
   MemoryTraceSink,
   createSpanAttrContractTracer,
 } from "@botiverse/raft-shared";
-import { buildCodexAppServerArgs, CodexDriver, clearCodexProbeCacheForTests, detectCodexModels, detectCodexModelsFromAppServer, probeCodex, compareCodexVersions, parseCodexVersion, resolveCodexCommand, resolveCodexSpawn } from "./codex.js";
-import { resolveCodexHomeRootFromEnv } from "./codexHome.js";
-import type { ParsedEvent, SpawnContext } from "./types.js";
-import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core.js";
+import { buildCodexAppServerArgs, CodexDriver, clearCodexProbeCacheForTests, detectCodexModels, detectCodexModelsFromAppServer, probeCodex, compareCodexVersions, parseCodexVersion, resolveCodexCommand, resolveCodexSpawn } from "./codex";
+import { resolveCodexHomeRootFromEnv } from "./codexHome";
+import type { ParsedEvent, SpawnContext } from "./types";
+import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core";
+import { traceRows } from "../testing/traceRows";
 
 const codexConfig = {
   name: "codex-agent",
@@ -387,7 +387,7 @@ test("codex launch trace records only derived host facts and launch generation",
   const tracer = new BasicTracer({ sink });
 
   await withScriptedCodexAppServer("fresh", async () => {
-    const spans = sink.getAllSpans().filter((span) => span.name === "daemon.runtime.node_host_launch");
+    const spans = traceRows(sink).filter((span) => span.name === "daemon.runtime.node_host_launch");
     assert.equal(spans.length, 1);
     assert.deepEqual(spans[0]?.attrs, {
       agentId: "agent-1",
@@ -420,7 +420,7 @@ test("codex instruction-shape trace covers actual fresh and resume thread reques
         `scripted codex ${expectedMethod} and initial turn/start`,
       );
 
-      const spans = sink.getAllSpans().filter(
+      const spans = traceRows(sink).filter(
         (span) => span.name === "daemon.codex.request_instruction_shape",
       );
       assert.equal(spans.length, 1);
@@ -476,7 +476,7 @@ test("codex resume fallback recomputes instruction shape from the second request
   assert.equal(requests[1].params.developerInstructions, fallbackDeveloper);
   assert.equal(requests[1].params.baseInstructions, fallbackBase);
 
-  const spans = sink.getAllSpans().filter(
+  const spans = traceRows(sink).filter(
     (span) => span.name === "daemon.codex.request_instruction_shape",
   );
   assert.equal(spans.length, 2);
@@ -529,7 +529,7 @@ test("codex instruction-shape trace covers compaction and its first subsequent r
     const encoded = driver.encodeStdinMessage("after compaction", driver.currentSessionId, { mode: "idle" });
     assert.ok(encoded);
 
-    const spans = sink.getAllSpans().filter(
+    const spans = traceRows(sink).filter(
       (span) => span.name === "daemon.codex.request_instruction_shape",
     );
     assert.deepEqual(spans.map((span) => span.attrs?.observation_phase), [
@@ -545,7 +545,7 @@ test("codex instruction-shape trace covers compaction and its first subsequent r
     assert.equal(spans[3]!.attrs?.session_id, "fresh-thread-1");
 
     driver.encodeStdinMessage("second request", driver.currentSessionId, { mode: "idle" });
-    assert.equal(sink.getAllSpans().filter(
+    assert.equal(traceRows(sink).filter(
       (span) => span.name === "daemon.codex.request_instruction_shape",
     ).length, 4);
   }, { tracer });

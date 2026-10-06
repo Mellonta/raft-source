@@ -2,26 +2,30 @@ import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import RaftBrandLockup from "../brand/RaftBrandLockup";
 import { AUTH_BRAND_TOP_BAR_CLASS } from "../brand/AuthBrandShell";
+import { isElectronDesktopShell } from "../../utils/desktopShell";
 import { useAuthStore } from "../../store/authStore";
 import TextLink from "../ui/TextLink";
 import SignedInAs from "./SignedInAs";
 
 export const ONBOARDING_CREATE_SHELL_CLASS =
-  "flex min-h-screen w-full flex-col bg-white font-display safe-top safe-bottom";
+  "flex min-h-screen w-full flex-col bg-layer-canvas font-display safe-top safe-bottom";
 
 export const ONBOARDING_CREATE_GRID_CLASS =
   "grid w-full flex-1 lg:grid-cols-[minmax(320px,2fr)_minmax(0,3fr)]";
 
 export const ONBOARDING_CREATE_FORM_PANEL_CLASS =
-  "relative flex w-full flex-col justify-center overflow-y-auto bg-white px-6 py-10 sm:px-10 lg:border-r-2 lg:border-black";
+  "relative flex w-full flex-col justify-center overflow-y-auto bg-layer-canvas px-6 py-10 sm:px-10 lg:border-r lg:border-line-hairline theme-brutal:lg:border-r-2 theme-brutal:lg:border-black";
 
 export const ONBOARDING_CREATE_DOT_GRID_CLASS =
-  "absolute inset-0 opacity-60 [background-image:radial-gradient(#111_1px,transparent_1px)] [background-size:16px_16px]";
+  "absolute inset-0 opacity-60 [background-image:radial-gradient(var(--line-strong)_1px,transparent_1px)] [background-size:16px_16px]";
 
 // Narrow screens render the onboarding flow as a plain auth form page — the
 // same yellow brand bar as sign in / sign up, and no demo pane. Wide screens
 // drop the bar and move the brand mark into the top-left of the form column.
 export function OnboardingBrandBar() {
+  // Desktop shell: the window's own top strip carries the RAFT logo (task #85), so this
+  // brand bar would stack a second signal-colored bar under it. Suppress on desktop.
+  if (isElectronDesktopShell()) return null;
   return (
     <div className={`${AUTH_BRAND_TOP_BAR_CLASS} lg:hidden`}>
       <RaftBrandLockup className="h-5 w-auto" />
@@ -51,7 +55,7 @@ export function OnboardingSessionFooter() {
   if (!user) return null;
 
   return (
-    <p className="text-center text-sm text-black/60" data-testid="onboarding-session-footer">
+    <p className="text-center text-sm text-foreground-muted" data-testid="onboarding-session-footer">
       <SignedInAs user={user} nameClassName="font-normal" suffix=". " />
       <TextLink variant="muted" onClick={() => logout()} disabled={loading}>
         {formatMessage({ id: "pages.serverSelector.logOut" })}
@@ -69,7 +73,7 @@ export function OnboardingCreateDotPane({
 }) {
   return (
     <aside
-      className="relative hidden overflow-hidden bg-brutal-cream lg:flex"
+      className="relative hidden overflow-hidden bg-layer-canvas-muted lg:flex theme-brutal:bg-brutal-cream"
       data-testid={testId}
     >
       <div className={ONBOARDING_CREATE_DOT_GRID_CLASS} aria-hidden="true" />

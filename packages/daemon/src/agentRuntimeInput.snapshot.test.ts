@@ -1,13 +1,12 @@
-import { expect, test } from "vitest";
-import { exampleMessage } from "./axExampleFixtures.js";
-import { getDriver } from "./drivers/index.js";
+import { exampleMessage } from "./axExampleFixtures";
+import { getDriver } from "./drivers/index";
 import {
   formatBoundedStartupUnreadSuffix,
   formatInboxUpdateRuntimeInput,
   formatOtherUnreadChannelsSuffix,
   formatResumeEmptyPrompt,
   formatResumeUnreadSummaryPrompt,
-} from "./agentRuntimeInput.js";
+} from "./agentRuntimeInput";
 
 // These are turn inputs, not standing instructions. Snapshot their complete
 // output here; APM tests own whether a lifecycle transition selects them.
@@ -53,7 +52,7 @@ test("inbox notices carry reading guidance across runtime delivery modes", () =>
     Inbox update: 1 unread message total; 1 changed target
     #general  pending: 1 message · first msg=00000000 · latest sender @richard · latest msg=00000000
     ]
-    These messages have not been read. Choose when to read them with \`raft message check\` or \`raft message read --target <target>\`; deferring them does not establish that there is no work."
+    These messages have not been read. Choose when to read them: \`raft message read --target <target> --unread\` reads one conversation's unread messages; \`raft message check\` reads all of them. Deferring them does not establish that there is no work."
   `);
 });
 
@@ -66,7 +65,7 @@ test("unread suffixes render every supplied target and count", () => {
     - #general: 12 unread
     - dm:@bob: 1 unread
 
-    Use the inbox/read commands at a natural breakpoint if you choose to inspect those targets."
+    Run \`raft inbox check\` at a natural breakpoint if you choose to inspect those targets; it lists every unread conversation with the command that opens it."
   `);
   expect(formatBoundedStartupUnreadSuffix(unread)).toMatchInlineSnapshot(`
     "
@@ -75,7 +74,7 @@ test("unread suffixes render every supplied target and count", () => {
     - #general: 12 unread
     - dm:@bob: 1 unread
 
-    Use the inbox/read commands at a natural breakpoint if you choose to inspect those targets."
+    Run \`raft inbox check\` at a natural breakpoint if you choose to inspect those targets; it lists every unread conversation with the command that opens it."
   `);
 });
 

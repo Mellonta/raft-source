@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { createIntl } from "react-intl";
 import "./helpers/domSetup";
 import type { ReactElement } from "react";
@@ -31,7 +30,6 @@ const IDS = [
   "layout.sidebar.displaySection",
   "layout.sidebar.humansFailedToLoad",
   "layout.sidebar.showJoinedChannelsOnly",
-  "layout.sidebar.wiki",
   "layout.sidebar.failedMuteActivity",
   "layout.sidebar.failedUnmuteActivity",
 ] as const;
@@ -152,7 +150,6 @@ test("catalog pins sidebar residue MessageIds with Chinese", () => {
   assert.equal(en["layout.sidebar.displaySection"], "Display");
   assert.equal(en["layout.sidebar.humansFailedToLoad"], "Humans failed to load");
   assert.equal(en["layout.sidebar.showJoinedChannelsOnly"], "Show joined channels only");
-  assert.equal(en["layout.sidebar.wiki"], "Wiki");
   assert.equal(en["layout.sidebar.failedMuteActivity"], "Failed to mute Activity for this channel.");
   assert.equal(en["layout.sidebar.failedUnmuteActivity"], "Failed to unmute Activity for this channel.");
 
@@ -162,7 +159,6 @@ test("catalog pins sidebar residue MessageIds with Chinese", () => {
   assert.equal(zh["layout.sidebar.displaySection"], "显示");
   assert.equal(zh["layout.sidebar.humansFailedToLoad"], "人类成员加载失败");
   assert.equal(zh["layout.sidebar.showJoinedChannelsOnly"], "仅显示已加入的频道");
-  assert.equal(zh["layout.sidebar.wiki"], "Wiki");
   assert.match(zh["layout.sidebar.failedMuteActivity"], /\p{Script=Han}/u);
   assert.match(zh["layout.sidebar.failedUnmuteActivity"], /\p{Script=Han}/u);
   assert.notEqual(zh["layout.sidebar.failedMuteActivity"], en["layout.sidebar.failedMuteActivity"]);

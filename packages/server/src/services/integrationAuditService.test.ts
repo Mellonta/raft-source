@@ -1,10 +1,9 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 import {
   redactIntegrationAuditEventForAppAdmin,
   sanitizeIntegrationAuditDiff,
   sanitizeIntegrationAuditMetadata,
-} from "./integrationAuditService.js";
+} from "./integrationAuditService";
 
 test("integration audit metadata keeps only event allowlist fields and drops credential-shaped data", () => {
   const sanitized = sanitizeIntegrationAuditMetadata("oauth.token_exchange_failed", {

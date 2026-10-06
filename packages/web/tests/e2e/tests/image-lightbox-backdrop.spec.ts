@@ -160,11 +160,32 @@ test("thumbnail download button triggers download without opening lightbox", asy
       body: imageBuffer,
     });
   });
+  const downloadFixturePath = `/thumbnail-download-fixture/${attachment.id}/${filename}`;
   await page.route(`**/api/attachments/${attachment.id}/url**`, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("disposition") === "attachment") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ url: downloadFixturePath }),
+      });
+      return;
+    }
+
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({ url: `data:image/png;base64,${PROOF_IMAGE_BASE64}` }),
+    });
+  });
+  await page.route(`**${downloadFixturePath}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "image/png",
+      headers: {
+        "Content-Disposition": `attachment; filename="${filename}"`,
+      },
+      body: imageBuffer,
     });
   });
 
@@ -181,10 +202,18 @@ test("thumbnail download button triggers download without opening lightbox", asy
   const downloadButton = page.getByLabel(`Download ${filename}`);
   await preview.hover();
   await expect(downloadButton).toBeVisible();
-  const [download] = await Promise.all([
+  const attachmentUrlResponse = page.waitForResponse((response) =>
+    response.url().includes(`/api/attachments/${attachment.id}/url?disposition=attachment`) &&
+    response.status() === 200,
+  );
+  const [download, signedUrlResponse] = await Promise.all([
     page.waitForEvent("download"),
+    attachmentUrlResponse,
     downloadButton.click(),
   ]);
+  expect(signedUrlResponse.ok()).toBeTruthy();
+  expect(await signedUrlResponse.json()).toEqual({ url: downloadFixturePath });
+  expect(download.url()).toContain(downloadFixturePath);
   expect(download.suggestedFilename()).toBe(filename);
   await expect(lightbox).toHaveCount(0);
 });

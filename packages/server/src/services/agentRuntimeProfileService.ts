@@ -10,19 +10,19 @@ import type {
   AgentRuntimeProfileSummary,
   ReasoningEffort,
 } from "@botiverse/raft-shared";
-import { getDb, isDatabaseInitialized, type DatabaseExecutor } from "../db/index.js";
-import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace.js";
+import { getDb, isDatabaseInitialized, type DatabaseExecutor } from "../db/index";
+import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace";
 import {
   agentRuntimeProfiles,
   agents,
   machines,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   compareDaemonSemver,
   getAgentDaemonReleaseNotice,
   renderAgentDaemonReleaseNotice,
-} from "./agentDaemonReleaseNotes.js";
-import { emitDecisionEvent } from "../tracing/decisionTrace.js";
+} from "./agentDaemonReleaseNotes";
+import { emitDecisionEvent } from "../tracing/decisionTrace";
 
 const POLICY_VERSION = "runtime-profile-v0";
 
@@ -624,8 +624,16 @@ async function tryRecordAgentRuntimeProfile(
   return result;
 }
 
-export async function queueRuntimeProfileMigrationForAgentSettings(agentId: string): Promise<RuntimeProfileRow | null> {
-  const db = getDb();
+/**
+ * With `options.executor` the enqueue joins the caller's (task #91 fenced) transaction as a savepoint, so a rolled-back
+ * authority write leaves no migration job; telemetry is then deferred to `options.afterCommit` instead of being emitted
+ * for a write that may still roll back.
+ */
+export async function queueRuntimeProfileMigrationForAgentSettings(
+  agentId: string,
+  options: { executor?: DatabaseExecutor; afterCommit?: Array<() => void> } = {},
+): Promise<RuntimeProfileRow | null> {
+  const db = options.executor ?? getDb();
   const now = new Date();
   const decisions: DaemonNotesDecisionArgs[] = [];
   const recordDecision: DaemonNotesDecisionRecorder = (...args) => decisions.push(args);
@@ -691,7 +699,11 @@ export async function queueRuntimeProfileMigrationForAgentSettings(agentId: stri
     };
   });
   if (outcome.emitDecisions) {
-    for (const decision of decisions) emitDaemonNotesDecision(...decision);
+    const emit = () => {
+      for (const decision of decisions) emitDaemonNotesDecision(...decision);
+    };
+    if (options.afterCommit) options.afterCommit.push(emit);
+    else emit();
   }
   return outcome.value;
 }

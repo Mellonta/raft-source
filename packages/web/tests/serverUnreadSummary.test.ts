@@ -1,11 +1,46 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
+  hasCurrentServerActivityUnread,
   hasOtherServerActivityUnread,
   hasOtherServerLoudUnread,
   parseServerUnreadSummaryRows,
   retainServerUnreadSummary,
 } from "../src/utils/serverUnreadSummary";
+
+test("current-server Activity uses an accepted total without OR-ing a stale summary", () => {
+  assert.equal(hasCurrentServerActivityUnread({
+    hasAcceptedWindow: true,
+    hasTotalUnread: false,
+    hasPreloadActiveUnread: false,
+    summaryUnreadCount: 1,
+  }), false);
+  assert.equal(hasCurrentServerActivityUnread({
+    hasAcceptedWindow: true,
+    hasTotalUnread: true,
+    hasPreloadActiveUnread: false,
+    summaryUnreadCount: 0,
+  }), true);
+});
+
+test("current-server Activity retains pre-load local and summary hints", () => {
+  assert.equal(hasCurrentServerActivityUnread({
+    hasAcceptedWindow: false,
+    hasTotalUnread: false,
+    hasPreloadActiveUnread: true,
+    summaryUnreadCount: 0,
+  }), true);
+  assert.equal(hasCurrentServerActivityUnread({
+    hasAcceptedWindow: false,
+    hasTotalUnread: false,
+    hasPreloadActiveUnread: false,
+    summaryUnreadCount: 1,
+  }), true);
+  assert.equal(hasCurrentServerActivityUnread({
+    hasAcceptedWindow: false,
+    hasTotalUnread: false,
+    hasPreloadActiveUnread: false,
+  }), false);
+});
 
 test("parseServerUnreadSummaryRows preserves counts, mute state, and known Activity values", () => {
   assert.deepEqual(

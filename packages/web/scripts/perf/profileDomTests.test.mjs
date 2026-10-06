@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import {
   atomicWriteJson,
@@ -19,7 +18,7 @@ import {
 
 function temporaryDirectory(t) {
   const directory = mkdtempSync(path.join(os.tmpdir(), "profile-dom-tests-"));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(directory, { recursive: true, force: true }));
   return directory;
 }
 
@@ -176,7 +175,7 @@ test("process-group timeout escalates from SIGTERM to SIGKILL", async (t) => {
   assert.equal(outcome.signal, "SIGKILL");
   const grandchildPid = Number(outcome.stdoutTail.match(/grandchild=(\d+)/)?.[1]);
   assert.ok(Number.isInteger(grandchildPid), `missing grandchild pid in ${JSON.stringify(outcome.stdoutTail)}`);
-  t.after(() => killIfPresent(grandchildPid));
+  onTestFinished(() => killIfPresent(grandchildPid));
 
   await assertProcessGone(grandchildPid);
 });
@@ -210,7 +209,7 @@ test("process-group escalation survives the direct leader exiting on SIGTERM", a
   assert.equal(outcome.signal, "SIGTERM");
   const grandchildPid = Number(outcome.stdoutTail.match(/grandchild=(\d+)/)?.[1]);
   assert.ok(Number.isInteger(grandchildPid), `missing grandchild pid in ${JSON.stringify(outcome.stdoutTail)}`);
-  t.after(() => killIfPresent(grandchildPid));
+  onTestFinished(() => killIfPresent(grandchildPid));
   await assertProcessGone(grandchildPid);
 });
 

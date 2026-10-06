@@ -1,7 +1,7 @@
 import type { Brand } from "@botiverse/raft-shared";
 
-import type { CliIo } from "./io.js";
-import type { CliError } from "./errors.js";
+import type { CliIo } from "./io";
+import type { CliError } from "./errors";
 
 /**
  * Text that is allowed to be written to the CLI reply face (stdout). Only the
@@ -247,6 +247,31 @@ function proxyDiagnosticsPayload(err: CliError): Record<string, unknown> | null 
 
 export function writeText(io: CliIo, ...parts: readonly CliReplyText[]): void {
   io.stdout.write(parts.join(""));
+}
+
+/**
+ * Resolve true once everything written so far has been handed to the stream
+ * without error (task #178: `message check` acks leased third-party events
+ * only after their bodies reached stdout). A destroyed pipe reports through
+ * the write callback; a stream that accepted the write with nothing queued is
+ * treated as flushed (test doubles never call back).
+ */
+export async function flushText(io: CliIo): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(ok);
+    };
+    try {
+      const accepted = io.stdout.write("", (error?: Error | null) => settle(!error));
+      const queued = (io.stdout as { writableLength?: number }).writableLength;
+      if (accepted && (queued === undefined || queued === 0)) queueMicrotask(() => settle(true));
+    } catch {
+      settle(false);
+    }
+  });
 }
 
 /**

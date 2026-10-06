@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { MemoryRouter } from "react-router-dom";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -300,7 +299,9 @@ test("MessageItem thread badge opens the first unread reply and keeps unread plu
   assert.match(badge.textContent ?? "", /2 replies/);
   assert.match(badge.textContent ?? "", /1 new/);
   assert.match(badge.textContent ?? "", /draft/);
-  assert.match(badge.className, /\bbg-brutal-cyan\/20\b/);
+  // The unread state rides the RUI Badge soft/information recipe now.
+  assert.equal(badge.getAttribute("data-slot"), "badge");
+  assert.match(badge.className, /\bbg-info-muted\b/);
   assert.equal(screen.getAllByTestId("message-thread-replies-badge").length, 1);
   fireEvent.click(badge);
 
@@ -809,7 +810,7 @@ test("a child dropdown backdrop owns its portaled touch sequence", async () => {
     assert.equal(download.getAttribute("aria-expanded"), "false",
       "the same outside interaction must return dropdown ownership immediately");
 
-    fireEvent.click(screen.getByRole("button", { name: "Code" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Code" }));
     assert.match(row.textContent ?? "", /graph TD/, "toolbar actions must work immediately after dismissing the dropdown");
 
     fireEvent.contextMenu(row, { clientX: 24, clientY: 36 });

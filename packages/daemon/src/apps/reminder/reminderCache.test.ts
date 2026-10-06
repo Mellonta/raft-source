@@ -2,25 +2,25 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 
 import type { ReminderJob } from "@botiverse/raft-shared";
 
-import { createAgentAppInboxStore, type AgentAppInboxStore } from "../../agentAppInbox.js";
-import { createScopedAppStorageFactory } from "../../scopedAppStorage.js";
+import { createAgentAppInboxStore, type AgentAppInboxStore } from "../../agentAppInbox";
+import { createScopedAppStorageFactory } from "../../scopedAppStorage";
 import {
   REMINDER_AGENT_INBOX_REGISTRY,
   REMINDER_DUE_NOTIFICATION_CLASS,
   REMINDER_INBOX_APP_ID,
-} from "./inboxDefinition.js";
+} from "./inboxDefinition";
 import {
   createReminderDueIdentity,
   createReminderPhaseTruth,
   REMINDER_BOUNDED_ALERT_PHASES,
   ReminderCache,
-} from "./reminderCache.js";
-import { FakeClock } from "../../testing/fakeClock.js";
-import type { ScopedAppStorage } from "../../scopedAppStorage.js";
+} from "./reminderCache";
+import { FakeClock } from "../../testing/fakeClock";
+import { logger } from "../../logger";
+import type { ScopedAppStorage } from "../../scopedAppStorage";
 
 function createTestReminderStorage(filePath: string): ScopedAppStorage {
   return {
@@ -1476,7 +1476,143 @@ test("equal-version owner receipts dispatch, retry, consume, and restart indepen
   }
 });
 
-test("persistent pre-Server failure exhausts the per-receipt cap and stops", async () => {
+test("exhausted unknown acceptance reconciles the same identity without snapshot or restart renewing its budget", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "reminder-reconcile-"));
+  const persistencePath = path.join(dir, "mirror.json");
+  const clock = new FakeClock();
+  const requests: string[] = [];
+  const options = {
+    clock,
+    storageForAgent: () => createTestReminderStorage(persistencePath),
+    fireRetryMaxAttempts: 1,
+    fireRetryDeadlineMs: 100,
+    fireReconcileDelayMs: 200,
+    reconciliationRandom: () => 0.5,
+    onFire: (_job: ReminderJob, context: { requestId: string }) => {
+      requests.push(context.requestId);
+      return { wakeEnqueued: false, retryStage: "fire_request" as const };
+    },
+  };
+  let cache = new ReminderCache(options);
+  const job = makeJob({ reminderId: "unknown", ownerAgentId: "agent-a", fireAt: new Date(5).toISOString() });
+  const readReceipt = () => JSON.parse(readFileSync(persistencePath, "utf8")).records[0].receipts[0];
+  try {
+    cache.start();
+    cache.snapshot("agent-a", [job]);
+    clock.advanceBy(5);
+    await new Promise((resolve) => setImmediate(resolve));
+    const first = readReceipt();
+    assert.equal(requests.length, 1);
+    assert.equal(first.retryTerminal.stage, "fire_request");
+    cache.snapshot("agent-a", [job]);
+    cache.replayPendingFireReceipts();
+    cache.replayPendingFireReceipts();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(requests.length, 1, "reconnect and equal-version snapshot cannot bypass reconciliation cadence");
+    cache.stop();
+    cache = new ReminderCache(options);
+    cache.start();
+    clock.advanceBy(100);
+    assert.equal(requests.length, 1, "no transport before authoritative owner snapshot");
+    cache.snapshot("agent-a", [job]);
+    clock.advanceBy(99);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(requests.length, 1, "restart retains persisted next reconciliation time");
+    clock.advanceBy(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(requests, [first.requestId, first.requestId], "unknown acceptance must reconcile instead of being buried");
+    const recovered = readReceipt();
+    assert.deepEqual(recovered.retryTerminal, first.retryTerminal, "first exhaustion fact is immutable during reconciliation");
+    assert.equal(recovered.retryDeadlineAt, first.retryDeadlineAt);
+    assert.equal(recovered.retryAttempt, first.retryAttempt);
+    assert.equal(recovered.job.version, first.job.version);
+  } finally {
+    cache.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("unknown acceptance reconciles lost ACK once and rejects mismatched or cancelled receipts", async () => {
+  for (const fired of [true, false]) {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "reminder-lost-ack-"));
+    const clock = new FakeClock();
+    const requests: string[] = [];
+    let materializations = 0;
+    const cache = new ReminderCache({
+      clock, storageForAgent: () => createTestReminderStorage(path.join(dir, "mirror.json")),
+      fireRetryMaxAttempts: 1, fireRetryDeadlineMs: 100, fireReconcileDelayMs: 200, reconciliationRandom: () => 0.5,
+      onFire: (_job, context) => {
+        if (context.serverAcked) {
+          if (!context.wakeEnqueued) materializations++;
+          return { wakeEnqueued: true };
+        }
+        requests.push(context.requestId);
+        return { wakeEnqueued: false, retryStage: "fire_request" };
+      },
+    });
+    const job = makeJob({ reminderId: "lost-ack", ownerAgentId: "agent-a", fireAt: new Date(5).toISOString() });
+    const identity = createReminderDueIdentity(job);
+    try {
+      cache.start(); cache.snapshot(job.ownerAgentId, [job]);
+      clock.advanceBy(5); await new Promise((resolve) => setImmediate(resolve));
+      // The source can disappear after either a committed fire or cancellation.
+      cache.snapshot(job.ownerAgentId, []);
+      clock.advanceBy(200); await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(requests, [requests[0], requests[0]], "retry must query the existing occurrence");
+      assert.equal(materializations, 0, "an unknown acceptance cannot create an Inbox item");
+      assert.equal(cache.acceptFireRequest({ ...identity, ownerAgentId: "different-owner" }, requests[0], { fired, catchup: false }), false);
+      assert.equal(cache.acceptFireRequest({ ...identity, version: job.version + 1 }, requests[0], { fired, catchup: false }), false);
+      assert.equal(cache.acceptFireRequest(identity, "wrong-request", { fired, catchup: false }), false);
+      assert.equal(cache.acceptFireRequest(identity, requests[0], { fired, catchup: false }), true);
+      await new Promise((resolve) => setImmediate(resolve));
+      cache.acceptFireRequest(identity, requests[0], { fired, catchup: false });
+      await new Promise((resolve) => setImmediate(resolve));
+      clock.advanceBy(10_000); await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(requests.length, 2);
+      assert.equal(materializations, fired ? 1 : 0, "duplicate acceptance cannot repeat the existing outbox action; cancelled source cannot wake");
+    } finally { cache.stop(); rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("slow reconciliation persists before outbound and never overlaps an unresolved request", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "reminder-reconcile-persist-"));
+  const persistencePath = path.join(dir, "mirror.json");
+  const clock = new FakeClock();
+  let failWrites = false;
+  const requests: string[] = [];
+  let settleRequest: (() => void) | undefined;
+  const cache = new ReminderCache({
+    clock, storageForAgent: () => createTestReminderStorage(persistencePath),
+    fireRetryMaxAttempts: 1, fireRetryDeadlineMs: 100, fireReconcileDelayMs: 200, reconciliationRandom: () => 0.5,
+    persistForTesting: (storage, payload) => { if (failWrites) throw new Error("write unavailable"); storage.writeTextAtomic(payload); },
+    onFire: (_job, context) => {
+      requests.push(context.requestId);
+      if (requests.length === 1) return { wakeEnqueued: false, retryStage: "fire_request" };
+      return new Promise((resolve) => { settleRequest = () => resolve({ wakeEnqueued: false, retryStage: "fire_request" }); });
+    },
+  });
+  const job = makeJob({ reminderId: "write-before-reconcile", ownerAgentId: "agent-a", fireAt: new Date(5).toISOString() });
+  try {
+    cache.start(); cache.snapshot(job.ownerAgentId, [job]);
+    clock.advanceBy(5); await new Promise((resolve) => setImmediate(resolve));
+    const first = JSON.parse(readFileSync(persistencePath, "utf8")).records[0].receipts[0];
+    failWrites = true;
+    clock.advanceBy(200); await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(requests.length, 1, "failed write-ahead permits zero reconciliation requests");
+    failWrites = false;
+    clock.advanceBy(200); await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(requests, [first.requestId, first.requestId]);
+    cache.replayPendingFireReceipts(); cache.snapshot(job.ownerAgentId, []);
+    clock.advanceBy(2_000); await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(requests.length, 2, "unresolved request must not overlap snapshot, timer or reconnect replay");
+    settleRequest!(); await new Promise((resolve) => setImmediate(resolve));
+    const last = JSON.parse(readFileSync(persistencePath, "utf8")).records[0].receipts[0];
+    assert.deepEqual(last.retryTerminal, first.retryTerminal);
+    assert.equal(last.retryDeadlineAt, first.retryDeadlineAt);
+  } finally { cache.stop(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("persistent pre-Server failure exhausts its fast retry cap and retains slow reconciliation", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "reminder-retry-cap-"));
   const persistencePath = path.join(dir, "mirror.json");
   const clock = new FakeClock();
@@ -1511,7 +1647,7 @@ test("persistent pre-Server failure exhausts the per-receipt cap and stops", asy
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.equal(attempts, 3);
-    assert.equal(clock.pendingTimerCount(), 0, "cap exhaustion leaves no process-local replay loop");
+    assert.equal(clock.pendingTimerCount(), 1, "cap exhaustion leaves one slow reconciliation timer");
     assert.equal(cache.pendingFireReceipts().length, 0, "terminal receipts are not transport-replayed");
     assert.deepEqual(exhaustions, [{
       code: "REMINDER_DELIVERY_RETRY_EXHAUSTED",
@@ -1825,13 +1961,13 @@ test("restart preserves retry delay, attempt count, and deadline", async () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(attempts, 3);
     assert.equal(exhaustionAttempts, 3, "the third failure exhausts the durable shared budget");
-    assert.equal(clock.pendingTimerCount(), 0);
+    assert.equal(clock.pendingTimerCount(), 1, "reconciliation does not renew the exhausted fast retry budget");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("absolute retry deadline survives restart and stops before the attempt cap", async () => {
+test("absolute retry deadline survives restart and escalates before the attempt cap", async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "reminder-retry-deadline-"));
   const persistencePath = path.join(dir, "mirror.json");
   const clock = new FakeClock();
@@ -1903,7 +2039,7 @@ test("absolute retry deadline survives restart and stops before the attempt cap"
       deadlineAt: new Date(30).toISOString(),
       exhaustedAt: new Date(30).toISOString(),
     });
-    assert.equal(clock.pendingTimerCount(), 0);
+    assert.equal(clock.pendingTimerCount(), 1, "exhausted unknown acceptance retains slow reconciliation");
     const terminal = JSON.parse(readFileSync(persistencePath, "utf8")).records[0].receipts[0].retryTerminal;
     assert.equal(terminal.code, "REMINDER_DELIVERY_RETRY_EXHAUSTED");
     assert.equal(terminal.deadlineAt, new Date(30).toISOString());
@@ -2008,5 +2144,69 @@ test("initial due-receipt persistence failure enters the same bounded budget", a
     assert.equal(clock.pendingTimerCount(), 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function captureReminderLogs() {
+  const lines: string[] = [];
+  const info = vi.spyOn(logger, "info").mockImplementation((msg: string) => { lines.push(msg); });
+  const warn = vi.spyOn(logger, "warn").mockImplementation((msg: string) => { lines.push(`WARN ${msg}`); });
+  return { lines, restore: () => { info.mockRestore(); warn.mockRestore(); } };
+}
+
+test("timer arm, clear and per-snapshot armed count are logged so an unarmed reminder can be attributed", () => {
+  const logs = captureReminderLogs();
+  try {
+    const clock = new FakeClock();
+    const cache = new ReminderCache({ clock, onFire: () => {} });
+    cache.start();
+    cache.snapshot("a1", [makeJob({ reminderId: "r1", ownerAgentId: "a1", version: 3, fireAt: new Date(60_000).toISOString() })]);
+    assert.ok(logs.lines.some((l) => /timer armed r1 v3 fireAt=\S+ in 60000ms \(schedule\)/.test(l)), logs.lines.join("\n"));
+    assert.ok(logs.lines.includes("[ReminderCache] snapshot applied for agent a1: 1 scheduled, 1 armed"), logs.lines.join("\n"));
+
+    cache.cancel("r1", 4, "a1");
+    assert.ok(logs.lines.includes("[ReminderCache] timer cleared r1 v3 (cancel)"), logs.lines.join("\n"));
+  } finally {
+    logs.restore();
+  }
+});
+
+test("a long-horizon re-arm is logged as rearm", () => {
+  const logs = captureReminderLogs();
+  try {
+    const clock = new FakeClock();
+    const cache = new ReminderCache({ clock, onFire: () => {}, maxDelayMs: 1_000 });
+    cache.start();
+    cache.snapshot("a1", [makeJob({ reminderId: "r1", ownerAgentId: "a1", fireAt: new Date(5_000).toISOString() })]);
+    clock.advanceBy(1_000);
+    assert.ok(logs.lines.some((l) => /timer armed r1 v1 .* \(rearm\)/.test(l)), logs.lines.join("\n"));
+  } finally {
+    logs.restore();
+  }
+});
+
+test("a same-revision snapshot that cannot re-arm a job-less record warns instead of staying silent", () => {
+  const logs = captureReminderLogs();
+  try {
+    const clock = new FakeClock();
+    const fired: string[] = [];
+    const cache = new ReminderCache({ clock, onFire: (j) => { fired.push(j.reminderId); } });
+    cache.start();
+    const job = makeJob({ reminderId: "r1", ownerAgentId: "a1", version: 2, fireAt: new Date(60_000).toISOString() });
+    cache.snapshot("a1", [job]);
+    // An authoritative snapshot that omits r1 leaves a same-revision tombstone.
+    cache.snapshot("a1", []);
+    assert.ok(logs.lines.includes("[ReminderCache] timer cleared r1 v2 (snapshot_omission)"), logs.lines.join("\n"));
+    // The same revision coming back cannot re-arm it; this used to be silent.
+    cache.snapshot("a1", [job]);
+    assert.ok(
+      logs.lines.includes("WARN [ReminderCache] snapshot entry r1 v2 ignored: cached v2 has no job, so it stays unarmed"),
+      logs.lines.join("\n"),
+    );
+    assert.ok(logs.lines.includes("[ReminderCache] snapshot applied for agent a1: 0 scheduled, 0 armed"), logs.lines.join("\n"));
+    clock.advanceBy(120_000);
+    assert.deepEqual(fired, []);
+  } finally {
+    logs.restore();
   }
 });

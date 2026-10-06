@@ -10,7 +10,7 @@ import {
   type AgentApiRequestQueryByRoute,
   type AgentApiResponseByRoute,
   type AgentApiRouteKey,
-} from "./agentApiContract.js";
+} from "./agentApiContract";
 
 export type AgentApiRawClientErrorReason =
   | "missing_route"
@@ -184,8 +184,16 @@ function parseBody<K extends AgentApiRouteKey>(
   routeKey: K,
   body: AgentApiRequestBodyByRoute[K] | undefined,
 ): AgentApiRequestBodyByRoute[K] | undefined | AgentApiRawFailure<K> {
-  if (body === undefined) return undefined;
   const route = agentApiContract[routeKey];
+  if (body === undefined) {
+    // A missing body is only legitimate when the route has none or its body
+    // schema accepts an empty value. Otherwise refuse: a write must never be
+    // sent without the body its contract requires.
+    if (!("body" in route.request)) return undefined;
+    const schema = route.request.body;
+    if (schema.safeParse(undefined).success || schema.safeParse({}).success) return undefined;
+    return failure(routeKey, "request_contract_mismatch", `Agent API ${route.key} requires a request body`);
+  }
   try {
     return ("body" in route.request ? route.request.body.parse(body) : undefined) as AgentApiRequestBodyByRoute[K] | undefined;
   } catch (cause) {
@@ -281,6 +289,20 @@ export async function requestAgentApiRawRoute<K extends AgentApiRouteKey>(
       data: response.data as AgentApiResponseByRoute[K],
     };
   }
+  if (getAgentApiResponseKind(route.response) === "empty") {
+    if (response.data !== null) {
+      return failure(routeKey, "response_contract_mismatch", `Agent API ${route.key} response must be empty`, {
+        status: response.status,
+        response: response.data,
+      });
+    }
+    return {
+      ok: true,
+      routeKey,
+      status: response.status,
+      data: null as AgentApiResponseByRoute[K],
+    };
+  }
   if (response.data === null) {
     return failure(routeKey, "empty_response", `Agent API ${route.key} returned an empty response body`, {
       status: response.status,
@@ -346,12 +368,24 @@ export function createAgentApiRawClient(
       method: string;
     };
     const resourceClient = client[resource] ??= {};
-    resourceClient[method] = (...args: unknown[]) =>
-      requestAgentApiRawRoute(
+    const expectedArgs = (["params", "query", "body"] as const).filter((part) => part in route.request).length;
+    resourceClient[method] = (...args: unknown[]) => {
+      // Arguments are positional over the parts this route declares (params,
+      // query, body — only those present). Extra arguments mean the caller
+      // assumed a different shape; refuse instead of silently dropping them.
+      if (args.length > expectedArgs) {
+        return Promise.resolve(failure(
+          routeKey,
+          "request_contract_mismatch",
+          `Agent API ${route.key} takes ${expectedArgs} argument${expectedArgs === 1 ? "" : "s"} (${(["params", "query", "body"] as const).filter((part) => part in route.request).join(", ") || "none"}); got ${args.length}`,
+        ));
+      }
+      return requestAgentApiRawRoute(
         transport,
         routeKey,
         requestOptionsFromMethodArgs(routeKey, pathPrefix, args),
       );
+    };
   }
   return client as AgentApiRawClient;
 }

@@ -6,7 +6,7 @@ import type { Tracer } from "@botiverse/raft-shared";
 import type {
   RuntimeToolDiagnosticInput,
   RuntimeToolDiagnosticSnapshot,
-} from "./types.js";
+} from "./types";
 
 export const PI_TOOL_OBSERVATION_INTERVAL_MS = 15 * 60_000;
 export const PI_TOOL_PROGRESS_COALESCE_MS = 60_000;
@@ -477,9 +477,8 @@ export class PiToolExecutionTraceObserver implements PiToolExecutionObserver {
     state: PiToolExecutionState,
     attrs: Record<string, unknown>,
   ): void {
-    const span = this.options.tracer?.startSpan(name, {
+    this.options.tracer?.emitEvent(name, {
       surface: "daemon",
-      kind: "internal",
       attrs: {
         schema_version: "stuck_tool_v0",
         server_id: this.options.serverId,
@@ -497,9 +496,9 @@ export class PiToolExecutionTraceObserver implements PiToolExecutionObserver {
         runtime_version: this.options.runtimeVersion,
         tool_class: "bash",
         ...attrs,
+        status: "ok",
       },
     });
-    span?.end("ok");
   }
 }
 

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 
 class MemoryStorage {
   private readonly map = new Map<string, string>();
@@ -45,8 +44,8 @@ Object.defineProperty(globalThis, "window", {
   configurable: true,
 });
 
-const api = (await import("../src/api/client.js")).default;
-const { SYNC_CORE_MESSAGES_FLAG_KEY, resetMessagesSyncCoreForTests } = await import("../src/store/messageSyncDomain.js");
+const api = (await import("../src/api/client")).default;
+const { SYNC_CORE_MESSAGES_FLAG_KEY, resetMessagesSyncCoreForTests } = await import("../src/store/messageSyncDomain");
 const {
   MESSAGE_REPLIES_SYNC_WINDOW_PRODUCER,
   messageRef,
@@ -55,25 +54,25 @@ const {
 } = await import("@botiverse/raft-shared");
 const {
   REGISTERED_SERVER_FEATURE_FLAG_KEYS,
-} = await import("../src/store/serverFeatureFlags.js");
-const { refreshSyncCoreMessagesFlagForCurrentServer, resetSyncCoreMessagesFlagForTests } = await import("../src/store/messageSyncFeatureFlag.js");
-const { refreshNormalizedMessageV2FlagForCurrentServer } = await import("../src/store/normalizedMessageV2FeatureFlag.js");
-const { reactionReadModelStore } = await import("../src/store/reactionReadModels.js");
-const { useChannelStore } = await import("../src/store/channelStore.js");
-const { useMessageStore } = await import("../src/store/messageStore.js");
-const { useServerStore } = await import("../src/store/serverStore.js");
-const { triggerServerReset } = await import("../src/store/serverResetRegistry.js");
-const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge.js");
-const { useInboxStore } = await import("../src/store/inboxStore.js");
-const { useThreadStore } = await import("../src/store/threadStore.js");
+} = await import("../src/store/serverFeatureFlags");
+const { refreshSyncCoreMessagesFlagForCurrentServer, resetSyncCoreMessagesFlagForTests } = await import("../src/store/messageSyncFeatureFlag");
+const { refreshNormalizedMessageV2FlagForCurrentServer } = await import("../src/store/normalizedMessageV2FeatureFlag");
+const { reactionReadModelStore } = await import("../src/store/reactionReadModels");
+const { useChannelStore } = await import("../src/store/channelStore");
+const { useMessageStore } = await import("../src/store/messageStore");
+const { useServerStore } = await import("../src/store/serverStore");
+const { triggerServerReset } = await import("../src/store/serverResetRegistry");
+const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge");
+const { useInboxStore } = await import("../src/store/inboxStore");
+const { useThreadStore } = await import("../src/store/threadStore");
 const {
   hydrateThreadRepliesSnapshotWithSyncCore,
   readThreadRepliesSyncCoreScopeForTests,
   requestThreadRepliesRebaselineSnapshot,
   resetThreadRepliesSyncCoreForTests,
-} = await import("../src/store/threadRepliesSyncDomain.js");
-const { triggerMessagesSyncCoreReset } = await import("../src/store/messageSyncCoreReset.js");
-const { invalidateReceiverPrivateIngressContexts } = await import("../src/store/receiverPrivateIngress.js");
+} = await import("../src/store/threadRepliesSyncDomain");
+const { triggerMessagesSyncCoreReset } = await import("../src/store/messageSyncCoreReset");
+const { invalidateReceiverPrivateIngressContexts } = await import("../src/store/receiverPrivateIngress");
 
 const channelId = "channel-sync-bridge";
 const originalPost = api.post.bind(api);

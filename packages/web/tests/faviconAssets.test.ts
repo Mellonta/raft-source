@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 const repoRoot = resolve(import.meta.dirname, "..");

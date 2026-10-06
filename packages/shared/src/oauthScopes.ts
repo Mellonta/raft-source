@@ -27,6 +27,13 @@ export const RAFT_OAUTH_SCOPE_CATALOG = {
     requiresResource: false,
     label: "Raft identity card",
   },
+  "agent:read": {
+    phase: "agent_directory",
+    defaultAllowed: false,
+    publicDiscovery: true,
+    requiresResource: false,
+    label: "Read the Server agent directory",
+  },
   "agent:event:write": {
     phase: "agent_inbound",
     defaultAllowed: false,

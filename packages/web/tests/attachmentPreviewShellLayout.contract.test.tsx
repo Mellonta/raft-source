@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { resetAttachmentPreviewSummaryCache } from "../src/components/message/attachmentPreviewSummaryCache";
-import { afterEach, test } from "node:test";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -326,3 +325,4 @@ test("attachment preview shell consumes Escape while mounted and removes the lis
   fireEvent.keyDown(document, { key: "Escape" });
   assert.equal(closeCount, closedWhileMounted, "unmounted previews must not retain global Escape handlers");
 });
+

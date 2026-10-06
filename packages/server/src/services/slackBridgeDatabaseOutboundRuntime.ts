@@ -5,43 +5,48 @@ import {
   currentDate,
   setClockTimeout,
   SLACK_BRIDGE_FEATURE_FLAG_KEYS,
+  type Tracer,
 } from "@botiverse/raft-shared";
-import { and, desc, eq, gt } from "drizzle-orm";
+import { and, desc, eq, gt, isNull } from "drizzle-orm";
 
-import { getDb, type Database, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type Database, type DatabaseExecutor } from "../db/index";
+import { withTraceRoot } from "../tracing/semanticTrace";
 import {
-  externalAuthorPolicies,
+  agents,
   externalBindingAudienceSnapshots,
   externalChannelBindings,
   externalMessageLinks,
-} from "../db/schema.js";
-import { resolveExternalBindingAuthority } from "./externalAppControlPlaneService.js";
-import { resolveExternalConversationTarget } from "./externalConversationTargetService.js";
+  serverMembers,
+  users,
+} from "../db/schema";
+import { resolveExternalBindingAuthority } from "./externalAppControlPlaneService";
+import { resolveExternalConversationTarget } from "./externalConversationTargetService";
 import {
   installOrdinaryMessageOutboundRuntime,
   mintSlackBridgeReconciliationMarker,
   type OrdinaryMessageOutboundAuthorizationResolver,
   type ProviderNeutralOutboundBindingAuthority,
-} from "./externalDeliveryOutboxService.js";
+} from "./externalDeliveryOutboxService";
 import {
   processExternalDeliveryPartitionHead,
   type ExternalDeliveryAuthorityAlert,
   type ExternalDeliveryWorkerDependencies,
   type ProcessExternalDeliveryPartitionHeadInput,
-} from "./externalDeliveryWorkerService.js";
-import { evaluateFeatureFlag } from "./featureFlagService.js";
-import { slackBridgeDatabaseRuntimeRevision } from "./slackBridgeDatabaseRuntimeAuthority.js";
-import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime.js";
-import { createSlackOutboundAttachmentAdapter } from "./slackOutboundAttachmentAdapter.js";
-import { dispatchExternalOutboundAttachments } from "./externalOutboundAttachmentCoordinator.js";
-import { getStorage } from "./storageService.js";
+} from "./externalDeliveryWorkerService";
+import { evaluateFeatureFlag } from "./featureFlagService";
+import { slackBridgeDatabaseRuntimeRevision } from "./slackBridgeDatabaseRuntimeAuthority";
+import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime";
+import { createSlackOutboundAttachmentAdapter } from "./slackOutboundAttachmentAdapter";
+import { dispatchExternalOutboundAttachments } from "./externalOutboundAttachmentCoordinator";
+import { getStorage } from "./storageService";
+import { effectiveAgentSenderName, effectiveUserSenderName } from "./effectiveSenderName";
 import {
   createSlackProviderPreparation,
   reconcileSlackOutboundDelivery,
   type SlackBridgeCredentialHandle,
   type SlackOutboundReconciliationResult,
   type SlackProviderAuthorityFence,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
 
 const DEFAULT_OUTBOUND_WORKER_INTERVAL_MS = 1_000;
 
@@ -88,6 +93,7 @@ export interface SlackBridgeDatabaseOutboundRuntimeDependencies {
   >;
   onAuthorityAlert?(alert: ExternalDeliveryAuthorityAlert): void;
   onError?(error: unknown): void;
+  tracer?: Tracer;
 }
 
 export interface SlackBridgeDatabaseOutboundRuntime {
@@ -99,20 +105,52 @@ function validDate(value: Date): boolean {
   return value instanceof Date && Number.isFinite(value.getTime());
 }
 
+async function resolveCurrentAuthorPresentation(input: {
+  executor: DatabaseExecutor;
+  serverId: string;
+  senderType: "user" | "agent";
+  senderId: string;
+}): Promise<{ displayName: string; fallbackKind: "human" | "agent" } | null> {
+  if (input.senderType === "user") {
+    const [subject] = await input.executor.select({
+      name: users.name,
+      displayName: users.displayName,
+    }).from(serverMembers).innerJoin(users, eq(users.id, serverMembers.userId)).where(and(
+      eq(serverMembers.serverId, input.serverId),
+      eq(serverMembers.userId, input.senderId),
+    )).limit(1);
+    return subject
+      ? { displayName: effectiveUserSenderName(subject), fallbackKind: "human" }
+      : null;
+  }
+  const [subject] = await input.executor.select({
+    name: agents.name,
+    displayName: agents.displayName,
+  }).from(agents).where(and(
+    eq(agents.id, input.senderId),
+    eq(agents.serverId, input.serverId),
+    isNull(agents.deletedAt),
+  )).limit(1);
+  return subject
+    ? { displayName: effectiveAgentSenderName(subject), fallbackKind: "agent" }
+    : null;
+}
+
 function canonicalRevision(input: {
   authority: ActiveBindingFact;
   audienceRevision: number;
-  consentRevision: number;
 }): string {
   return createHash("sha256").update(JSON.stringify({
     schema: "slack-bridge-database-outbound-runtime.v1",
     bindingRuntimeRevision: slackBridgeDatabaseRuntimeRevision(input.authority),
     audienceRevision: input.audienceRevision,
-    consentRevision: input.consentRevision,
   }), "utf8").digest("hex");
 }
 
-function sameNeutralAuthority(
+// Runtime/audience revisions are refreshed per dispatch. Only coordinates that
+// identify the bound destination belong in this fence; revision drift must not
+// poison an ordinary FIFO head.
+function sameHardNeutralAuthority(
   left: ProviderNeutralOutboundBindingAuthority,
   right: ProviderNeutralOutboundBindingAuthority,
 ): boolean {
@@ -124,9 +162,6 @@ function sameNeutralAuthority(
     && left.connectionEpoch === right.connectionEpoch
     && left.bindingId === right.bindingId
     && left.bindingEpoch === right.bindingEpoch
-    && left.memberRevision === right.memberRevision
-    && left.contextRevision === right.contextRevision
-    && left.consentRevision === right.consentRevision
     && left.privacyClass === right.privacyClass
     && left.raftChannelId === right.raftChannelId
     && left.providerAuthorityId === right.providerAuthorityId
@@ -190,22 +225,42 @@ export async function resolveCurrentOutboundAuthority(input: {
     input.expectedAudienceRevision !== undefined
     && (!Number.isSafeInteger(input.expectedAudienceRevision) || input.expectedAudienceRevision <= 0)
   ) return null;
+  const publicFrozenDispatch = decision.fact.privacyClass === "public"
+    && input.expectedAudienceRevision !== undefined;
   const snapshots = await input.executor.select({
     audienceRevision: externalBindingAudienceSnapshots.audienceRevision,
+    status: externalBindingAudienceSnapshots.status,
+    expiresAt: externalBindingAudienceSnapshots.expiresAt,
   }).from(externalBindingAudienceSnapshots).where(and(
     eq(externalBindingAudienceSnapshots.bindingId, decision.fact.bindingId),
     eq(externalBindingAudienceSnapshots.bindingEpoch, decision.fact.bindingEpoch),
-    eq(externalBindingAudienceSnapshots.status, "matched"),
-    gt(externalBindingAudienceSnapshots.expiresAt, input.now),
-    ...(input.expectedAudienceRevision === undefined
+    ...(publicFrozenDispatch
       ? []
-      : [eq(
-          externalBindingAudienceSnapshots.audienceRevision,
-          input.expectedAudienceRevision,
-        )]),
+      : [
+          eq(externalBindingAudienceSnapshots.status, "matched"),
+          gt(externalBindingAudienceSnapshots.expiresAt, input.now),
+          ...(input.expectedAudienceRevision === undefined
+            ? []
+            : [eq(
+                externalBindingAudienceSnapshots.audienceRevision,
+                input.expectedAudienceRevision,
+              )]),
+        ]),
   )).orderBy(desc(externalBindingAudienceSnapshots.audienceRevision)).limit(2);
   if (snapshots.length === 0) return null;
-  const audienceRevision = snapshots[0]!.audienceRevision;
+  const latestSnapshot = snapshots[0]!;
+  if (
+    publicFrozenDispatch
+    && (latestSnapshot.status !== "matched" || latestSnapshot.expiresAt <= input.now)
+  ) return null;
+  const audienceRevision = latestSnapshot.audienceRevision;
+  // Public-channel membership refreshes are informational while the binding
+  // and current matched snapshot remain valid. Preserve the frozen revision in
+  // the neutral authority so an ordinary refresh cannot poison a FIFO head;
+  // private channels keep the exact frozen revision contract above.
+  const effectiveAudienceRevision = publicFrozenDispatch
+    ? input.expectedAudienceRevision!
+    : audienceRevision;
   const currentPrivateAudienceRevision = decision.fact.privacyClass === "private"
     ? decision.fact.audienceRevision
     : null;
@@ -223,21 +278,15 @@ export async function resolveCurrentOutboundAuthority(input: {
     ))
   ) return null;
 
-  const policies = await input.executor.select({
-    consentRevision: externalAuthorPolicies.consentRevision,
-  }).from(externalAuthorPolicies).where(and(
-    eq(externalAuthorPolicies.serverId, decision.fact.serverId),
-    eq(externalAuthorPolicies.provider, decision.fact.provider),
-    eq(externalAuthorPolicies.appRegistrationId, decision.fact.registrationId),
-    eq(externalAuthorPolicies.installId, decision.fact.installId),
-    eq(externalAuthorPolicies.bindingId, decision.fact.bindingId),
-    eq(externalAuthorPolicies.bindingEpoch, decision.fact.bindingEpoch),
-    eq(externalAuthorPolicies.authorType, input.senderType),
-    eq(externalAuthorPolicies.authorId, input.senderId),
-    eq(externalAuthorPolicies.state, "granted"),
-  )).limit(2);
-  if (policies.length !== 1 || policies[0]!.consentRevision <= 0) return null;
-  const consentRevision = policies[0]!.consentRevision;
+  if (
+    input.expectedAudienceRevision === undefined
+    && !await resolveCurrentAuthorPresentation({
+      executor: input.executor,
+      serverId: decision.fact.serverId,
+      senderType: input.senderType,
+      senderId: input.senderId,
+    })
+  ) return null;
   const revisionAuthority = decision.fact.privacyClass === "private"
     && input.expectedAudienceRevision !== undefined
     ? { ...decision.fact, audienceRevision }
@@ -251,9 +300,8 @@ export async function resolveCurrentOutboundAuthority(input: {
     connectionEpoch: decision.fact.connectionEpoch,
     bindingId: decision.fact.bindingId,
     bindingEpoch: decision.fact.bindingEpoch,
-    memberRevision: audienceRevision,
-    contextRevision: audienceRevision,
-    consentRevision,
+    memberRevision: effectiveAudienceRevision,
+    contextRevision: effectiveAudienceRevision,
     privacyClass: decision.fact.privacyClass,
     raftChannelId: decision.fact.channelId,
     providerAuthorityId: decision.fact.providerAuthorityId,
@@ -265,8 +313,7 @@ export async function resolveCurrentOutboundAuthority(input: {
     neutral,
     runtimeRevision: canonicalRevision({
       authority: revisionAuthority,
-      audienceRevision,
-      consentRevision,
+      audienceRevision: effectiveAudienceRevision,
     }),
     attachmentTransferEnabled: attachmentTransfer.enabled,
   };
@@ -379,8 +426,7 @@ export function createSlackBridgeDatabaseOutboundRuntime(
     });
     if (
       !current
-      || current.runtimeRevision !== frozenSnapshot.enqueueRuntimeRevision
-      || !sameNeutralAuthority(current.neutral, frozen)
+      || !sameHardNeutralAuthority(current.neutral, frozen)
       || stopped
     ) return null;
     return {
@@ -608,38 +654,53 @@ export function createSlackBridgeDatabaseOutboundRuntime(
     timer = setClockTimeout(() => {
       timer = null;
       if (stopped || workerPromise) return;
-      workerPromise = (async () => {
-        const bindings = await db.select({
-          id: externalChannelBindings.id,
-          bindingEpoch: externalChannelBindings.bindingEpoch,
-        }).from(externalChannelBindings).where(and(
-          eq(externalChannelBindings.registrationId, dependencies.registrationId),
-          eq(externalChannelBindings.state, "active"),
-        ));
-        for (const binding of bindings) {
-          if (stopped) return;
-          const result = await runWorkerOnce({
-            db,
-            bindingId: binding.id,
-            bindingEpoch: binding.bindingEpoch,
-            leaseOwner: workerLeaseOwner,
-            dependencies: workerDependencies,
-          });
-          if (result.kind === "authority_blocked" && result.alert) {
-            try {
-              dependencies.onAuthorityAlert?.(result.alert);
-            } catch (error) {
-              dependencies.onError?.(error);
-            }
-          }
+      // Each tick is a root span, so the onError report is tied to it.
+      workerPromise = withTraceRoot(dependencies.tracer, "server.slack_bridge.outbound.tick", {
+        surface: "server",
+        kind: "internal",
+      }, async () => {
+        try {
+          await runOutboundTick();
+        } catch (error) {
+          dependencies.onError?.(error);
+          throw error;
         }
-      })().catch((error) => dependencies.onError?.(error)).finally(() => {
+      }).catch(() => {
+        // Already reported through onError inside the span.
+      }).finally(() => {
         workerPromise = null;
         schedule(workerIntervalMs);
       });
     }, delayMs);
     if (timer && typeof timer === "object" && "unref" in timer) {
       (timer as { unref(): void }).unref();
+    }
+  };
+
+  const runOutboundTick = async () => {
+    const bindings = await db.select({
+      id: externalChannelBindings.id,
+      bindingEpoch: externalChannelBindings.bindingEpoch,
+    }).from(externalChannelBindings).where(and(
+      eq(externalChannelBindings.registrationId, dependencies.registrationId),
+      eq(externalChannelBindings.state, "active"),
+    ));
+    for (const binding of bindings) {
+      if (stopped) return;
+      const result = await runWorkerOnce({
+        db,
+        bindingId: binding.id,
+        bindingEpoch: binding.bindingEpoch,
+        leaseOwner: workerLeaseOwner,
+        dependencies: workerDependencies,
+      });
+      if (result.kind === "authority_blocked" && result.alert) {
+        try {
+          dependencies.onAuthorityAlert?.(result.alert);
+        } catch (error) {
+          dependencies.onError?.(error);
+        }
+      }
     }
   };
 

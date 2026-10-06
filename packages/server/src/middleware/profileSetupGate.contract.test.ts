@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { test } from "vitest";
 
 test("verified human business surfaces inherit the account-global profile setup gate", async () => {
   const [authSource, appSource, authRoutesSource] = await Promise.all([

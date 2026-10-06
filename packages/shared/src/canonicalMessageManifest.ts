@@ -17,7 +17,7 @@
  *   `CanonicalMessageRow` — G2 mobile half. T8 verifies both ends by hash.
  */
 
-export const CANONICAL_MESSAGE_MANIFEST_VERSION = 5 as const;
+export const CANONICAL_MESSAGE_MANIFEST_VERSION = 6 as const;
 
 export type CanonicalFieldClass = "canonicalRequired" | "optionalAggregate";
 
@@ -190,6 +190,7 @@ export const CANONICAL_NESTED_WIRE_SHAPES = Object.freeze({
     { name: "projectionId", wireType: "string", nullable: false },
     { name: "provider", wireType: "string", nullable: false },
     { name: "workspaceId", wireType: "string", nullable: false },
+    { name: "workspaceName", wireType: "string", nullable: true },
   ]),
 } as const);
 

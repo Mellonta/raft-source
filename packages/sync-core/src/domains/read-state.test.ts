@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { createSyncCore } from "../core.js";
+import { createSyncCore } from "../core";
 import {
   READ_STATE_DOMAIN,
   createReadStateDomain,
   encodeReadStateScopeId,
   toReadStateFrame,
   type ReadStateFact,
-} from "./read-state.js";
-import type { SyncDomainConfig } from "../types.js";
+} from "./read-state";
+import type { SyncDomainConfig } from "../types";
 
 function fact(overrides: Partial<ReadStateFact> = {}): ReadStateFact {
   return {

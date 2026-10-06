@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { extractMarkdownOutline } from "../src/components/markdown/MarkdownOutline";
 
 test("markdown outline extracts h1-h3 headings with stable duplicate ids", () => {

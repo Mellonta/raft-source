@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { loginViaApi } from "../../fixtures/auth";
+import { navigateToMessageScrollerWithReadinessEvidence } from "../../fixtures/messageScrollerReadiness";
 import { waitForSeedState } from "../../fixtures/seedState";
 import { dismissOwnerOnboarding } from "../../fixtures/session";
 
@@ -119,7 +120,7 @@ test.describe("channel task board view", () => {
     await expect(page.getByTestId("channel-task-board-view")).toBeVisible();
   });
 
-  test("dragging an unassigned todo to In Progress claims it and writes the status", async ({ page, request }) => {
+  test("dragging an unassigned todo to In Progress claims it and writes the status", async ({ page, request }, testInfo) => {
     const seedState = await waitForSeedState();
     const login = await loginViaApi(request, seedState);
     await dismissOwnerOnboarding(request, seedState, login.accessToken);
@@ -137,8 +138,10 @@ test.describe("channel task board view", () => {
     const task = createBody.tasks[0];
     expect(task).toBeTruthy();
 
-    await page.goto(`/s/${seedState.server.slug}/channel/${seedState.channel.id}`);
-    await expect(page.getByTestId("message-scroller")).toBeVisible();
+    await navigateToMessageScrollerWithReadinessEvidence(page, testInfo, {
+      consumer: "channel-task-board",
+      channelId: seedState.channel.id,
+    }, () => page.goto(`/s/${seedState.server.slug}/channel/${seedState.channel.id}`));
     await page.getByTestId("panel-tab-tasks").click();
     await expect(page.getByTestId("channel-task-board-view")).toBeVisible();
 

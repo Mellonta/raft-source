@@ -82,3 +82,12 @@ export type AxSurfaceText = Brand<string, "AxSurfaceText">;
  * legal locations.
  */
 export const asAxSurfaceText = (text: string): AxSurfaceText => text as AxSurfaceText;
+
+/**
+ * A user's random product-analytics id (RFC-067 §3.4) — the only user key
+ * product tables may store. Minted only where it is read from
+ * `user_analytics_ids` (server `productAnalyticsGate`), so a Raft user id cannot
+ * be passed where an analytics id is expected. No `as` constructor on purpose:
+ * the branded-mint-sites gate pins the one legal cast.
+ */
+export type AnalyticsId = Brand<string, "AnalyticsId">;

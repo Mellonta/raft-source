@@ -1,18 +1,14 @@
+import { MessageItemToolbar, MessageItemToolbarButton, ThreadIcon } from "raft-ui";
 import type { MouseEvent } from "react";
 import { useIntl } from "react-intl";
-import { Bookmark, MessageSquare, SmilePlus } from "lucide-react";
+import { Bookmark, SmilePlus } from "lucide-react";
 import { useMediaQuery } from "../../hooks/effectPrimitives";
 
 /**
  * MessageHoverToolbar — the "骑线按钮组" (stdrc, task #44).
  *
  * A compact square pill that rides on a message row's top border (Slack-style),
- * revealed on row hover. Modelled on the theme-poc `themes/skins/regular`
- * MessageRow hover pill: straddles the row's top edge (`-top-3.5`) and floats
- * off the line with a hard `shadow-brutal-sm`. Buttons sit flush (no gap / no
- * padding) so their hover background reaches the pill border — `overflow-hidden`
- * clips it to the border — and the hover tint follows SegmentedControl
- * (`bg-soft-signal/30`).
+ * revealed on row hover. Built on RUI's MessageItemToolbar and MessageItemToolbarButton.
  *
  * The parent row must be `position: relative` (this renders absolutely against
  * it) and must allow vertical overflow (ChatPanel / ThreadPanel:
@@ -34,9 +30,6 @@ export interface MessageHoverToolbarProps {
   onToggleSave: (e: MouseEvent) => void;
 }
 
-// Flush square buttons; hover tint matches SegmentedControl's hover.
-const BUTTON = "flex size-6 items-center justify-center hover:bg-soft-signal/30";
-
 export function MessageHoverToolbar({
   isSaved,
   reactionActive,
@@ -53,49 +46,41 @@ export function MessageHoverToolbar({
   if (coarsePointer) return null;
 
   return (
-    <div
-      // Keep the transparent toolbar hit-testable. Half of it sits above the
-      // row; disabling its pointer events makes the row lose :hover while the
-      // cursor crosses that edge, so the controls can disappear under a click.
-      className={`absolute -top-3.5 right-2 z-20 flex items-center overflow-hidden border-2 border-black bg-white shadow-brutal-sm transition-opacity ${
-        reactionActive
-          ? "opacity-100"
-          : "opacity-0 group-hover/message:opacity-100 group-focus-within/message:opacity-100"
-      }`}
+    <MessageItemToolbar
       data-message-affordance="toolbar"
+      // #6297 (task #477/task #532): keep the toolbar hit-testable while invisible so
+      // hovering its upper half across the row boundary does not drop row hover.
+      className={`pointer-events-auto ${reactionActive ? "!opacity-100" : ""}`}
     >
       {!hideThreadActions && (
-        <button
-          type="button"
+        <MessageItemToolbarButton
           onClick={onReplyInThread}
           aria-label={formatMessage({ id: "message.messageItem.replyInThread" })}
           data-message-affordance="thread"
-          className={`${BUTTON} text-black/50 hover:text-black`}
         >
-          <MessageSquare size={13} />
-        </button>
+          <ThreadIcon width={13} height={13} />
+        </MessageItemToolbarButton>
       )}
       {!isSystem && canReact && (
-        <button
-          type="button"
+        <MessageItemToolbarButton
           onClick={onReactionClick}
           aria-label={formatMessage({ id: "message.messageItem.addReaction" })}
           aria-expanded={reactionActive}
+          data-popup-open={reactionActive ? "" : undefined}
           data-message-affordance="reaction"
-          className={`${BUTTON} ${reactionActive ? "text-black" : "text-black/50 hover:text-black"}`}
         >
           <SmilePlus size={13} strokeWidth={2} />
-        </button>
+        </MessageItemToolbarButton>
       )}
-      <button
-        type="button"
+      <MessageItemToolbarButton
+        active={isSaved}
         onClick={onToggleSave}
         aria-label={isSaved ? formatMessage({ id: "message.messageItem.removeFromSaved" }) : formatMessage({ id: "message.messageItem.saveMessage" })}
         data-message-affordance="bookmark"
-        className={`${BUTTON} ${isSaved ? "text-brutal-orange" : "text-black/50 hover:text-black"}`}
+        className={isSaved ? "data-active:text-primary-400 data-active:hover:text-primary-400 theme-brutal:data-active:text-brutal-orange theme-brutal:data-active:hover:text-brutal-orange" : undefined}
       >
         <Bookmark size={13} fill={isSaved ? "currentColor" : "none"} />
-      </button>
-    </div>
+      </MessageItemToolbarButton>
+    </MessageItemToolbar>
   );
 }

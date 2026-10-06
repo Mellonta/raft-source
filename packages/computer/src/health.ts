@@ -27,9 +27,9 @@
 
 import { readFile, writeFile, unlink, mkdir, appendFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { serverHealthPath, serviceLogPath, CURRENT_SCHEMA_VERSION } from "./paths.js";
-import { isValidServerId } from "./paths.js";
-import type { RunnerState } from "./lib/state.js";
+import { serverHealthPath, serviceLogPath, CURRENT_SCHEMA_VERSION } from "./paths";
+import { isValidServerId } from "./paths";
+import type { RunnerState } from "./lib/state";
 
 export const CRASH_WINDOW_MS = 60_000;
 export const DEGRADED_THRESHOLD = 3;

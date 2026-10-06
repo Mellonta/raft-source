@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import "dotenv/config";
 import {
   assertRandomIdColumnExists,
@@ -10,7 +10,7 @@ import {
   RANDOM_ID_INDEX_NAME,
   RANDOM_ID_INDEX_STATEMENT_TIMEOUT,
   readRandomIdIndexStatus,
-} from "./message-random-id-index.js";
+} from "./message-random-id-index";
 
 async function main() {
   const pool = createPool();

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, render as rtlRender } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
@@ -101,7 +100,7 @@ test("attachment metadata truncates the MIME label while preserving the APK size
   assert.equal(size.textContent, "147.0 MB");
 });
 
-test("attachment summary text clips before the fixed preview affordance slot", () => {
+test("attachment summary text clips inside the RUI summary slot", () => {
   const { container } = render(
     <AttachmentChip
       attachment={{
@@ -126,14 +125,18 @@ test("attachment summary text clips before the fixed preview affordance slot", (
   assert.ok(summaryText);
   assert.ok(previewIcon);
 
+  // RUI MessageAttachment anatomy (2026-09-23): the summary lives in the
+  // MessageAttachmentSummary slot and the affordance icon is an RUI action in
+  // the meta row end — no more absolutely-positioned corner box, so the old
+  // pr-6 clearance is gone.
+  assert.equal(summarySlot.getAttribute("data-slot"), "message-attachment-summary");
   assert.match(summarySlot.className, /\bmin-w-0\b/);
   assert.match(summarySlot.className, /\boverflow-hidden\b/);
-  assert.match(summarySlot.className, /\bpr-6\b/);
+  assert.doesNotMatch(summarySlot.className, /\bpr-6\b/);
   assert.match(summaryText.className, /\bmin-w-0\b/);
   assert.match(summaryText.className, /\bflex-1\b/);
   assert.match(summaryText.className, /\btruncate\b/);
-  assert.match(previewIcon.className, /\babsolute\b/);
-  assert.match(previewIcon.className, /\bsize-5\b/);
-  assert.match(previewIcon.className, /\bshrink-0\b/);
-  assert.match(previewIcon.className, /\bright-1\.5\b/);
+  assert.equal(previewIcon.getAttribute("data-slot"), "message-attachment-action");
+  assert.equal(previewIcon.parentElement?.getAttribute("data-slot"), "message-attachment-meta-end");
+  assert.doesNotMatch(previewIcon.className, /(^|\s)absolute(\s|$)/);
 });

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -15,7 +14,10 @@ import { zhCn as zhMessages } from "../src/i18n/messages/zh-cn";
 import api from "../src/api/client";
 import type { SidebarPinnedRef } from "../src/utils/sidebarPinnedRefs";
 import { resetServerFeatureFlagsForTests, setServerFeatureFlagForTests } from "../src/store/serverFeatureFlags";
-import { TOPBAR_OVERFLOW_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
+import {
+  CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
+  SERVER_GUEST_FEATURE_FLAG_KEY,
+} from "@botiverse/raft-shared";
 
 // EditChannelDialog — 68 ids under `channel.edit.*` (namespace from #5739).
 //
@@ -55,7 +57,7 @@ function seed(
   channelOver: Record<string, unknown> = {},
   serverOver: Record<string, unknown> = {},
   pinned: SidebarPinnedRef[] = [],
-  topbarOverflowEnabled = true,
+  channelToJointConversionEnabled = false,
 ) {
   const server = { id: "s1", slug: "s1", name: "S", role: "owner", plan: "pro", ...serverOver };
   useAuthStore.setState({ user: { id: "u1", name: "U" }, initialized: true } as never);
@@ -88,7 +90,11 @@ function seed(
       serverId: "s1", archivedAt: null, jointServers: [], ...channelOver,
     }],
   } as never);
-  setServerFeatureFlagForTests("s1", TOPBAR_OVERFLOW_FEATURE_FLAG_KEY, topbarOverflowEnabled);
+  setServerFeatureFlagForTests(
+    "s1",
+    CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
+    channelToJointConversionEnabled,
+  );
   return String(channelOver.name ?? PROBE_NAME);
 }
 
@@ -128,10 +134,27 @@ test("the default edit state renders in Chinese with no untranslated English", (
   renderZh(seed());
 
   const text = document.body.textContent ?? "";
-  for (const zh of ["设置", "名称", "描述", "保存更改", "取消"]) {
+  for (const zh of ["设置", "名称", "描述", "保存", "取消"]) {
     assert.ok(text.includes(zh), `dialog should render ${zh}`);
   }
   assertNoEnglish("the default edit state");
+});
+
+test("unlimited Guest Join hides all Server-wide limit usage", () => {
+  const name = seed({ guestVisible: true, guestJoinable: true });
+  useChannelStore.setState((state) => ({
+    channels: [
+      ...state.channels,
+      ...Array.from({ length: 4 }, (_, index) => ({
+        ...state.channels[0]!, id: `guest-${index}`, name: `guest-${index}`,
+      })),
+      { ...state.channels[0]!, id: "archived-guest", name: "archived-guest", archivedAt: "2026-09-15T00:00:00.000Z" },
+    ],
+  }));
+  setServerFeatureFlagForTests("s1", SERVER_GUEST_FEATURE_FLAG_KEY, true);
+  renderZh(name);
+  assert.equal(screen.queryByTestId("channel-settings-guest-joinable-usage"), null);
+  assert.doesNotMatch(document.body.textContent ?? "", /5\/5|上限|限额/);
 });
 
 test("the #all channel renders its Chinese rename hint", () => {
@@ -156,6 +179,7 @@ const CONFIRMS: Array<{
   trigger: string;
   expect: string;
   action: string;
+  flagOn?: boolean;
 }> = [
   { what: "archive", channel: {}, trigger: "归档频道", expect: "成员仍可阅读", action: "归档" },
   { what: "make private", channel: {}, trigger: "设为私密", expect: "未加入的服务器成员", action: "私密" },
@@ -175,15 +199,16 @@ const CONFIRMS: Array<{
     what: "convert to joint",
     channel: {},
     server: { slug: "botiverse" },
-    trigger: "转换为联合频道",
-    expect: "转换期间",
+    trigger: "转换",
+    expect: "转换后",
     action: "转换",
+    flagOn: true,
   },
 ];
 
 for (const c of CONFIRMS) {
   test(`the ${c.what} confirmation renders its message in Chinese`, () => {
-    renderZh(seed(c.channel, c.server));
+    renderZh(seed(c.channel, c.server, [], c.flagOn ?? false));
     fireEvent.click(screen.getByRole("button", { name: c.trigger }));
 
     const text = document.body.textContent ?? "";
@@ -212,37 +237,13 @@ test("the interpolated confirmations name the channel via ICU, not concatenation
     "channel.edit.confirmMakePublic",
     "channel.edit.confirmMakePrivate",
     "channel.edit.confirmLeave",
-    "channel.edit.confirmConvert",
+    "channel.edit.convertConfirmIntro",
     "channel.edit.confirmDisconnect",
     "channel.edit.confirmDelete",
   ]) {
     assert.match(en[id], /\{name\}/, `en ${id} needs {name}`);
     assert.match(zh[id], /\{name\}/, `zh ${id} needs {name}`);
   }
-});
-
-test("the task-identity drop sentence is one ICU plural message", () => {
-  // DECLARED GAP, narrowly: this string renders only when `taskIdentityDropPrompt`
-  // is set, and that state is written ONLY from the convert API's response body
-  // (`handleConvertToJoint`). There is no prop or context seam to reach it, so it
-  // stays catalog-only here; the render tooth belongs in e2e. Every OTHER confirm
-  // message above is click-covered.
-  //
-  // It was previously assembled from four JSX fragments around two {expr} holes
-  // plus an inline `? "" : "s"` — a sentence frame that cannot translate as a
-  // unit, and that neither scanner nor my sweep models even now.
-  const en = enMessages as Record<string, string>;
-  const zh = zhMessages as Record<string, string>;
-  const id = "channel.edit.taskIdentityDropCount";
-  for (const arg of ["{direct}", "{threads}"]) {
-    assert.ok(en[id].includes(arg), `en ${id} needs ${arg}`);
-    assert.ok(zh[id].includes(arg), `zh ${id} needs ${arg}`);
-  }
-  assert.match(en[id], /\{count, plural,/, "en must pluralize via ICU, not a ternary");
-  assert.match(zh[id], /\{count, plural,/, "zh must pluralize via ICU");
-  // zh has no plural distinction: a single `other` arm is correct, and an `one`
-  // arm copied over from English would be a mistranslation, not a nicety.
-  assert.ok(!/\bone\s*\{/.test(zh[id]), "zh must not carry an English `one` arm");
 });
 
 test("confirmation buttons use short action verbs instead of repeating dialog titles", () => {
@@ -379,22 +380,16 @@ test("name-validation errors are built entirely from the catalog", () => {
 // file already owns the EditChannelDialog render harness and store seeding.
 // ---------------------------------------------------------------------------
 
-test("the Pin action is visible for an ordinary unpinned channel", () => {
-  renderZh(seed({}, {}, [], false));
-  assert.ok(screen.getByRole("button", { name: "置顶" }), "Pin button must render");
-  assert.equal(screen.queryByRole("button", { name: "取消置顶" }), null, "Unpin button must not render");
-});
+for (const pinned of [false, true]) {
+  test(`the pin switch reflects pinned=${pinned}`, () => {
+    renderZh(seed({}, {}, pinned ? [{ kind: "channel", id: "c1" }] : []));
+    assert.equal(screen.getByTestId("channel-settings-pin-switch").getAttribute("aria-checked"), String(pinned));
+  });
+}
 
-test("the Unpin action is visible when the channel is already pinned", () => {
-  renderZh(seed({}, {}, [{ kind: "channel", id: "c1" }], false));
-  assert.ok(screen.getByRole("button", { name: "取消置顶" }), "Unpin button must render");
-  assert.equal(screen.queryByRole("button", { name: "置顶" }), null, "Pin button must not render");
-});
-
-test("the #all channel does not show Pin/Unpin", () => {
+test("the #all channel retains personal pin preferences", () => {
   renderZh(seed({ name: "all" }));
-  assert.equal(screen.queryByRole("button", { name: "置顶" }), null);
-  assert.equal(screen.queryByRole("button", { name: "取消置顶" }), null);
+  assert.equal(screen.getByTestId("channel-settings-pin-switch").getAttribute("aria-checked"), "false");
 });
 
 test("pinning a channel appends it to pinned refs and preserves unrelated refs", async () => {
@@ -409,7 +404,7 @@ test("pinning a channel appends it to pinned refs and preserves unrelated refs",
     return Promise.resolve({ data: {} });
   }) as typeof api.patch;
 
-  fireEvent.click(screen.getByRole("button", { name: "置顶" }));
+  fireEvent.click(screen.getByTestId("channel-settings-pin-switch"));
 
   await waitFor(() => assert.equal(patchedUrl, "/servers/s1/sidebar-order"));
   assert.deepEqual(
@@ -429,7 +424,7 @@ test("unpinning a channel removes only its ref and preserves unrelated refs", as
     return Promise.resolve({ data: {} });
   }) as typeof api.patch;
 
-  fireEvent.click(screen.getByRole("button", { name: "取消置顶" }));
+  fireEvent.click(screen.getByTestId("channel-settings-pin-switch"));
 
   await waitFor(() => {
     assert.deepEqual(
@@ -483,7 +478,7 @@ test("pinning tolerates a missing pinned array in the fixture", async () => {
     return Promise.resolve({ data: {} });
   }) as typeof api.patch;
 
-  fireEvent.click(screen.getByRole("button", { name: "置顶" }));
+  fireEvent.click(screen.getByTestId("channel-settings-pin-switch"));
 
   await waitFor(() => {
     assert.deepEqual(
@@ -493,3 +488,14 @@ test("pinning tolerates a missing pinned array in the fixture", async () => {
     );
   });
 });
+
+for (const conversionEnabled of [true, false]) {
+  test(`archived channel keeps an enabled restore action with conversion=${conversionEnabled}`, () => {
+    renderZh(seed({ archivedAt: "2026-09-01T00:00:00.000Z" }, {}, [], conversionEnabled));
+    const restore = screen.getByRole("button", { name: zhMessages["channel.edit.unarchiveChannel"] }) as HTMLButtonElement;
+    assert.equal(restore.disabled, false);
+    for (const label of ["channel.edit.archiveChannel", "channel.edit.deleteChannel", "channel.edit.leaveChannel"] as const) {
+      assert.equal(screen.queryByRole("button", { name: zhMessages[label], exact: true }), null);
+    }
+  });
+}

@@ -6,7 +6,7 @@
  * only the newest overlay request within that attempt may publish.
  */
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 
 import api from "../src/api/client";
 import { setActivityGateForTests } from "../src/store/activityPanel/runtime";
@@ -18,7 +18,7 @@ import { triggerServerReset } from "../src/store/serverResetRegistry";
 
 type TestFn = () => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn);
+  nodeTest(name,  fn);
 
 const originalGet = api.get;
 
@@ -121,6 +121,7 @@ for (const arrivalOrder of ["overlay-first", "main-first"] as const) {
 
     const state = useInboxStore.getState();
     assert.notEqual(state.acceptedWindowGeneration, "");
+    assert.equal(state.hasAcceptedWindow, true);
     assert.equal(state.unfollowedLoaded, true);
     assert.deepEqual(state.unfollowedItems, []);
     assert.equal(
@@ -130,6 +131,34 @@ for (const arrivalOrder of ["overlay-first", "main-first"] as const) {
     );
   });
 }
+
+test("a background reset preserves prior-window authority while its generation receipt is pending", async () => {
+  const main = deferred<ReturnType<typeof mainResponse>>();
+  api.get = (async (url: string) => {
+    if (url === "/channels/inbox") return main.promise;
+    throw new Error(`Unexpected GET ${url}`);
+  }) as typeof api.get;
+  useInboxStore.setState({
+    acceptedWindowGeneration: "accepted-before-refresh",
+    hasAcceptedWindow: true,
+    loaded: true,
+    totalUnreadCount: 0,
+    activeUnreadCount: 0,
+  });
+
+  const refresh = useInboxStore.getState().refreshInbox({ background: true });
+  assert.equal(useInboxStore.getState().acceptedWindowGeneration, "");
+  assert.equal(
+    useInboxStore.getState().hasAcceptedWindow,
+    true,
+    "invalidating the receipt must not erase the fact that a window was accepted",
+  );
+
+  main.resolve(mainResponse());
+  await refresh;
+  assert.notEqual(useInboxStore.getState().acceptedWindowGeneration, "");
+  assert.equal(useInboxStore.getState().hasAcceptedWindow, true);
+});
 
 for (const scenario of [
   {
@@ -207,6 +236,7 @@ test("real server reset and principal change synchronously invalidate BOTH pairi
 
   triggerServerReset();
   assert.equal(useInboxStore.getState().acceptedWindowGeneration, "");
+  assert.equal(useInboxStore.getState().hasAcceptedWindow, false);
   assert.equal(useInboxStore.getState().unfollowedWindowGeneration, null);
 
   useInboxStore.setState({
@@ -215,5 +245,6 @@ test("real server reset and principal change synchronously invalidate BOTH pairi
   });
   useMessageStore.getState().setCurrentUserId("user-b");
   assert.equal(useInboxStore.getState().acceptedWindowGeneration, "");
+  assert.equal(useInboxStore.getState().hasAcceptedWindow, false);
   assert.equal(useInboxStore.getState().unfollowedWindowGeneration, null);
 });

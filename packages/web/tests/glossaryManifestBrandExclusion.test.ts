@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { assign, displayText, parseCatalog, stripBrand } from "../scripts/build-glossary-manifest.mjs";
 

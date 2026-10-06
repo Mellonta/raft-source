@@ -1,4 +1,4 @@
-import type { SyncDomainConfig, SyncScopeId, SyncSnapshot } from "../types.js";
+import type { SyncDomainConfig, SyncScopeId, SyncSnapshot } from "../types";
 
 /**
  * Activity domain (RFC 043 + the Activity Sync contract v1).
@@ -18,7 +18,7 @@ export const ACTIVITY_DOMAIN = "activity";
 // The uint64 primitives moved to `../uint64.js` so the read-state path can
 // import them without pulling this whole domain into the web startup chunk
 // (module-identity gate). Re-exported here so existing importers are unchanged.
-import { compareUInt64String, isUInt64String, type UInt64String } from "../uint64.js";
+import { compareUInt64String, isUInt64String, type UInt64String } from "../uint64";
 
 export { compareUInt64String, isUInt64String, type UInt64String };
 

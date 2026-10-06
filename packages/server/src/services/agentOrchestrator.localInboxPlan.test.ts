@@ -1,7 +1,6 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
-import { planLocalInboxEnqueueAction } from "./agentOrchestrator.js";
+import { planLocalInboxEnqueueAction } from "./agentOrchestrator";
 
 test("planLocalInboxEnqueueAction enqueues when neither seq nor messageId is duplicated", () => {
   assert.equal(

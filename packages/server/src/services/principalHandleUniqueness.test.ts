@@ -1,12 +1,12 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { and, eq, isNull } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, serverMembers, users } from "../db/schema.js";
-import { createAgent } from "./agentService.js";
-import { addMember, createServer } from "./serverService.js";
+import { getDb } from "../db/index";
+import { agents, serverMembers, users } from "../db/schema";
+import { createAgent } from "./agentService";
+import { addMember, createServer } from "./serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -44,7 +44,7 @@ test("createAgent rejects reserved mention-like handles", async ({ app }) => {
   const owner = await seedUser("principal-reserved-owner@slock.test", "principal-reserved-owner");
   const server = await createServer("Principal Reserved", "principal-reserved", owner.id);
 
-  for (const name of ["all", "Human", "HUMANS", "agent", "Agents", "here", "Idle", "BUSY", "system"]) {
+  for (const name of ["all", "Human", "HUMANS", "agent", "Agents", "here", "Idle", "BUSY", "system", "reminders", "REMINDERS"]) {
     await assert.rejects(
       createAgent(server.id, name, { runtime: "codex" }),
       /is reserved\. Choose another name\./i,

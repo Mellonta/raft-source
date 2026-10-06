@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -8,7 +8,7 @@ import {
   isMobilePlatform,
   lookupLatestAsset,
   platformFromUserAgent,
-} from "./mobileDownload.js";
+} from "./mobileDownload";
 
 function jsonResponse(status: number, body: unknown): Response {
   return {
@@ -165,7 +165,7 @@ async function callRoute(
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => upstream()) as typeof fetch;
   try {
-    const { mobileDownloadRouter: router } = await import("./mobileDownload.js");
+    const { mobileDownloadRouter: router } = await import("./mobileDownload");
     app.use("/api/mobile-download", router);
     const server = app.listen(0);
     const address = server.address();

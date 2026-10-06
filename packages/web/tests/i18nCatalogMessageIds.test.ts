@@ -16,7 +16,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import test from "node:test";
 import {
   aggregateFindings,
   collectCurrentFindings,
@@ -313,7 +312,7 @@ test("collectCurrentFindings: temp root without en.ts stays GREEN via catalogMes
   }
 });
 
-test("real corpus: catalog MessageId filter drops exact 24 keys/33 hits (billing+workspace-grid+settings)", () => {
+test("real corpus: catalog MessageId filter drops exact 23 keys/30 hits (billing+workspace-grid+settings+agent profile)", () => {
   const catalog = loadCatalogMessageIdsFromPath(EN_CATALOG);
   const baseline = JSON.parse(readFileSync(BASELINE_PATH, "utf8")) as Array<{
     path: string;
@@ -344,11 +343,18 @@ test("real corpus: catalog MessageId filter drops exact 24 keys/33 hits (billing
     target: "src",
   });
 
-  assert.equal(droppedAgg.length, 24, `expected 24 filtered keys; got ${droppedAgg.length}`);
+  // Wiki retirement removes settingsNavigation SETTINGS_TABS label/title
+  // "wiki.settings": one aggregated key, two hits (24/33 -> 23/31).
+  // Agent profile edit dialogs (task #672) title each field through a MessageId
+  // map; "agent.detail.editDescription" is a catalog id there, not copy (24/32).
+  // messageStore's focused-context failure now picks its catalog id through a
+  // ternary (not-found vs beyond-history, task #14) instead of two object
+  // literal `contextLoadError:` values, retiring that key/2 hits (23/30).
+  assert.equal(droppedAgg.length, 23, `expected 23 filtered keys; got ${droppedAgg.length}`);
   assert.equal(
     droppedAgg.reduce((n, e) => n + e.count, 0),
-    33,
-    "expected 33 filtered hits",
+    30,
+    "expected 30 filtered hits",
   );
   assert.equal(
     droppedAgg.filter((e) => e.path === "src/components/agent/AgentScopesPanel.tsx").length,
@@ -364,7 +370,7 @@ test("real corpus: catalog MessageId filter drops exact 24 keys/33 hits (billing
   );
   assert.equal(
     droppedAgg.filter((e) => e.path === "src/components/settings/settingsNavigation.ts").length,
-    1,
+    0,
   );
   for (const entry of droppedAgg) {
     assert.equal(entry.rule, "formatjs/no-literal-string-in-object");
@@ -385,10 +391,28 @@ test("real corpus: catalog MessageId filter drops exact 24 keys/33 hits (billing
   // became a raft-ui <Input> for per-row invite roles, so its audited
   // `name@company.com` placeholder stopped being reported — the same intrinsic-only
   // effect recorded above for RuntimeConfigFields, ratcheting DOWN again.
-  assert.equal(current.length, 153, `final disposition baseline keys; got ${current.length}`);
+  // ReleaseNotesPanel's eight owner-managed literals moved into the catalogs.
+  // 180 -> 179 hits: MachineDetailPanel lost its raw-daemon version row (the
+  // standalone daemon has no release line any more), so one audited `v` prefix
+  // literal stopped being reported.
+  // ReleaseNotesPanel's owner-managed strings moved into the message catalogs (143/171),
+  // and the wave-2 title→Tooltip migration deleted HumanDetailPanel's redundant handle-span title
+  // `` `@${human.name}` `` (title == visible text), ratcheting down to 142 keys / 170 hits.
+  // 2026-09-24: 142 -> 138 keys / 170 -> 166 hits. 11fc52292 removed the dormant
+  // PostHog integration, deleting src/analytics/flagRegistry.ts ("Chat grid
+  // layout", "Sync-core messages", "Auto", "Feature flags") and two App.tsx
+  // entries. The baseline was pruned in that commit; only these counts were left.
+  // Task #41 deleted the separate Provider-connection select and its duplicate
+  // item literals; the one Provider selector now owns both saved and direct
+  // choices. Net after staging's own moves the corpus holds at 138 keys / 166 hits.
+  // 138 -> 137 keys / 166 -> 165 hits: the Computer upgrade copy rework renders
+  // the target inside the catalogued "Upgrade to v{version}" button label, so
+  // MachineDetailPanel's audited `(v` version-marker literal left the source.
+  assert.equal(current.length, 137, `final disposition baseline keys; got ${current.length}`);
   assert.equal(
     current.reduce((n, e) => n + e.count, 0),
-    182,
+    165,
+
     "final disposition baseline hits",
   );
   assert.equal(
@@ -407,7 +431,8 @@ test("real corpus: catalog MessageId filter drops exact 24 keys/33 hits (billing
     }),
   );
 
-  assert.equal(baseline.length, 153);
+  assert.equal(baseline.length, 137);
+
   assert.equal(
     baseline.filter((e) => e.path === "src/components/agent/AgentScopesPanel.tsx").length,
     0,

@@ -3,7 +3,6 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import type { ChildProcess } from "node:child_process";
 import {
   BasicTracer,
@@ -12,10 +11,11 @@ import {
   type AgentMessage,
   type MachineToServerMessage,
 } from "@botiverse/raft-shared";
-import { AgentProcessManager, resolveRuntimeSessionRef } from "./agentProcessManager.js";
-import { installDaemonFetchMockForTests } from "./daemonFetch.js";
-import { GrokDriver } from "./drivers/grok.js";
-import type { SpawnContext, SpawnResult } from "./drivers/types.js";
+import { AgentProcessManager, resolveRuntimeSessionRef } from "./agentProcessManager";
+import { installDaemonFetchMockForTests } from "./daemonFetch";
+import { GrokDriver } from "./drivers/grok";
+import type { SpawnContext, SpawnResult } from "./drivers/types";
+import { traceRows } from "./testing/traceRows";
 
 class FakeGrokChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -80,7 +80,9 @@ function makeGrokConfig(): AgentConfig {
     serverUrl: "https://daemon.example.com",
     authToken: "sk_machine_test",
     agentCredentialKey: "sk_agent_test",
-    agentCredentialId: "cred-test",
+    // No credential id by default: a stop would revoke it over the injected
+    // fetch, and tests that do not fake the server must not send anything.
+    agentCredentialId: null,
   };
 }
 
@@ -370,7 +372,7 @@ test("grok interaction lifecycle stays out of Activity and late completion canno
     assert.equal(ap.activityHeartbeat.kind, "inactive");
 
     assert.deepEqual(
-      sink.getAllSpans()
+      traceRows(sink)
         .filter((span) => span.name === "daemon.runtime.progress.activity.suppressed")
         .map((span) => ({
           outcome: span.attrs?.outcome,
@@ -513,10 +515,10 @@ test("grok response-first late concrete output cannot strand the next inbound be
     // the regression receipt is deterministic and does not depend on timers.
     (manager as any).sendStdinNotification("agent-1");
 
-    const routed = sink.getAllSpans()
+    const routed = traceRows(sink)
       .filter((span) => span.name === "daemon.agent.delivery.routed")
       .at(-1);
-    const notification = sink.getAllSpans()
+    const notification = traceRows(sink)
       .filter((span) => span.name === "daemon.agent.stdin_notification")
       .at(-1);
 
@@ -569,7 +571,7 @@ test("grok response-first late concrete output cannot strand the next inbound be
     assert.equal(driver.encodedCalls.at(-1)?.mode, "busy");
     assert.equal((driver.encodedCalls.at(-1)?.request as any)?.method, "_x.ai/interject");
     assert.equal(
-      sink.getAllSpans().some((span) => span.name === "daemon.agent.pending_delivery.flush_outcome"),
+      traceRows(sink).some((span) => span.name === "daemon.agent.pending_delivery.flush_outcome"),
       false,
       "a successful active-turn interject must not enter the closed-turn fallback",
     );
@@ -629,19 +631,19 @@ test("grok closed native turn flushes ordered notification debt once through idl
     assert.equal((driver.encodedCalls[1]?.request as any)?.method, "session/prompt");
     assert.match(String(((driver.encodedCalls[1]?.request as any)?.params as any)?.prompt?.[0]?.text), /2 unread messages/);
 
-    const reconciliation = sink.getAllSpans()
+    const reconciliation = traceRows(sink)
       .filter((span) => span.name === "daemon.agent.busy_delivery.readiness_reconciled")
       .at(-1);
     assert.equal(reconciliation?.attrs?.closed_reason, "no_active_turn");
     assert.equal(reconciliation?.attrs?.source, "busy_notification_attempt");
     assert.equal(reconciliation?.attrs?.pending_age_ms_bucket, "10-60s");
-    const flushOutcome = sink.getAllSpans()
+    const flushOutcome = traceRows(sink)
       .filter((span) => span.name === "daemon.agent.pending_delivery.flush_outcome")
       .at(-1);
     assert.equal(flushOutcome?.attrs?.closed_reason, "no_active_turn");
     assert.equal(flushOutcome?.attrs?.outcome, "written_idle");
     assert.equal(flushOutcome?.attrs?.pending_age_ms_bucket, "10-60s");
-    const newTraceJson = JSON.stringify(sink.getAllSpans().filter((span) =>
+    const newTraceJson = JSON.stringify(traceRows(sink).filter((span) =>
       span.name === "daemon.agent.busy_delivery.readiness_reconciled"
       || span.name === "daemon.agent.pending_delivery.flush_outcome"
     ));
@@ -702,7 +704,7 @@ test("grok notification timer debt that observes idle flushes as one idle prompt
     assert.deepEqual(driver.encodedCalls.map((call) => call.mode), ["idle", "idle"]);
     assert.equal((driver.encodedCalls[1]?.request as any)?.method, "session/prompt");
 
-    const flushOutcome = sink.getAllSpans()
+    const flushOutcome = traceRows(sink)
       .filter((span) => span.name === "daemon.agent.pending_delivery.flush_outcome")
       .at(-1);
     assert.equal(flushOutcome?.attrs?.trigger, "notification_timer_observed_idle");

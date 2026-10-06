@@ -1,17 +1,15 @@
 import {
   AGENT_MIGRATION_FEATURE_FLAG_KEY,
+  ANTIPROTON_HOSTED_RUNTIME_FEATURE_FLAG_KEY,
   CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY,
+  CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
   CHANNEL_MANAGER_ROLE_ACTIONS_FEATURE_FLAG_KEY,
   COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY,
   PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY,
   PUBLIC_SERVER_FEATURE_FLAG_KEY,
   SERVER_LABS_UI_FEATURE_FLAG_KEY,
-  RUNTIME_ACCOUNT_USAGE_FEATURE_FLAG_KEY,
-  THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY,
   SLACK_BRIDGE_FEATURE_FLAG_KEYS,
   SERVER_GUEST_FEATURE_FLAG_KEY,
-  TOPBAR_OVERFLOW_FEATURE_FLAG_KEY,
-  WIKI_FEATURE_FLAG_KEY,
   setClockTimeout,
 } from "@botiverse/raft-shared";
 import { useCallback, useSyncExternalStore } from "react";
@@ -26,26 +24,37 @@ export const SYNC_CORE_NOTIFICATION_PREFS_FLAG_KEY = "sync_core_notification_pre
 export const ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY = "attachment_comments_v0";
 export const READ_RECEIPTS_FEATURE_FLAG_KEY = "read_receipts_v0";
 export const ACTIVITY_SIDEBAR_INBOX_FLAG_KEY = "activity_sidebar_inbox_v0";
+/** Web remote Computer upgrade v2 (task #873). Default off: the upgrade button stays greyed. */
+export const REMOTE_COMPUTER_UPGRADE_V2_FLAG_KEY = "remote_computer_upgrade_v2";
+/** Create-agent form over runtime form protocol v2 (packages/runtime-form). Default off. */
+export const RUNTIME_FORM_V2_WEB_FLAG_KEY = "runtime_form_v2_web";
+/**
+ * RFC-067 "Share usage data" + workspace product-analytics switches in
+ * Settings. Default off: hidden until the default and the privacy-policy
+ * section are confirmed (#proj-analytics:63b84f03).
+ */
+export const PRODUCT_ANALYTICS_SETTINGS_FLAG_KEY = "product_analytics_settings_v0";
 
 const SERVER_FEATURE_FLAG_REGISTRY = {
   activitySidebarInbox: ACTIVITY_SIDEBAR_INBOX_FLAG_KEY,
   agentMigration: AGENT_MIGRATION_FEATURE_FLAG_KEY,
+  antiprotonHostedRuntime: ANTIPROTON_HOSTED_RUNTIME_FEATURE_FLAG_KEY,
   attachmentComments: ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
   chatGridLayout: CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY,
+  channelToJointConversion: CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
   channelManagerRoleActions: CHANNEL_MANAGER_ROLE_ACTIONS_FEATURE_FLAG_KEY,
   composerResourceReferences: COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY,
   readReceipts: READ_RECEIPTS_FEATURE_FLAG_KEY,
+  remoteComputerUpgradeV2: REMOTE_COMPUTER_UPGRADE_V2_FLAG_KEY,
+  runtimeFormV2Web: RUNTIME_FORM_V2_WEB_FLAG_KEY,
   providerConnections: PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY,
+  productAnalyticsSettings: PRODUCT_ANALYTICS_SETTINGS_FLAG_KEY,
   publicServer: PUBLIC_SERVER_FEATURE_FLAG_KEY,
-  runtimeAccountUsage: RUNTIME_ACCOUNT_USAGE_FEATURE_FLAG_KEY,
-  threadAgentFollowerManagement: THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY,
   serverLabsUi: SERVER_LABS_UI_FEATURE_FLAG_KEY,
   slackBridge: SLACK_BRIDGE_FEATURE_FLAG_KEYS.master,
   serverGuest: SERVER_GUEST_FEATURE_FLAG_KEY,
   syncCoreMessages: SYNC_CORE_MESSAGES_FLAG_KEY,
   syncCoreNotificationPrefs: SYNC_CORE_NOTIFICATION_PREFS_FLAG_KEY,
-  topbarOverflow: TOPBAR_OVERFLOW_FEATURE_FLAG_KEY,
-  wiki: WIKI_FEATURE_FLAG_KEY,
 } as const;
 
 export const REGISTERED_SERVER_FEATURE_FLAG_KEYS = Object.freeze(
@@ -55,6 +64,13 @@ export const REGISTERED_SERVER_FEATURE_FLAG_KEYS = Object.freeze(
 export type RegisteredServerFeatureFlagKey =
   (typeof REGISTERED_SERVER_FEATURE_FLAG_KEYS)[number];
 
+export type ServerFeatureFlagResolution = "loading" | "resolved" | "undetermined";
+export type ServerFeatureFlagState =
+  | "loading"
+  | "enabled"
+  | "disabled"
+  | "undetermined";
+
 type FeatureFlagEvaluateResponse = {
   evaluations: Array<{ key: string; enabled: boolean }>;
 };
@@ -62,12 +78,14 @@ type FeatureFlagEvaluateResponse = {
 export type ServerFeatureFlagSnapshot = Readonly<{
   serverId: string | null;
   resolved: boolean;
+  resolution: ServerFeatureFlagResolution;
   values: Readonly<Record<string, boolean>>;
 }>;
 
 const noServerSnapshot: ServerFeatureFlagSnapshot = Object.freeze({
   serverId: null,
   resolved: false,
+  resolution: "loading",
   values: Object.freeze({}),
 });
 
@@ -91,6 +109,7 @@ function unresolvedSnapshot(serverId: string): ServerFeatureFlagSnapshot {
   const created = Object.freeze({
     serverId,
     resolved: false,
+    resolution: "loading",
     values: disabledValues(),
   });
   snapshots.set(serverId, created);
@@ -110,6 +129,7 @@ function applyLabDerivedValues(snapshot: ServerFeatureFlagSnapshot): ServerFeatu
   return Object.freeze({
     serverId: snapshot.serverId,
     resolved: snapshot.resolved,
+    resolution: snapshot.resolution,
     values: Object.freeze({
       ...snapshot.values,
       ...derived,
@@ -152,7 +172,17 @@ async function evaluateRegisteredServerFeatureFlags(
   return Object.freeze({
     serverId,
     resolved: true,
+    resolution: "resolved",
     values: Object.freeze(values),
+  });
+}
+
+function undeterminedSnapshot(serverId: string): ServerFeatureFlagSnapshot {
+  return Object.freeze({
+    serverId,
+    resolved: true,
+    resolution: "undetermined",
+    values: disabledValues(),
   });
 }
 
@@ -191,18 +221,15 @@ function prefetchServerFeatureFlagsInternal(
   const request = evaluateRegisteredServerFeatureFlags(serverId).catch(async () => {
     await waitForRetryBackoff(requestRetryBackoffMs);
     if (generation !== requestGeneration || getServerGeneration(serverId) !== requestServerGeneration) {
-      return Object.freeze({
-        serverId,
-        resolved: true,
-        values: disabledValues(),
-      });
+      return undeterminedSnapshot(serverId);
     }
     return evaluateRegisteredServerFeatureFlags(serverId);
-  }).catch(() => Object.freeze({
-    serverId,
-    resolved: true,
-    values: disabledValues(),
-  })).then((snapshot) => {
+  }).catch(() => {
+    console.warn("[serverFeatureFlags] evaluation failed; keeping registered flags fail-closed", {
+      serverId,
+    });
+    return undeterminedSnapshot(serverId);
+  }).then((snapshot) => {
     if (generation === requestGeneration && getServerGeneration(serverId) === requestServerGeneration) publish(snapshot);
     return snapshot;
   }).finally(() => {
@@ -252,8 +279,23 @@ export function publishServerFeatureFlagValuesFromLabsReadback(
   publish(Object.freeze({
     serverId: readback.serverId,
     resolved: snapshot.resolved,
+    resolution: snapshot.resolution,
     values: Object.freeze(values),
   }));
+}
+
+export function readServerFeatureFlagState(
+  serverId: string | null | undefined,
+  key: RegisteredServerFeatureFlagKey,
+): ServerFeatureFlagState {
+  const snapshot = getServerFeatureFlagSnapshot(serverId);
+  const derived = serverId ? labDerivedValues.get(serverId) : undefined;
+  if (derived && Object.hasOwn(derived, key)) {
+    return derived[key] === true ? "enabled" : "disabled";
+  }
+  if (!snapshot.resolved) return "loading";
+  if (snapshot.resolution === "undetermined") return "undetermined";
+  return snapshot.values[key] === true ? "enabled" : "disabled";
 }
 
 export function readServerFeatureFlag(
@@ -267,7 +309,7 @@ export function readServerFeatureFlag(
 export function useServerFeatureFlag(
   key: RegisteredServerFeatureFlagKey,
   options: { prefetch?: boolean } = {},
-): { resolved: boolean; enabled: boolean } {
+): { resolved: boolean; enabled: boolean; state: ServerFeatureFlagState } {
   const serverId = useServerStore((state) => state.current?.id ?? null);
   const subscribe = useCallback((listener: () => void) => {
     const unsubscribe = subscribeServerFeatureFlags(listener);
@@ -283,6 +325,7 @@ export function useServerFeatureFlag(
   return {
     resolved: snapshot.resolved,
     enabled: snapshot.values[key] === true,
+    state: readServerFeatureFlagState(serverId, key),
   };
 }
 
@@ -311,6 +354,7 @@ export function setServerFeatureFlagForTests(
   publish(Object.freeze({
     serverId,
     resolved: true,
+    resolution: "resolved",
     values,
   }));
 }

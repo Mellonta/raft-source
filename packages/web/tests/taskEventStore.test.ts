@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import test from "node:test";
 import api from "../src/api/client";
 import { registerTaskRealtimeHandlers } from "../src/store/taskRealtimeSync";
 import { useTaskStore } from "../src/store/taskStore";
@@ -79,11 +78,11 @@ function resetTaskStore() {
   });
 }
 
-test("loadTasks preserves concurrent channel buckets while stale responses cannot pollute the classic projection", async (t) => {
+test("loadTasks preserves concurrent channel buckets while stale responses cannot pollute the classic projection", async () => {
   resetTaskStore();
   const channelOne = deferred<{ data: { tasks: Task[] } }>();
   const channelTwo = deferred<{ data: { tasks: Task[] } }>();
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     if (url === "/tasks/channel/channel-1") return channelOne.promise;
     if (url === "/tasks/channel/channel-2") return channelTwo.promise;
     throw new Error(`unexpected GET ${url}`);
@@ -191,12 +190,12 @@ test("task realtime patch upserts idempotently, respects current channel, and re
   }
 });
 
-test("observed task realtime updates queue one history refresh without remounting", async (t) => {
+test("observed task realtime updates queue one history refresh without remounting", async () => {
   resetTaskStore();
   const firstHistory = deferred<{ data: { events: TaskHistoryEvent[] } }>();
   const secondHistory = deferred<{ data: { events: TaskHistoryEvent[] } }>();
   let historyRequests = 0;
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     assert.equal(url, "/tasks/task-1/history");
     historyRequests += 1;
     return historyRequests === 1 ? firstHistory.promise : secondHistory.promise;
@@ -238,9 +237,9 @@ test("observed task realtime updates queue one history refresh without remountin
   }
 });
 
-test("loadServerTasks hydrates task-domain metadata and settles loading state", async (t) => {
+test("loadServerTasks hydrates task-domain metadata and settles loading state", async () => {
   resetTaskStore();
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     assert.equal(url, "/tasks/server");
     return {
       data: {
@@ -265,7 +264,7 @@ test("loadServerTasks hydrates task-domain metadata and settles loading state", 
   assert.equal(useTaskStore.getState().taskMessageIdByTaskId["task-5"], "message-5");
 });
 
-test("large server task hydration clones each metadata index at most once", async (t) => {
+test("large server task hydration clones each metadata index at most once", async () => {
   resetTaskStore();
   const tasks = Array.from({ length: 5_000 }, (_, index) => fullTask({
     id: `task-${index}`,
@@ -289,7 +288,7 @@ test("large server task hydration clones each metadata index at most once", asyn
   });
   useTaskStore.setState({ taskMetadataByMessageId, taskMessageIdByTaskId });
 
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     assert.equal(url, "/tasks/server");
     return { data: { tasks } };
   });
@@ -390,7 +389,7 @@ test("task removal evicts only the removed task metadata, even when the message 
   assert.equal(useTaskStore.getState().taskMessageIdByTaskId["task-other"], "message-other");
 });
 
-test("local task intents patch task metadata before any socket echo", async (t) => {
+test("local task intents patch task metadata before any socket echo", async () => {
   resetTaskStore();
   useTaskStore.setState({
     currentChannelId: "channel-1",
@@ -398,7 +397,7 @@ test("local task intents patch task metadata before any socket echo", async (t) 
     serverTasks: [fullTask({ id: "task-1", status: "todo", claimedByName: null })],
   });
 
-  t.mock.method(api, "patch", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "patch").mockImplementation(async (url: string, body?: unknown) => {
     if (url === "/tasks/task-1/status") {
       assert.deepEqual(body, { status: "done" });
       return { data: { task: fullTask({ id: "task-1", status: "done", completedAt: "2026-07-07T00:02:00.000Z" }) } };
@@ -411,11 +410,11 @@ test("local task intents patch task metadata before any socket echo", async (t) 
     }
     throw new Error(`unexpected PATCH ${url}`);
   });
-  t.mock.method(api, "delete", async (url: string) => {
+  vi.spyOn(api, "delete").mockImplementation(async (url: string) => {
     assert.equal(url, "/tasks/task-1");
     return { data: {} };
   });
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     assert.equal(url, "/tasks/convert-message");
     assert.deepEqual(body, { messageId: "message-convert" });
     return {
@@ -455,7 +454,7 @@ test("local task intents patch task metadata before any socket echo", async (t) 
   assert.deepEqual(useTaskStore.getState().tasks.map((task) => task.id), ["task-convert"]);
 });
 
-test("unassigned todo -> in_progress uses the authoritative claim/start transition", async (t) => {
+test("unassigned todo -> in_progress uses the authoritative claim/start transition", async () => {
   resetTaskStore();
   const unassigned = fullTask({ id: "task-1", status: "todo", claimedById: null, claimedAt: null });
   useTaskStore.setState({
@@ -465,7 +464,7 @@ test("unassigned todo -> in_progress uses the authoritative claim/start transiti
   });
 
   let patchCalls = 0;
-  t.mock.method(api, "patch", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "patch").mockImplementation(async (url: string, body?: unknown) => {
     patchCalls += 1;
     assert.equal(url, "/tasks/task-1/claim");
     assert.equal(body, undefined);
@@ -492,7 +491,7 @@ test("unassigned todo -> in_progress uses the authoritative claim/start transiti
   assert.equal(useTaskStore.getState().taskMetadataByMessageId["message-1"]?.status, "in_progress");
 });
 
-test("assigned todo -> in_progress remains an explicit status transition", async (t) => {
+test("assigned todo -> in_progress remains an explicit status transition", async () => {
   resetTaskStore();
   const assigned = fullTask({
     id: "task-1",
@@ -508,7 +507,7 @@ test("assigned todo -> in_progress remains an explicit status transition", async
     serverTasks: [assigned],
   });
 
-  t.mock.method(api, "patch", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "patch").mockImplementation(async (url: string, body?: unknown) => {
     assert.equal(url, "/tasks/task-1/status");
     assert.deepEqual(body, { status: "in_progress" });
     return {

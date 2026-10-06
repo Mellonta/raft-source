@@ -3,11 +3,10 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { test } from "vitest";
 
-import { runAttach } from "./attach.js";
-import { deriveDefaultComputerName } from "./paths.js";
-import { CliExit } from "./output.js";
+import { runAttach } from "./attach";
+import { deriveDefaultComputerName } from "./paths";
+import { CliExit } from "./output";
 
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
 

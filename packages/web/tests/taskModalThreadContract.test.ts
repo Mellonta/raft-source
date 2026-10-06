@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const strykerBackupRoot = () => {
@@ -23,18 +22,19 @@ test("tasks route opens task threads in a centered modal instead of the side pan
   assert.match(layoutSource, /import Modal from "\.\.\/Modal";/);
   assert.match(layoutSource, /const isTasksRoute = \/\\\/tasks\\\/\?\$\/\.test\(location\.pathname\);/);
   // The INVARIANT is unchanged: a task's thread opens as a centered modal with a
-  // backdrop. Only its PREDICATE broadened — it used to be `isTasksRoute`, which
-  // was a proxy for "this is a task" and meant the same task opened centered
-  // from the Tasks page and as a side panel from its own channel. One object
-  // must not get two containers based on where you clicked (@stdrc).
-  assert.match(layoutSource, /const renderTaskThreadPanel = \(\) => \{[\s\S]*<Modal onClose=\{closeThread\} closeOnBackdrop>[\s\S]*<ThreadPanelWrapper presentation="modal" \/>/);
-  assert.match(layoutSource, /threadIsTop && \(isTasksRoute \|\| openedAsTask\)[\s\S]*return renderTaskThreadPanel\(\);/);
-  // Teeth for the broadening itself: the route must no longer be the sole gate.
-  // Teeth for the broadening: the surface follows the caller's declared INTENT.
-  // Inferring "is the parent a task" conflated two actions on one message — the
-  // thread icon (replies, side panel) and the badge (open the task, modal) —
-  // so the thread icon started opening a modal. @stdrc msg=ef2492f5.
-  assert.match(layoutSource, /const openedAsTask = useThreadStore\(\(s\) => s\.openIntent === "task"\)/);
+  // backdrop. Its host mechanism changed with task #699: the modal owns an
+  // independent store slot (`taskModal`) and OVERLAYS the base surface instead
+  // of replacing it — the side thread underneath keeps its identity, mount,
+  // and scroll. The /tasks-route open* modal keeps closeThread; the slot
+  // overlay closes with closeTaskModal.
+  assert.match(layoutSource, /const renderTaskThreadPanel = \(onClose: \(\) => void\) => \{[\s\S]*<Modal onClose=\{onClose\} closeOnBackdrop>[\s\S]*<ThreadPanelWrapper presentation="modal" \/>/);
+  assert.match(layoutSource, /if \(threadIsTop && isTasksRoute\) \{[\s\S]*return <>\{renderTaskThreadPanel\(closeThread\)\}\{taskModalOverlay\}<\/>;/);
+  // Teeth for the slot: the task surface is predicated on the slot, not on
+  // intent inferred into the shared open* fields — the old `openedAsTask`
+  // predicate is what clobbered the side thread's identity (task #699).
+  assert.match(layoutSource, /const taskModalOpen = useThreadStore\(\(s\) => s\.taskModal !== null\)/);
+  assert.match(layoutSource, /const taskModalOverlay = taskModalOpen \? renderTaskThreadPanel\(closeTaskModal\) : null;/);
+  assert.doesNotMatch(layoutSource, /openedAsTask/);
   assert.doesNotMatch(layoutSource, /threadParentIsTask/);
   const messageItemSource = readSource("src/components/message/MessageItem.tsx");
   assert.match(messageItemSource, /openThread\(\{[\s\S]*?intent: "task",[\s\S]*?\}\)/,
@@ -73,10 +73,10 @@ test("tasks route uses rail-visible (md) breakpoint and mobile-modal at <md (no 
   // RightPanel tracks the md breakpoint (Rail visible) and only wraps in
   // <Modal> at md+; <md renders the panel directly as mobile-modal.
   assert.match(layoutSource, /matchMedia\("\(min-width: 768px\)"\)/);
-  assert.match(layoutSource, /const renderTaskThreadPanel = \(\) => \{[\s\S]*if \(railVisible\)[\s\S]*<Modal onClose=\{closeThread\} closeOnBackdrop>[\s\S]*<ThreadPanelWrapper presentation="modal" \/>[\s\S]*return <ThreadPanelWrapper presentation="mobile-modal" \/>[\s\S]*\};/);
-  assert.match(layoutSource, /if \(isContentRoute\) \{[\s\S]*if \(threadIsTop && openedAsTask\) \{[\s\S]*return renderTaskThreadPanel\(\);[\s\S]*if \(threadIsTop && searchSlotKind && searchSlotKind !== "thread"\)/,
-    "content master/detail routes must still open task-intent threads as task modals");
-  assert.match(layoutSource, /threadIsTop && \(isTasksRoute \|\| openedAsTask\)[\s\S]*return renderTaskThreadPanel\(\);/);
+  assert.match(layoutSource, /const renderTaskThreadPanel = \(onClose: \(\) => void\) => \{[\s\S]*if \(railVisible\)[\s\S]*<Modal onClose=\{onClose\} closeOnBackdrop>[\s\S]*<ThreadPanelWrapper presentation="modal" \/>[\s\S]*return <ThreadPanelWrapper presentation="mobile-modal" \/>[\s\S]*\};/);
+  assert.match(layoutSource, /if \(isContentRoute\) \{[\s\S]*return <>\{base\}\{taskModalOverlay\}<\/>;/,
+    "content master/detail routes compose the task modal over the base surface");
+  assert.match(layoutSource, /if \(threadIsTop && isTasksRoute\) \{[\s\S]*return <>\{renderTaskThreadPanel\(closeThread\)\}\{taskModalOverlay\}<\/>;/);
   assert.match(layoutSource, /isTasksRoute && legacyTaskOpen[\s\S]*if \(railVisible\)[\s\S]*<Modal onClose=\{closeLegacyTask\} closeOnBackdrop>[\s\S]*<LegacyTaskPanelWrapper presentation="modal" \/>[\s\S]*return <LegacyTaskPanelWrapper presentation="mobile-modal" \/>/);
 
   // mobile-modal CSS: absolute full-screen sheet (no Modal wrapper) with a
@@ -84,12 +84,12 @@ test("tasks route uses rail-visible (md) breakpoint and mobile-modal at <md (no 
   // Lives on the ThreadPanelWrapper in MainLayout post-2026-05-28 column /
   // surface split; LegacyTaskPanel still owns its own per-presentation
   // panelClassName ternary (parallel refactor not in this PR's scope).
-  assert.match(layoutSource, /presentation === "mobile-modal"[\s\S]*"absolute inset-0 z-30 flex flex-col bg-white"[\s\S]*data-testid="task-thread-modal"[\s\S]*<TaskModalBar task=\{hostTask\} onClose=\{mobileTaskBack\} mobile \/>[\s\S]*<ThreadPanel[\s\S]*presentation="mobile-modal"/);
-  assert.match(layoutSource, /const mobileTaskBack = useMobileBack\(closeThread, closeThread\)/,
+  assert.match(layoutSource, /presentation === "mobile-modal"[\s\S]*"absolute inset-0 z-30 flex flex-col bg-layer-panel theme-brutal:bg-white"[\s\S]*data-testid="task-thread-modal"[\s\S]*<TaskModalBar task=\{hostTask\} onClose=\{mobileTaskBack\} mobile \/>[\s\S]*<ThreadPanel[\s\S]*presentation="mobile-modal"/);
+  assert.match(layoutSource, /const mobileTaskBack = useMobileBack\(closeSurface, closeSurface\)/,
     "mobile task Back must close synchronously before consuming its history PUSH");
   assert.match(layoutSource, /data-testid="task-modal-mobile-back"[\s\S]*<ArrowLeft size=\{14\}/,
     "the full-height task sheet needs an explicit visible back affordance");
-  assert.match(legacyTaskSource, /presentation === "mobile-modal"\s*\?\s*"absolute inset-0 z-30 flex flex-col bg-white"/);
+  assert.match(legacyTaskSource, /presentation === "mobile-modal"\s*\?\s*"absolute inset-0 z-30 flex flex-col bg-layer-canvas"/);
 });
 
 // X close button visibility per stdrc 2026-05-21 #proj-task:287f18ce
@@ -98,27 +98,20 @@ test("tasks route uses rail-visible (md) breakpoint and mobile-modal at <md (no 
 //   mobile-modal — NO X (full-screen overlay; back chevron is the close)
 //   side         — X on desktop only (`hidden lg:flex`)
 //
-// Also pins the flag-off View-in-channel fallback to the same size-7 icon
-// shape used by the flag-on thread action menu, plus the back-chevron
-// breakpoint flip between side (lg) and modal / mobile-modal (md).
-test("X close visibility is modal-only / non-mobile-modal, View-in-channel stays a size-7 icon fallback", () => {
+test("X close visibility is modal-only / non-mobile-modal", () => {
   const threadSource = readSource("src/components/message/ThreadPanel.tsx");
   const legacyTaskSource = readSource("src/components/task/LegacyTaskPanel.tsx");
 
   // X close button skipped only in mobile-modal — modal and side both render it.
   // Click handler is `handleClose` (= onClose ?? closeThread) so embedding
   // hosts (e.g. /search col-3) can layer extra teardown on top of closeThread.
-  assert.match(threadSource, /const showCloseButton = presentation !== "mobile-modal";[\s\S]*\{showCloseButton && \(\s*<button[\s\S]*onClick=\{handleClose\}[\s\S]*<X size=\{14\}/);
+  assert.match(threadSource, /const showCloseButton = presentation !== "mobile-modal";[\s\S]*\{showCloseButton && \(\s*<Tooltip[\s\S]*?<CloseButton[\s\S]*onClick=\{handleClose\}[\s\S]*<X size=\{14\}/);
   assert.match(legacyTaskSource, /\{presentation !== "mobile-modal" && \([\s\S]*onClick=\{handleClose\}[\s\S]*<X size=\{14\}/);
 
   // closeButtonClassName: modal → always flex; side → hidden lg:flex.
-  assert.match(threadSource, /const closeButtonClassName = presentation === "modal"\s*\?\s*"btn-brutal-sm flex size-7 items-center justify-center bg-white"\s*:\s*"btn-brutal-sm hidden size-7 items-center justify-center bg-white lg:flex"/);
-  assert.match(legacyTaskSource, /const closeButtonClassName = presentation === "modal"\s*\?\s*"btn-brutal-sm flex size-7 items-center justify-center bg-white"\s*:\s*"btn-brutal-sm hidden size-7 items-center justify-center bg-white lg:flex"/);
+  assert.match(threadSource, /const closeButtonClassName = presentation === "modal"\s*\?\s*"flex size-7 items-center justify-center"\s*:\s*"hidden size-7 items-center justify-center lg:flex"/);
+  assert.match(legacyTaskSource, /const closeButtonClassName = presentation === "modal"\s*\?\s*"flex size-7 items-center justify-center"\s*:\s*"hidden size-7 items-center justify-center lg:flex"/);
 
-  // task #187 moves View-in-channel into the ellipsis menu when the flag is
-  // on; the flag-off fallback therefore stays a compact icon at every width.
-  assert.match(threadSource, /className="btn-brutal-sm flex size-7 shrink-0 items-center justify-center bg-white"[\s\S]*data-testid="thread-view-in-channel"/);
-  assert.doesNotMatch(threadSource, /data-testid="thread-view-in-channel"[\s\S]{0,240}sm:w-auto/);
 
   // Back chevron breakpoint: side → lg, modal / mobile-modal → md.
   assert.match(threadSource, /mobileBreakpoint=\{presentation === "side" \? "lg" : "md"\}/);

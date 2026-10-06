@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createIntl } from "react-intl";
 
 import { zhCn as zhMessages } from "../src/i18n/messages/zh-cn";

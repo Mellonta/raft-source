@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { buildAgentLifecycleStateSnapshot, planActivitySignalAction } from "./agentOrchestrator.js";
+import { buildAgentLifecycleStateSnapshot, planActivitySignalAction } from "./agentOrchestrator";
 
 function activityInput(input: Parameters<typeof buildAgentLifecycleStateSnapshot>[0]) {
   return { state: buildAgentLifecycleStateSnapshot(input) };

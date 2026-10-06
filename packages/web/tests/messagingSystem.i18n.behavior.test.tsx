@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createIntl } from "react-intl";
 
 import { buildSystemMessageRenderStates } from "../src/components/message/systemMessageGrouping";

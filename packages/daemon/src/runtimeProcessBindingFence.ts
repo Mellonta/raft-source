@@ -2,7 +2,7 @@ import type {
   ParsedEvent,
   RuntimeSendResult,
   RuntimeSession,
-} from "./drivers/index.js";
+} from "./drivers/index";
 
 export interface RuntimeBindingProcess {
   readonly runtime: RuntimeSession;

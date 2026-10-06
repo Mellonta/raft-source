@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { createElement } from "react";
 import type { ReactElement } from "react";
@@ -123,10 +122,10 @@ test("AddMembersDialog uses the member-list surface and submits only candidates 
   assert.equal(screen.getByText("Wug").textContent, "Wug");
   assert.equal(screen.getByText("Mei").textContent, "Mei");
   assert.ok(shell.querySelector('[data-channel-member-avatar-badge-shell="true"]'));
-  assert.match(screen.getByText("Wug").closest(".group")?.className ?? "", /hover:bg-soft-signal\/30/);
+  assert.match(screen.getByText("Wug").closest(".group")?.className ?? "", /hover:bg-fill-muted/);
 
   const removeMei = screen.getByRole("button", { name: "Remove Mei from add list" });
-  assert.match(removeMei.className, /bg-brutal-red\/20/);
+  assert.match(removeMei.className, /bg-danger-soft/);
   assert.equal(removeMei.querySelector("svg")?.getAttribute("width"), "12");
   fireEvent.click(removeMei);
 
@@ -184,11 +183,13 @@ test("channel member role UI hides Member and swaps Channel Admin for hover acti
   assert.match((trailing.children[0] as HTMLElement).className, /group-hover:invisible/);
   assert.match((trailing.children[1] as HTMLElement).className, /group-hover:visible/);
   const hoverActions = screen.getByTestId("channel-member-hover-actions");
-  assert.equal(hoverActions.textContent, "DemoteRemove");
+  assert.equal(hoverActions.textContent, "Demote");
   assert.match(hoverActions.className, /items-center/);
   const roleAction = screen.getByTestId("channel-member-role-action");
   const removeAction = screen.getByRole("button", { name: "Remove Mei" });
-  assert.equal(removeAction.textContent, "Remove");
+  // Icon-only now: the action carries no text, just its glyph and label.
+  assert.equal(removeAction.textContent, "");
+  assert.ok(removeAction.querySelector("svg"), "remove action renders its icon");
   assert.match(roleAction.className, /h-7/);
   assert.match(removeAction.className, /h-7/);
   assert.doesNotMatch(removeAction.className, /(?:^|\s)mt-1(?:\s|$)/);

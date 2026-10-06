@@ -1,5 +1,5 @@
-import { dbTest as test } from "../../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../../test/integration/database.js";
+import { dbTest as test } from "../../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../../test/integration/database";
 /**
  * Recurring reminder slot-anchor correctness (task #806).
  *
@@ -22,13 +22,12 @@ import { closeTestDatabase, openTestDatabase } from "../../test/integration/data
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../../db/index.js";
-import { agents, reminderEvents, reminders, servers, users } from "../../db/schema.js";
-import type { Recurrence } from "../../services/recurrence.js";
-import { createReminder, fireReminder, FIRE_DUE_TOLERANCE_MS, type TimeProvider } from "./service.js";
+import { getDb } from "../../db/index";
+import { agents, reminderEvents, reminders, servers, users } from "../../db/schema";
+import type { Recurrence } from "../../services/recurrence";
+import { createReminder, fireReminder, FIRE_DUE_TOLERANCE_MS, type TimeProvider } from "./service";
 
 
 afterEach(async () => {

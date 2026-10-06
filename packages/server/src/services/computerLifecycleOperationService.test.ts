@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { dbTest as test } from "../test/integration/dbTest.js";
+import { dbTest as test } from "../test/integration/dbTest";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { getDb } from "../db/index";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import {
   agentActivityEvents,
   agents,
@@ -13,7 +13,7 @@ import {
   machines,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   createUserComputerLifecycleOperation,
   expirePendingComputerLifecycleOperations,
@@ -24,7 +24,7 @@ import {
   projectTerminalComputerLifecycleActivity,
   reduceComputerLifecycleTerminal,
   resolveComputerLifecycleOperationId,
-} from "./computerLifecycleOperationService.js";
+} from "./computerLifecycleOperationService";
 
 const now = new Date("2026-07-10T00:00:00Z");
 

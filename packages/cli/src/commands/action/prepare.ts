@@ -43,14 +43,16 @@ import type { Command } from "commander";
 
 import { actionCardActionSchema, validateActionCardAction } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { applyDmPeerKind, PEER_KIND_OPTION } from "../_target";
 
 interface PrepareOpts {
   target: string;
+  peerKind?: string;
 }
 
 const ACTION_HEREDOC_DELIMITER = "RAFTACTION";
@@ -110,12 +112,14 @@ export const actionPrepareCommand = defineCommand(
         flags: "--target <target>",
         description: "Channel/DM/thread target to post the card. Same format as raft message send: '#channel', 'dm:@peer', '#channel:shortid', 'dm:@peer:shortid'",
       },
+      PEER_KIND_OPTION,
     ],
   },
   async (ctx, opts: PrepareOpts) => {
       if (!opts.target?.trim()) {
         throw cliError("INVALID_ARG", "--target is required");
       }
+      const target = opts.peerKind === undefined ? opts.target : applyDmPeerKind(opts.target.trim(), opts.peerKind);
 
       const agentContext = ctx.loadAgentContext();
       let raw: unknown;
@@ -140,7 +144,7 @@ export const actionPrepareCommand = defineCommand(
 
       const client = ctx.createApiClient(agentContext);
       const agentApi = createAgentApiSurfaceClient(client);
-      const res = await agentApi.actions.prepare({ target: opts.target, action: parsed.data });
+      const res = await agentApi.actions.prepare({ target, action: parsed.data });
       if (!res.ok) {
         const code = res.status >= 500 ? "SERVER_5XX" : "PREPARE_FAILED";
         throw cliError(code, res.error ?? `HTTP ${res.status}`);
@@ -152,8 +156,8 @@ export const actionPrepareCommand = defineCommand(
       const shortId = data.messageId ? data.messageId.slice(0, 8) : null;
       writeText(ctx.io, adoptCliReplyText(
         shortId
-          ? `Action card posted to ${opts.target} as message ${data.messageId} (short ${shortId}). The human can click the action verb to commit.\n`
-          : `Action card posted to ${opts.target}.\n`,
+          ? `Action card posted to ${target} as message ${data.messageId} (short ${shortId}). The human can click the action verb to commit.\n`
+          : `Action card posted to ${target}.\n`,
       ));
   },
 );

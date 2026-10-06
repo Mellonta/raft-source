@@ -1,27 +1,27 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import MentionLink from "../src/components/message/MentionLink";
 import { useAuthStore } from "../src/store/authStore";
 
-// Independent of `MSG_REF_CHIP` in product source. If the production
-// constant shrinks, this expected set must still fail the rendered chip.
+// Independent of the product constant — this pins the RENDERED chip box.
+// Since raft-ui 0.5.15 the box layout (inline-flex / gap / truncate / padding)
+// comes from the RUI message-reference recipe; since 0.5.16 (#319) the recipe
+// also owns size and the text-baseline alignment. MentionLink adds nothing to
+// the box: task #708 measured that a local `align-middle` override sank every
+// @mention 1.3px below the surrounding text (Brutal 1.55px). Vertical
+// alignment is a layout fact jsdom cannot see — it is pinned in a real
+// browser by tests/e2e/tests/message/mention-baseline.spec.ts.
 const EXPECTED_SELF_MENTION_BOX_TOKENS = [
-  "inline-block",
+  "inline-flex",
   "max-w-full",
-  "overflow-hidden",
-  "text-ellipsis",
-  "whitespace-nowrap",
-  "align-bottom",
+  "truncate",
   "border",
-  "border-black",
   "px-1",
   "py-0",
-  "[font-size:0.875em]",
-  "font-bold",
-  "leading-[1.3em]",
+  "[font-size:inherit]",
+  "leading-[1.2em]",
   "select-text",
 ] as const;
 
@@ -49,8 +49,8 @@ test("self mention uses the inbox mention-you yellow treatment", () => {
   const chip = screen.getByText("@self");
   assert.match(
     chip.className,
-    /(^|\s)bg-soft-signal(\s|$)/,
-    "self mention must keep the yellow mention-you fill",
+    /(^|\s)bg-primary(\s|$)/,
+    "self mention must use the semantic primary-soft fill",
   );
   for (const token of EXPECTED_SELF_MENTION_BOX_TOKENS) {
     assert.match(

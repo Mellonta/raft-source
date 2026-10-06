@@ -1,15 +1,14 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   agents,
   channels,
@@ -18,12 +17,12 @@ import {
   externalAppCredentials,
   externalAppIngressEndpoints,
   externalAppInstallGrantReceipts,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalAppManifestReceipts,
   externalAppRegistrations,
   externalAppRegistrationSecrets,
   externalAppServerGrants,
-  externalAuthorPolicies,
   externalChannelBindings,
   externalOutboundDeliveries,
   featureFlags,
@@ -31,12 +30,11 @@ import {
   oauthClientInstalls,
   oauthClients,
   users,
-} from "../db/schema.js";
-import { updateFeatureFlag } from "./featureFlagService.js";
-import { setExternalAuthorPolicyState } from "./externalAppControlPlaneService.js";
-import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService.js";
-import { createServer } from "./serverService.js";
-import { broadcastAndDeliver, drainSenderReadReceiptsForTests } from "./messageService.js";
+} from "../db/schema";
+import { updateFeatureFlag } from "./featureFlagService";
+import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService";
+import { createServer } from "./serverService";
+import { broadcastAndDeliver, drainSenderReadReceiptsForTests } from "./messageService";
 import {
   createSlackBridgeLocalRuntimeFromEnv,
   observeSlackBridgeLocalManifestAuthorityFromEnv,
@@ -47,7 +45,7 @@ import {
   type SlackBridgeLocalOutboundBootstrapInput,
   type SlackBridgeLocalManifestAuthorityInput,
   type SlackBridgeLocalRealAuthorityInput,
-} from "./slackBridgeLocalRuntime.js";
+} from "./slackBridgeLocalRuntime";
 
 
 const NOW = new Date("2026-08-06T08:30:00.000Z");
@@ -122,7 +120,6 @@ async function writeRuntimeConfig(input: {
         bindingId: input.bindingId,
         connectionEpoch: 1,
         bindingEpoch: 1,
-        consentRevision: 1,
         level: "top_level",
         membership: {
           registrationId: input.registrationId,
@@ -287,6 +284,16 @@ async function fixture() {
     providerBotId: "B_REAL_AUTHORITY",
     lastVerifiedAt: NOW,
   }).returning();
+  await db.insert(externalAppInstallServerGrants).values({
+    installId: install.id,
+    serverId: server.id,
+    registrationId: registration.id,
+    serverGrantId: grant.id,
+    grantEpoch: grant.grantEpoch,
+    state: "active",
+    authorizedByType: "human",
+    authorizedById: owner.id,
+  });
   await db.insert(externalAppCredentials).values({
     installId: install.id,
     state: "active",
@@ -335,21 +342,6 @@ async function fixture() {
     consentedById: owner.id,
     consentedAt: new Date(NOW.getTime() - 60_000),
   }).returning();
-  const [authorPolicy] = await db.insert(externalAuthorPolicies).values({
-    serverId: server.id,
-    provider: "slack",
-    appRegistrationId: registration.id,
-    installId: install.id,
-    bindingId: binding.id,
-    bindingEpoch: 1,
-    authorType: "user",
-    authorId: owner.id,
-    displayName: owner.displayName!,
-    fallbackKind: "human",
-    consentRevision: 1,
-    state: "granted",
-  }).returning();
-
   const actorInputs = [
     { externalActorId: "U_ALICE", displayName: "Alice Current", handles: ["alice"], actorKind: "human" as const },
     { externalActorId: "U_BOB", displayName: "Bob Current", handles: ["bob"], actorKind: "guest" as const },
@@ -427,7 +419,6 @@ async function fixture() {
     bindingEpoch: 1,
     memberRevision: 2,
     contextRevision: 2,
-    consentRevision: 1,
     observedAt: NOW.toISOString(),
     expiresAt: EXPIRES.toISOString(),
     actors: actorInputs.map((actor) => ({ ...actor, projectionRevision: 2 })),
@@ -444,7 +435,6 @@ async function fixture() {
     registration,
     install,
     binding,
-    authorPolicy,
     actors,
     file,
     packet,
@@ -452,163 +442,6 @@ async function fixture() {
     baselineChannelCount,
   };
 }
-
-test("real-authority preparation keeps frozen display fail-closed until an explicit policy update", async () => {
-  const surface = await fixture();
-  try {
-    await replaceSlackBridgeLocalRealAuthorityFromEnv(surface.packet, surface.env, {
-      db: surface.db,
-      now: () => NOW,
-    });
-    const renamedDisplayName = "Renamed Real Authority Owner";
-    await surface.db.update(users).set({ displayName: renamedDisplayName })
-      .where(eq(users.id, surface.owner.id));
-    const renewedObservedAt = new Date(NOW.getTime() + 30 * 60_000);
-    const renewedExpiresAt = new Date(renewedObservedAt.getTime() + 60 * 60_000);
-    const renewedPacket: SlackBridgeLocalRealAuthorityInput = {
-      ...surface.packet,
-      observedAt: renewedObservedAt.toISOString(),
-      expiresAt: renewedExpiresAt.toISOString(),
-    };
-    const beforePolicy = (await surface.db.select().from(externalAuthorPolicies))[0]!;
-    const beforeActors = await surface.db.select().from(externalActorProjections);
-    await assert.rejects(
-      replaceSlackBridgeLocalRealAuthorityFromEnv(renewedPacket, surface.env, {
-        db: surface.db,
-        now: () => renewedObservedAt,
-      }),
-      /author policy display name mismatch/,
-    );
-    assert.deepEqual(
-      (await surface.db.select().from(externalAuthorPolicies))[0],
-      beforePolicy,
-      "freshness renewal cannot silently refresh a frozen author identity",
-    );
-    assert.deepEqual(
-      (await surface.db.select().from(externalActorProjections)).map((actor) => actor.observedAt),
-      beforeActors.map((actor) => actor.observedAt),
-      "the rejected renewal cannot partially advance provider freshness",
-    );
-
-    const policyUpdate = await setExternalAuthorPolicyState({
-      serverId: surface.channel.serverId,
-      requestingUserId: surface.owner.id,
-      authority: {
-        provider: "slack",
-        registrationId: surface.registration.id,
-        installId: surface.install.id,
-        bindingId: surface.binding.id,
-        bindingEpoch: surface.binding.bindingEpoch,
-        consentRevision: surface.packet.consentRevision,
-      },
-      authorType: "user",
-      authorId: surface.owner.id,
-      state: "granted",
-    }, surface.db);
-    assert.equal(policyUpdate.created, false);
-    assert.equal(policyUpdate.policy.id, surface.authorPolicy.id);
-    assert.equal(policyUpdate.policy.displayName, renamedDisplayName);
-    const receipt = await replaceSlackBridgeLocalRealAuthorityFromEnv(renewedPacket, surface.env, {
-      db: surface.db,
-      now: () => renewedObservedAt,
-    });
-    assert.equal(receipt.authorPolicyCount, 1);
-    const policies = await surface.db.select().from(externalAuthorPolicies);
-    assert.equal(policies.length, 1, "the explicit control-plane update preserves the unique policy");
-    assert.equal(policies[0]!.id, surface.authorPolicy.id);
-    assert.equal(policies[0]!.displayName, renamedDisplayName);
-
-    const afterRuntime = await createSlackBridgeLocalRuntimeFromEnv(surface.env, {
-      db: surface.db,
-      now: () => renewedObservedAt,
-      runWorkerOnce: async () => ({ kind: "empty" as const }),
-    });
-    assert.ok(afterRuntime);
-    afterRuntime.start();
-    const committed = await broadcastAndDeliver(createIo(), noopOrchestrator, {
-      channelId: surface.channel.id,
-      senderType: "user",
-      senderId: surface.owner.id,
-      senderName: renamedDisplayName,
-      content: "prepared outbound",
-      randomId: "real-authority-display-preparation-green",
-    });
-    await afterRuntime.stop();
-    const deliveries = await surface.db.select().from(externalOutboundDeliveries);
-    assert.equal((await surface.db.select().from(messages)).length, 1);
-    assert.equal(deliveries.length, 1);
-    assert.equal(deliveries[0]!.sourceMessageId, committed.id);
-  } finally {
-    await surface.file.cleanup();
-  }
-});
-
-test("real-authority runtime starts before the first outbound author policy is granted", async () => {
-  const surface = await fixture();
-  try {
-    await surface.db.delete(externalAuthorPolicies)
-      .where(eq(externalAuthorPolicies.id, surface.authorPolicy.id));
-    const receipt = await replaceSlackBridgeLocalRealAuthorityFromEnv(surface.packet, surface.env, {
-      db: surface.db,
-      now: () => NOW,
-    });
-    assert.equal(receipt.authorPolicyCount, 0);
-
-    const runtime = await createSlackBridgeLocalRuntimeFromEnv(surface.env, {
-      db: surface.db,
-      now: () => NOW,
-      runWorkerOnce: async () => ({ kind: "empty" as const }),
-    });
-    assert.ok(runtime);
-    runtime.start();
-    await runtime.stop();
-  } finally {
-    await surface.file.cleanup();
-  }
-});
-
-test("real-authority runtime accepts independent Human and Agent author policies", async () => {
-  const surface = await fixture();
-  try {
-    const [agent] = await surface.db.insert(agents).values({
-      serverId: surface.channel.serverId,
-      name: `real-authority-agent-${randomUUID().slice(0, 8)}`,
-      displayName: "Real Authority Agent",
-      status: "active",
-    }).returning();
-    await surface.db.insert(externalAuthorPolicies).values({
-      serverId: surface.channel.serverId,
-      provider: "slack",
-      appRegistrationId: surface.registration.id,
-      installId: surface.install.id,
-      bindingId: surface.binding.id,
-      bindingEpoch: 1,
-      authorType: "agent",
-      authorId: agent.id,
-      displayName: agent.displayName!,
-      fallbackKind: "agent",
-      consentRevision: 1,
-      state: "granted",
-    });
-
-    const receipt = await replaceSlackBridgeLocalRealAuthorityFromEnv(surface.packet, surface.env, {
-      db: surface.db,
-      now: () => NOW,
-    });
-    assert.equal(receipt.authorPolicyCount, 2);
-    const runtime = await createSlackBridgeLocalRuntimeFromEnv(surface.env, {
-      db: surface.db,
-      now: () => NOW,
-      runWorkerOnce: async () => ({ kind: "empty" as const }),
-    });
-    assert.ok(runtime);
-    runtime.start();
-    await runtime.stop();
-  } finally {
-    await surface.file.cleanup();
-  }
-});
-
 test("real-authority accepts only an existing canonical thread target under the bound Raft channel", async () => {
   const surface = await fixture();
   try {
@@ -672,19 +505,6 @@ test("real-authority accepts only an existing canonical thread target under the 
     });
     assert.ok(runtime);
     runtime.start();
-    assert.ok(runtime.resolveAuthorPolicyAuthority);
-    assert.deepEqual(await runtime.resolveAuthorPolicyAuthority({
-      serverId: surface.channel.serverId,
-      bindingId: surface.binding.id,
-      now: NOW,
-    }), {
-      provider: "slack",
-      registrationId: surface.registration.id,
-      installId: surface.install.id,
-      bindingId: surface.binding.id,
-      bindingEpoch: 1,
-      consentRevision: 1,
-    }, "top-level and thread carriers with one authority resolve one author-policy grant");
     const reply = await broadcastAndDeliver(createIo(), noopOrchestrator, {
       channelId: thread!.id,
       senderType: "user",
@@ -703,7 +523,7 @@ test("real-authority accepts only an existing canonical thread target under the 
     const consistentConfigBytes = await readFile(surface.file.path, "utf8");
     const divergentConfig = await surface.file.read();
     delete divergentConfig.realAuthority;
-    divergentConfig.outbound!.bindings[1]!.consentRevision = 2;
+    divergentConfig.outbound!.bindings[1]!.membership.receiptRevision = 3;
     await writeFile(surface.file.path, JSON.stringify(divergentConfig), { mode: 0o600 });
     const divergentRuntime = await createSlackBridgeLocalRuntimeFromEnv(surface.env, {
       db: surface.db,
@@ -711,12 +531,6 @@ test("real-authority accepts only an existing canonical thread target under the 
       runWorkerOnce: async () => ({ kind: "empty" as const }),
     });
     assert.ok(divergentRuntime);
-    assert.ok(divergentRuntime.resolveAuthorPolicyAuthority);
-    assert.equal(await divergentRuntime.resolveAuthorPolicyAuthority({
-      serverId: surface.channel.serverId,
-      bindingId: surface.binding.id,
-      now: NOW,
-    }), null, "carriers with divergent policy authority remain fail-closed");
     await divergentRuntime.stop();
     await writeFile(surface.file.path, consistentConfigBytes, { mode: 0o600 });
     assert.equal(await readFile(surface.file.path, "utf8"), consistentConfigBytes,
@@ -1036,6 +850,11 @@ test("real-authority replacement renews only freshness on a same-revision provid
       (await surface.db.select().from(externalAddressabilityProjections)).map((address) => address.expiresAt),
       beforeAddresses.map((address) => address.expiresAt),
     );
+    assert.deepEqual(
+      (await surface.db.select().from(externalChannelBindings))[0],
+      beforeBinding,
+      "privacy freshness rolls back with the same renewal transaction",
+    );
     assert.equal((await surface.file.read()).realAuthority!.observedAt, NOW.toISOString());
 
     await surface.db.update(externalActorProjections).set({ observedAt: new Date(NOW.getTime() - 1) })
@@ -1088,7 +907,12 @@ test("real-authority replacement renews only freshness on a same-revision provid
     const afterAddresses = await surface.db.select().from(externalAddressabilityProjections);
     assert.equal(afterBinding.id, beforeBinding.id);
     assert.equal(afterBinding.connectionEpoch, beforeBinding.connectionEpoch);
-    assert.equal(afterBinding.updatedAt.getTime(), beforeBinding.updatedAt.getTime());
+    assert.equal(afterBinding.updatedAt.getTime(), renewedObservedAt.getTime());
+    assert.equal(
+      afterBinding.privacyFreshUntil.getTime(),
+      renewedObservedAt.getTime() + 10 * 60_000,
+      "the same provider observation renews privacy freshness without changing binding identity",
+    );
     assert.deepEqual(afterActors.map((actor) => actor.id), beforeActors.map((actor) => actor.id));
     assert.deepEqual(afterActors.map((actor) => actor.projectionRevision), [2, 2]);
     assert.deepEqual(afterActors.map((actor) => actor.observedAt), [renewedObservedAt, renewedObservedAt]);

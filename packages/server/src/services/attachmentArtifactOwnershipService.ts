@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
-import type { DatabaseExecutor } from "../db/index.js";
+import type { DatabaseExecutor } from "../db/index";
 import {
   attachmentObjectArtifacts,
   attachmentStorageArtifacts,
-} from "../db/schema.js";
+} from "../db/schema";
 import type {
   AttachmentTransferArtifactBackend,
   AttachmentTransferArtifactRole,
-} from "./attachmentTransferIntentService.js";
+} from "./attachmentTransferIntentService";
 
 export type AttachmentArtifactIdentity = Readonly<{
   backend: AttachmentTransferArtifactBackend;

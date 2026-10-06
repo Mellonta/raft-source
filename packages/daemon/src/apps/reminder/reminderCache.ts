@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 
-import type { ReminderJob } from "@botiverse/raft-shared";
-import type { Clock } from "../../connection.js";
-import { systemClock } from "../../connection.js";
-import { logger } from "../../logger.js";
-import type { ScopedAppStorage } from "../../scopedAppStorage.js";
+import { errorClassOf, type ReminderJob } from "@botiverse/raft-shared";
+import { appSourceTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace";
+import type { Clock } from "../../connection";
+import { systemClock } from "../../connection";
+import { logger } from "../../logger";
+import type { ScopedAppStorage } from "../../scopedAppStorage";
 
 interface ReminderRecord {
   ownerAgentId: string;
@@ -76,8 +77,10 @@ export interface ReminderFireReceipt {
   /**
    * Durable retry exhaustion evidence.
    *
-   * Pre-Server failures are terminal because the Server has not consumed the
-   * source revision. `inbox_materialization` is different: the Server already
+   * fire_request exhaustion means remote acceptance is unknown; the same
+   * identity is reconciled at a slower cadence without clearing this record.
+   * Exhaustion before any fire request (persistence-only) remains terminal.
+   * For `inbox_materialization`, Server already
    * accepted that exact due fact and may have independently armed the next
    * recurrence. In that stage this field is an escalation marker, not
    * permission to bury the still-unmaterialized occurrence; replay continues
@@ -169,9 +172,17 @@ function isRetryablePostServerEscalation(receipt: ReminderFireReceipt): boolean 
     && !receipt.wakeEnqueued;
 }
 
+function isAcceptanceUnknown(receipt: ReminderFireReceipt): boolean {
+  return receipt.retryTerminal?.stage === "fire_request" && !receipt.serverAcked;
+}
+
+function isRetryableEscalation(receipt: ReminderFireReceipt): boolean {
+  return isAcceptanceUnknown(receipt) || isRetryablePostServerEscalation(receipt);
+}
+
 function isRetryObligationTerminal(receipt: ReminderFireReceipt): boolean {
   return receipt.retryTerminal !== null
-    && !isRetryablePostServerEscalation(receipt);
+    && !isRetryableEscalation(receipt);
 }
 
 export type ReminderRetryStage = "persistence" | "fire_request" | "inbox_materialization";
@@ -262,8 +273,19 @@ export interface ReminderCacheOptions {
   fireRetryMaxAttempts?: number;
   /** Wall-clock retry ceiling, persisted across process restarts. */
   fireRetryDeadlineMs?: number;
+  /** Reconciliation after unknown remote acceptance; does not renew the retry budget. */
+  fireReconcileDelayMs?: number;
+  /** Test seam; production jitters the persisted cadence across owners. */
+  reconciliationRandom?: () => number;
   /** Typed fail-closed signal for observability; receives no reminder payload. */
   onRetryExhausted?: (exhaustion: ReminderRetryExhaustion) => void;
+  onReconciliationAttempt?: (exhaustion: ReminderRetryExhaustion) => void;
+  /**
+   * Optional trace sink for the existing daemon.app_source fire-receipt event
+   * family. Wired to the runtime trace in production; absent (tests) keeps
+   * the historical logger-only behavior.
+   */
+  trace?: (name: string, attrs: Record<string, unknown>, status?: "ok" | "error") => void;
   /** Test seam for persistence failures; production uses scoped atomic replace. */
   persistForTesting?: (storage: ScopedAppStorage, payload: string) => void;
 }
@@ -273,6 +295,7 @@ const DEFAULT_FIRE_RETRY_DELAY_MS = 1_000;
 const DEFAULT_FIRE_RETRY_MAX_DELAY_MS = 60_000;
 const DEFAULT_FIRE_RETRY_MAX_ATTEMPTS = 8;
 const DEFAULT_FIRE_RETRY_DEADLINE_MS = 15 * 60 * 1_000;
+const DEFAULT_FIRE_RECONCILE_DELAY_MS = 5 * 60 * 1_000;
 
 /**
  * Server-authoritative Reminder cache with a scoped pending-receipt outbox.
@@ -292,7 +315,11 @@ export class ReminderCache {
   private readonly fireRetryMaxDelayMs: number;
   private readonly fireRetryMaxAttempts: number;
   private readonly fireRetryDeadlineMs: number;
+  private readonly fireReconcileDelayMs: number;
+  private readonly reconciliationRandom: () => number;
   private readonly onRetryExhausted: ((exhaustion: ReminderRetryExhaustion) => void) | null;
+  private readonly onReconciliationAttempt: ReminderCacheOptions["onReconciliationAttempt"];
+  private readonly trace: ReminderCacheOptions["trace"];
   private readonly persistForTesting: ReminderCacheOptions["persistForTesting"] | null;
   private readonly fireRetryTimers = new Map<string, unknown>();
   private readonly dispatchingReceipts = new Set<string>();
@@ -313,7 +340,11 @@ export class ReminderCache {
     this.fireRetryMaxDelayMs = opts.fireRetryMaxDelayMs ?? DEFAULT_FIRE_RETRY_MAX_DELAY_MS;
     this.fireRetryMaxAttempts = opts.fireRetryMaxAttempts ?? DEFAULT_FIRE_RETRY_MAX_ATTEMPTS;
     this.fireRetryDeadlineMs = opts.fireRetryDeadlineMs ?? DEFAULT_FIRE_RETRY_DEADLINE_MS;
+    this.fireReconcileDelayMs = opts.fireReconcileDelayMs ?? DEFAULT_FIRE_RECONCILE_DELAY_MS;
+    this.reconciliationRandom = opts.reconciliationRandom ?? Math.random;
     this.onRetryExhausted = opts.onRetryExhausted ?? null;
+    this.onReconciliationAttempt = opts.onReconciliationAttempt;
+    this.trace = opts.trace;
     this.persistForTesting = opts.persistForTesting ?? null;
     if (
       this.fireRetryDelayMs <= 0
@@ -321,9 +352,38 @@ export class ReminderCache {
       || !Number.isSafeInteger(this.fireRetryMaxAttempts)
       || this.fireRetryMaxAttempts < 1
       || this.fireRetryDeadlineMs <= 0
+      || !Number.isFinite(this.fireReconcileDelayMs)
+      || this.fireReconcileDelayMs <= 0
     ) {
       throw new Error("reminder retry policy invalid");
     }
+  }
+
+  /**
+   * Extend the existing daemon.app_source fire-receipt trace events with the
+   * bounded identity of the exception that put a receipt on its retry path.
+   * Same event family and attr vocabulary as the runtime-side retry events;
+   * observability only — never changes retry scheduling or delivery.
+   */
+  private fireReceiptFailureTrace(
+    name: string,
+    receipt: Pick<ReminderFireReceipt, "job" | "requestId">,
+    outcome: string,
+    error: unknown,
+    attrs?: Record<string, unknown>,
+  ): void {
+    this.trace?.(name, {
+      ...appSourceTraceAttrs({
+        appId: "system.reminder",
+        ownerAgentId: receipt.job.ownerAgentId,
+        notificationClass: "due",
+        sourceRef: { kind: "reminder", id: receipt.job.reminderId, revision: String(receipt.job.version) },
+      }),
+      request_id: receipt.requestId,
+      outcome,
+      error_class: errorClassOf(error),
+      ...attrs,
+    }, "error");
   }
 
   /** Bind the authenticated Server/App-scoped receipt carrier exactly once. */
@@ -346,7 +406,7 @@ export class ReminderCache {
       logger.info(`[ReminderCache] Stale upsert for ${job.reminderId} (incoming v${job.version} <= cached v${existing.version}) — ignored`);
       return "stale";
     }
-    if (existing?.timer) this.clock.clearTimeout(existing.timer);
+    if (existing) this.clearJobTimer(job.reminderId, existing, "upsert");
     const record: ReminderRecord = {
       ownerAgentId: job.ownerAgentId,
       version: job.version,
@@ -375,7 +435,7 @@ export class ReminderCache {
       );
       return "stale";
     }
-    if (existing?.timer) this.clock.clearTimeout(existing.timer);
+    if (existing) this.clearJobTimer(reminderId, existing, "cancel");
     if (!existing && !ownerAgentId) return "stale";
     this.records.set(reminderId, {
       ownerAgentId: existing?.ownerAgentId ?? ownerAgentId!,
@@ -394,7 +454,7 @@ export class ReminderCache {
     if (firstAuthoritativeSnapshot) {
       for (const [reminderId, record] of this.records) {
         if (record.ownerAgentId !== agentId) continue;
-        if (record.timer) this.clock.clearTimeout(record.timer);
+        this.clearJobTimer(reminderId, record, "first_snapshot_reset");
         if (record.receipts.length === 0) {
           // Pre-snapshot pushes and tombstones are not authoritative across the
           // initial sync boundary. Keep an omission fence, but let a matching
@@ -439,9 +499,16 @@ export class ReminderCache {
             ? "stale"
             : "rejected",
         );
+        if (record.job === null) {
+          // The only shape that leaves a scheduled reminder silently unarmed:
+          // a same-revision tombstone makes every later snapshot entry stale.
+          logger.warn(
+            `[ReminderCache] snapshot entry ${reminderId} v${job.version} ignored: cached v${record.version} has no job, so it stays unarmed`,
+          );
+        }
         continue;
       }
-      if (record.timer) this.clock.clearTimeout(record.timer);
+      this.clearJobTimer(reminderId, record, job ? "snapshot_replace" : "snapshot_omission");
       if (!job) {
         // Authoritative omission is a lifecycle tombstone, not permission to
         // forget the revision fence. Otherwise a same/older replay can re-arm
@@ -468,7 +535,7 @@ export class ReminderCache {
         );
         continue;
       }
-      if (existing?.timer) this.clock.clearTimeout(existing.timer);
+      if (existing) this.clearJobTimer(job.reminderId, existing, "snapshot_install");
       const record: ReminderRecord = {
         ownerAgentId: job.ownerAgentId,
         version: job.version,
@@ -483,6 +550,14 @@ export class ReminderCache {
       if (this.started) record.timer = this.scheduleTimer(job, job.reminderId);
       outcomes.set(job.reminderId, "applied");
     }
+    let scheduled = 0;
+    let armed = 0;
+    for (const record of this.records.values()) {
+      if (record.ownerAgentId !== agentId || !record.job) continue;
+      scheduled += 1;
+      if (record.timer) armed += 1;
+    }
+    logger.info(`[ReminderCache] snapshot applied for agent ${agentId}: ${scheduled} scheduled, ${armed} armed`);
     this.persist();
     for (const record of this.records.values()) {
       for (const receipt of record.receipts) {
@@ -507,10 +582,7 @@ export class ReminderCache {
   /** Stop process-local timers without deleting the scoped pending outbox. */
   stop(): void {
     this.started = false;
-    for (const record of this.records.values()) {
-      if (record.timer) this.clock.clearTimeout(record.timer);
-      record.timer = null;
-    }
+    for (const [reminderId, record] of this.records) this.clearJobTimer(reminderId, record, "stop");
     for (const timer of this.fireRetryTimers.values()) this.clock.clearTimeout(timer);
     this.fireRetryTimers.clear();
     this.dispatchingReceipts.clear();
@@ -551,7 +623,8 @@ export class ReminderCache {
 
   /** Re-enter the same budgeted path after transport reconnect. */
   replayPendingFireReceipts(): void {
-    for (const receipt of this.pendingFireReceipts()) {
+    for (const receipt of [...this.records.values()].flatMap((record) => record.receipts)) {
+      if (receipt.serverAcked || isRetryObligationTerminal(receipt)) continue;
       if (this.synchronizedAgents.has(receipt.job.ownerAgentId)) {
         this.scheduleOrDispatchRestoredReceipt(receipt);
       }
@@ -649,23 +722,45 @@ export class ReminderCache {
     return true;
   }
 
-  private scheduleTimer(job: ReminderJob, reminderId: string, retryDelayMs?: number): unknown {
+  /** Clear a record's schedule timer and say why, so an unarmed reminder can be attributed from runner.log. */
+  private clearJobTimer(reminderId: string, record: ReminderRecord, reason: string): void {
+    if (!record.timer) return;
+    this.clock.clearTimeout(record.timer);
+    record.timer = null;
+    logger.info(`[ReminderCache] timer cleared ${reminderId} v${record.version} (${reason})`);
+  }
+
+  private scheduleTimer(
+    job: ReminderJob,
+    reminderId: string,
+    retryDelayMs?: number,
+    reason: "schedule" | "rearm" = "schedule",
+  ): unknown {
     const fireAt = Date.parse(job.fireAt);
     if (Number.isNaN(fireAt)) {
       logger.warn(`[ReminderCache] Invalid fireAt for ${job.reminderId}: ${job.fireAt}`);
       return null;
     }
     const delay = retryDelayMs ?? Math.max(0, Math.min(this.maxDelayMs, fireAt - this.clock.now()));
+    logger.info(
+      `[ReminderCache] timer armed ${reminderId} v${job.version} fireAt=${job.fireAt} in ${delay}ms (${retryDelayMs === undefined ? reason : "retry"})`,
+    );
     return this.clock.setTimeout(() => {
       const current = this.records.get(reminderId);
-      if (!current?.job || current.version !== job.version) return;
+      if (!current?.job || current.version !== job.version) {
+        logger.info(
+          `[ReminderCache] timer for ${reminderId} v${job.version} ran but ${current?.job ? `cache is at v${current.version}` : "cache has no job"}; not firing`,
+        );
+        return;
+      }
       if (retryDelayMs === undefined && fireAt > this.clock.now()) {
-        current.timer = this.scheduleTimer(job, reminderId);
+        current.timer = this.scheduleTimer(job, reminderId, undefined, "rearm");
         return;
       }
       const firedAtClient = new Date(this.clock.now()).toISOString();
       const catchup = fireAt < this.clock.now();
       const requestId = randomUUID();
+      logger.info(`[ReminderCache] timer fired ${reminderId} v${job.version} requestId=${requestId} catchup=${catchup}`);
       current.job = null;
       current.timer = null;
       const receipt: ReminderFireReceipt = {
@@ -700,11 +795,13 @@ export class ReminderCache {
         }
       } catch (error) {
         logger.error("[ReminderCache] occurrence observer failed", error);
+        this.fireReceiptFailureTrace("daemon.app_source.fire", receipt, "observer_threw", error);
       }
       try {
         this.persist();
       } catch (error) {
         logger.error(`[ReminderCache] due receipt persistence failed for ${receipt.job.reminderId}`, error);
+        this.fireReceiptFailureTrace("daemon.app_source.retry", receipt, "retry_scheduled", error, { stage: "persistence" });
         this.scheduleFireRetry(receipt, "persistence");
         return;
       }
@@ -717,15 +814,24 @@ export class ReminderCache {
     const identity = receiptIdentity(receipt);
     const key = receiptKey(identity);
     if (this.dispatchingReceipts.has(key) || isRetryObligationTerminal(receipt)) return;
+    if (isAcceptanceUnknown(receipt)) {
+      if (!this.started || !this.synchronizedAgents.has(receipt.job.ownerAgentId)) return;
+      if (receipt.retryNextAttemptAt === null || Date.parse(receipt.retryNextAttemptAt) > this.clock.now()) {
+        this.scheduleOrDispatchRestoredReceipt(receipt);
+        return;
+      }
+    }
     if (
       this.retryBudgetExhausted(receipt)
-      && !isRetryablePostServerEscalation(receipt)
+      && !isRetryableEscalation(receipt)
     ) {
       this.exhaustRetry(receipt, this.defaultRetryStage(receipt));
       return;
     }
     this.clearFireRetry(identity);
-    receipt.retryAttempt += 1;
+    // The original attempt budget and exhaustion record are historical facts.
+    // Reconciliation must not mutate them or manufacture another occurrence.
+    if (!isAcceptanceUnknown(receipt)) receipt.retryAttempt += 1;
     if (isRetryablePostServerEscalation(receipt)) {
       // Keep the persisted escalation self-consistent while later recovery
       // attempts continue beyond the original bounded alert threshold.
@@ -738,10 +844,14 @@ export class ReminderCache {
       this.persist();
     } catch (error) {
       logger.error(`[ReminderCache] retry write-ahead failed for ${receipt.job.reminderId}`, error);
+      this.fireReceiptFailureTrace("daemon.app_source.retry", receipt, "retry_scheduled", error, { stage: "persistence" });
       this.scheduleFireRetry(receipt, "persistence");
       return;
     }
     this.dispatchingReceipts.add(key);
+    if (isAcceptanceUnknown(receipt)) {
+      try { this.onReconciliationAttempt?.(receipt.retryTerminal!); } catch { /* diagnostics cannot strand delivery */ }
+    }
     let delivery: void | ReminderFireDeliveryResult | Promise<void | ReminderFireDeliveryResult>;
     try {
       delivery = this.onFire(receipt.job, {
@@ -758,6 +868,7 @@ export class ReminderCache {
     } catch (error) {
       this.dispatchingReceipts.delete(key);
       logger.error(`[ReminderCache] onFire rejected for ${receipt.job.reminderId}`, error);
+      this.fireReceiptFailureTrace("daemon.app_source.retry", receipt, "retry_scheduled", error, { stage: this.defaultRetryStage(receipt) });
       this.scheduleFireRetry(receipt, this.defaultRetryStage(receipt));
       return;
     }
@@ -794,6 +905,7 @@ export class ReminderCache {
     }).catch((error) => {
       this.dispatchingReceipts.delete(key);
       logger.error(`[ReminderCache] onFire rejected for ${receipt.job.reminderId}`, error);
+      this.fireReceiptFailureTrace("daemon.app_source.retry", receipt, "retry_scheduled", error, { stage: this.defaultRetryStage(receipt) });
       this.scheduleFireRetry(receipt, this.defaultRetryStage(receipt));
     });
   }
@@ -826,6 +938,7 @@ export class ReminderCache {
       // The already-durable deadline still bounds restart replay. In this
       // process the same per-obligation timer/cap continues fail-closed.
       logger.error(`[ReminderCache] retry schedule persistence failed for ${receipt.job.reminderId}`, error);
+      this.fireReceiptFailureTrace("daemon.app_source.retry", receipt, "schedule_persist_failed", error, { stage });
     }
     const timer = this.clock.setTimeout(() => {
       this.fireRetryTimers.delete(key);
@@ -835,6 +948,10 @@ export class ReminderCache {
   }
 
   private scheduleOrDispatchRestoredReceipt(receipt: ReminderFireReceipt): void {
+    if (isAcceptanceUnknown(receipt) && receipt.retryNextAttemptAt === null) {
+      receipt.retryNextAttemptAt = new Date(this.clock.now() + this.reconciliationDelayMs()).toISOString();
+      this.persist();
+    }
     const nextAttemptAt = receipt.retryNextAttemptAt === null
       ? this.clock.now()
       : Date.parse(receipt.retryNextAttemptAt);
@@ -845,7 +962,7 @@ export class ReminderCache {
       const timer = this.clock.setTimeout(() => {
         this.fireRetryTimers.delete(key);
         this.dispatchFire(receipt);
-      }, isRetryablePostServerEscalation(receipt)
+      }, isRetryableEscalation(receipt)
         ? nextAttemptAt - this.clock.now()
         : Math.min(
             nextAttemptAt - this.clock.now(),
@@ -884,7 +1001,10 @@ export class ReminderCache {
       && !receipt.wakeEnqueued;
     const firstEscalation = receipt.retryTerminal === null;
     if (firstEscalation) receipt.retryTerminal = exhaustion;
-    if (retryablePostServer) {
+    const reconcile = isAcceptanceUnknown(receipt);
+    if (reconcile) {
+      receipt.retryNextAttemptAt = new Date(this.clock.now() + this.reconciliationDelayMs()).toISOString();
+    } else if (retryablePostServer) {
       // The Server may already have advanced the recurring source row. Keep
       // this older due identity as a durable, independently retryable outbox
       // obligation instead of converting a bounded alert into data loss.
@@ -902,16 +1022,23 @@ export class ReminderCache {
       this.persist();
     } catch (error) {
       logger.error(`[ReminderCache] retry exhaustion state persistence failed for ${receipt.job.reminderId}`, error);
+      this.fireReceiptFailureTrace("daemon.app_source.retry", receipt, "terminal_persist_failed", error, { stage });
     }
     if (firstEscalation) this.onRetryExhausted?.(exhaustion);
-    if (retryablePostServer && this.started) {
+    if ((retryablePostServer || reconcile) && this.started) {
       const key = receiptKey(identity);
       const timer = this.clock.setTimeout(() => {
         this.fireRetryTimers.delete(key);
         this.dispatchFire(receipt);
-      }, this.fireRetryMaxDelayMs);
+      }, Math.max(0, Date.parse(receipt.retryNextAttemptAt!) - this.clock.now()));
       this.fireRetryTimers.set(key, timer);
     }
+  }
+
+  private reconciliationDelayMs(): number {
+    const sample = this.reconciliationRandom();
+    const bounded = Number.isFinite(sample) ? Math.min(1, Math.max(0, sample)) : 0.5;
+    return Math.max(1, Math.round(this.fireReconcileDelayMs * (0.9 + bounded * 0.2)));
   }
 
   private clearFireRetry(identity: ReminderDueIdentity): void {

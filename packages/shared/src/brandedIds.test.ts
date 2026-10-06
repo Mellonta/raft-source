@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   asServerId,
   asMachineId,
@@ -9,7 +8,7 @@ import {
   type MachineId,
   type MessageId,
   type ChannelId,
-} from "./brandedIds.js";
+} from "./brandedIds";
 
 // A representative consumer that demands a *proven* server id — stands in for
 // real boundary-sensitive functions (e.g. the access-control check that #945

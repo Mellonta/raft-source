@@ -2,7 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { clearClockTimeout, currentTimeMs, setClockTimeout } from "@botiverse/raft-shared";
 
-export { FakeClock } from "./fakeClock.js";
+export { FakeClock } from "./fakeClock";
 
 const DEFAULT_EVENT_TIMEOUT_MS = 1_000;
 const DEFAULT_CHILD_EVENT_TIMEOUT_MS = 15_000;

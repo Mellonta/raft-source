@@ -6,13 +6,19 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { PassThrough, Readable } from "node:stream";
-import test, { afterEach } from "node:test";
+import { fileURLToPath } from "node:url";
 import { Command } from "commander";
 import {
   assertSurfaceProducerFactLineage,
 } from "@botiverse/raft-shared";
 
-import { clearSavedDraft, getSavedDraft, setSavedDraft } from "./_continueDraftState.js";
+import {
+  clearSavedDraft,
+  clearSavedDraftIfIdempotencyKeyMatches,
+  getSavedDraft,
+  lookupSavedDraft,
+  setSavedDraft,
+} from "./_continueDraftState";
 import {
   DRAFT_REPLACED_EXCERPT_LIMIT,
   classifyMessageSendOutcome,
@@ -32,12 +38,50 @@ import {
   validateDraftSendFlags,
   formatDriveByJoinedToPostTip,
   formatHeldSendOutput,
-} from "./send.js";
+} from "./send";
 import {
   formatFreshnessHoldOutput,
   redactFreshnessHoldForReviewerIsolation,
-} from "../freshness/_format.js";
-import { CliError } from "../../core/errors.js";
+} from "../freshness/_format";
+import { CliError } from "../../core/errors";
+
+// Hermetic regardless of test order: anything that resolves through the Raft
+// home (legacy import, the published read record) stays in a temp directory.
+process.env.RAFT_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "raft-cli-test-home-"));
+
+const draftLockChildMode = process.argv.find((arg) => arg.startsWith("--draft-lock-child="));
+if (draftLockChildMode) {
+  const mode = draftLockChildMode.slice("--draft-lock-child=".length);
+  const stateDir = process.argv[process.argv.indexOf(draftLockChildMode) + 1];
+  const releasePath = process.argv[process.argv.indexOf(draftLockChildMode) + 2];
+  if (!stateDir) throw new Error("missing child draft state directory");
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = stateDir;
+  if (mode === "clear-when-released") {
+    if (!releasePath) throw new Error("missing child release path");
+    const target = process.argv[process.argv.indexOf(draftLockChildMode) + 3] ?? "#room";
+    // Wait until the parent says the interleaving point is reached, then
+    // compare-and-clear: the ledger's single-statement delete must only
+    // remove the draft when it still carries the expected idempotency key.
+    while (!fs.existsSync(releasePath)) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+    }
+    const cleared = clearSavedDraftIfIdempotencyKeyMatches("agent-cross-process", target, "key-a");
+    process.stdout.write(cleared ? "CLEARED\n" : "SKIPPED\n");
+  } else if (mode === "writer") {
+    const target = process.argv[process.argv.indexOf(draftLockChildMode) + 2];
+    if (!target) throw new Error("missing child writer target");
+    setSavedDraft("agent-cross-process", target, {
+      content: `draft from writer ${target}`,
+      attachmentIds: [],
+      idempotencyKey: `key-${target}`,
+      savedAt: Date.now(),
+      reholdCount: 0,
+    });
+  } else {
+    throw new Error(`unknown child mode ${mode}`);
+  }
+  process.exit(0);
+}
 
 const originalDraftStateDir = process.env.SLOCK_CLI_DRAFT_STATE_DIR;
 const PENDING_ACTION_ID = "33333333-3333-4333-8333-333333333333";
@@ -169,17 +213,19 @@ test("resolveOptionalSendContent bounds open empty non-TTY stdin by its deadline
   }
 });
 
-test("resolveOptionalSendContent catches a real child-process pipe before the deadline", async () => {
+test("resolveOptionalSendContent reads an already-readable real child-process pipe", async () => {
   const child = spawn(
     process.execPath,
-    ["-e", "setTimeout(() => process.stdout.write('child body\\n'), 25)"],
+    ["-e", "process.stdout.write('child body\\n')"],
     { stdio: ["ignore", "pipe", "ignore"] },
   );
   const exited = once(child, "exit");
 
   assert.ok(child.stdout);
+  await once(child.stdout, "readable");
+  assert.ok(child.stdout.readableLength > 0);
   assert.equal(
-    await resolveOptionalSendContent(child.stdout, { observationWindowMs: 1_000 }),
+    await resolveOptionalSendContent(child.stdout, { observationWindowMs: 1 }),
     "child body\n",
   );
   await exited;
@@ -189,25 +235,26 @@ test("resolveOptionalSendContent treats bytes after the deadline as absent", asy
   const input = new PassThrough();
   input.setEncoding("utf8");
   let deadlineExpired = false;
-  const timer = setTimeout(() => {
-    input.end("late body\n");
-  }, 40);
+  let timer: NodeJS.Timeout | undefined;
 
   try {
-    assert.equal(
-      await resolveOptionalSendContent(input, {
-        observationWindowMs: 20,
-        onNoBytesWithinWindow: () => {
-          deadlineExpired = true;
-        },
-      }),
-      undefined,
-    );
+    const pending = resolveOptionalSendContent(input, {
+      observationWindowMs: 20,
+      onNoBytesWithinWindow: () => {
+        deadlineExpired = true;
+      },
+    });
+    // Registered after the function's deadline timer at the same threshold:
+    // this write occurs after the deadline callback has run and returned.
+    timer = setTimeout(() => {
+      input.end("late body\n");
+    }, 20);
+    assert.equal(await pending, undefined);
     assert.equal(deadlineExpired, true);
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(input.read(), "late body\n");
   } finally {
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     input.destroy();
   }
 });
@@ -265,6 +312,31 @@ test("validateDraftSendFlags allows --anyway with --send-draft", () => {
   assert.doesNotThrow(() => validateDraftSendFlags({ anyway: true, sendDraft: true }));
 });
 
+test("validateDraftSendFlags requires --send-draft for --expected-draft-key", () => {
+  assert.throws(
+    () => validateDraftSendFlags({ expectedDraftKey: "key-a" }),
+    (err: unknown) => err instanceof SendContentError && err.code === "EXPECTED_DRAFT_KEY_REQUIRES_SEND_DRAFT",
+  );
+});
+
+test("validateDraftSendFlags: --discard-draft takes --expected-draft-key but not --send-draft, attachments or mentions", () => {
+  assert.doesNotThrow(() => validateDraftSendFlags({ discardDraft: true, expectedDraftKey: "key-a" }));
+  assert.throws(
+    () => validateDraftSendFlags({ discardDraft: true, sendDraft: true }),
+    (err: unknown) => err instanceof SendContentError && err.code === "DISCARD_DRAFT_WITH_SEND_DRAFT",
+  );
+  for (const extra of [{ attachmentId: ["att-1"] }, { mention: ["agent:00000000-0000-4000-8000-000000000000:bot"] }]) {
+    assert.throws(
+      () => validateDraftSendFlags({ discardDraft: true, ...extra }),
+      (err: unknown) => err instanceof SendContentError && err.code === "DISCARD_DRAFT_OPTIONS_UNSUPPORTED",
+    );
+  }
+  assert.throws(
+    () => validateDraftSendFlags({ discardDraft: true, anyway: true }),
+    (err: unknown) => err instanceof SendContentError && err.code === "SEND_DRAFT_ANYWAY_REQUIRES_SEND_DRAFT",
+  );
+});
+
 test("rejectSendDraftStdin fails loud and points agents to a normal send", () => {
   assert.throws(
     () => rejectSendDraftStdin("revised draft\n", "#room:abcd1234"),
@@ -296,6 +368,7 @@ test("local draft state stores body and expires stale drafts", () => {
     savedAt: Date.now(),
     reholdCount: 2,
     seenUpToSeq: 42,
+    seenExactSeqs: [44, 45],
   });
 
   const saved = getSavedDraft("agent-1", "#room:abcd1234");
@@ -311,18 +384,82 @@ test("local draft state stores body and expires stale drafts", () => {
     savedAt: saved.savedAt,
     reholdCount: 2,
     seenUpToSeq: 42,
+    seenExactSeqs: [44, 45],
   });
 
   clearSavedDraft("agent-1", "#room:abcd1234");
   assert.equal(getSavedDraft("agent-1", "#room:abcd1234"), null);
 
+  const expiredSavedAt = Date.now() - 11 * 60 * 1000;
   setSavedDraft("agent-1", "#room:abcd1234", {
     content: "expired body",
     attachmentIds: [],
-    savedAt: Date.now() - 11 * 60 * 1000,
+    savedAt: expiredSavedAt,
     reholdCount: 1,
   });
+  // The first touch reports the expiry (and discards the draft); afterwards it is simply missing.
+  assert.deepEqual(lookupSavedDraft("agent-1", "#room:abcd1234"), { status: "expired", savedAt: expiredSavedAt, content: "expired body" });
+  assert.deepEqual(lookupSavedDraft("agent-1", "#room:abcd1234"), { status: "missing" });
   assert.equal(getSavedDraft("agent-1", "#room:abcd1234"), null);
+});
+
+test("held send output states the draft lifetime and the expiry error code", () => {
+  const out = formatHeldSendOutput("#room", {
+    producerFactId: "freshness_decision_fact:cli-held-readout",
+    newMessageCount: 1,
+    shownMessageCount: 1,
+    heldMessages: [{ seq: 10, id: "msg10", senderName: "alice", content: "context" }],
+  });
+  assert.match(out, /saved as a draft \(kept for 10 minutes\)/);
+  assert.match(out, /within 10 minutes; after that the draft is discarded and --send-draft reports SEND_DRAFT_EXPIRED/);
+  assert.match(out, /raft message send --send-draft --target "#room"/);
+});
+
+test("send-draft on an expired draft fails with SEND_DRAFT_EXPIRED, returns the last copy of the body, and sends nothing", async () => {
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-expired-draft-"));
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-expired-draft-"));
+  const savedAt = Date.now() - 11 * 60 * 1000;
+  setSavedDraft("agent-expired-draft", "#room", {
+    content: "stale body\n",
+    attachmentIds: [],
+    savedAt,
+    reholdCount: 1,
+  });
+  let sendCount = 0;
+  const ctx = createCommandContext({
+    io: {
+      stdin: Readable.from([]),
+      stdout: { write: () => true },
+      stderr: { write: () => true },
+    } as never,
+    env: {},
+    loadAgentContext: () => ({
+      agentId: "agent-expired-draft",
+      serverUrl: "http://stub.local",
+      clientMode: "self-hosted-runner",
+      profileSlug: "t",
+    }) as never,
+    createApiClient: () => ({
+      request: async () => {
+        sendCount += 1;
+        return { ok: true, status: 200, error: null, data: { ok: true, state: "sent", messageId: "should-not-send" } };
+      },
+    }) as never,
+  });
+
+  await assert.rejects(
+    async () => messageSendCommand.handler(ctx, [], { target: "#room", sendDraft: true }),
+    (err: unknown) =>
+      err instanceof CliError &&
+      err.code === "SEND_DRAFT_EXPIRED" &&
+      /kept for 10 minutes/.test(err.message) &&
+      err.message.includes(new Date(savedAt).toISOString()) &&
+      /This command did not send anything/.test(err.message) &&
+      /confirm before resending/.test(err.message) &&
+      /this is its last copy:\n---\nstale body\n---/.test(err.message),
+  );
+  assert.equal(sendCount, 0, "an expired draft must never be sent");
+  assert.deepEqual(lookupSavedDraft("agent-expired-draft", "#room"), { status: "missing" });
 });
 
 test("formatHeldSendOutput frames held context as bounded latest messages", () => {
@@ -509,11 +646,13 @@ test("formatFreshnessHoldOutput can block non-message side effects without draft
 // keep the draft boundary as the priority source. Handler-level (real
 // command handler + captured request body), since the bug class lives in
 // what the wire body actually carries. ---
-import { createCommandContext } from "../../core/context.js";
-import { registerCliCommand } from "../../core/command.js";
-import { messageSendCommand } from "./send.js";
-import { getConsumedSeq, recordConsumedRead, recordConsumedSeqs } from "./_consumedSeqState.js";
-import { messageReadCommand } from "./read.js";
+import { createCommandContext } from "../../core/context";
+import { registerCliCommand } from "../../core/command";
+import { messageSendCommand } from "./send";
+import { getConsumedSeq, recordConsumedExactSeqs, recordConsumedRead, recordConsumedSeqs } from "./_consumedSeqState";
+import { messageReadCommand } from "./read";
+import { DatabaseSync } from "node:sqlite";
+import { resolveStateDbPath } from "../../state/agentLedger";
 
 function sendHarness(stdin: NodeJS.ReadableStream = Readable.from(["hello from test\n"])) {
   const bodies: Array<Record<string, unknown>> = [];
@@ -544,6 +683,458 @@ function sendHarness(stdin: NodeJS.ReadableStream = Readable.from(["hello from t
   });
   return { ctx, bodies, paths, stdout, stderr };
 }
+
+function ambiguousSendHarness(
+  responses: Array<Error | { ok: boolean; status: number; error: string | null; data: unknown }>,
+) {
+  const bodies: Array<Record<string, unknown>> = [];
+  const stdout: string[] = [];
+  const ctx = createCommandContext({
+    io: {
+      stdin: Readable.from(["one logical send\n"]),
+      stdout: { write: (chunk: string | Uint8Array) => { stdout.push(String(chunk)); return true; } },
+      stderr: { write: () => true },
+    } as never,
+    env: {},
+    loadAgentContext: () => ({
+      agentId: "agent-send-reconcile",
+      serverUrl: "http://stub.local",
+      clientMode: "self-hosted-runner",
+      profileSlug: "t",
+    }) as never,
+    createApiClient: () => ({
+      request: async (_method: string, _path: string, body?: Record<string, unknown>) => {
+        bodies.push(body ?? {});
+        const response = responses.shift();
+        if (!response) throw new Error("missing test response");
+        if (response instanceof Error) throw response;
+        return response;
+      },
+    }) as never,
+  });
+  return { ctx, bodies, stdout };
+}
+
+function preResponseTimeout(): CliError {
+  return new CliError({
+    code: "PROXY_5XX",
+    message: "message send timed out before a response",
+    faultDomain: "agent_api_transport",
+    proxyFailureClass: "pre_response_transport",
+    proxyResponseStarted: false,
+    proxyResponseComplete: false,
+  });
+}
+
+test("message send reconciles a timeout after commit without replaying content", async () => {
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-reconcile-after-"));
+  const { ctx, bodies, stdout } = ambiguousSendHarness([
+    preResponseTimeout(),
+    {
+      ok: true,
+      status: 200,
+      error: null,
+      data: {
+        ok: true,
+        state: "committed",
+        messageId: "committed-1",
+        reconciliation: true,
+        receiptComplete: false,
+      },
+    },
+  ]);
+
+  await messageSendCommand.handler(ctx, [], { target: "#room" });
+
+  assert.equal(bodies.length, 2);
+  assert.equal(typeof bodies[0]!.idempotencyKey, "string");
+  assert.equal(bodies[1]!.idempotencyKey, bodies[0]!.idempotencyKey);
+  assert.equal(bodies[1]!.reconcileOnly, true);
+  assert.equal(Object.hasOwn(bodies[1]!, "content"), false);
+  assert.equal(getSavedDraft("agent-send-reconcile", "#room"), null);
+  assert.match(stdout.join(""), /Message commit confirmed/);
+  assert.match(stdout.join(""), /receipt details.*unavailable/);
+});
+
+test("a committed send still prints its receipt when the post-commit draft clear fails", async () => {
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-clear-fails-"));
+  const agentId = "agent-send-clear-fails";
+  const stdout: string[] = [];
+  let requests = 0;
+  const ctx = createCommandContext({
+    io: {
+      stdin: Readable.from(["delivered once\n"]),
+      stdout: { write: (chunk: string | Uint8Array) => { stdout.push(String(chunk)); return true; } },
+      stderr: { write: () => true },
+    } as never,
+    env: {},
+    loadAgentContext: () => ({ agentId, serverUrl: "http://stub.local", clientMode: "self-hosted-runner", profileSlug: "t" }) as never,
+    createApiClient: () => ({
+      request: async () => {
+        requests += 1;
+        // The server commits; meanwhile the ledger becomes unwritable for
+        // this CLI (here: a newer CLI bumped the schema), so the clear throws.
+        const db = new DatabaseSync(resolveStateDbPath(agentId));
+        db.prepare("UPDATE meta SET value = '2' WHERE key = 'version'").run();
+        db.close();
+        return { ok: true, status: 200, error: null, data: { ok: true, state: "sent", messageId: "delivered-1" } };
+      },
+    }) as never,
+  });
+
+  await messageSendCommand.handler(ctx, [], { target: "#room" });
+
+  assert.equal(requests, 1);
+  assert.match(stdout.join(""), /delivered-1/, "the Message ID reaches the agent, so it has no reason to resend");
+});
+
+test("message send reconciles a timeout before commit then replays once with the same key", async () => {
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-reconcile-before-"));
+  const { ctx, bodies } = ambiguousSendHarness([
+    preResponseTimeout(),
+    { ok: true, status: 200, error: null, data: { ok: true, state: "not_found", reconciliation: true } },
+    { ok: true, status: 200, error: null, data: { ok: true, state: "sent", messageId: "replayed-1" } },
+  ]);
+
+  await messageSendCommand.handler(ctx, [], { target: "#room" });
+
+  assert.equal(bodies.length, 3);
+  assert.equal(bodies[1]!.reconcileOnly, true);
+  assert.equal(bodies[2]!.content, "one logical send\n");
+  assert.equal(bodies[1]!.idempotencyKey, bodies[0]!.idempotencyKey);
+  assert.equal(bodies[2]!.idempotencyKey, bodies[0]!.idempotencyKey);
+  assert.equal(getSavedDraft("agent-send-reconcile", "#room"), null);
+});
+
+test("message send does not offer same-key retry after another send replaces its draft", async () => {
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-reconcile-replaced-"));
+  const bodies: Array<Record<string, unknown>> = [];
+  let requestCount = 0;
+  const ctx = createCommandContext({
+    io: {
+      stdin: Readable.from(["original logical send\n"]),
+      stdout: { write: () => true },
+      stderr: { write: () => true },
+    } as never,
+    env: {},
+    loadAgentContext: () => ({
+      agentId: "agent-send-reconcile-replaced",
+      serverUrl: "http://stub.local",
+      clientMode: "self-hosted-runner",
+      profileSlug: "t",
+    }) as never,
+    createApiClient: () => ({
+      request: async (_method: string, _path: string, body?: Record<string, unknown>) => {
+        bodies.push(body ?? {});
+        requestCount += 1;
+        if (requestCount === 1) throw preResponseTimeout();
+        if (requestCount === 2) {
+          return { ok: true, status: 200, error: null, data: { ok: true, state: "not_found", reconciliation: true } };
+        }
+        setSavedDraft("agent-send-reconcile-replaced", "#room", {
+          content: "replacement send\n",
+          attachmentIds: [],
+          idempotencyKey: "replacement-key",
+          savedAt: Date.now(),
+          reholdCount: 0,
+        });
+        throw preResponseTimeout();
+      },
+    }) as never,
+  });
+
+  await assert.rejects(
+    async () => messageSendCommand.handler(ctx, [], { target: "#room" }),
+    (err: unknown) =>
+      err instanceof CliError &&
+      err.retryable === false &&
+      err.draftSaved === false &&
+      /CANNOT_CONFIRM/.test(err.suggestedNextAction ?? "") &&
+      /different send/.test(err.suggestedNextAction ?? ""),
+  );
+
+  assert.equal(bodies.length, 3);
+  assert.equal(bodies[2]!.idempotencyKey, bodies[0]!.idempotencyKey);
+  const replacement = getSavedDraft("agent-send-reconcile-replaced", "#room");
+  assert.equal(replacement?.content, "replacement send\n");
+  assert.equal(replacement?.idempotencyKey, "replacement-key");
+});
+
+test("identity-bound retry command rejects a later replacement with zero requests", async () => {
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-bound-retry-replaced-"));
+  const { ctx, bodies } = ambiguousSendHarness([
+    preResponseTimeout(),
+    { ok: true, status: 200, error: null, data: { ok: true, state: "not_found", reconciliation: true } },
+    preResponseTimeout(),
+  ]);
+
+  let initialFailure: CliError | undefined;
+  try {
+    await messageSendCommand.handler(ctx, [], { target: "#room" });
+  } catch (err) {
+    if (err instanceof CliError) initialFailure = err;
+  }
+  assert.ok(initialFailure);
+  assert.equal(initialFailure.retryable, true);
+  const keyMatch = initialFailure.suggestedNextAction?.match(/--expected-draft-key "([^"]+)"/);
+  assert.ok(keyMatch, initialFailure.suggestedNextAction);
+  const originalKey = keyMatch[1]!;
+  assert.equal(originalKey, bodies[0]!.idempotencyKey);
+
+  setSavedDraft("agent-send-reconcile", "#room", {
+    content: "replacement B\n",
+    attachmentIds: [],
+    idempotencyKey: "replacement-key-b",
+    savedAt: Date.now(),
+    reholdCount: 0,
+  });
+
+  let retryRequests = 0;
+  const stderr: string[] = [];
+  const program = new Command();
+  program.exitOverride();
+  registerCliCommand(program, messageSendCommand, {
+    io: {
+      stdin: Readable.from([]),
+      stdout: { write: () => true },
+      stderr: { write: (chunk: string | Uint8Array) => { stderr.push(String(chunk)); return true; } },
+    } as never,
+    env: {},
+    loadAgentContext: () => ({
+      agentId: "agent-send-reconcile",
+      serverUrl: "http://stub.local",
+      clientMode: "self-hosted-runner",
+      profileSlug: "t",
+    }) as never,
+    createApiClient: () => ({
+      request: async () => {
+        retryRequests += 1;
+        throw new Error("identity guard should reject before this request");
+      },
+    }) as never,
+  });
+
+  await assert.rejects(
+    () => program.parseAsync([
+      "node",
+      "raft",
+      "send",
+      "--send-draft",
+      "--expected-draft-key",
+      originalKey,
+      "--target",
+      "#room",
+    ]),
+    /CliExit\(1\)/,
+  );
+  assert.equal(retryRequests, 0);
+  assert.match(stderr.join(""), /no longer matches the expected idempotency key/i);
+  assert.equal(getSavedDraft("agent-send-reconcile", "#room")?.content, "replacement B\n");
+  assert.equal(getSavedDraft("agent-send-reconcile", "#room")?.idempotencyKey, "replacement-key-b");
+});
+
+test("identity-bound retry command sends when the expected draft key still matches", async () => {
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-bound-retry-match-"));
+  setSavedDraft("agent-bound-retry", "#room", {
+    content: "original A\n",
+    attachmentIds: [],
+    idempotencyKey: "expected-key-a",
+    savedAt: Date.now(),
+    reholdCount: 0,
+  });
+  const bodies: Array<Record<string, unknown>> = [];
+  const program = new Command();
+  program.exitOverride();
+  registerCliCommand(program, messageSendCommand, {
+    io: {
+      stdin: Readable.from([]),
+      stdout: { write: () => true },
+      stderr: { write: () => true },
+    } as never,
+    env: {},
+    loadAgentContext: () => ({
+      agentId: "agent-bound-retry",
+      serverUrl: "http://stub.local",
+      clientMode: "self-hosted-runner",
+      profileSlug: "t",
+    }) as never,
+    createApiClient: () => ({
+      request: async (_method: string, _path: string, body?: Record<string, unknown>) => {
+        bodies.push(body ?? {});
+        return { ok: true, status: 200, error: null, data: { ok: true, state: "sent", messageId: "sent-a" } };
+      },
+    }) as never,
+  });
+
+  await program.parseAsync([
+    "node",
+    "raft",
+    "send",
+    "--send-draft",
+    "--expected-draft-key",
+    "expected-key-a",
+    "--target",
+    "#room",
+  ]);
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0]!.content, "original A\n");
+  assert.equal(bodies[0]!.idempotencyKey, "expected-key-a");
+  assert.equal(getSavedDraft("agent-bound-retry", "#room"), null);
+});
+
+test("message send does not replay when authoritative reconciliation is unavailable", async () => {
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-reconcile-unavailable-"));
+  const { ctx, bodies } = ambiguousSendHarness([
+    preResponseTimeout(),
+    { ok: false, status: 400, error: "unsupported field", data: null },
+  ]);
+
+  await assert.rejects(
+    async () => messageSendCommand.handler(ctx, [], { target: "#room" }),
+    (err: unknown) => err instanceof CliError && err.retryable === false && /CANNOT_CONFIRM/.test(err.suggestedNextAction ?? ""),
+  );
+
+  assert.equal(bodies.length, 2);
+  const draft = getSavedDraft("agent-send-reconcile", "#room");
+  assert.equal(draft?.idempotencyKey, bodies[0]!.idempotencyKey);
+});
+
+test("message send fails closed when reconciliation returns a non-authoritative state", async () => {
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-reconcile-thin-"));
+  const { ctx, bodies } = ambiguousSendHarness([
+    { ok: false, status: 500, error: "failed after commit", data: null },
+    { ok: true, status: 200, error: null, data: { ok: true, state: "sent", messageId: "thin-old-receipt" } },
+  ]);
+
+  await assert.rejects(
+    async () => messageSendCommand.handler(ctx, [], { target: "#room" }),
+    (err: unknown) =>
+      err instanceof CliError &&
+      err.retryable === false &&
+      err.draftSaved === true &&
+      /CANNOT_CONFIRM/.test(err.suggestedNextAction ?? ""),
+  );
+
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[1]!.reconcileOnly, true);
+  assert.equal(getSavedDraft("agent-send-reconcile", "#room")?.idempotencyKey, bodies[0]!.idempotencyKey);
+});
+
+test("a completed send does not clear a newer concurrent draft for the same target", async () => {
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-concurrent-send-"));
+  let resolveFirst!: (value: unknown) => void;
+  const firstResponse = new Promise((resolve) => { resolveFirst = resolve; });
+  let requestCount = 0;
+  const makeContext = (content: string) => createCommandContext({
+    io: {
+      stdin: Readable.from([content]),
+      stdout: { write: () => true },
+      stderr: { write: () => true },
+    } as never,
+    env: {},
+    loadAgentContext: () => ({
+      agentId: "agent-concurrent-send",
+      serverUrl: "http://stub.local",
+      clientMode: "self-hosted-runner",
+      profileSlug: "t",
+    }) as never,
+    createApiClient: () => ({
+      request: async () => {
+        requestCount += 1;
+        if (requestCount === 1) return firstResponse;
+        if (requestCount === 2) throw preResponseTimeout();
+        return { ok: false, status: 503, error: "reconciliation unavailable", data: null };
+      },
+    }) as never,
+  });
+
+  const firstSend = messageSendCommand.handler(makeContext("first send\n"), [], { target: "#room" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(
+    async () => { await messageSendCommand.handler(makeContext("second send\n"), [], { target: "#room" }); },
+    (err: unknown) => err instanceof CliError && err.retryable === false,
+  );
+  const secondDraft = getSavedDraft("agent-concurrent-send", "#room");
+  assert.equal(secondDraft?.content, "second send\n");
+
+  resolveFirst({ ok: true, status: 200, error: null, data: { ok: true, state: "sent", messageId: "first-1" } });
+  await firstSend;
+  assert.deepEqual(getSavedDraft("agent-concurrent-send", "#room"), secondDraft);
+});
+
+test("compare-and-clear across processes only removes the draft that still carries the expected key", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-cross-process-"));
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = stateDir;
+  const childArgs = ["--import", "@oxc-node/core/register", fileURLToPath(import.meta.url)];
+  const spawnClearer = (releasePath: string, target: string) => {
+    const child = spawn(process.execPath, [...childArgs, "--draft-lock-child=clear-when-released", stateDir, releasePath, target], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, SLOCK_CLI_DRAFT_STATE_DIR: stateDir },
+    });
+    const errors: Buffer[] = [];
+    child.stderr.on("data", (chunk) => errors.push(chunk));
+    const output = once(child.stdout, "data") as Promise<[Buffer]>;
+    return { child, exit: once(child, "exit"), output, errors };
+  };
+
+  // The draft is replaced (new idempotency key) before the other process
+  // clears with the old key: the clear must be a no-op — the newer draft
+  // survives. This is the lost-update the compare half exists to prevent.
+  setSavedDraft("agent-cross-process", "#room", {
+    content: "draft A", attachmentIds: [], idempotencyKey: "key-a", savedAt: Date.now(), reholdCount: 0,
+  });
+  const skippedRelease = path.join(stateDir, "release-skip");
+  const skipped = spawnClearer(skippedRelease, "#room");
+  setSavedDraft("agent-cross-process", "#room", {
+    content: "draft B", attachmentIds: [], idempotencyKey: "key-b", savedAt: Date.now(), reholdCount: 0,
+  });
+  fs.writeFileSync(skippedRelease, "release");
+  assert.match((await skipped.output)[0].toString(), /SKIPPED/);
+  const [skippedCode] = await skipped.exit;
+  assert.equal(skippedCode, 0, Buffer.concat(skipped.errors).toString());
+  assert.equal(getSavedDraft("agent-cross-process", "#room")?.idempotencyKey, "key-b");
+
+  // The matching direction still works from another process: a draft that
+  // kept its key is cleared exactly once.
+  setSavedDraft("agent-cross-process", "#room2", {
+    content: "draft C", attachmentIds: [], idempotencyKey: "key-a", savedAt: Date.now(), reholdCount: 0,
+  });
+  const clearedRelease = path.join(stateDir, "release-clear");
+  const cleared = spawnClearer(clearedRelease, "#room2");
+  fs.writeFileSync(clearedRelease, "release");
+  assert.match((await cleared.output)[0].toString(), /CLEARED/);
+  const [clearedCode] = await cleared.exit;
+  assert.equal(clearedCode, 0, Buffer.concat(cleared.errors).toString());
+  assert.equal(getSavedDraft("agent-cross-process", "#room2"), null);
+});
+
+test("concurrent cross-process writers all land in the ledger without corruption", async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-concurrent-writers-"));
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = stateDir;
+  const childArgs = ["--import", "@oxc-node/core/register", fileURLToPath(import.meta.url)];
+  const targets = ["#w1", "#w2", "#w3"];
+  const writers = targets.map((target) => {
+    const child = spawn(process.execPath, [...childArgs, "--draft-lock-child=writer", stateDir, target], {
+      stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, SLOCK_CLI_DRAFT_STATE_DIR: stateDir },
+    });
+    const errors: Buffer[] = [];
+    child.stderr.on("data", (chunk) => errors.push(chunk));
+    return { target, exit: once(child, "exit"), errors };
+  });
+  setSavedDraft("agent-cross-process", "#w0", {
+    content: "draft from writer #w0", attachmentIds: [], idempotencyKey: "key-#w0", savedAt: Date.now(), reholdCount: 0,
+  });
+  for (const writer of writers) {
+    const [code] = await writer.exit;
+    assert.equal(code, 0, Buffer.concat(writer.errors).toString());
+  }
+  for (const target of ["#w0", ...targets]) {
+    const draft = getSavedDraft("agent-cross-process", target);
+    assert.equal(draft?.content, `draft from writer ${target}`);
+    assert.equal(draft?.idempotencyKey, `key-${target}`);
+  }
+});
 
 test("message send forwards typed mention identity on the Agent API body", async () => {
   const { ctx, bodies, paths } = sendHarness(Readable.from(["hello @same_handle\n"]));
@@ -646,7 +1237,7 @@ test("message send failure draft wrapper preserves existing CliError fields", ()
   assert.equal(wrapped.outputMode, "json");
 });
 
-test("message send received 5xx keeps the draft without masquerading as unknown commit", async () => {
+test("message send received 5xx keeps the draft and reports unknown when reconciliation is unavailable", async () => {
   process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-send-5xx-"));
   process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-send-5xx-"));
   recordConsumedSeqs("agent-send-5xx", { "#room": 77 });
@@ -687,13 +1278,12 @@ test("message send received 5xx keeps the draft without masquerading as unknown 
 
   assert.deepEqual(stdout, []);
   const rendered = stderr.join("");
-  assert.equal(
-    rendered,
-    "Error: failed to proxy local agent request\n"
-      + "Code: SERVER_5XX\n"
-      + "Draft saved: yes\n",
-  );
-  assert.doesNotMatch(rendered, /UNKNOWN|CANNOT_CONFIRM|Do not resend/);
+  assert.match(rendered, /Error: failed to proxy local agent request/);
+  assert.match(rendered, /Code: SERVER_5XX/);
+  assert.match(rendered, /Draft saved: yes/);
+  assert.match(rendered, /UNKNOWN/);
+  assert.match(rendered, /CANNOT_CONFIRM/);
+  assert.match(rendered, /Do not resend/);
   const draft = getSavedDraft("agent-send-5xx", "#room");
   assert.equal(draft?.content, "send body\n");
   assert.deepEqual(draft?.attachmentIds, []);
@@ -742,7 +1332,7 @@ test("message send transport ambiguity keeps the draft and fails closed as not r
   assert.equal(getSavedDraft("agent-send-transport", "#room")?.content, "send body\n");
 });
 
-test("message send-draft received 5xx reports the retained draft as a known response", async () => {
+test("message send-draft received 5xx retains the draft and reports unknown when reconciliation is unavailable", async () => {
   process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-send-draft-5xx-"));
   process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-send-draft-5xx-"));
   setSavedDraft("agent-send-draft-5xx", "#room", {
@@ -789,13 +1379,12 @@ test("message send-draft received 5xx reports the retained draft as a known resp
 
   assert.deepEqual(stdout, []);
   const rendered = stderr.join("");
-  assert.equal(
-    rendered,
-    "Error: failed to proxy local agent request\n"
-      + "Code: SERVER_5XX\n"
-      + "Draft saved: yes\n",
-  );
-  assert.doesNotMatch(rendered, /UNKNOWN|CANNOT_CONFIRM|Do not resend/);
+  assert.match(rendered, /Error: failed to proxy local agent request/);
+  assert.match(rendered, /Code: SERVER_5XX/);
+  assert.match(rendered, /Draft saved: yes/);
+  assert.match(rendered, /UNKNOWN/);
+  assert.match(rendered, /CANNOT_CONFIRM/);
+  assert.match(rendered, /Do not resend/);
   assert.equal(getSavedDraft("agent-send-draft-5xx", "#room")?.content, "saved body\n");
 });
 
@@ -962,13 +1551,15 @@ test("message send-draft re-hold exits nonzero and retains the draft without tar
     /CliExit\(1\)/,
   );
 
-  assert.deepEqual(bodies, [{
+  assert.equal(typeof bodies[0]!.idempotencyKey, "string");
+  const { idempotencyKey: _idempotencyKey, ...sentBody } = bodies[0]!;
+  assert.deepEqual(sentBody, {
     target: "#room",
     content: "saved body\n",
     draftReholdCount: 1,
     seenUpToSeq: 77,
     sendDraft: true,
-  }]);
+  });
   assert.match(stdout.join(""), /Held — /);
   assert.match(stdout.join(""), /Your message has been saved as a draft/);
   assert.doesNotMatch(stdout.join(""), /Message sent|Message queued/);
@@ -1202,6 +1793,8 @@ test("read→send handoff attests the returned history boundary", async () => {
           has_more: false,
           has_older: false,
           has_newer: false,
+          last_read_seq: 100,
+          model_seen_up_to_seq: 105,
         },
       }),
     }) as never,
@@ -1228,6 +1821,55 @@ test("read→send handoff attests the returned history boundary", async () => {
 
   assert.equal(bodies.length, 1);
   assert.equal(bodies[0]!.seenUpToSeq, 105);
+});
+
+test("read B → read higher seq in A → send B keeps B's own boundary", async () => {
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-read-cross-target-send-"));
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-read-cross-target-send-"));
+  const agentContext = {
+    agentId: "agent-send-attest",
+    serverUrl: "http://stub.local",
+    clientMode: "self-hosted-runner",
+    profileSlug: "t",
+  } as never;
+
+  const readTarget = async (target: string, seq: number) => {
+    const readCtx = createCommandContext({
+      io: { stdout: { write: () => true }, stderr: { write: () => true } } as never,
+      env: {},
+      loadAgentContext: () => agentContext,
+      createApiClient: () => ({
+        request: async () => ({
+          ok: true,
+          status: 200,
+          error: null,
+          data: {
+            target,
+            // Real history rows do not carry channel identity. The resolver's
+            // top-level target is the only authority for this evidence key.
+            messages: [{ seq, id: `message-${seq}`, content: `body ${seq}` }],
+            has_more: false,
+            has_older: false,
+            has_newer: false,
+            model_seen_up_to_seq: seq,
+          },
+        }),
+      }) as never,
+    });
+    await messageReadCommand.handler(readCtx, { target });
+  };
+
+  // B was read at 100. A later message can arrive in B server-side without
+  // changing this local evidence; reading globally newer A at 500 must not
+  // upgrade B's attestation and let that stale send bypass the server hold.
+  await readTarget("#beta", 100);
+  await readTarget("#alpha", 500);
+
+  const { ctx, bodies } = sendHarness();
+  await messageSendCommand.handler(ctx, [], { target: "#beta" });
+
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0]!.seenUpToSeq, 100, "target A's seq 500 must prove nothing about target B");
 });
 
 test("read→send handoff isolates parent channel and thread targets", async () => {
@@ -1604,6 +2246,34 @@ test("send never borrows a different target's cursor (gate 3, client side)", asy
   assert.equal("seenUpToSeq" in bodies[0]!, false, "unconsumed target must omit seenUpToSeq (fail-closed)");
 });
 
+test("send ignores legacy #undefined alias collapse instead of borrowing another target's cursor", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-poisoned-send-"));
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = tmp;
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-poisoned-send-"));
+  const statePath = path.join(
+    tmp,
+    "slock-cli-consumed-seq",
+    "agent-send-attest",
+    "consumed-seqs.json",
+  );
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, JSON.stringify({
+    targets: { "#undefined": { seq: 900, readOrder: 20 } },
+    aliases: { "#busy": "#undefined", "#never-read": "#undefined" },
+    nextReadOrder: 21,
+  }), { mode: 0o600 });
+
+  const { ctx, bodies } = sendHarness();
+  await messageSendCommand.handler(ctx, [], { target: "#never-read" });
+
+  assert.equal(bodies.length, 1);
+  assert.equal(
+    "seenUpToSeq" in bodies[0]!,
+    false,
+    "a poisoned cross-target alias must fail closed instead of attesting seq 900",
+  );
+});
+
 test("hold-issued draft boundary takes priority over the local cursor (gate 4)", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-send-"));
   process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = tmp;
@@ -1623,13 +2293,46 @@ test("hold-issued draft boundary takes priority over the local cursor (gate 4)",
   assert.equal(bodies[0]!.seenUpToSeq, 60, "draft boundary (from the hold response) must win");
 });
 
+test("a hold-issued draft boundary is a floor: reads after the hold that move the cursor past it still count", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-send-"));
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = tmp;
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-send-"));
+  // Held at 60; the draft keeps that boundary.
+  recordConsumedSeqs("agent-send-attest", { "#room": 60 });
+  setSavedDraft("agent-send-attest", "#room", {
+    content: "draft body",
+    attachmentIds: [],
+    savedAt: Date.now(),
+    reholdCount: 1,
+    seenUpToSeq: 60,
+  });
+  // A sparse read sees 75 and 80, then a contiguous read moves the cursor to
+  // 80, folding those exact seqs into the cursor.
+  recordConsumedExactSeqs("agent-send-attest", { "#room": [75, 80] });
+  recordConsumedSeqs("agent-send-attest", { "#room": 80 });
+
+  for (const sendDraft of [false, true]) {
+    const { ctx, bodies } = sendHarness(sendDraft ? Readable.from([]) : undefined);
+    await messageSendCommand.handler(ctx, [], sendDraft ? { target: "#room", sendDraft: true } : { target: "#room" });
+    assert.equal(bodies.length, 1);
+    assert.equal(bodies[0]!.seenUpToSeq, 80, `sendDraft=${sendDraft}: the read after the hold must be attested`);
+    setSavedDraft("agent-send-attest", "#room", {
+      content: "draft body",
+      attachmentIds: [],
+      savedAt: Date.now(),
+      reholdCount: 1,
+      seenUpToSeq: 60,
+    });
+  }
+});
+
 // --- model-seen boundary note: `message check` can return a sparse event
 // batch, especially around @mention/wake delivery. A high seq in that batch
 // must not become a per-target `seenUpToSeq` boundary; otherwise older unseen
 // messages in the same target can be buried as model-seen. ---
-import { messageCheckCommand } from "./check.js";
+import { messageCheckCommand } from "./check";
 
-test("check→send does not auto-attest sparse event-drain seqs for DM or thread targets", async () => {
+test("check→send attests sparse event-drain seqs exactly, never as a high-water boundary", async () => {
   process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-align-"));
   process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-align-"));
 
@@ -1711,6 +2414,11 @@ test("check→send does not auto-attest sparse event-drain seqs for DM or thread
       "seenUpToSeq" in bodies[0]!,
       false,
       `${target}: sparse check seq ${expectedSeq} must not be attested as a high-water model-seen boundary`,
+    );
+    assert.deepEqual(
+      bodies[0]!.seenExactSeqs,
+      [expectedSeq],
+      `${target}: send must identify only the sparse body that check actually rendered`,
     );
   }
 });
@@ -2544,9 +3252,7 @@ test("a short draft is printed whole, with no truncation notice", () => {
 //
 // ⭐ Three independent operators invented the same unsound inference. That is why the
 //    criterion has to come from the platform, and why this copy must stop at
-//    CANNOT_CONFIRM: there is no reconcile-by-identity surface on the send path
-//    (verified: idempotency exists only in the integration command family; correlationId
-//    arrives on a server RESPONSE header and no command consumes it for reconciliation).
+//    CANNOT_CONFIRM whenever keyed reconciliation is unavailable or non-authoritative.
 //
 // ⛔ Deliberately NOT asserting the sentence verbatim — that pins wording, every copy edit
 //    turns red for no safety reason, and the next author deletes the test.

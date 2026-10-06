@@ -2,18 +2,17 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import Redis from "ioredis";
 import WebSocket from "ws";
-import { vi } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { SERVER_GUEST_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
-import { featureFlagRules, serverMembers } from "../db/schema.js";
-import { createHttpClient } from "../test/integration/http.js";
-import { updateChannel } from "../services/channelService.js";
-import { dbTest } from "../test/integration/dbTest.js";
-import { createTestApp } from "../test/integration/app.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { createSession, revokeSession, revokeAllUserSessions } from "../services/sessionService.js";
-import * as redis from "../redis.js";
-import * as revocations from "./accessRevocation.js";
+import { featureFlagRules, serverMembers } from "../db/schema";
+import { createHttpClient } from "../test/integration/http";
+import { updateChannel } from "../services/channelService";
+import { dbTest } from "../test/integration/dbTest";
+import { createTestApp } from "../test/integration/app";
+import { signAccessToken } from "../middleware/auth";
+import { createSession, revokeSession, revokeAllUserSessions } from "../services/sessionService";
+import * as redis from "../redis";
+import * as revocations from "./accessRevocation";
 
 // Opt-in transport integration: point only at a disposable local Redis.
 const redisUrl = process.env.RAFT_TEST_REDIS_URL;

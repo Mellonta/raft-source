@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   buildRepairGroups,
   DELETE_DUPLICATE_DM_IDENTITIES_SQL,
@@ -9,7 +8,7 @@ import {
   rewritePinnedRefs,
   rewriteStringIdArray,
   type DetailedRow,
-} from "../../scripts/repair-dm-duplicate-channels.js";
+} from "../../scripts/repair-dm-duplicate-channels";
 
 const baseRow: DetailedRow = {
   serverId: "00000000-0000-4000-8000-000000000001",

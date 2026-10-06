@@ -9,14 +9,14 @@ import {
 import { and, asc, desc, eq, gt, inArray, isNull } from "drizzle-orm";
 import { currentDate } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   nativeNotificationCredentials,
   nativeNotificationDevices,
   nativeNotificationEnrollmentGrants,
   nativeNotificationEvents,
   sessionFamilies,
-} from "../db/schema.js";
+} from "../db/schema";
 
 export const NATIVE_NOTIFICATION_PROTOCOL_VERSION = 1 as const;
 export const NATIVE_NOTIFICATION_SCOPE = "notifications:stream" as const;

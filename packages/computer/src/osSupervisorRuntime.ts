@@ -21,8 +21,8 @@ import {
   type BuildOsSupervisorSpecInput,
   type OsSupervisorSpec,
   type SupervisorCommand,
-} from "./osSupervisor.js";
-import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv.js";
+} from "./osSupervisor";
+import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv";
 
 const execFileAsync = promisify(execFile);
 const OS_SUPERVISOR_COMMAND_TIMEOUT_MS = 5_000;

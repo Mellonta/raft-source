@@ -8,14 +8,14 @@ import {
 } from "@botiverse/raft-shared";
 import { and, eq, gt, isNull, lte, or } from "drizzle-orm";
 
-import { getDb, type Database } from "../db/index.js";
+import { getDb, type Database } from "../db/index";
 import {
   externalAppCredentials,
   externalAppInstalls,
   externalChannelBindings,
   externalMessageLinks,
-} from "../db/schema.js";
-import type { SlackAudienceCredentialResolver } from "./slackAudienceRefreshService.js";
+} from "../db/schema";
+import type { SlackAudienceCredentialResolver } from "./slackAudienceRefreshService";
 import {
   SLACK_BRIDGE_CREDENTIAL_LEASE_SCHEMA,
   type SlackBridgeCredentialHandle,
@@ -25,7 +25,7 @@ import {
   type SlackWebApiRequest,
   type SlackWebApiTransport,
   type SlackWebApiTransportResult,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
 
 const DEFAULT_CREDENTIAL_LEASE_TTL_MS = 60_000;
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;

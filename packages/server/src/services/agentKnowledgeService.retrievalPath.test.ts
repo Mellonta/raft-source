@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   resolveAgentKnowledgeDocWithDiscovery,
   searchAgentKnowledgeDocsWithResolution,
-} from "./agentKnowledgeService.js";
+} from "./agentKnowledgeService";
 
 test("get retrieval paths distinguish canonical ids, aliases, and token routes", async () => {
   const exact = await resolveAgentKnowledgeDocWithDiscovery("membership");

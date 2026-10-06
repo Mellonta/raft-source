@@ -1,6 +1,6 @@
-import * as serverService from "../services/serverService.js";
-import { actorHasServerCapabilityInServer } from "../lib/actorPermissions.js";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
+import * as serverService from "../services/serverService";
+import { actorHasServerCapabilityInServer } from "../lib/actorPermissions";
+import { addTraceEvent } from "../tracing/semanticTrace";
 
 export interface AgentServerManageActor {
   id: string;

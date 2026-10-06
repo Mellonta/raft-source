@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   assertIndexCreationDatabaseUrlIsDirectSession,
   assertIndexCreationTimeouts,
@@ -7,7 +6,7 @@ import {
   CREATE_INBOX_SERVING_ROWS_RECEIVER_SERVER_INDEX_SQL,
   INBOX_SERVING_ROWS_RECEIVER_SERVER_INDEX_NAME,
   type InboxServingRowsIndexStatus,
-} from "./inbox-serving-rows-receiver-server-index.js";
+} from "./inbox-serving-rows-receiver-server-index";
 
 type TimeoutClient = Parameters<typeof assertIndexCreationTimeouts>[0];
 

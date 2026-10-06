@@ -3,7 +3,7 @@
 // too clean to surface real bugs). Reads creds from .dev-env-<name>.json.
 //
 // Usage:
-//   pnpm --filter @botiverse/raft-web exec tsx tests/stress/messageStress.ts \
+//   pnpm --filter @botiverse/raft-web exec node --import @oxc-node/core/register tests/stress/messageStress.ts \
 //     --env message-list-e2e [--load 1500] [--scenarios swipe,switch,permalink,append]
 //
 // Each scenario is a small probe designed to provoke one class of bug. The

@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import HumanDetailPanel from "../src/components/member/HumanDetailPanel";
@@ -63,5 +62,5 @@ test("human profile surfaces the handle alongside the display name", () => {
 
   assert.ok(screen.getAllByText("Ada Lovelace").length > 0);
   assert.ok(screen.getAllByText("@ada").length >= 2);
-  assert.ok(screen.getByTitle("@ada"));
+  assert.ok(screen.queryByTitle("@ada") === null, "handle duplicates its visible text, so no native title tooltip");
 });

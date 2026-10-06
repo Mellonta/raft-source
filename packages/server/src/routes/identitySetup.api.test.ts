@@ -1,23 +1,23 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { eq } from "drizzle-orm";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   newsletterAudienceContacts,
   onboardingEmailJourneys,
   serverMembers,
   servers,
   users,
-} from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
+} from "../db/schema";
+import { openTestApp } from "../test/integration/app";
 import {
   resetNewsletterTestOverrides,
   setNewsletterConfigForTest,
   setNewsletterContactClientForTest,
-} from "../services/newsletterService.js";
+} from "../services/newsletterService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -108,6 +108,18 @@ test("identity setup creates a pending account, gates business writes, and compl
     });
     assert.equal(reserved.status, 400);
     assert.equal((await reserved.json() as { code: string }).code, "PROFILE_SETUP_NAME_RESERVED");
+
+    // `reminders` is reserved: dm:@reminders names each agent's private reminder conversation.
+    const remindersHandle = await fetch(`${app.baseUrl}/api/auth/me/complete-profile`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${body.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "Reminders", displayName: "Reminders" }),
+    });
+    assert.equal(remindersHandle.status, 400);
+    assert.equal((await remindersHandle.json() as { code: string }).code, "PROFILE_SETUP_NAME_RESERVED");
 
     const completeBody = { name: "final-handle", displayName: "Final User" };
     const complete = await fetch(`${app.baseUrl}/api/auth/me/complete-profile`, {

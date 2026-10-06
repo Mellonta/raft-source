@@ -6,9 +6,11 @@
 // attachmentCommentService already imports messageService — importing the
 // comment service back from messageService would cycle.
 //
-// Contract (Dozy/Bugen review gates): short and stable; quote capped so an
-// artifact never floods agent context; empty/invalid anchors get an honest
-// structural fallback, never a pretend-located label.
+// Contract (Dozy/Bugen review gates): the human-facing anchor label may carry
+// a capped quote preview. The Agent scope header is structural only because
+// its following blockquote carries the complete selection (bounded by the
+// anchor payload limit). Empty/invalid anchors get an honest fallback, never
+// a pretend-located label.
 
 const QUOTE_CAP = 80;
 
@@ -115,15 +117,85 @@ export function renderAnchorLabel(
 
 /**
  * The full scope line the agent projection prepends to a scoped comment's
- * content, e.g. `[re: report.html · L3–7 ·「口径」]`. Filename alone when the
- * comment is unanchored — the attachment scope itself was the part agents
- * never saw (task #37, huxijin report).
+ * content, e.g. `[re: report.html · L3–7]`. The selected text is deliberately
+ * absent from this header because the complete quotation immediately follows
+ * as a blockquote. Filename alone when the comment is unanchored — the
+ * attachment scope itself was the part agents never saw (tasks #37/#158).
  */
+export type AgentCommentScopeProjection = {
+  filename: string;
+  anchorLabel: string | null;
+  anchorQuote: string | null;
+};
+
+function renderScopeLine(scope: AgentCommentScopeProjection): string {
+  return scope.anchorLabel
+    ? `[re: ${scope.filename} · ${scope.anchorLabel}]`
+    : `[re: ${scope.filename}]`;
+}
+
 export function renderAgentCommentScopeLine(
   filename: string,
   anchorType: string | null | undefined,
   anchorData: unknown,
 ): string {
-  const label = renderAnchorLabel(anchorType, anchorData);
-  return label ? `[re: ${filename} · ${label}]` : `[re: ${filename}]`;
+  return renderScopeLine(projectAgentCommentScope(filename, anchorType, anchorData));
+}
+
+/**
+ * Preserve the complete selected text for the Agent projection. The Agent
+ * header is location-only; this value becomes the durable, untruncated
+ * blockquote that follows it (task #158).
+ */
+export function readFullAnchorQuote(anchorData: unknown): string | null {
+  if (!anchorData || typeof anchorData !== "object" || Array.isArray(anchorData)) return null;
+  const quote = (anchorData as Record<string, unknown>).quote;
+  if (typeof quote !== "string") return null;
+  const trimmed = quote.trim();
+  return trimmed || null;
+}
+
+function withoutAnchorQuote(anchorData: unknown): unknown {
+  if (!anchorData || typeof anchorData !== "object" || Array.isArray(anchorData)) return anchorData;
+  const locationData = { ...(anchorData as Record<string, unknown>) };
+  delete locationData.quote;
+  return locationData;
+}
+
+export function projectAgentCommentScope(
+  filename: string,
+  anchorType: string | null | undefined,
+  anchorData: unknown,
+): AgentCommentScopeProjection {
+  return {
+    filename,
+    // Agent headers identify location only. The full selected text has one
+    // canonical home in the blockquote below, never a duplicate 80-char
+    // preview in the header (task #158, Cindy 2026-09-26).
+    anchorLabel: renderAnchorLabel(anchorType, withoutAnchorQuote(anchorData)),
+    anchorQuote: readFullAnchorQuote(anchorData),
+  };
+}
+
+/**
+ * One canonical Agent-visible scope block shared by live delivery, thread
+ * context, history reads, and search results. Callers outside the attachment-
+ * comment feature gate receive no projection and must not call this renderer.
+ */
+export function renderAgentCommentScopeBlock(scope: AgentCommentScopeProjection): string {
+  const scopeLine = renderScopeLine(scope);
+  if (!scope.anchorQuote) return scopeLine;
+  const quoteBlock = scope.anchorQuote
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => (line.trim().length > 0 ? `> ${line}` : ">"))
+    .join("\n");
+  return `${scopeLine}\n${quoteBlock}`;
+}
+
+export function renderAgentCommentScopedContent(
+  content: string,
+  scope: AgentCommentScopeProjection | null | undefined,
+): string {
+  return scope ? `${renderAgentCommentScopeBlock(scope)}\n${content}` : content;
 }

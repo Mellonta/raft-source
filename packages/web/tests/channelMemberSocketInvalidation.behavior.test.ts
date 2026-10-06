@@ -1,7 +1,7 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
+import api from "../src/api/client";
 import { subscribeChannelMembersChanged } from "../src/store/channelMemberEvents";
 import { useAgentStore } from "../src/store/agentStore";
 import { useChannelStore } from "../src/store/channelStore";
@@ -95,7 +95,45 @@ test("server member and agent roster socket events invalidate all channel snapsh
   assert.equal(memberLoads, 4);
   assert.equal(agentLoads, 2);
   assert.deepEqual(invalidations, [null, null, null, null, null, null]);
+
+  // A profile edit made elsewhere re-reads the agent list; membership is untouched.
+  invoke("agent:updated", { agentId: "agent-1" });
+  assert.equal(agentLoads, 3);
+  assert.equal(invalidations.length, 6);
   unsubscribe();
+});
+
+test("an agent profile push that lands during an older agent read triggers one more read", async () => {
+  // The older read was answered before the edit; without a second read its
+  // stale avatar is written back and nothing ever replaces it.
+  useServerStore.setState({ current: server });
+  const agentRow = (avatarUrl: string) => ({ id: "agent-1", serverId: server.id, name: "agent-one", avatarUrl, status: "active", activity: "online", activityDetail: "" });
+  const pending: Array<(avatarUrl: string) => void> = [];
+  const originalGet = api.get.bind(api);
+  api.get = ((url: string) => {
+    assert.equal(url, "/agents");
+    return new Promise((resolve) => { pending.push((avatarUrl) => resolve({ data: [agentRow(avatarUrl)] })); });
+  }) as typeof api.get;
+  try {
+    const bindings = buildMainLayoutSocketBindings(socket, () => undefined, async () => undefined, () => undefined, () => undefined);
+    const pushUpdated = () => bindings.find((candidate) => candidate.event === "agent:updated")!.handler({ agentId: "agent-1" });
+
+    const olderRead = useAgentStore.getState().loadAgents();
+    pushUpdated();
+    pushUpdated();
+    assert.equal(pending.length, 1, "the pushes wait for the read already in flight");
+
+    pending[0]!("/old.webp");
+    await olderRead;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(pending.length, 2, "both pushes share exactly one follow-up read");
+
+    pending[1]!("/new.webp");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(useAgentStore.getState().agents[0]?.avatarUrl, "/new.webp");
+  } finally {
+    api.get = originalGet;
+  }
 });
 
 test("the current user's role update immediately refreshes server and channel authority", () => {

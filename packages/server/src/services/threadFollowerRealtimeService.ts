@@ -1,5 +1,5 @@
 import type { Server as SocketServer } from "socket.io";
-import * as channelService from "./channelService.js";
+import * as channelService from "./channelService";
 
 export async function emitThreadFollowersUpdated(
   io: SocketServer | undefined,

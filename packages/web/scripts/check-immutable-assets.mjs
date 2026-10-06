@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -26,6 +26,33 @@ async function listFiles(directory) {
 
 const files = await listFiles(assetsRoot);
 assert.ok(files.length > 0, "production build emitted no /assets files");
+
+// A hashed CSS filename alone does not prove its referenced fonts were emitted.
+// Imported font-face rules once retained unresolved relative TTF URLs, producing
+// a successful Vite build whose published fonts all returned 404.
+for (const file of files.filter((path) => path.endsWith(".css"))) {
+  const css = await readFile(file, "utf8");
+  for (const face of css.matchAll(/@font-face\s*\{([^}]+)\}/g)) {
+    for (const source of face[1].matchAll(/url\(\s*["']?([^\s"')]+)["']?\s*\)/g)) {
+      const url = source[1];
+      if (/^(?:https?:|data:|\/\/)/.test(url)) continue;
+      const pathname = decodeURIComponent(url.split(/[?#]/)[0]);
+      const target = pathname.startsWith("/")
+        ? resolve(webRoot, "dist", `.${pathname}`)
+        : resolve(dirname(file), pathname);
+      assert.ok(target.startsWith(`${resolve(webRoot, "dist")}${sep}`), `font escapes dist: ${url}`);
+      const bytes = await readFile(target).catch((error) => {
+        throw new Error(`unresolved built font ${url} in ${relative(assetsRoot, file)}`, { cause: error });
+      });
+      const signature = bytes.subarray(0, 4);
+      assert.ok(
+        signature.equals(Buffer.from([0, 1, 0, 0])) ||
+          ["wOFF", "wOF2", "OTTO", "ttcf"].includes(signature.toString()),
+        `built font is not a font file: ${url}`,
+      );
+    }
+  }
+}
 
 const stableNames = files
   .map((path) => relative(assetsRoot, path))

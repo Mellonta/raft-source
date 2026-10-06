@@ -1,4 +1,3 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -7,7 +6,7 @@ import {
   SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION,
   type ProductionSystemMessageProducer,
   type SystemMessageBornReadClassification,
-} from "./systemMessageBornReadRegistry.js";
+} from "./systemMessageBornReadRegistry";
 
 const VALID_CLASSIFICATIONS: readonly SystemMessageBornReadClassification[] = [
   "born-read",
@@ -126,11 +125,10 @@ test("Computer-local Reminder cutover leaves no Server execution compatibility s
     "../routes/reminders.ts",
     "./agentOrchestrator.ts",
     "./reminderArmWatchdog.ts",
-    "./wikiService.ts",
   ]) {
     assert.doesNotMatch(
       readSource(sourcePath),
-      /services\/reminderService\.js|\.\/reminderService\.js/,
+      /services\/reminderService(?:\.js)?["']|\.\/reminderService(?:\.js)?["']/,
       `${sourcePath} must import the app-owned Reminder service directly`,
     );
   }

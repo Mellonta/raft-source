@@ -13,7 +13,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
@@ -26,7 +25,7 @@ import {
   formatMigrationFailure,
   readJournalTags,
   runDeployMigrations,
-} from "./migrateDeploy.js";
+} from "./migrateDeploy";
 
 function writeMigrations(entries: Array<{ tag: string; sql: string }>): string {
   const folder = mkdtempSync(path.join(tmpdir(), "migrate-deploy-"));
@@ -141,7 +140,7 @@ test("extractPgError walks the chain; formatter is deterministic and bounded", a
   assert.equal(extracted.code, "22003");
   assert.equal(extracted.message, "value out of range");
   assert.equal(extracted.position, "35");
-  const { boundStatementSnippet } = await import("./migrateDeploy.js");
+  const { boundStatementSnippet } = await import("./migrateDeploy");
   assert.ok((boundStatementSnippet(extracted.query) as string).length <= 300, "statement snippet must be bounded");
 
   const noCode = extractPgError(new Error("plain"));
@@ -282,16 +281,21 @@ test("readJournalTags reads tags in journal order", () => {
 // Transient-concurrency retry teeth (2026-09-11, v1.13.0 cut).
 //
 // Property under test (NOT shape): a migration phase that loses a lock race
-// (SQLSTATE 40P01 deadlock_detected / 40001 serialization_failure) is retried
-// within a bounded budget, because a failed phase rolls back wholesale and is
-// safe to re-run from its boundary. Every OTHER failure must still fail on the
-// FIRST attempt — retrying a real defect would convert an error into an
-// accidental success. Both directions are asserted, so the teeth cannot be
-// satisfied by "always retry" or "never retry".
+// (SQLSTATE 40P01 deadlock_detected / 40001 serialization_failure / 55P03
+// lock_not_available from lock_timeout) is retried within a bounded budget,
+// because a failed phase rolls back wholesale and is safe to re-run from its
+// boundary. Every OTHER failure must still fail on the FIRST attempt — retrying
+// a real defect would convert an error into an accidental success. Both
+// directions are asserted, so the teeth cannot be satisfied by "always retry"
+// or "never retry".
 // ---------------------------------------------------------------------------
 
 function deadlockError(): Error {
   return Object.assign(new Error("deadlock detected"), { code: "40P01" });
+}
+
+function lockTimeoutError(): Error {
+  return Object.assign(new Error("canceling statement due to lock timeout"), { code: "55P03" });
 }
 
 function syntaxError(): Error {
@@ -318,6 +322,33 @@ test("retry: a deadlock on the first attempt is retried and the run succeeds", a
   assert.match(joined, /sqlstate=40P01/, "the diagnostic names the transient SQLSTATE");
   assert.match(joined, /\[MIGRATION_RETRY\] reason=sqlstate=40P01 attempt=1\/3/, "the retry is observable in the log");
   assert.match(joined, /\[MIGRATION_RETRY_SUCCEEDED\] attempt=2\/3/, "a retried success is distinguishable from a first-try success");
+});
+
+test("retry: a lock timeout on the first attempt is retried and the run succeeds", async () => {
+  const folder = writeMigrations([
+    { tag: "0000_lock_contended", sql: "ALTER INDEX idx SET (fastupdate = off);" },
+  ]);
+  const logs: string[] = [];
+  let calls = 0;
+  await runDeployMigrations(
+    async () => {
+      calls += 1;
+      if (calls === 1) throw lockTimeoutError();
+    },
+    folder,
+    async () => 0,
+    (line) => logs.push(line),
+    { sleep: async () => {}, maxAttempts: 3, baseDelayMs: 1 },
+  );
+  assert.equal(calls, 2, "the phase must be re-run exactly once after lock_timeout");
+  const joined = logs.join("\n");
+  assert.match(joined, /sqlstate=55P03/, "the diagnostic names lock_not_available");
+  assert.match(
+    joined,
+    /\[MIGRATION_RETRY\] reason=sqlstate=55P03 attempt=1\/3/,
+    "the retry is observable in the log",
+  );
+  assert.match(joined, /\[MIGRATION_RETRY_SUCCEEDED\] attempt=2\/3/, "the retry resolution is explicit");
 });
 
 test("retry: a non-concurrency failure is NOT retried (no accidental masking)", async () => {

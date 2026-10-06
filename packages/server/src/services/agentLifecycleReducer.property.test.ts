@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 // Lifecycle-v2 P1-B harness slice (#458).
 //

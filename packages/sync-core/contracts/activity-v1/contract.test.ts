@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
 
 /**
  * Runs the frozen contract verifiers as part of `pnpm --filter @botiverse/raft-shared test`.

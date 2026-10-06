@@ -1,0 +1,1 @@
+ALTER TABLE "joint_channels" ADD COLUMN "over_limit_since" timestamp with time zone;

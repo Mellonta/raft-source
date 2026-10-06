@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { CSV_PREVIEW_MAX_FILE_SIZE_BYTES } from "@botiverse/raft-shared";
-import { buildCsvPreview, CSV_PREVIEW_MAX_ROWS, CSV_PREVIEW_PAYLOAD_BYTE_LIMIT, csvPreviewProvider, isCsvAttachment, parseCsvRows } from "./providers/csv.js";
-import { buildMarkdownPreview, isMarkdownAttachment, markdownPreviewProvider } from "./providers/markdown.js";
-import { isPdfAttachment, pdfPreviewProvider } from "./providers/pdf.js";
-import { buildTextPreview, decodeUtf8Text, isTextAttachment, textPreviewProvider } from "./providers/text.js";
-import { buildXlsxPreview, isXlsxAttachment, xlsxPreviewProvider, XLSX_PREVIEW_MAX_ROWS } from "./providers/xlsx.js";
+import { buildCsvPreview, CSV_PREVIEW_MAX_ROWS, CSV_PREVIEW_PAYLOAD_BYTE_LIMIT, csvPreviewProvider, isCsvAttachment, parseCsvRows } from "./providers/csv";
+import { buildMarkdownPreview, isMarkdownAttachment, markdownPreviewProvider } from "./providers/markdown";
+import { isPdfAttachment, pdfPreviewProvider } from "./providers/pdf";
+import { buildTextPreview, decodeUtf8Text, isTextAttachment, textPreviewProvider } from "./providers/text";
+import { buildXlsxPreview, isXlsxAttachment, xlsxPreviewProvider, XLSX_PREVIEW_MAX_ROWS } from "./providers/xlsx";
 import * as XLSX from "xlsx";
 
 test("CSV provider classifies by extension and MIME", () => {

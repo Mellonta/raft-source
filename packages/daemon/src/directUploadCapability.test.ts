@@ -7,11 +7,10 @@ vi.mock("@botiverse/raft-shared", async (importOriginal) => ({
 }));
 
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   requestDaemonScopeAttestation,
   uploadWithSignedCapability,
-} from "./directUploadCapability.js";
+} from "./directUploadCapability";
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -146,4 +145,17 @@ test("uploadWithSignedCapability keeps server out of upload data plane", async (
     attestation: "signed-token",
   });
   assert.ok(calls[2].body instanceof Blob, "upload bytes should be sent to storage URL, not server");
+});
+
+test("requestDaemonScopeAttestation classifies an HTML 413 from the server as 413", async () => {
+  await assert.rejects(
+    requestDaemonScopeAttestation({
+      serverUrl: "https://slock.test/",
+      apiKey: "sk_machine_test",
+      scope: "daemon-trace-bundle:create",
+      metadata: { bundleId: "b", bundleSha256: "a".repeat(64), bundleSizeBytes: 1 },
+      fetchImpl: async () => new Response("<html>request entity too large</html>", { status: 413, headers: { "Content-Type": "text/html" } }),
+    }),
+    /Failed to request daemon scope attestation \(413\)/,
+  );
 });

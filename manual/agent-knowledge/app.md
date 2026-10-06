@@ -1,114 +1,92 @@
 ---
 doc_id: app
-title: Built-in RAP Apps
-description: Server-side apps that watch an agent's state and push items into its inbox — reminder delivery and memory-size hints. `raft app config` shows and atomically updates a built-in app's durable config. Agent-facing only; there is no human UI for it.
+title: Built-in Apps
+description: Understand built-in reminders and memory cleanup hints, and configure Cleaner with raft app config.
 ---
 
 {/*
 Verified against:
-- packages/cli/src/commands/app/config.ts (`config` is the only `raft app` subcommand)
-- packages/server/src/apps/cleaner/definition.ts:34-60 (manifest: enabled / threshold_bytes / interval_seconds; notification kind memory_size_hint; grant all_server_agents)
-- packages/shared/src/apps/cleaner/configProtocol.ts:29-42 (CLEANER_APP_ID, canonical defaults and bounds)
-- live readback on a managed runner for both app ids
-- absence of a human surface checked in packages/web/src (no RAP-app config UI; settings/AppNotificationsControls.tsx is push-notification preferences, unrelated)
-@ verified 2026-08-18
+- packages/cli/src/commands/app/config.ts (view, set, unset, and atomic updates)
+- packages/server/src/apps/cleaner/definition.ts (built-in app registration and config fields)
+- packages/shared/src/apps/cleaner/configProtocol.ts (canonical defaults, bounds, and disk threshold)
+- packages/daemon/src/apps/cleaner/runtime.ts (memory and disk checks, memory hint with daily rewake cooldown, disk is trace-only)
+- packages/daemon/src/apps/cleaner/definition.ts (memory threshold action and disk cleanup guidance action)
+- manual/agent-knowledge/inbox.md (linked inbox guide)
+@ verified 2026-10-01 against repository sources; no live runner verification in this update
 */}
 
-## When a user asks: "What put this in my agent's inbox? / Why does the inbox count keep going up? / Can I stop the memory warnings?"
+## Built-in apps
 
-A **built-in RAP App** is a server-side app that watches an agent's state and delivers notifications
-into that agent's app inbox. Apps are not invoked; they run on their own and push items at you.
+Built-in apps deliver reminders and cleanup hints to your agent's [inbox](/agent-knowledge/inbox).
+Use `raft inbox check` to read them.
 
-> **In one sentence**: apps are the things that put items in `raft inbox check`, and `raft app config`
-> is how an agent reads and changes their settings.
+- **`system.reminder`** delivers due reminders.
+- **`system.cleaner`** reminds you to tidy up when `MEMORY.md` exceeds its size threshold. It
+  also checks whether the disk holding agent data has less than 10% (and under 20 GiB) available space, but low disk
+  space is a machine-wide condition, so it is not sent to agents.
 
-There are two, both granted to every agent in the server:
+## Respond to a memory hint
 
-- **`system.reminder`** — delivers due reminders. No configurable fields.
-- **`system.cleaner`** — watches `MEMORY.md` size and emits a `memory_size_hint` when it grows past a
-  threshold.
+`MEMORY.md` is loaded into context each session. Keep it concise:
 
-## What humans do
+- Remove outdated information, such as superseded decisions, completed task status, and obsolete
+  environment details. Check against current sources; old information may still be valid.
+- Keep an index in memory and move supporting details or history into notes.
 
-**Nothing, currently.** There is no human-facing UI for RAP app config — no settings page exposes
-`system.cleaner`'s threshold or `system.reminder`. A human who wants one of these changed asks the
-agent to run the command, or changes the underlying condition (for example, helps the agent decide
-what belongs in `MEMORY.md` versus a notes file).
+At most once a week the hint also suggests deleting workspace files you know are unused, such as
+stale worktrees, old build outputs, or temporary downloads. Cleaner does not scan your workspace;
+delete only what you are sure you no longer need, or nothing.
 
-Humans do see the *consequences*: an agent that reports "my inbox has N pending items" is describing
-app-delivered items, and an agent that keeps mentioning its memory file is probably receiving cleaner
-hints.
+Cleaner provides a reminder; you decide what to keep and what to remove. After `MEMORY.md` falls
+within the size threshold, the hint clears on the next check.
 
-## What agents do
+The hint is advisory. It wakes a running agent at most once a day while `MEMORY.md` stays over the
+threshold, or sooner if the file grows by a quarter or more since the last hint. It never starts a
+stopped agent; the hint waits in the inbox until the agent wakes for another reason.
 
-**Show a config**
-```
+The hint's suggested command raises the size threshold, usually by doubling it. Use that when the
+larger memory file is intentional; otherwise, trim the file first.
+
+## Configure Cleaner
+
+Run these commands in the agent's environment. Settings apply to that agent. `enabled` and
+`interval_seconds` control both checks; `threshold_bytes` controls only the memory check.
+The disk threshold is fixed: less than 10% and less than 20 GiB available.
+
+View the current settings:
+
+```sh
 raft app config --app system.cleaner
 ```
-Prints the app id, a `Revision` counter, and each field with its current value, whether that value is
-a default or an override, and the declared default.
 
-**Change a config**
-```
+| Setting | Default | Allowed values |
+| --- | --- | --- |
+| `enabled` | `true` | `true` or `false` |
+| `threshold_bytes` | `65536` (64 KiB) | `4096`–`1073741824` bytes |
+| `interval_seconds` | `3600` (1 hour) | `900`–`604800` seconds |
+
+For example, set the size threshold to 128 KiB:
+
+```sh
 raft app config --app system.cleaner --set threshold_bytes=131072
+```
+
+Restore the default threshold:
+
+```sh
 raft app config --app system.cleaner --unset threshold_bytes
 ```
-`--set` takes booleans and integers and is repeatable. `--unset` drops an override and returns the
-field to its declared default. Updates are atomic and bump `Revision`.
 
-**`system.cleaner` fields**, with the bounds the server enforces:
+Turn Cleaner off or back on:
 
-| key | default | range |
-| --- | --- | --- |
-| `enabled` | `true` | boolean |
-| `threshold_bytes` | `65536` (64 KiB) | `4096` – `1073741824` |
-| `interval_seconds` | `3600` | `900` – `604800` |
+```sh
+raft app config --app system.cleaner --set enabled=false
+raft app config --app system.cleaner --set enabled=true
+```
 
-**`system.reminder`** prints `(no configurable fields)`. There is nothing to tune; its items are the
-`class=due` rows in `raft inbox check`.
+`--set` and `--unset` can each be repeated to change several settings in one command. The output
+shows current values and whether each is a default or an override. `Revision` counts configuration
+changes.
 
-## What it CAN'T do
-
-- **Cannot list the apps.** There is no `raft app list`; `config` is the only subcommand, and it
-  requires an `--app` id you already know. The two ids are `system.reminder` and `system.cleaner`.
-- **Cannot install, remove, or disable an app wholesale.** `system.cleaner` has an `enabled` flag;
-  `system.reminder` has no fields at all, so its delivery cannot be turned off this way.
-- **Cannot dismiss, ack, or clear an inbox item.** No subcommand does this, in this family or any
-  other. Items with `retention=until_source_read` accumulate.
-- **Cannot be reached by a human.** Agent-facing CLI only.
-
-⚠️ **These were verified absent when written, and this list rots one way:** a feature that ships makes an entry wrong and nothing here turns red. ⇒ Before telling anyone a capability is missing, re-check it — `--help` on the relevant command family is usually enough. See [What Raft Doesn't Have](/agent-knowledge/cross-cutting/what-slock-doesnt-have).
-
-## Gotchas
-
-**A rising inbox count is normal, and is not a backlog.** Reminder items carry
-`retention=until_source_read` and there is no agent-side way to terminate them. Cleaner hints carry
-`retention=transient` and clear themselves once the condition stops holding. Those two behaviours in
-one list is why the count only ever seems to grow.
-
-⚠️ **An item being present does not mean the duty behind it is outstanding.** Three things that look
-equivalent are not: running the action an item suggests does not remove it; completing the underlying
-responsibility does not remove it; and no command removes it. Judge whether work is owed from that
-work's own record — the task, the thread, the reminder's subject — never from the presence or the
-count of inbox items.
-
-**The cleaner's suggested action is usually the wrong one.** The hint proposes doubling
-`threshold_bytes`. `MEMORY.md` is loaded into context every session, so its size is a cost paid on
-every wake; raising the threshold silences the measurement and leaves the cost. Prefer trimming the
-file — keep an index, move detail into notes. When you do, the hint disappears on its own, and that
-disappearance is a cheap confirmation the trim actually worked.
-
-**`Revision` is a change counter, not a version.** It starts at `0` and increments on each atomic
-update. Two agents reading different revisions are reading different config states, not different
-software.
-
-## Composition
-
-A built-in RAP App:
-- Has an **app id** (`system.reminder`, `system.cleaner`) — the `--app` argument
-- Has a **manifest** declaring its config fields, their types, defaults and bounds, and the
-  notification kinds it emits
-- Has a **grant** deciding who receives it (both built-ins: every agent in the server)
-- Has **durable config** per agent, with a `Revision` counter
-- Emits **notifications** into the agent's [inbox](/agent-knowledge/inbox), each carrying a
-  `retention` that decides whether the item clears itself
+`system.reminder` has no configurable settings. See the [inbox guide](/agent-knowledge/inbox) for
+handling its reminders.

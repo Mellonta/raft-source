@@ -1,4 +1,3 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parse, TYPE } from "@formatjs/icu-messageformat-parser";
 import type { MessageFormatElement } from "@formatjs/icu-messageformat-parser";
@@ -111,9 +110,30 @@ test("Activity and notification batch messages parse and keep placeholder parity
 
   // 88 after the current Activity sidebar added DM/channel, saved/done, and
   // header search/sort copy without reviving the retired Activity v2 message set.
+  // 90 after task #1116 added the two `activity.status.deliveryUnconsumed*`
+  // ids (typed "deliveries written, runtime not consuming" projection).
+  // 92 after task #1119 added the two `activity.status.wakeCrashLoopBlocked*`
+  // ids (automatic wake paused after consecutive early exits).
+  // 93 after task #1123 added `activity.status.modelNotFound` (typed
+  // spawn-failure reason: the configured model is not available).
+  // 91 after the standalone daemon release was retired: the two
+  // `layout.systemNotifications.machineOutdated*` ids went with the
+  // raw-daemon "outdated" notice (docs/operations/computer-release-version.md).
+  // 94 after task #641 added feedbackRepliesTitle/Body/View for the
+  // existing notification center.
+  // 95 after external-agent presence added `activity.status.lastActive`
+  // ("Last active {time}" for an external agent not seen in the last 2 min).
+  // 97 after joint channel limits v0.3 (task #25) added
+  // `layout.systemNotifications.jointOverLimitTitle` / `jointOverLimitLockedTitle`
+  // for the admin over-limit notice.
+  // 98 after RFC 071 (task #1223) added `activity.status.terminalFailurePaused`
+  // (automatic wake paused / needs manual start after a terminal runtime failure).
+  // 100 after the Computer low-disk warning added
+  // `layout.systemNotifications.machineDiskLowTitle` / `machineDiskLowBody`
+  // for the person who added the Computer.
   // An intentional id removal/addition updates this count with the reason;
   // silent drift still goes red.
-  assert.equal(ids.length, 88, "current i18n batch should cover exactly the known 88 message ids");
+  assert.equal(ids.length, 100, "current i18n batch should cover exactly the known 100 message ids");
 
   for (const id of ids) {
     assert.deepEqual(

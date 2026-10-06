@@ -1,20 +1,22 @@
 import { createHash } from "node:crypto";
 import {
   SLACK_BRIDGE_FEATURE_FLAG_KEYS,
+  SLACK_BRIDGE_INTERNAL_FEATURE_FLAG_KEYS,
+  SLACK_BRIDGE_PRODUCT_FEATURE_FLAG_KEYS,
   currentDate,
   type SlackBridgeFeatureFlagKey,
 } from "@botiverse/raft-shared";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   evaluateFeatureFlags,
   getFeatureFlagConfigVersion,
   type FeatureFlagEvaluation,
-} from "./featureFlagService.js";
+} from "./featureFlagService";
 import {
   resolveExternalBindingAuthority,
   type ExternalBindingAuthorityDecision,
   type ExternalBindingAuthorityReason,
-} from "./externalAppControlPlaneService.js";
+} from "./externalAppControlPlaneService";
 
 export const SLACK_BRIDGE_ACTIVE_PREDICATE_SCHEMA = "slack-bridge-active-predicate.v1" as const;
 export const SLACK_BRIDGE_RELEASE_CONTRACT_REVISION = "slack-bridge-revision-5" as const;
@@ -24,14 +26,15 @@ export type SlackBridgeRuntimeLevel = "top_level" | "thread";
 
 const BASE_ACTIVE_FLAG_KEYS = [
   SLACK_BRIDGE_FEATURE_FLAG_KEYS.master,
-  SLACK_BRIDGE_FEATURE_FLAG_KEYS.directory,
-  SLACK_BRIDGE_FEATURE_FLAG_KEYS.enqueue,
-  SLACK_BRIDGE_FEATURE_FLAG_KEYS.dispatch,
-  SLACK_BRIDGE_FEATURE_FLAG_KEYS.customAuthorship,
-  SLACK_BRIDGE_FEATURE_FLAG_KEYS.nativeMention,
-  SLACK_BRIDGE_FEATURE_FLAG_KEYS.eventIngress,
-  SLACK_BRIDGE_FEATURE_FLAG_KEYS.inboundProjection,
 ] as const satisfies readonly SlackBridgeFeatureFlagKey[];
+
+export const SLACK_BRIDGE_PRODUCT_FLAG_KEYS = Object.freeze(
+  Object.values(SLACK_BRIDGE_PRODUCT_FEATURE_FLAG_KEYS),
+) as readonly SlackBridgeFeatureFlagKey[];
+
+export const SLACK_BRIDGE_INTERNAL_FLAG_KEYS = Object.freeze([
+  ...SLACK_BRIDGE_INTERNAL_FEATURE_FLAG_KEYS,
+] as const);
 
 export type SlackBridgeAppMembershipReason =
   | "missing"
@@ -188,13 +191,22 @@ function isFreshDate(value: unknown, now: Date): value is Date {
 }
 
 function requiredActiveFlagKeys(
+  _privacyClass: "public" | "private",
+  _level: SlackBridgeRuntimeLevel,
+): SlackBridgeFeatureFlagKey[] {
+  return [...BASE_ACTIVE_FLAG_KEYS];
+}
+
+/**
+ * Product-facing flags are deliberately smaller than the runtime predicate.
+ * Internal fuses are expanded by this resolver and should not become separate
+ * operator-facing rollout controls.
+ */
+export function slackBridgeRequiredRuntimeFlagKeys(
   privacyClass: "public" | "private",
   level: SlackBridgeRuntimeLevel,
 ): SlackBridgeFeatureFlagKey[] {
-  const keys: SlackBridgeFeatureFlagKey[] = [...BASE_ACTIVE_FLAG_KEYS];
-  if (privacyClass === "private") keys.push(SLACK_BRIDGE_FEATURE_FLAG_KEYS.privateBinding);
-  if (level === "thread") keys.push(SLACK_BRIDGE_FEATURE_FLAG_KEYS.threadDelivery);
-  return keys.sort();
+  return requiredActiveFlagKeys(privacyClass, level);
 }
 
 function appMembershipMatches(

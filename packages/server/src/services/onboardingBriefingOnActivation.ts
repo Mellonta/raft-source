@@ -1,9 +1,9 @@
 import type { Server as SocketServer } from "socket.io";
 import { and, eq, isNull } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { servers } from "../db/schema.js";
-import type { AgentOrchestrator } from "./agentOrchestrator.js";
-import * as onboardingService from "./onboardingService.js";
+import { getDb } from "../db/index";
+import { servers } from "../db/schema";
+import type { AgentOrchestrator } from "./agentOrchestrator";
+import * as onboardingService from "./onboardingService";
 
 /**
  * Brief Cindy when her COMPUTER comes back — because she herself never wakes up.

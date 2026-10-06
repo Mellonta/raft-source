@@ -1,26 +1,23 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { PRO_AGENT_SEAT_BLOCK_SIZE } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { jointChannels, jointChannelServers, subscriptions, servers, users } from "../db/schema.js";
-import { createAgent } from "./agentService.js";
+import { getDb } from "../db/index";
+import { serverMembers, subscriptions, servers, users } from "../db/schema";
+import { createAgent } from "./agentService";
 import {
   assertAgentCapacityAvailable,
-  assertJointChannelCreationCapacity,
-  getJointChannelCreationEntitlement,
   getHistoryCutoff,
   getServerBillingEntitlement,
   getServerBillingUsage,
   isChannelReadOnlyByBillingFeature,
   requireTeamBillingFeature,
-} from "./planService.js";
-import { addMember, createServer } from "./serverService.js";
-import { createChannel, getOrCreateThread } from "./channelService.js";
-import { createMessage } from "./messageService.js";
+} from "./planService";
+import { addMember, createServer } from "./serverService";
+import { createChannel, getOrCreateThread } from "./channelService";
+import { createMessage } from "./messageService";
 
 
 afterEach(async () => {
@@ -37,6 +34,21 @@ async function seedUser(label: string) {
   }).returning();
   return user;
 }
+
+test("billing usage excludes Guests from paid human seats", async ({ db }) => {
+  const owner = await seedUser("guest-seat-owner");
+  const guest = await seedUser("guest-seat-guest");
+  const member = await seedUser("guest-seat-member");
+  const server = await createServer("Guest seats", `guest-seats-${randomUUID()}`, owner.id);
+  await db.insert(serverMembers).values([
+    { serverId: server.id, userId: guest.id, role: "guest" },
+    { serverId: server.id, userId: member.id, role: "member" },
+  ]);
+
+  const usage = await getServerBillingUsage(db, server.id);
+  assert.equal(usage.humans, 2, "owner and Member consume seats; Guest does not");
+  assert.equal(usage.universalSeats, 2);
+});
 
 function futureDate() {
   return new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -70,46 +82,6 @@ async function insertProSubscription(input: {
     createdByUserId: input.ownerId,
     updatedByUserId: input.ownerId,
   });
-}
-
-async function createRetainedJointChannel(input: {
-  hostServerId: string;
-  hostOwnerId: string;
-  targetServerId?: string;
-  targetOwnerId?: string;
-  createdAt?: Date;
-}) {
-  const db = getDb();
-  const canonical = await createChannel(input.hostServerId, `canonical-${randomUUID()}`);
-  const hostProjection = await createChannel(input.hostServerId, `host-joint-${randomUUID()}`, undefined, "joint");
-  const targetProjection = input.targetServerId
-    ? await createChannel(input.targetServerId, `target-joint-${randomUUID()}`, undefined, "joint")
-    : null;
-  const [joint] = await db.insert(jointChannels).values({
-    canonicalChannelId: canonical.id,
-    createdByServerId: input.hostServerId,
-    createdByUserId: input.hostOwnerId,
-    createdAt: input.createdAt,
-  }).returning();
-  await db.insert(jointChannelServers).values([
-    {
-      jointChannelId: joint.id,
-      serverId: input.hostServerId,
-      localChannelId: hostProjection.id,
-      role: "host",
-      joinedByUserId: input.hostOwnerId,
-    },
-    ...(targetProjection && input.targetServerId
-      ? [{
-          jointChannelId: joint.id,
-          serverId: input.targetServerId,
-          localChannelId: targetProjection.id,
-          role: "participant" as const,
-          joinedByUserId: input.targetOwnerId ?? input.hostOwnerId,
-        }]
-      : []),
-  ]);
-  return { joint, canonical, hostProjection, targetProjection };
 }
 
 test("Free history cutoff starts after the full-featured trial while Pro and internal plans are unlimited", () => {
@@ -273,136 +245,6 @@ test("entitlement projection serializes Pro provider metadata and gates paid fea
     maxUniversalSeats: 3,
   });
   await requireTeamBillingFeature(db, server.id, "Joint channels");
-});
-
-test("the single free Joint Channel and its threads remain writable permanently", async ({ db }) => {
-
-  const owner = await seedUser("joint-retained-owner");
-  const server = await createServer("Joint Retained", `joint-retained-${randomUUID()}`, owner.id);
-  const { hostProjection: joint } = await createRetainedJointChannel({
-    hostServerId: server.id,
-    hostOwnerId: owner.id,
-  });
-
-  assert.equal(await isChannelReadOnlyByBillingFeature(joint.id, server.id, DURING_FULL_FEATURE_TRIAL), false);
-  assert.equal(await isChannelReadOnlyByBillingFeature(joint.id, server.id, AFTER_FULL_FEATURE_TRIAL), false);
-
-  const parent = await createMessage(joint.id, "user", owner.id, "retained joint thread parent");
-  const thread = await getOrCreateThread(parent.id, owner.id, "user");
-  assert.equal(await isChannelReadOnlyByBillingFeature(thread.id, server.id, AFTER_FULL_FEATURE_TRIAL), false);
-
-  await insertProSubscription({ serverId: server.id, ownerId: owner.id, packQuantity: 1 });
-  assert.equal(await isChannelReadOnlyByBillingFeature(joint.id, server.id, AFTER_FULL_FEATURE_TRIAL), false);
-  assert.equal(await isChannelReadOnlyByBillingFeature(thread.id, server.id, AFTER_FULL_FEATURE_TRIAL), false);
-});
-
-test("Free may create one active Joint Channel permanently", async ({ db }) => {
-
-  const owner = await seedUser("joint-free-owner");
-  const server = await createServer("Joint Free", `joint-free-${randomUUID()}`, owner.id);
-  const farFuture = new Date("2040-01-01T00:00:00Z");
-
-  const freeEntitlement = await getJointChannelCreationEntitlement(
-    getDb(),
-    server.id,
-    farFuture,
-  );
-  assert.equal(freeEntitlement, "free");
-  await assertJointChannelCreationCapacity(getDb(), server.id, freeEntitlement);
-
-  await createRetainedJointChannel({
-    hostServerId: server.id,
-    hostOwnerId: owner.id,
-  });
-  await assert.rejects(
-    () => assertJointChannelCreationCapacity(getDb(), server.id, freeEntitlement),
-    /Creating a second Joint Channel requires the Pro plan/,
-  );
-});
-
-test("only the oldest active host-created Joint Channel stays permanently free", async ({ db }) => {
-
-  const owner = await seedUser("joint-free-retained-owner");
-  const server = await createServer("Joint Free Retained", `joint-free-retained-${randomUUID()}`, owner.id);
-  const first = await createRetainedJointChannel({
-    hostServerId: server.id,
-    hostOwnerId: owner.id,
-    createdAt: new Date("2026-08-01T00:00:00Z"),
-  });
-  const second = await createRetainedJointChannel({
-    hostServerId: server.id,
-    hostOwnerId: owner.id,
-    createdAt: new Date("2026-08-02T00:00:00Z"),
-  });
-  const farFuture = new Date("2040-01-01T00:00:00Z");
-
-  assert.equal(
-    await isChannelReadOnlyByBillingFeature(first.hostProjection.id, server.id, farFuture),
-    false,
-  );
-  assert.equal(
-    await isChannelReadOnlyByBillingFeature(second.hostProjection.id, server.id, farFuture),
-    true,
-  );
-});
-
-test("joint channels remain writable while any active participant server has Pro", async ({ db: database }) => {
-
-  const db = getDb();
-  const hostOwner = await seedUser("joint-host-owner");
-  const targetOwner = await seedUser("joint-target-owner");
-  const hostServer = await createServer("Joint Host", `joint-host-${randomUUID()}`, hostOwner.id);
-  const targetServer = await createServer("Joint Target", `joint-target-${randomUUID()}`, targetOwner.id);
-  await createRetainedJointChannel({
-    hostServerId: hostServer.id,
-    hostOwnerId: hostOwner.id,
-    createdAt: new Date("2026-08-01T00:00:00Z"),
-  });
-  await insertProSubscription({ serverId: hostServer.id, ownerId: hostOwner.id, packQuantity: 1 });
-
-  const { hostProjection, targetProjection } = await createRetainedJointChannel({
-    hostServerId: hostServer.id,
-    hostOwnerId: hostOwner.id,
-    targetServerId: targetServer.id,
-    targetOwnerId: targetOwner.id,
-    createdAt: new Date("2026-08-02T00:00:00Z"),
-  });
-  assert.ok(targetProjection);
-
-  assert.equal(await isChannelReadOnlyByBillingFeature(hostProjection.id, hostServer.id, AFTER_FULL_FEATURE_TRIAL), false);
-  assert.equal(await isChannelReadOnlyByBillingFeature(targetProjection.id, targetServer.id, AFTER_FULL_FEATURE_TRIAL), false);
-
-  const parent = await createMessage(targetProjection.id, "user", targetOwner.id, "target joint thread parent");
-  const thread = await getOrCreateThread(parent.id, targetOwner.id, "user");
-  assert.equal(await isChannelReadOnlyByBillingFeature(thread.id, targetServer.id, AFTER_FULL_FEATURE_TRIAL), false);
-
-  await db.update(subscriptions)
-    .set({ status: "canceled" })
-    .where(eq(subscriptions.serverId, hostServer.id));
-
-  assert.equal(await isChannelReadOnlyByBillingFeature(hostProjection.id, hostServer.id, AFTER_FULL_FEATURE_TRIAL), true);
-  assert.equal(await isChannelReadOnlyByBillingFeature(targetProjection.id, targetServer.id, AFTER_FULL_FEATURE_TRIAL), true);
-  assert.equal(await isChannelReadOnlyByBillingFeature(thread.id, targetServer.id, AFTER_FULL_FEATURE_TRIAL), true);
-});
-
-test("Founder and Partner plans never lock retained Joint Channels", async ({ db: database }) => {
-
-  const db = getDb();
-  for (const plan of ["founder", "partner"] as const) {
-    const owner = await seedUser(`${plan}-joint-owner`);
-    const server = await createServer(`${plan} Joint Retained`, `${plan}-joint-${randomUUID()}`, owner.id);
-    await db.update(servers).set({ plan }).where(eq(servers.id, server.id));
-    const { hostProjection: joint } = await createRetainedJointChannel({
-      hostServerId: server.id,
-      hostOwnerId: owner.id,
-    });
-    const parent = await createMessage(joint.id, "user", owner.id, `${plan} retained joint thread parent`);
-    const thread = await getOrCreateThread(parent.id, owner.id, "user");
-
-    await requireTeamBillingFeature(db, server.id, "Joint channels", AFTER_FULL_FEATURE_TRIAL);
-    assert.equal(await isChannelReadOnlyByBillingFeature(joint.id, server.id, AFTER_FULL_FEATURE_TRIAL), false);
-    assert.equal(await isChannelReadOnlyByBillingFeature(thread.id, server.id, AFTER_FULL_FEATURE_TRIAL), false);
-  }
 });
 
 test("non-entitling subscriptions cannot grant Pro capacity through stale server plan", async ({ db: database }) => {

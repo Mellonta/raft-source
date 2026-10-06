@@ -14,6 +14,7 @@ export type CliErrorCode =
   | "CREATE_FAILED"
   | "RECEIPT_FAILED"
   | "INBOX_CHECK_FAILED"
+  | "INBOX_UNAVAILABLE"
   | "TOKEN_FILE_UNREADABLE"
   | "TOKEN_FILE_EMPTY"
   | "PROFILE_FILE_UNREADABLE"
@@ -25,15 +26,22 @@ export type CliErrorCode =
   | "BRIDGE_EXPECTED_AGENT_REQUIRED"
   | "BRIDGE_IDENTITY_MISMATCH"
   | "SEND_HELD_AS_DRAFT"
+  | "SEND_HELD"
+  | "GUIDANCE_DELIVERED"
   | "SEND_DRAFT_NOT_FOUND"
+  | "SEND_DRAFT_EXPIRED"
   | "THREAD_CONTEXT_TARGET_CONFIRMATION_REQUIRED"
   | "INVALID_ARG"
   | "INVALID_SCOPE"
   | "INVALID_TARGET"
   | "INVALID_JSON_RESPONSE"
+  | "IDENTITY_MISMATCH"
+  | "PROMPT_UNAVAILABLE"
+  | "WHOAMI_FAILED"
   | "INFO_FAILED"
   | "INTEGRATION_SESSION_HANDOFF_FAILED"
   | "HISTORY_FAILED"
+  | "UNSUPPORTED_BY_SERVER"
   | "JOIN_FAILED"
   | "KNOWLEDGE_GET_FAILED"
   | "KNOWLEDGE_SEARCH_FAILED"
@@ -74,9 +82,6 @@ export type CliErrorCode =
   | "UPDATE_FAILED"
   | "VIEW_FAILED"
   | "VERSION_UNAVAILABLE"
-  | "WIKI_ARTIFACT_READ_FAILED"
-  | "WIKI_MANIFEST_GET_FAILED"
-  | "WIKI_MANIFEST_PUBLISH_FAILED"
   | "WAIT_FAILED"
   | "LOCAL_WRITE_FAILED"
   | "LOCAL_WRITE_SOURCE_FAILED"
@@ -118,7 +123,7 @@ export interface FileWriteEffectState {
   tempFilePath?: string;
 }
 
-export type CliEffect = "draft_saved" | "message_queued";
+export type CliEffect = "draft_saved" | "message_queued" | "not_executed";
 
 /**
  * Text-only presentation intent. When set, the text renderer omits the labelled

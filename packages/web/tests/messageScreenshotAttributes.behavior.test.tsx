@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { MemoryRouter } from "react-router-dom";
-import { cleanup, render as rtlRender } from "@testing-library/react";
+import { act, cleanup, render as rtlRender } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 import type { Agent } from "../src/store/agentStore";
@@ -9,6 +8,7 @@ import type { User } from "../src/store/authStore";
 import type { Channel } from "../src/store/channelStore";
 import type { Message, MessageAttachment, MessageReaction } from "../src/store/messageStore";
 import type { Server, ServerMember } from "../src/store/serverStore";
+import { useAppearanceStore } from "../src/store/appearanceStore";
 
 // DOM behavior coverage for the data-* attributes the share-screenshot pipeline
 // (src/utils/selectScreenshot.ts) reads off MessageItem's rendered DOM. Replaces
@@ -116,6 +116,21 @@ async function renderMessage(message: Message) {
 }
 
 afterEach(cleanup);
+
+test("message body font size remains user-controlled after the RUI theme recipe", async () => {
+  useAppearanceStore.setState({ messageBodyFontSize: "sm" });
+  const { row } = await renderMessage(makeMessage());
+  const body = row.querySelector<HTMLElement>("[data-message-font-size]");
+  assert.ok(body, "the shared MessageItem body exposes its resolved preference");
+  assert.equal(body.dataset.messageFontSize, "sm");
+  assert.equal(body.style.fontSize, "0.75rem");
+
+  act(() => {
+    useAppearanceStore.getState().setMessageBodyFontSize("lg");
+  });
+  assert.equal(body.dataset.messageFontSize, "lg");
+  assert.equal(body.style.fontSize, "1rem");
+});
 
 test("image attachments expose select-screenshot dataset attributes for protected byte fetches", async () => {
   const { row } = await renderMessage(makeMessage({ attachments: [makeImageAttachment()] }));

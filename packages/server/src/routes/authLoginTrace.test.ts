@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   BasicTracer,
   MemoryTraceSink,
   traceEventRowsForSpan,
 } from "@botiverse/raft-shared";
 
-import { runWithTraceSpan } from "../tracing/semanticTrace.js";
-import { recordEmailLoginRejectedTrace } from "./authLoginTrace.js";
+import { runWithTraceSpan } from "../tracing/semanticTrace";
+import { recordEmailLoginRejectedTrace } from "./authLoginTrace";
 
 const TRACE_RESOURCE = {
   serviceName: "slock-server",

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { channel } from "node:diagnostics_channel";
 import { mkdirSync as fsMkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync as fsWriteFileSync } from "node:fs";
 import os from "node:os";
 import { createServer } from "node:http";
@@ -17,10 +17,14 @@ import {
   createKimiSdkEventMappingState,
   detectKimiSdkModels,
   mapKimiSdkEventToParsedEvents,
+  setKimiSdkEventMappingSession,
+  typedKimiStartError,
   type KimiSessionFactory,
-} from "./kimi-sdk.js";
-import { prepareCliTransport } from "./cliTransport.js";
+} from "./kimi-sdk";
+import { classifySpawnFailure } from "../spawnFailureClassification";
+import { prepareCliTransport, toolEnvFromSpawnEnv } from "./cliTransport";
 import {
+  KimiError,
   LocalKaos,
   createKimiHarness,
   type Event as KimiSdkEvent,
@@ -28,9 +32,13 @@ import {
   type KimiHarness,
   type Session as KimiSession,
 } from "@botiverse/kimi-code-sdk";
-import type { ParsedEvent, SpawnContext } from "./types.js";
+import type { ParsedEvent, SpawnContext } from "./types";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
-import { __resetManagedMcpRuntimeProxyForTest } from "../managedMcpRuntimeProxy.js";
+import { __resetManagedMcpRuntimeProxyForTest } from "../managedMcpRuntimeProxy";
+import {
+  KIMI_REQUEST_DIAGNOSTIC_AGENT_ID_ENV,
+  KIMI_REQUEST_DIAGNOSTIC_SESSION_ID_ENV,
+} from "./kimiRequestDiagnostics";
 
 function makeSpawnContext(overrides: Partial<SpawnContext["config"]> = {}): SpawnContext {
   return {
@@ -113,7 +121,12 @@ test("buildKimiSessionDir lives under the agent's working directory", () => {
 
 test("createKimiSdkEventMappingState seeds with the session id and announces only once", () => {
   const state = createKimiSdkEventMappingState("kimi-session-1");
-  assert.deepEqual(state, { sessionId: "kimi-session-1", sessionAnnounced: false });
+  assert.deepEqual(state, {
+    sessionId: "kimi-session-1",
+    sessionAnnounced: false,
+    seenUsageSteps: new Set(),
+    usageIdentityOmissionObserved: false,
+  });
 
   // First emit — session_init prepended.
   const first = mapKimiSdkEventToParsedEvents(
@@ -132,6 +145,172 @@ test("createKimiSdkEventMappingState seeds with the session id and announces onl
     state,
   );
   assert.deepEqual(second, [{ kind: "text", text: " there" }]);
+});
+
+test("turn.step.completed maps SDK per-generation usage without conflating missing fields with zero", () => {
+  const state = createKimiSdkEventMappingState("kimi-session-1");
+  state.sessionAnnounced = true;
+
+  const present = mapKimiSdkEventToParsedEvents({
+    ...eventBase(),
+    type: "turn.step.completed",
+    turnId: 7,
+    step: 2,
+    stepId: "step-7-2",
+    usage: {
+      inputOther: 120,
+      output: 0,
+      inputCacheRead: 30,
+      inputCacheCreation: 4,
+    },
+  }, state);
+  assert.deepEqual(present, [{
+    kind: "telemetry",
+    name: "token_usage",
+    source: "kimi_turn_step_completed_usage",
+    usageKind: "per_generation",
+    sessionId: "kimi-session-1",
+    turnId: "7",
+    runtimeResultId: "kimi-session-1:step:step-7-2",
+    attrs: {
+      input_tokens: 120,
+      output_tokens: 0,
+      cached_read_tokens: 30,
+      cache_write_tokens: 4,
+      total_tokens: 154,
+    },
+  }]);
+
+  const missing = mapKimiSdkEventToParsedEvents({
+    ...eventBase(),
+    type: "turn.step.completed",
+    turnId: 7,
+    step: 3,
+    stepId: "step-7-3",
+  }, state);
+  assert.deepEqual(missing, [], "absent usage must not become a zero-valued report");
+
+  const partial = mapKimiSdkEventToParsedEvents({
+    ...eventBase(),
+    type: "turn.step.completed",
+    turnId: 7,
+    step: 4,
+    stepId: "step-7-4",
+    usage: { output: 5 } as never,
+  }, state);
+  assert.deepEqual(partial, [{
+    kind: "telemetry",
+    name: "token_usage",
+    source: "kimi_turn_step_completed_usage",
+    usageKind: "per_generation",
+    sessionId: "kimi-session-1",
+    turnId: "7",
+    runtimeResultId: "kimi-session-1:step:step-7-4",
+    attrs: { output_tokens: 5 },
+  }], "a missing counter must remain absent and must not be folded into total_tokens");
+});
+
+test("Kimi usage de-duplicates repeated completions, ignores retry metadata, and scopes identities to the session", () => {
+  const state = createKimiSdkEventMappingState("kimi-session-1");
+  state.sessionAnnounced = true;
+  const completion = {
+    ...eventBase(),
+    type: "turn.step.completed" as const,
+    turnId: 9,
+    step: 1,
+    stepId: "stable-step-id",
+    usage: {
+      inputOther: 10,
+      output: 2,
+      inputCacheRead: 1,
+      inputCacheCreation: 0,
+    },
+  };
+
+  const firstStep = mapKimiSdkEventToParsedEvents(completion, state);
+  assert.equal(firstStep.filter((event) => event.kind === "telemetry").length, 1);
+  assert.deepEqual(mapKimiSdkEventToParsedEvents(completion, state), [], "the same completed step must report once");
+  const secondStep = mapKimiSdkEventToParsedEvents({
+    ...completion,
+    step: 2,
+    stepId: "stable-step-id-2",
+    usage: {
+      inputOther: 8,
+      output: 3,
+      inputCacheRead: 2,
+      inputCacheCreation: 0,
+    },
+  }, state);
+  assert.equal(secondStep.length, 1, "a second generation in the same logical turn must remain a distinct delta");
+  const firstTotal = firstStep[0]?.kind === "telemetry" ? firstStep[0].attrs.total_tokens : undefined;
+  const secondTotal = secondStep[0]?.kind === "telemetry" ? secondStep[0].attrs.total_tokens : undefined;
+  assert.equal(
+    Number(firstTotal) + Number(secondTotal),
+    26,
+    "two step deltas can be summed without cumulative double counting",
+  );
+  assert.deepEqual(mapKimiSdkEventToParsedEvents({
+    ...eventBase(),
+    type: "turn.step.retrying",
+    turnId: 9,
+    step: 1,
+    stepId: "stable-step-id",
+    failedAttempt: 1,
+    nextAttempt: 2,
+    maxAttempts: 3,
+    delayMs: 100,
+    errorName: "RetryableError",
+    errorMessage: "redacted from telemetry",
+  }, state), [], "retry lifecycle metadata must not create token usage");
+
+  setKimiSdkEventMappingSession(state, "kimi-session-2");
+  const nextSession = mapKimiSdkEventToParsedEvents({ ...completion, sessionId: "kimi-session-2" }, state);
+  assert.deepEqual(nextSession.map((event) => event.kind), ["session_init", "telemetry"]);
+  const telemetry = nextSession.find((event) => event.kind === "telemetry");
+  assert.equal(telemetry?.sessionId, "kimi-session-2");
+  assert.equal(telemetry?.runtimeResultId, "kimi-session-2:step:stable-step-id");
+});
+
+test("Kimi usage fallback de-duplicates by turn+step and fails closed without a complete identity", () => {
+  const state = createKimiSdkEventMappingState("kimi-session-1");
+  state.sessionAnnounced = true;
+  const withoutStepId = {
+    ...eventBase(),
+    type: "turn.step.completed" as const,
+    turnId: 11,
+    step: 4,
+    usage: {
+      inputOther: 1,
+      output: 2,
+      inputCacheRead: 3,
+      inputCacheCreation: 4,
+    },
+  };
+  assert.equal(mapKimiSdkEventToParsedEvents(withoutStepId, state).filter((event) => event.kind === "telemetry").length, 1);
+  assert.deepEqual(mapKimiSdkEventToParsedEvents(withoutStepId, state), []);
+  assert.equal(
+    mapKimiSdkEventToParsedEvents({ ...withoutStepId, step: 5 }, state).filter((event) => event.kind === "telemetry").length,
+    1,
+    "different fallback steps must not collapse into one identity",
+  );
+
+  assert.deepEqual(mapKimiSdkEventToParsedEvents({
+    ...withoutStepId,
+    turnId: undefined,
+  } as unknown as KimiSdkEvent, state), [{
+    kind: "telemetry",
+    name: "usage_omission",
+    source: "kimi_turn_step_completed_usage",
+    sessionId: "kimi-session-1",
+    attrs: {
+      omission_reason: "missing_usage_identity",
+      event_type: "turn.step.completed",
+    },
+  }], "missing turnId must be observable without emitting a zero usage record");
+  assert.deepEqual(mapKimiSdkEventToParsedEvents({
+    ...withoutStepId,
+    step: undefined,
+  } as unknown as KimiSdkEvent, state), [], "repeated malformed identities coalesce within the session");
 });
 
 test("mapKimiSdkEventToParsedEvents — content-streaming events map to the right ParsedEvent kinds", () => {
@@ -229,7 +408,6 @@ test("RS-004 invariant — explicit drops (state-only / out-of-band) emit no Par
   const dropped: Array<KimiSdkEvent & Record<string, unknown>> = [
     { ...eventBase(), type: "turn.started", turnId: 1, origin: "user" as never },
     { ...eventBase(), type: "turn.step.started", turnId: 1, step: 0 },
-    { ...eventBase(), type: "turn.step.completed", turnId: 1, step: 0 },
     { ...eventBase(), type: "turn.step.retrying", turnId: 1, step: 0, failedAttempt: 1, nextAttempt: 2, maxAttempts: 3, delayMs: 100, errorName: "X", errorMessage: "y" },
     { ...eventBase(), type: "turn.step.interrupted", turnId: 1, step: 0, reason: "abort" },
     { ...eventBase(), type: "tool.call.delta", turnId: 1, toolCallId: "t1" },
@@ -585,7 +763,8 @@ function makeCapturingHarness(): {
 } {
   const createCalls: Array<Record<string, unknown>> = [];
   const resumeCalls: Array<Record<string, unknown>> = [];
-  const fakeSession = { id: "kimi-session-x" } as unknown as KimiSession;
+  // setModel: a fresh session resolves its model at start (task #1221).
+  const fakeSession = { id: "kimi-session-x", setModel: async () => {} } as unknown as KimiSession;
   const harness = {
     createSession: async (fields: Record<string, unknown>) => {
       createCalls.push(fields);
@@ -664,6 +843,7 @@ function makeFakeDeps(
   createHarnessCalls: Array<Record<string, unknown>> = [],
   slockDir: string = "/tmp/kimi-wrappers/agent-1",
   slockHome: string = "/tmp/kimi-slock-home",
+  spawnEnvExtra: Record<string, string> = {},
 ) {
   const { localKaos, toolKaos, capturedEnv } = makeFakeLocalKaos();
   return {
@@ -672,7 +852,7 @@ function makeFakeDeps(
       return harness;
     }) as never,
     prepareTransport: (async () => ({
-      spawnEnv: { KIMI_CODE_HOME: home, NO_COLOR: "1" },
+      spawnEnv: { KIMI_CODE_HOME: home, NO_COLOR: "1", ...spawnEnvExtra },
       wrapperPath: WRAPPER_PATH,
       slockDir,
       slockHome,
@@ -691,6 +871,98 @@ test("composeStandingRoleAdditional carries only the standing prompt; wrapper pa
 
   assert.equal(composeStandingRoleAdditional(undefined, null), "");
   assert.equal(composeStandingRoleAdditional("only standing", null), "only standing");
+});
+
+test("kimi tool Kaos keeps the transport's PATH (wrapper dir + agent-configured PATH), not a fresh daemon PATH (#8610)", async () => {
+  const { ctx, home } = makeTempCtx({ sessionId: null });
+  const { harness } = makeCapturingHarness();
+  const slockDir = "/tmp/kimi-wrappers/agent-1/w3-launch";
+  const transportPath = `${slockDir}${path.delimiter}/opt/homebrew/bin:/Users/x/.local/bin:/usr/bin:/bin`;
+  const deps = makeFakeDeps(home, harness, [], slockDir, "/tmp/kimi-slock-home", { PATH: transportPath });
+
+  await createKimiAgentSessionForContext(ctx, "sess-path", deps);
+
+  assert.equal(deps._capturedEnv.PATH, transportPath, "the bash tool sees exactly the runtime PATH");
+});
+
+test("kimi tool Kaos carries the managed-launch agent env, not only the daemon's process env", async () => {
+  const { ctx, home } = makeTempCtx({ sessionId: null });
+  const { harness } = makeCapturingHarness();
+  const agentEnv = {
+    SLOCK_AGENT_ID: "agent-1",
+    SLOCK_AGENT_LAUNCH_ID: "launch-1",
+    SLOCK_SERVER_URL: "https://api.raft.test",
+    SLOCK_CURRENT_AGENT_ID: "agent-1",
+    SLOCK_CURRENT_SERVER_ID: "server-1",
+    SLOCK_CURRENT_DAEMON_VERSION: "0.0.0-kimi-tool-env-test",
+    SLOCK_CURRENT_WORKSPACE_PATH: "/tmp/ws",
+    RAFT_CURRENT_COMPUTER_ID: "computer-1",
+    RAFT_CURRENT_COMPUTER_NAME: "box",
+    RAFT_CURRENT_COMPUTER_HOSTNAME: "box.local",
+    RAFT_CURRENT_COMPUTER_OS: "linux",
+    AGENT_CONFIGURED_VAR: "from-agent-config",
+  };
+  const deps = makeFakeDeps(home, harness, [], "/tmp/kimi-wrappers/agent-1/w4-launch", "/tmp/kimi-slock-home", agentEnv);
+
+  await createKimiAgentSessionForContext(ctx, "sess-agent-env", deps);
+
+  for (const [key, value] of Object.entries(agentEnv)) {
+    assert.equal(deps._capturedEnv[key], value, `bash tool env must carry ${key}`);
+  }
+});
+
+test("kimi tool Kaos unsets daemon env keys the transport removed (credentials, profile selectors)", async () => {
+  const leaked = {
+    SLOCK_AGENT_TOKEN_FILE: "/tmp/daemon-token",
+    SLOCK_AGENT_PROXY_URL: "http://127.0.0.1:1/daemon",
+    RAFT_PROFILE: "daemon-login-profile",
+  };
+  const saved = Object.fromEntries(Object.keys(leaked).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, leaked);
+  try {
+    const { ctx, home } = makeTempCtx({ sessionId: null });
+    const { harness } = makeCapturingHarness();
+    // Fake transport env mirrors prepareCliTransport: these keys deleted.
+    const deps = makeFakeDeps(home, harness, [], "/tmp/kimi-wrappers/agent-1/w5-launch", "/tmp/kimi-slock-home", { SLOCK_AGENT_ID: "agent-1" });
+
+    await createKimiAgentSessionForContext(ctx, "sess-unset", deps);
+
+    for (const key of Object.keys(leaked)) {
+      assert.ok(key in deps._capturedEnv, `tool env must explicitly unset ${key}`);
+      assert.equal(deps._capturedEnv[key], undefined, `tool env must not carry ${key}`);
+    }
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("toolEnvFromSpawnEnv on a real LocalKaos: tool sees spawnEnv values and not removed daemon keys", async () => {
+  const base = { ...process.env, KIMI_TOOL_ENV_TEST_REMOVED: "daemon-value" };
+  const saved = process.env.KIMI_TOOL_ENV_TEST_REMOVED;
+  process.env.KIMI_TOOL_ENV_TEST_REMOVED = "daemon-value";
+  try {
+    const spawnEnv = { ...base, KIMI_TOOL_ENV_TEST_AGENT: "agent-value" } as NodeJS.ProcessEnv;
+    delete spawnEnv.KIMI_TOOL_ENV_TEST_REMOVED;
+    const toolKaos = (await LocalKaos.create()).withEnv(
+      toolEnvFromSpawnEnv(spawnEnv, base) as Record<string, string>,
+    );
+    const proc = await toolKaos.exec(
+      "sh",
+      "-c",
+      'printf "%s|%s" "${KIMI_TOOL_ENV_TEST_AGENT-unset}" "${KIMI_TOOL_ENV_TEST_REMOVED-unset}"',
+    );
+    const chunks: Buffer[] = [];
+    for await (const chunk of proc.stdout) chunks.push(chunk);
+    await proc.wait();
+    await proc.dispose();
+    assert.equal(Buffer.concat(chunks).toString("utf8"), "agent-value|unset");
+  } finally {
+    if (saved === undefined) delete process.env.KIMI_TOOL_ENV_TEST_REMOVED;
+    else process.env.KIMI_TOOL_ENV_TEST_REMOVED = saved;
+  }
 });
 
 test("createKimiAgentSessionForContext passes standing prompt + per-session tool Kaos on CREATE path", async () => {
@@ -720,11 +992,9 @@ test("createKimiAgentSessionForContext passes standing prompt + per-session tool
   assert.equal(deps._capturedEnv.SLOCK_HOME, slockHome);
   assert.equal(deps._capturedEnv.SLOCK_AGENT_LAUNCH_DIR, path.basename(slockDir));
   assert.ok(deps._capturedEnv.PATH?.startsWith(slockDir), "tool Kaos PATH must be prepended with slockDir");
-  assert.deepEqual(
-    Object.keys(deps._capturedEnv).sort(),
-    ["NO_COLOR", "PATH", "SLOCK_AGENT_LAUNCH_DIR", "SLOCK_CLI_TRANSPORT_DIR", "SLOCK_HOME"].sort(),
-    "tool Kaos env must contain only the allowed per-session keys",
-  );
+  for (const key of ["KIMI_CODE_HOME", "NO_COLOR", "PATH", "SLOCK_AGENT_LAUNCH_DIR", "SLOCK_CLI_TRANSPORT_DIR", "SLOCK_HOME"]) {
+    assert.equal(typeof deps._capturedEnv[key], "string", `tool Kaos env must set ${key}`);
+  }
 });
 
 test("createKimiAgentSessionForContext passes standing prompt + per-session tool Kaos on RESUME path", async () => {
@@ -749,11 +1019,9 @@ test("createKimiAgentSessionForContext passes standing prompt + per-session tool
   assert.ok(fields.persistenceKaos, "resumeSession must receive a persistence Kaos");
   assert.notEqual(fields.kaos, fields.persistenceKaos, "tool Kaos and persistence Kaos must be distinct");
   assert.equal(deps._capturedEnv.SLOCK_AGENT_LAUNCH_DIR, path.basename(slockDir));
-  assert.deepEqual(
-    Object.keys(deps._capturedEnv).sort(),
-    ["NO_COLOR", "PATH", "SLOCK_AGENT_LAUNCH_DIR", "SLOCK_CLI_TRANSPORT_DIR", "SLOCK_HOME"].sort(),
-    "tool Kaos env must contain only the allowed per-session keys on resume",
-  );
+  for (const key of ["KIMI_CODE_HOME", "NO_COLOR", "PATH", "SLOCK_AGENT_LAUNCH_DIR", "SLOCK_CLI_TRANSPORT_DIR", "SLOCK_HOME"]) {
+    assert.equal(typeof deps._capturedEnv[key], "string", `tool Kaos env must set ${key} on resume`);
+  }
 });
 
 test("createKimiAgentSessionForContext applies schema-selected effort on fresh create and persisted resume", async () => {
@@ -1166,6 +1434,92 @@ test("KimiSdkRuntimeSession.start no longer injects the standing prompt / wrappe
   );
 
   await runtime.dispose();
+});
+
+test("KimiSdkRuntimeSession emits request diagnostics only for the exact configured native session", async () => {
+  const sessionId = "kimi-session-diagnostic";
+  const originalAgentSelector = process.env[KIMI_REQUEST_DIAGNOSTIC_AGENT_ID_ENV];
+  const originalSessionSelector = process.env[KIMI_REQUEST_DIAGNOSTIC_SESSION_ID_ENV];
+  process.env[KIMI_REQUEST_DIAGNOSTIC_AGENT_ID_ENV] = "agent-1";
+  process.env[KIMI_REQUEST_DIAGNOSTIC_SESSION_ID_ENV] = sessionId;
+
+  let eventListener: ((event: KimiSdkEvent) => void) | null = null;
+  const fakeSession = {
+    id: sessionId,
+    setApprovalHandler() {},
+    onEvent(listener: (event: KimiSdkEvent) => void) {
+      eventListener = listener;
+      return () => {};
+    },
+    prompt() {
+      assert.ok(eventListener);
+      eventListener({ ...eventBase(), sessionId, type: "turn.step.started", turnId: 4, step: 3 });
+      const request = {
+        method: "POST",
+        path: "/v1/chat/completions?private=query",
+        headers: { authorization: "Bearer private-token" },
+        body: "private-prompt",
+      };
+      channel("undici:request:create").publish({ request });
+      channel("undici:request:headers").publish({ request, response: { statusCode: 200 } });
+      channel("undici:request:trailers").publish({ request });
+      return Promise.resolve();
+    },
+    steer() {
+      return Promise.resolve();
+    },
+    cancel() {
+      return Promise.resolve();
+    },
+  } as unknown as KimiSession;
+  const runtime = new KimiSdkRuntimeSession(makeSpawnContext(), () => {}, async () => ({
+    harness: {} as KimiHarness,
+    session: fakeSession,
+    wrapperPath: WRAPPER_PATH,
+  }));
+  const runtimeEvents: ParsedEvent[] = [];
+  runtime.on("runtime_event", (event) => runtimeEvents.push(event));
+
+  try {
+    assert.deepEqual(await runtime.start({ text: "start" }), { ok: true, acceptedAs: "prompt" });
+    await flushImmediate();
+    const diagnostic = runtimeEvents.find(
+      (event): event is Extract<ParsedEvent, { kind: "telemetry" }> =>
+        event.kind === "telemetry" && event.name === "request_diagnostic",
+    );
+    assert.ok(diagnostic);
+    assert.equal(diagnostic.source, "kimi_request_diagnostic");
+    assert.equal(diagnostic.sessionId, sessionId);
+    assert.equal(diagnostic.turnId, "4");
+    const {
+      duration_ms: durationMs,
+      started_at_ms: startedAtMs,
+      finished_at_ms: finishedAtMs,
+      ...stableAttrs
+    } = diagnostic.attrs;
+    assert.equal(typeof durationMs, "number");
+    assert.equal(typeof startedAtMs, "number");
+    assert.equal(typeof finishedAtMs, "number");
+    assert.deepEqual(stableAttrs, {
+      diagnostic_kind: "kimi_request",
+      correlation_id: `${sessionId}:4.3:1.1`,
+      step: 3,
+      outer_attempt: 1,
+      inner_attempt: 1,
+      outcome: "success",
+      status_code: 200,
+    });
+    const serialized = JSON.stringify(diagnostic);
+    for (const secret of ["query", "private-token", "private-prompt"]) {
+      assert.ok(!serialized.includes(secret));
+    }
+  } finally {
+    await runtime.dispose();
+    if (originalAgentSelector === undefined) delete process.env[KIMI_REQUEST_DIAGNOSTIC_AGENT_ID_ENV];
+    else process.env[KIMI_REQUEST_DIAGNOSTIC_AGENT_ID_ENV] = originalAgentSelector;
+    if (originalSessionSelector === undefined) delete process.env[KIMI_REQUEST_DIAGNOSTIC_SESSION_ID_ENV];
+    else process.env[KIMI_REQUEST_DIAGNOSTIC_SESSION_ID_ENV] = originalSessionSelector;
+  }
 });
 
 test("KimiSdkRuntimeSession defers SDK logical turn.ended until active goal continuation clears", async () => {
@@ -1614,4 +1968,73 @@ test("LocalKaos per-session PATH resolves bare `raft` to the current launch wrap
     }
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+
+test("Kimi start failures map to typed reasons instead of the generic runtime_spawn_failed (task #1221)", async () => {
+  const notConfigured = new KimiError(
+    "config.invalid",
+    'Model "devin/swe-2" is not configured in config.toml. Add a [models."devin/swe-2"] entry with max_context_size.',
+    { details: { model: "devin/swe-2" } },
+  );
+  const fresh = makeTempCtx({ sessionId: null, model: "devin/swe-2" });
+  const harness = {
+    createSession: async () => ({
+      id: "fresh",
+      setModel: async () => { throw notConfigured; },
+    }),
+    resumeSession: async () => { throw new Error("no resume on the fresh path"); },
+  } as unknown as KimiHarness;
+  const modelError = await createKimiAgentSessionForContext(fresh.ctx, "fresh", makeFakeDeps(fresh.home, harness)).then(
+    () => assert.fail("a model missing from the local config must fail the start"),
+    (error: unknown) => error,
+  );
+  assert.equal(classifySpawnFailure(modelError).reason, "model_not_configured");
+  assert.match(classifySpawnFailure(modelError).userMessage, /devin\/swe-2/);
+
+  const loginRequired = new KimiError("auth.login_required", 'OAuth provider "kimi-code" requires login before it can be used.');
+  assert.equal(classifySpawnFailure(typedKimiStartError(loginRequired, null)).reason, "runtime_login_required");
+  const badConfig = new KimiError("config.invalid", "Provider \"x\" is not configured.");
+  assert.equal(classifySpawnFailure(typedKimiStartError(badConfig, null)).reason, "runtime_config_invalid");
+  const plain = new Error("socket hang up");
+  assert.equal(typedKimiStartError(plain, null), plain, "non-Kimi errors pass through unchanged");
+});
+
+test("a resume failure that is not a session problem surfaces instead of silently starting fresh", async () => {
+  const resumed = makeTempCtx({ sessionId: "resume-auth", model: "kimi-code/k3" });
+  let created = 0;
+  const harness = {
+    createSession: async () => { created += 1; return { id: "fresh", setModel: async () => {} }; },
+    resumeSession: async () => { throw new KimiError("auth.login_required", "requires login"); },
+  } as unknown as KimiHarness;
+  const error = await createKimiAgentSessionForContext(resumed.ctx, "resume-auth", makeFakeDeps(resumed.home, harness)).then(
+    () => assert.fail("login required must fail the start"),
+    (caught: unknown) => caught,
+  );
+  assert.equal(classifySpawnFailure(error).reason, "runtime_login_required");
+  assert.equal(created, 0, "no fresh session when the failure would repeat");
+
+  // A missing session file still falls back to a fresh session.
+  const missing = makeTempCtx({ sessionId: "resume-missing", model: "kimi-code/k3" });
+  const setModelCalls: string[] = [];
+  const fallbackHarness = {
+    createSession: async () => ({ id: "fresh", setModel: async (model: string) => { setModelCalls.push(model); } }),
+    resumeSession: async () => { throw new KimiError("session.not_found", 'Session "resume-missing" was not found'); },
+  } as unknown as KimiHarness;
+  await createKimiAgentSessionForContext(missing.ctx, "resume-missing", makeFakeDeps(missing.home, fallbackHarness));
+  assert.deepEqual(setModelCalls, ["kimi-code/k3"], "the fresh fallback resolves the model at start too");
+
+  // An ordinary (non-Kimi) error, e.g. I/O, is surfaced as-is: no silent fresh session.
+  const io = makeTempCtx({ sessionId: "resume-io", model: "kimi-code/k3" });
+  let ioCreated = 0;
+  const ioHarness = {
+    createSession: async () => { ioCreated += 1; return { id: "fresh", setModel: async () => {} }; },
+    resumeSession: async () => { throw new Error("EIO: i/o error, read"); },
+  } as unknown as KimiHarness;
+  const ioError = await createKimiAgentSessionForContext(io.ctx, "resume-io", makeFakeDeps(io.home, ioHarness)).then(
+    () => assert.fail("an unknown resume error must fail the start"),
+    (caught: unknown) => caught,
+  );
+  assert.match((ioError as Error).message, /EIO/);
+  assert.equal(ioCreated, 0, "no fresh session for an unknown resume error");
 });

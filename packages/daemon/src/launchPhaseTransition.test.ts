@@ -1,4 +1,3 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
 import {
@@ -10,7 +9,7 @@ import {
   type LaunchIdentityAttrs,
   type LaunchReadinessTransitionState,
   type LaunchTransitionRow,
-} from "./launchPhaseTransition.js";
+} from "./launchPhaseTransition";
 
 function identity(overrides: Partial<LaunchIdentityAttrs> = {}): LaunchIdentityAttrs {
   return {
@@ -163,7 +162,7 @@ import {
   buildLaunchActivationEnterAttrs,
   type LaunchActivationTransitionState,
   type LaunchDeliveredVia,
-} from "./launchPhaseTransition.js";
+} from "./launchPhaseTransition";
 
 function activationState(overrides: Partial<LaunchActivationTransitionState> = {}): LaunchActivationTransitionState {
   const id = overrides.identity ?? identity();

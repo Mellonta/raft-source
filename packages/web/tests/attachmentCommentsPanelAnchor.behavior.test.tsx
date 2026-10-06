@@ -1,7 +1,6 @@
 import "global-jsdom/register";
 import { resetAttachmentPreviewSummaryCache } from "../src/components/message/attachmentPreviewSummaryCache";
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 // oxlint-disable-next-line no-restricted-imports -- Whole-module React shim for classic-runtime test dependencies.
 import * as React from "react";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";

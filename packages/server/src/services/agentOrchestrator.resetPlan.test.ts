@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { planResetActions, type ResetPlanAction, type ResetPlanInput } from "./agentOrchestrator.js";
+import { planResetActions, type ResetPlanAction, type ResetPlanInput } from "./agentOrchestrator";
 
 type ResetPlanCase = {
   name: string;

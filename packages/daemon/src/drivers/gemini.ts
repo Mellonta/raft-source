@@ -1,17 +1,18 @@
+import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig , type AxSurfaceText } from "@botiverse/raft-shared";
-import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./types.js";
-import { buildGeminiTokenUsageEvent } from "./geminiEventNormalizer.js";
-import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport.js";
-import { resolveNodeHostLaunch } from "./nodeHostLaunch.js";
-import { resolveCommandOnPath, type ProbeDeps } from "./probe.js";
+import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./types";
+import { buildGeminiTokenUsageEvent } from "./geminiEventNormalizer";
+import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
+import { resolveNodeHostLaunch } from "./nodeHostLaunch";
+import { resolveCommandOnPath, type ProbeDeps } from "./probe";
 import {
   prepareManagedMcpRuntimeProxy,
   writeManagedMcpRuntimeConfigFile,
-} from "../managedMcpRuntimeProxy.js";
-import { resolveRaftHome } from "../raftHome.js";
+} from "../managedMcpRuntimeProxy";
+import { resolveRaftHome } from "../raftHome";
 
 export async function buildGeminiSpawnEnv(
   ctx: SpawnContext,
@@ -123,10 +124,9 @@ export function resolveGeminiSpawn(
   }
 
   if (!geminiEntry) {
-    throw new Error(
+    throw new RuntimeExecutableNotFoundError({ runtimeId: "gemini", message:
       "Cannot resolve Gemini CLI entry point on Windows. " +
-      "Ensure @google/gemini-cli is installed globally via npm (npm i -g @google/gemini-cli).",
-    );
+      "Ensure @google/gemini-cli is installed globally via npm (npm i -g @google/gemini-cli)." });
   }
 
   const nodeHost = resolveNodeHostLaunch({

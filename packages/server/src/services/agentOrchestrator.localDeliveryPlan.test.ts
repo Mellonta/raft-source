@@ -1,7 +1,6 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
-import { planLocalDeliveryGateAction } from "./agentOrchestrator.js";
+import { planLocalDeliveryGateAction } from "./agentOrchestrator";
 
 test("planLocalDeliveryGateAction drops when the agent is missing", () => {
   assert.equal(

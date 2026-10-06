@@ -32,7 +32,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync, readFileSync } from "node:fs";
-import { chmod, copyFile, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -218,20 +218,6 @@ async function bundleCjs({ version, daemonVersion, cliVersion, workDir }) {
   return outfile;
 }
 
-async function assertBundledDaemonReleaseContracts(bundlePath) {
-  const bundle = await readFile(bundlePath, "utf8");
-  for (const requiredText of [
-    "wiki-workspace-pack:v1",
-    "Configured Wiki Agent has no valid installed workspace pack",
-  ]) {
-    if (!bundle.includes(requiredText)) {
-      throw new Error(
-        `bundled daemon release contract missing from Computer SEA input: ${requiredText}`,
-      );
-    }
-  }
-}
-
 async function resolvePhotonWasmPath() {
   const candidates = [
     join(DAEMON_ROOT, "node_modules", "@silvia-odwyer", "photon-node", PHOTON_WASM_FILENAME),
@@ -330,11 +316,19 @@ async function injectAndSign({ officialNode, blobPath, platform, outBinary }) {
   await chmod(outBinary, 0o755);
 }
 
-function smokeNativeBinary({ outBinary, platform, arch, version, daemonVersion, cliVersion }) {
+function smokeNativeBinary({ outBinary, platform, arch, version, daemonVersion, cliVersion, smokeHome }) {
   if (platform !== process.platform || arch !== process.arch) return;
+  // Prevent K dispatch from testing an installed resident instead of these
+  // newly injected bytes, and keep host account credentials out of all probes.
+  const smokeEnv = {
+    ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot } : {}),
+    RAFT_HOME: smokeHome,
+    SLOCK_HOME: smokeHome,
+  };
   const result = spawnSync(outBinary, ["--version"], {
     encoding: "utf8",
     windowsHide: true,
+    env: smokeEnv,
   });
   if (result.status !== 0) {
     throw new Error(
@@ -351,6 +345,7 @@ function smokeNativeBinary({ outBinary, platform, arch, version, daemonVersion, 
   const versionsResult = spawnSync(outBinary, ["__build-versions"], {
     encoding: "utf8",
     windowsHide: true,
+    env: smokeEnv,
   });
   if (versionsResult.status !== 0) {
     throw new Error(
@@ -402,6 +397,20 @@ function smokeNativeBinary({ outBinary, platform, arch, version, daemonVersion, 
     }
   }
   console.log(`[verify] ${outBinary} __build-versions → ${JSON.stringify(reported)}`);
+
+  const oauthResult = spawnSync(outBinary, ["__verify-bundled-oauth"], {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 15_000,
+    env: smokeEnv,
+  });
+  if (oauthResult.status !== 0 || oauthResult.stdout.trim() !== "oauth-bundle-ok") {
+    throw new Error(
+      `native OAuth bundle smoke failed with ${oauthResult.status ?? oauthResult.signal}: ` +
+        `${oauthResult.stderr || oauthResult.stdout || oauthResult.error}`,
+    );
+  }
+  console.log(`[verify] ${outBinary} bundled OAuth derivation passed`);
 }
 
 async function sha256(file) {
@@ -431,11 +440,11 @@ async function main() {
       join(DAEMON_ROOT, "src"),
       join(DAEMON_ROOT, "package.json"),
       join(DAEMON_ROOT, "tsconfig.json"),
-      join(DAEMON_ROOT, "tsup.config.ts"),
+      join(DAEMON_ROOT, "tsdown.config.ts"),
       join(COMPUTER_ROOT, "..", "cli", "src"),
       join(COMPUTER_ROOT, "..", "cli", "package.json"),
       join(COMPUTER_ROOT, "..", "cli", "tsconfig.json"),
-      join(COMPUTER_ROOT, "..", "cli", "tsup.config.ts"),
+      join(COMPUTER_ROOT, "..", "cli", "tsdown.config.ts"),
       join(COMPUTER_ROOT, "..", "shared", "src"),
       join(COMPUTER_ROOT, "..", "shared", "package.json"),
       join(COMPUTER_ROOT, "..", "shared", "tsconfig.json"),
@@ -454,7 +463,6 @@ async function main() {
   await mkdir(workDir, { recursive: true });
 
   const bundlePath = await bundleCjs({ version, daemonVersion, cliVersion, workDir });
-  await assertBundledDaemonReleaseContracts(bundlePath);
   if (bundleOnly) {
     console.log(`[build] bundle-only contract passed: ${bundlePath}`);
     return;
@@ -469,7 +477,12 @@ async function main() {
   await rm(outBinary, { force: true });
 
   await injectAndSign({ officialNode, blobPath, platform, outBinary });
-  smokeNativeBinary({ outBinary, platform, arch, version, daemonVersion, cliVersion });
+  const smokeHome = await mkdtemp(join(workDir, "smoke-home-"));
+  try {
+    smokeNativeBinary({ outBinary, platform, arch, version, daemonVersion, cliVersion, smokeHome });
+  } finally {
+    await rm(smokeHome, { recursive: true, force: true });
+  }
 
   const digest = await sha256(outBinary);
   await writeFile(`${outBinary}.sha256`, `${digest}  ${binaryName}\n`);

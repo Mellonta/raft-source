@@ -10,12 +10,12 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { currentDate, type AgentConfig, type AgentRuntimeProfileRef } from "@botiverse/raft-shared";
-import { buildRuntimeErrorDiagnosticEnvelope } from "../runtimeErrorDiagnostics.js";
+import { buildRuntimeErrorDiagnosticEnvelope } from "../runtimeErrorDiagnostics";
 import {
   codexSessionRootCandidates,
   resolveCodexHomeRootFromConfig,
-} from "./codexHome.js";
-import { resolveGrokHomeFromEnv } from "./grokHome.js";
+} from "./codexHome";
+import { resolveGrokHomeFromEnv } from "./grokHome";
 
 export function allowedTranscriptRootsForRuntime(
   runtime: string,
@@ -206,6 +206,130 @@ export interface WriteRuntimeTerminalCauseOptions {
   message: string;
 }
 
+export type RuntimeLifecycleDiagnosticEvent =
+  | {
+      kind: "session_start";
+      phase: "started" | "ready" | "failed";
+      errorClass?: string;
+      errorCode?: string;
+    }
+  | {
+      kind: "model_resolved";
+      requestedModel: string;
+      providerId: string | null;
+      modelId: string | null;
+      modelApi: string | null;
+      configSource: string | null;
+    }
+  | {
+      kind: "provider_request";
+      requestId: string;
+      providerId: string;
+      phase: "waiting" | "responding" | "failed" | "cancelled";
+      httpStatus?: number;
+      cancelSource?: "requested_stop" | "dispose" | "sdk_internal_or_unknown";
+    }
+  | {
+      kind: "compaction";
+      phase: "started" | "succeeded" | "failed" | "aborted";
+      reason?: "manual" | "threshold" | "overflow" | "unknown";
+      failureReason?: "recovery_exhausted" | "input_too_large" | "compaction_failed";
+      willRetry?: boolean;
+    }
+  | {
+      kind: "transcript_persist";
+      outcome: "deferred" | "persisted" | "failed";
+      entryType:
+        | "message"
+        | "thinking_level_change"
+        | "model_change"
+        | "compaction"
+        | "branch_summary"
+        | "custom"
+        | "custom_message"
+        | "label"
+        | "session_info"
+        | "unknown";
+      errorClass?: string;
+      errorCode?: string;
+    }
+  | {
+      kind: "cancel_requested";
+      source: "requested_stop" | "dispose";
+      signal: NodeJS.Signals | null;
+      providerRequestActive: boolean;
+    };
+
+export interface WriteRuntimeLifecycleDiagnosticOptions {
+  runtime: string;
+  sessionId: string;
+  fallbackDir: string;
+  agentId?: string;
+  launchId?: string | null;
+  processInstanceId?: string | null;
+  event: RuntimeLifecycleDiagnosticEvent;
+}
+
+const MAX_RUNTIME_LIFECYCLE_DIAGNOSTIC_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Persist a content-free runtime lifecycle fact next to the existing terminal
+ * cause handoff. This file is intentionally independent of the native runtime
+ * transcript: a transcript write failure must not erase the evidence needed to
+ * distinguish model resolution, provider transport, compaction, and shutdown.
+ */
+export function writeRuntimeLifecycleDiagnosticRecord(
+  opts: WriteRuntimeLifecycleDiagnosticOptions,
+): AgentRuntimeProfileRef | null {
+  try {
+    const filePath = runtimeSessionHandoffPath(opts.fallbackDir, opts.runtime, opts.sessionId);
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    const joinKey = [
+      "runtime_lifecycle",
+      opts.agentId ?? "unknown_agent",
+      opts.launchId ?? "missing_launch",
+      opts.processInstanceId ?? "missing_process",
+      opts.sessionId,
+    ].join(":");
+    const record = JSON.stringify({
+      type: "runtime_lifecycle",
+      artifactVersion: 1,
+      runtime: opts.runtime,
+      agentId: opts.agentId ?? null,
+      sessionId: opts.sessionId,
+      launchId: opts.launchId ?? null,
+      processInstanceId: opts.processInstanceId ?? null,
+      joinKey,
+      event: opts.event,
+      createdAt: currentDate().toISOString(),
+    }) + "\n";
+
+    const currentSize = existsSync(filePath) ? statSync(filePath).size : 0;
+    if (currentSize + Buffer.byteLength(record, "utf8") > MAX_RUNTIME_LIFECYCLE_DIAGNOSTIC_BYTES) {
+      writeFileSync(filePath, JSON.stringify({
+        type: "runtime_lifecycle_history_truncated",
+        artifactVersion: 1,
+        runtime: opts.runtime,
+        agentId: opts.agentId ?? null,
+        sessionId: opts.sessionId,
+        launchId: opts.launchId ?? null,
+        processInstanceId: opts.processInstanceId ?? null,
+        joinKey,
+        createdAt: currentDate().toISOString(),
+      }) + "\n", { mode: 0o600 });
+    }
+    appendFileSync(filePath, record, { mode: 0o600 });
+    return {
+      label: opts.sessionId,
+      path: filePath,
+      runtime: opts.runtime,
+      reachable: true,
+      reason: "daemon lifecycle diagnostic written independently of native transcript",
+    };
+  } catch {
+    return null;
+  }
+}
 export function writeRuntimeTerminalCauseRecord(opts: WriteRuntimeTerminalCauseOptions): AgentRuntimeProfileRef | null {
   try {
     const filePath = runtimeSessionHandoffPath(opts.fallbackDir, opts.runtime, opts.sessionId);
@@ -277,7 +401,11 @@ function writeRuntimeSessionHandoff(
       note: "The native runtime transcript file was not found on this machine; this daemon-created handoff records the runtime session identity + the directories checked for diagnostics.",
     }) + "\n";
     const existing = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
-    if (existing.includes("\"type\":\"runtime_terminal_cause\"")) {
+    if (
+      existing.includes("\"type\":\"runtime_terminal_cause\"") ||
+      existing.includes("\"type\":\"runtime_lifecycle\"") ||
+      existing.includes("\"type\":\"runtime_lifecycle_history_truncated\"")
+    ) {
       appendFileSync(filePath, line, { mode: 0o600 });
     } else {
       writeFileSync(filePath, line, { mode: 0o600 });
@@ -330,6 +458,25 @@ export interface ResolveRuntimeSessionRefOptions {
   processInstanceId?: string;
 }
 
+/**
+ * How a session ref was resolved, decided by the resolver itself (never parsed
+ * back out of `reason`): the runtime's own file, the daemon-written workspace
+ * handoff placeholder, or nothing.
+ */
+export type RuntimeSessionResolution = "native" | "daemon_handoff" | "not_found";
+
+export interface RuntimeSessionRefResolution {
+  ref: AgentRuntimeProfileRef;
+  resolution: RuntimeSessionResolution;
+  lookupMethod: string;
+  searchedPaths: string[];
+}
+
+/**
+ * The runtime-profile resolver (unchanged behaviour: a native miss with a
+ * fallback dir writes and returns the handoff file as a reachable ref). Thin
+ * wrapper over resolveRuntimeSessionRefDetailed.
+ */
 export function resolveRuntimeSessionRef(
   runtime: string,
   sessionId: string,
@@ -337,6 +484,16 @@ export function resolveRuntimeSessionRef(
   fallbackDir?: string,
   opts?: ResolveRuntimeSessionRefOptions,
 ): AgentRuntimeProfileRef {
+  return resolveRuntimeSessionRefDetailed(runtime, sessionId, homeDir, fallbackDir, opts).ref;
+}
+
+export function resolveRuntimeSessionRefDetailed(
+  runtime: string,
+  sessionId: string,
+  homeDir = os.homedir(),
+  fallbackDir?: string,
+  opts?: ResolveRuntimeSessionRefOptions,
+): RuntimeSessionRefResolution {
   let resolvedPath: string | null = null;
   let lookupMethod = "none";
   const searchedPaths: string[] = [];
@@ -392,7 +549,14 @@ export function resolveRuntimeSessionRef(
       { launchId: opts?.launchId, processInstanceId: opts?.processInstanceId },
       { lookupMethod, searchedPaths },
     );
-    if (fallback) return { ...fallback, reason: `${fallback.reason}; attempted_lookup=${lookupMethod}` };
+    if (fallback) {
+      return {
+        ref: { ...fallback, reason: `${fallback.reason}; attempted_lookup=${lookupMethod}` },
+        resolution: "daemon_handoff",
+        lookupMethod,
+        searchedPaths,
+      };
+    }
   }
 
   const ref: AgentRuntimeProfileRef = {
@@ -404,5 +568,5 @@ export function resolveRuntimeSessionRef(
   if (!resolvedPath) {
     ref.reason = `session file path not found; attempted_lookup=${lookupMethod}; searched=[${searchedPaths.join(", ")}]`;
   }
-  return ref;
+  return { ref, resolution: resolvedPath ? "native" : "not_found", lookupMethod, searchedPaths };
 }

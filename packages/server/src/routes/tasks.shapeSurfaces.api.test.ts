@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 /**
  * Shape coverage entered through the *surfaces*, not the service functions.
  *
@@ -17,13 +17,13 @@ import { createApiTest } from "../test/integration/apiTest.js";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
-import { getDb } from "../db/index.js";
-import { users, messages, tasks } from "../db/schema.js";
-import { createChannel, addHuman, addAgent } from "../services/channelService.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
-import { registerMachine } from "../services/machineService.js";
-import * as taskService from "../services/taskService.js";
+import { getDb } from "../db/index";
+import { users, messages, tasks } from "../db/schema";
+import { createChannel, addHuman, addAgent } from "../services/channelService";
+import { createServer } from "../services/serverService";
+import { createAgent, assignMachine } from "../services/agentService";
+import { registerMachine } from "../services/machineService";
+import * as taskService from "../services/taskService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

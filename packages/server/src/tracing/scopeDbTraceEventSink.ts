@@ -13,7 +13,7 @@ import {
   type TraceSpanFactRecord,
 } from "@botiverse/raft-shared";
 
-import type { ScopeDbPersistenceTier } from "../services/scopeDbSdkPolicy.js";
+import type { ScopeDbPersistenceTier } from "../services/scopeDbSdkPolicy";
 
 export interface ScopeDbTraceEventSinkOptions extends TraceEventRowResource {
   endpoint: string;

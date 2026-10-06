@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import { utcInstantFromDate } from "@botiverse/oar";
 
@@ -9,7 +8,7 @@ import {
   projectOarAccountUsageFailure,
   projectOarAccountUsageSnapshot,
   type OarAccountUsageSnapshot,
-} from "./oarAdapter.js";
+} from "./oarAdapter";
 
 const OBSERVED_AT_MS = Date.parse("2026-08-26T09:00:00.000Z");
 const BASE = {

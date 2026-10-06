@@ -1,9 +1,8 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { integrationAppRotateSecretCommand } from "./app.js";
+import { integrationAppRotateSecretCommand } from "./app";
 
 // Task #94. The Manual told every agent to run `rotate-secret --output <path>` with no
 // way to tell whether their own carrier has that flag. Carriers are not uniform: on

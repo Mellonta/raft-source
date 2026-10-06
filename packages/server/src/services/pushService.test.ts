@@ -1,47 +1,52 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
+import { Agent as HttpsAgent } from "node:https";
 
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
 import { and, eq, isNotNull } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb, isDatabaseInitialized } from "../db/index";
 import {
   channels,
   featureFlags,
-  inboxServingRows,
   inboxTargetMuteStates,
   messages,
   mobilePushOutbox,
   pushRegistrations,
+  pushSubscriptions,
   sessionFamilies,
   sessions,
   serverMembers,
   servers,
   users,
-} from "../db/schema.js";
-import { recordInboxNotificationFacts } from "./inboxNotificationService.js";
+} from "../db/schema";
+import { recordInboxNotificationFacts } from "./inboxNotificationService";
+import { __setActivityReadSourceForTests, getActivityReadSourceOverride } from "./activityReadSource";
 import {
   ApnsDeliveryError,
   __resetApnsHttpClientForTests,
   __resetApnsPushProviderForTests,
   __resetMobilePushDeliveryRuntimeForTests,
+  __resetWebPushRuntimeForTests,
   __setApnsHttpClientForTests,
   __setApnsPushProviderForTests,
   __setMobilePushDeliveryRuntimeForTests,
+  __setWebPushRuntimeForTests,
   dispatchMobilePushForInboxFacts,
   drainMobilePushOutbox,
   ensureFamilyRevokeCapability,
   revokePushFamilyByCapability,
+  sendPushToUsers,
   startMobilePushOutboxWorker,
   unbindPushInstallation,
   upsertPushRegistration,
   type ApnsDeliveryInput,
   type ApnsPushProvider,
-} from "./pushService.js";
-import { MOBILE_PUSH_DELIVERY_FEATURE_FLAG_KEY } from "./featureFlagService.js";
-import { runWithTraceSpan } from "../tracing/semanticTrace.js";
+} from "./pushService";
+import { MOBILE_PUSH_DELIVERY_FEATURE_FLAG_KEY } from "./featureFlagService";
+import { runWithTraceSpan } from "../tracing/semanticTrace";
 
 
 process.env.JWT_SECRET ||= "push-service-test-secret";
@@ -306,6 +311,127 @@ test("mobile push fanout is user-scoped across server-bound registrations", asyn
   }
 });
 
+test("a person on several servers of one joint channel gets one push per message", async ({ db }) => {
+  const deliveries: ApnsDeliveryInput[] = [];
+  const scheduled: Promise<void>[] = [];
+  __setApnsPushProviderForTests({
+    async send(input) {
+      deliveries.push(input);
+      return { status: "sent" };
+    },
+  });
+  __setMobilePushDeliveryRuntimeForTests({
+    schedule: (work) => {
+      scheduled.push(work());
+    },
+    sleep: async () => {},
+    jitterMs: () => 1,
+  });
+  try {
+    const { owner, server, otherServer, channel, message, family } = await seedPushFixture();
+    // The same joint channel as seen from the owner's other server.
+    const [otherCopy] = await getDb().insert(channels).values({
+      serverId: otherServer.id,
+      name: "general",
+      type: "channel",
+    }).returning();
+    await upsertPushRegistration({
+      installationId: "joint-install",
+      provider: "apns",
+      userId: owner.id,
+      serverId: server.id,
+      sessionFamilyId: family.id,
+      deviceToken: "joint-token",
+      topic: "ai.slock.app",
+      env: "production",
+    });
+
+    // One Activity fact per copy, all for the same canonical message.
+    const facts = [channel, otherCopy].map((copy) => ({
+      receiverType: "user" as const,
+      receiverId: owner.id,
+      serverId: copy.serverId,
+      kind: "channel" as const,
+      sourceChannelId: copy.id,
+      messageId: message.id,
+      messageSeq: message.seq,
+      activityAt: new Date("2026-07-10T00:00:03.000Z"),
+    }));
+    await recordInboxNotificationFacts(facts);
+    await Promise.all(scheduled.splice(0));
+    // A retried enqueue of the same facts must not add a second push either.
+    await recordInboxNotificationFacts(facts);
+    await Promise.all(scheduled.splice(0));
+
+    assert.equal(deliveries.length, 1, "one message must buzz the phone once, not once per joint copy");
+    const outbox = await db.select().from(mobilePushOutbox).where(eq(mobilePushOutbox.receiverId, owner.id));
+    assert.equal(outbox.length, 1);
+  } finally {
+    __resetApnsPushProviderForTests();
+    __resetMobilePushDeliveryRuntimeForTests();
+    await closeTestDatabase();
+  }
+});
+
+test("the one joint push goes through a copy whose server push mode allows it", async ({ db }) => {
+  const deliveries: ApnsDeliveryInput[] = [];
+  const scheduled: Promise<void>[] = [];
+  __setApnsPushProviderForTests({
+    async send(input) {
+      deliveries.push(input);
+      return { status: "sent" };
+    },
+  });
+  __setMobilePushDeliveryRuntimeForTests({
+    schedule: (work) => {
+      scheduled.push(work());
+    },
+    sleep: async () => {},
+    jitterMs: () => 1,
+  });
+  try {
+    const { owner, server, otherServer, channel, message, family } = await seedPushFixture();
+    const [otherCopy] = await getDb().insert(channels).values({
+      serverId: otherServer.id,
+      name: "general",
+      type: "channel",
+    }).returning();
+    // Silence the server whose copy would win the id tie-break.
+    const [first, second] = [channel, otherCopy].sort((a, b) => (a.id < b.id ? -1 : 1));
+    await db.update(serverMembers).set({ serverPushMode: "none" })
+      .where(and(eq(serverMembers.userId, owner.id), eq(serverMembers.serverId, first!.serverId)));
+    await upsertPushRegistration({
+      installationId: "joint-mode-install",
+      provider: "apns",
+      userId: owner.id,
+      serverId: server.id,
+      sessionFamilyId: family.id,
+      deviceToken: "joint-mode-token",
+      topic: "ai.slock.app",
+      env: "production",
+    });
+
+    await recordInboxNotificationFacts([first!, second!].map((copy) => ({
+      receiverType: "user" as const,
+      receiverId: owner.id,
+      serverId: copy.serverId,
+      kind: "channel" as const,
+      sourceChannelId: copy.id,
+      messageId: message.id,
+      messageSeq: message.seq,
+      activityAt: new Date("2026-07-10T00:00:04.000Z"),
+    })));
+    await Promise.all(scheduled.splice(0));
+
+    assert.equal(deliveries.length, 1, "a silenced server must not swallow the push another server allows");
+    assert.equal(deliveries[0].payload.channelId, second!.id);
+  } finally {
+    __resetApnsPushProviderForTests();
+    __resetMobilePushDeliveryRuntimeForTests();
+    await closeTestDatabase();
+  }
+});
+
 test("mobile APNs uses the shared plain-text notification preview", async ({ db }) => {
 
   const deliveries: ApnsDeliveryInput[] = [];
@@ -543,30 +669,6 @@ test("thread push carries canonical parent identity and global unread badge", as
       content: "thread reply",
       seq: 1,
     }).returning();
-    await getDb().insert(inboxServingRows).values([
-      {
-        receiverType: "user",
-        receiverId: owner.id,
-        serverId: server.id,
-        kind: "channel",
-        sourceChannelId: channel.id,
-        latestNotifiedMessageId: message.id,
-        latestNotifiedSeq: message.seq,
-        latestNotifiedAt: new Date("2026-07-10T00:00:04.000Z"),
-        unreadCount: 2,
-      },
-      {
-        receiverType: "user",
-        receiverId: owner.id,
-        serverId: server.id,
-        kind: "thread",
-        sourceChannelId: thread.id,
-        latestNotifiedMessageId: reply.id,
-        latestNotifiedSeq: reply.seq,
-        latestNotifiedAt: new Date("2026-07-10T00:00:05.000Z"),
-        unreadCount: 3,
-      },
-    ]);
     await upsertPushRegistration({
       installationId: "thread-install",
       provider: "apns",
@@ -598,10 +700,50 @@ test("thread push carries canonical parent identity and global unread badge", as
       parentMessageId: message.id,
       messageId: reply.id,
       kind: "thread",
-      badge: 5,
+      // Badge totals come from the unified chain totals view (UNIFIED_CHAIN_VIEWS);
+      // without a RisingWave environment the badge is the presence constant 1.
+      badge: 1,
       alertTitle: "Thread in #general · Mobile Push",
       alertBody: "MobilePushOther: thread reply",
     });
+
+    // The outbox drain loads the badge before opening the writer-fence
+    // transaction and hands it in; a provided badge is used as is.
+    await dispatchMobilePushForInboxFacts([{
+      receiverType: "user",
+      receiverId: owner.id,
+      serverId: server.id,
+      kind: "thread",
+      sourceChannelId: thread.id,
+      messageId: reply.id,
+      messageSeq: reply.seq,
+      activityAt: new Date("2026-07-10T00:00:05.000Z"),
+    }], getDb(), { badgeByReceiverId: new Map([[owner.id, 7]]) });
+    assert.equal(deliveries[1]?.payload.badge, 7);
+
+    // RisingWave cannot answer the badge: the push is still delivered, without
+    // a badge (the device keeps its current one), not failed and dropped.
+    const installed = getActivityReadSourceOverride();
+    __setActivityReadSourceForTests({
+      ...installed!,
+      async activityUnreadTotals() { throw new Error("risingwave unavailable"); },
+    });
+    try {
+      const degraded = await dispatchMobilePushForInboxFacts([{
+        receiverType: "user",
+        receiverId: owner.id,
+        serverId: server.id,
+        kind: "thread",
+        sourceChannelId: thread.id,
+        messageId: reply.id,
+        messageSeq: reply.seq,
+        activityAt: new Date("2026-07-10T00:00:05.000Z"),
+      }]);
+      assert.deepEqual(degraded, { attempted: 1, sent: 1, skipped: 0, revoked: 0, dropped: 0 });
+      assert.equal(deliveries[2]?.payload.badge, undefined);
+    } finally {
+      __setActivityReadSourceForTests(installed);
+    }
   } finally {
     __resetApnsPushProviderForTests();
     await closeTestDatabase();
@@ -689,6 +831,75 @@ test("configured APNs provider sends a real preview with identity-only custom ro
       messageId: message.id,
       kind: "channel",
     });
+  } finally {
+    __resetApnsHttpClientForTests();
+    __resetApnsPushProviderForTests();
+    restoreEnv("APNS_KEY_ID", previousEnv.keyId);
+    restoreEnv("APNS_TEAM_ID", previousEnv.teamId);
+    restoreEnv("APNS_PRIVATE_KEY", previousEnv.privateKey);
+    await closeTestDatabase();
+  }
+});
+
+test("thread APNs thread-id groups by the parent channel", async ({ db }) => {
+
+  const previousEnv = {
+    keyId: process.env.APNS_KEY_ID,
+    teamId: process.env.APNS_TEAM_ID,
+    privateKey: process.env.APNS_PRIVATE_KEY,
+  };
+  const { privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  process.env.APNS_KEY_ID = "TESTKEY123";
+  process.env.APNS_TEAM_ID = "TEAM123456";
+  process.env.APNS_PRIVATE_KEY = privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+  const capturedRequests: Array<{ body: unknown }> = [];
+  __resetApnsPushProviderForTests();
+  __setApnsHttpClientForTests(async (request) => {
+    capturedRequests.push(request);
+    return { statusCode: 200, body: "" };
+  });
+  try {
+    const { owner, other, server, channel, message, family } = await seedPushFixture();
+    const [thread] = await getDb().insert(channels).values({
+      serverId: server.id,
+      name: `thread-${message.id}`,
+      type: "thread",
+      parentMessageId: message.id,
+    }).returning();
+    const [reply] = await getDb().insert(messages).values({
+      channelId: thread.id,
+      senderType: "user",
+      senderId: other.id,
+      content: "thread reply",
+      seq: 1,
+    }).returning();
+    await upsertPushRegistration({
+      installationId: "thread-group-install",
+      provider: "apns",
+      userId: owner.id,
+      serverId: server.id,
+      sessionFamilyId: family.id,
+      deviceToken: "threadgrouptoken",
+      topic: "ai.slock.app.dev",
+      env: "sandbox",
+    });
+
+    const result = await dispatchMobilePushForInboxFacts([{
+      receiverType: "user",
+      receiverId: owner.id,
+      serverId: server.id,
+      kind: "thread",
+      sourceChannelId: thread.id,
+      messageId: reply.id,
+      messageSeq: reply.seq,
+      activityAt: new Date("2026-07-10T00:00:05.000Z"),
+    }]);
+
+    assert.deepEqual(result, { attempted: 1, sent: 1, skipped: 0, revoked: 0, dropped: 0 });
+    const body = capturedRequests[0]?.body as { aps?: { "thread-id"?: string }; channelId?: string; parentChannelId?: string };
+    assert.equal(body.channelId, thread.id);
+    assert.equal(body.parentChannelId, channel.id);
+    assert.equal(body.aps?.["thread-id"], `${server.id}:${channel.id}`);
   } finally {
     __resetApnsHttpClientForTests();
     __resetApnsPushProviderForTests();
@@ -1035,8 +1246,11 @@ test("mobile push interval worker drains inside an explicit trace root", async (
     assert.equal(intervalSpan?.attrs?.batch_size, 100);
     assert.equal(intervalSpan?.attrs?.claimed_count, 1);
     assert.equal(intervalSpan?.attrs?.processed_count, 1);
+    // The badge is read through the Activity totals (in CI, the installed
+    // test-only Postgres reference, whose inbox.* read events land here too);
+    // this pins the push event sequence.
     assert.deepEqual(
-      intervalSpan?.events.map((event) => event.name),
+      intervalSpan?.events.map((event) => event.name).filter((name) => name.startsWith("push.")),
       [
         "push.mobile.targets.built",
         "push.mobile.delivery.attempt",
@@ -1067,7 +1281,10 @@ test("database close drains default deferred mobile push before releasing SQL", 
     async send() {
       markEntered();
       await released;
-      assert.equal((await db.select().from(users)).length, 2, "provider work still owns a live database");
+      // Dispatch holds the conversion fence transaction. A second PGlite
+      // query through the outer database would wait on this very callback.
+      assert.equal(isDatabaseInitialized(), true, "provider work still owns a live database");
+      assert.equal(getDb(), db);
       delivered = true;
       return { status: "sent" };
     },
@@ -1099,10 +1316,141 @@ test("database close drains default deferred mobile push before releasing SQL", 
     releaseProvider();
     await closing;
     assert.equal(delivered, true, "close joins the actual provider and its SQL work");
+    assert.equal(isDatabaseInitialized(), false, "SQL closes only after delivery returns");
   } finally {
     releaseProvider();
     await closing?.catch(() => {});
     __resetApnsPushProviderForTests();
     __resetMobilePushDeliveryRuntimeForTests();
+  }
+});
+
+async function seedWebPushSubscriptions(db: ReturnType<typeof getDb>, endpoints: string[]) {
+  const [owner] = await db.insert(users).values({
+    email: "web-push-owner@test.com",
+    name: "WebPushOwner",
+    passwordHash: "x",
+    emailVerified: true,
+  }).returning();
+  // Rows are inserted directly: they stand in for subscriptions saved before
+  // endpoints were validated at registration.
+  await db.insert(pushSubscriptions).values(endpoints.map((endpoint) => ({
+    userId: owner.id,
+    endpoint,
+    p256dh: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM",
+    auth: "tBHItJI5svbpez7KI4CCXg",
+  })));
+  return owner;
+}
+
+function storedEndpoints(db: ReturnType<typeof getDb>, userId: string) {
+  return db.select({ endpoint: pushSubscriptions.endpoint }).from(pushSubscriptions)
+    .where(eq(pushSubscriptions.userId, userId))
+    .then((rows) => rows.map((row) => row.endpoint).sort());
+}
+
+test("web push delivery drops subscriptions whose endpoint is not a public HTTPS host without contacting it", async ({ db }) => {
+  const resolved: string[] = [];
+  let sends = 0;
+  __setWebPushRuntimeForTests({
+    enabled: true,
+    lookup: async (hostname) => {
+      resolved.push(hostname);
+      return [{ address: "10.0.0.5", family: 4 }];
+    },
+    sendNotification: async () => {
+      sends += 1;
+      return { statusCode: 201, body: "", headers: {} };
+    },
+  });
+  try {
+    const owner = await seedWebPushSubscriptions(db, [
+      "https://push.corp.example/sub/private-range",
+      "http://updates.push.services.mozilla.com/wpush/v2/plain-http",
+      "https://169.254.169.254/latest/meta-data",
+      "https://[::1]/sub/loopback",
+      "https://push.internal/sub/internal-suffix",
+    ]);
+
+    const result = await sendPushToUsers([owner.id], { title: "t", body: "b", tag: "web-push-test", url: "/" });
+
+    assert.deepEqual(result, { attempted: 5, delivered: 0, failed: 5 });
+    assert.equal(sends, 0, "no push endpoint may be contacted");
+    assert.deepEqual(resolved, ["push.corp.example"], "only a syntactically acceptable host reaches DNS");
+    assert.deepEqual(await storedEndpoints(db, owner.id), [], "undeliverable subscriptions are dropped like a 410");
+  } finally {
+    __resetWebPushRuntimeForTests();
+  }
+});
+
+test("web push delivery keeps the subscription when name resolution itself fails", async ({ db }) => {
+  let sends = 0;
+  __setWebPushRuntimeForTests({
+    enabled: true,
+    lookup: async () => {
+      throw Object.assign(new Error("getaddrinfo EAI_AGAIN"), { code: "EAI_AGAIN" });
+    },
+    sendNotification: async () => {
+      sends += 1;
+      return { statusCode: 201, body: "", headers: {} };
+    },
+  });
+  try {
+    const owner = await seedWebPushSubscriptions(db, ["https://fcm.googleapis.com/fcm/send/transient"]);
+
+    const result = await sendPushToUsers([owner.id], { title: "t", body: "b", tag: "web-push-test", url: "/" });
+
+    assert.deepEqual(result, { attempted: 1, delivered: 0, failed: 1 });
+    assert.equal(sends, 0);
+    assert.deepEqual(await storedEndpoints(db, owner.id), ["https://fcm.googleapis.com/fcm/send/transient"]);
+  } finally {
+    __resetWebPushRuntimeForTests();
+  }
+});
+
+test("web push delivery pins the connection to the public address the endpoint resolved to", async ({ db }) => {
+  const lookups: Array<{ hostname: string; options: unknown }> = [];
+  const sends: Array<{ endpoint: string; agent: unknown }> = [];
+  __setWebPushRuntimeForTests({
+    enabled: true,
+    lookup: async (hostname, options) => {
+      lookups.push({ hostname, options });
+      return [
+        { address: "142.250.72.10", family: 4 },
+        { address: "2607:f8b0:4004:c07::5f", family: 6 },
+      ];
+    },
+    sendNotification: async (subscription, _payload, options) => {
+      sends.push({ endpoint: subscription.endpoint, agent: options?.agent });
+      return { statusCode: 201, body: "", headers: {} };
+    },
+  });
+  try {
+    const owner = await seedWebPushSubscriptions(db, ["https://fcm.googleapis.com/fcm/send/pinned"]);
+
+    const result = await sendPushToUsers([owner.id], { title: "t", body: "b", tag: "web-push-test", url: "/" });
+
+    assert.deepEqual(result, { attempted: 1, delivered: 1, failed: 0 });
+    assert.deepEqual(lookups, [{ hostname: "fcm.googleapis.com", options: { all: true, verbatim: true } }]);
+    assert.equal(sends.length, 1);
+    assert.equal(sends[0].endpoint, "https://fcm.googleapis.com/fcm/send/pinned");
+    const agent = sends[0].agent;
+    assert.ok(agent instanceof HttpsAgent, "delivery must go through an https.Agent the service controls");
+    const pinnedLookup = agent.options.lookup as (
+      hostname: string,
+      options: { all: boolean },
+      callback: (error: Error | null, ...rest: unknown[]) => void,
+    ) => void;
+    const single = await new Promise<unknown[]>((resolve) => {
+      pinnedLookup("fcm.googleapis.com", { all: false }, (_error, ...rest) => resolve(rest));
+    });
+    assert.deepEqual(single, ["142.250.72.10", 4], "the socket connects to the address that passed the check");
+    const all = await new Promise<unknown[]>((resolve) => {
+      pinnedLookup("fcm.googleapis.com", { all: true }, (_error, ...rest) => resolve(rest));
+    });
+    assert.deepEqual(all, [[{ address: "142.250.72.10", family: 4 }]]);
+    assert.deepEqual(await storedEndpoints(db, owner.id), ["https://fcm.googleapis.com/fcm/send/pinned"]);
+  } finally {
+    __resetWebPushRuntimeForTests();
   }
 });

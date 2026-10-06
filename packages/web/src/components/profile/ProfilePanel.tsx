@@ -1,6 +1,12 @@
+import CloseButton from "../ui/CloseButton";
+import Tooltip from "../ui/Tooltip";
 import { useCallback, useState, useEffect } from "react";
 import { useIntl } from "react-intl";
 import { X } from "lucide-react";
+import {
+  ProfilePanel,
+  ProfilePanelBody,
+} from "raft-ui";
 import { useProfileStore } from "../../store/profileStore";
 import { useAgentStore } from "../../store/agentStore";
 import type { Agent } from "../../store/agentStore";
@@ -11,11 +17,11 @@ import AgentDetailPanel from "../agent/AgentDetailPanel";
 import HumanDetailPanel from "../member/HumanDetailPanel";
 import type { HumanProfile } from "../member/HumanDetailPanel";
 import PanelHeader from "../ui/PanelHeader";
-import Button from "../ui/Button";
 import { resolveHumanProfile } from "../member/resolveHumanProfile";
 import api from "../../api/client";
 import { canRenderAgentDetail, isRemoteAgentProjection } from "../agent/agentDetailAvailability";
 import AgentUnavailablePanel from "../agent/AgentUnavailablePanel";
+import ExternalIdentityDetailPanel from "./ExternalIdentityDetailPanel";
 import {
   getCachedAgentProfile,
   getCachedHumanProfile,
@@ -28,7 +34,9 @@ export interface ProfilePanelTarget {
   id: string;
 }
 
-export default function ProfilePanel({
+const RESIZE_HANDLE_CLASS_NAME = "hidden md:block absolute left-0 top-0 bottom-0 w-2 -ml-1 z-10 cursor-col-resize touch-none select-none";
+
+export default function ConnectedProfilePanel({
   target,
   presentation = "overlay",
   onBack,
@@ -49,6 +57,7 @@ export default function ProfilePanel({
   const { formatMessage } = useIntl();
   const storeProfileType = useProfileStore((s) => s.profileType);
   const storeProfileId = useProfileStore((s) => s.profileId);
+  const externalProfile = useProfileStore((s) => s.externalProfile);
   const closeProfile = useProfileStore((s) => s.closeProfile);
   const profileType = target?.type ?? storeProfileType;
   const profileId = target?.id ?? storeProfileId;
@@ -204,15 +213,22 @@ export default function ProfilePanel({
   // panel hydrates — overlay close, no skipping past the underlying surface.
   const skeletonMobileBack = useMobileBack(closePanel);
   const headerBack = onBack ?? skeletonMobileBack;
+  // The divider between this pane and its left neighbour belongs to this
+  // pane's own box, applied in index.css only when a neighbour exists (the
+  // sidebar already draws its own edge). The resize handle stays transparent:
+  // it sits over the neighbour, so anything stacked above it there (the
+  // composer bar) would hide a line drawn on it (#proj-frontend task #683).
   const containerClassName = embedded
-    ? "flex min-h-0 min-w-0 flex-1 flex-col bg-white"
-    : "absolute inset-0 z-30 flex min-h-0 min-w-0 flex-col bg-white lg:relative lg:inset-auto lg:z-auto lg:border-l-2 lg:border-black";
-  const containerStyle = !embedded && isDesktop ? { width } : undefined;
+    ? "flex min-h-0 flex-1 flex-col"
+    : "absolute inset-0 z-30 flex flex-col border-l-0 lg:relative lg:inset-auto lg:z-auto";
+  const containerEdge = embedded ? "inset" : "attached";
+  const containerStyle = !embedded && isDesktop ? { width, flex: "0 0 auto" } : undefined;
 
   // Render order:
-  // 1. Loaded agent → AgentDetailPanel
-  // 2. Loaded human → HumanDetailPanel
-  // 3. profileType+profileId set but data not yet resolved → skeleton with
+  // 1. External message author → provider identity detail in this same panel
+  // 2. Loaded agent → AgentDetailPanel
+  // 3. Loaded human → HumanDetailPanel
+  // 4. profileType+profileId set but data not yet resolved → skeleton with
   //    PanelHeader (back chevron). Without this, the panel returned `null`
   //    while serverStore.members hydrated / the fallback /profile fetch
   //    landed, which (a) flashed an empty viewport for users hitting a
@@ -221,18 +237,46 @@ export default function ProfilePanel({
   //    Playwright expect timeout in CI (back-navigation.spec.ts flake,
   //    task #18 #proj-frontend:4224cf76 2026-05-28).
 
-  if (profileType === "agent" && canRenderAgentDetail(resolvedAgent, currentServerId)) {
+  if (profileType === "external" && profileId && externalProfile) {
     return (
-      <div
+      <ProfilePanel
         data-testid="profile-panel"
         data-presentation={presentation}
+        edge={containerEdge}
+        className={containerClassName}
+        style={containerStyle}
+      >
+        {!embedded && (
+          <div
+            className={RESIZE_HANDLE_CLASS_NAME}
+            onPointerDown={handleResizeStart}
+            onPointerMove={handleResizeMove}
+            onPointerUp={handleResizeEnd}
+            onPointerCancel={handleResizeEnd}
+          />
+        )}
+        <ExternalIdentityDetailPanel
+          profile={externalProfile}
+          onBack={onBack}
+          onClose={closePanel}
+        />
+      </ProfilePanel>
+    );
+  }
+
+  if (profileType === "agent" && canRenderAgentDetail(resolvedAgent, currentServerId)) {
+    return (
+      <ProfilePanel
+        data-testid="profile-panel"
+        data-presentation={presentation}
+        edge={containerEdge}
         className={containerClassName}
         style={containerStyle}
       >
         {/* Resize handle (desktop only) */}
         {!embedded && (
           <div
-            className="hidden md:block absolute left-0 top-0 bottom-0 w-2 -ml-1 z-10 cursor-col-resize touch-none select-none"
+        className={RESIZE_HANDLE_CLASS_NAME}
             onPointerDown={handleResizeStart}
             onPointerMove={handleResizeMove}
             onPointerUp={handleResizeEnd}
@@ -245,26 +289,27 @@ export default function ProfilePanel({
           onClose={closePanel}
           onOpenProfile={onOpenProfile}
         />
-      </div>
+      </ProfilePanel>
     );
   }
 
   if (profileType === "agent" && profileId && (resolvedAgent || agentFallbackComplete)) {
     return (
-      <div
+      <ProfilePanel
         data-testid="profile-panel"
-        className="absolute inset-0 z-30 flex min-h-0 min-w-0 flex-col bg-white lg:relative lg:inset-auto lg:z-auto lg:border-l-2 lg:border-black"
+        edge="attached"
+        className="absolute inset-0 z-30 flex min-h-0 min-w-0 flex-col border-l-0 bg-layer-panel lg:relative lg:inset-auto lg:z-auto"
         style={isDesktop ? { width } : undefined}
       >
         <div
-          className="hidden md:block absolute left-0 top-0 bottom-0 w-2 -ml-1 z-10 cursor-col-resize touch-none select-none"
+          className={RESIZE_HANDLE_CLASS_NAME}
           onPointerDown={handleResizeStart}
           onPointerMove={handleResizeMove}
           onPointerUp={handleResizeEnd}
           onPointerCancel={handleResizeEnd}
         />
         <AgentUnavailablePanel onClose={closeProfile} />
-      </div>
+      </ProfilePanel>
     );
   }
 
@@ -274,16 +319,17 @@ export default function ProfilePanel({
 
   if (profileType === "human" && resolvedHuman) {
     return (
-      <div
+      <ProfilePanel
         data-testid="profile-panel"
         data-presentation={presentation}
+        edge={containerEdge}
         className={containerClassName}
         style={containerStyle}
       >
         {/* Resize handle (desktop only) */}
         {!embedded && (
           <div
-            className="hidden md:block absolute left-0 top-0 bottom-0 w-2 -ml-1 z-10 cursor-col-resize touch-none select-none"
+            className={RESIZE_HANDLE_CLASS_NAME}
             onPointerDown={handleResizeStart}
             onPointerMove={handleResizeMove}
             onPointerUp={handleResizeEnd}
@@ -296,7 +342,7 @@ export default function ProfilePanel({
           onClose={closePanel}
           onOpenProfile={onOpenProfile}
         />
-      </div>
+      </ProfilePanel>
     );
   }
 
@@ -307,17 +353,22 @@ export default function ProfilePanel({
   // quiet loading placeholder; the real panel takes over as soon as
   // resolvedAgent / resolvedHuman flips non-null in the next render.
   if (profileType && profileId) {
-    const testid = profileType === "agent" ? "agent-mobile-back" : "human-mobile-back";
+    const testid = profileType === "agent"
+      ? "agent-mobile-back"
+      : profileType === "external"
+        ? "external-mobile-back"
+        : "human-mobile-back";
     return (
-      <div
+      <ProfilePanel
         data-testid="profile-panel"
         data-presentation={presentation}
+        edge={containerEdge}
         className={containerClassName}
         style={containerStyle}
       >
         {!embedded && (
           <div
-            className="hidden md:block absolute left-0 top-0 bottom-0 w-2 -ml-1 z-10 cursor-col-resize touch-none select-none"
+            className={RESIZE_HANDLE_CLASS_NAME}
             onPointerDown={handleResizeStart}
             onPointerMove={handleResizeMove}
             onPointerUp={handleResizeEnd}
@@ -333,20 +384,21 @@ export default function ProfilePanel({
             title: formatMessage({ id: "common.announcement.back" }),
           }}
           actions={onClose ? (
-            <Button
-              shape="icon"
-              onClick={closePanel}
-              title={formatMessage({ id: "common.close" })}
-              aria-label={formatMessage({ id: "common.close" })}
-            >
-              <X size={14} />
-            </Button>
+            <Tooltip content={formatMessage({ id: "common.close" })}>
+              <CloseButton
+                onClick={closePanel}
+                aria-label={formatMessage({ id: "common.close" })}
+                data-slot="button"
+              >
+                <X size={14} />
+              </CloseButton>
+            </Tooltip>
           ) : undefined}
         />
-        <div className="flex flex-1 items-center justify-center text-sm text-black/40 font-display">
+        <ProfilePanelBody className="flex flex-1 items-center justify-center text-sm text-foreground-muted font-display">
           {formatMessage({ id: "common.loading" })}
-        </div>
-      </div>
+        </ProfilePanelBody>
+      </ProfilePanel>
     );
   }
 

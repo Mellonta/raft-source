@@ -27,11 +27,11 @@ import type {
   ResetRunnerResult,
   ResetServiceResult,
   ServiceClient,
-} from "./lib/types.js";
-import { resetRunnerHealth } from "./health.js";
-import { clearServiceCrashHistory } from "./serviceState.js";
-import { readServerAttachment } from "./serverState.js";
-import { connectService } from "./lib/ipc-client.js";
+} from "./lib/types";
+import { resetRunnerHealth } from "./health";
+import { clearServiceCrashHistory } from "./serviceState";
+import { readServerAttachment } from "./serverState";
+import { connectService } from "./lib/ipc-client";
 import type { Tracer } from "@botiverse/raft-shared";
 
 /**

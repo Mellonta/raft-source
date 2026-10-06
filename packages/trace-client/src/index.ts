@@ -5,19 +5,30 @@
 // @botiverse/raft-shared/tracing where they're web-bundle-safe.
 
 export {
+  getActiveSpan,
+  getActiveTraceContext,
+  runWithActiveSpan,
+  runWithoutActiveSpan,
+} from "./activeSpan";
+export {
   LocalRotatingTraceSink,
   type LocalRotatingTraceSinkOptions,
-} from "./localTraceSink.js";
+} from "./localTraceSink";
+export {
+  LEGACY_TO_CANONICAL_TRACE_ATTRS,
+  withCanonicalTraceAttributes,
+} from "./traceAttributeAliases";
 export {
   bucketDelayMs,
   computeTraceJitter,
   NO_JITTER,
   type TraceJitter,
-} from "./traceJitter.js";
+} from "./traceJitter";
 export {
   createTraceClient,
   type TraceClient,
   type TraceClientOptions,
+  type TraceClientEmitEventOptions,
   type TraceClientSource,
   MultiSink,
-} from "./traceClient.js";
+} from "./traceClient";

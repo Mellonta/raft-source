@@ -13,7 +13,7 @@
   "dependencies": {
     "@botiverse/raft-web": "workspace:*",
     "lucide-react": "^0.575.0",
-    "raft-ui": "0.5.8",
+    "raft-ui": "0.5.18",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
@@ -21,10 +21,10 @@
     "@tailwindcss/postcss": "^4.2.2",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.1.4",
+    "@vitejs/plugin-react": "^6.1.1",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.2",
-    "typescript": "^5.9.3",
-    "vite": "^7.3.1"
+    "typescript": "^6.0.3",
+    "vite": "^8.3.1"
   }
 }

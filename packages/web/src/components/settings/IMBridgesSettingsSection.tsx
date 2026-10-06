@@ -22,7 +22,7 @@ export function IMBridgesSection({
 
   return (
     <div className="space-y-4" data-testid="im-bridges-section">
-      <section className="border-2 border-black bg-brutal-cream p-4 shadow-brutal-sm" aria-labelledby="im-bridges-providers-heading">
+      <section className="border border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream theme-brutal:shadow-brutal-sm" aria-labelledby="im-bridges-providers-heading">
         <SectionEyebrow as="div">{formatMessage({ id: "settings.imBridges.eyebrow" })}</SectionEyebrow>
         <h2 id="im-bridges-providers-heading" className="mt-1 text-lg font-black">
           {formatMessage({ id: "settings.imBridges.title" })}

@@ -6,13 +6,13 @@
 import type { Command } from "commander";
 import { type AgentApiTaskAssignBody } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText, NL } from "../../core/renderer.js";
-import { requireTargetAlias, type TargetAliasOpts } from "../_target.js";
-import { formatTaskAssigned } from "./_format.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText, NL } from "../../core/renderer";
+import { PEER_KIND_OPTION, requireTargetAlias, type TargetAliasOpts } from "../_target";
+import { formatTaskAssigned } from "./_format";
 
 interface AssignOpts extends TargetAliasOpts {
   number: string;
@@ -76,6 +76,7 @@ export const taskAssignCommand = defineCommand(
     options: [
       { flags: "--target <target>", description: "Channel target: '#channel'" },
       { flags: "--channel <target>", description: "Legacy alias for --target (accepted during transition)" },
+      PEER_KIND_OPTION,
       { flags: "--number <n>", description: "Task number to assign" },
       { flags: "--assignee <@who>", description: "Human or agent to assign to, e.g. @alice" },
       {

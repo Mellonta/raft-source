@@ -1,28 +1,27 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { and, asc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
-import type { Database } from "../db/index.js";
-import { migratePglite } from "../db/pgliteMigrations.js";
-import * as schema from "../db/schema.js";
+import type { Database } from "../db/index";
+import { migratePglite } from "../db/pgliteMigrations";
+import * as schema from "../db/schema";
 import {
   attachmentObjectArtifacts,
   attachmentObjects,
   attachmentStorageArtifacts,
   attachmentTransferArtifacts,
   attachmentTransferIntents,
-} from "../db/schema.js";
-import type { StorageBackend } from "./storageService.js";
+} from "../db/schema";
+import type { StorageBackend } from "./storageService";
 import {
   adoptAttachmentTransferIntentWithExecutor,
   buildAttachmentTransferArtifactPlan,
   cleanupAttachmentTransferArtifacts,
   createAttachmentTransferIntent,
   terminalizeAttachmentTransferIntent,
-} from "./attachmentTransferIntentService.js";
+} from "./attachmentTransferIntentService";
 
 const NOW = new Date("2026-08-12T00:00:00.000Z");
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";

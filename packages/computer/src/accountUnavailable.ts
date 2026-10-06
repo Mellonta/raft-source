@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 
-import type { UserSessionIdentity } from "./lib/userSession.js";
+import type { UserSessionIdentity } from "./lib/userSession";
 
 export type AccountUnavailableLocale = "en" | "zh-cn";
 

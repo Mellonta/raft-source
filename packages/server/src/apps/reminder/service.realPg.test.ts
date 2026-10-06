@@ -1,22 +1,21 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
 
-import { closeDatabase, getDb, initDatabase } from "../../db/index.js";
-import * as schema from "../../db/schema.js";
-import { agents, servers, users } from "../../db/schema.js";
-import type { Recurrence } from "../../services/recurrence.js";
-import type { TimeProvider } from "./service.js";
+import { closeDatabase, getDb, getRootDb, initDatabase } from "../../db/index";
+import * as schema from "../../db/schema";
+import { agents, servers, users } from "../../db/schema";
+import type { Recurrence } from "../../services/recurrence";
+import type { TimeProvider } from "./service";
 import {
   ackAuthorizedReminderFire,
   createReminder,
   fireReminder,
-} from "./service.js";
+} from "./service";
 
 const REAL_PG_URL_ENV = "REMINDER_ACK_REAL_PG_URL";
 const REAL_PG_URL = process.env[REAL_PG_URL_ENV];
@@ -146,7 +145,11 @@ test(
             competingFire.current = fireReminder(
               reminder.id,
               firstFireRow.version,
-              { clock: { now: () => firstFireRow.fireAt } },
+              {
+                clock: { now: () => firstFireRow.fireAt },
+                // Model an independent fire request, not a savepoint in the ACK transaction.
+                executor: getRootDb(),
+              },
             );
             await waitForLockWaiter(observerClient);
           },

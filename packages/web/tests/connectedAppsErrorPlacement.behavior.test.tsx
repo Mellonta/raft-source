@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import {
   ConnectedAppsErrorBanner,
@@ -14,7 +13,6 @@ afterEach(cleanup);
 test("connected apps error surface selects exactly one visible target", () => {
   const base = {
     selectedListing: null,
-    selectedBuiltInApp: null,
     showRegisterDrawer: false,
     deleteClientTarget: null,
     offlineRequestTarget: null,
@@ -24,7 +22,6 @@ test("connected apps error surface selects exactly one visible target", () => {
   const getSurface = (overrides: Partial<typeof base> & { error: string }) => getConnectedAppsErrorSurface(
     overrides.error,
     overrides.selectedListing ?? base.selectedListing,
-    overrides.selectedBuiltInApp ?? base.selectedBuiltInApp,
     overrides.showRegisterDrawer ?? base.showRegisterDrawer,
     overrides.deleteClientTarget ?? base.deleteClientTarget,
     overrides.offlineRequestTarget ?? base.offlineRequestTarget,
@@ -35,7 +32,6 @@ test("connected apps error surface selects exactly one visible target", () => {
   assert.equal(getSurface({ error: "Load failed" }), "page");
   assert.equal(getSurface({ error: "Install failed", selectedListing: {} }), "listing");
   assert.equal(getSurface({ error: "Publish failed", showRegisterDrawer: true }), "form");
-  assert.equal(getSurface({ error: "Hidden", selectedBuiltInApp: {} }), "modal");
   assert.equal(getSurface({ error: "Hidden", deleteClientTarget: {} }), "modal");
   assert.equal(getSurface({ error: "Hidden", offlineRequestTarget: {} }), "modal");
   assert.equal(getSurface({ error: "Hidden", marketplaceUninstallTarget: {} }), "modal");

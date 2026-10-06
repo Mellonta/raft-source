@@ -6,7 +6,6 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { test } from "vitest";
 
 const CHAINED_ROOM_TARGET = /\.(?:in|to)\((?:[^()]|\([^()]*\))*\)\s*\.(?:in|to)\(/gs;
 

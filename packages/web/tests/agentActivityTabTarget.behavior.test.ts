@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   AGENT_ACTIVITY_TAB,
   openConversationAgentActivity,
   openConversationAgentProfile,
-} from "../src/utils/profilePanelUrl.js";
+} from "../src/utils/profilePanelUrl";
 
 /**
  * The activity affordance must land on the ACTIVITY tab — the destination IS

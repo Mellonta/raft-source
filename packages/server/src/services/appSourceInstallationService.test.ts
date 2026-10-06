@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { oauthClients, oauthClientInstalls, users } from "../db/schema.js";
-import { createServer } from "./serverService.js";
-import { createOAuthClient } from "./oauthService.js";
-import { createAppOutboundPermissionRevision } from "./appOutboundPermissionService.js";
-import { ensureLocalAppSourceInstallation, backfillLocalAppSourceInstallations } from "./appSourceInstallationService.js";
-import { configureAppWebhook, __setAppWebhookEncryptionKeyForTests } from "./appWebhookConfigService.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { oauthClients, oauthClientInstalls, users } from "../db/schema";
+import { createServer } from "./serverService";
+import { createOAuthClient } from "./oauthService";
+import { createAppOutboundPermissionRevision } from "./appOutboundPermissionService";
+import { ensureLocalAppSourceInstallation, backfillLocalAppSourceInstallations } from "./appSourceInstallationService";
+import { configureAppWebhook, __setAppWebhookEncryptionKeyForTests } from "./appWebhookConfigService";
 
 test("local source upgrade is idempotent, preserves suspension and only inserts eligible missing rows", async ({ db }) => {
   const [owner] = await db.insert(users).values({ name: "owner", email: "local-upgrade@slock.test", passwordHash: "unused" }).returning();

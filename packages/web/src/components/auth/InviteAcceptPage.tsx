@@ -9,7 +9,7 @@ import api from "../../api/client";
 import { storePendingInvite } from "../../utils/socialAuth";
 import { ArrowLeft, LogIn, UserPlus } from "lucide-react";
 import Banner from "../ui/Banner";
-import Button from "../ui/Button";
+import { Button } from "raft-ui";
 import CenteredCardFrame from "./CenteredCardFrame";
 import { AuthPageIntro } from "./AuthPageFrame";
 import AgreementBody from "../server/AgreementBody";
@@ -204,7 +204,7 @@ export default function InviteAcceptPage({
           <Button
             onClick={handleContinue}
             size="lg"
-            tone="pink"
+            variant="accent"
             className="w-full"
           >
             {formatMessage({ id: "pages.invite.continueToRaft" })}
@@ -246,7 +246,7 @@ export default function InviteAcceptPage({
                   )}
             >
               {insidePreview && (
-                <p className="mt-2 text-sm text-black/60">
+                <p className="mt-2 text-sm text-foreground-muted">
                   {insidePreview}
                 </p>
               )}
@@ -254,15 +254,15 @@ export default function InviteAcceptPage({
             {inviteInfo.agreement && (
               <div className="card-brutal mb-4 p-4 text-left">
                 <div className="mb-3">
-                  <div className="text-sm font-bold text-black">{inviteInfo.agreement.title}</div>
-                  <div className="mt-0.5 text-xs text-black/50">
+                  <div className="text-sm font-bold text-foreground-strong">{inviteInfo.agreement.title}</div>
+                  <div className="mt-0.5 text-xs text-foreground-hint">
                     {formatMessage(
                       { id: "pages.invite.agreementVersion" },
                       { version: inviteInfo.agreement.version },
                     )}
                   </div>
                 </div>
-                <div className="max-h-56 overflow-y-auto border-2 border-black/30 bg-brutal-cream p-3 text-sm">
+                <div className="max-h-56 overflow-y-auto rounded-md border border-line-muted bg-layer-canvas-muted p-3 text-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-brutal-cream">
                   <AgreementBody source={inviteInfo.agreement.bodyMarkdown} />
                 </div>
               </div>
@@ -276,7 +276,7 @@ export default function InviteAcceptPage({
         ) : null}
 
         {accepting && (
-          <div className="mb-4 text-center text-sm text-black/60">
+          <div className="mb-4 text-center text-sm text-foreground-muted">
             {formatMessage({ id: "pages.invite.joiningServer" })}
           </div>
         )}
@@ -286,7 +286,7 @@ export default function InviteAcceptPage({
             onClick={() => void handleAccept(inviteInfo.agreement?.id)}
             disabled={accepting}
             size="lg"
-            tone="pink"
+            variant="accent"
             className="w-full"
           >
             {accepting
@@ -297,7 +297,7 @@ export default function InviteAcceptPage({
 
         {!user && inviteInfo && !errorText && !humanSeatLimitReached && (
           <div className="space-y-3">
-            <p className="text-center text-sm text-black/60 mb-4">
+            <p className="text-center text-sm text-foreground-muted mb-4">
               {formatMessage({ id: "pages.invite.signInPrompt" })}
             </p>
             <Button
@@ -308,38 +308,39 @@ export default function InviteAcceptPage({
                 onSwitchToLogin();
               }}
               size="lg"
-              shape="iconText"
-              tone="pink"
+              variant="accent"
               className="w-full"
             >
               <LogIn size={16} />
               {formatMessage({ id: "pages.invite.signIn" })}
             </Button>
-            <button
+            <Button size="sm"
+              variant="outline"
+              className="w-full"
               onClick={() => {
                 storePendingInvite(token);
                 clearInviteUrl();
                 onSwitchToRegister();
               }}
-              className="btn-brutal-sm flex w-full items-center justify-center gap-2 bg-white p-2 text-sm"
             >
               <UserPlus size={14} />
               {formatMessage({ id: "pages.invite.createAccount" })}
-            </button>
+            </Button>
           </div>
         )}
 
         {(errorText || humanSeatLimitReached) && (
-          <button
+          <Button size="sm"
+            variant="outline"
+            className="w-full"
             onClick={() => {
               clearInviteUrl();
               window.location.reload();
             }}
-            className="btn-brutal flex w-full items-center justify-center gap-2 bg-white px-3 py-2 text-sm"
           >
             <ArrowLeft size={16} />
             {formatMessage({ id: "pages.invite.goToRaft" })}
-          </button>
+          </Button>
         )}
       </div>
     </CenteredCardFrame>

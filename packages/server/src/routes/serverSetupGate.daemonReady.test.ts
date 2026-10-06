@@ -1,27 +1,26 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
-import { openTestDatabase, closeTestDatabase } from "../test/integration/database.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
+import { openTestDatabase, closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { afterAll, beforeAll } from "vitest";
 
 import { WebSocket } from "ws";
 
-import { getDb } from "../db/index.js";
-import { computers, users } from "../db/schema.js";
-import { setupMachineWebSocket } from "./daemon.js";
-import { createServer as createRaftServer } from "../services/serverService.js";
-import { registerMachine } from "../services/machineService.js";
-import { generateComputerApiKeyMaterial } from "../services/computerCredentialService.js";
-import { AgentOrchestrator } from "../services/agentOrchestrator.js";
-import type { ReplicaStateStore } from "../services/replicaStateStore.js";
-import { getActorServerRoleInServer } from "../lib/actorPermissions.js";
+import { getDb } from "../db/index";
+import { computers, users } from "../db/schema";
+import { setupMachineWebSocket } from "./daemon";
+import { createServer as createRaftServer } from "../services/serverService";
+import { registerMachine } from "../services/machineService";
+import { generateComputerApiKeyMaterial } from "../services/computerCredentialService";
+import { AgentOrchestrator } from "../services/agentOrchestrator";
+import type { ReplicaStateStore } from "../services/replicaStateStore";
+import { getActorServerRoleInServer } from "../lib/actorPermissions";
 import {
   createServerSetupStateService,
   DrizzleServerSetupStateRepository,
   resolveServerSetupLiveFacts,
-} from "../services/serverSetupStateService.js";
+} from "../services/serverSetupStateService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -92,6 +91,8 @@ function makeAvailableReplicaStateStore(): ReplicaStateStore {
     releaseWakeLock: async () => {},
     setAgentActivity: async () => {},
     getAgentActivity: async () => null,
+    getWakeCrashLoopState: async () => null,
+    compareAndSetWakeCrashLoopState: async () => true,
     setAgentRuntimeError: async () => {},
     getAgentRuntimeError: async () => null,
     setMachineMeta: async () => {},
@@ -108,6 +109,7 @@ function setupStateService() {
   return createServerSetupStateService({
     repository: new DrizzleServerSetupStateRepository(),
     resolveActorRole: (serverId, actor) => getActorServerRoleInServer(serverId, actor.type, actor.id),
+    resolveServerCompleted: async () => false,
     resolveLiveFacts: (serverId, userId) => resolveServerSetupLiveFacts(serverId, userId, orchestrator),
   });
 }

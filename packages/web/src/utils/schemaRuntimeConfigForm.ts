@@ -13,6 +13,7 @@ import { RuntimeConfigBuildError } from "./runtimeConfigForm";
 
 export function buildSchemaDrivenBuiltInConfig(input: {
   definition: ResolvedAgentCreateFormDefinition;
+  loadLocalPlugins?: boolean;
   providerId: string;
   apiKey: string;
   baseUrl: string;
@@ -61,11 +62,14 @@ export function buildSchemaDrivenBuiltInConfig(input: {
     reasoningEffort: null,
     envVars: input.envVars,
     hostUserState: "forbidden",
+    ...("loadLocalPlugins" in input.definition.dataSchema.properties
+      ? { loadLocalPlugins: input.loadLocalPlugins === true } : {}),
   };
 }
 
 export function buildConnectionDrivenBuiltInConfig(input: {
   definition: ResolvedAgentCreateFormDefinition;
+  loadLocalPlugins?: boolean;
   connectionId: string;
   providerId: string;
   model: string;
@@ -95,6 +99,8 @@ export function buildConnectionDrivenBuiltInConfig(input: {
     reasoningEffort: null,
     envVars: input.envVars,
     hostUserState: "forbidden",
+    ...("loadLocalPlugins" in input.definition.dataSchema.properties
+      ? { loadLocalPlugins: input.loadLocalPlugins === true } : {}),
   };
 }
 

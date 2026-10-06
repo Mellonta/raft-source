@@ -6,25 +6,38 @@ import {
   type AgentApiMessageClientOptions,
   type AgentApiMessageClientResult,
   type AgentApiMessageClientSuccess,
-} from "@botiverse/raft-shared/src/agentApiMessages.js";
+} from "@botiverse/raft-shared/src/agentApiMessages";
 import {
   createAgentApiClient,
-} from "@botiverse/raft-shared/src/agentApiClient.js";
+} from "@botiverse/raft-shared/src/agentApiClient";
 
 import {
   joinRaftChannelByTarget,
   type RaftChannelJoinRequest,
   type RaftChannelJoinResult,
-} from "./channelJoin.js";
-import { receiveRaftEvents, type RaftEventsReceiveRequest, type RaftEventsReceiveResult } from "./events.js";
+} from "./channelJoin";
+import { receiveRaftEvents, type RaftEventsReceiveRequest, type RaftEventsReceiveResult } from "./events";
+import { createRaftRoutes, type RaftRoutes } from "./routes";
+import { getRaftContext, type RaftContextResult } from "./context";
+import { createRaftManageClient, type RaftManageClient } from "./manage";
 
-export type RaftClient = AgentApiMessageClient & {
+export type RaftClient = AgentApiMessageClient & RaftManageClient & {
   events: {
     /** Nonblocking inbox pull. Returned messages are acknowledged before the response; never automatically retried. */
     receive(request?: RaftEventsReceiveRequest): Promise<RaftEventsReceiveResult>;
   };
   channels: {
     join(request: RaftChannelJoinRequest): Promise<RaftChannelJoinResult>;
+  };
+  /**
+   * Every Agent API route as `routes.<resource>.<method>({ params, query, body })` (one named object, typed per route),
+   * typed from the shared contract, with per-route metadata via `routes.describe`.
+   * Retry policy follows the contract: reads may retry, writes make one attempt.
+   */
+  routes: RaftRoutes;
+  agent: {
+    /** Read the bound agent, its Server (id, slug, name), and credential capabilities. */
+    context(): Promise<RaftContextResult>;
   };
 };
 export type RaftClientError = AgentApiMessageClientError;
@@ -152,6 +165,18 @@ export function createRaftClient(options: CreateRaftClientOptions): RaftClient {
       auth,
     },
   });
+  // Writes are not idempotent (a retried prepare would post a second card), so
+  // they always make one attempt regardless of options.retry.
+  const writeApi = createAgentApiClient({
+    fetch: {
+      baseUrl: serverUrl,
+      fetch: options.fetch,
+      headers: options.headers,
+      retry: { attempts: 1 },
+      throttle: options.throttle,
+      auth,
+    },
+  });
   const eventsApi = createAgentApiClient({
     fetch: {
       baseUrl: serverUrl,
@@ -167,11 +192,29 @@ export function createRaftClient(options: CreateRaftClientOptions): RaftClient {
 
   return {
     ...messageClient,
+    ...createRaftManageClient(agentApi, writeApi, {
+      serverUrl,
+      fetch: options.fetch ?? fetch,
+      headers: Object.fromEntries(new Headers(options.headers)),
+      authorization: auth.authorization,
+      beforeRequest: options.throttle?.beforeRequest,
+    }),
     events: {
       receive: (request) => receiveRaftEvents(eventsApi, request),
     },
     channels: {
       join: (request) => joinRaftChannelByTarget(agentApi, request),
+    },
+    routes: createRaftRoutes({
+      serverUrl,
+      fetch: options.fetch,
+      headers: options.headers,
+      authorization: auth.authorization,
+      readAttempts: options.retry?.attempts,
+      beforeRequest: options.throttle?.beforeRequest,
+    }),
+    agent: {
+      context: () => getRaftContext(agentApi),
     },
   };
 }

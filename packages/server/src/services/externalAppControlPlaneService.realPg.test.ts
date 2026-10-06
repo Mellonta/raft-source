@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { eq } from "drizzle-orm";
 import pg from "pg";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
-import * as schema from "../db/schema.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
+import * as schema from "../db/schema";
 import {
   externalAppCredentials,
   externalAppInstalls,
@@ -21,14 +20,14 @@ import {
   oauthClients,
   servers,
   users,
-} from "../db/schema.js";
-import { createServer, deleteServer } from "./serverService.js";
+} from "../db/schema";
+import { createServer, deleteServer } from "./serverService";
 import {
   beginExternalOAuthAttempt,
   claimExternalOAuthAttempt,
   completeExternalOAuthAttempt,
   ExternalAppControlPlaneError,
-} from "./externalAppControlPlaneService.js";
+} from "./externalAppControlPlaneService";
 
 const REAL_PG_URL_ENV = "SLACK_BRIDGE_OAUTH_REAL_PG_URL";
 const REAL_PG_URL = process.env[REAL_PG_URL_ENV];
@@ -216,6 +215,7 @@ test(
         providerAppId: seeded.registration.providerAppId,
         providerTeamId: "T_TEST_WORKSPACE",
         providerUserId: "U_TEST_OWNER",
+        providerInstallerIsWorkspaceAdmin: true,
         botUserId: "U_TEST_BOT",
         providerBotId: "B_TEST_BOT",
         workspaceName: "Test Workspace",

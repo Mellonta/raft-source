@@ -1,9 +1,11 @@
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
+import { Badge, Button } from "raft-ui";
 import type { AgentActivity, ServerRole } from "@botiverse/raft-shared";
-import { X } from "lucide-react";
+import { UserMinus, X } from "lucide-react";
 import AvatarSlot from "../ui/AvatarSlot";
 import SectionEyebrow from "../ui/SectionEyebrow";
+import Tooltip from "../ui/Tooltip";
 import AgentActivityDot from "../agent/AgentActivityDot";
 
 export function ChannelMemberListShell({
@@ -23,7 +25,7 @@ export function ChannelMemberListShell({
     <div
       className={
         framed
-          ? `max-h-72 overflow-y-auto border-2 border-black bg-white shadow-brutal-sm ${className}`
+          ? `max-h-72 overflow-y-auto border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm ${className}`
           : className
       }
       data-testid={dataTestId}
@@ -35,7 +37,7 @@ export function ChannelMemberListShell({
 
 export function ChannelMemberSectionHeader({ children }: { children: ReactNode }) {
   return (
-    <SectionEyebrow as="div" uppercase={false} className="bg-white/50 px-3 py-1.5">
+    <SectionEyebrow as="div" uppercase={false} className="bg-fill-muted px-3 py-1.5 text-foreground-muted theme-brutal:bg-white/50 theme-brutal:text-black">
       {children}
     </SectionEyebrow>
   );
@@ -49,15 +51,12 @@ function ChannelMemberActivityBadge({
   fallbackActivity?: AgentActivity;
 }) {
   return (
-    <span data-channel-member-avatar-badge-shell="true" className="absolute bottom-0 right-0 block size-0">
-      <AgentActivityDot
-        agentId={agentId}
-        fallbackActivity={fallbackActivity}
-        size="md"
-        pulse
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-      />
-    </span>
+    <AgentActivityDot
+      agentId={agentId}
+      fallbackActivity={fallbackActivity}
+      size="md"
+      data-channel-member-avatar-badge-shell="true"
+    />
   );
 }
 
@@ -69,14 +68,17 @@ export function MemberRoleTag({ role }: { role: ServerRole }) {
   if (role === "member") return null;
   const isGuest = role === "guest";
   return (
-    <span
+    <Badge
       data-testid={isGuest ? "member-page-role-channel-guest" : "member-page-role-channel-admin"}
-      className={`shrink-0 border-[1.5px] border-black px-1.5 py-0.5 font-mono text-[10px] leading-3 ${isGuest ? "bg-brutal-cyan" : "bg-brutal-lavender"}`}
+      appearance="soft"
+      variant={isGuest ? "information" : "muted"}
+      uppercase={false}
+      className="shrink-0 font-mono"
     >
       {formatMessage({ id: isGuest
         ? "channel.membersPage.role.channelGuest"
         : "channel.membersPage.role.channelAdmin" })}
-    </span>
+    </Badge>
   );
 }
 
@@ -151,11 +153,11 @@ export function ChannelMemberRow({
   const body = (
     <>
       <div className="min-w-0 flex-1">
-        <div className={`truncate text-sm text-black ${type === "human" ? "font-bold" : "font-medium"}`}>
+        <div className={`truncate text-sm text-foreground-strong ${type === "human" ? "font-bold" : "font-medium"}`}>
           {name}
         </div>
         {secondary ? (
-          <div className="truncate text-xs text-black/50">
+          <div className="truncate text-xs text-foreground-muted">
             {secondary}
           </div>
         ) : null}
@@ -169,7 +171,7 @@ export function ChannelMemberRow({
     // trailing slot (role tag, remove button) renders as a sibling so
     // interactive controls never nest inside a button.
     return (
-      <div className="group flex items-start gap-2 px-3 py-2 transition-colors [@media(max-height:600px)]:py-1 hover:bg-soft-signal/30">
+      <div className="group flex items-start gap-2 px-3 py-2 transition-colors [@media(max-height:600px)]:py-1 hover:bg-fill-muted">
         <button
           type="button"
           onClick={onRowClick}
@@ -177,11 +179,11 @@ export function ChannelMemberRow({
         >
           <span className="relative mt-1 shrink-0">{avatar}</span>
           <div className="min-w-0 flex-1">
-            <div className={`truncate text-sm text-black ${type === "human" ? "font-bold" : "font-medium"}`}>
+            <div className={`truncate text-sm text-foreground-strong ${type === "human" ? "font-bold" : "font-medium"}`}>
               {name}
             </div>
             {secondary ? (
-              <div className="truncate text-xs text-black/50">
+              <div className="truncate text-xs text-foreground-muted">
                 {secondary}
               </div>
             ) : null}
@@ -193,7 +195,7 @@ export function ChannelMemberRow({
   }
 
   return (
-    <div className="group flex items-start gap-2 px-3 py-2 transition-colors [@media(max-height:600px)]:py-1 hover:bg-soft-signal/30">
+    <div className="group flex items-start gap-2 px-3 py-2 transition-colors [@media(max-height:600px)]:py-1 hover:bg-fill-muted">
       {onAvatarClick ? (
         <button
           type="button"
@@ -215,6 +217,7 @@ export function ChannelMemberRemoveButton({
   onClick,
   revealOnRowHover = true,
   visibleLabel,
+  icon,
 }: {
   label: string;
   onClick: () => void;
@@ -223,20 +226,22 @@ export function ChannelMemberRemoveButton({
    *  control appears (Artea 2026-08-05: reveal jitter). Mobile always
    *  shows it (no hover). */
   revealOnRowHover?: boolean;
-  /** Member-management rows use a full text button alongside their role
-   *  action. Other compact lists keep the existing icon affordance. */
+  /** Member-management rows render icon-only with a suitable icon (Artea,
+   *  2026-09-17); other compact lists keep the bare icon affordance. */
   visibleLabel?: string;
+  icon?: ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`${revealOnRowHover ? "flex md:invisible md:group-hover:visible md:group-focus-within:visible" : "flex"} ${visibleLabel ? "btn-brutal-sm h-7 whitespace-nowrap bg-brutal-red/20 px-2 text-xs hover:bg-brutal-red/60" : "mt-1 size-6 border border-black bg-brutal-red/20 hover:bg-brutal-red/60"} shrink-0 items-center justify-center text-black transition-colors`}
-      title={label}
-      aria-label={label}
-    >
-      {visibleLabel ?? <X size={12} />}
-    </button>
+    <Tooltip content={label}>
+      <button
+        type="button"
+        onClick={onClick}
+        className={`${revealOnRowHover ? "flex md:invisible md:group-hover:visible md:group-focus-within:visible" : "flex"} ${visibleLabel ? "h-7 px-2 text-xs" : icon ? "h-7 w-7" : "size-6 mt-1"} shrink-0 items-center justify-center rounded-sm border border-line-muted bg-danger-soft text-danger-strong transition-colors hover:bg-danger/30 theme-brutal:rounded-none theme-brutal:border-black theme-brutal:bg-brutal-red/20 theme-brutal:text-black theme-brutal:hover:bg-brutal-red/60`}
+        aria-label={label}
+      >
+        {visibleLabel ?? icon ?? <X size={12} />}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -255,32 +260,33 @@ export function ChannelMemberHoverActions({
     onClick: () => void;
   };
 }) {
-  const { formatMessage } = useIntl();
   if (!roleAction && !removeAction) return null;
 
   return (
     <span className="flex items-center gap-2" data-testid="channel-member-hover-actions">
       {roleAction && (
-        <button
+        <Button
           type="button"
           onClick={(event) => {
             event.stopPropagation();
             roleAction.onClick();
           }}
           disabled={roleAction.disabled}
-          className="btn-brutal-sm h-7 whitespace-nowrap bg-white px-2 text-xs disabled:opacity-50"
+          size="sm"
+          variant="outline"
+          className="h-7 whitespace-nowrap px-2 text-xs"
           data-testid="channel-member-role-action"
           aria-label={roleAction.ariaLabel}
         >
           {roleAction.label}
-        </button>
+        </Button>
       )}
       {removeAction && (
         <ChannelMemberRemoveButton
           label={removeAction.label}
           onClick={removeAction.onClick}
           revealOnRowHover={false}
-          visibleLabel={formatMessage({ id: "agent.channelMembers.removeAction" })}
+          icon={<UserMinus size={14} aria-hidden />}
         />
       )}
     </span>

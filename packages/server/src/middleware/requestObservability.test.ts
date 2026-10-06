@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { EventEmitter } from "node:events";
 import { BasicTracer, MemoryTraceSink, traceEventRowsForSpan, traceSpanFactRowForSpan } from "@botiverse/raft-shared";
-import { httpRequestDuration, httpRequestsTotal } from "../metrics.js";
-import { attachAuthTraceIdentity, bucketHttpStatus, inferHttpCallerKind, normalizeObservedRoutePattern, requestObservabilityMiddleware } from "./requestObservability.js";
+import { httpRequestDuration, httpRequestsTotal } from "../metrics";
+import { attachAuthTraceIdentity, bucketHttpStatus, inferHttpCallerKind, normalizeObservedRoutePattern, requestObservabilityMiddleware } from "./requestObservability";
 
 const EXPECTED_LABELS = {
   route_pattern: "/api/servers/:id/members/:memberId/profile",

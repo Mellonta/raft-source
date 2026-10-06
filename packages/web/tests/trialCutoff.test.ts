@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { TRIAL_END_DATE } from "@botiverse/raft-shared";
 import {

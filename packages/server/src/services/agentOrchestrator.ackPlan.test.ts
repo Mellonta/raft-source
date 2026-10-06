@@ -1,7 +1,6 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
-import { partitionAcknowledgedMessages } from "./agentOrchestrator.js";
+import { partitionAcknowledgedMessages } from "./agentOrchestrator";
 import type { AgentMessage } from "@botiverse/raft-shared";
 
 function makeMessage(seq?: number, messageId?: string): AgentMessage {

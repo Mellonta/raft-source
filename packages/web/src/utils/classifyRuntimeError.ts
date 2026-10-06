@@ -6,7 +6,11 @@ import type { MessageId } from "../i18n/messages";
 // diagnostic in the creator debug view). We never substring-translate
 // arbitrary server English.
 
-export type RuntimeErrorKind = "notLoggedIn" | "notInstalled" | "authFailed";
+// `toolArgsInvalid` (task #1127) is reachable only from the daemon's typed
+// carrier, never from `classifyRuntimeError` below: the upstream sentence is
+// matched once in the daemon, and the web must not grow a second text matcher
+// for the same fact.
+export type RuntimeErrorKind = "notLoggedIn" | "notInstalled" | "authFailed" | "toolArgsInvalid";
 
 const PATTERNS: readonly { kind: RuntimeErrorKind; re: RegExp }[] = [
   { kind: "notLoggedIn", re: /is not logged in/i },
@@ -25,4 +29,5 @@ export const RUNTIME_ERROR_LABEL_ID: Record<RuntimeErrorKind, MessageId> = {
   notLoggedIn: "agent.runtimeError.notLoggedIn",
   notInstalled: "agent.runtimeError.notInstalled",
   authFailed: "agent.runtimeError.authFailed",
+  toolArgsInvalid: "agent.runtimeError.toolArgsInvalid",
 };

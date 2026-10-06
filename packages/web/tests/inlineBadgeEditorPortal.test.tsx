@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import InlineBadgeEditor from "../src/components/InlineBadgeEditor";
@@ -50,8 +49,8 @@ function renderEditor(onRequestClose: () => void) {
   );
 }
 
-test("InlineBadgeEditor portals its measured dropdown to the body", async (t) => {
-  t.mock.method(HTMLElement.prototype, "getBoundingClientRect", function (this: HTMLElement) {
+test("InlineBadgeEditor portals its measured dropdown to the body", async () => {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     if (this.dataset.testid === "badge-trigger") {
       return rect({ bottom: 50, height: 20, left: 20, right: 100, top: 30, width: 80, x: 20, y: 30 });
     }
@@ -75,8 +74,8 @@ test("InlineBadgeEditor portals its measured dropdown to the body", async (t) =>
   view.unmount();
 });
 
-test("InlineBadgeEditor keeps trigger and portal clicks inside, then closes on an outside click", async (t) => {
-  t.mock.method(HTMLElement.prototype, "getBoundingClientRect", () => rect({ height: 20, width: 80 }));
+test("InlineBadgeEditor keeps trigger and portal clicks inside, then closes on an outside click", async () => {
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => rect({ height: 20, width: 80 }));
   let closeRequests = 0;
 
   renderEditor(() => { closeRequests += 1; });

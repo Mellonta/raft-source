@@ -23,9 +23,9 @@
 import lockfile from "proper-lockfile";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { computerDir, resolveRaftHome } from "./paths.js";
-import { fail } from "./output.js";
-import { ComputerError } from "./lib/errors.js";
+import { computerDir, resolveRaftHome } from "./paths";
+import { fail } from "./output";
+import { ComputerError } from "./lib/errors";
 
 const STALE_LOCK_THRESHOLD_MS = 60_000;
 

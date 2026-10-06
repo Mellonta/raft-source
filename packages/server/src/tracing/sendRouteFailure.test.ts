@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   OBSERVABLE_SEND_ROUTE_SUBKINDS,
   TAGGABLE_SEND_ROUTE_SUBKINDS,
   SendRouteError,
   resolveSendRouteSubkind,
   type SendRouteSubkind,
-} from "./sendRouteFailure.js";
+} from "./sendRouteFailure";
 
 test("resolveSendRouteSubkind returns the tagged subkind for a SendRouteError", () => {
   assert.equal(resolveSendRouteSubkind(new SendRouteError("target_forbidden", "x")), "target_forbidden");

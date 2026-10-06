@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { getRuntimeDisplayName } from "@botiverse/raft-shared";
+import { getRuntimeDisplayName, runtimeErrorReasonForClass } from "@botiverse/raft-shared";
 import type {
   RuntimeErrorActivityDiagnostic,
   RuntimeErrorClass,
@@ -30,6 +30,45 @@ const RUNTIME_AUTH_ACTION_REQUIRED_PATTERNS: RegExp[] = [
   /invalid api key/i,
   /api key (?:is )?not set/i,
 ];
+// task #917 — provider wording for an exhausted billing or credit balance.
+// Seen: Grok Build "402 ... usage balance exhausted"; the others are the common
+// provider phrasings of the same fact. "usage limit" / "quota exceeded" stay on
+// their existing terminal path and are deliberately not matched here.
+const RUNTIME_BILLING_EXHAUSTED_PATTERNS: RegExp[] = [
+  /\bpayment required\b/i,
+  /\b(?:usage|credit|account)\s+balance\b[^.]*\b(?:exhausted|depleted|insufficient|too low)\b/i,
+  /\binsufficient\s+(?:balance|credits?|funds)\b/i,
+  /\b(?:out of|run out of|no remaining)\s+credits?\b/i,
+];
+// task #352 — the provider answered that the account's plan/subscription does
+// not include the requested model. Field sample (Sora, #proj-daemon:78630c13):
+// z.ai `429: {"code":"1311","message":"Your current subscription plan does not
+// yet include access to GLM-5.3-Highspeed"}`. Retrying cannot succeed until the
+// user changes the model or the plan, so this is action-required like an auth
+// failure. A plain rate-limit 429 and a timeout never match: both patterns need
+// a plan/subscription word AND an access/model word joined by a negation.
+const RUNTIME_PLAN_ACCESS_PATTERNS: RegExp[] = [
+  /\b(?:subscription|plan|tier)\b[^.\n]{0,80}\b(?:does not|doesn't|do not|don't|not)\b[^.\n]{0,40}\b(?:include|allow|support|grant)\b[^.\n]{0,40}\b(?:access|model)\b/i,
+  /\b(?:model|access)\b[^.\n]{0,80}\b(?:not|isn't|is not)\b[^.\n]{0,20}\b(?:included|available|enabled|allowed)\b[^.\n]{0,40}\b(?:subscription|plan|tier)\b/i,
+];
+// Capacity / transient-limit wording can co-occur with "plan" and "model"
+// ("your plan does not support more requests to this model right now") but
+// means a temporary limit, not missing access. Any marker vetoes plan-access
+// so a rate limit never becomes a user-action terminal failure.
+const RUNTIME_TRANSIENT_LIMIT_MARKERS: RegExp[] = [
+  /\brate.?limit/i,
+  /\btoo many requests\b/i,
+  /\bconcurrenc(?:y|ies)\b/i,
+  /\bretry(?:ing)?\b/i,
+  /\btry again\b/i,
+  /\blater\b/i,
+  /\bresets?\b/i,
+  /\bper (?:second|minute|hour|day)\b/i,
+  /\b[RT]PM\b/,
+  /\bat the moment\b/i,
+  /\bright now\b/i,
+  /\bat capacity\b/i,
+];
 const RUNTIME_LAUNCHER_FAILURE_PATTERNS: RegExp[] = [
   /\bunknown command\b[\s\S]*\b(?:codex|gemini|opencode)\.(?:js|mjs|cjs)\b/i,
 ];
@@ -46,7 +85,7 @@ export function buildRuntimeErrorDiagnosticEnvelope(message: string): RuntimeErr
   const httpStatus = extractHttpStatus(rawMessage);
   const runtimeErrorClass = classifyRuntimeError(rawMessage, httpStatus);
   const runtimeErrorReason = classifyRuntimeErrorReason(runtimeErrorClass);
-  const runtimeErrorAction = classifyRuntimeErrorAction(runtimeErrorClass);
+  const runtimeErrorAction = classifyRuntimeErrorAction(runtimeErrorClass, rawMessage);
   const fingerprint = fingerprintRuntimeError(scrubbed);
   const inputTooLargeAttrs = runtimeErrorClass === "InputTooLargeError"
     ? extractInputTooLargeAttrs(rawMessage)
@@ -77,6 +116,22 @@ export function buildRuntimeErrorDiagnosticEnvelope(message: string): RuntimeErr
   };
 }
 
+export function isRuntimeBillingErrorText(message: string): boolean {
+  const rawMessage = String(message || "");
+  return classifyRuntimeError(rawMessage, extractHttpStatus(rawMessage)) === "BillingError";
+}
+
+export function formatRuntimeBillingExhaustedMessage(runtimeId: string): string {
+  const runtimeLabel = runtimeDisplayName(runtimeId);
+  return `${runtimeLabel} reported that the provider's billing or credit balance is exhausted. Raft stopped retrying because retries cannot succeed until the balance is restored. Messages that were waiting are kept and will be delivered when the agent starts again. Add credits or switch this agent to another model or provider, then restart the agent.`;
+}
+
+export function formatRuntimePlanAccessMessage(runtimeId: string, model?: string | null): string {
+  const runtimeLabel = runtimeDisplayName(runtimeId);
+  const modelLabel = typeof model === "string" && model.trim() ? ` (${model.trim()})` : "";
+  return `${runtimeLabel} reported that the provider plan for this agent does not include access to the configured model${modelLabel}. Raft stopped retrying because retries cannot succeed until the model or the plan changes. Switch this agent to a model the plan includes, or upgrade the plan, then retry starting this agent.`;
+}
+
 export function isRuntimeInputTooLargeErrorText(message: string): boolean {
   const rawMessage = String(message || "");
   return classifyRuntimeError(rawMessage, extractHttpStatus(rawMessage)) === "InputTooLargeError";
@@ -87,12 +142,21 @@ export function buildRuntimeErrorActivityDiagnostic(
   metadata: {
     nativeReasonPresent?: boolean;
     reasonProvenance?: RuntimeErrorReasonProvenance;
+    /**
+     * task #1127 — a caller that already holds a typed code supplies it here so
+     * the class is decided by that code rather than re-derived from the text.
+     * The text is still used for the fingerprint, and only for that.
+     */
+    errorClass?: RuntimeErrorClass;
   } = {},
 ): RuntimeErrorActivityDiagnostic {
   const envelope = buildRuntimeErrorDiagnosticEnvelope(message);
+  const errorClass = metadata.errorClass ?? normalizeRuntimeErrorClass(envelope.spanAttrs.runtime_error_class);
   return {
-    errorClass: normalizeRuntimeErrorClass(envelope.spanAttrs.runtime_error_class),
-    errorReason: normalizeRuntimeErrorReason(envelope.spanAttrs.turn_reason),
+    errorClass,
+    errorReason: metadata.errorClass
+      ? runtimeErrorReasonForClass(metadata.errorClass)
+      : normalizeRuntimeErrorReason(envelope.spanAttrs.turn_reason),
     fingerprint: String(envelope.spanAttrs.runtime_error_fingerprint),
     reasonProvenance: metadata.reasonProvenance ?? "runtime_error_event",
     ...(typeof metadata.nativeReasonPresent === "boolean"
@@ -114,6 +178,8 @@ function normalizeRuntimeErrorClass(value: unknown): RuntimeErrorClass {
     case "ProviderStreamError":
     case "ProviderServerError":
     case "ProviderApiError":
+    case "OperationAbortedError":
+    case "BillingError":
       return value;
     default:
       return "RuntimeError";
@@ -133,6 +199,8 @@ function normalizeRuntimeErrorReason(value: unknown): RuntimeErrorReason {
     case "provider_stream_error":
     case "provider_server_error":
     case "provider_api_error":
+    case "operation_aborted":
+    case "billing_exhausted":
       return value;
     default:
       return "unclassified_runtime_error";
@@ -152,7 +220,20 @@ export function formatRuntimeStartTimeoutMessage(runtimeId: string): string {
   return `${runtimeLabel} did not finish starting on this machine. Check that ${runtimeLabel} is installed, logged in, and can run non-interactively, then retry starting this agent.`;
 }
 
+// Grok has no user-triggerable compaction, and Restart reloads the same
+// session (session/load). Name the control that actually starts a new session,
+// with its web labels ("Restart / Reset" → "Reset Session & Restart"; members
+// see "Reset Model"). Other runtimes keep the generic text until their recovery
+// paths are verified one by one.
+const GROK_INPUT_TOO_LARGE_MESSAGE =
+  "Grok Build reported input that is too large for the selected model. Restart keeps the existing session. "
+  + "To start a new session, someone who can manage this agent can open Restart / Reset and choose Reset Session & Restart "
+  + "(shown as Reset Model for members). This stops current work and clears the runtime conversation context, "
+  + "while keeping Raft messages and workspace files, including MEMORY.md. "
+  + "If the error persists in a new session, reduce the prompt or configured startup context.";
+
 export function formatRuntimeInputTooLargeMessage(runtimeId: string): string {
+  if (runtimeId === "grok") return GROK_INPUT_TOO_LARGE_MESSAGE;
   const runtimeLabel = runtimeDisplayName(runtimeId);
   return `${runtimeLabel} reported input that is too large for the selected model. Reduce the current prompt or injected startup context. For a resumed session, compact it or start a new session before retrying.`;
 }
@@ -212,7 +293,8 @@ function truncateDiagnosticText(value: string, maxChars: number): { value: strin
 
 function extractHttpStatus(message: string): number | null {
   const match = /\b(?:HTTP|status(?:\s+code)?|API\s+Error)[:\s]+([45]\d{2})\b/i.exec(message)
-    ?? /\b([45]\d{2})\s+(?:Bad Request|Unauthorized|Forbidden|Not Found|Conflict|Too Many Requests|Internal Server Error|Service Unavailable)\b/i.exec(message);
+    ?? /\b([45]\d{2})\s+(?:Bad Request|Unauthorized|Forbidden|Not Found|Conflict|Too Many Requests|Internal Server Error|Service Unavailable)\b/i.exec(message)
+    ?? /\b([45]\d{2})\s*:/i.exec(message);
   if (!match) return null;
   const status = Number(match[1]);
   return Number.isInteger(status) ? status : null;
@@ -225,6 +307,12 @@ function classifyRuntimeError(message: string, httpStatus: number | null): strin
   const explicit = /\b([A-Z][A-Za-z0-9_]*(?:Error|Exception))\b/.exec(message);
   if (explicit && /InputTooLargeError/i.test(explicit[1])) return "InputTooLargeError";
   if (
+    (explicit && /^(?:AbortError|OperationAbortedError)$/i.test(explicit[1]))
+    || /^\s*(?:this\s+)?operation was aborted\.?\s*$/i.test(message)
+  ) {
+    return "OperationAbortedError";
+  }
+  if (
     /\bINPUT_TOO_LARGE\b/i.test(message) ||
     /\binput too large\b/i.test(message) ||
     /\bexceeds the maximum allowed\b/i.test(message) ||
@@ -235,6 +323,15 @@ function classifyRuntimeError(message: string, httpStatus: number | null): strin
   ) {
     return "InputTooLargeError";
   }
+  // task #917 — billing exhaustion is checked before the generic status mapping
+  // so a 402 never lands in the retryable ProviderApiError bucket.
+  if (httpStatus === 402 || RUNTIME_BILLING_EXHAUSTED_PATTERNS.some((pattern) => pattern.test(message))) {
+    return "BillingError";
+  }
+  // task #352 — plan/subscription-without-model is decided before the status
+  // mapping so a 429 (or 403) carrying that wording never lands in the
+  // retryable RateLimitError bucket.
+  if (isRuntimePlanAccessText(message)) return "ModelConfigError";
   if (explicit) return explicit[1];
   if (httpStatus !== null) {
     if (httpStatus === 429) return "RateLimitError";
@@ -268,11 +365,27 @@ function classifyRuntimeError(message: string, httpStatus: number | null): strin
   return "RuntimeError";
 }
 
-function classifyRuntimeErrorAction(runtimeErrorClass: string): "none" | "user_reauth" {
+export type RuntimeErrorAction = "none" | "user_reauth" | "user_model_access";
+
+function classifyRuntimeErrorAction(runtimeErrorClass: string, message: string): RuntimeErrorAction {
   if (runtimeErrorClass === "AuthError") {
     return "user_reauth";
   }
+  // task #352 — only the plan-without-model wording is action-required; other
+  // ModelConfigError texts keep their existing sticky-terminal path.
+  if (runtimeErrorClass === "ModelConfigError" && isRuntimePlanAccessText(message)) {
+    return "user_model_access";
+  }
   return "none";
+}
+
+function isRuntimePlanAccessText(text: string): boolean {
+  if (RUNTIME_TRANSIENT_LIMIT_MARKERS.some((pattern) => pattern.test(text))) return false;
+  return RUNTIME_PLAN_ACCESS_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+export function isRuntimePlanAccessErrorText(message: string): boolean {
+  return isRuntimePlanAccessText(String(message || ""));
 }
 
 function isRuntimeAuthActionRequiredText(text: string): boolean {
@@ -303,6 +416,10 @@ function classifyRuntimeErrorReason(runtimeErrorClass: string): string {
       return "provider_server_error";
     case "ProviderApiError":
       return "provider_api_error";
+    case "OperationAbortedError":
+      return "operation_aborted";
+    case "BillingError":
+      return "billing_exhausted";
     default:
       return "unclassified_runtime_error";
   }

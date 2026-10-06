@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { classifyRouteForTab } from "../src/hooks/useTabRouteMemory";
 
 // Regression: task #311 (#proj-uiux:c2313b1d). /search must NOT be

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { planStaleTransientNormalizationAction } from "./agentOrchestrator.js";
+import { planStaleTransientNormalizationAction } from "./agentOrchestrator";
 
 test("planStaleTransientNormalizationAction keeps non-transient snapshots unchanged", () => {
   assert.equal(

@@ -1,10 +1,10 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { createServer as createServerRecord } from "../services/serverService.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { createServer as createServerRecord } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

@@ -7,15 +7,15 @@ import { EncryptCommand, KMSClient } from "@aws-sdk/client-kms";
 import { currentDate } from "@botiverse/raft-shared";
 import { and, eq } from "drizzle-orm";
 
-import { getDb, type Database } from "../db/index.js";
+import { getDb, type Database } from "../db/index";
 import {
   externalAppRegistrations,
   externalAppRegistrationSecrets,
-} from "../db/schema.js";
+} from "../db/schema";
 import type {
   SlackBotCredentialSealer,
   SlackOAuthAppSecretLeaseProvider,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
 
 const OAUTH_SECRET_SCHEMA = "slack-oauth-client-secret.v1" as const;
 const OAUTH_SECRET_AUDIENCE = "slack-oauth-exchange" as const;

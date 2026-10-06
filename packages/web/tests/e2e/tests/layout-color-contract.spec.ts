@@ -26,8 +26,9 @@ import { waitForSeedState } from "../fixtures/seedState";
  * the horizontal border-b-2 used by panel headers.
  *
  * This spec asserts the rendered backgroundColor for each region
- * via getComputedStyle, so any regression on the @theme tokens or
- * on the Tailwind class names lights up here. */
+ * via getComputedStyle, so any regression on the theme tokens lights
+ * up here. Elements are located by their RUI data-slot hooks
+ * (post-#7347), not by Tailwind class names. */
 test.describe("layout color contract (desktop)", () => {
   test.use({ viewport: { width: 1280, height: 800 } });
 
@@ -38,33 +39,26 @@ test.describe("layout color contract (desktop)", () => {
     const seedState = await waitForSeedState();
     await loginViaApi(request, seedState);
     await page.goto(seedState.urls.web);
-    // Wait for the desktop shell to be present.
-    await page.waitForSelector(".bg-soft-signal", { timeout: 10_000 });
+    // Wait for the desktop shell to be present. Since the RUI migration
+    // (#7347) the layout regions are addressed by their stable data-slot
+    // hooks, not Tailwind class names — the COLOR contract below is
+    // unchanged, only the element lookup moved.
+    await page.waitForSelector('[data-slot="app-rail-root"]', { timeout: 10_000 });
+    await page.waitForSelector('[data-slot="sidebar-root"]', { timeout: 10_000 });
+    await page.waitForSelector('[data-slot="conversation-panel-root"]', { timeout: 10_000 });
 
     const colors = await page.evaluate(() => {
-      // The LeftRail is the only top-level yellow column in the desktop
-      // shell. Match it loosely on the brand-yellow class so this selector
-      // survives width / arbitrary-value adjustments to the rail's outer
-      // div (PR #1281 moved it from `w-14` to `w-[64px]`).
-      const leftRail = Array.from(
-        document.querySelectorAll<HTMLElement>("div.bg-soft-signal"),
-      ).find(
-        (el) =>
-          el.className.toString().includes("border-r-2") &&
-          el.className.toString().includes("flex-col"),
+      // The LeftRail is the RUI AppRail root (brutal: bg-primary → yellow).
+      const leftRail = document.querySelector(
+        '[data-slot="app-rail-root"]',
       ) as HTMLElement | null;
+      // The sidebar column (brutal: theme-brutal:bg-brutal-cream → cream).
       const sidebar = document.querySelector(
-        "div.bg-brutal-cream",
+        '[data-slot="sidebar-root"]',
       ) as HTMLElement | null;
-      // Find the main content wrapper that has md:bg-white. On md+ it
-      // resolves to white; on smaller viewports the class doesn't apply.
-      const mainCandidate = Array.from(
-        document.querySelectorAll<HTMLElement>("div"),
-      ).find(
-        (el) =>
-          el.className &&
-          el.className.toString().includes("md:bg-white") &&
-          el.className.toString().includes("flex-1"),
+      // The main panel (white in every theme).
+      const mainCandidate = document.querySelector(
+        '[data-slot="conversation-panel-root"]',
       ) as HTMLElement | null;
       return {
         leftRail: leftRail ? getComputedStyle(leftRail).backgroundColor : null,
@@ -75,8 +69,11 @@ test.describe("layout color contract (desktop)", () => {
       };
     });
 
-    // brutal-yellow = #FFD440 = rgb(255, 212, 64)
-    await expectCssColor(page, colors.leftRail, "#FFD440");
+    // brutal-yellow: the contract value is #FFD440 = rgb(255, 212, 64).
+    // Since #7347 the rail takes RUI's `bg-primary` token
+    // (oklch(0.883 0.162 91.89)), whose color-space round-trip lands at
+    // [255,212,65] — hence tolerance 1, not a changed contract.
+    await expectCssColor(page, colors.leftRail, "#FFD440", 1);
     // brutal-cream = #FFFAEF = rgb(255, 250, 239)
     await expectCssColor(page, colors.sidebar, "#FFFAEF");
     // bg-white = #FFFFFF

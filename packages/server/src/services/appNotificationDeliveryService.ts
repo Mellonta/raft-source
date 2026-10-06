@@ -5,11 +5,14 @@ import {
   clearClockInterval,
   clearClockTimeout,
   currentDate,
+  noopTracer,
   setClockInterval,
   setClockTimeout,
+  type Tracer,
 } from "@botiverse/raft-shared";
 import { and, asc, eq, isNull, lt, lte, or, sql } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { withTraceRoot } from "../tracing/semanticTrace";
 import {
   agents,
   channels,
@@ -22,19 +25,21 @@ import {
   oauthClientInstalls,
   oauthClients,
   servers,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   APP_OUTBOUND_EVENT_GROUPS,
   appOutboundEventRequiredGroups,
   computeEffectiveAppOutboundAuthority,
   type AppOutboundEventType,
   type AppOutboundGroup,
-} from "./appOutboundPermissionService.js";
+} from "./appOutboundPermissionService";
 import {
   AppWebhookConfigError,
   decryptAppWebhookSigningSecret,
   isPublicWebhookAddress,
-} from "./appWebhookConfigService.js";
+} from "./appWebhookConfigService";
+import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy";
+import { responseRequestId } from "./externalRequestCorrelation";
 
 const DELIVERY_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
 const DELIVERY_TIMEOUT_MS = 10_000;
@@ -50,12 +55,26 @@ const SAFE_PROVENANCE_KEYS = new Set([
 ]);
 const SAFE_UUID_PROVENANCE_KEYS = new Set(["outage_occurrence_id", "recovery_for_event_id"]);
 
-type WebhookPost = (input: {
+export type WebhookPost = (input: {
   endpointUrl: string;
   body: string;
   headers: Record<string, string>;
   timeoutMs: number;
-}) => Promise<{ status: number }>;
+}) => Promise<WebhookPostResponse>;
+
+/** `requestId`: the receiver's own request id header, when it sent one (see externalRequestCorrelation). */
+/**
+ * Where the POST's time went, in ms from the start of the call (DNS lookup
+ * included). connect/tls are absent when an idle keep-alive socket was reused.
+ */
+export type WebhookPostTiming = {
+  dnsMs: number;
+  connectMs?: number;
+  tlsMs?: number;
+  ttfbMs?: number;
+  socketReused: boolean;
+};
+export type WebhookPostResponse = { status: number; retryAfter?: string; requestId?: string; timing?: WebhookPostTiming };
 
 type PinnedLookupAddress = { address: string; family: number };
 type PinnedLookupCallback = (
@@ -218,6 +237,7 @@ export async function emitAppFacingNotificationEvent(input: {
       eq(oauthClientInstalls.serverId, input.serverId),
       eq(oauthClientInstalls.status, "active"),
       eq(oauthClients.enabled, true),
+      oauthClientIsUserManagedPredicate(),
       eq(oauthAppWebhookConfigs.enabled, true),
     ));
 
@@ -250,10 +270,17 @@ export async function emitAppFacingNotificationEvent(input: {
   return { eventId, recipientCount };
 }
 
-async function postPublicHttps(input: Parameters<WebhookPost>[0]): Promise<{ status: number }> {
+/**
+ * POST to a public HTTPS endpoint: DNS-pinned to a public address, no
+ * redirects, TLS verified. Shared by app webhooks and the agent inbox push.
+ */
+export async function postPublicHttps(input: Parameters<WebhookPost>[0]): Promise<WebhookPostResponse> {
   const url = new URL(input.endpointUrl);
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const startedAt = performance.now();
+  const sinceStart = () => Math.round(performance.now() - startedAt);
   const addresses = await lookup(hostname, { all: true, verbatim: true });
+  const timing: WebhookPostTiming = { dnsMs: sinceStart(), socketReused: false };
   if (addresses.length === 0 || addresses.some((entry) => !isPublicWebhookAddress(entry.address))) {
     throw new AppNotificationDeliveryError("Webhook host resolved to a private or special-use address");
   }
@@ -270,8 +297,19 @@ async function postPublicHttps(input: Parameters<WebhookPost>[0]): Promise<{ sta
       rejectUnauthorized: true,
       lookup: createAppWebhookPinnedLookup(pinned) as never,
     }, (response) => {
+      timing.ttfbMs = sinceStart();
       response.resume();
-      resolve({ status: response.statusCode ?? 0 });
+      const retryAfter = response.headers["retry-after"];
+      const requestId = responseRequestId((name) => {
+        const value = response.headers[name];
+        return typeof value === "string" ? value : undefined;
+      });
+      resolve({
+        status: response.statusCode ?? 0,
+        ...(typeof retryAfter === "string" ? { retryAfter } : {}),
+        ...(requestId ? { requestId } : {}),
+        timing,
+      });
     });
     const timeout = setClockTimeout(
       () => request.destroy(new Error("Webhook request timed out")),
@@ -279,6 +317,10 @@ async function postPublicHttps(input: Parameters<WebhookPost>[0]): Promise<{ sta
     );
     request.once("close", () => clearClockTimeout(timeout));
     request.on("socket", (socket) => {
+      // A reused keep-alive socket is already connected: no connect/TLS phase.
+      timing.socketReused = !socket.connecting;
+      socket.once("connect", () => { timing.connectMs = sinceStart(); });
+      socket.once("secureConnect", () => { timing.tlsMs = sinceStart(); });
       socket.once("connect", () => {
         if (!socket.remoteAddress || !isPublicWebhookAddress(socket.remoteAddress)) {
           request.destroy(new Error("Webhook connection reached a non-public address"));
@@ -388,7 +430,10 @@ export async function drainAppNotificationDeliveries(input: {
     }).from(oauthClientInstalls)
       .innerJoin(oauthClients, eq(oauthClients.id, oauthClientInstalls.clientId))
       .innerJoin(oauthAppWebhookConfigs, eq(oauthAppWebhookConfigs.clientId, oauthClients.id))
-      .where(eq(oauthClientInstalls.id, base.notification.recipientId)).limit(1) : [];
+      .where(and(
+        eq(oauthClientInstalls.id, base.notification.recipientId),
+        oauthClientIsUserManagedPredicate(),
+      )).limit(1) : [];
 
     const attemptNumber = claimed.attemptCount;
     if (!base || !authority || authority.installation.status !== "active" || !authority.clientEnabled || !authority.config.enabled
@@ -493,11 +538,21 @@ export function startAppNotificationDeliveryWorker(input: {
   batchSize?: number;
   scheduleEvery?: (fn: () => void, intervalMs: number) => unknown;
   clear?: (handle: unknown) => void;
+  tracer?: Tracer;
 } = {}) {
   const intervalMs = input.intervalMs ?? 15_000;
   const batchSize = input.batchSize ?? DELIVERY_BATCH_SIZE;
+  const tracer = input.tracer ?? noopTracer;
   const run = () => {
-    drainAppNotificationDeliveries({ batchSize }).catch((error) => {
+    // Each drain is a root span. A failure also records the
+    // `server.app_notification_delivery.error` event inside it.
+    withTraceRoot(
+      tracer,
+      "server.app_notification_delivery.drain",
+      { surface: "server", kind: "internal", attrs: { batch_size: batchSize } },
+      () => drainAppNotificationDeliveries({ batchSize }),
+      "server.app_notification_delivery.error",
+    ).catch((error) => {
       console.error("[AppNotificationDelivery] drain failed", boundedError(error));
     });
   };

@@ -1,4 +1,5 @@
-import { serializeErrorForLog } from "../tracing/safeErrorLog.js";
+import { respondToTaskWriteError } from "../lib/taskWriteErrorResponse";
+import { serializeErrorForLog } from "../tracing/safeErrorLog";
 // LEGACY AGENT API SURFACE: DO NOT ADD OR EXPAND ROUTES HERE.
 //
 // This router exists for old daemon builds and compatibility clients that
@@ -19,44 +20,46 @@ import { serializeErrorForLog } from "../tracing/safeErrorLog.js";
 import { Router, type Request, type RequestHandler, type Response, type Router as RouterType } from "express";
 import multer from "multer";
 import { randomUUID } from "node:crypto";
-import * as messageService from "../services/messageService.js";
-import * as channelService from "../services/channelService.js";
-import * as agentService from "../services/agentService.js";
-import * as machineService from "../services/machineService.js";
-import * as serverService from "../services/serverService.js";
-import * as taskService from "../services/taskService.js";
+import * as messageService from "../services/messageService";
+import * as channelService from "../services/channelService";
+import * as agentService from "../services/agentService";
+import * as machineService from "../services/machineService";
+import * as serverService from "../services/serverService";
+import * as taskService from "../services/taskService";
 import {
   getTaskRealtimeSurfaceTargets,
+  isHistoricalJointTaskReadOnly,
   resolveTaskChannelSurface,
-} from "../services/taskChannelSurface.js";
-import * as searchService from "../services/searchService.js";
-import * as reminderCrud from "../apps/reminder/crud.js";
-import * as reminderService from "../apps/reminder/service.js";
-import * as oauthService from "../services/oauthService.js";
-import { resolveScheduleInput } from "../services/reminderScheduleInput.js";
-import { parseRecurrenceString, computeNextFire, formatRecurrence, type Recurrence } from "../services/recurrence.js";
-import * as agentPermalinkRenderService from "../services/agentPermalinkRenderService.js";
-import * as actionCardsService from "../services/actionCardsService.js";
-import * as attestedSendService from "../services/attestedSendService.js";
-import { emitScopeReadUpdated } from "../services/readReceiptService.js";
-import { emitThreadFollowersUpdated } from "../services/threadFollowerRealtimeService.js";
-import { emitTaskCreated, emitTaskMessageNew } from "../services/taskRealtimeEvents.js";
+} from "../services/taskChannelSurface";
+import * as searchService from "../services/searchService";
+import * as reminderCrud from "../apps/reminder/crud";
+import * as reminderService from "../apps/reminder/service";
+import { publishReminderEvent } from "../apps/reminder/realtime";
+import * as oauthService from "../services/oauthService";
+import { resolveScheduleInput } from "../services/reminderScheduleInput";
+import { parseRecurrenceString, computeNextFire, formatRecurrence, type Recurrence } from "../services/recurrence";
+import * as agentPermalinkRenderService from "../services/agentPermalinkRenderService";
+import * as actionCardsService from "../services/actionCardsService";
+import * as attestedSendService from "../services/attestedSendService";
+import { emitScopeReadUpdated } from "../services/readReceiptService";
+import { emitThreadFollowersUpdated } from "../services/threadFollowerRealtimeService";
+import { emitTaskCreated, emitTaskMessageNew } from "../services/taskRealtimeEvents";
 import {
   describeTaskMutation,
   emitTaskMutationToSurfaces,
-} from "../services/taskMutationBroadcast.js";
+} from "../services/taskMutationBroadcast";
 import {
   loadCanonicalTaskFactsByMessageId,
   refreshQueuedAgentTaskProjections,
   withProjectedTaskFacts,
-} from "../services/messageTaskProjection.js";
-import { projectRichMessageSocketPayload } from "../services/messageRealtimeEvents.js";
-import { mutateMessageReaction } from "../services/messageReactionService.js";
-import { buildMachineReadModel } from "../services/machineReadModel.js";
-import { getLatestDaemonVersion } from "../services/daemonVersionService.js";
-import { resolveSearchSenderFilter } from "../services/searchSenderFilterService.js";
-import { actorHasServerCapabilityInServer } from "../lib/actorPermissions.js";
-import { getServerPlan, getHistoryCutoff, isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService.js";
+} from "../services/messageTaskProjection";
+import { projectRichMessageSocketPayload } from "../services/messageRealtimeEvents";
+import { mutateMessageReaction } from "../services/messageReactionService";
+import { ChannelConversionInProgressError } from "../services/channelConversionFenceService";
+import { buildMachineReadModel } from "../services/machineReadModel";
+import { resolveSearchSenderFilter } from "../services/searchSenderFilterService";
+import { actorHasServerCapabilityInServer } from "../lib/actorPermissions";
+import { getServerPlan, getHistoryCutoff, isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService";
 import {
   PLAN_CONFIG,
   DAEMON_CAPABILITY_MODEL_SEEN_BOUNDARY,
@@ -80,13 +83,26 @@ import {
   type TaskStatus,
   type ActionCardAction,
   type ApmFreshnessHeldDecision,
+  FEEDBACK_TRACE_BUNDLE_TRANSCRIPT_METADATA_KEYS,
+  FEEDBACK_TRACE_BUNDLE_TRANSCRIPT_RESULT_METADATA_KEYS,
+  FEEDBACK_TRANSCRIPT_OUTCOME_MAX_UPLOAD_BYTES,
+  isFeedbackTranscriptUploadableContentKind,
+  readFeedbackTranscriptByteCount,
+  readFeedbackTranscriptRequestId,
+  type FeedbackTraceBundleTranscriptResultMetadataKey,
   asMachineId,
+  FEEDBACK_MACHINE_EVIDENCE_MAX_UPLOAD_BYTES,
+  FEEDBACK_MACHINE_EVIDENCE_SECTIONS,
+  isFeedbackAttachmentKind,
+  type FeedbackTraceBundleTranscriptMetadataKey,
+  AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT,
+  AGENT_API_MESSAGE_SEARCH_MAX_LIMIT
 } from "@botiverse/raft-shared";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
 import type { Server as SocketServer } from "socket.io";
-import { getFlyInstanceForMachine } from "../replicaRouter.js";
-import { getDb } from "../db/index.js";
-import { getAppUrl } from "../config/appUrl.js";
+import { getFlyInstanceForMachine } from "../replicaRouter";
+import { getDb } from "../db/index";
+import { getAppUrl } from "../config/appUrl";
 import {
   agents,
   channelAgents,
@@ -96,14 +112,14 @@ import {
   jointChannelServers,
   messages,
   users,
-} from "../db/schema.js";
-import { and, desc, eq, gt, not, sql } from "drizzle-orm";
-import { getStorage, getCdnStorage, isStorageTimeoutError } from "../services/storageService.js";
+} from "../db/schema";
+import { and, desc, eq, gt, isNull, not, sql } from "drizzle-orm";
+import { getStorage, getCdnStorage, isStorageTimeoutError } from "../services/storageService";
 import {
   FileUploadQuotaExceededError,
   buildFileUploadQuotaExceededResponse,
-} from "../services/fileUploadQuotaService.js";
-import { uploadAttachmentBuffers } from "../services/attachmentUploadWriterService.js";
+} from "../services/fileUploadQuotaService";
+import { uploadAttachmentBuffers } from "../services/attachmentUploadWriterService";
 import {
   buildAttachmentTooLargeResponse,
   canGenerateImagePreview,
@@ -119,16 +135,16 @@ import {
   resolveAttachmentMimeType,
   resolveRequestAttachmentFileSizeLimitBytes,
   runSingleAttachmentUpload,
-} from "./attachments.js";
-import { applyHistoryThreadMetadata, getHistoryThreadParentMessageIds } from "./historyThreadMetadata.js";
-import { paginateHistoryProbe } from "./historyCursor.js";
-import { forbiddenMessageForTarget, notFoundMessageForTarget, resolveWritableAgentTarget } from "./agentWritableTarget.js";
-import { createScopeAttestation } from "../lib/scopeAttestation.js";
-import { messageIdShortPrefixConditions, UUID_RE } from "../lib/messageId.js";
-import { requireAgentScope } from "../middleware/agentScope.js";
-import { AGENT_CREDENTIAL_BRIDGE_MACHINE_ID } from "../middleware/agentCredentialBridge.js";
-import * as agentScopesService from "../services/agentScopesService.js";
-import { addTraceEvent, getCurrentTraceContext, getCurrentTraceSpan, tracePhase } from "../tracing/semanticTrace.js";
+} from "./attachments";
+import { applyHistoryThreadMetadata, getHistoryThreadParentMessageIds } from "./historyThreadMetadata";
+import { paginateHistoryProbe } from "./historyCursor";
+import { forbiddenMessageForTarget, notFoundMessageForTarget, resolveWritableAgentTarget } from "./agentWritableTarget";
+import { createScopeAttestation, ScopeAttestationOverBudgetError } from "../lib/scopeAttestation";
+import { messageIdShortPrefixConditions, UUID_RE } from "../lib/messageId";
+import { requireAgentScope } from "../middleware/agentScope";
+import { AGENT_CREDENTIAL_BRIDGE_MACHINE_ID } from "../middleware/agentCredentialBridge";
+import * as agentScopesService from "../services/agentScopesService";
+import { addTraceEvent, errorClassOf, getCurrentTraceContext, getCurrentTraceSpan, safeAddTraceEvent, tracePhase } from "../tracing/semanticTrace";
 import {
   createAvatarUpload,
   MAX_PROFILE_AVATAR_BYTES,
@@ -137,16 +153,18 @@ import {
   runSingleAvatarUpload,
   storeAgentAvatar,
   storeServerAvatar,
-} from "../services/avatarService.js";
-import { handleAgentKnowledgeGet, handleAgentKnowledgeSearch } from "./agentKnowledge.js";
-import { AttachmentLinkError } from "../services/attachmentLinkingService.js";
-import { getActorServerRoleInServer } from "../lib/actorPermissions.js";
-import { bindRequestAbortSignal } from "./requestAbortSignal.js";
-import { createChannelForAgent } from "./agentChannelCreate.js";
-import { addChannelMemberForAgent, removeChannelMemberForAgent } from "./agentChannelMembers.js";
-import { updateChannelForAgent } from "./agentChannelUpdate.js";
-import { sendJsonServerError } from "./errorResponse.js";
-import { assertAgentCanManageServerProfile, updateServerProfileForAgent } from "./agentServerManage.js";
+} from "../services/avatarService";
+import { handleAgentKnowledgeGet, handleAgentKnowledgeSearch } from "./agentKnowledge";
+import { AttachmentLinkError } from "../services/attachmentLinkingService";
+import { getActorServerRoleInServer } from "../lib/actorPermissions";
+import { bindRequestAbortSignal } from "./requestAbortSignal";
+import { broadcastAgentUpdated } from "./agentUpdatedBroadcast";
+import { createChannelForAgent } from "./agentChannelCreate";
+import { addChannelMemberForAgent, removeChannelMemberForAgent } from "./agentChannelMembers";
+import { updateChannelForAgent } from "./agentChannelUpdate";
+import { respondToDmTargetResolutionError, sendJsonServerError, transientSendConflictBody } from "./errorResponse";
+import { transientTransactionSqlState } from "../db/transientTransactionRetry";
+import { assertAgentCanManageServerProfile, updateServerProfileForAgent } from "./agentServerManage";
 
 export const internalRouter: RouterType = Router();
 
@@ -281,25 +299,69 @@ function toAgentFacingActorType(type: "user" | "agent" | "external_projection"):
   return type === "external_projection" ? "third_party_app" : type === "user" ? "human" : "agent";
 }
 
+async function buildServerInfoAgentSummary(
+  serverId: string,
+  a: Awaited<ReturnType<typeof agentService.listAgents>>[number],
+  agentOrchestrator?: AgentOrchestrator,
+) {
+  const visibleActivity = agentOrchestrator
+    ? await agentOrchestrator.getActivity(a.id, { parent: getCurrentTraceContext() })
+    : null;
+  const resolvedRole = await getActorServerRoleInServer(serverId, "agent", a.id);
+  return {
+    name: a.name,
+    description: a.description,
+    status: a.status,
+    activity: visibleActivity?.activity ?? null,
+    activityDetail: visibleActivity?.activityDetail ?? "",
+    role: resolvedRole === "guest" ? null : resolvedRole,
+  };
+}
+
 export async function buildServerInfoAgentSummaries(
   serverId: string,
   agentOrchestrator?: AgentOrchestrator,
 ) {
   const allAgentsList = await agentService.listAgents(serverId);
-  return Promise.all(allAgentsList.map(async (a) => {
-    const visibleActivity = agentOrchestrator
-      ? await agentOrchestrator.getActivity(a.id, { parent: getCurrentTraceContext() })
-      : null;
-    const resolvedRole = await getActorServerRoleInServer(serverId, "agent", a.id);
-    return {
-      name: a.name,
-      description: a.description,
-      status: a.status,
-      activity: visibleActivity?.activity ?? null,
-      activityDetail: visibleActivity?.activityDetail ?? "",
-      role: resolvedRole === "guest" ? null : resolvedRole,
-    };
-  }));
+  return Promise.all(allAgentsList.map((a) => buildServerInfoAgentSummary(serverId, a, agentOrchestrator)));
+}
+
+/**
+ * The first `serverInfo` agents entry with exactly this name and that agent's
+ * id, or null; only that agent's activity is read.
+ */
+export async function findServerInfoAgentSummaryByName(
+  serverId: string,
+  name: string,
+  agentOrchestrator?: AgentOrchestrator,
+) {
+  const agent = (await agentService.listAgents(serverId)).find((candidate) => candidate.name === name);
+  return agent ? { id: agent.id, summary: await buildServerInfoAgentSummary(serverId, agent, agentOrchestrator) } : null;
+}
+
+/** Server members the requesting agent's directory shows, in `serverInfo` order. */
+async function listServerInfoVisibleHumans(serverId: string, agentId: string) {
+  const members = await serverService.getServerMembers(serverId, null);
+  return filterAgentVisibleHumansForHiddenDirectory(serverId, agentId, members);
+}
+
+function toServerInfoHumanSummary(member: Awaited<ReturnType<typeof listServerInfoVisibleHumans>>[number]) {
+  return {
+    name: member.name,
+    description: member.description,
+    role: member.role,
+  };
+}
+
+/** The `serverInfo` humans entries: server members the requesting agent's directory shows. */
+export async function buildServerInfoHumanSummaries(serverId: string, agentId: string) {
+  return (await listServerInfoVisibleHumans(serverId, agentId)).map(toServerInfoHumanSummary);
+}
+
+/** The first `serverInfo` humans entry with exactly this name and that user's id, or null. */
+export async function findServerInfoHumanSummaryByName(serverId: string, agentId: string, name: string) {
+  const member = (await listServerInfoVisibleHumans(serverId, agentId)).find((candidate) => candidate.name === name);
+  return member ? { id: member.userId, summary: toServerInfoHumanSummary(member) } : null;
 }
 
 export function messageResolveErrorPayload(resolved: { ok: false; error: string }) {
@@ -382,10 +444,10 @@ export async function buildAgentResolvedMessagePayload(
     parentChannel = parentMessage ? await channelService.getChannel(parentMessage.channelId) : null;
   }
   const channelName = channel.type === "dm"
-    ? await resolveDmChannelNameForAgent(channel.id, requestingAgentId)
+    ? await channelService.resolveAgentFacingDmPeerFace(serverId, requestingAgentId, channel.id)
     : channel.name;
   const parentChannelName = parentChannel?.type === "dm"
-    ? await resolveDmChannelNameForAgent(parentChannel.id, requestingAgentId)
+    ? await channelService.resolveAgentFacingDmPeerFace(serverId, requestingAgentId, parentChannel.id)
     : parentChannel?.name ?? null;
   if (!channelName || (parentChannel?.type === "dm" && !parentChannelName)) {
     return null;
@@ -498,29 +560,7 @@ export async function resolveAgentVisibleMessagePayload(
   return buildAgentResolvedMessagePayload(viewerScopedMessage, storageChannel, serverId, requestingAgentId);
 }
 
-async function resolveDmChannelNameForAgent(
-  channelId: string,
-  requestingAgentId: string,
-): Promise<string | null> {
-  const db = getDb();
-  const humanPeers = await db
-    .select({ name: users.name })
-    .from(channelHumans)
-    .innerJoin(users, eq(channelHumans.userId, users.id))
-    .where(eq(channelHumans.channelId, channelId));
-  if (humanPeers.length === 1 && humanPeers[0]?.name) return humanPeers[0].name;
-  if (humanPeers.length > 1) return null;
-
-  const agentPeers = await db
-    .select({ id: agents.id, name: agents.name })
-    .from(channelAgents)
-    .innerJoin(agents, eq(channelAgents.agentId, agents.id))
-    .where(eq(channelAgents.channelId, channelId));
-  const peerAgents = agentPeers.filter((agent) => agent.id !== requestingAgentId);
-  return peerAgents.length === 1 ? peerAgents[0]?.name ?? null : null;
-}
-
-function serializeOAuthClientForAgent(
+async function serializeOAuthClientForAgent(
   client: Awaited<ReturnType<typeof oauthService.listOAuthClients>>[number],
 ) {
   const isThirdPartyGlobal = client.appType === "third_party_global";
@@ -542,6 +582,7 @@ function serializeOAuthClientForAgent(
     allowedScopes: client.allowedScopes ?? [],
     createdAt: client.createdAt.toISOString(),
     updatedAt: client.updatedAt.toISOString(),
+    ...await oauthService.projectOfficialAppDiscoveryForAgent(client),
   };
 }
 
@@ -951,12 +992,12 @@ function deriveDaemonTraceBundleMetadata(
   const bundleSha256 = readAttestationSha256(metadata.bundleSha256, "metadata.bundleSha256");
   const bundleSizeBytes = readAttestationInteger(metadata.bundleSizeBytes, "metadata.bundleSizeBytes", TRACE_BUNDLE_MAX_BYTES);
   const uploadId = randomUUID();
-  const bundleContentType = typeof metadata.bundleContentType === "string" && metadata.bundleContentType.length > 0
-    ? metadata.bundleContentType
-    : "application/x-ndjson";
-  const bundleContentEncoding = typeof metadata.bundleContentEncoding === "string" && metadata.bundleContentEncoding.length > 0
-    ? metadata.bundleContentEncoding
-    : "gzip";
+  // Every daemon-supplied string that is signed is bounded to what the worker
+  // accepts, so the server never mints a claim the worker would refuse.
+  const bundleContentType = readOptionalBoundedAttestationString(metadata.bundleContentType, "metadata.bundleContentType", 128)
+    ?? "application/x-ndjson";
+  const bundleContentEncoding = readOptionalBoundedAttestationString(metadata.bundleContentEncoding, "metadata.bundleContentEncoding", 64)
+    ?? "gzip";
   const claimedDeploymentEnvironment = typeof metadata.deploymentEnvironment === "string"
     && metadata.deploymentEnvironment.length > 0
     ? metadata.deploymentEnvironment
@@ -976,12 +1017,12 @@ function deriveDaemonTraceBundleMetadata(
     bundleContentEncoding,
     deploymentEnvironment,
   };
-  if (typeof metadata.feedbackReportId === "string" && metadata.feedbackReportId.length > 0) {
-    result.feedbackReportId = metadata.feedbackReportId;
-  }
-  if (typeof metadata.agentId === "string" && metadata.agentId.length > 0) {
-    result.agentId = metadata.agentId;
-  }
+  // Both ids become object-store path segments on the worker, so only a
+  // canonical UUID is ever signed.
+  const feedbackReportId = readOptionalAttestationUuid(metadata.feedbackReportId, "metadata.feedbackReportId");
+  if (feedbackReportId) result.feedbackReportId = feedbackReportId;
+  const agentId = readOptionalAttestationUuid(metadata.agentId, "metadata.agentId");
+  if (agentId) result.agentId = agentId;
   const feedbackReportGeneratedAt = readOptionalAttestationTimestamp(
     metadata.feedbackReportGeneratedAt,
     "metadata.feedbackReportGeneratedAt",
@@ -1002,19 +1043,65 @@ function deriveDaemonTraceBundleMetadata(
     "metadata.feedbackTranscriptLastEventAt",
   );
   if (feedbackTranscriptLastEventAt) result.feedbackTranscriptLastEventAt = feedbackTranscriptLastEventAt;
-  if (
-    metadata.feedbackReportTimeSource === "web_report_bundle"
-    || metadata.feedbackReportTimeSource === "server_request_received"
-  ) {
-    result.feedbackReportTimeSource = metadata.feedbackReportTimeSource;
+  const transcriptHandlers = {
+    feedbackReportTimeSource(value: unknown): void {
+      if (value === "web_report_bundle" || value === "server_request_received") {
+        result.feedbackReportTimeSource = value;
+      }
+    },
+    feedbackTranscriptFirstEventAt(): void {
+      if (feedbackTranscriptFirstEventAt) result.feedbackTranscriptFirstEventAt = feedbackTranscriptFirstEventAt;
+    },
+    feedbackTranscriptLastEventAt(): void {
+      if (feedbackTranscriptLastEventAt) result.feedbackTranscriptLastEventAt = feedbackTranscriptLastEventAt;
+    },
+    feedbackTranscriptTruncated(value: unknown): void {
+      if (value === "true" || value === "false") {
+        result.feedbackTranscriptTruncated = value;
+      }
+    },
+    feedbackTranscriptTruncationDirection(value: unknown): void {
+      if (value === "head" || value === "tail" || value === "window") {
+        result.feedbackTranscriptTruncationDirection = value;
+      }
+    },
+    feedbackTranscriptWindowCoverage(value: unknown): void {
+      if (
+        value === "covered"
+        || value === "outside_report_window"
+        || value === "timestamps_unavailable"
+        || value === "report_time_invalid"
+      ) {
+        result.feedbackTranscriptWindowCoverage = value;
+      }
+    },
+  } satisfies Record<FeedbackTraceBundleTranscriptMetadataKey, (value: unknown) => void>;
+  for (const key of Object.keys(FEEDBACK_TRACE_BUNDLE_TRANSCRIPT_METADATA_KEYS) as FeedbackTraceBundleTranscriptMetadataKey[]) {
+    transcriptHandlers[key](metadata[key]);
   }
-  if (
-    metadata.feedbackTranscriptWindowCoverage === "covered"
-    || metadata.feedbackTranscriptWindowCoverage === "outside_report_window"
-    || metadata.feedbackTranscriptWindowCoverage === "timestamps_unavailable"
-    || metadata.feedbackTranscriptWindowCoverage === "report_time_invalid"
-  ) {
-    result.feedbackTranscriptWindowCoverage = metadata.feedbackTranscriptWindowCoverage;
+  // task #1228 ①: what the transcript bytes are (closed enum; there is no
+  // "placeholder" value because placeholders are never uploaded), the two
+  // byte counts, and the request id that links the transcript to its
+  // transcript_outcome. Malformed values are dropped, never coerced.
+  const resultHandlers = {
+    feedbackTranscriptContent(value: unknown): void {
+      if (isFeedbackTranscriptUploadableContentKind(value)) result.feedbackTranscriptContent = value;
+    },
+    feedbackTranscriptSourceBytes(value: unknown): void {
+      const n = readFeedbackTranscriptByteCount(value);
+      if (n !== null) result.feedbackTranscriptSourceBytes = n;
+    },
+    feedbackTranscriptBytes(value: unknown): void {
+      const n = readFeedbackTranscriptByteCount(value);
+      if (n !== null) result.feedbackTranscriptBytes = n;
+    },
+    feedbackTranscriptRequestId(value: unknown): void {
+      const id = readFeedbackTranscriptRequestId(value);
+      if (id) result.feedbackTranscriptRequestId = id;
+    },
+  } satisfies Record<FeedbackTraceBundleTranscriptResultMetadataKey, (value: unknown) => void>;
+  for (const key of Object.keys(FEEDBACK_TRACE_BUNDLE_TRANSCRIPT_RESULT_METADATA_KEYS) as FeedbackTraceBundleTranscriptResultMetadataKey[]) {
+    resultHandlers[key](metadata[key]);
   }
   if (
     typeof metadata.feedbackTranscriptWindowToleranceMs === "number"
@@ -1024,7 +1111,124 @@ function deriveDaemonTraceBundleMetadata(
   ) {
     result.feedbackTranscriptWindowToleranceMs = metadata.feedbackTranscriptWindowToleranceMs;
   }
+  // Feedback diagnostics (tier-1 observed-failure summary, task #279 trace
+  // tail + machine state) are NEVER signed. They travel as their own
+  // machine_evidence object; anything optional in this token competes with
+  // the transcript for the worker's SCOPE_ATTESTATION_MAX_CHARS budget, and a
+  // busy trace window used to make the TRANSCRIPT fail. Daemons <= a8039c677
+  // still send them here: strip, warn, and record it. Nothing is lost — the
+  // worker never read these claims.
+  const unsignedDiagnostics = FEEDBACK_MACHINE_EVIDENCE_SECTIONS.filter((key) => metadata[key] !== undefined).sort();
+  if (unsignedDiagnostics.length > 0) {
+    console.warn(
+      `[trace-bundle] stripping unsigned feedback diagnostics from machine ${ctx.machineId}: ${unsignedDiagnostics.join(",")} (older daemon; diagnostics now travel as machine_evidence)`,
+    );
+    safeAddTraceEvent("machine.trace_bundle.evidence_unsigned", () => ({
+      event_kind: "legacy_diagnostics_stripped",
+      outcome: "dropped",
+      reason: "diagnostics_not_signed",
+      machine_id: ctx.machineId,
+      fields: unsignedDiagnostics.join(","),
+    }));
+  }
+  // Tier 2 (task #272): the machine log tail is a distinct attachment KIND on
+  // the same bundle path. The kind is a closed enum so a reader can tell a
+  // transcript from a log tail without sniffing content; the tail's counters
+  // are bounded and dropped-with-warn when malformed rather than failing the
+  // upload.
+  if (metadata.feedbackAttachmentKind !== undefined) {
+    if (isFeedbackAttachmentKind(metadata.feedbackAttachmentKind)) {
+      result.feedbackAttachmentKind = metadata.feedbackAttachmentKind;
+    } else {
+      console.warn(`[trace-bundle] dropping unknown feedbackAttachmentKind from machine ${ctx.machineId}`);
+    }
+  }
+  // machine_evidence: one gzipped JSON object, bound to a report and an agent,
+  // filed outside trace-bundles/ so nothing that scans trace bundles reads it
+  // as traces. Its content type, encoding, key and size bound are the
+  // server's, not the daemon's. The agent binding to THIS machine is checked
+  // in the route (it needs the database).
+  if (result.feedbackAttachmentKind === "machine_evidence") {
+    if (!result.feedbackReportId) throw new Error("metadata.feedbackReportId is required for machine_evidence");
+    if (!result.agentId) throw new Error("metadata.agentId is required for machine_evidence");
+    if (bundleSizeBytes > FEEDBACK_MACHINE_EVIDENCE_MAX_UPLOAD_BYTES) {
+      throw new Error("metadata.bundleSizeBytes exceeds the machine_evidence limit");
+    }
+    result.objectKey = `feedback-machine-evidence/${ctx.serverId}/${ctx.machineId}/${uploadId}.json.gz`;
+    result.maxBytes = FEEDBACK_MACHINE_EVIDENCE_MAX_UPLOAD_BYTES;
+    result.bundleContentType = "application/json";
+    result.bundleContentEncoding = "gzip";
+  }
+  // transcript_outcome (task #1228 ①): one small gzipped JSON object bound to
+  // a report, an agent and a request; filed outside trace-bundles/ (readers
+  // that accept only trace-bundles/<serverId>/ keys skip it). It carries no
+  // transcript label. The agent binding to THIS machine is checked in the route.
+  if (result.feedbackAttachmentKind === "transcript_outcome") {
+    if (!result.feedbackReportId) throw new Error("metadata.feedbackReportId is required for transcript_outcome");
+    if (!result.agentId) throw new Error("metadata.agentId is required for transcript_outcome");
+    if (!result.feedbackTranscriptRequestId) throw new Error("metadata.feedbackTranscriptRequestId is required for transcript_outcome");
+    if (bundleSizeBytes > FEEDBACK_TRANSCRIPT_OUTCOME_MAX_UPLOAD_BYTES) {
+      throw new Error("metadata.bundleSizeBytes exceeds the transcript_outcome limit");
+    }
+    for (const key of ["feedbackTranscriptContent", "feedbackTranscriptSourceBytes", "feedbackTranscriptBytes"] as const) delete result[key];
+    result.objectKey = `feedback-transcript-outcomes/${ctx.serverId}/${ctx.machineId}/${uploadId}.json.gz`;
+    result.maxBytes = FEEDBACK_TRANSCRIPT_OUTCOME_MAX_UPLOAD_BYTES;
+    result.bundleContentType = "application/json";
+    result.bundleContentEncoding = "gzip";
+  }
+  if (result.feedbackAttachmentKind === "machine_log_tail") {
+    for (const key of [
+      "feedbackMachineLogTailLineCount",
+      "feedbackMachineLogTailSourceLineCount",
+      "feedbackMachineLogTailLinesOutsideWindow",
+      "feedbackMachineLogTailUndatedLines",
+    ] as const) {
+      const value = metadata[key];
+      if (value === undefined) continue;
+      if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= 10_000_000) {
+        result[key] = value;
+      } else {
+        console.warn(`[trace-bundle] dropping malformed ${key} from machine ${ctx.machineId}`);
+      }
+    }
+    for (const key of ["feedbackMachineLogTailTruncated", "feedbackMachineLogTailIncludesOtherAgents"] as const) {
+      const value = metadata[key];
+      if (value === undefined) continue;
+      if (value === "true" || value === "false") {
+        result[key] = value;
+      } else {
+        console.warn(`[trace-bundle] dropping malformed ${key} from machine ${ctx.machineId}`);
+      }
+    }
+  }
   return result;
+}
+
+function readOptionalBoundedAttestationString(value: unknown, name: string, maxLength: number): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  if (value.length > maxLength) throw new Error(`${name} is too long`);
+  return value;
+}
+
+function readOptionalAttestationUuid(value: unknown, name: string): string | undefined {
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string" || !UUID_RE.test(value)) throw new Error(`${name} is invalid`);
+  return value;
+}
+
+async function isAgentBoundToMachine(agentId: string, ctx: { serverId: string; machineId: string }): Promise<boolean> {
+  if (!UUID_RE.test(agentId)) return false;
+  const [row] = await getDb()
+    .select({ id: agents.id })
+    .from(agents)
+    .where(and(
+      eq(agents.id, agentId),
+      eq(agents.serverId, ctx.serverId),
+      eq(agents.machineId, ctx.machineId),
+      isNull(agents.deletedAt),
+    ))
+    .limit(1);
+  return !!row;
 }
 
 function readOptionalAttestationTimestamp(value: unknown, name: string): string | undefined {
@@ -1163,13 +1367,13 @@ internalRouter.get("/machine/self", async (req, res) => {
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
     const readModel = await buildMachineReadModel(machine, agentOrchestrator);
     const server = await serverService.getServer(serverId);
-    const latestDaemonVersion = await getLatestDaemonVersion();
     res.json({
       ...readModel,
       workspaceId: serverId,
       workspaceName: server?.name ?? null,
       serverSlug: server?.slug ?? null,
-      latestDaemonVersion,
+      // Retired with the standalone daemon release; kept for older daemons.
+      latestDaemonVersion: null,
     });
   } catch {
     res.status(500).json({ error: "Failed to load machine" });
@@ -1301,8 +1505,11 @@ internalRouter.get("/agent/:id/integrations", async (req, res) => {
       activeLogins,
     });
   } catch (err) {
-    console.error("List agent integrations error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to list agent integrations" });
+    sendJsonServerError(req, res, {
+      error: "Failed to list agent integrations",
+      logPrefix: "List agent integrations error:",
+      err,
+    });
   }
 });
 
@@ -1340,7 +1547,7 @@ internalRouter.post("/agent/:id/integrations/login", async (req, res) => {
       const response: {
         status: "install_required";
         nextAction: "install_from_marketplace";
-        service: ReturnType<typeof serializeOAuthClientForAgent>;
+        service: Awaited<ReturnType<typeof serializeOAuthClientForAgent>>;
         scopes: string[];
         installation: {
           serverSlug: string;
@@ -1352,7 +1559,7 @@ internalRouter.post("/agent/:id/integrations/login", async (req, res) => {
       } = {
         status: "install_required",
         nextAction: "install_from_marketplace",
-        service: serializeOAuthClientForAgent(marketplaceResolved.client),
+        service: await serializeOAuthClientForAgent(marketplaceResolved.client),
         scopes,
         installation: {
           serverSlug: server.slug,
@@ -1406,12 +1613,13 @@ internalRouter.post("/agent/:id/integrations/login", async (req, res) => {
       serverSlug: server.slug,
       agentName: result.agent.name,
       scopes,
+      initiatedByAgent: true,
     });
 
     if (requested.grantStatus === "pending") {
       const response: {
         status: "approval_required";
-        service: ReturnType<typeof serializeOAuthClientForAgent>;
+        service: Awaited<ReturnType<typeof serializeOAuthClientForAgent>>;
         scopes: string[];
         requestId: string;
         approval: {
@@ -1421,7 +1629,7 @@ internalRouter.post("/agent/:id/integrations/login", async (req, res) => {
         };
       } = {
         status: "approval_required",
-        service: serializeOAuthClientForAgent(resolved.client),
+        service: await serializeOAuthClientForAgent(resolved.client),
         scopes: requested.request.scopes ?? [],
         requestId: requested.request.id,
         approval: {
@@ -1471,7 +1679,7 @@ internalRouter.post("/agent/:id/integrations/login", async (req, res) => {
 
     res.json({
       status: requested.grantStatus === "reused" ? "already_logged_in" : "logged_in",
-      service: serializeOAuthClientForAgent(resolved.client),
+      service: await serializeOAuthClientForAgent(resolved.client),
       scopes: requested.request.scopes ?? [],
       requestId: requested.request.id,
     });
@@ -1491,8 +1699,11 @@ internalRouter.post("/agent/:id/integrations/login", async (req, res) => {
       res.status(404).json({ error: message });
       return;
     }
-    console.error("Agent integration login error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to provision agent login" });
+    sendJsonServerError(req, res, {
+      error: "Failed to provision agent login",
+      logPrefix: "Agent integration login error:",
+      err,
+    });
   }
 });
 
@@ -1613,8 +1824,11 @@ internalRouter.post("/agent/:id/integrations/app/prepare", async (req, res) => {
       res.status(400).json({ error: err.message });
       return;
     }
-    console.error("Prepare integration app registration error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to prepare integration app registration" });
+    sendJsonServerError(req, res, {
+      error: "Failed to prepare integration app registration",
+      logPrefix: "Prepare integration app registration error:",
+      err,
+    });
   }
 });
 
@@ -1678,6 +1892,16 @@ internalRouter.post("/machine/scope-attestation", async (req, res) => {
     const audience = policy.audience;
     const resource = policy.deriveResource({ serverId: server.id, machineId: machine.id });
     const metadata = policy.deriveMetadata?.({ serverId: server.id, machineId: machine.id }, requestMetadata);
+    // machine_evidence binds an agent; it must be an agent of THIS server
+    // that runs on THIS (credential-derived) machine.
+    if (
+      (metadata?.feedbackAttachmentKind === "machine_evidence" || metadata?.feedbackAttachmentKind === "transcript_outcome")
+      && !(await isAgentBoundToMachine(String(metadata.agentId), { serverId: server.id, machineId: machine.id }))
+    ) {
+      addTraceEvent("response.ready", { status_code: 403, surface: "machine", scope, reason: "machine_evidence_agent_not_bound" });
+      res.status(403).json({ error: "agentId is not an agent on this machine", code: "machine_evidence_agent_not_bound" });
+      return;
+    }
 
     const expiresAt = new Date(Date.now() + DAEMON_CAPABILITY_TTL_MS);
     const attestation = await tracePhase(
@@ -1723,6 +1947,19 @@ internalRouter.post("/machine/scope-attestation", async (req, res) => {
       expiresAt: expiresAt.toISOString(),
     });
   } catch (err) {
+    if (err instanceof ScopeAttestationOverBudgetError) {
+      // Never sign what the worker would refuse; required claims alone should
+      // not get here (all daemon-supplied strings are bounded above).
+      console.error(`[scope-attestation] refusing to sign: ${err.message}`);
+      safeAddTraceEvent("scope_attestation.over_budget", () => ({
+        outcome: "error",
+        surface: "machine",
+        attestation_chars: err.attestationChars,
+        max_chars: err.maxChars,
+      }));
+      res.status(500).json({ error: "Scope attestation exceeds the signing budget", code: "scope_attestation_over_budget" });
+      return;
+    }
     const message = err instanceof Error ? err.message : "Failed to create scope attestation";
     if (message.includes("not configured")) {
       res.status(503).json({ error: message });
@@ -1823,13 +2060,18 @@ async function listRecentFreshnessMessagesAfterSeq(
       limit,
       { ...options, latestSeq },
     );
-  return messageService.listMessagesByIds(
+  const recentMessages = await messageService.listMessagesByIds(
     freshnessMessages.map((message) => message.messageId),
     {
       forwardedBundleViewerAgentId: agentId,
       forwardedBundleViewerServerId: agentServerId,
     },
   );
+  if (recentMessages.length === 0) return [];
+  // Same as the agent API held path: label each held row with the send
+  // target's agent-facing conversation identity, resolved once.
+  const identity = await messageService.resolveAgentConversationIdentity(agentServerId, agentId, channelId);
+  return recentMessages.map((message) => ({ ...message, ...identity }));
 }
 
 // Agent uploads an attachment
@@ -1875,7 +2117,7 @@ internalRouter.post("/agent/:id/upload", requireAgentScope("attachment:upload"),
       return;
     }
     if (await isChannelReadOnlyByBillingFeature(channelId, agent.serverId)) {
-      res.status(403).json({ error: "Joint Channels require the Pro plan. Upgrade to continue." });
+      res.status(403).json({ error: "This joint channel is read-only because it has more than 2 free servers. It becomes writable again when a server upgrades or a free server leaves." });
       return;
     }
 
@@ -1972,8 +2214,11 @@ internalRouter.post("/agent/:id/resolve-channel", async (req, res) => {
 
     res.json({ channelId: resolved.channelId });
   } catch (err) {
-    console.error("Resolve channel error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to resolve channel" });
+    sendJsonServerError(req, res, {
+      error: "Failed to resolve channel",
+      logPrefix: "Resolve channel error:",
+      err,
+    });
   }
 });
 
@@ -2079,7 +2324,7 @@ internalRouter.post("/agent/:id/send", validateLegacyAgentSendBody, requireAgent
       return;
     }
     if (await isChannelReadOnlyByBillingFeature(resolved.channelId, agent.serverId)) {
-      res.status(403).json({ error: "Joint Channels require the Pro plan. Upgrade to continue." });
+      res.status(403).json({ error: "This joint channel is read-only because it has more than 2 free servers. It becomes writable again when a server upgrades or a free server leaves." });
       return;
     }
 
@@ -2220,27 +2465,36 @@ internalRouter.post("/agent/:id/send", validateLegacyAgentSendBody, requireAgent
             targetType: attestedTargetType,
             targetRef: effectiveTarget,
           };
-          const readState = await channelService.markAgentLegacyRead(agentId, resolved.channelId, latestSeq);
-          await emitScopeReadUpdated({
-            io: req.app.get("io") as SocketServer | undefined,
-            serverId: agent.serverId,
-            scopeId: resolved.channelId,
-            peerKind: "agent",
-            peerId: agentId,
-            maxReadSeq: readState.maxReadSeq,
-            changed: readState.changed,
-          });
+          // Read through (and drop from the delivery queue) only what this hold
+          // showed: messages omitted by the context cap were not handed to the
+          // agent, so they stay unread and queued for delivery.
+          const showedEveryHeldMessage = shownMessageCount >= attentionHoldCount;
+          if (showedEveryHeldMessage) {
+            const readState = await channelService.markAgentLegacyRead(agentId, resolved.channelId, latestSeq);
+            await emitScopeReadUpdated({
+              io: req.app.get("io") as SocketServer | undefined,
+              serverId: agent.serverId,
+              scopeId: resolved.channelId,
+              peerKind: "agent",
+              peerId: agentId,
+              maxReadSeq: readState.maxReadSeq,
+              changed: readState.changed,
+            });
+          }
           if (latestSeq > attestedBoundarySeq) {
-            const ack = agentOrchestrator.acknowledgeDeliveredMessagesForChannelUpToSeq?.(
-              agentId,
-              resolved.channelId,
-              latestSeq,
-            ) ?? agentOrchestrator.acknowledgeDeliveredMessagesForChannel(agentId, resolved.channelId, heldSeqs);
+            const ack = showedEveryHeldMessage
+              ? agentOrchestrator.acknowledgeDeliveredMessagesForChannelUpToSeq?.(
+                  agentId,
+                  resolved.channelId,
+                  latestSeq,
+                ) ?? agentOrchestrator.acknowledgeDeliveredMessagesForChannel(agentId, resolved.channelId, heldSeqs)
+              : agentOrchestrator.acknowledgeDeliveredMessagesForChannel(agentId, resolved.channelId, heldSeqs);
             addTraceEvent("held_context.delivery_suppressed", {
               target_type: attestedTargetType,
               shown_message_count: shownMessageCount,
               omitted_message_count: omittedMessageCount,
               removed_count: ack.removedCount,
+              read_through: showedEveryHeldMessage,
             });
           }
           await attestedSendService.recordGateTriggered(eventSubject, {
@@ -2344,7 +2598,7 @@ internalRouter.post("/agent/:id/send", validateLegacyAgentSendBody, requireAgent
         content,
         attachmentIds,
         ...(typeof idempotencyKey === "string" && idempotencyKey.length > 0
-          ? { agentSendKey: idempotencyKey }
+          ? { agentSendKey: idempotencyKey, rejectMismatchedAgentSendReplay: true }
           : {}),
       }),
       (_durationMs, message) => ({
@@ -2414,16 +2668,37 @@ internalRouter.post("/agent/:id/send", validateLegacyAgentSendBody, requireAgent
     }
     return;
   } catch (err) {
+    if (err instanceof ChannelConversionInProgressError) {
+      res.status(err.status).json({ error: err.message, code: err.code, conversionEpoch: err.conversionEpoch });
+      return;
+    }
     if (err instanceof channelService.ChannelArchivedError) {
       res.status(409).json({ error: "This channel is archived", code: "channel_archived" });
+      return;
+    }
+    if (err instanceof messageService.AgentSendIdempotencyConflictError) {
+      res.status(err.status).json({
+        error: err.message,
+        code: err.code,
+        mismatch: err.mismatch,
+        suggestedNextAction: err.suggestedNextAction,
+      });
       return;
     }
     if (err instanceof AttachmentLinkError) {
       res.status(err.status).json({ error: err.message, code: err.code });
       return;
     }
-    console.error("Internal send error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to send message" });
+    if (transientTransactionSqlState(err)) {
+      res.setHeader("Retry-After", "1");
+      res.status(503).json(transientSendConflictBody());
+      return;
+    }
+    sendJsonServerError(req, res, {
+      error: "Failed to send message",
+      logPrefix: "Internal send error:",
+      err,
+    });
   }
 });
 
@@ -2457,7 +2732,7 @@ internalRouter.post("/agent/:id/messages/:messageId/reactions", requireAgentScop
     await channelService.assertChannelNotArchived(message.channelId);
 
     if (await isChannelReadOnlyByBillingFeature(message.channelId, agent.serverId)) {
-      res.status(403).json({ error: "Joint Channels require the Pro plan. Upgrade to continue." });
+      res.status(403).json({ error: "This joint channel is read-only because it has more than 2 free servers. It becomes writable again when a server upgrades or a free server leaves." });
       return;
     }
     if (await isChannelReadOnlyByQuota(message.channelId, agent.serverId)) {
@@ -2466,6 +2741,7 @@ internalRouter.post("/agent/:id/messages/:messageId/reactions", requireAgentScop
     }
 
     await mutateMessageReaction({
+      channelId: message.channelId,
       messageId: message.id,
       emoji,
       actor: { kind: "agent", id: agent.id },
@@ -2490,12 +2766,19 @@ internalRouter.post("/agent/:id/messages/:messageId/reactions", requireAgentScop
     );
     res.json(messageService.projectAgentVisibleHttpMessageResponse(enriched));
   } catch (err) {
+    if (err instanceof ChannelConversionInProgressError) {
+      res.status(err.status).json({ error: err.message, code: err.code, conversionEpoch: err.conversionEpoch });
+      return;
+    }
     if (err instanceof channelService.ChannelArchivedError) {
       res.status(409).json({ error: "This channel is archived", code: "channel_archived" });
       return;
     }
-    console.error("Internal add reaction error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to add reaction" });
+    sendJsonServerError(req, res, {
+      error: "Failed to add reaction",
+      logPrefix: "Internal add reaction error:",
+      err,
+    });
   }
 });
 
@@ -2527,7 +2810,7 @@ internalRouter.delete("/agent/:id/messages/:messageId/reactions", requireAgentSc
     await channelService.assertChannelNotArchived(message.channelId);
 
     if (await isChannelReadOnlyByBillingFeature(message.channelId, agent.serverId)) {
-      res.status(403).json({ error: "Joint Channels require the Pro plan. Upgrade to continue." });
+      res.status(403).json({ error: "This joint channel is read-only because it has more than 2 free servers. It becomes writable again when a server upgrades or a free server leaves." });
       return;
     }
     if (await isChannelReadOnlyByQuota(message.channelId, agent.serverId)) {
@@ -2536,6 +2819,7 @@ internalRouter.delete("/agent/:id/messages/:messageId/reactions", requireAgentSc
     }
 
     await mutateMessageReaction({
+      channelId: message.channelId,
       messageId: message.id,
       emoji,
       actor: { kind: "agent", id: agent.id },
@@ -2560,12 +2844,19 @@ internalRouter.delete("/agent/:id/messages/:messageId/reactions", requireAgentSc
     );
     res.json(messageService.projectAgentVisibleHttpMessageResponse(enriched));
   } catch (err) {
+    if (err instanceof ChannelConversionInProgressError) {
+      res.status(err.status).json({ error: err.message, code: err.code, conversionEpoch: err.conversionEpoch });
+      return;
+    }
     if (err instanceof channelService.ChannelArchivedError) {
       res.status(409).json({ error: "This channel is archived", code: "channel_archived" });
       return;
     }
-    console.error("Internal remove reaction error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to remove reaction" });
+    sendJsonServerError(req, res, {
+      error: "Failed to remove reaction",
+      logPrefix: "Internal remove reaction error:",
+      err,
+    });
   }
 });
 
@@ -2697,7 +2988,7 @@ internalRouter.get("/agent/:id/receive", requireAgentScope("message:read"), asyn
     });
   } catch (err) {
     addTraceEvent("agent_receive.request.failed", {
-      error_class: err instanceof Error ? err.name : typeof err,
+      error_class: errorClassOf(err),
     });
     console.error("Internal receive error:", serializeErrorForLog(err));
     res.status(500).json({ error: "Failed to receive messages" });
@@ -2741,8 +3032,11 @@ internalRouter.post("/agent/:id/receive-ack", async (req, res) => {
     }
     res.json({ ok: true });
   } catch (err) {
-    console.error("Internal receive-ack error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to acknowledge received messages" });
+    sendJsonServerError(req, res, {
+      error: "Failed to acknowledge received messages",
+      logPrefix: "Internal receive-ack error:",
+      err,
+    });
   }
 });
 
@@ -2784,8 +3078,11 @@ internalRouter.post("/agent/:id/runtime-profile/migration-done", async (req, res
       message: "Runtime Profile migration acknowledgments are deprecated; runtime changes reset the session automatically.",
     });
   } catch (err) {
-    console.error("Internal runtime-profile migration-done error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to complete runtime profile reset acknowledgment" });
+    sendJsonServerError(req, res, {
+      error: "Failed to complete runtime profile reset acknowledgment",
+      logPrefix: "Internal runtime-profile migration-done error:",
+      err,
+    });
   }
 });
 
@@ -2814,8 +3111,11 @@ internalRouter.get("/agent/:id/messages/:messageId/resolve", requireAgentScope("
 
     res.json({ message: payload });
   } catch (err) {
-    console.error("Internal message resolve error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to resolve message" });
+    sendJsonServerError(req, res, {
+      error: "Failed to resolve message",
+      logPrefix: "Internal message resolve error:",
+      err,
+    });
   }
 });
 
@@ -3031,8 +3331,11 @@ internalRouter.get("/agent/:id/history", requireAgentScope("message:read"), asyn
       historyLimitMessage,
     });
   } catch (err) {
-    console.error("Internal history error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to read history" });
+    sendJsonServerError(req, res, {
+      error: "Failed to read history",
+      logPrefix: "Internal history error:",
+      err,
+    });
   }
 });
 
@@ -3078,7 +3381,10 @@ internalRouter.get("/agent/:id/search", requireAgentScope("message:read"), async
       channelId = resolved.channelId;
     }
 
-    const limit = Math.min(Number(req.query.limit) || 20, 50);
+    const limit = Math.min(
+      Number(req.query.limit) || AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT,
+      AGENT_API_MESSAGE_SEARCH_MAX_LIMIT,
+    );
     const offset = Math.max(Number(req.query.offset) || 0, 0);
     const senderFilter = await resolveSearchSenderFilter(
       agent.serverId,
@@ -3176,6 +3482,7 @@ internalRouter.get("/agent/:id/search", requireAgentScope("message:read"), async
     if (requestAbort.signal.aborted || searchService.isSearchQueryAbortedError(err)) {
       return;
     }
+    if (respondToDmTargetResolutionError(err, res)) return;
     console.error("Internal search error:", serializeErrorForLog(err));
     if (!res.headersSent) {
       res.status(500).json({ error: "Failed to search messages" });
@@ -3243,9 +3550,9 @@ internalRouter.post("/agent/:id/channels/:channelId/join", requireAgentScope("ch
               mode: "record",
               producer: "agent.join_channel",
               reason: "agent joining a channel is shared channel activity",
+              causalActor: { type: "agent", id: result.agent.id },
             },
             // The joining agent should not see its own join as unread.
-            causalActor: { type: "agent", id: result.agent.id },
           },
         );
       }
@@ -3280,13 +3587,16 @@ internalRouter.post("/agent/:id/channels/:channelId/leave", requireAgentScope("c
       res.status(404).json({ error: "Channel not found" });
       return;
     }
-    if (channel.type !== "channel" && channel.type !== "private") {
-      res.status(403).json({ error: "Agents can only leave regular channels" });
+    // Joint channels carry ordinary membership: a human can leave one, so an
+    // agent can too. Leaving only removes this agent's row on this server's
+    // projection; other servers' members are untouched.
+    if (channel.type !== "channel" && channel.type !== "private" && channel.type !== "joint") {
+      res.status(403).json({ error: "Agents can only leave regular or joint channels" });
       return;
     }
     const hasAccess = await channelService.canAgentAccessChannel(channel.id, result.agent.id);
     if (!hasAccess) {
-      res.status(403).json({ error: "Agents can only leave visible regular channels" });
+      res.status(403).json({ error: "Agents can only leave channels they can see" });
       return;
     }
     if (channel.archivedAt) {
@@ -3344,8 +3654,11 @@ internalRouter.post("/agent/:id/channels", requireAgentScope("channel:create"), 
       });
     }
   } catch (err) {
-    console.error("Internal channel create error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to create channel" });
+    sendJsonServerError(req, res, {
+      error: "Failed to create channel",
+      logPrefix: "Internal channel create error:",
+      err,
+    });
   }
 });
 
@@ -3374,8 +3687,11 @@ internalRouter.patch("/agent/:id/channels/:channelId", requireAgentScope("channe
       });
     }
   } catch (err) {
-    console.error("Internal channel update error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to update channel" });
+    sendJsonServerError(req, res, {
+      error: "Failed to update channel",
+      logPrefix: "Internal channel update error:",
+      err,
+    });
   }
 });
 
@@ -3405,8 +3721,11 @@ internalRouter.post("/agent/:id/channels/:channelId/members", requireAgentScope(
       });
     }
   } catch (err) {
-    console.error("Internal channel add member error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to add member" });
+    sendJsonServerError(req, res, {
+      error: "Failed to add member",
+      logPrefix: "Internal channel add member error:",
+      err,
+    });
   }
 });
 
@@ -3436,8 +3755,11 @@ internalRouter.delete("/agent/:id/channels/:channelId/members", requireAgentScop
       });
     }
   } catch (err) {
-    console.error("Internal channel remove member error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to remove member" });
+    sendJsonServerError(req, res, {
+      error: "Failed to remove member",
+      logPrefix: "Internal channel remove member error:",
+      err,
+    });
   }
 });
 
@@ -3488,7 +3810,15 @@ internalRouter.post("/agent/:id/threads/unfollow", requireAgentScope("thread:unf
     await emitThreadFollowersUpdated(io, threadChannelId);
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
     if (io && agentOrchestrator) {
-      await messageService.broadcastSystemMessage(
+      // Joint threads: the local projection is not where reads resolve.
+      // broadcastSystemMessage persists against the channelId it is handed,
+      // so a receipt for a joint thread landed in the LOCAL projection while
+      // every read (permalink, thread parent lookup) resolves to the
+      // CANONICAL thread -- the message became unreachable, and the local
+      // projection has no parent linkage, so Activity rendered a blank row.
+      // ...ToLocalSurfaces resolves the projection first and falls back to
+      // this exact call when there is no joint mapping.
+      await messageService.broadcastSystemMessageToLocalSurfaces(
         io,
         agentOrchestrator,
         threadChannelId,
@@ -3552,8 +3882,11 @@ internalRouter.get("/agent/:id/channel-members", requireAgentScope("channel:read
       humans: visibleHumans.map((u) => ({ name: u.name, description: u.description, role: u.role })),
     });
   } catch (err) {
-    console.error("Internal channel members error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to get channel members" });
+    sendJsonServerError(req, res, {
+      error: "Failed to get channel members",
+      logPrefix: "Internal channel members error:",
+      err,
+    });
   }
 });
 
@@ -3608,8 +3941,11 @@ internalRouter.get("/agent/:id/server", requireAgentScope("server:read"), async 
       humans,
     });
   } catch (err) {
-    console.error("Internal server info error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to get server info" });
+    sendJsonServerError(req, res, {
+      error: "Failed to get server info",
+      logPrefix: "Internal server info error:",
+      err,
+    });
   }
 });
 
@@ -3635,8 +3971,11 @@ internalRouter.patch("/agent/:id/server", requireAgentScope("server:update"), as
       });
     }
   } catch (err) {
-    console.error("Internal server update error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to update server" });
+    sendJsonServerError(req, res, {
+      error: "Failed to update server",
+      logPrefix: "Internal server update error:",
+      err,
+    });
   }
 });
 
@@ -3697,8 +4036,11 @@ internalRouter.post("/agent/:id/server/avatar", requireAgentScope("server:update
       });
       return;
     }
-    console.error("Internal server avatar update error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to upload avatar" });
+    sendJsonServerError(req, res, {
+      error: "Failed to upload avatar",
+      logPrefix: "Internal server avatar update error:",
+      err,
+    });
   }
 });
 
@@ -3744,8 +4086,11 @@ internalRouter.get("/agent/:id/profile", async (req, res) => {
 
     res.json(resolved.profile);
   } catch (err) {
-    console.error("Internal profile read error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to load profile" });
+    sendJsonServerError(req, res, {
+      error: "Failed to load profile",
+      logPrefix: "Internal profile read error:",
+      err,
+    });
   }
 });
 
@@ -3769,6 +4114,7 @@ internalRouter.post("/agent/:id/profile/avatar", async (req, res) => {
       agentOrchestrator.evictCache(result.agent.id);
     }
     await agentService.updateAgent(result.agent.id, { avatarUrl });
+    broadcastAgentUpdated(req, result.agent.serverId, result.agent.id);
 
     const profile = await buildAgentProfileView(result.agent.id, result.agent.id, agentOrchestrator);
     if (!profile) {
@@ -3798,8 +4144,11 @@ internalRouter.post("/agent/:id/profile/avatar", async (req, res) => {
       });
       return;
     }
-    console.error("Internal profile avatar update error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to update avatar" });
+    sendJsonServerError(req, res, {
+      error: "Failed to update avatar",
+      logPrefix: "Internal profile avatar update error:",
+      err,
+    });
   }
 });
 
@@ -3893,6 +4242,7 @@ internalRouter.post("/agent/:id/profile", async (req, res) => {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
+    broadcastAgentUpdated(req, result.agent.serverId, result.agent.id);
 
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
     if (agentOrchestrator) {
@@ -3912,8 +4262,11 @@ internalRouter.post("/agent/:id/profile", async (req, res) => {
       target: `@${profile.name}`,
     });
   } catch (err) {
-    console.error("Internal profile update error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to update profile" });
+    sendJsonServerError(req, res, {
+      error: "Failed to update profile",
+      logPrefix: "Internal profile update error:",
+      err,
+    });
   }
 });
 
@@ -3951,6 +4304,19 @@ function rejectAgentTaskWriteIfNeeded(canPost: boolean, res: Response): boolean 
   return false;
 }
 
+function rejectHistoricalJointTaskWriteIfNeeded(
+  surface: Awaited<ReturnType<typeof resolveTaskChannelSurface>>,
+  createdAt: Date | string,
+  res: Response,
+): boolean {
+  if (!surface || !isHistoricalJointTaskReadOnly(surface, createdAt)) return false;
+  res.status(403).json({
+    error: "Historical tasks are read-only from a participant workspace",
+    code: "joint_task_read_only",
+  });
+  return true;
+}
+
 // Agent lists tasks
 internalRouter.get("/agent/:id/tasks", requireAgentScope("task:read"), async (req, res) => {
   try {
@@ -3983,8 +4349,11 @@ internalRouter.get("/agent/:id/tasks", requireAgentScope("task:read"), async (re
     const tasks = await taskService.listTasks(ctx.storageChannelId, statusFilter);
     res.json({ tasks: taskService.projectTasksToChannel(tasks, ctx.localChannel) });
   } catch (err) {
-    console.error("Internal list tasks error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to list tasks" });
+    sendJsonServerError(req, res, {
+      error: "Failed to list tasks",
+      logPrefix: "Internal list tasks error:",
+      err,
+    });
   }
 });
 
@@ -4062,9 +4431,9 @@ internalRouter.post("/agent/:id/tasks", requireAgentScope("task:write"), async (
         mode: "record",
         producer: "task.created_summary",
         reason: "new shared tasks are channel activity",
+        causalActor: { type: "agent", id: req.params.id },
       },
       // The agent that created the tasks should not see its own action as unread.
-      causalActor: { type: "agent", id: req.params.id },
     }).catch(() => {});
 
     res.json({ tasks: taskService.projectTasksToChannel(created, ctx.localChannel) });
@@ -4074,8 +4443,12 @@ internalRouter.post("/agent/:id/tasks", requireAgentScope("task:write"), async (
       target: channel,
     });
   } catch (err) {
-    console.error("Internal create tasks error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to create tasks" });
+    if (respondToTaskWriteError(err, res)) return;
+    sendJsonServerError(req, res, {
+      error: "Failed to create tasks",
+      logPrefix: "Internal create tasks error:",
+      err,
+    });
   }
 });
 
@@ -4111,6 +4484,13 @@ internalRouter.post("/agent/:id/tasks/claim", requireAgentScope("task:write"), a
     const agentName = ctx.agent.displayName || ctx.agent.name;
     const successfulClaims: { taskNumber: number; title: string; messageId: string }[] = [];
 
+    if (hasTaskNumbers) {
+      for (const taskNumber of task_numbers) {
+        const existing = await taskService.getTaskByNumber(ctx.storageChannelId, taskNumber);
+        if (existing && rejectHistoricalJointTaskWriteIfNeeded(ctx.surface, existing.createdAt, res)) return;
+      }
+    }
+
     // Claim by task numbers
     const results: { taskNumber?: number; messageId?: string; success: boolean; reason?: string }[] = [];
     if (hasTaskNumbers) {
@@ -4119,6 +4499,7 @@ internalRouter.post("/agent/:id/tasks/claim", requireAgentScope("task:write"), a
         task_numbers,
         "agent",
         req.params.id,
+        ctx.localChannel,
       );
 
       for (const r of batchResults) {
@@ -4137,6 +4518,14 @@ internalRouter.post("/agent/:id/tasks/claim", requireAgentScope("task:write"), a
     // Convert messages to tasks then claim them (supports short ID prefixes)
     if (hasMessageIds) {
       for (const rawMsgId of message_ids) {
+        const preflight = await taskService.resolveMessageInChannel(ctx.storageChannelId, rawMsgId);
+        if (preflight && rejectHistoricalJointTaskWriteIfNeeded(ctx.surface, preflight.createdAt, res)) return;
+        if (preflight) {
+          const existing = await taskService.resolveTaskByMessageId(preflight.id);
+          if (existing && rejectHistoricalJointTaskWriteIfNeeded(ctx.surface, existing.row.createdAt, res)) return;
+        }
+      }
+      for (const rawMsgId of message_ids) {
         // Resolve short ID prefix to full message ID
         const resolved = await taskService.resolveMessageInChannel(ctx.storageChannelId, rawMsgId);
         if (!resolved) {
@@ -4145,6 +4534,11 @@ internalRouter.post("/agent/:id/tasks/claim", requireAgentScope("task:write"), a
         }
         const msgId = resolved.id;
 
+        // Converting a pre-cutover message into a task is itself a historical
+        // write. Participant projections may read it but cannot materialize
+        // or mutate task identity in their local workspace.
+        if (rejectHistoricalJointTaskWriteIfNeeded(ctx.surface, resolved.createdAt, res)) return;
+
         // First convert message to task
         const converted = await taskService.convertMessageToTask(msgId, "agent", req.params.id, ctx.storageChannelId);
         if (typeof converted === "string") {
@@ -4152,6 +4546,7 @@ internalRouter.post("/agent/:id/tasks/claim", requireAgentScope("task:write"), a
           if (converted === "already converted") {
             const existingOwner = await taskService.resolveTaskByMessageId(msgId);
             if (existingOwner) {
+              if (rejectHistoricalJointTaskWriteIfNeeded(ctx.surface, existingOwner.row.createdAt, res)) return;
               // P3: both arms of the old ownership ternary read the same field.
               const existingNumber = existingOwner.row.taskNumber;
               const reason = await taskService.getClaimConflictReasonForOwner(existingOwner, "agent", req.params.id);
@@ -4211,8 +4606,12 @@ internalRouter.post("/agent/:id/tasks/claim", requireAgentScope("task:write"), a
       });
     }
   } catch (err) {
-    console.error("Internal claim tasks error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to claim tasks" });
+    if (respondToTaskWriteError(err, res)) return;
+    sendJsonServerError(req, res, {
+      error: "Failed to claim tasks",
+      logPrefix: "Internal claim tasks error:",
+      err,
+    });
   }
 });
 
@@ -4242,6 +4641,8 @@ internalRouter.post("/agent/:id/tasks/unclaim", requireAgentScope("task:write"),
       return;
     }
 
+    if (rejectHistoricalJointTaskWriteIfNeeded(ctx.surface, task.createdAt, res)) return;
+
     const result = await taskService.unclaimTask(task.id, "agent", req.params.id);
     if (typeof result === "string") {
       res.status(409).json({ error: result });
@@ -4262,8 +4663,12 @@ internalRouter.post("/agent/:id/tasks/unclaim", requireAgentScope("task:write"),
       correlationId: task.id,
     });
   } catch (err) {
-    console.error("Internal unclaim task error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to unclaim task" });
+    if (respondToTaskWriteError(err, res)) return;
+    sendJsonServerError(req, res, {
+      error: "Failed to unclaim task",
+      logPrefix: "Internal unclaim task error:",
+      err,
+    });
   }
 });
 
@@ -4297,6 +4702,8 @@ internalRouter.post("/agent/:id/tasks/update-status", requireAgentScope("task:wr
       return;
     }
 
+    if (rejectHistoricalJointTaskWriteIfNeeded(ctx.surface, task.createdAt, res)) return;
+
     const result = await taskService.updateTaskStatus(task.id, status, req.params.id, "agent");
     if (typeof result === "string") {
       res.status(409).json({ error: result });
@@ -4319,8 +4726,12 @@ internalRouter.post("/agent/:id/tasks/update-status", requireAgentScope("task:wr
       correlationId: task.id,
     });
   } catch (err) {
-    console.error("Internal update-status task error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to update task status" });
+    if (respondToTaskWriteError(err, res)) return;
+    sendJsonServerError(req, res, {
+      error: "Failed to update task status",
+      logPrefix: "Internal update-status task error:",
+      err,
+    });
   }
 });
 
@@ -4360,8 +4771,11 @@ internalRouter.get("/agent/:id/reminders", async (req, res) => {
     const summaries = await reminderService.toReminderSummaries(rows, req.serverId!);
     res.json({ reminders: summaries });
   } catch (err) {
-    console.error("Internal list reminders error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to list reminders" });
+    sendJsonServerError(req, res, {
+      error: "Failed to list reminders",
+      logPrefix: "Internal list reminders error:",
+      err,
+    });
   }
 });
 
@@ -4492,8 +4906,6 @@ internalRouter.post("/agent/:id/reminders", async (req, res) => {
     });
     await syncReminderToComputer(req, row, "upsert");
 
-    const io = req.app.get("io") as SocketServer;
-
     // No chat-surface "🔔 X scheduled a reminder ..." system message — schedule
     // is a personal event for the owner agent (per stdrc #proj-task msg=c580faed).
     // Audit lives in `reminder_events` (recordReminderEvent runs inside
@@ -4502,9 +4914,9 @@ internalRouter.post("/agent/:id/reminders", async (req, res) => {
     const [summary] = await reminderService.toReminderSummaries([row], req.serverId!);
 
     // Live UI updates — humans watching the agent profile's Reminders tab
-    // should see new entries appear without reloading. Scoped to the server
-    // room so only members of this server receive it.
-    io?.to(`server:${row.serverId}`).emit("reminder:scheduled", { reminder: summary });
+    // should see new entries appear without reloading. Delivered only to
+    // users who may inspect the owner agent's private surfaces.
+    await publishReminderEvent(req.app.get("io"), row, { type: "reminder:scheduled", reminder: summary });
 
     const body: { reminder: typeof summary; warning?: string } = { reminder: summary };
     if (warning) body.warning = warning;
@@ -4516,8 +4928,11 @@ internalRouter.post("/agent/:id/reminders", async (req, res) => {
       correlationId: row.id,
     });
   } catch (err) {
-    console.error("Internal create reminder error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to create reminder" });
+    sendJsonServerError(req, res, {
+      error: "Failed to create reminder",
+      logPrefix: "Internal create reminder error:",
+      err,
+    });
   }
 });
 
@@ -4554,11 +4969,7 @@ internalRouter.delete("/agent/:id/reminders/:reminderId", async (req, res) => {
 
     // Live UI update — pair with reminder:scheduled so the Reminders tab
     // reflects cancellations in real time without manual refresh.
-    const io = req.app.get("io") as SocketServer;
-    io?.to(`server:${canceled.serverId}`).emit("reminder:canceled", {
-      reminderId: canceled.id,
-      ownerAgentId: canceled.ownerAgentId,
-    });
+    await publishReminderEvent(req.app.get("io"), canceled, { type: "reminder:canceled" });
 
     res.json({ reminder: summary });
     recordRaftCliActivity(req, req.params.id, {
@@ -4568,8 +4979,11 @@ internalRouter.delete("/agent/:id/reminders/:reminderId", async (req, res) => {
       correlationId: canceled.id,
     });
   } catch (err) {
-    console.error("Internal cancel reminder error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to cancel reminder" });
+    sendJsonServerError(req, res, {
+      error: "Failed to cancel reminder",
+      logPrefix: "Internal cancel reminder error:",
+      err,
+    });
   }
 });
 
@@ -4612,8 +5026,7 @@ internalRouter.post("/agent/:id/reminders/:reminderId/snooze", async (req, res) 
     await syncReminderToComputer(req, snoozed, "upsert");
 
     const [summary] = await reminderService.toReminderSummaries([snoozed], req.serverId!);
-    const io = req.app.get("io") as SocketServer;
-    io?.to(`server:${snoozed.serverId}`).emit("reminder:scheduled", { reminder: summary });
+    await publishReminderEvent(req.app.get("io"), snoozed, { type: "reminder:scheduled", reminder: summary });
     res.json({ reminder: summary });
     recordRaftCliActivity(req, req.params.id, {
       command: "reminder.snooze",
@@ -4622,8 +5035,11 @@ internalRouter.post("/agent/:id/reminders/:reminderId/snooze", async (req, res) 
       correlationId: snoozed.id,
     });
   } catch (err) {
-    console.error("Internal snooze reminder error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to snooze reminder" });
+    sendJsonServerError(req, res, {
+      error: "Failed to snooze reminder",
+      logPrefix: "Internal snooze reminder error:",
+      err,
+    });
   }
 });
 
@@ -4732,8 +5148,7 @@ internalRouter.patch("/agent/:id/reminders/:reminderId", async (req, res) => {
     await syncReminderToComputer(req, updated, "upsert");
 
     const [summary] = await reminderService.toReminderSummaries([updated], req.serverId!);
-    const io = req.app.get("io") as SocketServer;
-    io?.to(`server:${updated.serverId}`).emit("reminder:scheduled", { reminder: summary });
+    await publishReminderEvent(req.app.get("io"), updated, { type: "reminder:scheduled", reminder: summary });
     const body: { reminder: typeof summary; warning?: string } = { reminder: summary };
     if (warning) body.warning = warning;
     res.json(body);
@@ -4744,8 +5159,11 @@ internalRouter.patch("/agent/:id/reminders/:reminderId", async (req, res) => {
       correlationId: updated.id,
     });
   } catch (err) {
-    console.error("Internal update reminder error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to update reminder" });
+    sendJsonServerError(req, res, {
+      error: "Failed to update reminder",
+      logPrefix: "Internal update reminder error:",
+      err,
+    });
   }
 });
 
@@ -4767,8 +5185,11 @@ internalRouter.get("/agent/:id/reminders/:reminderId/log", async (req, res) => {
     const events = await reminderCrud.listAppReminderEvents(existing.id);
     res.json({ events: reminderService.toReminderEventSummaries(events) });
   } catch (err) {
-    console.error("Internal reminder log error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to read reminder log" });
+    sendJsonServerError(req, res, {
+      error: "Failed to read reminder log",
+      logPrefix: "Internal reminder log error:",
+      err,
+    });
   }
 });
 
@@ -4850,8 +5271,11 @@ internalRouter.post("/agent/:id/prepare-action", requireAgentScope("action:prepa
       res.status(err.status).json({ error: err.message, errorCode: err.code });
       return;
     }
-    console.error("Internal prepare-action error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to prepare action card" });
+    sendJsonServerError(req, res, {
+      error: "Failed to prepare action card",
+      logPrefix: "Internal prepare-action error:",
+      err,
+    });
   }
 });
 
@@ -4879,7 +5303,10 @@ internalRouter.get("/agent/:id/scopes", async (req, res) => {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    console.error("Internal agent scopes error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to load agent scopes" });
+    sendJsonServerError(req, res, {
+      error: "Failed to load agent scopes",
+      logPrefix: "Internal agent scopes error:",
+      err,
+    });
   }
 });

@@ -1,0 +1,244 @@
+.r-mermaid-diagram {
+  position: relative;
+  margin-block: 0.5rem;
+  border: 2px solid var(--color-black);
+  background: var(--color-code-surface);
+}
+
+.r-mermaid-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  border-bottom: 2px solid var(--color-black);
+  background: var(--color-code-surface);
+  padding: 0.375rem 0.5rem;
+}
+
+.r-mermaid-toolbar__views {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-right: auto;
+}
+
+.r-mermaid-toolbar__touch-target {
+  position: relative;
+}
+
+.r-mermaid-toolbar__touch-target::before {
+  position: absolute;
+  inset: -4px;
+  content: "";
+}
+
+.r-mermaid-toolbar__tab-label,
+.r-mermaid-toolbar__zoom {
+  display: none;
+}
+
+.r-mermaid-tooltip {
+  font-weight: 400;
+}
+
+.r-mermaid-download-menu {
+  min-width: 0;
+  padding: 0.25rem;
+}
+
+.r-mermaid-download-menu__item {
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1rem;
+}
+
+.r-mermaid-source {
+  min-width: 0;
+}
+
+.r-mermaid-source__code {
+  overflow-x: auto;
+  border: 0;
+  background: var(--color-code-surface);
+  padding: 0.75rem 3rem 0.75rem 0.75rem;
+  color: var(--color-code-foreground);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+.r-mermaid-source__code > code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.r-mermaid-diagram__loading,
+.r-mermaid-render-error {
+  display: flex;
+  height: clamp(320px, 50vh, 560px);
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+}
+
+.r-mermaid-capture-snapshot__viewport {
+  display: flex;
+  height: clamp(320px, 50vh, 560px);
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--color-code-surface);
+  padding: 0.75rem;
+}
+
+.r-mermaid-capture-snapshot__image {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.r-mermaid-diagram__loading {
+  color: var(--foreground-muted);
+}
+
+.r-mermaid-render-error {
+  flex-direction: column;
+  color: var(--foreground-muted);
+  font-weight: 500;
+}
+
+
+
+.r-mermaid-viewer--fullscreen {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 0%;
+  flex-direction: column;
+}
+
+.r-mermaid-viewport {
+  position: relative;
+  display: flex;
+  overflow: hidden;
+  background: var(--color-code-surface);
+  container-type: size;
+}
+
+.r-mermaid-viewport--inline {
+  height: clamp(320px, 50vh, 560px);
+  touch-action: pan-y;
+}
+
+.r-mermaid-viewport--fullscreen {
+  min-height: 0;
+  flex: 1 1 0%;
+  touch-action: none;
+}
+
+.r-mermaid-zoom-anchor {
+  pointer-events: none;
+  margin: auto;
+}
+
+.r-mermaid-zoom-anchor--inline {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.r-mermaid-zoom-anchor--fullscreen {
+  position: absolute;
+  inset: 0;
+}
+
+.r-mermaid-zoom-media {
+  pointer-events: auto;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+}
+
+.r-mermaid-frame {
+  pointer-events: none;
+  position: absolute;
+  display: block;
+  border: 0;
+  background: transparent;
+}
+
+.r-mermaid-fullscreen {
+  display: flex;
+  flex-direction: column;
+  padding: 0.75rem;
+}
+
+@media (min-width: 640px) {
+  .r-mermaid-toolbar,
+  .r-mermaid-toolbar__views {
+    gap: 0.25rem;
+  }
+
+  .r-mermaid-toolbar__touch-target::before {
+    display: none;
+  }
+
+  .r-mermaid-toolbar__tab {
+    width: auto;
+    height: 1.5rem;
+    gap: 0.25rem;
+    padding-inline: 0.5rem;
+    font-size: 0.6875rem;
+  }
+
+  .r-mermaid-toolbar__tab-label {
+    display: inline;
+  }
+
+  .r-mermaid-toolbar__zoom {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+}
+
+@media (min-width: 768px) {
+  .r-mermaid-fullscreen {
+    padding: 1.5rem;
+  }
+}
+
+:where([data-theme="elegant"]) .r-mermaid-diagram {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+/* The RUI lightbox stage is pointer-events-none by contract; the interactive
+   mermaid viewport inside it opts back in and stretches across the stage so the
+   sandboxed frame keeps a definite box (it is absolutely positioned inside). */
+.r-mermaid-fullscreen__stage {
+  pointer-events: auto;
+  align-items: stretch;
+  justify-content: stretch;
+}
+
+.r-mermaid-fullscreen__stage > * {
+  flex: 1 1 0%;
+  width: 100%;
+  min-height: 0;
+}
+
+:where([data-theme="elegant"]) .r-mermaid-toolbar {
+  border-bottom: 1px solid var(--line);
+  border-radius: 6px 6px 0 0;
+}
+

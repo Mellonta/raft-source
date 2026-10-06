@@ -1,7 +1,6 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
-import { planStaleActivitySweepAction } from "./agentOrchestrator.js";
+import { planStaleActivitySweepAction } from "./agentOrchestrator";
 
 test("planStaleActivitySweepAction sweeps transient activity once it exceeds the stale threshold", () => {
   assert.equal(

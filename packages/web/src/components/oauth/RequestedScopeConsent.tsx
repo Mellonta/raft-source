@@ -30,24 +30,26 @@ export default function RequestedScopeConsent({
   }
   const grouped: Record<OAuthScopeTier, typeof visibleScopes> = {
     identity: visibleScopes.filter((scope) => OAUTH_SCOPE_PRESENTATION[scope].tier === "identity"),
+    agent_directory: visibleScopes.filter((scope) => OAUTH_SCOPE_PRESENTATION[scope].tier === "agent_directory"),
     agent_messaging: visibleScopes.filter((scope) => OAUTH_SCOPE_PRESENTATION[scope].tier === "agent_messaging"),
   };
   const hasAgentInboundRequest = hasAgentInboundOAuthScope(visibleScopes);
-  // Three mutually exclusive states, so three ids rather than one sentence with
-  // conditional fragments — the clause order differs between languages.
+  // Use complete messages; clause order differs between languages.
   const requestedAccessCopy = formatMessage({
     id: unpresentedScopes.length > 0
       ? "oauth.consent.introUnrecognized"
-      : hasAgentInboundRequest
-        ? "oauth.consent.introAgentMessaging"
-        : "oauth.consent.introIdentityOnly",
+      : visibleScopes.includes("agent:read")
+        ? "oauth.consent.introAgentDirectory"
+        : hasAgentInboundRequest
+          ? "oauth.consent.introAgentMessaging"
+          : "oauth.consent.introIdentityOnly",
   });
 
   function renderEmptyRecognizedScopes() {
     // Stryker disable next-line ConditionalExpression,EqualityOperator: covered by DOM tests; generated mutants hang tsx.
     if (visibleScopes.length !== 0) return null;
     return (
-      <div className="border-2 border-black/15 bg-white p-2 text-xs font-bold text-black/55">
+      <div className="rounded-md border border-line-hairline bg-layer-panel p-2 text-xs font-bold text-foreground-muted theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/15 theme-brutal:bg-white theme-brutal:text-black/55">
         {formatMessage({ id: "oauth.consent.noRecognizedScopes" })}
       </div>
     );
@@ -58,24 +60,24 @@ export default function RequestedScopeConsent({
     // Stryker disable next-line ConditionalExpression: covered by DOM tests; generated mutants hang tsx.
     if (tierScopes.length === 0) return null;
     return (
-      <details key={tier} open={tier === "agent_messaging"} className="border-2 border-black/15 bg-brutal-cream p-2">
-        <summary className="text-xs font-black text-black">
+      <details key={tier} open={tier !== "identity"} className="rounded-md border border-line-hairline bg-layer-inset p-2 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/15 theme-brutal:bg-brutal-cream">
+        <summary className="text-xs font-black text-foreground-strong">
           <span>{formatMessage({ id: scopeGroupLabelId(tier) })}</span>
           {tier === "identity" ? (
-            <span className="font-medium text-black/55">
+            <span className="font-medium text-foreground-muted">
               {formatMessage({ id: IDENTITY_SCOPE_GROUP_SUMMARY_ID })}
             </span>
           ) : null}
         </summary>
-        <div className="mt-2 divide-y divide-black/15 border-t border-black/15">
+        <div className="mt-2 divide-y divide-line-hairline border-t border-line-hairline">
           {tierScopes.map((scope) => {
             const detail = OAUTH_SCOPE_PRESENTATION[scope];
             return (
               <div key={scope} data-oauth-scope-row={scope} className="py-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <code className="break-all text-[11px] font-bold text-black/55">{scope}</code>
+                  <code className="break-all text-[11px] font-bold text-foreground-muted">{scope}</code>
                 </div>
-                <div className="mt-1 text-xs leading-relaxed text-black/65">{formatMessage({ id: detail.copyId })}</div>
+                <div className="mt-1 text-xs leading-relaxed text-foreground-muted">{formatMessage({ id: detail.copyId })}</div>
               </div>
             );
           })}
@@ -88,7 +90,7 @@ export default function RequestedScopeConsent({
     // Stryker disable next-line BooleanLiteral,ConditionalExpression: covered by DOM tests; generated mutants hang tsx.
     if (!hasAgentInboundRequest) return null;
     return (
-      <div className="text-xs font-bold leading-relaxed text-black/65">
+      <div className="text-xs font-bold leading-relaxed text-foreground-muted">
         {/* ONE message. This was two English sentences concatenated in JSX, so a
             translation could not reorder them or merge them into the single
             sentence Chinese wants. */}
@@ -101,11 +103,11 @@ export default function RequestedScopeConsent({
     // Stryker disable next-line ConditionalExpression,EqualityOperator: covered by DOM tests; generated mutants hang tsx.
     if (unpresentedScopes.length === 0) return null;
     return (
-      <div className="text-xs font-bold leading-relaxed text-black/65">
+      <div className="text-xs font-bold leading-relaxed text-foreground-muted">
         <span>{formatMessage({ id: "oauth.consent.unrecognizedScopes" })} </span>
         <span className="inline-flex flex-wrap gap-1.5">
           {unpresentedScopes.map((scope) => (
-            <code key={scope} className="break-all border border-black/20 bg-white px-1.5 py-0.5 text-[11px] text-black/60">
+            <code key={scope} className="break-all rounded-sm border border-line-muted bg-layer-panel px-1.5 py-0.5 text-[11px] text-foreground-muted theme-brutal:rounded-none theme-brutal:border-black/20 theme-brutal:bg-white">
               {scope}
             </code>
           ))}
@@ -119,12 +121,12 @@ export default function RequestedScopeConsent({
       <div className="text-xs font-black uppercase tracking-widest">
         {formatMessage({ id: "oauth.consent.requestedAccess" })}
       </div>
-      <div className="mt-1 text-xs leading-5 text-black/60">
+      <div className="mt-1 text-xs leading-5 text-foreground-muted">
         {requestedAccessCopy}
       </div>
-      <div className="mt-3 space-y-3 border-2 border-black bg-white p-3 shadow-brutal-sm">
+      <div className="mt-3 space-y-3 rounded-md border border-line-muted bg-layer-panel p-3 shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
         {renderEmptyRecognizedScopes()}
-        {(["identity", "agent_messaging"] as OAuthScopeTier[]).map(renderTierScopes)}
+        {(["identity", "agent_directory", "agent_messaging"] as OAuthScopeTier[]).map(renderTierScopes)}
         {renderAgentInboundNotice()}
         {renderUnpresentedScopes()}
       </div>

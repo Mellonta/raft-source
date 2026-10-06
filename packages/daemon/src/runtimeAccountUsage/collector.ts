@@ -7,7 +7,7 @@ import {
   projectOarAccountUsageFailure,
   projectOarAccountUsageSnapshot,
   type OarAccountUsageSnapshot,
-} from "./oarAdapter.js";
+} from "./oarAdapter";
 
 const DEFAULT_TIMEOUT_MS = 20_000;
 

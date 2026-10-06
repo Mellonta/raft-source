@@ -41,9 +41,9 @@
  *     so an attacker cannot probe slug existence.
  */
 import { and, asc, eq, isNotNull, isNull } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { machines, servers } from "../db/schema.js";
-import { isMember } from "./serverService.js";
+import { getDb } from "../db/index";
+import { machines, servers } from "../db/schema";
+import { isMember } from "./serverService";
 
 export interface LegacyMachineRosterEntry {
   /** server `daemons.id` — display + post-migration identity. NOT a join key. */

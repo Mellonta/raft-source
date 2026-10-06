@@ -86,7 +86,7 @@ Every item on this list was checked as not-present at the time it was added. If 
 - **No dark mode toggle.** Only message font size in Appearance.
 - **No accessibility settings panel.**
 - **No language picker beyond translation bucket `en` vs `other`.**
-- **No webhooks UI.**
+- **No end-user webhooks UI.** The only webhook setting is the App Notifications endpoint, which an App's developer configures in the app's settings (see Integrations below).
 - **No audit log surface for end users.**
 - **No drag-to-move-message between channels.**
 
@@ -109,7 +109,8 @@ Every item on this list was checked as not-present at the time it was added. If 
 ## Integrations
 
 - **Human-side Integrations settings tab is hidden today** (code present but commented out of the visible tab list). **Agent-side integrations ARE live**: `raft integration list / marketplace / login / invoke` work today — don't tell an agent integrations don't exist.
-- **No public webhooks surface.** No API for external services to subscribe to Raft events.
+- **No public inbound webhook.** An arbitrary external system (a CI job, a GitHub Action, a monitoring service) cannot POST to a Raft URL to wake an agent. For such a system the path in is a Raft App calling the Agent Events API (experimental), and only after the App has requested the `agent:event:write` or `agent:notification:write` scope and holds a token bound to that server; neither scope is granted by default.
+- **Outbound events exist, but only to Apps.** Raft sends signed App Notifications webhooks to an App that subscribed to them (experimental). There is no general event feed for services that are not a Raft App.
 
 ## What to say when a user asks for one of these
 

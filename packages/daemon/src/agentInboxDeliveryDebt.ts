@@ -1,5 +1,5 @@
 import type { AgentConfig, AgentMessage } from "@botiverse/raft-shared";
-import { RuntimeNotificationState } from "./runtimeNotificationState.js";
+import { RuntimeNotificationState } from "./runtimeNotificationState";
 
 export type SessionReadyDeliveryRetryFlushSource = "timer";
 
@@ -22,7 +22,7 @@ export interface PendingInboxDeliveryProcess {
   sessionReadyDeliveryRetry: SessionReadyDeliveryRetryState;
 }
 
-type RecordDaemonTrace = (name: string, attrs?: Record<string, unknown>, status?: "ok" | "error" | "cancelled") => void;
+type RecordDaemonEvent = (name: string, attrs?: Record<string, unknown>, status?: "ok" | "error" | "cancelled") => void;
 
 export function createSessionReadyDeliveryRetryState(): SessionReadyDeliveryRetryState {
   return { kind: "idle", scheduler: null, attempts: 0 };
@@ -90,7 +90,7 @@ export function scheduleSessionReadyDeliveryRetry<TProcess extends PendingInboxD
     readyDelayCapMs: number;
     canDeliverToRuntimeSession: (ap: TProcess) => boolean;
     flush: (agentId: string, source: SessionReadyDeliveryRetryFlushSource) => boolean;
-    recordDaemonTrace: RecordDaemonTrace;
+    recordDaemonEvent: RecordDaemonEvent;
   },
 ): boolean {
   if (ap.sessionReadyDeliveryRetry.kind === "scheduled" && ap.sessionReadyDeliveryRetry.scheduler.hasTimer) return false;
@@ -117,7 +117,7 @@ export function scheduleSessionReadyDeliveryRetry<TProcess extends PendingInboxD
     opts.flush(agentId, "timer");
   }, delayMs);
   ap.sessionReadyDeliveryRetry = state;
-  opts.recordDaemonTrace("daemon.agent.session_ready_delivery_retry.scheduled", {
+  opts.recordDaemonEvent("daemon.agent.session_ready_delivery_retry.scheduled", {
     agentId,
     runtime: ap.config.runtime,
     model: ap.config.model,
@@ -149,7 +149,7 @@ export function flushSessionReadyDeliveryRetry<TProcess extends PendingInboxDeli
       source: string,
     ) => boolean;
     sendStdinNotification: (agentId: string, options?: { forceUnsupportedRetry?: boolean }) => boolean;
-    recordDaemonTrace: RecordDaemonTrace;
+    recordDaemonEvent: RecordDaemonEvent;
   },
 ): boolean {
   const ap = opts.getProcess(agentId);
@@ -162,7 +162,7 @@ export function flushSessionReadyDeliveryRetry<TProcess extends PendingInboxDeli
   ap.sessionReadyDeliveryRetry = createSessionReadyDeliveryRetryState();
   if (ap.inbox.length === 0) return false;
   if (!ap.driver.supportsStdinNotification || !ap.sessionId) {
-    opts.recordDaemonTrace("daemon.agent.session_ready_delivery_retry.flush", {
+    opts.recordDaemonEvent("daemon.agent.session_ready_delivery_retry.flush", {
       agentId,
       runtime: ap.config.runtime,
       model: ap.config.model,
@@ -180,7 +180,7 @@ export function flushSessionReadyDeliveryRetry<TProcess extends PendingInboxDeli
 
   if (!opts.canDeliverToRuntimeSession(ap)) {
     ap.sessionReadyForDelivery = true;
-    opts.recordDaemonTrace("daemon.agent.session_ready_for_delivery.timeout", {
+    opts.recordDaemonEvent("daemon.agent.session_ready_for_delivery.timeout", {
       agentId,
       runtime: ap.config.runtime,
       model: ap.config.model,
@@ -199,7 +199,7 @@ export function flushSessionReadyDeliveryRetry<TProcess extends PendingInboxDeli
     ap.notifications.pruneContributedToPending(ap.inbox, ap.sessionId);
     const messages = ap.notifications.filterUncontributedMessages(ap.inbox, ap.sessionId);
     if (messages.length === 0) {
-      opts.recordDaemonTrace("daemon.agent.session_ready_delivery_retry.flush", {
+      opts.recordDaemonEvent("daemon.agent.session_ready_delivery_retry.flush", {
         agentId,
         runtime: ap.config.runtime,
         model: ap.config.model,
@@ -224,7 +224,7 @@ export function flushSessionReadyDeliveryRetry<TProcess extends PendingInboxDeli
       "idle",
       "session_ready_delivery_retry",
     );
-    opts.recordDaemonTrace("daemon.agent.session_ready_delivery_retry.flush", {
+    opts.recordDaemonEvent("daemon.agent.session_ready_delivery_retry.flush", {
       agentId,
       runtime: ap.config.runtime,
       model: ap.config.model,
@@ -245,7 +245,7 @@ export function flushSessionReadyDeliveryRetry<TProcess extends PendingInboxDeli
     ap.notifications.add(ap.inbox.length);
   }
   const accepted = opts.sendStdinNotification(agentId, { forceUnsupportedRetry: true });
-  opts.recordDaemonTrace("daemon.agent.session_ready_delivery_retry.flush", {
+  opts.recordDaemonEvent("daemon.agent.session_ready_delivery_retry.flush", {
     agentId,
     runtime: ap.config.runtime,
     model: ap.config.model,
@@ -279,7 +279,7 @@ export function flushIdleInboxDeliveryRetry<TProcess extends PendingInboxDeliver
       source: string,
     ) => boolean;
     sendStdinNotification: (agentId: string, options?: { forceUnsupportedRetry?: boolean }) => boolean;
-    recordDaemonTrace: RecordDaemonTrace;
+    recordDaemonEvent: RecordDaemonEvent;
   },
 ): boolean {
   const ap = opts.getProcess(agentId);
@@ -289,7 +289,7 @@ export function flushIdleInboxDeliveryRetry<TProcess extends PendingInboxDeliver
   if (count === 0) return false;
   if (!ap.driver.supportsStdinNotification || !ap.sessionId || ap.inbox.length === 0) {
     ap.notifications.add(count);
-    opts.recordDaemonTrace(traceName, {
+    opts.recordDaemonEvent(traceName, {
       agentId,
       runtime: ap.config.runtime,
       model: ap.config.model,
@@ -312,7 +312,7 @@ export function flushIdleInboxDeliveryRetry<TProcess extends PendingInboxDeliver
   ap.notifications.pruneContributedToPending(ap.inbox, ap.sessionId);
   const messages = ap.notifications.filterUncontributedMessages(ap.inbox, ap.sessionId);
   if (messages.length === 0) {
-    opts.recordDaemonTrace(traceName, {
+    opts.recordDaemonEvent(traceName, {
       agentId,
       runtime: ap.config.runtime,
       model: ap.config.model,
@@ -335,7 +335,7 @@ export function flushIdleInboxDeliveryRetry<TProcess extends PendingInboxDeliver
     "idle",
     source,
   );
-  opts.recordDaemonTrace(traceName, {
+  opts.recordDaemonEvent(traceName, {
     agentId,
     runtime: ap.config.runtime,
     model: ap.config.model,

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { planActivityHintResolutionAction } from "./agentOrchestrator.js";
+import { planActivityHintResolutionAction } from "./agentOrchestrator";
 
 test("planActivityHintResolutionAction returns the snapshot when the machine is locally reachable", () => {
   assert.equal(

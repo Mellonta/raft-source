@@ -4,6 +4,7 @@ import {
   createECDH,
   createHash,
   createPrivateKey,
+  createPublicKey,
   hkdfSync,
   randomBytes,
   sign,
@@ -132,8 +133,73 @@ function deriveSigningKey(): DerivedSigningKey {
   return signingKey;
 }
 
+function configuredSigningKey(): DerivedSigningKey {
+  const pem = process.env.RAFT_OIDC_SIGNING_PRIVATE_KEY?.trim();
+  if (!pem) return deriveSigningKey();
+  try {
+    const privateKey = createPrivateKey(pem);
+    const exported = createPublicKey(privateKey).export({ format: "jwk" });
+    if (exported.kty !== "EC" || exported.crv !== "P-256" || !exported.x || !exported.y) throw new Error();
+    const publicBytes = Buffer.concat([Buffer.from([4]), Buffer.from(exported.x, "base64url"), Buffer.from(exported.y, "base64url")]);
+    const kid = toBase64Url(createHash("sha256").update(publicBytes).digest().subarray(0, 16));
+    return { privateKey, publicJwk: { kty: "EC", crv: "P-256", x: exported.x, y: exported.y, kid, alg: "ES256", use: "sig" } };
+  } catch {
+    throw new Error("Invalid OIDC signing key configuration");
+  }
+}
+
+// Publish prospective and retiring public keys independently of the active
+// signer. Operators pre-publish before switching and retain until all tokens
+// (including one-hour ID tokens) expire. Never change JWT_SECRET to rotate here.
 export function getOidcJwks() {
-  return { keys: [deriveSigningKey().publicJwk] };
+  const active = configuredSigningKey().publicJwk;
+  const keys: OidcJwk[] = [active];
+  const raw = process.env.RAFT_OIDC_ADDITIONAL_PUBLIC_KEYS?.trim();
+  if (!raw) return { keys };
+  try {
+    const extra: unknown = JSON.parse(raw);
+    if (!Array.isArray(extra) || extra.length > 10) throw new Error();
+    for (const value of extra) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+      const item = value as Record<string, unknown>;
+      if (Object.keys(item).some((key) => !["kty", "crv", "x", "y", "kid", "alg", "use"].includes(key))) throw new Error();
+      if (item.kty !== "EC" || item.crv !== "P-256" || item.alg !== "ES256" || item.use !== "sig"
+        || typeof item.x !== "string" || typeof item.y !== "string" || typeof item.kid !== "string"
+        || !/^[A-Za-z0-9_-]{43}$/.test(item.x) || !/^[A-Za-z0-9_-]{43}$/.test(item.y)) throw new Error();
+      const publicBytes = Buffer.concat([Buffer.from([4]), Buffer.from(item.x, "base64url"), Buffer.from(item.y, "base64url")]);
+      const kid = toBase64Url(createHash("sha256").update(publicBytes).digest().subarray(0, 16));
+      if (kid !== item.kid) throw new Error();
+      const key: OidcJwk = { kty: "EC", crv: "P-256", x: item.x, y: item.y, kid, alg: "ES256", use: "sig" };
+      createPublicKey({ key, format: "jwk" });
+      if (!keys.some((existing) => existing.kid === kid)) keys.push(key);
+    }
+    return { keys };
+  } catch {
+    throw new Error("Invalid OIDC public key configuration");
+  }
+}
+
+export function signAgentAccessJwt(input: {
+  issuer: string; agentId: string; clientId: string; serverId: string;
+  serverSlug: string; serverRole: string; agentName: string; displayName: string;
+  jti: string; now: Date;
+}): string {
+  const now = Math.floor(input.now.getTime() / 1000);
+  const { privateKey, publicJwk } = configuredSigningKey();
+  // Validate the publication configuration before issuing credentials.
+  getOidcJwks();
+  const header = toBase64Url(JSON.stringify({ alg: "ES256", kid: publicJwk.kid, typ: "at+jwt" }));
+  const payload = toBase64Url(JSON.stringify({
+    iss: input.issuer, aud: input.clientId, sub: input.agentId,
+    iat: now, nbf: now, exp: now + 300, jti: input.jti,
+    token_use: "agent_access", type: "agent", server_id: input.serverId,
+    server_slug: input.serverSlug, server_role: input.serverRole,
+    preferred_username: input.agentName, name: input.displayName,
+    login: `raft-agent-${input.agentId}`,
+  }));
+  const signingInput = `${header}.${payload}`;
+  const signature = sign("sha256", Buffer.from(signingInput, "ascii"), { key: privateKey, dsaEncoding: "ieee-p1363" });
+  return `${signingInput}.${toBase64Url(signature)}`;
 }
 
 export function encodeOidcAuthorizationCode(context: OidcAuthorizationContext): string {
@@ -190,11 +256,17 @@ function safeEqualStrings(left: string, right: string): boolean {
 }
 
 export function validateOidcAuthorizationCode(input: {
-  context: OidcAuthorizationContext;
+  context: OidcAuthorizationContext | null;
   clientId: string;
   redirectUri: unknown;
   codeVerifier: unknown;
 }): void {
+  // RFC 9700 §4.8.2: a verifier is valid only for an authorization that
+  // included a challenge. Legacy raw codes have no OIDC/PKCE context.
+  if (input.codeVerifier !== undefined && !input.context?.codeChallenge) {
+    throw new Error("unexpected_oidc_code_verifier");
+  }
+  if (!input.context) return;
   if (!safeEqualStrings(input.context.clientId, input.clientId)) {
     throw new Error("invalid_oidc_authorization_code");
   }
@@ -246,7 +318,7 @@ export function signOidcIdToken(input: {
     server_slug: input.identity.serverSlug,
     server_role: input.identity.serverRole,
   };
-  const { privateKey, publicJwk } = deriveSigningKey();
+  const { privateKey, publicJwk } = configuredSigningKey();
   const header = { alg: "ES256", typ: "JWT", kid: publicJwk.kid };
   const signingInput = `${toBase64Url(JSON.stringify(header))}.${toBase64Url(JSON.stringify(payload))}`;
   const signature = sign("sha256", Buffer.from(signingInput, "ascii"), {
@@ -260,24 +332,58 @@ export function oidcCodeChallenge(verifier: string): string {
   return toBase64Url(createHash("sha256").update(verifier, "ascii").digest());
 }
 
-export function oidcIssuer(rawServerUrl = process.env.SERVER_URL ?? "http://localhost:3001"): string {
+export const OIDC_SERVER_SEGMENT_PATTERN = /^[A-Za-z0-9-]{1,128}$/;
+
+/**
+ * Server-scoping lives in the issuer PATH, not in a query parameter.
+ *
+ * Some OIDC clients (observed: Aliyun) accept only a bare issuer/discovery URL
+ * and reject query or fragment components, so `?server=` could never reach
+ * them. A path-scoped issuer is the interoperable form, and it is what Azure
+ * does with tenants.
+ *
+ * `serverSegment` is a Server ID or slug. When absent this returns the legacy
+ * unscoped issuer, which still serves existing integrations; retiring it is a
+ * separate scheduled cutover, not part of this function's contract.
+ */
+export function oidcIssuer(
+  rawServerUrl = process.env.SERVER_URL ?? "http://localhost:3001",
+  serverSegment?: string,
+): string {
   const value = rawServerUrl?.trim().replace(/\/+$/, "");
   if (!value) throw new Error("SERVER_URL environment variable is required for OIDC");
   const parsed = new URL(value);
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     throw new Error("SERVER_URL must be an HTTP(S) origin for OIDC");
   }
-  return parsed.origin;
+  if (serverSegment === undefined) return parsed.origin;
+  // Refuse rather than silently falling back to the unscoped issuer: a bad
+  // segment must not mint a token whose `iss` is wider than the caller asked
+  // for.
+  if (!OIDC_SERVER_SEGMENT_PATTERN.test(serverSegment)) {
+    throw new Error("OIDC server segment must be a Server ID or slug");
+  }
+  return `${parsed.origin}/oidc/${serverSegment}`;
 }
 
-export function oidcDiscoveryDocument() {
-  const issuer = oidcIssuer();
+/**
+ * `serverSegment` scopes the whole endpoint family, not just the issuer: the
+ * advertised authorization/token URLs carry the server in their path so the
+ * client never has to add a parameter of its own.
+ *
+ * The returned `issuer` is always CONCRETE. Azure's multi-tenant `common`
+ * endpoint returns a literal `{tenantid}` placeholder here, which breaks client
+ * libraries that compare `iss` verbatim -- do not imitate that.
+ */
+export function oidcDiscoveryDocument(serverSegment?: string) {
+  const issuer = oidcIssuer(undefined, serverSegment);
   return {
     issuer,
     authorization_endpoint: `${issuer}/api/oauth/authorize`,
     token_endpoint: `${issuer}/api/oauth/token`,
     userinfo_endpoint: `${issuer}/api/oauth/userinfo`,
     jwks_uri: `${issuer}/api/oauth/jwks`,
+    agents_endpoint: `${issuer}/api/oauth/agents`,
     serverinfo_endpoint: `${issuer}/api/oauth/serverinfo`,
     grant_types_supported: ["authorization_code", "urn:slock:grant-type:agent_request"],
     scopes_supported: [] as string[],

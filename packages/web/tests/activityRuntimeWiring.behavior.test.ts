@@ -8,7 +8,6 @@
 // and observe whether the Activity sync endpoints get hit. Behavioural, not
 // source-matching: a wiring that is deleted stops issuing the request.
 import assert from "node:assert/strict";
-import test from "node:test";
 import api from "../src/api/client";
 
 const originalGet = api.get.bind(api);

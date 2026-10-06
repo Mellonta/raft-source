@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const strykerBackupSrc = () => {
@@ -50,20 +49,21 @@ test("Share preview lightbox owns image artifact actions and platform targets", 
   assert.ok(toolbarRenderingIdIdx >= 0, "select toolbar rendering label id anchor not found");
   assert.ok(toolbarGenerateImageIdIdx >= 0, "select toolbar generate-image label id anchor not found");
   assert.match(toolbar, /<Image size=\{14\} \/>/);
-  assert.match(toolbar, /import Button from "\.\.\/ui\/Button";/);
-  assert.match(toolbar, /import MenuItem from "\.\.\/ui\/MenuItem";/);
-  assert.match(toolbar, /const toolbarButtonClass = "box-border appearance-none whitespace-nowrap px-1 focus:outline-none focus-visible:outline-none";/);
-  assert.match(toolbar, /const toolbarIconButtonClass = `\$\{toolbarButtonClass\} min-w-7 gap-0 sm:min-w-0`;/);
+  assert.match(toolbar, /import\s*\{[^}]*\bButton\b[^}]*\}\s*from\s*"raft-ui";/);
+  assert.match(toolbar, /DropdownMenuContent/);
+  assert.match(toolbar, /const toolbarButtonClass = "whitespace-nowrap";/);
+  assert.doesNotMatch(toolbar, /toolbarIconButtonClass/);
+  assert.doesNotMatch(toolbar, /gap-0|px-1|focus:outline-none|focus-visible:outline-none/);
   assert.match(toolbar, /const compactForward = compactLevel >= 1 \+ \(onCopyLinks \? 1 : 0\);/);
-  assert.match(toolbar, /shape=\{compactForward \? "icon" : "iconText"\}/);
+  assert.match(toolbar, /size=\{compactForward \? "icon-sm" : "sm"\}/);
   assert.ok(toolbarSelectedCountIdIdx >= 0, "select toolbar selected-count label id anchor not found");
   assert.match(toolbar, /<Button[\s\S]*data-testid="select-mode-select-all"/);
   assert.match(toolbar, /<Button[\s\S]*data-testid="select-mode-cancel"/);
   assert.match(toolbar, /<Button[\s\S]*data-testid="select-mode-forward"/);
   assert.match(toolbar, /<Button[\s\S]*data-testid="select-mode-copy-link"/);
-  assert.match(toolbar, /<MenuItem[\s\S]*data-testid="select-mode-share-open"/);
-  assert.match(toolbar, /<MenuItem[\s\S]*data-testid="select-mode-copy-md"/);
-  assert.match(toolbar, /tone="pink"[\s\S]*data-testid="select-mode-forward"[\s\S]*\{!compactForward && <span>\{forwardLabel\}<\/span>\}/);
+  assert.match(toolbar, /<DropdownMenuItem[\s\S]*data-testid="select-mode-share-open"/);
+  assert.match(toolbar, /<DropdownMenuItem[\s\S]*data-testid="select-mode-copy-md"/);
+  assert.match(toolbar, /variant="accent"[\s\S]*data-testid="select-mode-forward"[\s\S]*\{!compactForward && <span>\{forwardLabel\}<\/span>\}/);
   assert.doesNotMatch(toolbar, /data-testid="select-mode-forward-as-one"/);
   assert.doesNotMatch(toolbar, /text-\[11px\]/);
   assert.doesNotMatch(toolbar, /h-10 min-h-10/);
@@ -88,9 +88,9 @@ test("Share preview lightbox owns image artifact actions and platform targets", 
   assert.match(lightbox, /message\.selectShare\.copyImage/);
   assert.match(lightbox, /message\.selectShare\.saveImage/);
   assert.match(lightbox, /common\.lightbox\.download/);
-  assert.match(lightbox, /import \{ Button \} from "raft-ui";/);
+  assert.match(lightbox, /import\s*\{[^}]*\bButton\b[^}]*\}\s*from\s*"raft-ui";/);
   assert.doesNotMatch(lightbox, /from "\.\.\/ui\/Button"/);
-  assert.match(lightbox, /<Button[\s\S]*size="sm"[\s\S]*variant="default"[\s\S]*data-testid="select-share-lightbox-download"/);
+  assert.match(lightbox, /<Button[\s\S]*size="sm"[\s\S]*variant="outline"[\s\S]*data-testid="select-share-lightbox-download"/);
   assert.match(lightbox, /canSavePngViaNativeShare\(dataUrl, filename\)/);
   assert.match(lightbox, /nav\.canShare\(\{ files: \[file\] \}\)/);
   assert.match(lightbox, /await nav\.share\?\.\(\{[\s\S]*files: \[file\],[\s\S]*message\.selectShare\.nativeShareTitle/);

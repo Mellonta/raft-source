@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import argon2 from "argon2";
-import { vi } from "vitest";
-import { createApiTest } from "../test/integration/apiTest.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { computers, machines } from "../db/schema.js";
-import { createAgent } from "../services/agentService.js";
-import { registerMachine } from "../services/machineService.js";
-import { findComputerByApiKey, findComputerByApiKeyWithReason } from "../services/computerCredentialService.js";
+import { createApiTest } from "../test/integration/apiTest";
+import { signAccessToken } from "../middleware/auth";
+import { computers, machines } from "../db/schema";
+import { createAgent } from "../services/agentService";
+import { registerMachine } from "../services/machineService";
+import { findComputerByApiKey, findComputerByApiKeyWithReason } from "../services/computerCredentialService";
 
 const test = createApiTest({ onboardingOpenerFlagDefaultEnabled: false });
 

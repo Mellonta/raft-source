@@ -38,7 +38,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import path from "node:path";
-import { currentDate, DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
+import { currentDate, redactDiagnosticText, DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 
 import {
   computerDir,
@@ -47,11 +47,11 @@ import {
   serversDir,
   serviceLogPath,
   userSessionPath,
-} from "../paths.js";
-import { isProcessAlive, readPidfileAt } from "../internal/process-primitives.js";
-import type { ComputerApiEvent } from "../lib/events.js";
-import { canonicalizeServerUrl } from "../serverUrl.js";
-import { buildStatusReport } from "../status.js";
+} from "../paths";
+import { isProcessAlive, readPidfileAt } from "../internal/process-primitives";
+import type { ComputerApiEvent } from "../lib/events";
+import { canonicalizeServerUrl } from "../serverUrl";
+import { buildStatusReport } from "../status";
 
 /** Per-runner upload-bearing marker prefix. MUST start with `daemon-trace-`
  *  so the daemon `DaemonTraceBundleUploader.findUploadCandidates` glob
@@ -296,35 +296,14 @@ async function readComputerTraceRecords(slockHome: string): Promise<string[]> {
   return lines;
 }
 
-const SECRET_PATTERNS: RegExp[] = [
-  /sk_[a-z]+_[A-Za-z0-9._-]+/g,
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi,
-  /\b(?:sk|sk-ant|sk-proj|xox[baprs]?)-[A-Za-z0-9_-]{8,}\b/g,
-  /\beyJ[A-Za-z0-9._-]{20,}/g,
-  /\b[A-Fa-f0-9]{40,}\b/g,
-  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
-  /\/Users\/[^\s"'<>:]+(?:\/[^\s"'<>:]+)*/g,
-  /\/home\/[^\s"'<>:]+(?:\/[^\s"'<>:]+)*/g,
-  /[A-Za-z]:\\Users\\[^\s"'<>:]+(?:\\[^\s"'<>:]+)*/g,
-];
-
-function redactUrlQuery(value: string): string {
-  try {
-    const url = new URL(value);
-    if (url.search) url.search = "?[REDACTED_QUERY]";
-    if (url.username) url.username = "[REDACTED_USER]";
-    if (url.password) url.password = "[REDACTED_PASSWORD]";
-    return url.toString();
-  } catch {
-    return value.replace(/\?.*$/, "?[REDACTED_QUERY]");
-  }
-}
-
-function redactDiagnosticText(text: string): string {
-  let out = text.replace(/https?:\/\/[^\s"'<>]+/gi, (url) => redactUrlQuery(url));
-  for (const re of SECRET_PATTERNS) out = out.replace(re, "***REDACTED***");
-  return out;
-}
+// Credential/identity masking is the SHARED primitive (packages/shared
+// diagnosticRedaction). This file previously carried a private copy whose rule
+// set stopped at the pre-#7791 state, so GitHub / AWS / Google / xAI / sap_ /
+// PEM / key=value secrets reached the uploaded bundle unmasked (task #263).
+// Default options are deliberate: `urls: "query"` preserves the previous
+// behaviour of keeping host+path and masking only the query, and the shared
+// IDENTITY_PATTERNS are byte-identical to the email/home-path rules this file
+// used to declare, so the swap is a strict superset with no behaviour change.
 
 interface RedactedTail {
   lines: string[];
@@ -341,18 +320,28 @@ function boundDiagnosticLine(line: string, maxChars: number): { text: string; tr
 }
 
 function redactedTailFromText(text: string, maxLines = RUNNER_LOG_TAIL_MAX_LINES, maxLineChars = RUNNER_LOG_TAIL_MAX_LINE_CHARS): RedactedTail {
-  const allLines = text.split(/\r?\n/).filter(Boolean);
-  const tailLines = allLines.slice(-maxLines);
+  // Redact the WHOLE text before windowing. Redacting line by line silently
+  // disables every multi-line rule: the shared PEM rule spans BEGIN..END, so
+  // per-line it matches nothing and the key body survives (archer, task #263).
+  // Doing it before the tail cut also covers a block that straddles the window
+  // boundary, where the BEGIN line would otherwise fall outside the window.
+  const redactedLines = redactDiagnosticText(text).split(/\r?\n/).filter(Boolean);
+  // sourceLineCount stays a property of the SOURCE: a collapsed multi-line
+  // block must not make the file look shorter than it was.
+  const sourceLineCount = text.split(/\r?\n/).filter(Boolean).length;
+  const tailLines = redactedLines.slice(-maxLines);
   let lineTruncatedCount = 0;
   const lines = tailLines.map((line) => {
-    const bounded = boundDiagnosticLine(redactDiagnosticText(line), maxLineChars);
+    const bounded = boundDiagnosticLine(line, maxLineChars);
     if (bounded.truncated) lineTruncatedCount += 1;
     return bounded.text;
   });
   return {
     lines,
-    sourceLineCount: allLines.length,
-    truncated: allLines.length > maxLines,
+    sourceLineCount,
+    // truncated describes the REPORTED window: did we drop lines we could have
+    // carried. Measured on the redacted lines, which is what the window cuts.
+    truncated: redactedLines.length > maxLines,
     lineTruncatedCount,
     maxLines,
     maxLineChars,

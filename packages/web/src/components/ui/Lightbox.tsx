@@ -11,6 +11,7 @@ import type {
   RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+import { dismissLayerProps } from "./dismissLayer";
 
 const LightboxPortalContainerContext = createContext<RefObject<HTMLDivElement | null> | null>(null);
 
@@ -147,6 +148,7 @@ export default function Lightbox({
       ref={rootRef}
       tabIndex={-1}
       {...rest}
+      {...dismissLayerProps}
       className={`${positionClass} ${backdropClass} ${className} outline-none`}
       style={{ zIndex }}
       onPointerDownCapture={(e) => {

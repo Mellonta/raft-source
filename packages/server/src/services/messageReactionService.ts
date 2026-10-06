@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { and, asc, eq, gt, inArray, or, sql } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   agents,
   externalActorProjections,
@@ -10,8 +10,9 @@ import {
   messageReactions,
   messageReactionViewerVersions,
   users,
-} from "../db/schema.js";
-import { enqueueExternalReactionAggregateTransition } from "./externalReactionCommandRuntime.js";
+} from "../db/schema";
+import { withChannelWriterFence } from "./channelConversionFenceService";
+import { enqueueExternalReactionAggregateTransition } from "./externalReactionCommandRuntime";
 
 const REACTION_ACTORS_CURSOR_KIND = "message-reaction-actors-v1";
 const MAX_CURSOR_LENGTH = 2_048;
@@ -235,12 +236,13 @@ export function projectReactionViewerSnapshot(input: {
 }
 
 export async function mutateMessageReaction(input: {
+  channelId: string;
   messageId: string;
   emoji: string;
   actor: { kind: ReactionActorKind; id: string };
   operation: "add" | "remove";
 }): Promise<ReactionMutationResult> {
-  return getDb().transaction(async (tx) => {
+  return withChannelWriterFence(input.channelId, async (tx) => {
     const [aggregateBeforeRow] = await tx.select({ count: sql<number>`count(*)::int` })
       .from(messageReactions)
       .where(and(

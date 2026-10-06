@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { ErrorRequestHandler, Request, Response } from "express";
-import { normalizeObservedRoutePattern } from "../middleware/requestObservability.js";
-import { addTraceEvent, getCurrentTraceContext } from "../tracing/semanticTrace.js";
-import { sanitizeRouteErrorMessage } from "../tracing/routeFailure.js";
+import { normalizeObservedRoutePattern } from "../middleware/requestObservability";
+import { addTraceEvent, errorClassOf, getCurrentTraceContext } from "../tracing/semanticTrace";
+import { sanitizeRouteErrorMessage } from "../tracing/routeFailure";
+import { DmTargetResolutionError } from "../services/dmTargetResolutionError";
 
 interface JsonServerErrorOptions {
   error: string;
@@ -12,14 +13,41 @@ interface JsonServerErrorOptions {
   err: unknown;
 }
 
+/**
+ * Answer a DM target the caller can fix (ambiguous same-name peer, unknown
+ * peer kind) with its 4xx status, stable code and suggestedNextAction. For
+ * routes whose catch does not end in sendJsonServerError.
+ */
+export function respondToDmTargetResolutionError(err: unknown, res: Response): boolean {
+  if (!(err instanceof DmTargetResolutionError)) return false;
+  res.status(err.status).json(err.toResponseBody());
+  return true;
+}
+
+/**
+ * Body for a send whose transaction lost a deadlock/serialization race on every
+ * bounded retry. It rolled back, so resending (same idempotency key) is safe.
+ */
+export function transientSendConflictBody() {
+  return {
+    error: "The message was not sent because of a temporary database conflict. Retry the send.",
+    code: "send_transient_conflict",
+    retryable: true,
+    suggestedNextAction: "retry the same send (reuse the idempotencyKey)",
+  };
+}
+
 export function sendJsonServerError(
   req: Request,
   res: Response,
   options: JsonServerErrorOptions,
 ): void {
+  // A route that wraps channel resolution in a generic catch must still tell
+  // the caller how to fix an ambiguous or malformed DM target.
+  if (respondToDmTargetResolutionError(options.err, res)) return;
   const status = options.status ?? 500;
   const correlationId = getCurrentTraceContext()?.traceId ?? randomUUID();
-  const errorClass = options.err instanceof Error ? options.err.name : typeof options.err;
+  const errorClass = errorClassOf(options.err);
   const rawMessage = options.err instanceof Error ? options.err.message : String(options.err ?? "");
   const sanitizedMessage = sanitizeRouteErrorMessage(rawMessage);
   const route = normalizeObservedRoutePattern(req);
@@ -57,6 +85,10 @@ export const globalJsonServerErrorHandler: ErrorRequestHandler = (err, req, res,
     next(err);
     return;
   }
+
+  // A DM target the caller can fix (ambiguous same-name peer, unknown peer
+  // kind): answer with its 4xx status and machine-readable code.
+  if (respondToDmTargetResolutionError(err, res)) return;
 
   const candidateStatus = Number((err as { status?: unknown; statusCode?: unknown } | null)?.status
     ?? (err as { statusCode?: unknown } | null)?.statusCode);

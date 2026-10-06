@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act } from "react";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -390,6 +389,8 @@ test("a joint message from a current-server store agent keeps local thread autho
 });
 
 test("the production message click handler fails closed when context is unauthorized or missing", async () => {
+  const { toast } = await import("raft-ui");
+  const toastError = vi.spyOn(toast, "error");
   const getCalls: string[] = [];
   api.get = (async (url: string) => {
     getCalls.push(url);
@@ -403,8 +404,9 @@ test("the production message click handler fails closed when context is unauthor
   });
 
   await waitFor(() => {
-    assert.match(document.body.textContent ?? "", /Unable to open thread/);
+    assert.equal(toastError.mock.calls.length, 1, "the unresolvable thread surfaces the standard RUI toast");
   });
+  assert.match(String(toastError.mock.calls[0][0]), /Unable to open thread/);
   assert.deepEqual(getCalls, ["/messages/context/deadbeef"]);
   assert.equal(useThreadStore.getState().openParentMessageId, null, "no wrong thread is opened on a 403/miss");
 });
@@ -540,4 +542,105 @@ test("a same-server context response still opens in the captured server epoch", 
     assert.equal(useThreadStore.getState().openParentMessageId, "parent-1111-2222-3333-444444444444");
     assert.match(screen.getByTestId("route-location").textContent ?? "", /msg=parent-1111-2222-3333-444444444444/);
   });
+});
+
+const dmArtinChannel: Channel = {
+  id: "dm-artin",
+  name: "artin",
+  description: null,
+  type: "dm",
+  peerName: "artin",
+  createdAt: "2026-07-14T00:00:00.000Z",
+};
+
+test("a dm-thread ref stays one clickable token even when the peer is a structured mention", async () => {
+  const { toast } = await import("raft-ui");
+  const toastError = vi.spyOn(toast, "error");
+  const getCalls: string[] = [];
+  api.get = (async (url: string) => {
+    getCalls.push(url);
+    throw new Error("expected fail-closed context miss");
+  }) as typeof api.get;
+
+  await renderMessage({
+    channels: [channel, dmArtinChannel],
+    message: {
+      ...message,
+      content: "原始坐标：dm:@artin:1f1def75",
+      mentions: [{ type: "user", id: "user-artin", name: "artin" }],
+    },
+  });
+
+  const ref = screen.getByRole("link", { name: "dm:@artin:1f1def75" });
+  assert.ok(
+    screen.queryByRole("link", { name: "@artin" }) === null,
+    "the peer inside a dm-thread ref must not chip as a separate mention",
+  );
+  await act(async () => {
+    fireEvent.click(ref);
+  });
+  assert.deepEqual(getCalls, ["/messages/context/1f1def75"]);
+  await waitFor(() => {
+    assert.equal(toastError.mock.calls.length, 1, "an unresolvable thread ref surfaces the standard RUI toast");
+  });
+  assert.match(String(toastError.mock.calls[0][0]), /Unable to open thread/);
+});
+
+test("a bare dm ref links to the dm instead of degrading into a mention chip", async () => {
+  await renderMessage({
+    channels: [channel, dmArtinChannel],
+    message: {
+      ...message,
+      content: "找 dm:@artin 确认",
+      mentions: [{ type: "user", id: "user-artin", name: "artin" }],
+    },
+  });
+
+  const ref = screen.getByRole("link", { name: "dm:@artin" });
+  assert.ok(
+    screen.queryByRole("link", { name: "@artin" }) === null,
+    "the peer inside a bare dm ref must not chip as a separate mention",
+  );
+  fireEvent.click(ref);
+  await waitFor(() => {
+    assert.match(screen.getByTestId("route-location").textContent ?? "", /\/dm\/dm-artin/);
+  });
+});
+
+const twinDmChannels: Channel[] = [
+  { id: "dm-twin-human", name: "dm-twin-human", description: null, type: "dm", peerName: "Twin", peerType: "user", createdAt: "2026-07-14T00:00:00.000Z" },
+  { id: "dm-twin-agent", name: "dm-twin-agent", description: null, type: "dm", peerName: "Twin", peerType: "agent", createdAt: "2026-07-14T00:00:00.000Z" },
+];
+
+test("a kind-pinned dm ref opens the DM with that kind of peer", async () => {
+  await renderMessage({
+    channels: [channel, ...twinDmChannels],
+    message: { ...message, content: "找 dm:@Twin~agent 确认，不是 dm:@Twin~human" },
+  });
+
+  // Two suffixed refs in one message must not pair their `~` into strikethrough.
+  assert.ok(screen.getByRole("link", { name: "dm:@Twin~human" }));
+  fireEvent.click(screen.getByRole("link", { name: "dm:@Twin~agent" }));
+  await waitFor(() => {
+    assert.match(screen.getByTestId("route-location").textContent ?? "", /\/dm\/dm-twin-agent/);
+  });
+});
+
+test("an unknown peer kind in text stays plain, never a link to another target", async () => {
+  await renderMessage({
+    channels: [channel, ...twinDmChannels],
+    message: {
+      ...message,
+      content: "别点 dm:@Twin~bot 或 dm:@Twin~agentXYZ",
+      mentions: [{ type: "user", id: "user-twin", name: "Twin" }],
+    },
+  });
+
+  assert.deepEqual(
+    screen.queryAllByRole("link").map((link) => link.textContent),
+    [],
+    "neither dm:@Twin nor @Twin may be carved out of a malformed ref",
+  );
+  assert.ok(screen.getByText("dm:@Twin~bot"));
+  assert.ok(screen.getByText("dm:@Twin~agentXYZ"));
 });

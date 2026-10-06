@@ -1,10 +1,10 @@
 import { useState } from "react";
+import { Input, Button } from "raft-ui";
 import type { FormEvent } from "react";
 import { useIntl } from "react-intl";
 import { useAuthStore } from "../../store/authStore";
 import { ArrowLeft } from "lucide-react";
 import AuthPageFrame, { AuthPageIntro } from "./AuthPageFrame";
-import Button from "../ui/Button";
 import Banner from "../ui/Banner";
 import FormField from "../ui/FormField";
 import { AUTH_MESSAGE_IDS, authServerErrorMessage } from "./authErrors";
@@ -42,10 +42,11 @@ export default function ResetPasswordPage({ token, onBack }: ResetPasswordPagePr
     try {
       await resetPassword(token, password);
       setSuccess(true);
-      // Clean up URL
+      // Clean up URL — drop ONLY the reset token; preserve any other query params
+      // (invite/verify/etc.) so a following flow isn't silently lost.
       const url = new URL(window.location.href);
       url.searchParams.delete("reset");
-      window.history.replaceState({}, "", url.pathname + url.hash);
+      window.history.replaceState({}, "", url.pathname + url.search + url.hash);
     } catch (err: any) {
       setError(authServerErrorMessage(err, formatMessage({ id: "pages.resetPassword.failed" }), formatMessage));
     } finally {
@@ -64,8 +65,7 @@ export default function ResetPasswordPage({ token, onBack }: ResetPasswordPagePr
           <Button
             onClick={onBack}
             size="lg"
-            shape="iconText"
-            tone="pink"
+            variant="accent"
             className="w-full"
           >
             <ArrowLeft size={16} />
@@ -87,27 +87,27 @@ export default function ResetPasswordPage({ token, onBack }: ResetPasswordPagePr
 
         <form onSubmit={handleSubmit} className="space-y-4" noValidate>
           <FormField label={formatMessage({ id: "pages.resetPassword.newPasswordLabel" })} labelStyle="plain" error={fieldErrors.password}>
-            <input
+            <Input
               type="password"
               value={password}
               onChange={(e) => {
                 setPassword(e.target.value);
                 if (fieldErrors.password) setFieldErrors((current) => ({ ...current, password: undefined }));
               }}
-              className="w-full border-2 border-black p-2 text-base shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+              data-invalid={fieldErrors.password ? true : undefined}
               placeholder={formatMessage({ id: "pages.resetPassword.passwordPlaceholder" })}
               required
             />
           </FormField>
           <FormField label={formatMessage({ id: "pages.resetPassword.confirmPasswordLabel" })} labelStyle="plain" error={fieldErrors.confirmPassword}>
-            <input
+            <Input
               type="password"
               value={confirmPassword}
               onChange={(e) => {
                 setConfirmPassword(e.target.value);
                 if (fieldErrors.confirmPassword) setFieldErrors((current) => ({ ...current, confirmPassword: undefined }));
               }}
-              className="w-full border-2 border-black p-2 text-base shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+              data-invalid={fieldErrors.confirmPassword ? true : undefined}
               required
             />
           </FormField>
@@ -115,7 +115,7 @@ export default function ResetPasswordPage({ token, onBack }: ResetPasswordPagePr
             type="submit"
             disabled={loading}
             size="lg"
-            tone="pink"
+            variant="accent"
             className="w-full"
           >
             {loading

@@ -1,14 +1,14 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { afterEach, beforeEach } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channels,
   externalAppCredentials,
   externalAppInstallGrantReceipts,
+  externalAppInstallServerGrants,
   externalAppInstalls, externalAppRegistrationSecrets,
   externalAppRegistrations,
   externalAppServerGrants,
@@ -21,8 +21,8 @@ import {
   serverMembers,
   servers,
   users
-} from "../db/schema.js";
-import { createServer } from "./serverService.js";
+} from "../db/schema";
+import { createServer } from "./serverService";
 import {
   beginExternalOAuthAttempt,
   claimExternalOAuthAttempt,
@@ -32,8 +32,8 @@ import {
   markExternalOAuthExchangeUnknown,
   resolveExternalBindingAuthority,
   revokeExternalHumanIdentityLink,
-} from "./externalAppControlPlaneService.js";
-import { reconcileSlackPrivateAudience } from "./slackBindingLifecycleService.js";
+} from "./externalAppControlPlaneService";
+import { reconcileSlackPrivateAudience } from "./slackBindingLifecycleService";
 
 
 beforeEach(async () => {
@@ -150,18 +150,20 @@ async function completeInstall(
   attemptId: string,
   teamId = "T_TEST_WORKSPACE",
   providerUserId = "U_TEST_OWNER",
+  encryptedMaterial = "sealed:test-only-ciphertext",
 ) {
   return completeExternalOAuthAttempt({
     attemptId,
     providerAppId: seeded.registration.providerAppId,
     providerTeamId: teamId,
     providerUserId,
+    providerInstallerIsWorkspaceAdmin: true,
     botUserId: "U_TEST_BOT",
     providerBotId: "B_TEST_BOT",
     workspaceName: "Test Workspace",
     installedScopes: ["chat:write", "channels:history"],
     sealedCredential: {
-      encryptedMaterial: "sealed:test-only-ciphertext",
+      encryptedMaterial,
       envelopeKeyId: "test-envelope-key",
       aadVersion: 1,
     },
@@ -275,6 +277,7 @@ test("OAuth completion atomically installs only exact scopes and sealed credenti
       providerAppId: seeded.registration.providerAppId,
       providerTeamId: "T_TEST_WORKSPACE",
       providerUserId: "U_TEST_OWNER",
+      providerInstallerIsWorkspaceAdmin: true,
       botUserId: "U_TEST_BOT",
       installedScopes: ["chat:write"],
       sealedCredential: {
@@ -299,7 +302,30 @@ test("OAuth completion atomically installs only exact scopes and sealed credenti
       attemptId: claimed.attemptId,
       providerAppId: seeded.registration.providerAppId,
       providerTeamId: "T_TEST_WORKSPACE",
+      providerUserId: "U_TEST_OWNER",
+      providerInstallerIsWorkspaceAdmin: false,
+      botUserId: "U_TEST_BOT",
+      installedScopes: ["chat:write", "channels:history"],
+      sealedCredential: {
+        encryptedMaterial: "sealed:test-only-ciphertext",
+        envelopeKeyId: "test-envelope-key",
+        aadVersion: 1,
+      },
+    }),
+    (error: unknown) =>
+      error instanceof ExternalAppControlPlaneError
+      && error.code === "external_app_not_authorized",
+  );
+  assert.equal((await getDb().select().from(externalAppInstalls)).length, 0);
+  assert.equal((await getDb().select().from(externalAppCredentials)).length, 0);
+
+  await assert.rejects(
+    completeExternalOAuthAttempt({
+      attemptId: claimed.attemptId,
+      providerAppId: seeded.registration.providerAppId,
+      providerTeamId: "T_TEST_WORKSPACE",
       providerUserId: "U_TEST_BOT",
+      providerInstallerIsWorkspaceAdmin: true,
       botUserId: "U_TEST_BOT",
       installedScopes: ["chat:write", "channels:history"],
       sealedCredential: {
@@ -527,10 +553,30 @@ test("ambiguous provider exchange is terminally fenced from automatic state reus
   assert.equal((await getDb().select().from(externalAppCredentials)).length, 0);
 });
 
-test("one provider workspace authority cannot be copied to a second Raft server", async () => {
+test("one provider workspace install is shared across two independently granted Raft servers", async () => {
   const seeded = await seedControlPlane();
   const first = await beginAndClaim(seeded);
-  await completeInstall(seeded, first.claimed.attemptId);
+  const firstInstall = await completeInstall(seeded, first.claimed.attemptId);
+  const [firstBoundChannel] = await getDb().insert(channels).values({
+    serverId: seeded.server.id,
+    name: `slack-first-bound-${randomUUID()}`,
+    type: "channel",
+  }).returning();
+  const [firstBinding] = await getDb().insert(externalChannelBindings).values({
+    serverId: seeded.server.id,
+    registrationId: seeded.registration.id,
+    installId: firstInstall.installId,
+    channelId: firstBoundChannel.id,
+    providerConversationId: "C_FIRST_SERVER",
+    providerConversationKind: "public_channel",
+    privacyClass: "public",
+    grantEpoch: seeded.grant.grantEpoch,
+    connectionEpoch: firstInstall.connectionEpoch,
+    bindingEpoch: 1,
+    consentedByType: "human",
+    consentedById: seeded.owner.id,
+    consentedAt: new Date(),
+  }).returning();
 
   const [secondOwner] = await getDb()
     .insert(users)
@@ -581,16 +627,115 @@ test("one provider workspace authority cannot be copied to a second Raft server"
     expectedRedirectUri: "https://raft.test/api/external-apps/slack/oauth/callback",
   });
 
-  await assert.rejects(
-    completeInstall(
-      { ...seeded, owner: secondOwner, server: secondServer, grant: secondGrant },
-      secondClaim.attemptId,
-    ),
-    (error: unknown) =>
-      error instanceof ExternalAppControlPlaneError
-      && error.code === "external_app_install_conflict",
+  const second = await completeInstall(
+    { ...seeded, owner: secondOwner, server: secondServer, grant: secondGrant },
+    secondClaim.attemptId,
+    "T_TEST_WORKSPACE",
+    "U_SECOND_OWNER",
+    "sealed:second-server-must-not-overwrite",
   );
-  assert.equal((await getDb().select().from(externalAppInstalls)).length, 1);
+  const installs = await getDb().select().from(externalAppInstalls);
+  const serverGrants = await getDb().select().from(externalAppInstallServerGrants);
+  const credentials = await getDb().select().from(externalAppCredentials);
+  assert.equal(installs.length, 1, "the workspace token must not be copied per server");
+  assert.equal(credentials.length, 1, "the shared install must retain one credential row");
+  assert.equal(credentials[0]!.encryptedMaterial, "sealed:test-only-ciphertext");
+  assert.equal(second.installId, installs[0]!.id);
+  assert.equal(second.connectionEpoch, 1, "granting a second server must not rotate the shared workspace credential");
+  assert.equal(installs[0]!.serverId, seeded.server.id, "the second server must not steal credential custody");
+  const [preservedFirstBinding] = await getDb().select().from(externalChannelBindings)
+    .where(eq(externalChannelBindings.id, firstBinding.id));
+  assert.equal(preservedFirstBinding.state, "active");
+  assert.equal(preservedFirstBinding.stateReason, null);
+  assert.equal(preservedFirstBinding.connectionEpoch, firstInstall.connectionEpoch);
+  assert.equal(preservedFirstBinding.bindingEpoch, 1);
+  assert.deepEqual(
+    serverGrants.map((entry) => [entry.serverId, entry.serverGrantId, entry.state]).sort(),
+    [
+      [seeded.server.id, seeded.grant.id, "active"],
+      [secondServer.id, secondGrant.id, "active"],
+    ].sort(),
+  );
+
+  const now = new Date("2026-09-25T00:00:00.000Z");
+  await seedFreshInstallGrant(seeded, second.installId, now);
+  const [secondChannel] = await getDb().insert(channels).values({
+    serverId: secondServer.id,
+    name: `slack-second-server-${randomUUID()}`,
+    type: "channel",
+  }).returning();
+  const [secondBinding] = await getDb().insert(externalChannelBindings).values({
+    serverId: secondServer.id,
+    registrationId: seeded.registration.id,
+    installId: second.installId,
+    channelId: secondChannel.id,
+    providerConversationId: "C_SECOND_SERVER",
+    providerConversationKind: "public_channel",
+    privacyClass: "public",
+    privacyFreshUntil: new Date(now.getTime() + 60 * 60_000),
+    grantEpoch: secondGrant.grantEpoch,
+    connectionEpoch: second.connectionEpoch,
+    bindingEpoch: 1,
+    consentedByType: "human",
+    consentedById: secondOwner.id,
+    consentedAt: now,
+  }).returning();
+  const authority = await resolveExternalBindingAuthority({
+    serverId: secondServer.id,
+    bindingId: secondBinding.id,
+    expectedConnectionEpoch: second.connectionEpoch,
+    expectedBindingEpoch: secondBinding.bindingEpoch,
+    now,
+  });
+  if (!authority.active) {
+    assert.fail(`the second server must resolve through its own grant association: ${authority.reason}`);
+  }
+
+  const [firstCollisionChannel] = await getDb().insert(channels).values({
+    serverId: seeded.server.id,
+    name: `slack-first-server-${randomUUID()}`,
+    type: "channel",
+  }).returning();
+  await assert.rejects(
+    getDb().insert(externalChannelBindings).values({
+      serverId: seeded.server.id,
+      registrationId: seeded.registration.id,
+      installId: second.installId,
+      channelId: firstCollisionChannel.id,
+      providerConversationId: "C_SECOND_SERVER",
+      providerConversationKind: "public_channel",
+      privacyClass: "public",
+      privacyFreshUntil: new Date(now.getTime() + 60 * 60_000),
+      grantEpoch: seeded.grant.grantEpoch,
+      connectionEpoch: second.connectionEpoch,
+      bindingEpoch: 1,
+      consentedByType: "human",
+      consentedById: seeded.owner.id,
+      consentedAt: now,
+    }),
+    "one Slack channel must remain globally exclusive across server partitions",
+  );
+
+  const reconnectAttempt = await beginAndClaim(seeded);
+  const reconnected = await completeInstall(
+    seeded,
+    reconnectAttempt.claimed.attemptId,
+    "T_TEST_WORKSPACE",
+    "U_TEST_OWNER",
+    "sealed:workspace-reconnected",
+  );
+  assert.equal(reconnected.installId, second.installId);
+  assert.equal(reconnected.connectionEpoch, 2);
+  const frozenBindings = await getDb().select().from(externalChannelBindings).where(and(
+    eq(externalChannelBindings.installId, second.installId),
+    eq(externalChannelBindings.connectionEpoch, reconnected.connectionEpoch),
+  ));
+  assert.equal(frozenBindings.length, 2);
+  assert.equal(frozenBindings.every((binding) =>
+    binding.state === "paused"
+    && binding.stateReason === "provider_reauthorized_review_required"
+    && binding.bindingEpoch === 2), true,
+  "workspace credential reconnect must atomically freeze every server partition");
 });
 
 test("database invariants reject org-wide installs and privacy-class substitution", async () => {

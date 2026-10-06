@@ -1,5 +1,6 @@
 import Redis, { type RedisOptions } from "ioredis";
-import { redisErrors, redisConnected } from "./metrics.js";
+import { redisErrors, redisConnected } from "./metrics";
+import { recordExternalSinkInsideTransaction } from "./db/ambientTransaction";
 
 let _redis: Redis | null = null;
 let _redisSub: Redis | null = null;
@@ -45,24 +46,32 @@ export function initRedis(redisUrl: string) {
 
 /** General-purpose Redis client (commands, pub, locks, caches) */
 export function getRedis(): Redis {
+  // Check BEFORE the null check: the hazard is "code reached for a Redis client
+  // while a transaction is open", not "the command actually ran". In production
+  // Redis is up, so this call would fire; the null check below is only the
+  // uninitialized path. Mark armed + record any in-transaction hit first.
+  recordExternalSinkInsideTransaction("redis");
   if (!_redis) throw new Error("Redis not initialized — call initRedis() first");
   return _redis;
 }
 
 /** Dedicated publisher for Socket.io Redis adapter */
 export function getRedisPub(): Redis {
+  recordExternalSinkInsideTransaction("redis");
   if (!_redisPub) throw new Error("Redis not initialized");
   return _redisPub;
 }
 
 /** Dedicated subscriber for Socket.io Redis adapter */
 export function getRedisSub(): Redis {
+  recordExternalSinkInsideTransaction("redis");
   if (!_redisSub) throw new Error("Redis not initialized");
   return _redisSub;
 }
 
 /** Dedicated subscriber for ReplicaRouter cross-replica pub/sub */
 export function getRedisReplicaSub(): Redis {
+  recordExternalSinkInsideTransaction("redis");
   if (!_redisReplicaSub) throw new Error("Redis not initialized");
   return _redisReplicaSub;
 }
@@ -82,6 +91,11 @@ export function resetRedisReplicaSub(): Redis {
 
 /** Returns true if Redis is configured and available */
 export function isRedisAvailable(): boolean {
+  // This is the universal "does this path intend to use Redis?" gate: callers
+  // check it before ever reaching getRedis(). Record it so a path that intends
+  // to use Redis inside a transaction is surfaced even when Redis is absent
+  // (the default test suite has no Redis, so getRedis() is often never reached).
+  recordExternalSinkInsideTransaction("redis");
   return _redis !== null;
 }
 

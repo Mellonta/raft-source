@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import type { CliIo } from "../../core/io.js";
-import { taskHistoryCommand } from "./history.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import type { CliIo } from "../../core/io";
+import { taskHistoryCommand } from "./history";
 
 function memoryIo(): { io: CliIo; stdout: string[] } {
   const stdout: string[] = [];
@@ -65,6 +64,8 @@ test("task history reads the exact task and renders ordered actor-bound audit ev
   }]);
   const output = stdout.join("");
   assert.match(output, /## Task #99 history — revision 3/);
+  assert.match(output, /^Current title: Current title$/m);
+  assert.match(output, /^Current description: Current criteria$/m);
   assert.match(output, /seq=123 time=2026-08-05T00:00:00.000Z actor=@cross type=amended/);
   assert.match(output, /"from":"Old","to":"Current title"/);
 });

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { planLifecycleEventAcceptance } from "./agentOrchestrator.js";
+import { planLifecycleEventAcceptance } from "./agentOrchestrator";
 
 test("planLifecycleEventAcceptance accepts events in legacy mode", () => {
   assert.equal(

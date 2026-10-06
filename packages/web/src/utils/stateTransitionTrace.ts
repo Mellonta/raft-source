@@ -4,14 +4,14 @@ import {
 import type {
   StateTransitionTraceInput,
 } from "@botiverse/raft-shared";
-import { emitWebTrace } from "./webAuthTrace";
+import { emitWebEvent } from "./webAuthTrace";
 
-type StateTransitionEmitter = typeof emitWebTrace;
+type StateTransitionEmitter = typeof emitWebEvent;
 
-let emitter: StateTransitionEmitter = emitWebTrace;
+let emitter: StateTransitionEmitter = emitWebEvent;
 
 export function __setStateTransitionEmitterForTest(next: StateTransitionEmitter | null): void {
-  emitter = next ?? emitWebTrace;
+  emitter = next ?? emitWebEvent;
 }
 
 export function emitStateTransitionTrace(input: StateTransitionTraceInput): void {

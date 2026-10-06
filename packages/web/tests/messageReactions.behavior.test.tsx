@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import type { SyncScopeKey } from "@botiverse/raft-shared";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render as rtlRender, waitFor } from "@testing-library/react";
@@ -201,9 +200,9 @@ test("read-only reaction summaries stay visible but expose no mutation affordanc
   assert.equal(row.querySelector("[data-message-affordance='mobile-reaction-add']"), null);
 });
 
-test("normalized reactions render shared count with viewer overlay and detail cache", async (t) => {
+test("normalized reactions render shared count with viewer overlay and detail cache", async () => {
   useServerStore.setState({ current: makeServer() });
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     assert.equal(url, "/feature-flags/evaluate");
     return {
       data: {
@@ -238,9 +237,9 @@ test("normalized reactions render shared count with viewer overlay and detail ca
   assert.equal(JSON.stringify(sharedFact).includes("reactorIds"), false);
 });
 
-test("an unselected normalized reaction uses the shared neutral fill and hover", async (t) => {
+test("an unselected normalized reaction uses the shared neutral fill and hover", async () => {
   useServerStore.setState({ current: makeServer() });
-  t.mock.method(api, "post", async () => ({
+  vi.spyOn(api, "post").mockImplementation(async () => ({
     data: {
       evaluations: [{ key: SYNC_CORE_MESSAGES_FLAG_KEY, enabled: true }],
     },
@@ -268,13 +267,13 @@ test("an unselected normalized reaction uses the shared neutral fill and hover",
     (button) => button.getAttribute("aria-label") === "👍 reaction from Bob",
   );
   assert.ok(chip);
-  assert.match(chip.className, /bg-black\/\[0\.03\]/, "an unselected reaction shares the neutral 3% fill");
-  assert.match(chip.className, /hover:bg-black\/\[0\.08\]/, "an unselected reaction shares the neutral 8% hover");
+  assert.match(chip.className, /bg-fill-muted\/40/, "an unselected reaction shares the themed neutral fill");
+  assert.match(chip.className, /hover:bg-fill-muted/, "an unselected reaction strengthens within the active theme");
 });
 
-test("normalized thread reactions read detail from the explicit local parent scope", async (t) => {
+test("normalized thread reactions read detail from the explicit local parent scope", async () => {
   useServerStore.setState({ current: makeServer() });
-  t.mock.method(api, "post", async () => ({
+  vi.spyOn(api, "post").mockImplementation(async () => ({
     data: {
       evaluations: [{ key: SYNC_CORE_MESSAGES_FLAG_KEY, enabled: true }],
     },
@@ -314,9 +313,9 @@ test("normalized thread reactions read detail from the explicit local parent sco
   );
 });
 
-test("normalized optimism changes count plus overlay without inventing a shared roster", async (t) => {
+test("normalized optimism changes count plus overlay without inventing a shared roster", async () => {
   useServerStore.setState({ current: makeServer() });
-  t.mock.method(api, "post", async () => ({
+  vi.spyOn(api, "post").mockImplementation(async () => ({
     data: {
       evaluations: [{ key: SYNC_CORE_MESSAGES_FLAG_KEY, enabled: true }],
     },
@@ -343,7 +342,7 @@ test("normalized optimism changes count plus overlay without inventing a shared 
   const requestResult = new Promise<{ data: Message }>((resolve) => {
     resolveRequest = resolve;
   });
-  t.mock.method(api, "request", async () => requestResult);
+  vi.spyOn(api, "request").mockImplementation(async () => requestResult);
 
   const { row, useMessageStore } = await renderMessage(makeMessage([...sharedFact]));
   const chip = Array.from(row.querySelectorAll<HTMLElement>("button[aria-label]")).find(
@@ -376,9 +375,9 @@ test("normalized optimism changes count plus overlay without inventing a shared 
   });
 });
 
-test("two normalized emoji mutations replay out of order and roll back only the failed target", async (t) => {
+test("two normalized emoji mutations replay out of order and roll back only the failed target", async () => {
   useServerStore.setState({ current: makeServer() });
-  t.mock.method(api, "post", async () => ({
+  vi.spyOn(api, "post").mockImplementation(async () => ({
     data: {
       evaluations: [{ key: SYNC_CORE_MESSAGES_FLAG_KEY, enabled: true }],
     },
@@ -413,7 +412,7 @@ test("two normalized emoji mutations replay out of order and roll back only the 
     resolve(value: { data: Message & { reactionViewer?: unknown } }): void;
     reject(reason: Error): void;
   }>();
-  t.mock.method(api, "request", async (config: { data?: { emoji?: string } }) => (
+  vi.spyOn(api, "request").mockImplementation(async (config: { data?: { emoji?: string } }) => (
     new Promise((resolve, reject) => {
       pending.set(config.data?.emoji ?? "", { resolve, reject });
     })
@@ -499,8 +498,8 @@ test("mobile reaction-add affordance appears only when reactions are visible", a
   );
 });
 
-test("clicking a reaction chip optimistically toggles it off then reconciles from the API", async (t) => {
-  const requestMock = t.mock.method(api, "request", async () => ({
+test("clicking a reaction chip optimistically toggles it off then reconciles from the API", async () => {
+  const requestMock = vi.spyOn(api, "request").mockImplementation(async () => ({
     data: {
       id: messageId,
       channelId,
@@ -531,9 +530,9 @@ test("clicking a reaction chip optimistically toggles it off then reconciles fro
 
   // The DELETE round-trip fired against the reactions endpoint.
   await waitFor(() => {
-    assert.equal(requestMock.mock.callCount(), 1);
+    assert.equal(requestMock.mock.calls.length, 1);
   });
-  const call = requestMock.mock.calls[0].arguments[0] as {
+  const call = requestMock.mock.calls[0][0] as {
     method: string;
     url: string;
     data: { emoji: string };

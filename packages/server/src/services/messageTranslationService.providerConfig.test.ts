@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   isTranslationProviderConfigured,
   resolveProviderFromEnv,
-} from "./messageTranslationService.js";
+} from "./messageTranslationService";
 
 const OPENAI_COMPATIBLE_ENV_KEYS = [
   "TRANSLATION_PROVIDER",

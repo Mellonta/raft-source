@@ -1,6 +1,6 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { inboxSuppressionStates, readCursorWidenPhase } from "../db/schema.js";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { inboxSuppressionStates, readCursorWidenPhase } from "../db/schema";
 
 const INT4_AUTHORITY_MAX = 2_147_483_647n;
 
@@ -453,4 +453,33 @@ export async function clearFollowedThreadSuppressionForReceiver(params: {
       eq(inboxSuppressionStates.targetChannelId, params.threadChannelId),
       eq(inboxSuppressionStates.targetKind, "followed_thread"),
     ));
+}
+
+/** Clear conversion-retired suppression rows through the single writer registry. */
+export async function clearSuppressionForReceivers(params: {
+  receiverIds: string[];
+  channelIds: string[];
+  executor?: DatabaseExecutor;
+  limit?: number;
+}): Promise<number> {
+  if (params.receiverIds.length === 0 || params.channelIds.length === 0) return 0;
+  const db = executorFor(params.executor);
+  return (await db
+    .delete(inboxSuppressionStates)
+    .where(and(
+      params.limit === undefined ? undefined : sql`${inboxSuppressionStates}.ctid IN (
+        SELECT ctid FROM ${inboxSuppressionStates} WHERE receiver_type = 'user'
+          AND receiver_id IN (${sql.join(params.receiverIds.map(id => sql`${id}`), sql`, `)})
+          AND (target_channel_id IN (${sql.join(params.channelIds.map(id => sql`${id}::uuid`), sql`, `)})
+            OR source_channel_id IN (${sql.join(params.channelIds.map(id => sql`${id}::uuid`), sql`, `)}))
+        LIMIT ${params.limit}
+      )`,
+      eq(inboxSuppressionStates.receiverType, "user"),
+      inArray(inboxSuppressionStates.receiverId, params.receiverIds),
+      or(
+        inArray(inboxSuppressionStates.targetChannelId, params.channelIds),
+        inArray(inboxSuppressionStates.sourceChannelId, params.channelIds),
+      ),
+    ))
+    .returning({ receiverId: inboxSuppressionStates.receiverId })).length;
 }

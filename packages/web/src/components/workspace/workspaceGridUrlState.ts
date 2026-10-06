@@ -10,8 +10,7 @@ import type {
 import type { MessageId } from "../../i18n/messages/en";
 import { en } from "../../i18n/messages/en";
 import { useLiveSearchParams } from "../../hooks/useLiveSearchParams";
-import type { WorkspacePanelConfig, WorkspacePanelKind } from "./workspaceGridDemoConfig";
-import type { WorkspaceGridFormatMessage } from "./workspaceGridDemoConfig";
+import type { WorkspacePanelConfig, WorkspacePanelKind, WorkspaceGridFormatMessage } from "./workspaceGridDemoConfig";
 
 export const WORKSPACE_GRID_URL_PARAM = "wg";
 export const WORKSPACE_GRID_URL_STATE_VERSION = 1;

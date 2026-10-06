@@ -5,12 +5,12 @@ import {
   type AgentApiSendBody,
   type AgentApiSendV2Body,
   type AgentApiSendResponse,
-} from "./agentApiMessageContract.js";
+} from "./agentApiMessageContract";
 import {
   AGENT_API_BASE_PATH,
   AGENT_API_MESSAGE_SEND_PATH,
   AGENT_API_MESSAGE_SEND_V2_PATH,
-} from "./agentApiPaths.js";
+} from "./agentApiPaths";
 
 export type AgentApiMessageClientErrorReason =
   | "request_contract_mismatch"

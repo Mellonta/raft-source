@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Exercise the ordinary npm bin with native Node after every package build.
-// Source/tsx tests and the SEA builder can both hide a dependency that exports
+// Source-loaded tests and the SEA builder can both hide a dependency that exports
 // TypeScript from node_modules, so syntax checks alone are not sufficient.
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));

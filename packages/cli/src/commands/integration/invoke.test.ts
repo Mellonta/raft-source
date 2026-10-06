@@ -5,21 +5,22 @@ import net, { type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
-import test from "node:test";
+
+import { setCanonicalFetchImplForTests } from "../../proxy";
 
 import { Command } from "commander";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import type { CliIo } from "../../core/io.js";
-import { renderError } from "../../core/renderer.js";
-import type { IntegrationLoginResponse, RegisteredIntegrationService } from "./_format.js";
-import { CleanupOutcome, integrationInvokeCommand, registerIntegrationInvokeCommand } from "./invoke.js";
-import { IntegrationV1Error } from "./invokeV1.js";
-import type { AgentManifestV0 } from "./manifest.js";
-import { validateAgentManifestV1, type AgentManifestV1 } from "./manifestV1.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import { CliError } from "../../core/errors";
+import type { CliIo } from "../../core/io";
+import { renderError } from "../../core/renderer";
+import type { IntegrationLoginResponse, RegisteredIntegrationService } from "./_format";
+import { CleanupOutcome, integrationInvokeCommand, registerIntegrationInvokeCommand } from "./invoke";
+import { IntegrationV1Error } from "./invokeV1";
+import type { AgentManifestV0 } from "./manifest";
+import { validateAgentManifestV1, type AgentManifestV1 } from "./manifestV1";
 
 const agentContext: AgentContext = {
   agentId: "agent-123",
@@ -316,9 +317,8 @@ async function withMockFetch<T>(
     expectedActionBody?: unknown;
   } = {},
 ): Promise<T> {
-  const previousFetch = globalThis.fetch;
   const calls: Array<{ url: string; init?: RequestInit }> = [];
-  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  const previousFetch = setCanonicalFetchImplForTests((async (url: string | URL | Request, init?: RequestInit) => {
     const resolvedUrl = typeof url === "string" || url instanceof URL ? url.toString() : url.url;
     calls.push({ url: resolvedUrl, init });
     if (resolvedUrl.endsWith("/.well-known/slock-agent-manifest.json")) {
@@ -362,11 +362,11 @@ async function withMockFetch<T>(
       }, resolvedUrl);
     }
     return responseWithUrl("not found", { status: 404 }, resolvedUrl);
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     return await fn(calls);
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 }
 
@@ -416,9 +416,8 @@ async function withV1Fetch<T>(
   manifestValue: AgentManifestV1,
   fn: (calls: Array<{ url: string; init?: RequestInit }>) => Promise<T>,
 ): Promise<T> {
-  const previousFetch = globalThis.fetch;
   const calls: Array<{ url: string; init?: RequestInit }> = [];
-  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  const mockFetch = (async (url: string | URL | Request, init?: RequestInit) => {
     const resolvedUrl = typeof url === "string" || url instanceof URL ? url.toString() : url.url;
     calls.push({ url: resolvedUrl, init });
     if (resolvedUrl.endsWith("/.well-known/slock-agent-manifest.json")) {
@@ -447,10 +446,15 @@ async function withV1Fetch<T>(
     }
     return responseWithUrl("not found", { status: 404 }, resolvedUrl);
   }) as typeof fetch;
+  const previousFetch = setCanonicalFetchImplForTests(mockFetch);
+  // V1 action transport still uses native fetch; manifest/session use canonical.
+  const previousGlobalFetch = globalThis.fetch;
+  globalThis.fetch = mockFetch;
   try {
     return await fn(calls);
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
+    globalThis.fetch = previousGlobalFetch;
   }
 }
 
@@ -502,17 +506,16 @@ async function withManifestResponse<T>(
   response: (url: string) => Response,
   fn: (calls: string[]) => Promise<T>,
 ): Promise<T> {
-  const previousFetch = globalThis.fetch;
   const calls: string[] = [];
-  globalThis.fetch = (async (url: string | URL | Request) => {
+  const previousFetch = setCanonicalFetchImplForTests((async (url: string | URL | Request) => {
     const resolvedUrl = typeof url === "string" || url instanceof URL ? url.toString() : url.url;
     calls.push(resolvedUrl);
     return response(resolvedUrl);
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     return await fn(calls);
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 }
 
@@ -522,9 +525,8 @@ async function withFeedbackAdminFetch<T>(
     manifest?: AgentManifestV0;
   } = {},
 ): Promise<T> {
-  const previousFetch = globalThis.fetch;
   const calls: Array<{ url: string; init?: RequestInit }> = [];
-  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  const previousFetch = setCanonicalFetchImplForTests((async (url: string | URL | Request, init?: RequestInit) => {
     const resolvedUrl = typeof url === "string" || url instanceof URL ? url.toString() : url.url;
     calls.push({ url: resolvedUrl, init });
     if (resolvedUrl.endsWith("/.well-known/slock-agent-manifest.json")) {
@@ -583,11 +585,11 @@ async function withFeedbackAdminFetch<T>(
       }, resolvedUrl);
     }
     return responseWithUrl("not found", { status: 404 }, resolvedUrl);
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     return await fn(calls);
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 }
 
@@ -604,10 +606,9 @@ async function withFeedbackAdminFileFetch<T>(
     contentLength?: string;
   } = {},
 ): Promise<T> {
-  const previousFetch = globalThis.fetch;
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const binaryBody = Buffer.from("1f8b0800000000000000", "hex");
-  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  const previousFetch = setCanonicalFetchImplForTests((async (url: string | URL | Request, init?: RequestInit) => {
     const resolvedUrl = typeof url === "string" || url instanceof URL ? url.toString() : url.url;
     calls.push({ url: resolvedUrl, init });
     if (resolvedUrl.endsWith("/.well-known/slock-agent-manifest.json")) {
@@ -653,11 +654,11 @@ async function withFeedbackAdminFileFetch<T>(
       }, resolvedUrl);
     }
     return responseWithUrl("not found", { status: 404 }, resolvedUrl);
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     return await fn(calls, options.outputPath ?? "");
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 }
 
@@ -3343,12 +3344,11 @@ test("integration invoke list-actions automatically renders typed action fields 
 
 test("integration list-actions succeeds for an existing Web app with no manifest", async () => {
   const { io, stdout } = memoryIo();
-  const previousFetch = globalThis.fetch;
   let fetches = 0;
-  globalThis.fetch = (async () => {
+  const previousFetch = setCanonicalFetchImplForTests((async () => {
     fetches += 1;
     throw new Error("no manifest fetch is expected");
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     await integrationInvokeCommand.handler(
       commandContext({ io, service: service({ agentManifestUrl: null }) }),
@@ -3357,7 +3357,7 @@ test("integration list-actions succeeds for an existing Web app with no manifest
       { service: "pr-diff-viewer-3c05bd", listActions: true },
     );
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 
   assert.equal(fetches, 0);
@@ -3417,12 +3417,11 @@ test("integration list-actions JSON preserves unknown surface for a missing regi
 
 test("integration list-actions JSON reports web-only only when no manifest is configured", async () => {
   const { io, stdout } = memoryIo();
-  const previousFetch = globalThis.fetch;
   let fetches = 0;
-  globalThis.fetch = (async () => {
+  const previousFetch = setCanonicalFetchImplForTests((async () => {
     fetches += 1;
     throw new Error("no manifest fetch is expected");
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     await integrationInvokeCommand.handler(
       commandContext({ io, service: service({ agentManifestUrl: null }) }),
@@ -3431,7 +3430,7 @@ test("integration list-actions JSON reports web-only only when no manifest is co
       { service: "pr-diff-viewer-3c05bd", listActions: true, json: true },
     );
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 
   const payload = JSON.parse(stdout.join("")) as {
@@ -3863,9 +3862,8 @@ test("legacy action execution reaches a proxy-only target and preserves a direct
   });
   const proxyPort = await listen(proxy);
 
-  const previousFetch = globalThis.fetch;
   let currentManifest = manifest();
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+  const previousFetch = setCanonicalFetchImplForTests((async (input: string | URL | Request, init?: RequestInit) => {
     const resolvedUrl = typeof input === "string" || input instanceof URL ? input.toString() : input.url;
     if (resolvedUrl.endsWith("/.well-known/slock-agent-manifest.json")) {
       return responseWithUrl(JSON.stringify(currentManifest), {
@@ -3874,7 +3872,7 @@ test("legacy action execution reaches a proxy-only target and preserves a direct
       }, resolvedUrl);
     }
     return previousFetch(input, init);
-  }) as typeof fetch;
+  }) as typeof fetch);
 
   const invoke = async (input: {
     baseUrl: string;
@@ -3916,7 +3914,7 @@ test("legacy action execution reaches a proxy-only target and preserves a direct
     });
     assert.equal(proxyConnects, proxyConnectsBeforeDirect, "the direct action must not use the proxy");
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
     for (const socket of proxySockets) socket.destroy();
     for (const socket of originSockets) socket.destroy();
     await Promise.all([
@@ -3945,8 +3943,7 @@ test("legacy action transport failures preserve a bounded cause without dispatch
   const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "raft-integration-action-timeout-"));
   writeStoredV0Session(profileDir, "pr-diff-viewer.botiverse.workers.dev");
   const { io } = memoryIo();
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: string | URL | Request) => {
+  const previousFetch = setCanonicalFetchImplForTests((async (input: string | URL | Request) => {
     const resolvedUrl = typeof input === "string" || input instanceof URL ? input.toString() : input.url;
     if (resolvedUrl.endsWith("/.well-known/slock-agent-manifest.json")) {
       return responseWithUrl(JSON.stringify(manifest()), {
@@ -3956,7 +3953,7 @@ test("legacy action transport failures preserve a bounded cause without dispatch
     }
     const timeoutCause = Object.assign(new Error("connection timed out"), { code: "ETIMEDOUT" });
     throw Object.assign(new TypeError("fetch failed"), { cause: timeoutCause });
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     await assert.rejects(
       async () => integrationInvokeCommand.handler(
@@ -3984,7 +3981,7 @@ test("legacy action transport failures preserve a bounded cause without dispatch
       },
     );
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 });
 

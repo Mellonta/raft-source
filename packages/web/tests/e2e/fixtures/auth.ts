@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { test } from "@playwright/test";
 import type { APIRequestContext, Browser, Page } from "@playwright/test";
-import { evidenceConfig, observeLogin } from "../../../../../scripts/e2e/transportEvidence.js";
-import type { LoginAttempt } from "../../../../../scripts/e2e/transportEvidence.js";
+import { evidenceConfig, observeLogin } from "../../../../../scripts/e2e/transportEvidence";
+import type { LoginAttempt } from "../../../../../scripts/e2e/transportEvidence";
 import { AUTH_STATE_PATH, STATE_DIR } from "./seedState";
 import type { PlaywrightSeedState } from "./seedState";
 

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { after, afterEach } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -59,7 +58,7 @@ const record = (args: unknown[]) => {
 console.error = (...args: unknown[]) => { record(args); };
 console.warn = (...args: unknown[]) => { record(args); };
 
-after(() => {
+afterAll(() => {
   console.error = originalConsoleError;
   console.warn = originalConsoleWarn;
 });

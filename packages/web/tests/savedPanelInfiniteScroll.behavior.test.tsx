@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, render as rtlRender, screen } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -9,7 +8,7 @@ import SavedPanel from "../src/components/saved/SavedPanel";
 import { useSavedStore } from "../src/store/savedStore";
 import type { SavedEntry } from "../src/store/savedStore";
 
-const SERIAL = { concurrency: false };
+const SERIAL = {};
 
 const initialSavedState = useSavedStore.getState();
 let intersectionCallback: IntersectionObserverCallback | null = null;

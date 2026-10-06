@@ -51,7 +51,7 @@ export default defineConfig({
       },
     },
     {
-      command: "pnpm --dir ../server exec tsx src/test/startPlaywrightServer.ts",
+      command: "pnpm --dir ../server exec node --import @oxc-node/core/register src/test/startPlaywrightServer.ts",
       url: `http://127.0.0.1:${apiPort}/health`,
       reuseExistingServer: !process.env.CI,
       env: {

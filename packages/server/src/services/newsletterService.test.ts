@@ -1,25 +1,24 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { afterEach } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { newsletterAudienceContacts, newsletterWebhookEvents, onboardingEmailJourneys, users } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
+import { getDb } from "../db/index";
+import { newsletterAudienceContacts, newsletterWebhookEvents, onboardingEmailJourneys, users } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
 import {
   backfillNewsletterAudience,
   resetNewsletterTestOverrides,
   setNewsletterConfigForTest,
   setNewsletterContactClientForTest,
   syncNewsletterSignup,
-} from "./newsletterService.js";
+} from "./newsletterService";
 import {
   resetComputerMobileAppEmailJourneyTestOverrides,
   setComputerMobileAppEmailJourneyConfigForTest,
-} from "./computerMobileAppEmailJourneyService.js";
+} from "./computerMobileAppEmailJourneyService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

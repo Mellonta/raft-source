@@ -1,11 +1,10 @@
-import { dbTest as test } from "../../test/integration/dbTest.js";
-import { closeTestDatabase } from "../../test/integration/database.js";
+import { dbTest as test } from "../../test/integration/dbTest";
+import { closeTestDatabase } from "../../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
-import { getDb } from "../../db/index.js";
-import { agents, channelAgents, channels, messages, reminderEvents, reminders, servers, users } from "../../db/schema.js";
-import { reminderSourceAcknowledgements } from "./sourceAckSchema.js";
+import { getDb } from "../../db/index";
+import { agents, channelAgents, channels, messages, reminderEvents, reminders, servers, users } from "../../db/schema";
+import { reminderSourceAcknowledgements } from "./sourceAckSchema";
 import {
   ackAuthorizedReminderFire,
   cancelReminder,
@@ -15,9 +14,9 @@ import {
   listReminders,
   toReminderSummaries,
   type TimeProvider,
-} from "./service.js";
-import { ackBuiltInAppSource } from "../../registry.manifest.js";
-import type { Recurrence } from "../../services/recurrence.js";
+} from "./service";
+import { ackBuiltInAppSource } from "../../registry.manifest";
+import type { Recurrence } from "../../services/recurrence";
 
 
 /**
@@ -423,9 +422,59 @@ test("reminder exact ACK writes one source-event-bound tombstone and repeats whi
   assert.equal(acknowledgements[0]?.ackAttemptId, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
 });
 
-test("reminder exact ACK treats newer fired source as stale before old tombstone idempotency", async ({ db }) => {
-
+test("reminder exact ACK can retire an older fired occurrence after recurring source advances", async ({ db }) => {
   const { server, agent, reminder, firstFire } = await seedFiredRecurringReminder();
+  const secondFire = firedOk(await fireReminder(
+    reminder.id,
+    firstFire.row.version,
+    { clock: clockAt(firstFire.row.fireAt) },
+  ));
+  assert.equal(secondFire.row.version, firstFire.row.version + 1);
+
+  const older = await ackAuthorizedReminderFire({
+    serverId: server.id,
+    actingAgentId: agent.id,
+    reminderId: reminder.id,
+    sourceVersion: reminder.version,
+    ackAttemptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  });
+  assert.equal(older.ok, true);
+  assert.equal(older.ok && older.sourceVersion, reminder.version);
+
+  const latest = await ackAuthorizedReminderFire({
+    serverId: server.id,
+    actingAgentId: agent.id,
+    reminderId: reminder.id,
+    sourceVersion: firstFire.row.version,
+    ackAttemptId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  });
+  assert.equal(latest.ok, true);
+  assert.equal(latest.ok && latest.sourceVersion, firstFire.row.version);
+
+  const acknowledgements = await getDb()
+    .select()
+    .from(reminderSourceAcknowledgements)
+    .where(eq(reminderSourceAcknowledgements.reminderId, reminder.id));
+  assert.deepEqual(
+    acknowledgements.map((ack) => ack.sourceVersion).sort((a, b) => a - b),
+    [reminder.version, firstFire.row.version],
+  );
+});
+
+test("canceled recurring reminder keeps each historical fire independently ACKable", async ({ db }) => {
+  const { server, agent, reminder, firstFire } = await seedFiredRecurringReminder();
+  const secondFire = firedOk(await fireReminder(
+    reminder.id,
+    firstFire.row.version,
+    { clock: clockAt(firstFire.row.fireAt) },
+  ));
+  const canceled = await cancelReminder(reminder.id, {
+    expectedVersion: secondFire.row.version,
+    clock: clockAt(secondFire.row.fireAt),
+  });
+  assert.ok(canceled);
+  assert.equal(canceled.status, "canceled");
+
   const firstAck = await ackAuthorizedReminderFire({
     serverId: server.id,
     actingAgentId: agent.id,
@@ -434,26 +483,34 @@ test("reminder exact ACK treats newer fired source as stale before old tombstone
     ackAttemptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   });
   assert.equal(firstAck.ok, true);
-
-  const secondFire = firedOk(await fireReminder(
-    reminder.id,
-    firstFire.row.version,
-    { clock: clockAt(firstFire.row.fireAt) },
-  ));
-  assert.equal(secondFire.row.version, firstFire.row.version + 1);
-
-  const stale = await ackAuthorizedReminderFire({
+  const secondAck = await ackAuthorizedReminderFire({
     serverId: server.id,
     actingAgentId: agent.id,
     reminderId: reminder.id,
-    sourceVersion: reminder.version,
+    sourceVersion: firstFire.row.version,
     ackAttemptId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
   });
-  assert.deepEqual(stale, {
-    ok: false,
-    reason: "stale_source_revision",
-    latestFiredSourceVersion: firstFire.row.version,
-  });
+  assert.equal(secondAck.ok, true);
+  assert.notEqual(
+    firstAck.ok && firstAck.sourceEventId,
+    secondAck.ok && secondAck.sourceEventId,
+    "each occurrence must bind a distinct fired event",
+  );
+
+  const acknowledgements = await getDb()
+    .select()
+    .from(reminderSourceAcknowledgements)
+    .where(eq(reminderSourceAcknowledgements.reminderId, reminder.id));
+  assert.deepEqual(
+    acknowledgements
+      .map((ack) => [ack.sourceVersion, ack.sourceEventId] as const)
+      .sort(([a], [b]) => a - b),
+    [
+      [reminder.version, firstAck.ok && firstAck.sourceEventId],
+      [firstFire.row.version, secondAck.ok && secondAck.sourceEventId],
+    ],
+  );
+  assert.equal((await getReminderById(reminder.id))?.status, "canceled");
 });
 
 test("same reminder ACK attempt can complete locally after Server accepted before a newer fire", async ({ db }) => {

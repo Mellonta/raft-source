@@ -8,7 +8,7 @@ import type {
   RuntimeSession,
   RuntimeSessionDescriptor,
   SpawnContext,
-} from "./types.js";
+} from "./types";
 
 function descriptorFromDriver(driver: RuntimeDriver): RuntimeSessionDescriptor {
   const lifecycle = driver.lifecycle.kind === "per_turn" ? "turn_based" : "persistent_stream";
@@ -189,11 +189,15 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
       if (text) this.events.emit("stderr", text);
     });
 
+    let errored = false;
+    let exitEmitted = false;
     process.on("error", (err) => {
+      errored = true;
       this.events.emit("error", err);
     });
 
     process.on("exit", (code, signal) => {
+      exitEmitted = true;
       this.events.emit("exit", {
         code,
         signal,
@@ -202,6 +206,12 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
     });
 
     process.on("close", (code, signal) => {
+      // A failed spawn (EACCES, ENOENT) gets `error` and `close`, never
+      // `exit`; `exit` is the session's one end-of-process event, so emit it.
+      if (errored && !exitEmitted) {
+        exitEmitted = true;
+        this.events.emit("exit", { code, signal, reason: "error" } satisfies RuntimeExitInfo);
+      }
       this.events.emit("close", {
         code,
         signal,

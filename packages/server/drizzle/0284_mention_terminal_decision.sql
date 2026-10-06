@@ -1,0 +1,1 @@
+ALTER TABLE "mention_delivery_occurrences" ADD COLUMN "terminal_decision" jsonb;

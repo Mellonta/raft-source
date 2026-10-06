@@ -1,28 +1,27 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import type { ReminderSummary } from "@botiverse/raft-shared";
 
-import type { ApiResponse } from "../client.js";
-import type { AgentContext } from "../auth/env.js";
-import { createCommandContext } from "../core/context.js";
-import { CliError } from "../core/errors.js";
-import type { CliIo } from "../core/io.js";
-import { attachmentUploadCommand } from "./attachment/upload.js";
-import { channelMembersCommand } from "./channel/members.js";
-import { integrationListCommand } from "./integration/list.js";
-import { integrationLoginCommand } from "./integration/login.js";
-import { integrationInvokeCommand } from "./integration/invoke.js";
-import { profileUpdateCommand } from "./profile/update.js";
-import { reminderCancelCommand } from "./reminder/cancel.js";
-import { reminderListCommand } from "./reminder/list.js";
-import { reminderLogCommand } from "./reminder/log.js";
-import { reminderSnoozeCommand } from "./reminder/snooze.js";
-import { reminderUpdateCommand } from "./reminder/update.js";
-import { taskClaimCommand } from "./task/claim.js";
-import { taskCreateCommand } from "./task/create.js";
-import { taskAmendCommand } from "./task/amend.js";
-import { taskHistoryCommand } from "./task/history.js";
+import type { ApiResponse } from "../client";
+import type { AgentContext } from "../auth/env";
+import { createCommandContext } from "../core/context";
+import { CliError } from "../core/errors";
+import type { CliIo } from "../core/io";
+import { attachmentUploadCommand } from "./attachment/upload";
+import { channelMembersCommand } from "./channel/members";
+import { integrationListCommand } from "./integration/list";
+import { integrationLoginCommand } from "./integration/login";
+import { integrationInvokeCommand } from "./integration/invoke";
+import { profileUpdateCommand } from "./profile/update";
+import { reminderCancelCommand } from "./reminder/cancel";
+import { reminderListCommand } from "./reminder/list";
+import { reminderLogCommand } from "./reminder/log";
+import { reminderSnoozeCommand } from "./reminder/snooze";
+import { reminderUpdateCommand } from "./reminder/update";
+import { taskClaimCommand } from "./task/claim";
+import { taskCreateCommand } from "./task/create";
+import { taskAmendCommand } from "./task/amend";
+import { taskHistoryCommand } from "./task/history";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -229,7 +228,7 @@ test("newly migrated commands use injected client and write canonical success ou
         ok({ status: "logged_in", service: service(), scopes: ["read"], requestId: "req-1" }),
         (ctx) => integrationLoginCommand.handler(ctx, { service: "docs", scope: ["read"] }),
       ),
-      stdout: /Agent login ready: Docs/,
+      stdout: /Raft grant active: Docs/,
     },
     {
       name: "profile update",

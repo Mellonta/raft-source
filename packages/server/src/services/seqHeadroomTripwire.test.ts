@@ -5,7 +5,6 @@
 // negative cases sit ADJACENT across each threshold so only real
 // threshold-reading logic stays green (no arithmetic coincidence).
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   INT4_MAX,
@@ -14,7 +13,7 @@ import {
   classifySeqHeadroom,
   probeSeqHeadroom,
   resetSeqHeadroomThrottleForTest,
-} from "./seqHeadroomTripwire.js";
+} from "./seqHeadroomTripwire";
 
 test("classify: adjacent values across the warn threshold disagree", () => {
   const warnAt = Math.ceil(INT4_MAX * SEQ_HEADROOM_WARN_RATIO);

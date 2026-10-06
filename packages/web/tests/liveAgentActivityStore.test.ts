@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { useLiveAgentActivityStore } from "../src/store/liveAgentActivityStore.js";
-import type { Agent } from "../src/store/agentStore.js";
+import { useLiveAgentActivityStore } from "../src/store/liveAgentActivityStore";
+import type { Agent } from "../src/store/agentStore";
 
 function resetStore() {
   useLiveAgentActivityStore.setState({ items: [] });

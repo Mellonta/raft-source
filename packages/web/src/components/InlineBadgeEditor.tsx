@@ -1,9 +1,14 @@
+import { Badge, DropdownMenuPopup } from "raft-ui";
+import type { BadgeProps } from "raft-ui";
+import MenuItem from "./ui/MenuItem";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Pencil, Check } from "lucide-react";
 
 import SelectionPopover from "./ui/SelectionPopover";
+import Tooltip from "./ui/Tooltip";
+import { dismissLayerProps } from "./ui/dismissLayer";
 
 interface InlineBadgeEditorProps {
   /** Display label shown in the badge */
@@ -18,6 +23,7 @@ interface InlineBadgeEditorProps {
   onToggle: () => void;
   onRequestClose?: () => void;
   badgeClassName: string;
+  badgeVariant?: BadgeProps["variant"];
   capitalize?: boolean;
   /**
    * Apply the brutal uppercase + tracking-wide transform on the
@@ -65,6 +71,7 @@ export default function InlineBadgeEditor({
   onToggle,
   onRequestClose,
   badgeClassName,
+  badgeVariant = "muted",
   capitalize,
   uppercase = true,
   dropdownMinWidth = "min-w-[120px]",
@@ -198,7 +205,7 @@ export default function InlineBadgeEditor({
         onSearchChange={onSearchChange ?? (() => {})}
         searchPlaceholder={searchPlaceholder}
         emptyLabel={emptyLabel}
-        className="w-[240px] border-2 border-black bg-white shadow-brutal"
+        className="w-[240px] border border-line-muted bg-layer-popover text-foreground-strong shadow-raft-md theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:text-black theme-brutal:shadow-brutal"
         options={options.map((opt) => ({
           key: opt.id,
           label: opt.label,
@@ -210,41 +217,28 @@ export default function InlineBadgeEditor({
       />
     </div>
   ) : open ? (
-    <div
+    <DropdownMenuPopup
       ref={dropdownRef}
       style={dropdownStyle}
-      className={`card-brutal overflow-y-auto ${dropdownMinWidth}`}
+      className={`overflow-y-auto ${dropdownMinWidth}`}
       data-testid={dropdownTestId}
+      {...dismissLayerProps}
       onMouseDown={(event) => event.stopPropagation()}
       onClick={(event) => event.stopPropagation()}
     >
-      {/* Dropdown chrome aligned to the Select / SelectionPopover family per
-          stdrc #proj-theme:ac79cf20 msg=832c2c02 + msg=b0b92c1c
-          (2026-05-25): no yellow hover, no yellow selected; hover =
-          `bg-soft-signal/30` (shared with SegmentedControl unselected
-          and MenuItem); ✓ on the right (trailing slot is the canonical
-          selected indicator). */}
-      {options.map((opt) => {
-        const isSelected = opt.id === selectedId;
-        return (
-          <button
-            key={opt.id}
-            type="button"
-            onClick={async () => {
-              await onSelect(opt.id);
-            }}
-            data-testid={optionTestIdPrefix ? `${optionTestIdPrefix}-${opt.id}` : undefined}
-            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-sm text-left transition-colors bg-white hover:bg-soft-signal/30"
-          >
-            <span className="flex min-w-0 items-center gap-2">
-              {opt.avatar}
-              <span className="truncate">{opt.label}</span>
-            </span>
-            <Check size={14} className={`shrink-0 ${isSelected ? "opacity-100" : "opacity-0"}`} />
-          </button>
-        );
-      })}
-    </div>
+      {options.map((opt) => (
+        <MenuItem
+          key={opt.id}
+          role="button"
+          onClick={async () => { await onSelect(opt.id); }}
+          data-testid={optionTestIdPrefix ? `${optionTestIdPrefix}-${opt.id}` : undefined}
+          icon={opt.avatar}
+          trailing={<Check size={14} className={`shrink-0 ${opt.id === selectedId ? "opacity-100" : "opacity-0"}`} />}
+        >
+          {opt.label}
+        </MenuItem>
+      ))}
+    </DropdownMenuPopup>
   ) : null;
 
   // Trigger badge matches the brutal Badge visual contract (stdrc
@@ -257,28 +251,33 @@ export default function InlineBadgeEditor({
   // state below uses `disabled:opacity-60`. stdrc msg=3d60f9dd #proj-theme
   // — the older `hover:opacity-70 transition-colors` was a mismatch
   // (transition target didn't cover opacity, so the state snapped).
-  const defaultButtonClassName = `mt-0.5 inline-flex items-center gap-1 border-2 border-black ${badgeClassName} px-2 py-0.5 text-xs font-bold ${uppercase ? "uppercase tracking-wide " : ""}text-black transition-[filter,opacity] duration-100 hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-60${capitalize ? " capitalize" : ""}`;
+  const defaultButtonClassName = `mt-0.5 inline-flex items-center gap-1 theme-brutal:border-2 theme-brutal:border-black ${badgeClassName} px-2 py-0.5 text-xs font-bold ${uppercase ? "uppercase tracking-wide " : ""}theme-brutal:text-black transition-[filter,opacity] duration-100 hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-60${capitalize ? " capitalize" : ""}`;
+
+  const badge = (
+    <Badge
+      render={<button ref={triggerRef} type="button" disabled={disabled} />}
+      appearance="soft"
+      variant={badgeVariant}
+      uppercase={uppercase}
+      onClick={onToggle}
+      data-testid={buttonTestId}
+      data-task-status={buttonDataTaskStatus}
+      data-slot="badge"
+      aria-label={buttonAriaLabel}
+      className={buttonClassName ?? defaultButtonClassName}
+    >
+      {buttonChildren ?? (
+        <>
+          {displayValue}
+          <Pencil size={10} className="opacity-40" />
+        </>
+      )}
+    </Badge>
+  );
 
   return (
     <>
-      <button
-        ref={triggerRef}
-        type="button"
-        onClick={onToggle}
-        disabled={disabled}
-        data-testid={buttonTestId}
-        data-task-status={buttonDataTaskStatus}
-        title={buttonTitle}
-        aria-label={buttonAriaLabel}
-        className={buttonClassName ?? defaultButtonClassName}
-      >
-        {buttonChildren ?? (
-          <>
-            {displayValue}
-            <Pencil size={10} className="opacity-40" />
-          </>
-        )}
-      </button>
+      {buttonTitle ? <Tooltip content={buttonTitle}>{badge}</Tooltip> : badge}
       {dropdown && createPortal(dropdown, document.body)}
     </>
   );

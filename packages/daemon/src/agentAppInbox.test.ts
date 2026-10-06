@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 
 import {
   AGENT_INBOX_PREVIEW_MAX_CHARS,
@@ -16,11 +15,11 @@ import {
   deriveStableItemId,
   type AgentAppInboxRegistry,
   type AgentAppSourceRefNormalizeResult,
-} from "./agentAppInbox.js";
+} from "./agentAppInbox";
 import {
   createScopedAppStorageFactory,
   type ScopedAppStorage,
-} from "./scopedAppStorage.js";
+} from "./scopedAppStorage";
 
 const SOURCE_REF_KEYS = new Set(["kind", "id", "revision"]);
 
@@ -114,7 +113,7 @@ function storeWithFixture(opts?: {
   beforeAck?: (item: import("@botiverse/raft-shared").AgentInboxAppItem) => boolean | void;
   beforeServerAuthorizedAck?: (
     item: import("@botiverse/raft-shared").AgentInboxAppItem,
-    intent: import("./agentAppInbox.js").AgentAppInboxAckIntent,
+    intent: import("./agentAppInbox").AgentAppInboxAckIntent,
   ) => boolean | void;
   storage?: ScopedAppStorage;
   trace?: (name: string, attrs: Record<string, unknown>, status?: "ok" | "error") => void;
@@ -241,6 +240,138 @@ test("source ACK rejection preserves the item and emits an error terminal", () =
     ack?.attrs.app_correlation_id,
     `source:agent-a:fixture:${REF_R1.id}:${REF_R1.revision}`,
   );
+});
+
+test("exact source seals survive restart and block both local and server-authorized ACK paths", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "agent-app-inbox-seal-"));
+  const storage = createTestStorage(dir);
+  try {
+    let beforeAckCalls = 0;
+    const first = storeWithFixture({
+      storage,
+      beforeAck: () => { beforeAckCalls += 1; return true; },
+    });
+    const minted = first.mint({ appId: "test.fixture", notificationClass: "due", sourceRef: REF_R1 });
+    assert.equal(minted.ok, true);
+    if (!minted.ok) return;
+    assert.equal(first.sealSources({
+      sources: [{ appId: minted.item.appId, notificationClass: minted.item.notificationClass, sourceRef: minted.item.sourceRef }],
+      owner: "@Stone",
+      until: "release deployed",
+    })?.length, 1);
+    assert.equal(first.ack(minted.item.itemId), false);
+    assert.equal(beforeAckCalls, 0, "seal guard runs before the source receipt callback");
+    const intent = first.beginServerAuthorizedAckIntent({ itemId: minted.item.itemId, ackAttemptId: "attempt-1" });
+    assert.equal(intent, null, "seal guard runs before a durable Server ACK intent is created");
+    assert.equal(first.completeServerAuthorizedAck({ itemId: minted.item.itemId, ackAttemptId: "attempt-1" }), false);
+
+    const restored = storeWithFixture({ storage });
+    assert.equal(restored.list()[0]?.seal?.owner, "@Stone");
+    assert.equal(restored.list()[0]?.seal?.until, "release deployed");
+    assert.equal(restored.list().length, 1);
+    assert.equal(restored.unsealSources({
+      sources: [{ appId: minted.item.appId, notificationClass: minted.item.notificationClass, sourceRef: minted.item.sourceRef }],
+    })?.length, 1);
+    assert.equal(restored.ack(minted.item.itemId), true, "explicit unseal restores normal behavior");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("version 3 persisted bytes restore before seals existed", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "agent-app-inbox-v3-"));
+  const storage = createTestStorage(dir);
+  try {
+    storage.writeTextAtomic(`${JSON.stringify({
+      version: 3,
+      items: [{
+        source: "app",
+        itemId: deriveStableItemId("test.fixture", "due", REF_R1),
+        appId: "test.fixture",
+        notificationClass: "due",
+        sourceRef: REF_R1,
+        primaryAction: { kind: "run_command", commandId: "fixture.log" },
+        actionCli: "raft fixture log --id aaaaaaaa",
+        retention: "until_source_read",
+        createdAtMs: 1_000,
+      }],
+      acknowledgedSources: [],
+      ackIntents: [],
+    })}\n`);
+    const restored = storeWithFixture({ storage });
+    assert.equal(restored.list().length, 1);
+    assert.equal(restored.list()[0]?.actionCli, "raft fixture log --id aaaaaaaa");
+    assert.equal(restored.list()[0]?.seal, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("seals match exact id plus revision even when a sibling revision was acknowledged", () => {
+  const store = storeWithFixture();
+  const newer = store.mint({ appId: "test.fixture", notificationClass: "due", sourceRef: REF_R2 });
+  assert.equal(newer.ok, true);
+  if (!newer.ok) return;
+  assert.equal(store.ack(newer.item.itemId), true);
+  const older = store.mint({ appId: "test.fixture", notificationClass: "due", sourceRef: REF_R1 });
+  assert.equal(older.ok, true);
+  if (!older.ok) return;
+  assert.equal(store.sealSources({
+    sources: [{ appId: "test.fixture", notificationClass: "due", sourceRef: REF_R1 }],
+    owner: "@Stone",
+    until: "release",
+  })?.length, 1);
+  assert.equal(store.list()[0]?.sourceRef.revision, "1");
+  assert.equal(store.list()[0]?.seal?.owner, "@Stone");
+  assert.equal(store.listAcknowledgedSources()[0]?.sourceRef.revision, "2");
+});
+
+test("a tuple seal protects later revisions by source id without projecting evidence onto them", () => {
+  const store = storeWithFixture();
+  assert.equal(store.sealSources({
+    sources: [{ appId: "test.fixture", notificationClass: "due", sourceRef: REF_R1 }],
+    owner: "@Stone",
+    until: "release",
+  })?.length, 1);
+  const newer = store.mint({ appId: "test.fixture", notificationClass: "due", sourceRef: REF_R2 });
+  assert.equal(newer.ok, true);
+  if (!newer.ok) return;
+  assert.equal(store.list()[0]?.seal, undefined, "later revision is not represented as the sealed evidence tuple");
+  assert.equal(store.findProtectingSeal(newer.item)?.sourceRef.revision, "1");
+  assert.equal(store.ack(newer.item.itemId), false, "id-level protection survives revision drift");
+  assert.equal(store.beginServerAuthorizedAckIntent({ itemId: newer.item.itemId, ackAttemptId: "attempt-new" }), null);
+});
+
+test("an id-only detached seal protects a later item and round-trips without item projection", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "agent-app-inbox-id-only-seal-"));
+  const storage = createTestStorage(dir);
+  try {
+    const store = storeWithFixture({ storage });
+    const idOnly = { kind: REF_R1.kind, id: REF_R1.id };
+    assert.equal(store.sealSources({
+      sources: [{ appId: "test.fixture", notificationClass: "due", sourceRef: idOnly }],
+      owner: "@Stone",
+      until: "release",
+    })?.length, 1);
+    const restored = storeWithFixture({ storage });
+    assert.equal(restored.listSeals()[0]?.sourceRef.revision, undefined);
+    const minted = restored.mint({ appId: "test.fixture", notificationClass: "due", sourceRef: REF_R2 });
+    assert.equal(minted.ok, true);
+    if (!minted.ok) return;
+    assert.equal(restored.list()[0]?.seal, undefined);
+    assert.equal(restored.findProtectingSeal(minted.item)?.sourceRef.revision, undefined);
+    assert.equal(restored.ack(minted.item.itemId), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("seal registry rejects invalid labels and duplicate source identities atomically", () => {
+  const store = storeWithFixture();
+  const source = { appId: "test.fixture", notificationClass: "due", sourceRef: REF_R1 };
+  assert.equal(store.sealSources({ sources: [source], owner: " ", until: "release" }), null);
+  assert.equal(store.sealSources({ sources: [source, source], owner: "@Stone", until: "release" }), null);
+  assert.deepEqual(store.listSeals(), []);
 });
 
 test("server-authorized ACK intent persists, reuses attempt id, and completes exact item atomically", () => {
@@ -555,7 +686,7 @@ test("until_source_read persists across store recreation; transient never reache
 test("invalid persisted JSON emits a scoped decode failure before restore rejects", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "agent-app-inbox-invalid-json-"));
   try {
-    const failures: import("./scopedAppStorage.js").ScopedAppStorageFailureEvent[] = [];
+    const failures: import("./scopedAppStorage").ScopedAppStorageFailureEvent[] = [];
     const storage = createScopedAppStorageFactory({
       slockHome: dir,
       owner: { machineId: "machine-test", serverId: "server-test" },
@@ -584,7 +715,7 @@ test("invalid persisted JSON emits a scoped decode failure before restore reject
 test("semantically invalid persisted payload emits exactly one scoped decode failure", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "agent-app-inbox-invalid-envelope-"));
   try {
-    const failures: import("./scopedAppStorage.js").ScopedAppStorageFailureEvent[] = [];
+    const failures: import("./scopedAppStorage").ScopedAppStorageFailureEvent[] = [];
     const storage = createScopedAppStorageFactory({
       slockHome: dir,
       owner: { machineId: "machine-test", serverId: "server-test" },
@@ -621,7 +752,7 @@ test("unexpected restore callback failure is reported once as internal_error", (
       sourceRef: REF_R1,
     }).ok, true);
 
-    const failures: import("./scopedAppStorage.js").ScopedAppStorageFailureEvent[] = [];
+    const failures: import("./scopedAppStorage").ScopedAppStorageFailureEvent[] = [];
     const observedStorage = createScopedAppStorageFactory({
       slockHome: dir,
       owner: { machineId: "machine-test", serverId: "server-test" },

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -80,7 +79,7 @@ test("download-as-image uses a tablet-width cap without lowering pixel ratio", (
   // Measuring
   // `parentElement` (the chat column) lets the container become wider than
   // where the row actually sits, and html-to-image's <foreignObject> re-lays
-  // out inline-block children like `<MSG_REF_CHIP>` (`#proj-growth`) →
+  // out inline children like the message reference chips (`#proj-growth`) →
   // overflow. Letting a wide desktop row through uncapped makes single-message
   // shares look flat once scaled into the preview lightbox.
   const screenshot = readFileSync(resolve(repoRoot, "src/utils/selectScreenshot.ts"), "utf8");
@@ -169,21 +168,21 @@ test("download-as-image bounds broken attachment image fetches before placeholde
   assert.ok(placeholderIndex > timeoutIndex, "timed-out image fetches should fall back to the placeholder path");
 });
 
-test("download-as-image materializes pixel avatars before rasterization", () => {
+test("pixel avatars are already single data-URL images, so capture needs no grid inliner (task #137)", () => {
   const screenshot = readFileSync(resolve(repoRoot, "src/utils/selectScreenshot.ts"), "utf8");
+  const avatar = readFileSync(resolve(repoRoot, "src/components/agent/PixelAvatar.tsx"), "utf8");
 
-  assert.match(screenshot, /function inlinePixelAvatarsForScreenshot/);
-  assert.match(screenshot, /\[data-agent-pixel-avatar\]/);
-  assert.match(screenshot, /data:image\/svg\+xml;charset=utf-8/);
-  assert.match(screenshot, /shape-rendering="crispEdges"/);
-  assert.match(screenshot, /img\.style\.imageRendering = "pixelated"/);
-
-  const pixelInlineIndex = screenshot.indexOf("inlinePixelAvatarsForScreenshot(container);");
-  const imageQueryIndex = screenshot.indexOf('container.querySelectorAll("img")');
-  const rasterizeIndex = screenshot.indexOf("return await toPng(container");
-  assert.ok(pixelInlineIndex >= 0, "pixel avatar inlining should be explicit");
-  assert.ok(imageQueryIndex > pixelInlineIndex, "pixel avatars should become data-url images before generic image inlining");
-  assert.ok(rasterizeIndex > pixelInlineIndex, "pixel avatars must be inlined before html-to-image rasterizes");
+  // One builder for the live avatar AND the capture fallback.
+  assert.match(avatar, /export function pixelAvatarDataUrl\(/);
+  assert.match(avatar, /data:image\/svg\+xml;charset=utf-8/);
+  assert.match(avatar, /shape-rendering="crispEdges"/);
+  assert.match(screenshot, /pixelAvatarDataUrl\(DEFAULT_AVATAR_KEY\)/, "the capture default agent avatar comes from the same builder");
+  // The live avatar is one <img> (no 64-cell CSS grid for html-to-image to lose).
+  assert.match(avatar, /<img\s[^>]*data-agent-pixel-avatar="true"/s);
+  assert.doesNotMatch(avatar, /gridTemplateColumns/);
+  assert.doesNotMatch(screenshot, /inlinePixelAvatarsForScreenshot/);
+  // Avatars then take the generic image path like every other <img>.
+  assert.ok(screenshot.indexOf('container.querySelectorAll("img")') < screenshot.indexOf("return await toPng(container"));
 });
 
 test("download-as-image uses a public no-auth fetch for uploaded avatar URLs", () => {

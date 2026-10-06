@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { currentDate } from "@botiverse/raft-shared";
-import { readBuildIdentityStatus, SERVER_VERSION, type BuildIdentityStatus } from "../version.js";
+import { readBuildIdentityStatus, SERVER_VERSION, type BuildIdentityStatus } from "../version";
+import { errorClassOf } from "../tracing/semanticTrace";
 
 export type AgentMigrationWorkerName = "receipt_outbox" | "remediation";
 export type AgentMigrationWorkerDrainOutcome = "empty" | "served" | "failed";
 
 export type AgentMigrationWorkerObservation = {
-  event: "startup" | "drain";
+  event: "startup" | "drain" | "receipt_retry_exhausted";
   worker: AgentMigrationWorkerName;
-  outcome: "started" | AgentMigrationWorkerDrainOutcome;
+  outcome: "started" | AgentMigrationWorkerDrainOutcome | "parked";
   observed_at: string;
   runtime_id: string;
   server_version: string;
@@ -16,11 +17,35 @@ export type AgentMigrationWorkerObservation = {
   release_sha: string | null;
   release_branch: string | null;
   release_built_at: string | null;
+  /**
+   * Identity of the exception behind an outcome=failed transition. Bounded
+   * (exception name or typeof); present only on failure observations that
+   * carry one. Repeated failures stay heartbeat-bounded — per the drain
+   * contract, this classifies the transition, it does not count occurrences.
+   */
+  error_class?: string;
+  /** receipt_retry_exhausted only: the parked outbox row (ids, never content). */
+  outbox_id?: string;
+  migration_id?: string;
+  receipt_kind?: string;
+  attempt_count?: number;
+  /** Code-shaped last delivery error, or "unclassified". */
+  last_error_code?: string;
 };
+
+export interface AgentMigrationReceiptRetryExhaustion {
+  outboxId: string;
+  migrationId: string;
+  receiptKind: string;
+  attemptCount: number;
+  lastError: string | null;
+}
 
 export interface AgentMigrationWorkerObservability {
   startup(): void;
-  drain(outcome: AgentMigrationWorkerDrainOutcome): void;
+  drain(outcome: AgentMigrationWorkerDrainOutcome, error?: unknown): void;
+  /** A receipt outbox row hit its retry cap and is parked. Emitted once per row, never bounded. */
+  receiptRetryExhausted?(row: AgentMigrationReceiptRetryExhaustion): void;
 }
 
 const DEFAULT_OUTCOME_HEARTBEAT_MS = 5 * 60_000;
@@ -47,8 +72,14 @@ function observationIdentity(status: BuildIdentityStatus): Pick<
 }
 
 function defaultEmit(observation: AgentMigrationWorkerObservation): void {
+  if (observation.event === "receipt_retry_exhausted") {
+    console.warn("[AgentMigrationWorker]", JSON.stringify(observation));
+    return;
+  }
   console.info("[AgentMigrationWorker]", JSON.stringify(observation));
 }
+
+const ERROR_CODE_SHAPE = /^[A-Za-z0-9_:.-]{1,160}$/;
 
 /**
  * Emits a privacy-safe lifecycle signal for one worker instance.
@@ -82,6 +113,8 @@ export function createAgentMigrationWorkerObservability(input: {
     event: AgentMigrationWorkerObservation["event"],
     outcome: AgentMigrationWorkerObservation["outcome"],
     observedAt: Date,
+    error?: unknown,
+    extra: Partial<AgentMigrationWorkerObservation> = {},
   ) => {
     const observation: AgentMigrationWorkerObservation = {
       event,
@@ -91,6 +124,8 @@ export function createAgentMigrationWorkerObservability(input: {
       runtime_id: runtimeId,
       server_version: serverVersion,
       ...observationIdentity(buildIdentity),
+      ...(error === undefined ? {} : { error_class: errorClassOf(error) }),
+      ...extra,
     };
     try {
       emit(observation);
@@ -105,7 +140,7 @@ export function createAgentMigrationWorkerObservability(input: {
       startupEmitted = true;
       emitSafely("startup", "started", now());
     },
-    drain(outcome) {
+    drain(outcome, error) {
       const observedAt = now();
       const elapsedMs = lastDrainEmittedAtMs === null
         ? Number.POSITIVE_INFINITY
@@ -116,7 +151,16 @@ export function createAgentMigrationWorkerObservability(input: {
       }
       lastDrainOutcome = outcome;
       lastDrainEmittedAtMs = observedAt.getTime();
-      emitSafely("drain", outcome, observedAt);
+      emitSafely("drain", outcome, observedAt, error);
+    },
+    receiptRetryExhausted(row) {
+      emitSafely("receipt_retry_exhausted", "parked", now(), undefined, {
+        outbox_id: row.outboxId,
+        migration_id: row.migrationId,
+        receipt_kind: row.receiptKind,
+        attempt_count: row.attemptCount,
+        last_error_code: row.lastError && ERROR_CODE_SHAPE.test(row.lastError) ? row.lastError : "unclassified",
+      });
     },
   };
 }
@@ -134,6 +178,8 @@ export function classifyAgentMigrationReceiptDrain(input: {
 export function classifyAgentMigrationRemediationDrain(input: {
   autoStart: boolean;
   cancellation: boolean;
+  deadline: boolean;
+  sourceArchive: boolean;
 }): AgentMigrationWorkerDrainOutcome {
-  return input.autoStart || input.cancellation ? "served" : "empty";
+  return input.autoStart || input.cancellation || input.deadline || input.sourceArchive ? "served" : "empty";
 }

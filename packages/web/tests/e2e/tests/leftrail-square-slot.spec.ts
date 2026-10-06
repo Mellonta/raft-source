@@ -35,12 +35,12 @@ test.describe("LeftRail ServerName slot is always square", () => {
       const seedState = await waitForSeedState();
       await loginViaApi(request, seedState);
       await page.goto(seedState.urls.web);
-      // Wait for LeftRail to mount (md+ only).
+      // Wait for the rail to mount (md+ only). Since the RUI migration
+      // (#7347) the ServerName slot is the AppRail header — the wrapper
+      // around the server-initial button at the top of the yellow rail —
+      // addressed by its data-slot hook, not the old class chain.
       const railSlot = page.locator(
-        // The ServerName slot is the wrapper around the server-initial
-        // button at LeftRail.tsx:89 — the only h-panel-header inside the
-        // yellow rail.
-        "div.bg-soft-signal.border-r-2 > div.h-panel-header",
+        '[data-slot="app-rail-root"] > [data-slot="app-rail-header"]',
       ).first();
       await expect(railSlot).toBeVisible({ timeout: 10_000 });
 

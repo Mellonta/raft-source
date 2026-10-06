@@ -1,6 +1,6 @@
-#!/usr/bin/env tsx
-import { closeDatabase, initDatabase } from "../src/db/index.js";
-import { backfillNewsletterAudience } from "../src/services/newsletterService.js";
+#!/usr/bin/env -S node --import=@oxc-node/core/register
+import { closeDatabase, initDatabase } from "../src/db/index";
+import { backfillNewsletterAudience } from "../src/services/newsletterService";
 
 type CliOptions = {
   batchSize: number;
@@ -39,7 +39,7 @@ function usage() {
   console.error(
     [
       "Usage:",
-      "  DATABASE_URL=... RESEND_API_KEY=... RESEND_NEWSLETTER_SEGMENT_ID=... tsx scripts/backfill-newsletter-audience.ts [--batch-size 500] [--limit 5000] [--dry-run]",
+      "  DATABASE_URL=... RESEND_API_KEY=... RESEND_NEWSLETTER_SEGMENT_ID=... node --import @oxc-node/core/register scripts/backfill-newsletter-audience.ts [--batch-size 500] [--limit 5000] [--dry-run]",
       "",
       "Options:",
       "  --batch-size <n>  Number of users to scan per batch (default: 500)",

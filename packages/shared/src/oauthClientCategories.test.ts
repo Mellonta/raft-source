@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   LEGACY_OAUTH_CLIENT_CATEGORY_ALIASES,
   OAUTH_CLIENT_CATEGORIES,
   canonicalizeOAuthClientCategory,
-} from "./oauthClientCategories.js";
+} from "./oauthClientCategories";
 
 test("Connected App categories expose the complete intent-based taxonomy in display order", () => {
   assert.deepEqual(OAUTH_CLIENT_CATEGORIES, [

@@ -25,8 +25,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$DIST_DIR" ] && [ -n "$VERSION" ] || usage
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-  echo "::error::Version must be a plain semver" >&2
+# Plain stable semver, or a feature-channel build stamped
+# <major>.<minor>.<patch>-<channel>.<n> (task #816; same shape as
+# classify-release-tag.mjs emits). RC builds are stamped with the plain base
+# version, so no other pre-release form is accepted here.
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9][a-z0-9-]{1,62}[a-z0-9]\.[1-9][0-9]*)?$ ]] || {
+  echo "::error::Version must be a plain semver or a feature-channel version (<x.y.z>-<channel>.<n>)" >&2
   exit 1
 }
 [ "$(uname -s)" = "Darwin" ] || {

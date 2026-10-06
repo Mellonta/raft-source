@@ -1,20 +1,23 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { afterEach, vi } from "vitest";
 import {
   AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
   AGENT_MIGRATION_COMMIT_MARKER_PATH,
   AGENT_MIGRATION_CONTROL_SCHEMA_VERSION,
-  AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
+  AGENT_MIGRATION_DEFAULT_CHUNK_BYTES,
+  AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES,
+  AGENT_MIGRATION_CAPABILITY,
   AGENT_MIGRATION_RESUMABLE_PROTOCOL,
+  BasicTracer,
   MAX_AGENT_MIGRATION_TRANSPORT_BYTES,
+  MemoryTraceSink,
   type AgentMigrationControlManifest,
   type ServerToMachineMessage,
 } from "@botiverse/raft-shared";
 import { eq, sql } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   agentMigrationReceiptChannels,
   agentMigrationReceiptOutbox,
@@ -26,15 +29,15 @@ import {
   machines,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   AGENT_MIGRATION_AUTO_START_LEASE_MS,
+  AGENT_MIGRATION_MAX_DURATION_MS,
   AGENT_MIGRATION_AUTO_START_MAX_RETRY_ATTEMPTS,
   AGENT_MIGRATION_AUTO_START_REMEDIATION_WINDOW_MS,
+  AGENT_MIGRATION_ORPHANED_ARRIVAL_GRACE_MS,
   DEFAULT_AGENT_MIGRATION_TRANSPORT_MAX_BYTES,
-  abortAgentMigration,
   agentMigrationGeneration,
-  beginAgentMigration,
   beginAgentMigrationProvisioning,
   buildAgentMigrationCancellationDeliveries,
   claimAgentMigrationAutoStartRemediation,
@@ -43,35 +46,47 @@ import {
   completeAgentMigrationAutoStart,
   createAgentMigrationLifecycleEvent,
   evaluateAgentMigrationTransferLeaseReady,
-  flipAgentMigrationMachine,
   getActiveAgentMigration,
   getAgentMigrationGateStatus,
-  getAgentMigrationHistory,
-  isAgentZenMigrating,
+  getLatestAgentMigration,
   markAgentMigrationTargetImportArrived,
-  markAgentMigrationReady,
-  markAgentMigrationTransportLost,
-  markAgentMigrationTransportProvisioned,
+  markAgentMigrationTransportLostForComputer,
   planZenMigratingDelivery,
   planAgentMigrationChunkTransfers,
   projectAgentMigrationUpdatedPayload,
   provisionAgentMigrationObjectStoreTransfer,
   recordAgentMigrationChunkReceipt,
   recordAgentMigrationSourceWorkspaceArchived,
+  recordAgentMigrationSourceBuildProgress,
   recordAgentMigrationSourceQuiesced,
   recordAgentMigrationAutoStartFailure,
   requestAgentMigrationCancellation,
   acknowledgeAgentMigrationCancellation,
+  prepareAgentMigrationStreamedChunk,
   registerAgentMigrationControlManifest,
-  startAgentMigrationTransfer,
-} from "./agentMigrationService.js";
+  sweepElapsedAgentMigrationDeadline,
+  AGENT_MIGRATION_SOURCE_ARCHIVE_MAX_ATTEMPTS,
+  claimAgentMigrationSourceArchiveRetry,
+  recordAgentMigrationSourceArchiveAttemptFailed,
+  recordAgentMigrationSourceWorkspaceArchivedById,
+  AGENT_MIGRATION_LEASE_REPROVISION_MIN_AGE_MS,
+  reprovisionAgentMigrationTransport,
+  reissueAgentMigrationTargetLease,
+  agentMigrationLostRunRecovery,
+} from "./agentMigrationService";
+import {
+  beginTestAgentMigration,
+  flipTestAgentMigration,
+  markTestAgentMigrationReady,
+  startTestAgentMigrationTransfer,
+} from "../test/agentMigrationFixture";
 import {
   drainAgentMigrationRemediation,
   startAgentMigrationRemediationWorker,
-} from "./agentMigrationRemediationWorker.js";
-import { AgentOrchestrator } from "./agentOrchestrator.js";
-import { createMessage, deliverMessageToAgent } from "./messageService.js";
-import type { ReplicaStateStore } from "./replicaStateStore.js";
+} from "./agentMigrationRemediationWorker";
+import { AgentOrchestrator } from "./agentOrchestrator";
+import { createMessage, deliverMessageToAgent } from "./messageService";
+import type { ReplicaStateStore } from "./replicaStateStore";
 
 
 afterEach(async () => {
@@ -176,6 +191,8 @@ function makeAvailableReplicaStateStore(): ReplicaStateStore {
     releaseWakeLock: async () => {},
     setAgentActivity: async () => {},
     getAgentActivity: async () => null,
+    getWakeCrashLoopState: async () => null,
+    compareAndSetWakeCrashLoopState: async () => true,
     setAgentRuntimeError: async () => {},
     getAgentRuntimeError: async () => null,
     setMachineMeta: async () => {},
@@ -210,13 +227,19 @@ class TestAgentOrchestrator extends AgentOrchestrator {
   }
 }
 
+/** Whether ordinary deliveries to the agent are queued behind its active migration. */
+async function zenMigrating(agentId: string, now?: Date): Promise<boolean> {
+  const migration = await getActiveAgentMigration(agentId, getDb(), now);
+  return planZenMigratingDelivery({ migration, now }).action === "queue";
+}
+
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 test("server lifecycle wires the migration remediation worker and stops it on shutdown", async () => {
   const source = await readFile(new URL("../server.ts", import.meta.url), "utf8");
-  assert.match(source, /import \{ startAgentMigrationRemediationWorker \} from "\.\/services\/agentMigrationRemediationWorker\.js";/);
+  assert.match(source, /import \{ startAgentMigrationRemediationWorker \} from "\.\/services\/agentMigrationRemediationWorker";/);
   assert.match(source, /const agentMigrationRemediationWorker = startAgentMigrationRemediationWorker\(\{\s*io,\s*orchestrator: agentOrchestrator,\s*\}\);/s);
   assert.match(source, /agentMigrationRemediationWorker\.stop\(\);/);
 });
@@ -264,6 +287,72 @@ async function seedMigrationFixture() {
   return { user, server, sourceMachine, targetMachine, agent };
 }
 
+test("progress slides the transfer and arrival deadlines, never past six hours from creation", async ({ db }) => {
+  const { server, sourceMachine, targetMachine, agent } = await seedMigrationFixture();
+  const t0 = new Date("2099-07-05T17:00:00.000Z");
+  const at = (ms: number) => new Date(t0.getTime() + ms);
+  const minutes = (count: number) => count * 60 * 1000;
+  const provisioned = await beginAgentMigrationProvisioning({
+    agentId: agent.id,
+    targetMachineId: targetMachine.id,
+    now: t0,
+    transportSessionId: "session-deadline-slide",
+  });
+  // The lease outlives the longest migration; the deadlines stop a stalled one.
+  assert.equal(provisioned.migration.transportExpiresAt?.getTime(), at(AGENT_MIGRATION_MAX_DURATION_MS).getTime());
+  assert.equal(provisioned.migration.transferDeadlineAt.getTime(), at(minutes(60)).getTime());
+  const arrivalWindow = provisioned.migration.arrivalDeadlineAt.getTime() - provisioned.migration.transferDeadlineAt.getTime();
+  const sourceActor = {
+    migrationId: provisioned.migration.id,
+    serverId: server.id,
+    sourceMachineId: sourceMachine.id,
+    transportToken: provisioned.source.message.bearerToken,
+  };
+  const generation = provisioned.source.message.transportGeneration!;
+  await recordAgentMigrationSourceQuiesced({
+    ...sourceActor,
+    receipt: {
+      schemaVersion: "agent-migration-quiesce/v1",
+      migrationId: provisioned.migration.id,
+      migrationGeneration: generation,
+      agentId: agent.id,
+      sourceMachineId: sourceMachine.id,
+      sourceRuntimeState: "stopped",
+      stoppedAt: at(1_000).toISOString(),
+      actor: "migration",
+      launchSessionIdentity: "launch:launch-1:session:session-1",
+      expectedRuntimeRevision: String(provisioned.source.message.expectedMigrationRevision),
+    },
+    now: at(1_000),
+  });
+  let files = 0;
+  const progressAt = async (ms: number) => {
+    files += 1;
+    const result = await recordAgentMigrationSourceBuildProgress({
+      ...sourceActor,
+      report: { migrationGeneration: generation, phase: "packing", files, bytes: files },
+      now: at(ms),
+    });
+    assert.equal(result.advanced, true);
+    return result.migration;
+  };
+
+  const early = await progressAt(minutes(20));
+  assert.equal(early.transferDeadlineAt.getTime(), at(minutes(60)).getTime(), "progress never shortens the transfer deadline");
+  const late = await progressAt(minutes(55));
+  assert.equal(late.transferDeadlineAt.getTime(), at(minutes(85)).getTime(), "one transfer idle window after progress");
+  assert.equal(late.arrivalDeadlineAt.getTime() - late.transferDeadlineAt.getTime(), arrivalWindow);
+  assert.equal(late.prepDeadlineAt.getTime(), at(minutes(65)).getTime());
+  assert.equal(late.revision, early.revision, "sliding deadlines does not bump revision");
+
+  const nearCap = await progressAt(minutes(5 * 60 + 45));
+  assert.equal(nearCap.transferDeadlineAt.getTime(), at(AGENT_MIGRATION_MAX_DURATION_MS).getTime(), "capped six hours after creation");
+  assert.equal(nearCap.arrivalDeadlineAt.getTime() - nearCap.transferDeadlineAt.getTime(), arrivalWindow);
+  const atCap = await progressAt(minutes(5 * 60 + 55));
+  assert.equal(atCap.transferDeadlineAt.getTime(), at(AGENT_MIGRATION_MAX_DURATION_MS).getTime());
+  assert.equal(atCap.prepDeadlineAt.getTime(), at(AGENT_MIGRATION_MAX_DURATION_MS).getTime(), "prep never outlasts the transfer deadline");
+});
+
 test("contract-v1 begin is rejected before migration or receipt-surface mutation", async ({ db: database }) => {
 
   const { user, server, sourceMachine, targetMachine, agent } = await seedMigrationFixture();
@@ -306,7 +395,7 @@ test("contract-v1 begin is rejected before migration or receipt-surface mutation
 });
 
 async function completeArrivingMigration(input: {
-  grantKey: string;
+  migrationId: string;
   agentId: string;
   targetMachineId: string;
   initiatedByUserId: string;
@@ -315,21 +404,21 @@ async function completeArrivingMigration(input: {
   now: Date;
 }) {
   const db = getDb();
-  const [migration] = await db.select().from(agentMigrations).where(eq(agentMigrations.grantKey, input.grantKey));
+  const [migration] = await db.select().from(agentMigrations).where(eq(agentMigrations.id, input.migrationId));
   assert.ok(migration);
   await db.update(agentMigrations).set({
     initiatedByUserId: input.initiatedByUserId,
     transferSummary: TEST_TRANSFER_SUMMARY,
   }).where(eq(agentMigrations.id, migration.id));
   const archived = await recordAgentMigrationSourceWorkspaceArchived({
-    grantKey: input.grantKey,
+    migrationId: input.migrationId,
     migrationGeneration: agentMigrationGeneration(migration),
     serverId: migration.serverId,
     targetMachineId: input.targetMachineId,
     now: input.now,
   });
   const arrival = await markAgentMigrationTargetImportArrived({
-    grantKey: input.grantKey,
+    migrationId: input.migrationId,
     migrationGeneration: archived.migrationGeneration,
     serverId: migration.serverId,
     targetMachineId: input.targetMachineId,
@@ -339,7 +428,7 @@ async function completeArrivingMigration(input: {
   });
   assert.equal(arrival.migration.state, "starting");
   return await completeAgentMigrationAutoStart({
-    grantKey: input.grantKey,
+    migrationId: input.migrationId,
     agentId: input.agentId,
     targetMachineId: input.targetMachineId,
     now: input.now,
@@ -348,39 +437,36 @@ async function completeArrivingMigration(input: {
 
 async function seedAutoStartFailedMigration(input: {
   now?: Date;
-  stage?: "orchestrator" | "start_agent" | "legacy";
-  code?: "orchestrator_unavailable" | "start_not_dispatched" | "start_threw" | "legacy_auto_start_failed";
+  stage?: "orchestrator" | "start_agent";
+  code?: "orchestrator_unavailable" | "start_not_dispatched" | "start_threw";
 } = {}) {
   const { user, server, sourceMachine, targetMachine, agent } = await seedMigrationFixture();
   const startedAt = input.now ?? new Date("2026-07-05T14:00:00.000Z");
-  const migration = await beginAgentMigration({
+  const provisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     now: startedAt,
   });
-  await markAgentMigrationReady({
-    grantKey: migration.grantKey,
-    manifestPath: "manifest.json",
-    now: new Date(startedAt.getTime() + 60_000),
-  });
-  await startAgentMigrationTransfer(migration.grantKey, new Date(startedAt.getTime() + 120_000));
-  const arriving = await flipAgentMigrationMachine(migration.grantKey, new Date(startedAt.getTime() + 180_000));
+  const { migration } = provisioning;
+  await markTestAgentMigrationReady(provisioning, { now: new Date(startedAt.getTime() + 60_000) });
+  await startTestAgentMigrationTransfer(migration.id, new Date(startedAt.getTime() + 120_000));
+  const arriving = await flipTestAgentMigration(migration.id, new Date(startedAt.getTime() + 180_000));
   const archived = await recordAgentMigrationSourceWorkspaceArchived({
-    grantKey: migration.grantKey,
+    migrationId: migration.id,
     migrationGeneration: agentMigrationGeneration(arriving),
     serverId: server.id,
     targetMachineId: targetMachine.id,
     now: new Date(startedAt.getTime() + 210_000),
   });
   await markAgentMigrationTargetImportArrived({
-    grantKey: migration.grantKey,
+    migrationId: migration.id,
     migrationGeneration: archived.migrationGeneration,
     serverId: server.id,
     targetMachineId: targetMachine.id,
     now: new Date(startedAt.getTime() + 240_000),
   });
   const failed = await recordAgentMigrationAutoStartFailure({
-    grantKey: migration.grantKey,
+    migrationId: migration.id,
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     stage: input.stage ?? "start_agent",
@@ -390,7 +476,7 @@ async function seedAutoStartFailedMigration(input: {
   return { user, server, sourceMachine, targetMachine, agent, migration: failed };
 }
 
-test("object-store transfer provisioner mints presigned PUT and GET URLs from storage", async () => {
+test("object-store transfer provisioner presigns no whole-bundle URL", async () => {
   const calls: Array<{ kind: string; key: string; expiresIn?: number }> = [];
   const storage = {
     put: async () => undefined,
@@ -416,14 +502,8 @@ test("object-store transfer provisioner mints presigned PUT and GET URLs from st
   });
   assert.equal(provision.provider, "object_store");
   assert.equal(provision.sessionId, "session-test");
-  assert.equal(provision.storageKey, "agent-migrations/session-test/bundle");
-  assert.equal(provision.sourceTransferUrl, "https://r2.example.test/agent-migrations/session-test/bundle?put=1");
-  assert.equal(provision.targetTransferUrl, "https://r2.example.test/agent-migrations/session-test/bundle?get=1");
   assert.equal(provision.maxBytes, 4096);
-  assert.deepEqual(calls, [
-    { kind: "put", key: "agent-migrations/session-test/bundle", expiresIn: 120 },
-    { kind: "get", key: "agent-migrations/session-test/bundle", expiresIn: 120 },
-  ]);
+  assert.deepEqual(calls, [], "chunks are presigned per transfer");
 });
 
 test("object-store transfer provisioner defaults to the 10 GiB compressed-bundle cap", async () => {
@@ -454,8 +534,6 @@ test("resumable migration persists the source fence and plans only chunks missin
     targetMachineId: targetMachine.id,
     now: t0,
     transportSessionId: "session-resumable",
-    sourceTransferUrl: "https://unused.example.test/source",
-    targetTransferUrl: "https://unused.example.test/target",
     transportLeaseMs: 60 * 60 * 1000,
     transportMaxBytes: 10_000,
   });
@@ -474,7 +552,7 @@ test("resumable migration persists the source fence and plans only chunks missin
       sourceMachineId: sourceMachine.id,
       targetMachineId: targetMachine.id,
     },
-    capability: { required: [...AGENT_MIGRATION_RESUMABLE_CAPABILITIES] },
+    capability: { required: [AGENT_MIGRATION_CAPABILITY] },
     bundle: {
       contentType: AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
       totalBytes: 7,
@@ -542,11 +620,56 @@ test("resumable migration persists the source fence and plans only chunks missin
     }),
     /MIGRATION_SOURCE_QUIESCE_RECEIPT_INVALID/,
   );
-  await recordAgentMigrationSourceQuiesced({
+  const quiesced = await recordAgentMigrationSourceQuiesced({
     ...sourceActor,
     receipt,
     now: new Date(t0.getTime() + 2_000),
   });
+  // The source builds the whole bundle after quiescing and reports nothing until
+  // control registration, so the quiesce slides the prep window by the longer
+  // bundle-build window, capped by the transfer deadline.
+  const bundleWindowDeadline = Math.min(
+    t0.getTime() + 2_000 + 30 * 60 * 1000,
+    quiesced.transferDeadlineAt.getTime(),
+  );
+  assert.ok(bundleWindowDeadline > t0.getTime() + 10 * 60 * 1000, "bundle window outlasts the default prep window");
+  assert.equal(quiesced.prepDeadlineAt.getTime(), bundleWindowDeadline);
+
+  // Bundle-build progress between quiesce and registration: only a report that
+  // moved forward is stored and slides the deadline by one idle window.
+  const progressAt = (ms: number) => new Date(t0.getTime() + ms);
+  const report = (phase: "scanning" | "packing" | "hashing", files: number, bytes: number, migrationGeneration = generation) =>
+    ({ migrationGeneration, phase, files, bytes });
+  await assert.rejects(
+    () => recordAgentMigrationSourceBuildProgress({ ...sourceActor, report: { ...report("scanning", 1, 1), extra: true }, now: progressAt(2_050) }),
+    /MIGRATION_SOURCE_PROGRESS_INVALID/,
+  );
+  await assert.rejects(
+    () => recordAgentMigrationSourceBuildProgress({ ...sourceActor, report: report("scanning", 1, 1, "stale-generation"), now: progressAt(2_050) }),
+    /MIGRATION_GENERATION_STALE/,
+  );
+  // Pretend the build window is almost over so a slide is observable.
+  await getDb().update(agentMigrations)
+    .set({ prepDeadlineAt: progressAt(2_100) })
+    .where(eq(agentMigrations.id, provisioned.migration.id));
+  const first = await recordAgentMigrationSourceBuildProgress({ ...sourceActor, report: report("packing", 10, 1_000), now: progressAt(2_200) });
+  assert.equal(first.advanced, true);
+  assert.equal(first.migration.prepDeadlineAt.getTime(), progressAt(2_200).getTime() + 10 * 60 * 1000);
+  assert.deepEqual(first.migration.sourceBuildProgress, {
+    phase: "packing",
+    files: 10,
+    bytes: 1_000,
+    reportedAt: progressAt(2_200).toISOString(),
+  });
+  assert.equal(first.migration.revision, quiesced.revision, "progress does not bump revision");
+  for (const stale of [report("packing", 10, 1_000), report("packing", 9, 900), report("scanning", 50, 5_000)]) {
+    const repeated = await recordAgentMigrationSourceBuildProgress({ ...sourceActor, report: stale, now: progressAt(2_400) });
+    assert.equal(repeated.advanced, false, `${stale.phase} ${stale.files}/${stale.bytes} is not progress`);
+    assert.equal(repeated.migration.prepDeadlineAt.getTime(), first.migration.prepDeadlineAt.getTime());
+  }
+  const later = await recordAgentMigrationSourceBuildProgress({ ...sourceActor, report: report("hashing", 0, 1), now: progressAt(2_500) });
+  assert.equal(later.advanced, true, "a later phase is progress even with smaller counts");
+  assert.equal(later.migration.prepDeadlineAt.getTime(), progressAt(2_500).getTime() + 10 * 60 * 1000);
   const legacyV1Control = {
     ...control,
     schemaVersion: "agent-migration-control/v1",
@@ -587,6 +710,21 @@ test("resumable migration persists the source fence and plans only chunks missin
     now: new Date(t0.getTime() + 3_000),
   });
   assert.deepEqual(registered.missingChunkIndexes, [0, 1]);
+  // Registering the control manifest is source progress: the prep window slides
+  // to one idle window after it, capped by the transfer deadline, but never
+  // shrinks an earlier window.
+  const [afterRegistration] = await getDb().select().from(agentMigrations)
+    .where(eq(agentMigrations.id, provisioned.migration.id));
+  assert.equal(
+    afterRegistration.prepDeadlineAt.getTime(),
+    Math.max(
+      later.migration.prepDeadlineAt.getTime(),
+      Math.min(t0.getTime() + 3_000 + 10 * 60 * 1000, afterRegistration.transferDeadlineAt.getTime()),
+    ),
+  );
+  const afterRegistrationReport = await recordAgentMigrationSourceBuildProgress({ ...sourceActor, report: report("hashing", 1, 99), now: progressAt(3_100) });
+  assert.equal(afterRegistrationReport.advanced, false, "progress after registration is ignored");
+  assert.equal(afterRegistration.revision, registered.migration.revision, "deadline slide does not bump revision");
 
   const storage = {
     put: async () => undefined,
@@ -714,7 +852,14 @@ test("resumable migration persists the source fence and plans only chunks missin
     role: "target" as const,
     transportToken: provisioned.target.message.bearerToken,
   };
-  assert.equal((await recordAgentMigrationChunkReceipt(targetChunk0)).outcome, "recorded");
+  assert.equal((await recordAgentMigrationChunkReceipt({
+    ...targetChunk0,
+    now: new Date(t0.getTime() + 55 * 60 * 1000),
+  })).outcome, "recorded");
+  // Target download progress slides the transfer deadline too.
+  const [afterTargetReceipt] = await getDb().select().from(agentMigrations)
+    .where(eq(agentMigrations.id, provisioned.migration.id));
+  assert.equal(afterTargetReceipt.transferDeadlineAt.getTime(), t0.getTime() + 85 * 60 * 1000);
   assert.equal((await recordAgentMigrationChunkReceipt(targetChunk0)).outcome, "reused");
   assert.deepEqual((await planAgentMigrationChunkTransfers({
     migrationId: provisioned.migration.id,
@@ -748,20 +893,17 @@ test("resumable migration persists the source fence and plans only chunks missin
     sha256: chunk1.sha256,
   };
   assert.equal((await recordAgentMigrationChunkReceipt(targetChunk1)).outcome, "recorded");
-  await startAgentMigrationTransfer(provisioned.migration.grantKey, new Date(t0.getTime() + 6_000));
-  const arriving = await flipAgentMigrationMachine(
-    provisioned.migration.grantKey,
-    new Date(t0.getTime() + 7_000),
-  );
+  await startTestAgentMigrationTransfer(provisioned.migration.id, new Date(t0.getTime() + 6_000));
+  const arriving = await flipTestAgentMigration(provisioned.migration.id, new Date(t0.getTime() + 7_000));
   const archived = await recordAgentMigrationSourceWorkspaceArchived({
-    grantKey: provisioned.migration.grantKey,
+    migrationId: provisioned.migration.id,
     migrationGeneration: agentMigrationGeneration(arriving),
     serverId: server.id,
     targetMachineId: targetMachine.id,
     now: new Date(t0.getTime() + 7_500),
   });
   const arrival = await markAgentMigrationTargetImportArrived({
-    grantKey: provisioned.migration.grantKey,
+    migrationId: provisioned.migration.id,
     migrationGeneration: archived.migrationGeneration,
     serverId: server.id,
     targetMachineId: targetMachine.id,
@@ -769,14 +911,14 @@ test("resumable migration persists the source fence and plans only chunks missin
   });
   assert.equal(arrival.migration.state, "starting");
   const completed = await completeAgentMigrationAutoStart({
-    grantKey: provisioned.migration.grantKey,
+    migrationId: provisioned.migration.id,
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     now: new Date(t0.getTime() + 9_000),
   });
   assert.equal(completed.state, "completed");
   const completedReplay = await completeAgentMigrationAutoStart({
-    grantKey: provisioned.migration.grantKey,
+    migrationId: provisioned.migration.id,
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     now: new Date(t0.getTime() + 10_000),
@@ -788,54 +930,264 @@ test("resumable migration persists the source fence and plans only chunks missin
   assert.equal(outboxRows[0]?.receiptKind, "completed");
 });
 
-test("auto-start completion requires a durable source workspace archive receipt, including legacy completed rows", async ({ db: database }) => {
-
-  const { user, server, targetMachine, agent, migration } = await seedAutoStartFailedMigration();
-  const db = getDb();
-  await db.update(agentMigrations)
-    .set({ sourceWorkspaceArchivedAt: null })
-    .where(eq(agentMigrations.id, migration.id));
-
-  await assert.rejects(
-    () => completeAgentMigrationAutoStart({
-      grantKey: migration.grantKey,
-      agentId: agent.id,
-      targetMachineId: targetMachine.id,
-    }),
-    /MIGRATION_SOURCE_WORKSPACE_ARCHIVE_PENDING/,
-  );
-  const [pending] = await db.select().from(agentMigrations).where(eq(agentMigrations.id, migration.id));
-  assert.equal(pending?.state, "starting");
-  assert.equal(pending?.completedAt, null);
-
-  assert.ok(pending);
-  await recordAgentMigrationSourceWorkspaceArchived({
-    grantKey: migration.grantKey,
-    migrationGeneration: agentMigrationGeneration(pending),
-    serverId: server.id,
+test("streamed source uploads each chunk before the control and is held to the migration's entry limit", async ({ db }) => {
+  const { server, sourceMachine, targetMachine, agent } = await seedMigrationFixture();
+  const t0 = new Date("2099-07-05T15:00:00.000Z");
+  const provisioned = await beginAgentMigrationProvisioning({
+    agentId: agent.id,
     targetMachineId: targetMachine.id,
+    now: t0,
+    transportSessionId: "session-streamed",
+    transportLeaseMs: 60 * 60 * 1000,
+    transportMaxBytes: 10_000,
   });
+  assert.equal(provisioned.migration.transportMaxArchiveEntries, AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES);
+  const generation = provisioned.source.message.transportGeneration!;
+  const leaseId = provisioned.source.message.leaseId!;
+  const sourceActor = {
+    migrationId: provisioned.migration.id,
+    serverId: server.id,
+    sourceMachineId: sourceMachine.id,
+    transportToken: provisioned.source.message.bearerToken,
+  };
+  const storage = {
+    put: async () => undefined,
+    get: async () => { throw new Error("not used"); },
+    delete: async () => undefined,
+    getPresignedPutUrl: async (key: string) => `https://r2.example.test/${key}?put=1`,
+    getPresignedUrl: async (key: string) => `https://r2.example.test/${key}?get=1`,
+  };
+  const chunks = [
+    { index: 0, offsetBytes: 0, sizeBytes: 4, sha256: "a".repeat(64) },
+    { index: 1, offsetBytes: 4, sizeBytes: 3, sha256: "b".repeat(64) },
+  ];
+  const stream = (chunk: (typeof chunks)[number], overrides: Partial<{ sha256: string; sizeBytes: number; chunkIndex: number; migrationGeneration: string }> = {}) =>
+    prepareAgentMigrationStreamedChunk({
+      ...sourceActor,
+      migrationGeneration: generation,
+      leaseId,
+      chunkIndex: chunk.index,
+      sizeBytes: chunk.sizeBytes,
+      sha256: chunk.sha256,
+      storage,
+      ...overrides,
+    });
+
+  await assert.rejects(() => stream(chunks[0]), /MIGRATION_SOURCE_NOT_QUIESCED/);
+  await recordAgentMigrationSourceQuiesced({
+    ...sourceActor,
+    receipt: {
+      schemaVersion: "agent-migration-quiesce/v1",
+      migrationId: provisioned.migration.id,
+      migrationGeneration: generation,
+      agentId: agent.id,
+      sourceMachineId: sourceMachine.id,
+      sourceRuntimeState: "stopped",
+      stoppedAt: new Date(t0.getTime() + 1_000).toISOString(),
+      actor: "migration",
+      launchSessionIdentity: "launch:launch-1:session:session-1",
+      expectedRuntimeRevision: String(provisioned.source.message.expectedMigrationRevision),
+    },
+    now: new Date(t0.getTime() + 1_000),
+  });
+  await assert.rejects(() => stream(chunks[0], { migrationGeneration: "stale-generation" }), /MIGRATION_GENERATION_STALE/);
+  await assert.rejects(() => stream(chunks[0], { sha256: "not-a-digest" }), /MIGRATION_STREAMED_CHUNK_INVALID/);
+  await assert.rejects(
+    () => stream(chunks[0], { sizeBytes: AGENT_MIGRATION_DEFAULT_CHUNK_BYTES + 1 }),
+    /MIGRATION_STREAMED_CHUNK_INVALID/,
+  );
+
+  const first = await stream(chunks[0]);
+  assert.equal(first.uploaded, false);
+  assert.match(first.url ?? "", /\/resumable\/[0-9a-f]{24}\/chunks\/0\?put=1$/);
+  // Same chunk again (an upload retry) gets a fresh URL; a different digest for the index is refused.
+  assert.equal((await stream(chunks[0])).uploaded, false);
+  await assert.rejects(() => stream(chunks[0], { sha256: "d".repeat(64) }), /MIGRATION_CHUNK_RECEIPT_MISMATCH/);
+  const sourceReceipt = (chunk: (typeof chunks)[number]) => recordAgentMigrationChunkReceipt({
+    migrationId: provisioned.migration.id,
+    serverId: server.id,
+    machineId: sourceMachine.id,
+    role: "source",
+    transportToken: provisioned.source.message.bearerToken,
+    migrationGeneration: generation,
+    leaseId,
+    chunkIndex: chunk.index,
+    sizeBytes: chunk.sizeBytes,
+    sha256: chunk.sha256,
+  });
+  await sourceReceipt(chunks[0]);
+  assert.deepEqual(await stream(chunks[0]), { uploaded: true, url: null });
+  await stream(chunks[1]);
+  await sourceReceipt(chunks[1]);
+
+  const control = (entryCount: number): AgentMigrationControlManifest => ({
+    schemaVersion: AGENT_MIGRATION_CONTROL_SCHEMA_VERSION,
+    protocol: AGENT_MIGRATION_RESUMABLE_PROTOCOL,
+    identity: {
+      migrationId: provisioned.migration.id,
+      migrationGeneration: generation,
+      leaseId,
+      agentId: agent.id,
+      sourceMachineId: sourceMachine.id,
+      targetMachineId: targetMachine.id,
+    },
+    capability: { required: [AGENT_MIGRATION_CAPABILITY] },
+    bundle: {
+      contentType: AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
+      totalBytes: 7,
+      sha256: "c".repeat(64),
+      chunkSizeBytes: 1024 * 1024,
+      chunks,
+    },
+    archive: {
+      format: "tar+gzip",
+      entryCount,
+      expandedBytes: entryCount,
+      maxEntryBytes: 1,
+      allowedEntryTypes: ["file", "symlink"],
+    },
+    transferSummary: {
+      includedFileCount: entryCount,
+      includedBytes: entryCount,
+      excludedRegenerableCount: 0,
+      excludedRegenerableByCategory: {
+        thirdPartyDependencies: 0,
+        caches: 0,
+        buildArtifacts: 0,
+        otherRegenerable: 0,
+      },
+      keyWorkspaceEntries: { memoryMdPresent: true, notesPresent: false },
+    },
+    commit: {
+      mode: "atomic-rename",
+      markerPath: AGENT_MIGRATION_COMMIT_MARKER_PATH,
+      requireWholeBundleDigest: true,
+      requireAllChunkDigests: true,
+      existingWorkspace: "idle-or-same-commit",
+    },
+  });
+  await assert.rejects(
+    () => registerAgentMigrationControlManifest({ ...sourceActor, control: control(AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES + 1), now: new Date(t0.getTime() + 2_000) }),
+    /MIGRATION_CONTROL_MANIFEST_INVALID/,
+  );
+  // A control whose chunk set differs from what was streamed is refused.
+  await assert.rejects(
+    () => registerAgentMigrationControlManifest({
+      ...sourceActor,
+      control: { ...control(250_001), bundle: { ...control(1).bundle, totalBytes: 4, chunks: [chunks[0]] } },
+      now: new Date(t0.getTime() + 2_000),
+    }),
+    /MIGRATION_CHUNK_RECEIPT_SET_MISMATCH/,
+  );
+  const largeControl = control(250_001);
+  const registered = await registerAgentMigrationControlManifest({ ...sourceActor, control: largeControl, now: new Date(t0.getTime() + 2_000) });
+  assert.deepEqual(registered.missingChunkIndexes, [], "streamed chunks are already uploaded");
+  // The chunk set is fixed once the control is registered.
+  await assert.rejects(
+    () => stream({ index: 2, offsetBytes: 7, sizeBytes: 1, sha256: "e".repeat(64) }),
+    /MIGRATION_CHUNK_RECEIPT_MISMATCH/,
+  );
+  const complete = await completeAgentMigrationResumableUpload({
+    ...sourceActor,
+    migrationGeneration: generation,
+    leaseId,
+    controlSha256: registered.controlSha256,
+    now: new Date(t0.getTime() + 3_000),
+  });
+  assert.equal(complete.state, "ready");
+});
+
+test("completion no longer waits for the source archive, and never backfills it", async ({ db: database }) => {
+
+  const { user, targetMachine, agent, migration } = await seedAutoStartFailedMigration();
+  const db = getDb();
   await db.update(agentMigrations).set({
+    sourceWorkspaceArchivedAt: null,
     initiatedByUserId: user.id,
     transferSummary: TEST_TRANSFER_SUMMARY,
   }).where(eq(agentMigrations.id, migration.id));
-  await completeAgentMigrationAutoStart({
-    grantKey: migration.grantKey,
+
+  const completed = await completeAgentMigrationAutoStart({
+    migrationId: migration.id,
     agentId: agent.id,
     targetMachineId: targetMachine.id,
   });
-  await db.update(agentMigrations)
-    .set({ sourceWorkspaceArchivedAt: null })
+  assert.equal(completed.state, "completed");
+  assert.equal(completed.sourceWorkspaceArchivedAt, null, "historical/pending archive is not silently backfilled");
+
+  // Rows never attempted under the retry policy are not picked up by the background retry.
+  assert.equal(await claimAgentMigrationSourceArchiveRetry({ now: new Date("2026-07-06T00:00:00.000Z") }), null);
+});
+
+test("source archive retry backs off, guards against the agent moving, and gives up visibly", async ({ db: database }) => {
+
+  const { sourceMachine, targetMachine, agent, migration } = await seedAutoStartFailedMigration();
+  const db = getDb();
+  await db.update(agentMigrations).set({ sourceWorkspaceArchivedAt: null })
     .where(eq(agentMigrations.id, migration.id));
-  await assert.rejects(
-    () => completeAgentMigrationAutoStart({
-      grantKey: migration.grantKey,
-      agentId: agent.id,
-      targetMachineId: targetMachine.id,
-    }),
-    /MIGRATION_SOURCE_WORKSPACE_ARCHIVE_PENDING/,
-    "historical completed rows must not be silently backfilled as archived",
-  );
+  const t0 = new Date("2026-07-06T00:00:00.000Z");
+
+  const failed = await recordAgentMigrationSourceArchiveAttemptFailed({
+    migrationId: migration.id,
+    errorCode: "MIGRATION_SOURCE_WORKSPACE_ARCHIVE_TIMEOUT",
+    now: t0,
+  });
+  assert.equal(failed?.sourceWorkspaceArchiveAttempts, 1);
+  assert.equal(failed?.sourceWorkspaceArchiveLastError, "MIGRATION_SOURCE_WORKSPACE_ARCHIVE_TIMEOUT");
+  assert.equal(failed?.sourceWorkspaceArchiveRetryAt?.toISOString(), "2026-07-06T00:01:00.000Z");
+  assert.equal(failed?.revision, migration.revision, "bookkeeping does not bump the state-machine revision");
+
+  assert.equal(await claimAgentMigrationSourceArchiveRetry({ now: new Date("2026-07-06T00:00:30.000Z") }), null);
+  const claim = await claimAgentMigrationSourceArchiveRetry({ now: new Date("2026-07-06T00:01:01.000Z") });
+  assert.equal(claim?.action, "archive");
+  // The claim pushes retry_at out as a lease so another replica does not double-dispatch.
+  assert.equal(await claimAgentMigrationSourceArchiveRetry({ now: new Date("2026-07-06T00:01:02.000Z") }), null);
+
+  const archived = await recordAgentMigrationSourceWorkspaceArchivedById({
+    migrationId: migration.id,
+    now: new Date("2026-07-06T00:01:03.000Z"),
+  });
+  assert.ok(archived?.sourceWorkspaceArchivedAt);
+  assert.equal(archived?.sourceWorkspaceArchiveRetryAt, null);
+
+  // Guard: the agent moved back to the source → abandon instead of archiving a live workspace.
+  await db.update(agentMigrations).set({
+    sourceWorkspaceArchivedAt: null,
+    sourceWorkspaceArchiveRetryAt: t0,
+  }).where(eq(agentMigrations.id, migration.id));
+  await db.update(agents).set({ machineId: sourceMachine.id }).where(eq(agents.id, agent.id));
+  const moved = await claimAgentMigrationSourceArchiveRetry({ now: new Date("2026-07-06T00:02:00.000Z") });
+  assert.equal(moved?.action, "abandoned");
+  assert.equal(moved?.migration.sourceWorkspaceArchiveLastError, "agent_moved");
+  assert.ok(moved?.migration.sourceWorkspaceArchiveAbandonedAt);
+  assert.equal(await claimAgentMigrationSourceArchiveRetry({ now: new Date("2026-07-07T00:00:00.000Z") }), null);
+
+  // The source daemon refusing because the workspace is live again abandons at once.
+  await db.update(agents).set({ machineId: targetMachine.id }).where(eq(agents.id, agent.id));
+  await db.update(agentMigrations).set({
+    sourceWorkspaceArchiveAbandonedAt: null,
+    sourceWorkspaceArchiveAttempts: 1,
+  }).where(eq(agentMigrations.id, migration.id));
+  const refused = await recordAgentMigrationSourceArchiveAttemptFailed({
+    migrationId: migration.id,
+    errorCode: "MIGRATION_WORKSPACE_ARCHIVE_NEWER_OWNER",
+    now: t0,
+  });
+  assert.ok(refused?.sourceWorkspaceArchiveAbandonedAt);
+  assert.equal(refused?.sourceWorkspaceArchiveRetryAt, null);
+  assert.equal(refused?.sourceWorkspaceArchiveLastError, "agent_moved");
+
+  // Cap: exhausting the attempts leaves a visible abandoned state instead of retrying forever.
+  await db.update(agents).set({ machineId: targetMachine.id }).where(eq(agents.id, agent.id));
+  await db.update(agentMigrations).set({
+    sourceWorkspaceArchiveAbandonedAt: null,
+    sourceWorkspaceArchiveAttempts: AGENT_MIGRATION_SOURCE_ARCHIVE_MAX_ATTEMPTS - 1,
+  }).where(eq(agentMigrations.id, migration.id));
+  const exhausted = await recordAgentMigrationSourceArchiveAttemptFailed({ migrationId: migration.id, now: t0 });
+  assert.equal(exhausted?.sourceWorkspaceArchiveAttempts, AGENT_MIGRATION_SOURCE_ARCHIVE_MAX_ATTEMPTS);
+  assert.equal(exhausted?.sourceWorkspaceArchiveRetryAt, null);
+  assert.ok(exhausted?.sourceWorkspaceArchiveAbandonedAt);
+  assert.equal(exhausted?.sourceWorkspaceArchiveLastError, "MIGRATION_SOURCE_WORKSPACE_ARCHIVE_FAILED");
 });
 
 test("provisioning migration persists object-store lease metadata and sends role-specific leases without plaintext tokens", async ({ db }) => {
@@ -849,8 +1201,6 @@ test("provisioning migration persists object-store lease metadata and sends role
     initiatedByUserId: user.id,
     now: t0,
     transportSessionId: "session-123",
-    sourceTransferUrl: "https://r2.example.test/migrations/session-123.bundle?put=1",
-    targetTransferUrl: "https://r2.example.test/migrations/session-123.bundle?get=1",
     transportLeaseMs: 30 * 60 * 1000,
     transportMaxBytes: 12_345,
   });
@@ -858,8 +1208,8 @@ test("provisioning migration persists object-store lease metadata and sends role
   assert.equal(result.migration.state, "provisioning");
   assert.equal(result.migration.transportProvider, "object_store");
   assert.equal(result.migration.transportSessionId, "session-123");
-  assert.equal(result.migration.sourceTransportUrl, "https://r2.example.test/migrations/session-123.bundle?put=1");
-  assert.equal(result.migration.targetTransportUrl, "https://r2.example.test/migrations/session-123.bundle?get=1");
+  assert.equal(result.migration.sourceTransportUrl, null);
+  assert.equal(result.migration.targetTransportUrl, null);
   assert.equal(result.migration.transportLeaseSource, "server");
   assert.equal(result.migration.transportMaxBytes, 12_345);
   assert.ok(result.migration.sourceTransportTokenHash);
@@ -871,13 +1221,12 @@ test("provisioning migration persists object-store lease metadata and sends role
   assert.equal(result.source.message.sessionId, "session-123");
   assert.equal(result.source.message.provider, "object_store");
   assert.equal(result.source.message.transferKind, "upload");
-  assert.equal(result.source.message.url, "https://r2.example.test/migrations/session-123.bundle?put=1");
+  assert.equal("url" in result.source.message, false, "the lease carries no whole-bundle URL");
   assert.equal(result.source.message.expiresAt, "2026-07-05T14:30:00.000Z");
   assert.equal(result.source.message.maxBytes, 12_345);
   assert.equal(result.target.machineId, targetMachine.id);
   assert.equal(result.target.message.role, "target");
   assert.equal(result.target.message.transferKind, "download");
-  assert.equal(result.target.message.url, "https://r2.example.test/migrations/session-123.bundle?get=1");
   assert.match(result.source.message.bearerToken, /^slock_migration_/);
   assert.match(result.target.message.bearerToken, /^slock_migration_/);
   assert.notEqual(result.source.message.bearerToken, result.target.message.bearerToken);
@@ -895,8 +1244,6 @@ test("transfer lease ready helper validates object-store role/session/expiry/max
     targetMachineId: targetMachine.id,
     now: new Date("2026-07-05T14:00:00.000Z"),
     transportSessionId: "session-ready",
-    sourceTransferUrl: "https://r2.example.test/session-ready?put=1",
-    targetTransferUrl: "https://r2.example.test/session-ready?get=1",
     transportLeaseMs: 60_000,
     transportMaxBytes: 999,
   });
@@ -958,33 +1305,29 @@ test("migration service enforces T0-T7 server state and flips machineId only at 
   const { user, sourceMachine, targetMachine, agent } = await seedMigrationFixture();
   const t0 = new Date("2026-07-05T14:00:00.000Z");
 
-  const migration = await beginAgentMigration({
+  const provisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     initiatedByUserId: user.id,
     now: t0,
   });
-  assert.equal(migration.state, "prep");
+  const { migration } = provisioning;
+  assert.equal(migration.state, "provisioning");
   assert.equal(migration.sourceMachineId, sourceMachine.id);
   assert.equal(migration.targetMachineId, targetMachine.id);
-  assert.equal(await isAgentZenMigrating(agent.id, getDb(), new Date("2026-07-05T14:00:30.000Z")), true);
+  assert.equal(await zenMigrating(agent.id, new Date("2026-07-05T14:00:30.000Z")), true);
 
   let [agentRow] = await getDb().select().from(agents).where(eq(agents.id, agent.id));
   assert.equal(agentRow.machineId, sourceMachine.id, "source machine remains authoritative during prep");
 
-  const ready = await markAgentMigrationReady({
-    grantKey: migration.grantKey,
-    manifestPath: "MIGRATION-MANIFEST.json",
-    manifestSha256: "sha256:manifest",
-    now: new Date("2026-07-05T14:01:00.000Z"),
-  });
+  const ready = await markTestAgentMigrationReady(provisioning, { now: new Date("2026-07-05T14:01:00.000Z") });
   assert.equal(ready.state, "ready");
   assert.equal(ready.readyAt?.toISOString(), "2026-07-05T14:01:00.000Z");
 
-  const inTransit = await startAgentMigrationTransfer(migration.grantKey, new Date("2026-07-05T14:02:00.000Z"));
+  const inTransit = await startTestAgentMigrationTransfer(migration.id, new Date("2026-07-05T14:02:00.000Z"));
   assert.equal(inTransit.state, "in_transit");
 
-  const arriving = await flipAgentMigrationMachine(migration.grantKey, new Date("2026-07-05T14:03:00.000Z"));
+  const arriving = await flipTestAgentMigration(migration.id, new Date("2026-07-05T14:03:00.000Z"));
   assert.equal(arriving.state, "arriving");
   assert.equal(arriving.flippedAt?.toISOString(), "2026-07-05T14:03:00.000Z");
 
@@ -993,7 +1336,7 @@ test("migration service enforces T0-T7 server state and flips machineId only at 
   assert.equal(agentRow.sessionId, "source-native-session", "resume state remains until arrival commits");
 
   const completed = await completeArrivingMigration({
-    grantKey: migration.grantKey,
+    migrationId: migration.id,
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     initiatedByUserId: user.id,
@@ -1006,7 +1349,7 @@ test("migration service enforces T0-T7 server state and flips machineId only at 
   [agentRow] = await getDb().select().from(agents).where(eq(agents.id, agent.id));
   assert.equal(agentRow.sessionId, null, "arrival atomically forces a cold native session on the target");
   assert.equal(await getActiveAgentMigration(agent.id), null);
-  assert.equal(await isAgentZenMigrating(agent.id), false);
+  assert.equal(await zenMigrating(agent.id), false);
 });
 
 test("arrival finalizes runtime profile projection and marks transfer teardown", async ({ db }) => {
@@ -1060,28 +1403,18 @@ test("arrival finalizes runtime profile projection and marks transfer teardown",
     migrationNudgeCount: 2,
   });
 
-  const provisioned = await beginAgentMigrationProvisioning({
+  const provisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     now: t0,
-    transportSessionId: "session-finalize",
-    sourceTransferUrl: "https://r2.example.test/session-finalize?put=1",
-    targetTransferUrl: "https://r2.example.test/session-finalize?get=1",
   });
-  const prep = await markAgentMigrationTransportProvisioned({
-    migrationId: provisioned.migration.id,
-    now: new Date("2026-07-05T14:00:05.000Z"),
-  });
-  await markAgentMigrationReady({
-    grantKey: prep.grantKey,
-    manifestPath: "manifest.json",
-    now: new Date("2026-07-05T14:01:00.000Z"),
-  });
-  await startAgentMigrationTransfer(prep.grantKey, new Date("2026-07-05T14:02:00.000Z"));
-  await flipAgentMigrationMachine(prep.grantKey, new Date("2026-07-05T14:03:00.000Z"));
+  const { migration } = provisioning;
+  await markTestAgentMigrationReady(provisioning, { now: new Date("2026-07-05T14:01:00.000Z") });
+  await startTestAgentMigrationTransfer(migration.id, new Date("2026-07-05T14:02:00.000Z"));
+  await flipTestAgentMigration(migration.id, new Date("2026-07-05T14:03:00.000Z"));
 
   const completed = await completeArrivingMigration({
-    grantKey: prep.grantKey,
+    migrationId: migration.id,
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     initiatedByUserId: user.id,
@@ -1118,26 +1451,23 @@ test("arrival deadline starts at machine flip, not migration begin", async ({ db
   const { user, targetMachine, agent } = await seedMigrationFixture();
   const t0 = new Date("2026-07-05T14:00:00.000Z");
 
-  const migration = await beginAgentMigration({
+  const provisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     now: t0,
     transferDeadlineMs: 60 * 60 * 1000,
     arrivalDeadlineMs: 10 * 60 * 1000,
   });
-  await markAgentMigrationReady({
-    grantKey: migration.grantKey,
-    manifestPath: "manifest.json",
-    now: new Date("2026-07-05T14:01:00.000Z"),
-  });
-  await startAgentMigrationTransfer(migration.grantKey, new Date("2026-07-05T14:02:00.000Z"));
+  const { migration } = provisioning;
+  await markTestAgentMigrationReady(provisioning, { now: new Date("2026-07-05T14:01:00.000Z") });
+  await startTestAgentMigrationTransfer(migration.id, new Date("2026-07-05T14:02:00.000Z"));
 
-  const arriving = await flipAgentMigrationMachine(migration.grantKey, new Date("2026-07-05T14:20:00.000Z"));
+  const arriving = await flipTestAgentMigration(migration.id, new Date("2026-07-05T14:20:00.000Z"));
   assert.equal(arriving.state, "arriving");
   assert.equal(arriving.arrivalDeadlineAt.toISOString(), "2026-07-05T14:30:00.000Z");
 
   const completed = await completeArrivingMigration({
-    grantKey: migration.grantKey,
+    migrationId: migration.id,
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     initiatedByUserId: user.id,
@@ -1150,26 +1480,23 @@ test("machine flip requires an explicit in-transit transfer state", async ({ db 
 
   const { targetMachine, agent } = await seedMigrationFixture();
 
-  const migration = await beginAgentMigration({
+  const provisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     now: new Date("2026-07-05T14:00:00.000Z"),
   });
-  await markAgentMigrationReady({
-    grantKey: migration.grantKey,
-    manifestPath: "manifest.json",
-    now: new Date("2026-07-05T14:01:00.000Z"),
-  });
+  const { migration } = provisioning;
+  await markTestAgentMigrationReady(provisioning, { now: new Date("2026-07-05T14:01:00.000Z") });
 
   await assert.rejects(
-    () => flipAgentMigrationMachine(migration.grantKey, new Date("2026-07-05T14:02:00.000Z")),
+    () => flipTestAgentMigration(migration.id, new Date("2026-07-05T14:02:00.000Z")),
     /MIGRATION_NOT_FLIPPABLE/,
   );
 });
 
-test("zen(migrating) delivery planner queues ordinary traffic and pierces protocol or owner paths until deadline", async () => {
+test("zen(migrating) delivery planner queues ordinary traffic until deadline", async () => {
   const migration = {
-    state: "prep" as const,
+    state: "provisioning" as const,
     prepDeadlineAt: new Date("2026-07-05T14:10:00.000Z"),
     transferDeadlineAt: new Date("2026-07-05T15:00:00.000Z"),
     arrivalDeadlineAt: new Date("2026-07-05T15:10:00.000Z"),
@@ -1179,16 +1506,6 @@ test("zen(migrating) delivery planner queues ordinary traffic and pierces protoc
     migration,
     now: new Date("2026-07-05T14:01:00.000Z"),
   }), { action: "queue", reason: "zen-migrating" });
-  assert.deepEqual(planZenMigratingDelivery({
-    migration,
-    now: new Date("2026-07-05T14:01:00.000Z"),
-    migrationProtocol: true,
-  }), { action: "deliver", reason: "migration-protocol" });
-  assert.deepEqual(planZenMigratingDelivery({
-    migration,
-    now: new Date("2026-07-05T14:01:00.000Z"),
-    ownerPierce: true,
-  }), { action: "deliver", reason: "owner-pierce" });
   assert.deepEqual(planZenMigratingDelivery({
     migration,
     now: new Date("2026-07-05T14:11:00.000Z"),
@@ -1203,27 +1520,24 @@ test("zen(migrating) delivery planner queues ordinary traffic and pierces protoc
 test("post-arrival start failure remains active and retryable after the former arrival deadline", async ({ db }) => {
 
   const { server, targetMachine, agent } = await seedMigrationFixture();
-  const migration = await beginAgentMigration({
+  const provisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     now: new Date("2026-07-05T14:00:00.000Z"),
   });
-  await markAgentMigrationReady({
-    grantKey: migration.grantKey,
-    manifestPath: "manifest.json",
-    now: new Date("2026-07-05T14:01:00.000Z"),
-  });
-  await startAgentMigrationTransfer(migration.grantKey, new Date("2026-07-05T14:02:00.000Z"));
-  const arriving = await flipAgentMigrationMachine(migration.grantKey, new Date("2026-07-05T14:03:00.000Z"));
+  const { migration } = provisioning;
+  await markTestAgentMigrationReady(provisioning, { now: new Date("2026-07-05T14:01:00.000Z") });
+  await startTestAgentMigrationTransfer(migration.id, new Date("2026-07-05T14:02:00.000Z"));
+  const arriving = await flipTestAgentMigration(migration.id, new Date("2026-07-05T14:03:00.000Z"));
   await markAgentMigrationTargetImportArrived({
-    grantKey: migration.grantKey,
+    migrationId: migration.id,
     migrationGeneration: agentMigrationGeneration(arriving),
     serverId: server.id,
     targetMachineId: targetMachine.id,
     now: new Date("2026-07-05T14:04:00.000Z"),
   });
   await recordAgentMigrationAutoStartFailure({
-    grantKey: migration.grantKey,
+    migrationId: migration.id,
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     stage: "start_agent",
@@ -1235,8 +1549,7 @@ test("post-arrival start failure remains active and retryable after the former a
   const gate = await getAgentMigrationGateStatus(agent.id, getDb(), afterFormerDeadline);
   assert.equal(gate.migration?.state, "starting");
   assert.equal(gate.migration?.failureReason, "auto_start_failed");
-  assert.equal(gate.expiredLifecycleEvent, undefined);
-  assert.equal(await isAgentZenMigrating(agent.id, getDb(), afterFormerDeadline), false);
+  assert.equal(await zenMigrating(agent.id, afterFormerDeadline), false);
 
   const [persisted] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, migration.id));
   assert.equal(persisted.state, "starting");
@@ -1258,6 +1571,43 @@ test("auto-start failure persists typed privacy-narrowed cause before retry is e
   assert.equal(persisted.autoStartRetryDeadlineAt, null);
 });
 
+test("auto-start reconciler adopts an arrival that never recorded an outcome, only after the grace", async ({ db }) => {
+
+  const { migration } = await seedAutoStartFailedMigration();
+  // Shape left by an `/arrived` request that died after writing `starting`.
+  await getDb().update(agentMigrations)
+    .set({ failureReason: null, autoStartFailureStage: null, autoStartFailureCode: null })
+    .where(eq(agentMigrations.id, migration.id));
+  const arrivedAt = new Date("2026-07-05T14:04:00.000Z");
+
+  const early = await claimAgentMigrationAutoStartRemediation({
+    workerId: "server-reconciler",
+    now: new Date(arrivedAt.getTime() + AGENT_MIGRATION_ORPHANED_ARRIVAL_GRACE_MS - 1_000),
+  });
+  assert.equal(early, null);
+
+  const claimNow = new Date(arrivedAt.getTime() + AGENT_MIGRATION_ORPHANED_ARRIVAL_GRACE_MS + 1_000);
+  const claim = await claimAgentMigrationAutoStartRemediation({
+    workerId: "server-reconciler",
+    now: claimNow,
+    leaseMs: 30_000,
+  });
+  assert.ok(claim);
+  assert.equal(claim.action, "dispatch");
+  assert.equal(claim.candidateVariant, "orphaned_arrival");
+  assert.equal(claim.migration.autoStartRetryAttempts, 1);
+
+  // A claim that crashes before recording an outcome is re-adopted once its lease expires.
+  const reclaimed = await claimAgentMigrationAutoStartRemediation({
+    workerId: "server-reconciler-b",
+    now: new Date(claimNow.getTime() + 31_000),
+    leaseMs: 30_000,
+  });
+  assert.ok(reclaimed);
+  assert.equal(reclaimed.candidateVariant, "orphaned_arrival");
+  assert.equal(reclaimed.migration.autoStartRetryAttempts, 2);
+});
+
 test("auto-start reconciler skips untyped legacy stuck rows instead of silently sweeping them", async ({ db }) => {
 
   const { migration } = await seedAutoStartFailedMigration();
@@ -1269,7 +1619,6 @@ test("auto-start reconciler skips untyped legacy stuck rows instead of silently 
     .where(eq(agentMigrationReceiptOutbox.migrationId, migration.id));
 
   const claim = await claimAgentMigrationAutoStartRemediation({
-    executor: "server",
     workerId: "server-reconciler",
     now: new Date("2026-07-05T14:05:00.000Z"),
   });
@@ -1291,7 +1640,7 @@ test("auto-start reconciler skips untyped legacy stuck rows instead of silently 
     workerId: "server-boot",
     now: new Date("2026-07-05T14:05:01.000Z"),
   });
-  assert.deepEqual(workerResult, { autoStart: false, cancellation: false });
+  assert.deepEqual(workerResult, { autoStart: false, cancellation: false, deadline: false, sourceArchive: false });
   assert.equal(startAgentCalls, 0);
   assert.equal(cancelCalls, 0);
 
@@ -1305,17 +1654,7 @@ test("auto-start reconciler skips untyped legacy stuck rows instead of silently 
 test("auto-start reconciler is independent, leased, bounded, and terminalizes with receipt", async ({ db }) => {
 
   const { sourceMachine, targetMachine, agent, migration } = await seedAutoStartFailedMigration();
-  await assert.rejects(
-    () => claimAgentMigrationAutoStartRemediation({
-      executor: "faulted_agent" as never,
-      workerId: "blocked-agent",
-      now: new Date("2026-07-05T14:05:00.000Z"),
-    }),
-    /MIGRATION_AUTO_START_REMEDIATION_EXECUTOR_INVALID/,
-  );
-
   const first = await claimAgentMigrationAutoStartRemediation({
-    executor: "healthy_steward",
     workerId: "steward-a",
     now: new Date("2026-07-05T14:05:00.000Z"),
     leaseMs: 30_000,
@@ -1329,7 +1668,7 @@ test("auto-start reconciler is independent, leased, bounded, and terminalizes wi
   assert.equal(first.migration.autoStartRetryDeadlineAt?.toISOString(), "2026-07-05T14:07:00.000Z");
 
   await recordAgentMigrationAutoStartFailure({
-    grantKey: migration.grantKey,
+    migrationId: migration.id,
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     stage: "start_agent",
@@ -1337,7 +1676,6 @@ test("auto-start reconciler is independent, leased, bounded, and terminalizes wi
     now: new Date("2026-07-05T14:05:10.000Z"),
   });
   const contended = await claimAgentMigrationAutoStartRemediation({
-    executor: "server",
     workerId: "server-b",
     now: new Date("2026-07-05T14:05:20.000Z"),
   });
@@ -1346,7 +1684,6 @@ test("auto-start reconciler is independent, leased, bounded, and terminalizes wi
   for (let attempt = 2; attempt <= AGENT_MIGRATION_AUTO_START_MAX_RETRY_ATTEMPTS; attempt += 1) {
     const retryAt = new Date(Date.parse("2026-07-05T14:05:00.000Z") + attempt * 31_000);
     const claim = await claimAgentMigrationAutoStartRemediation({
-      executor: "server",
       workerId: `server-${attempt}`,
       now: retryAt,
       leaseMs: 30_000,
@@ -1356,7 +1693,7 @@ test("auto-start reconciler is independent, leased, bounded, and terminalizes wi
     assert.equal(claim.candidateVariant, "typed_failed");
     assert.equal(claim.migration.autoStartRetryAttempts, attempt);
     await recordAgentMigrationAutoStartFailure({
-      grantKey: migration.grantKey,
+      migrationId: migration.id,
       agentId: agent.id,
       targetMachineId: targetMachine.id,
       stage: "start_agent",
@@ -1366,7 +1703,6 @@ test("auto-start reconciler is independent, leased, bounded, and terminalizes wi
   }
 
   const terminal = await claimAgentMigrationAutoStartRemediation({
-    executor: "server",
     workerId: "server-terminal",
     now: new Date("2026-07-05T14:08:00.000Z"),
   });
@@ -1376,18 +1712,19 @@ test("auto-start reconciler is independent, leased, bounded, and terminalizes wi
   assert.equal(terminal.migration.state, "failed");
   assert.equal(terminal.migration.failureReason, "auto_start_failed");
   assert.equal(terminal.migration.transportTeardownAt?.toISOString(), "2026-07-05T14:08:00.000Z");
-  assert.equal(await isAgentZenMigrating(agent.id, getDb(), new Date("2026-07-05T14:08:01.000Z")), false);
+  assert.equal(await zenMigrating(agent.id, new Date("2026-07-05T14:08:01.000Z")), false);
 
   const outbox = await getDb().select().from(agentMigrationReceiptOutbox).where(eq(agentMigrationReceiptOutbox.migrationId, migration.id));
   assert.equal(outbox.length, 1);
   assert.equal(outbox[0]!.receiptKind, "failed");
 
-  const successor = await beginAgentMigration({
+  const successorProvisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: sourceMachine.id,
     now: new Date("2026-07-05T14:09:00.000Z"),
   });
-  assert.equal(successor.state, "prep");
+  const successor = successorProvisioning.migration;
+  assert.equal(successor.state, "provisioning");
 });
 
 test("orphaned exhausted auto-start dispatch terminalizes on successor worker tick", async ({ db }) => {
@@ -1395,7 +1732,6 @@ test("orphaned exhausted auto-start dispatch terminalizes on successor worker ti
   const { targetMachine, agent, migration } = await seedAutoStartFailedMigration();
 
   const first = await claimAgentMigrationAutoStartRemediation({
-    executor: "server",
     workerId: "server-lost-owner",
     now: new Date("2026-07-05T14:05:00.000Z"),
     leaseMs: 30_000,
@@ -1426,7 +1762,7 @@ test("orphaned exhausted auto-start dispatch terminalizes on successor worker ti
     now: new Date("2026-07-05T14:05:31.000Z"),
   });
 
-  assert.deepEqual(result, { autoStart: true, cancellation: false });
+  assert.deepEqual(result, { autoStart: true, cancellation: false, deadline: false, sourceArchive: false });
   assert.equal(startCalls, 0);
 
   const [persisted] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, migration.id));
@@ -1436,7 +1772,7 @@ test("orphaned exhausted auto-start dispatch terminalizes on successor worker ti
   assert.equal(persisted.autoStartFailureCode, "start_not_dispatched");
   assert.equal(persisted.autoStartRemediationLeaseId, null);
   assert.equal(persisted.autoStartRemediationLeaseExpiresAt, null);
-  assert.equal(await isAgentZenMigrating(agent.id, getDb(), new Date("2026-07-05T14:05:32.000Z")), false);
+  assert.equal(await zenMigrating(agent.id, new Date("2026-07-05T14:05:32.000Z")), false);
 
   const outbox = await getDb().select().from(agentMigrationReceiptOutbox).where(eq(agentMigrationReceiptOutbox.migrationId, migration.id));
   assert.equal(outbox.length, 1);
@@ -1453,7 +1789,7 @@ test("orphaned exhausted auto-start dispatch terminalizes on successor worker ti
 
   await assert.rejects(
     () => recordAgentMigrationAutoStartFailure({
-      grantKey: migration.grantKey,
+      migrationId: migration.id,
       agentId: agent.id,
       targetMachineId: targetMachine.id,
       stage: "start_agent",
@@ -1486,7 +1822,7 @@ test("server remediation worker dispatches post-arrival auto-start and completes
     now: new Date("2026-07-05T14:05:00.000Z"),
   });
 
-  assert.deepEqual(result, { autoStart: true, cancellation: false });
+  assert.deepEqual(result, { autoStart: true, cancellation: false, deadline: false, sourceArchive: false });
   assert.equal(startedAgentId, agent.id);
   const [persisted] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, migration.id));
   assert.equal(persisted.state, "completed");
@@ -1521,7 +1857,6 @@ test("remediation worker stop prevents new claims while durable leases allow saf
   assert.equal(afterStop.autoStartRemediationLeaseId, null);
 
   const first = await claimAgentMigrationAutoStartRemediation({
-    executor: "server",
     workerId: "server-first",
     now: new Date("2026-07-05T14:05:00.000Z"),
     leaseMs: 30_000,
@@ -1536,7 +1871,7 @@ test("remediation worker stop prevents new claims while durable leases allow saf
 
   await assert.rejects(
     () => recordAgentMigrationAutoStartFailure({
-      grantKey: migration.grantKey,
+      migrationId: migration.id,
       agentId: agent.id,
       targetMachineId: targetMachine.id,
       stage: "start_agent",
@@ -1552,7 +1887,7 @@ test("remediation worker stop prevents new claims while durable leases allow saf
 
   await assert.rejects(
     () => completeAgentMigrationAutoStart({
-      grantKey: migration.grantKey,
+      migrationId: migration.id,
       agentId: agent.id,
       targetMachineId: targetMachine.id,
       remediationLeaseId: first.leaseId,
@@ -1565,7 +1900,6 @@ test("remediation worker stop prevents new claims while durable leases allow saf
   assert.deepEqual(migrationSnapshot(afterExpiredComplete), firstOwnerSnapshot);
 
   const successor = await claimAgentMigrationAutoStartRemediation({
-    executor: "server",
     workerId: "server-successor",
     now: new Date("2026-07-05T14:05:31.000Z"),
     leaseMs: 30_000,
@@ -1577,7 +1911,7 @@ test("remediation worker stop prevents new claims while durable leases allow saf
 
   await assert.rejects(
     () => recordAgentMigrationAutoStartFailure({
-      grantKey: migration.grantKey,
+      migrationId: migration.id,
       agentId: agent.id,
       targetMachineId: targetMachine.id,
       stage: "start_agent",
@@ -1589,7 +1923,7 @@ test("remediation worker stop prevents new claims while durable leases allow saf
   );
   await assert.rejects(
     () => completeAgentMigrationAutoStart({
-      grantKey: migration.grantKey,
+      migrationId: migration.id,
       agentId: agent.id,
       targetMachineId: targetMachine.id,
       remediationLeaseId: first.leaseId,
@@ -1599,7 +1933,7 @@ test("remediation worker stop prevents new claims while durable leases allow saf
   );
 
   const completed = await completeAgentMigrationAutoStart({
-    grantKey: migration.grantKey,
+    migrationId: migration.id,
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     remediationLeaseId: successor.leaseId,
@@ -1613,7 +1947,6 @@ test("auto-start reconciler terminalizes when deadline expires even before max a
   const { migration } = await seedAutoStartFailedMigration();
 
   const first = await claimAgentMigrationAutoStartRemediation({
-    executor: "server",
     workerId: "server-a",
     now: new Date("2026-07-05T14:05:00.000Z"),
   });
@@ -1625,7 +1958,6 @@ test("auto-start reconciler terminalizes when deadline expires even before max a
     .where(eq(agentMigrations.id, migration.id));
 
   const terminal = await claimAgentMigrationAutoStartRemediation({
-    executor: "server",
     workerId: "server-deadline",
     now: new Date(Date.parse("2026-07-05T14:05:00.000Z") + AGENT_MIGRATION_AUTO_START_REMEDIATION_WINDOW_MS),
   });
@@ -1637,20 +1969,17 @@ test("auto-start reconciler terminalizes when deadline expires even before max a
 test("stale post-arrival auto-start dispatch is reclaimable exactly once", async ({ db }) => {
 
   const { server, targetMachine, agent } = await seedMigrationFixture();
-  const migration = await beginAgentMigration({
+  const provisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     now: new Date("2026-07-05T14:00:00.000Z"),
   });
-  await markAgentMigrationReady({
-    grantKey: migration.grantKey,
-    manifestPath: "manifest.json",
-    now: new Date("2026-07-05T14:01:00.000Z"),
-  });
-  await startAgentMigrationTransfer(migration.grantKey, new Date("2026-07-05T14:02:00.000Z"));
-  const arriving = await flipAgentMigrationMachine(migration.grantKey, new Date("2026-07-05T14:03:00.000Z"));
+  const { migration } = provisioning;
+  await markTestAgentMigrationReady(provisioning, { now: new Date("2026-07-05T14:01:00.000Z") });
+  await startTestAgentMigrationTransfer(migration.id, new Date("2026-07-05T14:02:00.000Z"));
+  const arriving = await flipTestAgentMigration(migration.id, new Date("2026-07-05T14:03:00.000Z"));
   const arrivalInput = {
-    grantKey: migration.grantKey,
+    migrationId: migration.id,
     migrationGeneration: agentMigrationGeneration(arriving),
     serverId: server.id,
     targetMachineId: targetMachine.id,
@@ -1679,43 +2008,14 @@ test("stale post-arrival auto-start dispatch is reclaimable exactly once", async
   assert.equal(persisted.failureReason, null);
 });
 
-test("arriving migration abort can roll back machineId to the source machine", async ({ db }) => {
-
-  const { targetMachine, sourceMachine, agent } = await seedMigrationFixture();
-  const migration = await beginAgentMigration({
-    agentId: agent.id,
-    targetMachineId: targetMachine.id,
-    now: new Date("2026-07-05T14:00:00.000Z"),
-  });
-  await markAgentMigrationReady({
-    grantKey: migration.grantKey,
-    manifestPath: "manifest.json",
-    now: new Date("2026-07-05T14:01:00.000Z"),
-  });
-  await startAgentMigrationTransfer(migration.grantKey, new Date("2026-07-05T14:02:00.000Z"));
-  await flipAgentMigrationMachine(migration.grantKey, new Date("2026-07-05T14:03:00.000Z"));
-
-  const aborted = await abortAgentMigration({
-    grantKey: migration.grantKey,
-    reason: "adopt_failed",
-    rollbackArrivingMachine: true,
-    now: new Date("2026-07-05T14:05:00.000Z"),
-  });
-  assert.equal(aborted.state, "aborted");
-  assert.equal(aborted.abortReason, "adopt_failed");
-
-  const [agentRow] = await getDb().select().from(agents).where(eq(agents.id, agent.id));
-  assert.equal(agentRow.machineId, sourceMachine.id);
-});
-
 test("active migration unique index prevents split-brain migration grants for one agent", async ({ db }) => {
 
   const { targetMachine, agent } = await seedMigrationFixture();
 
-  await beginAgentMigration({ agentId: agent.id, targetMachineId: targetMachine.id });
+  await beginTestAgentMigration({ agentId: agent.id, targetMachineId: targetMachine.id });
   await assert.rejects(async () => {
     try {
-      await beginAgentMigration({ agentId: agent.id, targetMachineId: targetMachine.id });
+      await beginTestAgentMigration({ agentId: agent.id, targetMachineId: targetMachine.id });
     } catch (err) {
       const message = `${err instanceof Error ? err.message : String(err)} ${(err as { cause?: unknown })?.cause ?? ""}`;
       assert.match(message, /idx_agent_migrations_active_agent|duplicate key|constraint/i);
@@ -1727,119 +2027,321 @@ test("active migration unique index prevents split-brain migration grants for on
   assert.equal(rows.length, 1);
 });
 
-test("migration history is newest-first and enforces its requested bound", async ({ db }) => {
+test("transport-lost keeps the daemon's detailed cause while failure_reason stays in the known set", async ({ db }) => {
 
-  const { targetMachine, agent } = await seedMigrationFixture();
-  const migrationIds: string[] = [];
+  const { server, sourceMachine, targetMachine, agent } = await seedMigrationFixture();
+  const provisioning = await beginTestAgentMigration({ agentId: agent.id, targetMachineId: targetMachine.id });
+  const { migration } = provisioning;
 
-  for (let index = 0; index < 4; index += 1) {
-    const startedAt = new Date(`2026-07-05T14:0${index}:00.000Z`);
-    const migration = await beginAgentMigration({
-      agentId: agent.id,
-      targetMachineId: targetMachine.id,
-      now: startedAt,
-    });
-    migrationIds.push(migration.id);
-    await abortAgentMigration({
-      grantKey: migration.grantKey,
-      reason: `history-${index}`,
-      now: new Date(startedAt.getTime() + 1_000),
-    });
-  }
-
-  const latestTwo = await getAgentMigrationHistory(
-    agent.id,
-    2,
-    getDb(),
-    new Date("2026-07-05T15:00:00.000Z"),
+  const failed = await markAgentMigrationTransportLostForComputer({
+    migrationId: migration.id,
+    serverId: server.id,
+    machineId: sourceMachine.id,
+    detailCode: "MIGRATION_TARGET_IMPORT_ARRIVED_FAILED:503:migration_source_workspace_archive_failed",
+    message: "MIGRATION_TARGET_IMPORT_ARRIVED_FAILED:503:migration_source_workspace_archive_failed",
+  });
+  assert.equal(failed.state, "failed");
+  assert.equal(failed.failureReason, "MIGRATION_TRANSPORT_LOST");
+  assert.equal(
+    failed.transportErrorCode,
+    "MIGRATION_TARGET_IMPORT_ARRIVED_FAILED:503:migration_source_workspace_archive_failed",
   );
-  assert.deepEqual(latestTwo.map((migration) => migration.id), [migrationIds[3], migrationIds[2]]);
 
-  const minimumBound = await getAgentMigrationHistory(
-    agent.id,
-    0,
-    getDb(),
-    new Date("2026-07-05T15:00:00.000Z"),
-  );
-  assert.equal(minimumBound.length, 1);
-  assert.equal(minimumBound[0]?.id, migrationIds[3]);
+  // A repeated report from the other side is idempotent on the known reason.
+  const repeated = await markAgentMigrationTransportLostForComputer({
+    migrationId: migration.id,
+    serverId: server.id,
+    machineId: targetMachine.id,
+    detailCode: "FETCH_ECONNRESET",
+  });
+  assert.equal(repeated.revision, failed.revision);
+  assert.equal(repeated.transportErrorCode, failed.transportErrorCode);
 });
 
-test("elapsed deadlines auto-exit zen migrating gate and free the active grant", async ({ db }) => {
+test("a pre-flip migration whose transfer run was lost is re-provisioned under a new transport generation", async ({ db }) => {
+
+  const { server, sourceMachine, targetMachine, agent } = await seedMigrationFixture();
+  const t0 = new Date("2099-07-05T14:00:00.000Z");
+  const provisioned = await beginAgentMigrationProvisioning({
+    agentId: agent.id,
+    targetMachineId: targetMachine.id,
+    now: t0,
+    transportSessionId: "session-original",
+    transportLeaseMs: 60 * 60 * 1000,
+    transportMaxBytes: 10_000,
+  });
+  const oldGeneration = provisioned.migration.transportGeneration!;
+  const provision = {
+    provider: "object_store" as const,
+    sessionId: "session-rotated",
+    leaseMs: 60 * 60 * 1000,
+    maxBytes: 10_000,
+    storageKey: "rotated",
+  };
+
+  // A lease younger than the minimum age may still be in flight: leave it alone.
+  assert.equal(await reprovisionAgentMigrationTransport({
+    migrationId: provisioned.migration.id,
+    expectedTransportGeneration: oldGeneration,
+    provision,
+    now: new Date(t0.getTime() + 5_000),
+  }), null);
+
+  const later = new Date(t0.getTime() + AGENT_MIGRATION_LEASE_REPROVISION_MIN_AGE_MS + 1_000);
+  const rotated = await reprovisionAgentMigrationTransport({
+    migrationId: provisioned.migration.id,
+    expectedTransportGeneration: oldGeneration,
+    provision,
+    now: later,
+  });
+  assert.ok(rotated);
+  assert.notEqual(rotated.migration.transportGeneration, oldGeneration);
+  assert.equal(rotated.migration.transportLeaseId, "session-rotated");
+  assert.equal(rotated.migration.transportControlSha256, null);
+  assert.equal(rotated.migration.sourceQuiesceReceipt, null);
+  assert.equal(rotated.migration.transportExpectedMigrationRevision, rotated.migration.revision);
+  assert.equal(rotated.source.message.transportGeneration, rotated.migration.transportGeneration);
+  assert.equal(rotated.target.message.transportGeneration, rotated.migration.transportGeneration);
+  assert.notEqual(rotated.source.message.bearerToken, provisioned.source.message.bearerToken);
+
+  // Only the generation that was observed missing is replaced (no double rotation).
+  assert.equal(await reprovisionAgentMigrationTransport({
+    migrationId: provisioned.migration.id,
+    expectedTransportGeneration: oldGeneration,
+    provision,
+    now: new Date(later.getTime() + 60_000),
+  }), null);
+
+  // The old generation's still-running peer reports transport-lost: ignored.
+  const afterStale = await markAgentMigrationTransportLostForComputer({
+    migrationId: provisioned.migration.id,
+    serverId: server.id,
+    machineId: targetMachine.id,
+    code: "MIGRATION_GENERATION_STALE",
+    transportGeneration: oldGeneration,
+  });
+  assert.equal(afterStale.state, provisioned.migration.state);
+  assert.equal(afterStale.revision, rotated.migration.revision);
+
+  // A failure in the current generation still fails the migration.
+  const failed = await markAgentMigrationTransportLostForComputer({
+    migrationId: provisioned.migration.id,
+    serverId: server.id,
+    machineId: sourceMachine.id,
+    transportGeneration: rotated.migration.transportGeneration,
+  });
+  assert.equal(failed.state, "failed");
+
+  // Post-flip / terminal rows are never re-provisioned.
+  assert.equal(await reprovisionAgentMigrationTransport({
+    migrationId: provisioned.migration.id,
+    expectedTransportGeneration: rotated.migration.transportGeneration!,
+    provision,
+    now: new Date(later.getTime() + 120_000),
+  }), null);
+});
+
+test("a target that lost its run gets its lease re-issued under the same generation, even after upload", async ({ db }) => {
 
   const { targetMachine, agent } = await seedMigrationFixture();
+  const t0 = new Date("2099-07-05T14:00:00.000Z");
+  const provisioned = await beginAgentMigrationProvisioning({
+    agentId: agent.id,
+    targetMachineId: targetMachine.id,
+    now: t0,
+    transportSessionId: "session-target-reissue",
+    transportLeaseMs: 60 * 60 * 1000,
+    transportMaxBytes: 10_000,
+  });
+  const generation = provisioned.migration.transportGeneration!;
+  const later = new Date(t0.getTime() + AGENT_MIGRATION_LEASE_REPROVISION_MIN_AGE_MS + 1_000);
+  // Upload already completed: the row is `ready`. The source no longer matters; the target does.
+  await getDb().update(agentMigrations).set({ state: "ready" }).where(eq(agentMigrations.id, provisioned.migration.id));
+  const [ready] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, provisioned.migration.id));
+  assert.equal(agentMigrationLostRunRecovery(ready, "source", later), null);
+  assert.equal(agentMigrationLostRunRecovery(ready, "target", later), "reissue_target_lease");
+  assert.equal(agentMigrationLostRunRecovery(ready, "target", new Date(t0.getTime() + 1_000)), null, "in-flight first lease");
 
-  const migration = await beginAgentMigration({
+  const delivery = await reissueAgentMigrationTargetLease({
+    migrationId: ready.id,
+    expectedTransportGeneration: generation,
+    now: later,
+  });
+  assert.ok(delivery);
+  assert.equal(delivery.role, "target");
+  assert.equal(delivery.message.transportGeneration, generation, "same generation: the download resumes");
+  assert.notEqual(delivery.message.bearerToken, provisioned.target.message.bearerToken);
+  const [after] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, ready.id));
+  assert.equal(after.revision, ready.revision, "no revision bump");
+  assert.equal(after.sourceTransportTokenHash, ready.sourceTransportTokenHash);
+  assert.notEqual(after.targetTransportTokenHash, ready.targetTransportTokenHash);
+
+  // A superseded generation or a post-flip row is not re-issued.
+  assert.equal(await reissueAgentMigrationTargetLease({
+    migrationId: ready.id,
+    expectedTransportGeneration: "agent_migration_transport:other",
+    now: later,
+  }), null);
+  await getDb().update(agentMigrations).set({ state: "arriving" }).where(eq(agentMigrations.id, ready.id));
+  assert.equal(await reissueAgentMigrationTargetLease({
+    migrationId: ready.id,
+    expectedTransportGeneration: generation,
+    now: later,
+  }), null);
+});
+
+test("elapsed deadlines exit the zen migrating gate on read, and only the sweep aborts and frees the grant", async ({ db }) => {
+
+  const { sourceMachine, targetMachine, agent } = await seedMigrationFixture();
+
+  const provisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     now: new Date("2026-07-05T14:00:00.000Z"),
     prepDeadlineMs: 1000,
   });
+  const { migration } = provisioning;
+  const [before] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, migration.id));
 
-  assert.equal(await isAgentZenMigrating(agent.id, getDb(), new Date("2026-07-05T14:00:00.500Z")), true);
-  const expired = await getAgentMigrationGateStatus(agent.id, getDb(), new Date("2026-07-05T14:00:02.000Z"));
-  assert.equal(expired.migration, null);
-  assert.equal(expired.expiredLifecycleEvent?.eventType, "migration_aborted");
-  assert.equal(expired.expiredLifecycleEvent?.reason, "migration_abort");
-  assert.equal(await isAgentZenMigrating(agent.id, getDb(), new Date("2026-07-05T14:00:02.000Z")), false);
+  assert.equal(await zenMigrating(agent.id, new Date("2026-07-05T14:00:00.500Z")), true);
+  const afterDeadline = new Date("2026-07-05T14:00:02.000Z");
+  const expired = await getAgentMigrationGateStatus(agent.id, getDb(), afterDeadline);
+  assert.equal(expired.migration, null, "an expired migration no longer gates delivery");
+  assert.equal(await zenMigrating(agent.id, afterDeadline), false);
+  const status = await getLatestAgentMigration(agent.id, getDb(), afterDeadline);
+  assert.equal(status?.id, migration.id);
+  assert.equal(status?.state, "aborted", "the status read reports the migration as the sweep will leave it");
+  assert.equal(status?.abortReason, "prep-deadline");
+
+  // Reads are pure: the row, its receipts, and the agent's machine are untouched.
+  const [unchanged] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, migration.id));
+  assert.deepEqual(unchanged, before);
+  assert.deepEqual(await getDb().select().from(agentMigrationReceiptOutbox)
+    .where(eq(agentMigrationReceiptOutbox.migrationId, migration.id)), []);
+  const [agentRow] = await getDb().select().from(agents).where(eq(agents.id, agent.id));
+  assert.equal(agentRow.machineId, sourceMachine.id, "pre-flip, delivery stays on the source");
+
+  const swept = await sweepElapsedAgentMigrationDeadline({ now: afterDeadline });
+  assert.equal(swept?.id, migration.id);
+  const [aborted] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, migration.id));
+  assert.equal(aborted.state, "aborted");
+  assert.equal(aborted.abortReason, "prep-deadline");
+  assert.equal(aborted.revision, status?.revision, "the projection matches what the sweep wrote");
+
+  const retryProvisioning = await beginTestAgentMigration({ agentId: agent.id, targetMachineId: targetMachine.id });
+  const retry = retryProvisioning.migration;
+  assert.equal(retry.state, "provisioning");
+});
+
+test("a post-flip expired migration stops gating on read and stays on the target until the sweep aborts it", async ({ db }) => {
+
+  const { targetMachine, agent } = await seedMigrationFixture();
+  const provisioning = await beginTestAgentMigration({
+    agentId: agent.id,
+    targetMachineId: targetMachine.id,
+    now: new Date("2026-07-05T14:00:00.000Z"),
+    arrivalDeadlineMs: 60_000,
+  });
+  await markTestAgentMigrationReady(provisioning, { now: new Date("2026-07-05T14:00:01.000Z") });
+  await startTestAgentMigrationTransfer(provisioning.migration.id, new Date("2026-07-05T14:00:02.000Z"));
+  const arriving = await flipTestAgentMigration(provisioning.migration.id, new Date("2026-07-05T14:00:03.000Z"));
+  assert.equal(arriving.state, "arriving");
+  const afterDeadline = new Date(arriving.arrivalDeadlineAt.getTime() + 1_000);
+
+  assert.equal((await getAgentMigrationGateStatus(agent.id, getDb(), afterDeadline)).migration, null);
+  assert.equal((await getLatestAgentMigration(agent.id, getDb(), afterDeadline))?.abortReason, "arrival-deadline");
+  const [unchanged] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, arriving.id));
+  assert.equal(unchanged.state, "arriving");
+  assert.equal(unchanged.revision, arriving.revision);
+  const [agentRow] = await getDb().select().from(agents).where(eq(agents.id, agent.id));
+  assert.equal(agentRow.machineId, targetMachine.id, "post-flip, delivery goes to the target");
+
+  const swept = await sweepElapsedAgentMigrationDeadline({ now: afterDeadline });
+  assert.equal(swept?.state, "aborted");
+  assert.equal(swept?.abortReason, "arrival-deadline");
+});
+
+test("remediation sweeps an elapsed deadline without any delivery touching the agent", async ({ db }) => {
+
+  const { targetMachine, agent } = await seedMigrationFixture();
+  const provisioning = await beginTestAgentMigration({
+    agentId: agent.id,
+    targetMachineId: targetMachine.id,
+    now: new Date("2026-07-05T14:00:00.000Z"),
+    prepDeadlineMs: 1000,
+  });
+  const { migration } = provisioning;
+
+  assert.equal(await sweepElapsedAgentMigrationDeadline({ now: new Date("2026-07-05T14:00:00.500Z") }), null);
+
+  const sink = new MemoryTraceSink();
+  const orchestrator = new AgentOrchestrator(makeAvailableReplicaStateStore(), undefined, new BasicTracer({ sink }));
+  const migrationAbortedEvents = () => sink.getAllSpans()
+    .filter((span) => span.name === "server.agent.migration.deadline_expired")
+    .flatMap((span) => span.events)
+    .filter((event) => event.name === "agent.lifecycle.event" && event.attrs?.event_type === "migration_aborted");
+  const result = await drainAgentMigrationRemediation({
+    io: fakeIo() as never,
+    orchestrator,
+    workerId: "server-sweeper",
+    now: new Date("2026-07-05T14:00:02.000Z"),
+  });
+  assert.equal(result.deadline, true);
 
   const [aborted] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, migration.id));
   assert.equal(aborted.state, "aborted");
   assert.equal(aborted.abortReason, "prep-deadline");
+  // The agent is told (the receipt is queued with the abort, not a precondition of it).
+  const abortedReceipts = await getDb().select().from(agentMigrationReceiptOutbox)
+    .where(eq(agentMigrationReceiptOutbox.migrationId, migration.id));
+  assert.deepEqual(abortedReceipts.map((row) => row.receiptKind), ["aborted"]);
+  // The sweep's abort emits migration_aborted, once.
+  const emitted = migrationAbortedEvents();
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0]!.attrs?.reason, "migration_abort");
+  assert.equal(
+    emitted[0]!.attrs?.idempotency_key,
+    `agent_migration:${migration.supportRef}:migration_aborted:${aborted.revision}`,
+  );
 
-  const retry = await beginAgentMigration({ agentId: agent.id, targetMachineId: targetMachine.id });
-  assert.equal(retry.state, "prep");
+  const again = await drainAgentMigrationRemediation({
+    io: fakeIo() as never,
+    orchestrator,
+    workerId: "server-sweeper",
+    now: new Date("2026-07-05T14:00:03.000Z"),
+  });
+  assert.equal(again.deadline, false);
+  assert.equal(migrationAbortedEvents().length, 1, "a later tick does not re-emit");
+  assert.equal(await sweepElapsedAgentMigrationDeadline({ now: new Date("2026-07-05T14:00:03.000Z") }), null);
 });
 
-test("migration lifecycle events use control-class event names without leaking grant keys", async ({ db }) => {
+test("migration aborted lifecycle event uses control-class names without leaking grant keys", async ({ db }) => {
 
-  const { user, targetMachine, sourceMachine, agent } = await seedMigrationFixture();
+  const { targetMachine, sourceMachine, agent } = await seedMigrationFixture();
 
-  const migration = await beginAgentMigration({
+  const provisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     now: new Date("2026-07-05T14:00:00.000Z"),
   });
-  const started = createAgentMigrationLifecycleEvent({
+  const { migration } = provisioning;
+  const preFlipAbortEvent = createAgentMigrationLifecycleEvent({
     migration,
-    eventType: "migration_started",
     occurredAt: "2026-07-05T14:00:00.000Z",
   });
-  assert.equal(started.eventType, "migration_started");
-  assert.equal(started.reason, "migration_prepare");
-  assert.equal(started.machineId, sourceMachine.id);
-  assert.equal(started.correlationId, `agent_migration:${migration.supportRef}`);
-  assert.equal(started.idempotencyKey, `agent_migration:${migration.supportRef}:migration_started:${migration.revision}`);
-  assert.doesNotMatch(JSON.stringify(started), new RegExp(migration.grantKey));
+  assert.equal(preFlipAbortEvent.eventType, "migration_aborted");
+  assert.equal(preFlipAbortEvent.reason, "migration_abort");
+  assert.equal(preFlipAbortEvent.machineId, sourceMachine.id);
+  assert.equal(preFlipAbortEvent.correlationId, `agent_migration:${migration.supportRef}`);
+  assert.equal(preFlipAbortEvent.idempotencyKey, `agent_migration:${migration.supportRef}:migration_aborted:${migration.revision}`);
 
-  await markAgentMigrationReady({
-    grantKey: migration.grantKey,
-    manifestPath: "manifest.json",
-    now: new Date("2026-07-05T14:01:00.000Z"),
-  });
-  await startAgentMigrationTransfer(migration.grantKey, new Date("2026-07-05T14:02:00.000Z"));
-  const arriving = await flipAgentMigrationMachine(migration.grantKey, new Date("2026-07-05T14:03:00.000Z"));
-  const completed = await completeArrivingMigration({
-    grantKey: migration.grantKey,
-    agentId: agent.id,
-    targetMachineId: targetMachine.id,
-    initiatedByUserId: user.id,
-    now: new Date("2026-07-05T14:04:00.000Z"),
-  });
+  await markTestAgentMigrationReady(provisioning, { now: new Date("2026-07-05T14:01:00.000Z") });
+  await startTestAgentMigrationTransfer(migration.id, new Date("2026-07-05T14:02:00.000Z"));
+  const arriving = await flipTestAgentMigration(migration.id, new Date("2026-07-05T14:03:00.000Z"));
 
-  const arrivingAbortEvent = createAgentMigrationLifecycleEvent({
-    migration: arriving,
-    eventType: "migration_aborted",
-  });
+  const arrivingAbortEvent = createAgentMigrationLifecycleEvent({ migration: arriving });
   assert.equal(arrivingAbortEvent.reason, "migration_abort");
   assert.equal(arrivingAbortEvent.machineId, targetMachine.id);
-
-  const completedEvent = createAgentMigrationLifecycleEvent({
-    migration: completed,
-    eventType: "migration_completed",
-  });
-  assert.equal(completedEvent.reason, "migration_arrived");
-  assert.equal(completedEvent.machineId, targetMachine.id);
 });
 
 test("safe cancel terminalizes, keeps cleanup fenced, and lets server/steward retry independently", async ({ db }) => {
@@ -1850,8 +2352,6 @@ test("safe cancel terminalizes, keeps cleanup fenced, and lets server/steward re
     targetMachineId: targetMachine.id,
     initiatedByUserId: user.id,
     transportSessionId: "cancel-session",
-    sourceTransferUrl: "https://r2.example.test/source",
-    targetTransferUrl: "https://r2.example.test/target",
     now: new Date("2026-08-03T08:00:00.000Z"),
   });
   assert.match(provisioned.migration.supportRef, /^mig_[A-Za-z0-9_-]{22}$/);
@@ -1882,19 +2382,16 @@ test("safe cancel terminalizes, keeps cleanup fenced, and lets server/steward re
   );
   const gateDuringCancellation = await getAgentMigrationGateStatus(agent.id, undefined, afterLegacyDeadlines);
   assert.equal(gateDuringCancellation.migration, null);
-  assert.equal(gateDuringCancellation.expiredLifecycleEvent, undefined);
-  assert.equal(
-    await markAgentMigrationTransportLost({ migrationId: requested.migration.id, now: afterLegacyDeadlines }),
-    null,
-  );
   await assert.rejects(
-    () => abortAgentMigration({
-      grantKey: requested.migration.grantKey,
-      reason: "stale_abort_racing_cancel",
+    () => markAgentMigrationTransportLostForComputer({
+      migrationId: requested.migration.id,
+      serverId: server.id,
+      machineId: sourceMachine.id,
       now: afterLegacyDeadlines,
     }),
     /MIGRATION_NOT_ACTIVE/,
   );
+  assert.equal(await sweepElapsedAgentMigrationDeadline({ now: afterLegacyDeadlines }), null);
 
   const duplicateRequest = await requestAgentMigrationCancellation({
     agentId: agent.id,
@@ -1909,7 +2406,6 @@ test("safe cancel terminalizes, keeps cleanup fenced, and lets server/steward re
   assert.equal(duplicateRequest.migration.revision, requested.migration.revision);
 
   const retried = await claimAgentMigrationCancellationCleanup({
-    executor: "server",
     workerId: "cancel-cleanup-worker-a",
     now: new Date("2026-08-03T08:00:02.000Z"),
   });
@@ -1918,20 +2414,17 @@ test("safe cancel terminalizes, keeps cleanup fenced, and lets server/steward re
   assert.equal(retried?.migration.cancelDispatchAttempts, 2);
   assert.ok(retried?.leaseId);
   const contended = await claimAgentMigrationCancellationCleanup({
-    executor: "healthy_steward",
     workerId: "cancel-cleanup-worker-b",
     now: new Date("2026-08-03T08:00:02.100Z"),
   });
   assert.equal(contended, null);
   const lastDispatch = await claimAgentMigrationCancellationCleanup({
-    executor: "healthy_steward",
     workerId: "cancel-cleanup-worker-b",
     now: new Date("2026-08-03T08:00:40.000Z"),
   });
   assert.equal(lastDispatch?.dispatch, "required");
   assert.equal(lastDispatch?.migration.cancelDispatchAttempts, 3);
   const exhausted = await claimAgentMigrationCancellationCleanup({
-    executor: "server",
     workerId: "cancel-cleanup-worker-a",
     now: new Date("2026-08-03T08:01:11.000Z"),
   });
@@ -1939,15 +2432,6 @@ test("safe cancel terminalizes, keeps cleanup fenced, and lets server/steward re
   assert.equal(exhausted.dispatch, "none");
   assert.equal(exhausted.migration.cancelErrorCode, "cancel_dispatch_retry_exhausted");
   assert.ok(exhausted.migration.cancelNeedsAttentionAt);
-  await assert.rejects(
-    () => claimAgentMigrationCancellationCleanup({
-      executor: "faulted_agent" as never,
-      workerId: "blocked-agent",
-      now: new Date("2026-08-03T08:00:41.500Z"),
-    }),
-    /MIGRATION_CANCEL_CLEANUP_EXECUTOR_INVALID/,
-  );
-
   await assert.rejects(
     () => acknowledgeAgentMigrationCancellation({
       migrationId: requested.migration.id,
@@ -2015,8 +2499,6 @@ test("server remediation worker dispatches pending migration cancellation delive
     targetMachineId: targetMachine.id,
     initiatedByUserId: user.id,
     transportSessionId: "worker-cancel-session",
-    sourceTransferUrl: "https://r2.example.test/source",
-    targetTransferUrl: "https://r2.example.test/target",
     now: new Date("2026-08-03T08:00:00.000Z"),
   });
   const requested = await requestAgentMigrationCancellation({
@@ -2041,7 +2523,7 @@ test("server remediation worker dispatches pending migration cancellation delive
     now: new Date("2026-08-03T08:00:02.000Z"),
   });
 
-  assert.deepEqual(result, { autoStart: false, cancellation: true });
+  assert.deepEqual(result, { autoStart: false, cancellation: true, deadline: false, sourceArchive: false });
   assert.deepEqual(sent, [
     { machineId: sourceMachine.id, role: "source", migrationRef: requested.migration.supportRef },
     { machineId: targetMachine.id, role: "target", migrationRef: requested.migration.supportRef },
@@ -2060,8 +2542,6 @@ test("cancellation cleanup stale owners cannot write after durable lease success
     targetMachineId: targetMachine.id,
     initiatedByUserId: user.id,
     transportSessionId: "worker-cancel-stale-session",
-    sourceTransferUrl: "https://r2.example.test/source",
-    targetTransferUrl: "https://r2.example.test/target",
     now: new Date("2026-08-03T08:00:00.000Z"),
   });
   const requested = await requestAgentMigrationCancellation({
@@ -2073,7 +2553,6 @@ test("cancellation cleanup stale owners cannot write after durable lease success
     now: new Date("2026-08-03T08:00:01.000Z"),
   });
   const first = await claimAgentMigrationCancellationCleanup({
-    executor: "server",
     workerId: "cancel-first",
     now: new Date("2026-08-03T08:00:02.000Z"),
     leaseMs: 30_000,
@@ -2107,7 +2586,6 @@ test("cancellation cleanup stale owners cannot write after durable lease success
   assert.deepEqual(migrationSnapshot(afterExpiredAttention), firstOwnerSnapshot);
 
   const successor = await claimAgentMigrationCancellationCleanup({
-    executor: "server",
     workerId: "cancel-successor",
     now: new Date("2026-08-03T08:00:33.000Z"),
     leaseMs: 30_000,
@@ -2175,8 +2653,6 @@ test("cancel recovery teeth prove unavailable control, released gate, and next m
     targetMachineId: targetMachine.id,
     initiatedByUserId: user.id,
     transportSessionId: "cancel-recovery-teeth",
-    sourceTransferUrl: "https://r2.example.test/source",
-    targetTransferUrl: "https://r2.example.test/target",
     now: migrationStartedAt,
   });
   const [active] = await getDb().update(agentMigrations)
@@ -2243,7 +2719,7 @@ test("cancel recovery teeth prove unavailable control, released gate, and next m
       now: new Date("2026-08-03T08:30:03.000Z"),
     });
     assert.equal(canceled.migration.state, "canceled_pre_flip");
-    assert.equal(await isAgentZenMigrating(agent.id, undefined, postTerminalNow), false);
+    assert.equal(await zenMigrating(agent.id, postTerminalNow), false);
     assert.equal((await getAgentMigrationGateStatus(agent.id, undefined, postTerminalNow)).migration, null);
     assert.equal(
       planZenMigratingDelivery({
@@ -2281,8 +2757,6 @@ test("cancel recovery teeth prove unavailable control, released gate, and next m
     targetMachineId: nextTargetMachine.id,
     initiatedByUserId: user.id,
     transportSessionId: "cancel-recovery-successor",
-    sourceTransferUrl: "https://r2.example.test/successor-source",
-    targetTransferUrl: "https://r2.example.test/successor-target",
     now: new Date("2026-08-03T08:30:05.000Z"),
   });
   assert.equal(successor.migration.state, "provisioning");
@@ -2297,8 +2771,6 @@ test("post-flip cancel truthfully retains target authority", async ({ db }) => {
     targetMachineId: targetMachine.id,
     initiatedByUserId: user.id,
     transportSessionId: "post-flip-cancel-session",
-    sourceTransferUrl: "https://r2.example.test/source",
-    targetTransferUrl: "https://r2.example.test/target",
     now: new Date("2026-08-03T09:00:00.000Z"),
   });
   const flippedAt = new Date("2026-08-03T09:00:01.000Z");

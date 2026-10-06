@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { slackActorProjectionRevisionAfterRefresh } from "./slackBridgeProvisioningControlPlane.js";
+import {
+  projectSlackProviderChannelsForServer,
+  slackActorProjectionRevisionAfterRefresh,
+} from "./slackBridgeProvisioningControlPlane";
 
 const currentActor = {
   displayName: "Peng",
@@ -43,4 +45,18 @@ test("material Slack actor changes advance the actor authority revision exactly 
     handle: "peng",
     actorKind: "human",
   }), 77);
+});
+
+test("another server's reserved Slack channel is omitted without exposing its binding", () => {
+  const projected = projectSlackProviderChannelsForServer({
+    observed: [
+      { id: "C_OWN", name: "own", privacyClass: "public" },
+      { id: "C_OTHER", name: "secret-other-server-name", privacyClass: "private" },
+      { id: "C_FREE", name: "free", privacyClass: "public" },
+    ],
+    currentBindings: [{ providerConversationId: "C_OWN", privacyClass: "public" }],
+    reservedByOtherServer: new Set(["C_OTHER"]),
+  });
+  assert.deepEqual(projected.map((channel) => channel.id), ["C_OWN", "C_FREE"]);
+  assert.equal(JSON.stringify(projected).includes("secret-other-server-name"), false);
 });

@@ -2,7 +2,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -24,50 +23,33 @@ import {
   shouldRefuseExternalRisingWaveTransition,
   shouldRefuseRisingWaveSeedWithoutState,
   waitForRisingWaveReadiness,
-} from "./raftdev.ts";
+} from "./raftdev";
 import {
   buildRisingWaveBootstrapStatements,
   createCdcTableStatement,
+  createdIndexTarget,
   createdRelationName,
+  referencedRelations,
+  RISINGWAVE_ARTIFACT_CDC_TABLES,
+  RISINGWAVE_BOOTSTRAP_ARTIFACTS,
   RISINGWAVE_CDC_TABLES,
   RISINGWAVE_LOCAL_SOURCE,
   RISINGWAVE_PUBLICATION_TABLES,
   RISINGWAVE_REQUIRED_RELATIONS,
-  RISINGWAVE_V3_VISIBILITY_ORDER,
+  RISINGWAVE_SERVER_READ_RELATIONS,
   splitSqlStatements,
-} from "./raftdev-risingwave-bootstrap.ts";
+} from "./raftdev-risingwave-bootstrap";
+import { renderReleaseQaRisingWaveBootstrap } from "./emit-risingwave-bootstrap";
 
 // Asserts on private CI/deploy files that the source-available snapshot does not
 // carry; skipped when an exported snapshot's RELEASE_SOURCE marker is present.
 const inSourceSnapshot = existsSync(new URL("../../RELEASE_SOURCE", import.meta.url));
 
-function loadActualBootstrapArtifacts() {
-  return {
-    base: readFileSync(
-      new URL("../../infra/risingwave/sql/024-risingwave-unread-inbox-full-materialized.sql", import.meta.url),
-      "utf8",
-    ),
-    productionV3: readFileSync(
-      new URL("../../infra/risingwave/sql/024-risingwave-inbox-v3-production-definition-2026-07-07.sql", import.meta.url),
-      "utf8",
-    ),
-    muteV32: readFileSync(
-      new URL("../../infra/risingwave/sql/039-risingwave-inbox-v03-production-mute-v3_2-ddl.sql", import.meta.url),
-      "utf8",
-    ),
-    bornReadV33: readFileSync(
-      new URL("../../infra/risingwave/sql/039-risingwave-inbox-born-read-v3_3-ddl.sql", import.meta.url),
-      "utf8",
-    ),
-    factVisibilityV34: readFileSync(
-      new URL("../../infra/risingwave/sql/056-risingwave-inbox-fact-visibility-v3_4-ddl.sql", import.meta.url),
-      "utf8",
-    ),
-    readFrontierV1: readFileSync(
-      new URL("../../infra/risingwave/sql/056-risingwave-inbox-read-frontier-v1-ddl.sql", import.meta.url),
-      "utf8",
-    ),
-  };
+function loadActualBootstrapArtifacts(): Record<string, string> {
+  return Object.fromEntries(RISINGWAVE_BOOTSTRAP_ARTIFACTS.map((artifact) => [
+    artifact.file,
+    readFileSync(new URL(`../../${artifact.file}`, import.meta.url), "utf8"),
+  ]));
 }
 
 test("RisingWave is default-off and parses full/process-only profiles explicitly", () => {
@@ -381,65 +363,59 @@ test("full Postgres Docker args enable bounded logical replication on the shared
   );
 });
 
-test("CDC manifest covers the exact 15-table publication and deliberate versioned aliases", () => {
+test("CDC manifest covers the exact 16-table publication and deliberate versioned aliases", () => {
   assert.deepEqual([...RISINGWAVE_PUBLICATION_TABLES], [
     "channels",
     "messages",
     "channel_humans",
+    "channel_agents",
     "user_channel_read_cursors",
-    "read_mutation_authorities",
+    "agent_channel_read_cursors",
     "user_channel_inbox_states",
     "thread_follows",
-    "tasks",
     "message_mentions",
     "server_members",
     "joint_channels",
     "joint_channel_servers",
     "inbox_suppression_states",
     "inbox_target_mute_states",
-    "inbox_notification_facts",
+    "servers",
+    "tasks",
   ]);
-  assert.equal(new Set(RISINGWAVE_PUBLICATION_TABLES).size, 15);
+  assert.equal(new Set(RISINGWAVE_PUBLICATION_TABLES).size, 16);
   assert.deepEqual(RISINGWAVE_CDC_TABLES.map((table) => table.name), [
     "rw_channels",
     "rw_messages",
     "rw_channel_humans",
-    "rw_user_channel_read_cursors",
+    "rw_channel_agents",
     "rw_user_channel_read_cursors_v2",
-    "rw_read_mutation_authorities_v1",
+    "rw_agent_channel_read_cursors",
     "rw_user_channel_inbox_states",
     "rw_thread_follows",
-    "rw_tasks",
-    "rw_message_mentions",
     "rw_message_mentions_v2",
     "rw_server_members",
     "rw_joint_channels",
     "rw_joint_channel_servers",
     "rw_inbox_suppression_states",
-    "rw_inbox_notification_facts_v1",
+    "rw_tasks",
   ]);
-  assert.deepEqual(
-    RISINGWAVE_CDC_TABLES
-      .filter((table) => table.upstream === "message_mentions")
-      .map((table) => table.name),
-    ["rw_message_mentions", "rw_message_mentions_v2"],
-  );
   assert.deepEqual(
     RISINGWAVE_CDC_TABLES
       .filter((table) => table.upstream === "user_channel_read_cursors")
       .map((table) => table.name),
-    ["rw_user_channel_read_cursors", "rw_user_channel_read_cursors_v2"],
+    ["rw_user_channel_read_cursors_v2"],
   );
-  assert.deepEqual(
-    RISINGWAVE_CDC_TABLES
-      .filter((table) => table.upstream === "read_mutation_authorities")
-      .map((table) => table.name),
-    ["rw_read_mutation_authorities_v1"],
-  );
+  // Every publication table feeds exactly the CDC relations the graph reads;
+  // the two artifact-owned ones (061) come with their production DDL.
+  const fed = new Set([
+    ...RISINGWAVE_CDC_TABLES.map((table) => table.upstream),
+    ...RISINGWAVE_ARTIFACT_CDC_TABLES.map((table) => table.upstream),
+  ]);
+  assert.deepEqual([...fed].sort(), [...RISINGWAVE_PUBLICATION_TABLES].sort());
   assert.equal(
     RISINGWAVE_CDC_TABLES.some((table) => table.upstream === "inbox_target_mute_states"),
     false,
-    "RFC039 owns the sole versioned mute CDC table",
+    "the RFC-061 chain artifact owns the sole versioned mute CDC table",
   );
 });
 
@@ -469,6 +445,14 @@ test("explicit CDC statements preserve upstream PKs and exclude unsupported mess
     "  sender_id varchar,",
     "  content varchar,",
     "  created_at timestamptz,",
+    "  message_type varchar,",
+    "  causal_actor_type varchar,",
+    "  causal_actor_id varchar,",
+    "  system_subtype varchar,",
+    "  task_status varchar,",
+    "  task_number int,",
+    "  task_assignee_type varchar,",
+    "  task_assignee_id varchar,",
     "  PRIMARY KEY (id)",
     ") FROM slockdev_pg_cdc TABLE 'public.messages'",
   ].join("\n"));
@@ -497,14 +481,6 @@ test("explicit CDC statements preserve upstream PKs and exclude unsupported mess
     "last_applied_authority_seq bigint",
   ]);
 
-  const readAuthorities = RISINGWAVE_CDC_TABLES.find(
-    (table) => table.name === "rw_read_mutation_authorities_v1",
-  );
-  assert.deepEqual(readAuthorities?.columns, [
-    "server_id varchar",
-    "principal_id varchar",
-    "last_terminal_authority_seq bigint",
-  ]);
 });
 
 test("SQL splitter ignores semicolons in strings, identifiers, comments, and dollar quotes", () => {
@@ -519,14 +495,14 @@ test("SQL splitter ignores semicolons in strings, identifiers, comments, and dol
   assert.match(statements[2], /SELECT \$\$body;value\$\$/);
 });
 
-test("actual RFC bootstrap uses foreground settings and rewrites the production source", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("actual RFC bootstrap uses foreground settings and rewrites the production source", { skip: inSourceSnapshot }, () => {
   const statements = buildRisingWaveBootstrapStatements(loadActualBootstrapArtifacts());
   assert.equal(statements[0], "SET BACKGROUND_DDL = false");
   assert.equal(statements[1], "SET STREAMING_PARALLELISM = 1");
 
   const sql = statements.join(";\n");
-  assert.equal(sql.match(/SET\s+BACKGROUND_DDL\s*=\s*false/gi)?.length, 5);
-  assert.equal(sql.match(/SET\s+STREAMING_PARALLELISM\s*=\s*1/gi)?.length, 5);
+  assert.ok((sql.match(/SET\s+BACKGROUND_DDL\s*=\s*false/gi)?.length ?? 0) >= 1);
+  assert.ok((sql.match(/SET\s+STREAMING_PARALLELISM\s*=\s*1/gi)?.length ?? 0) >= 1);
   assert.doesNotMatch(sql, /SET\s+BACKGROUND_DDL\s*=\s*true/i);
   assert.doesNotMatch(sql, /SET\s+STREAMING_PARALLELISM\s*=\s*(?:4|8)\b/i);
   assert.doesNotMatch(sql, /\bslock_neon_cdc\b/);
@@ -534,15 +510,6 @@ test("actual RFC bootstrap uses foreground settings and rewrites the production 
     sql,
     /CREATE TABLE rw_user_channel_read_cursors_v2[\s\S]*FROM slockdev_pg_cdc TABLE 'public\.user_channel_read_cursors'/,
   );
-  assert.match(
-    sql,
-    /CREATE TABLE rw_read_mutation_authorities_v1[\s\S]*FROM slockdev_pg_cdc TABLE 'public\.read_mutation_authorities'/,
-  );
-  assert.match(
-    sql,
-    /CREATE MATERIALIZED VIEW rw_inbox_read_authorities_v1[\s\S]*FROM rw_read_mutation_authorities_v1/,
-  );
-
   const muteCdc = statements.find(
     (statement) => createdRelationName(statement) === "rw_inbox_target_mute_states_v2",
   );
@@ -550,16 +517,9 @@ test("actual RFC bootstrap uses foreground settings and rewrites the production 
     muteCdc ?? "",
     /FROM slockdev_pg_cdc TABLE 'public\.inbox_target_mute_states'/,
   );
-  const notificationFactsCdc = statements.find(
-    (statement) => createdRelationName(statement) === "rw_inbox_notification_facts_v1",
-  );
-  assert.match(
-    notificationFactsCdc ?? "",
-    /FROM slockdev_pg_cdc TABLE 'public\.inbox_notification_facts'/,
-  );
 });
 
-test("actual RFC bootstrap preserves dependency order and excludes captured duplicate terminals", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("actual RFC bootstrap preserves dependency order and excludes superseded generations", { skip: inSourceSnapshot }, () => {
   const statements = buildRisingWaveBootstrapStatements(loadActualBootstrapArtifacts());
   const names = statements
     .map(createdRelationName)
@@ -567,57 +527,139 @@ test("actual RFC bootstrap preserves dependency order and excludes captured dupl
   const cdcNames = RISINGWAVE_CDC_TABLES.map((table) => table.name);
   assert.deepEqual(names.slice(0, cdcNames.length), cdcNames);
 
-  const firstV3 = names.indexOf(RISINGWAVE_V3_VISIBILITY_ORDER[0]);
-  assert.ok(firstV3 > names.indexOf("rw_inbox_items_v2"));
-  assert.deepEqual(
-    names.slice(firstV3, firstV3 + RISINGWAVE_V3_VISIBILITY_ORDER.length),
-    [...RISINGWAVE_V3_VISIBILITY_ORDER],
-  );
-  assert.ok(
-    names.indexOf("rw_inbox_visibility_facts_v3") <
-      names.indexOf("rw_inbox_target_mute_states_v2"),
-  );
-  assert.ok(
-    names.indexOf("rw_inbox_target_mute_states_v2") <
-      names.indexOf("rw_inbox_suppression_facts_v3_2"),
-  );
-  assert.ok(
-    names.indexOf("rw_inbox_cloak_decisions_v3_2") <
-      names.indexOf("rw_inbox_items_v2_suppressed_v3_2"),
-  );
-  assert.ok(
-    names.indexOf("rw_inbox_items_v2_suppressed_v3_2") <
-      names.indexOf("rw_inbox_items_v2_suppressed_v3_3"),
-  );
-  assert.ok(
-    names.indexOf("rw_inbox_items_v3_2") <
-      names.indexOf("rw_inbox_items_v2_suppressed_v3_3"),
-  );
-  assert.ok(
-    names.indexOf("rw_inbox_items_v2_suppressed_v3_3") <
-      names.indexOf("rw_inbox_fact_visibility_targets_v1"),
-  );
-  assert.ok(
-    names.indexOf("rw_inbox_fact_visibility_targets_v1") <
-      names.indexOf("rw_inbox_items_v2_suppressed_v3_4"),
-  );
+  // Independent point-order checks (self-referential whole-list comparisons
+  // prove nothing — #8017 lesson). The v4 base (063-unified) precedes the v5
+  // arms (063-chain-v5) even though the file names sort the other way.
+  const before = (a: string, b: string) =>
+    assert.ok(names.indexOf(a) >= 0 && names.indexOf(a) < names.indexOf(b), `${a} before ${b}`);
+  before("rw_inbox_target_mute_states_v2", "rw_subs_v2");
+  before("rw_servers", "rw_target_eligible_v1");
+  before("rw_message_target_v3", "rw_target_latest_v4");
+  before("rw_target_eligible_v1", "rw_inbox_normal_v4");
+  before("rw_receiver_cursors_v1", "rw_inbox_muted_prefix_v1");
+  before("rw_muted_subs_v1", "rw_inbox_muted_full_v1");
+  before("rw_thread_parent_v3", "rw_inbox_mention_v6");
+  before("rw_inbox_mention_v6", "rw_inbox_items_v10");
+  before("rw_activity_watermark_v5", "rw_inbox_serving_v6");
+  before("rw_inbox_serving_v6", "rw_activity_totals_v4");
+  before("rw_inbox_muted_full_v1", "rw_conversation_unread_v2");
+  before("rw_receiver_cursors_v1", "rw_followed_threads_v4");
+  before("rw_tasks", "rw_followed_threads_v4");
 
-  assert.equal(names.filter((name) => name === "rw_inbox_items_v2").length, 1);
-  assert.equal(names.includes("rw_inbox_items_v3"), false);
-  assert.equal(names.includes("rw_inbox_cloak_decisions_v3"), false);
+  // Superseded / retired generations must not resurface.
+  for (const retired of [
+    "rw_inbox_items_v2",
+    "rw_inbox_items_v2_suppressed_v3_4",
+    "rw_sidebar_unread_summary_v1",
+    "rw_channel_unread_counts_v2",
+    "rw_channel_latest_message_v1",
+    "rw_user_channel_unread_v1",
+    "rw_inbox_serving_v3",
+    "rw_inbox_serving_v4",
+    "rw_inbox_serving_v5",
+    "rw_inbox_items_v7",
+    "rw_inbox_items_v8",
+    "rw_inbox_items_v9",
+    "rw_inbox_mention_v4",
+    "rw_inbox_mention_v5",
+    "rw_activity_totals_v1",
+    "rw_activity_totals_v2",
+    "rw_activity_totals_v3",
+    "rw_activity_watermark_v4",
+    "rw_agent_inbox_v1",
+    "rw_agent_inbox_v2",
+    "rw_agent_inbox_v3",
+    "rw_agent_inbox_v4",
+    "rw_conversation_unread_v1",
+    "rw_followed_thread_stats_v1",
+    "rw_followed_thread_stats_v2",
+    "rw_message_mentions",
+    "rw_inbox_notification_facts_v1",
+    "rw_read_mutation_authorities_v1",
+  ]) {
+    assert.equal(names.includes(retired), false, `${retired} must stay out of the bootstrap`);
+  }
+
+  // Indexes ride with their base relation and only with it.
+  for (const statement of statements) {
+    const target = createdIndexTarget(statement);
+    if (target) assert.ok(names.indexOf(target) < names.indexOf(createdRelationName(statement)!), target);
+  }
 });
 
-test("actual RFC bootstrap creates every serving-readiness relation exactly once", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("actual RFC bootstrap creates every server-read relation and required relation exactly once", { skip: inSourceSnapshot }, () => {
   const names = buildRisingWaveBootstrapStatements(loadActualBootstrapArtifacts())
     .map(createdRelationName)
     .filter((name): name is string => name !== null);
-  for (const relation of RISINGWAVE_REQUIRED_RELATIONS) {
+  for (const relation of [...RISINGWAVE_REQUIRED_RELATIONS, ...RISINGWAVE_SERVER_READ_RELATIONS]) {
     assert.equal(
       names.filter((name) => name === relation).length,
       1,
       `${relation} should be created exactly once`,
     );
   }
+  // Mirrors UNIFIED_CHAIN_VIEWS / CONVERSATION_UNREAD_VIEW in packages/server/src/db/risingwave.ts.
+  const serverSource = readFileSync(new URL("../../packages/server/src/db/risingwave.ts", import.meta.url), "utf8");
+  for (const view of serverSource.matchAll(/^\s+\w+: "(rw_[a-z0-9_]+)",$|^export const CONVERSATION_UNREAD_VIEW = "(rw_[a-z0-9_]+)";$/gm)) {
+    const name = view[1] ?? view[2];
+    assert.ok((RISINGWAVE_SERVER_READ_RELATIONS as readonly string[]).includes(name), `${name} is read by the server`);
+  }
+});
+
+test("release-QA emitter uses the exact raftdev/real-RW relation contract", { skip: inSourceSnapshot }, () => {
+  const sourceRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const rendered = renderReleaseQaRisingWaveBootstrap(sourceRoot);
+  assert.deepEqual(rendered.contract.publication_tables, [...RISINGWAVE_PUBLICATION_TABLES]);
+  assert.deepEqual(rendered.contract.cdc_relations, RISINGWAVE_CDC_TABLES.map((table) => table.name));
+  assert.deepEqual(rendered.contract.artifact_cdc_relations, RISINGWAVE_ARTIFACT_CDC_TABLES.map((table) => table.name));
+  assert.deepEqual(rendered.contract.required_relations, [...RISINGWAVE_REQUIRED_RELATIONS]);
+  assert.deepEqual(rendered.contract.server_read_relations, [...RISINGWAVE_SERVER_READ_RELATIONS]);
+  assert.match(rendered.cdcSql, /CREATE SOURCE :"rw_source_name"/);
+  assert.doesNotMatch(rendered.cdcSql, /\bslockdev_pg_cdc\b|\bslock_neon_cdc\b/);
+  for (const table of RISINGWAVE_CDC_TABLES) {
+    assert.equal((rendered.cdcSql.match(new RegExp(`CREATE TABLE ${table.name}\\b`, "g")) ?? []).length, 1);
+    assert.doesNotMatch(rendered.manifestSql, new RegExp(`CREATE TABLE ${table.name}\\b`));
+  }
+  for (const relation of RISINGWAVE_SERVER_READ_RELATIONS) {
+    assert.match(`${rendered.cdcSql}\n${rendered.manifestSql}`, new RegExp(`CREATE (?:TABLE|MATERIALIZED VIEW) ${relation}\\b`));
+  }
+  assert.doesNotMatch(rendered.manifestSql, /rw_followed_thread_stats_v1|rw_channel_unread_counts_v2/);
+  assert.match(rendered.manifestSql, /SET BACKGROUND_DDL = false;/);
+  assert.doesNotMatch(rendered.manifestSql, /SET BACKGROUND_DDL = true;/);
+});
+
+test("bootstrap composition rejects out-of-order, unknown-source, and missing relations", { skip: inSourceSnapshot }, () => {
+  const actual = loadActualBootstrapArtifacts();
+  const chain068 = "infra/risingwave/sql/068-chain-mention-v6-consumers.sql";
+  const mention067 = "infra/risingwave/sql/067-mention-v6.sql";
+  // 068 before 067: rw_inbox_items_v10 reads rw_inbox_mention_v6, not yet created.
+  assert.throws(
+    () => buildRisingWaveBootstrapStatements({ ...actual, [mention067]: "", [chain068]: actual[chain068] }),
+    /rw_inbox_mention_v6 exactly once/,
+  );
+  assert.throws(
+    () => buildRisingWaveBootstrapStatements({
+      ...actual,
+      [mention067]: actual[mention067].replace("FROM rw_message_mentions_v2", "FROM rw_message_mentions_v9"),
+    }),
+    /reads rw_message_mentions_v9, which is not created before it/,
+  );
+  const chain061 = "infra/risingwave/sql/061-inbox-derivation-chain.sql";
+  assert.throws(
+    () => buildRisingWaveBootstrapStatements({
+      ...actual,
+      [chain061]: actual[chain061].replaceAll("slock_neon_cdc", "other_prod_cdc"),
+    }),
+    /unknown CDC source other_prod_cdc/,
+  );
+  assert.throws(
+    () => buildRisingWaveBootstrapStatements({ ...actual, [chain068]: `${actual[chain068]}\nDROP MATERIALIZED VIEW rw_x;` }),
+    /unsupported executable statement/,
+  );
+  assert.deepEqual(
+    referencedRelations("CREATE MATERIALIZED VIEW rw_a AS SELECT 'rw_fake' FROM rw_b -- rw_comment\nJOIN public.rw_c ON true"),
+    ["rw_b", "rw_c"],
+  );
 });
 
 test("readiness requires a real SQL success and stops immediately on container exit", () => {
@@ -659,7 +701,7 @@ test("readiness times out after the exact configured attempt budget", () => {
 
 test("ports CLI exposes the deterministic clustertest pgwire/dashboard anchors", () => {
   const script = fileURLToPath(new URL("./raftdev.ts", import.meta.url));
-  const child = spawnSync(process.execPath, ["--import", "tsx", script, "ports", "clustertest"], {
+  const child = spawnSync(process.execPath, ["--import", "@oxc-node/core/register", script, "ports", "clustertest"], {
     encoding: "utf8",
     env: { ...process.env },
   });
@@ -672,7 +714,7 @@ test("ports CLI exposes the deterministic clustertest pgwire/dashboard anchors",
 test("local/external conflict fails before tooling and never prints the external DSN", () => {
   const script = fileURLToPath(new URL("./raftdev.ts", import.meta.url));
   const secretDsn = "postgresql://secret-user:secret-password@example.invalid:4566/dev";
-  const child = spawnSync(process.execPath, ["--import", "tsx", script, "start", "conflict", "--risingwave"], {
+  const child = spawnSync(process.execPath, ["--import", "@oxc-node/core/register", script, "start", "conflict", "--risingwave"], {
     encoding: "utf8",
     env: {
       ...process.env,

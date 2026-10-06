@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { cleanup, render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -22,7 +22,7 @@ import api from "../src/api/client";
  */
 
 const test = ((name: string, fn: Parameters<typeof nodeTest>[1]) =>
-  nodeTest(name, { concurrency: false }, fn)) as typeof nodeTest;
+  nodeTest(name,  fn)) as typeof nodeTest;
 
 const originalPost = api.post.bind(api);
 

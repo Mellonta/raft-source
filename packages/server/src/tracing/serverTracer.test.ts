@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   noopTracer,
   TRACE_EVENT_ROW_V2_INGEST_STATEMENT,
   TRACE_EVENT_ROW_V2_LEGACY_INGEST_STATEMENT,
 } from "@botiverse/raft-shared";
-import { createServerTracerFromEnv } from "./serverTracer.js";
+import { createServerTracerFromEnv } from "./serverTracer";
 
 test("createServerTracerFromEnv defaults to noop when OTLP endpoint is unset", () => {
   const runtime = createServerTracerFromEnv({});

@@ -15,7 +15,7 @@ import type {
   ThreadActivityRow,
   TombstoneReason,
 } from "@botiverse/raft-sync-core";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   activitySyncChanges,
   activitySyncPrincipalAuthorities,
@@ -26,12 +26,12 @@ import {
   threadFollows,
   userChannelInboxStates,
   userChannelReadCursors,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   getInboxItems,
   type InboxFilter,
   type InboxItem,
-} from "./channelService.js";
+} from "./channelService";
 
 const WINDOW_ID = "main";
 const MAIN_WINDOW_SIZE = 100;

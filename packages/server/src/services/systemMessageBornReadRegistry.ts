@@ -1,4 +1,4 @@
-import type { SystemMessageInboxFactProducer } from "./messageService.js";
+import type { SystemMessageInboxFactProducer } from "./messageService";
 
 /**
  * Born-read classification registry for system-message / persisted-fact producers.
@@ -64,6 +64,10 @@ export const SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION = {
   "agent.migration_completed_receipt": "notify-exclude",
   "agent.migration_canceled_receipt": "notify-exclude",
   "agent.migration_failed_receipt": "notify-exclude",
+  "agent.migration_aborted_receipt": "notify-exclude",
+  // An official app's due reminder in the agent's private dm:@reminders; the
+  // agent is the only and intended reader, so it stays unread.
+  "app.agent_reminder": "notify-exclude",
   "channel.agent_membership": "born-read",
   "channel.human_membership": "born-read",
   "channel.rename": "born-read",
@@ -76,6 +80,9 @@ export const SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION = {
   // recorded for the thread audience, born-read for the actor who moved the task.
   // Product ruling #9 (Tenny): born-read, not skip.
   "task.lifecycle_thread": "born-read",
+  // Action-card result reply in the card thread: @mentions the preparing
+  // agent (unread for it); born-read for the human who executed the card.
+  "action_card.result_reply": "born-read",
 
   // No fact recorded (mode:"skip"): lifecycle churn / zero-audience.
   "channel.self_unfollow_thread": "skip",
@@ -107,3 +114,15 @@ export function isBornReadProducer(
 ): boolean {
   return SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION[producer] === "born-read";
 }
+
+/**
+ * The `born-read` producers — the subset whose call site MUST pass `causalActor`.
+ * Derived from the classification registry (single source of truth), so adding a
+ * producer and classifying it `born-read` updates this automatically. Used to
+ * build the compile-time discriminated union on `broadcastSystemMessage`'s
+ * `inboxFactPolicy`.
+ */
+export type RequiresCausalActorProducer = {
+  [P in ProductionSystemMessageProducer]:
+    (typeof SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION)[P] extends "born-read" ? P : never;
+}[ProductionSystemMessageProducer];

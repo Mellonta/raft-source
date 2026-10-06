@@ -1,14 +1,21 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, computers, machines, serverMembers, servers, users } from "../db/schema.js";
-import { createServer } from "./serverService.js";
-import { createAgent } from "./agentService.js";
-import { __setAgentCreateLockObserverForTests } from "./planService.js";
-import { CURRENT_CONTRACT_VERSION, projectServerSetup, resetServerSetup, resolveServerSetupLiveFacts, ServerSetupStateError } from "./serverSetupStateService.js";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
+import { getDb } from "../db/index";
+import { agents, computers, machines, serverMembers, servers, users } from "../db/schema";
+import { createServer, removeMember } from "./serverService";
+import { createAgent } from "./agentService";
+import { __setAgentCreateLockObserverForTests } from "./planService";
+import {
+  CURRENT_CONTRACT_VERSION,
+  projectServerSetup,
+  resetServerSetup,
+  resolveServerSetup,
+  resolveServerSetupLiveFacts,
+  ServerSetupStateError,
+} from "./serverSetupStateService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -346,19 +353,69 @@ test("only the owner may throw a server away", async ({ app }) => {
   assert.equal(live.length, 1, "a non-owner cannot revoke someone else's computer");
 });
 
+test("a primary owner removed from the Server cannot reset setup through the stale servers.ownerId", async ({ app }) => {
+  // Task #91 (steady-state authorization gap, not only a race): `servers.ownerId` is immutable, and another
+  // owner may remove the primary owner. The removed human's old session must not revoke the Server's Computers.
+  const db = getDb();
+  const primaryOwner = await seedUser("reset-removed-primary-owner");
+  const secondOwner = await seedUser("reset-second-owner");
+  const server = await createServer("Removed owner", `removed-owner-${randomUUID()}`, primaryOwner.id);
+  await db.insert(serverMembers).values({ serverId: server.id, userId: secondOwner.id, role: "owner" });
+  await attachComputer(server.id, "laptop");
+  await attachComputer(server.id, "desktop");
+  await removeMember(server.id, primaryOwner.id, { reason: "removed", actorUserId: secondOwner.id });
+
+  const setupRows = () => db.select({
+    userId: serverMembers.userId,
+    role: serverMembers.role,
+    setupStatus: serverMembers.setupStatus,
+    setupCompletionReason: serverMembers.setupCompletionReason,
+  }).from(serverMembers).where(eq(serverMembers.serverId, server.id)).orderBy(serverMembers.userId);
+  const setupBefore = await setupRows();
+
+  await assert.rejects(
+    () => resetServerSetup({ serverId: server.id, actor: { type: "user", id: primaryOwner.id } }),
+    (error: unknown) => (error as ServerSetupStateError).code === "INSUFFICIENT_PERMISSION",
+  );
+
+  const revoked = await db.select({ id: computers.id }).from(computers)
+    .where(and(eq(computers.serverId, server.id), isNotNull(computers.revokedAt)));
+  assert.equal(revoked.length, 0, "a removed owner revokes no Computers");
+  assert.deepEqual(await setupRows(), setupBefore, "setup rows are unchanged");
+});
+
 test("a server that is already complete cannot be un-finished by a rollback", async ({ app }) => {
   const db = getDb();
   const owner = await seedUser("reset-complete");
+  const coOwner = await seedUser("reset-complete-co-owner");
   const server = await createServer("Done", `done-${randomUUID()}`, owner.id);
+  await db.insert(serverMembers).values({ serverId: server.id, userId: coOwner.id, role: "owner" });
   await attachComputer(server.id, "laptop");
 
-  // Grandfathered: complete, but with NO agent — the shape ~486 production servers are in.
-  // The agent guard alone would wave this through and write `not_started` over a finished
+  // Grandfathered completion is durable even without the compatibility onboarding-agent pointer.
+  // The pointer guard alone would wave this through and write `not_started` over a finished
   // setup. `complete` is terminal (@stdrc), and terminal has to mean terminal on every road
   // that reaches the column, not just the one we happened to be thinking about.
   await db.update(serverMembers)
     .set({ setupStatus: "complete", setupCompletionReason: "grandfathered" })
     .where(and(eq(serverMembers.serverId, server.id), eq(serverMembers.userId, owner.id)));
+
+  const [checkpoint] = await db.select({ onboardingAgentId: servers.onboardingAgentId })
+    .from(servers)
+    .where(eq(servers.id, server.id));
+  assert.equal(checkpoint.onboardingAgentId, null, "the compatibility agent checkpoint is deliberately absent");
+
+  const projection = await resolveServerSetup({
+    serverId: server.id,
+    actor: { type: "user", id: coOwner.id },
+  });
+  assert.equal(
+    projection.surface,
+    "complete",
+    "another member's completed row suppresses Create Cindy without an agent pointer",
+  );
+  assert.equal(projection.currentStep, null);
+  assert.equal(projection.blocksChat, false);
 
   await assert.rejects(
     () => resetServerSetup({ serverId: server.id, actor: { type: "user", id: owner.id } }),
@@ -372,6 +429,56 @@ test("a server that is already complete cannot be un-finished by a rollback", as
   const live = await db.select({ id: computers.id }).from(computers)
     .where(and(eq(computers.serverId, server.id), isNull(computers.revokedAt)));
   assert.equal(live.length, 1, "and its computer is not revoked out from under it");
+});
+
+test("another owner's completion blocks destructive reset for the whole server", async ({ app }) => {
+  const db = getDb();
+  const primaryOwner = await seedUser("reset-primary-incomplete");
+  const completedCoOwner = await seedUser("reset-completed-co-owner");
+  const server = await createServer("Split predicates", `split-predicates-${randomUUID()}`, primaryOwner.id);
+  await db.insert(serverMembers).values({
+    serverId: server.id,
+    userId: completedCoOwner.id,
+    role: "owner",
+    setupStatus: "complete",
+    setupCompletionReason: "grandfathered",
+  });
+  await attachComputer(server.id, "protected-laptop");
+
+  const [checkpoint] = await db.select({ onboardingAgentId: servers.onboardingAgentId })
+    .from(servers)
+    .where(eq(servers.id, server.id));
+  assert.equal(checkpoint.onboardingAgentId, null, "the compatibility onboarding-agent pointer is absent");
+
+  const [primaryBefore] = await db.select({ status: serverMembers.setupStatus })
+    .from(serverMembers)
+    .where(and(eq(serverMembers.serverId, server.id), eq(serverMembers.userId, primaryOwner.id)));
+  assert.equal(primaryBefore.status, "not_started", "the primary owner's own row has not completed setup");
+
+  const projection = await resolveServerSetup({
+    serverId: server.id,
+    actor: { type: "user", id: primaryOwner.id },
+  });
+  assert.equal(projection.surface, "complete", "one owner's durable completion completes the server projection");
+  assert.equal(projection.currentStep, null);
+  assert.equal(projection.blocksChat, false);
+
+  const setupRows = () => db.select({
+    userId: serverMembers.userId,
+    status: serverMembers.setupStatus,
+    completionReason: serverMembers.setupCompletionReason,
+  }).from(serverMembers).where(eq(serverMembers.serverId, server.id)).orderBy(serverMembers.userId);
+  const before = await setupRows();
+
+  await assert.rejects(
+    () => resetServerSetup({ serverId: server.id, actor: { type: "user", id: primaryOwner.id } }),
+    (error: unknown) => (error as ServerSetupStateError).code === "SERVER_ALREADY_SET_UP",
+  );
+
+  const live = await db.select({ id: computers.id }).from(computers)
+    .where(and(eq(computers.serverId, server.id), isNull(computers.revokedAt)));
+  assert.equal(live.length, 1, "the rejected reset revokes no Computer");
+  assert.deepEqual(await setupRows(), before, "the rejected reset rewinds no member setup row");
 });
 
 // A managed Computer plus the live daemon identity it runs on. The `computers` row is the

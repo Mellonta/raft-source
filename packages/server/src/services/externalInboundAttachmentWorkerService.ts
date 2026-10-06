@@ -1,19 +1,19 @@
 import { clearClockInterval, currentDate, setClockInterval } from "@botiverse/raft-shared";
 import { and, eq } from "drizzle-orm";
 
-import type { Database, DatabaseExecutor } from "../db/index.js";
+import type { Database, DatabaseExecutor } from "../db/index";
 import {
   channels,
   externalAttachmentAssets,
   externalAttachmentMessageFacts,
   externalAttachmentTransferJobs,
   externalInboundEvents,
-} from "../db/schema.js";
+} from "../db/schema";
 import type {
   ExternalAttachmentAuthority,
   ExternalAttachmentProviderFailure,
   ExternalInboundAttachmentProviderAdapter,
-} from "./externalAttachmentProviderAdapter.js";
+} from "./externalAttachmentProviderAdapter";
 import {
   beginInboundExternalAttachmentMaterialization,
   claimExternalAttachmentTransferJob,
@@ -22,12 +22,12 @@ import {
   releaseExternalAttachmentTransferClaimQueued,
   releaseExternalAttachmentTransferClaimForRetry,
   terminalizeInboundExternalAttachmentUnavailable,
-} from "./externalAttachmentTransferService.js";
+} from "./externalAttachmentTransferService";
 import {
   reuseStoredExternalInboundAttachmentWithExecutor,
   storeExternalInboundAttachment,
-} from "./externalInboundAttachmentStorageService.js";
-import type { StorageBackend } from "./storageService.js";
+} from "./externalInboundAttachmentStorageService";
+import type { StorageBackend } from "./storageService";
 
 const DEFAULT_RETRY_MS = 30_000;
 const MATERIALIZATION_WAIT_MS = 1_000;

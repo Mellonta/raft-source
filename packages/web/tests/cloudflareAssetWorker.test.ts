@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { describe, test } from "node:test";
 
 type AssetBinding = {
   fetch(request: Request): Promise<Response>;

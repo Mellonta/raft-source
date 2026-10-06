@@ -1,20 +1,20 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
+import { dbTest as test } from "../test/integration/dbTest";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { getDb } from "../db/index.js";
-import { agents, channelAgents, channelHumans, channels, dmChannelIdentities, messages, users } from "../db/schema.js";
-import { createAgent, deleteAgent } from "./agentService.js";
+import { getDb } from "../db/index";
+import { agents, channelAgents, channelHumans, channels, dmChannelIdentities, messages, serverMembers, users } from "../db/schema";
+import { createAgent, deleteAgent } from "./agentService";
 import {
   findOrCreateAgentDM,
   findOrCreateDM,
   findOrCreateUserDM,
   getReadableDMChannelForUser,
   listDMChannels,
-} from "./channelService.js";
-import { createServer } from "./serverService.js";
+} from "./channelService";
+import { createServer } from "./serverService";
 
 
 test("findOrCreateDM creates one human-agent DM under concurrent calls", async ({ db }) => {
@@ -66,6 +66,84 @@ test("findOrCreateUserDM returns the peer's uploaded avatar with normalized Grav
     dm.peerGravatarHash,
     createHash("sha256").update(peerEmail.trim().toLowerCase()).digest("hex"),
   );
+});
+
+test("listDMChannels attaches a bounded latest-message preview and sender name without extra queries", async ({ db }) => {
+  const owner = await seedUser("dm-preview-owner@slock.test", "DM Preview Owner");
+  const peer = await seedUser("dm-preview-peer@slock.test", "DM Preview Peer");
+  const boundaryPeer = await seedUser("dm-preview-boundary@slock.test", "DM Preview Boundary");
+  const server = await createServer("DM Preview Projection", "dm-preview-projection", owner.id);
+  await db.insert(serverMembers).values([
+    { serverId: server.id, userId: peer.id, role: "member" },
+    { serverId: server.id, userId: boundaryPeer.id, role: "member" },
+  ]);
+  const agent = await createAgent(server.id, "dm-preview-agent", { runtime: "codex" });
+  await db.update(agents).set({ displayName: "DM Preview Agent" }).where(eq(agents.id, agent.id));
+
+  const userDm = await findOrCreateUserDM(server.id, owner.id, peer.id);
+  const boundaryDm = await findOrCreateUserDM(server.id, owner.id, boundaryPeer.id);
+  const agentDm = await findOrCreateDM(server.id, owner.id, agent.id);
+  const selfDm = await findOrCreateUserDM(server.id, owner.id, owner.id);
+  assert.ok(userDm);
+  assert.ok(boundaryDm);
+  assert.ok(agentDm);
+  assert.ok(selfDm);
+
+  await db.insert(messages).values([
+    {
+      channelId: userDm.id,
+      senderType: "user",
+      senderId: owner.id,
+      content: "older message",
+      createdAt: new Date("2026-09-13T10:00:00.000Z"),
+    },
+    {
+      channelId: userDm.id,
+      senderType: "user",
+      senderId: peer.id,
+      content: `  ${"x".repeat(139)}\n\tyy  `,
+      createdAt: new Date("2026-09-13T10:02:00.000Z"),
+    },
+    {
+      channelId: boundaryDm.id,
+      senderType: "user",
+      senderId: boundaryPeer.id,
+      content: "b".repeat(140),
+      createdAt: new Date("2026-09-13T10:01:30.000Z"),
+    },
+    {
+      channelId: agentDm.id,
+      senderType: "agent",
+      senderId: agent.id,
+      content: " \n\t ",
+      createdAt: new Date("2026-09-13T10:01:00.000Z"),
+    },
+  ]);
+
+  const queryNames: string[] = [];
+  const dms = await listDMChannels(server.id, owner.id, {
+    traceQuery: async (queryName, query, attrs) => {
+      queryNames.push(queryName);
+      const result = await query();
+      attrs?.(result);
+      return result;
+    },
+  });
+
+  assert.deepEqual(dms.map((dm) => dm.id), [userDm.id, boundaryDm.id, agentDm.id, selfDm.id]);
+  assert.equal(dms[0]?.lastMessageAt?.toISOString(), "2026-09-13T10:02:00.000Z");
+  assert.equal(dms[0]?.lastMessagePreview, `${"x".repeat(139)}…`);
+  assert.ok((dms[0]?.lastMessagePreview?.length ?? Infinity) <= 140);
+  assert.equal(dms[0]?.lastMessageSenderName, peer.displayName);
+  assert.equal(dms[1]?.lastMessagePreview, "b".repeat(140), "the exact limit is not ellipsized");
+  assert.equal(dms[1]?.lastMessagePreview?.length, 140);
+  assert.equal(dms[1]?.lastMessageSenderName, boundaryPeer.displayName);
+  assert.equal(dms[2]?.lastMessagePreview, null, "blank attachment-only bodies stay unlabelled");
+  assert.equal(dms[2]?.lastMessageSenderName, "DM Preview Agent");
+  assert.equal(dms[3]?.lastMessageAt, null);
+  assert.equal(dms[3]?.lastMessagePreview, null);
+  assert.equal(dms[3]?.lastMessageSenderName, null);
+  assert.equal(queryNames.filter((name) => name === "dm_channels.last_messages_by_channels").length, 1);
 });
 
 test("findOrCreateAgentDM creates one agent-agent DM under concurrent reversed calls", async ({ db }) => {

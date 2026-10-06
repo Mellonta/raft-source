@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { Command } from "commander";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import { CliError, CliExit } from "../../core/errors.js";
-import type { CliIo } from "../../core/io.js";
-import { registerTaskUpdateCommand, taskUpdateCommand } from "./update.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import { CliError, CliExit } from "../../core/errors";
+import type { CliIo } from "../../core/io";
+import { registerTaskUpdateCommand, taskUpdateCommand } from "./update";
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];

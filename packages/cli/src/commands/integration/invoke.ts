@@ -9,28 +9,28 @@ import { pipeline } from "node:stream/promises";
 import type { TransformCallback } from "node:stream";
 import type { Command } from "commander";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError, CliError, type FileWriteEffectState } from "../../core/errors.js";
-import { writeJson, writeText, NL, adoptCliReplyText } from "../../core/renderer.js";
-import { CanonicalFetchTransportError, fetchWithCanonicalProxy } from "../../proxy.js";
-import { apiFailureError } from "../_apiFailure.js";
-import type { IntegrationListResponse, IntegrationLoginResponse, RegisteredIntegrationService } from "./_format.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError, CliError, type FileWriteEffectState } from "../../core/errors";
+import { writeJson, writeText, NL, adoptCliReplyText } from "../../core/renderer";
+import { CanonicalFetchTransportError, fetchWithCanonicalProxy } from "../../proxy";
+import { apiFailureError } from "../_apiFailure";
+import type { IntegrationListResponse, IntegrationLoginResponse, RegisteredIntegrationService } from "./_format";
 import {
   cookieHeaderForUrl,
   ensureIntegrationServiceSession,
   loadStoredIntegrationSession,
   type SessionCookie,
-} from "./_session.js";
+} from "./_session";
 import {
   type AgentManifest,
   type AgentManifestActionV0,
   type AgentManifestV0,
-} from "./manifest.js";
+} from "./manifest";
 import {
   resolveRegisteredActionBaseUrl,
-} from "./actionV1.js";
+} from "./actionV1";
 import {
   actionUndeclaredV1Error,
   formatIntegrationReceiptV1,
@@ -38,15 +38,15 @@ import {
   invokeManifestActionV1,
   localCliDesignBlockedError,
   preflightManifestActionV1,
-} from "./invokeV1.js";
-import type { AgentManifestActionV1, AgentManifestV1 } from "./manifestV1.js";
+} from "./invokeV1";
+import type { AgentManifestActionV1, AgentManifestV1 } from "./manifestV1";
 import {
   humanSurface,
   probeIntegrationManifest,
   type ManifestObservation,
   type ManifestProbeResult,
-} from "./readiness.js";
-import { buildIntegrationReadinessV1 } from "./readinessV1.js";
+} from "./readiness";
+import { buildIntegrationReadinessV1 } from "./readinessV1";
 
 /** Default maximum bytes allowed for a file-response download (100 MiB). */
 const DEFAULT_MAX_FILE_RESPONSE_BYTES = 100 * 1024 * 1024;

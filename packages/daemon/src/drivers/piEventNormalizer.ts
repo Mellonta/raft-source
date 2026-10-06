@@ -1,4 +1,4 @@
-import type { ParsedEvent } from "./types.js";
+import type { ParsedEvent } from "./types";
 
 /**
  * Pi (and builtin, which extends PiDriver) token-usage normalizer.

@@ -1,13 +1,13 @@
 import {
   FeedbackProvider,
   FeedbackWorkspace,
-} from "@botiverse/hands-feedback-react/source";
+} from "@botiverse/hands-feedback-react";
 import type {
   FeedbackTicketDetail,
   FeedbackTicketSummary,
   HandsFeedbackTransport,
-} from "@botiverse/hands-feedback-react/source";
-import "@botiverse/hands-feedback-react/source/styles.css";
+} from "@botiverse/hands-feedback-react";
+import "@botiverse/hands-feedback-react/styles.css";
 
 const TRIAL_TICKET_ID = "feedback-sdk-trial-ticket";
 const FIXTURE_NOW = Date.UTC(2026, 6, 25, 15, 0, 0);

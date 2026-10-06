@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { getSidebarDmContextTarget } from "../src/components/layout/sidebarDmContext.js";
-import type { Channel } from "../src/store/channelStore.js";
+import { getSidebarDmContextTarget } from "../src/components/layout/sidebarDmContext";
+import type { Channel } from "../src/store/channelStore";
 
 function makeDm(overrides: Partial<Channel> & { id: string }): Channel {
   return {

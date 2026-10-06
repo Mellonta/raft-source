@@ -1,19 +1,22 @@
+import { MessageReferenceChip } from "raft-ui";
+import type { MessageReferenceChipVariant } from "raft-ui";
 import type { LucideIcon } from "lucide-react";
-import { MSG_REF_CHIP } from "./messageRefChip";
+import Tooltip from "../ui/Tooltip";
 
 /**
  * Shared in-message reference chip. Both the Slock-permalink inline ref and the
  * attachment comment-ref render through this one structure so they are provably
- * consistent (same box/weight/layout, one height via MSG_REF_CHIP), differing
- * only by icon, color, label, and an optional trailing badge (stdrc directive).
+ * consistent (same box/weight/layout, one height via the RUI message-reference
+ * recipe, which owns size and baseline since raft-ui 0.5.16), differing only by icon, color, label, and
+ * an optional trailing badge (stdrc directive).
  *
- * The bordered box (MSG_REF_CHIP) carries no cursor on purpose. This component
+ * The chip carries no cursor in its shared layers on purpose. This component
  * adds `cursor-default` explicitly because in-message refs are the arrow-cursor
  * exception to the app's normal link-hand control contract.
  */
 export function ReferenceChip({
   icon: Icon,
-  colorClass,
+  variant,
   label,
   trailing,
   as = "span",
@@ -23,7 +26,7 @@ export function ReferenceChip({
   "data-message-affordance": dataMessageAffordance,
 }: {
   icon: LucideIcon;
-  colorClass: string;
+  variant: MessageReferenceChipVariant;
   label: React.ReactNode;
   trailing?: React.ReactNode;
   as?: "a" | "span";
@@ -35,16 +38,18 @@ export function ReferenceChip({
   const Tag = as;
   const anchorProps = as === "a" ? { href, onClick } : {};
 
-  return (
-    <Tag
-      {...anchorProps}
-      title={title}
-      data-message-affordance={dataMessageAffordance}
-      className={`${MSG_REF_CHIP} inline-flex max-w-full cursor-default items-center gap-1 ${colorClass}`}
+  const chip = (
+    <MessageReferenceChip
+      variant={variant}
+      render={<Tag {...anchorProps} data-message-affordance={dataMessageAffordance} />}
+      className="cursor-default"
     >
       <Icon size={12} className="shrink-0" />
       <span className="min-w-0 truncate">{label}</span>
       {trailing}
-    </Tag>
+    </MessageReferenceChip>
   );
+  // Native title= on the chip element is only a hover tooltip; route it
+  // through the RUI Tooltip so it follows the theme recipe (title= migration).
+  return title ? <Tooltip content={title}>{chip}</Tooltip> : chip;
 }

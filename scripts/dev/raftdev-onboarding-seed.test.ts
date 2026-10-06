@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   buildDevSeedArgs,
   parseSeedCommandArgs,
-} from "./raftdev.js";
+} from "./raftdev";
 
 test("raftdev seed defaults to the validation-ready fixture", () => {
   assert.deepEqual(parseSeedCommandArgs([], "slock"), {
@@ -11,7 +10,10 @@ test("raftdev seed defaults to the validation-ready fixture", () => {
     withOnboarding: false,
   });
   assert.deepEqual(buildDevSeedArgs("/tmp/seed.json", false), [
-    "tsx",
+    "exec",
+    "node",
+    "--import",
+    "@oxc-node/core/register",
     "scripts/seed.ts",
     "--output",
     "/tmp/seed.json",
@@ -28,7 +30,10 @@ test("raftdev seed accepts --with-onboarding before or after the environment nam
     withOnboarding: true,
   });
   assert.deepEqual(buildDevSeedArgs("/tmp/seed.json", true), [
-    "tsx",
+    "exec",
+    "node",
+    "--import",
+    "@oxc-node/core/register",
     "scripts/seed.ts",
     "--output",
     "/tmp/seed.json",

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { runAttachmentObjectBackfill } from "./attachmentObjectBackfillService.js";
-import type { AttachmentObjectParityReport } from "./attachmentObjectBackfillService.js";
+import { runAttachmentObjectBackfill } from "./attachmentObjectBackfillService";
+import type { AttachmentObjectParityReport } from "./attachmentObjectBackfillService";
 
 // task #79, entry-level teeth. These drive the RUN SEQUENCE, not the decision
 // helpers: the contract here is the ORDER of the steps, and an earlier revision

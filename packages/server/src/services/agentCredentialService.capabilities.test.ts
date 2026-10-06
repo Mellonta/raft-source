@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { normalizeAgentCapabilities } from "./agentCredentialService.js";
+import { normalizeAgentCapabilities } from "./agentCredentialService";
 
 test("normalizeAgentCapabilities accepts, dedupes, and sorts valid scopes", () => {
   assert.deepEqual(normalizeAgentCapabilities(["read", "send", "read"]), ["read", "send"]);

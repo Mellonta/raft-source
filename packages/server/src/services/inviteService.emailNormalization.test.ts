@@ -1,12 +1,11 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { afterEach } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { serverInvites, serverMembers, servers, users } from "../db/schema.js";
-import { acceptInvite, createInvite } from "./inviteService.js";
+import { getDb } from "../db/index";
+import { serverInvites, serverMembers, servers, users } from "../db/schema";
+import { acceptInvite, createInvite } from "./inviteService";
 
 
 afterEach(async () => {

@@ -17,7 +17,7 @@ import {
   type ReminderRow,
   type ReminderServiceOptions,
   type ReminderUpdatePatch,
-} from "./service.js";
+} from "./service";
 
 export type AppReminderMutationOptions = ReminderMutationOptions;
 

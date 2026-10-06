@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, test } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
 import {
   attachmentObjects,
   attachments,
@@ -20,7 +19,7 @@ import {
   messages,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   advanceExternalAttachmentTransferClaim,
   claimExternalAttachmentTransferJob,
@@ -32,18 +31,18 @@ import {
   recordOutboundExternalAttachmentTicket,
   releaseExternalAttachmentTransferClaimForRetry,
   terminalizeExternalAttachmentTransferClaim,
-} from "./externalAttachmentTransferService.js";
-import { linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService.js";
-import { createPendingAttachmentProjectionWithExecutor } from "./attachmentProjectionWriterService.js";
+} from "./externalAttachmentTransferService";
+import { linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService";
+import { createPendingAttachmentProjectionWithExecutor } from "./attachmentProjectionWriterService";
 import {
   buildAttachmentTransferArtifactPlan,
   createAttachmentTransferIntent,
-} from "./attachmentTransferIntentService.js";
-import { listChannelFiles } from "./channelService.js";
+} from "./attachmentTransferIntentService";
+import { listChannelFiles } from "./channelService";
 import {
   type ExternalAttachmentProviderAdapter,
   validateExternalAttachmentCapabilityManifest,
-} from "./externalAttachmentProviderAdapter.js";
+} from "./externalAttachmentProviderAdapter";
 
 const NOW = new Date("2026-09-05T00:00:00.000Z");
 const DIGEST = "a".repeat(64);

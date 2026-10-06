@@ -1,15 +1,14 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { channels, messages, servers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { channels, messages, servers, users } from "../db/schema";
 import {
   formatCanonicalAgentMessageRef,
   replacePermalinksOutsideMarkdownCode,
   renderAgentReadablePermalinksInTexts,
   renderAgentReadablePermalinks,
-} from "./agentPermalinkRenderService.js";
+} from "./agentPermalinkRenderService";
 
 
 afterEach(async () => {

@@ -1,9 +1,13 @@
 import { asMachineId, type MachineId, type MachineToServerMessage } from "@botiverse/raft-shared";
 import type Redis from "ioredis";
-import { RouteFailureError } from "./tracing/routeFailure.js";
+import { RouteFailureError } from "./tracing/routeFailure";
 
 export type RelayedMachineResponse = Extract<MachineToServerMessage, {
-  type: "machine:runtime_models:result" | "machine:migration:source_workspace_archive_result";
+  type:
+    | "machine:runtime_models:result"
+    | "machine:migration:source_workspace_archive_result"
+    | "machine:provider_probe:result"
+    | "machine:runtime_account_usage:snapshot";
 }>;
 export type MachineReplyRequestId = string & { readonly __machineReplyRequestId: unique symbol };
 export type MachineReplyReplicaId = string & { readonly __machineReplyReplicaId: unique symbol };
@@ -22,6 +26,8 @@ export interface MachineReplyRequest {
   replyReplicaId: MachineReplyReplicaId;
   agentId?: string;
   migrationId?: string;
+  /** Probe correlation: results for another probe must never satisfy a wait. */
+  probeId?: string;
 }
 interface ReplyRecord extends MachineReplyRequest {
   response?: RelayedMachineResponse;
@@ -43,6 +49,7 @@ local response = cjson.decode(ARGV[2])
 if record.machineId ~= ARGV[1] or record.type ~= response.type or record.requestId ~= response.requestId then return false end
 if record.agentId and record.agentId ~= response.agentId then return false end
 if record.migrationId and record.migrationId ~= response.migrationId then return false end
+if record.probeId and record.probeId ~= response.probeId then return false end
 if not record.response then
   record.response = response
   record.sourceReplicaId = ARGV[3]
@@ -57,6 +64,9 @@ export function redisMachineReplyStore(redis: () => Redis): MachineReplyStore {
       if (result !== "OK") throw new Error("Machine reply request already exists");
     },
     async write(machineId, response, sourceReplicaId) {
+      // Some relayed types (e.g. runtime-account usage snapshots) can arrive
+      // uncorrelated; without a requestId there is no mailbox slot to fill.
+      if (!response.requestId) return null;
       const target = await redis().eval(WRITE_REPLY, 1, key(asMachineReplyRequestId(response.requestId)), machineId, JSON.stringify(response), sourceReplicaId);
       return typeof target === "string" ? asMachineReplyReplicaId(target) : null;
     },
@@ -143,6 +153,7 @@ export class MachineResponseRelay {
         || record.response.type !== expected.type) return;
       if (expected.agentId && (!("agentId" in record.response) || record.response.agentId !== expected.agentId)) return;
       if (expected.migrationId && (!("migrationId" in record.response) || record.response.migrationId !== expected.migrationId)) return;
+    if (expected.probeId && (!("probeId" in record.response) || record.response.probeId !== expected.probeId)) return;
       pending.finish(undefined, record);
     } catch {
       // A transient Redis read failure may recover before the original deadline.
@@ -151,6 +162,12 @@ export class MachineResponseRelay {
 
   async forward(machineId: string, response: RelayedMachineResponse, observe: Observe): Promise<void> {
     if (!this.isAvailable()) return; // Single-replica deployments have no relay mailbox.
+    // Uncorrelated pushes (a snapshot with no requestId) have no waiter to
+    // notify; skip them before any mailbox access.
+    if (!response.requestId) {
+      observe("unmatched", { request_id: "", machine_id: machineId, source_replica_id: this.replicaId, message_type: response.type });
+      return;
+    }
     const attrs = { request_id: response.requestId, machine_id: machineId, source_replica_id: this.replicaId, message_type: response.type };
     try {
       const target = await this.store.write(machineId, response, this.replicaId);

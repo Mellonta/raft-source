@@ -2,11 +2,11 @@ import { type ServerCapability } from "@botiverse/raft-shared";
 import { Router, type NextFunction, type Request, type Response, type Router as RouterType } from "express";
 import { MANAGED_MCP_OAUTH_RESULT_CHANNEL } from "@botiverse/raft-shared";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents } from "../db/schema.js";
-import { actorHasServerCapabilityInServer, getActorServerRoleInServer, userCanActOnAgentResource } from "../lib/actorPermissions.js";
+import { getDb } from "../db/index";
+import { agents } from "../db/schema";
+import { actorHasServerCapabilityInServer, getActorServerRoleInServer, userCanActOnAgentResource } from "../lib/actorPermissions";
+import { FencedAuthorizationDeniedError, ServerMembershipRevokedError, withActorMembershipFence } from "../lib/actorMembershipFence";
 import {
-  applyManagedMcpAssignments,
   createManagedMcpServer,
   deleteManagedMcpServer,
   listAgentManagedMcpCatalog,
@@ -15,18 +15,19 @@ import {
   setManagedMcpAssignment,
   testManagedMcpConfiguration,
   updateManagedMcpServer,
-} from "../services/managedMcpService.js";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
-import { ManagedMcpCredentialError } from "../services/managedMcpCredentialService.js";
-import { ManagedMcpGatewayError } from "../services/managedMcpGateway.js";
+  writeManagedMcpAssignments,
+} from "../services/managedMcpService";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
+import { ManagedMcpCredentialError } from "../services/managedMcpCredentialService";
+import { ManagedMcpGatewayError } from "../services/managedMcpGateway";
 import {
   completeManagedMcpOAuthConnection,
   disconnectManagedMcpOAuthConnection,
   failManagedMcpOAuthAttempt,
   ManagedMcpOAuthError,
   startManagedMcpOAuthConnection,
-} from "../services/managedMcpOAuthService.js";
-import { ManagedMcpServiceError } from "../services/managedMcpService.js";
+} from "../services/managedMcpOAuthService";
+import { ManagedMcpServiceError } from "../services/managedMcpService";
 
 export const managedMcpRouter: RouterType = Router();
 export const managedMcpOAuthCallbackRouter: RouterType = Router();
@@ -379,15 +380,39 @@ managedMcpRouter.put("/agents/:agentId/assignments/:mcpServerId", requireAgentCa
     if (typeof input.enabled !== "boolean") {
       throw new ManagedMcpCredentialError("enabled must be a boolean", "managed_mcp_credential_invalid");
     }
-    res.json(await setManagedMcpAssignment({
-      serverId: req.serverId!,
-      userId: req.userId!,
-      agentId: pathParam(req.params.agentId),
-      mcpServerId: pathParam(req.params.mcpServerId),
-      enabled: input.enabled,
-      allowedTools: optionalAllowedTools(input.allowedTools),
-    }));
+    const agentId = pathParam(req.params.agentId);
+    const allowedTools = optionalAllowedTools(input.allowedTools);
+    const enabled = input.enabled;
+    // Task #91: re-authorize the assignment write inside the write transaction under a share lock on the caller's
+    // membership row (member row first), then the agent row (same predicate as requireAgentCapabilityOrCreator).
+    const view = await withActorMembershipFence(req.serverId!, req.userId!, async (tx, lockedRole) => {
+      const [lockedAgent] = await tx
+        .select({ creatorType: agents.creatorType, creatorId: agents.creatorId })
+        .from(agents)
+        .where(and(eq(agents.id, agentId), eq(agents.serverId, req.serverId!)))
+        .for("share");
+      if (!lockedAgent || !userCanActOnAgentResource(lockedRole, req.userId!, lockedAgent, "editAgents")) {
+        throw new FencedAuthorizationDeniedError(lockedAgent ? "forbidden" : "not_found");
+      }
+      return setManagedMcpAssignment({
+        serverId: req.serverId!,
+        userId: req.userId!,
+        agentId,
+        mcpServerId: pathParam(req.params.mcpServerId),
+        enabled,
+        allowedTools,
+      }, { executor: tx });
+    });
+    res.json(view);
   } catch (error) {
+    if (error instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FencedAuthorizationDeniedError) {
+      res.status(403).json({ error: "editAgents capability or agent creator authority required", code: "managed_mcp_forbidden" });
+      return;
+    }
     sendManagedMcpError(error, res, next);
   }
 });
@@ -395,16 +420,39 @@ managedMcpRouter.put("/agents/:agentId/assignments/:mcpServerId", requireAgentCa
 managedMcpRouter.put("/agents/:agentId/assignments", requireAgentCapabilityOrCreator("editAgents"), async (req, res, next) => {
   try {
     const agentId = pathParam(req.params.agentId);
-    const catalog = await applyManagedMcpAssignments({
-      serverId: req.serverId!,
-      userId: req.userId!,
-      agentId,
-      assignments: requiredAssignmentUpdates(body(req).assignments),
+    const assignments = requiredAssignmentUpdates(body(req).assignments);
+    // Task #91: the bulk write re-authorizes inside its transaction exactly like the single assignment route (member
+    // row share lock first, then the agent row). The catalog read-back and the Agent restart run after commit; the
+    // restart is a runtime effect that task #93 fences.
+    await withActorMembershipFence(req.serverId!, req.userId!, async (tx, lockedRole) => {
+      const [lockedAgent] = await tx
+        .select({ creatorType: agents.creatorType, creatorId: agents.creatorId })
+        .from(agents)
+        .where(and(eq(agents.id, agentId), eq(agents.serverId, req.serverId!)))
+        .for("share");
+      if (!lockedAgent || !userCanActOnAgentResource(lockedRole, req.userId!, lockedAgent, "editAgents")) {
+        throw new FencedAuthorizationDeniedError(lockedAgent ? "forbidden" : "not_found");
+      }
+      await writeManagedMcpAssignments({
+        serverId: req.serverId!,
+        userId: req.userId!,
+        agentId,
+        assignments,
+      }, { executor: tx });
     });
+    const catalog = await listAgentManagedMcpCatalog(req.serverId!, agentId);
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
     await agentOrchestrator.resetAgent(agentId, "restart", { restartIfStopped: false });
     res.json(catalog);
   } catch (error) {
+    if (error instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FencedAuthorizationDeniedError) {
+      res.status(403).json({ error: "editAgents capability or agent creator authority required", code: "managed_mcp_forbidden" });
+      return;
+    }
     sendManagedMcpError(error, res, next);
   }
 });

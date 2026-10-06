@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act } from "react";
 import { createIntl } from "react-intl";
 import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
@@ -96,7 +95,7 @@ test("ImageLightbox renders localized chrome and failure copy under zh-cn", asyn
   const download = screen.getByRole("button", { name: zh["common.lightbox.download"] });
   const previous = screen.getByRole("button", { name: zh["common.lightbox.previousImage"] });
   const next = screen.getByRole("button", { name: zh["common.lightbox.nextImage"] });
-  const comments = screen.getByTitle(zh["common.lightbox.comments"]);
+  const comments = screen.getByRole("button", { name: zh["common.lightbox.comments"] });
   assert.ok(download);
   assert.ok(previous);
   assert.ok(next);
@@ -107,7 +106,11 @@ test("ImageLightbox renders localized chrome and failure copy under zh-cn", asyn
 
   fireEvent.click(comments);
   await waitFor(() => {
-    assert.equal(comments.getAttribute("title"), zh["common.lightbox.hideComments"]);
+    // Native title= is gone (RUI Tooltip migration); the accessible name
+    // flips to "Hide comments" and the trigger carries the Base UI marker.
+    assert.equal(comments.getAttribute("title"), null);
+    assert.ok(comments.hasAttribute("data-base-ui-tooltip-trigger"));
+    assert.equal(comments.getAttribute("aria-label"), zh["common.lightbox.hideComments"]);
     assert.equal(comments.getAttribute("aria-pressed"), "true");
     assert.equal(comments.getAttribute("data-comments-open"), "true");
   });

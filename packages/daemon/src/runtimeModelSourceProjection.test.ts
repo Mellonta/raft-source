@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { buildRuntimeModelSourceResultMessage } from "./runtimeModelSourceProjection.js";
+import { buildRuntimeModelSourceResultMessage } from "./runtimeModelSourceProjection";
 
 test("runtime model wire carries typed live truth and legacy catalog together", () => {
   const message = buildRuntimeModelSourceResultMessage("req-live", {
@@ -58,6 +57,7 @@ test("runtime model wire keeps every non-live outcome typed and legacy-safe", ()
     [{ kind: "no_models" }, { models: [] }],
     [{ kind: "unsupported" }, { error: "unsupported" }],
     [{ kind: "error", retryable: true }, { error: "error" }],
+    [{ kind: "error", retryable: true, code: "runtime_not_authenticated" }, { error: "error" }],
   ] as const;
 
   for (const [outcome, legacy] of cases) {

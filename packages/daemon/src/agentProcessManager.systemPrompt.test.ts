@@ -3,13 +3,12 @@ import type { ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { expect, test, vi } from "vitest";
 import { asAxSurfaceText, type AgentConfig, type AgentMessage } from "@botiverse/raft-shared";
-import { AgentProcessManager } from "./agentProcessManager.js";
-import { setDaemonFetchImplForTests } from "./daemonFetch.js";
-import { formatResumeEmptyPrompt, formatResumeUnreadSummaryPrompt } from "./agentRuntimeInput.js";
-import type { RuntimeDriver, SpawnContext } from "./drivers/index.js";
-import { promptConfig } from "./testing/promptFixture.js";
+import { AgentProcessManager } from "./agentProcessManager";
+import { setDaemonFetchImplForTests } from "./daemonFetch";
+import { formatResumeEmptyPrompt, formatResumeUnreadSummaryPrompt } from "./agentRuntimeInput";
+import type { RuntimeDriver, SpawnContext } from "./drivers/index";
+import { promptConfig } from "./testing/promptFixture";
 
 class PromptChild extends EventEmitter {
   exitCode: number | null = null;

@@ -48,15 +48,21 @@ const FLUSH_DELAY_MS = 4000;
 
 // --- Auth/web trace names/attrs (never raw secrets; raw boot diagnostics are non-secret only) ---
 
+// Point in time auth facts. Each one is sent as an event (OTLP log record).
 export type AuthTraceEventName =
   | "slock.auth.boot_init"
   | "slock.auth.restore"
-  | "slock.auth.refresh"
   | "slock.auth.verdict"
   | "slock.auth.session_cleared"
   | "slock.auth.cross_tab_sync"
   | "slock.auth.socket_auth"
   | "slock.auth.protected_request";
+
+// Auth work with a real start and end. Each one is sent as a span, and the
+// auth events emitted while it runs carry its trace_id and span_id.
+export type AuthTraceSpanName =
+  | "slock.auth.load_user"
+  | "slock.auth.cross_tab_wait";
 
 export type WebAgentActivityTraceEventName =
   | "slock.agent_activity.socket_received"
@@ -83,7 +89,20 @@ export type WebHttpClientTraceEventName = "web.http.client";
 // forever while silently leaving the registry.
 export type UploadCapabilityFallbackTraceEventName = "slock.attachment.upload_capability_fallback";
 
-export type WebTraceEventName = AuthTraceEventName | WebAgentActivityTraceEventName | StateTransitionTraceEventName | StateViolationTraceEventName | ClientErrorTraceEventName | UpdateGateTraceEventName | WebHttpClientTraceEventName | UploadCapabilityFallbackTraceEventName;
+// Names the web may emit as point in time events.
+export type WebEventName =
+  | AuthTraceEventName
+  | WebAgentActivityTraceEventName
+  | StateTransitionTraceEventName
+  | StateViolationTraceEventName
+  | ClientErrorTraceEventName
+  | UpdateGateTraceEventName
+  | UploadCapabilityFallbackTraceEventName;
+
+// Names the web may emit as spans with a real duration.
+export type WebSpanName = AuthTraceSpanName | WebHttpClientTraceEventName;
+
+export type WebTraceEventName = WebEventName | WebSpanName;
 
 export type StatusBucket = "auth_401_403" | "server_5xx" | "network_undefined" | "other";
 
@@ -197,7 +216,7 @@ export interface WebTraceRecord {
   trace_id: string;
   span_id: string;
   parent_span_id?: string;
-  name: WebTraceEventName;
+  name: WebSpanName;
   surface: "web";
   kind: string;
   status: TraceStatus;
@@ -206,15 +225,41 @@ export interface WebTraceRecord {
   attrs?: Record<string, unknown>;
 }
 
+/** A point in time web fact. The worker writes it as an OTLP log record. */
+export interface WebEventRecord {
+  type: "event";
+  schema_version: 1;
+  name: WebEventName;
+  surface: "web";
+  time: string;
+  trace_id?: string;
+  span_id?: string;
+  attrs?: Record<string, unknown>;
+}
+
+export interface EmitWebEventOptions {
+  traceId?: string;
+  spanId?: string;
+}
+
+// A span always wraps real work, so both times are required. A fact with no
+// duration must be emitted with emitWebEvent instead.
 export interface BuildWebTraceRecordOptions {
+  startTime: string;
+  endTime: string;
   traceId?: string;
   spanId?: string;
   parentSpanId?: string | null;
   kind?: string;
   status?: TraceStatus;
-  startTime?: string;
-  endTime?: string;
   surface?: "web";
+}
+
+/** A running web span. Call end once; the record is emitted at that point. */
+export interface WebSpanHandle {
+  readonly traceId: string;
+  readonly spanId: string;
+  end(status: TraceStatus, attrs?: Record<string, unknown>): void;
 }
 
 /** Map an HTTP-ish status to the contract's bounded statusBucket. */
@@ -382,6 +427,14 @@ const tabId: string = (() => {
   }
 })();
 
+/**
+ * This tab's random id (one per page load). Product events use it as their
+ * `client_session_id` so they join to this tab's traces (RFC-066 §3.3).
+ */
+export function getWebTabId(): string {
+  return tabId;
+}
+
 function dropUndefined(attrs: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(attrs)) {
@@ -417,13 +470,12 @@ function loadedWebAssetId(): string {
   }
 }
 
-/** Build a single web-surface span record. */
+/** Build a single web-surface span record from a real start and end time. */
 export function buildWebTraceRecord(
-  name: WebTraceEventName,
-  attrs: Record<string, unknown> = {},
-  options: BuildWebTraceRecordOptions = {},
+  name: WebSpanName,
+  attrs: Record<string, unknown>,
+  options: BuildWebTraceRecordOptions,
 ): WebTraceRecord {
-  const now = new Date().toISOString();
   return {
     type: "span",
     schema_version: 1,
@@ -434,22 +486,70 @@ export function buildWebTraceRecord(
     surface: options.surface ?? "web",
     kind: options.kind ?? "internal",
     status: options.status ?? "unset",
-    start_time: options.startTime ?? now,
-    end_time: options.endTime ?? now,
-    attrs: dropUndefined({
-      ...attrs,
-      tabId,
-      releaseSha: RELEASE_SHA,
-      deploymentEnv: DEPLOYMENT_ENV,
-      appVersion: APP_VERSION,
-      webAssetId: loadedWebAssetId(),
-    }),
+    start_time: options.startTime,
+    end_time: options.endTime,
+    attrs: withDefaultWebAttrs(attrs),
   };
 }
 
-/** Build a single web-surface span record for an auth trace event. */
-export function buildAuthTraceRecord(name: AuthTraceEventName, attrs: AuthTraceAttrs = {}): WebTraceRecord {
-  return buildWebTraceRecord(name, attrs as Record<string, unknown>);
+/**
+ * Start a web span. Ids are minted now so events emitted during the work can
+ * carry them. The span record is built and enqueued when end() is called.
+ * Never throws.
+ */
+export function startWebSpan(name: WebSpanName): WebSpanHandle {
+  const traceId = randomHex(16);
+  const spanId = randomHex(8);
+  const startTime = new Date().toISOString();
+  let ended = false;
+  return {
+    traceId,
+    spanId,
+    end(status: TraceStatus, attrs: Record<string, unknown> = {}): void {
+      if (ended) return;
+      ended = true;
+      try {
+        emitWebTraceRecord(buildWebTraceRecord(name, attrs, {
+          traceId,
+          spanId,
+          status,
+          startTime,
+          endTime: new Date().toISOString(),
+        }));
+      } catch {
+        // Swallow: ending a span must never affect the work it measured.
+      }
+    },
+  };
+}
+
+/** Build a single web event record with the same default attrs as spans. */
+export function buildWebEventRecord(
+  name: WebEventName,
+  attrs: Record<string, unknown> = {},
+  options: EmitWebEventOptions = {},
+): WebEventRecord {
+  return {
+    type: "event",
+    schema_version: 1,
+    name,
+    surface: "web",
+    time: new Date().toISOString(),
+    ...(options.traceId ? { trace_id: options.traceId } : {}),
+    ...(options.spanId ? { span_id: options.spanId } : {}),
+    attrs: withDefaultWebAttrs(attrs),
+  };
+}
+
+function withDefaultWebAttrs(attrs: Record<string, unknown>): Record<string, unknown> {
+  return dropUndefined({
+    ...attrs,
+    tabId,
+    releaseSha: RELEASE_SHA,
+    deploymentEnv: DEPLOYMENT_ENV,
+    appVersion: APP_VERSION,
+    webAssetId: loadedWebAssetId(),
+  });
 }
 
 // --- Fire-and-forget batching transport ---
@@ -457,16 +557,18 @@ export function buildAuthTraceRecord(name: AuthTraceEventName, attrs: AuthTraceA
 // Two independent paths share the trace receiver but NOT the queue/flushing
 // machinery:
 //
-//   1. Scheduled batch path (`emitAuthTrace` -> `scheduleFlush` ->
-//      `flushAuthTraces`): non-urgent traces accumulate in `queue` and flush
-//      ~4s later. Guarded by `flushing` to prevent overlapping batch sends.
+//   1. Scheduled batch path (`emitAuthTrace` / `emitWebEvent` /
+//      `emitWebTraceRecord` -> `scheduleFlush` -> `flushAuthTraces`):
+//      non-urgent records accumulate in `queue` and flush ~4s later. Guarded
+//      by `flushing` to prevent overlapping batch sends. Spans go out in the
+//      `records` array and events in the `events` array of one batch.
 //
 //   2. Urgent fire-and-send path (`emitAuthTraceAndFlush` ->
 //      `sendUrgentAuthTraceBatch`): release-gate-critical events cannot wait
 //      for the scheduled batch. `slock.auth.session_cleared` callers remove the
 //      auth token synchronously immediately after emit, and logout verdicts are
 //      the causal "why" immediately preceding those clears. Urgent emits
-//      snapshot token+serverId synchronously at emit-time, build the record
+//      snapshot token+serverId synchronously at emit-time, build the event
 //      synchronously, then fire a self-contained POST that bypasses the
 //      `queue` and the `flushing` guard. Missing-credential urgents are a true
 //      drop (no enqueue, no retry).
@@ -480,7 +582,7 @@ export function buildAuthTraceRecord(name: AuthTraceEventName, attrs: AuthTraceA
 // goes out regardless of the scheduled flush's state.
 
 interface QueuedWebTraceRecord {
-  record: WebTraceRecord;
+  record: WebTraceRecord | WebEventRecord;
   // Bind records emitted with an active server to that server. Records emitted
   // before server hydration remain unbound and may bind once, to the first
   // eligible active server. This prevents a later server switch from sending
@@ -554,8 +656,13 @@ function scheduleFlush(): void {
  * is dropped. Never throws, never touches auth state.
  */
 export async function flushAuthTraces(): Promise<void> {
+  // Single flight. This check must stay OUTSIDE try/finally: a call that bails
+  // here must not run the finally below, which would clear the flag owned by
+  // the flush in progress and let the next call start a parallel flush (one
+  // extra scope-attestation + web-traces pair per call, 9-10 per burst).
+  if (flushing) return;
   try {
-    if (!ENABLED || flushing || queue.length === 0) return;
+    if (!ENABLED || queue.length === 0) return;
 
     // Capture auth context SYNCHRONOUSLY, before any await. Tokens are never
     // retained in the queue: every attempt reads only the current credential.
@@ -588,7 +695,12 @@ export async function flushAuthTraces(): Promise<void> {
     flushing = true;
     const batch = queue.slice(0, MAX_BATCH_RECORDS);
     queue = queue.slice(batch.length);
-    const records = batch.map((entry) => entry.record);
+    const records: WebTraceRecord[] = [];
+    const events: WebEventRecord[] = [];
+    for (const entry of batch) {
+      if (entry.record.type === "event") events.push(entry.record);
+      else records.push(entry.record);
+    }
 
     // Raw fetch (NOT the axios `api` client): a 401 here must just drop the
     // batch, never trigger the refresh/logout response interceptor. This
@@ -615,7 +727,11 @@ export async function flushAuthTraces(): Promise<void> {
     await fetchImpl(`${TRACE_URL}/api/web-traces`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ attestation: data.attestation, records }),
+      body: JSON.stringify({
+        attestation: data.attestation,
+        records,
+        ...(events.length > 0 ? { events } : {}),
+      }),
     });
   } catch {
     // Swallow: tracing failure must never affect auth state.
@@ -649,7 +765,7 @@ export async function flushAuthTraces(): Promise<void> {
  * so we never reach this function without a serverId+token.
  */
 async function sendUrgentAuthTraceBatch(
-  record: WebTraceRecord,
+  event: WebEventRecord,
   serverId: string,
   token: string,
 ): Promise<void> {
@@ -671,10 +787,11 @@ async function sendUrgentAuthTraceBatch(
     const data = (await attestationResponse.json()) as { attestation?: string };
     if (!data?.attestation) return;
 
+    // The worker accepts an empty `records` array when `events` is present.
     await fetchImpl(`${TRACE_URL}/api/web-traces`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ attestation: data.attestation, records: [record] }),
+      body: JSON.stringify({ attestation: data.attestation, records: [], events: [event] }),
       keepalive: true,
     });
   } catch {
@@ -683,13 +800,13 @@ async function sendUrgentAuthTraceBatch(
 }
 
 interface CapturedUrgentAuthTrace {
-  record: WebTraceRecord;
+  record: WebEventRecord;
   serverId: string;
   token: string;
 }
 
-function captureUrgentWebTrace(
-  name: WebTraceEventName,
+function captureUrgentWebEvent(
+  name: WebEventName,
   attrs: Record<string, unknown>,
 ): CapturedUrgentAuthTrace | null {
   if (!ENABLED) return null;
@@ -697,7 +814,7 @@ function captureUrgentWebTrace(
   const token = localStorage.getItem("slock_access_token");
   if (!serverId || !token) return null;
   return {
-    record: buildWebTraceRecord(name, attrs),
+    record: buildWebEventRecord(name, attrs),
     serverId,
     token,
   };
@@ -706,6 +823,7 @@ function captureUrgentWebTrace(
 function captureUrgentAuthTrace(
   name: AuthTraceEventName,
   attrs: AuthTraceAttrs,
+  options: EmitWebEventOptions,
 ): CapturedUrgentAuthTrace | null {
   if (!ENABLED) return null;
 
@@ -732,7 +850,7 @@ function captureUrgentAuthTrace(
   }
 
   return {
-    record: buildAuthTraceRecord(name, recordAttrs),
+    record: buildWebEventRecord(name, recordAttrs as Record<string, unknown>, options),
     serverId,
     token,
   };
@@ -758,23 +876,42 @@ async function waitForUrgentTraceSend(promise: Promise<void>, timeoutMs: number)
 }
 
 /**
- * Emit an auth trace event. Fire-and-forget: enqueues a record and schedules a
- * batched flush. No-op when the receiver env is unset. Never throws.
+ * Emit an auth trace event. Fire-and-forget: enqueues an event record and
+ * schedules a batched flush. Pass the ids of a running auth span (for example
+ * `slock.auth.load_user`) so the event is attached to it. No-op when the
+ * receiver env is unset. Never throws.
  */
-export function emitAuthTrace(name: AuthTraceEventName, attrs: AuthTraceAttrs = {}): void {
-  emitWebTrace(name, attrs as Record<string, unknown>);
+export function emitAuthTrace(
+  name: AuthTraceEventName,
+  attrs: AuthTraceAttrs = {},
+  options: EmitWebEventOptions = {},
+): void {
+  emitWebEvent(name, attrs as Record<string, unknown>, options);
 }
 
 /**
- * Emit a non-urgent web trace event. Fire-and-forget: enqueues a record and
- * schedules a batched flush. No-op when the receiver env is unset. Never throws.
+ * Emit a point in time web event. Use this for facts that have no real
+ * duration instead of a span with equal start and end times. Pass traceId and
+ * spanId to attach the event to a running span. Fire and forget, never throws.
  */
-export function emitWebTrace(name: WebTraceEventName, attrs: Record<string, unknown> = {}): void {
-  emitWebTraceRecord(buildWebTraceRecord(name, attrs));
+export function emitWebEvent(
+  name: WebEventName,
+  attrs: Record<string, unknown> = {},
+  options: EmitWebEventOptions = {},
+): void {
+  try {
+    enqueueWebRecord(buildWebEventRecord(name, attrs, options));
+  } catch {
+    // Swallow: emitting a trace must never affect auth control flow.
+  }
 }
 
 /** Enqueue an already-completed web span while preserving its trace context. */
 export function emitWebTraceRecord(record: WebTraceRecord): void {
+  enqueueWebRecord(record);
+}
+
+function enqueueWebRecord(record: WebTraceRecord | WebEventRecord): void {
   try {
     if (!ENABLED) return;
     queue.push({
@@ -821,9 +958,13 @@ export function emitWebTraceRecord(record: WebTraceRecord): void {
  *
  * Never awaited, never throws, never blocks auth control flow.
  */
-export function emitAuthTraceAndFlush(name: AuthTraceEventName, attrs: AuthTraceAttrs = {}): void {
+export function emitAuthTraceAndFlush(
+  name: AuthTraceEventName,
+  attrs: AuthTraceAttrs = {},
+  options: EmitWebEventOptions = {},
+): void {
   try {
-    const captured = captureUrgentAuthTrace(name, attrs);
+    const captured = captureUrgentAuthTrace(name, attrs, options);
     if (!captured) return;
     void sendUrgentAuthTraceBatch(captured.record, captured.serverId, captured.token);
   } catch {
@@ -846,7 +987,7 @@ export async function emitAuthTraceAndFlushBeforeUnload(
   opts: { timeoutMs?: number } = {},
 ): Promise<void> {
   try {
-    const captured = captureUrgentAuthTrace(name, attrs);
+    const captured = captureUrgentAuthTrace(name, attrs, {});
     if (!captured) return;
     await waitForUrgentTraceSend(
       sendUrgentAuthTraceBatch(captured.record, captured.serverId, captured.token),
@@ -858,13 +999,13 @@ export async function emitAuthTraceAndFlushBeforeUnload(
 }
 
 /** Urgent non-auth event for a control path that is about to navigate away. */
-export async function emitWebTraceAndFlushBeforeUnload(
-  name: Exclude<WebTraceEventName, AuthTraceEventName>,
+export async function emitWebEventAndFlushBeforeUnload(
+  name: Exclude<WebEventName, AuthTraceEventName>,
   attrs: Record<string, unknown> = {},
   opts: { timeoutMs?: number } = {},
 ): Promise<void> {
   try {
-    const captured = captureUrgentWebTrace(name, attrs);
+    const captured = captureUrgentWebEvent(name, attrs);
     if (!captured) return;
     await waitForUrgentTraceSend(
       sendUrgentAuthTraceBatch(captured.record, captured.serverId, captured.token),

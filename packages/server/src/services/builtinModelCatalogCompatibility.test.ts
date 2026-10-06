@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import type { BuiltInRuntimeProviderId, RuntimeConfig } from "@botiverse/raft-shared";
 import {
   BuiltInModelCatalogError,
   assertBuiltInPresetSupportedByCatalog,
   builtInPresetSelectionChanged,
   filterBuiltInPiFormOptionSourceForCatalog,
-} from "./builtinModelCatalogCompatibility.js";
-import { buildBuiltInPiFormOptionSource } from "./runtimeFormDefinitionService.js";
+} from "./builtinModelCatalogCompatibility";
+import { buildBuiltInPiFormOptionSource } from "./runtimeFormDefinitionService";
 
 const preset = (
   model: string,

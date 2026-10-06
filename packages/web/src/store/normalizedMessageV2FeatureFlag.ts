@@ -1,8 +1,8 @@
 import { useServerStore } from "./serverStore";
 import {
   prefetchServerFeatureFlags,
-  getServerFeatureFlagSnapshot,
   readServerFeatureFlag,
+  readServerFeatureFlagState,
   resetServerFeatureFlagsForTests,
   subscribeServerFeatureFlags,
   SYNC_CORE_MESSAGES_FLAG_KEY,
@@ -16,9 +16,7 @@ const activatedServers = new Set<string>();
 function observeCurrentServerFlagTransition(): void {
   const serverId = useServerStore.getState().current?.id ?? null;
   if (!serverId) return;
-  const snapshot = getServerFeatureFlagSnapshot(serverId);
-  const enabled = snapshot.resolved
-    && snapshot.values[SYNC_CORE_MESSAGES_FLAG_KEY] === true;
+  const enabled = readServerFeatureFlagState(serverId, SYNC_CORE_MESSAGES_FLAG_KEY) === "enabled";
   if (!enabled) {
     activatedServers.delete(serverId);
     return;

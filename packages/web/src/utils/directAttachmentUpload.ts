@@ -1,4 +1,4 @@
-import type { components } from "@botiverse/raft-shared/src/generated/openapi.js";
+import type { components } from "@botiverse/raft-shared/src/generated/openapi";
 import { setClockTimeout } from "@botiverse/raft-shared";
 import axios from "axios";
 import type { AxiosProgressEvent, AxiosRequestConfig } from "axios";
@@ -14,6 +14,7 @@ type CreateRequest = components["schemas"]["CreateAttachmentUploadSessionRequest
 type CreateResponse = components["schemas"]["CreateAttachmentUploadSessionResponse"];
 type CompleteResponse = components["schemas"]["CompleteAttachmentUploadSessionResponse"];
 type SessionView = components["schemas"]["AttachmentUploadSessionView"];
+export type RecoveryView = components["schemas"]["AttachmentUploadRecoveryView"];
 
 type ContractError =
   | components["schemas"]["AttachmentUploadForbiddenError"]
@@ -34,6 +35,18 @@ export interface AttachmentUploadApi {
   get<T = unknown>(url: string, config?: ApiRequestConfig): Promise<ApiResponse<T>>;
   post<T = unknown>(url: string, body?: unknown, config?: ApiRequestConfig): Promise<ApiResponse<T>>;
   delete<T = unknown>(url: string): Promise<ApiResponse<T>>;
+}
+
+export async function listActiveAttachmentUploads(
+  api: AttachmentUploadApi,
+  channelId: string,
+  signal?: AbortSignal,
+): Promise<RecoveryView[]> {
+  const response = await api.get<{ uploads: RecoveryView[] }>(
+    `/attachments/upload-sessions/${encodeURIComponent(channelId)}/active`,
+    { signal },
+  );
+  return Array.isArray(response.data?.uploads) ? response.data.uploads : [];
 }
 
 export type DirectAttachmentUploadSession = Readonly<{ uploadId: string }>;

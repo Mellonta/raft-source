@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   buildAgentLifecycleStateSnapshot,
   normalizeDaemonAgentStatus,
@@ -7,7 +6,7 @@ import {
   type DaemonReportedAgentStatus,
   type StatusSignalPlanAction,
   type StatusSignalPlanInput,
-} from "./agentOrchestrator.js";
+} from "./agentOrchestrator";
 
 type StatusPlanCase = {
   name: string;

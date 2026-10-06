@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { uploadAttachmentFile } from "../src/utils/directAttachmentUpload";
 import type { AttachmentUploadApi } from "../src/utils/directAttachmentUpload";

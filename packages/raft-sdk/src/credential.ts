@@ -1,4 +1,4 @@
-import { currentDate } from "@botiverse/raft-shared/src/clock.js";
+import { currentDate } from "@botiverse/raft-shared/src/clock";
 
 import {
   createRaftClient,
@@ -6,7 +6,7 @@ import {
   requireServerUrl,
   type CreateRaftClientOptions,
   type RaftClient,
-} from "./client.js";
+} from "./client";
 
 export interface RaftCredentialIdentity {
   serverUrl: string;

@@ -5,8 +5,8 @@ import path from "node:path";
 
 import { currentDate } from "@botiverse/raft-shared";
 
-import type { AgentContext } from "../../auth/env.js";
-import type { AgentManifestActionV1 } from "./manifestV1.js";
+import type { AgentContext } from "../../auth/env";
+import type { AgentManifestActionV1 } from "./manifestV1";
 
 export type InvocationTerminalStateV1 =
   | "dispatching"

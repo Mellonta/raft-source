@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   FEATURE_FLAG_ROLLOUT_GUARDRAIL_ISSUER,
   FEATURE_FLAG_ROLLOUT_GUARDRAIL_POLICY_VERSION,
@@ -11,7 +10,7 @@ import {
   type FeatureFlagRolloutRuleInput,
   type FeatureFlagRolloutStateInput,
   type FeatureFlagRolloutWideningOperation,
-} from "./featureFlagRolloutGuardrail.js";
+} from "./featureFlagRolloutGuardrail";
 
 const NOW = Date.parse("2026-07-10T14:00:00.000Z");
 const RECEIPT_ID = "00000000-0000-4000-8000-000000000001";
@@ -51,7 +50,7 @@ function percentageRule(overrides: Partial<FeatureFlagRolloutRuleInput> = {}): F
 function state(overrides: Partial<FeatureFlagRolloutStateInput> = {}): FeatureFlagRolloutStateInput {
   return {
     controlPlaneId: "production",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     configVersion: 41,
     killSwitch: false,
     rules: [serverRule(), percentageRule()],
@@ -69,7 +68,7 @@ function receipt(
     verdict: "pass",
     issuer: FEATURE_FLAG_ROLLOUT_GUARDRAIL_ISSUER,
     controlPlaneId: "production",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     configVersion: 41,
     operation,
     policyVersion: FEATURE_FLAG_ROLLOUT_GUARDRAIL_POLICY_VERSION,
@@ -201,29 +200,29 @@ test("absent canonical rules produce explicit create plans", () => {
 test("kill activation remains available with no/stale version while unkill is guarded", () => {
   assert.deepEqual(classifyFeatureFlagRollout(state(), {
     kind: "kill_switch_set",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     desired: true,
   }), { kind: "narrowing", operation: { kind: "kill_switch_enable" } });
   assert.deepEqual(classifyFeatureFlagRollout(state(), {
     kind: "kill_switch_set",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     expectedConfigVersion: 0,
     desired: true,
   }), { kind: "narrowing", operation: { kind: "kill_switch_enable" } });
   assert.deepEqual(classifyFeatureFlagRollout(state({ killSwitch: true }), {
     kind: "kill_switch_set",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     desired: false,
   }), { kind: "blocked", reason: "config_version_required" });
   assert.deepEqual(classifyFeatureFlagRollout(state({ killSwitch: true }), {
     kind: "kill_switch_set",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     expectedConfigVersion: 41,
     desired: false,
   }), {
     kind: "widening",
     controlPlaneId: "production",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     configVersion: 41,
     operation: { kind: "kill_switch_disable" },
   });
@@ -233,34 +232,34 @@ test("malformed runtime state and intent fail closed without throwing", () => {
   assert.deepEqual(classifyFeatureFlagRollout(null, {}), { kind: "blocked", reason: "invalid_state" });
   assert.deepEqual(classifyFeatureFlagRollout({ ...state(), rules: null }, {
     kind: "kill_switch_set",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     desired: true,
   }), { kind: "narrowing", operation: { kind: "kill_switch_enable" } });
   assert.deepEqual(classifyFeatureFlagRollout({ ...state(), rules: null }, {
     kind: "server_allowlist_set",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     expectedConfigVersion: 41,
     serverId: SERVER_2,
     desired: "present",
   }), { kind: "blocked", reason: "invalid_state" });
   assert.deepEqual(classifyFeatureFlagRollout({ ...state({ killSwitch: true }), rules: null }, {
     kind: "kill_switch_set",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     expectedConfigVersion: 41,
     desired: false,
   }), { kind: "blocked", reason: "invalid_state" }, "unkill must not reactivate an unavailable rule snapshot");
   assert.deepEqual(classifyFeatureFlagRollout(state(), {
     kind: "kill_switch_set",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     desired: "false",
   }), { kind: "blocked", reason: "invalid_intent" });
   assert.deepEqual(classifyFeatureFlagRollout(state(), {
     kind: "caller_declared_safe",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
   }), { kind: "blocked", reason: "invalid_intent" });
   assert.deepEqual(classifyFeatureFlagRollout(state(), {
     kind: "kill_switch_set",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     desired: true,
     safe: true,
   }), { kind: "blocked", reason: "invalid_intent" });
@@ -387,19 +386,114 @@ test("lab rules remain valid but cannot masquerade as server or percentage rollo
   });
 });
 
+test("client rules: rollout widening that would bypass a client allow is blocked; narrowing is not", () => {
+  const clientAllow: FeatureFlagRolloutRuleInput = {
+    ...serverRule({ id: "20000000-0000-4000-8000-000000000097" }),
+    stage: "client",
+    decision: "allow",
+    values: [SERVER_3],
+    clientOs: ["android"],
+    minClientBuild: 11_200_132,
+  };
+  const allowlist = (current: FeatureFlagRolloutStateInput, serverId: string, desired: "present" | "absent") =>
+    classifyFeatureFlagRollout(current, {
+      kind: "server_allowlist_set",
+      flagKey: current.flagKey,
+      expectedConfigVersion: current.configVersion,
+      serverId,
+      desired,
+    });
+  const percentage = (current: FeatureFlagRolloutStateInput, desiredBasisPoints: number) =>
+    classifyFeatureFlagRollout(current, {
+      kind: "percentage_set",
+      flagKey: current.flagKey,
+      expectedConfigVersion: current.configVersion,
+      desiredBasisPoints,
+    });
+
+  // Server allowlist + client allow on different servers: adding another unrelated server is fine.
+  const noPercentage = state({ rules: [serverRule(), clientAllow] });
+  assert.deepEqual(allowlist(noPercentage, SERVER_2, "present"), {
+    kind: "widening",
+    controlPlaneId: noPercentage.controlPlaneId,
+    flagKey: noPercentage.flagKey,
+    configVersion: noPercentage.configVersion,
+    operation: { kind: "server_allowlist_add", ruleId: SERVER_RULE_ID, serverId: SERVER_2 },
+  });
+  // Allowlisting the client rule's own server would shadow it.
+  assert.deepEqual(allowlist(noPercentage, SERVER_3, "present"), { kind: "blocked", reason: "client_rule_bypass" });
+  // Any percentage above 0 is global and bypasses every client allow.
+  assert.deepEqual(percentage(noPercentage, 1), { kind: "blocked", reason: "client_rule_bypass" });
+
+  // Narrowing stays available even when the current state already conflicts.
+  const conflicting = state({ rules: [serverRule(), percentageRule(), clientAllow] });
+  assert.equal(allowlist(conflicting, SERVER_1, "absent").kind, "narrowing");
+  assert.equal(percentage(conflicting, 0).kind, "narrowing");
+  assert.deepEqual(allowlist(conflicting, SERVER_2, "present"), { kind: "blocked", reason: "client_rule_bypass" });
+  assert.equal(classifyFeatureFlagRollout(conflicting, {
+    kind: "kill_switch_set",
+    flagKey: conflicting.flagKey,
+    expectedConfigVersion: conflicting.configVersion,
+    desired: true,
+  }).kind, "narrowing");
+
+  // A client deny cannot be bypassed.
+  const clientDeny = state({ rules: [serverRule(), percentageRule(), { ...clientAllow, decision: "deny" }] });
+  assert.equal(allowlist(clientDeny, SERVER_3, "present").kind, "widening");
+});
+
+test("a server or percentage rule carrying client constraints is never canonical", () => {
+  for (const rules of [
+    [serverRule({ clientOs: ["android"] }), percentageRule()],
+    [serverRule(), percentageRule({ minClientBuild: 1 })],
+    [serverRule(), percentageRule({ clientBuildTypes: ["alpha"] })],
+  ]) {
+    const current = state({ rules });
+    const serverResult = classifyFeatureFlagRollout(current, {
+      kind: "server_allowlist_set",
+      flagKey: current.flagKey,
+      expectedConfigVersion: current.configVersion,
+      serverId: SERVER_2,
+      desired: "present",
+    });
+    const percentageResult = classifyFeatureFlagRollout(current, {
+      kind: "percentage_set",
+      flagKey: current.flagKey,
+      expectedConfigVersion: current.configVersion,
+      desiredBasisPoints: 2_000,
+    });
+    const constrainedIsServer = rules[0].clientOs != null;
+    assert.deepEqual(
+      constrainedIsServer ? serverResult : percentageResult,
+      {
+        kind: "blocked",
+        reason: constrainedIsServer ? "unsupported_server_allowlist_shape" : "unsupported_percentage_shape",
+      },
+      JSON.stringify(rules),
+    );
+    // Emergency kill stays available regardless of rule shapes.
+    assert.equal(classifyFeatureFlagRollout(current, {
+      kind: "kill_switch_set",
+      flagKey: current.flagKey,
+      expectedConfigVersion: current.configVersion,
+      desired: true,
+    }).kind, "narrowing");
+  }
+});
+
 test("persisted rule metadata is accepted only for the locked flag", () => {
   const realShapedState = {
     ...state(),
     rules: [
       {
         ...serverRule(),
-        flagKey: "message_forwarding_v0",
+        flagKey: "rollout_fixture_v0",
         createdAt: new Date("2026-07-10T13:00:00.000Z"),
         updatedAt: new Date("2026-07-10T13:30:00.000Z"),
       },
       {
         ...percentageRule(),
-        flagKey: "message_forwarding_v0",
+        flagKey: "rollout_fixture_v0",
         createdAt: new Date("2026-07-10T13:00:00.000Z"),
         updatedAt: new Date("2026-07-10T13:30:00.000Z"),
       },
@@ -438,7 +532,7 @@ test("safe decisions do not touch receipt storage or clock", async () => {
   });
   assert.deepEqual(await decideFeatureFlagRolloutGuardrail(state(), {
     kind: "kill_switch_set",
-    flagKey: "message_forwarding_v0",
+    flagKey: "rollout_fixture_v0",
     expectedConfigVersion: 0,
     desired: true,
   }, { client: "object" }, deps), {

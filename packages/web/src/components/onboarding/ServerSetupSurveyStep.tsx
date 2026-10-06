@@ -11,7 +11,7 @@ import type {
 } from "@botiverse/raft-shared";
 import { useAuthStore } from "../../store/authStore";
 import Banner from "../ui/Banner";
-import Button from "../ui/Button";
+import { Button } from "raft-ui";
 import SetupSessionFooter from "./SetupSessionFooter";
 
 /**
@@ -49,11 +49,11 @@ function OptionGrid<T extends string>({
             role="radio"
             aria-checked={selected}
             onClick={() => onChange(option.id)}
-            className={`border-2 border-black px-3 py-1.5 text-sm font-bold transition-shadow ${
+            className={`rounded-md border border-line-muted px-3 py-1.5 text-sm font-bold text-foreground-strong transition-shadow theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black ${
               // Brand yellow, not the pink accent: pink is the CTA/primary-action colour
               // (the Continue button right below), and a grid of pink chips read like a
               // row of buttons competing with it.
-              selected ? "bg-soft-signal shadow-brutal-sm" : "bg-white hover:shadow-brutal-sm"
+              selected ? "bg-primary-soft shadow-raft-xs theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm" : "bg-layer-panel hover:shadow-raft-xs theme-brutal:bg-white theme-brutal:text-black theme-brutal:hover:shadow-brutal-sm"
             }`}
             data-testid={`signup-${name}-${option.id}`}
           >
@@ -103,17 +103,17 @@ export default function ServerSetupSurveyStep({
 
   return (
     <section
-      className="flex w-full max-w-[620px] flex-col overflow-hidden border-2 border-black bg-white shadow-brutal"
+      className="flex w-full max-w-[620px] flex-col overflow-hidden rounded-lg border border-line-muted bg-layer-panel shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal"
       data-testid="server-setup-survey"
     >
-      <header className="shrink-0 border-b-2 border-black px-8 pb-5 pt-7">
-        <p className="font-mono text-[10px] font-bold uppercase tracking-wide text-black/55">
+      <header className="shrink-0 border-b border-line-hairline px-8 pb-5 pt-7 theme-brutal:border-b-2 theme-brutal:border-black">
+        <p className="font-mono text-[10px] font-bold uppercase tracking-wide text-foreground-muted">
           {formatMessage({ id: "layout.onboarding.setupServerEyebrow" })}
         </p>
         <h1 className="mt-2 text-xl font-bold">
           {formatMessage({ id: "layout.onboarding.tellAboutYou" }, { agentName })}
         </h1>
-        <p className="mt-1 text-xs leading-5 text-black/60">
+        <p className="mt-1 text-xs leading-5 text-foreground-muted">
           {formatMessage({ id: "layout.onboarding.surveyHint" })}
         </p>
       </header>
@@ -122,14 +122,14 @@ export default function ServerSetupSurveyStep({
         {error ? <Banner intent="warning" className="font-bold">{error}</Banner> : null}
 
         <div>
-          <p className="mb-2 text-sm font-bold text-black">
+          <p className="mb-2 text-sm font-bold text-foreground-strong">
             {formatMessage({ id: "layout.onboarding.whatDescribesYou" })}
           </p>
           <OptionGrid name="role" options={SIGNUP_ROLES} value={role} onChange={setRole} />
         </div>
 
         <div>
-          <p className="mb-2 text-sm font-bold text-black">
+          <p className="mb-2 text-sm font-bold text-foreground-strong">
             {formatMessage({ id: "layout.onboarding.howHearAboutRaft" })}
           </p>
           <OptionGrid name="source" options={REFERRAL_SOURCES} value={source} onChange={setSource} />
@@ -153,7 +153,7 @@ export default function ServerSetupSurveyStep({
             type="submit"
             disabled={loading || !role || !source}
             size="lg"
-            tone="pink"
+            variant="accent"
             className="w-full sm:w-auto"
             data-testid="server-setup-survey-continue"
           >

@@ -1,8 +1,8 @@
 import { Router, type Router as RouterType } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
-import { requireAuth, requireServer, requireVerified } from "../middleware/auth.js";
-import { getDb } from "../db/index.js";
-import { webPushPromptEvents } from "../db/schema.js";
+import { requireAuth, requireServer, requireVerified } from "../middleware/auth";
+import { getDb } from "../db/index";
+import { webPushPromptEvents } from "../db/schema";
 import {
   getVapidPublicKey,
   ensureFamilyRevokeCapability,
@@ -13,10 +13,12 @@ import {
   sendPushToUsers,
   unbindPushInstallation,
   upsertPushRegistration,
+  webPushEndpointHostname,
   type PushRegistrationEnv,
   type PushRegistrationProvider,
-} from "../services/pushService.js";
-import * as serverService from "../services/serverService.js";
+} from "../services/pushService";
+import * as serverService from "../services/serverService";
+import { sendJsonServerError } from "./errorResponse";
 
 export const pushRouter: RouterType = Router();
 const PUSH_PROMPT_EVENTS = new Set([
@@ -107,8 +109,11 @@ pushRouter.post("/prompt-events", requireAuth, async (req, res) => {
     });
     res.json({ ok: true });
   } catch (err) {
-    console.error("[Push] Failed to record prompt event:", err);
-    res.status(500).json({ error: "Failed to record prompt event" });
+    sendJsonServerError(req, res, {
+      error: "Failed to record prompt event",
+      logPrefix: "[Push] Failed to record prompt event:",
+      err,
+    });
   }
 });
 
@@ -129,13 +134,20 @@ pushRouter.post("/subscribe", requireAuth, requireVerified, async (req, res) => 
     res.status(400).json({ error: "Missing endpoint or subscription keys" });
     return;
   }
+  if (!webPushEndpointHostname(endpoint)) {
+    res.status(400).json({ error: "Push endpoint must be a public HTTPS URL" });
+    return;
+  }
 
   try {
     await saveSubscription(userId, endpoint, keys.p256dh, keys.auth);
     res.json({ ok: true });
   } catch (err) {
-    console.error("[Push] Failed to save subscription:", err);
-    res.status(500).json({ error: "Failed to save subscription" });
+    sendJsonServerError(req, res, {
+      error: "Failed to save subscription",
+      logPrefix: "[Push] Failed to save subscription:",
+      err,
+    });
   }
 });
 
@@ -156,8 +168,11 @@ pushRouter.delete("/subscribe", requireAuth, requireVerified, async (req, res) =
     await removeSubscription(userId, endpoint);
     res.json({ ok: true });
   } catch (err) {
-    console.error("[Push] Failed to remove subscription:", err);
-    res.status(500).json({ error: "Failed to remove subscription" });
+    sendJsonServerError(req, res, {
+      error: "Failed to remove subscription",
+      logPrefix: "[Push] Failed to remove subscription:",
+      err,
+    });
   }
 });
 
@@ -187,9 +202,12 @@ pushRouter.post("/family-revoke", familyRevokeLimiter, async (req, res) => {
       return;
     }
     res.status(204).end();
-  } catch {
-    console.error("[Push] Failed to revoke push family");
-    res.status(500).json({ error: "Failed to revoke push family" });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to revoke push family",
+      logPrefix: "[Push] Failed to revoke push family",
+      err,
+    });
   }
 });
 
@@ -266,8 +284,11 @@ pushRouter.post("/registrations", requireAuth, requireVerified, requireServer, a
       },
     });
   } catch (err) {
-    console.error("[Push] Failed to upsert mobile push registration:", err);
-    res.status(500).json({ error: "Failed to save push registration" });
+    sendJsonServerError(req, res, {
+      error: "Failed to save push registration",
+      logPrefix: "[Push] Failed to upsert mobile push registration:",
+      err,
+    });
   }
 });
 
@@ -289,8 +310,11 @@ pushRouter.delete("/registrations/:installationId", requireAuth, requireVerified
     const unbound = await unbindPushInstallation({ installationId, userId, serverId });
     res.json({ ok: true, unbound });
   } catch (err) {
-    console.error("[Push] Failed to unbind mobile push registration:", err);
-    res.status(500).json({ error: "Failed to unbind push registration" });
+    sendJsonServerError(req, res, {
+      error: "Failed to unbind push registration",
+      logPrefix: "[Push] Failed to unbind mobile push registration:",
+      err,
+    });
   }
 });
 
@@ -334,7 +358,10 @@ pushRouter.post("/test", requireAuth, requireVerified, async (req, res) => {
 
     res.json({ ok: true, ...result });
   } catch (err) {
-    console.error("[Push] Failed to send test push:", err);
-    res.status(500).json({ error: "Failed to send test push" });
+    sendJsonServerError(req, res, {
+      error: "Failed to send test push",
+      logPrefix: "[Push] Failed to send test push:",
+      err,
+    });
   }
 });

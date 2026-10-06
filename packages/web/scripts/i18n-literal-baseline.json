@@ -1,21 +1,5 @@
 [
   {
-    "path": "src/analytics/flagRegistry.ts",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "\"Chat grid layout\"",
-    "count": 1,
-    "classification": "internal_dev",
-    "reason": "Experiment display name shown only in Dev tools flag overrides."
-  },
-  {
-    "path": "src/analytics/flagRegistry.ts",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "\"Sync-core messages\"",
-    "count": 1,
-    "classification": "internal_dev",
-    "reason": "Experiment display name shown only in Dev tools flag overrides."
-  },
-  {
     "path": "src/App.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
     "source": "\"Copied\"",
@@ -42,14 +26,6 @@
   {
     "path": "src/App.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "Auto",
-    "count": 1,
-    "classification": "internal_dev",
-    "reason": "Dev tools feature-flag override option meaning follow PostHog/default."
-  },
-  {
-    "path": "src/App.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
     "source": "Clear Local Session",
     "count": 1,
     "classification": "internal_dev",
@@ -62,14 +38,6 @@
     "count": 1,
     "classification": "internal_dev",
     "reason": "Dev tools one-click seed-account login button."
-  },
-  {
-    "path": "src/App.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "Feature flags",
-    "count": 1,
-    "classification": "internal_dev",
-    "reason": "Heading for the local feature-flag override section in Dev tools."
   },
   {
     "path": "src/App.tsx",
@@ -152,14 +120,6 @@
     "reason": "User-visible 99+ overflow notation when totalParticipants exceeds 99 in the ChannelMembers header."
   },
   {
-    "path": "src/components/agent/LegacyChannelMembers.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "\"99+\"",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Flag-off compatibility keeps the same user-visible 99+ participant overflow notation."
-  },
-  {
     "path": "src/components/auth/AccountIdentitySetupPage.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
     "source": "@",
@@ -198,14 +158,6 @@
     "count": 1,
     "classification": "protocol",
     "reason": "Protocol #channelName prefix in the edit-channel drawer description."
-  },
-  {
-    "path": "src/components/channel/LegacyEditChannelDialog.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "#",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Flag-off compatibility keeps the protocol #channelName prefix in the settings drawer description."
   },
   {
     "path": "src/components/layout/MainLayout.tsx",
@@ -362,14 +314,6 @@
   {
     "path": "src/components/machine/MachineDetailPanel.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "(v",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "User-visible version marker (v{version}) beside the upgrade control."
-  },
-  {
-    "path": "src/components/machine/MachineDetailPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
     "source": "~/.slock/agents/",
     "count": 1,
     "classification": "code_example",
@@ -379,7 +323,7 @@
     "path": "src/components/machine/MachineDetailPanel.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
     "source": "v",
-    "count": 2,
+    "count": 1,
     "classification": "protocol",
     "reason": "User-visible version prefix v in v{computerVersion}/v{daemonVersion} notation."
   },
@@ -398,14 +342,6 @@
     "count": 1,
     "classification": "protocol",
     "reason": "Protocol @ prefix before the human handle on the human detail page."
-  },
-  {
-    "path": "src/components/member/HumanDetailPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "`@${human.name}`",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "PanelHeader title/subtitle uses @human.name protocol handle form."
   },
   {
     "path": "src/components/member/humanMembershipStatus.ts",
@@ -473,11 +409,11 @@
   },
   {
     "path": "src/components/search/MessageSearchPage.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "`#${ch.name}`",
+    "rule": "formatjs/no-literal-string-in-jsx",
+    "source": "#",
     "count": 1,
     "classification": "protocol",
-    "reason": "Search channel filter chip/menu shows channel refs as #name protocol form."
+    "reason": "Search channel filter combobox shows channel refs with # prefix."
   },
   {
     "path": "src/components/search/MessageSearchPage.tsx",
@@ -518,70 +454,6 @@
     "count": 1,
     "classification": "code_example",
     "reason": "Example custom gateway endpoint URL placeholder."
-  },
-  {
-    "path": "src/components/settings/ReleaseNotesPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "Current",
-    "count": 1,
-    "classification": "owner_managed",
-    "reason": "ReleaseNotesPanel 'Current' badge on the active version entry. Eric owns this panel; migrate only with owner-approved dedicated change."
-  },
-  {
-    "path": "src/components/settings/ReleaseNotesPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "title=\"Release Notes\"",
-    "count": 1,
-    "classification": "owner_managed",
-    "reason": "ReleaseNotesPanel PanelHeader title. Eric owns this panel; migrate only with owner-approved dedicated change."
-  },
-  {
-    "path": "src/components/settings/ReleaseNotesPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "What&apos;s New",
-    "count": 1,
-    "classification": "owner_managed",
-    "reason": "ReleaseNotesPanel SectionEyebrow \"What's New\". Eric owns this panel; migrate only with owner-approved dedicated change."
-  },
-  {
-    "path": "src/components/settings/ReleaseNotesPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "\"BREAKING\"",
-    "count": 1,
-    "classification": "owner_managed",
-    "reason": "ReleaseNotesPanel BREAKING release-type badge. Eric owns this panel; migrate only with owner-approved dedicated change."
-  },
-  {
-    "path": "src/components/settings/ReleaseNotesPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "\"DEPRECATED\"",
-    "count": 1,
-    "classification": "owner_managed",
-    "reason": "ReleaseNotesPanel DEPRECATED release-type badge. Eric owns this panel; migrate only with owner-approved dedicated change."
-  },
-  {
-    "path": "src/components/settings/ReleaseNotesPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "\"FIX\"",
-    "count": 1,
-    "classification": "owner_managed",
-    "reason": "ReleaseNotesPanel FIX release-type badge. Eric owns this panel; migrate only with owner-approved dedicated change."
-  },
-  {
-    "path": "src/components/settings/ReleaseNotesPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "\"IMPROVED\"",
-    "count": 1,
-    "classification": "owner_managed",
-    "reason": "ReleaseNotesPanel IMPROVED release-type badge. Eric owns this panel; migrate only with owner-approved dedicated change."
-  },
-  {
-    "path": "src/components/settings/ReleaseNotesPanel.tsx",
-    "rule": "formatjs/no-literal-string-in-object",
-    "source": "\"NEW\"",
-    "count": 1,
-    "classification": "owner_managed",
-    "reason": "ReleaseNotesPanel NEW release-type badge. Eric owns this panel; migrate only with owner-approved dedicated change."
   },
   {
     "path": "src/components/settings/settingsNavigation.ts",

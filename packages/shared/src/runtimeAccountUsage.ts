@@ -2,6 +2,16 @@ import { z } from "zod";
 
 export const RUNTIME_ACCOUNT_USAGE_PROTOCOL_VERSION = 2 as const;
 
+/**
+ * Server-side relay budget for a manual refresh round-trip: the server waits
+ * for the computer's correlated snapshot before answering the refresh POST.
+ * Collection usually completes in seconds, but a single daemon-side usage read
+ * can run to its own 20s collector timeout, so the budget covers that worst
+ * case plus transport slack — a slow Computer should surface as an answer,
+ * not as a relay timeout.
+ */
+export const RUNTIME_ACCOUNT_USAGE_RELAY_BUDGET_MS = 25_000;
+
 export const RUNTIME_ACCOUNT_USAGE_PROVIDERS = ["claude", "codex", "kimi", "grok"] as const;
 export type RuntimeAccountUsageProvider = (typeof RUNTIME_ACCOUNT_USAGE_PROVIDERS)[number];
 
@@ -110,6 +120,10 @@ export const runtimeAccountUsageAccountSchema = z.strictObject({
   accountKey: z.string().regex(/^[a-f0-9]{64}$/),
   maskedLabel: maskedLabelSchema.optional(),
   planLabel: safeLabelSchema.optional(),
+  // Provider-reported display name (Kimi's profile nickname). Unlike maskedLabel
+  // it is not an email, so it carries no mask marker; accounts signed in by
+  // phone have no email and this is their only readable identity.
+  displayName: safeLabelSchema.optional(),
   health: z.enum(RUNTIME_ACCOUNT_USAGE_HEALTHS),
   parseErrorCode: z.string().regex(/^[a-z0-9][a-z0-9_.-]{0,63}$/).optional(),
   windows: z.array(runtimeAccountUsageWindowSchema).max(12),

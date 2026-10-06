@@ -9,7 +9,7 @@ import {
   type ComputerLifecycleTerminal,
   type TrajectoryEntry,
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   agentActivityEvents,
   agents,
@@ -17,7 +17,7 @@ import {
   computerLifecycleOperationTargets,
   computerLifecycleOperations,
   computers,
-} from "../db/schema.js";
+} from "../db/schema";
 
 const SHUTDOWN_ACK_DEADLINE_MS = 30 * 1000;
 const READY_ACK_DEADLINE_MS = 2 * 60 * 1000;
@@ -84,11 +84,12 @@ export async function createUserComputerLifecycleOperation(input: {
     targetVersion: string;
     adapter: string;
   };
-}): Promise<{
+}, options: { executor?: DatabaseExecutor } = {}): Promise<{
   operationId: string;
   dispatch?: { operationId: string; action: "restart" | "upgrade"; targetVersion: string };
 } | null> {
-  const db = getDb();
+  // With a caller executor every read and write below (including the idempotent re-selects) runs in that transaction.
+  const db = options.executor ?? getDb();
   const [computer] = await db.select({ id: computers.id })
     .from(computers)
     .where(and(
@@ -736,22 +737,6 @@ export async function terminalizeComputerLifecycleOperation(input: {
   });
 }
 
-export async function recordComputerLifecycleUpgradeTarget(input: {
-  operationId: string;
-  serverId: string;
-  machineId: string;
-  targetVersion: string;
-}): Promise<void> {
-  if (!/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(input.targetVersion)) return;
-  await getDb().update(computerLifecycleOperations).set({ targetVersion: input.targetVersion }).where(and(
-    eq(computerLifecycleOperations.id, input.operationId),
-    eq(computerLifecycleOperations.serverId, input.serverId),
-    eq(computerLifecycleOperations.machineId, input.machineId),
-    eq(computerLifecycleOperations.action, "upgrade"),
-    eq(computerLifecycleOperations.status, "pending"),
-    isNull(computerLifecycleOperations.targetVersion),
-  ));
-}
 
 export async function expirePendingComputerLifecycleOperations(): Promise<ObserveComputerLifecycleResult[]> {
   const now = currentDate();

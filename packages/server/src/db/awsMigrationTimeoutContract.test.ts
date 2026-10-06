@@ -4,7 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 const execFileAsync = promisify(execFile);
 const SERVER_ROOT = path.resolve(

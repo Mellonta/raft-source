@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { buildAgentDmChannelByAgentId, resolveAgentDmProfileSource } from "../src/components/layout/agentDmProfileSource";
 import type { Channel } from "../src/store/channelStore";
 

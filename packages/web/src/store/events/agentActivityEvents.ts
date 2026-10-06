@@ -7,7 +7,7 @@
  */
 
 import { getToolActivityLabel, isAgentActivity, normalizeActivityDetailKind } from "@botiverse/raft-shared";
-import type { AgentActivity, AgentActivityDetailKind, TrajectoryEntry } from "@botiverse/raft-shared";
+import type { AgentActivity, AgentActivityDetailKind, DeliveryConsumptionActivityDiagnostic, SpawnFailureActivityDiagnostic, TrajectoryEntry, WakeCrashLoopActivityDiagnostic } from "@botiverse/raft-shared";
 
 export const MAX_ACTIVITY_LOG_ENTRIES = 200;
 export const MAX_TRAJECTORY_ENTRIES = 500;
@@ -16,6 +16,23 @@ export interface AgentActivityState {
   activity: AgentActivity;
   activityDetail: string;
   detailKind: AgentActivityDetailKind;
+  /**
+   * task #1116: the daemon's typed delivery-consumption observation. Present
+   * only while detailKind === "delivery_unconsumed"; any later activity
+   * replaces the state and drops it. Display only — never drives actions.
+   */
+  deliveryConsumption?: DeliveryConsumptionActivityDiagnostic;
+  /**
+   * task #1119: the server paused automatic wakes after consecutive early
+   * exits. Present only while detailKind === "wake_crash_loop_blocked".
+   */
+  wakeCrashLoop?: WakeCrashLoopActivityDiagnostic;
+  /**
+   * task #1123: the daemon's typed spawn-failure reason. Present only while
+   * detailKind === "runtime_unavailable"; a later activity drops it. Display
+   * only — picks copy, never drives actions.
+   */
+  spawnFailure?: SpawnFailureActivityDiagnostic;
 }
 
 type AgentActivityDetailBucket =
@@ -64,7 +81,11 @@ const ACTIVITY_DETAIL_BUCKET_BY_KIND = {
   slock_action: "message",
   system_message: "message",
   runtime_progress: "runtime",
+  delivery_unconsumed: "runtime",
+  wake_crash_loop_blocked: "lifecycle",
+  terminal_failure_paused: "lifecycle",
   model_request_started: "runtime",
+  provider_request_status: "runtime",
   model_response_started: "runtime",
   tool_started: "command",
   tool_end: "command",
@@ -100,6 +121,9 @@ export interface AgentActivityJoinKeys {
 
 export interface AgentActivityTraceJoin {
   clientEventId?: string;
+  // Client clock (Date.now()) when the socket event arrived. Only used to
+  // compute arrival_to_applied_ms at apply time; never stored or emitted raw.
+  arrivedAtMs?: number;
 }
 
 export interface ActivityLogEntry {
@@ -155,6 +179,9 @@ export type AgentActivityEvent =
       detailKind?: string;
       isHeartbeat?: boolean;
       isRefreshOnly?: boolean;
+      deliveryConsumption?: DeliveryConsumptionActivityDiagnostic;
+      wakeCrashLoop?: WakeCrashLoopActivityDiagnostic;
+      spawnFailure?: SpawnFailureActivityDiagnostic;
     }
   | {
       kind: "patch:trajectory-append";
@@ -273,6 +300,20 @@ function applySocketActivity(
   }
   const detailKind = normalizeActivityDetailKind(event.detailKind);
   const nextActivity = makeActivityState(normalized, event.activityDetail, detailKind);
+  // task #1116: keep the typed carrier next to the state it describes. It is
+  // attached only for the delivery_unconsumed frame, so a later plain
+  // activity (a fresh makeActivityState) naturally drops it.
+  if (detailKind === "delivery_unconsumed" && event.deliveryConsumption) {
+    nextActivity.deliveryConsumption = event.deliveryConsumption;
+  }
+  // task #1119: same rule for the server's wake crash-loop carrier.
+  if (detailKind === "wake_crash_loop_blocked" && event.wakeCrashLoop) {
+    nextActivity.wakeCrashLoop = event.wakeCrashLoop;
+  }
+  // task #1123: same rule for the typed spawn-failure reason.
+  if (detailKind === "runtime_unavailable" && event.spawnFailure) {
+    nextActivity.spawnFailure = event.spawnFailure;
+  }
   if (typeof event.serverSeq === "number") {
     const lastSeq = state.agentActivitySeq[event.agentId] ?? Number.NEGATIVE_INFINITY;
     const shouldUpgradeFallbackCurrent = event.serverSeq === lastSeq

@@ -1,22 +1,30 @@
 import { hostname } from "node:os";
 import { currentDate, setClockInterval } from "@botiverse/raft-shared";
 import type { Server as SocketServer } from "socket.io";
-import type { AgentOrchestrator } from "./agentOrchestrator.js";
+import type { AgentOrchestrator } from "./agentOrchestrator";
 import {
   acknowledgeAgentMigrationCancellation,
   claimAgentMigrationAutoStartRemediation,
   claimAgentMigrationCancellationCleanup,
+  claimAgentMigrationSourceArchiveRetry,
   completeAgentMigrationAutoStart,
   recordAgentMigrationAutoStartFailure,
-} from "./agentMigrationService.js";
-import { emitAgentMigrationUpdated } from "./agentMigrationRealtime.js";
+  recordAgentMigrationSourceArchiveAttemptFailed,
+  recordAgentMigrationSourceWorkspaceArchivedById,
+  sweepElapsedAgentMigrationDeadline,
+} from "./agentMigrationService";
+import { emitAgentMigrationUpdated } from "./agentMigrationRealtime";
+import { archiveMigrationSourceWorkspace } from "./agentMigrationSourceArchive";
 import {
   classifyAgentMigrationRemediationDrain,
   createAgentMigrationWorkerObservability,
   type AgentMigrationWorkerObservability,
-} from "./agentMigrationWorkerObservability.js";
+} from "./agentMigrationWorkerObservability";
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
+// Reads no longer abort expired migrations, so the sweep is the only abort path: drain a bounded batch per tick so a
+// burst of expiries is persisted (receipt queued, grant freed) within one interval instead of one row per interval.
+const MAX_DEADLINE_ABORTS_PER_TICK = 20;
 
 interface AgentMigrationRemediationOperationalInput {
   io: SocketServer;
@@ -38,7 +46,6 @@ async function remediateAutoStart(input: Required<Pick<AgentMigrationRemediation
   now: Date;
 }): Promise<boolean> {
   const claim = await claimAgentMigrationAutoStartRemediation({
-    executor: "server",
     workerId: input.workerId,
     now: input.now,
   });
@@ -51,7 +58,7 @@ async function remediateAutoStart(input: Required<Pick<AgentMigrationRemediation
   let current = claim.migration;
   if (!input.orchestrator || typeof input.orchestrator.startAgent !== "function") {
     current = await recordAgentMigrationAutoStartFailure({
-      grantKey: claim.migration.grantKey,
+      migrationId: claim.migration.id,
       agentId: claim.migration.agentId,
       targetMachineId: claim.migration.targetMachineId,
       stage: "orchestrator",
@@ -67,7 +74,7 @@ async function remediateAutoStart(input: Required<Pick<AgentMigrationRemediation
     const result = await input.orchestrator.startAgent(claim.migration.agentId);
     if (result.outcome !== "dispatched") {
       current = await recordAgentMigrationAutoStartFailure({
-        grantKey: claim.migration.grantKey,
+        migrationId: claim.migration.id,
         agentId: claim.migration.agentId,
         targetMachineId: claim.migration.targetMachineId,
         stage: "start_agent",
@@ -79,7 +86,7 @@ async function remediateAutoStart(input: Required<Pick<AgentMigrationRemediation
       return true;
     }
     current = await completeAgentMigrationAutoStart({
-      grantKey: claim.migration.grantKey,
+      migrationId: claim.migration.id,
       agentId: claim.migration.agentId,
       targetMachineId: claim.migration.targetMachineId,
       remediationLeaseId: claim.leaseId,
@@ -90,7 +97,7 @@ async function remediateAutoStart(input: Required<Pick<AgentMigrationRemediation
   } catch (error) {
     console.error("[AgentMigrationRemediation] auto-start dispatch failed:", error);
     current = await recordAgentMigrationAutoStartFailure({
-      grantKey: claim.migration.grantKey,
+      migrationId: claim.migration.id,
       agentId: claim.migration.agentId,
       targetMachineId: claim.migration.targetMachineId,
       stage: "start_agent",
@@ -107,7 +114,6 @@ async function remediateCancellation(input: Required<Pick<AgentMigrationRemediat
   now: Date;
 }): Promise<boolean> {
   const claim = await claimAgentMigrationCancellationCleanup({
-    executor: "server",
     workerId: input.workerId,
     now: input.now,
   });
@@ -166,9 +172,59 @@ async function remediateCancellation(input: Required<Pick<AgentMigrationRemediat
   return true;
 }
 
+async function sweepDeadline(input: Pick<AgentMigrationRemediationDrainInput, "io" | "orchestrator"> & {
+  now: Date;
+}): Promise<boolean> {
+  let swept = false;
+  for (let index = 0; index < MAX_DEADLINE_ABORTS_PER_TICK; index += 1) {
+    // The aborted receipt is queued inside the abort transaction; the lifecycle event is emitted here, once, by the
+    // worker that won the abort.
+    const aborted = await sweepElapsedAgentMigrationDeadline({ now: input.now });
+    if (!aborted) break;
+    swept = true;
+    await emitAgentMigrationUpdated(input.io, aborted);
+    if (typeof input.orchestrator?.recordAgentMigrationAborted === "function") {
+      try {
+        await input.orchestrator.recordAgentMigrationAborted(aborted, input.now);
+      } catch (error) {
+        console.error(`[AgentMigrationRemediation] migration_aborted lifecycle emit failed for ${aborted.id}:`, error);
+      }
+    }
+  }
+  return swept;
+}
+
+async function retrySourceArchive(input: Pick<AgentMigrationRemediationDrainInput, "io" | "orchestrator"> & {
+  now: Date;
+}): Promise<boolean> {
+  const claim = await claimAgentMigrationSourceArchiveRetry({ now: input.now });
+  if (!claim) return false;
+  if (claim.action === "abandoned") {
+    await emitAgentMigrationUpdated(input.io, claim.migration);
+    return true;
+  }
+  const result = await archiveMigrationSourceWorkspace(input.orchestrator, {
+    sourceMachineId: claim.migration.sourceMachineId,
+    migrationId: claim.migration.id,
+    agentId: claim.migration.agentId,
+    migrationCreatedAt: claim.migration.createdAt,
+  });
+  const updated = result.ok
+    ? await recordAgentMigrationSourceWorkspaceArchivedById({ migrationId: claim.migration.id, now: input.now })
+    : await recordAgentMigrationSourceArchiveAttemptFailed({
+        migrationId: claim.migration.id,
+        errorCode: result.errorCode,
+        now: input.now,
+      });
+  if (updated) await emitAgentMigrationUpdated(input.io, updated);
+  return true;
+}
+
 export async function drainAgentMigrationRemediation(input: AgentMigrationRemediationDrainInput): Promise<{
   autoStart: boolean;
   cancellation: boolean;
+  deadline: boolean;
+  sourceArchive: boolean;
 }> {
   const now = input.now ?? currentDate();
   const workerId = input.workerId ?? `server:${hostname()}`;
@@ -184,7 +240,9 @@ export async function drainAgentMigrationRemediation(input: AgentMigrationRemedi
     workerId,
     now,
   });
-  return { autoStart, cancellation };
+  const deadline = await sweepDeadline({ io: input.io, orchestrator: input.orchestrator, now });
+  const sourceArchive = await retrySourceArchive({ io: input.io, orchestrator: input.orchestrator, now });
+  return { autoStart, cancellation, deadline, sourceArchive };
 }
 
 export function startAgentMigrationRemediationWorker(input: AgentMigrationRemediationWorkerInput): { stop(): void } {
@@ -206,7 +264,7 @@ export function startAgentMigrationRemediationWorker(input: AgentMigrationRemedi
       });
       observability.drain(classifyAgentMigrationRemediationDrain(result));
     } catch (error) {
-      observability.drain("failed");
+      observability.drain("failed", error);
       console.error("[AgentMigrationRemediation] Failed to drain remediation queues:", error);
     } finally {
       running = false;

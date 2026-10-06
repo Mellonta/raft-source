@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { createHash, generateKeyPairSync, randomUUID, type KeyObject } from "node:crypto";
@@ -14,7 +14,7 @@ import {
   traceEventRowsForSpan,
 } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   emailVerifications,
   featureFlagRules,
@@ -23,14 +23,15 @@ import {
   sessionFamilies,
   sessions,
   userRetirementReceipts,
+  userAnalyticsIds,
   userLegalAcceptances,
   users,
-} from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { createSocialAuthCompletion, signSocialAuthState, verifySocialAuthState } from "../services/socialAuthService.js";
-import { oauthTransactions, userAuthIdentities } from "../db/schema.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { MAX_PROFILE_AVATAR_BYTES, PROFILE_AVATAR_TOO_LARGE_MESSAGE } from "../services/avatarService.js";
+} from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { createSocialAuthCompletion, signSocialAuthState, verifySocialAuthState } from "../services/socialAuthService";
+import { oauthTransactions, userAuthIdentities } from "../db/schema";
+import { signAccessToken } from "../middleware/auth";
+import { MAX_PROFILE_AVATAR_BYTES, PROFILE_AVATAR_TOO_LARGE_MESSAGE } from "../services/avatarService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -1687,6 +1688,25 @@ for (const malformed of malformedRegisterBodies) {
   });
 }
 
+test("POST /api/auth/register refuses a reserved handle such as reminders", async ({ app }) => {
+  const before = await readEmailAuthSideEffectCounts();
+  const res = await fetch(`${app.baseUrl}/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: "register-reminders@slock.test",
+      password: "password123",
+      name: "Reminders",
+      acceptTerms: true,
+      termsVersion: CURRENT_LEGAL_ACCEPTANCE.termsVersion,
+      privacyVersion: CURRENT_LEGAL_ACCEPTANCE.privacyVersion,
+    }),
+  });
+  assert.equal(res.status, 400);
+  assert.match((await res.json() as { error: string }).error, /reserved/);
+  assert.deepEqual(await readEmailAuthSideEffectCounts(), before);
+});
+
 const malformedLoginBodies: Array<{
   name: string;
   issuePath: string;
@@ -3317,4 +3337,36 @@ test("GET /api/auth/me returns current user's gravatar hash", async ({ app }) =>
     body.gravatarHash,
     createHash("sha256").update(user.email.trim().toLowerCase()).digest("hex"),
   );
+});
+
+test("PATCH /api/auth/me shareUsageData: true/false/null round-trip, anything else rejected", async ({ app }) => {
+  const user = await seedUser("share-usage-data@slock.test", "current-password");
+  const token = await login(app.baseUrl, user.email);
+  const patch = (body: unknown) => fetch(`${app.baseUrl}/api/auth/me`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const me = await fetch(`${app.baseUrl}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+  assert.equal((await me.json()).shareUsageData, null, "not chosen until the user says so");
+
+  const mapping = async () => (await getDb().select().from(userAnalyticsIds).where(eq(userAnalyticsIds.userId, user.id)))[0]?.analyticsId ?? null;
+  const original = await mapping();
+  assert.ok(original);
+
+  for (const value of [true, false, null]) {
+    const res = await patch({ shareUsageData: value });
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).shareUsageData, value);
+    if (value === true) assert.equal(await mapping(), original, "turning on keeps an existing id");
+    if (value === false) assert.equal(await mapping(), null, "turning off unlinks everything recorded so far");
+  }
+  const back = await patch({ shareUsageData: true });
+  assert.equal(back.status, 200);
+  const fresh = await mapping();
+  assert.ok(fresh);
+  assert.notEqual(fresh, original, "turning back on mints a fresh id; old records stay unlinked");
+  const invalid = await patch({ shareUsageData: "yes" });
+  assert.equal(invalid.status, 400);
 });

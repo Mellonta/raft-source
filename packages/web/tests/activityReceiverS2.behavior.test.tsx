@@ -6,7 +6,7 @@
  * completeness must all switch together or the assertion is precisely red.
  */
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 
@@ -32,7 +32,7 @@ import { useServerStore } from "../src/store/serverStore";
 
 type TestFn = () => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn);
+  nodeTest(name,  fn);
 
 const originalGet = api.get;
 const originalPost = api.post;

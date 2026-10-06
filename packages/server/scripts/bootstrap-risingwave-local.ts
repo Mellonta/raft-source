@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 /**
  * Destructive, local-only RisingWave CDC/MV bootstrap for raftdev.
  *
@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 
 import {
+  RISINGWAVE_ARTIFACT_CDC_TABLES,
+  RISINGWAVE_BOOTSTRAP_ARTIFACTS,
   RISINGWAVE_CDC_TABLES,
   RISINGWAVE_LOCAL_PUBLICATION,
   RISINGWAVE_LOCAL_SLOT,
@@ -20,15 +22,9 @@ import {
   RISINGWAVE_REQUIRED_RELATIONS,
   buildRisingWaveBootstrapStatements,
   createdRelationName,
-} from "../../../scripts/dev/raftdev-risingwave-bootstrap.js";
+} from "../../../scripts/dev/raftdev-risingwave-bootstrap";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "../../..");
-const BASE_DDL = join(ROOT, "infra/risingwave/sql/024-risingwave-unread-inbox-full-materialized.sql");
-const V3_DDL = join(ROOT, "infra/risingwave/sql/024-risingwave-inbox-v3-production-definition-2026-07-07.sql");
-const MUTE_V32_DDL = join(ROOT, "infra/risingwave/sql/039-risingwave-inbox-v03-production-mute-v3_2-ddl.sql");
-const BORN_READ_V33_DDL = join(ROOT, "infra/risingwave/sql/039-risingwave-inbox-born-read-v3_3-ddl.sql");
-const FACT_VISIBILITY_V34_DDL = join(ROOT, "infra/risingwave/sql/056-risingwave-inbox-fact-visibility-v3_4-ddl.sql");
-const READ_FRONTIER_V1_DDL = join(ROOT, "infra/risingwave/sql/056-risingwave-inbox-read-frontier-v1-ddl.sql");
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -191,13 +187,21 @@ async function assertRequiredRelations(risingwave: pg.Client): Promise<void> {
     throw new Error("rw_inbox_target_mute_states_v2 does not have the required nine-column shape");
   }
 
-  const invalidThreads = await risingwave.query<{ count: string }>([
-    "SELECT count(*)::text AS count",
-    "FROM rw_inbox_items_v2_suppressed_v3_4",
-    "WHERE kind = 'thread' AND reply_count IS NULL",
-  ].join(" "));
-  if (Number(invalidThreads.rows[0]?.count ?? -1) !== 0) {
-    throw new Error("v3.2 invariant failed: visible thread rows have NULL reply_count");
+  // Serving invariants on the view the server reads (UNIFIED_CHAIN_VIEWS.serving).
+  for (const [predicate, message] of [
+    ["kind = 'thread' AND reply_count IS NULL", "serving thread rows have NULL reply_count"],
+    ["mention_only AND activity_at IS NULL", "mention-only serving rows must carry the mention timestamp as activity_at"],
+    [
+      "mention_only AND latest_activity_message_id IS NULL",
+      "mention-only serving rows must anchor latest_activity to the mention message (requireLatestActivitySeq hard-rejects NULL)",
+    ],
+  ] as const) {
+    const invalid = await risingwave.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM rw_inbox_serving_v6 WHERE ${predicate}`,
+    );
+    if (Number(invalid.rows[0]?.count ?? -1) !== 0) {
+      throw new Error(`serving invariant failed: ${message}`);
+    }
   }
 }
 
@@ -260,20 +264,21 @@ async function main(): Promise<void> {
       password: cdcPassword,
     });
 
-    const statements = buildRisingWaveBootstrapStatements({
-      base: readFileSync(BASE_DDL, "utf8"),
-      productionV3: readFileSync(V3_DDL, "utf8"),
-      muteV32: readFileSync(MUTE_V32_DDL, "utf8"),
-      bornReadV33: readFileSync(BORN_READ_V33_DDL, "utf8"),
-      factVisibilityV34: readFileSync(FACT_VISIBILITY_V34_DDL, "utf8"),
-      readFrontierV1: readFileSync(READ_FRONTIER_V1_DDL, "utf8"),
-    });
+    const statements = buildRisingWaveBootstrapStatements(Object.fromEntries(
+      RISINGWAVE_BOOTSTRAP_ARTIFACTS.map((artifact) => [
+        artifact.file,
+        readFileSync(join(ROOT, artifact.file), "utf8"),
+      ]),
+    ));
     const pendingCdcRelations = new Set(RISINGWAVE_CDC_TABLES.map((table) => table.name));
     let sourceCounts: Record<string, number> | null = null;
     for (let index = 0; index < statements.length; index++) {
       const statement = statements[index];
+      const started = Date.now();
       try {
         await risingwave.query(statement);
+        const created = createdRelationName(statement);
+        if (created) console.error(`[rw-bootstrap] ${index + 1}/${statements.length} ${created} (${Date.now() - started}ms)`);
       } catch (error) {
         const relation = createdRelationName(statement);
         const label = relation ? ` while creating ${relation}` : "";
@@ -294,10 +299,7 @@ async function main(): Promise<void> {
         `bootstrap composition did not create CDC relations: ${[...pendingCdcRelations].join(", ")}`,
       );
     }
-    const targetMuteCounts = await waitForExactSourceCounts(postgres, risingwave, [{
-      upstream: "inbox_target_mute_states",
-      name: "rw_inbox_target_mute_states_v2",
-    }]);
+    const artifactCdcCounts = await waitForExactSourceCounts(postgres, risingwave, RISINGWAVE_ARTIFACT_CDC_TABLES);
     await assertRequiredRelations(risingwave);
 
     console.log(JSON.stringify({
@@ -306,9 +308,9 @@ async function main(): Promise<void> {
       publication: RISINGWAVE_LOCAL_PUBLICATION,
       slot: RISINGWAVE_LOCAL_SLOT,
       publicationTableCount: RISINGWAVE_PUBLICATION_TABLES.length,
-      cdcTableCount: RISINGWAVE_CDC_TABLES.length + 1,
+      cdcTableCount: RISINGWAVE_CDC_TABLES.length + RISINGWAVE_ARTIFACT_CDC_TABLES.length,
       relationCount: RISINGWAVE_REQUIRED_RELATIONS.length,
-      sourceCounts: { ...sourceCounts, ...targetMuteCounts },
+      sourceCounts: { ...sourceCounts, ...artifactCdcCounts },
     }, null, 2));
   } finally {
     await Promise.allSettled([postgres.end(), risingwave.end()]);

@@ -1,10 +1,10 @@
 import { createBundledHighlighter } from "shiki/core";
-import type { ThemedToken } from "shiki/core";
+import type { ThemedTokenWithVariants } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 import { normalizeCodeLanguage } from "./codeBlockLanguages";
 import type { NormalizedCodeLanguage } from "./codeBlockLanguages";
 
-export const SHIKI_CODE_THEME = "github-dark-high-contrast";
+export const SHIKI_CODE_THEMES = { light: "github-light", dark: "github-dark-high-contrast" } as const;
 
 const shikiLanguages = {
   bash: () => import("shiki/dist/langs/bash.mjs"),
@@ -45,10 +45,11 @@ const shikiLanguages = {
 } as const;
 
 const shikiThemes = {
-  [SHIKI_CODE_THEME]: () => import("shiki/dist/themes/github-dark-high-contrast.mjs"),
+  [SHIKI_CODE_THEMES.light]: () => import("shiki/dist/themes/github-light.mjs"),
+  [SHIKI_CODE_THEMES.dark]: () => import("shiki/dist/themes/github-dark-high-contrast.mjs"),
 } as const;
 
-export type CodeTokenLine = ThemedToken[];
+export type CodeTokenLine = ThemedTokenWithVariants[];
 
 const createHighlighter = createBundledHighlighter({
   langs: shikiLanguages,
@@ -123,7 +124,7 @@ function getHighlighter(): Promise<CodeHighlighter> {
 function ensureThemeLoaded(highlighter: CodeHighlighter): Promise<void> {
   if (isThemeLoaded) return Promise.resolve();
   if (!themePromise) {
-    themePromise = highlighter.loadTheme(SHIKI_CODE_THEME).then(() => {
+    themePromise = highlighter.loadTheme(...Object.values(SHIKI_CODE_THEMES)).then(() => {
       isThemeLoaded = true;
     });
   }
@@ -158,13 +159,13 @@ function addHighlightCacheEntry(
 
 export async function highlightCode(code: string, language: string | null | undefined): Promise<CodeTokenLine[]> {
   const normalizedLanguage = normalizeCodeLanguage(language);
-  if (normalizedLanguage === "text") return [[{ content: code, offset: 0 }]];
+  if (normalizedLanguage === "text") return [[{ content: code, offset: 0, variants: {} }]];
 
   return getHighlightedCode(code, normalizedLanguage);
 }
 
 export function getHighlightedCode(code: string, language: Exclude<NormalizedCodeLanguage, "text">): Promise<CodeTokenLine[]> {
-  const key = `${SHIKI_CODE_THEME}:${language}:${code}`;
+  const key = `${language}:${code}`;
   const cached = highlightedCodeCache.get(key);
   if (cached) {
     touchCacheEntry(key, cached);
@@ -175,7 +176,7 @@ export function getHighlightedCode(code: string, language: Exclude<NormalizedCod
     promise: getHighlighter().then(async (highlighter) => {
       await ensureThemeLoaded(highlighter);
       await ensureLanguageLoaded(highlighter, language);
-      const lines = highlighter.codeToTokensBase(code, { lang: language, theme: SHIKI_CODE_THEME });
+      const lines = highlighter.codeToTokensWithThemes(code, { lang: language, themes: SHIKI_CODE_THEMES });
       entry.lines = lines;
       return lines;
     }),
@@ -191,7 +192,7 @@ export function tryHighlightCodeSync(
   const normalizedLanguage = normalizeCodeLanguage(language);
   if (normalizedLanguage === "text") return null;
 
-  const key = `${SHIKI_CODE_THEME}:${normalizedLanguage}:${code}`;
+  const key = `${normalizedLanguage}:${code}`;
   const cached = highlightedCodeCache.get(key);
   if (cached?.lines) {
     touchCacheEntry(key, cached);
@@ -202,9 +203,9 @@ export function tryHighlightCodeSync(
     return null;
   }
 
-  const lines = highlighterInstance.codeToTokensBase(code, {
+  const lines = highlighterInstance.codeToTokensWithThemes(code, {
     lang: normalizedLanguage,
-    theme: SHIKI_CODE_THEME,
+    themes: SHIKI_CODE_THEMES,
   });
   addHighlightCacheEntry(key, {
     promise: Promise.resolve(lines),

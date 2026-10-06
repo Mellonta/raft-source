@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { test } from "vitest";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
+import os from "node:os";
 import {
   buildClaudeArgs,
   buildClaudeSpawnSpec,
   CLAUDE_DESKTOP_CLI_RELATIVE_PATH,
   CLAUDE_DISALLOWED_TOOLS,
+  writeClaudeSystemPromptFile,
   probeClaude,
   probeClaudeLaunch,
   resolveClaudeCommand,
   resolveClaudeLaunchCommand,
-} from "./claudeLaunch.js";
+} from "./claudeLaunch";
 
 const config = {
   name: "hao",
@@ -302,4 +304,19 @@ test("probeClaude recovers on the next Windows detection after a command lookup 
     available: true,
     version: "2.1.210 (Claude Code)",
   });
+});
+
+
+// task #302 sibling arm: kimi.ts was the file that lacked an explicit mode, but
+// the invariant belongs to the whole runtime prompt-file family, so pin it here
+// too rather than leaving the sibling unguarded.
+test("claude system prompt file is written owner-only (task #302)", () => {
+  if (process.platform === "win32") return; // POSIX permission bits do not apply
+  const dir = mkdtempSync(path.join(os.tmpdir(), "claude-mode-"));
+  try {
+    const promptPath = writeClaudeSystemPromptFile("standing prompt body", dir);
+    assert.equal(statSync(promptPath).mode & 0o777, 0o600, "claude system prompt file must be 0600");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

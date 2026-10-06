@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { createElement } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
@@ -102,7 +101,7 @@ test("the survey is asked after Cindy is created and before the handoff", async 
     referralSource: "other",
     referralSourceOther: "Local meetup",
   }]);
-  assert.ok(screen.getByTestId("server-setup-survey").classList.contains("shadow-brutal"));
+  assert.ok(screen.getByTestId("server-setup-survey").classList.contains("shadow-raft-md"));
 });
 
 test("the handoff screen is answered by the server alone, with no session-local memory", async () => {

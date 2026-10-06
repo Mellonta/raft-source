@@ -1,10 +1,9 @@
-import { dbTest as test } from "../../test/integration/dbTest.js";
-import { closeTestDatabase } from "../../test/integration/database.js";
+import { dbTest as test } from "../../test/integration/dbTest";
+import { closeTestDatabase } from "../../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 
-import { getDb } from "../../db/index.js";
-import { agents, servers, users } from "../../db/schema.js";
+import { getDb } from "../../db/index";
+import { agents, servers, users } from "../../db/schema";
 import {
   cancelAppReminder,
   createAppReminder,
@@ -12,7 +11,7 @@ import {
   replaceAppReminder,
   snoozeAppReminder,
   updateAppReminder,
-} from "./crud.js";
+} from "./crud";
 
 
 afterEach(async () => {
@@ -115,7 +114,7 @@ test("stable-id replacement keeps a monotonic revision across owner rebind", asy
     msgId: null,
     title: "old owner",
     fireAt: new Date("2026-08-07T03:00:00.000Z"),
-    payload: { kind: "wiki.incremental_discovery", version: 1 },
+    payload: { kind: "test.recurring", version: 1 },
     createdBy: { type: "human", id: user.id },
   }, { clock: FIXED_CLOCK });
 
@@ -125,11 +124,10 @@ test("stable-id replacement keeps a monotonic revision across owner rebind", asy
     msgId: null,
     title: "new owner",
     fireAt: new Date("2026-08-08T03:00:00.000Z"),
-    payload: { kind: "wiki.incremental_discovery", version: 1 },
+    payload: { kind: "test.recurring", version: 1 },
     createdBy: { type: "human", id: user.id },
   }, {
     actor: { type: "human", id: user.id },
-    allowSystemManaged: true,
     clock: FIXED_CLOCK,
     expectedVersion: created.version,
   });

@@ -1,10 +1,8 @@
 import { GitBranch, Hash, Lock, LogIn, UserPlus } from "lucide-react";
 import { useIntl } from "react-intl";
-import { Checkbox } from "raft-ui";
+import { Checkbox, Button, Spinner } from "raft-ui";
 import type { Channel } from "../../store/channelStore";
 import AvatarSlot from "../ui/AvatarSlot";
-import Button from "../ui/Button";
-import Spinner from "../ui/Spinner";
 import {
   MAX_FORWARD_DESTINATIONS,
   localSelectionKey,
@@ -84,8 +82,8 @@ export default function ForwardComposerTargetList({
           event.preventDefault();
           toggle();
         }}
-        className={`flex w-full min-w-0 items-center gap-2 border-2 border-black px-2 py-2 text-left text-sm font-bold transition-colors ${
-          unavailable ? "cursor-not-allowed bg-black/5 opacity-50" : selected ? "bg-soft-signal" : "bg-white hover:bg-brutal-cyan/15"
+        className={`flex w-full min-w-0 items-center gap-2 rounded-md border border-line-muted px-2 py-2 text-left text-sm font-bold transition-colors theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black ${
+          unavailable ? "cursor-not-allowed bg-fill-muted/40 opacity-50" : selected ? "bg-primary-soft theme-brutal:bg-soft-signal" : "bg-layer-panel hover:bg-fill-muted theme-brutal:bg-white theme-brutal:hover:bg-brutal-cyan/15"
         }`}
         data-testid={`forward-search-target-${target.type}-${target.id}`}
       >
@@ -108,13 +106,13 @@ export default function ForwardComposerTargetList({
         </span>
         <span className="min-w-0 flex-1 truncate">{target.title}</span>
         {target.requiredAction === "join_channel" && !resolvedChannelId && (
-          <span className="flex shrink-0 items-center gap-1 text-[10px] font-bold uppercase text-black/45">
+          <span className="flex shrink-0 items-center gap-1 text-[10px] font-bold uppercase text-foreground-hint">
             <LogIn size={10} />
             {formatMessage({ id: "message.forwardComposer.notJoined" })}
           </span>
         )}
         {target.requiredAction === "create_dm" && !resolvedChannelId && (
-          <span className="flex shrink-0 items-center gap-1 text-[10px] font-bold uppercase text-black/45">
+          <span className="flex shrink-0 items-center gap-1 text-[10px] font-bold uppercase text-foreground-hint">
             <UserPlus size={10} />
             {formatMessage({ id: "message.forwardComposer.newDm" })}
           </span>
@@ -142,7 +140,7 @@ export default function ForwardComposerTargetList({
           event.preventDefault();
           toggle();
         }}
-        className={`flex w-full min-w-0 items-center gap-2 border-2 border-black px-2 py-2 text-left text-sm font-bold transition-colors ${selected ? "bg-soft-signal" : "bg-white hover:bg-brutal-cyan/15"}`}
+        className={`flex w-full min-w-0 items-center gap-2 rounded-md border border-line-muted px-2 py-2 text-left text-sm font-bold transition-colors theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black ${selected ? "bg-primary-soft theme-brutal:bg-soft-signal" : "bg-layer-panel hover:bg-fill-muted theme-brutal:bg-white theme-brutal:hover:bg-brutal-cyan/15"}`}
         data-testid={`forward-target-${target.id}`}
       >
         {showCheckbox && <Checkbox checked={selected} disabled={disabled} tabIndex={-1} aria-hidden className="pointer-events-none" />}
@@ -153,17 +151,17 @@ export default function ForwardComposerTargetList({
   };
 
   if (!isSearchMode) return <>{filteredTargets.map(renderTarget)}</>;
-  if (searchLoading) return <div className="flex items-center justify-center py-4"><Spinner size="sm" /></div>;
+  if (searchLoading) return <div className="flex items-center justify-center py-4"><Spinner size="sm"  aria-label={formatMessage({ id: "common.loadingLabel" })} /></div>;
   if (searchFailed) {
     return (
       <div className="flex flex-col items-center gap-2 py-4 text-center">
-        <p className="text-xs font-bold text-black/55">{formatMessage({ id: "message.forwardComposer.searchFailed" })}</p>
-        <Button type="button" size="xs" tone="white" onClick={() => retrySearch(lowerQuery)}>{formatMessage({ id: "message.forwardComposer.tryAgain" })}</Button>
+        <p className="text-xs font-bold text-foreground-muted">{formatMessage({ id: "message.forwardComposer.searchFailed" })}</p>
+        <Button type="button" size="xs" variant="outline" onClick={() => retrySearch(lowerQuery)}>{formatMessage({ id: "message.forwardComposer.tryAgain" })}</Button>
       </div>
     );
   }
   if (searchResults.length === 0) {
-    return <p className="py-4 text-center text-xs font-bold text-black/35">{formatMessage({ id: "message.forwardComposer.noMatchingDestinations" })}</p>;
+    return <p className="py-4 text-center text-xs font-bold text-foreground-hint">{formatMessage({ id: "message.forwardComposer.noMatchingDestinations" })}</p>;
   }
   return <>{searchResults.map(renderSearchTarget)}</>;
 }

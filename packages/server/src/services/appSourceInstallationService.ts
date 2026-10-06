@@ -1,6 +1,6 @@
 import { and, asc, eq } from "drizzle-orm";
-import { getDb, type DatabaseTransaction } from "../db/index.js";
-import { oauthClients, oauthClientInstalls } from "../db/schema.js";
+import { getDb, type DatabaseTransaction } from "../db/index";
+import { oauthClients, oauthClientInstalls } from "../db/schema";
 
 // Called only inside an authorized source-server mutation, or the explicit
 // legacy backfill. Lock the client before reading its current grant so a

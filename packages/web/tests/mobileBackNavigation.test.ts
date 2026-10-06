@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   canUseBrowserBack,
+  navigationStackFromEntries,
   nextNavigationDepth,
+  nextNavigationEntries,
   nextNavigationStack,
   resolveMobileBackAction,
+  UNKNOWN_NAVIGATION_ENTRY,
 } from "../src/hooks/useAppNavigate";
 
 test("PUSH increments the depth counter", () => {
@@ -156,4 +158,26 @@ test("in-app PUSH chain unwinds via real history then falls back at the bottom",
     resolveMobileBackAction(depth, "/s/dev"),
     { kind: "fallback", path: "/s/dev" },
   );
+});
+
+test("index-keyed records: a multi-entry POP or Forward lands at its real index; PUSH discards records at/after it; unknown gaps stay unknown", () => {
+  let entries = nextNavigationEntries({}, "REPLACE", 0, "/s/other");
+  entries = nextNavigationEntries(entries, "PUSH", 1, "/s/dev/channel/b");
+  entries = nextNavigationEntries(entries, "PUSH", 2, "/s/dev/channel/c");
+  entries = nextNavigationEntries(entries, "PUSH", 3, "/s/dev/channel/d");
+  entries = nextNavigationEntries(entries, "PUSH", 4, "/s/dev/channel/e");
+  entries = nextNavigationEntries(entries, "POP", 1, "/s/dev/channel/b"); // go(-3)
+  entries = nextNavigationEntries(entries, "POP", 4, "/s/dev/channel/e"); // go(+3): records, discards nothing
+  entries = nextNavigationEntries(entries, "POP", 2, "/s/dev/channel/c"); // go(-2)
+  assert.deepEqual(navigationStackFromEntries(entries, 2), ["/s/other", "/s/dev/channel/b", "/s/dev/channel/c"]);
+  // The decision the reviewer's sequence hinges on: previous entry is b (same server) → browser back.
+  assert.deepEqual(resolveMobileBackAction(navigationStackFromEntries(entries, 2), "/s/dev"), { kind: "back" });
+  // A PUSH from c discards d/e records.
+  const pushed = nextNavigationEntries(entries, "PUSH", 3, "/s/dev/channel/x");
+  assert.deepEqual(Object.keys(pushed).map(Number), [0, 1, 2, 3]);
+  // Unknown predecessors (reload landed on idx 2): the gap is explicit and never a back target.
+  const afterReload = nextNavigationEntries({}, "POP", 2, "/s/dev/channel/c");
+  assert.deepEqual(navigationStackFromEntries(afterReload, 2), [UNKNOWN_NAVIGATION_ENTRY, UNKNOWN_NAVIGATION_ENTRY, "/s/dev/channel/c"]);
+  assert.deepEqual(resolveMobileBackAction(navigationStackFromEntries(afterReload, 2), "/s/dev"), { kind: "fallback", path: "/s/dev" });
+  assert.deepEqual(resolveMobileBackAction(navigationStackFromEntries(afterReload, 2), "/"), { kind: "fallback", path: "/" });
 });

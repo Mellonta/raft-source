@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
-import test from "node:test";
 import ts from "typescript";
 
 const repoRoot = resolve(import.meta.dirname, "..");

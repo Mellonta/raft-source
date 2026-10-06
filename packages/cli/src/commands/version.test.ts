@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { AgentContext } from "../auth/env.js";
-import type { ApiResponse } from "../client.js";
-import { createCommandContext } from "../core/context.js";
-import { CliError } from "../core/errors.js";
-import type { CliIo } from "../core/io.js";
-import { parseLiveVersionInfo, versionCommand } from "./version.js";
-import { readCliVersion } from "../version.js";
+import type { AgentContext } from "../auth/env";
+import type { ApiResponse } from "../client";
+import { createCommandContext } from "../core/context";
+import { CliError } from "../core/errors";
+import type { CliIo } from "../core/io";
+import { parseLiveVersionInfo, versionCommand } from "./version";
+import { readCliVersion } from "../version";
 
 const CLI_VERSION = readCliVersion();
 

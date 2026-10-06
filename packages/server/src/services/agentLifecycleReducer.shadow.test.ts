@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
 
 import type { AgentActivityDetailKind, AgentActivityKind } from "@botiverse/raft-shared";
 
@@ -12,7 +11,7 @@ import {
   type LifecycleObservationClass,
   type LifecycleShadowSnapshotInput,
   type LifecycleShadowSignalSite,
-} from "./agentLifecycleReducer.js";
+} from "./agentLifecycleReducer";
 
 // Lifecycle-v2 PR-beta shadow-builder tests (task #460).
 //
@@ -401,7 +400,7 @@ test("shadow: inexpressible verdicts bucket as null instead of voting agree/disa
 // blind to both (they are not inputs), and the seq-keyed reference mutant
 // below shows what a proxy-keyed classifier would do with the same stream.
 
-import { classifyDaemonActivityObservation, type LifecycleObservationIdentity } from "./agentLifecycleReducer.js";
+import { classifyDaemonActivityObservation, type LifecycleObservationIdentity } from "./agentLifecycleReducer";
 
 interface FixtureEmission extends LifecycleObservationIdentity {
   clientSeq: number;
@@ -493,7 +492,7 @@ test("classifier RED: a seq-advance-keyed classifier launders the heartbeat repl
 
 // --- gamma-2.1 control-command authority (Kai calibration v3 §B split) ------
 
-import { foldLifecycleArbitration } from "./agentLifecycleReducer.js";
+import { foldLifecycleArbitration } from "./agentLifecycleReducer";
 
 test("control class: authorized command replaces on its own axis in both directions (gamma-2.1)", () => {
   // Upgrade direction: online -> working via control command.
@@ -585,8 +584,8 @@ test("control class: fold admits the value but never synthesizes liveness (I6 pi
 
 // --- gamma-3 plan-path decision (skip-set + total class map) ----------------
 
-import { lifecyclePlanShadowDecision, LIFECYCLE_PLAN_SHADOW_CLASS } from "./agentLifecycleReducer.js";
-import { createAgentLifecycleEvent } from "./agentLifecycleEvents.js";
+import { lifecyclePlanShadowDecision, LIFECYCLE_PLAN_SHADOW_CLASS } from "./agentLifecycleReducer";
+import { createAgentLifecycleEvent } from "./agentLifecycleEvents";
 
 test("gamma-3 decision: handler-emitted families skip, everything else emits with the total map", () => {
   const base = {
@@ -635,8 +634,6 @@ test("gamma-3 decision: handler-emitted families skip, everything else emits wit
   // Emit: authorized commands map to control.
   assert.equal(LIFECYCLE_PLAN_SHADOW_CLASS.manual_stop_requested, "control");
   assert.equal(LIFECYCLE_PLAN_SHADOW_CLASS.runtime_profile_control_changed, "control");
-  assert.equal(LIFECYCLE_PLAN_SHADOW_CLASS.migration_started, "control");
-  assert.equal(LIFECYCLE_PLAN_SHADOW_CLASS.migration_completed, "control");
   assert.equal(LIFECYCLE_PLAN_SHADOW_CLASS.migration_aborted, "control");
   // Daemon-reported facts map to observed.
   assert.equal(LIFECYCLE_PLAN_SHADOW_CLASS.runtime_crashed, "observed");

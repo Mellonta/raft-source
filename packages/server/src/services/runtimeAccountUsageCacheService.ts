@@ -6,7 +6,7 @@ import {
   type RuntimeAccountUsageSnapshot,
 } from "@botiverse/raft-shared";
 
-import { getRedis, isRedisAvailable } from "../redis.js";
+import { getRedis, isRedisAvailable } from "../redis";
 
 export const RUNTIME_ACCOUNT_USAGE_CACHE_TTL_SECONDS = 24 * 60 * 60;
 export const RUNTIME_ACCOUNT_USAGE_REFRESH_COOLDOWN_SECONDS = 2 * 60;

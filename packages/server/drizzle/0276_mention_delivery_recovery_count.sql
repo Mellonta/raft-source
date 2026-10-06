@@ -1,0 +1,1 @@
+ALTER TABLE "mention_delivery_occurrences" ADD COLUMN "recovery_count" integer DEFAULT 0 NOT NULL;

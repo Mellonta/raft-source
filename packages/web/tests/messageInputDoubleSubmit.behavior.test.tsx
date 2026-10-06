@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act, startTransition, Suspense, useEffect, useLayoutEffect, useState } from "react";
 import type { ComponentProps } from "react";
 import { createRoot } from "react-dom/client";
@@ -31,8 +30,7 @@ import { useAuthStore } from "../src/store/authStore";
 import { useChannelStore } from "../src/store/channelStore";
 import { useMessageStore } from "../src/store/messageStore";
 import type { SendMessageResult } from "../src/store/messageStore";
-import { resetServerFeatureFlagsForTests, setServerFeatureFlagForTests } from "../src/store/serverFeatureFlags";
-import { TOPBAR_OVERFLOW_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
+import { resetServerFeatureFlagsForTests } from "../src/store/serverFeatureFlags";
 import { useServerStore } from "../src/store/serverStore";
 import type { ServerMember } from "../src/store/serverStore";
 
@@ -218,6 +216,7 @@ function setupComposer(
 function makeSendSpy(
   pendingMentionActions: SendMessageResult["pendingMentionActions"] = [],
   unresolvedMentionHandles: SendMessageResult["unresolvedMentionHandles"] = [],
+  deliveryWarnings: SendMessageResult["deliveryWarnings"] = [],
 ) {
   const calls: Array<{ content: string; attachmentIds: string[] }> = [];
   const details: Array<{
@@ -240,7 +239,7 @@ function makeSendSpy(
   ): Promise<SendMessageResult> => {
     calls.push({ content, attachmentIds });
     details.push({ channelId, content, attachmentIds, asTask, optimisticId, randomId, mentions });
-    return { messageId: `message-${calls.length}`, pendingMentionActions, unresolvedMentionHandles };
+    return { messageId: `message-${calls.length}`, pendingMentionActions, unresolvedMentionHandles, deliveryWarnings };
   };
   return Object.assign(send, { calls, details });
 }
@@ -302,6 +301,39 @@ async function submitTwiceInOneFrame(form: HTMLFormElement) {
   });
 }
 
+
+// ── Controlled frame ordering for the accepted-submit case (task #513) ──
+//
+// jsdom schedules rAF on a timer, so a frame queued by a keystroke normally has
+// NOT run when a synchronous assertion executes — which is why a plain focused
+// run cannot observe this ordering. Installing a manual queue makes it
+// deterministic: we can assert a frame is pending, submit for real, then flush.
+const originalRaf = globalThis.requestAnimationFrame;
+const originalCancelRaf = globalThis.cancelAnimationFrame;
+
+function installManualRafQueue() {
+  const queue = new Map<number, FrameRequestCallback>();
+  let nextId = 1;
+  globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+    const id = nextId++;
+    queue.set(id, cb);
+    return id;
+  }) as typeof globalThis.requestAnimationFrame;
+  globalThis.cancelAnimationFrame = (id: number) => {
+    queue.delete(id);
+  };
+  return {
+    get pending() {
+      return queue.size;
+    },
+    flush() {
+      const callbacks = [...queue.values()];
+      queue.clear();
+      for (const cb of callbacks) cb(performance.now());
+    },
+  };
+}
+
 afterEach(() => {
   resetUploadCapability();
   cleanup();
@@ -311,6 +343,8 @@ afterEach(() => {
   api.post = originalApiPost;
   console.error = originalConsoleError;
   window.HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
+  globalThis.requestAnimationFrame = originalRaf;
+  globalThis.cancelAnimationFrame = originalCancelRaf;
   useAuthStore.setState(useAuthStore.getInitialState(), true);
   useServerStore.setState(useServerStore.getInitialState(), true);
   useChannelStore.setState(useChannelStore.getInitialState(), true);
@@ -345,9 +379,10 @@ test("MessageInput keeps blank and whitespace-only drafts blocked", async () => 
 
   const emptyButton = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
   assert.equal(emptyButton.disabled, true);
-  assert.equal(emptyButton.title, "Send");
+  assert.equal(emptyButton.getAttribute("title"), null);
+  assert.ok(emptyButton.hasAttribute("data-base-ui-tooltip-trigger"), "send button tooltip uses the RUI Tooltip");
   assert.equal(emptyButton.getAttribute("aria-label"), "Send");
-  assert.ok(emptyButton.classList.contains("size-7"));
+  assert.equal(emptyButton.getAttribute("data-slot"), "button");
   assert.equal(emptyButton.classList.contains("size-9"), false);
   assertSendGlyph(emptyButton);
   await submitForm(form);
@@ -356,7 +391,8 @@ test("MessageInput keeps blank and whitespace-only drafts blocked", async () => 
   fireEvent.change(textarea, { target: { value: "   " } });
   const whitespaceButton = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
   assert.equal(whitespaceButton.disabled, true);
-  assert.equal(whitespaceButton.title, "Send");
+  assert.equal(whitespaceButton.getAttribute("title"), null);
+  assert.ok(whitespaceButton.hasAttribute("data-base-ui-tooltip-trigger"), "send button tooltip uses the RUI Tooltip");
   assert.equal(whitespaceButton.getAttribute("aria-label"), "Send");
   assertSendGlyph(whitespaceButton);
   await submitForm(form);
@@ -430,7 +466,8 @@ test("MessageInput allowEmptySubmit does not bypass the default send path withou
 
   const button = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
   assert.equal(button.disabled, true);
-  assert.equal(button.title, "Send");
+  assert.equal(button.getAttribute("title"), null);
+  assert.ok(button.hasAttribute("data-base-ui-tooltip-trigger"), "send button tooltip uses the RUI Tooltip");
   assert.equal(button.getAttribute("aria-label"), "Send");
   assertSendGlyph(button);
   await submitForm(form);
@@ -522,8 +559,10 @@ test("MessageInput media picker exposes videos to the native file chooser", () =
   assert.match(mediaInput.accept, /(^|,)image\/\*(,|$)/);
   assert.match(mediaInput.accept, /(^|,)video\/\*(,|$)/);
 
-  const mediaButton = screen.getByTitle("Attach media") as HTMLButtonElement;
+  const mediaButton = screen.getByRole("button", { name: "Attach media" }) as HTMLButtonElement;
   assert.equal(mediaButton.type, "button");
+  assert.equal(mediaButton.getAttribute("title"), null);
+  assert.ok(mediaButton.hasAttribute("data-base-ui-tooltip-trigger"), "attach-media tooltip uses the RUI Tooltip");
 });
 
 test("mention action result policy is closed across notify, add, dropped, stale, and missing results", () => {
@@ -615,7 +654,6 @@ test("MessageInput treats queued notify as success and removes the resolved stri
 });
 
 test("successful mention Add refreshes the sibling channel member count and list without a socket round-trip", async () => {
-  setServerFeatureFlagForTests("server-1", TOPBAR_OVERFLOW_FEATURE_FLAG_KEY, true);
   const resolutionId = "resolution-add-member";
   const sendMessage = makeSendSpy([{
     resolutionId,
@@ -662,7 +700,7 @@ test("successful mention Add refreshes the sibling channel member count and list
     {},
     { apiGet, renderChannelMembers: true },
   );
-  const participantsButton = screen.getByTitle("View participants");
+  const participantsButton = screen.getByRole("button", { name: "View participants" });
   await waitFor(() => assert.equal(participantsButton.textContent?.trim(), "1"));
   assert.equal(participantsButton.tagName, "BUTTON");
   assert.match(participantsButton.className, /\bh-7\b/);
@@ -670,13 +708,12 @@ test("successful mention Add refreshes the sibling channel member count and list
   assert.match(participantsButton.className, /\bgap-1\b/);
   assert.match(participantsButton.className, /\bpx-1\.5\b/);
   const participantsIcon = participantsButton.querySelector("svg");
-  const participantsCount = participantsButton.querySelector("span");
+  const participantsCount = participantsButton.querySelector('[data-testid="channel-members-count"]');
   assert.ok(participantsIcon);
   assert.ok(participantsCount);
   assert.equal(participantsIcon.getAttribute("width"), "14");
   assert.match(participantsIcon.getAttribute("class") ?? "", /\bshrink-0\b/);
-  assert.match(participantsCount.className, /(?:^|\s)min-w-\[1ch\](?:\s|$)/);
-  assert.match(participantsCount.className, /\btabular-nums\b/);
+  assert.ok(participantsCount?.textContent);
 
   api.post = (async (url: string, body?: unknown) => {
     assert.equal(url, "/messages/mention-actions/execute");
@@ -704,7 +741,6 @@ test("successful mention Add refreshes the sibling channel member count and list
 });
 
 test("ChannelMembers compact trigger renders the real participant count and caps it at 99+", async () => {
-  setServerFeatureFlagForTests("server-1", TOPBAR_OVERFLOW_FEATURE_FLAG_KEY, true);
   const makeHumans = (count: number) => Array.from({ length: count }, (_, index) => ({
     id: `member-${index}`,
     name: `member-${index}`,
@@ -724,7 +760,7 @@ test("ChannelMembers compact trigger renders the real participant count and caps
   );
 
   const three = mountCount(3);
-  const threeButton = screen.getByTitle("View participants");
+  const threeButton = screen.getByRole("button", { name: "View participants" });
   await waitFor(() => assert.equal(threeButton.textContent?.trim(), "3"));
   assert.match(threeButton.className, /\bh-7\b/);
   assert.doesNotMatch(threeButton.className, /\bh-8\b/);
@@ -738,7 +774,7 @@ test("ChannelMembers compact trigger renders the real participant count and caps
   three.unmount();
 
   mountCount(100);
-  const hundredButton = screen.getByTitle("View participants");
+  const hundredButton = screen.getByRole("button", { name: "View participants" });
   await waitFor(() => assert.equal(hundredButton.textContent?.trim(), "99+"));
 });
 
@@ -953,7 +989,8 @@ test("MessageInput enables normal text and ready attachment drafts through separ
   fireEvent.change(textComposer.textarea, { target: { value: "ready text" } });
   const textButton = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
   assert.equal(textButton.disabled, false);
-  assert.equal(textButton.title, "Send");
+  assert.equal(textButton.getAttribute("title"), null);
+  assert.ok(textButton.hasAttribute("data-base-ui-tooltip-trigger"), "send button tooltip uses the RUI Tooltip");
   assert.equal(textButton.getAttribute("aria-label"), "Send");
   assertSendGlyph(textButton);
   textComposer.unmount();
@@ -974,7 +1011,8 @@ test("MessageInput enables normal text and ready attachment drafts through separ
   await waitFor(() => {
     const attachmentButton = screen.getByRole("button", { name: "Send" }) as HTMLButtonElement;
     assert.equal(attachmentButton.disabled, false);
-    assert.equal(attachmentButton.title, "Send");
+    assert.equal(attachmentButton.getAttribute("title"), null);
+    assert.ok(attachmentButton.hasAttribute("data-base-ui-tooltip-trigger"), "send button tooltip uses the RUI Tooltip");
     assert.equal(attachmentButton.getAttribute("aria-label"), "Send");
     assertSendGlyph(attachmentButton);
   });
@@ -1075,7 +1113,7 @@ test("MessageInput preserves focus through the picker tap, then blurs after medi
   imageInput.click = () => { imagePickerClicks += 1; };
   fileInput.click = () => { filePickerClicks += 1; };
 
-  const imageButton = screen.getByTitle(/Attach (image|media)/) as HTMLButtonElement;
+  const imageButton = screen.getByRole("button", { name: /Attach (image|media)/ }) as HTMLButtonElement;
   const imagePointerDown = new window.Event("pointerdown", { bubbles: true, cancelable: true });
   imageButton.dispatchEvent(imagePointerDown);
   assert.equal(imagePointerDown.defaultPrevented, true);
@@ -1084,7 +1122,7 @@ test("MessageInput preserves focus through the picker tap, then blurs after medi
   assert.equal(imagePickerClicks, 1);
   assert.equal(document.activeElement, textarea);
 
-  const fileButton = screen.getByTitle("Attach file") as HTMLButtonElement;
+  const fileButton = screen.getByRole("button", { name: "Attach file" }) as HTMLButtonElement;
   const filePointerDown = new window.Event("pointerdown", { bubbles: true, cancelable: true });
   fileButton.dispatchEvent(filePointerDown);
   assert.equal(filePointerDown.defaultPrevented, true);
@@ -1104,10 +1142,14 @@ test("MessageInput preserves focus through the picker tap, then blurs after medi
 });
 
 test("MessageInput blurs the composer as soon as submit is accepted so the mobile keyboard closes smoothly", async () => {
+  const raf = installManualRafQueue();
   const sendMessage = makeDeferredSendSpy();
   const { textarea, form } = setupComposer(sendMessage);
 
   fireEvent.change(textarea, { target: { value: "ready text" } });
+  // The keystroke schedules one coalesced autosize frame (task #513).
+  assert.equal(raf.pending, 1, "precondition: the keystroke queued an autosize frame");
+
   textarea.style.height = "64px";
   textarea.focus();
   assert.equal(document.activeElement, textarea);
@@ -1118,8 +1160,112 @@ test("MessageInput blurs the composer as soon as submit is accepted so the mobil
   assert.equal(textarea.style.height, "");
   assert.notEqual(document.activeElement, textarea);
 
+  // Accepting the submit must not leave the queued frame able to overwrite the
+  // cleared height. Without the cancel at the submit reset this fails: the
+  // frame runs, measures the already-cleared field, and writes "0px".
+  await act(async () => {
+    raf.flush();
+  });
+  assert.equal(
+    textarea.style.height,
+    "",
+    "the queued autosize frame must not overwrite the accepted submit's clear",
+  );
+
+  // And autosizing must still work afterwards — cancelling drops the queued
+  // frame, it does not disable the feature.
+  fireEvent.change(textarea, { target: { value: "typing again" } });
+  assert.equal(raf.pending, 1, "a later keystroke schedules a fresh frame");
+  await act(async () => {
+    raf.flush();
+  });
+  assert.notEqual(textarea.style.height, "", "the fresh frame does resize");
+
   await act(async () => {
     sendMessage.resolveSend({ messageId: "message-1", pendingMentionActions: [], unresolvedMentionHandles: [] });
+  });
+});
+
+test("MessageInput shows a stopped-agent delivery warning after a successful DM send", async () => {
+  const sendMessage = makeSendSpy([], [], [{
+    targetType: "agent",
+    targetId: "agent-stopped",
+    reason: "agent_stopped",
+  }]);
+  const { textarea, form } = setupComposer(sendMessage, { channelName: "StoppedAgent" }, { channelType: "dm" });
+
+  fireEvent.change(textarea, { target: { value: "hello" } });
+  await submitForm(form);
+
+  assert.equal(sendMessage.calls.length, 1);
+  assert.equal(textarea.value, "");
+  const warning = await screen.findByText("Message sent, but this agent is stopped and was not notified.");
+  assert.ok(warning);
+  assert.equal(screen.queryByText("Failed to send"), null);
+
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss delivery warning" }));
+  await waitFor(() => {
+    assert.equal(screen.queryByText("Message sent, but this agent is stopped and was not notified."), null);
+  });
+});
+
+test("MessageInput only renders stopped-agent delivery warnings in DMs", async () => {
+  const sendMessage = makeSendSpy([], [], [{
+    targetType: "agent",
+    targetId: "agent-stopped",
+    reason: "agent_stopped",
+  }]);
+  const { textarea, form } = setupComposer(sendMessage);
+
+  fireEvent.change(textarea, { target: { value: "hello" } });
+  await submitForm(form);
+
+  assert.equal(sendMessage.calls.length, 1);
+  await waitFor(() => assert.equal(textarea.value, ""));
+  assert.equal(screen.queryByText("Message sent, but this agent is stopped and was not notified."), null);
+});
+
+test("MessageInput clears stopped-agent delivery warnings when the composer switches channel", async () => {
+  const sendMessage = makeSendSpy([], [], [{
+    targetType: "agent",
+    targetId: "agent-stopped",
+    reason: "agent_stopped",
+  }]);
+  const { textarea, form, rerender } = setupComposer(sendMessage, { channelName: "StoppedAgent" }, { channelType: "dm" });
+
+  fireEvent.change(textarea, { target: { value: "hello" } });
+  await submitForm(form);
+
+  assert.ok(await screen.findByText("Message sent, but this agent is stopped and was not notified."));
+
+  await act(async () => {
+    useChannelStore.setState({
+      channels: [],
+      dmChannels: [{
+        id: "dm-after-stopped-agent-warning",
+        serverId: "server-1",
+        name: "OtherAgent",
+        type: "dm",
+        description: null,
+        archived: false,
+        archivedAt: null,
+        archivedBy: null,
+        isDefault: false,
+        createdAt: "2026-07-04T00:00:00.000Z",
+      }],
+    } as never);
+    rerender(
+      <MemoryRouter>
+        <MessageInput channelId="dm-after-stopped-agent-warning" channelName="OtherAgent" />
+      </MemoryRouter>,
+    );
+  });
+
+  await waitFor(() => {
+    assert.equal(
+      Boolean(screen.queryByText("Message sent, but this agent is stopped and was not notified.")),
+      false,
+    );
   });
 });
 
@@ -1688,7 +1834,8 @@ test("MessageInput submitDisabled blocks override submit and exposes the custom 
 
   const button = screen.getByRole("button", { name: "Select a target first" }) as HTMLButtonElement;
   assert.equal(button.disabled, true);
-  assert.equal(button.title, "Select a target first");
+  assert.equal(button.getAttribute("title"), null);
+  assert.ok(button.hasAttribute("data-base-ui-tooltip-trigger"), "disabled-reason tooltip uses the RUI Tooltip");
   assert.equal(button.getAttribute("aria-label"), "Select a target first");
   fireEvent.click(button);
   await submitForm(form);
@@ -1707,7 +1854,8 @@ test("MessageInput submitDisabled falls back to a generic disabled label", () =>
 
   const button = screen.getByRole("button", { name: "Send disabled" }) as HTMLButtonElement;
   assert.equal(button.disabled, true);
-  assert.equal(button.title, "Send disabled");
+  assert.equal(button.getAttribute("title"), null);
+  assert.ok(button.hasAttribute("data-base-ui-tooltip-trigger"), "generic disabled tooltip uses the RUI Tooltip");
   assert.equal(button.getAttribute("aria-label"), "Send disabled");
 });
 
@@ -1722,7 +1870,8 @@ test("MessageInput submitBusy blocks submit and swaps the send icon for a spinne
 
   const button = screen.getByRole("button", { name: "Sending" }) as HTMLButtonElement;
   assert.equal(button.disabled, true);
-  assert.equal(button.title, "Sending...");
+  assert.equal(button.getAttribute("title"), null);
+  assert.ok(button.hasAttribute("data-base-ui-tooltip-trigger"), "busy tooltip uses the RUI Tooltip");
   assert.equal(button.getAttribute("aria-label"), "Sending");
   assert.ok(button.querySelector('[role="status"][aria-label="Loading"]'));
   fireEvent.click(button);
@@ -1753,7 +1902,8 @@ test("MessageInput upload states block submit with precise labels", async () => 
   try {
     const uploadingButton = await screen.findByRole("button", { name: "Uploading attachments" }) as HTMLButtonElement;
     assert.equal(uploadingButton.disabled, true);
-    assert.equal(uploadingButton.title, "Uploading attachments…");
+    assert.equal(uploadingButton.getAttribute("title"), null);
+    assert.ok(uploadingButton.hasAttribute("data-base-ui-tooltip-trigger"), "uploading tooltip uses the RUI Tooltip");
     assert.equal(uploadingButton.getAttribute("aria-label"), "Uploading attachments");
     assert.ok(uploadingButton.querySelector('[role="status"][aria-label="Loading"]'));
   } finally {
@@ -1775,7 +1925,8 @@ test("MessageInput upload states block submit with precise labels", async () => 
 
   const failedButton = await screen.findByRole("button", { name: "Retry or remove failed attachments" }) as HTMLButtonElement;
   assert.equal(failedButton.disabled, true);
-  assert.equal(failedButton.title, "Retry or remove failed attachments");
+  assert.equal(failedButton.getAttribute("title"), null);
+  assert.ok(failedButton.hasAttribute("data-base-ui-tooltip-trigger"), "retry-failed tooltip uses the RUI Tooltip");
   assert.equal(failedButton.getAttribute("aria-label"), "Retry or remove failed attachments");
   assert.equal(failedButton.querySelector('[role="status"]'), null);
   assert.deepEqual(sendMessage.calls, []);

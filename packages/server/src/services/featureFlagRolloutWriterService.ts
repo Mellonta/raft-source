@@ -9,18 +9,18 @@ import {
   type FeatureFlagRolloutNarrowingOperation,
   type FeatureFlagRolloutWideningOperation,
 } from "@botiverse/raft-shared";
-import { getDb, type Database, type DatabaseTransaction } from "../db/index.js";
+import { getDb, type Database, type DatabaseTransaction } from "../db/index";
 import {
   featureFlagConfigVersions,
   featureFlagRolloutAuditEvents,
   featureFlagRules,
   featureFlags,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   acquireFeatureFlagConfigVersionLock,
   acquireFeatureFlagLock,
   FEATURE_FLAG_CONFIG_SCOPE_GLOBAL,
-} from "./featureFlagService.js";
+} from "./featureFlagService";
 
 type AuthoritativeRolloutIntentKind = Extract<
   FeatureFlagRolloutIntent["kind"],

@@ -19,6 +19,13 @@ export interface ComputerStartSpanOptions {
   startTimeMs?: number;
 }
 
+export interface ComputerEmitEventOptions {
+  surface: ComputerTraceSurface;
+  attrs?: ComputerTraceAttributes;
+  parent?: ComputerTraceContext | null;
+  timeMs?: number;
+}
+
 export interface ComputerEndSpanOptions {
   attrs?: ComputerTraceAttributes;
 }
@@ -31,4 +38,5 @@ export interface ComputerActiveSpan {
 
 export interface ComputerTracer {
   startSpan(name: string, options: ComputerStartSpanOptions): ComputerActiveSpan;
+  emitEvent(name: string, options: ComputerEmitEventOptions): void;
 }

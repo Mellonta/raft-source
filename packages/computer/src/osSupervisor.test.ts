@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 
 import {
   buildLaunchdDiscoveryPath,
@@ -12,14 +11,14 @@ import {
   describeOsSupervisorKind,
   isOwnedHistoricalLaunchdDefinition,
   quoteWindowsArgument,
-} from "./osSupervisor.js";
-import { buildSystemdDiscoveryPath } from "./systemdDiscoveryPath.js";
+} from "./osSupervisor";
+import { buildSystemdDiscoveryPath } from "./systemdDiscoveryPath";
 import {
   retireLegacyOsSupervisor,
   resolveOsSupervisorSpec,
   type SupervisorCommandRunner,
-} from "./osSupervisorRuntime.js";
-import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv.js";
+} from "./osSupervisorRuntime";
+import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv";
 
 const home = "/tmp/raft home/.slock";
 const binary = "/tmp/raft bin/raft-computer";
@@ -447,15 +446,11 @@ test("stop plans disable the OS owner before ending the service, so no restart p
   ]);
 });
 
-test("shipped supervisor surface can only inspect or retire managers, never create, start, or repair them", async () => {
+test("supervisor retirement stays internal; no public manager mutation surface is exposed", async () => {
   const cli = await readFile(join(import.meta.dirname, "cli.ts"), "utf8");
-  const supervisorBlock = cli.slice(
-    cli.indexOf("const supervisorCommand"),
-    cli.indexOf("async function runCli"),
-  );
-  assert.match(supervisorBlock, /\.command\("retire-legacy"/);
-  assert.doesNotMatch(supervisorBlock, /\.command\("(?:repair|status|start)"/);
-  assert.doesNotMatch(supervisorBlock, /inspectOsSupervisor|mutateOsSupervisor/);
+  const { program } = await import("./cli");
+  assert.doesNotMatch(program.helpInformation(), /__supervisor|__legacy-supervisor-takeover/);
+  assert.doesNotMatch(cli, /inspectOsSupervisor|mutateOsSupervisor/);
 
   const runtime = await readFile(
     join(import.meta.dirname, "osSupervisorRuntime.ts"),

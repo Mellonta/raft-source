@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { useIntl } from "react-intl";
+import { Button } from "raft-ui";
 import api from "../api/client";
 import { useAuthStore } from "../store/authStore";
 import AuthPageFrame, { AuthPageIntro } from "../components/auth/AuthPageFrame";
@@ -71,13 +72,15 @@ export default function DeviceLoginPage() {
             title={formatMessage({ id: "pages.deviceLogin.approvedTitle" })}
             description={formatMessage({ id: "pages.deviceLogin.approvedDescription" })}
           />
-          <button
+          <Button
             type="button"
             onClick={closePage}
-            className="btn-brutal block w-full bg-brutal-pink px-3 py-2 text-center text-sm"
+            size="md"
+            variant="accent"
+            className="w-full"
           >
             {formatMessage({ id: "pages.deviceLogin.closePage" })}
-          </button>
+          </Button>
           {closeAttempted ? (
             <p className="mt-3 text-center text-xs font-bold text-brutal-gray-700">
               {formatMessage({ id: "pages.deviceLogin.closeManually" })}
@@ -113,26 +116,30 @@ export default function DeviceLoginPage() {
               placeholder={formatMessage({ id: "pages.deviceLogin.codePlaceholder" })}
               autoCapitalize="characters"
               autoComplete="one-time-code"
-              className="w-full border-2 border-black p-2 text-center font-mono text-lg font-black tracking-widest shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+              className="w-full rounded-md border border-line-field bg-layer-panel p-2 text-center font-mono text-lg font-black tracking-widest text-foreground-strong shadow-raft-xs focus:border-line-field-hover theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:shadow-brutal-sm theme-brutal:focus:shadow-brutal"
             />
           </FormField>
 
-          <button
+          <Button
             type="submit"
             disabled={submitting || !normalizedCode}
-            className="btn-brutal w-full bg-brutal-pink px-3 py-2 text-sm disabled:opacity-50"
+            size="md"
+            variant="accent"
+            className="w-full"
           >
             {submitting ? formatMessage({ id: "pages.deviceLogin.approving" }) : formatMessage({ id: "pages.deviceLogin.approve" })}
-          </button>
+          </Button>
         </form>
 
-        <button
+        <Button
           type="button"
           onClick={() => logout()}
-          className="mt-3 w-full border-2 border-black bg-white p-2 text-sm font-bold shadow-brutal-sm transition-all duration-100 hover:-translate-y-[1px] hover:shadow-brutal active:translate-x-[1px] active:translate-y-[1px] active:shadow-brutal-active"
+          size="md"
+          variant="outline"
+          className="mt-3 w-full"
         >
           {formatMessage({ id: "pages.deviceLogin.useAnotherAccount" })}
-        </button>
+        </Button>
       </div>
     </AuthPageFrame>
   );

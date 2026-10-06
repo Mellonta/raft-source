@@ -1,11 +1,11 @@
 import { and, eq, sql } from "drizzle-orm";
 import { FREE_MONTHLY_FILE_UPLOAD_LIMIT_BYTES, canUseProBillingFeatures, currentDate, type ServerPlan } from "@botiverse/raft-shared";
-import type { DatabaseTransaction } from "../db/index.js";
-import { getDb } from "../db/index.js";
-import { serverFileUploadUsageMonths, servers } from "../db/schema.js";
-import { getAppUrl } from "../config/appUrl.js";
-import { refreshSubscriptionForServerIfStale } from "./billingService.js";
-import { getServerBillingEntitlement, withServerResourceLock } from "./planService.js";
+import type { DatabaseTransaction } from "../db/index";
+import { getDb } from "../db/index";
+import { serverFileUploadUsageMonths, servers } from "../db/schema";
+import { getAppUrl } from "../config/appUrl";
+import { refreshSubscriptionForServerIfStale } from "./billingService";
+import { getServerBillingEntitlement, withServerResourceLock } from "./planService";
 
 const FILE_UPLOAD_QUOTA_LOCK_NAMESPACE = 4;
 

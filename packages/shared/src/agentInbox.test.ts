@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   AGENT_INBOX_TARGET_ROW_KEYS,
@@ -8,7 +7,7 @@ import {
   formatAgentInboxSnapshot,
   projectAgentReplyAffordance,
   type AgentInboxTargetRow,
-} from "./agentInbox.js";
+} from "./agentInbox";
 
 test("agent reply affordance is projected only from the non-member delivery fact", () => {
   assert.equal(projectAgentReplyAffordance({}), null);

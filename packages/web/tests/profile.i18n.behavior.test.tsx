@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -47,13 +46,13 @@ test("catalog pins profile skeleton MessageIds (shared common.*)", () => {
   assert.match(zh["common.announcement.back"], /\p{Script=Han}/u);
 });
 
-test("ProfilePanel renders its unresolved-profile skeleton in zh-cn", (t) => {
+test("ProfilePanel renders its unresolved-profile skeleton in zh-cn", () => {
   useServerStore.setState({
     current: { id: "server-1", slug: "server-1", name: "Server 1" },
     members: [],
     servers: [],
   } as never);
-  t.mock.method(api, "get", async () => await new Promise(() => undefined));
+  vi.spyOn(api, "get").mockImplementation(async () => await new Promise(() => undefined));
 
   render(
     <MemoryRouter initialEntries={["/s/server-1/members"]}>

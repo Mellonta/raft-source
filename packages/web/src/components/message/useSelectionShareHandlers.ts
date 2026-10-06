@@ -199,12 +199,6 @@ export function useSelectionShareHandlers(
     }
     if (messages.length === 0) return null;
     return await captureSelectedMessages(messages.map((m) => m.id), {
-      // Match the live main-panel bg per the post-#1272 layout color
-      // contract (sidebar=cream, main=white). Prior cream bg was the
-      // pre-contract value; export now reads as a white surface like
-      // the actual chat. stdrc 2026-05-02 #proj-message:787397b0
-      // 14135081: "share message 的截图的背景色，没对上最新的".
-      backgroundColor: "#FFFFFF",
       maxWidth: SHARE_PREVIEW_MAX_WIDTH,
       threadChildIds: new Set(messages.filter((m) => m.isThreadChild).map((m) => m.id)),
     });

@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import type { ServerToMachineMessage } from "@botiverse/raft-shared";
-import type { AppConfigWireSnapshot } from "@botiverse/raft-shared/src/appConfigTransport.js";
+import type { AppConfigWireSnapshot } from "@botiverse/raft-shared/src/appConfigTransport";
 import {
   CLEANER_APP_ID,
   CLEANER_CONFIG_DEFAULTS,
-} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol.js";
+} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol";
 
-import { receiveCleanerConfigMessage } from "./configReceiver.js";
-import { SystemCleanerRuntime, type CleanerClock } from "./runtime.js";
+import { receiveCleanerConfigMessage } from "./configReceiver";
+import { SystemCleanerRuntime, type CleanerClock } from "./runtime";
 
 type UpsertMessage = Extract<ServerToMachineMessage, { type: "app_config.upsert" }>;
 type SnapshotMessage = Extract<ServerToMachineMessage, { type: "app_config.snapshot" }>;

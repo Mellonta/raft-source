@@ -1,10 +1,10 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 /**
  * Seed script for dev environments.
  * Creates minimal test data directly via Drizzle ORM (no running server needed).
  *
  * Usage:
- *   DATABASE_URL="..." tsx scripts/seed.ts [--output <file>] [--with-onboarding]
+ *   DATABASE_URL="..." node --import @oxc-node/core/register scripts/seed.ts [--output <file>] [--with-onboarding]
  *
  * Idempotent: skips creation if data already exists.
  * Outputs JSON with credentials to stdout (or --output file).
@@ -14,10 +14,10 @@ import pg from "pg";
 import { eq, and, isNull, desc } from "drizzle-orm";
 import { createHash, randomBytes } from "node:crypto";
 import argon2 from "argon2";
-import * as schema from "../src/db/schema.js";
-import { buildSearchText } from "../src/services/searchService.js";
-import { getStorage } from "../src/services/storageService.js";
-import { applyDevSeedOnboardingFixture } from "./devSeedOnboarding.js";
+import * as schema from "../src/db/schema";
+import { buildSearchText } from "../src/services/searchService";
+import { getStorage } from "../src/services/storageService";
+import { applyDevSeedOnboardingFixture } from "./devSeedOnboarding";
 
 const {
   users,
@@ -1855,6 +1855,97 @@ async function main() {
       emoji: "👀",
     });
 
+    // #mention-mix (Artea, #proj-frontend:1a32281f): one channel whose messages
+    // mix every inline kind — self/other mentions, task, channel, thread and
+    // message-reference chips, short/medium/unbreakable inline code, bold,
+    // italic, quotes, lists, Chinese and emoji — so chip/baseline work can be
+    // reviewed on any fresh raftdev env without hand-seeding.
+    const mentionMixChannel = await ensureSeedChannel({
+      serverId: server.id,
+      name: "mention-mix",
+      description: "Mixed mentions, chips and inline code in long messages (layout review case).",
+      type: "channel",
+    });
+    for (const seededUser of [user, adminUser, memberUser]) {
+      await addHumanToChannel(mentionMixChannel.id, seededUser.id);
+    }
+    await addAgentToChannel(mentionMixChannel.id, agent.id);
+    const mentionMixThreadParent = await ensureMessage({
+      channelId: mentionMixChannel.id,
+      senderType: "user",
+      senderId: memberUser.id,
+      content: "Where should the chip review happen?",
+      createdAt: new Date(now - 4 * MINUTE),
+    });
+    const mentionMixThread = await ensureThreadChannel({
+      parentMessageId: mentionMixThreadParent.id,
+      participants: [
+        { type: "user", id: memberUser.id },
+        { type: "user", id: adminUser.id },
+      ],
+    });
+    await ensureMessage({
+      channelId: mentionMixThread.id,
+      senderType: "user",
+      senderId: adminUser.id,
+      content: "In thread: @Developer see task #15",
+      createdAt: new Date(now - 3 * MINUTE - 50_000),
+    });
+    // Task numbers are per channel: the messages below say "task #15", so
+    // #mention-mix needs its own #15 or every task chip renders as unknown.
+    await db.insert(tasks).values({
+      channelId: mentionMixChannel.id,
+      taskNumber: 15,
+      title: "Align inline message chips to the body baseline",
+      status: "in_progress",
+      createdByType: "user",
+      createdById: adminUser.id,
+      claimedByType: "agent",
+      claimedById: agent.id,
+      claimedAt: new Date(now - 4 * MINUTE),
+      messageId: mentionMixThreadParent.id,
+    }).onConflictDoNothing();
+    const mixThread = `#mention-mix:${mentionMixThreadParent.id.slice(0, 8)}`;
+    const mixGeneralThread = `#${channel.name}:${messageChipThreadRef}`;
+    const mixLink = messageChipPermalink;
+    const mixHash = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    const mentionMixMessages: Array<{ senderId: string; content: string }> = [
+      { senderId: adminUser.id, content: `@Developer can you check task #15 before the release? It is linked from #${channel.name} and the thread ${mixThread}.` },
+      { senderId: user.id, content: `Sure @Admin — looping in @Member and @assistant. See ${mixGeneralThread} and [this message](${mixLink}).` },
+      { senderId: memberUser.id, content: "Short one: @Developer" },
+      { senderId: memberUser.id, content: `@Developer @Admin @assistant task #15 #${channel.name} ${mixThread} \`inline code\` [permalink](${mixLink}) — everything on one line, back to back.` },
+      { senderId: adminUser.id, content: `Mixed with formatting: **bold @Developer**, _italic #${channel.name}_, \`@Developer #${channel.name} task #15\` (code must stay plain), and a long sentence that wraps across several lines so we can see whether @Member, task #15, #${channel.name} and ${mixThread} keep the same baseline as the words around them when the line breaks.` },
+      { senderId: user.id, content: [`> Quoted: @Admin asked about task #15 in #${channel.name}`, "", "- List item with @Member and task #15", `- List item with ${mixThread} and \`code\``, `- List item with [a message ref](${mixLink}) and @assistant`].join("\n") },
+      { senderId: adminUser.id, content: `中文混排：@Developer 请看一下 task #15，相关讨论在 #${channel.name} 和 ${mixThread}，代码里是 \`useMentionChip()\`，原始消息见 [这条](${mixLink})。@Member 也请留意。` },
+      { senderId: memberUser.id, content: `Emoji next to chips 🎉 @Developer 👀 task #15 ✅ #${channel.name} 🧵 ${mixThread}` },
+      {
+        senderId: adminUser.id,
+        content: [
+          `@Developer 这是一条故意写得很长的消息，把所有东西混在同一段里：先 @ 你，再 @Member 和 @assistant，然后是 task #15，频道 #${channel.name}，thread ${mixThread} 和 ${mixGeneralThread}，还有一条消息引用 [看这里](${mixLink})。`,
+          `行内代码有短的 \`x\`、\`ok\`、\`npm i\`，中等的 \`useMentionChip(message)\`，也有一个长到一行放不下的 \`sha256:${mixHash}${mixHash}\`。`,
+          `紧接着 chip 和代码交替出现：@Developer \`a\` task #15 \`b\` #${channel.name} \`c\` ${mixThread} \`d\` [消息](${mixLink}) \`e\` @Member，然后是一段普通英文 so the line keeps wrapping, including **bold @Developer**, _italic task #15_ and a trailing @assistant at the very end.`,
+        ].join(" "),
+      },
+      {
+        senderId: memberUser.id,
+        content: `@Developer here is the same idea in English only, one long paragraph: ping @Member and @assistant, then task #15, channel #${channel.name}, threads ${mixThread} and ${mixGeneralThread}, and a message reference [see this](${mixLink}). Inline code comes short \`x\`, \`ok\`, \`pnpm test\`, medium \`useMentionChip(message)\`, long \`packages/web/src/components/message/MessageReferenceChip.tsx\` and one that cannot fit on a line: \`sha256:${mixHash}${mixHash}\`. Then chips and code alternate: @Developer \`1\` task #15 \`2\` #${channel.name} \`3\` ${mixThread} \`4\` @Member \`5\` @assistant, and the sentence keeps going so the wrapped lines show whether **bold @Developer**, _italic #${channel.name}_ and \`code\` all sit on the same baseline as plain words.`,
+      },
+      // Task #708 (Artea): someone else's @mention as the very first token of
+      // a line, in Chinese and English — the case where a sunk mention shows
+      // most. Last in the channel so it is what opens on screen.
+      { senderId: user.id, content: "@Admin 用简洁明了的语言陈述一遍 根因和修法" },
+      { senderId: user.id, content: "@Member could you restate the root cause and the fix in plain words?" },
+    ];
+    for (let i = 0; i < mentionMixMessages.length; i++) {
+      await ensureMessage({
+        channelId: mentionMixChannel.id,
+        senderType: "user",
+        senderId: mentionMixMessages[i].senderId,
+        content: mentionMixMessages[i].content,
+        createdAt: new Date(now - 3 * MINUTE + i * 10_000),
+      });
+    }
+
     await db
       .update(threadFollows)
       .set({ doneAt: new Date(now - 16 * MINUTE) })
@@ -2267,7 +2358,6 @@ async function main() {
       { key: "onboarding_opener_v2", description: "Enable onboarding opener v2 flow", randomizationUnit: "server" as const },
       { key: "onboarding_owner_wizard_v0", description: "Enable owner onboarding wizard", randomizationUnit: "server" as const },
       { key: "attachment_comments_v0", description: "Enable attachment comments panel", randomizationUnit: "server" as const },
-      { key: "topbar_overflow_v0", description: "Enable channel/thread topbar details surfaces", randomizationUnit: "server" as const },
     ];
     for (const flag of devFeatureFlags) {
       const [existing] = await db.select().from(featureFlags).where(eq(featureFlags.key, flag.key)).limit(1);

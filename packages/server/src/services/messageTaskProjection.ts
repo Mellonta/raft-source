@@ -1,8 +1,8 @@
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { failpoints, type AgentMessage } from "@botiverse/raft-shared";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { agents, taskEvents, tasks, users } from "../db/schema.js";
-import { UUID_RE } from "../lib/messageId.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { agents, taskEvents, tasks, users } from "../db/schema";
+import { UUID_RE } from "../lib/messageId";
 
 export const TASK_CURRENT_PROJECTION_SOURCE = "tasks_current_projection" as const;
 

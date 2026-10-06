@@ -1,7 +1,7 @@
 import { readdirSync } from "node:fs";
 import path from "node:path";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig } from "@botiverse/raft-shared";
-import type { SpawnContext } from "./types.js";
+import type { SpawnContext } from "./types";
 
 export type ClaudeProviderIsolationEnv = Record<string, string | undefined>;
 

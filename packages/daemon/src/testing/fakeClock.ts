@@ -1,4 +1,4 @@
-import type { Clock } from "../connection.js";
+import type { Clock } from "../connection";
 
 interface FakeTimer {
   id: number;

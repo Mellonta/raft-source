@@ -4,18 +4,18 @@ import {
   currentTimeMs,
   setClockTimeout,
 } from "@botiverse/raft-shared";
-import type { AppId } from "./rapRegistry.js";
+import type { AppId } from "./rapRegistry";
 import {
   getInstalledApp,
   raiseDueEvent,
   type HookDispatch,
-} from "./rapRegistryStore.js";
+} from "./rapRegistryStore";
 import type {
   RapTimerCancelInput,
   RapTimerScheduleInput,
   RapTimerScheduleReceipt,
   RapTimerSeam,
-} from "./rapSyscalls.js";
+} from "./rapSyscalls";
 
 export const RAP_TIMER_MAX_DATA_BYTES = 4_096;
 const RAP_TIMER_MAX_SOURCE_ID_BYTES = 512;

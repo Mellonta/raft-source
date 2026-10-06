@@ -4,22 +4,19 @@ import { currentDate } from "@botiverse/raft-shared";
 import { and, asc, desc, eq, inArray } from "drizzle-orm";
 import sharp from "sharp";
 
-import type { Database, DatabaseTransaction } from "../db/index.js";
+import type { Database, DatabaseTransaction } from "../db/index";
 import {
-  agents,
   externalActorProjections,
-  externalAuthorPolicies,
   externalProjectionAvatarArtifacts,
-  users,
-} from "../db/schema.js";
-import type { StorageBackend } from "./storageService.js";
+} from "../db/schema";
+import type { StorageBackend } from "./storageService";
 
 export const EXTERNAL_AVATAR_MAX_SOURCE_BYTES = 5 * 1024 * 1024;
 export const EXTERNAL_AVATAR_MAX_DIMENSION = 4096;
 const EXTERNAL_AVATAR_OUTPUT_DIMENSION = 256;
 const STALE_PENDING_MS = 10 * 60_000;
 
-type OwnerType = "user" | "agent" | "external_projection";
+type OwnerType = "external_projection";
 type Artifact = typeof externalProjectionAvatarArtifacts.$inferSelect;
 
 export type ExternalAvatarMaterializationResult =
@@ -393,55 +390,6 @@ export async function materializeExternalProjectionAvatar(input: {
         eq(externalActorProjections.projectionRevision, projection.projectionRevision),
       )).returning({ id: externalActorProjections.id });
       return Boolean(updated);
-    },
-  });
-}
-
-export async function materializeRaftAuthorPolicyAvatar(input: {
-  db: Database;
-  storage: StorageBackend;
-  source: ExternalAvatarSourceAdapter;
-  policyId: string;
-  sourceLocator: string;
-  publicOrigin: string;
-  signal?: AbortSignal;
-  now?: () => Date;
-}): Promise<ExternalAvatarMaterializationResult> {
-  const [policy] = await input.db.select().from(externalAuthorPolicies)
-    .where(eq(externalAuthorPolicies.id, input.policyId)).limit(1);
-  if (!policy || policy.state !== "granted") return { kind: "authority_stale" };
-  return materializeAvatar({
-    ...input,
-    ownerType: policy.authorType,
-    ownerId: policy.authorId,
-    lockAuthority: async (tx) => {
-      const [currentPolicy] = await tx.select().from(externalAuthorPolicies).where(and(
-        eq(externalAuthorPolicies.id, policy.id),
-        eq(externalAuthorPolicies.authorType, policy.authorType),
-        eq(externalAuthorPolicies.authorId, policy.authorId),
-        eq(externalAuthorPolicies.consentRevision, policy.consentRevision),
-        eq(externalAuthorPolicies.state, "granted"),
-      )).for("update").limit(1);
-      if (!currentPolicy) return false;
-      if (policy.authorType === "user") {
-        const [owner] = await tx.select({ avatarUrl: users.avatarUrl }).from(users)
-          .where(eq(users.id, policy.authorId)).for("update").limit(1);
-        return owner?.avatarUrl === input.sourceLocator;
-      }
-      const [owner] = await tx.select({ avatarUrl: agents.avatarUrl }).from(agents)
-        .where(eq(agents.id, policy.authorId)).for("update").limit(1);
-      return owner?.avatarUrl === input.sourceLocator;
-    },
-    bindArtifact: async (tx, artifact) => {
-      const updated = await tx.update(externalAuthorPolicies).set({
-        avatarArtifactId: artifact.id,
-        updatedAt: input.now?.() ?? currentDate(),
-      }).where(and(
-        eq(externalAuthorPolicies.authorType, policy.authorType),
-        eq(externalAuthorPolicies.authorId, policy.authorId),
-        eq(externalAuthorPolicies.state, "granted"),
-      )).returning({ id: externalAuthorPolicies.id });
-      return updated.some((row) => row.id === policy.id);
     },
   });
 }

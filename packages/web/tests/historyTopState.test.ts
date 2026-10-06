@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { getHistoryTopState } from "../src/utils/historyTopState";
 
 test("load_older wins when more history is available", () => {

@@ -1,5 +1,5 @@
-import type { ParsedEvent } from "./types.js";
-import type { JsonRpcMessage } from "./codexEventNormalizer.js";
+import type { ParsedEvent } from "./types";
+import type { JsonRpcMessage } from "./codexEventNormalizer";
 
 type TelemetryAttrs = Extract<ParsedEvent, { kind: "telemetry" }>["attrs"];
 

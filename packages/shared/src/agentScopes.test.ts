@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   AGENT_GRANTABLE_SCOPES,
   AGENT_INTRINSIC_SCOPES,
@@ -10,7 +9,7 @@ import {
   isIntrinsicScope,
   sanitizeGrantedScopes,
   type AgentScopeSet,
-} from "./agentScopes.js";
+} from "./agentScopes";
 
 test("v1 default profile grants every grantable scope — no privilege tier", () => {
   // All 19 grantable scopes are default-on for the default profile; the contract has no

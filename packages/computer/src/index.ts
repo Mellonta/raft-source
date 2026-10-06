@@ -24,29 +24,23 @@
  * itself (write-dist-bins.mjs contract), so top-level auto-run stays behind
  * the same main guard the previous entry used.
  */
-import net from "node:net";
-import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { parseLegacyOsSupervisorInvocation } from "./osSupervisorLifecycle";
 import {
-  OS_SUPERVISOR_KIND_ENV_VAR,
-  parseLegacyOsSupervisorInvocation,
-} from "./osSupervisorLifecycle.js";
-import {
-  applyCapturedEnv,
+  bootstrapServiceEnv,
   captureShellEnv,
-  serializeEnvFrame,
+  printEnvMode,
   SHELL_ENV_STATE_ENV_VAR,
-} from "./shellEnvCapture.js";
-import { compareRealFiles, type ResolveRealPath } from "./realFileIdentity.js";
+} from "./shellEnvCapture";
+import { compareRealFiles, type ResolveRealPath } from "./realFileIdentity";
 
 export { SHELL_ENV_STATE_ENV_VAR };
 
-const POSIX_SUPERVISED_KINDS = new Set(["launchd-user", "systemd-user"]);
 
 const seaRequire = createRequire(import.meta.url);
 function isSeaEntry(): boolean {
@@ -57,52 +51,8 @@ function isSeaEntry(): boolean {
   }
 }
 
-type Execve = (
-  file: string,
-  args: string[],
-  env: Record<string, string>,
-) => void;
-
-type SpawnReplacement = (
-  file: string,
-  args: string[],
-  env: Record<string, string>,
-) => Promise<number>;
-
-async function spawnReplacementChild(
-  file: string,
-  args: string[],
-  env: Record<string, string>,
-): Promise<number> {
-  const child = spawn(file, args, {
-    env,
-    stdio: "inherit",
-    windowsHide: false,
-  });
-  return new Promise<number>((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code) => resolve(code ?? 1));
-  });
-}
-
-function bootstrapRaftHome(
-  env: NodeJS.ProcessEnv,
-  homeDir = os.homedir(),
-): string {
-  const configured = env.RAFT_HOME?.trim() || env.SLOCK_HOME?.trim();
-  const raw = configured && configured.length > 0 ? configured : path.join(homeDir, ".slock");
-  const expanded = raw === "~"
-    ? homeDir
-    : raw.startsWith("~/")
-      ? path.join(homeDir, raw.slice(2))
-      : raw;
-  return path.resolve(expanded);
-}
-
 /** Published bin name (package.json "bin", install.sh BIN_NAME). */
 const PRODUCT_BIN_NAME = "raft-computer";
-const RAFT_COMPUTER_DISPATCHER_PATH_ENV_VAR =
-  "RAFT_COMPUTER_DISPATCHER_PATH";
 
 /** Basename that works on both separator conventions regardless of host. */
 function binaryBasename(binaryPath: string): string {
@@ -146,102 +96,6 @@ function isSelfArgvToken(
 }
 
 /**
- * Replace an installed pre-K carrier with K's stable SEA before the stale
- * carrier imports its own CLI/service graph. Stable and experiment binaries
- * recognize their own exact paths, so the handoff cannot recurse.
- */
-export async function dispatchToKResident(
-  argv: string[] = process.argv,
-  env: NodeJS.ProcessEnv = process.env,
-  deps: {
-    isSea?: () => boolean;
-    currentBinary?: string;
-    resolveResident?: (
-      slockHome: string,
-      currentBinary: string,
-      isSea: boolean,
-    ) => Promise<string>;
-    /** null forces the Node-20/no-execve test path. */
-    execve?: Execve | null;
-    platform?: NodeJS.Platform;
-    resolveRealPath?: ResolveRealPath;
-    spawnReplacement?: SpawnReplacement;
-    setExitCode?: (code: number) => void;
-  } = {},
-): Promise<boolean> {
-  const isSea = (deps.isSea ?? isSeaEntry)();
-  if (!isSea) return false;
-
-  const currentBinary = path.resolve(deps.currentBinary ?? process.execPath);
-  const platform = deps.platform ?? process.platform;
-  const resolveRealPath = deps.resolveRealPath ?? realpathSync.native;
-  // Node SEA exposes the invoked executable as argv[1] on the native carrier;
-  // ordinary Node-style tests/embedders start user args there instead. Drop
-  // only a token that references this binary (exact path, or the bare name a
-  // PATH launch passes through — task #423), never a positional by index
-  // alone. No subcommand shares the binary's name, so the bare-name form
-  // cannot swallow a real argument.
-  const forwardedArgs = isSelfArgvToken(
-    argv[1],
-    currentBinary,
-    platform,
-    resolveRealPath,
-  )
-    ? argv.slice(2)
-    : argv.slice(1);
-  // The official installer executes the newly verified candidate itself so
-  // that K can consume those exact bytes. Handing this private mode to the
-  // old stable resident would make the candidate identity unverifiable and
-  // could re-enter the stale binary that the installer is repairing.
-  if (forwardedArgs[0] === "__installer-converge") return false;
-  const resolveResident = deps.resolveResident ?? (async (slockHome, binary, sea) => {
-    const { resolveKResidentBinary } = await import("./kResidentBinary.js");
-    return resolveKResidentBinary(slockHome, binary, sea);
-  });
-  const resident = path.resolve(await resolveResident(
-    bootstrapRaftHome(env),
-    currentBinary,
-    true,
-  ));
-  const residentIdentity = compareRealFiles(
-    resident,
-    currentBinary,
-    resolveRealPath,
-    platform === "win32",
-  );
-  if (residentIdentity !== "different") return false;
-
-  const cleanEnv = Object.fromEntries(
-    Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined),
-  );
-  // The K resident must never persist its replaceable slot path as the macOS
-  // login carrier. Bind the pre-dispatch executable before exec/spawn so the
-  // resident can prove the stable PATH dispatcher identity.
-  cleanEnv[RAFT_COMPUTER_DISPATCHER_PATH_ENV_VAR] = currentBinary;
-  const nativeExecve = typeof process.execve === "function"
-    ? ((file: string, args: string[], childEnv: Record<string, string>) => {
-        process.execve!(file, args, childEnv);
-      })
-    : undefined;
-  const execve = deps.execve === null ? undefined : (deps.execve ?? nativeExecve);
-  if (platform === "win32" || execve === undefined) {
-    // Windows and the Node 20 SEA carrier have no execve. Keep the installed
-    // carrier as a transient wrapper, wait for the K-owned child and preserve
-    // its CLI exit status. Long-lived service/runner children are spawned
-    // directly from the K slot elsewhere, so wrappers do not accumulate.
-    const exitCode = await (deps.spawnReplacement ?? spawnReplacementChild)(
-      resident,
-      forwardedArgs,
-      cleanEnv,
-    );
-    (deps.setExitCode ?? ((code) => { process.exitCode = code; }))(exitCode);
-    return true;
-  }
-  execve(resident, [resident, ...forwardedArgs], cleanEnv);
-  return true;
-}
-
-/**
  * Rescue argv double-forwarded by an installed pre-fix carrier (task #423).
  *
  * A ≤1.0.17 carrier launched via PATH failed to recognize its own bare name
@@ -281,26 +135,7 @@ export function stripForwardedCarrierName(
   return true;
 }
 
-function argvValue(argv: string[], flag: string): string | undefined {
-  const index = argv.indexOf(flag);
-  return index >= 0 ? argv[index + 1] : undefined;
-}
 
-/**
- * `__print-env`: serialize post-rc env over the parent's private capture
- * socket and exit. The sink is established HERE, after the rc chain has
- * fully run — an inherited fd would not survive real rc files (command
- * substitution reuses/closes descriptors).
- */
-function printEnvMode(argv: string[]): void {
-  const nonce = argvValue(argv, "--nonce") ?? "";
-  const sockPath = argvValue(argv, "--sock") ?? "";
-  const frame = serializeEnvFrame(nonce, process.env);
-  const socket = net.connect(sockPath, () => {
-    socket.end(frame, () => process.exit(0));
-  });
-  socket.on("error", () => process.exit(8));
-}
 
 /**
  * Argv vector that re-executes this exact entry (SEA binary or Node +
@@ -320,32 +155,7 @@ export async function bootstrapSupervisedServiceEnv(
   env: NodeJS.ProcessEnv = process.env,
   capture: typeof captureShellEnv = () => captureShellEnv({ selfExec: buildSelfExecArgv() }),
 ): Promise<"skipped" | "inherited" | `unavailable:${string}`> {
-  if (!argv.includes("__service")) return "skipped";
-  const kind = argv.includes("--os-supervised")
-    ? argvValue(argv, "--os-supervised")
-    : env[OS_SUPERVISOR_KIND_ENV_VAR];
-  if (!kind || !POSIX_SUPERVISED_KINDS.has(kind)) return "skipped";
-
-  // H2/S1: freeze the supervisor's truth into the CANONICAL env keys BEFORE
-  // capture, so the protected snapshot carries argv authority — a rc can
-  // neither poison nor omit them.
-  const slockHomeArg = argvValue(argv, "--slock-home") ?? argvValue(argv, "--raft-home");
-  if (slockHomeArg) env.SLOCK_HOME = slockHomeArg;
-  env[OS_SUPERVISOR_KIND_ENV_VAR] = kind;
-
-  const result = await capture();
-  if (result.ok) {
-    applyCapturedEnv(env, result.env);
-    env[SHELL_ENV_STATE_ENV_VAR] = "inherited";
-    return "inherited";
-  }
-  env[SHELL_ENV_STATE_ENV_VAR] = `unavailable:${result.code}`;
-  process.stderr.write(
-    `raft-computer: shell environment import failed during service boot (${result.code}: ${result.detail}); ` +
-      "continuing with the baseline supervisor environment. Runtime discovery may " +
-      "miss tools available in your terminal until this is resolved.\n",
-  );
-  return `unavailable:${result.code}`;
+  return bootstrapServiceEnv(argv, env, capture);
 }
 
 export interface CliEntryModule {
@@ -362,13 +172,9 @@ export async function bootstrapThenRun(
   argv: string[] = process.argv,
   env: NodeJS.ProcessEnv = process.env,
   capture?: typeof captureShellEnv,
-  importCli: () => Promise<CliEntryModule> = () => import("./cli.js"),
+  importCli: () => Promise<CliEntryModule> = () => import("./cli"),
   writeDiagnostic: (message: string) => void = (message) =>
     process.stderr.write(message),
-  dispatch: (
-    argv: string[],
-    env: NodeJS.ProcessEnv,
-  ) => Promise<boolean> = dispatchToKResident,
   stripCarrierName: (argv: string[]) => boolean = stripForwardedCarrierName,
 ): Promise<void> {
   const legacyInvocation = parseLegacyOsSupervisorInvocation(argv);
@@ -381,10 +187,8 @@ export async function bootstrapThenRun(
     );
     return;
   }
-  if (await dispatch(argv, env)) return;
-  // Running as the K resident (or as an already-current carrier): repair a
-  // pre-fix carrier's double-forwarded self name BEFORE the CLI graph parses
-  // argv. `argv` defaults to process.argv, which Commander reads, so the
+  // Repair a pre-fix carrier's double-forwarded self name BEFORE the CLI graph
+  // parses argv. `argv` defaults to process.argv, which Commander reads, so the
   // in-place strip is what makes the rescue reach the parser.
   stripCarrierName(argv);
   await bootstrapSupervisedServiceEnv(argv, env, capture);

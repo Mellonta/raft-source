@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   createSlackKmsBotCredentialSealer,
   createSlackOAuthSecretsManagerLeaseProvider,
   type SlackOAuthSecretAuthorityStore,
-} from "./slackBridgeAwsSecrets.js";
+} from "./slackBridgeAwsSecrets";
 
 const NOW = new Date("2026-08-11T09:00:00.000Z");
 const SECRET_ARN = "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:slack-oauth-AbCdEf";

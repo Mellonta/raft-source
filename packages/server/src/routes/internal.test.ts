@@ -1,15 +1,14 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { channels, messages, servers, users } from "../db/schema.js";
-import { getMessageContext, getMessageContextByShortId, listMessages, resolveMessageIdInServer, resolveMessageSeqAnchor } from "../services/messageService.js";
-import { resolveMessageInChannel } from "../services/taskService.js";
-import { classifyHistoryAroundCursor, paginateHistoryProbe } from "./historyCursor.js";
-import { applyHistoryThreadMetadata, getHistoryThreadParentMessageIds } from "./historyThreadMetadata.js";
-import { resolveReminderMsgId } from "./internal.js";
+import { getDb } from "../db/index";
+import { channels, messages, servers, users } from "../db/schema";
+import { getMessageContext, getMessageContextByShortId, listMessages, resolveMessageIdInServer, resolveMessageSeqAnchor } from "../services/messageService";
+import { resolveMessageInChannel } from "../services/taskService";
+import { classifyHistoryAroundCursor, paginateHistoryProbe } from "./historyCursor";
+import { applyHistoryThreadMetadata, getHistoryThreadParentMessageIds } from "./historyThreadMetadata";
+import { resolveReminderMsgId } from "./internal";
 
 
 afterEach(async () => {

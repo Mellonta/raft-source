@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import MarkdownContent from "../src/components/markdown/MarkdownContent";
 import { TestIntlProvider } from "./helpers/intl";

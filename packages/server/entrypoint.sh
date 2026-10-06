@@ -2,4 +2,4 @@
 set -e
 
 cd /app
-exec npx tsx packages/server/src/server.ts
+exec node --import @oxc-node/core/register packages/server/src/server.ts

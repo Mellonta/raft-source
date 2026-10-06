@@ -18,6 +18,10 @@ import type { ScenarioSeedState } from "./seedState";
 // artifacts (`trace: "on-first-retry"`). The key stays in helper-local memory and
 // failure messages are status-only.
 //
+// `agentId` must be an external agent (e.g. `seedState.externalAgent`): only
+// external agents can mint credentials; a managed agent's credentials come from
+// its Computer, so the mint returns 400 `agent_not_external`.
+//
 // Requires the Playwright test server env to have device-login enabled (default-on)
 // so credential minting works, and (to avoid the send being held) freshness off
 // via SLOCK_ATTESTED_SEND_MODE=off.

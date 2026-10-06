@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor, within } from "@testing-library/react";
@@ -29,7 +29,7 @@ import { useThreadStore } from "../src/store/threadStore";
 const originalPost = api.post.bind(api);
 const originalGet = api.get.bind(api);
 const test = ((name: string, fn: Parameters<typeof nodeTest>[1]) =>
-  nodeTest(name, { concurrency: false }, fn)) as typeof nodeTest;
+  nodeTest(name,  fn)) as typeof nodeTest;
 
 window.matchMedia = window.matchMedia ?? (() => ({
   matches: false,
@@ -239,7 +239,6 @@ function renderForwardPanel(
     channelMessages?: Record<string, Message[]>;
     visibleMessages?: Message[];
     withServer?: boolean;
-    serverMessageForwardingEnabled?: boolean | "error";
     highlightedMessageId?: string | null;
     transientFocusRequest?: { channelId: string; messageId: string; nonce: number } | null;
     loadMessages?: (channelId: string) => Promise<void>;
@@ -263,10 +262,6 @@ function renderForwardPanel(
   })];
 
   api.get = (async (url: string) => {
-    if (url === "/messages/forward/enabled") {
-      if (options.serverMessageForwardingEnabled === "error") throw new Error("flag endpoint unavailable");
-      return { data: { enabled: options.serverMessageForwardingEnabled !== false } };
-    }
     if (url.endsWith("/members")) {
       const channelId = url.match(/^\/channels\/([^/]+)\/members$/)?.[1];
       return { data: channelId ? options.channelMembers?.[channelId] ?? { humans: [], agents: [] } : { humans: [], agents: [] } };
@@ -432,13 +427,10 @@ test("selected rows block actions when some ids cannot be resolved", async () =>
 
 
 
-test("forward flag defaults hidden until the server enables it", async () => {
+test("forward action stays available without a rollout flag", async () => {
   const source = makeChannel();
-  renderForwardPanel(source, [makeMessage({ id: "message-server-on" })], {
-    serverMessageForwardingEnabled: true,
-  });
+  renderForwardPanel(source, [makeMessage({ id: "message-server-on" })]);
 
-  assert.equal(hasTestId("select-mode-forward"), false);
   await screen.findByTestId("select-mode-forward");
 });
 
@@ -474,7 +466,14 @@ test("mixed unsupported chat selections block before an origin-only selection se
     /Some selected items can't be forwarded\. Keep only regular messages selected and try again\./,
   ));
 
-  useSelectionStore.getState().enter(source.id, [forwardable.id, secondForwardable.id]);
+  act(() => {
+    useSelectionStore.getState().enter(source.id, [forwardable.id, secondForwardable.id]);
+  });
+  assert.deepEqual(
+    [...useSelectionStore.getState().selectedIds],
+    [forwardable.id, secondForwardable.id],
+  );
+  assert.match(screen.getByTestId("select-mode-count").textContent ?? "", /2 selected/);
   fireEvent.click(screen.getByTestId("select-mode-forward"));
   const dialog = await screen.findByTestId("forward-composer-dialog");
   assert.match(dialog.textContent ?? "", /2 selected from #source/);
@@ -714,8 +713,8 @@ test("desktop Forward note matches the mobile input and action controls", async 
   assert.equal(textarea.getAttribute("maxLength"), "4000");
   assert.match(textarea.className, /\btext-base\b/);
   assert.match(textarea.className, /\bmd:text-sm\b/);
-  assert.match(send.className, /size-7/);
-  assert.match(send.className, /bg-brutal-pink/);
+  assert.equal(send.getAttribute("data-slot"), "button");
+  assert.ok(send.className.includes("bg-brutal-pink"));
   assert.equal(send.getAttribute("aria-label"), "Send forward");
   assert.equal(send.querySelector("svg")?.getAttribute("width"), "14");
   assert.equal(noteActions.querySelector('button[title="Attach image"]'), null);
@@ -938,8 +937,12 @@ test("forward composer sends canonical multi-target batches without an Open acti
   assert.equal(composerHeading?.textContent, "Forward");
   assert.equal(composerHeading?.classList.contains("uppercase"), false);
   const targetSearch = screen.getByPlaceholderText("Search targets");
-  assert.match(targetSearch.parentElement?.className ?? "", /\bshadow-brutal-sm\b/);
-  assert.match(targetSearch.parentElement?.className ?? "", /\bfocus-within:shadow-brutal\b/);
+  // B3: the forward composer's box shadow is themed now (the bare brutal token
+    // leaked a hard black shadow into the elegant themes).
+    assert.match(targetSearch.parentElement?.className ?? "", /\bshadow-raft-sm\b/);
+    assert.match(targetSearch.parentElement?.className ?? "", /\btheme-brutal:shadow-brutal-sm\b/);
+  assert.match(targetSearch.parentElement?.className ?? "", /\bfocus-within:shadow-raft-md\b/);
+    assert.match(targetSearch.parentElement?.className ?? "", /\btheme-brutal:focus-within:shadow-brutal\b/);
   assert.match(screen.getByTestId("forward-desktop-note-actions").className, /\bp-3\b/);
   fireEvent.click(screen.getByTestId("forward-target-target-a"));
   fireEvent.click(screen.getByTestId("forward-target-target-b"));
@@ -1051,8 +1054,8 @@ test("mobile Forward opens a full-page note and send step without a drawer", asy
   assert.match(actions.className, /pb-\[max\(12px,env\(safe-area-inset-bottom\)\)\]/);
   assert.doesNotMatch(actions.className, /fixed|sticky|mt-4/);
   const mobileSend = screen.getByRole("button", { name: "Send forward" });
-  assert.match(mobileSend.className, /size-7/);
-  assert.match(mobileSend.className, /bg-brutal-pink/);
+  assert.equal(mobileSend.getAttribute("data-slot"), "button");
+  assert.ok(mobileSend.className.includes("bg-brutal-pink"));
   assert.equal(mobileSend.getAttribute("aria-label"), "Send forward");
   assert.equal(mobileSend.querySelector("svg")?.getAttribute("width"), "14");
   assert.ok(actions.contains(screen.getByLabelText("Optional note")));
@@ -1622,10 +1625,11 @@ test("public Join action reports progress, blocks duplicate submission, and reso
   assert.match(joinBanner.className, /items-center/);
   assert.ok(joinBanner.contains(joinButton));
   assert.ok(joinButton.querySelector("svg"));
-  const joinCopy = joinBanner.querySelector("[title]");
+  const joinCopy = joinBanner.querySelector("[data-base-ui-tooltip-trigger]");
   assert.ok(joinCopy);
   assert.match(joinCopy.className, /truncate/);
-  assert.equal(joinCopy.getAttribute("title"), `Join ${joinableLabel} before forwarding.`);
+  assert.equal(joinCopy.getAttribute("title"), null);
+  assert.equal(joinCopy.textContent, `Join ${joinableLabel} before forwarding.`);
 
   fireEvent.click(joinButton);
   fireEvent.click(joinButton);

@@ -10,16 +10,15 @@ import {
 } from "@botiverse/raft-shared";
 import { and, eq, inArray } from "drizzle-orm";
 
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   externalActorProjections,
   externalAddressabilityProjections,
-  externalAuthorPolicies,
   externalMentionFacts,
   externalMessageAuthorFacts,
   externalProjectionAvatarArtifacts,
   messages,
-} from "../db/schema.js";
+} from "../db/schema";
 
 const MAX_EXTERNAL_MESSAGE_BYTES = 40_000;
 
@@ -27,27 +26,6 @@ export type CanonicalExternalMessageResult = {
   kind: "created" | "duplicate";
   message: typeof messages.$inferSelect;
   author: ExternalMessageAuthorProjection;
-};
-
-export type ExternalAuthorPolicyFact = {
-  policyId: string;
-  serverId: string;
-  provider: string;
-  appRegistrationId: string;
-  installId: string;
-  bindingId: string;
-  bindingEpoch: number;
-  authorType: "user" | "agent";
-  authorId: string;
-  displayName: string;
-  consentRevision: number;
-  avatar: null | {
-    artifactId: string;
-    publicUrl: string;
-    sourceDigest: string;
-    artifactRevision: number;
-  };
-  fallbackKind: "human" | "agent";
 };
 
 function nonEmpty(value: string, label: string): string {
@@ -82,6 +60,7 @@ function toAuthorProjection(
     appRegistrationId: row.appRegistrationId,
     installId: row.installId,
     workspaceId: row.workspaceId,
+    workspaceName: row.workspaceName,
     externalActorId: row.externalActorId,
     externalConversationId: row.externalConversationId,
     externalMessageId: row.externalMessageId,
@@ -142,6 +121,7 @@ export async function insertCanonicalExternalMessage(input: {
   appRegistrationId: string;
   installId: string;
   workspaceId: string;
+  workspaceName?: string | null;
   externalActorId: string;
   externalConversationId: string;
   externalMessageId: string;
@@ -157,6 +137,7 @@ export async function insertCanonicalExternalMessage(input: {
     appRegistrationId: nonEmpty(input.appRegistrationId, "app registration ID"),
     installId: nonEmpty(input.installId, "install ID"),
     workspaceId: nonEmpty(input.workspaceId, "workspace ID"),
+    workspaceName: input.workspaceName?.trim() || null,
     externalActorId: nonEmpty(input.externalActorId, "actor ID"),
     externalConversationId: nonEmpty(input.externalConversationId, "conversation ID"),
     externalMessageId: nonEmpty(input.externalMessageId, "message ID"),
@@ -268,6 +249,7 @@ export async function insertCanonicalExternalMessage(input: {
       appRegistrationId: actor.appRegistrationId,
       installId: actor.installId,
       workspaceId: actor.workspaceId,
+      workspaceName: normalized.workspaceName,
       externalActorId: actor.externalActorId,
       externalConversationId: normalized.externalConversationId,
       externalMessageId: normalized.externalMessageId,
@@ -322,75 +304,6 @@ export async function loadExternalMessageAuthors(
       : null;
     return [row.fact.messageId, toAuthorProjection(row.fact, effectiveAvatarUrl)];
   }));
-}
-
-export async function resolveExternalAuthorPolicy(input: {
-  executor?: DatabaseExecutor;
-  serverId: string;
-  provider: string;
-  appRegistrationId: string;
-  installId: string;
-  bindingId: string;
-  bindingEpoch: number;
-  authorType: "user" | "agent";
-  authorId: string;
-}): Promise<ExternalAuthorPolicyFact | null> {
-  const executor = input.executor ?? getDb();
-  const [policy] = await executor
-    .select()
-    .from(externalAuthorPolicies)
-    .where(and(
-      eq(externalAuthorPolicies.serverId, input.serverId),
-      eq(externalAuthorPolicies.provider, input.provider),
-      eq(externalAuthorPolicies.appRegistrationId, input.appRegistrationId),
-      eq(externalAuthorPolicies.installId, input.installId),
-      eq(externalAuthorPolicies.bindingId, input.bindingId),
-      eq(externalAuthorPolicies.bindingEpoch, input.bindingEpoch),
-      eq(externalAuthorPolicies.authorType, input.authorType),
-      eq(externalAuthorPolicies.authorId, input.authorId),
-      eq(externalAuthorPolicies.state, "granted"),
-    ))
-    .limit(1)
-    .for("update");
-  if (!policy) return null;
-
-  const [avatar] = policy.avatarArtifactId
-    ? await executor
-      .select()
-      .from(externalProjectionAvatarArtifacts)
-      .where(and(
-        eq(externalProjectionAvatarArtifacts.id, policy.avatarArtifactId),
-        eq(externalProjectionAvatarArtifacts.ownerType, policy.authorType),
-        eq(externalProjectionAvatarArtifacts.ownerId, policy.authorId),
-        eq(externalProjectionAvatarArtifacts.state, "active"),
-      ))
-      .limit(1)
-      .for("update")
-    : [];
-  if (policy.avatarArtifactId && !avatar) return null;
-
-  return {
-    policyId: policy.id,
-    serverId: policy.serverId,
-    provider: policy.provider,
-    appRegistrationId: policy.appRegistrationId,
-    installId: policy.installId,
-    bindingId: policy.bindingId,
-    bindingEpoch: policy.bindingEpoch,
-    authorType: policy.authorType,
-    authorId: policy.authorId,
-    displayName: policy.displayName,
-    consentRevision: policy.consentRevision,
-    avatar: avatar
-      ? {
-          artifactId: avatar.id,
-          publicUrl: avatar.publicUrl,
-          sourceDigest: avatar.sourceDigest,
-          artifactRevision: avatar.artifactRevision,
-        }
-      : null,
-    fallbackKind: policy.fallbackKind,
-  };
 }
 
 export async function resolveExternalMentionFromDurableAuthority(input: {

@@ -1,5 +1,5 @@
 // Route-failure error classification for server-side observability traces.
-import { addTraceEvent } from "./semanticTrace.js";
+import { addTraceEvent, errorClassOf } from "./semanticTrace";
 //
 // Background: `traceRouteFailure()` historically emitted only `error_class`
 // (= `err.name`, which is almost always the generic "Error"), discarding both
@@ -137,6 +137,21 @@ export function resolveRouteFailureKind(subkind: RouteFailureSubkind): RouteFail
 const MAX_ERROR_MESSAGE_LENGTH = 240;
 
 /**
+ * A libpq keyword-form DSN value for a secret-bearing key:
+ *   password=hunter2 · passfile=/run/secrets/pgpass · sslkey=/etc/certs/client.key
+ * The key name is left in place (it is diagnosis); only the value is removed.
+ * A value may be quoted and contain spaces, so all three forms are matched here;
+ * a bare \S+ would stop at the first space and leak the remainder. The caller's
+ * later whitespace collapse only NORMALISES spacing -- it deletes nothing, so it
+ * cannot stand in for this rule.
+ */
+const SPILLED_DSN_SECRET =
+  /\b(pass(?:word|file)|sslkey|sslcert|sslrootcert|sslpassword|token|secret)\s*=\s*('(?:[^']|'')*'|"[^"]*"|\S+)/gi;
+/// The replacement keeps the key: the key NAME is what makes the line diagnostic,
+/// only the value is a secret. `$1` is the captured key, `$2` the value.
+const SPILLED_DSN_SECRET_REPLACEMENT = "$1=[redacted]";
+
+/**
  * Bounded, sanitized error message for trace attributes.
  *
  * Mirrors the #74 transport sanitizer (`sanitizeOriginalMessage` in
@@ -159,7 +174,20 @@ export function sanitizeRouteErrorMessage(message: string): string {
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[jwt redacted]")
     .replace(/sk_(?:agent|machine|computer|daemon)_[A-Za-z0-9_-]+/g, "sk_[redacted]")
     .replace(/sap_[A-Za-z0-9_-]+/g, "sap_[redacted]")
-    .replace(/https?:\/\/\S+/g, "[url]")
+    // Any scheme, not just http(s): a connection string pasted into an error
+    // is `postgres://user:pw@host/...`, and an `https?`-only rule lets the whole
+    // thing through -- credentials included. Kept in step with
+    // TRACE_ERROR_MESSAGE_URL in ./queryTrace.ts.
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[url]")
+    // libpq KEYWORD-FORM DSNs carry no scheme at all:
+    //   host=db.internal user=raft password=hunter2
+    // so the URL rule above cannot see them. Redact the VALUES of the keys that
+    // can hold a secret. The key is kept -- its name is what makes the line
+    // diagnostic -- which is why the rule captures it and puts it back. A value
+    // may be quoted and contain spaces ('password="two words"'), so it is matched
+    // in all three forms; a bare \S+ would stop at the first space and leak the
+    // remainder.
+    .replace(SPILLED_DSN_SECRET, SPILLED_DSN_SECRET_REPLACEMENT)
     .replace(/\s+/g, " ")
     .trim();
   return normalized.length > MAX_ERROR_MESSAGE_LENGTH
@@ -175,7 +203,7 @@ export function sanitizeRouteErrorMessage(message: string): string {
 export function traceRouteFailure(name: string, err: unknown, attrs: Record<string, unknown> = {}) {
   const errorSubkind = resolveRouteFailureSubkind(err);
   addTraceEvent(name, {
-    error_class: err instanceof Error ? err.name : typeof err,
+    error_class: errorClassOf(err),
     error_kind: resolveRouteFailureKind(errorSubkind),
     error_subkind: errorSubkind,
     error_message: sanitizeRouteErrorMessage(err instanceof Error ? err.message : String(err ?? "")),

@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 /**
  * Backfill: create a canonical `tasks` row for every legacy message-task.
  *
@@ -17,9 +17,9 @@
  * Safe to re-run. `idx_tasks_message_id` is unique, so an interrupted run
  * resumes and an already-migrated task is skipped rather than duplicated.
  *
- *   pnpm --filter @botiverse/raft-server exec tsx scripts/backfill-tasks-from-messages.ts --dry-run
- *   pnpm --filter @botiverse/raft-server exec tsx scripts/backfill-tasks-from-messages.ts --apply
- *   pnpm --filter @botiverse/raft-server exec tsx scripts/backfill-tasks-from-messages.ts --verify
+ *   pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/backfill-tasks-from-messages.ts --dry-run
+ *   pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/backfill-tasks-from-messages.ts --apply
+ *   pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/backfill-tasks-from-messages.ts --verify
  */
 import "dotenv/config";
 import pg from "pg";

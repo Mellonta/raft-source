@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { TraceAttributes } from "@botiverse/raft-shared";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
+import { addTraceEvent } from "../tracing/semanticTrace";
 
 // Design note: this file defines the canonical lifecycle event and projection
 // trace envelope documented in rfcs/031-agent-lifecycle-event-model-rfc.zh.html
@@ -59,8 +59,6 @@ export type AgentLifecycleEventType =
   | "manual_start_requested"
   | "manual_stop_requested"
   | "migration_aborted"
-  | "migration_completed"
-  | "migration_started"
   | "ready_reconciled"
   | "runtime_crashed"
   | "runtime_interrupted"
@@ -82,9 +80,7 @@ export type AgentLifecycleReason =
   | "manual_start"
   | "manual_stop"
   | "migration_abort"
-  | "migration_arrived"
   | "migration_pending"
-  | "migration_prepare"
   | "missing_running_agent"
   | "runtime_crash"
   | "runtime_exit"

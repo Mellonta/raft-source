@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup } from "@testing-library/react";
 import { SavedNavCount } from "../src/components/layout/Sidebar";
 import { renderWithIntl } from "./helpers/intl";

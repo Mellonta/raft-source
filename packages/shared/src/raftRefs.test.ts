@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   createRaftBareTaskRefRegex,
   createRaftDmThreadRefRegex,
@@ -11,7 +10,7 @@ import {
   replaceOutsideMarkdownCode,
   structuredRaftMentionStillAppears,
   type RaftTargetString,
-} from "./raftRefs.js";
+} from "./raftRefs";
 
 // --- Type-level guarantees for RaftTargetString (enforced by `tsc --noEmit`) ---
 // formatRaftRefTarget's return is the precise wire form, not an opaque string:

@@ -21,9 +21,6 @@ const PGLITE_COMPATIBILITY_STATEMENTS = [
   `CREATE UNIQUE INDEX IF NOT EXISTS "idx_messages_user_random_id"
     ON "messages" USING btree ("sender_id", "random_id")
     WHERE sender_type = 'user' and random_id is not null`,
-  `CREATE INDEX IF NOT EXISTS "idx_inbox_serving_rows_receiver_server_last_activity"
-    ON "inbox_serving_rows" USING btree
-      ("receiver_type", "receiver_id", "server_id", "last_activity_at")`,
   `CREATE INDEX IF NOT EXISTS "idx_messages_sender_created_at"
     ON "messages" USING btree ("sender_id", "created_at", "id")`,
 ];

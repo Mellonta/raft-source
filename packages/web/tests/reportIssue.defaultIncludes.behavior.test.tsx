@@ -1,8 +1,8 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import ReportIssueDialog from "../src/components/agent/ReportIssueDialog";
 import api from "../src/api/client";
 import { en as enMessages } from "../src/i18n/messages/en";
@@ -18,6 +18,9 @@ import { TestIntlProvider } from "./helpers/intl";
 const originalApiPost = api.post;
 const originalFetch = globalThis.fetch;
 const consentLabel = enMessages["agent.reportIssue.consent"] as string;
+const logTailDisclosureEn = enMessages["agent.reportIssue.machineLogTailDisclosure"] as string;
+const logTailDisclosureZh = zhMessages["agent.reportIssue.machineLogTailDisclosure"] as string;
+
 
 const agentBase: Agent = {
   id: "agent-1",
@@ -106,14 +109,25 @@ function renderDialog(hasMachine: boolean, locale = "en") {
   const agent = { ...agentBase, machineId: hasMachine ? machine.id : null };
   render(
     <TestIntlProvider locale={locale}>
-      <ReportIssueDialog
-        agent={agent}
-        onClose={() => undefined}
-        feedbackExportUrl="https://feedback.example.test"
-      />
+      <MemoryRouter>
+        <ReportIssueDialog
+          agent={agent}
+          onClose={() => undefined}
+          feedbackExportUrl="https://feedback.example.test"
+        />
+      </MemoryRouter>
     </TestIntlProvider>,
   );
 }
+
+test("runner log-tail disclosure keeps the consent facts in both locales", () => {
+  for (const fact of ["free text", "other agents", "including agents", "floor, not a guarantee", "transcript"]) {
+    assert.ok(logTailDisclosureEn.includes(fact), `en disclosure lost: ${fact}`);
+  }
+  for (const fact of ["自由文本", "其他 Agent", "含 Agent", "下限不是保证", "会话记录"]) {
+    assert.ok(logTailDisclosureZh.includes(fact), `zh disclosure lost: ${fact}`);
+  }
+});
 
 test("the mounted dialog sends its formatted agent title under zh-cn", async () => {
   const mocks = installSubmitMocks();
@@ -130,19 +144,29 @@ test("the mounted dialog sends its formatted agent title under zh-cn", async () 
   assert.equal(mocks.getCreatePayload()?.title, "针对 Helper 的问题报告");
 });
 
+// RUI Checkbox is a Base UI span[role=checkbox] + hidden native input, so
+// getByLabelText would double-match; query the span by role and read state
+// from aria-checked / data-disabled instead of native input properties.
 function checkbox(label: string) {
-  return screen.getByLabelText(label) as HTMLInputElement;
+  return screen.getByRole("checkbox", { name: label });
 }
 
 function consentCheckbox() {
-  return screen.getByRole("checkbox", { name: consentLabel }) as HTMLInputElement;
+  return screen.getByRole("checkbox", { name: consentLabel });
 }
 
-function installSubmitMocks() {
+function isChecked(element: HTMLElement) {
+  return element.getAttribute("aria-checked") === "true";
+}
+
+function installSubmitMocks(options: { ticketFailures?: number } = {}) {
   let createPayload: ReportPayload | null = null;
+  let ticketForm: FormData | null = null;
+  const ticketForms: FormData[] = [];
+  let ticketFailuresLeft = options.ticketFailures ?? 0;
   const apiCalls: string[] = [];
 
-  api.post = (async (url: string) => {
+  api.post = (async (url: string, body?: unknown) => {
     apiCalls.push(url);
     if (url === "/servers/server-1/scope-attestation") {
       return {
@@ -153,7 +177,15 @@ function installSubmitMocks() {
         },
       };
     }
-    if (url === "/servers/server-1/feedback/report-1/receipt") return { data: {} };
+    if (url === "/product-feedback") {
+      ticketForm = body as FormData;
+      ticketForms.push(ticketForm);
+      if (ticketFailuresLeft > 0) {
+        ticketFailuresLeft -= 1;
+        throw new Error("Hands unavailable");
+      }
+      return { data: { id: "ticket-1" } };
+    }
     throw new Error(`Unexpected API call: ${url}`);
   }) as typeof api.post;
 
@@ -179,6 +211,8 @@ function installSubmitMocks() {
   return {
     apiCalls,
     getCreatePayload: () => createPayload,
+    getTicketForm: () => ticketForm,
+    ticketForms,
   };
 }
 
@@ -186,26 +220,26 @@ test("assigned-machine defaults are individually on while consent starts off", (
   renderDialog(true);
 
   assert.ok(screen.getByText("These are included by default — untick anything you don't want to send."));
-  assert.equal(checkbox("Recent DM messages with this agent").checked, true);
-  assert.equal(checkbox("Recent live agent activity").checked, true);
-  assert.equal(checkbox("Activity tab history").checked, true);
-  assert.equal(checkbox("Runtime session transcript").checked, true);
-  assert.equal(consentCheckbox().checked, false);
+  assert.equal(isChecked(checkbox("Recent DM messages with this agent")), true);
+  assert.equal(isChecked(checkbox("Recent live agent activity")), true);
+  assert.equal(isChecked(checkbox("Activity tab history")), true);
+  assert.equal(isChecked(checkbox("Runtime session transcript")), true);
+  assert.equal(isChecked(consentCheckbox()), false);
 });
 
 test("without an assigned machine transcript is unavailable, off, and omitted from the request", async () => {
   const mocks = installSubmitMocks();
   renderDialog(false);
 
-  assert.equal(checkbox("Recent DM messages with this agent").checked, true);
-  assert.equal(checkbox("Recent live agent activity").checked, true);
-  assert.equal(checkbox("Activity tab history").checked, true);
+  assert.equal(isChecked(checkbox("Recent DM messages with this agent")), true);
+  assert.equal(isChecked(checkbox("Recent live agent activity")), true);
+  assert.equal(isChecked(checkbox("Activity tab history")), true);
   const transcript = checkbox("Runtime session transcript");
-  assert.equal(transcript.checked, false);
-  assert.equal(transcript.disabled, true);
+  assert.equal(isChecked(transcript), false);
+  assert.equal(transcript.hasAttribute("data-disabled"), true);
   assert.ok(screen.getByText("Runtime transcript upload is unavailable until the agent is assigned to a machine."));
   const consent = consentCheckbox();
-  assert.equal(consent.checked, false);
+  assert.equal(isChecked(consent), false);
 
   fireEvent.click(consent);
   fireEvent.click(screen.getByRole("button", { name: "Report Issue" }));
@@ -231,16 +265,16 @@ test("each user untick stays equal between the final DOM and the request payload
 
   for (const [label] of rows) {
     const input = checkbox(label);
-    assert.equal(input.checked, true, `${label} must start on`);
+    assert.equal(isChecked(input), true, `${label} must start on`);
     fireEvent.click(input);
-    assert.equal(input.checked, false, `${label} must end off after its own untick`);
+    assert.equal(isChecked(input), false, `${label} must end off after its own untick`);
   }
   const finalDomState = Object.fromEntries(
-    rows.map(([label, payloadKey]) => [payloadKey, checkbox(label).checked]),
+    rows.map(([label, payloadKey]) => [payloadKey, isChecked(checkbox(label))]),
   ) as Record<(typeof rows)[number][1], boolean>;
 
   const consent = consentCheckbox();
-  assert.equal(consent.checked, false);
+  assert.equal(isChecked(consent), false);
   fireEvent.click(consent);
   fireEvent.click(screen.getByRole("button", { name: "Report Issue" }));
 
@@ -252,4 +286,57 @@ test("each user untick stays equal between the final DOM and the request payload
   }
   assert.equal(payload.metadata.transcript?.requested, finalDomState.runtimeSessionTranscript);
   assert.equal(payload.metadata.transcript?.requestable, true);
+});
+
+test("a submitted report files a Hands ticket that carries only the report id and the user's words", async () => {
+  const mocks = installSubmitMocks();
+  renderDialog(false);
+
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "It stopped replying" } });
+  fireEvent.click(consentCheckbox());
+  fireEvent.click(screen.getByRole("button", { name: "Report Issue" }));
+
+  await screen.findByText(enMessages["agent.reportIssue.ticketFiled"] as string);
+  const form = mocks.getTicketForm();
+  assert.ok(form);
+  assert.equal(form.get("type"), "problem");
+  assert.equal(form.get("feedback_report_id"), "report-1");
+  assert.equal(form.get("message"), "Issue report for Helper\n\nIt stopped replying");
+  assert.equal(form.getAll("attachments").length, 0, "debug evidence must never be attached to the ticket");
+  assert.equal(mocks.apiCalls.some((url) => url.includes("/receipt")), false);
+  assert.ok(screen.getByRole("button", { name: "View ticket" }));
+  assert.ok(screen.queryByText("Report ID") === null);
+});
+
+test("when the ticket cannot be filed the uploaded report still surfaces its reference", async () => {
+  installSubmitMocks({ ticketFailures: Infinity });
+  renderDialog(false);
+
+  fireEvent.click(consentCheckbox());
+  fireEvent.click(screen.getByRole("button", { name: "Report Issue" }));
+
+  await screen.findByText(enMessages["agent.reportIssue.ticketFailed"] as string);
+  assert.ok(screen.getByText("report-1"));
+  assert.ok(screen.queryByRole("button", { name: "View ticket" }) === null);
+});
+
+test("a failed ticket can be retried with the same submission id", async () => {
+  const mocks = installSubmitMocks({ ticketFailures: 1 });
+  renderDialog(false);
+
+  fireEvent.click(consentCheckbox());
+  fireEvent.click(screen.getByRole("button", { name: "Report Issue" }));
+
+  await screen.findByText(enMessages["agent.reportIssue.ticketFailed"] as string);
+  fireEvent.click(screen.getByRole("button", { name: enMessages["agent.reportIssue.retryTicket"] as string }));
+
+  await screen.findByRole("button", { name: "View ticket" });
+  assert.equal(mocks.ticketForms.length, 2);
+  assert.equal(mocks.ticketForms[1]!.get("feedback_report_id"), "report-1");
+  assert.equal(
+    mocks.ticketForms[1]!.get("submission_id"),
+    mocks.ticketForms[0]!.get("submission_id"),
+    "a retry must reuse the submission id so Hands can dedupe it",
+  );
+  assert.ok(screen.queryByText(enMessages["agent.reportIssue.ticketFailed"] as string) === null);
 });

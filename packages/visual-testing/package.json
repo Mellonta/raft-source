@@ -22,7 +22,8 @@
     "diff": "node src/cli.mjs diff",
     "report": "node src/cli.mjs report",
     "site": "node src/cli.mjs site",
-    "publish": "node src/cli.mjs publish-gh-pages"
+    "publish": "node src/cli.mjs publish-gh-pages",
+    "test:model": "node --test tests/pi-model.test.mjs"
   },
   "files": [
     "README.md",
@@ -39,7 +40,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.84.4",
-    "sharp": "^0.34.5"
+    "sharp": "^0.35.4"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1"

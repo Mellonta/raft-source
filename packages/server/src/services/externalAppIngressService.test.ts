@@ -1,13 +1,12 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 
 import { eq } from "drizzle-orm";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channels,
   externalActorProjections,
@@ -15,6 +14,7 @@ import {
   externalAppCredentials,
   externalAppIngressEndpoints,
   externalAppInstallGrantReceipts,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalAppManifestReceipts,
   externalAppRegistrations,
@@ -30,12 +30,15 @@ import {
   oauthClientInstalls,
   oauthClients,
   users,
-} from "../db/schema.js";
-import { createServer } from "./serverService.js";
-import { verifyAndAdmitSlackIngress } from "./externalAppIngressService.js";
-import { updateFeatureFlag } from "./featureFlagService.js";
-import { readSlackBindingLifecycleProjection } from "./slackBindingLifecycleService.js";
-import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService.js";
+} from "../db/schema";
+import { createServer } from "./serverService";
+import {
+  ExternalAppIngressError,
+  verifyAndAdmitSlackIngress,
+} from "./externalAppIngressService";
+import { updateFeatureFlag } from "./featureFlagService";
+import { readSlackBindingLifecycleProjection } from "./slackBindingLifecycleService";
+import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService";
 
 
 const NOW = new Date("2026-08-05T12:00:00.000Z");
@@ -135,6 +138,16 @@ async function seedIngressAuthority(
     workspaceName: "Test Workspace",
     lastVerifiedAt: NOW,
   }).returning();
+  await db.insert(externalAppInstallServerGrants).values({
+    installId: install.id,
+    serverId: server.id,
+    registrationId: registration.id,
+    serverGrantId: grant.id,
+    grantEpoch: grant.grantEpoch,
+    state: "active",
+    authorizedByType: "human",
+    authorizedById: owner.id,
+  });
   await db.insert(externalAppCredentials).values({
     installId: install.id,
     state: "active",
@@ -235,7 +248,7 @@ async function seedIngressAuthority(
     observedAt: NOW,
     expiresAt: new Date(NOW.getTime() + 60 * 60_000),
   });
-  return { registration, signingSecret, endpoint, install, channel, binding, projection };
+  return { registration, signingSecret, endpoint, grant, install, channel, binding, projection };
 }
 
 function signedRequest(body: Buffer) {
@@ -1001,6 +1014,10 @@ test("Slack app_uninstalled requires the real event_callback wrapper and revokes
     externalAppCredentials.installId,
     fixture.install.id,
   )))[0]?.state, "revoked");
+  assert.equal((await getDb().select().from(externalAppInstallServerGrants).where(eq(
+    externalAppInstallServerGrants.installId,
+    fixture.install.id,
+  )))[0]?.state, "revoked");
   assert.equal((await getDb().select().from(externalChannelBindings).where(eq(
     externalChannelBindings.id,
     fixture.binding.id,
@@ -1115,6 +1132,34 @@ test("signed Slack channel lifecycle pauses only the exact binding and preserves
     assert.equal((await getDb().select().from(externalInboundEvents)).length, 0);
     await closeTestDatabase();
   }
+});
+
+test("stale server-grant epoch cannot apply a Slack channel lifecycle mutation", async () => {
+  const fixture = await seedIngressAuthority("public");
+  await getDb().update(externalAppServerGrants).set({ grantEpoch: fixture.grant.grantEpoch + 1 })
+    .where(eq(externalAppServerGrants.id, fixture.grant.id));
+  const body = Buffer.from(JSON.stringify({
+    type: "event_callback",
+    api_app_id: "A_TEST_APP",
+    team_id: "T_TEST",
+    event_id: "Ev_CHANNEL_ARCHIVE_STALE_GRANT",
+    event: { type: "channel_archive", channel: "C_TEST" },
+  }));
+
+  await assert.rejects(verifyAndAdmitSlackIngress({
+    requestUrl: REQUEST_URL,
+    environment: "test",
+    rawBody: body,
+    ...signedRequest(body),
+    ...lifecycleDependencies(),
+    now: NOW,
+  }), (error: unknown) =>
+    error instanceof ExternalAppIngressError
+    && error.code === "external_ingress_authority_unavailable");
+  const [binding] = await getDb().select().from(externalChannelBindings)
+    .where(eq(externalChannelBindings.id, fixture.binding.id));
+  assert.equal(binding.state, "active");
+  assert.equal(binding.bindingEpoch, fixture.binding.bindingEpoch);
 });
 
 test("Slack tokens_revoked fences only the current install bot user id", async () => {
@@ -1289,9 +1334,9 @@ test.each(["U_HUMAN", "U_BOT"])("reaction from %s crosses production cipher and 
       flagKey: key, stage: "server", priority: 999, decision: "allow", values: [fixture.channel.serverId],
     });
   }
-  const { createSlackBridgeEnvSecretBackends } = await import("./slackBridgeEnvSecrets.js");
+  const { createSlackBridgeEnvSecretBackends } = await import("./slackBridgeEnvSecrets");
   const { createSlackDatabaseIngressRuntimeResolver, createSlackDatabaseInboundWorkerRuntimeResolver } =
-    await import("./slackBridgeDatabaseRuntimeAuthority.js");
+    await import("./slackBridgeDatabaseRuntimeAuthority");
   const crypto = createSlackBridgeEnvSecretBackends({
     registrationId: fixture.registration.id, environment: "test", providerAppId: "A_TEST_APP",
     providerOAuthClientId: "test-client", signingSecret: SIGNING_SECRET, oauthClientSecret: "test-only",
@@ -1328,4 +1373,87 @@ test.each(["U_HUMAN", "U_BOT"])("reaction from %s crosses production cipher and 
   });
   assert.equal(JSON.parse(plaintext).externalActorId, actorId);
   assert.equal((await db.select().from(externalActorProjections)).length, 1, "bot echo creates no human identity");
+});
+
+test.each([{
+  label: "reaction",
+  capabilityFlag: SLACK_BRIDGE_FEATURE_FLAG_KEYS.reactionSync,
+  event: {
+    type: "reaction_added",
+    user: "U_HUMAN",
+    reaction: "eyes",
+    item: { type: "message", channel: "C_TEST", ts: "1785931200.000300" },
+    event_ts: "1785931201.000301",
+  },
+}, {
+  label: "attachment",
+  capabilityFlag: SLACK_BRIDGE_FEATURE_FLAG_KEYS.attachmentTransfer,
+  event: {
+    type: "message",
+    subtype: "file_share",
+    channel: "C_TEST",
+    user: "U_HUMAN",
+    text: "must not be sealed",
+    ts: "1785931200.000302",
+    files: [{ id: "F_PRIVACY_STALE" }],
+  },
+}] as const)("expired privacy blocks $label admission before payload or business writes", async (sample) => {
+  const fixture = await seedIngressAuthority();
+  const db = getDb();
+  for (const key of [SLACK_BRIDGE_FEATURE_FLAG_KEYS.master, sample.capabilityFlag]) {
+    await db.insert(featureFlags).values({
+      key,
+      description: `test ${key}`,
+      enabled: true,
+      defaultEnabled: false,
+      killSwitch: false,
+      randomizationUnit: "server",
+      salt: key,
+    }).onConflictDoUpdate({
+      target: featureFlags.key,
+      set: { enabled: true, killSwitch: false },
+    });
+    await db.insert(featureFlagRules).values({
+      flagKey: key,
+      stage: "server",
+      priority: 999,
+      decision: "allow",
+      values: [fixture.channel.serverId],
+    });
+  }
+  await db.update(externalChannelBindings).set({ privacyFreshUntil: NOW })
+    .where(eq(externalChannelBindings.id, fixture.binding.id));
+  const { createSlackDatabaseIngressRuntimeResolver } =
+    await import("./slackBridgeDatabaseRuntimeAuthority");
+  const body = Buffer.from(JSON.stringify({
+    type: "event_callback",
+    api_app_id: "A_TEST_APP",
+    team_id: "T_TEST",
+    event_id: `Ev_PRIVACY_STALE_${sample.label.toUpperCase()}`,
+    event: sample.event,
+  }));
+  let sealCalls = 0;
+  await assert.rejects(verifyAndAdmitSlackIngress({
+    requestUrl: REQUEST_URL,
+    environment: "test",
+    rawBody: body,
+    ...signedRequest(body),
+    secretResolver: { async resolveSigningSecret() { return SIGNING_SECRET; } },
+    payloadSealer: {
+      async sealNormalizedPayload() {
+        sealCalls += 1;
+        throw new Error("expired privacy must reject before payload sealing");
+      },
+    },
+    runtimeResolver: createSlackDatabaseIngressRuntimeResolver(db),
+    now: NOW,
+  }), /Slack binding authority is inactive/);
+  assert.equal(sealCalls, 0);
+  assert.equal((await db.select().from(externalInboundEvents)).length, 0);
+  assert.equal((await db.select().from(messages)).length, 0);
+  assert.equal((await db.select().from(externalOutboundDeliveries)).length, 0);
+  const [binding] = await db.select().from(externalChannelBindings)
+    .where(eq(externalChannelBindings.id, fixture.binding.id));
+  assert.equal(binding.state, "active");
+  assert.equal(binding.privacyFreshUntil.getTime(), NOW.getTime());
 });

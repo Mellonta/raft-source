@@ -1867,8 +1867,400 @@
     {
       "idx": 266,
       "version": "7",
-      "when": 1789376344766,
-      "tag": "0266_session_token_predecessors",
+      "when": 1788862672971,
+      "tag": "0266_channel_joint_conversion",
+      "breakpoints": true
+    },
+    {
+      "idx": 267,
+      "version": "7",
+      "when": 1789369662379,
+      "tag": "0267_feature_flag_admin_preview_privileges",
+      "breakpoints": true
+    },
+    {
+      "idx": 268,
+      "version": "7",
+      "when": 1789379201879,
+      "tag": "0268_living_kitty_pryde",
+      "breakpoints": true
+    },
+    {
+      "idx": 269,
+      "version": "7",
+      "when": 1789401290989,
+      "tag": "0269_same_jane_foster",
+      "breakpoints": true
+    },
+    {
+      "idx": 270,
+      "version": "7",
+      "when": 1789429067932,
+      "tag": "0270_tranquil_omega_flight",
+      "breakpoints": true
+    },
+    {
+      "idx": 271,
+      "version": "7",
+      "when": 1789442537863,
+      "tag": "0271_provider_probe_enforcement_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 272,
+      "version": "7",
+      "when": 1789451957341,
+      "tag": "0272_provider_probe_flag_unification",
+      "breakpoints": true
+    },
+    {
+      "idx": 273,
+      "version": "7",
+      "when": 1789461572432,
+      "tag": "0273_session_token_predecessors",
+      "breakpoints": true
+    },
+    {
+      "idx": 274,
+      "version": "7",
+      "when": 1789462572432,
+      "tag": "0274_sloppy_sunfire",
+      "breakpoints": true
+    },
+    {
+      "idx": 275,
+      "version": "7",
+      "when": 1789468846963,
+      "tag": "0275_sloppy_manta",
+      "breakpoints": true
+    },
+    {
+      "idx": 276,
+      "version": "7",
+      "when": 1789490325649,
+      "tag": "0276_mention_delivery_recovery_count",
+      "breakpoints": true
+    },
+    {
+      "idx": 277,
+      "version": "7",
+      "when": 1789550000000,
+      "tag": "0277_official_app_auto_install",
+      "breakpoints": true
+    },
+    {
+      "idx": 278,
+      "version": "7",
+      "when": 1789647773453,
+      "tag": "0278_remove_external_author_policy_model",
+      "breakpoints": true
+    },
+    {
+      "idx": 279,
+      "version": "7",
+      "when": 1789836961660,
+      "tag": "0279_inbox_derivation_send_columns",
+      "breakpoints": true
+    },
+    {
+      "idx": 280,
+      "version": "7",
+      "when": 1789988085248,
+      "tag": "0280_retire_inbox_serving_rows",
+      "breakpoints": true
+    },
+    {
+      "idx": 281,
+      "version": "7",
+      "when": 1790066192414,
+      "tag": "0281_calm_big_bertha",
+      "breakpoints": true
+    },
+    {
+      "idx": 282,
+      "version": "7",
+      "when": 1790077982578,
+      "tag": "0282_daffy_thunderbolts",
+      "breakpoints": true
+    },
+    {
+      "idx": 283,
+      "version": "7",
+      "when": 1790103015101,
+      "tag": "0283_attachment_original_storage_v2_feature_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 284,
+      "version": "7",
+      "when": 1790178331737,
+      "tag": "0284_mention_terminal_decision",
+      "breakpoints": true
+    },
+    {
+      "idx": 285,
+      "version": "7",
+      "when": 1790232481681,
+      "tag": "0285_swift_wraith",
+      "breakpoints": true
+    },
+    {
+      "idx": 286,
+      "version": "7",
+      "when": 1790234720809,
+      "tag": "0286_retire_wiki",
+      "breakpoints": true
+    },
+    {
+      "idx": 287,
+      "version": "7",
+      "when": 1790340962194,
+      "tag": "0287_feature_flag_client_rule_stage",
+      "breakpoints": true
+    },
+    {
+      "idx": 288,
+      "version": "7",
+      "when": 1790349506717,
+      "tag": "0288_external_install_server_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 289,
+      "version": "7",
+      "when": 1790351351044,
+      "tag": "0289_gifted_human_fly",
+      "breakpoints": true
+    },
+    {
+      "idx": 290,
+      "version": "7",
+      "when": 1790499554677,
+      "tag": "0290_messages_search_gin_fastupdate_off",
+      "breakpoints": true
+    },
+    {
+      "idx": 291,
+      "version": "7",
+      "when": 1790500085481,
+      "tag": "0291_messages_autovacuum_thresholds",
+      "breakpoints": true
+    },
+    {
+      "idx": 292,
+      "version": "7",
+      "when": 1790511642368,
+      "tag": "0292_backfill_thread_parent_thread_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 293,
+      "version": "7",
+      "when": 1790511943900,
+      "tag": "0293_messages_channel_thread_parent_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 294,
+      "version": "7",
+      "when": 1790567731345,
+      "tag": "0294_agent_inbox_push",
+      "breakpoints": true
+    },
+    {
+      "idx": 295,
+      "version": "7",
+      "when": 1790572254077,
+      "tag": "0295_agent_runtime_provider",
+      "breakpoints": true
+    },
+    {
+      "idx": 296,
+      "version": "7",
+      "when": 1790592969850,
+      "tag": "0296_antiproton_hosted_runtime",
+      "breakpoints": true
+    },
+    {
+      "idx": 297,
+      "version": "7",
+      "when": 1790615690523,
+      "tag": "0297_channels_parent_channel_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 298,
+      "version": "7",
+      "when": 1790622387718,
+      "tag": "0298_channels_thread_parent_channel_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 299,
+      "version": "7",
+      "when": 1790657274275,
+      "tag": "0299_agent_status_protocol_adopted",
+      "breakpoints": true
+    },
+    {
+      "idx": 300,
+      "version": "7",
+      "when": 1790665230096,
+      "tag": "0300_oauth_clients_when_to_use",
+      "breakpoints": true
+    },
+    {
+      "idx": 301,
+      "version": "7",
+      "when": 1790671834856,
+      "tag": "0301_joint_channels_over_limit_since",
+      "breakpoints": true
+    },
+    {
+      "idx": 302,
+      "version": "7",
+      "when": 1790690104551,
+      "tag": "0302_messages_autoanalyze_threshold",
+      "breakpoints": true
+    },
+    {
+      "idx": 303,
+      "version": "7",
+      "when": 1790746937995,
+      "tag": "0303_feature_flag_admin_lab_definitions_privileges",
+      "breakpoints": true
+    },
+    {
+      "idx": 304,
+      "version": "7",
+      "when": 1790761607864,
+      "tag": "0304_app_login_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 305,
+      "version": "7",
+      "when": 1790775701625,
+      "tag": "0305_agent_migration_source_archive_retry",
+      "breakpoints": true
+    },
+    {
+      "idx": 306,
+      "version": "7",
+      "when": 1790782813176,
+      "tag": "0306_agent_migration_aborted_receipt",
+      "breakpoints": true
+    },
+    {
+      "idx": 307,
+      "version": "7",
+      "when": 1790783810260,
+      "tag": "0307_durable_tasks",
+      "breakpoints": true
+    },
+    {
+      "idx": 308,
+      "version": "7",
+      "when": 1790786565751,
+      "tag": "0308_agent_inbox_push_reminded_max_seq",
+      "breakpoints": true
+    },
+    {
+      "idx": 309,
+      "version": "7",
+      "when": 1790789673542,
+      "tag": "0309_messages_drop_channel_thread_parent_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 310,
+      "version": "7",
+      "when": 1790796605570,
+      "tag": "0310_message_server_timeline",
+      "breakpoints": true
+    },
+    {
+      "idx": 311,
+      "version": "7",
+      "when": 1790830026278,
+      "tag": "0311_messages_search_vector_statistics",
+      "breakpoints": true
+    },
+    {
+      "idx": 312,
+      "version": "7",
+      "when": 1790845433026,
+      "tag": "0312_feature_flag_admin_trace_identity_privileges",
+      "breakpoints": true
+    },
+    {
+      "idx": 313,
+      "version": "7",
+      "when": 1790910509686,
+      "tag": "0313_agent_migration_source_build_progress",
+      "breakpoints": true
+    },
+    {
+      "idx": 314,
+      "version": "7",
+      "when": 1790941778690,
+      "tag": "0314_agent_migration_max_archive_entries",
+      "breakpoints": true
+    },
+    {
+      "idx": 315,
+      "version": "7",
+      "when": 1791050588717,
+      "tag": "0315_app_agent_reminder_messages",
+      "breakpoints": true
+    },
+    {
+      "idx": 316,
+      "version": "7",
+      "when": 1791096423480,
+      "tag": "0316_agent_api_idempotency_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 317,
+      "version": "7",
+      "when": 1791136884693,
+      "tag": "0317_messages_server_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 318,
+      "version": "7",
+      "when": 1791174277234,
+      "tag": "0318_third_party_agent_events_panel",
+      "breakpoints": true
+    },
+    {
+      "idx": 319,
+      "version": "7",
+      "when": 1791185623180,
+      "tag": "0319_agents_created_at_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 320,
+      "version": "7",
+      "when": 1791186416656,
+      "tag": "0320_users_trace_user_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 321,
+      "version": "7",
+      "when": 1791187825495,
+      "tag": "0321_product_analytics_gate",
+      "breakpoints": true
+    },
+    {
+      "idx": 322,
+      "version": "7",
+      "when": 1791189888327,
+      "tag": "0322_task_events_seq_index",
       "breakpoints": true
     }
   ]

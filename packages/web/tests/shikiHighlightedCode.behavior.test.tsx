@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import test, { afterEach, beforeEach } from "node:test";
-import { cleanup, waitFor } from "@testing-library/react";
+import * as shikiHighlighter from "../src/components/markdown/shikiHighlighter";
+import { act, cleanup, waitFor } from "@testing-library/react";
 import MarkdownContent from "../src/components/markdown/MarkdownContent";
 import { renderWithIntl } from "./helpers/intl";
 import {
@@ -16,6 +16,7 @@ import {
   __resetShikiHighlightedCodeCacheForTests,
   __setShikiHighlightedCodeCacheLimitsForTests,
   getHighlightedCode,
+  tryHighlightCodeSync,
 } from "../src/components/markdown/shikiHighlighter";
 
 beforeEach(() => {
@@ -344,26 +345,55 @@ test("oversized fenced code blocks stay plaintext and bypass Shiki work", async 
   ).join("\n");
   assert.equal(isTooLargeForInlineHighlight(oversizedCode), true);
 
-  const startedAt = performance.now();
-  const { container } = renderWithIntl(
-    <MarkdownContent
-      source={["```ts", oversizedCode, "```"].join("\n")}
-      density="compact"
-    />,
-  );
-  await new Promise((resolve) => window.setTimeout(resolve, 0));
-  const timerDelayMs = performance.now() - startedAt;
+  const syncHighlight = vi.spyOn(shikiHighlighter, "tryHighlightCodeSync");
+  const asyncHighlight = vi.spyOn(shikiHighlighter, "highlightCode");
+  const prefetch = vi.spyOn(shikiHighlighter, "prefetchCommonCodeLanguages");
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    const { container } = renderWithIntl(
+      <MarkdownContent
+        source={["```ts", oversizedCode, "```"].join("\n")}
+        density="compact"
+      />,
+    );
 
-  const code = container.querySelector("pre code.language-ts");
-  assert.ok(code);
-  assert.match(code.textContent ?? "", /const value500 = 500;/);
-  assert.equal(container.querySelector('pre code.language-ts span[style*="color"]'), null);
-  assert.equal(__getShikiHighlightRecordCountForTests(), 0);
-  assert.equal(__getShikiHighlightedCodeCacheSizeForTests(), 0);
-  assert.ok(
-    timerDelayMs < 50,
-    `oversized plaintext render should not block the next browser timer for a long task (${timerDelayMs.toFixed(1)}ms)`,
-  );
+    const assertBypassed = () => {
+      const code = container.querySelector("pre code.language-ts");
+      assert.ok(code);
+      assert.match(code.textContent ?? "", /const value500 = 500;/);
+      assert.equal(container.querySelector('pre code.language-ts span[style*="color"]'), null);
+      assert.equal(__getShikiHighlightRecordCountForTests(), 0);
+      assert.equal(__getShikiHighlightedCodeCacheSizeForTests(), 0);
+      assert.equal(syncHighlight.mock.calls.length, 0);
+      assert.equal(asyncHighlight.mock.calls.length, 0);
+      assert.equal(prefetch.mock.calls.length, 0);
+    };
+
+    // The contract is zero highlighting work, both at render and after deferred
+    // work can run. A real timer's host scheduling delay is not render cost.
+    assertBypassed();
+    let timerRan = false;
+    window.setTimeout(() => { timerRan = true; }, 100);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_000);
+    });
+    assert.equal(timerRan, true, "the controlled browser timer must have run");
+    assertBypassed();
+
+    // A normal fence must reach the same observed highlighter: the zero-call
+    // assertions above must not pass because the spies are disconnected.
+    vi.useRealTimers();
+    renderWithIntl(<MarkdownContent source={"```ts\nconst control = 1;\n```"} density="compact" />);
+    await waitFor(() => {
+      assert.ok(syncHighlight.mock.calls.length + asyncHighlight.mock.calls.length > 0);
+      assert.ok(__getShikiHighlightedCodeCacheSizeForTests() > 0);
+    });
+  } finally {
+    vi.useRealTimers();
+    syncHighlight.mockRestore();
+    asyncHighlight.mockRestore();
+    prefetch.mockRestore();
+  }
 });
 
 test("Shiki cutoff keeps exact-threshold blocks eligible and blocks over-threshold input", () => {
@@ -375,7 +405,7 @@ test("Shiki cutoff keeps exact-threshold blocks eligible and blocks over-thresho
   assert.equal(isTooLargeForInlineHighlight("x".repeat(MAX_SHIKI_HIGHLIGHT_CHARS + 1)), true);
 });
 
-test("long code lines stay horizontally scrollable inside the brutal code surface", () => {
+test("long code lines stay horizontally scrollable inside the theme code surface", () => {
   const { container } = renderWithIntl(
     <MarkdownContent
       source={["```json", `{"veryLongField":"${"x".repeat(180)}"}`, "```"].join("\n")}
@@ -387,5 +417,27 @@ test("long code lines stay horizontally scrollable inside the brutal code surfac
   assert.ok(pre);
   assert.ok(pre.className.includes("overflow-x-auto"));
   assert.ok(pre.className.includes("border-2"));
-  assert.ok(pre.className.includes("bg-[#07111f]"));
+  assert.ok(pre.className.includes("bg-code-surface"));
+});
+
+test("cold and warm code retain both Shiki palettes in the same cached token entry", async () => {
+  const code = "const themeValue = 42; // both modes";
+  const tokens = await getHighlightedCode(code, "typescript");
+  const keyword = tokens.flat().find((token) => token.content === "const");
+  assert.ok(keyword?.variants.light.color);
+  assert.ok(keyword?.variants.dark.color);
+  assert.notEqual(keyword.variants.light.color, keyword.variants.dark.color);
+  assert.equal(tryHighlightCodeSync(code, "ts"), tokens);
+
+  const result = renderWithIntl(
+    <MarkdownContent source={["```ts", code, "```"].join("\n")} />,
+  );
+  await waitFor(() => assert.ok(result.container.querySelector(".r-code-token")));
+  const node = [...result.container.querySelectorAll<HTMLElement>(".r-code-token")]
+    .find((token) => token.textContent === "const");
+  assert.ok(node);
+  assert.equal(node.style.getPropertyValue("--shiki-light-color"), keyword.variants.light.color);
+  assert.equal(node.style.getPropertyValue("--shiki-dark-color"), keyword.variants.dark.color);
+  assert.equal(node.style.color, "", "the root theme must remain free to choose the token color");
+  assert.equal(result.container.querySelector("pre code")?.textContent, `${code}\n`);
 });

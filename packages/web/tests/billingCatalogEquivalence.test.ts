@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 import { en as enMessages } from "../src/i18n/messages/en";
 import { zhCn as zhMessages } from "../src/i18n/messages/zh-cn";
@@ -385,7 +384,7 @@ const EXPECTED_CALLSITE_IDS: Record<string, readonly string[]> = {
     "billing.seatQuantitiesAreAlreadyUpToDate", "billing.subscriptionReactivatedYourCurrentProSeatCap", "billing.failedToUpdateSeats",
     "billing.subscriptionCancellationScheduledForTheEndOf", "billing.failedToCancelSubscription", "billing.currentPlan",
     "billing.finalTrialPeriod", "billing.included", "billing.notIncluded",
-    "billing.seat", "billing.humans", "billing.agents",
+    "billing.seat", "billing.seat", "billing.humans", "billing.agents",
     "billing.humans", "billing.agents", "billing.messageHistory",
     "billing.unlimited", "billing.fileUploads", "billing.openStripeBillingPortal",
     "billing.opening", "billing.billingPortal", "billing.cancelTheWholeProSubscriptionAtPeriodEnd",

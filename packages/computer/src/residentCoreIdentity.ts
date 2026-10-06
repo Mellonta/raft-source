@@ -1,5 +1,5 @@
 import type { DaemonCoreOptions } from "@botiverse/raft-daemon/core";
-import { BUNDLED_DAEMON_VERSION, COMPUTER_VERSION } from "./version.js";
+import { BUNDLED_DAEMON_VERSION, COMPUTER_VERSION } from "./version";
 
 export interface ResidentCoreIdentityCredentials {
   serverId: string;

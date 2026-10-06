@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
@@ -9,8 +9,8 @@ import {
   PLAN_CONFIG,
   type ServerId,
 } from "@botiverse/raft-shared";
-import { ATTACHMENT_UPLOAD_MAX_SIZE_BYTES } from "@botiverse/raft-shared/src/attachmentUploadContract.js";
-import { getDb } from "../db/index.js";
+import { ATTACHMENT_UPLOAD_MAX_SIZE_BYTES } from "@botiverse/raft-shared/src/attachmentUploadContract";
+import { getDb } from "../db/index";
 import {
   attachments,
   channels,
@@ -19,24 +19,24 @@ import {
   serverFileUploadUsageMonths,
   servers,
   users,
-} from "../db/schema.js";
-import { signAccessToken } from "../middleware/auth.js";
+} from "../db/schema";
+import { signAccessToken } from "../middleware/auth";
 import {
   addHuman,
   canUserAccessChannel,
   canUserPostToChannel,
   createChannel,
-} from "../services/channelService.js";
-import { isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService.js";
-import { addMember, createServer } from "../services/serverService.js";
-import { billingUsageMonth } from "../services/fileUploadQuotaService.js";
-import { openTestApp } from "../test/integration/app.js";
+} from "../services/channelService";
+import { isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService";
+import { addMember, createServer } from "../services/serverService";
+import { billingUsageMonth } from "../services/fileUploadQuotaService";
+import { openTestApp } from "../test/integration/app";
 import type {
   AttachmentUploadSessionContext,
   AttachmentUploadSessionResult,
   AttachmentUploadSessionService,
   CreateAttachmentUploadSessionInput,
-} from "./attachmentUploadSessions.js";
+} from "./attachmentUploadSessions";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -55,6 +55,10 @@ class FakeAttachmentUploadSessionService implements AttachmentUploadSessionServi
   readonly requestKeys = new Map<string, string>();
   nextResult: AttachmentUploadSessionResult | null = null;
   nextCompleteResult: AttachmentUploadSessionResult | null = null;
+
+  async listActive(_context: AttachmentUploadSessionContext, _channelId: string): Promise<AttachmentUploadSessionResult> {
+    return { status: 200, body: { sessions: [] } };
+  }
 
   async capabilities(): Promise<AttachmentUploadSessionResult> {
     this.calls.capabilities += 1;
@@ -577,13 +581,6 @@ test("enabled fake exercises distinct post, channel quota, Joint entitlement, an
       PLAN_CONFIG.free.limits.maxChannels = originalMaxChannels;
     }
 
-    const freeCanonical = await createChannel(fixture.server.id, `free-joint-canonical-${randomUUID()}`);
-    await getDb().insert(jointChannels).values({
-      canonicalChannelId: freeCanonical.id,
-      createdByServerId: fixture.server.id,
-      createdByUserId: fixture.owner.id,
-      createdAt: new Date("2026-08-01T00:00:00Z"),
-    });
     const canonical = await createChannel(fixture.server.id, `joint-canonical-${randomUUID()}`);
     const projection = await createChannel(
       fixture.server.id,
@@ -596,7 +593,8 @@ test("enabled fake exercises distinct post, channel quota, Joint entitlement, an
       canonicalChannelId: canonical.id,
       createdByServerId: fixture.server.id,
       createdByUserId: fixture.owner.id,
-      createdAt: new Date("2026-08-02T00:00:00Z"),
+      // Contract v0.3 §18.8: over the free-server cap for more than 3 days.
+      overLimitSince: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000),
     }).returning();
     await getDb().insert(jointChannelServers).values({
       jointChannelId: joint.id,
@@ -618,9 +616,9 @@ test("enabled fake exercises distinct post, channel quota, Joint entitlement, an
         new Date("2040-01-01T00:00:00Z"),
       ),
       true,
-      "a second Free-hosted Joint projection is read-only even far in the future",
+      "a Joint projection past its over-limit grace is read-only",
     );
-    await expectDenied(projection.id, "Joint entitlement read-only is denied");
+    await expectDenied(projection.id, "Joint over-limit read-only is denied");
 
     await getDb().update(servers).set({ plan: "pro" }).where(eq(servers.id, fixture.server.id));
     const proSize = FREE_SINGLE_FILE_UPLOAD_LIMIT_BYTES + 1;

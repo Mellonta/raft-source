@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
-import { getDb, type Database, type DatabaseExecutor } from "../db/index.js";
-import { channels, productFeedbackLocators } from "../db/schema.js";
+import { getDb, type Database, type DatabaseExecutor } from "../db/index";
+import { channels, productFeedbackLocators } from "../db/schema";
 
 export const FEEDBACK_LOCATOR_ARTIFACT_KIND = "raft-feedback-locator-v0" as const;
 export const FEEDBACK_LOCATOR_EVENT_KIND = "feedback-locator:created" as const;

@@ -1,6 +1,6 @@
 import { desc, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { integrationAuditEvents, oauthClients, servers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { integrationAuditEvents, oauthClients, servers, users } from "../db/schema";
 
 export const INTEGRATION_AUDIT_EVENT_TYPES = [
   "app.registered",
@@ -13,12 +13,16 @@ export const INTEGRATION_AUDIT_EVENT_TYPES = [
   "app.offline_requested",
   "app.offline_approved",
   "app.offline_rejected",
+  "official_app.registry_created",
+  "official_app.registry_updated",
+  "official_app.registry_removed",
   "marketplace.installed",
   "marketplace.uninstalled",
   "client.secret_rotated",
   "action_card.executed",
   "oauth.redirect_mismatch",
   "oauth.lifecycle",
+  "agent.jwt_issued",
   "oauth.token_exchange_failed",
   "private_share.link_created",
   "private_share.link_revoked",
@@ -37,7 +41,15 @@ export const INTEGRATION_AUDIT_EVENT_TYPES = [
   "provider_connection.updated",
   "provider_connection.credential_rotated",
   "provider_connection.tested",
+  "provider_connection.assignment_detached",
+  "provider_connection.probe_issued",
+  "provider_connection.probe_receipt",
   "provider_connection.deleted",
+  "agent_connection.connect_initiated",
+  "agent_connection.confirmed",
+  "agent_connection.disconnected",
+  "agent_connection.connector_assigned",
+  "agent_connection.connector_disconnected",
 ] as const;
 
 export type IntegrationAuditEventType = (typeof INTEGRATION_AUDIT_EVENT_TYPES)[number];
@@ -61,11 +73,15 @@ const EVENT_METADATA_ALLOWLIST: Record<IntegrationAuditEventType, readonly strin
   "app.offline_requested": ["clientKey", "appType", "previousPublishStatus"],
   "app.offline_approved": ["clientKey", "appType", "previousPublishStatus", "nextPublishStatus", "removedInstallCount", "revokedGrantCount", "revokedTokenCount", "deniedPendingRequestCount"],
   "app.offline_rejected": ["clientKey", "appType", "previousPublishStatus", "nextPublishStatus"],
+  "official_app.registry_created": ["clientKey", "publisherServerId", "revision", "autoInstall", "status", "purpose"],
+  "official_app.registry_updated": ["clientKey", "publisherServerId", "revision", "autoInstall", "status", "purpose", "changedFields"],
+  "official_app.registry_removed": ["clientKey", "publisherServerId", "revision", "autoInstall", "status", "purpose"],
   "marketplace.installed": ["clientKey", "targetServerId"],
   "marketplace.uninstalled": ["clientKey", "targetServerId", "revokedGrantCount", "revokedTokenCount", "deniedPendingRequestCount"],
   "client.secret_rotated": ["clientKey", "appType"],
   "action_card.executed": ["actionType", "clientKey", "mode"],
   "oauth.redirect_mismatch": ["clientKey", "errorCode"],
+  "agent.jwt_issued": ["clientKey", "grantId", "jti", "expiresAt"],
   "oauth.lifecycle": ["clientKey", "stage", "result", "grantType", "principalType", "errorClass"],
   "oauth.token_exchange_failed": ["clientKey", "grantType", "errorCode", "requestIdHash"],
   "private_share.link_created": ["clientKey", "shareLinkId", "expiresAt", "convertedFromServerLocal"],
@@ -85,7 +101,15 @@ const EVENT_METADATA_ALLOWLIST: Record<IntegrationAuditEventType, readonly strin
   "provider_connection.updated": ["changedFields", "configVersion", "enabled"],
   "provider_connection.credential_rotated": ["configVersion", "credentialVersion", "status"],
   "provider_connection.tested": ["configVersion", "credentialVersion", "status"],
+  "provider_connection.assignment_detached": ["providerId", "configVersion", "credentialVersion", "agentId", "reason"],
+  "provider_connection.probe_issued": ["probeId", "computerId", "runtime", "modelDigest", "configVersion", "credentialVersion", "probeKind"],
+  "provider_connection.probe_receipt": ["probeId", "computerId", "runtime", "modelDigest", "configVersion", "credentialVersion", "category", "latencyMs"],
   "provider_connection.deleted": ["providerId", "configVersion", "credentialVersion"],
+  "agent_connection.connect_initiated": ["connectionProvider", "access", "scopes", "errorCode"],
+  "agent_connection.confirmed": ["connectionProvider", "account", "connectorId", "errorCode"],
+  "agent_connection.disconnected": ["connectionProvider", "errorCode"],
+  "agent_connection.connector_assigned": ["connectionProvider", "connectorId", "actingRole", "errorCode"],
+  "agent_connection.connector_disconnected": ["connectionProvider", "connectorId", "actingRole", "errorCode"],
 };
 
 const EVENT_CATEGORY: Record<IntegrationAuditEventType, IntegrationAuditEventCategory> = {
@@ -99,12 +123,16 @@ const EVENT_CATEGORY: Record<IntegrationAuditEventType, IntegrationAuditEventCat
   "app.offline_requested": "revocation",
   "app.offline_approved": "revocation",
   "app.offline_rejected": "revocation",
+  "official_app.registry_created": "registration",
+  "official_app.registry_updated": "registration",
+  "official_app.registry_removed": "revocation",
   "marketplace.installed": "install",
   "marketplace.uninstalled": "revocation",
   "client.secret_rotated": "revocation",
   "action_card.executed": "runtime",
   "oauth.redirect_mismatch": "runtime",
   "oauth.lifecycle": "runtime",
+  "agent.jwt_issued": "runtime",
   "oauth.token_exchange_failed": "runtime",
   "private_share.link_created": "install",
   "private_share.link_revoked": "revocation",
@@ -123,7 +151,15 @@ const EVENT_CATEGORY: Record<IntegrationAuditEventType, IntegrationAuditEventCat
   "provider_connection.updated": "registration",
   "provider_connection.credential_rotated": "revocation",
   "provider_connection.tested": "runtime",
+  "provider_connection.assignment_detached": "revocation",
+  "provider_connection.probe_issued": "runtime",
+  "provider_connection.probe_receipt": "runtime",
   "provider_connection.deleted": "revocation",
+  "agent_connection.connect_initiated": "scope",
+  "agent_connection.confirmed": "scope",
+  "agent_connection.disconnected": "revocation",
+  "agent_connection.connector_assigned": "scope",
+  "agent_connection.connector_disconnected": "revocation",
 };
 
 const DIFF_ALLOWLIST = new Set([
@@ -138,6 +174,9 @@ const DIFF_ALLOWLIST = new Set([
   "enabled",
   "humanMarketplaceVisible",
   "publishStatus",
+  "autoInstall",
+  "purpose",
+  "status",
 ]);
 
 const CREDENTIAL_KEY_PATTERN = /(^|_)(authorization|bearer|client_secret|code|cookie|jwt|password|secret|token)(_|$)/i;

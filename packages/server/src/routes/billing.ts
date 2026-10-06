@@ -1,7 +1,8 @@
 import { Router, type Router as RouterType, type Request, type Response } from "express";
 import { canMutateBilling, canReadBillingSummary } from "@botiverse/raft-shared";
-import * as billingService from "../services/billingService.js";
-import { getActorServerRoleInServer } from "../lib/actorPermissions.js";
+import * as billingService from "../services/billingService";
+import { getActorServerRoleInServer } from "../lib/actorPermissions";
+import { sendJsonServerError } from "./errorResponse";
 
 export const billingRouter: RouterType = Router();
 
@@ -69,7 +70,11 @@ billingRouter.post("/checkout", async (req: Request, res: Response) => {
     } else if (message.includes("must be")) {
       res.status(400).json({ error: message });
     } else {
-      res.status(500).json({ error: "Failed to create checkout session" });
+      sendJsonServerError(req, res, {
+        error: "Failed to create checkout session",
+        logPrefix: "[Billing] Checkout error:",
+        err,
+      });
     }
   }
 });
@@ -97,7 +102,11 @@ async function handleSeatPackQuantityUpdate(req: Request, res: Response) {
     } else if (isSeatPackQuantityRequestError(message)) {
       res.status(400).json({ error: message });
     } else {
-      res.status(500).json({ error: "Failed to update pack quantity" });
+      sendJsonServerError(req, res, {
+        error: "Failed to update pack quantity",
+        logPrefix: "[Billing] Seat pack quantity update error:",
+        err,
+      });
     }
   }
 }
@@ -125,7 +134,11 @@ async function handleSeatPackQuantityPreview(req: Request, res: Response) {
     } else if (isSeatPackQuantityRequestError(message)) {
       res.status(400).json({ error: message });
     } else {
-      res.status(500).json({ error: "Failed to preview pack quantity update" });
+      sendJsonServerError(req, res, {
+        error: "Failed to preview pack quantity update",
+        logPrefix: "[Billing] Seat pack quantity preview error:",
+        err,
+      });
     }
   }
 }
@@ -161,7 +174,11 @@ billingRouter.post("/cancel", async (req: Request, res: Response) => {
     } else if (message.includes("does not have")) {
       res.status(400).json({ error: message });
     } else {
-      res.status(500).json({ error: "Failed to cancel subscription" });
+      sendJsonServerError(req, res, {
+        error: "Failed to cancel subscription",
+        logPrefix: "[Billing] Cancellation error:",
+        err,
+      });
     }
   }
 });
@@ -193,8 +210,11 @@ billingRouter.post("/portal", async (req: Request, res: Response) => {
     const url = await billingService.createPortalSession(req.serverId!, returnUrl);
     res.json({ url });
   } catch (err: any) {
-    console.error("[Billing] Portal error:", err);
-    res.status(500).json({ error: "Failed to create portal session" });
+    sendJsonServerError(req, res, {
+      error: "Failed to create portal session",
+      logPrefix: "[Billing] Portal error:",
+      err,
+    });
   }
 });
 

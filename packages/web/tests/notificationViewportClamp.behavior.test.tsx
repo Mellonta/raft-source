@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { act, renderHook } from "@testing-library/react";
 import type { RefObject } from "react";
 import {
   calculateViewportClampStyle,
   useViewportClamp,
-} from "../src/components/layout/useViewportClamp.js";
+} from "../src/components/layout/useViewportClamp";
 
 const triggerRect = {
   top: 700,

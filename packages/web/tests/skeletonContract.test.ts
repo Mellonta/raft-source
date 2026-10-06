@@ -1,4 +1,3 @@
-import { describe, it } from "node:test";
 import assert from "node:assert";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
@@ -79,16 +78,18 @@ describe("SkeletonRow layout-shift composition", () => {
 });
 
 describe("ConversationCardSkeleton (inbox/saved shared ~96px card)", () => {
-  it("renders cards in the real ConversationPreviewCard box (border-2 border-black/30 bg-white p-3)", () => {
+  it("uses themed card surfaces and standard RUI loading bars", () => {
     const html = renderToStaticMarkup(createElement(ConversationCardSkeleton));
-    assert.match(html, /border-2 border-black\/30 bg-white p-3/);
+    assert.match(html, /border-line-muted bg-layer-panel p-3/);
+    assert.doesNotMatch(html, /bg-white|bg-black\/|border-black/);
+    assert.equal((html.match(/data-slot="skeleton"/g) ?? []).length, 30);
     assert.match(html, /aria-busy="true"/);
   });
 
   it("renders the requested number of cards", () => {
     const html = renderToStaticMarkup(createElement(ConversationCardSkeleton, { count: 3 }));
     // 3 cards, each carrying the card box class.
-    const matches = html.match(/border-2 border-black\/30 bg-white p-3/g) ?? [];
+    const matches = html.match(/border-line-muted bg-layer-panel p-3/g) ?? [];
     assert.equal(matches.length, 3);
   });
 });

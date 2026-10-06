@@ -54,14 +54,31 @@ async function postThreadReply(
 }
 
 async function readChannelMetrics(page: Page) {
-  return page.getByTestId("message-scroller").evaluate((el) => ({
-    scrollTop: el.scrollTop,
-    scrollHeight: el.scrollHeight,
-    clientHeight: el.clientHeight,
-    bottomGap: Math.max(0, el.scrollHeight - el.scrollTop - el.clientHeight),
-    itemCount: el.querySelectorAll("[data-message-id]").length,
-    loadingText: el.textContent?.includes("Loading") ?? false,
-  }));
+  return page.getByTestId("message-scroller").evaluate((el) => {
+    // "Is the CONVERSATION list itself loading?" (task #503).
+    //
+    // This used to be `el.textContent.includes("Loading")`, which was a false
+    // positive: message bodies and attachment states also render the word
+    // "Loading" (e.g. `Loading <filename>` for an attachment being fetched).
+    // A natural failure proved it — the single match was a message row
+    // (`messageId` set) whose text was an attachment's loading label.
+    //
+    // Scope is now the list's own pagination hints only:
+    //   list-loading-older  header, HistoryTopState(noun="messages")
+    //   list-loading-newer  footer, ChatPanel channelFooter
+    // The thread panel uses distinct ids (thread-loading-*), so a thread's own
+    // hint can never be mistaken for the parent list's.
+    const loadingOlder = el.querySelector('[data-testid="list-loading-older"]') !== null;
+    const loadingNewer = el.querySelector('[data-testid="list-loading-newer"]') !== null;
+    return {
+      scrollTop: el.scrollTop,
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+      bottomGap: Math.max(0, el.scrollHeight - el.scrollTop - el.clientHeight),
+      itemCount: el.querySelectorAll("[data-message-id]").length,
+      loadingText: loadingOlder || loadingNewer,
+    };
+  });
 }
 
 async function captureChannelAnchor(page: Page) {
@@ -157,7 +174,13 @@ test.describe("thread open preserves channel list", () => {
       await expect(page.getByText(parentContent)).toBeVisible();
 
       const staleAnchorCard = channelScroller.locator(`#message-${staleAnchorMessage.id}`);
-      await expect(staleAnchorCard).toHaveClass(/bg-brutal-cyan\/25/);
+      // RUI migration (#7347): the highlight is no longer a bare
+      // `bg-brutal-cyan/25` class on the row — the row's class string now
+      // permanently carries the conditional variant
+      // `has-data-[slot=message-item-search-match]:bg-brutal-cyan/25`, so a
+      // class regex matches whether or not the highlight is active. The
+      // state oracle is `data-highlighted="true"` on the row (MessageItem.tsx).
+      await expect(staleAnchorCard).toHaveAttribute("data-highlighted", "true");
       const parentMessageCard = channelScroller.locator(`#message-${parentMessage.id}`);
       await parentMessageCard.scrollIntoViewIfNeeded();
       await expect(parentMessageCard).toBeVisible();
@@ -170,9 +193,11 @@ test.describe("thread open preserves channel list", () => {
       await parentMessageCard.locator('[data-message-affordance="inline-thread-replies"]').click();
       await expect(page.getByTestId("thread-message-scroller")).toBeVisible();
       await expect(page.getByTestId("thread-message-scroller").getByText(replyContent)).toBeVisible();
-      await expect(staleAnchorCard).not.toHaveClass(/bg-brutal-cyan\/25/);
-      await expect(parentMessageCard).toHaveClass(/border-2 border-black bg-white/);
-      await expect(parentMessageCard).not.toHaveClass(/bg-brutal-cyan\/25/);
+      await expect(staleAnchorCard).not.toHaveAttribute("data-highlighted", "true");
+      // Selected-as-thread-parent chrome is now the `data-selected="true"`
+      // attribute on the row (was `border-2 border-black bg-white` classes).
+      await expect(parentMessageCard).toHaveAttribute("data-selected", "true");
+      await expect(parentMessageCard).not.toHaveAttribute("data-highlighted", "true");
       await page.waitForTimeout(4_000);
 
       const metricsAfter = await readChannelMetrics(page);
@@ -185,14 +210,17 @@ test.describe("thread open preserves channel list", () => {
       );
 
       expect(fetchesAfterOpen, "opening a thread must not refetch the parent channel window").toHaveLength(0);
-      expect(metricsAfter.loadingText, "parent channel scroller must not show a loading state").toBe(false);
+      expect(
+        metricsAfter.loadingText,
+        "parent channel scroller must not show its own list loading hint",
+      ).toBe(false);
       expect(drift, "parent channel anchor should survive thread panel open").toBeLessThan(120);
 
       await page.goto(
         `/s/${seedState.server.slug}/channel/${seedState.channel.id}?msg=${parentMessage.id}`,
       );
       await expect(channelScroller).toBeVisible();
-      await expect(parentMessageCard).toHaveClass(/bg-brutal-cyan\/25/);
+      await expect(parentMessageCard).toHaveAttribute("data-highlighted", "true");
       await parentMessageCard.scrollIntoViewIfNeeded();
 
       const sameParentAnchorBefore = await captureChannelAnchor(page);
@@ -204,8 +232,8 @@ test.describe("thread open preserves channel list", () => {
 
       await parentMessageCard.locator('[data-message-affordance="inline-thread-replies"]').click();
       await expect(page.getByTestId("thread-message-scroller")).toBeVisible();
-      await expect(parentMessageCard).toHaveClass(/border-2 border-black bg-white/);
-      await expect(parentMessageCard).not.toHaveClass(/bg-brutal-cyan\/25/);
+      await expect(parentMessageCard).toHaveAttribute("data-selected", "true");
+      await expect(parentMessageCard).not.toHaveAttribute("data-highlighted", "true");
       await page.waitForTimeout(4_000);
 
       const sameParentDrift = await measureChannelAnchorDrift(page, sameParentAnchorBefore!);

@@ -1,13 +1,13 @@
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   oauthAppPermissionRevisions,
   oauthAppWebhookConfigs,
   oauthClientInstalls,
   oauthClients,
-} from "../db/schema.js";
-import { computeEffectiveAppOutboundAuthority } from "./appOutboundPermissionService.js";
-import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy.js";
+} from "../db/schema";
+import { computeEffectiveAppOutboundAuthority } from "./appOutboundPermissionService";
+import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy";
 
 export async function getAppNotificationDeveloperState(input: {
   clientId: string;

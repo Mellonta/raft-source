@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { formatProfile } from "./_format.js";
+import { formatProfile } from "./_format";
 
 test("formatProfile renders agent computer context prominently", () => {
   const formatted = formatProfile({

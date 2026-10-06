@@ -1,10 +1,10 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import type { DatabaseExecutor } from "../db/index.js";
-import { newsletterAudienceContacts, newsletterWebhookEvents, users } from "../db/schema.js";
-import { suppressScheduledComputerMobileAppEmailJourneys } from "./computerMobileAppEmailJourneyService.js";
-import { normalizeEmail } from "./emailNormalization.js";
+import { getDb } from "../db/index";
+import type { DatabaseExecutor } from "../db/index";
+import { newsletterAudienceContacts, newsletterWebhookEvents, users } from "../db/schema";
+import { suppressScheduledComputerMobileAppEmailJourneys } from "./computerMobileAppEmailJourneyService";
+import { normalizeEmail } from "./emailNormalization";
 
 type NewsletterStatus = "synced" | "sync_failed" | "unsubscribed" | "bounced" | "complained";
 type OptOutStatus = Extract<NewsletterStatus, "unsubscribed" | "bounced" | "complained">;

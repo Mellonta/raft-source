@@ -1,7 +1,6 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
-import { planSendToMachineAction } from "./agentOrchestrator.js";
+import { planSendToMachineAction } from "./agentOrchestrator";
 
 test("planSendToMachineAction sends locally when a ready local connection exists", () => {
   assert.equal(

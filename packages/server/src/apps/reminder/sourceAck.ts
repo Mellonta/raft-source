@@ -1,6 +1,6 @@
-import type { AgentApiRequestBodyByRoute, AgentApiResponseByRoute } from "@botiverse/raft-shared/src/agentApiContract.js";
-import * as reminderCrud from "./crud.js";
-import { ackAuthorizedReminderFire } from "./service.js";
+import type { AgentApiRequestBodyByRoute, AgentApiResponseByRoute } from "@botiverse/raft-shared/src/agentApiContract";
+import * as reminderCrud from "./crud";
+import { ackAuthorizedReminderFire } from "./service";
 
 export const REMINDER_INBOX_APP_ID = "system.reminder" as const;
 export const REMINDER_DUE_NOTIFICATION_CLASS = "due" as const;
@@ -82,14 +82,12 @@ export async function handleReminderSourceAck(
   if (!ack.ok) {
     return {
       ok: false,
-      status: ack.reason === "reminder_not_found" || ack.reason === "target_not_fired" ? 404 : 409,
+      status: 404,
       body: {
         error:
-          ack.reason === "stale_source_revision"
-            ? "Source revision is stale; refresh Inbox and retry"
-            : ack.reason === "target_not_fired"
-              ? "Source revision was not fired"
-              : "Source not found",
+          ack.reason === "target_not_fired"
+            ? "Source revision was not fired"
+            : "Source not found",
         code: ack.reason === "reminder_not_found" ? "source_not_found" : ack.reason,
         latestFiredSourceVersion: ack.latestFiredSourceVersion,
       },

@@ -2,15 +2,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, test } from "vitest";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
-import { agents, rapAppConfigs, servers, users } from "../db/schema.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
+import { agents, rapAppConfigs, servers, users } from "../db/schema";
 import {
   getRapAppConfig,
   patchRapAppConfig,
   RapAppConfigError,
-} from "./rapAppConfigService.js";
+} from "./rapAppConfigService";
 
 afterEach(async () => {
   await closeDatabase();

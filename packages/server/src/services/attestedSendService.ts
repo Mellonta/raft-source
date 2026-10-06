@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 
-import { and, desc, eq, gt, lte, not, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, lte, not, sql } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   agents,
   attestedSendEvents,
@@ -11,8 +11,8 @@ import {
   messageMentions,
   messages,
   users,
-} from "../db/schema.js";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
+} from "../db/schema";
+import { addTraceEvent } from "../tracing/semanticTrace";
 
 export type AttestedSendEventType = "gate_triggered" | "continue" | "silence" | "e1_exempt";
 export type AttestedSendTargetType = "channel" | "dm" | "thread";
@@ -41,6 +41,7 @@ export type FreshnessMessageAnchorOptions = {
 
 export type FreshnessMessageRangeOptions = FreshnessMessageAnchorOptions & {
   latestSeq?: number;
+  excludeExactSeqs?: number[];
 };
 
 export type FreshnessMessageAnchor = {
@@ -65,6 +66,14 @@ function messageAnchorConditions(channelId: string, options?: FreshnessMessageAn
     )!));
   }
   return conditions;
+}
+
+function normalizedExactSeqs(seqs: number[] | undefined, afterSeq = 0): number[] {
+  if (!seqs) return [];
+  return [...new Set(seqs
+    .map((seq) => Math.floor(Number(seq)))
+    .filter((seq) => Number.isInteger(seq) && seq > afterSeq))]
+    .slice(0, 2_500);
 }
 
 export async function withTargetFreshnessGate<T>(channelId: string, work: () => Promise<T>): Promise<T> {
@@ -256,6 +265,8 @@ export async function countMessagesAfterSeq(
   const db = getDb();
   const conditions = messageAnchorConditions(channelId, options);
   conditions.push(gt(messages.seq, seq));
+  const excludedSeqs = normalizedExactSeqs(options?.excludeExactSeqs, seq);
+  if (excludedSeqs.length > 0) conditions.push(not(inArray(messages.seq, excludedSeqs)));
   if (typeof options?.latestSeq === "number" && Number.isFinite(options.latestSeq)) {
     conditions.push(lte(messages.seq, Math.max(0, Math.floor(options.latestSeq))));
   }
@@ -276,6 +287,8 @@ export async function listRecentMessagesAfterSeq(
   const db = getDb();
   const conditions = messageAnchorConditions(channelId, options);
   conditions.push(gt(messages.seq, seq));
+  const excludedSeqs = normalizedExactSeqs(options?.excludeExactSeqs, seq);
+  if (excludedSeqs.length > 0) conditions.push(not(inArray(messages.seq, excludedSeqs)));
   if (typeof options?.latestSeq === "number" && Number.isFinite(options.latestSeq)) {
     conditions.push(lte(messages.seq, Math.max(0, Math.floor(options.latestSeq))));
   }
@@ -305,6 +318,10 @@ function agentAttentionConditions(
   ];
   if (typeof options?.latestSeq === "number" && Number.isFinite(options.latestSeq)) {
     conditions.push(lte(inboxNotificationFacts.messageSeq, Math.max(0, Math.floor(options.latestSeq))));
+  }
+  const excludedSeqs = normalizedExactSeqs(options?.excludeExactSeqs, seq);
+  if (excludedSeqs.length > 0) {
+    conditions.push(not(inArray(inboxNotificationFacts.messageSeq, excludedSeqs)));
   }
   if (options?.excludeSender) {
     conditions.push(not(and(
@@ -437,7 +454,13 @@ export async function getThreadParentMessage(channelId: string): Promise<{
   };
 }
 
-export async function getFormalMentionFacts(agentId: string, channelId: string, lastSeenSeq: number, latestSeq: number): Promise<{
+export async function getFormalMentionFacts(
+  agentId: string,
+  channelId: string,
+  lastSeenSeq: number,
+  latestSeq: number,
+  excludeExactSeqs?: number[],
+): Promise<{
   count: number;
   firstMessageId: string | null;
   firstHandle: string | null;
@@ -446,20 +469,23 @@ export async function getFormalMentionFacts(agentId: string, channelId: string, 
     return { count: 0, firstMessageId: null, firstHandle: null };
   }
   const db = getDb();
+  const conditions = [
+    eq(messageMentions.targetType, "agent"),
+    eq(messageMentions.targetId, agentId),
+    eq(messageMentions.channelId, channelId),
+    sql`(${messageMentions.notifiableAtSend} OR ${messageMentions.notifiedAt} IS NOT NULL)`,
+    gt(messageMentions.messageSeq, lastSeenSeq),
+    lte(messageMentions.messageSeq, latestSeq),
+  ];
+  const excludedSeqs = normalizedExactSeqs(excludeExactSeqs, lastSeenSeq);
+  if (excludedSeqs.length > 0) conditions.push(not(inArray(messageMentions.messageSeq, excludedSeqs)));
   const rows = await db
     .select({
       messageId: messageMentions.messageId,
       handleAtSendTime: messageMentions.handleAtSendTime,
     })
     .from(messageMentions)
-    .where(and(
-      eq(messageMentions.targetType, "agent"),
-      eq(messageMentions.targetId, agentId),
-      eq(messageMentions.channelId, channelId),
-      sql`(${messageMentions.notifiableAtSend} OR ${messageMentions.notifiedAt} IS NOT NULL)`,
-      gt(messageMentions.messageSeq, lastSeenSeq),
-      lte(messageMentions.messageSeq, latestSeq),
-    ))
+    .where(and(...conditions))
     .orderBy(messageMentions.messageSeq);
 
   return {

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test, vi } from "vitest";
 
 import type { AgentMessage } from "@botiverse/raft-shared";
 import {
@@ -8,7 +7,7 @@ import {
   handleReplicaMessage,
   routeInboxDeliveryWithReceipt,
   type RoutedInboxDeliveryReceipt,
-} from "./replicaRouter.js";
+} from "./replicaRouter";
 
 const message: AgentMessage = {
   channel_id: "channel-1",

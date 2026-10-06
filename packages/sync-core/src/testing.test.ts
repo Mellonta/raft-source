@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { createSyncCore } from "./core.js";
+import { createSyncCore } from "./core";
 import {
   generateSyncHarnessFixture,
   generateSyncMixedInterleavingHarnessFixture,
   replaySyncHarnessFixture,
   type SyncHarnessEvent,
   type SyncHarnessSnapshotState,
-} from "./testing.js";
-import type { SyncDomainConfig } from "./types.js";
+} from "./testing";
+import type { SyncDomainConfig } from "./types";
 
 test("sync harness generator is deterministic for a fixed seed", () => {
   const options = { seed: 43, domain: "messages", scopeIds: ["channel-a", "channel-b"], steps: 8 };

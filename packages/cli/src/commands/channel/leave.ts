@@ -4,11 +4,11 @@
 import type { Command } from "commander";
 import type { AgentApiResponseByRoute } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
 
 interface LeaveOpts {
   target?: string;
@@ -45,11 +45,11 @@ export function formatAlreadyNotJoined(target: string): string {
 export const channelLeaveCommand = defineCommand(
   {
     name: "leave",
-    description: "Leave a regular channel you have joined",
+    description: "Leave a channel you have joined (public, private, or joint)",
     options: [
       {
         flags: "--target <target>",
-        description: "Regular channel to leave, e.g. '#engineering'",
+        description: "Channel to leave, e.g. '#engineering'",
       },
     ],
   },
@@ -59,7 +59,7 @@ export const channelLeaveCommand = defineCommand(
     if (!channelName) {
       throw new CliError({
         code: "INVALID_TARGET",
-        message: "Target must be a regular channel in the form '#channel-name'. DMs and thread targets are not supported.",
+        message: "Target must be a channel in the form '#channel-name'. DMs and thread targets are not supported.",
       });
     }
 

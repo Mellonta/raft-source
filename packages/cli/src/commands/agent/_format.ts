@@ -3,9 +3,9 @@
 // byte-pin tests in _format.test.ts copy the pre-move inline literals.
 // This is an AX contract, not an implementation detail.
 
-import type { DeviceAuthorization } from "../../agentLogin/deviceAuthClient.js";
-import { sampleLoginOptions, sampleProfilePaths } from "../_axExampleFixtures.js";
-import { axSurface } from "../../core/renderer.js";
+import type { DeviceAuthorization } from "../../agentLogin/deviceAuthClient";
+import { sampleLoginOptions, sampleProfilePaths } from "../_axExampleFixtures";
+import { axSurface } from "../../core/renderer";
 
 export interface LoginProfilePaths {
   profileSlug: string;
@@ -201,10 +201,14 @@ export const formatCredentialRemintNotice = axSurface(
   },
 );
 
+export const agentTokenStdinGuidance = "Pipe the agent token from your secret manager or redirect an existing token file into this command: raft agent login --server <url> --agent <agentId> --profile-slug <slug> < /path/to/agent-token";
+
 export const formatAgentTokenPrompt = axSurface(
-  "Hidden terminal prompt for an existing agent token.",
-  (): string => "Agent token (input hidden): ",
-  { examples: [{ args: [] }] },
+  "Hidden terminal prompt or non-TTY stdin guidance for an existing agent token.",
+  (terminal = true): string => terminal
+    ? "Agent token (input hidden): "
+    : `No interactive terminal (TTY). Reading the agent token from stdin. ${agentTokenStdinGuidance}\n`,
+  { examples: [{ args: [] }, { title: "non-TTY stdin", args: [false] }] },
 );
 
 export const formatBridgeRecovered = axSurface(

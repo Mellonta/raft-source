@@ -1,6 +1,6 @@
 import type { NextFunction, Request, RequestHandler, Response } from "express";
 import { noopTracer, type ActiveSpan, type Tracer } from "@botiverse/raft-shared";
-import { getCurrentTraceContext, safeAddTraceEvent } from "./semanticTrace.js";
+import { getCurrentTraceContext, safeAddTraceEvent } from "./semanticTrace";
 
 export type ForwardDiagnosticPhase =
   | "gate"

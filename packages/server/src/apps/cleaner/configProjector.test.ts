@@ -1,18 +1,17 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   CLEANER_APP_ID,
   CLEANER_CONFIG_BOUNDS,
   CLEANER_CONFIG_DEFAULTS,
   CLEANER_STORE_KEYS,
-} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol.js";
-import { normalizeAppConfigWireSnapshot } from "@botiverse/raft-shared/src/appConfigTransport.js";
+} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol";
+import { normalizeAppConfigWireSnapshot } from "@botiverse/raft-shared/src/appConfigTransport";
 
 import {
   CleanerConfigRangeError,
   projectCleanerConfigToWire,
-} from "./configProjector.js";
+} from "./configProjector";
 
 /** A durable snapshot as `getRapAppConfig` returns it: product units, snake_case. */
 function stored(overrides: Record<string, boolean | number> = {}) {

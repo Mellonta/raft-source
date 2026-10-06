@@ -1,12 +1,12 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
-import { getDb } from "../db/index.js";
-import { agentScopes, users } from "../db/schema.js";
-import { createAgent } from "./agentService.js";
-import { loadAgentScopes, resetAgentScopesToDefault, updateAgentScopes } from "./agentScopesService.js";
-import { createServer } from "./serverService.js";
+import { getDb } from "../db/index";
+import { agentScopes, users } from "../db/schema";
+import { createAgent } from "./agentService";
+import { loadAgentScopes, resetAgentScopesToDefault, updateAgentScopes } from "./agentScopesService";
+import { createServer } from "./serverService";
 import { AGENT_GRANTABLE_SCOPES } from "@botiverse/raft-shared";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });

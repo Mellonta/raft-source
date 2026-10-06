@@ -14,7 +14,7 @@ Raft supports a pattern where **agents prepare actions, humans commit them under
 
 ### Action Cards (the primary CLI primitive)
 
-- **What it's for**: agent wants to do something it can't execute itself — for a **member** agent that includes creating a channel or adding members ([admin agents](/agent-knowledge/workspace/server-role) do those directly); creating another agent is card-only for every agent
+- **What it's for**: agent wants to do something it can't execute itself. ⚠️ Server role alone does not decide that: a member agent can create a channel and can add members to a channel it is already in (see [permission-matrix](/agent-knowledge/cross-cutting/permission-matrix)). Creating another agent is card-only for every agent
 - **CLI**: `raft action prepare --target <ch>` with action JSON on stdin (stdin variants: `channel:create`, `channel:add_member`, `agent:create`; the integration variants ride dedicated flows — see Action Cards)
 - **Flow**: agent posts card → human clicks action button → prefilled dialog opens → human reviews/edits → submit → action runs under human identity, card flips Done
 - **Identity at execution**: the human is the visible actor

@@ -1,4 +1,4 @@
-import { PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY, SERVER_LABS_UI_FEATURE_FLAG_KEY, SLACK_BRIDGE_FEATURE_FLAG_KEYS, WIKI_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
+import { PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY, SERVER_LABS_UI_FEATURE_FLAG_KEY, SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 import { useMemo, useState } from "react";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
 import { useServerFeatureFlag } from "../../store/serverFeatureFlags";
@@ -21,14 +21,12 @@ export default function WorkspaceSettingsModal() {
   const providerConnectionsEnabled = useServerFeatureFlag(PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY).enabled;
   const slackBridgeGate = useServerFeatureFlag(SLACK_BRIDGE_FEATURE_FLAG_KEYS.master);
   const slackBridgeEnabled = isSlackBridgeSurfaceEnabled(slackBridgeGate);
-  const wikiEnabled = useServerFeatureFlag(WIKI_FEATURE_FLAG_KEY).enabled;
   const { capabilities, role } = useServerPermissions();
   const hiddenTabIds = useMemo(
     () => {
       const hidden = new Set<SettingsTabId>();
       if (!labsUiEnabled) hidden.add("labs");
       if (!providerConnectionsEnabled || !capabilities.manageExternalAuth) hidden.add("providers");
-      if (!wikiEnabled || !capabilities.editServerSettings) hidden.add("wiki");
       if (!canOpenSettingsTab("billing", capabilities)) hidden.add("billing");
       if (!canOpenSettingsTab("administration", capabilities)) hidden.add("administration");
       if (!canOpenSettingsTab("integrations", capabilities, role)) hidden.add("integrations");
@@ -36,7 +34,7 @@ export default function WorkspaceSettingsModal() {
       if (!slackBridgeEnabled) hidden.add("im-bridges");
       return hidden.size > 0 ? hidden : undefined;
     },
-    [capabilities, labsUiEnabled, providerConnectionsEnabled, role, slackBridgeEnabled, wikiEnabled],
+    [capabilities, labsUiEnabled, providerConnectionsEnabled, role, slackBridgeEnabled],
   );
 
   const effectiveActiveTab = resolveWorkspaceSettingsActiveTab(activeTab, slackBridgeEnabled);

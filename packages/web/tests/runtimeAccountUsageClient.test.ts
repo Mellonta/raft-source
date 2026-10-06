@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { RuntimeAccountUsageClient } from "../src/utils/runtimeAccountUsageClient";
 
@@ -50,4 +49,36 @@ test("dedupes refreshes and enforces a two-minute client cooldown", async () => 
   now += 120_001;
   await client.refresh("server", "machine", "claude", "manual");
   assert.equal(calls, 2);
+});
+
+test("a fresh refresh result is written into the read cache in the read-path shape", async () => {
+  let now = 1_000;
+  let reads = 0;
+  const freshSnapshot = { protocolVersion: 2, provider: "codex" } as unknown as never;
+  const client = new RuntimeAccountUsageClient(
+    async () => {
+      reads += 1;
+      return { state: "missing", snapshot: null };
+    },
+    async () => ({ accepted: true, state: "fresh" as const, snapshot: freshSnapshot }),
+    () => now,
+  );
+  const result = await client.refresh("server", "machine", "codex", "manual");
+  assert.equal(result.state, "fresh");
+  assert.deepEqual(await client.read("server", "machine", "codex"), {
+    state: "fresh",
+    snapshot: freshSnapshot,
+  });
+  assert.equal(reads, 0);
+});
+
+test("a timed-out refresh result passes through unchanged", async () => {
+  const client = new RuntimeAccountUsageClient(
+    async () => ({ state: "missing", snapshot: null }),
+    async () => ({ accepted: true, state: "timeout" as const }),
+  );
+  assert.deepEqual(await client.refresh("server", "machine", "claude", "manual"), {
+    accepted: true,
+    state: "timeout",
+  });
 });

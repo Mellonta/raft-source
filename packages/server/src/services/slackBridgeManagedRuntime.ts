@@ -1,10 +1,9 @@
-import type { SlackBridgeRouteDependencies } from "../routes/slackBridge.js";
+import type { SlackBridgeRouteDependencies } from "../routes/slackBridge";
 import type {
   ExternalIngressPayloadSealer,
   ExternalIngressRuntimeResolver,
   ExternalIngressSecretResolver,
-} from "./externalAppIngressService.js";
-import type { ExternalAuthorPolicyRuntimeAuthority } from "./externalAppControlPlaneService.js";
+} from "./externalAppIngressService";
 import {
   createSlackOAuthExchangeAdapter,
   createSlackOAuthHttpTransport,
@@ -12,7 +11,7 @@ import {
   type SlackBotCredentialSealer,
   type SlackIngressAuthorityAdapter,
   type SlackOAuthAppSecretLeaseProvider,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
 
 export interface SlackBridgeManagedRuntimeDependencies {
   environment: "test" | "production";
@@ -29,12 +28,6 @@ export interface SlackBridgeManagedRuntimeDependencies {
   provisioning?: SlackBridgeRouteDependencies["provisioning"];
   runtimeResolver?: ExternalIngressRuntimeResolver;
   admitSlackIngress?: SlackIngressAuthorityAdapter;
-  resolveAuthorPolicyAuthority?(input: {
-    serverId: string;
-    bindingId: string;
-    now: Date;
-  }): Promise<ExternalAuthorPolicyRuntimeAuthority | null>;
-  materializeAuthorAvatar?: SlackBridgeRouteDependencies["materializeAuthorAvatar"];
   requestLifecycleReconcile?(): Promise<unknown> | void;
   onLifecycleError?(error: unknown): void;
   fetch?: typeof fetch;
@@ -89,8 +82,6 @@ export function createSlackBridgeManagedRuntime(
     provisioning: dependencies.provisioning,
     runtimeResolver: dependencies.runtimeResolver,
     admitSlackIngress: dependencies.admitSlackIngress,
-    resolveAuthorPolicyAuthority: dependencies.resolveAuthorPolicyAuthority,
-    materializeAuthorAvatar: dependencies.materializeAuthorAvatar,
     requestLifecycleReconcile: dependencies.requestLifecycleReconcile,
     onLifecycleError: dependencies.onLifecycleError,
     now: dependencies.now,

@@ -1,9 +1,8 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { formatMyTaskList } from "./_format.js";
+import { formatMyTaskList } from "./_format";
 
 // Task #108. The Manual's `--mine` paragraph now describes behaviour an agent relies on to find
 // work assigned to it, so two of its claims are bound to the renderer that produces them:

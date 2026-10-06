@@ -1,9 +1,9 @@
 import { Router, type Router as RouterType } from "express";
 import type { ServerId } from "@botiverse/raft-shared";
-import type { PersistableJsonValue, WorkflowStepOutput, WorkflowTemplateStep } from "../db/schema.js";
-import { getActorServerRoleInServer } from "../lib/actorPermissions.js";
-import * as channelService from "../services/channelService.js";
-import * as serverService from "../services/serverService.js";
+import type { PersistableJsonValue, WorkflowStepOutput, WorkflowTemplateStep } from "../db/schema";
+import { getActorServerRoleInServer } from "../lib/actorPermissions";
+import * as channelService from "../services/channelService";
+import * as serverService from "../services/serverService";
 import {
   WorkflowConflictError,
   WorkflowInputError,
@@ -12,7 +12,7 @@ import {
   createWorkflowTemplate,
   getWorkflowSnapshot,
   startWorkflowInstance,
-} from "../services/workflowService.js";
+} from "../services/workflowService";
 
 export const workflowRouter: RouterType = Router();
 
@@ -196,6 +196,11 @@ async function rejectIfNoChannelWriteAccess(
 
 workflowRouter.post("/templates", async (req, res) => {
   try {
+    const requesterRole = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+    if (requesterRole === "guest") {
+      res.status(403).json({ error: "Guests cannot create workflow templates" });
+      return;
+    }
     const body = asBodyObject(req.body);
     const template = await createWorkflowTemplate(req.serverId!, "user", req.userId!, {
       name: parseWorkflowTemplateName(body),

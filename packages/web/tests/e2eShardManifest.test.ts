@@ -1,18 +1,17 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
-import test from "node:test";
 import {
   aggregateByFile,
   classifyProfileVerdict,
   classifyProfileTimings,
   normalizeReportFile,
   resolveSourceCommit,
-} from "../scripts/perf/profileE2eShards.js";
+} from "../scripts/perf/profileE2eShards";
 import type {
   PlaywrightJsonReport,
-} from "../scripts/perf/profileE2eShards.js";
-import { assignOrphans } from "../scripts/runE2eShard.js";
+} from "../scripts/perf/profileE2eShards";
+import { assignOrphans } from "../scripts/runE2eShard";
 
 // Asserts on private CI/deploy files that the source-available snapshot does not
 // carry; skipped when an exported snapshot's RELEASE_SOURCE marker is present.
@@ -203,7 +202,7 @@ test("committed e2e shard duration totals reconcile with recorded file timings",
   }
 });
 
-test("manifest refresh matches formal runner contracts and builds e2e dist first", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("manifest refresh matches formal runner contracts and builds e2e dist first", { skip: inSourceSnapshot }, () => {
   const webRoot = path.resolve(import.meta.dirname, "..");
   const repoRoot = path.resolve(webRoot, "../..");
   const refreshWorkflow = readFileSync(path.join(repoRoot, ".github/workflows/manifest-refresh.yml"), "utf8");
@@ -234,7 +233,7 @@ test("manifest refresh matches formal runner contracts and builds e2e dist first
   assert.ok(profileContract.image);
   assert.ok(profileContract.build);
   assert.deepEqual(profileContract, formalContract);
-  assert.ok(profileJob.indexOf(profileContract.build) < profileJob.indexOf("pnpm exec tsx scripts/perf/profileE2eShards.ts"));
+  assert.ok(profileJob.indexOf(profileContract.build) < profileJob.indexOf("pnpm exec node --import @oxc-node/core/register scripts/perf/profileE2eShards.ts"));
   assert.match(profileJob, /E2E_PROFILE_SOURCE_COMMIT: \$\{\{ github\.sha \}\}/);
   assert.match(profileJob, /- name: Report e2e profile verdict\n\s+shell: bash\n/);
 

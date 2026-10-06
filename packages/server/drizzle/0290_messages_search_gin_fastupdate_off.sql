@@ -1,0 +1,23 @@
+-- Turn off the GIN pending list ("fastupdate") on the message full-text index.
+--
+-- Why: with fastupdate on, new entries queue in a 4 MB pending list, and the
+-- backend whose insert overflows it merges the whole list into the 5.7 GB
+-- index synchronously. On Neon that merge is dominated by cold page-server
+-- reads (Neon/PS_ReadIO): prod sampling on 2026-09-27 caught INSERT INTO
+-- messages running 12-15 s in pairs about every 30 minutes, the first killed by
+-- the 15 s statement timeout (57014) and the next finishing the merge. That
+-- lottery lands on whichever message send happens to overflow the list.
+--
+-- Cost: each insert (and each non-HOT update) now writes its GIN entries
+-- directly. Messages average about 86 lexemes (p50 60, p95 244, 7-day sample),
+-- so an insert touches on the order of tens of GIN leaf pages; the upper levels
+-- stay cached. Estimate: a few ms per insert when pages are cached, tens of ms
+-- when several leaves are cold, instead of an occasional 12-15 s stall. The
+-- no-op thread_id update fix (same release) removes most non-HOT rewrites that
+-- used to feed this index.
+--
+-- ALTER INDEX only changes the storage option; it does not rebuild the index.
+-- Entries already in the pending list stay there until cleaned, so run
+-- SELECT gin_clean_pending_list('idx_messages_search_vector_gin') once before
+-- deploying (done manually on prod at low traffic).
+ALTER INDEX "idx_messages_search_vector_gin" SET (fastupdate = off);

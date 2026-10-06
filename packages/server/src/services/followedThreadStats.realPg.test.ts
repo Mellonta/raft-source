@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
-import { getRisingWavePool } from "../db/risingwave.js";
-import * as schema from "../db/schema.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
+import { getRisingWavePool } from "../db/risingwave";
+import * as schema from "../db/schema";
 import {
   channels,
   messages,
@@ -17,8 +16,9 @@ import {
   servers,
   threadFollows,
   users,
-} from "../db/schema.js";
-import { getFollowedThreads } from "./channelService.js";
+} from "../db/schema";
+import { getFollowedThreads } from "./channelService";
+import { installRisingWaveReadReferences, uninstallRisingWaveReadReferences } from "../test/risingWaveReadReference";
 
 // B1-independent real-PG gate (does NOT borrow READ_MUTATION_* semantics).
 // Hosted CI sets FOLLOWED_THREAD_RW_REAL_PG_URL + REQUIRED=1; missing URL with
@@ -47,31 +47,43 @@ function quoteIdentifier(identifier: string): string {
   return `"${identifier}"`;
 }
 
-// Minimal rw_followed_thread_stats_v1 carrier: only the columns the production
-// RW replay query selects/joins. This is a plain PG table standing in for the
-// RisingWave materialized view; the production query path is unchanged.
-const RW_CARRIER_DDL = `
-  CREATE TABLE rw_followed_thread_stats_v1 (
+// Minimal rw_followed_threads_v4 carrier (072): the columns the production
+// reads select/join, both the active-path read (RISINGWAVE_FOLLOWED_THREADS_ROWS_SQL)
+// and the stats replay read the legacy path uses. A plain PG table standing in
+// for the RisingWave materialized view; the production query paths are unchanged.
+const RW_V4_CARRIER_DDL = `
+  CREATE TABLE rw_followed_threads_v4 (
     server_id varchar NOT NULL,
     user_id varchar NOT NULL,
     thread_channel_id varchar NOT NULL,
     storage_thread_channel_id varchar,
-    last_read_seq bigint,
     reply_count int,
     unread_count int,
     latest_seq bigint,
-    first_unread_seq bigint,
     latest_message_id varchar,
     last_reply_at timestamp,
     latest_preview text,
     latest_sender_type varchar,
     latest_sender_id varchar,
-    first_unread_message_id varchar
+    first_unread_message_id varchar,
+    parent_message_id varchar,
+    parent_channel_id varchar,
+    parent_server_id varchar,
+    parent_preview text,
+    parent_sender_type varchar,
+    parent_sender_id varchar,
+    parent_seq bigint,
+    parent_created_at timestamptz,
+    task_id varchar,
+    task_number int,
+    task_status varchar,
+    task_claimed_by_type varchar,
+    task_claimed_by_id varchar
   )
 `;
 
 test(
-  "production getFollowedThreads reads latestActivitySeq byte-exact from a real PG rw_followed_thread_stats_v1 carrier",
+  "production getFollowedThreads reads latestActivitySeq byte-exact from a real PG rw_followed_threads_v4 carrier",
   {
     skip: !(REAL_PG_URL || REAL_PG_REQUIRED),
   },
@@ -81,7 +93,6 @@ test(
     const admin = new pg.Client({ connectionString: REAL_PG_URL, application_name: "b1-followed-admin" });
     await admin.connect();
     const prevRwUrl = process.env.RISINGWAVE_DATABASE_URL;
-    const prevRwVersion = process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
     let carrier: pg.Client | null = null;
     let carrierDbName: string | null = null;
     try {
@@ -165,44 +176,36 @@ test(
       const carrierUrl = databaseUrlFor(REAL_PG_URL, carrierDbName, "b1-followed-carrier");
       carrier = new pg.Client({ connectionString: carrierUrl });
       await carrier.connect();
-      await carrier.query(RW_CARRIER_DDL);
       const latestMessageId = randomUUID();
-      await carrier.query(
-        `INSERT INTO rw_followed_thread_stats_v1 (
+      await carrier.query(RW_V4_CARRIER_DDL);
+      const v4Insert = `INSERT INTO rw_followed_threads_v4 (
           server_id, user_id, thread_channel_id, storage_thread_channel_id,
-          last_read_seq, reply_count, unread_count, latest_seq, first_unread_seq,
-          latest_message_id, last_reply_at, latest_preview, latest_sender_type,
-          latest_sender_id, first_unread_message_id
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-        [
-          server.id, owner.id, threadChannel.id, threadChannel.id,
-          0, 1, 1, HIGH_SEQ, HIGH_SEQ,
-          latestMessageId, new Date("2026-07-30T00:00:00.000Z"), "reply preview", "user",
-          owner.id, latestMessageId,
-        ],
-      );
-      // Zero-reply carrier row: no latest message/seq (NULL), reply_count 0.
-      // The production path must fall back to the parent (id + seq) same-source.
-      await carrier.query(
-        `INSERT INTO rw_followed_thread_stats_v1 (
-          server_id, user_id, thread_channel_id, storage_thread_channel_id,
-          last_read_seq, reply_count, unread_count, latest_seq, first_unread_seq,
-          latest_message_id, last_reply_at, latest_preview, latest_sender_type,
-          latest_sender_id, first_unread_message_id
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-        [
-          server.id, owner.id, zeroReplyThreadChannel.id, zeroReplyThreadChannel.id,
-          0, 0, 0, null, null,
-          null, null, null, null,
-          null, null,
-        ],
-      );
-
-      // Point production RW pool at the sidecar carrier + enable the feature.
+          reply_count, unread_count, latest_seq, latest_message_id, last_reply_at,
+          latest_preview, latest_sender_type, latest_sender_id, first_unread_message_id,
+          parent_message_id, parent_channel_id, parent_server_id, parent_preview,
+          parent_sender_type, parent_sender_id, parent_seq, parent_created_at
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`;
+      await carrier.query(v4Insert, [
+        server.id, owner.id, threadChannel.id, threadChannel.id,
+        1, 1, HIGH_SEQ, latestMessageId, new Date("2026-07-30T00:00:00.000Z"),
+        "reply preview", "user", owner.id, latestMessageId,
+        parentMessage.id, parentChannel.id, server.id, parentMessage.content,
+        "user", owner.id, String(parentMessage.seq), parentMessage.createdAt,
+      ]);
+      await carrier.query(v4Insert, [
+        server.id, owner.id, zeroReplyThreadChannel.id, zeroReplyThreadChannel.id,
+        0, 0, null, null, null,
+        null, null, null, null,
+        parentMessage2.id, parentChannel.id, server.id, parentMessage2.content,
+        "user", owner.id, HIGH_SEQ_PARENT, parentMessage2.createdAt,
+      ]);
+      // Point production RW pool at the sidecar carrier, and take the installed
+      // test reference away so the production RW query path runs.
       process.env.RISINGWAVE_DATABASE_URL = carrierUrl;
-      process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION = "1";
+      uninstallRisingWaveReadReferences();
 
-      const followed = await getFollowedThreads(server.id, owner.id, undefined);
+      // Legacy path first: its stats replay read is also served by v4.
+      const followed = await getFollowedThreads(server.id, owner.id, undefined, { forceLegacyPath: true });
       const row = followed.find((t) => t.threadChannelId === threadChannel.id);
       assert.ok(row, "followed thread must be returned");
       // Byte-exact: the same tuple (latest_message_id + latest_seq) read back
@@ -216,6 +219,22 @@ test(
       assert.ok(zeroReplyRow, "zero-reply followed thread must be returned");
       assert.equal(zeroReplyRow.latestActivityMessageId, parentMessage2.id, "zero-reply falls back to the parent message id");
       assert.equal(zeroReplyRow.latestActivitySeq, HIGH_SEQ_PARENT, "zero-reply falls back to the parent seq byte-exact, never NULL");
+      // Now the RW path: it must read the same tuples byte-exact.
+      const viaV4 = await getFollowedThreads(server.id, owner.id, undefined);
+      const v4Row = viaV4.find((t) => t.threadChannelId === threadChannel.id);
+      assert.ok(v4Row, "followed thread must be returned on the RW path");
+      assert.equal(v4Row.latestActivityMessageId, latestMessageId);
+      assert.equal(v4Row.latestActivitySeq, HIGH_SEQ, "v4: latestActivitySeq must be byte-exact high-S");
+      const v4ZeroReply = viaV4.find((t) => t.threadChannelId === zeroReplyThreadChannel.id);
+      assert.ok(v4ZeroReply, "zero-reply followed thread must be returned on the RW path");
+      assert.equal(v4ZeroReply.latestActivityMessageId, parentMessage2.id);
+      assert.equal(v4ZeroReply.latestActivitySeq, HIGH_SEQ_PARENT, "v4: zero-reply parent seq byte-exact");
+      assert.equal(v4ZeroReply.lastActivityAt, parentMessage2.createdAt.toISOString(), "parent_created_at round-trips to the legacy ISO string");
+      assert.deepEqual(
+        [...viaV4].sort((a, b) => a.threadChannelId.localeCompare(b.threadChannelId)),
+        [...followed].sort((a, b) => a.threadChannelId.localeCompare(b.threadChannelId)),
+        "the RW path equals the legacy path on the same carrier data",
+      );
     } finally {
       // Restore env FIRST so a later getRisingWavePool() in this process does
       // not hand back the carrier pool, then end that pool (it stays connected
@@ -223,8 +242,7 @@ test(
       // the test process and block DROP DATABASE).
       if (prevRwUrl === undefined) delete process.env.RISINGWAVE_DATABASE_URL;
       else process.env.RISINGWAVE_DATABASE_URL = prevRwUrl;
-      if (prevRwVersion === undefined) delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
-      else process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION = prevRwVersion;
+      installRisingWaveReadReferences();
       const rwPool = getRisingWavePool();
       if (rwPool) await rwPool.end().catch(() => undefined);
       if (carrier) await carrier.end().catch(() => undefined);

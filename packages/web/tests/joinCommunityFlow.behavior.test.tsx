@@ -1,4 +1,3 @@
-import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import type { ComponentProps } from "react";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";

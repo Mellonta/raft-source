@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 // Wiring tooth for the seq-headroom tripwire (review gate on #5715).
 //
 // The pure-unit teeth pin the classifier but not the PRODUCTION WIRING: with
@@ -8,15 +8,14 @@ import { createApiTest } from "../test/integration/apiTest.js";
 // MAX(seq) query -> structured log, plus the throttle. Deleting the app.ts
 // call site, the DB query, or the log emission each goes RED here.
 import assert from "node:assert/strict";
-import { onTestFinished, vi } from "vitest";
 
-import { getDb } from "../db/index.js";
-import { channels, messages, servers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { channels, messages, servers, users } from "../db/schema";
 import {
   INT4_MAX,
   SEQ_HEADROOM_CRITICAL_RATIO,
   resetSeqHeadroomThrottleForTest,
-} from "./seqHeadroomTripwire.js";
+} from "./seqHeadroomTripwire";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

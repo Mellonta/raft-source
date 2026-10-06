@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
@@ -9,23 +9,23 @@ import {
   __setFailpointsForTests,
 } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channelAgents,
   channelHumans,
   messages,
   servers,
   users,
-} from "../db/schema.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { createAgent } from "../services/agentService.js";
+} from "../db/schema";
+import { signAccessToken } from "../middleware/auth";
+import { createAgent } from "../services/agentService";
 import {
   addHuman,
   createChannel,
   isChannelAgent,
   isChannelHuman,
-} from "../services/channelService.js";
-import { addMember, createServer } from "../services/serverService.js";
+} from "../services/channelService";
+import { addMember, createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

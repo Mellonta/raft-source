@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createIntl } from "react-intl";
 
 import { getBillingPlanPresentation } from "../src/utils/billingControls";
@@ -151,11 +150,15 @@ test("Free and Pro render their distinct Joint Channel allowances in both locale
   });
 
   assert.ok(free.includedFeatures.includes("billing.limitedTimeFreeJointChannel"));
-  assert.ok(free.notIncludedFeatures.includes("billing.unlimitedJointChannels"));
+  // Free already states its joint channel allowance under "Included"; it must
+  // not repeat a joint channel row under "Not included".
+  assert.ok(!free.notIncludedFeatures.includes("billing.unlimitedJointChannels"));
   assert.ok(pro.includedFeatures.includes("billing.unlimitedJointChannels"));
 
-  assert.equal(render("en", "billing.limitedTimeFreeJointChannel"), "1 free Joint Channel for a limited time");
-  assert.equal(render("zh-cn", "billing.limitedTimeFreeJointChannel"), "限时免费 1 个联合频道");
-  assert.equal(render("en", "billing.unlimitedJointChannels"), "Unlimited Joint Channels");
-  assert.equal(render("zh-cn", "billing.unlimitedJointChannels"), "不限数量的联合频道");
+  // Contract v0.3: joint channels allow up to 2 free servers each; paid
+  // servers never count toward that cap.
+  assert.equal(render("en", "billing.limitedTimeFreeJointChannel"), "Use Joint Channels (each Joint Channel has 2 free-server slots)");
+  assert.equal(render("zh-cn", "billing.limitedTimeFreeJointChannel"), "使用联合频道（每个联合频道有连接 2 个免费版服务器的名额）");
+  assert.equal(render("en", "billing.unlimitedJointChannels"), "Use Joint Channels");
+  assert.equal(render("zh-cn", "billing.unlimitedJointChannels"), "使用联合频道");
 });

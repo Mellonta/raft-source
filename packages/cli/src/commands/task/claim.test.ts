@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import type { CliIo } from "../../core/io.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import type { CliIo } from "../../core/io";
 import { TASK_CLAIM_REASON_ALREADY_CLAIMED_BY_YOU } from "@botiverse/raft-shared";
-import { CliExit } from "../../core/errors.js";
-import { taskClaimCommand } from "./claim.js";
+import { CliExit } from "../../core/errors";
+import { taskClaimCommand } from "./claim";
 
 function memoryIo(): { io: CliIo; stdout: string[] } {
   const stdout: string[] = [];
@@ -257,4 +256,41 @@ test("a partial claim (one success, one conflict) does not throw", async () => {
   ]);
   await taskClaimCommand.handler(ctx, { target: "#proj-task", number: ["1", "2"] });
   assert.match(stdout.join(""), /1 claimed, 1 failed/);
+});
+
+// task #333: the proxy-5xx branch no longer carries its own copy of the
+// "inspect daemon proxy transport logs" text; it takes the shared
+// per-failure_class default, so an upstream_http_response envelope points at
+// the server side (the daemon proxy discards the upstream body).
+test("proxy 5xx with upstream_http_response yields PROXY_5XX with the server-side next action", async () => {
+  const { io } = memoryIo();
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (): Promise<ApiResponse<unknown>> => ({
+        ok: false,
+        status: 503,
+        error: "upstream HTTP response failed",
+        errorCode: "agent_proxy_failed",
+        data: null,
+        proxy: {
+          layer: "local_daemon_proxy",
+          correlationId: "aaef4710a7b732e5",
+          failureClass: "upstream_http_response",
+          causeCode: "HTTP_503",
+          routeFamily: "tasks",
+          upstreamStatus: 503,
+          responseStarted: true,
+          responseComplete: true,
+        },
+      }),
+    }) as any,
+  });
+  await assert.rejects(
+    async () => taskClaimCommand.handler(ctx, { target: "#proj-task", number: ["57"] }),
+    (error: any) => error?.code === "PROXY_5XX"
+      && /discarded the upstream response body/.test(String(error.suggestedNextAction))
+      && !/inspect daemon proxy transport logs/.test(String(error.suggestedNextAction)),
+  );
 });

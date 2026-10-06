@@ -102,6 +102,16 @@ export const slackBridgeRawHealthSchema = z.strictObject({
     id: opaqueIdSchema,
     state: z.enum(["active", "paused", "revoked", "quarantined"]),
     bindingEpoch: positiveSafeIntegerSchema,
+    stateReason: z.string().trim().min(1).max(160).nullable(),
+    recoveryAction: z.enum([
+      "none",
+      "unarchive_slack_channel",
+      "select_replacement_slack_channel",
+      "reinstall_slack_app",
+      "reauthorize_slack_app",
+      "migrate_slack_channel_audience",
+      "review_and_resume_binding",
+    ]),
   })).max(500),
   audiences: z.array(z.strictObject({
     bindingId: opaqueIdSchema,

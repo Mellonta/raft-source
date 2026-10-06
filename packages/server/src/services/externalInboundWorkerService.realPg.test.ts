@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -12,8 +11,8 @@ import {
   closeDatabase,
   type Database,
   initDatabase,
-} from "../db/index.js";
-import * as schema from "../db/schema.js";
+} from "../db/index";
+import * as schema from "../db/schema";
 import {
   agents,
   channelAgents,
@@ -28,22 +27,22 @@ import {
   serverMembers,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   enqueueExternalInboundEvent,
   processExternalInboundEventOnce,
   type ExternalInboundNormalizedMessage,
   type ExternalInboundRuntimeAuthority,
   type ExternalInboundWorkerDependencies,
-} from "./externalInboundWorkerService.js";
+} from "./externalInboundWorkerService";
 import {
   __resetOrdinaryMessageOutboundAuthorizationResolverForTests,
   __setOrdinaryMessageOutboundAuthorizationResolverForTests,
-} from "./externalDeliveryOutboxService.js";
+} from "./externalDeliveryOutboxService";
 import {
   broadcastAndDeliver,
   drainSenderReadReceiptsForTests,
-} from "./messageService.js";
+} from "./messageService";
 
 const REAL_PG_URL_ENV = "EXTERNAL_INBOUND_REAL_PG_URL";
 const REAL_PG_URL = process.env[REAL_PG_URL_ENV];

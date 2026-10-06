@@ -1,35 +1,36 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channelAgents,
   channelHumans,
   channelMembershipRoleEvents,
   channels,
+  messages,
   serverAgentMembers,
   serverMembers,
   users,
-} from "../db/schema.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { createAgent } from "../services/agentService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
+} from "../db/schema";
+import { signAccessToken } from "../middleware/auth";
+import { createAgent } from "../services/agentService";
+import { mintAgentCredential } from "../services/agentCredentialService";
 import {
   addAgent,
   addHuman,
   createChannel,
   isChannelHuman,
   listChannelsForAgent,
-} from "../services/channelService.js";
-import { createServer } from "../services/serverService.js";
-import { drainChannelMembershipRoleOutbox } from "../services/channelMembershipRoleOutbox.js";
-import { setChannelArchivedForAgent } from "./agentChannelLifecycle.js";
-import { addChannelMemberForAgent, removeChannelMemberForAgent } from "./agentChannelMembers.js";
-import { updateChannelForAgent } from "./agentChannelUpdate.js";
+} from "../services/channelService";
+import { createServer } from "../services/serverService";
+import { drainChannelMembershipRoleOutbox } from "../services/channelMembershipRoleOutbox";
+import { setChannelArchivedForAgent } from "./agentChannelLifecycle";
+import { addChannelMemberForAgent, removeChannelMemberForAgent } from "./agentChannelMembers";
+import { updateChannelForAgent } from "./agentChannelUpdate";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -619,4 +620,75 @@ test("channel-role outbox retries idempotently and dead-letters after a bounded 
 
   const sixth = await drainChannelMembershipRoleOutbox({ io: failingIo });
   assert.deepEqual(sixth, { attempted: 0, sent: 0, failed: 0, deadLettered: 0 });
+});
+
+test("membership system messages persist causal actor and subtype at send (human and agent adds)", async ({ app }) => {
+  const owner = await seedUser("membership-columns-owner");
+  const invitee = await seedUser("membership-columns-invitee");
+  const server = await createServer("Membership Columns", `membership-columns-${randomUUID()}`, owner.id);
+  await getDb().insert(serverMembers).values([
+    { serverId: server.id, userId: invitee.id, role: "member" },
+  ]);
+  const channel = await createChannel(server.id, "membership-columns", undefined, "channel", { type: "user", id: owner.id });
+
+  // Human add via the API goes through addMemberWithMembershipSystemMessage
+  // (persistedMessage path), which must now write the columns at persist time.
+  const addHumanResponse = await fetch(`${app.baseUrl}/api/channels/${channel.id}/members`, {
+    method: "POST",
+    headers: headers(owner.id, server.id),
+    body: JSON.stringify({ userId: invitee.id }),
+  });
+  assert.equal(addHumanResponse.status, 200);
+
+  const [humanSystemMessage] = await getDb().select().from(messages).where(and(
+    eq(messages.channelId, channel.id),
+    eq(messages.messageType, "system"),
+    eq(messages.systemSubtype, "channel.human_membership"),
+  )).orderBy(messages.seq).limit(1);
+  assert.equal(humanSystemMessage?.causalActorType, "user");
+  assert.equal(humanSystemMessage?.causalActorId, owner.id);
+
+  // Agent add via the API (persistedMessage path too).
+  const agent = await createAgent(server.id, `membership-agent-${randomUUID().slice(0, 8)}`, { runtime: "codex" });
+  const addAgentResponse = await fetch(`${app.baseUrl}/api/channels/${channel.id}/members`, {
+    method: "POST",
+    headers: headers(owner.id, server.id),
+    body: JSON.stringify({ agentId: agent.id }),
+  });
+  assert.equal(addAgentResponse.status, 200);
+
+  const [agentSystemMessage] = await getDb().select().from(messages).where(and(
+    eq(messages.channelId, channel.id),
+    eq(messages.messageType, "system"),
+    eq(messages.systemSubtype, "channel.agent_membership"),
+  )).orderBy(messages.seq).limit(1);
+  assert.equal(agentSystemMessage?.causalActorType, "user");
+  assert.equal(agentSystemMessage?.causalActorId, owner.id);
+});
+
+test("agent channel rename broadcasts a channel.rename system message with the agent as causal actor", async ({ app }) => {
+  const owner = await seedUser("agent-rename-owner");
+  const server = await createServer("Agent Rename", `agent-rename-${randomUUID()}`, owner.id);
+  const agent = await createAgent(server.id, `agent-renamer-${randomUUID().slice(0, 8)}`, { runtime: "codex" });
+  const channel = await createChannel(server.id, "agent-rename-before", undefined, "channel", { type: "user", id: owner.id });
+  await addAgent(channel.id, agent.id, { role: "admin" });
+  const actor = { id: agent.id, name: agent.name, serverId: server.id };
+
+  const result = await updateChannelForAgent({
+    actor,
+    serverId: server.id,
+    channelId: channel.id,
+    body: { name: "agent-rename-after" },
+    io: app.io as never,
+    agentOrchestrator: app.app.get("agentOrchestrator") as never,
+  });
+  assert.equal(result.status, 200);
+
+  const [renameMessage] = await getDb().select().from(messages).where(and(
+    eq(messages.channelId, channel.id),
+    eq(messages.messageType, "system"),
+    eq(messages.systemSubtype, "channel.rename"),
+  )).orderBy(messages.seq).limit(1);
+  assert.equal(renameMessage?.causalActorType, "agent");
+  assert.equal(renameMessage?.causalActorId, agent.id);
 });

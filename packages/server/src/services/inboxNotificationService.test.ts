@@ -1,13 +1,11 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
+import { dbTest as test } from "../test/integration/dbTest";
 import assert from "node:assert/strict";
-import { afterEach, beforeEach } from "vitest";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channels,
   inboxNotificationFacts,
-  inboxServingRows,
   inboxTargetMuteStates,
   messages,
   mobilePushOutbox,
@@ -15,15 +13,14 @@ import {
   servers,
   userChannelReadCursors,
   users,
-} from "../db/schema.js";
-import { markRead } from "./channelService.js";
+} from "../db/schema";
+import { markRead } from "./channelService";
 import {
-  rebuildInboxServingRowsForReceiverTargets,
   recordInboxNotificationFacts,
   type InboxNotificationFactInput,
-} from "./inboxNotificationService.js";
-import { runWithTraceSpan } from "../tracing/semanticTrace.js";
-import { __resetMobilePushDeliveryRuntimeForTests, __setMobilePushDeliveryRuntimeForTests } from "./pushService.js";
+} from "./inboxNotificationService";
+import { runWithTraceSpan } from "../tracing/semanticTrace";
+import { __resetMobilePushDeliveryRuntimeForTests, __setMobilePushDeliveryRuntimeForTests } from "./pushService";
 
 
 beforeEach(() => {
@@ -121,78 +118,6 @@ async function seedInboxNotificationFixture() {
   return { owner, other, server, channel, thread, parent, ownMessage, mention, broadcastMention, threadReply, unfollowedThreadReply };
 }
 
-function normalizeServingRows(rows: (typeof inboxServingRows.$inferSelect)[]) {
-  return rows
-    .map(({ updatedAt, ...row }) => ({
-      ...row,
-      latestNotifiedAt: row.latestNotifiedAt.toISOString(),
-      lastActivityAt: row.lastActivityAt?.toISOString() ?? null,
-    }))
-    .sort((a, b) => `${a.receiverType}:${a.receiverId}:${a.sourceChannelId}`.localeCompare(`${b.receiverType}:${b.receiverId}:${b.sourceChannelId}`));
-}
-
-test("recordInboxNotificationFacts persists facts and rebuilds serving rows from read cursors", async ({ db }) => {
-  const { owner, server, channel, parent, ownMessage, mention } = await seedInboxNotificationFixture();
-  const activityAt = new Date("2026-06-27T00:00:00.000Z");
-
-  await recordInboxNotificationFacts([
-    {
-      receiverType: "user",
-      receiverId: owner.id,
-      serverId: server.id,
-      kind: "channel",
-      sourceChannelId: channel.id,
-      messageId: parent.id,
-      messageSeq: parent.seq,
-      activityAt,
-    },
-    {
-      receiverType: "user",
-      receiverId: owner.id,
-      serverId: server.id,
-      kind: "channel",
-      sourceChannelId: channel.id,
-      messageId: ownMessage.id,
-      messageSeq: ownMessage.seq,
-      activityAt: new Date(activityAt.getTime() + 1000),
-      unreadEligible: false,
-    },
-    {
-      receiverType: "user",
-      receiverId: owner.id,
-      serverId: server.id,
-      kind: "channel",
-      sourceChannelId: channel.id,
-      messageId: mention.id,
-      messageSeq: mention.seq,
-      activityAt: new Date(activityAt.getTime() + 2000),
-      personalMention: true,
-    },
-  ]);
-
-  const factRows = await getDb().select().from(inboxNotificationFacts);
-  assert.equal(factRows.length, 3);
-
-  const [serving] = await getDb().select().from(inboxServingRows);
-  assert.equal(serving.latestNotifiedMessageId, mention.id);
-  assert.equal(serving.latestNotifiedSeq, mention.seq);
-  assert.equal(serving.lastActivityAt?.toISOString(), new Date(activityAt.getTime() + 2000).toISOString());
-  assert.equal(serving.firstUnreadMessageId, mention.id);
-  assert.equal(serving.unreadCount, 1);
-  assert.equal(serving.latestPersonalMentionMessageId, mention.id);
-  assert.equal(serving.unreadMentionCount, 1);
-  assert.equal(serving.hasAnyMention, true);
-
-  await markRead(owner.id, channel.id, mention.seq);
-  const [afterRead] = await getDb().select().from(inboxServingRows);
-  assert.equal(afterRead.latestNotifiedMessageId, mention.id);
-  assert.equal(afterRead.unreadCount, 0);
-  assert.equal(afterRead.firstUnreadMessageId, null);
-  assert.equal(afterRead.unreadMentionCount, 0);
-  assert.equal(afterRead.latestPersonalMentionMessageId, mention.id);
-  assert.equal(afterRead.hasAnyMention, true);
-});
-
 test("recordInboxNotificationFacts skips muted ordinary activity while personal mentions pierce", async ({ db }) => {
   const { owner, server, channel, thread, parent, ownMessage, mention, threadReply } = await seedInboxNotificationFixture();
   const base = new Date("2026-06-27T02:00:00.000Z");
@@ -258,13 +183,6 @@ test("recordInboxNotificationFacts skips muted ordinary activity while personal 
     mention.id,
     threadReply.id,
   ]));
-
-  const servingRows = normalizeServingRows(await getDb().select().from(inboxServingRows));
-  const channelRow = servingRows.find((row) => row.sourceChannelId === channel.id);
-  assert.equal(channelRow?.latestNotifiedMessageId, mention.id);
-  assert.equal(channelRow?.latestPersonalMentionMessageId, mention.id);
-  const threadRow = servingRows.find((row) => row.sourceChannelId === thread.id);
-  assert.equal(threadRow?.latestNotifiedMessageId, threadReply.id);
 
   const outboxRows = await getDb()
     .select({ messageId: mobilePushOutbox.messageId })
@@ -407,57 +325,7 @@ test("recordInboxNotificationFacts emits diagnostic trace decisions with closed-
   assert.equal(unfollowedThread?.personal_mention, false);
   assert.equal(unfollowedThread?.["inbox.trace_join_key"], `user:${owner.id}:${thread.id}:${unfollowedThreadReply.id}`);
 
-  const rebuilds = recorded.events.filter((event) => event.name === "inbox.serving_row.rebuild");
-  assert.equal(rebuilds.length, 2);
-  assert.ok(rebuilds.every((event) => event.attrs?.state === "row_upserted"));
-  assert.ok(rebuilds.every((event) => typeof event.attrs?.["inbox.trace_join_key"] === "string"));
+  // serving-row increment/rebuild events died with serving_rows maintenance
+  // (2026-09-21 teardown); the decision family above is the surviving contract.
 });
 
-test("serving rows are byte-equivalent after drop and rebuild from notification facts", async ({ db }) => {
-  const { owner, server, channel, thread, parent, mention, threadReply } = await seedInboxNotificationFixture();
-  const base = new Date("2026-06-27T01:00:00.000Z");
-  const facts: InboxNotificationFactInput[] = [
-    {
-      receiverType: "user",
-      receiverId: owner.id,
-      serverId: server.id,
-      kind: "channel",
-      sourceChannelId: channel.id,
-      messageId: parent.id,
-      messageSeq: parent.seq,
-      activityAt: base,
-    },
-    {
-      receiverType: "user",
-      receiverId: owner.id,
-      serverId: server.id,
-      kind: "channel",
-      sourceChannelId: channel.id,
-      messageId: mention.id,
-      messageSeq: mention.seq,
-      activityAt: new Date(base.getTime() + 1000),
-      personalMention: true,
-    },
-    {
-      receiverType: "user",
-      receiverId: owner.id,
-      serverId: server.id,
-      kind: "thread",
-      sourceChannelId: thread.id,
-      messageId: threadReply.id,
-      messageSeq: threadReply.seq,
-      activityAt: new Date(base.getTime() + 2000),
-    },
-  ];
-  await recordInboxNotificationFacts(facts);
-
-  const before = normalizeServingRows(await getDb().select().from(inboxServingRows));
-  await getDb().delete(inboxServingRows);
-  await rebuildInboxServingRowsForReceiverTargets([
-    { receiverType: "user", receiverId: owner.id, sourceChannelId: channel.id },
-    { receiverType: "user", receiverId: owner.id, sourceChannelId: thread.id },
-  ]);
-  const after = normalizeServingRows(await getDb().select().from(inboxServingRows));
-
-  assert.deepEqual(after, before);
-});

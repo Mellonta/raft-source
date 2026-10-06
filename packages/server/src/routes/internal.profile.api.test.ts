@@ -1,5 +1,6 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
+import { cliChildEnv } from "../test/cliChildEnv";
 import assert from "node:assert/strict";
 
 import { execFile } from "node:child_process";
@@ -9,12 +10,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
-import { registerMachine } from "../services/machineService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { createAgent, assignMachine } from "../services/agentService";
+import { registerMachine } from "../services/machineService";
+import { mintAgentCredential } from "../services/agentCredentialService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -44,7 +45,7 @@ async function seed() {
   await assignMachine(agent.id, machine.id);
   const { apiKey: agentApiKey } = await mintAgentCredential({
     agentId: agent.id,
-    scopes: ["read", "server"],
+    scopes: ["read", "send", "server"],
     name: "profile-cli-e2e",
     createdByUserId: owner.id,
   });
@@ -66,7 +67,7 @@ async function runSlockCli(
       agentId: childEnv.SLOCK_AGENT_ID,
       serverId: childEnv.SLOCK_SERVER_ID,
       apiKey: childEnv.SLOCK_AGENT_TOKEN,
-      scopes: ["read", "server"],
+      scopes: ["read", "send", "server"],
     }));
     childEnv.RAFT_PROFILE = "cli-e2e";
     childEnv.RAFT_PROFILE_DIR = profileDir;
@@ -77,12 +78,8 @@ async function runSlockCli(
     cleanupProfile = () => rmSync(profileDir, { recursive: true, force: true });
   }
   try {
-    return await execFileAsync(process.execPath, ["--import", "tsx", cliEntry, ...args], {
-      env: {
-        ...process.env,
-        SLOCK_AGENT_TOKEN_FILE: "",
-        ...childEnv,
-      },
+    return await execFileAsync(process.execPath, ["--import", "@oxc-node/core/register", cliEntry, ...args], {
+      env: cliChildEnv(childEnv),
     });
   } finally {
     cleanupProfile?.();

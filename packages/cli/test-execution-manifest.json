@@ -1,10 +1,10 @@
 {
   "schemaVersion": 2,
   "package": "@botiverse/raft",
-  "runner": "node --import tsx --test",
+  "runner": "vitest run",
   "testFileGlob": "src/**/*.test.ts",
-  "fileCount": 103,
-  "total": 918,
+  "fileCount": 118,
+  "total": 1138,
   "files": [
     {
       "file": "src/agentApiNoBypass.test.ts",
@@ -74,7 +74,7 @@
     },
     {
       "file": "src/agentCommsCore/bridge.test.ts",
-      "count": 15,
+      "count": 16,
       "cases": [
         {
           "name": "bridge records wake-only proofs and never stores body or upgrades to model_seen/read"
@@ -105,6 +105,9 @@
         },
         {
           "name": "activity sanitizer preserves plugin 0.3.0 event-level truncation provenance"
+        },
+        {
+          "name": "activity sanitizer forwards raft-agent-status.v1 status and detail, including status-only events"
         },
         {
           "name": "wake hint is pruned from the replay ledger after successful injection (task #77)"
@@ -147,6 +150,21 @@
         },
         {
           "name": "pollDeviceToken throws expired_token once the deadline passes"
+        }
+      ]
+    },
+    {
+      "file": "src/apps/reminder/sealGuard.test.ts",
+      "count": 3,
+      "cases": [
+        {
+          "name": "reminder mutation guard blocks a matching seal and permits an unsealed control"
+        },
+        {
+          "name": "reminder mutation guard fails closed when local seal state cannot be read"
+        },
+        {
+          "name": "cancel guard blocks a detached seal even when no Inbox item remains"
         }
       ]
     },
@@ -227,7 +245,7 @@
     },
     {
       "file": "src/auth/managedTransport.test.ts",
-      "count": 5,
+      "count": 13,
       "cases": [
         {
           "name": "managed transport: a host-global CLI resolves the exact current-launch wrapper"
@@ -242,19 +260,103 @@
           "name": "managed transport: wrapper-authenticated invocation does not recurse"
         },
         {
+          "name": "managed transport: an attempted handoff without wrapper credentials fails instead of looping"
+        },
+        {
+          "name": "managed transport: the real CLI preserves a wrapper termination signal"
+        },
+        {
           "name": "managed transport: the real CLI entry forwards before parsing or profile auth"
+        },
+        {
+          "name": "managed transport: real CLI preserves stdin, both output streams, literal arguments and exit code"
+        },
+        {
+          "name": "managed transport: a signal sent only to the global CLI reaches the child"
+        },
+        {
+          "name": "managed transport: a broken wrapper reentering the CLI fails with a bounded error"
+        },
+        {
+          "name": "managed transport: symlink wrappers, missing identity and Windows bypass fail closed"
+        },
+        {
+          "name": "managed transport: login-shell PATH override still authenticates as the current managed agent"
+        },
+        {
+          "name": "managed transport: unexecutable wrapper returns a typed error and removes signal handlers"
+        }
+      ]
+    },
+    {
+      "file": "src/ax/commandGuidance.test.ts",
+      "count": 17,
+      "cases": [
+        {
+          "name": "C1 first use: nothing executes, not-executed line first, guidance, equivalent command, GUIDANCE_DELIVERED"
+        },
+        {
+          "name": "C2 an unchanged re-run executes"
+        },
+        {
+          "name": "C3 a new context, and C4 a changed guidance text, each hold once more"
+        },
+        {
+          "name": "C5 --help delivers the guidance in full; the next run executes"
+        },
+        {
+          "name": "C6 a context switch between decision and flush records under the decision's context"
+        },
+        {
+          "name": "C7 a runtime that does not report compaction: executes, guidance attached first, every time"
+        },
+        {
+          "name": "C8 no context signal, no transport dir or no agent identity: executes plainly"
+        },
+        {
+          "name": "gate: passiveAx missing (older daemon) or false is today's behaviour, and nothing is booked"
+        },
+        {
+          "name": "gate: only a literal true turns it on"
+        },
+        {
+          "name": "C9 a ledger that cannot record the release attaches instead of holding"
+        },
+        {
+          "name": "C9b a read-only ledger with WAL sidecars present attaches instead of holding"
+        },
+        {
+          "name": "a hold whose flush fails is not delivery: the next run holds again"
+        },
+        {
+          "name": "a --help whose flush fails (e.g. `| head` closed the pipe) is not delivery"
+        },
+        {
+          "name": "C10 the held guidance is byte-identical to the --help section"
+        },
+        {
+          "name": "C11 every command's guidance is within the limit, and registration rejects one that is not"
+        },
+        {
+          "name": "C12 parallel first uses in one context are all held"
+        },
+        {
+          "name": "a pre-release observations table without context_id gains the column and reads as not delivered"
         }
       ]
     },
     {
       "file": "src/axManifest.test.ts",
-      "count": 2,
+      "count": 3,
       "cases": [
         {
           "name": "manifest covers both sides and the standing prompt"
         },
         {
           "name": "branded mint-site gate is clean (raw `as Brand` casts only in declared utils)"
+        },
+        {
+          "name": "branded mint-site gate turns RED on a raw `as MachineCreateLock` outside machineService.ts"
         }
       ]
     },
@@ -263,13 +365,13 @@
       "count": 1,
       "cases": [
         {
-          "name": "tsup config inlines runtime deps for the Computer app sidecar CLI"
+          "name": "tsdown config inlines runtime deps for the Computer app sidecar CLI"
         }
       ]
     },
     {
       "file": "src/client.test.ts",
-      "count": 24,
+      "count": 25,
       "cases": [
         {
           "name": "ApiClient marks requests as slock CLI traffic"
@@ -342,6 +444,9 @@
         },
         {
           "name": "transport route family classifier returns only closed route families"
+        },
+        {
+          "name": "ApiClient forwards the caller abort signal to canonical JSON transport"
         }
       ]
     },
@@ -524,7 +629,7 @@
     },
     {
       "file": "src/commands/agent/login.test.ts",
-      "count": 20,
+      "count": 23,
       "cases": [
         {
           "name": "authorized login report gives both audiences an executable Manual next step"
@@ -552,6 +657,12 @@
         },
         {
           "name": "ordinary login consumes an existing token from tty without device authorization or minting"
+        },
+        {
+          "name": "non-TTY login explains input before waiting and rejects empty input without creating a profile"
+        },
+        {
+          "name": "login help explains non-TTY token input without a token argument"
         },
         {
           "name": "direct login preserves the profile on revoked"
@@ -585,6 +696,9 @@
         },
         {
           "name": "login start parses --server/--agent written after the subcommand (parent-shadow regression)"
+        },
+        {
+          "name": "login wait sends the profile's previous credential as replacesCredentialId (rotation)"
         }
       ]
     },
@@ -719,10 +833,25 @@
     },
     {
       "file": "src/commands/auth/whoami.test.ts",
-      "count": 1,
+      "count": 6,
       "cases": [
         {
-          "name": "whoami command uses injected context and redacts token"
+          "name": "whoami prints local context plus the server-confirmed identity and redacts the token"
+        },
+        {
+          "name": "whoami on network failure prints the local context as unconfirmed and fails explicitly"
+        },
+        {
+          "name": "whoami on an HTTP failure carries the server's error code"
+        },
+        {
+          "name": "whoami refuses to confirm when the server names a different agent"
+        },
+        {
+          "name": "whoami --prompt prints the server-rendered guide verbatim"
+        },
+        {
+          "name": "whoami --prompt fails explicitly for a managed agent (no server-rendered prompt)"
         }
       ]
     },
@@ -929,22 +1058,49 @@
     },
     {
       "file": "src/commands/inbox/check.test.ts",
-      "count": 6,
+      "count": 15,
       "cases": [
         {
-          "name": "inbox check command renders pending target snapshot without content"
+          "name": "formatter: empty inbox says so and ends with one Next line"
         },
         {
-          "name": "inbox check command rejects non-managed runners before network I/O"
+          "name": "formatter: a page with more renders open commands, the More trailer, and exactly one Next line"
         },
         {
-          "name": "inbox check command renders empty snapshot"
+          "name": "formatter: the last page has no More line and names its seq window"
         },
         {
-          "name": "inbox check command uses inbox-specific failure code"
+          "name": "formatter: a page past the end points back to the newest page"
         },
         {
-          "name": "inbox check command message-only response is byte-compatible with shared snapshot formatter"
+          "name": "formatter: mentions view has a mentions header and keeps the view on the More line"
+        },
+        {
+          "name": "formatter: daemon pending rows annotate listed targets and lead the first page when the list lags"
+        },
+        {
+          "name": "formatter: the grouped third-party app events row points at message check, not an unreadable target"
+        },
+        {
+          "name": "inbox check reads the server list and the daemon snapshot for managed runners"
+        },
+        {
+          "name": "inbox check works for external agents from the server list alone"
+        },
+        {
+          "name": "inbox check maps 503 INBOX_UNAVAILABLE to a retry hint"
+        },
+        {
+          "name": "inbox check rejects bad flags before network I/O"
+        },
+        {
+          "name": "inbox check still lists conversations when the daemon snapshot fails, and says what is missing"
+        },
+        {
+          "name": "inbox check renders twenty sealed reminder rows without ack actions and one unsealed control"
+        },
+        {
+          "name": "inbox check reports revision drift and detached id-only seals without projecting them onto items"
         },
         {
           "name": "inbox check command renders structured sourceRef and exact actionCli from OS mint"
@@ -953,7 +1109,7 @@
     },
     {
       "file": "src/commands/integration/_format.test.ts",
-      "count": 8,
+      "count": 9,
       "cases": [
         {
           "name": "formatIntegrationLogin makes agent login completion explicit"
@@ -971,13 +1127,16 @@
           "name": "formatIntegrationList only prints manifest line for services that declare one"
         },
         {
-          "name": "formatIntegrationList separates built-in Raft apps from registered services"
+          "name": "formatIntegrationList drops retired built-in services and their active logins"
         },
         {
           "name": "formatIntegrationList keeps its observation boundary at the inventory decision point"
         },
         {
           "name": "formatIntegrationList projects a structured scope mutation into its first decision unit"
+        },
+        {
+          "name": "formatIntegrationList marks official apps and prints purpose; ordinary services get neither line"
         }
       ]
     },
@@ -1550,7 +1709,7 @@
           "name": "integration list reports only registry and login facts without external fan-out"
         },
         {
-          "name": "integration list JSON preserves the registry response without synthesized readiness"
+          "name": "integration list JSON removes retired services without synthesized readiness"
         },
         {
           "name": "integration list JSON projects a structured scope mutation into its machine receipt"
@@ -1559,7 +1718,7 @@
     },
     {
       "file": "src/commands/integration/login.test.ts",
-      "count": 10,
+      "count": 11,
       "cases": [
         {
           "name": "integration login consumes one-time handoff and stores service session without exposing request id"
@@ -1590,6 +1749,9 @@
         },
         {
           "name": "integration login preserves typed invalid scope failures"
+        },
+        {
+          "name": "integration login does not claim authenticated success for a redirect with only an error cookie"
         }
       ]
     },
@@ -1759,6 +1921,30 @@
       ]
     },
     {
+      "file": "src/commands/integration/token.test.ts",
+      "count": 6,
+      "cases": [
+        {
+          "name": "JWT process delivery uses FD 3, strips credential environment and redacts split child output"
+        },
+        {
+          "name": "JWT process launch failure does not issue a token"
+        },
+        {
+          "name": "JWT issuance failure terminates the waiting receiver and does not print its credential"
+        },
+        {
+          "name": "JWT receiver nonzero exit and timeout are failures rather than successful delivery receipts"
+        },
+        {
+          "name": "integration token parser uses the canonical route and passes receiver arguments without a shell"
+        },
+        {
+          "name": "JWT timeout aborts an in-flight issuance request and terminates the receiver"
+        }
+      ]
+    },
+    {
       "file": "src/commands/knowledge/get.test.ts",
       "count": 8,
       "cases": [
@@ -1823,7 +2009,7 @@
     },
     {
       "file": "src/commands/mention/_format.test.ts",
-      "count": 11,
+      "count": 12,
       "cases": [
         {
           "name": "send mention partial result is referent-bound, privacy-safe, and copyable"
@@ -1844,7 +2030,10 @@
           "name": "sender formatter preserves a legal non-ASCII authored token byte-for-byte"
         },
         {
-          "name": "formatPendingMentionActions names empty pending state"
+          "name": "formatPendingMentionActions names empty pending state, and says whether it is the whole list"
+        },
+        {
+          "name": "pending page verdict has three states and absent never renders as false"
         },
         {
           "name": "normalizers accept server response aliases without leaking malformed rows"
@@ -1880,22 +2069,43 @@
     },
     {
       "file": "src/commands/mention/pending.test.ts",
-      "count": 2,
+      "count": 7,
       "cases": [
         {
           "name": "mention pending calls pending endpoint and renders actions"
         },
         {
           "name": "mention pending --json emits normalized action payload"
+        },
+        {
+          "name": "--json carries the server's has_more as `truncated`, and the requested limit"
+        },
+        {
+          "name": "--limit 100 is accepted: the bound is the server's cap, not one below it"
+        },
+        {
+          "name": "at the cap, truncated=true stops telling the reader to raise --limit"
+        },
+        {
+          "name": "the three JSON states are distinguishable only by identity, not by falsiness"
+        },
+        {
+          "name": "--limit rejects values the server would silently turn back into the default"
         }
       ]
     },
     {
       "file": "src/commands/message/_consumedSeqState.test.ts",
-      "count": 5,
+      "count": 9,
       "cases": [
         {
           "name": "consumed cursor is strictly per-target — no cross-target leakage (gate 3)"
+        },
+        {
+          "name": "poisoned #undefined aliases and targets are ignored and scrubbed on the next write"
+        },
+        {
+          "name": "alias writes reject poisoned canonical targets while retaining valid aliases"
         },
         {
           "name": "consumed cursor merges monotonically per target"
@@ -1907,14 +2117,23 @@
           "name": "cursors are per-agent isolated"
         },
         {
+          "name": "sparse exact seqs stay per-target and are pruned only by a real high-water read"
+        },
+        {
           "name": "most recent thread context follows local read order, not global message seq"
+        },
+        {
+          "name": "the record this CLI writes answers the SDK's latest-read-thread question"
         }
       ]
     },
     {
       "file": "src/commands/message/_format.test.ts",
-      "count": 39,
+      "count": 61,
       "cases": [
+        {
+          "name": "formatInboxHint: points at raft inbox check with the conversation count"
+        },
         {
           "name": "formatMessages: empty list"
         },
@@ -1988,10 +2207,61 @@
           "name": "formatHistory: thread target suppresses nested reply target"
         },
         {
+          "name": "formatHistory: parent reads declare that thread replies are excluded"
+        },
+        {
+          "name": "formatHistory: the last-colon thread rule permits colons in the parent target"
+        },
+        {
           "name": "formatHistory: historyLimited footer"
         },
         {
+          "name": "formatSearchResults: a capped page declares truncated=true and how to page"
+        },
+        {
+          "name": "formatSearchResults: an exhausted page declares truncated=false"
+        },
+        {
+          "name": "formatSearchResults: hasMore=false is WITHHELD when the row count equals the requested limit"
+        },
+        {
+          "name": "formatSearchResults: hasMore=false still stands when the page is short of the limit"
+        },
+        {
+          "name": "formatSearchResults: with no --limit the guard still fires at the contract default"
+        },
+        {
+          "name": "formatSearchResults: a --limit above the cap fingerprints on the cap and says it was clamped"
+        },
+        {
+          "name": "formatSearchResults: --limit exactly at the cap also gets the narrow-the-query remedy"
+        },
+        {
+          "name": "formatSearchResults: the two unknown branches state different causes"
+        },
+        {
+          "name": "formatSearchResults: recent sort recommends the STABLE time key, not --offset"
+        },
+        {
+          "name": "formatSearchResults: relevance sort still recommends --offset (no time key applies)"
+        },
+        {
+          "name": "formatSearchResults: offset is carried into the next-page hint"
+        },
+        {
+          "name": "formatSearchResults: missing hasMore renders unknown, never false"
+        },
+        {
+          "name": "formatSearchResults: every render carries a truncation verdict"
+        },
+        {
           "name": "formatSearchResults: empty"
+        },
+        {
+          "name": "formatSearchResults: the EMPTY render also carries a truncation verdict"
+        },
+        {
+          "name": "formatSearchResults: empty with unreported hasMore is unknown, not false"
         },
         {
           "name": "formatSearchResults: filtered browse without query"
@@ -2031,12 +2301,24 @@
         },
         {
           "name": "formatSearchResults: expands matches that would split ref-shaped literals"
+        },
+        {
+          "name": "formatHistory: message body cannot forge structural lines"
+        },
+        {
+          "name": "formatMessages: message body cannot forge structural lines"
+        },
+        {
+          "name": "formatHistory: superseded task description cannot forge structural lines"
+        },
+        {
+          "name": "AGENT_BODY_LINE_SEPARATOR is stateless (no g flag) and matches the test split"
         }
       ]
     },
     {
       "file": "src/commands/message/_inbox.test.ts",
-      "count": 7,
+      "count": 10,
       "cases": [
         {
           "name": "drainInbox: uses agent-api events without a separate ack call"
@@ -2058,12 +2340,21 @@
         },
         {
           "name": "drainInbox returns accumulated has_more batches in seq order"
+        },
+        {
+          "name": "drainInbox: cursor acks pass the previous last_seen_seq until a request returns nothing"
+        },
+        {
+          "name": "drainInbox: a server without cursor acks keeps since=latest"
+        },
+        {
+          "name": "drainInbox: managed runners do not request cursor acks"
         }
       ]
     },
     {
       "file": "src/commands/message/_privateStateFile.test.ts",
-      "count": 5,
+      "count": 6,
       "cases": [
         {
           "name": "draft state is private and never follows symlinks"
@@ -2072,10 +2363,13 @@
           "name": "cursor state is private and never follows symlinks"
         },
         {
-          "name": "draft state written by the pre-hardening layout is imported once on first read"
+          "name": "draft state written by the pre-hardening layouts is imported once on first read"
         },
         {
-          "name": "cursor state written by the pre-hardening layout is imported once on first read"
+          "name": "cursor state written by the pre-hardening layouts is imported once on first read"
+        },
+        {
+          "name": "the hardened private-layout store is imported in preference to the shared tmpdir and left in place"
         },
         {
           "name": "legacy import refuses symlinks and does not run under an explicit state directory"
@@ -2084,10 +2378,13 @@
     },
     {
       "file": "src/commands/message/check.test.ts",
-      "count": 6,
+      "count": 14,
       "cases": [
         {
           "name": "message check command drains inbox through injected ApiClient and writes canonical text"
+        },
+        {
+          "name": "message check command prints the server's inbox hint after the messages"
         },
         {
           "name": "message check command renders an actionable hint when more messages may remain"
@@ -2099,10 +2396,31 @@
           "name": "message check command renders a final-drain hint when has_more batches were fully drained"
         },
         {
+          "name": "message check command exposes pending App Inbox work after an empty managed drain without rendering actions"
+        },
+        {
+          "name": "message check command leaves an empty managed drain unchanged when App Inbox is empty"
+        },
+        {
+          "name": "message check command does not query App Inbox when a managed drain returns messages"
+        },
+        {
           "name": "message check command maps events failures into typed CliError"
         },
         {
           "name": "message check command fails loud when the inbox events surface returns 5xx"
+        },
+        {
+          "name": "message check command says app items are unavailable after an empty external drain"
+        },
+        {
+          "name": "task #178: message check declares the lease on /events and acks the batch after the output was written"
+        },
+        {
+          "name": "task #178: message check does not ack when stdout cannot be written"
+        },
+        {
+          "name": "task #178: a daemon without the ack route (older daemon) does not fail message check"
         }
       ]
     },
@@ -2120,13 +2438,19 @@
     },
     {
       "file": "src/commands/message/read.test.ts",
-      "count": 12,
+      "count": 21,
       "cases": [
         {
           "name": "message read command uses injected ApiClient and writes canonical history"
         },
         {
           "name": "message read command records consumed boundary for ordinary history reads"
+        },
+        {
+          "name": "message read keeps channel, thread, and DM evidence on distinct resolver targets"
+        },
+        {
+          "name": "message read records a gapped latest window as exact seqs instead of skipping older unread"
         },
         {
           "name": "message read marks a transport failure as retryable without calling it an unknown write"
@@ -2157,6 +2481,27 @@
         },
         {
           "name": "message read command preserves fail-closed anchor error codes"
+        },
+        {
+          "name": "message read records evidence under the canonical thread target, not the spelling it was called with"
+        },
+        {
+          "name": "message read --unread asks the Server for unread and prints the same command to continue"
+        },
+        {
+          "name": "message read --unread with nothing unread says where the read position is"
+        },
+        {
+          "name": "message read --unread fails closed on a Server that ignored the flag"
+        },
+        {
+          "name": "message read --unread refuses an anchor before calling the Server"
+        },
+        {
+          "name": "message read --unread says when the newest messages were too recent to mark read"
+        },
+        {
+          "name": "message read --unread folds a message it already showed instead of repeating it as new"
         }
       ]
     },
@@ -2225,7 +2570,7 @@
     },
     {
       "file": "src/commands/message/send.test.ts",
-      "count": 78,
+      "count": 96,
       "cases": [
         {
           "name": "resolveSendContent reads multiline content from stdin"
@@ -2258,7 +2603,7 @@
           "name": "resolveOptionalSendContent bounds open empty non-TTY stdin by its deadline"
         },
         {
-          "name": "resolveOptionalSendContent catches a real child-process pipe before the deadline"
+          "name": "resolveOptionalSendContent reads an already-readable real child-process pipe"
         },
         {
           "name": "resolveOptionalSendContent treats bytes after the deadline as absent"
@@ -2282,6 +2627,12 @@
           "name": "validateDraftSendFlags allows --anyway with --send-draft"
         },
         {
+          "name": "validateDraftSendFlags requires --send-draft for --expected-draft-key"
+        },
+        {
+          "name": "validateDraftSendFlags: --discard-draft takes --expected-draft-key but not --send-draft, attachments or mentions"
+        },
+        {
           "name": "rejectSendDraftStdin fails loud and points agents to a normal send"
         },
         {
@@ -2289,6 +2640,12 @@
         },
         {
           "name": "local draft state stores body and expires stale drafts"
+        },
+        {
+          "name": "held send output states the draft lifetime and the expiry error code"
+        },
+        {
+          "name": "send-draft on an expired draft fails with SEND_DRAFT_EXPIRED, returns the last copy of the body, and sends nothing"
         },
         {
           "name": "formatHeldSendOutput frames held context as bounded latest messages"
@@ -2309,6 +2666,39 @@
           "name": "formatFreshnessHoldOutput can block non-message side effects without draft copy"
         },
         {
+          "name": "message send reconciles a timeout after commit without replaying content"
+        },
+        {
+          "name": "a committed send still prints its receipt when the post-commit draft clear fails"
+        },
+        {
+          "name": "message send reconciles a timeout before commit then replays once with the same key"
+        },
+        {
+          "name": "message send does not offer same-key retry after another send replaces its draft"
+        },
+        {
+          "name": "identity-bound retry command rejects a later replacement with zero requests"
+        },
+        {
+          "name": "identity-bound retry command sends when the expected draft key still matches"
+        },
+        {
+          "name": "message send does not replay when authoritative reconciliation is unavailable"
+        },
+        {
+          "name": "message send fails closed when reconciliation returns a non-authoritative state"
+        },
+        {
+          "name": "a completed send does not clear a newer concurrent draft for the same target"
+        },
+        {
+          "name": "compare-and-clear across processes only removes the draft that still carries the expected key"
+        },
+        {
+          "name": "concurrent cross-process writers all land in the ledger without corruption"
+        },
+        {
           "name": "message send forwards typed mention identity on the Agent API body"
         },
         {
@@ -2318,13 +2708,13 @@
           "name": "message send failure draft wrapper preserves existing CliError fields"
         },
         {
-          "name": "message send received 5xx keeps the draft without masquerading as unknown commit"
+          "name": "message send received 5xx keeps the draft and reports unknown when reconciliation is unavailable"
         },
         {
           "name": "message send transport ambiguity keeps the draft and fails closed as not retryable"
         },
         {
-          "name": "message send-draft received 5xx reports the retained draft as a known response"
+          "name": "message send-draft received 5xx retains the draft and reports unknown when reconciliation is unavailable"
         },
         {
           "name": "freshness hold recovery sends the saved draft with open empty non-TTY stdin"
@@ -2349,6 +2739,9 @@
         },
         {
           "name": "read→send handoff attests the returned history boundary"
+        },
+        {
+          "name": "read B → read higher seq in A → send B keeps B's own boundary"
         },
         {
           "name": "read→send handoff isolates parent channel and thread targets"
@@ -2396,10 +2789,16 @@
           "name": "send never borrows a different target's cursor (gate 3, client side)"
         },
         {
+          "name": "send ignores legacy #undefined alias collapse instead of borrowing another target's cursor"
+        },
+        {
           "name": "hold-issued draft boundary takes priority over the local cursor (gate 4)"
         },
         {
-          "name": "check→send does not auto-attest sparse event-drain seqs for DM or thread targets"
+          "name": "a hold-issued draft boundary is a floor: reads after the hold that move the cursor past it still count"
+        },
+        {
+          "name": "check→send attests sparse event-drain seqs exactly, never as a high-water boundary"
         },
         {
           "name": "send renders pending mention actions only on sent responses"
@@ -2464,26 +2863,71 @@
       ]
     },
     {
-      "file": "src/commands/migrate/index.test.ts",
+      "file": "src/commands/message/sendLedgerUnwritable.test.ts",
+      "count": 2,
+      "cases": [
+        {
+          "name": "an unwritable ledger does not stop a send"
+        },
+        {
+          "name": "a hold on an unwritable ledger says no draft was kept"
+        }
+      ]
+    },
+    {
+      "file": "src/commands/message/threadContextScope.test.ts",
+      "count": 9,
+      "cases": [
+        {
+          "name": "C13 a read from another context is not attested: no seenUpToSeq"
+        },
+        {
+          "name": "C14 a read in this context is attested"
+        },
+        {
+          "name": "C15 without a context signal, today's behaviour: the local value is attested"
+        },
+        {
+          "name": "C16 a row booked before context scoping (context_id empty) is not attested once a signal exists"
+        },
+        {
+          "name": "C17 the exported read record keeps its shape: { seq, readOrder } only"
+        },
+        {
+          "name": "C18 a new context replaces, not maxes: old 500, new read to 300 attests 300"
+        },
+        {
+          "name": "holds are counted by cause: context switch vs. evidence attached"
+        },
+        {
+          "name": "a hold on a target never read in any context moves neither counter"
+        },
+        {
+          "name": "gate: with passiveAx missing or false, a read from another context is still attested (today's behaviour)"
+        }
+      ]
+    },
+    {
+      "file": "src/commands/peerKind.test.ts",
       "count": 6,
       "cases": [
         {
-          "name": "migrate import rejects agent-initiated migration before calling the API"
+          "name": "--peer-kind appends the kind to a DM target and keeps a thread suffix"
         },
         {
-          "name": "migrate status prints an empty active migration state"
+          "name": "--peer-kind refuses a contradiction, a non-DM target and an unknown kind"
         },
         {
-          "name": "migrate ready hashes a readable manifest and submits the callback"
+          "name": "every command that takes a DM target declares --peer-kind"
         },
         {
-          "name": "migrate export rejects action-card preparation before calling the API"
+          "name": "read sends the kind-pinned target and leaves --around untouched"
         },
         {
-          "name": "migrate export does not surface server-suggested grant-control next actions"
+          "name": "a saved draft for the kind-pinned DM is resent to that DM, not the bare name"
         },
         {
-          "name": "agent-visible migration help and manual do not expose harness grant-control seam"
+          "name": "thread unfollow and reminder anchors carry the kind"
         }
       ]
     },
@@ -2514,6 +2958,102 @@
         },
         {
           "name": "profile show command maps server failures into typed CliError"
+        }
+      ]
+    },
+    {
+      "file": "src/commands/registryPin/registryPin.help.test.ts",
+      "count": 9,
+      "cases": [
+        {
+          "name": "--help"
+        },
+        {
+          "name": "parse errors"
+        },
+        {
+          "name": "--peer-kind"
+        },
+        {
+          "name": "no stdin"
+        },
+        {
+          "name": "managed runner: message check"
+        },
+        {
+          "name": "managed runner: inbox check"
+        },
+        {
+          "name": "reminder cancel seal guard"
+        },
+        {
+          "name": "reminder snooze / update"
+        },
+        {
+          "name": "message search --before naive timestamp"
+        }
+      ]
+    },
+    {
+      "file": "src/commands/registryPin/registryPin.test.ts",
+      "count": 19,
+      "cases": [
+        {
+          "name": "message read"
+        },
+        {
+          "name": "message check"
+        },
+        {
+          "name": "message send"
+        },
+        {
+          "name": "message send --discard-draft"
+        },
+        {
+          "name": "message search"
+        },
+        {
+          "name": "message react"
+        },
+        {
+          "name": "inbox check"
+        },
+        {
+          "name": "thread unfollow"
+        },
+        {
+          "name": "channel join / leave / members"
+        },
+        {
+          "name": "server info"
+        },
+        {
+          "name": "user info"
+        },
+        {
+          "name": "task list"
+        },
+        {
+          "name": "task claim"
+        },
+        {
+          "name": "task update"
+        },
+        {
+          "name": "task create"
+        },
+        {
+          "name": "reminder schedule / list / cancel"
+        },
+        {
+          "name": "manual get / search"
+        },
+        {
+          "name": "action prepare"
+        },
+        {
+          "name": "server error responses"
         }
       ]
     },
@@ -2570,8 +3110,23 @@
     },
     {
       "file": "src/commands/reminder/ack.test.ts",
-      "count": 8,
+      "count": 13,
       "cases": [
+        {
+          "name": "ack rejects a sealed exact reminder before posting the item"
+        },
+        {
+          "name": "seal and unseal all-pending use exact local item identities"
+        },
+        {
+          "name": "seal can register an exact full reminder identity after its Inbox item is gone"
+        },
+        {
+          "name": "seal can register a detached reminder-id-only protection entry"
+        },
+        {
+          "name": "ack rejects a later revision when an earlier tuple for the reminder id is sealed"
+        },
         {
           "name": "ack retires the exact active fired item, including legacy persisted reminder item shape"
         },
@@ -2591,10 +3146,31 @@
           "name": "ack does not treat absence as idempotency without an exact tombstone"
         },
         {
-          "name": "ack of N fails closed after the same reminder advances to active N+1"
+          "name": "repeat ack of N stays idempotent after the same reminder advances to active N+1"
         },
         {
           "name": "ack rejects a short id that is ambiguous across active or acknowledged reminder sources"
+        }
+      ]
+    },
+    {
+      "file": "src/commands/reminder/cancel.seal.test.ts",
+      "count": 1,
+      "cases": [
+        {
+          "name": "cancel is blocked by a reminder-id seal even when the exact Inbox item is absent"
+        }
+      ]
+    },
+    {
+      "file": "src/commands/reminder/external.test.ts",
+      "count": 2,
+      "cases": [
+        {
+          "name": "reminder schedule surfaces the external-agent refusal code"
+        },
+        {
+          "name": "reminder snooze and update say the seal check is unavailable, then surface the refusal"
         }
       ]
     },
@@ -2668,6 +3244,21 @@
       ]
     },
     {
+      "file": "src/commands/sdkOpsParity.test.ts",
+      "count": 3,
+      "cases": [
+        {
+          "name": "users.info text is the CLI's `raft user info` (human, agent, paged, skipped rosters)"
+        },
+        {
+          "name": "channels.info text is the CLI's `raft channel info` (roles, capabilities, mute, archive, refused roster)"
+        },
+        {
+          "name": "tasks.show text is the CLI's `raft task show` (three description states, done tasks, misses)"
+        }
+      ]
+    },
+    {
       "file": "src/commands/server/_format.test.ts",
       "count": 4,
       "cases": [
@@ -2732,7 +3323,7 @@
     },
     {
       "file": "src/commands/task/_format.test.ts",
-      "count": 25,
+      "count": 28,
       "cases": [
         {
           "name": "formatTaskList: empty with no filter"
@@ -2808,6 +3399,15 @@
         },
         {
           "name": "formatMyTaskList: the cross-channel view carries the same stamps"
+        },
+        {
+          "name": "formatTaskList: a report-block title collapses to one physical line carrying the assignee (task #123)"
+        },
+        {
+          "name": "formatTaskList: collapsing the title leaves the deliberate details block expanded (task #123)"
+        },
+        {
+          "name": "formatMyTaskList: the same report-block title stays on one line (task #123, other render path)"
         }
       ]
     },
@@ -2852,7 +3452,7 @@
     },
     {
       "file": "src/commands/task/claim.test.ts",
-      "count": 7,
+      "count": 8,
       "cases": [
         {
           "name": "task claim command keeps repeated task numbers as one batched claim request"
@@ -2874,6 +3474,9 @@
         },
         {
           "name": "a partial claim (one success, one conflict) does not throw"
+        },
+        {
+          "name": "proxy 5xx with upstream_http_response yields PROXY_5XX with the server-side next action"
         }
       ]
     },
@@ -3004,6 +3607,39 @@
       ]
     },
     {
+      "file": "src/commands/task/show.test.ts",
+      "count": 9,
+      "cases": [
+        {
+          "name": "task show renders the delivery surface's labels verbatim"
+        },
+        {
+          "name": "task show asks for status=all, or finished tasks become invisible"
+        },
+        {
+          "name": "an EMPTY list is ambiguous: neither 'read failed' nor 'does not exist'"
+        },
+        {
+          "name": "a NON-empty list with no match is NOT_FOUND and states the denominator"
+        },
+        {
+          "name": "a count is not a denominator unless the server asserted the list was complete"
+        },
+        {
+          "name": "the completeness clause tracks the response, so it cannot become a fixed decoration"
+        },
+        {
+          "name": "an EMPTY list with the completeness assertion is a definite not-found"
+        },
+        {
+          "name": "a truncated:true body never reaches the completeness branch — the contract rejects it first"
+        },
+        {
+          "name": "description null and description absent are DIFFERENT states, neither rendered as blank"
+        }
+      ]
+    },
+    {
       "file": "src/commands/task/unassign.test.ts",
       "count": 4,
       "cases": [
@@ -3067,6 +3703,21 @@
       ]
     },
     {
+      "file": "src/commands/thread/list.test.ts",
+      "count": 3,
+      "cases": [
+        {
+          "name": "formatThreadList prints an empty state"
+        },
+        {
+          "name": "formatThreadList prints exact unfollow targets"
+        },
+        {
+          "name": "thread list command uses injected ApiClient and writes the list"
+        }
+      ]
+    },
+    {
       "file": "src/commands/thread/unfollow.test.ts",
       "count": 5,
       "cases": [
@@ -3089,7 +3740,7 @@
     },
     {
       "file": "src/commands/user/info.test.ts",
-      "count": 3,
+      "count": 6,
       "cases": [
         {
           "name": "user info command shows visible agent facts and channel memberships"
@@ -3099,6 +3750,15 @@
         },
         {
           "name": "user info maps missing users to typed error with next action"
+        },
+        {
+          "name": "user info without roster access looks the user up in server info and skips every inspected channel"
+        },
+        {
+          "name": "user info rejects --limit above 200 before sending anything"
+        },
+        {
+          "name": "user info keeps the server's message for a refused or failed request"
         }
       ]
     },
@@ -3130,35 +3790,50 @@
       ]
     },
     {
-      "file": "src/commands/wiki/index.test.ts",
-      "count": 5,
+      "file": "src/core/apiFailure.test.ts",
+      "count": 6,
       "cases": [
         {
-          "name": "wiki manifest prints the canonical manifest envelope as JSON"
+          "name": "upstream_http_response: next action sends the reader to the server side, not the proxy transport log"
         },
         {
-          "name": "wiki read fetches the current canonical artifact envelope as JSON"
+          "name": "pre_response_transport: next action keeps the proxy transport log hint (that log carries the transport cause)"
         },
         {
-          "name": "wiki read rejects a missing or invalid artifact id before auth or network"
+          "name": "mid_response_transport and missing diagnostics fall back to the transport log hint"
         },
         {
-          "name": "wiki publish reads one JSON payload file and returns the committed envelope"
+          "name": "upstream_http_response without a numeric upstream status still names the discarded body"
         },
         {
-          "name": "wiki publish fails before auth or network when the input file is invalid"
+          "name": "an explicit caller or upstream next action still wins over the default"
+        },
+        {
+          "name": "non-proxy 5xx gets no default next action"
         }
       ]
     },
     {
       "file": "src/core/browserHandoff.test.ts",
-      "count": 2,
+      "count": 6,
       "cases": [
         {
           "name": "installEnterToOpenUrl opens the URL on Enter and only once"
         },
         {
           "name": "canInstallEnterToOpenUrl requires TTY stdin"
+        },
+        {
+          "name": "browserOpenCommand opens http(s) URLs on Windows without going through cmd"
+        },
+        {
+          "name": "browserOpenCommand refuses anything that is not an http(s) URL"
+        },
+        {
+          "name": "browserOpenCommand normalizes spaces and quotes out of the URL it passes on"
+        },
+        {
+          "name": "openUrlInBrowser does not spawn anything for a non-http(s) URL"
         }
       ]
     },
@@ -3320,7 +3995,7 @@
           "name": "unsupported Node 18 exits before CLI runtime dependencies load"
         },
         {
-          "name": "supported Node 20+ continues without writing or exiting"
+          "name": "supported Node 24+ continues without writing or exiting"
         },
         {
           "name": "runtime copy tracks the published CLI Node contract and repository pin"
@@ -3346,14 +4021,89 @@
       ]
     },
     {
+      "file": "src/state/agentLedger.test.ts",
+      "count": 15,
+      "cases": [
+        {
+          "name": "ledger path resolution prefers the explicit override, then legacy aliases, then the Raft home"
+        },
+        {
+          "name": "ledger round-trips streams, drafts, and meta through one database"
+        },
+        {
+          "name": "first open imports both legacy tmpdir stores once, preserving cursors and drafts"
+        },
+        {
+          "name": "cursor booking is load-bearing and sections do not clobber each other"
+        },
+        {
+          "name": "additive tables and meta keys from a newer CLI survive this version's writes"
+        },
+        {
+          "name": "a legacy store polluted by the #undefined alias collapse imports without merging evidence across targets"
+        },
+        {
+          "name": "isTrustedCanonicalTarget rejects every undefined-shaped spelling and accepts real targets"
+        },
+        {
+          "name": "a corrupt ledger is moved aside and the next operation starts fresh"
+        },
+        {
+          "name": "a ledger with a newer meta.version fails closed"
+        },
+        {
+          "name": "legacy import is exactly-once and never regresses live bookings"
+        },
+        {
+          "name": "the TTL delete only removes the exact draft it read"
+        },
+        {
+          "name": "an agent id that could name another directory is refused"
+        },
+        {
+          "name": "the exported read record is never older than the ledger"
+        },
+        {
+          "name": "concurrent CLI processes all land and the read record matches the ledger"
+        },
+        {
+          "name": "a trusted shared-tmpdir copy shadowed by the private layout is still removed after import"
+        }
+      ]
+    },
+    {
+      "file": "src/state/commandStateStore.test.ts",
+      "count": 1,
+      "cases": [
+        {
+          "name": "the ledger store matches the reference memory store"
+        }
+      ]
+    },
+    {
+      "file": "src/stdoutEpipe.test.ts",
+      "count": 2,
+      "cases": [
+        {
+          "name": "a reader that closes stdout early gets a quiet exit, not an EPIPE stack"
+        },
+        {
+          "name": "EPIPE keeps quiet but never decides success: a non-zero exit code survives"
+        }
+      ]
+    },
+    {
       "file": "src/transportTrace.routeFamily.test.ts",
-      "count": 3,
+      "count": 4,
       "cases": [
         {
           "name": "routeFamilyForPath classifies attachment comments ahead of generic attachment families"
         },
         {
           "name": "routeFamilyForPath classifies agent-api activity ingest"
+        },
+        {
+          "name": "routeFamilyForPath classifies thread list separately from thread unfollow"
         },
         {
           "name": "routeFamilyForPath classifies direct attachment upload control-plane calls"

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { extractClipboardFiles } from "../src/utils/clipboardFiles.js";
+import { extractClipboardFiles } from "../src/utils/clipboardFiles";
 
 function makeFile(name: string, type: string, body = "x", lastModified = 1): File {
   return new File([body], name, { type, lastModified });

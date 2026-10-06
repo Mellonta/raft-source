@@ -1,14 +1,14 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import type { ServerId } from "@botiverse/raft-shared";
-import { openTestApp } from "../test/integration/app.js";
+import { openTestApp } from "../test/integration/app";
 import {
   ATTACHMENT_DIRECT_UPLOAD_FEATURE_FLAG_KEY,
   createFeatureFlag,
   createFeatureFlagRule,
-} from "../services/featureFlagService.js";
-import { isAttachmentDirectUploadEnabledForServer } from "./attachmentDirectUpload.js";
+} from "../services/featureFlagService";
+import { isAttachmentDirectUploadEnabledForServer } from "./attachmentDirectUpload";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

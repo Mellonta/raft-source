@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 import type { Request, Response } from "express";
-import { shouldRecordRaftdevActivity, raftdevActivityMiddleware } from "./raftdevActivity.js";
+import { shouldRecordRaftdevActivity, raftdevActivityMiddleware } from "./raftdevActivity";
 
 test("raftdev activity records real user API requests", () => {
   const dir = mkdtempSync(join(tmpdir(), "raftdev-activity-"));

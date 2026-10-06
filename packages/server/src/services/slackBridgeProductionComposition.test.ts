@@ -1,56 +1,61 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { createHash, createHmac, randomUUID } from "node:crypto";
 import sharp from "sharp";
-import { runNamedCase } from "../test/runNamedCase.js";
+import { runNamedCase } from "../test/runNamedCase";
 
 import { and, desc, eq, gt, sql } from "drizzle-orm";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channels,
   externalActorProjections,
   externalAddressabilityProjections,
   externalAppCredentials,
   externalAppInstallGrantReceipts,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalAppRegistrations,
   externalAppServerGrants,
-  externalAuthorPolicies,
   externalBindingAudienceSnapshots,
   externalChannelBindings,
+  externalDeliveryPartitions,
   externalInboundEvents,
   externalHumanIdentityLinks,
   externalMessageLinks,
+  externalOutboundDeliveries,
   externalProjectionAvatarArtifacts,
   messages,
   oauthAccessRequests,
   oauthClients,
   oauthClientInstalls,
   users,
-} from "../db/schema.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../routes/slackBridge.js";
-import { openTestApp } from "../test/integration/app.js";
-import { createServer } from "./serverService.js";
-import { createAgent } from "./agentService.js";
-import { createFeatureFlagRule } from "./featureFlagService.js";
-import { createSlackBridgeEnvCredentialCipher } from "./slackBridgeEnvSecrets.js";
-import { processExternalInboundEventOnce } from "./externalInboundWorkerService.js";
-import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService.js";
-import { createSlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime.js";
-import { createSlackInboundAttachmentAdapter } from "./slackInboundAttachmentAdapter.js";
-import { createSlackOutboundAttachmentAdapter } from "./slackOutboundAttachmentAdapter.js";
-import { lookupSlackProviderConversation } from "./slackProviderAdapter.js";
+} from "../db/schema";
+import { signAccessToken } from "../middleware/auth";
+import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../routes/slackBridge";
+import { openTestApp } from "../test/integration/app";
+import { createServer } from "./serverService";
+import { createAgent } from "./agentService";
+import { createFeatureFlagRule } from "./featureFlagService";
+import { createSlackBridgeEnvCredentialCipher } from "./slackBridgeEnvSecrets";
+import { processExternalInboundEventOnce } from "./externalInboundWorkerService";
+import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService";
+import { createSlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime";
+import { createSlackInboundAttachmentAdapter } from "./slackInboundAttachmentAdapter";
+import { createSlackOutboundAttachmentAdapter } from "./slackOutboundAttachmentAdapter";
+import { lookupSlackProviderConversation } from "./slackProviderAdapter";
 import {
   reconcileSlackBridgeOAuthIdentityAppType,
   refreshSlackPublicConversationAuthority,
   slackBridgeProvisioningManifestHash,
   SLACK_BRIDGE_PROVISIONING_CAPABILITIES,
-} from "./slackBridgeProvisioningControlPlane.js";
-import { createSlackBridgeServerRuntimeFromEnv } from "./slackBridgeServerRuntime.js";
-import { ExternalAppControlPlaneError } from "./externalAppControlPlaneService.js";
+} from "./slackBridgeProvisioningControlPlane";
+import { createSlackBridgeServerRuntimeFromEnv } from "./slackBridgeServerRuntime";
+import {
+  ExternalAppControlPlaneError,
+  resolveExternalBindingAuthority,
+} from "./externalAppControlPlaneService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -191,6 +196,7 @@ test("true Server production composition makes all seven provisioning endpoints 
   let grantIdentityMode: "valid" | "wrong-team" | "wrong-user" | "missing-bot" = "valid";
   let providerAuthTestCalls = 0;
   let providerAudienceCalls = 0;
+  let beforeAudienceResponse: (() => Promise<void>) | null = null;
   let providerBotInConversation = true;
   let providerOtherChannelMember = false;
   const providerQueryRequests: Array<{
@@ -374,11 +380,15 @@ test("true Server production composition makes all seven provisioning endpoints 
           contentType: new Headers(init?.headers).get("content-type"),
           query: requestUrl.searchParams.toString(),
         });
+        const responseHook = beforeAudienceResponse;
+        beforeAudienceResponse = null;
+        if (responseHook) await responseHook();
         return new Response(JSON.stringify({
           ok: true,
           user: {
             id: "U_PRODUCTION_OWNER",
             name: "production-owner",
+            is_admin: true,
             is_bot: false,
             is_app_user: false,
             is_restricted: false,
@@ -889,42 +899,6 @@ test("true Server production composition makes all seven provisioning endpoints 
     ));
     await getDb().execute(sql.raw("DROP FUNCTION reject_install_grant_receipt_for_test()"));
 
-    await getDb().execute(sql.raw(`
-      CREATE FUNCTION reject_author_policy_for_test() RETURNS trigger AS $$
-      BEGIN
-        RAISE EXCEPTION 'directed author policy failure';
-      END;
-      $$ LANGUAGE plpgsql
-    `));
-    await getDb().execute(sql.raw(`
-      CREATE TRIGGER reject_author_policy_for_test
-      BEFORE INSERT ON external_author_policies
-      FOR EACH ROW EXECUTE FUNCTION reject_author_policy_for_test()
-    `));
-    const failedConsentEnable = await fetch(`${app.baseUrl}/api/slack-bridge/provisioning/enable`, {
-      method: "POST",
-      headers,
-    });
-    assert.equal(failedConsentEnable.status, 503);
-    const [stillPausedAfterConsentFailure] = await getDb().select()
-      .from(externalChannelBindings)
-      .where(eq(externalChannelBindings.id, binding.id));
-    assert.equal(stillPausedAfterConsentFailure?.state, "paused");
-    assert.equal(
-      (await getDb().select().from(externalAppInstallGrantReceipts)
-        .where(eq(externalAppInstallGrantReceipts.installId, install.id))).length,
-      0,
-      "author consent persistence failure must roll back the install-grant receipt",
-    );
-    assert.equal(
-      (await getDb().select().from(externalAuthorPolicies)).length,
-      0,
-      "author consent persistence failure must not leave partial policy authority",
-    );
-    await getDb().execute(sql.raw(
-      "DROP TRIGGER reject_author_policy_for_test ON external_author_policies",
-    ));
-    await getDb().execute(sql.raw("DROP FUNCTION reject_author_policy_for_test()"));
 
     const enable = await fetch(`${app.baseUrl}/api/slack-bridge/provisioning/enable`, {
       method: "POST",
@@ -939,52 +913,65 @@ test("true Server production composition makes all seven provisioning endpoints 
     assert.deepEqual(receipts[0]?.grantedScopes, [...SLACK_BRIDGE_REQUIRED_BOT_SCOPES].sort());
     assert.equal(receipts[0]?.observationSource, "token_introspection");
 
-    let managerPolicies = await getDb().select().from(externalAuthorPolicies).where(and(
-      eq(externalAuthorPolicies.serverId, server.id),
-      eq(externalAuthorPolicies.appRegistrationId, registration.id),
-      eq(externalAuthorPolicies.installId, install.id),
-      eq(externalAuthorPolicies.bindingId, binding.id),
-      eq(externalAuthorPolicies.bindingEpoch, binding.bindingEpoch),
-      eq(externalAuthorPolicies.authorType, "user"),
-      eq(externalAuthorPolicies.authorId, owner.id),
+    const [readyPartition] = await getDb().select().from(externalDeliveryPartitions).where(and(
+      eq(externalDeliveryPartitions.bindingId, binding.id),
+      eq(externalDeliveryPartitions.bindingEpoch, binding.bindingEpoch),
     ));
-    assert.equal(managerPolicies.length, 1);
-    assert.equal(managerPolicies[0]?.state, "granted");
-    assert.equal(managerPolicies[0]?.consentRevision, binding.bindingEpoch);
+    assert.ok(readyPartition, "binding activation must atomically establish delivery readiness");
+    assert.equal(readyPartition.lastEnqueuedPosition, 0);
+    assert.equal(readyPartition.cursorPosition, 0);
 
-    await getDb().delete(externalAuthorPolicies).where(eq(
-      externalAuthorPolicies.id,
-      managerPolicies[0]!.id,
-    ));
-    const consentlessLoad = await fetch(`${app.baseUrl}/api/slack-bridge/provisioning`, { headers });
-    assert.equal(consentlessLoad.status, 200, await consentlessLoad.clone().text());
-    assert.equal(
-      (await consentlessLoad.json() as { snapshot: { stage: string } }).snapshot.stage,
-      "enable",
-      "a manager without exact current-epoch outbound consent must not see Connected",
-    );
-    const repairConsent = await fetch(`${app.baseUrl}/api/slack-bridge/provisioning/enable`, {
-      method: "POST",
-      headers,
+    const seededDelivery = await getDb().transaction(async (tx) => {
+      const [source] = await tx.insert(messages).values({
+        channelId: raftChannel.id,
+        senderType: "user",
+        senderId: owner.id,
+        messageType: "chat",
+        content: "completed delivery retained across repeated enable",
+      }).returning();
+      await tx.update(externalDeliveryPartitions).set({
+        lastEnqueuedPosition: 1,
+        cursorPosition: 1,
+      }).where(eq(externalDeliveryPartitions.id, readyPartition.id));
+      const [delivery] = await tx.insert(externalOutboundDeliveries).values({
+        sourceMessageId: source.id,
+        bindingId: binding.id,
+        bindingEpoch: binding.bindingEpoch,
+        partitionPosition: 1,
+        enqueueRuntimeRevision: "test-runtime-revision",
+        state: "accepted",
+        renderSnapshotSchema: "slack-bridge-render-snapshot.v3",
+        renderSnapshot: { testOnly: true },
+        renderSnapshotDigest: "a".repeat(64),
+        reconciliationMarker: "A".repeat(43),
+        providerAttempts: 1,
+        ambiguityBudgetProviderAttempts: 1,
+        firstDispatchedAt: new Date(),
+        providerMessageId: "1788541200.000001",
+        acceptedAt: new Date(),
+        stateReason: "provider_accepted",
+      }).returning();
+      await tx.insert(externalMessageLinks).values({
+        deliveryId: delivery.id,
+        provider: "slack",
+        installId: install.id,
+        providerAuthorityId: install.providerAuthorityId,
+        providerConversationId: binding.providerConversationId,
+        providerMessageId: delivery.providerMessageId,
+        providerThreadId: null,
+        bindingId: binding.id,
+        bindingEpoch: binding.bindingEpoch,
+        connectionEpoch: binding.connectionEpoch,
+        raftMessageId: source.id,
+        raftCanonicalRootMessageId: null,
+        firstDirection: "raft_outbound",
+        payloadFingerprint: delivery.renderSnapshotDigest,
+        outcomeState: "accepted",
+        authorityState: "active",
+        stateReason: "provider_accepted",
+      });
+      return delivery;
     });
-    assert.equal(repairConsent.status, 200, await repairConsent.clone().text());
-    assert.equal(
-      (await repairConsent.json() as { snapshot: { stage: string } }).snapshot.stage,
-      "health",
-      "explicit Enable must restore the requesting manager's exact current-epoch consent",
-    );
-    managerPolicies = await getDb().select().from(externalAuthorPolicies).where(and(
-      eq(externalAuthorPolicies.serverId, server.id),
-      eq(externalAuthorPolicies.appRegistrationId, registration.id),
-      eq(externalAuthorPolicies.installId, install.id),
-      eq(externalAuthorPolicies.bindingId, binding.id),
-      eq(externalAuthorPolicies.bindingEpoch, binding.bindingEpoch),
-      eq(externalAuthorPolicies.authorType, "user"),
-      eq(externalAuthorPolicies.authorId, owner.id),
-    ));
-    assert.equal(managerPolicies.length, 1, "consent repair must be idempotent per binding epoch");
-    assert.equal(managerPolicies[0]?.state, "granted");
-    assert.equal(managerPolicies[0]?.consentRevision, binding.bindingEpoch);
 
     const repeatEnable = await fetch(`${app.baseUrl}/api/slack-bridge/provisioning/enable`, {
       method: "POST",
@@ -999,6 +986,17 @@ test("true Server production composition makes all seven provisioning endpoints 
       (await waitForInstallGrantReceipt(install.id)).length,
       1,
       "a fresh repeated enable must not mint a duplicate grant observation",
+    );
+    const [preservedPartition] = await getDb().select().from(externalDeliveryPartitions).where(
+      eq(externalDeliveryPartitions.id, readyPartition.id),
+    );
+    assert.equal(preservedPartition?.lastEnqueuedPosition, 1);
+    assert.equal(preservedPartition?.cursorPosition, 1);
+    assert.equal(
+      (await getDb().select().from(externalOutboundDeliveries)
+        .where(eq(externalOutboundDeliveries.id, seededDelivery.id))).length,
+      1,
+      "repeated enable must not replace or reset an existing nonzero delivery partition",
     );
 
     await getDb().delete(externalAddressabilityProjections).where(eq(
@@ -1375,6 +1373,55 @@ test("true Server production composition makes all seven provisioning endpoints 
         await providerProbe.releaseCredential(conversationCredential);
       }
 
+      const [installServerAssociation] = await getDb().select()
+        .from(externalAppInstallServerGrants)
+        .where(and(
+          eq(externalAppInstallServerGrants.installId, install.id),
+          eq(externalAppInstallServerGrants.serverId, binding.serverId),
+          eq(externalAppInstallServerGrants.registrationId, binding.registrationId),
+        ));
+      assert.ok(installServerAssociation);
+      await getDb().delete(externalAppInstallServerGrants)
+        .where(eq(externalAppInstallServerGrants.id, installServerAssociation.id));
+      assert.equal(await providerProbe.credentialResolver.resolve({
+        authority: conversationAuthority,
+        now: new Date(),
+      }), null, "the shared credential resolver must reject a missing install-server association");
+      const grantCallsBeforeMissingAssociation = providerAuthTestCalls;
+      assert.deepEqual(await providerProbe.provisioningProvider.readInstallGrant({
+        installId: install.id,
+        providerAppId: install.providerAppId,
+        providerAuthorityId: install.providerAuthorityId,
+        botUserId: install.botUserId!,
+        connectionEpoch: install.connectionEpoch,
+        credentialRevision: install.credentialRevision,
+        now: new Date(),
+      }), { kind: "unverified" });
+      assert.equal(
+        providerAuthTestCalls,
+        grantCallsBeforeMissingAssociation,
+        "a workspace-level credential caller must also reject missing install-server authority before Slack I/O",
+      );
+      await getDb().insert(externalAppInstallServerGrants).values(installServerAssociation);
+
+      await getDb().update(externalAppServerGrants).set({ grantEpoch: grant.grantEpoch + 1 })
+        .where(eq(externalAppServerGrants.id, grant.id));
+      assert.equal(await providerProbe.credentialResolver.resolve({
+        authority: conversationAuthority,
+        now: new Date(),
+      }), null, "the shared credential resolver must reject a stale install-server association epoch");
+      await getDb().update(externalAppServerGrants).set({ grantEpoch: grant.grantEpoch })
+        .where(eq(externalAppServerGrants.id, grant.id));
+
+      await getDb().update(externalChannelBindings).set({ grantEpoch: binding.grantEpoch + 1 })
+        .where(eq(externalChannelBindings.id, binding.id));
+      assert.equal(await providerProbe.credentialResolver.resolve({
+        authority: conversationAuthority,
+        now: new Date(),
+      }), null, "the shared credential resolver must reject a stale binding grant epoch");
+      await getDb().update(externalChannelBindings).set({ grantEpoch: binding.grantEpoch })
+        .where(eq(externalChannelBindings.id, binding.id));
+
       const callsBeforeWrongApp = providerAuthTestCalls;
       assert.deepEqual(await providerProbe.provisioningProvider.readInstallGrant({
         installId: install.id,
@@ -1542,6 +1589,69 @@ test("true Server production composition makes all seven provisioning endpoints 
         `${label} must append or update zero actor/address/snapshot authority`,
       );
     };
+
+    await runNamedCase("public refresh discards a provider observation when the Server grant drifts in flight", async () => {
+      const beforeRows = await readPublicAuthorityRows();
+      const callsBefore = providerAudienceCalls;
+      const raceProvider = createSlackBridgeProviderRuntime({
+        credentialCipher: createSlackBridgeEnvCredentialCipher({
+          key: Buffer.from(CREDENTIAL_KEY, "base64"),
+        }),
+        db: getDb(),
+        fetch: providerFetch,
+      });
+      let responseHookCalled = false;
+      beforeAudienceResponse = async () => {
+        responseHookCalled = true;
+        await getDb().update(externalAppServerGrants).set({
+          grantEpoch: grant.grantEpoch + 1,
+        }).where(eq(externalAppServerGrants.id, grant.id));
+      };
+      const observedAt = new Date();
+      try {
+        const refreshResult = await refreshSlackPublicConversationAuthority({
+          db: getDb(),
+          provider: raceProvider.provisioningProvider,
+          bindingId: binding.id,
+          now: observedAt,
+        });
+        assert.equal(responseHookCalled, true);
+        const [driftedGrant] = await getDb().select().from(externalAppServerGrants)
+          .where(eq(externalAppServerGrants.id, grant.id));
+        assert.equal(driftedGrant.grantEpoch, grant.grantEpoch + 1);
+        assert.deepEqual(refreshResult, {
+          bindingId: binding.id,
+          audienceStatus: "unavailable",
+          observedAtMs: observedAt.getTime(),
+          reason: "authority_quarantined",
+        });
+        assert.equal(providerAudienceCalls, callsBefore + 1, "the race must occur after provider I/O");
+        assert.deepEqual(
+          await readPublicAuthorityRows(),
+          beforeRows,
+          "an in-flight grant drift must write no actor, address, or audience snapshot authority",
+        );
+      } finally {
+        beforeAudienceResponse = null;
+        await raceProvider.stop();
+        await getDb().update(externalAppServerGrants).set({
+          grantEpoch: grant.grantEpoch,
+        }).where(eq(externalAppServerGrants.id, grant.id));
+      }
+    });
+
+    await runNamedCase("public lifecycle cannot extend authority after the binding grant epoch drifts", async () => {
+      await getDb().update(externalChannelBindings).set({
+        grantEpoch: binding.grantEpoch + 1,
+      }).where(eq(externalChannelBindings.id, binding.id));
+      try {
+        await assertLifecycleAuthorityRejected("drifted binding grant epoch");
+      } finally {
+        await getDb().update(externalChannelBindings).set({
+          grantEpoch: binding.grantEpoch,
+        }).where(eq(externalChannelBindings.id, binding.id));
+      }
+    });
 
     await runNamedCase("public lifecycle cannot extend authority after the Server grant is revoked", async () => {
       await getDb().update(externalAppServerGrants).set({
@@ -1730,14 +1840,68 @@ test("true Server production composition makes all seven provisioning endpoints 
       row.id === publicBindingAfterAdd.id)!;
     const privateAfterAdditiveEnable = bindingsAfterAdditiveEnable.find((row) =>
       row.id === privateBinding.id)!;
+    const {
+      privacyFreshUntil: publicPrivacyFreshBeforeEnable,
+      updatedAt: publicUpdatedAtBeforeEnable,
+      ...publicStableBeforeEnable
+    } = publicBeforeAdditiveEnable;
+    const {
+      privacyFreshUntil: publicPrivacyFreshAfterEnable,
+      updatedAt: publicUpdatedAtAfterEnable,
+      ...publicStableAfterEnable
+    } = publicAfterAdditiveEnable;
     assert.deepEqual(
-      publicAfterAdditiveEnable,
-      publicBeforeAdditiveEnable,
-      "enabling an additive paused pair must leave the existing active binding byte-equivalent",
+      publicStableAfterEnable,
+      publicStableBeforeEnable,
+      "enabling an additive paused pair must preserve the existing active binding authority",
     );
+    assert.ok(
+      publicPrivacyFreshAfterEnable >= publicPrivacyFreshBeforeEnable,
+      "the background lifecycle may independently extend the verified privacy deadline",
+    );
+    assert.ok(publicUpdatedAtAfterEnable >= publicUpdatedAtBeforeEnable);
     assert.equal(privateAfterAdditiveEnable.state, "active");
     assert.equal(privateAfterAdditiveEnable.stateReason, null);
     assert.equal(privateAfterAdditiveEnable.bindingEpoch, privateBeforeAdditiveEnable.bindingEpoch);
+
+    await getDb().update(externalChannelBindings).set({
+      state: "paused",
+      stateReason: "privacy_changed_audience_migration_required",
+    }).where(eq(externalChannelBindings.id, publicAfterAdditiveEnable.id));
+    const migrationBlockedHealth = await fetch(
+      `${app.baseUrl}/api/slack-bridge/provisioning`,
+      { headers },
+    );
+    assert.equal(migrationBlockedHealth.status, 200, await migrationBlockedHealth.clone().text());
+    const migrationBlockedBody = await migrationBlockedHealth.json() as {
+      snapshot: {
+        rawHealth: {
+          bindings: Array<{
+            id: string;
+            state: string;
+            bindingEpoch: number;
+            stateReason: string | null;
+            recoveryAction: string;
+          }>;
+        };
+      };
+    };
+    assert.deepEqual(
+      migrationBlockedBody.snapshot.rawHealth.bindings.find(({ id }) =>
+        id === publicAfterAdditiveEnable.id),
+      {
+        id: publicAfterAdditiveEnable.id,
+        state: "paused",
+        bindingEpoch: publicAfterAdditiveEnable.bindingEpoch,
+        stateReason: "privacy_changed_audience_migration_required",
+        recoveryAction: "migrate_slack_channel_audience",
+      },
+      "owner provisioning health must expose the actionable privacy migration block",
+    );
+    await getDb().update(externalChannelBindings).set({
+      state: "active",
+      stateReason: null,
+    }).where(eq(externalChannelBindings.id, publicAfterAdditiveEnable.id));
 
     const visibleChannels = await fetch(`${app.baseUrl}/api/channels`, { headers });
     assert.equal(visibleChannels.status, 200, await visibleChannels.clone().text());
@@ -2245,11 +2409,65 @@ test("true Server production composition makes all seven provisioning endpoints 
       "teardown revival must not override a binding revoked for another reason",
     );
 
-    await getDb().update(externalAppInstalls).set({
-      state: "reauth_required",
-      stateReason: "test_provider_reauthorization_required",
-      updatedAt: new Date(),
-    }).where(eq(externalAppInstalls.id, install.id));
+    const [partitionOwner] = await getDb().insert(users).values({
+      email: `slack-partition-${randomUUID()}@raft.test`,
+      name: `slack-partition-${randomUUID().slice(0, 8)}`,
+      passwordHash: "test-only",
+      emailVerified: true,
+    }).returning();
+    const partitionServer = await createServer(
+      "Slack Partition B",
+      `slack-partition-${randomUUID()}`,
+      partitionOwner.id,
+    );
+    await getDb().insert(oauthClientInstalls).values({
+      serverId: partitionServer.id,
+      clientId: client.id,
+      installedByUserId: partitionOwner.id,
+    });
+    const [partitionGrant] = await getDb().insert(externalAppServerGrants).values({
+      serverId: partitionServer.id,
+      registrationId: registration.id,
+      state: "active",
+      grantEpoch: 1,
+      grantedManifestVersion: registration.capabilityManifestVersion,
+      grantedManifestHash: registration.capabilityManifestHash,
+      grantedCapabilities: registration.requiredCapabilities,
+      grantedByType: "human",
+      grantedById: partitionOwner.id,
+    }).returning();
+    const [partitionAssociation] = await getDb().insert(externalAppInstallServerGrants).values({
+      installId: install.id,
+      serverId: partitionServer.id,
+      registrationId: registration.id,
+      serverGrantId: partitionGrant.id,
+      grantEpoch: partitionGrant.grantEpoch,
+      state: "active",
+      authorizedByType: "human",
+      authorizedById: partitionOwner.id,
+    }).returning();
+    const [partitionChannel] = await getDb().insert(channels).values({
+      serverId: partitionServer.id,
+      name: `slack-partition-${randomUUID().slice(0, 8)}`,
+      type: "channel",
+    }).returning();
+    const [partitionBinding] = await getDb().insert(externalChannelBindings).values({
+      serverId: partitionServer.id,
+      registrationId: registration.id,
+      installId: install.id,
+      channelId: partitionChannel.id,
+      providerConversationId: "C_PRODUCTION_PARTITION_B",
+      providerConversationKind: "public_channel",
+      privacyClass: "public",
+      privacyFreshUntil: new Date(Date.now() + 60 * 60_000),
+      state: "active",
+      grantEpoch: partitionGrant.grantEpoch,
+      connectionEpoch: install.connectionEpoch,
+      bindingEpoch: 1,
+      consentedByType: "human",
+      consentedById: partitionOwner.id,
+      consentedAt: new Date(),
+    }).returning();
 
     const readDisconnectAuthority = async () => ({
       grant: (await getDb().select().from(externalAppServerGrants)
@@ -2258,10 +2476,11 @@ test("true Server production composition makes all seven provisioning endpoints 
         .where(eq(externalAppInstalls.id, install.id)))[0],
       credential: (await getDb().select().from(externalAppCredentials)
         .where(eq(externalAppCredentials.installId, install.id)))[0],
+      installServerGrants: await getDb().select().from(externalAppInstallServerGrants)
+        .where(eq(externalAppInstallServerGrants.installId, install.id))
+        .orderBy(externalAppInstallServerGrants.serverId),
       bindings: await getDb().select().from(externalChannelBindings)
         .where(eq(externalChannelBindings.installId, install.id)),
-      policies: await getDb().select().from(externalAuthorPolicies)
-        .where(eq(externalAuthorPolicies.installId, install.id)),
       links: await getDb().select().from(externalHumanIdentityLinks)
         .where(eq(externalHumanIdentityLinks.installId, install.id)),
       clientInstall: (await getDb().select().from(oauthClientInstalls).where(and(
@@ -2321,10 +2540,11 @@ test("true Server production composition makes all seven provisioning endpoints 
       .where(eq(externalAppInstalls.id, install.id));
     const [credentialAfterDisconnect] = await getDb().select().from(externalAppCredentials)
       .where(eq(externalAppCredentials.installId, install.id));
+    const associationsAfterDisconnect = await getDb().select().from(externalAppInstallServerGrants)
+      .where(eq(externalAppInstallServerGrants.installId, install.id))
+      .orderBy(externalAppInstallServerGrants.serverId);
     const bindingsAfterDisconnect = await getDb().select().from(externalChannelBindings)
       .where(eq(externalChannelBindings.installId, install.id));
-    const policiesAfterDisconnect = await getDb().select().from(externalAuthorPolicies)
-      .where(eq(externalAuthorPolicies.installId, install.id));
     const linksAfterDisconnect = await getDb().select().from(externalHumanIdentityLinks)
       .where(eq(externalHumanIdentityLinks.installId, install.id));
     const [clientInstallAfterDisconnect] = await getDb().select().from(oauthClientInstalls)
@@ -2334,28 +2554,49 @@ test("true Server production composition makes all seven provisioning endpoints 
       ));
     assert.equal(grantAfterDisconnect.state, "revoked");
     assert.equal(grantAfterDisconnect.revokeReason, "manager_unbound_workspace");
-    assert.equal(installAfterDisconnect.state, "revoked");
-    assert.equal(installAfterDisconnect.stateReason, "manager_unbound_workspace");
-    assert.equal(installAfterDisconnect.connectionEpoch, install.connectionEpoch + 1);
-    assert.equal(credentialAfterDisconnect.state, "revoked");
-    assert.ok(credentialAfterDisconnect.revokedAt);
-    assert.equal(bindingsAfterDisconnect.some((row) => ["active", "paused", "quarantined"].includes(row.state)), false);
-    assert.ok(bindingsAfterDisconnect.some((row) => row.stateReason === "manager_unbound_workspace"));
+    assert.equal(installAfterDisconnect.state, "active");
+    assert.equal(installAfterDisconnect.stateReason, null);
+    assert.equal(installAfterDisconnect.connectionEpoch, install.connectionEpoch);
+    assert.equal(credentialAfterDisconnect.state, "active");
+    assert.equal(credentialAfterDisconnect.revokedAt, null);
+    assert.equal(
+      associationsAfterDisconnect.find((row) => row.serverId === server.id)?.state,
+      "revoked",
+    );
+    assert.equal(
+      associationsAfterDisconnect.find((row) => row.id === partitionAssociation.id)?.state,
+      "active",
+    );
+    assert.equal(bindingsAfterDisconnect.some((row) =>
+      row.serverId === server.id && ["active", "paused", "quarantined"].includes(row.state)), false);
+    assert.ok(bindingsAfterDisconnect.some((row) =>
+      row.serverId === server.id && row.stateReason === "manager_unbound_workspace"));
+    assert.equal(
+      bindingsAfterDisconnect.find((row) => row.id === partitionBinding.id)?.state,
+      "active",
+      "disconnecting one server must preserve another server's partition",
+    );
     assert.deepEqual(
       bindingsAfterDisconnect.find((row) => row.id === securityRevoked.id),
       securityRevoked,
       "disconnect must preserve a prior security revocation reason byte-equivalent",
     );
-    assert.equal(policiesAfterDisconnect.some((row) => row.state === "granted"), false);
     assert.equal(linksAfterDisconnect.some((row) => row.state === "active"), false);
     assert.equal(clientInstallAfterDisconnect.status, "suspended");
+    assert.equal((await resolveExternalBindingAuthority({
+      serverId: partitionServer.id,
+      bindingId: partitionBinding.id,
+      expectedConnectionEpoch: partitionBinding.connectionEpoch,
+      expectedBindingEpoch: partitionBinding.bindingEpoch,
+      now: new Date(),
+    })).active, true, "the surviving server partition must remain authorized");
 
     const disconnectState = {
       grant: grantAfterDisconnect,
       install: installAfterDisconnect,
       credential: credentialAfterDisconnect,
+      installServerGrants: associationsAfterDisconnect,
       bindings: bindingsAfterDisconnect,
-      policies: policiesAfterDisconnect,
       links: linksAfterDisconnect,
       clientInstall: clientInstallAfterDisconnect,
     };
@@ -2432,9 +2673,23 @@ test("true Server production composition makes all seven provisioning endpoints 
       "reconnect must preserve the manager-unbound binding as immutable history",
     );
     const currentReconnectBindings = bindingsAfterReconnect.filter((row) =>
-      row.connectionEpoch === installAfterDisconnect.connectionEpoch + 1
+      row.serverId === server.id
+      && row.connectionEpoch === installAfterDisconnect.connectionEpoch + 1
       && row.state === "paused");
     assert.equal(currentReconnectBindings.length, 1);
+    const partitionAfterReconnect = bindingsAfterReconnect.find((row) => row.id === partitionBinding.id);
+    assert.ok(partitionAfterReconnect);
+    assert.equal(partitionAfterReconnect.state, "paused");
+    assert.equal(partitionAfterReconnect.stateReason, "provider_reauthorized_review_required");
+    assert.equal(partitionAfterReconnect.connectionEpoch, installAfterDisconnect.connectionEpoch + 1);
+    assert.deepEqual(await resolveExternalBindingAuthority({
+      serverId: partitionServer.id,
+      bindingId: partitionBinding.id,
+      expectedConnectionEpoch: partitionAfterReconnect.connectionEpoch,
+      expectedBindingEpoch: partitionAfterReconnect.bindingEpoch,
+      now: new Date(),
+    }), { active: false, reason: "binding_inactive" },
+    "workspace reconnect must freeze every server partition at the new epoch");
 
     const reconnectPreflight = await fetch(
       `${app.baseUrl}/api/slack-bridge/provisioning/preflight`,

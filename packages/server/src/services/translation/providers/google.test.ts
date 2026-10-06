@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
-import { test } from "vitest";
-import { GoogleTranslationProvider, parseGoogleServiceAccountJson } from "./google.js";
-import { TranslationPlaceholderValidationError, TranslationProviderError } from "../errors.js";
-import { createRegexPlaceholderPolicy } from "../placeholderPolicy.js";
+import { GoogleTranslationProvider, parseGoogleServiceAccountJson } from "./google";
+import { TranslationPlaceholderValidationError, TranslationProviderError } from "../errors";
+import { createRegexPlaceholderPolicy } from "../placeholderPolicy";
 
 const placeholderPolicy = createRegexPlaceholderPolicy({
   name: "brace-placeholder-v1",

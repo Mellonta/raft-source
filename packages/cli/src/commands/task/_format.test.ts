@@ -1,10 +1,9 @@
 // Snapshot-style tests for agent-facing task output format.
 // Pins the exact text shape of the AX contract.
 
-import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { formatMyTaskList, formatTaskList, formatTasksCreated, formatClaimResults, formatTaskUnclaimed, formatTaskStatusUpdated } from "./_format.js";
+import { formatMyTaskList, formatTaskList, formatTasksCreated, formatClaimResults, formatTaskUnclaimed, formatTaskStatusUpdated } from "./_format";
 
 test("formatTaskList: empty with no filter", () => {
   assert.equal(formatTaskList("#engineering", { tasks: [] }), "No tasks in #engineering.");
@@ -36,7 +35,7 @@ test("formatTaskList: single task with assignee and creator", () => {
     [
       "## Task Board for #proj-slock (1 tasks)",
       "",
-      "#1 [in_progress] implement CLI transport → @akko (by @xxchan) msg=abcd1234",
+      "#1 [in_progress] → @akko (by @xxchan) msg=abcd1234 Current title: implement CLI transport",
     ].join("\n"),
   );
 });
@@ -64,8 +63,8 @@ test("formatTaskList: departed creator is distinct while an active creator stays
   });
 
   const lines = out.split("\n");
-  assert.equal(lines[2], "#1 [todo] live creator (by @alice) msg=11111111");
-  assert.equal(lines[3], "#2 [todo] historical creator (by @departed_alice [departed]) msg=22222222");
+  assert.equal(lines[2], "#1 [todo] (by @alice) msg=11111111 Current title: live creator");
+  assert.equal(lines[3], "#2 [todo] (by @departed_alice [departed]) msg=22222222 Current title: historical creator");
 });
 
 test("formatMyTaskList: departed creator state remains visible in the cross-channel view", () => {
@@ -83,7 +82,7 @@ test("formatMyTaskList: departed creator state remains visible in the cross-chan
 
   assert.match(
     out,
-    /#proj-release task #2 \[in_review\] by=@departed_alice creator=departed msg=22222222 historical creator/,
+    /#proj-release task #2 \[in_review\] by=@departed_alice creator=departed msg=22222222 Current title: historical creator/,
   );
 });
 
@@ -121,9 +120,9 @@ test("formatTaskList: multiple tasks with mixed states", () => {
   });
   const lines = out.split("\n");
   assert.equal(lines[0], "## Task Board for #engineering (3 tasks)");
-  assert.equal(lines[2], "#1 [done] set up repo → @bob (by @alice) msg=11111111");
-  assert.equal(lines[3], "#2 [todo] write tests (by @alice) msg=22222222");
-  assert.equal(lines[4], "#3 [in_progress] fix flaky CI → @akko msg=33333333");
+  assert.equal(lines[2], "#1 [done] → @bob (by @alice) msg=11111111 Current title: set up repo");
+  assert.equal(lines[3], "#2 [todo] (by @alice) msg=22222222 Current title: write tests");
+  assert.equal(lines[4], "#3 [in_progress] → @akko msg=33333333 Current title: fix flaky CI");
 });
 
 test("formatTaskList: unresolved claimed assignee never prints opaque id", () => {
@@ -139,7 +138,7 @@ test("formatTaskList: unresolved claimed assignee never prints opaque id", () =>
       },
     ],
   });
-  assert.match(out, /#4 \[in_progress\] hold ownership → <unresolved> msg=44444444/);
+  assert.match(out, /#4 \[in_progress\] → <unresolved> msg=44444444 Current title: hold ownership/);
   assert.doesNotMatch(out, /6e6ef0c5/);
   assert.doesNotMatch(out, /agent:6e6ef0c5/);
 });
@@ -150,7 +149,7 @@ test("formatTaskList: legacy task", () => {
       { taskNumber: 5, status: "todo", title: "old migration", messageId: "aaaa000000000000", isLegacy: true },
     ],
   });
-  assert.match(out, /#5 \[todo\] old migration msg=aaaa0000 \[LEGACY — read-only\]/);
+  assert.match(out, /#5 \[todo\] msg=aaaa0000 \[LEGACY — read-only\] Current title: old migration/);
 });
 
 test("formatTaskList: task without messageId", () => {
@@ -164,7 +163,7 @@ test("formatTaskList: task without messageId", () => {
     [
       "## Task Board for #general (1 tasks)",
       "",
-      "#1 [todo] no msg id task",
+      "#1 [todo] Current title: no msg id task",
     ].join("\n"),
   );
 });
@@ -379,7 +378,7 @@ test("formatTaskList: omits the stamps entirely when absent", () => {
   });
   assert.doesNotMatch(out, /created=/);
   assert.doesNotMatch(out, /updated=/);
-  assert.match(out, /#8 \[todo\] No stamps/);
+  assert.match(out, /#8 \[todo\] Current title: No stamps/);
 });
 
 test("formatMyTaskList: the cross-channel view carries the same stamps", () => {
@@ -393,4 +392,85 @@ test("formatMyTaskList: the cross-channel view carries the same stamps", () => {
     }],
   });
   assert.match(out, / created=2026-08-28 10:30:44Z/);
+});
+
+// task #123 — a multiline task title must not break the task-number line apart.
+// The card's own title names the target: "normalize channel-board titles to one line".
+// The report-block shape (blank-line separated, label: value) is the one that escaped:
+// it is how agent-issue reports arrive, and it is a real specimen from #wg-agent-issue #4.
+const REPORT_BLOCK_TITLE = [
+  "reportId: a433ea30-b2de-4acc-982d-521f93c5ba94",
+  "serverId: 36e6355e-bcca-4e36-9679-d13c1b250ba8",
+  "",
+  "issueDescription:",
+  "not responding 谁帮忙看一下这个issue是为什么没有响应",
+].join("\n");
+
+function taskBodyLines(out: string): string[] {
+  // output is "## Task Board …\n\n<tasks>" — everything after the header/blank is the board
+  return out.split("\n").slice(2);
+}
+
+test("formatTaskList: a report-block title collapses to one physical line carrying the assignee (task #123)", () => {
+  const out = formatTaskList("#wg-agent-issue", {
+    tasks: [
+      {
+        taskNumber: 4,
+        status: "in_review",
+        title: REPORT_BLOCK_TITLE,
+        claimedById: "agent-1",
+        claimedByName: "HaoHao",
+        createdByName: "RC",
+        messageId: "983f3882aaaabbbb",
+      },
+    ],
+  });
+  const body = taskBodyLines(out);
+  // rev3 acceptance: exactly one physical task line, and the #N line carries the assignee.
+  assert.equal(body.length, 1, `expected 1 physical task line, got ${body.length}:\n${body.join("\n")}`);
+  assert.ok(body[0].startsWith("#4 "), `task line must start with #4: ${body[0]}`);
+  assert.ok(body[0].includes("→ @HaoHao"), `assignee must sit on the #N line: ${body[0]}`);
+});
+
+test("formatTaskList: collapsing the title leaves the deliberate details block expanded (task #123)", () => {
+  // Huaihuai's boundary: fix the title, ⛔ do not flatten the description block — it is
+  // intentionally multi-line and indented, and is a separate contract from the title.
+  const out = formatTaskList("#wg-agent-issue", {
+    tasks: [
+      {
+        taskNumber: 5,
+        status: "todo",
+        title: "line one\nline two",
+        description: "first detail\nsecond detail",
+        claimedById: null,
+        claimedByName: null,
+        createdByName: "RC",
+      },
+    ],
+  });
+  const body = taskBodyLines(out);
+  assert.equal(body.length, 3, `1 task line + 2 details lines expected, got:\n${body.join("\n")}`);
+  assert.ok(body[0].startsWith("#5 ") && body[0].includes("line one line two"));
+  assert.ok(body[1].startsWith("  Current description: first detail"));
+  assert.ok(body[2].startsWith("                       second detail"));
+  assert.doesNotMatch(out, /\n  details:/);
+});
+
+test("formatMyTaskList: the same report-block title stays on one line (task #123, other render path)", () => {
+  // The --mine path already collapses. Kept as the paired guard so a future change
+  // cannot fix one path and regress the other — that asymmetry is the whole defect.
+  const out = formatMyTaskList({
+    tasks: [
+      {
+        taskNumber: 4,
+        channelRef: "#wg-agent-issue",
+        status: "in_review",
+        title: REPORT_BLOCK_TITLE,
+        createdByName: "RC",
+        messageId: "983f3882aaaabbbb",
+      },
+    ],
+  });
+  const taskLines = out.split("\n").filter((l) => l.startsWith("- #wg-agent-issue task #4 "));
+  assert.equal(taskLines.length, 1, `expected exactly 1 task line, got ${taskLines.length}`);
 });

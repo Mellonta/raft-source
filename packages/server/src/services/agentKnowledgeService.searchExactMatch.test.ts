@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { searchAgentKnowledgeDocs, resolveAgentKnowledgeDoc } from "./agentKnowledgeService.js";
+import { searchAgentKnowledgeDocs, resolveAgentKnowledgeDoc } from "./agentKnowledgeService";
 
 // Regression: `raft manual search 联合频道` returned knowledge_not_found in production while
 // `raft manual get 联合频道` resolved, for the same alias in the same served build.

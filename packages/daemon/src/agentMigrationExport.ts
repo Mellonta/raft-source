@@ -1,41 +1,30 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readdir, readFile, readlink } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   agentMigrationTransferSummarySchema,
   type AgentMigrationTransferSummary,
 } from "@botiverse/raft-shared";
 
-export const AGENT_MIGRATION_BUNDLE_SCHEMA_VERSION = "agent-bundle/v2" as const;
-
-export type AgentMigrationExportMode = "cooperative" | "forensic";
 export type AgentMigrationBundleEntrySource = "workspace" | "runtime";
 export type AgentMigrationBundleEntryKind = "file" | "symlink";
 
-export interface CooperativeAgentMigrationManifest {
-  include?: string[];
-  exclude_regenerable?: string[];
-  secrets_disclosed?: string[];
-  cleaned?: string[];
+/** Entries counted past the entry limit, for the limit error. */
+export interface AgentMigrationExportEntryOverflow {
+  entryCount: number;
+  /** Keyed by top-level workspace path, `dir/` for directories. */
+  countByTopLevelPath: Map<string, number>;
 }
 
-export interface AgentMigrationRuntimeSessionRef {
-  runtime: string;
-  label: string;
-  path: string;
-  reachable?: boolean;
-  reason?: string;
-}
-
-export interface BuildAgentMigrationExportManifestInput {
-  agentId: string;
-  slockHome: string;
-  workspacePath?: string;
-  mode: AgentMigrationExportMode;
-  cooperativeManifest?: CooperativeAgentMigrationManifest;
-  runtimeSessionRefs?: AgentMigrationRuntimeSessionRef[];
-  now?: Date;
+/**
+ * Cumulative source-build progress. `files`/`bytes` only grow within a phase;
+ * the phases run in order scanning -> packing.
+ */
+export interface AgentMigrationExportProgress {
+  phase: "scanning" | "packing";
+  files: number;
+  bytes: number;
 }
 
 export interface AgentMigrationBundleFileEntry {
@@ -48,28 +37,20 @@ export interface AgentMigrationBundleFileEntry {
   mode?: number;
   mtimeMs?: number;
   linkTarget?: string;
-  secretShapes?: string[];
-}
-
-export interface AgentMigrationSourceBundleFileEntry extends AgentMigrationBundleFileEntry {
-  sourcePath: string;
 }
 
 export interface AgentMigrationExcludedRegenerableEntry {
   path: string;
-  reason: "regenerable_default" | "cooperative_exclude_regenerable";
+  reason: "regenerable_default";
   regenerableHint: string;
 }
 
-export interface AgentMigrationPromotedIncludeEntry {
+/** A workspace path listed in `.raftmigrateignore` and therefore not moved. */
+export interface AgentMigrationExcludedIgnoredEntry {
   path: string;
-  reason: "exclude_not_regenerable";
-}
-
-export interface AgentMigrationProposalRefusalEntry {
-  path: string;
-  reason: "outside_workspace" | "unsafe_path";
-  source: "include" | "exclude_regenerable" | "secrets_disclosed" | "cleaned";
+  reason: "raftmigrateignore";
+  fileCount: number;
+  sizeBytes: number;
 }
 
 export interface AgentMigrationUnreachableEntry {
@@ -78,76 +59,60 @@ export interface AgentMigrationUnreachableEntry {
   detail?: string;
 }
 
-export interface AgentMigrationSecretDisclosure {
-  path: string;
-  shapes: string[];
-}
-
-export interface AgentMigrationCrossTreeRefEntry {
-  runtime: string;
-  label: string;
-  bundlePath: string;
-  reachable: boolean;
-  reason?: string;
-  sha256?: string;
-  sizeBytes?: number;
-}
-
-export interface AgentMigrationExportManifest {
-  schemaVersion: typeof AGENT_MIGRATION_BUNDLE_SCHEMA_VERSION;
-  agentId: string;
-  mode: AgentMigrationExportMode;
-  createdAt: string;
-  defaults: {
-    unknownFiles: "include";
-    excludePolicy: "regenerable_only";
-    regenerableDirectoryNames: string[];
-  };
-  files: AgentMigrationBundleFileEntry[];
-  excludedRegenerable: AgentMigrationExcludedRegenerableEntry[];
-  promotedIncludes: AgentMigrationPromotedIncludeEntry[];
-  proposalRefusals: AgentMigrationProposalRefusalEntry[];
-  unreachable: AgentMigrationUnreachableEntry[];
-  secretsDisclosed: AgentMigrationSecretDisclosure[];
-  cleaned: string[];
-  crossTreeRefs: AgentMigrationCrossTreeRefEntry[];
-}
-
-export interface AgentMigrationExportBuildPlan {
-  manifest: AgentMigrationExportManifest;
-  files: AgentMigrationSourceBundleFileEntry[];
-  roots: {
-    slockHome: string;
-    workspace: string;
-  };
-}
+// Matched against every path segment, so only names that are unambiguously
+// tool-generated belong here (e.g. not `build`, `out`, `coverage`, `venv`).
+const THIRD_PARTY_REGENERABLE_NAMES = new Set([
+  ".nox",
+  ".pnpm-store",
+  ".terraform",
+  ".tox",
+  ".venv",
+  "bower_components",
+  "node_modules",
+  "vendor",
+]);
+const CACHE_REGENERABLE_NAMES = new Set([
+  ".cache",
+  ".dart_tool",
+  ".gradle",
+  ".mypy_cache",
+  ".parcel-cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".turbo",
+  "__pycache__",
+]);
+const BUILD_REGENERABLE_NAMES = new Set([".next", ".nuxt", ".svelte-kit", "dist", "target"]);
 
 const REGENERABLE_DIRECTORY_NAMES = [
-  ".cache",
-  ".gradle",
-  ".pnpm-store",
-  ".venv",
-  "__pycache__",
-  "dist",
-  "node_modules",
-  "target",
-  "vendor",
-];
+  ...THIRD_PARTY_REGENERABLE_NAMES,
+  ...CACHE_REGENERABLE_NAMES,
+  ...BUILD_REGENERABLE_NAMES,
+].sort();
 
-const THIRD_PARTY_REGENERABLE_NAMES = new Set([".pnpm-store", ".venv", "node_modules", "vendor"]);
-const CACHE_REGENERABLE_NAMES = new Set([".cache", ".gradle", "__pycache__"]);
-const BUILD_REGENERABLE_NAMES = new Set(["dist", "target"]);
+const EXCLUDED_IGNORED_SUMMARY_LARGEST = 5;
 
-export function summarizeAgentMigrationExportManifest(
-  manifest: Pick<AgentMigrationExportManifest, "files" | "excludedRegenerable">,
-): AgentMigrationTransferSummary {
+/** Whether a moved workspace path is the agent's `notes/` directory or under it. */
+export function isNotesPath(workspaceRelativePath: string): boolean {
+  return workspaceRelativePath === "notes" || workspaceRelativePath.startsWith("notes/");
+}
+
+/** The transfer summary from running totals, for a bundle that never lists its files in memory. */
+export function summarizeAgentMigrationTransfer(input: {
+  includedFileCount: number;
+  includedBytes: number;
+  memoryMdPresent: boolean;
+  notesPresent: boolean;
+  excludedRegenerable: AgentMigrationExcludedRegenerableEntry[];
+  excludedIgnored?: AgentMigrationExcludedIgnoredEntry[];
+}): AgentMigrationTransferSummary {
   const excludedRegenerableByCategory = {
     thirdPartyDependencies: 0,
     caches: 0,
     buildArtifacts: 0,
     otherRegenerable: 0,
   };
-  for (const entry of manifest.excludedRegenerable) {
+  for (const entry of input.excludedRegenerable) {
     const names = entry.path.replaceAll("\\", "/").split("/").filter(Boolean);
     if (names.some((name) => THIRD_PARTY_REGENERABLE_NAMES.has(name))) {
       excludedRegenerableByCategory.thirdPartyDependencies += 1;
@@ -159,138 +124,108 @@ export function summarizeAgentMigrationExportManifest(
       excludedRegenerableByCategory.otherRegenerable += 1;
     }
   }
-  const includedWorkspacePaths = manifest.files
-    .map((entry) => entry.workspaceRelativePath?.replaceAll("\\", "/"))
-    .filter((entry): entry is string => Boolean(entry));
-
   return agentMigrationTransferSummarySchema.parse({
-    includedFileCount: manifest.files.length,
-    includedBytes: manifest.files.reduce(
-      (total, entry) => total + (entry.kind === "file" ? entry.sizeBytes ?? 0 : 0),
-      0,
-    ),
-    excludedRegenerableCount: manifest.excludedRegenerable.length,
+    includedFileCount: input.includedFileCount,
+    includedBytes: input.includedBytes,
+    excludedRegenerableCount: input.excludedRegenerable.length,
     excludedRegenerableByCategory,
     keyWorkspaceEntries: {
-      memoryMdPresent: includedWorkspacePaths.includes("MEMORY.md"),
-      notesPresent: includedWorkspacePaths.some((entry) => entry === "notes" || entry.startsWith("notes/")),
+      memoryMdPresent: input.memoryMdPresent,
+      notesPresent: input.notesPresent,
     },
+    // Only present when something was ignored, so a summary without ignores
+    // stays readable by servers that predate the field.
+    ...(input.excludedIgnored && input.excludedIgnored.length > 0
+      ? { excludedIgnored: summarizeExcludedIgnored(input.excludedIgnored) }
+      : {}),
   });
 }
 
-const SECRET_FILE_NAMES = new Set([
-  ".env",
-  ".env.local",
-  ".env.development",
-  ".env.production",
-  ".env.test",
-  "credentials.json",
-  "credential.json",
-]);
-
-const ENV_KEY_PATTERN = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/;
-const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:/;
-
-export async function buildAgentMigrationExportManifest(
-  input: BuildAgentMigrationExportManifestInput,
-): Promise<AgentMigrationExportManifest> {
-  return (await buildAgentMigrationExportPlan(input)).manifest;
+function summarizeExcludedIgnored(entries: AgentMigrationExcludedIgnoredEntry[]): NonNullable<AgentMigrationTransferSummary["excludedIgnored"]> {
+  return {
+    count: entries.length,
+    fileCount: entries.reduce((total, entry) => total + entry.fileCount, 0),
+    bytes: entries.reduce((total, entry) => total + entry.sizeBytes, 0),
+    largest: [...entries]
+      .sort((a, b) => b.sizeBytes - a.sizeBytes || a.path.localeCompare(b.path))
+      .slice(0, EXCLUDED_IGNORED_SUMMARY_LARGEST)
+      .map((entry) => ({ path: entry.path, bytes: entry.sizeBytes })),
+  };
 }
 
-export async function buildAgentMigrationExportPlan(
-  input: BuildAgentMigrationExportManifestInput,
-): Promise<AgentMigrationExportBuildPlan> {
-  const slockHome = path.resolve(input.slockHome);
-  const workspace = path.resolve(input.workspacePath ?? path.join(slockHome, "agents", input.agentId));
-  const proposedIncludes = normalizeProposalPaths(input.cooperativeManifest?.include, workspace, "include");
-  const proposedRegenerableExcludes = normalizeProposalPaths(input.cooperativeManifest?.exclude_regenerable, workspace, "exclude_regenerable");
-  const cleanedProposal = normalizeProposalPaths(input.cooperativeManifest?.cleaned, workspace, "cleaned");
+/** Workspace-root file listing paths that are regenerable and need not move. */
+export const AGENT_MIGRATION_IGNORE_FILE = ".raftmigrateignore";
+// Never excluded by `.raftmigrateignore`: the agent's memory, and the ignore
+// file itself so the next migration applies the same list. Everything else is
+// the agent's call; the source keeps an archived copy for up to 30 days.
+const ALWAYS_MOVED_ROOT_PATHS = ["MEMORY.md", AGENT_MIGRATION_IGNORE_FILE];
+const IGNORE_PATTERN_CHARS = /[*?[\]!]/;
+
+const WINDOWS_DRIVE_PATH_PATTERN = /^[A-Za-z]:/;
+
+/** What a listing-only walk excluded; `onEntry` saw everything else. */
+export interface AgentMigrationWorkspaceListing {
+  excludedRegenerable: AgentMigrationExcludedRegenerableEntry[];
+  excludedIgnored: AgentMigrationExcludedIgnoredEntry[];
+  unreachable: AgentMigrationUnreachableEntry[];
+}
+
+/**
+ * Walks the workspace with the same exclusions as an export (built-in
+ * regenerable directories, `.raftmigrateignore`) and hands each file or
+ * symlink path to `onEntry` in a fixed order, without reading anything or
+ * keeping a per-file list. `measureIgnored: false` skips sizing ignored paths
+ * on a repeat walk.
+ */
+export async function listAgentMigrationWorkspace(input: {
+  workspacePath: string;
+  onEntry: (workspaceRelativePath: string) => Promise<void> | void;
+  measureIgnored?: boolean;
+  onProgress?: (progress: AgentMigrationExportProgress) => void;
+}): Promise<AgentMigrationWorkspaceListing> {
+  const workspace = path.resolve(input.workspacePath);
   const state: BuildState = {
     workspace,
-    files: [],
     excludedRegenerable: [],
-    promotedIncludes: [],
-    proposalRefusals: [
-      ...proposedIncludes.refusals,
-      ...proposedRegenerableExcludes.refusals,
-      ...cleanedProposal.refusals,
-    ],
+    excludedIgnored: [],
     unreachable: [],
-    secretsDisclosed: [],
-    seenWorkspacePaths: new Set(),
-    explicitIncludePaths: new Set(proposedIncludes.paths),
+    ignoredPaths: new Set(await readAgentMigrationIgnoreFile(workspace)),
+    progress: { files: 0, bytes: 0 },
+    onProgress: input.onProgress,
+    onEntry: input.onEntry,
+    measureIgnored: input.measureIgnored ?? true,
   };
-
-  await walkWorkspace(workspace, "", new Set(proposedRegenerableExcludes.paths), state, { forceIncludeRegenerable: false });
-
-  for (const requestedPath of proposedIncludes.paths) {
-    if (!state.seenWorkspacePaths.has(requestedPath)) {
-      await includeWorkspacePath(requestedPath, state, { forceIncludeRegenerable: true });
-    }
-  }
-
-  for (const requestedPath of proposedRegenerableExcludes.paths) {
-    if (isRegenerablePath(requestedPath)) continue;
-    state.promotedIncludes.push({ path: requestedPath, reason: "exclude_not_regenerable" });
-    await includeWorkspacePath(requestedPath, state, { forceIncludeRegenerable: true });
-  }
-
-  const crossTreeRefs = await buildCrossTreeRefs(input.runtimeSessionRefs ?? []);
-  const secretDisclosureProposal = normalizeProposalPaths(input.cooperativeManifest?.secrets_disclosed, workspace, "secrets_disclosed");
-  state.proposalRefusals.push(...secretDisclosureProposal.refusals);
-
-  const sourceFiles = sortSourceBundleEntries(state.files);
-  const manifest: AgentMigrationExportManifest = {
-    schemaVersion: AGENT_MIGRATION_BUNDLE_SCHEMA_VERSION,
-    agentId: input.agentId,
-    mode: input.mode,
-    createdAt: (input.now ?? new Date()).toISOString(),
-    defaults: {
-      unknownFiles: "include",
-      excludePolicy: "regenerable_only",
-      regenerableDirectoryNames: [...REGENERABLE_DIRECTORY_NAMES],
-    },
-    files: sourceFiles.map(toPortableBundleEntry),
-    excludedRegenerable: sortByPath(state.excludedRegenerable),
-    promotedIncludes: sortByPath(state.promotedIncludes),
-    proposalRefusals: sortByPath(state.proposalRefusals),
-    unreachable: sortByPath(state.unreachable),
-    secretsDisclosed: sortByPath([
-      ...state.secretsDisclosed,
-      ...normalizeProvidedSecretDisclosures(secretDisclosureProposal.paths),
-    ]),
-    cleaned: cleanedProposal.paths,
-    crossTreeRefs: crossTreeRefs.sort((a, b) => a.bundlePath.localeCompare(b.bundlePath)),
-  };
-
+  await walkWorkspace(workspace, "", state);
   return {
-    manifest,
-    files: sourceFiles,
-    roots: {
-      slockHome,
-      workspace,
-    },
+    excludedRegenerable: sortByPath(state.excludedRegenerable),
+    excludedIgnored: sortByPath(state.excludedIgnored),
+    unreachable: sortByPath(state.unreachable),
   };
 }
 
 interface BuildState {
   workspace: string;
-  files: AgentMigrationSourceBundleFileEntry[];
   excludedRegenerable: AgentMigrationExcludedRegenerableEntry[];
-  promotedIncludes: AgentMigrationPromotedIncludeEntry[];
-  proposalRefusals: AgentMigrationProposalRefusalEntry[];
+  excludedIgnored: AgentMigrationExcludedIgnoredEntry[];
   unreachable: AgentMigrationUnreachableEntry[];
-  secretsDisclosed: AgentMigrationSecretDisclosure[];
-  seenWorkspacePaths: Set<string>;
-  explicitIncludePaths: Set<string>;
+  ignoredPaths: Set<string>;
+  progress: { files: number; bytes: number };
+  onProgress?: (progress: AgentMigrationExportProgress) => void;
+  onEntry: (relativePath: string) => Promise<void> | void;
+  /** Count and size `.raftmigrateignore` paths (skipped by a repeat walk). */
+  measureIgnored?: boolean;
+}
+
+/** Top-level workspace path an entry is accounted under: `name` or `dir/`. */
+export function agentMigrationTopLevelPath(relativePath: string): string {
+  const slashIndex = relativePath.indexOf("/");
+  return slashIndex === -1 ? relativePath : `${relativePath.slice(0, slashIndex)}/`;
 }
 
 async function walkWorkspace(
   root: string,
   relativeDir: string,
-  proposedRegenerableExcludes: Set<string>,
   state: BuildState,
-  opts: { forceIncludeRegenerable: boolean },
 ): Promise<void> {
   const absoluteDir = path.join(root, relativeDir);
   let entries;
@@ -307,157 +242,99 @@ async function walkWorkspace(
   entries.sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of entries) {
     const relativePath = toPosixPath(path.join(relativeDir, entry.name));
+    if (state.ignoredPaths.has(relativePath)) {
+      await excludeIgnoredPath(relativePath, entry.isDirectory(), state);
+      continue;
+    }
     if (entry.isDirectory()) {
-      if (!opts.forceIncludeRegenerable && isRegenerablePath(relativePath)) {
-        if (state.explicitIncludePaths.has(relativePath)) {
-          await walkWorkspace(root, relativePath, proposedRegenerableExcludes, state, { forceIncludeRegenerable: true });
-          continue;
-        }
-        if (hasExplicitIncludeDescendant(relativePath, state.explicitIncludePaths)) {
-          await walkWorkspace(root, relativePath, proposedRegenerableExcludes, state, opts);
-          continue;
-        }
+      if (isRegenerablePath(relativePath)) {
         state.excludedRegenerable.push({
           path: relativePath,
-          reason: proposedRegenerableExcludes.has(relativePath) ? "cooperative_exclude_regenerable" : "regenerable_default",
+          reason: "regenerable_default",
           regenerableHint: `${entry.name} is treated as rebuildable/installable state and is not bundled by default`,
         });
         continue;
       }
-      await walkWorkspace(root, relativePath, proposedRegenerableExcludes, state, opts);
+      await walkWorkspace(root, relativePath, state);
       continue;
     }
 
-    await includeWorkspacePath(relativePath, state, { forceIncludeRegenerable: opts.forceIncludeRegenerable });
+    await state.onEntry(relativePath);
   }
 }
 
-async function includeWorkspacePath(
-  workspaceRelativePath: string,
-  state: BuildState,
-  opts: { forceIncludeRegenerable: boolean },
-): Promise<void> {
-  const normalizedRelativePath = normalizeRelativePath(workspaceRelativePath);
-  if (state.seenWorkspacePaths.has(normalizedRelativePath)) return;
-  const sourcePath = path.join(state.workspace, normalizedRelativePath);
+function reportScanProgress(state: BuildState, files: number, bytes: number): void {
+  state.progress.files += files;
+  state.progress.bytes += bytes;
+  state.onProgress?.({ phase: "scanning", files: state.progress.files, bytes: state.progress.bytes });
+}
 
-  let stat;
+/**
+ * Reads `.raftmigrateignore` at the workspace root: one workspace-relative path
+ * per line, `#` comments, no patterns. Only regenerable or re-downloadable
+ * content belongs there; paths that must always move are dropped here.
+ */
+async function readAgentMigrationIgnoreFile(workspace: string): Promise<string[]> {
+  let text: string;
   try {
-    stat = await lstat(sourcePath);
+    const ignorePath = path.join(workspace, AGENT_MIGRATION_IGNORE_FILE);
+    if (!(await lstat(ignorePath)).isFile()) return [];
+    text = await readFile(ignorePath, "utf8");
   } catch {
-    state.unreachable.push({
-      path: normalizedRelativePath,
-      reason: "missing",
-    });
-    return;
+    return [];
   }
-
-  if (stat.isDirectory()) {
-    if (!opts.forceIncludeRegenerable && isRegenerablePath(normalizedRelativePath)) {
-      state.excludedRegenerable.push({
-        path: normalizedRelativePath,
-        reason: "cooperative_exclude_regenerable",
-        regenerableHint: `${path.basename(normalizedRelativePath)} is treated as rebuildable/installable state and is not bundled by default`,
-      });
-      return;
-    }
-    await walkWorkspace(state.workspace, normalizedRelativePath, new Set(), state, opts);
-    return;
+  const candidates: string[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || IGNORE_PATTERN_CHARS.test(line)) continue;
+    candidates.push(line.replace(/^\.\//, "").replace(/\/+$/, ""));
   }
-
-  state.seenWorkspacePaths.add(normalizedRelativePath);
-  const baseEntry = {
-    source: "workspace" as const,
-    sourcePath,
-    workspaceRelativePath: normalizedRelativePath,
-    bundlePath: `workspace/${normalizedRelativePath}`,
-    mode: stat.mode,
-    mtimeMs: stat.mtimeMs,
-  };
-
-  if (stat.isSymbolicLink()) {
-    let rawLinkTarget: string;
-    try {
-      rawLinkTarget = await readlink(sourcePath);
-    } catch {
-      state.unreachable.push({
-        path: normalizedRelativePath,
-        reason: "read_error",
-      });
-      return;
-    }
-    let linkTarget: string;
-    try {
-      linkTarget = normalizeAgentMigrationSymlinkTarget(normalizedRelativePath, rawLinkTarget);
-    } catch {
-      state.unreachable.push({
-        path: normalizedRelativePath,
-        reason: "unsafe_symlink_target",
-        detail: redactedSymlinkTarget(rawLinkTarget),
-      });
-      return;
-    }
-    state.files.push({
-      ...baseEntry,
-      kind: "symlink",
-      linkTarget,
-    });
-    return;
-  }
-
-  if (!stat.isFile()) {
-    state.unreachable.push({
-      path: normalizedRelativePath,
-      reason: "unsupported_file_type",
-    });
-    return;
-  }
-
-  const secretShapes = await detectSecretShapes(sourcePath, normalizedRelativePath);
-  if (secretShapes.length > 0) {
-    state.secretsDisclosed.push({ path: normalizedRelativePath, shapes: secretShapes });
-  }
-
-  state.files.push({
-    ...baseEntry,
-    kind: "file",
-    sizeBytes: stat.size,
-    sha256: await sha256File(sourcePath),
-    secretShapes: secretShapes.length > 0 ? secretShapes : undefined,
-  });
+  return normalizeIgnorePaths(candidates, workspace).filter((entry) => !isAlwaysMovedPath(entry));
 }
 
-async function buildCrossTreeRefs(
-  refs: AgentMigrationRuntimeSessionRef[],
-): Promise<AgentMigrationCrossTreeRefEntry[]> {
-  const result: AgentMigrationCrossTreeRefEntry[] = [];
-  for (const ref of refs) {
-    const sourcePath = path.resolve(ref.path);
-    const bundlePath = `runtime/${safeBundleSegment(ref.runtime)}/${safeBundleSegment(ref.label)}/${safeBundleSegment(path.basename(sourcePath) || "session")}`;
-    const entry: AgentMigrationCrossTreeRefEntry = {
-      runtime: ref.runtime,
-      label: ref.label,
-      bundlePath,
-      reachable: ref.reachable !== false,
-      reason: ref.reason,
-    };
+function isAlwaysMovedPath(relativePath: string): boolean {
+  return ALWAYS_MOVED_ROOT_PATHS.includes(relativePath);
+}
 
-    try {
-      const stat = await lstat(sourcePath);
-      if (stat.isFile()) {
-        entry.sizeBytes = stat.size;
-        entry.sha256 = await sha256File(sourcePath);
+/**
+ * Records an ignored path with its size and file count (lstat only, symlinks
+ * are not followed).
+ */
+async function excludeIgnoredPath(
+  relativePath: string,
+  isDirectory: boolean,
+  state: BuildState,
+): Promise<void> {
+  if (state.measureIgnored === false) return;
+  const totals = { fileCount: 0, sizeBytes: 0 };
+  const visit = async (entryPath: string, directory: boolean): Promise<void> => {
+    if (!directory) {
+      try {
+        const entryStat = await lstat(path.join(state.workspace, entryPath));
+        totals.fileCount += 1;
+        totals.sizeBytes += entryStat.isFile() ? entryStat.size : 0;
+      } catch {
+        // Vanished while walking: nothing to move or count.
       }
-    } catch {
-      entry.reachable = false;
+      reportScanProgress(state, 1, 0);
+      return;
     }
-
-    result.push(entry);
-  }
-  return result;
+    let children;
+    try {
+      children = await readdir(path.join(state.workspace, entryPath), { withFileTypes: true });
+    } catch {
+      state.unreachable.push({ path: entryPath, reason: "read_error" });
+      return;
+    }
+    for (const child of children) {
+      await visit(toPosixPath(path.join(entryPath, child.name)), child.isDirectory());
+    }
+  };
+  await visit(relativePath, isDirectory);
+  state.excludedIgnored.push({ path: relativePath, reason: "raftmigrateignore", ...totals });
 }
 
-async function sha256File(filePath: string): Promise<string> {
+export async function sha256File(filePath: string): Promise<string> {
   const hash = createHash("sha256");
   await new Promise<void>((resolve, reject) => {
     const stream = createReadStream(filePath);
@@ -468,105 +345,25 @@ async function sha256File(filePath: string): Promise<string> {
   return hash.digest("hex");
 }
 
-async function detectSecretShapes(sourcePath: string, relativePath: string): Promise<string[]> {
-  const basename = path.basename(relativePath);
-  const lowerBasename = basename.toLowerCase();
-  const shapes = new Set<string>();
-
-  if (SECRET_FILE_NAMES.has(lowerBasename) || lowerBasename.startsWith(".env.")) {
-    shapes.add(`file:${basename}`);
-    try {
-      const text = await readFile(sourcePath, "utf8");
-      for (const line of text.split(/\r?\n/)) {
-        const match = ENV_KEY_PATTERN.exec(line);
-        if (match) shapes.add(`env:${match[1]}`);
-      }
-    } catch {
-      shapes.add("content:unreadable");
-    }
-  }
-
-  if (/(?:secret|token|credential|api[-_]?key)/i.test(relativePath)) {
-    shapes.add(`path:${basename}`);
-  }
-
-  return [...shapes].sort();
-}
-
-function normalizeProvidedSecretDisclosures(disclosures: string[]): AgentMigrationSecretDisclosure[] {
-  return disclosures.map((entry) => ({
-    path: entry,
-    shapes: ["provided"],
-  }));
-}
-
-interface NormalizedProposalPaths {
-  paths: string[];
-  refusals: AgentMigrationProposalRefusalEntry[];
-}
-
-function normalizeProposalPaths(
-  paths: string[] | undefined,
-  workspace: string,
-  source: AgentMigrationProposalRefusalEntry["source"],
-): NormalizedProposalPaths {
-  if (!paths) return { paths: [], refusals: [] };
+function normalizeIgnorePaths(paths: string[], workspace: string): string[] {
   const workspacePathApi = path.posix.isAbsolute(workspace) ? path.posix : path.win32;
   const result: string[] = [];
-  const refusals: AgentMigrationProposalRefusalEntry[] = [];
   for (const value of paths) {
     const trimmed = value.trim();
     if (!trimmed) continue;
+    let relative = trimmed;
     if (isPortableAbsolutePath(trimmed)) {
-      if (!workspacePathApi.isAbsolute(trimmed)) {
-        refusals.push({
-          path: redactedProposalPath(trimmed, "absolute"),
-          reason: "outside_workspace",
-          source,
-        });
-        continue;
-      }
-      const relative = workspacePathApi.relative(workspace, trimmed);
-      if (isOutsideWorkspaceRelativePath(relative)) {
-        refusals.push({
-          path: redactedProposalPath(trimmed, "absolute"),
-          reason: "outside_workspace",
-          source,
-        });
-        continue;
-      }
-      try {
-        result.push(normalizeRelativePath(relative));
-      } catch {
-        refusals.push({
-          path: redactedProposalPath(trimmed, "absolute"),
-          reason: "unsafe_path",
-          source,
-        });
-      }
-      continue;
+      if (!workspacePathApi.isAbsolute(trimmed)) continue;
+      relative = workspacePathApi.relative(workspace, trimmed);
+      if (isOutsideWorkspaceRelativePath(relative)) continue;
     }
     try {
-      result.push(normalizeRelativePath(trimmed));
+      result.push(normalizeRelativePath(relative));
     } catch {
-      refusals.push({
-        path: redactedProposalPath(trimmed, "unsafe"),
-        reason: "unsafe_path",
-        source,
-      });
+      // Unsafe paths are skipped.
     }
   }
-  return { paths: [...new Set(result)], refusals };
-}
-
-function redactedProposalPath(value: string, kind: "absolute" | "unsafe"): string {
-  const fingerprint = createHash("sha256").update(value).digest("hex").slice(0, 16);
-  return `<redacted:${kind}:${fingerprint}>`;
-}
-
-function redactedSymlinkTarget(value: string): string {
-  const fingerprint = createHash("sha256").update(value).digest("hex").slice(0, 16);
-  return `<redacted:unsafe-symlink-target:${fingerprint}>`;
+  return [...new Set(result)];
 }
 
 export function normalizeAgentMigrationSymlinkTarget(
@@ -599,25 +396,6 @@ export function normalizeAgentMigrationSymlinkTarget(
     throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_LINK");
   }
   return normalizedTarget;
-}
-
-export function assertAgentMigrationManifestSymlinkTargetsSafe(
-  manifest: AgentMigrationExportManifest,
-): void {
-  if (!Array.isArray(manifest.files)) throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_LINK");
-  for (const entry of manifest.files) {
-    if (entry.kind !== "symlink") continue;
-    if (!entry.workspaceRelativePath || entry.linkTarget === undefined) {
-      throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_LINK");
-    }
-    const normalized = normalizeAgentMigrationSymlinkTarget(
-      entry.workspaceRelativePath,
-      entry.linkTarget,
-    );
-    if (normalized !== entry.linkTarget) {
-      throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_LINK");
-    }
-  }
 }
 
 function normalizeRelativePath(value: string): string {
@@ -654,30 +432,8 @@ function isRegenerablePath(relativePath: string): boolean {
     .some((segment) => REGENERABLE_DIRECTORY_NAMES.includes(segment));
 }
 
-function hasExplicitIncludeDescendant(relativePath: string, explicitIncludePaths: Set<string>): boolean {
-  const prefix = `${relativePath}/`;
-  for (const includePath of explicitIncludePaths) {
-    if (includePath.startsWith(prefix)) return true;
-  }
-  return false;
-}
-
-function safeBundleSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
-}
-
 function toPosixPath(value: string): string {
   return value.split(path.sep).join("/");
-}
-
-function toPortableBundleEntry(entry: AgentMigrationSourceBundleFileEntry): AgentMigrationBundleFileEntry {
-  const { sourcePath: _sourcePath, ...portable } = entry;
-  void _sourcePath;
-  return portable;
-}
-
-function sortSourceBundleEntries(entries: AgentMigrationSourceBundleFileEntry[]): AgentMigrationSourceBundleFileEntry[] {
-  return [...entries].sort((a, b) => a.bundlePath.localeCompare(b.bundlePath));
 }
 
 function sortByPath<T extends { path: string }>(entries: T[]): T[] {

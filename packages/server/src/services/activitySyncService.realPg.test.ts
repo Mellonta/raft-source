@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -9,8 +9,8 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
 import type { SnapshotIngress } from "@botiverse/raft-sync-core";
-import { getDb } from "../db/index.js";
-import * as schema from "../db/schema.js";
+import { getDb } from "../db/index";
+import * as schema from "../db/schema";
 import {
   activitySyncChanges,
   activitySyncPrincipalAuthorities,
@@ -24,9 +24,9 @@ import {
   servers,
   users,
   userChannelReadCursors,
-} from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { setActivitySyncTestHooksForTest } from "./activitySyncService.js";
+} from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { setActivitySyncTestHooksForTest } from "./activitySyncService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

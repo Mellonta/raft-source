@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import {
   acceptActivityReadAllAck,
   getAcceptedActivityReadState,
@@ -7,10 +6,10 @@ import {
   hasActivityReadHold,
   releaseActivityReadHoldForMessage,
   resetActivityReadStateForTests,
-} from "../src/store/activityReadState.js";
+} from "../src/store/activityReadState";
 import type {
   ActivityReadStateIngressContext,
-} from "../src/store/activityReadState.js";
+} from "../src/store/activityReadState";
 
 const context: ActivityReadStateIngressContext = {
   serverId: "server-a",

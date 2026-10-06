@@ -1,4 +1,4 @@
-#!/usr/bin/env -S node --import tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import { readFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import pg from "pg";
@@ -13,11 +13,11 @@ import {
   serverMembers,
   servers,
   users,
-} from "../src/db/schema.js";
+} from "../src/db/schema";
 import {
   extractApiKeyFingerprint,
   extractApiKeyPrefix,
-} from "../src/services/machineService.js";
+} from "../src/services/machineService";
 
 type Scenario = "matrix" | "add-computer" | "offline-computer" | "runtime-ready" | "community-gated";
 

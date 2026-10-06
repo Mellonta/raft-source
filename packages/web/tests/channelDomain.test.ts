@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   applyActivityMuteState,
   canToggleActivityMute,
@@ -7,8 +6,8 @@ import {
   hydrateDmChannels,
   refreshExistingDm,
   setLocalChannelMembership,
-} from "../src/store/channelDomain.js";
-import type { ApiChannel, Channel } from "../src/store/channelStore.js";
+} from "../src/store/channelDomain";
+import type { ApiChannel, Channel } from "../src/store/channelStore";
 
 function ch(id: string, over: Partial<Channel> = {}): Channel {
   return {

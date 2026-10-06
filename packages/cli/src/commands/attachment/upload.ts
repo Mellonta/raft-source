@@ -20,14 +20,14 @@ import { finished } from "node:stream/promises";
 import type { Command } from "commander";
 import { setClockTimeout } from "@botiverse/raft-shared";
 
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { formatAttachmentUploaded } from "./_format.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { apiFailureError } from "../_apiFailure.js";
-import { resolveTargetAlias, type TargetAliasOpts } from "../_target.js";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { formatAttachmentUploaded } from "./_format";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { apiFailureError } from "../_apiFailure";
+import { PEER_KIND_OPTION, resolveTargetAlias, type TargetAliasOpts } from "../_target";
 
 // Compatibility fallback for servers that predate the capability endpoint.
 // Current servers always project the active plan limit at command startup.
@@ -234,6 +234,7 @@ export const attachmentUploadCommand = defineCommand(
         description: "Target where the attachment will be used: '#channel', 'dm:@peer', or thread variants. Required by the v0 server until channel-less uploads land.",
       },
       { flags: "--channel <target>", description: "Legacy alias for --target (accepted during transition)" },
+      PEER_KIND_OPTION,
       { flags: "--mime-type <type>", description: "Explicit MIME type override, e.g. image/png" },
     ],
   },

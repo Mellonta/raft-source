@@ -3,7 +3,6 @@
 // every exit imports the constructor these teeth pin, so a drift here is a
 // drift everywhere.
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { compareUInt64String, isUInt64String } from "@botiverse/raft-sync-core";
 
@@ -12,7 +11,7 @@ import {
   type InboxScopeCursorRow,
   formatInboxScopeCorruptionLine,
   makeInboxScopeReadFrontier,
-} from "./inboxScopeReadFrontier.js";
+} from "./inboxScopeReadFrontier";
 
 test("tooth 1: no cursor row (null) is absent", () => {
   assert.deepEqual(makeInboxScopeReadFrontier(null), { kind: "absent" });

@@ -1,19 +1,20 @@
 import { createHash, randomBytes } from "node:crypto";
 import { currentDate } from "@botiverse/raft-shared";
 import { and, eq, gt, isNull } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   oauthAppInstallationTokens,
   oauthClientInstalls,
   oauthClients,
-} from "../db/schema.js";
-import * as integrationAuditService from "./integrationAuditService.js";
+} from "../db/schema";
+import * as integrationAuditService from "./integrationAuditService";
 import {
   computeEffectiveAppOutboundAuthority,
   normalizeAppOutboundGroups,
   type AppOutboundGroup,
   AppOutboundPermissionError,
-} from "./appOutboundPermissionService.js";
+} from "./appOutboundPermissionService";
+import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy";
 
 export const APP_INSTALLATION_TOKEN_AUDIENCE = "raft:app-installation-api";
 export const APP_INSTALLATION_TOKEN_TTL_MS = 10 * 60 * 1000;
@@ -43,6 +44,49 @@ export type VerifiedAppInstallationCredential = {
   expiresAt: Date;
 };
 
+export type ActiveAppInstallationDiscovery = {
+  installationId: string;
+  serverId: string;
+};
+
+export class AppInstallationDiscoveryInvariantError extends Error {
+  constructor() {
+    super("Multiple active installations matched one App and Server");
+    this.name = "AppInstallationDiscoveryInvariantError";
+  }
+}
+
+/**
+ * Resolve the caller App's one active installation on an exact Server.
+ *
+ * The database uniqueness constraint makes `(server_id, client_id)` singular,
+ * while the two-row read keeps this boundary fail-closed if that invariant is
+ * ever absent or corrupted in an environment.
+ */
+export async function discoverActiveAppInstallation(input: {
+  clientId: string;
+  serverId: string;
+}, dbOrTx: ReturnType<typeof getDb> = getDb()): Promise<ActiveAppInstallationDiscovery | null> {
+  const rows = await dbOrTx.select({
+    installationId: oauthClientInstalls.id,
+    serverId: oauthClientInstalls.serverId,
+  }).from(oauthClientInstalls)
+    .innerJoin(oauthClients, eq(oauthClients.id, oauthClientInstalls.clientId))
+    .where(and(
+      eq(oauthClientInstalls.clientId, input.clientId),
+      eq(oauthClientInstalls.serverId, input.serverId),
+      eq(oauthClientInstalls.status, "active"),
+      eq(oauthClients.enabled, true),
+      oauthClientIsUserManagedPredicate(),
+    ))
+    .limit(2);
+
+  if (rows.length > 1) {
+    throw new AppInstallationDiscoveryInvariantError();
+  }
+  return rows[0] ?? null;
+}
+
 export async function mintAppInstallationCredential(input: {
   clientId: string;
   installationId: string;
@@ -66,6 +110,7 @@ export async function mintAppInstallationCredential(input: {
       .where(and(
         eq(oauthClientInstalls.id, input.installationId),
         eq(oauthClientInstalls.clientId, input.clientId),
+        oauthClientIsUserManagedPredicate(),
       ))
       .limit(1)
       .for("update");
@@ -167,6 +212,7 @@ export async function verifyAppInstallationCredential(
       eq(oauthAppInstallationTokens.audience, audience),
       isNull(oauthAppInstallationTokens.revokedAt),
       gt(oauthAppInstallationTokens.expiresAt, now),
+      oauthClientIsUserManagedPredicate(),
     ))
     .limit(1);
   if (!row || !row.clientEnabled || row.installStatus !== "active") return null;

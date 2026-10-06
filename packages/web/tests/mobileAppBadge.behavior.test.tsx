@@ -1,6 +1,5 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -71,7 +70,7 @@ function renderRail(userId: string | null) {
  */
 function railDots() {
   const help = screen.queryByTestId("left-rail-help");
-  return help ? help.querySelectorAll("span.rounded-full") : [];
+  return help ? help.querySelectorAll('[data-slot="app-rail-item-indicator"]') : [];
 }
 
 function openHelp() {

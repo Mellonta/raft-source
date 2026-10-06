@@ -1,7 +1,7 @@
 import { crc32, inflateRawSync } from "node:zlib";
 import * as XLSX from "xlsx";
 import { XLSX_PREVIEW_MAX_FILE_SIZE_BYTES, type XlsxAttachmentPreviewData, type XlsxSheetPreviewData } from "@botiverse/raft-shared";
-import type { AttachmentPreviewProvider } from "../types.js";
+import type { AttachmentPreviewProvider } from "../types";
 
 export const XLSX_PREVIEW_BYTE_LIMIT = XLSX_PREVIEW_MAX_FILE_SIZE_BYTES;
 export const XLSX_PREVIEW_PAYLOAD_BYTE_LIMIT = 64 * 1024;

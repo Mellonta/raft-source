@@ -5,7 +5,7 @@
  * a ~2.2x max/min imbalance on this codebase — one shard runs ~520s while the
  * fastest finishes ~240s.
  *
- * Run: pnpm --filter @botiverse/raft-server tsx scripts/perf/profileTestShards.ts
+ * Run: pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/perf/profileTestShards.ts
  *
  * Output: writes `packages/server/test-shard-manifest.json` next to the
  * server package. The workflow reads that file to drive the matrix.
@@ -49,7 +49,8 @@ import {
   evaluateCalibrationGate,
   loadBaseline,
   type CalibrationBaseline,
-} from "./manifestCalibration.js";
+} from "./manifestCalibration";
+import { profileVitestArgs } from "./profileVitestCommand";
 
 // Bump when the manifest shape changes in a way that callers must adapt to.
 // Today: runTestShard.ts + .github/workflows/test.yml read .shardCount and
@@ -158,7 +159,7 @@ function profileFiles(files: string[]): Array<{ file: string; durationMs: number
   try {
     const run = spawnSync(
       "node",
-      [VITEST_CLI, "run", ...files, "--reporter=json", `--outputFile=${outputPath}`],
+      profileVitestArgs(VITEST_CLI, files, outputPath),
       {
         cwd: SERVER_DIR,
         env: { ...process.env, TZ: "Asia/Singapore" },
@@ -201,6 +202,33 @@ function profileFiles(files: string[]): Array<{ file: string; durationMs: number
     });
   } finally {
     rmSync(outputDir, { recursive: true, force: true });
+  }
+}
+
+// Keep a small, explicit projection rather than Vitest's report: assertion
+// messages, console output and runtime payloads are not needed for calibration.
+// Diagnostics are opt-in and best-effort; refusing a manifest remains the
+// primary outcome even if the artifact destination cannot be written.
+function saveRefusedProfile(
+  outcome: "failed_tests" | "calibration_refused",
+  timings: ReturnType<typeof profileFiles>,
+  calibration: ReturnType<typeof evaluateCalibrationGate>["provenance"] | null,
+) {
+  const destination = process.env.SERVER_PROFILE_DIAGNOSTICS;
+  if (!destination) return;
+  try {
+    writeFileSync(destination, JSON.stringify({
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      sourceCommit: tryGitHeadCommit(),
+      nodeVersion: process.version,
+      outcome,
+      manifestWritten: false,
+      calibration,
+      fileTimings: timings.map(({ file, durationMs, ok }) => ({ file, durationMs, ok })),
+    }, null, 2) + "\n");
+  } catch {
+    console.warn("Could not save profile diagnostics; preserving the profile refusal.");
   }
 }
 
@@ -254,6 +282,7 @@ async function main() {
 
   const failed = timings.filter((t) => !t.ok);
   if (failed.length > 0) {
+    saveRefusedProfile("failed_tests", timings, null);
     console.error(`\n${failed.length} test file(s) failed during profiling:`);
     for (const f of failed) console.error("  ", f.file);
     console.error("Refusing to write manifest from a partial / failing profile.");
@@ -286,6 +315,7 @@ async function main() {
   for (const line of calibrationGate.diagnostics.warnings) console.warn(line);
   for (const line of calibrationGate.diagnostics.errors) console.error(line);
   if (!calibrationGate.writeAllowed) {
+    saveRefusedProfile("calibration_refused", timings, calibrationGate.provenance);
     process.exit(calibrationGate.exitCode ?? 1);
   }
 

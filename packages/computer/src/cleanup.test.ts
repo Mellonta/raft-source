@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, writeFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
 import {
   cleanupStalePidfile,
@@ -13,14 +12,14 @@ import {
   cleanupStaleLock,
   runFullCleanup,
   emptyCleanupReport,
-} from "./cleanup.js";
+} from "./cleanup";
 import {
   computerDir,
   servicePidPath,
   serverRunnerPidPath,
   serverAttachmentPath,
-} from "./paths.js";
-import { withComputerMutationLock } from "./concurrency.js";
+} from "./paths";
+import { withComputerMutationLock } from "./concurrency";
 
 // PR-H §3.1 regression guard — residue cleanup primitives.
 
@@ -125,33 +124,7 @@ test("cleanupPowerLossPartialState: valid attachment → no action", async () =>
   });
 });
 
-test("cleanupTmpFiles: removes old upgrade-snapshot.json (>24h)", async () => {
-  await withHome(async (home) => {
-    const cdir = computerDir(home);
-    await mkdir(cdir, { recursive: true });
-    const snap = join(cdir, "upgrade-snapshot.json");
-    await writeFile(snap, "{}");
-    // Backdate by 25h
-    const past = new Date(Date.now() - 25 * 60 * 60 * 1000);
-    const { utimes } = await import("node:fs/promises");
-    await utimes(snap, past, past);
-    const removed = await cleanupTmpFiles(home);
-    assert.equal(removed.length, 1);
-    assert.ok(removed[0].endsWith("upgrade-snapshot.json"));
-  });
-});
 
-test("cleanupTmpFiles: keeps recent upgrade-snapshot.json", async () => {
-  await withHome(async (home) => {
-    const cdir = computerDir(home);
-    await mkdir(cdir, { recursive: true });
-    const snap = join(cdir, "upgrade-snapshot.json");
-    await writeFile(snap, "{}");
-    const removed = await cleanupTmpFiles(home);
-    assert.equal(removed.length, 0);
-    await assert.doesNotReject(() => stat(snap));
-  });
-});
 
 test("cleanupStaleLock: stale lock dir (>60s) → ownership-safe reclaim + release", async () => {
   await withHome(async (home) => {
@@ -196,10 +169,10 @@ test("runFullCleanup: aggregates all 5 categories, sets anyAction correctly", as
     await writePidfile(servicePidPath(home), 999999999); // dead pid
     const cdir = computerDir(home);
     await mkdir(cdir, { recursive: true });
-    const snap = join(cdir, "upgrade-snapshot.json");
-    await writeFile(snap, "{}");
+    const staged = join(cdir, "upgrade-staging", "1.0.0");
+    await mkdir(staged, { recursive: true });
     const { utimes } = await import("node:fs/promises");
-    await utimes(snap, new Date(Date.now() - 25 * 60 * 60 * 1000), new Date(Date.now() - 25 * 60 * 60 * 1000));
+    await utimes(staged, new Date(Date.now() - 25 * 60 * 60 * 1000), new Date(Date.now() - 25 * 60 * 60 * 1000));
 
     const r = await runFullCleanup(home);
     assert.equal(r.anyAction, true);

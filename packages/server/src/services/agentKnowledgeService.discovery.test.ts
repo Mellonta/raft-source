@@ -1,11 +1,10 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 import {
   buildAgentKnowledgeNotFoundGuidanceWithCandidates,
   findKnowledgeMissCandidates,
   resolveAgentKnowledgeDoc,
   resolveAgentKnowledgeDocWithDiscovery,
-} from "./agentKnowledgeService.js";
+} from "./agentKnowledgeService";
 
 // Discovery-layer contract (Cindy-approved design, #proj-docs thread 843fddc1,
 // 2026-09-01; supersedes the generic-skill no-shadow contract from PR #7151):

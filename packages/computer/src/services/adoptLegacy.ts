@@ -27,19 +27,19 @@ import { chmod, mkdir, readFile, writeFile, appendFile, stat } from "node:fs/pro
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { ComputerAttachClient } from "../apiClient.js";
-import { LEGACY_MACHINE_NOT_FOUND_MESSAGE } from "../lib/adoptLegacyResponse.js";
-import { refreshUserSession } from "../lib/userSession.js";
+import { ComputerAttachClient } from "../apiClient";
+import { LEGACY_MACHINE_NOT_FOUND_MESSAGE } from "../lib/adoptLegacyResponse";
+import { refreshUserSession } from "../lib/userSession";
 import {
   resolveRaftHome,
   userSessionPath,
   serverAttachmentPath,
   adoptionLogPath,
   computerDir,
-} from "../paths.js";
-import { formatServerSlugDisplay, normalizeServerSlug } from "../serverState.js";
-import { resolveServerUrl, resolveServerUrlEnv } from "../serverUrl.js";
-import { ComputerServiceError } from "./errors.js";
+} from "../paths";
+import { formatServerSlugDisplay, normalizeServerSlug } from "../serverState";
+import { resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
+import { ComputerServiceError } from "./errors";
 
 interface UserSession {
   kind?: string;

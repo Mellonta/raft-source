@@ -12,11 +12,10 @@
 // to the wrong shape. It does NOT execute the CLI — importing index.ts is
 // import-safe (the argv parse is guarded behind an entrypoint check).
 
-import { test } from "vitest";
 import assert from "node:assert/strict";
 import type { Command } from "commander";
 
-import { program } from "./cli.js";
+import { program } from "./cli";
 
 // Every per-server command takes the server slug as a POSITIONAL
 // argument. `runners` subcommands are addressed as "runners list" /
@@ -85,9 +84,3 @@ test("channel versions contract: optional channel plus JSON and bounded limit fl
   assert.deepEqual(optionLongs(cmd).sort(), ["--json", "--limit"].sort());
 });
 
-test("operation acknowledge contract requires one exact receipt id and no override flags", () => {
-  const cmd = findCommand(program, "operation acknowledge");
-  assert.deepEqual(argNames(cmd), ["operationId"]);
-  assert.deepEqual(optionLongs(cmd), []);
-  assert.match(cmd.helpInformation(), /without deleting its audit record/);
-});

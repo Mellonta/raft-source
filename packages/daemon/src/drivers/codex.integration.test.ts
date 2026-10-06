@@ -11,7 +11,7 @@
  *        - `OPENAI_API_KEY` env var set
  *   3. Set `RUN_CODEX_INTEGRATION_TESTS=1` to opt in (default CI skip)
  *
- *   Then: `RUN_CODEX_INTEGRATION_TESTS=1 pnpm --filter @botiverse/raft-daemon exec tsx --test src/drivers/codex.integration.test.ts`
+ *   Then: `RUN_CODEX_INTEGRATION_TESTS=1 pnpm --filter @botiverse/raft-daemon exec vitest run src/drivers/codex.integration.test.ts`
  *
  * Why guarded:
  * - Local dev machines without `codex` installed shouldn't false-fail
@@ -36,7 +36,6 @@
  * when the daemon explicitly asks for them on thread/start.
  */
 
-import { test } from "vitest";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";

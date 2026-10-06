@@ -1,13 +1,11 @@
 import path from "node:path";
 import { lstat, open, realpath } from "node:fs/promises";
+import { redactDiagnosticText } from "@botiverse/raft-shared";
 
-function redactTranscript(text: string): string {
-  return text
-    .replace(/sk_(?:agent|machine|computer)_[A-Za-z0-9_-]+/g, "sk_[redacted]")
-    .replace(/sap_[A-Za-z0-9_-]+/g, "sap_[redacted]")
-    .replace(/Bearer\s+[A-Za-z0-9_\-./+=]+/g, "Bearer [redacted]")
-    .replace(/["']?auth[_-]?token["']?\s*[:=]\s*["'][^"']+["']/gi, "[redacted]")
-    .replace(/https?:\/\/[^\s\"]+/g, "[url]");
+// Shared rule set (task #272): the previous local four-rule list let a bare
+// JWT through. Transcripts keep dropping whole URLs, as they always have.
+export function redactTranscript(text: string): string {
+  return redactDiagnosticText(text, { urls: "drop" });
 }
 
 export async function isPathWithinAllowedRoots(filePath: string, roots: string[]): Promise<boolean> {
@@ -22,6 +20,14 @@ export async function isPathWithinAllowedRoots(filePath: string, roots: string[]
   return false;
 }
 
+/** The path is not something the transcript reader may read (symlink, not a regular file). */
+export class TranscriptPathRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TranscriptPathRejectedError";
+  }
+}
+
 async function readBoundedTranscriptFile(
   filePath: string,
   maxBytes: number,
@@ -29,12 +35,14 @@ async function readBoundedTranscriptFile(
 ): Promise<{
   text: string;
   sizeBytes: number;
+  /** Size of the file on disk when it was read. */
+  sourceBytes: number;
   truncated: boolean;
   truncationDirection?: "head" | "tail" | "window";
 }> {
   const info = await lstat(filePath);
-  if (info.isSymbolicLink()) throw new Error("symbolic links are not allowed");
-  if (!info.isFile()) throw new Error(`not a regular file: ${filePath}`);
+  if (info.isSymbolicLink()) throw new TranscriptPathRejectedError("symbolic links are not allowed");
+  if (!info.isFile()) throw new TranscriptPathRejectedError(`not a regular file: ${filePath}`);
 
   const fd = await open(filePath, "r");
   try {
@@ -64,6 +72,7 @@ async function readBoundedTranscriptFile(
     return {
       text,
       sizeBytes: Buffer.byteLength(text, "utf8"),
+      sourceBytes: info.size,
       truncated,
       // TOOTH-2 F3: direction names which side of the ORIGINAL file this bounded
       // read dropped. Derived from actual geometry, never guessed:
@@ -196,6 +205,35 @@ function isCompleteJsonRecord(input: Buffer): boolean {
   }
 }
 
+export type DetailedTranscriptRead =
+  | {
+    ok: true;
+    text: string;
+    /** Size of the source file on disk at read time. */
+    sourceBytes: number;
+    truncated: boolean;
+    truncationDirection?: "head" | "tail" | "window";
+  }
+  | { ok: false; failure: "path_rejected" | "read_failed"; errorClass: string };
+
+/** Like readAndRedactTranscript, but a failure says which kind it was instead of becoming null. */
+export async function readAndRedactTranscriptDetailed(
+  filePath: string,
+  maxBytes: number,
+  anchorAt?: string,
+): Promise<DetailedTranscriptRead> {
+  try {
+    const { text, sourceBytes, truncated, truncationDirection } = await readBoundedTranscriptFile(filePath, maxBytes, anchorAt);
+    return { ok: true, text: redactTranscript(text), sourceBytes, truncated, truncationDirection };
+  } catch (err) {
+    return {
+      ok: false,
+      failure: err instanceof TranscriptPathRejectedError ? "path_rejected" : "read_failed",
+      errorClass: err instanceof Error ? err.name : "Error",
+    };
+  }
+}
+
 export async function readAndRedactTranscript(
   filePath: string,
   maxBytes: number,
@@ -205,10 +243,6 @@ export async function readAndRedactTranscript(
   truncated: boolean;
   truncationDirection?: "head" | "tail" | "window";
 } | null> {
-  try {
-    const { text, truncated, truncationDirection } = await readBoundedTranscriptFile(filePath, maxBytes, anchorAt);
-    return { text: redactTranscript(text), truncated, truncationDirection };
-  } catch {
-    return null;
-  }
+  const read = await readAndRedactTranscriptDetailed(filePath, maxBytes, anchorAt);
+  return read.ok ? { text: read.text, truncated: read.truncated, truncationDirection: read.truncationDirection } : null;
 }

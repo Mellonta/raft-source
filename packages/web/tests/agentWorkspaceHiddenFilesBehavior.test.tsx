@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act } from "react";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 
@@ -152,8 +151,8 @@ test("Agent Workspace exposes the runtime path, copy and real markdown view cont
     await screen.findByTestId("workspace-file-view-preview");
 
     const inlineCode = await screen.findByText(longToken);
-    assert.match(inlineCode.className, /bg-soft-signal\/40/);
-    assert.match(inlineCode.className, /\[overflow-wrap:anywhere\]/);
+    assert.match(inlineCode.className, /bg-fill-muted/);
+    assert.match(inlineCode.className, /\[overflow-wrap:break-word\]/);
     assert.doesNotMatch(inlineCode.className, /\[overflow-wrap:normal\]|wrap-normal/);
 
     fireEvent.click(screen.getByTestId("workspace-file-view-raw"));
@@ -169,5 +168,39 @@ test("Agent Workspace exposes the runtime path, copy and real markdown view cont
       configurable: true,
       value: originalClipboard,
     });
+  }
+});
+
+test("Agent Workspace says when a listing was truncated, at the root and inside a directory", async () => {
+  installLocalStorage();
+  const [{ default: AgentWorkspace }, { default: api }] = await Promise.all([
+    import("../src/components/agent/AgentWorkspace"),
+    import("../src/api/client"),
+  ]);
+  const originalGet = api.get.bind(api);
+  const node = (path: string, isDirectory: boolean) => ({
+    name: path.split("/").at(-1)!,
+    path,
+    isDirectory,
+    size: 0,
+    modifiedAt: "2026-10-01T00:00:00.000Z",
+  });
+  api.get = (async (_url: string, config?: { params?: Record<string, unknown> }) => {
+    if (config?.params?.dirPath === "sandbox") {
+      return { data: { files: [node("sandbox/a.txt", false), node("sandbox/b.txt", false)], truncated: true } };
+    }
+    return { data: { files: [node("state", true), node("sandbox", true)], truncated: true, omitted: 7 } };
+  }) as typeof api.get;
+
+  try {
+    render(<AgentWorkspace agentId="agent-1" />);
+    await waitFor(() => assert.ok(screen.getByText("Showing the first 2 items; 7 more not shown")));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "sandbox" }));
+    });
+    await waitFor(() => assert.ok(screen.getByText("Showing the first 2 items; more not shown")));
+    assert.equal(screen.getAllByTestId("agent-workspace-truncated").length, 2);
+  } finally {
+    api.get = originalGet as typeof api.get;
   }
 });

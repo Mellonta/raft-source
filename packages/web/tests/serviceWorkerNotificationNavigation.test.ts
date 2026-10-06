@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 import vm from "node:vm";
 import { serviceWorkerNavigationPath } from "../src/components/pwa/ServiceWorkerNavigationBridge";
 

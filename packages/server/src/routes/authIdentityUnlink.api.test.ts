@@ -1,13 +1,13 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 
 import argon2 from "argon2";
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { passwordResets, userAuthIdentities, users } from "../db/schema.js";
-import { signAccessToken } from "../middleware/auth.js";
+import { getDb } from "../db/index";
+import { passwordResets, userAuthIdentities, users } from "../db/schema";
+import { signAccessToken } from "../middleware/auth";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

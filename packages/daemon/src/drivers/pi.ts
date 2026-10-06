@@ -1,11 +1,15 @@
+import { RuntimeModelNotFoundError } from "../spawnFailureErrors";
+import type { ProviderRequestObserver } from "../providerRequestFetch";
+import "../bundledPiOAuth";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import path from "node:path";
 import {
   createAgentSessionFromServices,
   createAgentSessionServices,
   getAgentDir,
+  DefaultPackageManager,
   ModelRegistry,
   ModelRuntime,
   SessionManager,
@@ -22,6 +26,8 @@ import {
 } from "@earendil-works/pi-ai";
 import {
   buildLaunchPlan,
+  errorClassOf,
+  RUNTIME_ERROR_CLASSES,
   BUILTIN_RUNTIME_GATEWAY_PROVIDER_ENV_KEYS,
   BUILTIN_RUNTIME_HOST_PROVIDER_ENV_SCRUB_KEYS,
   BUILTIN_RUNTIME_PROVIDER_ENV_KEYS,
@@ -40,6 +46,7 @@ import {
   type RuntimeModelSet,
   type RuntimeModelSourceOutcome,
   type RuntimeConfig,
+  type ProviderRequestActivity,
   type ProviderConnectionLaunchProjection,
   currentTimeMs,
   type AxSurfaceText,
@@ -47,20 +54,26 @@ import {
 import {
   normalizeRuntimeCompactionReason,
   type RuntimeCompactionReason,
-} from "../runtimeCompactionProjection.js";
-import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport.js";
-import { buildPiTokenUsageEvent } from "./piEventNormalizer.js";
-import { createManagedMcpPiTools } from "./managedMcpTools.js";
-import { createPiCommandTool } from "./piCommandTool.js";
+} from "../runtimeCompactionProjection";
+import { buildRuntimeErrorActivityDiagnostic } from "../runtimeErrorDiagnostics";
+import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
+import { buildPiTokenUsageEvent } from "./piEventNormalizer";
+import { createManagedMcpPiTools } from "./managedMcpTools";
+import { createPiCommandTool } from "./piCommandTool";
 import {
   createProviderHttpClient,
   type ProviderHttpClient,
-} from "../daemonFetch.js";
+} from "../daemonFetch";
 import {
   createPiToolExecutionObserver,
   type PiToolExecutionObserver,
-} from "./piToolExecutionObservability.js";
-import { type RuntimeTerminalCausePhase, writeRuntimeTerminalCauseRecord } from "./index.js";
+} from "./piToolExecutionObservability";
+import {
+  type RuntimeLifecycleDiagnosticEvent,
+  type RuntimeTerminalCausePhase,
+  writeRuntimeLifecycleDiagnosticRecord,
+  writeRuntimeTerminalCauseRecord,
+} from "./index";
 import type {
   ParsedEvent,
   RuntimeToolDiagnosticInput,
@@ -74,7 +87,7 @@ import type {
   RuntimeSessionDescriptor,
   SpawnContext,
   SpawnResult,
-} from "./types.js";
+} from "./types";
 
 const PI_SESSION_DIR = ".pi-sessions";
 const BUILTIN_SESSION_DIR = ".builtin-sessions";
@@ -106,6 +119,7 @@ type PiSessionFactory = (
   ctx: SpawnContext,
   sessionId: string,
   toolExecutionObserver?: PiToolExecutionObserver,
+  providerObserver?: ProviderRequestObserver,
 ) => Promise<AgentSession>;
 type PiAssistantMessageEvent = Extract<AgentSessionEvent, { type: "message_update" }>["assistantMessageEvent"];
 
@@ -152,12 +166,47 @@ type PiCompactionOutcome =
   | "compaction_succeeded"
   | "compaction_failed_or_exhausted"
   | "aborted";
-type PiCompactionFailureReason = "recovery_exhausted" | "compaction_failed";
+type PiCompactionFailureReason = "recovery_exhausted" | "input_too_large" | "compaction_failed";
+type PiCompactionProjection = {
+  outcome: PiCompactionOutcome;
+  reason: RuntimeCompactionReason;
+  failureReason?: PiCompactionFailureReason;
+  willRetry: boolean;
+};
 
 export interface PiCompactionInputEvidence {
   messageCount: number;
   inputTextLength: number;
   configuredContextLimit: number | null;
+}
+
+function projectPiCompactionEnd(
+  event: Extract<AgentSessionEvent, { type: "compaction_end" }>,
+): PiCompactionProjection {
+  const reason = normalizeRuntimeCompactionReason(event.reason);
+  if (event.aborted) {
+    return { outcome: "aborted", reason, willRetry: event.willRetry === true };
+  }
+  if (event.result !== undefined) {
+    return { outcome: "compaction_succeeded", reason, willRetry: event.willRetry === true };
+  }
+  const failureReason = reason === "overflow"
+    && typeof event.errorMessage === "string"
+    && /after one compact-and-retry attempt/iu.test(event.errorMessage)
+    ? "recovery_exhausted"
+    : isContextOverflow({
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: event.errorMessage ?? "",
+      } as Parameters<typeof isContextOverflow>[0])
+      ? "input_too_large"
+      : "compaction_failed";
+  return {
+    outcome: "compaction_failed_or_exhausted",
+    reason,
+    failureReason,
+    willRetry: event.willRetry === true,
+  };
 }
 
 const PI_TELEMETRY_MESSAGE_COUNT_CAP = 1_024;
@@ -288,6 +337,45 @@ export async function buildPiSpawnEnv(ctx: SpawnContext): Promise<NodeJS.Process
   return (await prepareCliTransport(ctx, { NO_COLOR: "1" })).spawnEnv;
 }
 
+/**
+ * A provider key goes into an HTTP header (`Authorization: Bearer <key>` or an
+ * api-key header). A key with a pasted note or placeholder in it (e.g. Chinese
+ * text) otherwise surfaces as Node's opaque "Cannot convert argument to a
+ * ByteString because the character at index 7…" on every request. Refuse it up
+ * front with a message that names the key.
+ *
+ * Only what every header form refuses is rejected: fetch trims leading and
+ * trailing HTTP whitespace (tab, LF, CR, space) from a header value, so the
+ * check runs on the trimmed key and then refuses what remains that no header
+ * value can carry (a character above U+00FF, CR, LF, NUL). A key that worked in
+ * some header form before is never newly refused.
+ */
+const HTTP_WHITESPACE_EDGES = /^[\t\n\r ]+|[\t\n\r ]+$/g;
+
+export function assertProviderApiKeyIsHeaderSafe(apiKey: string, keyName: string): void {
+  const leading = apiKey.length - apiKey.replace(/^[\t\n\r ]+/, "").length;
+  const trimmed = apiKey.replace(HTTP_WHITESPACE_EDGES, "");
+  for (let index = 0; index < trimmed.length; index += 1) {
+    const code = trimmed.charCodeAt(index);
+    if (code > 0xff || code === 0x0a || code === 0x0d || code === 0x00) {
+      throw new Error(
+        `${keyName} contains a character that cannot be sent in an HTTP header (position ${leading + index + 1}, `
+        + `code ${code}). Remove any pasted text, line breaks or other characters that are not part of the key.`,
+      );
+    }
+  }
+}
+
+async function setHeaderSafeRuntimeApiKey(
+  modelRuntime: Pick<ModelRuntime, "setRuntimeApiKey">,
+  providerId: string,
+  apiKey: string,
+  keyName: string,
+): Promise<void> {
+  assertProviderApiKeyIsHeaderSafe(apiKey, keyName);
+  await modelRuntime.setRuntimeApiKey(providerId, apiKey);
+}
+
 export async function seedPiSessionModelRuntime(
   modelRuntime: Pick<ModelRuntime, "setRuntimeApiKey">,
   runtimeConfig: RuntimeConfig,
@@ -301,9 +389,11 @@ export async function seedPiSessionModelRuntime(
   // freshness is the caller's separate concern, and we deliberately do not request it here.
   // Passing an options object is no longer possible — AuthOperationOptions is { signal? }.
   if (runtimeConfig.runtime === "pi" && runtimeConfig.provider?.kind === "pi-builtin") {
-    await modelRuntime.setRuntimeApiKey(
+    await setHeaderSafeRuntimeApiKey(
+      modelRuntime,
       runtimeConfig.provider.providerId,
       runtimeConfig.provider.apiKey,
+      `The ${runtimeConfig.provider.providerId} API key`,
     );
     return;
   }
@@ -320,20 +410,22 @@ export async function seedPiSessionModelRuntime(
       : providerConnection.providerId === "anthropic-compatible"
         ? "anthropic"
         : providerConnection.providerId;
-    await modelRuntime.setRuntimeApiKey(runtimeProviderId, apiKey);
+    await setHeaderSafeRuntimeApiKey(modelRuntime, runtimeProviderId, apiKey, apiKeyEnv);
     return;
   }
   if (runtimeConfig.provider.kind === "preset") {
-    await modelRuntime.setRuntimeApiKey(
+    await setHeaderSafeRuntimeApiKey(
+      modelRuntime,
       runtimeConfig.provider.providerId,
       runtimeConfig.provider.apiKey,
+      `The ${runtimeConfig.provider.providerId} API key`,
     );
     return;
   }
   if (runtimeConfig.provider.providerId === "openai-compatible") {
-    await modelRuntime.setRuntimeApiKey("openai", runtimeConfig.provider.apiKey);
+    await setHeaderSafeRuntimeApiKey(modelRuntime, "openai", runtimeConfig.provider.apiKey, "The OpenAI-compatible API key");
   } else if (runtimeConfig.provider.providerId === "anthropic-compatible") {
-    await modelRuntime.setRuntimeApiKey("anthropic", runtimeConfig.provider.apiKey);
+    await setHeaderSafeRuntimeApiKey(modelRuntime, "anthropic", runtimeConfig.provider.apiKey, "The Anthropic-compatible API key");
   }
 }
 
@@ -405,19 +497,34 @@ export async function withProcessEnvPatch<T>(
   });
 }
 
-function resolvePiModelFromRegistry(
+/** The model-registry provider a built-in gateway custom model is registered
+ * under. Registration and selection must use this one mapping. */
+function builtInGatewayRegistryProvider(
+  providerId: "openai-compatible" | "anthropic-compatible",
+): { id: "openai"; api: "openai-completions"; apiKeyEnv: "OPENAI_API_KEY" }
+  | { id: "anthropic"; api: "anthropic-messages"; apiKeyEnv: "ANTHROPIC_API_KEY" } {
+  return providerId === "openai-compatible"
+    ? { id: "openai", api: "openai-completions", apiKeyEnv: "OPENAI_API_KEY" }
+    : { id: "anthropic", api: "anthropic-messages", apiKeyEnv: "ANTHROPIC_API_KEY" };
+}
+
+export function resolvePiModelFromRegistry(
   modelId: string | null | undefined,
   modelRegistry: ModelRegistry,
   runtimeConfig: RuntimeConfig,
+  providerConnection: ProviderConnectionLaunchProjection | null = null,
 ) {
   if (!modelId || modelId === "default") return undefined;
-  if (
-    runtimeConfig.runtime === "builtin"
-    && runtimeConfig.provider.kind === "gateway"
-    && runtimeConfig.model.kind === "custom"
-  ) {
-    const provider = runtimeConfig.provider.providerId === "openai-compatible" ? "openai" : "anthropic";
-    return modelRegistry.find(provider, runtimeConfig.model.name);
+  // A built-in custom model reached through a gateway — configured directly or
+  // through a managed provider connection — is registered under exactly one
+  // provider (configureBuiltInGatewayCustomModel). Select only that entry: the
+  // bare name can also exist in the SDK catalog under another provider (e.g.
+  // github-copilot/kimi-k3), and a custom name may itself contain "/". A missing
+  // entry must stay missing so the launch fails as RuntimeModelNotFoundError
+  // instead of silently running a different provider's model.
+  const gateway = resolveBuiltInGatewayLaunch(runtimeConfig, providerConnection);
+  if (gateway && runtimeConfig.runtime === "builtin" && runtimeConfig.model.kind === "custom") {
+    return modelRegistry.find(builtInGatewayRegistryProvider(gateway.providerId).id, runtimeConfig.model.name);
   }
   const [provider, ...modelParts] = modelId.split("/");
   if (provider && modelParts.length > 0) {
@@ -481,7 +588,7 @@ export function resolveBuiltInGatewayLaunch(
   return null;
 }
 
-function configureBuiltInGatewayCustomModel(
+export function configureBuiltInGatewayCustomModel(
   modelRegistry: ModelRegistry,
   runtimeConfig: RuntimeConfig,
   providerConnection: ProviderConnectionLaunchProjection | null,
@@ -489,10 +596,7 @@ function configureBuiltInGatewayCustomModel(
   const gateway = resolveBuiltInGatewayLaunch(runtimeConfig, providerConnection);
   if (!gateway || runtimeConfig.runtime !== "builtin" || runtimeConfig.model.kind !== "custom") return;
 
-  const provider =
-    gateway.providerId === "openai-compatible"
-      ? { id: "openai", api: "openai-completions" as const, apiKeyEnv: "OPENAI_API_KEY" }
-      : { id: "anthropic", api: "anthropic-messages" as const, apiKeyEnv: "ANTHROPIC_API_KEY" };
+  const provider = builtInGatewayRegistryProvider(gateway.providerId);
   const matchingModel = provider.api === "openai-completions"
     ? findMatchingOpenAICompatibleModel(
         modelRegistry,
@@ -679,6 +783,129 @@ type PiProviderRequestState = {
   span: ActiveSpan | undefined;
   settle?: (status: "ok" | "error") => void;
 };
+
+function writePiLifecycleDiagnostic(
+  ctx: SpawnContext,
+  sessionId: string,
+  event: RuntimeLifecycleDiagnosticEvent,
+  logPrefix: string,
+): boolean {
+  const written = Boolean(writeRuntimeLifecycleDiagnosticRecord({
+    runtime: ctx.config.runtime,
+    sessionId,
+    fallbackDir: ctx.workingDirectory,
+    agentId: ctx.agentId,
+    launchId: ctx.launchId ?? null,
+    processInstanceId: ctx.processInstanceId ?? null,
+    event,
+  }));
+  console.info("[%s] runtime_lifecycle %s", logPrefix, JSON.stringify({
+    sessionId,
+    launchId: ctx.launchId ?? null,
+    processInstanceId: ctx.processInstanceId ?? null,
+    event,
+    diagnosticPersisted: written,
+  }));
+  return written;
+}
+
+/**
+ * Closed set of error classes the persisted lifecycle diagnostics may name.
+ * The sidecar is a diagnostic artifact that outlives the process, so an
+ * `error.name` is copied only when it is one of these known categories;
+ * anything else (including a name that merely looks identifier-shaped) is
+ * written as `UnknownError`. The set is the shared runtime error taxonomy
+ * plus the daemon's own startup/launch error classes and the JS built-ins
+ * that reach the Built-in driver's start and transcript-persist paths.
+ */
+const DIAGNOSTIC_ERROR_CLASSES: ReadonlySet<string> = new Set<string>([
+  ...RUNTIME_ERROR_CLASSES,
+  "RuntimeModelNotFoundError",
+  "RuntimeExecutableNotFoundError",
+  "RuntimeSessionStartError",
+  "RuntimeVersionTooOldError",
+  "ProviderConnectionMaterializationError",
+  "RunnerCredentialMintError",
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "ReferenceError",
+  "AggregateError",
+  "AbortError",
+]);
+
+export function safeDiagnosticErrorClass(error: unknown): string {
+  const name = error instanceof Error ? error.name : undefined;
+  return name !== undefined && DIAGNOSTIC_ERROR_CLASSES.has(name) ? name : "UnknownError";
+}
+
+/**
+ * Closed set of `error.code` values the persisted lifecycle diagnostics may copy:
+ * Node/undici transport codes and Node file-system codes that reach the Built-in
+ * driver's start and transcript-persist paths. Like the error class, the code is
+ * externally controlled text, so an identifier-shaped value is not enough; anything
+ * outside this set is omitted rather than persisted.
+ */
+const DIAGNOSTIC_ERROR_CODES: ReadonlySet<string> = new Set<string>([
+  // transport
+  "ABORT_ERR",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_ABORTED",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+  // file system
+  "EACCES",
+  "EAGAIN",
+  "EBUSY",
+  "EEXIST",
+  "EINVAL",
+  "EIO",
+  "EISDIR",
+  "EMFILE",
+  "ENAMETOOLONG",
+  "ENFILE",
+  "ENOENT",
+  "ENOSPC",
+  "ENOTDIR",
+  "EPERM",
+  "EROFS",
+]);
+
+export function safeDiagnosticErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && DIAGNOSTIC_ERROR_CODES.has(code) ? code : undefined;
+}
+
+function safeTranscriptEntryType(
+  value: unknown,
+): Extract<RuntimeLifecycleDiagnosticEvent, { kind: "transcript_persist" }>["entryType"] {
+  switch (value) {
+    case "message":
+    case "thinking_level_change":
+    case "model_change":
+    case "compaction":
+    case "branch_summary":
+    case "custom":
+    case "custom_message":
+    case "label":
+    case "session_info":
+      return value;
+    default:
+      return "unknown";
+  }
+}
 
 type PiDeliveryRequest = {
   requestMethod: () => "turn/start" | "turn/steer";
@@ -1002,33 +1229,19 @@ export function mapPiSdkEventToParsedEvents(
       return events;
     case "compaction_end": {
       if (state.compactionTerminal) return events;
-      const reason = normalizeRuntimeCompactionReason(event.reason);
-      let outcome: PiCompactionOutcome;
-      let failureReason: PiCompactionFailureReason | undefined;
-      if (event.aborted) {
-        outcome = "aborted";
+      const projection = projectPiCompactionEnd(event);
+      const { outcome, reason, failureReason, willRetry } = projection;
+      if (outcome === "aborted") {
         events.push({
           kind: "compaction_interrupted",
           outcome,
           reason,
+          willRetry,
         });
-      } else if (event.result !== undefined) {
-        outcome = "compaction_succeeded";
+      } else if (outcome === "compaction_succeeded") {
         events.push({ kind: "compaction_finished" });
       } else {
-        outcome = "compaction_failed_or_exhausted";
-        failureReason = reason === "overflow"
-          && typeof event.errorMessage === "string"
-          && /after one compact-and-retry attempt/iu.test(event.errorMessage)
-          ? "recovery_exhausted"
-          : "compaction_failed";
         state.compactionTerminal = true;
-        events.push({
-          kind: "compaction_interrupted",
-          outcome,
-          reason,
-          failureReason,
-        });
       }
       events.push({
         kind: "telemetry",
@@ -1038,18 +1251,27 @@ export function mapPiSdkEventToParsedEvents(
           recovery_outcome: outcome,
           compaction_reason: reason,
           ...(failureReason ? { failure_reason: failureReason } : {}),
-          will_retry: event.willRetry === true,
+          will_retry: willRetry,
           ...projectPiCompactionInputTelemetry(inputEvidence, reason),
         },
       });
       if (outcome === "compaction_failed_or_exhausted") {
+        const failureDiagnostic = typeof event.errorMessage === "string" && event.errorMessage.trim().length > 0
+          ? buildRuntimeErrorActivityDiagnostic(event.errorMessage)
+          : undefined;
         events.push({
           kind: "error",
           // Machine-readable classifier only. APM projects this structured
           // terminal outcome through the existing bounded runtime guidance;
           // raw provider text and new user-facing adapter copy stay out.
-          message: "InputTooLargeError",
+          message: failureReason === "compaction_failed" ? "RuntimeError: context compaction failed" : "InputTooLargeError",
           terminalReason: "compaction_failed_or_exhausted",
+          // One atomic terminal event owns both the error and compaction facts.
+          // A separate interruption would produce duplicate terminal Activity.
+          compaction: {
+            outcome, reason, failureReason, willRetry: event.willRetry === true,
+            ...(failureDiagnostic ? { failureDiagnostic } : {}),
+          },
         });
       }
       return events;
@@ -1091,12 +1313,19 @@ const PI_IDLE_PROMPT_MAX_WAIT_MS = 1_000;
 function installProviderHttpClient(
   modelRuntime: ModelRuntime,
   providerHttpClient: ProviderHttpClient,
+  customEndpoint: boolean,
 ): void {
+  const fetchForModel = (model: Parameters<ModelRuntime["stream"]>[0]) => {
+    const prefix = model.id.split("/")[0];
+    const provider = customEndpoint ? "custom" : isBuiltInRuntimeProviderId(model.provider) ? model.provider
+      : isBuiltInRuntimeProviderId(prefix) ? prefix : "custom";
+    return providerHttpClient.forProvider?.(provider) ?? providerHttpClient.fetch;
+  };
   const stream = modelRuntime.stream.bind(modelRuntime);
   modelRuntime.stream = ((model, context, options) => {
     const providerOptions = {
       ...options,
-      fetch: providerHttpClient.fetch,
+      fetch: fetchForModel(model),
     } as typeof options;
     return stream(model, context, providerOptions);
   }) as ModelRuntime["stream"];
@@ -1104,7 +1333,7 @@ function installProviderHttpClient(
   const streamSimple = modelRuntime.streamSimple.bind(modelRuntime);
   modelRuntime.streamSimple = ((model, context, options) => streamSimple(model, context, {
     ...options,
-    fetch: providerHttpClient.fetch,
+    fetch: fetchForModel(model),
   })) as ModelRuntime["streamSimple"];
 }
 
@@ -1113,12 +1342,32 @@ export async function createPiAgentSessionForContext(
   sessionId: string,
   opts: { agentDir?: string; sessionDir?: string; traceName?: string; traceEventPrefix?: string; logPrefix?: string; exposeLaunchEnvToTools?: boolean; isolateHostProviderEnv?: boolean; agentDirSource?: "default" | "spawn_env" | "managed_builtin"; exposeLaunchTraceEvidence?: boolean } = {},
   toolExecutionObserver?: PiToolExecutionObserver,
+  providerObserver?: ProviderRequestObserver,
 ): Promise<AgentSession> {
   const sessionDir = opts.sessionDir ?? buildPiSessionDir(ctx.workingDirectory);
   mkdirSync(sessionDir, { recursive: true });
 
-  const runtimeConfig = hydrateRuntimeConfig(ctx.config);
-  const launchPlan = buildLaunchPlan(runtimeConfig);
+  const logPrefix = opts.logPrefix ?? "pi-driver";
+  writePiLifecycleDiagnostic(ctx, sessionId, {
+    kind: "session_start",
+    phase: "started",
+  }, logPrefix);
+
+  let runtimeConfig: ReturnType<typeof hydrateRuntimeConfig>;
+  let launchPlan: ReturnType<typeof buildLaunchPlan>;
+  try {
+    runtimeConfig = hydrateRuntimeConfig(ctx.config);
+    launchPlan = buildLaunchPlan(runtimeConfig);
+  } catch (error) {
+    const errorCode = safeDiagnosticErrorCode(error);
+    writePiLifecycleDiagnostic(ctx, sessionId, {
+      kind: "session_start",
+      phase: "failed",
+      errorClass: safeDiagnosticErrorClass(error),
+      ...(errorCode ? { errorCode } : {}),
+    }, logPrefix);
+    throw error;
+  }
   const { trace: launchTrace, configSource: _configSource, ...launchRuntimeFields } = launchPlan;
   launchRuntimeFields.envVars = {
     ...(launchRuntimeFields.envVars ?? {}),
@@ -1170,7 +1419,6 @@ export async function createPiAgentSessionForContext(
       ...launchTraceEvidenceAttrs,
     },
   });
-  const logPrefix = opts.logPrefix ?? "pi-driver";
   const traceEventPrefix = opts.traceEventPrefix ?? "daemon.pi.session";
   let providerHttpClient: ProviderHttpClient | undefined;
 
@@ -1179,12 +1427,27 @@ export async function createPiAgentSessionForContext(
     const agentDir = opts.agentDir ?? spawnEnv.PI_CODING_AGENT_DIR ?? getAgentDir();
     mkdirSync(agentDir, { recursive: true });
     const settingsManager = SettingsManager.create(ctx.workingDirectory, agentDir);
+    // Resolve only enabled host extensions. Keep host auth, models and other
+    // settings out of the managed Built-in session, and never install packages.
+    let localExtensionPaths: string[] = [];
+    if (runtimeConfig.runtime === "builtin" && runtimeConfig.loadLocalPlugins === true) {
+      const hostAgentDir = spawnEnv.PI_CODING_AGENT_DIR ?? getAgentDir();
+      const hostSettings = SettingsManager.create(ctx.workingDirectory, hostAgentDir, { projectTrusted: false });
+      const hostPackages = new DefaultPackageManager({
+        cwd: ctx.workingDirectory,
+        agentDir: hostAgentDir,
+        settingsManager: hostSettings,
+      });
+      const resources = await hostPackages.resolve(async () => "skip");
+      localExtensionPaths = resources.extensions.filter((entry) => entry.enabled).map((entry) => entry.path);
+    }
     const providerEnvScope = opts.isolateHostProviderEnv ? BUILTIN_BLOCKED_HOST_PROVIDER_ENV_KEYS : undefined;
     const sessionCreateEnvPatch = buildPiSessionCreateEnvPatch(runtimeConfig, launchRuntimeFields.envVars);
     const sessionServices = await withProcessEnvPatch(sessionCreateEnvPatch, async () => {
       const sessionProviderHttpClient = createProviderHttpClient(
         process.env,
         `pi-provider:${randomUUID()}`,
+        { provider: "custom", observe: providerObserver },
       );
       try {
         const modelRuntime = await ModelRuntime.create({
@@ -1192,7 +1455,9 @@ export async function createPiAgentSessionForContext(
           modelsPath: path.join(agentDir, "models.json"),
           allowModelNetwork: false,
         });
-        installProviderHttpClient(modelRuntime, sessionProviderHttpClient);
+        installProviderHttpClient(modelRuntime, sessionProviderHttpClient,
+          runtimeConfig.runtime === "builtin" && (runtimeConfig.provider.kind === "gateway"
+            || (runtimeConfig.provider.kind === "connection" && Boolean(managedProviderConnection?.endpointUrl))));
         // Request-time credentials and proxy routing must be session-local.
         // Holding a process.env patch across an async SDK turn serializes every
         // Pi agent in this runner. The short create-time scope also keeps
@@ -1210,6 +1475,7 @@ export async function createPiAgentSessionForContext(
           modelRuntime,
           settingsManager,
           resourceLoaderOptions: {
+            additionalExtensionPaths: localExtensionPaths,
             systemPromptOverride: () => ctx.standingPrompt,
           },
         });
@@ -1229,8 +1495,21 @@ export async function createPiAgentSessionForContext(
       agent_dir_source: opts.agentDirSource ?? (spawnEnv.PI_CODING_AGENT_DIR ? "spawn_env" : "default"),
       ...launchTraceEvidenceAttrs,
     });
-    const model = resolvePiModelFromRegistry(launchRuntimeFields.model, modelRegistry, runtimeConfig);
+    const model = resolvePiModelFromRegistry(
+      launchRuntimeFields.model,
+      modelRegistry,
+      runtimeConfig,
+      managedProviderConnection,
+    );
     const resolvedModel = formatPiModelLogId(model);
+    writePiLifecycleDiagnostic(ctx, sessionId, {
+      kind: "model_resolved",
+      requestedModel,
+      providerId: model?.provider ?? null,
+      modelId: model?.id ?? null,
+      modelApi: model?.api ?? null,
+      configSource: launchTrace.config_source ?? null,
+    }, logPrefix);
     traceSpan?.addEvent(`${traceEventPrefix}.model_resolved`, {
       available_models_count: modelRegistry.getAvailable().length,
       requested_model: requestedModel,
@@ -1269,13 +1548,42 @@ export async function createPiAgentSessionForContext(
           ...launchTraceEvidenceAttrs,
         },
       });
-      throw new Error(`Pi model not found: ${launchRuntimeFields.model}`);
+      throw new RuntimeModelNotFoundError({ runtimeId: "builtin", model: launchRuntimeFields.model });
     }
 
     const existingSessionFile = ctx.config.sessionId ? findPiSessionFile(sessionDir, ctx.config.sessionId) : null;
     const sessionManager = existingSessionFile
       ? SessionManager.open(existingSessionFile, sessionDir, ctx.workingDirectory)
       : SessionManager.create(ctx.workingDirectory, sessionDir, { id: sessionId });
+    const persistSessionEntry = sessionManager._persist.bind(sessionManager);
+    let lastTranscriptPersistOutcome: "deferred" | "persisted" | "failed" | null = null;
+    sessionManager._persist = (entry) => {
+      const entryType = safeTranscriptEntryType(entry.type);
+      try {
+        persistSessionEntry(entry);
+        const sessionFile = sessionManager.getSessionFile();
+        const outcome = sessionFile && existsSync(sessionFile) ? "persisted" : "deferred";
+        if (outcome !== lastTranscriptPersistOutcome) {
+          lastTranscriptPersistOutcome = outcome;
+          writePiLifecycleDiagnostic(ctx, sessionId, {
+            kind: "transcript_persist",
+            outcome,
+            entryType,
+          }, logPrefix);
+        }
+      } catch (error) {
+        lastTranscriptPersistOutcome = "failed";
+        const errorCode = safeDiagnosticErrorCode(error);
+        writePiLifecycleDiagnostic(ctx, sessionId, {
+          kind: "transcript_persist",
+          outcome: "failed",
+          entryType,
+          errorClass: safeDiagnosticErrorClass(error),
+          ...(errorCode ? { errorCode } : {}),
+        }, logPrefix);
+        throw error;
+      }
+    };
 
     const toolSpawnEnv = { ...spawnEnv };
     if (opts.exposeLaunchEnvToTools === false) {
@@ -1314,6 +1622,16 @@ export async function createPiAgentSessionForContext(
       }
     };
 
+    if (runtimeConfig.runtime === "builtin" && runtimeConfig.loadLocalPlugins === true) {
+      try {
+        // Complete the SDK extension lifecycle, including session_start hooks.
+        await session.bindExtensions({ mode: "rpc" });
+      } catch (error) {
+        session.dispose();
+        throw error;
+      }
+    }
+
     traceSpan?.addEvent(`${traceEventPrefix}.started`, {
       requested_model: requestedModel,
       resolved_model: resolvedModel,
@@ -1338,14 +1656,25 @@ export async function createPiAgentSessionForContext(
       requestedModel,
       resolvedModel,
     );
+    writePiLifecycleDiagnostic(ctx, sessionId, {
+      kind: "session_start",
+      phase: "ready",
+    }, logPrefix);
     providerHttpClient = undefined;
     return session;
   } catch (error) {
     providerHttpClient?.dispose();
+    const errorCode = safeDiagnosticErrorCode(error);
+    writePiLifecycleDiagnostic(ctx, sessionId, {
+      kind: "session_start",
+      phase: "failed",
+      errorClass: safeDiagnosticErrorClass(error),
+      ...(errorCode ? { errorCode } : {}),
+    }, logPrefix);
     traceSpan?.end("error", {
       attrs: {
         outcome: "error",
-        error_class: error instanceof Error ? error.name : typeof error,
+        error_class: errorClassOf(error),
         ...launchTraceEvidenceAttrs,
       },
     });
@@ -1382,6 +1711,7 @@ export class PiSdkRuntimeSession implements RuntimeSession {
   private started = false;
   private didClose = false;
   private requestedStopReason: string | undefined;
+  private cancellationSource: "requested_stop" | "dispose" | null = null;
   private exitInfo: RuntimeExitInfo | null = null;
   private activeProviderRequest: PiProviderRequestState | null = null;
 
@@ -1392,7 +1722,8 @@ export class PiSdkRuntimeSession implements RuntimeSession {
       sessionCtx,
       sessionId,
       observer,
-    ) => createPiAgentSessionForContext(sessionCtx, sessionId, {}, observer),
+      providerObserver,
+    ) => createPiAgentSessionForContext(sessionCtx, sessionId, {}, observer, providerObserver),
   ) {
     this.mappingState = createPiSdkEventMappingState(ctx.config.sessionId || null);
     const runtimeContext = ctx.config.runtimeContext;
@@ -1469,13 +1800,17 @@ export class PiSdkRuntimeSession implements RuntimeSession {
         ...this.ctx.config,
         sessionId,
       },
-    }, sessionId, this.toolExecutionObserver);
+    }, sessionId, this.toolExecutionObserver, (activity) => {
+      this.recordProviderRequestActivity(activity);
+      if (!this.didClose) this.emitRuntimeEvent({ kind: "provider_request", activity });
+    });
     this.session = session;
     this.mappingState.sessionId = session.sessionId;
     this.setCurrentSessionId(session.sessionId);
     this.toolExecutionObserver?.setRuntimeSessionId(session.sessionId);
     this.unsubscribe = session.subscribe((event) => {
       this.observeToolExecutionEvent(event);
+      this.recordCompactionLifecycle(event);
       if (
         event.type === "message_start" &&
         (event.message as { role?: unknown }).role === "assistant"
@@ -1541,6 +1876,15 @@ export class PiSdkRuntimeSession implements RuntimeSession {
     this.requestedStopReason = opts?.reason;
     const signal = opts?.signal ?? "SIGTERM";
     const session = this.session;
+    if (session?.isStreaming || this.activeProviderRequest) {
+      this.cancellationSource = "requested_stop";
+      this.recordLifecycle({
+        kind: "cancel_requested",
+        source: "requested_stop",
+        signal,
+        providerRequestActive: Boolean(this.activeProviderRequest),
+      });
+    }
     if (session?.isStreaming) {
       try {
         await session.abort();
@@ -1554,6 +1898,15 @@ export class PiSdkRuntimeSession implements RuntimeSession {
 
   async dispose(): Promise<void> {
     if (this.didClose) return;
+    if (this.session?.isStreaming || this.activeProviderRequest) {
+      this.cancellationSource = "dispose";
+      this.recordLifecycle({
+        kind: "cancel_requested",
+        source: "dispose",
+        signal: null,
+        providerRequestActive: Boolean(this.activeProviderRequest),
+      });
+    }
     await this.disposeSession();
     this.emitExitAndClose(0, null);
   }
@@ -1624,6 +1977,50 @@ export class PiSdkRuntimeSession implements RuntimeSession {
       default:
         return;
     }
+  }
+
+  private recordLifecycle(event: RuntimeLifecycleDiagnosticEvent): void {
+    const sessionId = this.mappingState.sessionId || this.ctx.config.sessionId;
+    if (!sessionId) return;
+    writePiLifecycleDiagnostic(
+      this.ctx,
+      sessionId,
+      event,
+      this.ctx.config.runtime === "builtin" ? "builtin-driver" : "pi-driver",
+    );
+  }
+
+  private recordProviderRequestActivity(activity: ProviderRequestActivity): void {
+    this.recordLifecycle({
+      kind: "provider_request",
+      requestId: activity.requestId,
+      providerId: activity.provider,
+      phase: activity.phase,
+      ...(activity.httpStatus === undefined ? {} : { httpStatus: activity.httpStatus }),
+      ...(activity.phase === "cancelled"
+        ? { cancelSource: this.cancellationSource ?? "sdk_internal_or_unknown" }
+        : {}),
+    });
+  }
+
+  private recordCompactionLifecycle(event: AgentSessionEvent): void {
+    if (event.type === "compaction_start") {
+      this.recordLifecycle({ kind: "compaction", phase: "started" });
+      return;
+    }
+    if (event.type !== "compaction_end") return;
+    const projection = projectPiCompactionEnd(event);
+    this.recordLifecycle({
+      kind: "compaction",
+      phase: projection.outcome === "compaction_succeeded"
+        ? "succeeded"
+        : projection.outcome === "aborted"
+          ? "aborted"
+          : "failed",
+      reason: projection.reason,
+      ...(projection.failureReason ? { failureReason: projection.failureReason } : {}),
+      willRetry: projection.willRetry,
+    });
   }
 
   private async waitForStreamingToClear(session: AgentSession): Promise<boolean> {
@@ -1746,8 +2143,15 @@ export class PiSdkRuntimeSession implements RuntimeSession {
       response_started: requestState.responseStarted || classified.http_status !== undefined,
       reason: classified.reason,
       ...(classified.http_status === undefined ? {} : { http_status: classified.http_status }),
-      session_id_present: Boolean(sessionId),
-      ...(sessionId ? { runtime_session_id: sessionId } : {}),
+      // #424 (@Leiysky): the flag keeps the same expression and changes only its
+      // name. `sessionId` here IS the runtime session id — it is assigned to
+      // `mappingState.sessionId` and `setRuntimeSessionId()` on the same line
+      // (:1792-1795) — so naming the flag `session_id_present` put it in a
+      // different family from the value it describes. The raw key is gone: the
+      // sink drops it and it has no hash form, so emitting it only bought a
+      // dropped-attribute count on every provider failure. Reads the same way
+      // as the `launch_id_present` / `launch_id` pair just below.
+      runtime_session_id_present: Boolean(sessionId),
       launch_id_present: Boolean(this.ctx.launchId),
       ...(this.ctx.launchId ? { launch_id: this.ctx.launchId } : {}),
     });
@@ -1909,8 +2313,9 @@ export class PiDriver implements RuntimeDriver {
  *   agent state under `.builtin-*` directories in the agent workspace.
  * - RuntimeConfig is the only launch source: provider/model/key/baseUrl and
  *   reasoning effort are materialized by `buildLaunchPlan()`.
- * - Host Pi settings/auth/packages/extensions and ambient provider env vars
- *   must not influence Built-in behavior. Session creation removes generated
+ * - Host Pi settings/auth and ambient provider env vars remain isolated.
+ *   Host extensions (including installed packages) load only with the per-agent
+ *   loadLocalPlugins opt-in. Session creation removes generated
  *   Pi provider API-key env names plus a small local set of non-API ambient
  *   credential envs before services/model registry initialization.
  * - Trace evidence is closed/non-secret (`provider_id`, `model_kind`,
@@ -1949,7 +2354,7 @@ export class BuiltInDriver extends PiDriver {
     this.sessionId = ctx.config.sessionId || null;
     return new PiSdkRuntimeSession(ctx, (sessionId) => {
       this.sessionId = sessionId;
-    }, (sessionCtx, sessionId) => createPiAgentSessionForContext(sessionCtx, sessionId, {
+    }, (sessionCtx, sessionId, _observer, providerObserver) => createPiAgentSessionForContext(sessionCtx, sessionId, {
       agentDir: buildBuiltInAgentDir(sessionCtx.workingDirectory),
       sessionDir: buildBuiltInSessionDir(sessionCtx.workingDirectory),
       traceName: "daemon.builtin.session.create",
@@ -1959,7 +2364,7 @@ export class BuiltInDriver extends PiDriver {
       exposeLaunchTraceEvidence: true,
       exposeLaunchEnvToTools: false,
       isolateHostProviderEnv: true,
-    }));
+    }, undefined, providerObserver));
   }
 
   buildSystemPrompt(config: AgentConfig, _agentId: string): AxSurfaceText {

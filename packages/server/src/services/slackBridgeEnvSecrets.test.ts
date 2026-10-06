@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import type { ExternalInboundPayloadAad } from "./externalAppIngressService.js";
+import type { ExternalInboundPayloadAad } from "./externalAppIngressService";
 import {
   createSlackBridgeEnvSecretBackends,
   slackBridgeKeyFromEnv,
   SLACK_BRIDGE_CREDENTIAL_KEY_ID,
   SLACK_BRIDGE_PAYLOAD_KEY_ID,
   SLACK_BRIDGE_SIGNING_SECRET_REF,
-} from "./slackBridgeEnvSecrets.js";
+} from "./slackBridgeEnvSecrets";
 
 const REGISTRATION_ID = "11111111-1111-4111-8111-111111111111";
 const SERVER_ID = "22222222-2222-4222-8222-222222222222";

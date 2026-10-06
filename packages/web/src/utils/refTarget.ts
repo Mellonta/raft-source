@@ -1,3 +1,4 @@
+import { parseDmPeerRef } from "@botiverse/raft-shared";
 // Shared reference resolve + navigate layer.
 //
 // This is the *only* piece shared between chat-message refs (rehype-AST
@@ -89,12 +90,20 @@ function findChannelByName(channels: Channel[], name: string): Channel | undefin
   );
 }
 
-function findDmByPeer(channels: Channel[], peer: string): Channel | undefined {
-  const lower = peer.toLowerCase();
+export function findDmByPeer(channels: Channel[], peer: string): Channel | undefined {
+  // `name~agent` / `name~human` pins the peer's kind when a human and an agent
+  // share a name (see dmPeerRef in shared); an unknown kind matches nothing.
+  // Matching is case-SENSITIVE: the name is a handle, the server is authoritative,
+  // and a relaxed match would let the same target string resolve to different
+  // objects here vs. the agent path.
+  const parsed = parseDmPeerRef(peer);
+  if (!parsed.ok) return undefined;
+  const wantType = parsed.peerKind === "human" ? "user" : parsed.peerKind;
   return channels.find(
     (c) =>
       c.type === "dm" &&
-      (c.peerName?.toLowerCase() === lower || c.name.toLowerCase() === lower),
+      (c.peerName === parsed.peerName || c.name === parsed.peerName) &&
+      (wantType === null || c.peerType === wantType),
   );
 }
 

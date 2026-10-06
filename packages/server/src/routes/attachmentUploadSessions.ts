@@ -12,14 +12,15 @@ import {
   attachmentUploadPathParamsSchema,
   createAttachmentUploadSessionRequestSchema,
   getAttachmentUploadResponseSchema,
-} from "@botiverse/raft-shared/src/attachmentUploadContract.js";
-import * as channelService from "../services/channelService.js";
+  listAttachmentUploadSessionsPathParamsSchema,
+} from "@botiverse/raft-shared/src/attachmentUploadContract";
+import * as channelService from "../services/channelService";
 import {
   getAttachmentFileSizeLimitBytes,
   getLegacyAttachmentFileSizeLimitBytes,
-} from "../services/attachmentUploadPolicy.js";
-import { getFileUploadQuotaSummary } from "../services/fileUploadQuotaService.js";
-import { isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService.js";
+} from "../services/attachmentUploadPolicy";
+import { getFileUploadQuotaSummary } from "../services/fileUploadQuotaService";
+import { isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService";
 
 export type AttachmentUploadSessionContext = Readonly<
   | { serverId: ServerId; userId: string; agentId?: never }
@@ -35,6 +36,7 @@ export type AttachmentUploadSessionResult = Readonly<{
 
 export interface AttachmentUploadSessionService {
   capabilities(context: AttachmentUploadSessionContext): Promise<AttachmentUploadSessionResult>;
+  listActive(context: AttachmentUploadSessionContext, channelId: string): Promise<AttachmentUploadSessionResult>;
   create(
     context: AttachmentUploadSessionContext,
     input: CreateAttachmentUploadSessionInput,
@@ -52,6 +54,12 @@ type AttachmentUploadSessionRouterOptions = Readonly<{
 const invalidRequestBody = {
   code: "UPLOAD_INVALID_REQUEST",
   message: "The upload request is invalid.",
+  retryable: false,
+} as const;
+
+const invalidChannelBody = {
+  code: "UPLOAD_INVALID_REQUEST",
+  message: "The channel id is invalid.",
   retryable: false,
 } as const;
 
@@ -161,7 +169,9 @@ async function canCreateUploadSession(
 }
 
 const ATTACHMENT_MOUNT = "/api/attachments";
-const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+// Same shape as the shared UUID_RE (lib/messageId.ts) — kept as a source
+// string because it is interpolated into route-matching regexes.
+const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
 function contractRoute(
   operation: AttachmentUploadOperation,
@@ -190,6 +200,7 @@ export const attachmentUploadCapabilitiesPath = contractRoute("capabilities", "g
 const completePath = uuidContractRoute("complete", "post");
 const cancelPath = uuidContractRoute("cancel", "delete");
 const statusPath = uuidContractRoute("status", "get");
+const listPath = contractRoute("list", "get").replace("{channelId}", ":channelId");
 
 function parsedUploadId(req: Request): string | null {
   const result = attachmentUploadPathParamsSchema.safeParse({ uploadId: req.params[0] });
@@ -211,6 +222,19 @@ export function createAttachmentUploadSessionRouter(
         ? await service.capabilities(requestContext(req))
         : await disabledCapabilities(requestContext(req)),
     );
+  });
+
+  router.get(listPath, ...securityMiddleware, async (req, res) => {
+    const parsed = listAttachmentUploadSessionsPathParamsSchema.safeParse({ channelId: req.params.channelId });
+    if (!parsed.success) {
+      sendContractResponse(res, "list", { status: 400, body: invalidChannelBody });
+      return;
+    }
+    if (!service) {
+      sendContractResponse(res, "list", { status: 200, body: { uploads: [] } });
+      return;
+    }
+    sendContractResponse(res, "list", await service.listActive(requestContext(req), parsed.data.channelId));
   });
 
   router.post(attachmentUploadCreatePath, ...securityMiddleware, options.createLimiter, async (req, res) => {

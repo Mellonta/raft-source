@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import type { Agent } from "../src/store/agentStore.js";
-import type { Channel } from "../src/store/channelStore.js";
+import type { Agent } from "../src/store/agentStore";
+import type { Channel } from "../src/store/channelStore";
 import {
   applyStatusActivityEvent,
   appendLiveAgentActivityItem,
@@ -9,10 +8,10 @@ import {
   buildStatusActivityItem,
   LIVE_AGENT_ACTIVITY_VISIBLE_MS,
   pruneExpiredLiveAgentActivityItems,
-} from "../src/utils/liveAgentActivity.js";
+} from "../src/utils/liveAgentActivity";
 import type {
   LiveAgentActivityItem,
-} from "../src/utils/liveAgentActivity.js";
+} from "../src/utils/liveAgentActivity";
 
 function agent(overrides: Partial<Agent> & Pick<Agent, "id" | "name">): Agent {
   return {

@@ -17,6 +17,9 @@ import type { CSSProperties, HTMLAttributeReferrerPolicy, ReactEventHandler, Ref
  *  - Mermaid diagram: `srcDoc` (front-end-generated SVG doc) + empty `sandbox`
  *    (static SVG needs zero scripts — the most locked-down setting).
  *
+ * NOT for PDFs: Chromium's PDF viewer cannot run inside any sandboxed frame, so
+ * the PDF preview uses `CrossOriginPdfFrame` (origin-enforced, no sandbox).
+ *
  * @Bugen security review 2026-05-18 #proj-uiux:df4d393b.
  */
 export interface SandboxedPreviewFrameProps {

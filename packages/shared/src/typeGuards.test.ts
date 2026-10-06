@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { makeIsMember } from "./typeGuards.js";
+import { makeIsMember } from "./typeGuards";
 
 const KINDS = ["turn", "step", "observation"] as const;
 type Kind = (typeof KINDS)[number];

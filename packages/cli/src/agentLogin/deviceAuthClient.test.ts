@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import type { fetch as undiciFetch } from "undici";
 
@@ -9,7 +8,7 @@ import {
   describeDeviceCodeLoginError,
   pollDeviceToken,
   runDeviceCodeLogin,
-} from "./deviceAuthClient.js";
+} from "./deviceAuthClient";
 
 type UndiciFetch = typeof undiciFetch;
 type FetchInput = Parameters<UndiciFetch>[0];

@@ -164,7 +164,17 @@ test("CSV Markdown and PDF attachments open document previews", async ({ page, r
   const markdownHeading = page.getByRole("heading", { name: "Preview Notes" });
   await expect(markdownHeading).toBeVisible();
   await expect(markdownHeading).toBeInViewport();
-  await expect(page.getByText("window.__bad = true")).toHaveCount(0);
+  // The contract is that embedded raw HTML neither renders nor executes.
+  // Post-RUI the header copy action legitimately carries the raw source in a
+  // sr-only, aria-hidden CopyableCode element, so an unscoped text-absence
+  // check would match that inert copy source. Pin the real contract instead:
+  // nothing rendered inside the markdown root, no <script> element, and the
+  // global side effect never happened.
+  await expect(
+    page.locator("[data-anchor-md-root]").getByText("window.__bad = true"),
+  ).toHaveCount(0);
+  await expect(page.locator("script", { hasText: "window.__bad" })).toHaveCount(0);
+  expect(await page.evaluate(() => (window as unknown as { __bad?: unknown }).__bad)).toBeUndefined();
   await page.getByRole("button", { name: "Close" }).click();
 
   await messageCard.getByLabel(`preview-${suffix}.pdf`).click();
@@ -441,7 +451,16 @@ test("iframe self-navigation invalidates parent-owned external-link hotspots", a
     window as Window & { __previewActivation: { nonce: string; documentEpoch: string } }
   ).__previewActivation);
 
-  await frame.getByRole("button", { name: "Replace preview document" }).click();
+  // Exercise document replacement directly: pointer delivery is not part of
+  // this story, while observing the response makes navigation a hard barrier.
+  const replacementNavigation = page.waitForResponse(
+    "https://example.com/replaced-preview",
+    { timeout: 5_000 },
+  );
+  await frame.locator("body").evaluate(() => {
+    window.location.assign("https://example.com/replaced-preview");
+  });
+  expect((await replacementNavigation).ok()).toBeTruthy();
   await expect(frame.getByText("Replacement preview")).toBeVisible();
 
   // Deterministically replay an inventory from the document that just
@@ -761,10 +780,11 @@ test("long preview filename truncates without a modal-header kind badge", async 
   expect(closeBox!.x + closeBox!.width).toBeLessThanOrEqual(viewport!.width);
 
   // Filename element should still truncate (scrollWidth > clientWidth) so
-  // long names don't push the close/download buttons off-screen.
-  const filenameSpan = page
-    .locator('[title*="' + longName + '"] > span')
-    .first();
+  // long names don't push the close/download buttons off-screen. The header
+  // filename is the truncated span carrying the full name as text; the full
+  // name is also exposed via the RUI Tooltip on hover (there is no longer a
+  // native title attribute).
+  const filenameSpan = previewRoot.getByText(longName, { exact: true }).first();
   await expect(filenameSpan).toBeVisible();
   const overflow = await filenameSpan.evaluate((el) => ({
     scrollWidth: (el as HTMLElement).scrollWidth,

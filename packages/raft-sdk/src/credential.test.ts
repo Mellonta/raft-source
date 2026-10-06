@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import test from "node:test";
 
 import {
   bootstrapRaftCredential,
@@ -12,7 +11,7 @@ import {
   RaftSdkConfigurationError,
   type RaftCredentialStore,
   type StoredRaftCredential,
-} from "./index.js";
+} from "./index";
 
 const identity = {
   agentId: "agent-rss",
@@ -314,7 +313,7 @@ test("createRaftClientFromStore fails closed when the store is empty or malforme
 
 test("file credential store is idempotent for one token and never overwrites it with another", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "raft-sdk-credential-"));
-  t.after(async () => {
+  onTestFinished(async () => {
     await rm(directory, { recursive: true, force: true });
   });
   const credentialPath = join(directory, "secrets", "raft.json");
@@ -350,7 +349,7 @@ test("file credential store is idempotent for one token and never overwrites it 
 
 test("file credential store atomically chooses one first writer under different-token races", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "raft-sdk-credential-race-"));
-  t.after(async () => {
+  onTestFinished(async () => {
     await rm(directory, { recursive: true, force: true });
   });
   const credentialPath = join(directory, "raft.json");
@@ -377,7 +376,7 @@ test("file credential store rejects relative paths, broad permissions, and malfo
   );
 
   const directory = await mkdtemp(join(tmpdir(), "raft-sdk-credential-invalid-"));
-  t.after(async () => {
+  onTestFinished(async () => {
     await rm(directory, { recursive: true, force: true });
   });
   const credentialPath = join(directory, "raft.json");

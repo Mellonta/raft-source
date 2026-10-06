@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
-import { agents, servers, users } from "../db/schema.js";
-import { getRapAppConfig, patchRapAppConfig, RapAppConfigError } from "./rapAppConfigService.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
+import { agents, servers, users } from "../db/schema";
+import { getRapAppConfig, patchRapAppConfig, RapAppConfigError } from "./rapAppConfigService";
 
 const REAL_PG_URL_ENV = "RAP_APP_CONFIG_REAL_PG_URL";
 const REAL_PG_URL = process.env[REAL_PG_URL_ENV];

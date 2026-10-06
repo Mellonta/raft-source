@@ -72,6 +72,10 @@ export function projectOarAccountUsageSnapshot(input: {
 
   const maskedLabel = maskRuntimeAccountEmail(snapshot.email);
   const planLabel = safeLabel(snapshot.plan);
+  // Only sent when there is no masked email: the UI would not show it, and a
+  // server that predates the field rejects the whole snapshot (strict parse), so
+  // email-identified accounts must never carry it.
+  const displayName = maskedLabel ? undefined : safeLabel(snapshot.displayName);
   let sawUnreadableRatio = false;
 
   const windows = snapshot.windows.map((window, index) => {
@@ -102,6 +106,7 @@ export function projectOarAccountUsageSnapshot(input: {
         accountKey,
         ...(maskedLabel ? { maskedLabel } : {}),
         ...(planLabel ? { planLabel } : {}),
+        ...(displayName ? { displayName } : {}),
         health: "error",
         windows: [],
       }],
@@ -115,6 +120,7 @@ export function projectOarAccountUsageSnapshot(input: {
       accountKey,
       ...(maskedLabel ? { maskedLabel } : {}),
       ...(planLabel ? { planLabel } : {}),
+      ...(displayName ? { displayName } : {}),
       health,
       ...(sawUnreadableRatio ? { parseErrorCode: "oar_window_ratio_unreadable" } : {}),
       windows,

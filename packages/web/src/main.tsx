@@ -1,12 +1,12 @@
-import { Component, StrictMode } from "react";
+import { Component, StrictMode, useEffect, useState } from "react";
 import type { ErrorInfo, ReactNode } from "react";
 import ReactDOM from "react-dom/client";
 import { currentTimeMs } from "@botiverse/raft-shared";
 import { installGlobalClientErrorReporters, reportClientError } from "./utils/clientErrorTrace";
-import { ThemeProvider, ToastProvider, TooltipProvider } from "raft-ui";
-import { BrowserRouter } from "react-router-dom";
+import { ThemeProvider } from "raft-ui";
 import { LocaleProvider } from "./i18n/LocaleProvider";
 import { IntlProviderWrapper } from "./i18n/IntlProviderWrapper";
+import { AppProviders } from "./AppProviders";
 import App from "./App";
 import ServiceWorkerNavigationBridge from "./components/pwa/ServiceWorkerNavigationBridge";
 import "./index.css";
@@ -19,8 +19,8 @@ import type {
   UpdateGateTriggerSource,
 } from "./utils/updateGateTrace";
 import { registerPushServiceWorker, supportsPushNotifications } from "./utils/pushNotifications";
-import { initAnalytics, identifyUser, resetAnalytics } from "./analytics/posthog";
-import { useAuthStore } from "./store/authStore";
+import { assertOfflineBundleStart } from "./utils/offlineBundleHost";
+import { cleanBrowserStateForRecovery } from "./utils/serviceWorkerRecovery";
 import { installExternalTranslationGuard } from "./utils/externalTranslationGuard";
 import RootErrorFallback from "./components/errors/RootErrorFallback";
 import {
@@ -35,7 +35,6 @@ import {
 import { installDesktopServerWindowBinding } from "./desktopServerWindow";
 import { installDesktopServerTitleBinding } from "./desktopServerTitle";
 import "./testHooks"; // attaches window.__SLOCK_E2E__ only when built with VITE_E2E=true
-import { ForwardToastProvider } from "./components/message/ForwardToastProvider";
 import { trackVisualViewport } from "./utils/visualViewport";
 
 const desktopHandshake = bootstrapDesktopHandshake();
@@ -46,33 +45,15 @@ void desktopHandshake.catch((error) => {
   renderDesktopHandshakeRecovery();
 });
 
-if (import.meta.env.DEV) {
-  await import("./devtools/localReactDevTools").then(({ installLocalReactDevTools }) => installLocalReactDevTools());
-}
+// Local dev tools must be installed before React's first render. Gate the render
+// on them rather than using top-level await: any TLA in the module graph makes
+// Rolldown turn off common-chunk merging for the whole production build.
+const localDevToolsReady = import.meta.env.DEV
+  ? import("./devtools/localReactDevTools").then(({ installLocalReactDevTools }) => installLocalReactDevTools())
+  : null;
 
 if (supportsPushNotifications()) {
   void registerPushServiceWorker();
-}
-
-// Env-gated: no-op unless VITE_POSTHOG_KEY is configured (staging/prod). Off in
-// dev / self-host / CI so nothing leaves the domain without an operator key.
-initAnalytics();
-
-// Tie analytics identity to the logged-in user across login / cold-load restore
-// / logout — a single subscription instead of touching every auth mutation
-// site. identify() also gives PostHog a stable distinct_id for deterministic
-// feature-flag bucketing. All calls no-op when analytics is disabled.
-{
-  const seedUser = useAuthStore.getState().user;
-  if (seedUser) identifyUser(seedUser.id);
-  let lastUserId = seedUser?.id ?? null;
-  useAuthStore.subscribe((state) => {
-    const nextId = state.user?.id ?? null;
-    if (nextId === lastUserId) return;
-    lastUserId = nextId;
-    if (nextId) identifyUser(nextId);
-    else resetAnalytics();
-  });
 }
 
 // Keyboard-only visualViewport pinning (#5888 / #725): trackVisualViewport
@@ -97,36 +78,11 @@ async function clearAssetCacheAndReload() {
   let serviceWorkerCount = 0;
   let assetCacheCount = 0;
   try {
-    const cleanup: Array<Promise<unknown>> = [];
-
-    if ("serviceWorker" in navigator) {
-      const registrations = await navigator.serviceWorker.getRegistrations();
-      serviceWorkerCount = registrations.length;
-      cleanup.push(
-        ...registrations
-          .filter((registration) => {
-            try {
-              return new URL(registration.scope).origin === window.location.origin;
-            } catch {
-              return false;
-            }
-          })
-          .map((registration) => registration.update().catch(() => { cleanupFailureCount += 1; })),
-      );
-      cleanup.push(navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).catch(() => { cleanupFailureCount += 1; }));
-    }
-
-    if ("caches" in window) {
-      const keys = await window.caches.keys();
-      assetCacheCount = keys.filter((key) => key.startsWith("slock-assets-")).length;
-      cleanup.push(
-        ...keys
-          .filter((key) => key.startsWith("slock-assets-"))
-          .map((key) => window.caches.delete(key).catch(() => { cleanupFailureCount += 1; return false; })),
-      );
-    }
-
-    await Promise.all(cleanup);
+    // Does nothing when the page was loaded from an offline bundle; see cleanBrowserStateForRecovery.
+    const result = await cleanBrowserStateForRecovery();
+    serviceWorkerCount = result.serviceWorkerCount;
+    assetCacheCount = result.assetCacheCount;
+    cleanupFailureCount += result.failureCount;
   } catch (error) {
     cleanupFailureCount += 1;
     console.warn("[RootErrorBoundary] app refresh cache cleanup failed", error);
@@ -267,41 +223,52 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, RootErrorBoun
     reportClientError({ source: "error_boundary", error, componentStack: info.componentStack });
   }
   render() {
-    // RootErrorBoundary sits above the app LocaleProvider; wrap intl-backed
-    // fallbacks so formatMessage resolves the user's persisted display locale.
+    const root = typeof document !== "undefined" ? document.documentElement : null;
+    const theme = root?.dataset.theme === "elegant" ? "elegant" : "brutal";
+    const mode = root?.classList.contains("dark") ? "dark" : "light";
+
+    // RootErrorBoundary sits above AppThemeProvider and LocaleProvider; wrap intl-backed
+    // and RUI fallbacks so formatMessage resolves the user's persisted display locale
+    // and RUI components resolve the active theme/mode from DOM without touching app stores.
     if (this.state.refreshRequired) {
       return (
-        <LocaleProvider>
-          <IntlProviderWrapper>
-            <AppRefreshRequiredScreen
-              onContinueAnyway={this.handleContinueAnyway}
-              onRecoverAndRefresh={this.handleRecoverAndRefresh}
-            />
-          </IntlProviderWrapper>
-        </LocaleProvider>
+        <ThemeProvider theme={theme} mode={mode} syncDom={false}>
+          <LocaleProvider>
+            <IntlProviderWrapper>
+              <AppRefreshRequiredScreen
+                onContinueAnyway={this.handleContinueAnyway}
+                onRecoverAndRefresh={this.handleRecoverAndRefresh}
+              />
+            </IntlProviderWrapper>
+          </LocaleProvider>
+        </ThemeProvider>
       );
     }
 
     if (this.state.error) {
       return (
-        <LocaleProvider>
-          <IntlProviderWrapper>
-            <RootErrorFallback
-              error={this.state.error}
-              componentStack={this.state.info?.componentStack}
-            />
-          </IntlProviderWrapper>
-        </LocaleProvider>
+        <ThemeProvider theme={theme} mode={mode} syncDom={false}>
+          <LocaleProvider>
+            <IntlProviderWrapper>
+              <RootErrorFallback
+                error={this.state.error}
+                componentStack={this.state.info?.componentStack}
+              />
+            </IntlProviderWrapper>
+          </LocaleProvider>
+        </ThemeProvider>
       );
     }
     return (
       <>
         {this.state.refreshWarningVisible ? (
-          <LocaleProvider>
-            <IntlProviderWrapper>
-              <AppRefreshWarningBanner onRefresh={this.handleRecoverAndRefresh} />
-            </IntlProviderWrapper>
-          </LocaleProvider>
+          <ThemeProvider theme={theme} mode={mode} syncDom={false}>
+            <LocaleProvider>
+              <IntlProviderWrapper>
+                <AppRefreshWarningBanner onRefresh={this.handleRecoverAndRefresh} />
+              </IntlProviderWrapper>
+            </LocaleProvider>
+          </ThemeProvider>
         ) : null}
         {this.props.children}
       </>
@@ -309,27 +276,47 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, RootErrorBoun
   }
 }
 
+// A host injection that is present but invalid is a failed offline start: show the
+// root error screen instead of running as an ordinary page. The host's own
+// timeout then falls back to the last good bundle.
+function OfflineBundleStartGate() {
+  assertOfflineBundleStart();
+  return null;
+}
+
+// E2E-only probe for calibrating the root error boundary in prod-like preview.
+function E2ERenderErrorProbe() {
+  const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (import.meta.env.VITE_E2E !== "true") return undefined;
+    const e2e = window.__SLOCK_E2E__;
+    if (!e2e) return undefined;
+    e2e.triggerRenderError = (nextMessage = "e2e-render-error") => setMessage(nextMessage);
+    return () => {
+      if (e2e.triggerRenderError) delete e2e.triggerRenderError;
+    };
+  }, []);
+
+  if (message) throw new Error(message);
+  return null;
+}
+
 installGlobalClientErrorReporters();
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+const renderRoot = () => ReactDOM.createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <RootErrorBoundary>
-      <ThemeProvider defaultTheme="brutal" defaultMode="light">
-        <TooltipProvider>
-          <ToastProvider>
-            <ForwardToastProvider>
-              <BrowserRouter>
-                <ServiceWorkerNavigationBridge />
-                <LocaleProvider>
-                  <IntlProviderWrapper>
-                    <App />
-                  </IntlProviderWrapper>
-                </LocaleProvider>
-              </BrowserRouter>
-            </ForwardToastProvider>
-          </ToastProvider>
-        </TooltipProvider>
-      </ThemeProvider>
+      <OfflineBundleStartGate />
+      {import.meta.env.VITE_E2E === "true" ? <E2ERenderErrorProbe /> : null}
+      {/* Root composition lives in AppProviders — shared with the desktop
+          shell, never re-listed here (see that file). */}
+      <AppProviders insideRouter={<ServiceWorkerNavigationBridge />}>
+        <App />
+      </AppProviders>
     </RootErrorBoundary>
   </StrictMode>
 );
+
+if (localDevToolsReady) void localDevToolsReady.then(renderRoot);
+else renderRoot();

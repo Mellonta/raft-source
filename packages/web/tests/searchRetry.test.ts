@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { buildSearchRetryReset } from "../src/components/search/searchRetry.js";
+import { buildSearchRetryReset } from "../src/components/search/searchRetry";
 
 test("retry clears stale results and enters a fresh loading cycle", () => {
   assert.deepEqual(buildSearchRetryReset(), {

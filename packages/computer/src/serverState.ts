@@ -17,8 +17,8 @@ import {
   legacyServerAttachmentPath,
   serverManagedFlagPath,
   CURRENT_SCHEMA_VERSION,
-} from "./paths.js";
-import { canonicalizeServerUrl, LEGACY_PRODUCTION_SERVER_URL } from "./serverUrl.js";
+} from "./paths";
+import { canonicalizeServerUrl, LEGACY_PRODUCTION_SERVER_URL } from "./serverUrl";
 
 export interface ServerAttachment {
   kind: "computer-attachment";

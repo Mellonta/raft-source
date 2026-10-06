@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 
 /**
  * Contract tooth (Cardy task #231): /serverinfo must consume the plan that

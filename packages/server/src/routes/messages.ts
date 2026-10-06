@@ -1,39 +1,43 @@
-import { serializeErrorForLog } from "../tracing/safeErrorLog.js";
+import { serializeErrorForLog } from "../tracing/safeErrorLog";
 import { Router, type Request, type Response, type Router as RouterType } from "express";
+import { UUID_RE } from "../lib/messageId";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import * as messageService from "../services/messageService.js";
-import * as channelService from "../services/channelService.js";
-import * as userService from "../services/userService.js";
-import * as agentService from "../services/agentService.js";
-import * as serverService from "../services/serverService.js";
-import * as searchService from "../services/searchService.js";
-import * as onboardingService from "../services/onboardingService.js";
-import { getServerPlan, getHistoryCutoff, isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService.js";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
-import { failpoints, type ServerId } from "@botiverse/raft-shared";
-import { addTraceEvent, createTraceDbQueryTracer, safeAddTraceEvent, tracePhase } from "../tracing/semanticTrace.js";
+import * as messageService from "../services/messageService";
+import * as channelService from "../services/channelService";
+import * as userService from "../services/userService";
+import * as agentService from "../services/agentService";
+import * as serverService from "../services/serverService";
+import * as searchService from "../services/searchService";
+import * as onboardingService from "../services/onboardingService";
+import { getServerPlan, getHistoryCutoff, isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
+import { failpoints, type ServerId, AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT, AGENT_API_MESSAGE_SEARCH_MAX_LIMIT } from "@botiverse/raft-shared";
+import { addTraceEvent, createTraceDbQueryTracer, safeAddTraceEvent, tracePhase } from "../tracing/semanticTrace";
 import {
   boundedUnexpectedForwardError,
   forwardCommitState,
   recordForwardTerminal,
   type ForwardDiagnosticPhase,
-} from "../tracing/messageForwardTrace.js";
-import { messageSearchErrorTraceAttrs, messageSearchParamTraceAttrs } from "../tracing/messageSearchTrace.js";
-import { getDb } from "../db/index.js";
-import { getAttachmentsForMessages, normalizeAttachmentFilename, resolveAttachmentMimeType } from "./attachments.js";
-import { AttachmentLinkError } from "../services/attachmentLinkingService.js";
-import { isAttachmentPreviewUnifiedEnabledForServer } from "../config/attachmentPreviewUnified.js";
-import { isMessageForwardingEnabledForServer } from "../config/messageForwarding.js";
-import { bindRequestAbortSignal } from "./requestAbortSignal.js";
+} from "../tracing/messageForwardTrace";
+import { messageSearchErrorTraceAttrs, messageSearchParamTraceAttrs } from "../tracing/messageSearchTrace";
+import { getDb } from "../db/index";
+import { messageMentions } from "../db/schema";
+import { listMentionDeliveryOccurrencesForMessage, evaluateMentionDeliveryOccurrence } from "../services/mentionDeliveryOccurrenceService";
+import { projectMentionDeliveryForSender } from "../services/senderMentionDeliveryProjection";
+import { getAttachmentsForMessages, normalizeAttachmentFilename, resolveAttachmentMimeType } from "./attachments";
+import { AttachmentLinkError } from "../services/attachmentLinkingService";
+import { isAttachmentPreviewUnifiedEnabledForServer } from "../config/attachmentPreviewUnified";
+import { bindRequestAbortSignal } from "./requestAbortSignal";
+import { sendJsonServerError } from "./errorResponse";
 import {
   executeMentionActionId,
   type MentionActionExecutionOptions,
   type MentionActionKind,
   type MentionActionResult,
-} from "../services/mentionActionService.js";
-import { projectRichMessageSocketPayload } from "../services/messageRealtimeEvents.js";
-import { CHANNEL_NOT_FOUND_BODY, denyChannelAccess } from "./channelAccessDenial.js";
+} from "../services/mentionActionService";
+import { projectRichMessageSocketPayload } from "../services/messageRealtimeEvents";
+import { CHANNEL_NOT_FOUND_BODY, denyChannelAccess } from "./channelAccessDenial";
 import {
   hydrateReactionViewer,
   InvalidReactionActorsCursorError,
@@ -42,25 +46,65 @@ import {
   projectReactionViewerSnapshot,
   ReactionActorVisibilityChangedError,
   ReactionDiscussionVersionChangedError,
-} from "../services/messageReactionService.js";
+} from "../services/messageReactionService";
 import {
   ForwardPersistenceError,
   persistForwardBundle,
   type InternalForwardBundleMetadata,
-} from "../services/attachmentForwardService.js";
-import { projectSlackBridgeOutboundAdmissionFailure } from "../services/externalDeliveryOutboxService.js";
-import { getActorServerRoleInServer } from "../lib/actorPermissions.js";
+} from "../services/attachmentForwardService";
+import {
+  assertChannelConversionWritable,
+  ChannelConversionInProgressError,
+  resolveChannelConversionLockTarget,
+} from "../services/channelConversionFenceService";
+import { projectSlackBridgeOutboundAdmissionFailure } from "../services/externalDeliveryOutboxService";
+import { getActorServerRoleInServer } from "../lib/actorPermissions";
 
 export const messageRouter: RouterType = Router();
 export const messageV2Router: RouterType = Router();
 
-const MAX_MESSAGE_LENGTH = 32_000;
+export const MAX_MESSAGE_LENGTH = 32_000;
 const MAX_RANDOM_ID_LENGTH = 128;
 const INVALID_RANDOM_ID = Symbol("invalidRandomId");
 const MAX_REACTION_LENGTH = 16;
 const MAX_FORWARD_BUNDLE_ITEMS = 20;
 const MAX_FORWARD_DESTINATIONS = 10;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The authenticated human author can inspect only coarse outcomes of their own
+// mentions while they still have access to the original conversation. Runtime
+// identities and terminal provenance remain on the existing diagnostic surface.
+messageRouter.get("/:messageId/mention-deliveries", async (req, res) => {
+  try {
+    const messageId = req.params.messageId;
+    const message = UUID_RE.test(messageId) ? await messageService.getMessage(messageId) : null;
+    if (!message || message.senderType !== "user" || message.senderId !== req.userId
+      || !await channelService.canUserAccessChannel(message.channelId, req.userId!, req.serverId!)) {
+      res.status(404).json({ status: "NOT_JOINABLE" });
+      return;
+    }
+    const mentions = await getDb().select({
+      id: messageMentions.id, targetId: messageMentions.targetId,
+      handle: messageMentions.handleAtSendTime,
+    }).from(messageMentions).where(and(
+      eq(messageMentions.messageId, messageId),
+      eq(messageMentions.serverId, req.serverId!),
+      eq(messageMentions.targetType, "agent"),
+      eq(messageMentions.notifiableAtSend, true),
+    ));
+    const occurrences = new Map((await listMentionDeliveryOccurrencesForMessage(messageId))
+      .map((row) => [row.occurrenceId, row]));
+    res.json({ messageId, deliveries: mentions.map((mention) => {
+      const row = occurrences.get(mention.id);
+      return {
+        targetId: mention.targetId,
+        ...projectMentionDeliveryForSender(mention.handle, row
+          ? evaluateMentionDeliveryOccurrence(row) : { status: "NOT_JOINABLE" }),
+      };
+    }) });
+  } catch (err) {
+    console.error("messages.mention-deliveries error:", serializeErrorForLog(err));
+    res.status(500).json({ status: "LOOKUP_FAILED" });
+  }
+});
 
 // Wire parser for picker-confirmed mention intent — payload contract / rationale
 // lives next to messageService.StructuredMentionInput. Exported so the
@@ -699,7 +743,10 @@ messageRouter.get("/search", async (req, res) => {
       }
     }
 
-    const limit = Math.min(Number(req.query.limit) || 20, 50);
+    const limit = Math.min(
+      Number(req.query.limit) || AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT,
+      AGENT_API_MESSAGE_SEARCH_MAX_LIMIT,
+    );
     const offset = Math.max(Number(req.query.offset) || 0, 0);
     const senderId = typeof req.query.senderId === "string" ? req.query.senderId : undefined;
     const senderType = parseSearchSenderType(req.query.senderType);
@@ -842,18 +889,43 @@ messageRouter.get("/search", async (req, res) => {
   }
 });
 
+// Messages on each side of a context target. Callers that only need the target
+// (the thread panel's parent message) pass before=0&after=0 instead of paying
+// for a 31-message window; absent or invalid values keep the default.
+const MESSAGE_CONTEXT_WINDOW_DEFAULT = 15;
+function parseContextWindowSide(raw: unknown): number {
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) return MESSAGE_CONTEXT_WINDOW_DEFAULT;
+  return Math.min(Number(raw), MESSAGE_CONTEXT_WINDOW_DEFAULT);
+}
+
 messageRouter.get("/context/:messageId", async (req, res) => {
   try {
-    const plan = await getServerPlan(req.serverId!);
+    const plan = await tracePhase(
+      () => getServerPlan(req.serverId!),
+      (_durationMs, result) => ({ name: "history.policy.checked", attrs: { plan: result } }),
+    );
     const historyCutoff = getHistoryCutoff(plan);
     const channelId = typeof req.query.channelId === "string" ? req.query.channelId : undefined;
     const queryChannel = channelId ? await channelService.getChannel(channelId) : null;
-    const queryJointResolved = queryChannel?.type === "joint" && channelId
-      ? await channelService.resolveChannelAccess({ serverId: req.serverId!, channelId })
+    // Historical permalinks retain the source workspace's local channel ID.
+    // Resolve only an active projection in the caller's current workspace;
+    // the local membership check below remains the read authority.
+    const localJointProjection = queryChannel?.type === "joint" && channelId
+      ? (await channelService.getActiveJointChannelProjectionsByLocalChannel(channelId))
+        .find((projection) => projection.serverId === req.serverId)
       : null;
-    const queryJointThreadProjection = queryChannel?.type === "thread"
-      ? await channelService.getJointThreadProjectionByLocalThread(channelId!, req.serverId!)
+    const queryJointResolved = localJointProjection
+      ? await channelService.resolveChannelAccess({ serverId: req.serverId!, channelId: localJointProjection.localChannelId })
       : null;
+    const sourceJointThreadProjection = queryChannel?.type === "thread"
+      ? await channelService.getJointThreadProjectionByLocalThread(channelId!)
+      : null;
+    const queryJointThreadProjection = sourceJointThreadProjection?.localServerId === req.serverId
+      ? sourceJointThreadProjection
+      : sourceJointThreadProjection
+        ? (await channelService.getActiveJointThreadProjectionsByCanonicalThread(sourceJointThreadProjection.canonicalThreadChannelId))
+          .find((projection) => projection.localServerId === req.serverId) ?? null
+        : null;
     const contextChannelId = queryJointResolved?.kind === "joint"
       ? queryJointResolved.canonicalChannelId
       : queryJointThreadProjection?.canonicalThreadChannelId ?? channelId;
@@ -861,6 +933,8 @@ messageRouter.get("/context/:messageId", async (req, res) => {
       res.status(404).json({ error: "Message not found" });
       return;
     }
+    const contextBefore = parseContextWindowSide(req.query.before);
+    const contextAfter = parseContextWindowSide(req.query.after);
     const looksLikeFullUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.messageId);
     const contextQueryOptions = {
       attachmentCommentViewerUserId: req.userId,
@@ -869,14 +943,20 @@ messageRouter.get("/context/:messageId", async (req, res) => {
     };
     const context = channelId
       ? looksLikeFullUuid
-        ? await messageService.getMessageContextInChannel(contextChannelId!, req.params.messageId, 15, 15, historyCutoff, contextQueryOptions)
-          ?? await messageService.getThreadReplyContextForParentChannel(contextChannelId!, req.params.messageId, 15, 15, historyCutoff, contextQueryOptions)
-          ?? await messageService.getThreadParentContextByThreadChannelIdForParentChannel(contextChannelId!, req.params.messageId, 15, 15, historyCutoff, contextQueryOptions)
-        : await messageService.getMessageContextByShortId(contextChannelId!, req.params.messageId, 15, 15, historyCutoff, contextQueryOptions)
-          ?? await messageService.getThreadReplyContextByShortIdForParentChannel(contextChannelId!, req.params.messageId, 15, 15, historyCutoff, contextQueryOptions)
-          ?? await messageService.getThreadParentContextByThreadChannelIdForParentChannel(contextChannelId!, req.params.messageId, 15, 15, historyCutoff, contextQueryOptions)
-      : await messageService.getMessageContext(req.params.messageId, 15, 15, historyCutoff, contextQueryOptions);
+        ? await messageService.getMessageContextInChannel(contextChannelId!, req.params.messageId, contextBefore, contextAfter, historyCutoff, contextQueryOptions)
+          ?? await messageService.getThreadReplyContextForParentChannel(contextChannelId!, req.params.messageId, contextBefore, contextAfter, historyCutoff, contextQueryOptions)
+          ?? await messageService.getThreadParentContextByThreadChannelIdForParentChannel(contextChannelId!, req.params.messageId, contextBefore, contextAfter, historyCutoff, contextQueryOptions)
+        : await messageService.getMessageContextByShortId(contextChannelId!, req.params.messageId, contextBefore, contextAfter, historyCutoff, contextQueryOptions)
+          ?? await messageService.getThreadReplyContextByShortIdForParentChannel(contextChannelId!, req.params.messageId, contextBefore, contextAfter, historyCutoff, contextQueryOptions)
+          ?? await messageService.getThreadParentContextByThreadChannelIdForParentChannel(contextChannelId!, req.params.messageId, contextBefore, contextAfter, historyCutoff, contextQueryOptions)
+      : await messageService.getMessageContext(req.params.messageId, contextBefore, contextAfter, historyCutoff, contextQueryOptions);
     if (!context) {
+      // Context queries apply the plan cutoff, so a target behind it lands
+      // here too; record whether a cutoff was in force (task #14).
+      addTraceEvent("message_context.not_found", {
+        plan,
+        history_cutoff_present: Boolean(historyCutoff),
+      });
       res.status(404).json({ error: "Message not found" });
       return;
     }
@@ -884,7 +964,14 @@ messageRouter.get("/context/:messageId", async (req, res) => {
     let responseChannelId = queryJointResolved?.kind === "joint"
       ? queryJointResolved.localChannelId
       : queryJointThreadProjection?.localThreadChannelId ?? context.channelId;
-    const canonicalTarget = ("canonicalTarget" in context ? context.canonicalTarget : null) as null | {
+    const canonicalTarget = (("canonicalTarget" in context ? context.canonicalTarget : null)
+      ?? (queryJointThreadProjection ? {
+        kind: "thread",
+        channelId: queryJointThreadProjection.localParentChannelId,
+        threadChannelId: queryJointThreadProjection.localThreadChannelId,
+        threadParentMessageId: queryJointThreadProjection.canonicalParentMessageId,
+        messageId: context.targetMessageId,
+      } : null)) as null | {
       kind?: string;
       channelId?: string;
       threadChannelId?: string;
@@ -900,6 +987,12 @@ messageRouter.get("/context/:messageId", async (req, res) => {
         responseChannelId = localThreadProjection.localThreadChannelId;
       }
     }
+    // A batch may already have rehomed the target while the local channel
+    // intentionally remains ordinary until final cutover. Authorize its local
+    // projection below, never the storage namespace.
+    const localReadProjection = (await channelService.getActiveJointChannelProjectionsByLocalChannel(responseChannelId))
+      .find((projection) => projection.serverId === req.serverId);
+    if (localReadProjection) responseChannelId = localReadProjection.localChannelId;
     const channel = await channelService.getChannel(responseChannelId);
     if (!channel || channel.serverId !== req.serverId) {
       res.status(404).json({ error: "Channel not found" });
@@ -919,13 +1012,16 @@ messageRouter.get("/context/:messageId", async (req, res) => {
         context.messages[0]?.seq,
       );
     }
+    addTraceEvent("history.limit.checked", {
+      plan,
+      history_cutoff_present: Boolean(historyCutoff),
+      history_limited: historyLimited,
+    });
 
-    const channelArchived = await channelService.isChannelArchived(context.channelId);
-    const projectedContextMessages = responseChannelId === context.channelId
-      ? context.messages
-      : queryJointResolved?.kind === "joint"
-        ? await messageService.projectJointMessagesToLocalChannel(context.messages, responseChannelId, req.serverId!)
-        : messageService.projectMessagesToChannel(context.messages, responseChannelId);
+    const channelArchived = await channelService.isChannelArchived(responseChannelId);
+    const projectedContextMessages = await messageService.projectJointMessagesToLocalChannel(
+      context.messages, responseChannelId, req.serverId!,
+    );
     const contextParentMessageIds = projectedContextMessages.map((message) => message.id);
     const threadSummariesByParentMessageId = contextParentMessageIds.length === 0
       ? {}
@@ -947,8 +1043,11 @@ messageRouter.get("/context/:messageId", async (req, res) => {
       channelArchived,
     });
   } catch (err) {
-    console.error("Get message context error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to load message context" });
+    sendJsonServerError(req, res, {
+      error: "Failed to load message context",
+      logPrefix: "Get message context error:",
+      err,
+    });
   }
 });
 
@@ -1041,7 +1140,7 @@ messageRouter.get("/channel/:channelId", async (req, res) => {
       ? await messageService.projectJointMessagesToLocalChannel(page.messages, resolved.localChannelId, req.serverId!)
       : jointThreadProjection
         ? messageService.projectMessagesToChannel(page.messages, jointThreadProjection.localThreadChannelId)
-      : page.messages;
+      : await messageService.projectJointMessagesToLocalChannel(page.messages, req.params.channelId, req.serverId!);
     const responseScopeId = resolved?.kind === "joint"
       ? resolved.localChannelId
       : jointThreadProjection?.localThreadChannelId ?? req.params.channelId;
@@ -1126,39 +1225,25 @@ messageRouter.get("/attachment-preview/enabled", async (req, res) => {
     });
     res.json({ enabled });
   } catch (err) {
-    console.error("Attachment preview flag evaluation failed:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to evaluate attachment preview availability" });
+    sendJsonServerError(req, res, {
+      error: "Failed to evaluate attachment preview availability",
+      logPrefix: "Attachment preview flag evaluation failed:",
+      err,
+    });
   }
 });
 
-messageRouter.get("/forward/enabled", async (req, res) => {
-  try {
-    const enabled = await isMessageForwardingEnabledForServer({
-      app: req.app,
-      userId: req.userId,
-      serverId: req.serverId,
-    });
-    res.json({ enabled });
-  } catch (err) {
-    console.error("Message forwarding flag evaluation failed:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to evaluate forwarding availability" });
-  }
+// Kept as a compatibility read for clients released before forwarding was
+// stable. The feature is now always available; access is enforced by the
+// ordinary message/channel authorization below.
+messageRouter.get("/forward/enabled", (_req, res) => {
+  res.json({ enabled: true });
 });
 
 const MAX_FORWARD_SEARCH_LIMIT = 20;
 
 messageRouter.get("/forward/targets/search", async (req, res) => {
   try {
-    const forwardingEnabled = await isMessageForwardingEnabledForServer({
-      app: req.app,
-      userId: req.userId,
-      serverId: req.serverId,
-    });
-    if (!forwardingEnabled) {
-      res.status(404).json({ error: "Forwarding is not available" });
-      return;
-    }
-
     const q = typeof req.query.q === "string" ? req.query.q.trim().toLowerCase() : "";
     const limit = Math.min(
       Math.max(1, parseInt(String(req.query.limit), 10) || MAX_FORWARD_SEARCH_LIMIT),
@@ -1299,8 +1384,11 @@ messageRouter.get("/forward/targets/search", async (req, res) => {
     const targets = results.slice(0, limit).map(({ score: _score, ...rest }) => rest);
     res.json({ targets });
   } catch (err) {
-    console.error("Forward target search failed:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to search forward targets" });
+    sendJsonServerError(req, res, {
+      error: "Failed to search forward targets",
+      logPrefix: "Forward target search failed:",
+      err,
+    });
   }
 });
 
@@ -1332,27 +1420,9 @@ function boundedForwardError(error: unknown): { stableCode: string; errorClass: 
 }
 
 messageRouter.post("/forward", async (req, res) => {
-  let phase: ForwardDiagnosticPhase = "gate";
+  let phase: ForwardDiagnosticPhase = "validate";
   const errorPhases = new WeakMap<object, ForwardDiagnosticPhase>();
   try {
-    const forwardingEnabled = await isMessageForwardingEnabledForServer({
-      app: req.app,
-      userId: req.userId,
-      serverId: req.serverId,
-    });
-    if (!forwardingEnabled) {
-      recordForwardTerminal(req, {
-        phase,
-        outcome: "rejected",
-        status: 404,
-        stableCode: "feature_disabled",
-        errorClass: "FeatureGateDenied",
-      });
-      res.status(404).json({ error: "Forwarding is not available" });
-      return;
-    }
-
-    phase = "validate";
     const destinationChannelId = typeof req.body?.destinationChannelId === "string"
       ? req.body.destinationChannelId.trim()
       : typeof req.body?.channelId === "string"
@@ -1422,7 +1492,7 @@ messageRouter.post("/forward", async (req, res) => {
           throw new ForwardRequestError(403, "You must join this channel to send messages", "destination_unavailable", "destination_membership_required");
         }
         if (await isChannelReadOnlyByBillingFeature(targetChannelId, req.serverId!)) {
-          throw new ForwardRequestError(403, "Joint Channels require the Pro plan. Upgrade to continue.", "destination_unavailable", "destination_billing_read_only");
+          throw new ForwardRequestError(403, "This joint channel is read-only because it has more than 2 free servers. It becomes writable again when a server upgrades or a free server leaves.", "destination_unavailable", "destination_billing_read_only");
         }
         if (await isChannelReadOnlyByQuota(targetChannelId, req.serverId!)) {
           throw new ForwardRequestError(403, "This channel is read-only on your current plan. Upgrade to continue.", "destination_unavailable", "destination_quota_read_only");
@@ -1512,6 +1582,20 @@ messageRouter.post("/forward", async (req, res) => {
           ...await forwardToDestination(targetChannelId),
         };
       } catch (err) {
+        if (err instanceof ChannelConversionInProgressError) {
+          addTraceEvent("messages.forward.destination.failed", {
+            destinationChannelId: targetChannelId,
+            code: err.code,
+            error: err.message,
+          });
+          return {
+            destinationChannelId: targetChannelId,
+            status: "failed" as const,
+            code: err.code,
+            error: err.message,
+            conversionEpoch: err.conversionEpoch,
+          };
+        }
         if (
           err instanceof messageService.UserRandomIdConflictError
           || (err instanceof ForwardPersistenceError && err.code === "idempotency_conflict")
@@ -1590,6 +1674,10 @@ messageRouter.post("/forward", async (req, res) => {
       stableCode: detail.stableCode,
       errorClass: detail.errorClass,
     });
+    if (err instanceof ChannelConversionInProgressError) {
+      res.status(err.status).json({ error: err.message, code: err.code, conversionEpoch: err.conversionEpoch });
+      return;
+    }
     if (err instanceof ForwardRequestError) {
       safeAddTraceEvent("messages.forward.rejected", () => ({ code: err.code, status: err.status }));
       res.status(err.status).json({ error: err.message, code: err.code });
@@ -1664,9 +1752,17 @@ async function createHumanMessage(
       return;
     }
 
+    // Fast typed rejection for an already-fenced source. The persistence
+    // boundary repeats this check while holding the same per-source lock, so
+    // this user-facing precheck is not the TOCTOU authority.
+    const conversionTarget = await resolveChannelConversionLockTarget(getDb(), channelId);
+    if (conversionTarget) {
+      await assertChannelConversionWritable(conversionTarget.sourceChannelId);
+    }
+
     // Check if channel is read-only due to quota (excess channels on free plan)
     if (await isChannelReadOnlyByBillingFeature(channelId, req.serverId!)) {
-      res.status(403).json({ error: "Joint Channels require the Pro plan. Upgrade to continue." });
+      res.status(403).json({ error: "This joint channel is read-only because it has more than 2 free servers. It becomes writable again when a server upgrades or a free server leaves." });
       return;
     }
     if (await isChannelReadOnlyByQuota(channelId, req.serverId!)) {
@@ -1705,11 +1801,13 @@ async function createHumanMessage(
 
     const pendingMentionActions = messageService.getSenderPendingMentionActions(enriched);
     const unresolvedMentionHandles = messageService.getSenderUnresolvedMentionHandles(enriched);
+    const deliveryWarnings = messageService.getSenderDeliveryWarnings(enriched);
     if (mentionContract === "v2") {
       res.json({
         message: enriched,
         ...(pendingMentionActions.length > 0 ? { pendingMentionActions } : {}),
         ...(unresolvedMentionHandles.length > 0 ? { unresolvedMentionHandles } : {}),
+        ...(deliveryWarnings.length > 0 ? { deliveryWarnings } : {}),
       });
       return;
     }
@@ -1720,6 +1818,10 @@ async function createHumanMessage(
 
     res.json(enriched);
   } catch (err) {
+    if (err instanceof ChannelConversionInProgressError) {
+      res.status(err.status).json({ error: err.message, code: err.code, conversionEpoch: err.conversionEpoch });
+      return;
+    }
     if (err instanceof channelService.ChannelArchivedError) {
       res.status(409).json({ error: "This channel is archived", code: "channel_archived" });
       return;
@@ -1824,8 +1926,11 @@ messageRouter.post("/mention-actions/execute", async (req, res) => {
     }
     res.json({ ok: true, action, results });
   } catch (err) {
-    console.error("messages.mention-actions.execute error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to execute mention action" });
+    sendJsonServerError(req, res, {
+      error: "Failed to execute mention action",
+      logPrefix: "messages.mention-actions.execute error:",
+      err,
+    });
   }
 });
 
@@ -1909,8 +2014,7 @@ messageRouter.get("/:messageId/reactions/actors", async (req, res) => {
       res.status(409).json({ error: err.message, code: err.code, rebaselineRequired: true });
       return;
     }
-    console.error("List reaction actors error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to list reaction actors" });
+    sendJsonServerError(req, res, { error: "Failed to list reaction actors", logPrefix: "List reaction actors error:", err });
   }
 });
 
@@ -1934,8 +2038,7 @@ messageRouter.get("/:messageId/reactions/viewer", async (req, res) => {
       res.status(409).json({ error: "This channel is archived", code: "channel_archived" });
       return;
     }
-    console.error("Hydrate reaction viewer error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to hydrate reaction viewer state" });
+    sendJsonServerError(req, res, { error: "Failed to hydrate reaction viewer state", logPrefix: "Hydrate reaction viewer error:", err });
   }
 });
 
@@ -1964,7 +2067,7 @@ messageRouter.post("/:messageId/reactions", async (req, res) => {
     await channelService.assertChannelNotArchived(localChannelId);
 
     if (await isChannelReadOnlyByBillingFeature(localChannelId, req.serverId!)) {
-      res.status(403).json({ error: "Joint Channels require the Pro plan. Upgrade to continue." });
+      res.status(403).json({ error: "This joint channel is read-only because it has more than 2 free servers. It becomes writable again when a server upgrades or a free server leaves." });
       return;
     }
     if (await isChannelReadOnlyByQuota(localChannelId, req.serverId!)) {
@@ -1973,6 +2076,7 @@ messageRouter.post("/:messageId/reactions", async (req, res) => {
     }
 
     const mutation = await mutateMessageReaction({
+      channelId: localChannelId,
       messageId: message.id,
       emoji,
       actor: { kind: "user", id: req.userId! },
@@ -2003,12 +2107,15 @@ messageRouter.post("/:messageId/reactions", async (req, res) => {
       reactionViewer,
     });
   } catch (err) {
+    if (err instanceof ChannelConversionInProgressError) {
+      res.status(err.status).json({ error: err.message, code: err.code, conversionEpoch: err.conversionEpoch });
+      return;
+    }
     if (err instanceof channelService.ChannelArchivedError) {
       res.status(409).json({ error: "This channel is archived", code: "channel_archived" });
       return;
     }
-    console.error("Add reaction error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to add reaction" });
+    sendJsonServerError(req, res, { error: "Failed to add reaction", logPrefix: "Add reaction error:", err });
   }
 });
 
@@ -2037,7 +2144,7 @@ messageRouter.delete("/:messageId/reactions", async (req, res) => {
     await channelService.assertChannelNotArchived(localChannelId);
 
     if (await isChannelReadOnlyByBillingFeature(localChannelId, req.serverId!)) {
-      res.status(403).json({ error: "Joint Channels require the Pro plan. Upgrade to continue." });
+      res.status(403).json({ error: "This joint channel is read-only because it has more than 2 free servers. It becomes writable again when a server upgrades or a free server leaves." });
       return;
     }
     if (await isChannelReadOnlyByQuota(localChannelId, req.serverId!)) {
@@ -2046,6 +2153,7 @@ messageRouter.delete("/:messageId/reactions", async (req, res) => {
     }
 
     const mutation = await mutateMessageReaction({
+      channelId: localChannelId,
       messageId: message.id,
       emoji,
       actor: { kind: "user", id: req.userId! },
@@ -2076,12 +2184,15 @@ messageRouter.delete("/:messageId/reactions", async (req, res) => {
       reactionViewer,
     });
   } catch (err) {
+    if (err instanceof ChannelConversionInProgressError) {
+      res.status(err.status).json({ error: err.message, code: err.code, conversionEpoch: err.conversionEpoch });
+      return;
+    }
     if (err instanceof channelService.ChannelArchivedError) {
       res.status(409).json({ error: "This channel is archived", code: "channel_archived" });
       return;
     }
-    console.error("Remove reaction error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to remove reaction" });
+    sendJsonServerError(req, res, { error: "Failed to remove reaction", logPrefix: "Remove reaction error:", err });
   }
 });
 

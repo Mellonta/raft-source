@@ -2,19 +2,19 @@ import type { ReactElement } from "react";
 import { useRef, useState, useSyncExternalStore } from "react";
 import { useIntl } from "react-intl";
 import { ChevronRight, CircleStop, Search, Settings } from "lucide-react";
-import { TooltipProvider } from "raft-ui";
+import { Badge, TooltipProvider, Button, Skeleton } from "raft-ui";
 import EditChannelDialog from "./EditChannelDialog";
+import { ChannelPreferencesSection } from "./ChannelPreferencesSection";
 import Modal from "../Modal";
 import ChannelMembers, { agentStatusFallbackActivity } from "../agent/ChannelMembers";
 import AgentActivityDot from "../agent/AgentActivityDot";
 import type { ChannelAgent, ChannelExternalMember, ChannelHuman } from "../../hooks/useChannelMembers";
+import { useAgentStore } from "../../store/agentStore";
 import { useAuthStore } from "../../store/authStore";
 import { useChannelStore } from "../../store/channelStore";
 import { useServerStore } from "../../store/serverStore";
 import { canUseChannelMemberAction } from "../../utils/channelMemberPermissions";
 import AvatarSlot from "../ui/AvatarSlot";
-import Button from "../ui/Button";
-import Skeleton from "../ui/Skeleton";
 import {
   OverflowActionRow,
   OverflowMenuTrigger,
@@ -47,7 +47,6 @@ function MemberStripTooltip({
   return (
     <Tooltip
       content={label}
-      contentProps={{ className: "bg-white" }}
     >
       {children}
     </Tooltip>
@@ -141,12 +140,12 @@ function MembersStrip({
         <span
           role="heading"
           aria-level={3}
-          className="text-base font-bold text-black"
           data-testid="channel-overflow-members-heading"
+          className="text-base font-bold text-foreground-strong theme-brutal:text-black"
         >
           {formatMessage({ id: "message.chatPanel.overflow.members" })}
         </span>
-        <span className="inline-flex min-w-0 items-center gap-1 text-xs font-bold text-black">
+        <span className="inline-flex min-w-0 items-center gap-1 text-xs font-bold text-foreground-muted theme-brutal:text-black">
           {loading
             ? formatMessage({ id: "message.chatPanel.overflow.membersLoading" })
             : formatMessage(
@@ -224,24 +223,25 @@ function MembersStrip({
             <button
               type="button"
               onClick={onOpen}
-              className="flex h-9 w-9 shrink-0 items-center justify-center border-2 border-black text-xs font-bold"
+              className="shrink-0 transition-colors hover:brightness-90"
               data-testid="channel-overflow-members-more"
             >
-              +{overflow}
+              <AvatarSlot context="panel-header" type="human">+{overflow}</AvatarSlot>
             </button>
           )}
           {onAdd && (
-            <button
-              type="button"
-              onClick={onAdd}
-              disabled={loading}
-              title={formatMessage({ id: "agent.channelMembers.addMember" })}
-              aria-label={formatMessage({ id: "agent.channelMembers.addMember" })}
-              className="flex h-9 w-9 shrink-0 items-center justify-center border-2 border-dashed border-black/40 text-lg font-bold text-black/45 transition-colors hover:border-black hover:text-black disabled:cursor-wait disabled:opacity-40"
-              data-testid="channel-overflow-members-add-tile"
-            >
-              +
-            </button>
+            <Tooltip content={formatMessage({ id: "agent.channelMembers.addMember" })}>
+              <button
+                type="button"
+                onClick={onAdd}
+                disabled={loading}
+                aria-label={formatMessage({ id: "agent.channelMembers.addMember" })}
+                className="shrink-0 transition-colors hover:brightness-90 disabled:cursor-wait disabled:opacity-40"
+                data-testid="channel-overflow-members-add-tile"
+              >
+                <AvatarSlot context="panel-header" type="human" className="border-dashed text-lg">+</AvatarSlot>
+              </button>
+            </Tooltip>
           )}
         </div>
       </TooltipProvider>
@@ -296,8 +296,7 @@ function MemberAvatarPreloader({
 }
 
 /**
- * Channel topbar details and settings surface (task #187, gated by
- * `topbar_overflow_v0`).
+ * Channel topbar details and settings surface.
  *
  * Collects the channel-header settings actions (members / channel settings
  * incl. activity mute / stop-all-agents) into a drawer. Search remains a
@@ -361,8 +360,8 @@ export interface ChannelOverflowMenuProps {
     changeMemberRole: (targetType: "user" | "agent", memberId: string, role: "member" | "admin") => Promise<void>;
     roleChangeFailed: boolean;
   };
-  /** Channel settings section. Omit when the user can neither manage
-   *  channels nor leave (mirrors `showChannelOptionsButton`). */
+  /** Settings entry follows the existing management/leave policy.
+   *  Individual actions retain their own capability checks. */
   settings?: {
     initialName: string;
     initialDescription: string;
@@ -403,8 +402,12 @@ export default function ChannelOverflowMenu({
   const [view, setView] = useState<"root" | "members">("root");
   const [membersInitialView, setMembersInitialView] = useState<"add" | undefined>(undefined);
   const open = controlledOpen ?? internalOpen;
-  // v2 identity header: visibility badge reads the live channel.
-  const channel = useChannelStore((s) => s.channels.find((c) => c.id === channelId));
+  // v2 identity header: visibility badge reads the live channel. DMs live in
+  // the store's dmChannels list, so look there too (task #703: this sheet IS
+  // the DM settings surface as well — same component as channels).
+  const channel = useChannelStore((s) =>
+    s.channels.find((c) => c.id === channelId) ?? s.dmChannels.find((c) => c.id === channelId));
+  const isDmChannel = channel?.type === "dm";
   const currentUserId = useAuthStore((s) => s.user?.id);
   const currentServerId = useServerStore((s) => s.current?.id);
   const serverMembers = useServerStore((s) => s.members);
@@ -499,24 +502,31 @@ export default function ChannelOverflowMenu({
              header instead of body rows. */
           <span className="flex min-w-0 items-center gap-2">
             <span className="truncate" data-testid="channel-overflow-title-text">
-              {formatMessage({ id: "message.chatPanel.overflow.channelName" }, { name: channelName })}
+              {/* A DM has no "#" name — the title is the peer's plain name. */}
+              {isDmChannel
+                ? channelName
+                : formatMessage({ id: "message.chatPanel.overflow.channelName" }, { name: channelName })}
             </span>
             {channel && (
-              <span
-                className="shrink-0 border-[1.5px] border-black bg-brutal-lime px-2 py-px text-[11px] font-bold"
+              <Badge
+                appearance="soft"
+                variant={isDmChannel ? "muted" : "success"}
+                className="shrink-0"
                 data-testid="channel-overflow-visibility-badge"
               >
-                {channel.type === "private"
+                {isDmChannel
+                  ? formatMessage({ id: "message.chatPanel.dmOverflow.dmBadge" })
+                  : channel.type === "private"
                   ? formatMessage({ id: "message.chatPanel.overflow.visibilityPrivate" })
                   : channel.type === "joint"
                     ? formatMessage({ id: "channel.edit.jointChannelBadge" })
-                  : formatMessage({ id: "message.chatPanel.overflow.visibilityPublic" })}
-              </span>
+                    : formatMessage({ id: "message.chatPanel.overflow.visibilityPublic" })}
+              </Badge>
             )}
           </span>
         )}
         subtitle={settings?.initialDescription ? (
-          <p className="truncate font-mono text-xs text-black/50" data-testid="channel-overflow-identity-desc">
+          <p className="truncate font-mono text-xs text-inherit opacity-85" data-testid="channel-overflow-identity-desc">
             {settings.initialDescription}
           </p>
         ) : undefined}
@@ -547,6 +557,8 @@ export default function ChannelOverflowMenu({
               onAdd={canAddMembers ? () => {
                 if (!canAddMembers) return;
                 setMembersInitialView("add");
+                // The add picker opens straight away: fetch the agent roster it lists.
+                void useAgentStore.getState().loadAgents();
                 setView("members");
               } : undefined}
             />
@@ -578,6 +590,21 @@ export default function ChannelOverflowMenu({
                 />
               ) : undefined}
             />
+          )}
+
+          {/* task #703: a DM shares THIS sheet (same component, same
+              language) but has no name/description form — its root view is
+              the two-participant strip plus the shared preferences block.
+              Per-DM mute stays out (documented non-feature). */}
+          {isDmChannel && (
+            <div className="px-4 pb-2">
+              <ChannelPreferencesSection
+                channelId={channelId}
+                isPanel
+                activityMute={activityMute}
+                collapseLongMessages={collapseLongMessages}
+              />
+            </div>
           )}
         </div>
 
@@ -643,7 +670,7 @@ export default function ChannelOverflowMenu({
                 }}
                 disabled={unsavedBusy}
                 size="sm"
-                tone="white"
+                variant="outline"
                 className="disabled:opacity-50"
               >
                 {formatMessage({ id: "message.chatPanel.overflow.keepEditing" })}
@@ -658,7 +685,7 @@ export default function ChannelOverflowMenu({
                 }}
                 disabled={unsavedBusy}
                 size="sm"
-                tone="orange"
+                variant="warning"
                 className="disabled:opacity-50"
                 data-testid="channel-overflow-unsaved-discard"
               >
@@ -669,7 +696,7 @@ export default function ChannelOverflowMenu({
                   onClick={() => void handleSaveAndClose()}
                   disabled={unsavedBusy}
                   size="sm"
-                  tone="pink"
+                  variant="accent"
                   className="disabled:opacity-50"
                   data-testid="channel-overflow-unsaved-save"
                 >

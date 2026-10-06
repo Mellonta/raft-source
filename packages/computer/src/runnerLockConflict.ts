@@ -1,11 +1,11 @@
-import { writePidfileAt } from "./internal/process-primitives.js";
+import { writePidfileAt } from "./internal/process-primitives";
 import {
   adoptExternalRunnerPid,
   RUNNER_TRIGGER,
   type RunnerRecord,
-} from "./lib/runnerStateMachine.js";
-import type { RunnerState } from "./lib/state.js";
-import { serverRunnerLogPath, serverRunnerPidPath } from "./paths.js";
+} from "./lib/runnerStateMachine";
+import type { RunnerState } from "./lib/state";
+import { serverRunnerLogPath, serverRunnerPidPath } from "./paths";
 
 export interface HandleRunnerLockConflictOptions {
   slockHome: string;

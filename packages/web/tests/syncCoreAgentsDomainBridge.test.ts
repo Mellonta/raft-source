@@ -5,16 +5,15 @@
  * the anchored direct fold — no toy domain.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createSyncCore } from "@botiverse/raft-shared";
 import type { SyncDomainConfig, SyncFrame } from "@botiverse/raft-shared";
 import {
   applyAgentActivityEvent,
-} from "../src/store/events/agentActivityEvents.js";
+} from "../src/store/events/agentActivityEvents";
 import type {
   AgentActivityDomainState,
   AgentActivityEvent,
-} from "../src/store/events/agentActivityEvents.js";
+} from "../src/store/events/agentActivityEvents";
 
 const INITIAL: AgentActivityDomainState = {
   agentActivities: {},

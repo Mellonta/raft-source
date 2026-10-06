@@ -1,10 +1,10 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { and, asc, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   labDefinitions,
   serverAgentMembers,
@@ -13,10 +13,10 @@ import {
   serverLabEnrollments,
   serverMembers,
   users,
-} from "../db/schema.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { createAgent } from "../services/agentService.js";
-import { createServer } from "../services/serverService.js";
+} from "../db/schema";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { createAgent } from "../services/agentService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

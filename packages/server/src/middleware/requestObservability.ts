@@ -10,9 +10,10 @@ import {
   type Tracer,
   type TraceStatus,
 } from "@botiverse/raft-shared";
-import { httpRequestDuration, httpRequestsTotal } from "../metrics.js";
-import { normalizeRequestRoutePattern } from "./requestRoutePattern.js";
-import { runWithTraceSpan } from "../tracing/semanticTrace.js";
+import { httpRequestDuration, httpRequestsTotal } from "../metrics";
+import { normalizeRequestRoutePattern } from "./requestRoutePattern";
+import { runWithTraceSpan } from "../tracing/semanticTrace";
+import { agentIdHashAttrs, serverIdHashAttrs } from "../tracing/traceIdentity";
 
 export type HttpStatusBucket = "2xx" | "3xx" | "4xx" | "5xx" | "other";
 export type HttpCallerKind = "human" | "agent" | "system";
@@ -29,6 +30,8 @@ const HTTP_REQUEST_SCOPE_ATTR_KEYS = [
   "server_id_present",
   "machine_id_present",
   "agent_id_present",
+  "agent_id_hash",
+  "server_id_hash",
   "session_id",
   "session_id_present",
   "auth_trace_source",
@@ -113,6 +116,7 @@ export type AuthTraceIdentitySource =
   | "mobile_oauth"
   | "social_oauth"
   | "device_auth"
+  | "app_login"
   | "require_auth"
   | "refresh"
   | "logout";
@@ -165,11 +169,19 @@ function buildRequestTraceScope(
     actor: {
       serverId: req.serverId,
       machineId: req.machineId,
-      ...(typeof agentIdPresent === "boolean" ? { agentIdPresent } : {}),
+      // Agent-credential auth (/internal/agent-api/*) sets actingAgentId; the
+      // header/route hint alone misses that surface.
+      ...(typeof agentIdPresent === "boolean" ? { agentIdPresent: agentIdPresent || Boolean(traceAgentIdOf(req)) } : {}),
       sessionId: req.authTraceIdentity?.sessionId,
       sessionIdPresent: Boolean(req.authTraceIdentity?.sessionId),
     },
   };
+}
+
+/** Agent the request acts for: agent-credential auth, else the scope-checked
+ *  `:id` of a machine-authenticated `/internal/agent/:id/*` call. */
+function traceAgentIdOf(req: Request): string | undefined {
+  return req.actingAgentId ?? req.traceAgentId;
 }
 
 function buildInitialRequestTraceScope(req: Request): TraceScope {
@@ -210,6 +222,8 @@ export function requestObservabilityMiddleware(req: Request, res: Response, next
     const requestScopeAttrs = {
       ...projectTraceScopeAttrs(buildRequestTraceScope(req, routePattern, callerKind, agentIdPresent)),
       ...projectAuthTraceIdentityAttrs(req),
+      ...agentIdHashAttrs(traceAgentIdOf(req)),
+      ...serverIdHashAttrs(req.serverId),
     };
     const labels = {
       route_pattern: routePattern,

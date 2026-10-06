@@ -8,7 +8,7 @@ import type {
   ComputerLifecycleExecutionAck,
 } from "@botiverse/raft-shared";
 import { currentDate } from "@botiverse/raft-shared";
-import { CURRENT_SCHEMA_VERSION, serverLifecycleOperationsPath, upgradeLogPath } from "./paths.js";
+import { CURRENT_SCHEMA_VERSION, serverLifecycleOperationsPath, upgradeLogPath } from "./paths";
 
 export type ComputerLifecycleAckPhase = "shutdown" | "ready";
 export type ComputerLifecycleTrigger = "cli" | "web" | "tray";

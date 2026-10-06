@@ -10,13 +10,14 @@
 // projection writer.
 //
 // Source discussion: #proj-runtime:4dbe9aa7.
+import { legacyActivityStateProjection } from "./legacyActivityStateInference";
 import type { AgentActivityDetailKind, AgentActivityKind, AgentStatus, DaemonTrajectoryEntry, TrajectoryEntry } from "@botiverse/raft-shared";
 import type {
   AgentLifecycleEvent,
   AgentLifecycleEventType,
   AgentLifecycleProjectionOutcome,
   AgentLifecycleTraceAttrs,
-} from "./agentLifecycleEvents.js";
+} from "./agentLifecycleEvents";
 
 export type LifecycleWakeBlockReason =
   | "control_gate"
@@ -344,6 +345,12 @@ export function reduceStartLifecycle(input: StartProjectionInput): AgentLifecycl
 }
 
 export interface DaemonActivityProjectionInput {
+  /**
+   * RFC 069 §8: false when the sending daemon reports agent state on its
+   * sequenced `agent:status` channel; activity then never changes state.
+   * Omitted (legacy daemons) means true.
+   */
+  activityDrivesInstanceState?: boolean;
   action: ActivitySignalPlanAction;
   activity: AgentActivityKind;
   detail: string;
@@ -405,7 +412,16 @@ export const CANONICAL_DAEMON_ACTIVITY_BY_DETAIL_KIND = {
   synthetic_repair: "online",
   system_message: "working",
   runtime_progress: "working",
+  // task #1116: daemon observation "deliveries written, runtime not consuming".
+  // Carried with a typed DeliveryConsumptionActivityDiagnostic; the process is
+  // alive and idle from the server's point of view, so it projects as online.
+  delivery_unconsumed: "online",
+  // task #1119: the server paused automatic wakes after consecutive early exits.
+  wake_crash_loop_blocked: "offline",
+  // RFC 071 §9: the terminal-failure breaker paused automatic wakes.
+  terminal_failure_paused: "offline",
   model_request_started: "working",
+  provider_request_status: "working",
   model_response_started: "working",
   tool_started: "working",
   tool_end: "working",
@@ -546,6 +562,39 @@ export function reduceRuntimeErrorActivityAction(input: {
   return "preserve";
 }
 
+/**
+ * RFC 069 §8: which (daemon process, client sequence) last set an agent's
+ * reported status, and whether a new sequenced status frame may replace it.
+ * Sequences compare only within one daemon process; frames from a process
+ * other than the one currently connected are stale by definition.
+ */
+export interface SequencedStatusVersion {
+  daemonInstanceId: string;
+  clientSeq: number;
+}
+
+export type SequencedStatusVerdict =
+  | { kind: "unsequenced" }
+  | { kind: "accept"; next: SequencedStatusVersion }
+  | { kind: "stale_instance" }
+  | { kind: "stale_seq" };
+
+export function planSequencedStatus(input: {
+  connectionInstanceId: string | null;
+  frameInstanceId: string | undefined;
+  frameSeq: number | undefined;
+  last: SequencedStatusVersion | undefined;
+}): SequencedStatusVerdict {
+  // Without a connected process to pin, ordering cannot be checked: fall back to
+  // the unsequenced path rather than trust the frame's own instance id.
+  if (!input.frameInstanceId || typeof input.frameSeq !== "number" || !input.connectionInstanceId) return { kind: "unsequenced" };
+  if (input.frameInstanceId !== input.connectionInstanceId) return { kind: "stale_instance" };
+  if (input.last && input.last.daemonInstanceId === input.frameInstanceId && input.frameSeq <= input.last.clientSeq) {
+    return { kind: "stale_seq" };
+  }
+  return { kind: "accept", next: { daemonInstanceId: input.frameInstanceId, clientSeq: input.frameSeq } };
+}
+
 export function reduceDaemonActivityLifecycle(input: DaemonActivityProjectionInput): AgentLifecycleProjectionPlan {
   const wakeBlockReason = stateWakeBlockReason(input.state);
   const sourceProducerFactAttrs = sourceProducerFactTraceAttrs(input.producerFactId);
@@ -563,40 +612,21 @@ export function reduceDaemonActivityLifecycle(input: DaemonActivityProjectionInp
   }
 
   const apmSourceFactAttrs = apmProducerFactTraceAttrs(input.entries);
-  const liveRuntimeActivity =
-    input.activity === "online" || input.activity === "thinking" || input.activity === "working";
-  const shouldRestoreActiveStatus = input.state.dbStatus === "inactive" && liveRuntimeActivity;
-  const runtimeState: LifecycleRuntimeState =
-    input.activity === "online" ? "running_idle"
-      : input.activity === "thinking" ? "thinking"
-        : input.activity === "working" ? "working"
-          : input.activity === "error" ? "crashed"
-            : "interrupted";
-  const dbStatus: LifecycleDbStatusProjection = shouldRestoreActiveStatus
-    ? {
-        kind: "apply",
-        status: "active",
-        writer: "signal",
-        attrs: {
-          activity_status: input.activity,
-          legacy_status: input.state.dbStatus,
-          runtime_state: input.state.runtimeState,
-        },
-      }
-    : {
-        kind: "skip",
-        skippedReason: "daemon_activity_does_not_change_db_status",
-        attrs: { activity_status: input.activity },
-      };
+  // RFC 069 §8: a daemon that reports status on its own sequenced channel owns
+  // the agent's state, so its activity only changes what is displayed. Older
+  // daemons still get their state inferred from activity (legacy, #1819).
+  const legacyState = input.activityDrivesInstanceState !== false
+    ? legacyActivityStateProjection({ activity: input.activity, state: input.state })
+    : null;
+  const dbStatus: LifecycleDbStatusProjection = legacyState?.dbStatus ?? {
+    kind: "skip",
+    skippedReason: "status_reported_on_sequenced_channel",
+    attrs: { activity_status: input.activity },
+  };
 
   return {
     event: input.event,
-    sideEffects: {
-      updateCache: {
-        runtimeState,
-        ...(shouldRestoreActiveStatus ? { status: "active" as const } : {}),
-      },
-    },
+    ...(legacyState ? { sideEffects: legacyState.sideEffects } : {}),
     dbStatus,
     wakeEligibility: { eligible: true },
     liveActivity: {
@@ -656,6 +686,13 @@ export interface ExternalActivityProjectionInput {
   entries?: TrajectoryEntry[];
   event: AgentLifecycleEvent;
   occurredAtMs?: number;
+  /**
+   * Ordering time for the activity kernel: the reported occurredAt clamped to
+   * server receive time (a client clock running ahead cannot pin the dot).
+   * External activity is always arbitrated by it, so an older event can never
+   * overwrite newer state.
+   */
+  observedAtMs?: number;
 }
 
 export function reduceExternalActivityLifecycle(input: ExternalActivityProjectionInput): AgentLifecycleProjectionPlan {
@@ -676,6 +713,7 @@ export function reduceExternalActivityLifecycle(input: ExternalActivityProjectio
       dedupeKey: input.dedupeKey,
       detailKind: "external_activity",
       nowOverride: input.occurredAtMs,
+      ...(input.observedAtMs !== undefined ? { observedAtMs: input.observedAtMs } : {}),
       attrs: apmSourceFactAttrs,
     },
     activityLog: {
@@ -1607,8 +1645,6 @@ export const LIFECYCLE_PLAN_SHADOW_CLASS = {
   manual_start_requested: "control", // authorized command
   manual_stop_requested: "control", // authorized command
   migration_aborted: "control", // authorized migration command chain
-  migration_completed: "control", // authorized migration command chain
-  migration_started: "control", // authorized migration command chain
   ready_reconciled: "synthetic", // readiness family (ready_online leg emits its own site)
   runtime_crashed: "observed", // daemon-detected runtime fact
   runtime_interrupted: "observed", // daemon-detected runtime fact
@@ -1763,8 +1799,6 @@ function eventKindForLifecyclePlan(planKind: AgentLifecycleEventType): string {
       return "runtime_working";
     case "runtime_profile_control_changed":
     case "migration_aborted":
-    case "migration_completed":
-    case "migration_started":
       return "internal_rpc";
   }
 }
@@ -1922,9 +1956,9 @@ export function buildLifecycleShadowVerdictAttrs(
 //
 // Deliberately rejected keys, with the disease each carries:
 // - clientSeq advance: the heartbeat allocates a fresh clientSeq per replay
-//   (agentProcessManager nextActivityClientSeq), so seq-advance launders
+//   (daemon LegacyActivitySink.publishHeartbeat), so seq-advance launders
 //   stale replays into fresh observed truth — the I6 failure family.
-// - producerFactId: today seq-DERIVED (buildActivityProducerFactId =
+// - producerFactId: today seq-DERIVED (daemon LegacyActivitySink =
 //   daemon_activity:agent:launch:clientSeq); every replay mints a fresh one,
 //   inheriting the seq disease wholesale. Only a daemon-side construction
 //   change (SMR-005A lineage semantics) could ever qualify it.

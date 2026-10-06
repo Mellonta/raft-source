@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { test } from "vitest";
 
 import express from "express";
 
-import { globalJsonServerErrorHandler } from "./errorResponse.js";
+import { globalJsonServerErrorHandler } from "./errorResponse";
 
 async function withErrorBoundaryApp<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   const app = express();

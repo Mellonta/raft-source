@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
-import test from "node:test";
 
 /**
  * Named decision: retain 22 legacy FormatJS baseline literals, but prove they

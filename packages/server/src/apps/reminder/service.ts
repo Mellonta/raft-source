@@ -8,19 +8,19 @@ import type {
   ReminderStatus,
   RaftTargetString,
 } from "@botiverse/raft-shared";
-import { getDb, type DatabaseExecutor } from "../../db/index.js";
-import { agents, reminders, reminderEvents, servers, messages, channels } from "../../db/schema.js";
-import { reminderSourceAcknowledgements } from "./sourceAckSchema.js";
-import * as channelService from "../../services/channelService.js";
-import * as messageService from "../../services/messageService.js";
-import type { AgentOrchestrator } from "../../services/agentOrchestrator.js";
-import { getConfiguredAppUrl } from "../../config/appUrl.js";
+import { getDb, type DatabaseExecutor } from "../../db/index";
+import { agents, reminders, reminderEvents, servers, messages, channels } from "../../db/schema";
+import { reminderSourceAcknowledgements } from "./sourceAckSchema";
+import * as channelService from "../../services/channelService";
+import * as messageService from "../../services/messageService";
+import type { AgentOrchestrator } from "../../services/agentOrchestrator";
+import { getConfiguredAppUrl } from "../../config/appUrl";
 import {
   computeNextFire,
   formatRecurrence,
   isSupportedRecurrence,
   type Recurrence,
-} from "../../services/recurrence.js";
+} from "../../services/recurrence";
 
 const ONBOARDING_OWNER_CHANNEL_NAME = "onboarding-owner";
 
@@ -93,8 +93,6 @@ export interface ReminderEventRow {
 export interface ReminderServiceOptions {
   executor?: DatabaseExecutor;
   clock?: TimeProvider;
-  /** Internal reconciliation may mutate system-owned reminders; generic APIs may not. */
-  allowSystemManaged?: boolean;
   /** Failure injection after row CAS but before source-log event insert. */
   afterFireTransitionForTesting?: () => void;
   /**
@@ -117,15 +115,6 @@ export type ReminderMutationOptions = ReminderServiceOptions & {
   /** Row version observed by the caller; every mutation is compare-and-swap. */
   expectedVersion: number;
 };
-
-function isSystemManagedReminderPayload(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  const payload = value as { kind?: unknown; version?: unknown };
-  return (
-    (payload.kind === "wiki.incremental_discovery" || payload.kind === "wiki.lint")
-    && payload.version === 1
-  );
-}
 
 function isOnboardingDay2Reminder(row: Pick<ReminderRow, "payload">): boolean {
   if (!row.payload || typeof row.payload !== "object") return false;
@@ -173,10 +162,6 @@ function formatTopLevelChannelRef(
   return channel.type === "channel" || channel.type === "private"
     ? `#${channel.name}`
     : null;
-}
-
-function isProtectedSystemManagedReminder(row: ReminderRow, opts: ReminderServiceOptions): boolean {
-  return isSystemManagedReminderPayload(row.payload) && opts.allowSystemManaged !== true;
 }
 
 function getExecutor(opts: ReminderServiceOptions): DatabaseExecutor {
@@ -236,8 +221,7 @@ export async function createReminder(
 /**
  * Replaces a stable reminder identity without resetting its revision.
  *
- * Wiki uses a stable daily-reminder id while allowing its owning Agent to be
- * rebound. Keeping one monotonically increasing revision lets the old
+ * Keeping one monotonically increasing revision lets the old
  * Computer consume a cancel for the replacement revision while the new
  * Computer receives the same revision as an upsert.
  */
@@ -332,7 +316,7 @@ export async function cancelReminder(
   const db = getExecutor(opts);
   const now = getClock(opts).now();
   const [current] = await db.select().from(reminders).where(eq(reminders.id, reminderId));
-  if (!current || isProtectedSystemManagedReminder(current as ReminderRow, opts)) return null;
+  if (!current) return null;
   const conditions = [
     eq(reminders.id, reminderId),
     inArray(reminders.status, ["scheduled", "fired"]),
@@ -373,7 +357,6 @@ export async function snoozeReminder(
   const [current] = await db.select().from(reminders).where(eq(reminders.id, reminderId));
   if (!current || !["scheduled", "fired"].includes((current as ReminderRow).status)) return null;
   const currentRow = current as ReminderRow;
-  if (isProtectedSystemManagedReminder(currentRow, opts)) return null;
   const conditions = [
     eq(reminders.id, reminderId),
     inArray(reminders.status, ["scheduled", "fired"]),
@@ -418,7 +401,6 @@ export async function updateReminder(
   const [current] = await db.select().from(reminders).where(eq(reminders.id, reminderId));
   if (!current || (current as ReminderRow).status !== "scheduled") return null;
   const currentRow = current as ReminderRow;
-  if (isProtectedSystemManagedReminder(currentRow, opts)) return null;
 
   const set: Record<string, unknown> = {
     updatedAt: now,
@@ -929,8 +911,7 @@ export type ReminderSourceAckResult =
       ok: false;
       reason:
         | "reminder_not_found"
-        | "target_not_fired"
-        | "stale_source_revision";
+        | "target_not_fired";
       latestFiredSourceVersion?: number;
     };
 
@@ -950,9 +931,10 @@ function firedSourceVersion(event: ReminderEventRow): number | null {
  * Server-authoritative exact acknowledgement for one fired Reminder source.
  *
  * The local daemon cannot use App Inbox item persistence as current-world
- * authority. This helper linearizes against the Reminder row, binds the exact
- * fired event, and only lets a same-attempt replay bypass a newer fired event
- * after the Server already accepted that exact operation.
+ * authority. This helper linearizes against the Reminder row and binds the
+ * exact fired event. A newer recurring occurrence does not invalidate an older
+ * pending fired item: each occurrence has its own source version, event row,
+ * and acknowledgement tombstone.
  */
 export async function ackAuthorizedReminderFire(input: {
   serverId: string;
@@ -1018,14 +1000,7 @@ export async function ackAuthorizedReminderFire(input: {
       if (sourceVersion === input.sourceVersion) targetEvent = event;
     }
 
-    if (latestFiredSourceVersion > input.sourceVersion) {
-      return {
-        ok: false,
-        reason: "stale_source_revision",
-        latestFiredSourceVersion,
-      };
-    }
-    if (!targetEvent || latestFiredSourceVersion !== input.sourceVersion) {
+    if (!targetEvent) {
       return {
         ok: false,
         reason: "target_not_fired",

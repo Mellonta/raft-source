@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { REASONING_EFFORT_RUNTIMES } from "@botiverse/raft-shared";
 import {
   buildRuntimeConfig,
@@ -8,6 +7,7 @@ import {
   hydrateRuntimeConfigForm,
   PI_PROVIDER_CONFIGURED,
   piBuiltinProviderDefaultModel,
+  reconcileBuiltInProviderModelSelection,
   runtimeConfigApiKey,
   runtimeConfigApiUrl,
   runtimeConfigBuiltInProviderMode,
@@ -26,7 +26,31 @@ import {
   supportsRuntimeCustomModelName,
   isBuiltInProviderApiKeyInvalid,
   isRuntimeConfigSaveDisabled,
-} from "../src/utils/runtimeConfigForm.js";
+} from "../src/utils/runtimeConfigForm";
+
+test("saved Provider selection preserves a compatible model and resets only an incompatible one", () => {
+  assert.deepEqual(reconcileBuiltInProviderModelSelection({
+    providerId: "deepseek",
+    currentModel: "deepseek/deepseek-v4-pro",
+  }), {
+    model: "deepseek/deepseek-v4-pro",
+    customModelMode: false,
+  });
+  assert.deepEqual(reconcileBuiltInProviderModelSelection({
+    providerId: "deepseek",
+    currentModel: "wrong/provider-model",
+  }), {
+    model: builtInProviderDefaultModel("deepseek"),
+    customModelMode: false,
+  });
+  assert.deepEqual(reconcileBuiltInProviderModelSelection({
+    providerId: "openai-compatible",
+    currentModel: "my-gateway-model",
+  }), {
+    model: "my-gateway-model",
+    customModelMode: true,
+  });
+});
 
 test("managed connection builder persists only a compatible connection reference", () => {
   const deepseek = buildManagedConnectionRuntimeConfig({

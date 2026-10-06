@@ -1,15 +1,15 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { agents, channelAgents, messages, tasks, users } from "../db/schema.js";
-import { createChannel, addHuman } from "./channelService.js";
-import { createServer } from "./serverService.js";
-import * as taskService from "./taskService.js";
+import { getDb } from "../db/index";
+import { agents, channelAgents, messages, tasks, users } from "../db/schema";
+import { createChannel, addHuman } from "./channelService";
+import { createServer } from "./serverService";
+import * as taskService from "./taskService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

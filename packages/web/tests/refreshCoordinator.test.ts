@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { authRefreshAttemptIdFromError } from "../src/utils/authErrors.js";
-import { createRefreshCoordinator } from "../src/utils/refreshCoordinator.js";
+import { authRefreshAttemptIdFromError } from "../src/utils/authErrors";
+import { createRefreshCoordinator } from "../src/utils/refreshCoordinator";
 import {
   __resetAuthTraceForTest,
   setAuthTraceFetchForTest,
   setAuthTraceServerIdGetter,
-} from "../src/utils/webAuthTrace.ts";
+} from "../src/utils/webAuthTrace";
 
 type StubStore = Record<string, string>;
 
@@ -380,7 +379,7 @@ test("refresh coordinator emits urgent cross-tab timeout evidence before surfaci
   const ls = stubLocalStorage({ slock_access_token: "at_1", slock_refresh_token: "rt_1" });
 
   try {
-    const tracePosts: Array<{ records?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
+    const tracePosts: Array<{ events?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
     setAuthTraceFetchForTest((input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.includes("/scope-attestation")) {
@@ -418,11 +417,11 @@ test("refresh coordinator emits urgent cross-tab timeout evidence before surfaci
       }
     }, /invalid_refresh_token/);
     await waitFor(() => tracePosts.some((post) =>
-      post.records?.some((record) => record.attrs?.crossTabSyncPhase === "wait_timeout")
+      post.events?.some((record) => record.attrs?.crossTabSyncPhase === "wait_timeout")
     ));
 
     const timeoutRecord = tracePosts
-      .flatMap((post) => post.records ?? [])
+      .flatMap((post) => post.events ?? [])
       .find((record) => record.attrs?.crossTabSyncPhase === "wait_timeout");
 
     assert.equal(timeoutRecord?.name, "slock.auth.cross_tab_sync");

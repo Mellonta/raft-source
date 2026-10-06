@@ -1,13 +1,15 @@
 import { Router, type NextFunction, type Request, type Response, type Router as RouterType } from "express";
+import { UUID_RE } from "../lib/messageId";
 import multer from "multer";
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { shareArtifacts } from "../db/schema.js";
-import * as channelService from "../services/channelService.js";
-import { getCdnStorage, isStorageTimeoutError } from "../services/storageService.js";
-import { streamStorageResponse } from "../services/storageResponseStream.js";
+import { getDb } from "../db/index";
+import { shareArtifacts } from "../db/schema";
+import { getActorServerRoleInServer } from "../lib/actorPermissions";
+import * as channelService from "../services/channelService";
+import { getCdnStorage, isStorageTimeoutError } from "../services/storageService";
+import { streamStorageResponse } from "../services/storageResponseStream";
 
 const SHARE_ARTIFACT_MAX_BYTES = 10 * 1024 * 1024;
 const SHARE_ARTIFACT_MAX_LABEL = "10MB";
@@ -20,7 +22,6 @@ const upload = multer({
 export const shareArtifactRouter: RouterType = Router();
 export const shareArtifactPublicRouter: RouterType = Router();
 
-const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function runShareArtifactUpload(req: Request, res: Response, next: NextFunction): void {
   upload.single("image")(req, res, (err: unknown) => {
@@ -79,7 +80,7 @@ function escapeHtml(value: string): string {
 }
 
 function isCanonicalUuid(value: string | undefined): value is string {
-  return typeof value === "string" && CANONICAL_UUID_RE.test(value);
+  return typeof value === "string" && UUID_RE.test(value);
 }
 
 function renderShareArtifactHtml(
@@ -139,6 +140,11 @@ shareArtifactRouter.post(
   runShareArtifactUpload,
   async (req, res) => {
     try {
+      const requesterRole = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+      if (requesterRole === "guest") {
+        res.status(403).json({ error: "Guests cannot create share artifacts" });
+        return;
+      }
       const file = req.file;
       if (!file || file.size <= 0 || file.buffer.length <= 0) {
         res.status(400).json({ error: "image is required" });

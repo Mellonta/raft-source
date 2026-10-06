@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createElement } from "react";
-import { readMermaidSource } from "../src/components/markdown/mermaid/mermaidSource";
+import { readMermaidSource } from "../src/components/mermaid/mermaidSource";
 
 const codeEl = (className: string | undefined, children: unknown) =>
   createElement("code", className === undefined ? {} : { className }, children as never);

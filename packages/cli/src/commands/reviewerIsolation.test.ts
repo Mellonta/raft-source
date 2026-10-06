@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { CliError } from "../core/errors.js";
+import { CliError } from "../core/errors";
 import {
   REVIEWER_ISOLATION_ENV,
   reviewerIsolationEnabled,
-} from "./reviewerIsolation.js";
+} from "./reviewerIsolation";
 
 test("reviewer isolation is per invocation or explicit seat environment, defaulting off", () => {
   assert.equal(reviewerIsolationEnabled({}, {}), false);

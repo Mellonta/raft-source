@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 
 import {
   messageReactionActorsDiscussion,
   messageRef,
 } from "@botiverse/raft-shared";
-import { createReactionReadModelStore } from "../src/store/reactionReadModels.js";
+import { createReactionReadModelStore } from "../src/store/reactionReadModels";
 
 const serverId = "server-a";
 const channelId = "channel-a";

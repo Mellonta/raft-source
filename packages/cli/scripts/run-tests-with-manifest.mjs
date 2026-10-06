@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -62,7 +63,7 @@ function buildManifest(testFiles, events) {
       throw new Error(`Reporter emitted a test case for an unexpected file: ${event.file ?? "<missing>"}`);
     }
     // Identity is the case name only. Do NOT pin event.line/event.column: the
-    // reporter sees tsx-transpiled positions (line 1 + a character offset),
+    // reporter sees transpiled positions (line 1 + a character offset),
     // which shift on any edit above a test and across toolchain versions —
     // pure false-red churn with no added protection. Duplicate names within a
     // file are still caught via the count and the ordered name list.
@@ -83,7 +84,7 @@ function buildManifest(testFiles, events) {
     // test:update-manifest` when the reporter shape changes.
     schemaVersion: 2,
     package: "@botiverse/raft",
-    runner: "node --import tsx --test",
+    runner: "vitest run",
     testFileGlob: "src/**/*.test.ts",
     fileCount: files.length,
     total,
@@ -113,13 +114,45 @@ function assertSameManifest(expected, observed) {
     }
   }
 
+  // Names are only unique within a file, and duplicate names are allowed.
+  // Keep multiplicity so a removed duplicate cannot hide behind net growth.
+  const countCases = (manifest) => {
+    const counts = new Map();
+    for (const file of manifest.files) {
+      for (const testCase of file.cases) {
+        const identity = JSON.stringify([file.file, testCase.name]);
+        counts.set(identity, (counts.get(identity) ?? 0) + 1);
+      }
+    }
+    return counts;
+  };
+  const expectedCases = countCases(expected);
+  const observedCases = countCases(observed);
+  const removedCases = [];
+  const addedCases = [];
+  for (const identity of new Set([...expectedCases.keys(), ...observedCases.keys()])) {
+    const delta = (observedCases.get(identity) ?? 0) - (expectedCases.get(identity) ?? 0);
+    const [file, name] = JSON.parse(identity);
+    const detail = `${file}: ${JSON.stringify(name)} (${Math.abs(delta)} occurrence(s))`;
+    if (delta < 0) removedCases.push(detail);
+    if (delta > 0) addedCases.push(detail);
+  }
+  const guidance = removedCases.length || missingFiles.length || observed.total < expected.total
+    ? "Tests or files disappeared. Do not update the manifest to silence this failure; investigate the removals first."
+    : addedCases.length
+      ? "No recorded cases disappeared. Review the additions; if intentional, run pnpm --filter @botiverse/raft test:update-manifest."
+      : "No case additions or removals were found. Review ordering and manifest metadata before deciding whether an update is warranted.";
+
   const details = [
     `expected total ${expected.total}, observed ${observed.total}`,
     missingFiles.length ? `missing files: ${missingFiles.join(", ")}` : null,
     extraFiles.length ? `extra files: ${extraFiles.join(", ")}` : null,
     countMismatches.length ? `count mismatches: ${countMismatches.join("; ")}` : null,
     identityMismatches.length ? `case identity mismatches: ${identityMismatches.join(", ")}` : null,
+    removedCases.length ? `removed cases: ${removedCases.join("; ")}` : null,
+    addedCases.length ? `added cases: ${addedCases.join("; ")}` : null,
     `observed manifest: ${toPosixPath(relative(packageRoot, observedManifestPath))}`,
+    guidance,
   ].filter(Boolean);
   throw new Error(`CLI test execution manifest mismatch\n${details.join("\n")}`);
 }
@@ -128,21 +161,19 @@ mkdirSync(resultsDir, { recursive: true });
 writeFileSync(eventLogPath, "");
 
 const testFiles = listTestFiles(resolve(packageRoot, "src"));
+const vitestPackageJson = createRequire(import.meta.url).resolve("vitest/package.json");
+const vitestCli = resolve(dirname(vitestPackageJson), JSON.parse(readFileSync(vitestPackageJson, "utf8")).bin.vitest);
 const result = spawnSync(process.execPath, [
-  "--import",
-  "tsx",
-  "--test",
-  "--test-reporter=tap",
-  "--test-reporter-destination=stdout",
-  "--test-reporter",
-  reporterPath,
-  "--test-reporter-destination",
-  eventLogPath,
+  vitestCli,
+  "run",
+  "--reporter=default",
+  `--reporter=${reporterPath}`,
   ...testFiles,
 ], {
   cwd: packageRoot,
   encoding: "utf8",
   stdio: "inherit",
+  env: { ...process.env, RAFT_CLI_TEST_EVENT_LOG: eventLogPath },
 });
 if (result.error) {
   throw result.error;

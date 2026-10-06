@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   AppOutboundPermissionError,
   appOutboundEventRequiredGroups,
   computeEffectiveAppOutboundAuthority,
   normalizeAppOutboundPermissionRequest,
-} from "./appOutboundPermissionService.js";
+} from "./appOutboundPermissionService";
 
 test("outbound permission requests are strict, deduplicated, and sorted", () => {
   assert.deepEqual(normalizeAppOutboundPermissionRequest({

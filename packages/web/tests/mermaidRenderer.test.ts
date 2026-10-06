@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import mermaid from "mermaid";
-import { renderMermaidDiagram } from "../src/components/markdown/mermaid/mermaidRenderer";
+import { renderMermaidDiagram } from "../src/components/mermaid/mermaidRenderer";
 
 test("unknown diagram types reject before Mermaid's serialized parse queue", async () => {
   const originalParse = mermaid.parse;

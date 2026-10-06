@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { normalizeManagedMcpToolDescription } from "../src/components/agent/managedMcpToolDescription.js";
+import { normalizeManagedMcpToolDescription } from "../src/components/agent/managedMcpToolDescription";
 
 test("managed MCP tool descriptions hide provider markup without hiding its text", () => {
   assert.equal(

@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
-import * as schema from "../db/schema.js";
-import { agents, channels, servers, users } from "../db/schema.js";
-import { setLocalChannelArchivedByAgent } from "./channelService.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
+import * as schema from "../db/schema";
+import { agents, channels, servers, users } from "../db/schema";
+import { setLocalChannelArchivedByAgent } from "./channelService";
 
 const REAL_PG_URL_ENV = "CHANNEL_LIFECYCLE_REAL_PG_URL";
 const REAL_PG_URL = process.env[REAL_PG_URL_ENV];

@@ -1,35 +1,42 @@
 import { Router, type Request, type Response, type Router as RouterType } from "express";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import multer from "multer";
 import type { ServerCapability } from "@botiverse/raft-shared";
-import { actorHasServerCapabilityInServer } from "../lib/actorPermissions.js";
-import { getDb } from "../db/index.js";
-import { agents, oauthClientInstalls, oauthClients } from "../db/schema.js";
-import * as oauthService from "../services/oauthService.js";
+import { actorHasServerCapabilityInServer, getActorServerRoleInServer, roleCanInspectAgentPrivateSurfaces, userCanActOnAgentResource } from "../lib/actorPermissions";
+import { getDb } from "../db/index";
+import { agents, oauthClientInstalls, oauthClients } from "../db/schema";
+import * as oauthService from "../services/oauthService";
+import {
+  AGENT_APP_EVENTS_MAX_LIMIT,
+  decodeAgentAppEventCursor,
+  getAgentAppEvent,
+  listAgentAppEvents,
+} from "../services/agentAppEventsService";
 import {
   createAvatarUpload,
   PROFILE_AVATAR_BAD_FORMAT_MESSAGE,
   PROFILE_AVATAR_TOO_LARGE_MESSAGE,
-} from "../services/avatarService.js";
-import { getCdnStorage, getStorage } from "../services/storageService.js";
-import { streamStorageResponse } from "../services/storageResponseStream.js";
+} from "../services/avatarService";
+import { getCdnStorage, getStorage } from "../services/storageService";
+import { streamStorageResponse } from "../services/storageResponseStream";
 import {
   approvePendingAppOutboundPermissionRevision,
   AppOutboundPermissionError,
   createAppOutboundPermissionRevision,
   updateAppInstallationGrant,
-} from "../services/appOutboundPermissionService.js";
+} from "../services/appOutboundPermissionService";
 import {
   getAppNotificationDeveloperState,
   getAppNotificationInstallationState,
-} from "../services/appNotificationManagementService.js";
+} from "../services/appNotificationManagementService";
 import {
   AppWebhookConfigError,
   configureAppWebhook,
   disableAppWebhook,
   rotateAppWebhookSecret,
-} from "../services/appWebhookConfigService.js";
-import { oauthClientIsUserManagedPredicate } from "../services/oauthClientManagementPolicy.js";
+} from "../services/appWebhookConfigService";
+import { oauthClientIsUserManagedPredicate } from "../services/oauthClientManagementPolicy";
+import { sendJsonServerError } from "./errorResponse";
 
 export const integrationRouter: RouterType = Router();
 export const integrationInviteRouter: RouterType = Router();
@@ -118,19 +125,14 @@ integrationRouter.get("/overview", async (req, res) => {
     const items = await oauthService.getServerIntegrationsOverview(req.serverId!);
     res.json(items);
   } catch (err) {
-    console.error("List integrations overview error:", err);
-    res.status(500).json({ error: "Failed to load integrations overview" });
+    sendJsonServerError(req, res, { error: "Failed to load integrations overview", logPrefix: "List integrations overview error:", err });
   }
 });
 
-integrationRouter.get("/built-in", async (req, res) => {
-  try {
-    const clients = await oauthService.listBuiltInOAuthClients();
-    res.json(clients);
-  } catch (err) {
-    console.error("List built-in OAuth clients error:", err);
-    res.status(500).json({ error: "Failed to list built-in OAuth clients" });
-  }
+integrationRouter.get("/built-in", (_req, res) => {
+  // Compatibility-only endpoint for cached Web clients. The retired class is
+  // never queried; new clients do not call this route.
+  res.json([]);
 });
 
 integrationRouter.get("/marketplace", async (req, res) => {
@@ -138,8 +140,7 @@ integrationRouter.get("/marketplace", async (req, res) => {
     const clients = await oauthService.listMarketplaceOAuthClients(req.serverId!);
     res.json(clients);
   } catch (err) {
-    console.error("List marketplace OAuth clients error:", err);
-    res.status(500).json({ error: "Failed to list marketplace OAuth clients" });
+    sendJsonServerError(req, res, { error: "Failed to list marketplace OAuth clients", logPrefix: "List marketplace OAuth clients error:", err });
   }
 });
 
@@ -148,8 +149,7 @@ integrationRouter.get("/clients", async (req, res) => {
     const clients = await oauthService.listOAuthClients(req.serverId!);
     res.json(clients);
   } catch (err) {
-    console.error("List OAuth clients error:", err);
-    res.status(500).json({ error: "Failed to list OAuth clients" });
+    sendJsonServerError(req, res, { error: "Failed to list OAuth clients", logPrefix: "List OAuth clients error:", err });
   }
 });
 
@@ -159,12 +159,13 @@ integrationRouter.post("/clients", async (req, res) => {
       res.status(403).json({ error: "Only server owners and admins can manage integrations" });
       return;
     }
-    const { name, description, homepageUrl, returnUrl, agentManifestUrl, clientId, allowedScopes, category } = req.body ?? {};
+    const { name, description, whenToUse, homepageUrl, returnUrl, agentManifestUrl, clientId, allowedScopes, category } = req.body ?? {};
     const created = await oauthService.createOAuthClient({
       serverId: req.serverId!,
       createdByUserId: req.userId!,
       name,
       description,
+      whenToUse,
       homepageUrl,
       returnUrl,
       agentManifestUrl,
@@ -181,7 +182,8 @@ integrationRouter.post("/clients", async (req, res) => {
       message.includes("agentManifestUrl") ||
       message.includes("scope") ||
       message.includes("category") ||
-      message.includes("returnUrl")
+      message.includes("returnUrl") ||
+      message.includes("whenToUse")
     ) {
       res.status(400).json({ error: message });
       return;
@@ -190,8 +192,7 @@ integrationRouter.post("/clients", async (req, res) => {
       res.status(409).json({ error: "Client ID is already taken" });
       return;
     }
-    console.error("Create OAuth client error:", err);
-    res.status(500).json({ error: "Failed to create OAuth client" });
+    sendJsonServerError(req, res, { error: "Failed to create OAuth client", logPrefix: "Create OAuth client error:", err });
   }
 });
 
@@ -201,13 +202,14 @@ integrationRouter.patch("/clients/:clientId", async (req, res) => {
       res.status(403).json({ error: "Only server owners and admins can manage integrations" });
       return;
     }
-    const { name, description, homepageUrl, returnUrl, agentManifestUrl, allowedScopes, category } = req.body ?? {};
+    const { name, description, whenToUse, homepageUrl, returnUrl, agentManifestUrl, allowedScopes, category } = req.body ?? {};
     const updated = await oauthService.updateOAuthClient({
       serverId: req.serverId!,
       clientId: req.params.clientId,
       actorUserId: req.userId!,
       name,
       description,
+      whenToUse,
       homepageUrl,
       returnUrl,
       agentManifestUrl,
@@ -221,12 +223,11 @@ integrationRouter.patch("/clients/:clientId", async (req, res) => {
     res.json(updated);
   } catch (err: any) {
     const message = err?.message || "Failed to update OAuth client";
-    if (message.includes("required") || message.includes("agentManifestUrl") || message.includes("scope") || message.includes("category") || message.includes("returnUrl")) {
+    if (message.includes("required") || message.includes("agentManifestUrl") || message.includes("scope") || message.includes("category") || message.includes("returnUrl") || message.includes("whenToUse")) {
       res.status(400).json({ error: message });
       return;
     }
-    console.error("Update OAuth client error:", err);
-    res.status(500).json({ error: "Failed to update OAuth client" });
+    sendJsonServerError(req, res, { error: "Failed to update OAuth client", logPrefix: "Update OAuth client error:", err });
   }
 });
 
@@ -273,8 +274,7 @@ integrationRouter.get("/clients/:clientId/app-notifications", async (req, res) =
       } : null,
     });
   } catch (error) {
-    console.error("Read App Notifications developer state error:", error);
-    res.status(500).json({ error: "Failed to load App Notifications settings" });
+    sendJsonServerError(req, res, { error: "Failed to load App Notifications settings", logPrefix: "Read App Notifications developer state error:", err: error });
   }
 });
 
@@ -309,8 +309,7 @@ integrationRouter.put("/clients/:clientId/app-notifications/permissions", async 
       res.status(400).json({ error: error.message });
       return;
     }
-    console.error("Update App Notifications permission request error:", error);
-    res.status(500).json({ error: "Failed to update App Notifications permission request" });
+    sendJsonServerError(req, res, { error: "Failed to update App Notifications permission request", logPrefix: "Update App Notifications permission request error:", err: error });
   }
 });
 
@@ -336,8 +335,7 @@ integrationRouter.post("/clients/:clientId/app-notifications/permissions/review"
       requested_events: revision.requestedEvents,
     });
   } catch (error) {
-    console.error("Review App Notifications permission request error:", error);
-    res.status(500).json({ error: "Failed to review App Notifications permission request" });
+    sendJsonServerError(req, res, { error: "Failed to review App Notifications permission request", logPrefix: "Review App Notifications permission request error:", err: error });
   }
 });
 
@@ -369,8 +367,7 @@ integrationRouter.put("/clients/:clientId/app-notifications/webhook", async (req
       res.status(400).json({ error: error.message });
       return;
     }
-    console.error("Configure app webhook error:", error);
-    res.status(500).json({ error: "Failed to configure app webhook" });
+    sendJsonServerError(req, res, { error: "Failed to configure app webhook", logPrefix: "Configure app webhook error:", err: error });
   }
 });
 
@@ -402,8 +399,7 @@ integrationRouter.post("/clients/:clientId/app-notifications/webhook/rotate-secr
       res.status(400).json({ error: error.message });
       return;
     }
-    console.error("Rotate app webhook secret error:", error);
-    res.status(500).json({ error: "Failed to rotate app webhook secret" });
+    sendJsonServerError(req, res, { error: "Failed to rotate app webhook secret", logPrefix: "Rotate app webhook secret error:", err: error });
   }
 });
 
@@ -421,8 +417,7 @@ integrationRouter.delete("/clients/:clientId/app-notifications/webhook", async (
     }
     res.json({ config_revision: disabled.revision, enabled: disabled.enabled });
   } catch (error) {
-    console.error("Disable app webhook error:", error);
-    res.status(500).json({ error: "Failed to disable app webhook" });
+    sendJsonServerError(req, res, { error: "Failed to disable app webhook", logPrefix: "Disable app webhook error:", err: error });
   }
 });
 
@@ -443,8 +438,7 @@ integrationRouter.post("/clients/:clientId/regenerate-secret", async (req, res) 
     }
     res.json(regenerated);
   } catch (err) {
-    console.error("Regenerate OAuth client secret error:", err);
-    res.status(500).json({ error: "Failed to regenerate client secret" });
+    sendJsonServerError(req, res, { error: "Failed to regenerate client secret", logPrefix: "Regenerate OAuth client secret error:", err });
   }
 });
 
@@ -470,8 +464,7 @@ integrationRouter.post("/clients/:clientId/request-publish", async (req, res) =>
       res.status(400).json({ error: message });
       return;
     }
-    console.error("Request OAuth client publish error:", err);
-    res.status(500).json({ error: "Failed to request marketplace publish" });
+    sendJsonServerError(req, res, { error: "Failed to request marketplace publish", logPrefix: "Request OAuth client publish error:", err });
   }
 });
 
@@ -492,8 +485,7 @@ integrationRouter.post("/clients/:clientId/request-unpublish", async (req, res) 
     }
     res.json(updated);
   } catch (err) {
-    console.error("Request OAuth client unpublish error:", err);
-    res.status(500).json({ error: "Failed to request marketplace offline review" });
+    sendJsonServerError(req, res, { error: "Failed to request marketplace offline review", logPrefix: "Request OAuth client unpublish error:", err });
   }
 });
 
@@ -513,8 +505,7 @@ integrationRouter.get("/clients/:clientId/share-link", async (req, res) => {
     }
     res.json(link);
   } catch (err) {
-    console.error("Get OAuth client share link error:", err);
-    res.status(500).json({ error: "Failed to load private share link" });
+    sendJsonServerError(req, res, { error: "Failed to load private share link", logPrefix: "Get OAuth client share link error:", err });
   }
 });
 
@@ -536,8 +527,7 @@ integrationRouter.post("/clients/:clientId/share-link", async (req, res) => {
     }
     res.json(created);
   } catch (err) {
-    console.error("Create OAuth client share link error:", err);
-    res.status(500).json({ error: "Failed to create private share link" });
+    sendJsonServerError(req, res, { error: "Failed to create private share link", logPrefix: "Create OAuth client share link error:", err });
   }
 });
 
@@ -558,8 +548,7 @@ integrationRouter.delete("/clients/:clientId/share-link", async (req, res) => {
     }
     res.json(link);
   } catch (err) {
-    console.error("Revoke OAuth client share link error:", err);
-    res.status(500).json({ error: "Failed to revoke private share link" });
+    sendJsonServerError(req, res, { error: "Failed to revoke private share link", logPrefix: "Revoke OAuth client share link error:", err });
   }
 });
 
@@ -586,8 +575,7 @@ integrationRouter.post("/clients/:clientId/review-publish", async (req, res) => 
       res.status(400).json({ error: message });
       return;
     }
-    console.error("Review OAuth client publish error:", err);
-    res.status(500).json({ error: "Failed to review marketplace publish request" });
+    sendJsonServerError(req, res, { error: "Failed to review marketplace publish request", logPrefix: "Review OAuth client publish error:", err });
   }
 });
 
@@ -603,8 +591,7 @@ integrationInviteRouter.get("/:token", async (req, res) => {
     }
     res.json(invite);
   } catch (err) {
-    console.error("Get OAuth client share invite error:", err);
-    res.status(500).json({ error: "Failed to load private app invite" });
+    sendJsonServerError(req, res, { error: "Failed to load private app invite", logPrefix: "Get OAuth client share invite error:", err });
   }
 });
 
@@ -626,8 +613,7 @@ integrationInviteRouter.post("/:token/install", async (req, res) => {
     }
     res.json(invite);
   } catch (err) {
-    console.error("Install OAuth client share invite error:", err);
-    res.status(500).json({ error: "Failed to install private app invite" });
+    sendJsonServerError(req, res, { error: "Failed to install private app invite", logPrefix: "Install OAuth client share invite error:", err });
   }
 });
 
@@ -648,8 +634,7 @@ integrationRouter.post("/marketplace/:clientId/install", async (req, res) => {
     }
     res.json(installed);
   } catch (err) {
-    console.error("Install marketplace OAuth client error:", err);
-    res.status(500).json({ error: "Failed to install marketplace app" });
+    sendJsonServerError(req, res, { error: "Failed to install marketplace app", logPrefix: "Install marketplace OAuth client error:", err });
   }
 });
 
@@ -684,8 +669,7 @@ integrationRouter.get("/marketplace/:clientId/install/app-notifications", async 
       approval_required: state.approvalRequired,
     });
   } catch (error) {
-    console.error("Read installed App Notifications state error:", error);
-    res.status(500).json({ error: "Failed to load installed App Notifications settings" });
+    sendJsonServerError(req, res, { error: "Failed to load installed App Notifications settings", logPrefix: "Read installed App Notifications state error:", err: error });
   }
 });
 
@@ -727,8 +711,7 @@ integrationRouter.put("/marketplace/:clientId/install/app-notifications/grant", 
       res.status(400).json({ error: error.message });
       return;
     }
-    console.error("Update installed App Notifications permissions error:", error);
-    res.status(500).json({ error: "Failed to update installed App Notifications permissions" });
+    sendJsonServerError(req, res, { error: "Failed to update installed App Notifications permissions", logPrefix: "Update installed App Notifications permissions error:", err: error });
   }
 });
 
@@ -749,8 +732,7 @@ integrationRouter.delete("/marketplace/:clientId/install", async (req, res) => {
     }
     res.json(result);
   } catch (err) {
-    console.error("Uninstall marketplace OAuth client error:", err);
-    res.status(500).json({ error: "Failed to uninstall marketplace app" });
+    sendJsonServerError(req, res, { error: "Failed to uninstall marketplace app", logPrefix: "Uninstall marketplace OAuth client error:", err });
   }
 });
 
@@ -778,8 +760,7 @@ integrationRouter.post("/clients/:clientId/logo", async (req, res) => {
     res.json(updated);
   } catch (err) {
     if (handleLogoUploadError(err, res)) return;
-    console.error("Upload OAuth client logo error:", err);
-    res.status(500).json({ error: "Failed to upload OAuth client logo" });
+    sendJsonServerError(req, res, { error: "Failed to upload OAuth client logo", logPrefix: "Upload OAuth client logo error:", err });
   }
 });
 
@@ -800,8 +781,7 @@ integrationRouter.delete("/clients/:clientId/logo", async (req, res) => {
     }
     res.json(updated);
   } catch (err) {
-    console.error("Clear OAuth client logo error:", err);
-    res.status(500).json({ error: "Failed to clear OAuth client logo" });
+    sendJsonServerError(req, res, { error: "Failed to clear OAuth client logo", logPrefix: "Clear OAuth client logo error:", err });
   }
 });
 
@@ -822,14 +802,28 @@ integrationRouter.delete("/clients/:clientId", async (req, res) => {
     }
     res.json(deleted);
   } catch (err) {
-    console.error("Delete OAuth client error:", err);
-    res.status(500).json({ error: "Failed to delete OAuth client" });
+    sendJsonServerError(req, res, { error: "Failed to delete OAuth client", logPrefix: "Delete OAuth client error:", err });
   }
 });
 
+/**
+ * Agent access by an app is managed by server owners/admins and by the
+ * agent's own creator.
+ */
+async function canManageAgentAccess(
+  req: Request,
+  agent: { creatorType: string | null; creatorId: string | null } | null,
+): Promise<boolean> {
+  // Role read fresh (not the request's cached one): a removed or demoted member
+  // loses this at once, the same as for the capability path.
+  const role = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+  if (!role) return false;
+  return userCanActOnAgentResource(role, req.userId!, agent ?? { creatorType: null, creatorId: null }, "manageExternalAuth");
+}
+
 integrationRouter.post("/requests/:requestId/approve", async (req, res) => {
   try {
-    if (!await currentUserHasServerCapability(req, "manageExternalAuth")) {
+    if (!await canManageAgentAccess(req, await oauthService.getAgentForAccessRequest(req.serverId!, req.params.requestId))) {
       res.status(403).json({ error: "Only server owners and admins can manage integrations" });
       return;
     }
@@ -847,14 +841,13 @@ integrationRouter.post("/requests/:requestId/approve", async (req, res) => {
       res.status(404).json({ error: message });
       return;
     }
-    console.error("Approve integration request error:", err);
-    res.status(500).json({ error: "Failed to approve integration request" });
+    sendJsonServerError(req, res, { error: "Failed to approve integration request", logPrefix: "Approve integration request error:", err });
   }
 });
 
 integrationRouter.post("/requests/:requestId/deny", async (req, res) => {
   try {
-    if (!await currentUserHasServerCapability(req, "manageExternalAuth")) {
+    if (!await canManageAgentAccess(req, await oauthService.getAgentForAccessRequest(req.serverId!, req.params.requestId))) {
       res.status(403).json({ error: "Only server owners and admins can manage integrations" });
       return;
     }
@@ -869,14 +862,13 @@ integrationRouter.post("/requests/:requestId/deny", async (req, res) => {
     }
     res.json(updated);
   } catch (err) {
-    console.error("Deny integration request error:", err);
-    res.status(500).json({ error: "Failed to deny integration request" });
+    sendJsonServerError(req, res, { error: "Failed to deny integration request", logPrefix: "Deny integration request error:", err });
   }
 });
 
 integrationRouter.post("/grants/:grantId/revoke", async (req, res) => {
   try {
-    if (!await currentUserHasServerCapability(req, "manageExternalAuth")) {
+    if (!await canManageAgentAccess(req, await oauthService.getAgentForGrant(req.serverId!, req.params.grantId))) {
       res.status(403).json({ error: "Only server owners and admins can manage integrations" });
       return;
     }
@@ -891,8 +883,139 @@ integrationRouter.post("/grants/:grantId/revoke", async (req, res) => {
     }
     res.json(updated);
   } catch (err) {
-    console.error("Revoke integration grant error:", err);
-    res.status(500).json({ error: "Failed to revoke integration grant" });
+    sendJsonServerError(req, res, { error: "Failed to revoke integration grant", logPrefix: "Revoke integration grant error:", err });
+  }
+});
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The agent in the active server, or null after answering 404. */
+async function loadAgentInServer(req: Request, res: Response) {
+  const agentId = String(req.params.agentId);
+  if (!UUID_RE.test(agentId)) {
+    res.status(404).json({ error: "Agent not found" });
+    return null;
+  }
+  const [agent] = await getDb().select({
+    id: agents.id,
+    serverId: agents.serverId,
+    creatorType: agents.creatorType,
+    creatorId: agents.creatorId,
+  }).from(agents).where(and(eq(agents.id, agentId), isNull(agents.deletedAt))).limit(1);
+  if (!agent || agent.serverId !== req.serverId) {
+    res.status(404).json({ error: "Agent not found" });
+    return null;
+  }
+  return agent;
+}
+
+/**
+ * The agent when the caller may see its private surfaces (its creator, or a
+ * server owner/admin), else null after answering 404/403.
+ */
+async function loadInspectableAgent(req: Request, res: Response): Promise<{ id: string } | null> {
+  const agent = await loadAgentInServer(req, res);
+  if (!agent) return null;
+  const role = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+  if (!role || !roleCanInspectAgentPrivateSurfaces(role, req.userId!, agent)) {
+    res.status(403).json({ error: "Only the agent's creator and server owners and admins can view its app events" });
+    return null;
+  }
+  return agent;
+}
+
+// Events connected apps sent to this agent, newest first (Agent panel).
+integrationRouter.get("/agents/:agentId/events", async (req, res) => {
+  try {
+    const agent = await loadInspectableAgent(req, res);
+    if (!agent) return;
+    const { clientId, before, limit } = req.query;
+    if (clientId !== undefined && (typeof clientId !== "string" || !UUID_RE.test(clientId))) {
+      res.status(400).json({ error: "clientId must be an app id" });
+      return;
+    }
+    let cursor: { createdAt: Date; id: string } | undefined;
+    if (before !== undefined) {
+      cursor = typeof before === "string" ? decodeAgentAppEventCursor(before) ?? undefined : undefined;
+      if (!cursor) {
+        res.status(400).json({ error: "before must be a cursor returned by this endpoint" });
+        return;
+      }
+    }
+    let pageSize: number | undefined;
+    if (limit !== undefined) {
+      pageSize = typeof limit === "string" && /^\d+$/.test(limit) ? Number(limit) : Number.NaN;
+      if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > AGENT_APP_EVENTS_MAX_LIMIT) {
+        res.status(400).json({ error: `limit must be an integer from 1 to ${AGENT_APP_EVENTS_MAX_LIMIT}` });
+        return;
+      }
+    }
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json(await listAgentAppEvents({ agentId: agent.id, clientId, before: cursor, limit: pageSize }));
+  } catch (err) {
+    sendJsonServerError(req, res, { error: "Failed to load agent app events", logPrefix: "List agent app events error:", err });
+  }
+});
+
+integrationRouter.get("/agents/:agentId/events/:eventId", async (req, res) => {
+  try {
+    const agent = await loadInspectableAgent(req, res);
+    if (!agent) return;
+    const event = await getAgentAppEvent({ agentId: agent.id, eventId: req.params.eventId });
+    if (!event) {
+      res.status(404).json({ error: "Event not found" });
+      return;
+    }
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json(event);
+  } catch (err) {
+    sendJsonServerError(req, res, { error: "Failed to load agent app event", logPrefix: "Read agent app event error:", err });
+  }
+});
+
+// Apps the caller may grant to this agent (picker for the on-behalf grant).
+integrationRouter.get("/agents/:agentId/grantable-apps", async (req, res) => {
+  try {
+    const agent = await loadAgentInServer(req, res);
+    if (!agent) return;
+    if (!await canManageAgentAccess(req, agent)) {
+      res.status(403).json({ error: "Only the agent's creator and server owners and admins can grant app access" });
+      return;
+    }
+    res.json({ apps: await oauthService.listGrantableAgentApps(req.serverId!) });
+  } catch (err) {
+    sendJsonServerError(req, res, { error: "Failed to load grantable apps", logPrefix: "List grantable agent apps error:", err });
+  }
+});
+
+// A person grants an app access to this agent without the agent asking.
+integrationRouter.post("/agents/:agentId/grants", async (req, res) => {
+  try {
+    const agent = await loadAgentInServer(req, res);
+    if (!agent) return;
+    if (!await canManageAgentAccess(req, agent)) {
+      res.status(403).json({ error: "Only the agent's creator and server owners and admins can grant app access" });
+      return;
+    }
+    const { clientId, scopes } = req.body ?? {};
+    if (typeof clientId !== "string" || !UUID_RE.test(clientId)) {
+      res.status(400).json({ error: "clientId must be an app id" });
+      return;
+    }
+    const result = await oauthService.grantAgentAccessOnBehalf({
+      serverId: req.serverId!,
+      agentId: agent.id,
+      clientId,
+      scopes,
+      grantedByUserId: req.userId!,
+    });
+    res.status(result.created ? 201 : 200).json(result);
+  } catch (err) {
+    if (err instanceof oauthService.AgentAccessGrantError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    sendJsonServerError(req, res, { error: "Failed to grant app access", logPrefix: "Grant agent app access error:", err });
   }
 });
 
@@ -913,7 +1036,6 @@ integrationRouter.get("/agents/:agentId", async (req, res) => {
     const items = await oauthService.getAgentIntegrationsOverview(req.params.agentId);
     res.json(items);
   } catch (err) {
-    console.error("List agent integrations error:", err);
-    res.status(500).json({ error: "Failed to load agent integrations" });
+    sendJsonServerError(req, res, { error: "Failed to load agent integrations", logPrefix: "List agent integrations error:", err });
   }
 });

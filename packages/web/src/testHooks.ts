@@ -19,6 +19,7 @@ declare global {
     __SLOCK_E2E__?: {
       loadMessages: (channelId: string) => Promise<void>;
       captureSelectedMessages: typeof captureSelectedMessages;
+      triggerRenderError?: (message?: string) => void;
     };
   }
 }

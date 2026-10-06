@@ -1,94 +1,55 @@
-import { legacyStatePath, privateStatePath, readPrivateStateWithLegacyImport, writePrivateState } from "./_privateStateFile.js";
-import { agentApiStructuredMentionSchema, type AgentApiStructuredMention } from "@botiverse/raft-shared";
+// Held-send drafts. The policy (one draft per target, TTL, rehold counter,
+// seen snapshot with sparse exact seqs) is shared
+// (shared/src/agentOps/seenPolicy/drafts.ts); this module is the CLI's
+// synchronous facade over it, backed by the agent ledger
+// (`src/state/commandStateStore.ts` over `src/state/agentLedger.ts`, RFC 072
+// R1). Legacy tmpdir state is imported once on first ledger miss. The ledger's
+// atomic keyed delete replaces the old file lock: no cross-process mutex is
+// needed to keep compare-and-clear safe.
+import {
+  clearSavedDraft as clearSharedSavedDraft,
+  clearSavedDraftIfIdempotencyKeyMatches as clearSharedSavedDraftIfIdempotencyKeyMatches,
+  expectSync,
+  LOCAL_DRAFT_TTL_MINUTES,
+  lookupSavedDraft as lookupSharedSavedDraft,
+  setSavedDraft as setSharedSavedDraft,
+  type SavedDraft,
+  type SavedDraftLookup,
+} from "@botiverse/raft-shared/src/agentOps/seenPolicy/index";
 
-export interface SavedDraft {
-  content: string;
-  attachmentIds: string[];
-  mentions?: AgentApiStructuredMention[];
-  savedAt: number;
-  reholdCount: number;
-  seenUpToSeq?: number;
-}
+import { createCliCommandStateStore } from "../../state/commandStateStore";
 
-interface DraftStateFile {
-  targets?: Record<string, string | SavedDraft>;
-}
+export { LOCAL_DRAFT_TTL_MINUTES, type SavedDraft, type SavedDraftLookup };
 
-const DEFAULT_LOCAL_DRAFT_TTL_MS = 10 * 60 * 1000;
-
-const DRAFT_STATE_NAMESPACE = "slock-cli-attested-send";
-const DRAFT_STATE_FILENAME = "continue-state.json";
-
-function stateFilePath(agentId: string): string {
-  return privateStatePath(process.env.SLOCK_CLI_DRAFT_STATE_DIR, DRAFT_STATE_NAMESPACE, agentId, DRAFT_STATE_FILENAME);
-}
-
-function readState(agentId: string): DraftStateFile {
-  try {
-    const raw = readPrivateStateWithLegacyImport(
-      stateFilePath(agentId),
-      legacyStatePath(process.env.SLOCK_CLI_DRAFT_STATE_DIR, DRAFT_STATE_NAMESPACE, agentId, DRAFT_STATE_FILENAME),
-    );
-    const parsed = JSON.parse(raw) as DraftStateFile;
-    return typeof parsed === "object" && parsed ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeState(agentId: string, state: DraftStateFile): void {
-  const filePath = stateFilePath(agentId);
-  writePrivateState(filePath, JSON.stringify(state));
-}
+const store = (agentId: string) => createCliCommandStateStore(agentId, process.env);
 
 export function getSavedDraft(agentId: string, target: string): SavedDraft | null {
-  const state = readState(agentId);
-  const draft = state.targets?.[target];
-  if (!draft || typeof draft === "string") return null;
-  if (typeof draft.content !== "string") return null;
-  const attachmentIds = Array.isArray(draft.attachmentIds)
-    ? draft.attachmentIds.filter((item): item is string => typeof item === "string")
-    : [];
-  const mentions: AgentApiStructuredMention[] | undefined = Array.isArray(draft.mentions)
-    ? draft.mentions.flatMap((item) => {
-      const parsed = agentApiStructuredMentionSchema.safeParse(item);
-      return parsed.success ? [parsed.data] : [];
-    })
-    : undefined;
-  const savedAt = Number.isFinite(draft.savedAt) ? draft.savedAt : Date.now();
-  const reholdCount = Number.isFinite(draft.reholdCount) ? draft.reholdCount : 0;
-  const seenUpToSeq = Number.isFinite(draft.seenUpToSeq) ? draft.seenUpToSeq : undefined;
-  if (Date.now() - savedAt > DEFAULT_LOCAL_DRAFT_TTL_MS) {
-    clearSavedDraft(agentId, target);
-    return null;
-  }
-  return {
-    content: draft.content,
-    attachmentIds,
-    ...(mentions && mentions.length > 0 ? { mentions } : {}),
-    savedAt,
-    reholdCount,
-    seenUpToSeq,
-  };
+  const lookup = lookupSavedDraft(agentId, target);
+  return lookup.status === "found" ? lookup.draft : null;
+}
+
+export function lookupSavedDraft(agentId: string, target: string): SavedDraftLookup {
+  return expectSync(lookupSharedSavedDraft(store(agentId), target, () => Date.now()));
 }
 
 export function setSavedDraft(agentId: string, target: string, draft: SavedDraft): void {
-  const state = readState(agentId);
-  const targets = state.targets ?? {};
-  targets[target] = {
-    content: draft.content,
-    attachmentIds: draft.attachmentIds,
-    ...(draft.mentions && draft.mentions.length > 0 ? { mentions: draft.mentions } : {}),
-    savedAt: draft.savedAt,
-    reholdCount: draft.reholdCount,
-    ...(draft.seenUpToSeq !== undefined ? { seenUpToSeq: draft.seenUpToSeq } : {}),
-  };
-  writeState(agentId, { targets });
+  expectSync(setSharedSavedDraft(store(agentId), target, draft));
 }
 
 export function clearSavedDraft(agentId: string, target: string): void {
-  const state = readState(agentId);
-  if (!state.targets || !(target in state.targets)) return;
-  delete state.targets[target];
-  writeState(agentId, state);
+  expectSync(clearSharedSavedDraft(store(agentId), target));
+}
+
+/** Clear the draft only when it still carries this idempotency key (#7646). */
+export function clearSavedDraftIfIdempotencyKeyMatches(
+  agentId: string,
+  target: string,
+  idempotencyKey: string,
+): boolean {
+  return expectSync(clearSharedSavedDraftIfIdempotencyKeyMatches(store(agentId), target, idempotencyKey));
+}
+
+/** Clear the draft only when it is still the one saved at `savedAt` (`--discard-draft` without a key). */
+export function clearSavedDraftIfSavedAt(agentId: string, target: string, savedAt: number): boolean {
+  return expectSync(store(agentId).deleteDraftIfSavedAt(target, savedAt));
 }

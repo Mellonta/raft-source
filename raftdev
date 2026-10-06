@@ -109,7 +109,7 @@ fi
 # Only `start` needs the signal/cleanup process-group boundary below. Keep
 # interactive commands such as `logs` attached to the foreground terminal.
 if [ "${1:-}" != "start" ]; then
-  exec node --import tsx "$project_dir/scripts/dev/raftdev.ts" "$@"
+  exec node --import @oxc-node/core/register "$project_dir/scripts/dev/raftdev.ts" "$@"
 fi
 
 intent_file="$(mktemp "${TMPDIR:-/tmp}/raftdev-start.XXXXXX")"
@@ -132,7 +132,7 @@ cleanup_armed_start() {
   if [ -z "$cleanup_name" ]; then
     return
   fi
-  RAFTDEV_START_INTENT_FILE="" node --import tsx \
+  RAFTDEV_START_INTENT_FILE="" node --import @oxc-node/core/register \
     "$project_dir/scripts/dev/raftdev.ts" __cleanup-failed-start "$cleanup_name" \
     "$seed_existed" "$legacy_base_owned" "$legacy_risingwave_owned" \
     "$legacy_risingwave_network_owned" "$tunnel_pid" || true
@@ -166,7 +166,7 @@ set -m
 trap 'forward_signal HUP 129' HUP
 trap 'forward_signal INT 130' INT
 trap 'forward_signal TERM 143' TERM
-RAFTDEV_START_INTENT_FILE="$intent_file" node --import tsx "$project_dir/scripts/dev/raftdev.ts" "$@" &
+RAFTDEV_START_INTENT_FILE="$intent_file" node --import @oxc-node/core/register "$project_dir/scripts/dev/raftdev.ts" "$@" &
 child_pid=$!
 wait "$child_pid"
 status=$?

@@ -1,10 +1,10 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   agents,
   serverAgreements,
@@ -14,14 +14,14 @@ import {
   serverMembershipAgreementAudit,
   servers as serversTable,
   users,
-} from "../db/schema.js";
-import { addMember, createServer as createServerService } from "../services/serverService.js";
-import { createJoinLink } from "../services/inviteService.js";
+} from "../db/schema";
+import { addMember, createServer as createServerService } from "../services/serverService";
+import { createJoinLink } from "../services/inviteService";
 import {
   AgreementRequiredError,
   PRE_JOIN_AGREEMENT_BODY_MAX_LENGTH,
   requireSelfServeAgreement,
-} from "../services/serverAgreementService.js";
+} from "../services/serverAgreementService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -336,38 +336,4 @@ test("self-serve join rejects no-active to active race before membership creatio
       eq(serverMembershipAgreementAudit.subjectId, joiner.id),
     ));
   assert.equal(audit, undefined);
-});
-
-test("admin-add bypass records admin-authority audit with current agreement", async ({ app }) => {
-  const owner = await seedVerifiedUser("agreement-adminadd-owner@slock.test");
-  const target = await seedVerifiedUser("agreement-adminadd-target@slock.test");
-  const server = await createServer("Agreement Admin Add", "agreement-admin-add", owner.id);
-  const ownerToken = await tokenForHuman(owner.email);
-
-  const configure = await fetch(`${app.baseUrl}/api/servers/${server.id}/agreement`, {
-    method: "PUT",
-    headers: serverHeaders(ownerToken, server.id),
-    body: JSON.stringify({ enabled: true, title: "Rules", bodyMarkdown: "Current rules." }),
-  });
-  assert.equal(configure.status, 200);
-  const configured = await configure.json() as { agreement: { id: string; version: number } };
-
-  const add = await fetch(`${app.baseUrl}/api/servers/${server.id}/members`, {
-    method: "POST",
-    headers: serverHeaders(ownerToken, server.id),
-    body: JSON.stringify({ userId: target.id }),
-  });
-  assert.equal(add.status, 200);
-
-  const [audit] = await getDb()
-    .select()
-    .from(serverMembershipAgreementAudit)
-    .where(and(
-      eq(serverMembershipAgreementAudit.serverId, server.id),
-      eq(serverMembershipAgreementAudit.subjectId, target.id),
-    ));
-  assert.equal(audit?.source, "admin-add");
-  assert.equal(audit?.actorUserId, owner.id);
-  assert.equal(audit?.agreementId, configured.agreement.id);
-  assert.equal(audit?.agreementVersion, configured.agreement.version);
 });

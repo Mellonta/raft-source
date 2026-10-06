@@ -1,12 +1,23 @@
 import { useEffect, useLayoutEffect } from "react";
 import { useIntl } from "react-intl";
+import {
+  AvatarImage,
+  LiveAgentActivityBar,
+  LiveAgentActivityBarAvatar,
+  LiveAgentActivityBarContent,
+  LiveAgentActivityBarRow,
+  LiveAgentActivityBarText,
+  Status,
+} from "raft-ui";
+import type { StatusProps } from "raft-ui";
+import type { AgentActivity } from "@botiverse/raft-shared";
 import { LIVE_AGENT_ACTIVITY_VISIBLE_MS } from "../../utils/liveAgentActivity";
 import type { LiveAgentActivityItem } from "../../utils/liveAgentActivity";
 import { useLiveAgentActivityStore } from "../../store/liveAgentActivityStore";
 import { useAppearanceStore } from "../../store/appearanceStore";
-import AvatarSlot from "../ui/AvatarSlot";
-import StatusDot from "../ui/StatusDot";
 import { formatActivityTextDescriptor } from "../../utils/activity";
+import { AgentAvatar, isCustomAvatar } from "../agent/PixelAvatar";
+import Tooltip from "../ui/Tooltip";
 
 export function useClearLiveAgentActivityOnServerChange(serverId: string | undefined) {
   useLayoutEffect(() => {
@@ -14,11 +25,29 @@ export function useClearLiveAgentActivityOnServerChange(serverId: string | undef
   }, [serverId]);
 }
 
-export default function LiveAgentActivityBar({
-  variant = "sidebar",
-}: {
-  variant?: "sidebar" | "mobile";
-}) {
+/**
+ * Activity → RUI Status variant. Preserves the five StatusDot semantics:
+ * online = green, thinking/working = busy yellow (static — task #136), error = orange/red,
+ * offline = neutral gray. In brutal the status lights keep their FIXED
+ * semantic colors (they must not follow the skin — see the --color-status-busy
+ * comment in index.css), so warning/danger are re-hued back to the exact
+ * production values; elegant takes RUI's semantic variant colors as designed.
+ */
+const ACTIVITY_STATUS_VARIANT: Record<AgentActivity, NonNullable<StatusProps["variant"]>> = {
+  online: "success",
+  thinking: "warning",
+  working: "warning",
+  error: "danger",
+  offline: "default",
+};
+
+const ACTIVITY_STATUS_BRUTAL_COLOR: Partial<Record<AgentActivity, string>> = {
+  thinking: "theme-brutal:[--status-color:var(--color-status-busy)]",
+  working: "theme-brutal:[--status-color:var(--color-status-busy)]",
+  error: "theme-brutal:[--status-color:var(--color-brutal-orange)]",
+};
+
+export default function ConnectedLiveAgentActivityBar() {
   const latest = useLiveAgentActivityStore((state) => state.items[0] ?? null);
   const visible = useAppearanceStore((state) => state.showLiveAgentActivityBar);
 
@@ -35,45 +64,46 @@ export default function LiveAgentActivityBar({
 
   if (!visible || !latest) return null;
 
-  return <LiveAgentActivityBarPresentation latest={latest} variant={variant} />;
+  return <LiveAgentActivityBarPresentation latest={latest} />;
 }
 
 export function LiveAgentActivityBarPresentation({
   latest,
-  variant = "sidebar",
 }: {
   latest: LiveAgentActivityItem | null;
-  variant?: "sidebar" | "mobile";
 }) {
   const { formatMessage } = useIntl();
   if (!latest) return null;
   const text = latest.textDescriptor
     ? formatActivityTextDescriptor(formatMessage, latest.textDescriptor)
     : latest.text;
-
-  const containerClassName = variant === "mobile"
-    ? "border-t-2 border-black bg-white px-3 py-2"
-    : "border-t-2 border-black bg-brutal-cream px-3 py-2";
+  const activity = latest.activity ?? "offline";
 
   return (
-    <div
-      data-testid="live-agent-activity-bar"
-      className={containerClassName}
-      aria-live="polite"
-    >
-      <div className="flex min-h-8 items-center gap-2">
-        <AvatarSlot
-          context="compact-list"
-          type="agent"
-          agentAvatarUrl={latest.agentAvatarUrl}
-        />
-        <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <StatusDot activity={latest.activity ?? "offline"} className="shrink-0" />
-          <span className="min-w-0 truncate text-sm text-black/60 font-mono" title={text}>
-            {text}
-          </span>
-        </div>
-      </div>
-    </div>
+    // RUI's brutal recipe pads px-4; production's bar is px-3 — keep brutal
+    // pixel-identical while the recipe owns everything else.
+    <LiveAgentActivityBar beam={false} className="theme-brutal:px-3!">
+      <LiveAgentActivityBarRow>
+        <LiveAgentActivityBarAvatar className="[&>[data-slot=avatar-fallback]]:hidden">
+          {latest.agentAvatarUrl && isCustomAvatar(latest.agentAvatarUrl) ? (
+            <AvatarImage src={latest.agentAvatarUrl} alt="" />
+          ) : (
+            <AgentAvatar avatarUrl={latest.agentAvatarUrl} size={20} className="!h-full !w-full" />
+          )}
+        </LiveAgentActivityBarAvatar>
+        <LiveAgentActivityBarContent>
+          <Status
+            aria-hidden
+            size="md"
+            variant={ACTIVITY_STATUS_VARIANT[activity]}
+            className={["theme-brutal:border-black", ACTIVITY_STATUS_BRUTAL_COLOR[activity]].filter(Boolean).join(" ")}
+            data-activity={activity}
+          />
+          <Tooltip content={text}>
+            <LiveAgentActivityBarText data-slot="live-agent-activity-bar-text">{text}</LiveAgentActivityBarText>
+          </Tooltip>
+        </LiveAgentActivityBarContent>
+      </LiveAgentActivityBarRow>
+    </LiveAgentActivityBar>
   );
 }

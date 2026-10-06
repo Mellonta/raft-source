@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
@@ -38,8 +37,8 @@ afterEach(() => {
   useAuthStore.setState(initialAuthState, true);
 });
 
-test("create account is a standalone credential page without identity fields or wizard chrome", async (t) => {
-  t.mock.method(api, "get", async () => ({ data: { providers: [] } }));
+test("create account is a standalone credential page without identity fields or wizard chrome", async () => {
+  vi.spyOn(api, "get").mockImplementation(async () => ({ data: { providers: [] } }));
   const { container } = renderPage();
 
   assert.ok(screen.getByRole("heading", { name: "Create your account" }));
@@ -63,8 +62,8 @@ test("create account is a standalone credential page without identity fields or 
   assert.equal(screen.queryByText(/skips this step/i), null);
 });
 
-test("create account submits email, password, and legal acceptance only", async (t) => {
-  t.mock.method(api, "get", async () => ({ data: { providers: [] } }));
+test("create account submits email, password, and legal acceptance only", async () => {
+  vi.spyOn(api, "get").mockImplementation(async () => ({ data: { providers: [] } }));
   const calls: unknown[][] = [];
   useAuthStore.setState({
     loading: false,
@@ -90,8 +89,8 @@ test("create account submits email, password, and legal acceptance only", async 
   });
 });
 
-test("create account exposes configured Google and GitHub entry buttons without explanatory skip copy", async (t) => {
-  t.mock.method(api, "get", async () => ({
+test("create account exposes configured Google and GitHub entry buttons without explanatory skip copy", async () => {
+  vi.spyOn(api, "get").mockImplementation(async () => ({
     data: {
       providers: [
         { id: "google", label: "Google", enabled: true },

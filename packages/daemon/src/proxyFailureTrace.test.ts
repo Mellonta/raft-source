@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { daemonProxyFailureTraceAttrs, daemonTransportErrorExcerpt } from "./proxyFailureTrace.js";
+import { daemonProxyFailureTraceAttrs, daemonTransportErrorExcerpt } from "./proxyFailureTrace";
 
 test("daemon proxy failure projection is route-classed, typed, bounded, and content-free", () => {
   const attrs = daemonProxyFailureTraceAttrs({

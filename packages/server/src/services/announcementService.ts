@@ -9,13 +9,13 @@ import {
   type AnnouncementPage,
   type DisplayLocale,
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   announcementAuditEvents,
   announcements,
   userAnnouncementDismissals,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 
 export type {
   Announcement,

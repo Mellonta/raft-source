@@ -167,7 +167,13 @@ function toBody(value: ArrayBuffer | ArrayBufferView | string): Buffer {
 }
 
 function encodeS3Key(key: string): string {
-  return key.split("/").map((part) => encodeURIComponent(part)).join("/");
+  // URL parsing collapses "." and ".." segments (encoded or not), which would
+  // move the request outside the bucket path; such keys are never valid.
+  const parts = key.split("/");
+  if (parts.some((part) => part === "." || part === "..")) {
+    throw new Error("object key has a dot path segment");
+  }
+  return parts.map((part) => encodeURIComponent(part)).join("/");
 }
 
 function readCustomMetadata(headers: Headers): Record<string, string> {

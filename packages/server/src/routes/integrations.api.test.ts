@@ -1,5 +1,5 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -18,41 +18,44 @@ import {
   oauthGrants,
   serverAgentMembers,
   users,
-} from "../db/schema.js";
-import { getDb } from "../db/index.js";
-import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness.js";
-import { addMember, createServer } from "../services/serverService.js";
+} from "../db/schema";
+import { getDb } from "../db/index";
+import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness";
+import { addMember, createServer } from "../services/serverService";
 import {
+  __resetOAuthServiceDbForTests,
+  __setOAuthServiceDbForTests,
   authenticateOAuthClient,
   createOAuthClient,
   exchangeAccessRequest,
   getOAuthClientForServer,
   getIdentityByAccessToken,
   listAgentAvailableOAuthClients,
+  listInstalledAppPromptCatalog,
   resolveOAuthClientForAgentMutation,
   rotateClientSecretForAgent,
   transferClientOwnershipForAgent,
   updateOAuthClientForAgent,
-} from "../services/oauthService.js";
-import { createAgent } from "../services/agentService.js";
+} from "../services/oauthService";
+import { createAgent } from "../services/agentService";
 import {
   __setAppWebhookEncryptionKeyForTests,
   configureAppWebhook,
-} from "../services/appWebhookConfigService.js";
+} from "../services/appWebhookConfigService";
 import {
   approvePendingAppOutboundPermissionRevision,
   createAppOutboundPermissionRevision,
   updateAppInstallationGrant,
   updateAppInstallationSubscriptions,
-} from "../services/appOutboundPermissionService.js";
+} from "../services/appOutboundPermissionService";
 import {
   getAppNotificationDeveloperState,
   getAppNotificationInstallationState,
-} from "../services/appNotificationManagementService.js";
+} from "../services/appNotificationManagementService";
 import {
   __setCdnStorageForTests,
   resetStorageForTests,
-} from "../services/storageService.js";
+} from "../services/storageService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -76,6 +79,59 @@ async function seedUser(email: string, name: string) {
     .returning();
   return user;
 }
+
+async function seedRetiredBuiltInOAuthClient(input: {
+  serverId: string;
+  createdByUserId: string;
+  clientId: string;
+  name: string;
+  description?: string | null;
+  homepageUrl?: string | null;
+  returnUrl?: string | null;
+}) {
+  const clientSecret = `retired_secret_${randomUUID()}`;
+  const [client] = await getDb().insert(oauthClients).values({
+    serverId: input.serverId,
+    createdByUserId: input.createdByUserId,
+    clientId: input.clientId,
+    clientSecretHash: createHash("sha256").update(clientSecret).digest("hex"),
+    clientSecret,
+    appType: "slock_builtin",
+    enabled: true,
+    publishStatus: "published",
+    humanMarketplaceVisible: true,
+    name: input.name,
+    description: input.description ?? null,
+    homepageUrl: input.homepageUrl ?? null,
+    returnUrl: input.returnUrl ?? null,
+  }).returning();
+  return { client, clientSecret };
+}
+
+test("new slock_builtin registration fails before persistence or audit", async ({ app: _app }) => {
+  const suffix = randomUUID();
+  const owner = await seedUser(`retired-create-${suffix}@slock.test`, `Retired Create ${suffix}`);
+  const server = await createServer("Retired Create", `retired-create-${suffix}`, owner.id);
+  const clientId = `retired-${suffix.slice(0, 8)}`;
+  const beforeAudits = await getDb().select({ id: integrationAuditEvents.id }).from(integrationAuditEvents);
+
+  await assert.rejects(
+    createOAuthClient({
+      serverId: server.id,
+      createdByUserId: owner.id,
+      clientId,
+      appType: "slock_builtin",
+      name: "Retired App",
+    }),
+    /slock_builtin OAuth clients are retired/,
+  );
+
+  const created = await getDb().select({ id: oauthClients.id }).from(oauthClients)
+    .where(eq(oauthClients.clientId, clientId));
+  const afterAudits = await getDb().select({ id: integrationAuditEvents.id }).from(integrationAuditEvents);
+  assert.deepEqual(created, []);
+  assert.equal(afterAudits.length, beforeAudits.length);
+});
 
 
 
@@ -181,11 +237,10 @@ test("POST and DELETE /api/integrations/clients/:clientId/logo manage registered
     homepageUrl: "https://logo.example.test",
     returnUrl: "https://logo.example.test/callback",
   });
-  const { client: builtInClient } = await createOAuthClient({
+  const { client: builtInClient } = await seedRetiredBuiltInOAuthClient({
     serverId: otherServer.id,
     createdByUserId: otherOwner.id,
     clientId: `logo-bi-${suffix.slice(0, 8)}`,
-    appType: "slock_builtin",
     name: "Built-in Logo",
     description: "Built-in",
     homepageUrl: "https://builtin-logo.example.test",
@@ -798,7 +853,7 @@ test("POST /api/integrations/clients/:clientId/regenerate-secret rotates a regis
   }));
 });
 
-test("integration list endpoints are readable by members while management stays capability-gated", async ({ app }) => {
+test("integration list endpoints retire built-in rows while preserving ordinary member reads", async ({ app }) => {
   const suffix = randomUUID();
   const owner = await seedUser(`integrations-builtin-owner-${suffix}@slock.test`, `integrations-builtin-owner-${suffix}`);
   const member = await seedUser(`integrations-builtin-member-${suffix}@slock.test`, `integrations-builtin-member-${suffix}`);
@@ -815,21 +870,19 @@ test("integration list endpoints are readable by members while management stays 
     homepageUrl: "https://local.example.test",
     returnUrl: "https://local.example.test/callback",
   });
-  const { client: builtInClient } = await createOAuthClient({
+  const { client: builtInClient } = await seedRetiredBuiltInOAuthClient({
     serverId: platformServer.id,
     createdByUserId: platformOwner.id,
     clientId: `survey-${suffix.slice(0, 8)}`,
-    appType: "slock_builtin",
     name: "Slock Survey",
     description: "First-party surveys",
     homepageUrl: "https://survey.slock.test",
     returnUrl: "https://survey.slock.test/callback",
   });
-  const { client: hiddenBuiltInClient } = await createOAuthClient({
+  const { client: hiddenBuiltInClient } = await seedRetiredBuiltInOAuthClient({
     serverId: platformServer.id,
     createdByUserId: platformOwner.id,
     clientId: `agent-bi-${suffix.slice(0, 8)}`,
-    appType: "slock_builtin",
     name: "Slock Agent Internal",
     description: "Agent-only built-in",
     homepageUrl: "https://agent-internal.slock.test",
@@ -847,13 +900,18 @@ test("integration list endpoints are readable by members while management stays 
     Authorization: `Bearer ${memberToken}`,
     "X-Server-Id": server.id,
   };
-  const memberBuiltInRes = await fetch(`${app.baseUrl}/api/integrations/built-in`, { headers: memberHeaders });
+  __setOAuthServiceDbForTests((() => {
+    throw new Error("retired built-in compatibility route must not resolve a service database");
+  }) as typeof getDb);
+  let memberBuiltInRes: Response;
+  try {
+    memberBuiltInRes = await fetch(`${app.baseUrl}/api/integrations/built-in`, { headers: memberHeaders });
+  } finally {
+    __resetOAuthServiceDbForTests();
+  }
   assert.equal(memberBuiltInRes.status, 200);
   const memberBuiltIns = await memberBuiltInRes.json() as Array<{ id: string; serverId?: string; createdByUserId?: string; returnUrl?: string }>;
-  assert.deepEqual(memberBuiltIns.map((client) => client.id), [builtInClient.id]);
-  assert.equal(memberBuiltIns[0]?.serverId, undefined);
-  assert.equal(memberBuiltIns[0]?.createdByUserId, undefined);
-  assert.equal(memberBuiltIns[0]?.returnUrl, undefined);
+  assert.deepEqual(memberBuiltIns, []);
 
   const memberClientsRes = await fetch(`${app.baseUrl}/api/integrations/clients`, { headers: memberHeaders });
   assert.equal(memberClientsRes.status, 200);
@@ -863,7 +921,9 @@ test("integration list endpoints are readable by members while management stays 
 
   const memberMarketplaceRes = await fetch(`${app.baseUrl}/api/integrations/marketplace`, { headers: memberHeaders });
   assert.equal(memberMarketplaceRes.status, 200);
-  assert.ok(Array.isArray(await memberMarketplaceRes.json()));
+  const memberMarketplace = await memberMarketplaceRes.json() as Array<{ id: string }>;
+  assert.equal(memberMarketplace.some(({ id }) => id === builtInClient.id), false);
+  assert.equal(memberMarketplace.some(({ id }) => id === hiddenBuiltInClient.id), false);
 
   const memberOverviewRes = await fetch(`${app.baseUrl}/api/integrations/overview`, { headers: memberHeaders });
   assert.equal(memberOverviewRes.status, 200);
@@ -895,15 +955,7 @@ test("integration list endpoints are readable by members while management stays 
   });
   assert.equal(builtInRes.status, 200);
   const builtIns = await builtInRes.json() as Array<{ id: string; clientId: string; appType: string; name: string; homepageUrl: string | null; serverId?: string; createdByUserId?: string; returnUrl?: string }>;
-  assert.equal(builtIns.length, 1);
-  assert.equal(builtIns[0]?.id, builtInClient.id);
-  assert.equal(builtIns[0]?.clientId, builtInClient.clientId);
-  assert.equal(builtIns[0]?.appType, "slock_builtin");
-  assert.equal(builtIns[0]?.name, "Slock Survey");
-  assert.equal(builtIns[0]?.homepageUrl, "https://survey.slock.test");
-  assert.equal(builtIns[0]?.serverId, undefined);
-  assert.equal(builtIns[0]?.createdByUserId, undefined);
-  assert.equal(builtIns[0]?.returnUrl, undefined);
+  assert.deepEqual(builtIns, []);
 
   const clientsRes = await fetch(`${app.baseUrl}/api/integrations/clients`, {
     headers: {
@@ -915,6 +967,96 @@ test("integration list endpoints are readable by members while management stays 
   const clients = await clientsRes.json() as Array<{ id: string; appType: string; name: string }>;
   assert.deepEqual(clients.map((client) => client.id), [localClient.id]);
   assert.equal(clients[0]?.appType, "server_local");
+});
+
+test("retired built-in management and App Notifications routes perform no mutation or audit", async ({ app }) => {
+  const suffix = randomUUID();
+  const owner = await seedUser(`retired-routes-${suffix}@slock.test`, `Retired Routes ${suffix}`);
+  const server = await createServer("Retired Routes", `retired-routes-${suffix}`, owner.id);
+  const { client } = await seedRetiredBuiltInOAuthClient({
+    serverId: server.id,
+    createdByUserId: owner.id,
+    clientId: `retired-routes-${suffix.slice(0, 8)}`,
+    name: "Retired Routes App",
+    returnUrl: "https://retired.example.test/callback",
+  });
+  const agent = await createAgent(server.id, "RetiredRoutesBot", {
+    runtime: "claude",
+    model: "sonnet",
+  });
+  const [pendingRequest] = await getDb().insert(oauthAccessRequests).values({
+    serverId: server.id,
+    principalType: "agent",
+    agentId: agent.id,
+    clientId: client.id,
+    scopes: ["openid", "profile"],
+    status: "pending",
+    remember: true,
+  }).returning();
+  const [activeGrant] = await getDb().insert(oauthGrants).values({
+    serverId: server.id,
+    agentId: agent.id,
+    clientId: client.id,
+    scopes: ["openid", "profile"],
+    grantedByUserId: owner.id,
+  }).returning();
+  const token = await tokenForHuman(owner.email);
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "X-Server-Id": server.id,
+    "Content-Type": "application/json",
+  };
+  const beforeAudits = await getDb().select({ id: integrationAuditEvents.id }).from(integrationAuditEvents);
+  const before = await getDb().select().from(oauthClients).where(eq(oauthClients.id, client.id));
+
+  const requests = await Promise.all([
+    fetch(`${app.baseUrl}/api/integrations/clients/${client.id}/app-notifications`, { headers }),
+    fetch(`${app.baseUrl}/api/integrations/clients/${client.id}/app-notifications/permissions`, {
+      method: "PUT", headers, body: JSON.stringify({ groups: ["agent"], events: ["agent.updated"] }),
+    }),
+    fetch(`${app.baseUrl}/api/integrations/clients/${client.id}/app-notifications/webhook`, {
+      method: "PUT", headers, body: JSON.stringify({ endpointUrl: "https://retired.example.test/webhook" }),
+    }),
+    fetch(`${app.baseUrl}/api/integrations/clients/${client.id}/regenerate-secret`, { method: "POST", headers }),
+    fetch(`${app.baseUrl}/api/integrations/clients/${client.id}`, {
+      method: "PATCH", headers, body: JSON.stringify({ name: "Must not change" }),
+    }),
+    fetch(`${app.baseUrl}/api/integrations/clients/${client.id}/logo`, { method: "DELETE", headers }),
+    fetch(`${app.baseUrl}/api/integrations/clients/${client.id}`, { method: "DELETE", headers }),
+    fetch(`${app.baseUrl}/api/integrations/requests/${pendingRequest.id}/approve`, {
+      method: "POST", headers, body: JSON.stringify({ remember: true }),
+    }),
+    fetch(`${app.baseUrl}/api/integrations/requests/${pendingRequest.id}/deny`, {
+      method: "POST", headers, body: JSON.stringify({}),
+    }),
+    fetch(`${app.baseUrl}/api/integrations/grants/${activeGrant.id}/revoke`, {
+      method: "POST", headers, body: JSON.stringify({}),
+    }),
+  ]);
+  assert.deepEqual(requests.map((response) => response.status), [404, 403, 403, 404, 404, 404, 404, 404, 404, 404]);
+
+  const after = await getDb().select().from(oauthClients).where(eq(oauthClients.id, client.id));
+  const afterAudits = await getDb().select({ id: integrationAuditEvents.id }).from(integrationAuditEvents);
+  assert.deepEqual(after, before);
+  assert.equal(afterAudits.length, beforeAudits.length);
+  assert.deepEqual(
+    await getDb().select().from(oauthAccessRequests).where(eq(oauthAccessRequests.id, pendingRequest.id)),
+    [pendingRequest],
+  );
+  assert.deepEqual(
+    await getDb().select().from(oauthGrants).where(eq(oauthGrants.id, activeGrant.id)),
+    [activeGrant],
+  );
+  assert.deepEqual(
+    await getDb().select({ id: oauthAppPermissionRevisions.id }).from(oauthAppPermissionRevisions)
+      .where(eq(oauthAppPermissionRevisions.clientId, client.id)),
+    [],
+  );
+  assert.deepEqual(
+    await getDb().select({ id: oauthAppWebhookConfigs.id }).from(oauthAppWebhookConfigs)
+      .where(eq(oauthAppWebhookConfigs.clientId, client.id)),
+    [],
+  );
 });
 
 test("external-registration-bound OAuth clients are hidden and immutable while ordinary third-party apps stay manageable", async ({ app }) => {
@@ -2891,11 +3033,10 @@ test("DELETE /api/integrations/clients/:clientId removes a server-local app and 
     homepageUrl: "https://delete.example.test",
     returnUrl: "https://delete.example.test/callback",
   });
-  const { client: builtInClient } = await createOAuthClient({
+  const { client: builtInClient } = await seedRetiredBuiltInOAuthClient({
     serverId: otherServer.id,
     createdByUserId: otherOwner.id,
     clientId: `builtin-${suffix.slice(0, 8)}`,
-    appType: "slock_builtin",
     name: "Built-in App",
     description: "Platform-owned",
     homepageUrl: "https://builtin.example.test",
@@ -3069,4 +3210,120 @@ test("server-local permission save atomically installs its source and grants ins
   assert.equal(deleted.status, 200);
   assert.equal((await installs()).length, 0);
   assert.equal((await read()).status, 401);
+});
+
+// task #319 — `whenToUse`: the Web PATCH path runs the same shared validator
+// as the agent `app update` route. Pin the happy path and each rejection class
+// so the two surfaces cannot drift apart.
+test("PATCH /api/integrations/clients/:id applies the shared whenToUse validator", async ({ app }) => {
+  const suffix = randomUUID();
+  const owner = await seedUser(`when-to-use-${suffix}@slock.test`, `When To Use ${suffix}`);
+  const server = await createServer("When To Use", `when-to-use-${suffix}`, owner.id);
+  const ownerToken = await tokenForHuman(owner.email);
+  const { client } = await createOAuthClient({
+    serverId: server.id,
+    createdByUserId: owner.id,
+    clientId: `when-to-use-${suffix.slice(0, 8)}`,
+    name: "When To Use App",
+    description: "demo",
+    returnUrl: "https://example.test/callback",
+  });
+
+  const headers = (token: string) => ({
+    "Authorization": `Bearer ${token}`,
+    "X-Server-Id": server.id,
+    "content-type": "application/json",
+  });
+  const patch = (body: Record<string, unknown>) =>
+    fetch(`${app.baseUrl}/api/integrations/clients/${client.id}`, {
+      method: "PATCH",
+      headers: headers(ownerToken),
+      body: JSON.stringify(body),
+    });
+
+  for (const bad of [
+    "a".repeat(161),
+    "first line\nsecond line",
+    "install @acme/metrics for usage stats",
+  ]) {
+    const res = await patch({ whenToUse: bad });
+    assert.equal(res.status, 400, `expected rejection for ${JSON.stringify(bad.slice(0, 40))}`);
+    assert.match((await res.json() as { error?: string }).error ?? "", /whenToUse/);
+  }
+
+  const ok = await patch({ whenToUse: "use `me.files` when attachments need sharing" });
+  assert.equal(ok.status, 200, await ok.clone().text());
+  assert.equal((await ok.json() as { whenToUse?: string | null }).whenToUse, "use `me.files` when attachments need sharing");
+
+  const [stored] = await getDb().select({ whenToUse: oauthClients.whenToUse }).from(oauthClients).where(eq(oauthClients.id, client.id));
+  assert.equal(stored.whenToUse, "use `me.files` when attachments need sharing");
+
+  const cleared = await patch({ whenToUse: "" });
+  assert.equal(cleared.status, 200);
+  const [afterClear] = await getDb().select({ whenToUse: oauthClients.whenToUse }).from(oauthClients).where(eq(oauthClients.id, client.id));
+  assert.equal(afterClear.whenToUse, null);
+
+  // The create path shares the same validator — a typed-in value must either
+  // land in the column or be refused, never silently dropped.
+  const badCreate = await fetch(`${app.baseUrl}/api/integrations/clients`, {
+    method: "POST",
+    headers: headers(ownerToken),
+    body: JSON.stringify({ name: "Bad Create", whenToUse: "install @acme/metrics now" }),
+  });
+  assert.equal(badCreate.status, 400);
+  const goodCreate = await fetch(`${app.baseUrl}/api/integrations/clients`, {
+    method: "POST",
+    headers: headers(ownerToken),
+    body: JSON.stringify({ name: "Good Create", whenToUse: "when approvals pile up" }),
+  });
+  const goodCreateText = await goodCreate.text();
+  assert.equal(goodCreate.status, 200, goodCreateText);
+  const createdBody = JSON.parse(goodCreateText) as { client?: { id: string; whenToUse?: string | null } };
+  assert.equal(createdBody.client?.whenToUse, "when approvals pile up");
+  const [createdStored] = await getDb().select({ whenToUse: oauthClients.whenToUse }).from(oauthClients).where(eq(oauthClients.id, createdBody.client!.id));
+  assert.equal(createdStored.whenToUse, "when approvals pile up");
+});
+
+// task #319 — the prompt catalog that rides agent:start config. Same app set
+// as `services`, narrowed to non-empty whenToUse, inert-rendered server-side
+// so the daemon renders it verbatim.
+test("listInstalledAppPromptCatalog returns only enabled apps with a non-empty whenToUse, inert-rendered", async ({ app }) => {
+  const suffix = randomUUID();
+  const owner = await seedUser(`catalog-${suffix}@slock.test`, `Catalog ${suffix}`);
+  const server = await createServer("Catalog", `catalog-${suffix}`, owner.id);
+
+  const { client: hinted } = await createOAuthClient({
+    serverId: server.id,
+    createdByUserId: owner.id,
+    clientId: `hinted-${suffix.slice(0, 8)}`,
+    name: "Hinted @alice App",
+    description: "Ask `@acme/metrics` first",
+    returnUrl: "https://hinted.example.test/callback",
+    whenToUse: "ping @alice when the queue backs up",
+  });
+  await createOAuthClient({
+    serverId: server.id,
+    createdByUserId: owner.id,
+    clientId: `plain-${suffix.slice(0, 8)}`,
+    name: "No Hint",
+    returnUrl: "https://plain.example.test/callback",
+  });
+  const { client: disabled } = await createOAuthClient({
+    serverId: server.id,
+    createdByUserId: owner.id,
+    clientId: `stopped-${suffix.slice(0, 8)}`,
+    name: "Stopped",
+    returnUrl: "https://stopped.example.test/callback",
+    whenToUse: "should never ship",
+  });
+  await getDb().update(oauthClients).set({ enabled: false }).where(eq(oauthClients.id, disabled.id));
+
+  const catalog = await listInstalledAppPromptCatalog(server.id);
+  assert.equal(catalog.length, 1);
+  const entry = catalog[0]!;
+  // name/description/whenToUse are already inert-rendered: bare @alice is the
+  // plain token user:alice, backticked @acme/metrics survives verbatim.
+  assert.equal(entry.name, "Hinted user:alice App");
+  assert.equal(entry.description, "Ask `@acme/metrics` first");
+  assert.equal(entry.whenToUse, "ping user:alice when the queue backs up");
 });

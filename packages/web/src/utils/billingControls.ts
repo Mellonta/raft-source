@@ -53,7 +53,6 @@ const FREE_INCLUDED_FEATURES: MessageId[] = [
 const FREE_NOT_INCLUDED_FEATURES: MessageId[] = [
   "billing.higherFileUploadLimits",
   "billing.unlimitedMessageHistory",
-  "billing.unlimitedJointChannels",
   "billing.moreProfessionalFeaturesComingSoon",
 ];
 

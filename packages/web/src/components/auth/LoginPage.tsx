@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Input, Button } from "raft-ui";
 import type { FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
@@ -7,7 +8,6 @@ import type { SocialAuthProviderId } from "../../hooks/useAuthProviders";
 import { useAuthProviders } from "../../hooks/useAuthProviders";
 import { buildSocialAuthStartUrl, getCurrentReturnTo, getExternalBrowserLoginUrl, isEmbeddedBrowser } from "../../utils/socialAuth";
 import AuthPageFrame, { AuthPageIntro } from "./AuthPageFrame";
-import Button from "../ui/Button";
 import TextLink from "../ui/TextLink";
 import Banner from "../ui/Banner";
 import FormField from "../ui/FormField";
@@ -78,7 +78,7 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
 
         <form onSubmit={handleSubmit} className="space-y-4" autoComplete="on" noValidate>
           <FormField label={formatMessage({ id: "pages.login.emailLabel" })} labelStyle="plain" error={fieldErrors.email} htmlFor="login-email">
-            <input
+            <Input
               id="login-email"
               name="username"
               type="email"
@@ -88,12 +88,12 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
                 setEmail(e.target.value);
                 if (fieldErrors.email) setFieldErrors((current) => ({ ...current, email: undefined }));
               }}
-              className="w-full border-2 border-black p-2 text-base shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+              data-invalid={fieldErrors.email ? true : undefined}
               required
             />
           </FormField>
           <FormField label={formatMessage({ id: "pages.login.passwordLabel" })} labelStyle="plain" error={fieldErrors.password} htmlFor="login-password">
-            <input
+            <Input
               id="login-password"
               name="password"
               type="password"
@@ -103,7 +103,7 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
                 setPassword(e.target.value);
                 if (fieldErrors.password) setFieldErrors((current) => ({ ...current, password: undefined }));
               }}
-              className="w-full border-2 border-black p-2 text-base shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+              data-invalid={fieldErrors.password ? true : undefined}
               required
             />
           </FormField>
@@ -111,7 +111,7 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
             type="submit"
             disabled={loading}
             size="lg"
-            tone="pink"
+            variant="accent"
             className="w-full"
           >
             {loading
@@ -123,11 +123,11 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
         {enabledProviders.length > 0 && (
           <>
             <div className="my-4 flex items-center gap-3">
-              <div className="h-0.5 flex-1 bg-black" />
-              <span className="text-xs font-bold uppercase tracking-widest text-black/45">
+              <div className="h-0.5 flex-1 bg-line-strong theme-brutal:bg-black" />
+              <span className="text-xs font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/45">
                 {formatMessage({ id: "pages.login.or" })}
               </span>
-              <div className="h-0.5 flex-1 bg-black" />
+              <div className="h-0.5 flex-1 bg-line-strong theme-brutal:bg-black" />
             </div>
             <div className="space-y-2">
               {enabledProviders.map((provider) => (
@@ -142,7 +142,7 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
           </>
         )}
 
-        <p className="mt-4 text-center text-xs leading-5 text-black/60">
+        <p className="mt-4 text-center text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
           {formatMessage(
             { id: "pages.login.legalAgreement" },
             {
@@ -152,7 +152,7 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
                   href={CURRENT_LEGAL_ACCEPTANCE.termsUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="underline hover:text-black"
+                  className="underline hover:text-foreground-strong theme-brutal:hover:text-black"
                 >
                   {c}
                 </a>
@@ -163,7 +163,7 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
                   href={CURRENT_LEGAL_ACCEPTANCE.privacyUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="underline hover:text-black"
+                  className="underline hover:text-foreground-strong theme-brutal:hover:text-black"
                 >
                   {c}
                 </a>

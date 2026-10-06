@@ -6,17 +6,16 @@ import { inspect } from "node:util";
 import argon2 from "argon2";
 import { and, eq, DrizzleQueryError } from "drizzle-orm";
 import WebSocket from "ws";
-import { vi } from "vitest";
-import { createApiTest } from "../test/integration/apiTest.js";
-import { signAccessToken, verifyActiveAccessToken } from "../middleware/auth.js";
-import * as session from "../services/sessionService.js";
-import * as userService from "../services/userService.js";
-import * as serverService from "../services/serverService.js";
-import * as searchService from "../services/searchService.js";
-import * as revocations from "../socket/accessRevocation.js";
-import { ensureFamilyRevokeCapability } from "../services/pushService.js";
-import { serializeErrorForLog } from "../tracing/safeErrorLog.js";
-import { channels, featureFlagRules, passwordResets, serverMembers, sessionFamilies, users } from "../db/schema.js";
+import { createApiTest } from "../test/integration/apiTest";
+import { signAccessToken, verifyActiveAccessToken } from "../middleware/auth";
+import * as session from "../services/sessionService";
+import * as userService from "../services/userService";
+import * as serverService from "../services/serverService";
+import * as searchService from "../services/searchService";
+import * as revocations from "../socket/accessRevocation";
+import { ensureFamilyRevokeCapability } from "../services/pushService";
+import { serializeErrorForLog } from "../tracing/safeErrorLog";
+import { channels, featureFlagRules, passwordResets, serverMembers, sessionFamilies, users } from "../db/schema";
 import { SERVER_GUEST_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 function disconnected(ws: WebSocket) {
   return new Promise<void>((resolve, reject) => {
@@ -456,3 +455,33 @@ for (const mode of ["visibility", "role", "logout", "capability"] as const) {
     }
   });
 }
+test("member removal tells the removed connection before closing it, and only that server's connection", async ({ app, seed, http }) => {
+  const owner = await seed.human();
+  const removed = await seed.human();
+  const server = await seed.server({ owner, members: [removed] });
+  const otherServer = await seed.server({ owner, members: [removed] });
+  const channel = await seed.channel({ server, members: [owner, removed] });
+  const removedSocket = await openSocket(app.baseUrl, signAccessToken(removed.id), server.id);
+  const otherSocket = await openSocket(app.baseUrl, signAccessToken(removed.id), otherServer.id);
+  try {
+    const removedClosed = disconnected(removedSocket.ws);
+    const otherClosed = disconnected(otherSocket.ws);
+    const res = await http.as(owner, server).request(`/api/servers/${server.id}/members/${removed.id}`, { method: "DELETE" });
+    assert.equal(res.status, 200, await res.text());
+    const sent = await http.as(owner, server).request("/api/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channelId: channel.id, content: "synthetic-after-member-removal" }),
+    });
+    assert.equal(sent.status, 200, await sent.text());
+    await Promise.all([removedClosed, otherClosed]);
+
+    const notice = `42["server:membership-removed",{"serverId":"${server.id}"}]`;
+    assert.equal(removedSocket.packets.at(-1), notice, "the removal notice is the last packet before close");
+    assert.equal(otherSocket.packets.some((p) => p.includes("server:membership-removed")), false);
+    assert.equal(removedSocket.packets.some((p) => p.includes("synthetic-after-member-removal")), false);
+  } finally {
+    removedSocket.ws.terminate();
+    otherSocket.ws.terminate();
+  }
+});

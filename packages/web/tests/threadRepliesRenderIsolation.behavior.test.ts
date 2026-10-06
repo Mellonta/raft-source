@@ -17,7 +17,6 @@
  * rendered tree) makes it a cheap, unavoidable regression guard.
  */
 import { strict as assert } from "node:assert";
-import test from "node:test";
 import { useThreadStore } from "../src/store/threadStore";
 import type { ThreadReplyPreview } from "../src/store/threadRepliesReadModel";
 

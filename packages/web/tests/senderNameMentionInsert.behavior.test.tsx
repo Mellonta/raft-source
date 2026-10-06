@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act } from "react";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -271,7 +270,8 @@ test("clicking an agent display name inserts the agent handle as a structured me
   await act(async () => {
     fireEvent.click(screen.getByTestId("message-sender-mention-message-1"));
   });
-  assert.equal(screen.getByTestId("message-sender-mention-message-1").getAttribute("title"), "Mention @agent-handle");
+  assert.equal(screen.getByTestId("message-sender-mention-message-1").getAttribute("title"), null);
+  assert.ok(screen.getByTestId("message-sender-mention-message-1").hasAttribute("data-base-ui-tooltip-trigger"), "mention hint now rides the RUI tooltip trigger");
   await waitFor(() => assert.equal(textarea.value, "@agent-handle "));
   await submitComposer();
 

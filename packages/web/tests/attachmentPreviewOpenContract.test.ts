@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const srcRoot = resolve(repoRoot, "src");
@@ -49,10 +48,10 @@ test("document attachment cards show preview affordance and visible loading feed
   // No opacity modifier — that combined with the OKlab color-mix shell bg
   // paints cyan on Chromium (stdrc 2026-05-23 #proj-theme:441c8b2b
   // cfd10230). The loading bar + spinner are the dominant busy signal.
-  assert.match(chipSource, /"!bg-soft-signal\/30 cursor-wait"/);
+  assert.match(chipSource, /"!bg-accent-soft\/30 cursor-wait"/);
   // Normal-state hover lives on PreviewShell's shared skin. No active token
   // — press inherits hover, matching pre-refactor QuotedMessageCard.
-  assert.match(shellSource, /hover:bg-black\/5`/);
+  assert.match(shellSource, /hover:bg-black\/5 shadow-none`/);
   assert.doesNotMatch(shellSource, /active:bg-soft-signal/);
   assert.doesNotMatch(shellSource, /active:opacity-90/);
   assert.match(chipSource, /const disabled = isOptimistic \|\| loading \|\| !onClick;/);
@@ -85,7 +84,14 @@ test("supported video attachments render an inline player and still reuse the at
   assert.doesNotMatch(messageSource, /data-message-affordance="inline-video-mute-toggle"/);
   assert.doesNotMatch(messageSource, /video-range-brutal/);
   assert.doesNotMatch(cssSource, /video-range-brutal/);
-  assert.match(messageSource, /className="absolute right-1\.5 top-1\.5 flex size-6 items-center justify-center border border-black bg-white\/80 text-black\/60 hover:bg-white hover:text-black"/);
+  // Inline video shell migrated to RUI MessageVideoPreview (task #640
+  // follow-up, 2026-09-23): the expand control is the RUI action slot
+  // (absolute right-1.5 top-1.5 size-6 comes from the recipe), still carrying
+  // the pinned affordance + Eye icon.
+  assert.match(messageSource, /<MessageVideoPreview\b/);
+  assert.match(messageSource, /<MessageVideoPreviewFallback\b/);
+  assert.match(messageSource, /<MessageVideoPreviewAction[\s\S]{0,200}?data-message-affordance="inline-video-expand"/);
+  assert.doesNotMatch(messageSource, /className="absolute right-1\.5 top-1\.5 flex size-6 items-center justify-center border border-line-muted bg-layer-panel\/80/);
   assert.match(messageSource, /<Eye size=\{12\} \/>/);
   assert.doesNotMatch(messageSource, /<Maximize2/);
   assert.doesNotMatch(messageSource, /data-message-affordance="inline-video-download"/);

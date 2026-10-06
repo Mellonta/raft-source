@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import type { Channel } from "../src/store/channelStore";
 import { isReadReceiptScopeEligible } from "../src/hooks/useReadReceiptHydrate";
 

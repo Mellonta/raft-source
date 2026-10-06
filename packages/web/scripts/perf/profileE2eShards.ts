@@ -5,7 +5,7 @@
  * this codebase that produced an uneven distribution and e2e shard 4 became
  * the post-PR-#2192 wall-clock long pole (~285s vs unit-server max ~224s).
  *
- * Run: pnpm --filter @botiverse/raft-web tsx scripts/perf/profileE2eShards.ts
+ * Run: pnpm --filter @botiverse/raft-web exec node --import @oxc-node/core/register scripts/perf/profileE2eShards.ts
  *
  * Output: writes `packages/web/e2e-shard-manifest.json`. The workflow's
  * `compute-e2e-shard-matrix` job reads that file to drive the e2e matrix.

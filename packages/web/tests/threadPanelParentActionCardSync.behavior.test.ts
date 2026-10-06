@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 
 // ThreadPanel imports authStore at module load; unit-fast does not install DOM globals.
 if (typeof globalThis.localStorage?.getItem !== "function") {

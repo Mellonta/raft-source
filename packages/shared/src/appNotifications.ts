@@ -1,4 +1,9 @@
-export const APP_NOTIFICATION_GROUPS = ["server", "agent", "channel", "computer"] as const;
+// `agent_reminder_write` is a write grant, not a notification group: it lets an
+// official app's installation write reminder messages into an agent's private
+// `dm:@reminders` conversation. It has no events and is only grantable to apps
+// in the official app registry (enforced server-side).
+export const APP_NOTIFICATION_GROUPS = ["server", "agent", "channel", "computer", "agent_reminder_write"] as const;
+export const APP_AGENT_REMINDER_WRITE_GROUP = "agent_reminder_write" satisfies AppNotificationGroup;
 export type AppNotificationGroup = (typeof APP_NOTIFICATION_GROUPS)[number];
 
 export const APP_NOTIFICATION_EVENT_GROUPS = {

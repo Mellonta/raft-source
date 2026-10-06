@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createIntl } from "react-intl";
 import { mergedMessages } from "../src/i18n/messages";
 import { DEFAULT_LOCALE } from "../src/i18n/locale";

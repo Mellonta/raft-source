@@ -2,14 +2,14 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { currentDate } from "@botiverse/raft-shared";
-import { COMPUTER_VERSION } from "./version.js";
-import { serverRunnerVersionPath, serviceVersionPath } from "./paths.js";
-import { SHELL_ENV_STATE_ENV_VAR } from "./shellEnvCapture.js";
+import { COMPUTER_VERSION } from "./version";
+import { serverRunnerVersionPath, serviceVersionPath } from "./paths";
+import { SHELL_ENV_STATE_ENV_VAR } from "./shellEnvCapture";
 import {
   readProcessVersionEvidence,
   writeProcessVersionEvidence,
   type ProcessVersionEvidence,
-} from "./versionEvidence.js";
+} from "./versionEvidence";
 
 export interface ServiceVersionEvidence {
   version: string | null;

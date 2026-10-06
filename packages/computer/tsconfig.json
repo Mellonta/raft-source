@@ -10,7 +10,9 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "types": ["node", "vitest/globals"],
     "outDir": "dist",
+    "rootDir": "../..",
     "declaration": true,
     "noEmit": true
   },

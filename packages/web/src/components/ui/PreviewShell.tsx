@@ -1,3 +1,4 @@
+import { Card } from "raft-ui";
 import type { ReactNode } from "react";
 
 /**
@@ -25,17 +26,20 @@ import type { ReactNode } from "react";
 
 /** Static border recipe only — exported for any future surface that wants
  *  the border tokens without the full bg + hover-bg skin. */
-export const PREVIEW_SHELL_BORDER = "border border-black/15 hover:border-black/30";
+export const PREVIEW_SHELL_BORDER = "border border-line-muted hover:border-line-strong theme-brutal:border-black/15 theme-brutal:hover:border-black/30";
 
-/** Full default skin: border + white bg + faint hover bg. No active token —
- *  press inherits hover. */
-export const PREVIEW_SHELL_SKIN = `${PREVIEW_SHELL_BORDER} bg-white hover:bg-black/5`;
+/** Full default skin: border + white bg + faint hover bg + explicitly NO
+ *  shadow. `shadow-none` is load-bearing: RUI Card's brutal default carries
+ *  `shadow-raft-md`, which would leak the hard offset shadow onto every
+ *  PreviewShell surface (message-link cards included) without this neutralizer.
+ *  No `active:` token — press inherits hover. */
+export const PREVIEW_SHELL_SKIN = `${PREVIEW_SHELL_BORDER} bg-layer-panel hover:bg-fill-muted theme-brutal:bg-white theme-brutal:hover:bg-black/5 shadow-none`;
 
 /** Muted / unavailable variant — visually unchanged from the prior
  *  QuotedMessageCard `unavailable` skin (kept distinct per stdrc: error
  *  semantic is separate from the route-B default). */
 export const PREVIEW_SHELL_SKIN_MUTED =
-  "border-2 border-black/30 bg-black/5 italic text-black/40 hover:shadow-brutal-sm";
+  "border border-line-muted bg-fill-muted italic text-foreground-placeholder hover:shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-black/5 theme-brutal:text-black/40 theme-brutal:hover:shadow-brutal-sm";
 
 export type PreviewShellVariant = "default" | "muted";
 
@@ -67,12 +71,13 @@ export default function PreviewShell({
   const Root = onClick ? "button" : "div";
   const skin = variant === "muted" ? PREVIEW_SHELL_SKIN_MUTED : PREVIEW_SHELL_SKIN;
   return (
-    <Root
+    <Card
+      render={<Root />}
       {...(onClick ? { type: "button" as const, onClick } : {})}
       {...rest}
       className={`${skin}${className ? ` ${className}` : ""}`}
     >
       {children}
-    </Root>
+    </Card>
   );
 }

@@ -1,11 +1,11 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channelHumans,
   channels,
@@ -17,16 +17,16 @@ import {
   userChannelInboxStates,
   userChannelReadCursors,
   users,
-} from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
+} from "../db/schema";
+import { createServer } from "../services/serverService";
 import {
   admitReadMutation,
   claimNextReadMutation,
   executeReadMutationClaim,
   getReadMutationFrontier,
   READ_MUTATION_COMPATIBILITY_WAIT_MS_ENV,
-} from "../services/readMutationSequencer.js";
-import { openTestApp } from "../test/integration/app.js";
+} from "../services/readMutationSequencer";
+import { openTestApp } from "../test/integration/app";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { planActivityBroadcastAction } from "./agentOrchestrator.js";
+import { planActivityBroadcastAction } from "./agentOrchestrator";
 
 test("planActivityBroadcastAction persists and emits immediately when trajectory entries are present", () => {
   assert.equal(

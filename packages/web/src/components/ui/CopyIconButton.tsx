@@ -1,7 +1,8 @@
 import { Check, Copy } from "lucide-react";
 import type { ButtonHTMLAttributes } from "react";
+import Tooltip from "./Tooltip";
 
-type CopyIconButtonSurface = "dark" | "light";
+type CopyIconButtonSurface = "dark" | "light" | "code";
 
 interface CopyIconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   copied: boolean;
@@ -12,6 +13,10 @@ interface CopyIconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const surfaceClasses: Record<CopyIconButtonSurface, { copied: string; idle: string }> = {
+  code: {
+    copied: "r-code-copy r-code-copy--copied",
+    idle: "r-code-copy",
+  },
   dark: {
     copied: "text-brutal-lime",
     idle: "text-white/0 group-hover:text-white/45 hover:!text-white/90 [@media(hover:none)]:text-white/45",
@@ -35,14 +40,15 @@ export default function CopyIconButton({
   const toneClass = copied ? surfaceClasses[surface].copied : surfaceClasses[surface].idle;
 
   return (
-    <button
-      type={type}
-      className={`flex size-6 items-center justify-center transition-colors focus:outline-none ${toneClass} ${className}`}
-      title={copied ? copiedLabel : copyLabel}
-      aria-label={copied ? copiedLabel : copyLabel}
-      {...props}
-    >
-      {copied ? <Check size={iconSize} /> : <Copy size={iconSize} />}
-    </button>
+    <Tooltip content={copied ? copiedLabel : copyLabel}>
+      <button
+        type={type}
+        className={`flex size-6 items-center justify-center transition-colors focus:outline-none ${toneClass} ${className}`}
+        aria-label={copied ? copiedLabel : copyLabel}
+        {...props}
+      >
+        {copied ? <Check size={iconSize} /> : <Copy size={iconSize} />}
+      </button>
+    </Tooltip>
   );
 }

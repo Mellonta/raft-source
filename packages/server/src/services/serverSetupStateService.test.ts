@@ -1,12 +1,12 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import type { ServerRole } from "@botiverse/raft-shared";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, computers, featureFlagRules, machines, serverAgentMembers, serverMembers, servers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agents, computers, featureFlagRules, machines, serverAgentMembers, serverMembers, servers, users } from "../db/schema";
 import {
   createServerSetupStateService,
   getServerSetupState,
@@ -18,9 +18,9 @@ import {
   type ServerSetupRepositoryTransition,
   type ServerSetupState,
   type ServerSetupStateRepository,
-} from "./serverSetupStateService.js";
-import { OFFICIAL_ONBOARDING_AGENT_IDENTITY } from "./officialOnboardingAgentIdentity.js";
-import { GROK_RUNTIME_FEATURE_FLAG_KEY } from "./featureFlagService.js";
+} from "./serverSetupStateService";
+import { OFFICIAL_ONBOARDING_AGENT_IDENTITY } from "./officialOnboardingAgentIdentity";
+import { GROK_RUNTIME_FEATURE_FLAG_KEY } from "./featureFlagService";
 
 
 function cloneState(state: ServerSetupState): ServerSetupState {
@@ -78,14 +78,22 @@ function makeService(options: {
   role?: ServerRole | null;
   live?: ServerSetupLiveFacts;
   liveError?: Error;
+  serverCompleted?: boolean;
+  serverCompletedError?: Error;
   now?: Date;
 } = {}) {
   const repository = new MemoryRepository(options.state === undefined ? makeState() : options.state);
   const events: Array<{ previous: ServerSetupState; state: ServerSetupState; action: string }> = [];
   let liveReads = 0;
+  let serverCompletedReads = 0;
   const service = createServerSetupStateService({
     repository,
     resolveActorRole: async () => options.role === undefined ? "owner" : options.role,
+    resolveServerCompleted: async () => {
+      serverCompletedReads += 1;
+      if (options.serverCompletedError) throw options.serverCompletedError;
+      return options.serverCompleted ?? false;
+    },
     resolveLiveFacts: async () => {
       liveReads += 1;
       if (options.liveError) throw options.liveError;
@@ -96,7 +104,13 @@ function makeService(options: {
       events.push({ previous: event.previous, state: event.state, action: event.action });
     },
   });
-  return { repository, events, service, getLiveReads: () => liveReads };
+  return {
+    repository,
+    events,
+    service,
+    getLiveReads: () => liveReads,
+    getServerCompletedReads: () => serverCompletedReads,
+  };
 }
 
 // task #172 Phase 1: `defer` is retired. There is no `complete_after_defer` determination
@@ -181,6 +195,7 @@ test("completion validation and post-commit observers cannot corrupt durable sta
   const service = createServerSetupStateService({
     repository,
     resolveActorRole: async () => "owner",
+    resolveServerCompleted: async () => false,
     resolveLiveFacts: async () => LIVE_READY,
     onTransitionCommitted: async () => {
       throw new Error("analytics unavailable");
@@ -508,6 +523,7 @@ test("actor-aware resolver hides setup from agents and non-managers", async () =
 test("complete projection ignores live flaps and resolver failures fail open for chat", async () => {
   const complete = makeService({
     state: makeState({ status: "complete", completionReason: "normal" }),
+    serverCompleted: true,
     liveError: new Error("live store unavailable"),
   });
   const completeProjection = await complete.service.resolveServerSetup({
@@ -517,6 +533,11 @@ test("complete projection ignores live flaps and resolver failures fail open for
   assert.equal(completeProjection.surface, "complete");
   assert.equal(completeProjection.gateReason, "setup_complete");
   assert.equal(completeProjection.blocksChat, false);
+  assert.equal(
+    complete.getServerCompletedReads(),
+    0,
+    "the owner's own completion must win before server inheritance so personal post-setup state is preserved",
+  );
   assert.equal(complete.getLiveReads(), 0);
 
   const failed = makeService({
@@ -531,6 +552,53 @@ test("complete projection ignores live flaps and resolver failures fail open for
   assert.equal(failedProjection.gateReason, "resolver_error");
   assert.equal(failedProjection.blocksChat, false);
   assert.deepEqual(failedProjection.sideEffectState, { transitions: "disabled", completion: "disabled" });
+});
+
+test("one owner's completion completes the server for every co-owner", async () => {
+  const coOwner = makeService({
+    state: makeState({ userId: "co-owner-2", status: "not_started" }),
+    serverCompleted: true,
+    liveError: new Error("live facts must not be read after server completion"),
+  });
+
+  const projection = await coOwner.service.resolveServerSetup({
+    serverId: "server-1",
+    actor: { type: "user", id: "co-owner-2" },
+  });
+
+  assert.equal(projection.surface, "complete");
+  assert.equal(projection.phase, "complete");
+  assert.equal(projection.gateReason, "setup_complete");
+  assert.equal(projection.blocksChat, false);
+  assert.deepEqual(projection.postSetup, { surveyPending: false, handoffPending: false });
+  assert.equal(coOwner.repository.state?.status, "not_started", "projection needs no backfill write");
+  assert.equal(coOwner.getServerCompletedReads(), 1);
+  assert.equal(coOwner.getLiveReads(), 0);
+});
+
+test("a fresh server with no completed owner still enters setup", async () => {
+  const fresh = makeService({ serverCompleted: false });
+  const projection = await fresh.service.resolveServerSetup({
+    serverId: "server-1",
+    actor: { type: "user", id: "owner-1" },
+  });
+
+  assert.equal(projection.surface, "create_agent");
+  assert.equal(fresh.getServerCompletedReads(), 1);
+  assert.equal(fresh.getLiveReads(), 1);
+});
+
+test("server-completion lookup failures never fall through into a blocking setup modal", async () => {
+  const unavailable = makeService({ serverCompletedError: new Error("database unavailable") });
+  const projection = await unavailable.service.resolveServerSetup({
+    serverId: "server-1",
+    actor: { type: "user", id: "owner-1" },
+  });
+
+  assert.equal(projection.surface, "retry");
+  assert.equal(projection.gateReason, "resolver_error");
+  assert.equal(projection.blocksChat, false);
+  assert.equal(unavailable.getLiveReads(), 0);
 });
 
 test("Drizzle adapter persists transitions and rejects arbitrary onboarding agents", async ({ onTestFinished }) => {

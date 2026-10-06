@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 
-import { afterEach, beforeEach, test } from "vitest";
 import { eq, sql } from "drizzle-orm";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
 import {
   channels,
   externalActorProjections,
@@ -17,11 +16,11 @@ import {
   messages,
   servers,
   users,
-} from "../db/schema.js";
-import { applyExternalReactionObservation } from "./externalReactionSyncService.js";
-import { processExternalInboundEventOnce } from "./externalInboundWorkerService.js";
-import { listReactionActors } from "./messageReactionService.js";
-import { listMessagesByIds } from "./messageService.js";
+} from "../db/schema";
+import { applyExternalReactionObservation } from "./externalReactionSyncService";
+import { processExternalInboundEventOnce } from "./externalInboundWorkerService";
+import { listReactionActors } from "./messageReactionService";
+import { listMessagesByIds } from "./messageService";
 
 beforeEach(async () => { await initDatabase("pglite://"); });
 afterEach(async () => { await closeDatabase(); });

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "vitest";
 
 // Why this exists: on 2026-08-24 `manual/agent-knowledge/app.md` was on disk and served
 // under its bare id, but was absent from SOURCE_PATHS — so the documented

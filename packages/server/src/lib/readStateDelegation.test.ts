@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { decideReadStateDelegation } from "./actorPermissions.js";
+import { decideReadStateDelegation } from "./actorPermissions";
 
 const USER = "human-caller";
 const creatorAgent = { creatorType: "user" as const, creatorId: USER };

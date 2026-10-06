@@ -1,5 +1,6 @@
 import type { TraceAttributes } from "@botiverse/raft-shared";
-import { sanitizeRouteErrorMessage } from "./routeFailure.js";
+import { sanitizeRouteErrorMessage } from "./routeFailure";
+import { errorClassOf } from "./semanticTrace";
 
 export const MESSAGE_SEARCH_TRACE_KIND = "message_search";
 
@@ -49,7 +50,7 @@ export function messageSearchErrorTraceAttrs(error: unknown, context: { query?: 
       : String(error ?? "");
 
   return {
-    error_class: error instanceof Error ? error.name : typeof error,
+    error_class: errorClassOf(error),
     ...(cause instanceof Error ? { error_cause_class: cause.name } : {}),
     ...(errorCode ? { error_code: errorCode, sqlstate: errorCode } : {}),
     error_message: sanitizeRouteErrorMessage(scrubSearchErrorMessage(message, context.query)),

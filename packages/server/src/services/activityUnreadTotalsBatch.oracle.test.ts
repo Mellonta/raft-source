@@ -1,5 +1,5 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 /**
  * task #235 DoD 9c/9d: oracle equality for the set-based Activity unread batch.
  *
@@ -10,17 +10,18 @@ import { createApiTest } from "../test/integration/apiTest.js";
  * SQL and the authority chain turns this file red.
  *
  * Backend coverage (contract v2.3.1 §2 reachability, DoD 9d):
- * - **PG serving-rows (Sink B)** — EXERCISED here. `isHumanActivityMuteEnabled`
- *   is unconditionally true (channelService.ts:1072-1084, code-level launch
- *   2026-06-30), so the authority call `getInboxItems(serverId, userId,
- *   {filter:"all", historyCutoff})` always satisfies the serving-rows entry
+ * - **PG serving-rows (Sink B)** — EXERCISED here. Human Activity mute defaults
+ *   to enabled (code-level launch 2026-06-30), so the authority call
+ *   `getInboxItems(serverId, userId, {filter:"all", historyCutoff})` satisfies
+ *   the serving-rows entry
  *   predicate `(humanActivityMuteEnabled || historyCutoff)`; this pglite
  *   harness has no RisingWave pool, so the serving-rows branch is the branch
  *   the oracle actually runs below.
  * - **RisingWave direct-query builder** — NOT EXERCISED (declared, not
- *   skipped silently): no RW harness exists in this repo's test setup
- *   (`getRisingWaveInboxPool()` is null under pglite). RW/PG row parity is
- *   owned by `risingwave:verify-inbox-parity` per the rfcs/024 contract.
+ *   skipped silently): no RW harness exists in this repo's test setup; the
+ *   Activity reads are served by the test-only Postgres reference installed
+ *   from vitest setupFiles (src/test/risingWaveReadReference.ts). RW/PG row
+ *   parity is owned by `risingwave:verify-inbox-parity` per the rfcs/024 contract.
  * - **PG legacy inline** — NOT EXERCISED (declared): unreachable for this
  *   authority computation. Entry requires `!(humanActivityMuteEnabled ||
  *   historyCutoff) || forceCanonicalPostgres`; mute is unconditionally true
@@ -30,18 +31,16 @@ import { createApiTest } from "../test/integration/apiTest.js";
 import assert from "node:assert/strict";
 
 import { and, eq, sql } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { serverMembers, users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
+import { getDb } from "../db/index";
+import { serverMembers, users } from "../db/schema";
+import { createServer } from "../services/serverService";
 import {
-  __testRisingWaveInboxFailSoft,
   addHuman,
   createChannel,
   getActivityUnreadTotalsBatch,
   getInboxItems,
-  isHumanActivityMuteEnabled,
   markReadLatest,
-} from "../services/channelService.js";
+} from "../services/channelService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -94,12 +93,22 @@ async function oracleTotals(
   historyCutoff?: Date,
   limit = 1,
 ): Promise<Totals> {
+  const queryNames: string[] = [];
   const result = await getInboxItems(serverId, userId, {
     filter: "all",
     limit,
     offset: 0,
     historyCutoff,
+    traceQuery: async (queryName, work) => {
+      queryNames.push(queryName);
+      return work();
+    },
   });
+  // No RisingWave in CI (a hard dependency of the product): the installed test
+  // reference (src/test/risingWaveReadReference.ts) serves the RW read through
+  // the canonical inline Postgres SQL.
+  assert.ok(queryNames.includes("channels.inbox_items_by_user"),
+    "oracle must exercise the canonical Postgres read through the test reference");
   return {
     totalUnreadCount: result.totalUnreadCount,
     activeUnreadCount: result.activeUnreadCount,
@@ -110,12 +119,6 @@ test("batch equals per-server oracle across contract states (DoD 9d) and empty s
   const db = getDb();
   const owner = await seedUser("orc-owner");
   const member = await seedUser("orc-member");
-
-  // Serving-rows is the branch the oracle takes (see file header): assert
-  // the predicate input so a future re-flag of mute turns this file red
-  // instead of silently moving the oracle onto an unexercised backend.
-  assert.equal(await isHumanActivityMuteEnabled("any", member.id), true,
-    "mute flag expected unconditionally true; oracle backend assumption broken");
 
   // Server A (positive): one joined channel with unread, plus a mention in
   // a channel the member did NOT join (mention-only fallback row: visible,
@@ -165,13 +168,16 @@ test("batch equals per-server oracle across contract states (DoD 9d) and empty s
   await addHuman(newRoomD.id, owner.id);
   await addHuman(newRoomD.id, member.id);
   await postMessage(app.baseUrl, ownerToken, serverD.id, newRoomD.id, "d after cutoff");
-  // Shift the old room's activity deterministically before the cutoff; the
-  // oracle and the batch read the same shifted rows, so equality still
-  // proves predicate parity while the cutoff provably bites.
+  // Shift the old room's activity deterministically before the cutoff. The
+  // canonical world reads raw truth (messages.created_at), so that is what
+  // the fixture shifts; the oracle and the batch read the same shifted rows,
+  // so equality still proves predicate parity while the cutoff provably
+  // bites. (The serving_rows shift this used to do died with that table's
+  // read paths.)
   await db.execute(sql`
-    UPDATE inbox_serving_rows
-    SET last_activity_at = last_activity_at - interval '1 hour'
-    WHERE source_channel_id = ${oldRoomD.id}
+    UPDATE messages
+    SET created_at = created_at - interval '1 hour'
+    WHERE channel_id = ${oldRoomD.id}
   `);
   const cutoffD = new Date(Date.now() - 5 * 60_000);
 
@@ -246,26 +252,9 @@ test("batch equals per-server oracle across contract states (DoD 9d) and empty s
     "sibling servers unaffected by one revocation");
   assert.deepEqual(revoked.get(serverC.id), batch.get(serverC.id));
 
-  // Backend-consistency guard: with RFC056 serving mode "on" AND an RW pool
-  // configured, Home's inbox authority can serve RW-computed totals, so the
-  // PG batch must fail closed (whole batch unknown) rather than assert a
-  // number Home might not show. "shadow" keeps Postgres authoritative and
-  // must stay computable.
-  try {
-    __testRisingWaveInboxFailSoft.setDeps({
-      getRfc056ServingMode: () => "on",
-      getPool: () => ({} as never),
-    });
-    const rwLive = await getActivityUnreadTotalsBatch(inputs, member.id);
-    assert.equal(rwLive.size, 0,
-      "RW live serving mode + pool present must fail closed to all-unknown");
-    __testRisingWaveInboxFailSoft.setDeps({
-      getRfc056ServingMode: () => "shadow",
-    });
-    const rwShadow = await getActivityUnreadTotalsBatch(inputs, member.id);
-    assert.deepEqual(rwShadow.get(serverA.id), batch.get(serverA.id),
-      "shadow mode keeps Postgres authoritative — batch must compute");
-  } finally {
-    __testRisingWaveInboxFailSoft.reset();
-  }
+  // First-principles world (2026-09-21 teardown): the rfc056 serving-mode
+  // guard and its fail-closed absence are gone. With a configured RisingWave
+  // pool the batch reads the totals MV (covered by RW-side verification, not
+  // this PG oracle); with no pool — the case this suite runs in — the inline
+  // PG aggregate below IS the canonical behavior. Nothing to inject.
 });

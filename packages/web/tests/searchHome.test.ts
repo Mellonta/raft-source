@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   FREQUENT_SEARCH_ENTITY_LIMIT,
   SEARCH_HISTORY_LIMIT,
@@ -22,8 +21,8 @@ import {
   removeSearchHistoryEntry,
   searchParamsHaveExplicitState,
   selectFrequentSearchEntities,
-} from "../src/components/search/searchHome.js";
-import type { SearchEntityResult } from "../src/components/search/searchEntities.js";
+} from "../src/components/search/searchHome";
+import type { SearchEntityResult } from "../src/components/search/searchEntities";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();

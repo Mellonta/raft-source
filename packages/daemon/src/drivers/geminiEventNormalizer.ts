@@ -1,4 +1,4 @@
-import type { ParsedEvent } from "./types.js";
+import type { ParsedEvent } from "./types";
 
 /**
  * Gemini CLI token-usage normalizer.

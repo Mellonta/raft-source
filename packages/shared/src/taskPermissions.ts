@@ -1,4 +1,4 @@
-import type { ServerRole } from "./serverPermissions.js";
+import type { ServerRole } from "./serverPermissions";
 
 export const TASK_ACTIONS = [
   "read",
@@ -13,6 +13,8 @@ export const TASK_ACTIONS = [
 
 export type TaskAction = typeof TASK_ACTIONS[number];
 
+export type TaskReadOnlyReason = "historical_joint_task";
+
 export interface TaskAuthorizationInput {
   action: TaskAction;
   serverRole: ServerRole | null | undefined;
@@ -22,6 +24,8 @@ export interface TaskAuthorizationInput {
   isAssignee?: boolean;
   hasAssignTasks?: boolean;
   hasDeleteAnyTask?: boolean;
+  /** Resource authority projected by the server, separate from actor role. */
+  readOnlyReason?: TaskReadOnlyReason | null;
 }
 
 /**
@@ -33,5 +37,5 @@ export function authorizeTaskAction(input: TaskAuthorizationInput): boolean {
   // This is the channel/admission gate, not a replacement for each route's
   // existing relationship/capability policy. Non-Guest mutations continue to
   // reach taskService and the route-specific assignee/assign/delete checks.
-  return input.serverRole !== "guest" && input.canWriteChannel;
+  return input.readOnlyReason == null && input.serverRole !== "guest" && input.canWriteChannel;
 }

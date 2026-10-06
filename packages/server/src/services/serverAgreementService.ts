@@ -1,6 +1,6 @@
 import { and, desc, eq, sql } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { serverAgreements, serverMembershipAgreementAudit } from "../db/schema.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { serverAgreements, serverMembershipAgreementAudit } from "../db/schema";
 
 export type AgreementSource = "invite" | "join" | "request-access" | "admin-add";
 export type AgreementSubjectType = "user" | "agent";

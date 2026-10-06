@@ -1,16 +1,15 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { Server as SocketServer } from "socket.io";
-import { getDb } from "../db/index.js";
-import { serverMembers, users } from "../db/schema.js";
-import { createAgent } from "./agentService.js";
-import { beginAgentMigration } from "./agentMigrationService.js";
-import { emitAgentMigrationUpdated } from "./agentMigrationRealtime.js";
-import { registerMachine } from "./machineService.js";
-import { createServer } from "./serverService.js";
+import { getDb } from "../db/index";
+import { serverMembers, users } from "../db/schema";
+import { createAgent } from "./agentService";
+import { beginTestAgentMigration } from "../test/agentMigrationFixture";
+import { emitAgentMigrationUpdated } from "./agentMigrationRealtime";
+import { registerMachine } from "./machineService";
+import { createServer } from "./serverService";
 
 
 afterEach(async () => {
@@ -33,7 +32,7 @@ test("migration realtime targets only current manageServer rooms and exposes onl
   const { machine: sourceMachine } = await registerMachine(server.id, owner.id, "migration-source");
   const { machine: targetMachine } = await registerMachine(server.id, owner.id, "migration-target");
   const agent = await createAgent(server.id, "migration-agent", { runtime: "codex", machineId: sourceMachine.id });
-  const migration = await beginAgentMigration({ agentId: agent.id, targetMachineId: targetMachine.id });
+  const { migration } = await beginTestAgentMigration({ agentId: agent.id, targetMachineId: targetMachine.id });
 
   const emitted: Array<{ room: string; event: string; payload: Record<string, unknown> }> = [];
   const io = {

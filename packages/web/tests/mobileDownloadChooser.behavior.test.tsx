@@ -1,9 +1,8 @@
 // @ts-nocheck
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, render, screen } from "@testing-library/react";
-import MobileDownloadChooserPage, { isTouchCapableMac } from "../src/pages/MobileDownloadChooserPage";
+import MobileDownloadChooserPage, { DESKTOP_BETA_RELEASES_URL, isTouchCapableMac } from "../src/pages/MobileDownloadChooserPage";
 import { TestIntlProvider } from "./helpers/intl";
 
 /**
@@ -46,6 +45,15 @@ test("both platforms are offered, each through our own endpoint", () => {
       assert.ok(!href.includes("hands.build"), `must not embed a vendor URL: ${href}`);
       assert.ok(!href.includes("testflight.apple.com"), `must not embed a vendor URL: ${href}`);
     }
+
+    // Desktop beta (task #714): the newsletter links here for desktop readers
+    // too, so the desktop entry ships on this page. It points at the GitHub
+    // releases page directly — there is no expiring signed URL to protect —
+    // and, like the iOS TestFlight hop, leaves Raft in a new tab.
+    const desktop = screen.getByTestId("mobile-download-chooser-desktop-beta");
+    assert.equal(desktop.getAttribute("href"), DESKTOP_BETA_RELEASES_URL);
+    assert.equal(desktop.getAttribute("target"), "_blank");
+    assert.match(desktop.getAttribute("rel") ?? "", /noopener/);
   } finally {
     cleanup();
   }
@@ -70,7 +78,7 @@ test("neither option is styled as the recommended one", () => {
   // even less, since this page exists precisely because detection failed.
   try {
     renderChooser();
-    for (const id of ["mobile-download-chooser-ios", "mobile-download-chooser-android"]) {
+    for (const id of ["mobile-download-chooser-ios", "mobile-download-chooser-android", "mobile-download-chooser-desktop-beta"]) {
       const el = screen.getByTestId(id);
       assert.ok(el.className.includes("bg-white"), `${id} must use the neutral surface`);
       assert.ok(!el.className.includes("bg-brutal-pink"), `${id} must not take the CTA fill`);
@@ -84,8 +92,9 @@ test("the page is localized, not English-only", () => {
   try {
     renderChooser("zh-cn");
     const text = document.body.textContent ?? "";
-    assert.match(text, /获取 Raft 手机 App/);
-    assert.ok(!text.includes("Get the Raft mobile app"), "zh-cn must not fall back to English");
+    assert.match(text, /获取 Raft App/);
+    assert.match(text, /获取桌面端 Beta/, "zh-cn must localize the desktop beta entry");
+    assert.ok(!text.includes("Get the Raft App"), "zh-cn must not fall back to English");
   } finally {
     cleanup();
   }

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   deriveInitialAuthRestoreState,
   getAuthBootstrapView,
@@ -7,10 +6,10 @@ import {
   nextAuthRestoreState,
   nextAuthRestoreStateAfterExternalTokenSync,
   shouldRetryAuthRestore,
-} from "../src/utils/authRestoreMachine.js";
+} from "../src/utils/authRestoreMachine";
 import type {
   AuthRestoreState,
-} from "../src/utils/authRestoreMachine.js";
+} from "../src/utils/authRestoreMachine";
 
 test("boot without a stored session resolves to signed_out after initialization", () => {
   const state = nextAuthRestoreState(

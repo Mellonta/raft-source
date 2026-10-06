@@ -1,23 +1,24 @@
 import { randomUUID } from "node:crypto";
 
-import { currentDate } from "@botiverse/raft-shared";
+import { currentDate, type Tracer } from "@botiverse/raft-shared";
 import { and, desc, eq, inArray } from "drizzle-orm";
 
-import { getDb, type Database } from "../db/index.js";
+import { getDb, type Database } from "../db/index";
 import {
   externalAppCredentials,
   externalAppInstalls,
   externalBindingAudienceSnapshots,
   externalChannelBindings,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   createSlackPrivateAudienceRefresher,
   type SlackAudienceIdentityAuthority,
-} from "./slackAudienceRefreshService.js";
-import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime.js";
-import { refreshSlackPublicConversationAuthority } from "./slackBridgeProvisioningControlPlane.js";
-import type { SlackBridgeAvatarMaterializer } from "./slackBridgeProvisioningControlPlane.js";
-import { refreshSlackBridgeInstallGrantReceipts } from "./slackBridgeInstallGrantService.js";
+} from "./slackAudienceRefreshService";
+import type { SlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime";
+import { refreshSlackBindingPrivacy } from "./slackBindingPrivacyFreshnessService";
+import { refreshSlackPublicConversationAuthority } from "./slackBridgeProvisioningControlPlane";
+import type { SlackBridgeAvatarMaterializer } from "./slackBridgeProvisioningControlPlane";
+import { refreshSlackBridgeInstallGrantReceipts } from "./slackBridgeInstallGrantService";
 import {
   startSlackBridgePersistentWorker,
   type SlackBridgeAudienceRefreshReceipt,
@@ -28,7 +29,7 @@ import {
   type SlackBridgePersistentWorkerRunResult,
   type SlackBridgeProbeObservation,
   type SlackBridgeProbeRequest,
-} from "./slackBridgeWorkerLifecycle.js";
+} from "./slackBridgeWorkerLifecycle";
 
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
 const DEFAULT_PROBE_FRESHNESS_MS = 10 * 60_000;
@@ -55,6 +56,7 @@ export interface SlackBridgeProductionLifecycleDependencies {
   clock?: SlackBridgePersistentWorkerClock;
   onReceipt?(receipt: SlackBridgeLifecycleExecutionReceipt): void;
   onError?(error: unknown): void;
+  tracer?: Tracer;
 }
 
 function validNow(value: Date): boolean {
@@ -97,6 +99,7 @@ export function createSlackBridgeProductionLifecycle(
     ?? `slack-bridge:${process.pid}:${randomUUID()}`;
   const latestAudience = new Map<string, SlackBridgeAudienceRefreshReceipt>();
   const bindingPrivacy = new Map<string, "public" | "private">();
+  const privacyRetryNotBeforeByInstall = new Map<string, number>();
   let worker: SlackBridgePersistentWorker | null = null;
   let stopped = false;
 
@@ -126,6 +129,39 @@ export function createSlackBridgeProductionLifecycle(
       // A provider or database failure never extends an old receipt. The
       // existing receipt expires on schedule and admission then fails closed.
       dependencies.onError?.(error);
+    }
+    // Privacy is independent from audience membership freshness. Refresh it
+    // before any worker consumes the stored classification; provider failure
+    // never extends the old deadline and the shared authority resolver then
+    // fails closed once that deadline expires.
+    const activeBindingIds = await db.select({
+      bindingId: externalChannelBindings.id,
+      installId: externalChannelBindings.installId,
+    })
+      .from(externalChannelBindings)
+      .where(eq(externalChannelBindings.state, "active"))
+      .orderBy(externalChannelBindings.installId, externalChannelBindings.id);
+    const activeInstallIds = new Set(activeBindingIds.map(({ installId }) => installId));
+    for (const installId of privacyRetryNotBeforeByInstall.keys()) {
+      if (!activeInstallIds.has(installId)) privacyRetryNotBeforeByInstall.delete(installId);
+    }
+    for (const { bindingId, installId } of activeBindingIds) {
+      if ((privacyRetryNotBeforeByInstall.get(installId) ?? 0) > nowMs) continue;
+      try {
+        const receipt = await refreshSlackBindingPrivacy({
+          bindingId,
+          provider: dependencies.provider,
+          db,
+          now: observedAt,
+        });
+        if (receipt.kind === "unavailable" && receipt.retryAfterMs !== undefined) {
+          privacyRetryNotBeforeByInstall.set(installId, nowMs + receipt.retryAfterMs);
+        } else {
+          privacyRetryNotBeforeByInstall.delete(installId);
+        }
+      } catch (error) {
+        dependencies.onError?.(error);
+      }
     }
     const rows = await db.select({
       bindingId: externalChannelBindings.id,
@@ -261,6 +297,7 @@ export function createSlackBridgeProductionLifecycle(
       dependencies.onReceipt?.(receipt);
     },
     onError: dependencies.onError,
+    tracer: dependencies.tracer,
   }, {
     orchestratorId,
     intervalMs,

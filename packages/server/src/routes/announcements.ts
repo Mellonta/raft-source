@@ -4,9 +4,9 @@ import {
 } from "express";
 import { currentTimeMs } from "@botiverse/raft-shared";
 import type { Server as SocketServer } from "socket.io";
-import { requireAuth, requireVerified } from "../middleware/auth.js";
-import { UUID_RE } from "../lib/messageId.js";
-import * as announcementService from "../services/announcementService.js";
+import { requireAuth, requireVerified } from "../middleware/auth";
+import { UUID_RE } from "../lib/messageId";
+import * as announcementService from "../services/announcementService";
 
 export const announcementRouter: RouterType = Router();
 

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 
 const servicesDir = dirname(fileURLToPath(import.meta.url));
 const channelServiceSource = readFileSync(resolve(servicesDir, "channelService.ts"), "utf8");

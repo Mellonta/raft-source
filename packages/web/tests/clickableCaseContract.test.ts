@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 // #proj-uiux:8c0c5558 task #313/#315 doctrine reversal (stdrc msg=1ac4c2d6 +
 // msg=18c70a63 + msg=08de25d5, 2026-05-26): clickable labels MUST be Title Case

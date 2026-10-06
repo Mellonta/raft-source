@@ -1,12 +1,20 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
+  actionCards,
+  attachmentCommentRefs,
+  attachmentObjects,
+  attachments,
+  featureFlags,
+  channelConversionJobs,
   channels,
   channelAgents,
+  channelHumans,
   inboxNotificationFacts,
   jointChannels,
   jointChannelServers,
@@ -16,16 +24,166 @@ import {
   taskEvents,
   tasks,
   users,
-} from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
-import { registerMachine } from "../services/machineService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import * as channelService from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import * as taskService from "../services/taskService.js";
+} from "../db/schema";
+import { createServer } from "../services/serverService";
+import { createAgent, assignMachine } from "../services/agentService";
+import { registerMachine } from "../services/machineService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import * as channelService from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import * as taskService from "../services/taskService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+
+test("Joint attachment comments use each viewer's local authority and persist in the shared canonical thread", async ({ app }) => {
+  const db = getDb();
+  const hostOwner = await seedUser("comment-host@test.invalid", "comment-host");
+  const peerOwner = await seedUser("comment-peer@test.invalid", "comment-peer");
+  const outsider = await seedUser("comment-outsider@test.invalid", "comment-outsider");
+  const fixture = await createJointFixture({ slug: "comment-authority", channelName: "comment-authority", hostOwnerId: hostOwner.id, peerOwnerId: peerOwner.id });
+  await db.insert(serverMembers).values({ serverId: fixture.peerServer.id, userId: outsider.id, role: "member" });
+  await db.update(featureFlags).set({ enabled: true, defaultEnabled: true, killSwitch: false }).where(eq(featureFlags.key, "attachment_comments_v0"));
+  const parent = await createMessage(fixture.canonical.id, "user", hostOwner.id, "Shared attachment host");
+  const objectId = randomUUID(), attachmentId = randomUUID();
+  await db.insert(attachmentObjects).values({ id: objectId, originServerId: fixture.hostServer.id, uploaderId: hostOwner.id, uploaderType: "user", storageKey: `comment/${objectId}`, mimeType: "text/plain", sizeBytes: 8, lifecycleState: "active" });
+  await db.insert(attachments).values({ id: attachmentId, objectId, messageId: parent.id, channelId: fixture.hostProjection.id, uploaderId: hostOwner.id, uploaderType: "user", createdById: hostOwner.id, createdByType: "user", filename: "shared.txt", mimeType: "text/plain", sizeBytes: 8, storageKey: `comment/${objectId}` });
+  const commentIds: string[] = [];
+  for (const [owner, server] of [[hostOwner, fixture.hostServer], [peerOwner, fixture.peerServer]] as const) {
+    const headers = authHeaders(await tokenForHuman(owner.email), server.id);
+    const readable = await fetch(`${app.baseUrl}/api/attachments/${attachmentId}/comments`, { headers, signal: AbortSignal.timeout(10_000) });
+    assert.equal(readable.status, 200);
+    assert.equal((await readable.json()).viewer.canComment, true);
+    const response = await fetch(`${app.baseUrl}/api/attachments/${attachmentId}/comments`, { method: "POST", headers, signal: AbortSignal.timeout(10_000), body: JSON.stringify({ content: `Comment from ${owner.name}` }) });
+    assert.equal(response.status, 200, await response.clone().text());
+    const result = await response.json() as { message: { id: string }; threadChannelId: string };
+    commentIds.push(result.message.id);
+  }
+  const refs = await db.select().from(attachmentCommentRefs).where(eq(attachmentCommentRefs.attachmentId, attachmentId));
+  assert.deepEqual(new Set(refs.map((ref) => ref.commentMessageId)), new Set(commentIds));
+  const replies = await db.select().from(messages).where(eq(messages.id, commentIds[0]!));
+  const second = await db.select().from(messages).where(eq(messages.id, commentIds[1]!));
+  assert.equal(replies[0]!.channelId, second[0]!.channelId, "both callers persist in one canonical thread");
+  const denied = await fetch(`${app.baseUrl}/api/attachments/${attachmentId}/comments`, { method: "POST", headers: authHeaders(await tokenForHuman(outsider.email), fixture.peerServer.id), signal: AbortSignal.timeout(10_000), body: JSON.stringify({ content: "Must not appear" }) });
+  assert.equal(denied.status, 404);
+  assert.equal((await db.select().from(attachmentCommentRefs).where(eq(attachmentCommentRefs.attachmentId, attachmentId))).length, 2);
+});
+
+test("a shared action-card history copy exposes its source authority and cannot execute or mark it in a participant workspace", async ({ app }) => {
+  const hostOwner = await seedUser("card-history-host@test.invalid", "card-history-host");
+  const peerOwner = await seedUser("card-history-peer@test.invalid", "card-history-peer");
+  const fixture = await createJointFixture({ slug: "card-history", channelName: "card-history-room", hostOwnerId: hostOwner.id, peerOwnerId: peerOwner.id });
+  const agent = await createAgent(fixture.hostServer.id, "history-card-agent", { runtime: "claude" });
+  const action = { type: "agent:create" as const, name: "from-source-card" };
+  const message = await createMessage(fixture.canonical.id, "agent", agent.id, "Shared action history");
+  await getDb().update(messages).set({ actionMetadata: { kind: "action-card", state: "prepared", action } }).where(eq(messages.id, message.id));
+  await getDb().insert(actionCards).values({ serverId: fixture.hostServer.id, messageId: message.id, requesterAgentId: agent.id, actionType: action.type, payload: action });
+  const peerHeaders = authHeaders(await tokenForHuman(peerOwner.email), fixture.peerServer.id);
+  const hostHeaders = authHeaders(await tokenForHuman(hostOwner.email), fixture.hostServer.id);
+  const read = await fetch(`${app.baseUrl}/api/messages/channel/${fixture.peerProjection.id}`, { headers: peerHeaders, signal: AbortSignal.timeout(10_000) });
+  assert.equal(read.status, 200);
+  const history = await read.json() as { messages: Array<{ id: string; actionMetadata: { sourceServerId: string } }> };
+  assert.equal(history.messages.find((row) => row.id === message.id)?.actionMetadata.sourceServerId, fixture.hostServer.id);
+  for (const endpoint of ["execute", "mark-executed", "reconfirm"]) {
+    const response = await fetch(`${app.baseUrl}/api/actions/${message.id}/${endpoint}`, { signal: AbortSignal.timeout(10_000), method: "POST", headers: peerHeaders, body: JSON.stringify({ expectedState: "prepared", result: { kind: "agent", id: fixture.peerProjection.id, name: "fake" } }) });
+    assert.equal(response.status, 403);
+    assert.equal((await response.json()).errorCode, "ACTION_CARD_SOURCE_WORKSPACE_REQUIRED");
+  }
+  const [untouched] = await getDb().select().from(actionCards).where(eq(actionCards.messageId, message.id));
+  assert.equal(untouched.state, "prepared");
+  assert.equal((await getDb().select().from(channels).where(eq(channels.name, "from-source-card"))).length, 0);
+  const created = await createAgent(fixture.hostServer.id, action.name, { runtime: "claude", creatorType: "user", creatorId: hostOwner.id });
+  const marked = await fetch(`${app.baseUrl}/api/actions/${message.id}/mark-executed`, { signal: AbortSignal.timeout(10_000), method: "POST", headers: hostHeaders, body: JSON.stringify({ result: { kind: "agent", id: created.id, name: created.name } }) });
+  assert.equal(marked.status, 200, await marked.clone().text());
+  assert.equal(created.serverId, fixture.hostServer.id);
+  const [executed] = await getDb().select().from(actionCards).where(eq(actionCards.messageId, message.id));
+  assert.equal(executed.state, "executed");
+
+  // This path must stay on the card transaction; a global PGlite read here
+  // waits for that same transaction and never returns to commit it.
+  const createAction = { type: "channel:create" as const, name: "source-card-channel", initialHumans: [hostOwner.id], initialAgents: [agent.id] };
+  const createCard = await createMessage(fixture.canonical.id, "agent", agent.id, "Create a source-owned channel");
+  await getDb().update(messages).set({ actionMetadata: { kind: "action-card", state: "prepared", action: createAction } }).where(eq(messages.id, createCard.id));
+  await getDb().insert(actionCards).values({ serverId: fixture.hostServer.id, messageId: createCard.id, requesterAgentId: agent.id, actionType: createAction.type, payload: createAction });
+  const createdChannelResponse = await fetch(`${app.baseUrl}/api/actions/${createCard.id}/execute`, {
+    method: "POST", headers: hostHeaders, signal: AbortSignal.timeout(10_000), body: JSON.stringify({ expectedState: "prepared" }),
+  });
+  assert.equal(createdChannelResponse.status, 200, await createdChannelResponse.clone().text());
+  const [createdChannel] = await getDb().select().from(channels).where(and(eq(channels.serverId, fixture.hostServer.id), eq(channels.name, createAction.name)));
+  assert.ok(createdChannel);
+  const [creatorMembership] = await getDb().select().from(channelHumans).where(and(eq(channelHumans.channelId, createdChannel.id), eq(channelHumans.userId, hostOwner.id)));
+  assert.equal(creatorMembership.role, "admin");
+  const [agentMembership] = await getDb().select().from(channelAgents).where(and(eq(channelAgents.channelId, createdChannel.id), eq(channelAgents.agentId, agent.id)));
+  assert.equal(agentMembership.role, "member");
+});
+
+test("an agent-prepared Joint action card persists canonically, is visible from every projection, and executes only on its target server", async ({ app }) => {
+  const db = getDb();
+  const hostOwner = await seedUser("joint-card-host@test.invalid", "joint-card-host");
+  const peerOwner = await seedUser("joint-card-peer@test.invalid", "joint-card-peer");
+  const dual = await seedUser("joint-card-dual@test.invalid", "joint-card-dual");
+  const fixture = await createJointFixture({ slug: "joint-card", channelName: "joint-card-room", hostOwnerId: hostOwner.id, peerOwnerId: peerOwner.id });
+  await db.insert(serverMembers).values([
+    { serverId: fixture.hostServer.id, userId: dual.id, role: "member" },
+    { serverId: fixture.peerServer.id, userId: dual.id, role: "member" },
+  ]);
+  await channelService.addHuman(fixture.hostProjection.id, dual.id);
+  await channelService.addHuman(fixture.peerProjection.id, dual.id);
+  const peerAgent = await createAgent(fixture.peerServer.id, "joint-card-peer-agent", { runtime: "claude" });
+  await channelService.addAgent(fixture.peerProjection.id, peerAgent.id);
+  const { apiKey } = await mintAgentCredential({ agentId: peerAgent.id, scopes: ["tasks"], name: "joint-card-prepare", createdByUserId: peerOwner.id });
+  installRecordingOrchestrator(app.app);
+  const realtimeEvents = installFakeIo(app.app);
+
+  const action = { type: "channel:create" as const, name: "joint-card-created" };
+  const prepared = await fetch(`${app.baseUrl}/internal/agent-api/prepare-action`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    signal: AbortSignal.timeout(10_000),
+    body: JSON.stringify({ target: `#${fixture.peerProjection.name}`, action }),
+  });
+  assert.equal(prepared.status, 201, await prepared.clone().text());
+  const { messageId } = await prepared.json() as { messageId: string };
+
+  // One durable carrier in canonical storage, owned by the preparer's server.
+  const [carrier] = await db.select().from(messages).where(eq(messages.id, messageId));
+  assert.equal(carrier.channelId, fixture.canonical.id, "joint carrier must persist in canonical storage");
+  const [card] = await db.select().from(actionCards).where(eq(actionCards.messageId, messageId));
+  assert.equal(card.serverId, fixture.peerServer.id);
+  assertMessageNewProjectedToLocalRooms(realtimeEvents, messageId, [fixture.hostProjection, fixture.peerProjection], "prepared joint card");
+
+  for (const [user, server, local] of [[hostOwner, fixture.hostServer, fixture.hostProjection], [peerOwner, fixture.peerServer, fixture.peerProjection]] as const) {
+    const read = await fetch(`${app.baseUrl}/api/messages/channel/${local.id}`, { headers: authHeaders(await tokenForHuman(user.email), server.id), signal: AbortSignal.timeout(10_000) });
+    assert.equal(read.status, 200);
+    const history = await read.json() as { messages: Array<{ id: string; actionMetadata?: { sourceServerId?: string; targetServerName?: string } }> };
+    const row = history.messages.find((candidate) => candidate.id === messageId);
+    assert.ok(row, `card must be visible from ${server.name}`);
+    assert.equal(row.actionMetadata?.sourceServerId, fixture.peerServer.id);
+    assert.equal(row.actionMetadata?.targetServerName, fixture.peerServer.name);
+  }
+
+  // A confirmer who is not a member of the target server is refused, naming it.
+  const refused = await fetch(`${app.baseUrl}/api/actions/${messageId}/execute`, {
+    method: "POST", headers: authHeaders(await tokenForHuman(hostOwner.email), fixture.hostServer.id), signal: AbortSignal.timeout(10_000), body: JSON.stringify({ expectedState: "prepared" }),
+  });
+  assert.equal(refused.status, 403);
+  const refusedBody = await refused.json() as { errorCode: string; error: string };
+  assert.equal(refusedBody.errorCode, "ACTION_CARD_SOURCE_WORKSPACE_REQUIRED");
+  assert.match(refusedBody.error, new RegExp(fixture.peerServer.name));
+  assert.equal((await db.select().from(channels).where(eq(channels.name, action.name))).length, 0);
+
+  // A confirmer eligible on the target server executes there, even when they
+  // view the carrier through the host projection.
+  const executed = await fetch(`${app.baseUrl}/api/actions/${messageId}/execute`, {
+    method: "POST", headers: authHeaders(await tokenForHuman(dual.email), fixture.hostServer.id), signal: AbortSignal.timeout(10_000), body: JSON.stringify({ expectedState: "prepared" }),
+  });
+  assert.equal(executed.status, 200, await executed.clone().text());
+  const created = await db.select().from(channels).where(eq(channels.name, action.name));
+  assert.equal(created.length, 1);
+  assert.equal(created[0]!.serverId, fixture.peerServer.id, "action executes on the card's target server, not the viewer's");
+  const [done] = await db.select().from(actionCards).where(eq(actionCards.messageId, messageId));
+  assert.equal(done.state, "executed");
+  assert.equal(done.executedByUserId, dual.id);
+});
 
 type EmittedEvent = { rooms: string[]; event: string; payload: unknown };
 
@@ -1114,3 +1272,114 @@ test("disconnect clears an agent assignee that lived on the disconnected project
     assert.equal(payload.previousAssigneeType, "agent");
     assert.equal(payload.previousAssigneeId, peerAgent.id);
 });
+
+test("participant workspace reads historical converted tasks but cannot mutate them; host remains writable", async ({ app }) => {
+    const db = getDb();
+    const hostOwner = await seedUser("joint-history-host@slock.test", "joint-history-host");
+    const peerOwner = await seedUser("joint-history-peer@slock.test", "joint-history-peer");
+    const fixture = await createJointFixture({
+      slug: "joint-history",
+      channelName: "joint-history-room",
+      hostOwnerId: hostOwner.id,
+      peerOwnerId: peerOwner.id,
+    });
+    const conversionAt = new Date("2026-08-20T00:00:00.000Z");
+    await db.insert(channelConversionJobs).values({
+      serverId: fixture.hostServer.id,
+      sourceChannelId: fixture.hostProjection.id,
+      sourceChannelType: "channel",
+      status: "done",
+      phase: "done", state: "succeeded",
+      canonicalChannelId: fixture.canonical.id,
+      jointChannelId: fixture.joint.id,
+      createdByUserId: hostOwner.id,
+      createdAt: conversionAt,
+      completedAt: new Date("2026-08-20T00:01:00.000Z"),
+    });
+    const { tasks: [historical] } = await taskService.createTasks(
+      fixture.canonical.id,
+      "user",
+      hostOwner.id,
+      [{ title: "historical task" }],
+    );
+    const { tasks: [fresh] } = await taskService.createTasks(
+      fixture.canonical.id,
+      "user",
+      hostOwner.id,
+      [{ title: "post-cutover task" }],
+    );
+    await db.update(tasks).set({
+      createdAt: new Date("2026-08-19T00:00:00.000Z"),
+      updatedAt: new Date("2026-08-19T00:00:00.000Z"),
+    }).where(eq(tasks.id, historical.id));
+    await db.update(tasks).set({
+      createdAt: new Date("2026-08-21T00:00:00.000Z"),
+      updatedAt: new Date("2026-08-21T00:00:00.000Z"),
+    }).where(eq(tasks.id, fresh.id));
+    const historicalMessage = await createMessage(
+      fixture.canonical.id,
+      "user",
+      hostOwner.id,
+      "historical message cannot become a participant task",
+    );
+    await db.update(messages).set({
+      createdAt: new Date("2026-08-19T00:00:00.000Z"),
+      updatedAt: new Date("2026-08-19T00:00:00.000Z"),
+    }).where(eq(messages.id, historicalMessage.id));
+
+    const peerToken = await tokenForHuman(peerOwner.email);
+    const hostToken = await tokenForHuman(hostOwner.email);
+    const peerHeaders = authHeaders(peerToken, fixture.peerServer.id);
+    const hostHeaders = authHeaders(hostToken, fixture.hostServer.id);
+
+    const readRes = await fetch(`${app.baseUrl}/api/tasks/channel/${fixture.peerProjection.id}`, { headers: peerHeaders });
+    assert.equal(readRes.status, 200);
+    const readBody = await readRes.json() as { tasks: Array<{ id: string; channelId: string; readOnlyReason: string | null }> };
+    assert.ok(readBody.tasks.some((task) => task.id === historical.id));
+    assert.ok(readBody.tasks.some((task) => task.id === fresh.id));
+    assert.equal(readBody.tasks.find((task) => task.id === historical.id)?.readOnlyReason, "historical_joint_task");
+    assert.equal(readBody.tasks.find((task) => task.id === fresh.id)?.readOnlyReason, null);
+    assert.ok(readBody.tasks.every((task) => task.channelId === fixture.peerProjection.id));
+
+    const participantConvert = await fetch(`${app.baseUrl}/api/tasks/convert-message`, {
+      method: "POST",
+      headers: peerHeaders,
+      body: JSON.stringify({ messageId: historicalMessage.id }),
+    });
+    assert.equal(participantConvert.status, 403);
+    assert.equal((await participantConvert.json()).code, "joint_task_read_only");
+
+    const mutationCases: Array<{ url: string; method: "PATCH" | "DELETE"; body?: Record<string, unknown> }> = [
+      { url: `/api/tasks/${historical.id}/claim`, method: "PATCH" },
+      { url: `/api/tasks/${historical.id}/unclaim`, method: "PATCH" },
+      { url: `/api/tasks/${historical.id}/status`, method: "PATCH", body: { status: "in_progress" } },
+      { url: `/api/tasks/${historical.id}/assignee`, method: "PATCH", body: { assignee: { type: "user", id: peerOwner.id } } },
+      { url: `/api/tasks/${historical.id}`, method: "DELETE" },
+    ];
+    for (const mutation of mutationCases) {
+      const response = await fetch(`${app.baseUrl}${mutation.url}`, {
+        method: mutation.method,
+        headers: peerHeaders,
+        ...(mutation.body ? { body: JSON.stringify(mutation.body) } : {}),
+      });
+      assert.equal(response.status, 403, `${mutation.method} ${mutation.url} should be read-only`);
+      assert.equal((await response.json()).code, "joint_task_read_only");
+    }
+
+    const [unchanged] = await db.select().from(tasks).where(eq(tasks.id, historical.id));
+    assert.equal(unchanged.status, "todo");
+    assert.equal(unchanged.claimedById, null);
+
+    const hostClaim = await fetch(`${app.baseUrl}/api/tasks/${historical.id}/claim`, {
+      method: "PATCH",
+      headers: hostHeaders,
+    });
+    assert.equal(hostClaim.status, 200, "data-owning workspace remains writable for historical tasks");
+
+    const peerFreshStatus = await fetch(`${app.baseUrl}/api/tasks/${fresh.id}/status`, {
+      method: "PATCH",
+      headers: peerHeaders,
+      body: JSON.stringify({ status: "in_progress" }),
+    });
+    assert.equal(peerFreshStatus.status, 200, "post-cutover participant task follows normal Joint rules");
+  });

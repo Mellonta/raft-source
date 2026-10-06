@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import path from "node:path";
+import os from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import {
   CursorDriver,
   buildCursorArgs,
   buildCursorManagedMcpConfig,
   buildCursorModelProbeEnv,
   buildCursorSpawnEnv,
-  detectCursorModels,
+  detectCursorModelSource,
+  killCursorProbeTree,
   parseCursorModelsOutput,
-} from "./cursor.js";
-import type { SpawnContext } from "./types.js";
+  runCursorModelsCommandAsync,
+} from "./cursor";
+import { CURSOR_MODEL_DETECTION_TIMEOUT_MS, runtimeModelDetectionRequestTimeoutMs } from "@botiverse/raft-shared";
+import type { SpawnContext } from "./types";
 
 function makeSpawnContext(envVars: Record<string, string> | null = null): SpawnContext {
   return {
@@ -315,14 +319,6 @@ test("parseCursorModelsOutput parses cursor-agent models output", () => {
   assert.equal(result!.default, "composer-2-fast");
 });
 
-test("detectCursorModels returns null when cursor-agent models fails", () => {
-  assert.equal(detectCursorModels(() => ({
-    status: 1,
-    stdout: "",
-    error: new Error("keychain locked"),
-  })), null);
-});
-
 test("driver exposes dynamic cursor model detection", async () => {
   const driver = new CursorDriver();
   assert.equal(typeof driver.detectModels, "function");
@@ -363,4 +359,93 @@ test("parseLine: full turn lifecycle", () => {
   assert.equal(all[1]!.kind, "text");
   assert.equal(all[2]!.kind, "tool_call");
   assert.equal(all[3]!.kind, "turn_end");
+});
+
+// artin 2026-09-27 (task #1209): switching a Cursor agent's model always
+// reported a detection timeout. The daemon probe and the server request both
+// allowed exactly 5s, so a slow `cursor-agent models` lost the race every time.
+test("the server waits longer for Cursor model detection than the daemon probe runs", () => {
+  assert.ok(
+    runtimeModelDetectionRequestTimeoutMs("cursor") > CURSOR_MODEL_DETECTION_TIMEOUT_MS,
+    "the daemon must be able to report its own timeout before the server gives up",
+  );
+  for (const runtime of ["claude", "codex", "grok", "cursor", "opencode"]) {
+    assert.equal(runtimeModelDetectionRequestTimeoutMs(runtime), 20_000, runtime);
+  }
+});
+
+test("a Cursor probe killed at its deadline reports detect_timeout, not a generic failure", async () => {
+  assert.deepEqual(
+    await detectCursorModelSource(async () => ({ status: null, stdout: "", timedOut: true })),
+    { kind: "error", retryable: true, code: "detect_timeout" },
+  );
+  assert.deepEqual(
+    await detectCursorModelSource(async () => ({ status: 1, stdout: "" })),
+    { kind: "error", retryable: true },
+  );
+});
+
+test("the async Cursor probe returns a slow command's live list and kills a hung one at the deadline", { skip: process.platform === "win32" }, async () => {
+  const listing = "printf 'composer-2 - Composer 2 (current, default)\\nauto - Auto\\n'";
+  // The daemon must keep running while the probe waits (artin: spawnSync froze it).
+  let ticks = 0;
+  const ticker = setInterval(() => { ticks += 1; }, 20);
+  const ok = await runCursorModelsCommandAsync({ timeoutMs: 5_000, command: "sh", args: ["-c", `sleep 0.3; ${listing}`] });
+  clearInterval(ticker);
+  assert.ok(ticks >= 5, `the event loop must keep turning during the probe (ticks=${ticks})`);
+  assert.equal(ok.timedOut, undefined);
+  assert.equal(ok.status, 0);
+  assert.deepEqual(
+    await detectCursorModelSource(async () => ok),
+    { kind: "live", value: { models: [
+      { id: "composer-2", label: "Composer 2", verified: "launchable" },
+      { id: "auto", label: "Auto", verified: "launchable" },
+    ], default: "composer-2" } },
+  );
+
+  // A wrapper whose child keeps stdout open must not outlive the deadline, and
+  // the deadline must take the wrapper's children with it (no orphan probes).
+  const pidFile = path.join(os.tmpdir(), `cursor-probe-child-${process.pid}-${Date.now()}`);
+  const started = Date.now();
+  const hung = await runCursorModelsCommandAsync({ timeoutMs: 500, command: "sh", args: ["-c", `sleep 30 & echo $! > ${pidFile}; wait`] });
+  assert.equal(hung.timedOut, true);
+  assert.ok(Date.now() - started < 3_000, `probe must settle at its deadline, took ${Date.now() - started}ms`);
+  const childPid = Number(readFileSync(pidFile, "utf8").trim());
+  rmSync(pidFile, { force: true });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.throws(() => process.kill(childPid, 0), "the wrapper's child must be killed with it");
+});
+
+test("the Cursor probe caps its output and kills the probe tree when the cap is exceeded", { skip: process.platform === "win32" }, async () => {
+  const killed: number[] = [];
+  const result = await runCursorModelsCommandAsync({
+    timeoutMs: 5_000,
+    command: "sh",
+    args: ["-c", "yes cursor-model-line; sleep 30"],
+    maxOutputBytes: 4_096,
+    killTree: (pid, platform) => { killed.push(pid); killCursorProbeTree(pid, platform); },
+  });
+  assert.equal(result.timedOut, undefined);
+  assert.match(String(result.error?.message), /exceeded 4096 bytes/);
+  assert.equal(killed.length, 1, "exceeding the cap must kill the probe tree");
+  assert.deepEqual(await detectCursorModelSource(async () => result), { kind: "error", retryable: true });
+});
+
+test("on Windows the deadline kills the whole probe tree through the tree killer", async () => {
+  // Windows has no process groups; the probe must hand the pid to the tree
+  // killer (taskkill /T) instead of killing only the parent.
+  const calls: Array<{ pid: number; platform: string }> = [];
+  const result = await runCursorModelsCommandAsync({
+    timeoutMs: 200,
+    command: process.execPath,
+    args: ["-e", "setTimeout(() => {}, 30000)"],
+    platform: "win32",
+    killTree: (pid, platform) => {
+      calls.push({ pid, platform });
+      try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+    },
+  });
+  assert.equal(result.timedOut, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].platform, "win32");
 });

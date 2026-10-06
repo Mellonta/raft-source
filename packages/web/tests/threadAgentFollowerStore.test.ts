@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import api from "../src/api/client";
 import {
   requestThreadAgentFollowers,
@@ -24,9 +23,9 @@ afterEach(() => {
   useThreadAgentFollowerStore.getState().reset();
 });
 
-test("thread Agent follower requests can force-refresh an already loaded roster", async (t) => {
+test("thread Agent follower requests can force-refresh an already loaded roster", async () => {
   let calls = 0;
-  t.mock.method(api, "get", async (url: string, config?: { params?: { threadChannelIds?: string } }) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string, config?: { params?: { threadChannelIds?: string } }) => {
     assert.equal(url, "/channels/threads/followers");
     assert.equal(config?.params?.threadChannelIds, threadChannelId);
     calls += 1;
@@ -66,9 +65,9 @@ test("thread Agent follower requests can force-refresh an already loaded roster"
   );
 });
 
-test("socketBridge follower updates force-refresh only the changed loaded roster and clean up", async (t) => {
+test("socketBridge follower updates force-refresh only the changed loaded roster and clean up", async () => {
   let calls = 0;
-  t.mock.method(api, "get", async (url: string, config?: { params?: { threadChannelIds?: string } }) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string, config?: { params?: { threadChannelIds?: string } }) => {
     assert.equal(url, "/channels/threads/followers");
     assert.equal(config?.params?.threadChannelIds, threadChannelId);
     calls += 1;

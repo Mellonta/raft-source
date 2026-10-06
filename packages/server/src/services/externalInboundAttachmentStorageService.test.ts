@@ -1,24 +1,27 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { afterEach, beforeEach, test } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
 import {
   attachmentObjects,
+  attachmentTransferArtifacts,
   attachmentTransferIntents,
   attachments,
   channels,
   externalActorProjections,
+  featureFlags,
   servers,
   users,
-} from "../db/schema.js";
-import type { StorageBackend } from "./storageService.js";
+} from "../db/schema";
+import type { StorageBackend } from "./storageService";
+import { ATTACHMENT_STORAGE_KEY_PREFIX } from "./storageService";
 import {
   externalInboundAttachmentIntentState,
   storeExternalInboundAttachment,
-} from "./externalInboundAttachmentStorageService.js";
+} from "./externalInboundAttachmentStorageService";
+import { ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY } from "./featureFlagService";
 
 const NOW = new Date("2026-09-05T01:00:00.000Z");
 
@@ -117,9 +120,14 @@ test("provider bytes stream into one pending externally-attributed canonical pro
   assert.equal(first.uploaderType, "external_projection");
   const [object] = await state.db.select().from(attachmentObjects)
     .where(eq(attachmentObjects.id, first.objectId!));
+  assert.ok(object.storageKey.startsWith(`${ATTACHMENT_STORAGE_KEY_PREFIX}${state.server.id}/server/${first.id}/`));
   assert.equal(object.contentHash, createHash("sha256").update(body).digest("hex"));
   assert.deepEqual(writes.get(object.storageKey), body);
   assert.equal(await externalInboundAttachmentIntentState(state.db, messageFactId), "completed");
+
+  await state.db.update(featureFlags)
+    .set({ killSwitch: true })
+    .where(eq(featureFlags.key, ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY));
 
   async function* mustNotReadAgain(): AsyncIterable<Uint8Array> {
     throw new Error("idempotent replay consumed provider bytes");
@@ -143,6 +151,37 @@ test("provider bytes stream into one pending externally-attributed canonical pro
   assert.equal(replay.id, first.id);
   assert.equal((await state.db.select().from(attachments)).length, 1);
   assert.equal((await state.db.select().from(attachmentObjects)).length, 1);
+});
+
+test("the attachment-original kill switch returns fresh external writes to the legacy route", async () => {
+  const state = await fixture();
+  await state.db.update(featureFlags)
+    .set({ killSwitch: true })
+    .where(eq(featureFlags.key, ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY));
+  const writes = new Map<string, Buffer>();
+  const body = Buffer.from("legacy external", "utf8");
+  async function* bytes() { yield body; }
+
+  const attachment = await storeExternalInboundAttachment({
+    assetId: randomUUID(),
+    messageFactId: randomUUID(),
+    serverId: state.server.id,
+    channelId: state.channel.id,
+    uploaderId: state.actor.id,
+    uploaderType: "external_projection",
+    filename: "legacy.txt",
+    mimeType: "text/plain",
+    declaredSizeBytes: body.length,
+    maximumSizeBytes: 1024,
+    bytes: bytes(),
+    storage: memoryStorage(writes),
+    db: state.db,
+    now: NOW,
+  });
+  const [object] = await state.db.select().from(attachmentObjects)
+    .where(eq(attachmentObjects.id, attachment.objectId!));
+  assert.equal(object.storageKey, `${state.server.id}/${attachment.id}.txt`);
+  assert.deepEqual(writes.get(object.storageKey), body);
 });
 
 test("a stream that exceeds provider metadata publishes no attachment projection", async () => {
@@ -229,4 +268,62 @@ test("authority loss after storage PUT leaves only a planned cleanup obligation"
   assert.equal((await state.db.select().from(attachmentObjects)).length, 0);
   assert.equal(await externalInboundAttachmentIntentState(state.db, messageFactId), "planned");
   assert.equal(writes.size, 1, "the pre-recorded intent owns cleanup of the possibly-created object");
+});
+
+test("a pre-deploy planned external intent keeps its legacy storage route on replay", async () => {
+  const state = await fixture();
+  const writes = new Map<string, Buffer>();
+  const body = Buffer.from("resume legacy route", "utf8");
+  const assetId = randomUUID();
+  const messageFactId = randomUUID();
+  async function* bytes() { yield body; }
+
+  await assert.rejects(storeExternalInboundAttachment({
+    assetId,
+    messageFactId,
+    serverId: state.server.id,
+    channelId: state.channel.id,
+    uploaderId: state.actor.id,
+    uploaderType: "external_projection",
+    filename: "legacy.txt",
+    mimeType: "text/plain",
+    declaredSizeBytes: body.length,
+    maximumSizeBytes: 1024,
+    bytes: bytes(),
+    storage: memoryStorage(writes),
+    db: state.db,
+    beforePublish: async () => { throw new Error("simulate deploy boundary"); },
+    now: NOW,
+  }), /simulate deploy boundary/);
+
+  const [intent] = await state.db.select().from(attachmentTransferIntents);
+  const [currentArtifact] = await state.db.select().from(attachmentTransferArtifacts)
+    .where(eq(attachmentTransferArtifacts.intentId, intent.id));
+  const legacyStorageKey = `${state.server.id}/${intent.reservationId}.txt`;
+  writes.delete(currentArtifact.storageKey);
+  await state.db.update(attachmentTransferArtifacts)
+    .set({ storageKey: legacyStorageKey })
+    .where(eq(attachmentTransferArtifacts.intentId, intent.id));
+
+  const replay = await storeExternalInboundAttachment({
+    assetId,
+    messageFactId,
+    serverId: state.server.id,
+    channelId: state.channel.id,
+    uploaderId: state.actor.id,
+    uploaderType: "external_projection",
+    filename: "legacy.txt",
+    mimeType: "text/plain",
+    declaredSizeBytes: body.length,
+    maximumSizeBytes: 1024,
+    bytes: bytes(),
+    storage: memoryStorage(writes),
+    db: state.db,
+    now: NOW,
+  });
+  const [object] = await state.db.select().from(attachmentObjects)
+    .where(eq(attachmentObjects.id, replay.objectId!));
+  assert.equal(object.storageKey, legacyStorageKey);
+  assert.deepEqual(writes.get(legacyStorageKey), body);
+  assert.equal(await externalInboundAttachmentIntentState(state.db, messageFactId), "completed");
 });

@@ -2,13 +2,13 @@
 
 import type { Command } from "commander";
 
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeJson, writeText, NL } from "../../core/renderer.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { formatIntegrationLogin, type IntegrationLoginResponse } from "./_format.js";
-import { ensureIntegrationServiceSession } from "./_session.js";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeJson, writeText, NL } from "../../core/renderer";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { formatIntegrationLogin, type IntegrationLoginResponse, type IntegrationLoginOutput } from "./_format";
+import { ensureIntegrationServiceSession } from "./_session";
 
 interface LoginOptions {
   service: string;
@@ -30,7 +30,7 @@ function normalizeScopes(raw: string[] | undefined): string[] | undefined {
   return scopes;
 }
 
-function redactSuccessfulRequestId(data: IntegrationLoginResponse): IntegrationLoginResponse {
+function redactSuccessfulRequestId(data: IntegrationLoginOutput): IntegrationLoginOutput {
   if (data.status === "approval_required" || data.status === "install_required") return data;
   const { requestId: _requestId, ...rest } = data;
   return rest;
@@ -39,7 +39,7 @@ function redactSuccessfulRequestId(data: IntegrationLoginResponse): IntegrationL
 export const integrationLoginCommand = defineCommand(
   {
     name: "login",
-    description: "Provision or reuse this agent's login for a built-in Raft app or registered service",
+    description: "Provision or reuse a Raft grant and store callback cookies; application authentication remains unverified",
     options: [
       { flags: "--service <id>", description: "Registered service id, client id, or exact service name" },
       {
@@ -87,13 +87,19 @@ export const integrationLoginCommand = defineCommand(
         ...data,
         session: {
           status: "stored",
+          authentication: "unverified",
           source: session.source,
           path: session.sessionPath,
         },
       };
     }
 
-    const outputData = redactSuccessfulRequestId(data);
+    const outputData = redactSuccessfulRequestId({
+      ...data,
+      status: data.status === "logged_in" || data.status === "already_logged_in"
+        ? "grant_active"
+        : data.status,
+    });
     if (opts.json) {
       writeJson(ctx.io, { ok: true, data: outputData });
       return;

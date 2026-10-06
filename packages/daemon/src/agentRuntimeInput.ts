@@ -1,7 +1,8 @@
-import { EXAMPLE_T, exampleMessage, exampleRestartDriver, exampleStdinDriver, exampleUnreadSummary } from "./axExampleFixtures.js";
+import { EXAMPLE_T, exampleMessage, exampleRestartDriver, exampleStdinDriver, exampleUnreadSummary } from "./axExampleFixtures";
 import {
   formatUtcTimestamp,
   formatProducerFactLineageBracket,
+  indentAgentBodyContinuationLines,
   renderThirdPartyInertJson,
   asAxSurfaceText,
   type AgentConfig,
@@ -13,11 +14,11 @@ import {
   formatAgentReplyAffordanceSuffix,
   projectAgentInboxSnapshot,
   type AgentInboxTargetRow,
-} from "./agentInboxProjection.js";
-import { formatAttachmentSuffix, type AttachmentDownloadHintStyle } from "./attachmentFormatting.js";
-import type { AgentProxyVisibleMessage } from "./agentCredentialProxy.js";
-import { formatAgentMessageVisibleTarget } from "./agentVisibleDeliveryLedger.js";
-import type { RuntimeDriver } from "./drivers/types.js";
+} from "./agentInboxProjection";
+import { formatAttachmentSuffix, type AttachmentDownloadHintStyle } from "./attachmentFormatting";
+import type { AgentProxyVisibleMessage } from "./agentCredentialProxy";
+import { formatAgentMessageVisibleTarget } from "./agentVisibleDeliveryLedger";
+import type { RuntimeDriver } from "./drivers/types";
 
 const RESPONSE_TARGET_HINT =
   "Reply in the channel or create/reply in a thread as appropriate; use each message's `target` and `msg` fields to choose the exact target.";
@@ -100,9 +101,13 @@ function getMessageShortId(messageId: string): string {
 }
 
 function formatSenderHandle(message: { sender_name: string; sender_description?: string | null }): string {
+  // sender_name / sender_description are free text (a human or agent profile
+  // description) and land on the same line as the header. Prefix their
+  // continuation lines so a newline in either cannot start a forged header.
+  const name = indentAgentBodyContinuationLines(message.sender_name);
   return message.sender_description
-    ? `@${message.sender_name} — ${message.sender_description}`
-    : `@${message.sender_name}`;
+    ? `@${name} — ${indentAgentBodyContinuationLines(message.sender_description)}`
+    : `@${name}`;
 }
 
 function formatVisibleActorType(type: AgentMessage["sender_type"]): string {
@@ -116,7 +121,7 @@ function formatThreadContextMessage(
   const time = message.timestamp ? formatUtcTimestamp(message.timestamp) : "-";
   const senderType = formatVisibleActorType(message.sender_type);
   const seq = typeof message.seq === "number" ? ` seq=${message.seq}` : "";
-  return `- [msg=${msgId}${seq} time=${time}${senderType}] ${formatSenderHandle(message)}: ${message.content}`;
+  return `- [msg=${msgId}${seq} time=${time}${senderType}] ${formatSenderHandle(message)}: ${indentAgentBodyContinuationLines(message.content)}`;
 }
 
 function formatIncomingMessage(message: AgentMessage, options: IncomingMessageFormatOptions): string {
@@ -153,7 +158,7 @@ function formatIncomingMessage(message: AgentMessage, options: IncomingMessageFo
     ? ` [task #${message.task_number} status=${message.task_status}${message.task_assignee_id ? ` assignee=${message.task_assignee_type ?? null}:${message.task_assignee_id}` : ""}]`
     : "";
   const lineageSuffix = formatProducerFactLineageBracket(message.producerFactId);
-  const body = `[target=${target} msg=${msgId} time=${time}${senderType}] ${formatSenderHandle(message)}: ${message.content}${message.third_party_event ? `\npayload:\n${renderThirdPartyInertJson(message.third_party_event.payload)}` : ""}${attachSuffix}${taskSuffix}${lineageSuffix}${formatAgentReplyAffordanceSuffix(message)}`;
+  const body = `[target=${target} msg=${msgId} time=${time}${senderType}] ${formatSenderHandle(message)}: ${indentAgentBodyContinuationLines(message.content)}${message.third_party_event ? `\npayload:\n${renderThirdPartyInertJson(message.third_party_event.payload)}` : ""}${attachSuffix}${taskSuffix}${lineageSuffix}${formatAgentReplyAffordanceSuffix(message)}`;
   const prefixes = [threadJoinPrefix, threadFollowReactivationPrefix].filter(Boolean);
   return prefixes.length > 0 ? `${prefixes.join("\n")}\n${body}` : body;
 }
@@ -207,7 +212,7 @@ export const formatInboxUpdateRuntimeInput = axSurface(
     "[Raft inbox notice:",
     formatAgentInboxDelta(rows, { totalPendingMessages }),
     "]",
-    "These messages have not been read. Choose when to read them with `raft message check` or `raft message read --target <target>`; deferring them does not establish that there is no work.",
+    "These messages have not been read. Choose when to read them: `raft message read --target <target> --unread` reads one conversation's unread messages; `raft message check` reads all of them. Deferring them does not establish that there is no work.",
   ].join("\n"));
 },
   {
@@ -216,6 +221,21 @@ export const formatInboxUpdateRuntimeInput = axSurface(
     examples: [{ args: [[{ ...exampleMessage, mentioned: true }, { ...exampleMessage, message_id: "55555555-6666-7777-8888-999999999999", seq: 101, channel_type: "dm", channel_name: "richard" }, { ...exampleMessage, message_id: "aaaabbbb-0000-0000-0000-000000000000", seq: 102, channel_type: "thread", channel_name: "thread-aaaabbbb", parent_channel_name: "general", parent_channel_type: "channel" }, { ...exampleMessage, message_id: "ccccdddd-0000-0000-0000-000000000000", seq: 103, channel_type: "thread", channel_name: "thread-55555555", parent_channel_name: "richard", parent_channel_type: "dm" }], exampleStdinDriver, 7] }],
   },
 );
+
+export function formatUnreadSummaryRows(unreadSummary: Record<string, number> | undefined): string {
+  return Object.entries(unreadSummary ?? {})
+    .map(([target, count]) => `- ${target}: ${count} unread`)
+    .join("\n");
+}
+
+export function formatUnreadSummaryAddendum(
+  unreadSummary: Record<string, number> | undefined,
+  leadLine: string,
+): string {
+  const rows = formatUnreadSummaryRows(unreadSummary);
+  if (!rows) return "";
+  return `\n\n${leadLine}\n${rows}\n\nUse the inbox/read commands at a natural breakpoint if you choose to inspect those targets.`;
+}
 
 export function inboxProjectionTraceAttrs(
   rows: readonly AgentInboxTargetRow[],
@@ -300,10 +320,19 @@ export const formatOtherUnreadChannelsSuffix = axSurface(
   "Wake-delivery suffix listing other channels with unread counts.",
   (unreadSummary: Record<string, number> | undefined): string => {
   if (!unreadSummary || Object.keys(unreadSummary).length === 0) return ("");
-  return (`\n\nYou also have unread messages in other channels:${formatUnreadChannelLines(unreadSummary)}\n\nUse the inbox/read commands at a natural breakpoint if you choose to inspect those targets.`);
+  return (`\n\nYou also have unread messages in other channels:${formatUnreadChannelLines(unreadSummary)}\n\nRun \`raft inbox check\` at a natural breakpoint if you choose to inspect those targets; it lists every unread conversation with the command that opens it.`);
 },
   {
     examples: [{ args: [exampleUnreadSummary] }],
+  },
+);
+
+export const formatAppInboxNoticeSuffix = axSurface(
+  "Start-input suffix telling a per-turn runtime that App items (reminders, cleaner hints) are pending in its Inbox.",
+  (pendingAppItems: number): string =>
+    `\n\n[Raft Inbox notice:\nApp items pending: ${pendingAppItems}\nRun \`raft inbox check\` to inspect them.]`,
+  {
+    examples: [{ args: [1] }],
   },
 );
 
@@ -311,7 +340,7 @@ export const formatBoundedStartupUnreadSuffix = axSurface(
   "Resume catch-up suffix warning that the startup batch is bounded.",
   (unreadSummary: Record<string, number> | undefined): string => {
   if (!unreadSummary || Object.keys(unreadSummary).length === 0) return ("");
-  return (`\n\nSome unread channels may not be included in this bounded startup batch:${formatUnreadChannelLines(unreadSummary)}\n\nUse the inbox/read commands at a natural breakpoint if you choose to inspect those targets.`);
+  return (`\n\nSome unread channels may not be included in this bounded startup batch:${formatUnreadChannelLines(unreadSummary)}\n\nRun \`raft inbox check\` at a natural breakpoint if you choose to inspect those targets; it lists every unread conversation with the command that opens it.`);
 },
   {
     examples: [{ args: [exampleUnreadSummary] }],

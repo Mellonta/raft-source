@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { externalReactionFromSlack, externalReactionToSlack } from "./externalReactionEmojiMap.js";
+import { externalReactionFromSlack, externalReactionToSlack } from "./externalReactionEmojiMap";
 
 test("versioned standard reaction mapping round-trips base and skin-tone emoji", () => {
   assert.deepEqual(externalReactionToSlack("👍"), {

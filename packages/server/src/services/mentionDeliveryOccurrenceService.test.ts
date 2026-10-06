@@ -1,24 +1,25 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, channels, mentionDeliveryOccurrences, messageMentions, messages, servers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agents, channels, mentionDeliveryOccurrences, messageMentions, messages, servers, users } from "../db/schema";
 import {
+  claimMentionDeliveryRecovery,
   claimMentionDeliveryRedrive,
   ensureMentionDeliveryOccurrences,
   evaluateMentionDeliveryOccurrence,
   getMentionDeliveryOccurrence,
   listRecoverableMentionDeliveries,
+  listRecoverableMentionDeliveriesForAgent,
   lookupMentionDeliveryOccurrence,
   recordMentionDeliveryAck,
   recordMentionDeliveryDaemonTransition,
   recordMentionDeliveryServerDecision,
   type MentionDeliveryLookupResult,
   type MentionDeliveryOccurrenceRow,
-} from "./mentionDeliveryOccurrenceService.js";
+} from "./mentionDeliveryOccurrenceService";
 
 
 const at = new Date("2026-08-16T00:00:00.000Z");
@@ -47,9 +48,11 @@ function ackedBusyOccurrence(): MentionDeliveryOccurrenceRow {
     ackedAt: at,
     terminalErrorAt: null,
     terminalErrorCode: null,
+    terminalDecision: null,
     pendingCoalescedCount: 0,
     version: 5,
     redriveCount: 0,
+    recoveryCount: 0,
     lastRedriveAt: null,
     createdAt: at,
     updatedAt: at,
@@ -524,6 +527,7 @@ test("the same terminal receipt is not an ordinary broken hop at DAEMON_PENDING 
     state: "daemon_received" as const,
     terminalErrorAt: new Date(),
     terminalErrorCode: null,
+    terminalDecision: null,
   };
   assert.equal(row.daemonPendingAt, null, "fixture precondition: the pending hop must be the missing one");
   assert.ok(row.terminalErrorAt, "fixture precondition: but a terminal receipt is present");
@@ -624,6 +628,7 @@ test("FINDING 1+3 SCHEMA: a half-written terminal receipt is now REJECTED by the
     () => getDb().update(mentionDeliveryOccurrences).set({
       terminalErrorAt: new Date(),
       terminalErrorCode: null,
+    terminalDecision: null,
     }).where(eq(mentionDeliveryOccurrences.occurrenceId, mention.id)),
     "terminal_error_at without terminal_error_code must violate terminal_error_shape",
   );
@@ -644,6 +649,7 @@ test("FINDING 2 (R9): an ACKED row carrying a terminal receipt is REJECTED, not 
       ackedAt: new Date(),
       terminalErrorAt: new Date(),
       terminalErrorCode: null,
+    terminalDecision: null,
     }).where(eq(mentionDeliveryOccurrences.occurrenceId, mention.id)),
     "an acked row carrying a half-written terminal receipt must not be storable",
   );
@@ -707,6 +713,7 @@ test("FINDING 1 CODE: the ACK hop counts terminalErrorAt — the arm the fix had
     ackedAt: null,
     terminalErrorAt: new Date(),
     terminalErrorCode: null,
+    terminalDecision: null,
   };
   // FIXTURE PRECONDITIONS — without these the arm could pass by never reaching the ACK hop at all,
   // which is precisely how the previous two arms failed to cover this.
@@ -721,4 +728,53 @@ test("FINDING 1 CODE: the ACK hop counts terminalErrorAt — the arm the fix had
     "ACK",
     "and the hop it names must be ACK, so this cannot pass via some other branch",
   );
+});
+
+
+// task #285: an occurrence the daemon holds (daemon_pending) but never terminalises was
+// re-listed on every agent:session / machine-ready and re-sent forever (field: 647 rounds
+// over 15h). The recovery budget counts rounds, not age, and ends the loop with a terminal
+// receipt so no listing returns the occurrence again.
+test("task #285: a daemon-held occurrence gets a bounded number of recovery rounds, then becomes REDELIVERY_EXHAUSTED and leaves every recovery listing", async () => {
+  const { mention, agent, identity, pending } = await pendingOccurrenceFixture();
+  let version = pending.version;
+  for (let round = 1; round <= 3; round += 1) {
+    const claim = await claimMentionDeliveryRecovery({ occurrenceId: mention.id, expectedVersion: version, maxRounds: 3 });
+    assert.equal(claim.status, "claimed", `round ${round} is within the budget`);
+    assert.ok(claim.status === "claimed");
+    assert.equal(claim.row.recoveryCount, round);
+    version = claim.row.version;
+  }
+  assert.equal((await listRecoverableMentionDeliveriesForAgent(identity.machineId, agent.id)).length, 1, "precondition: still recoverable before the budget is spent");
+
+  const exhausted = await claimMentionDeliveryRecovery({ occurrenceId: mention.id, expectedVersion: version, maxRounds: 3 });
+  assert.equal(exhausted.status, "exhausted");
+  const row = await getMentionDeliveryOccurrence(mention.messageId, agent.id);
+  assert.equal(row?.state, "terminal_error");
+  assert.equal(row?.terminalErrorCode, "REDELIVERY_EXHAUSTED");
+  assert.equal((await lookupMentionDeliveryOccurrence(mention.messageId, agent.id)).status, "TERMINAL_ERROR");
+  assert.equal((await listRecoverableMentionDeliveries(identity.machineId)).length, 0, "machine-ready recovery must not list it again");
+  assert.equal((await listRecoverableMentionDeliveriesForAgent(identity.machineId, agent.id)).length, 0, "agent:session recovery must not list it again");
+});
+
+test("task #285: an occurrence the daemon never received is not counted, so an offline agent keeps its mention", async () => {
+  const { mention, agent, identity, pending } = await pendingOccurrenceFixture();
+  // Rewind the fixture to server_decided: the daemon has not received it yet.
+  const [decided] = await getDb().update(mentionDeliveryOccurrences).set({
+    state: "server_decided",
+    daemonReceivedAt: null,
+    daemonPendingAt: null,
+    deliveryPath: "unknown",
+  }).where(eq(mentionDeliveryOccurrences.occurrenceId, mention.id)).returning();
+  assert.equal(decided.state, "server_decided");
+  assert.ok(pending);
+
+  for (let round = 1; round <= 5; round += 1) {
+    const claim = await claimMentionDeliveryRecovery({ occurrenceId: mention.id, expectedVersion: decided.version, maxRounds: 3 });
+    assert.equal(claim.status, "claimed", `round ${round}: undelivered occurrences recover without a budget`);
+  }
+  const row = await getMentionDeliveryOccurrence(mention.messageId, agent.id);
+  assert.equal(row?.recoveryCount, 0);
+  assert.equal(row?.terminalErrorAt, null);
+  assert.equal((await listRecoverableMentionDeliveries(identity.machineId)).length, 1);
 });

@@ -3,14 +3,14 @@
 /**
  * Profile the web jsdom/RTL corpus one file at a time.
  *
- * Each file runs in its own Node test process so a leaked handle or hung file
+ * Each file runs in its own Vitest process so a leaked handle or hung file
  * cannot hide every other timing. The profiler is intentionally serial: the
  * output is for attribution, not minimum wall-clock time.
  *
  * Run from the repository root:
  *
  *   node packages/web/scripts/perf/profileDomTests.mjs
- *   node --test packages/web/scripts/perf/profileDomTests.test.mjs
+ *   pnpm exec vitest run packages/web/scripts/perf/profileDomTests.test.mjs
  *
  * A checkpoint is written under artifacts/perf by default. Re-running the
  * same command resumes pending files. A different revision, environment,
@@ -37,7 +37,7 @@ import { readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 export const CHECKPOINT_SCHEMA_VERSION = 1;
 export const CHECKPOINT_KIND = "slock-web-jsdom-per-file-profile";
@@ -46,8 +46,7 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const WEB_ROOT = path.resolve(path.dirname(SCRIPT_PATH), "../..");
 const REPO_ROOT = path.resolve(WEB_ROOT, "../..");
 const TESTS_ROOT = path.join(WEB_ROOT, "tests");
-const DOM_SETUP = path.join(TESTS_ROOT, "helpers/domSetup.ts");
-const TEST_TSCONFIG = path.join(TESTS_ROOT, "tsconfig.json");
+const RUN_VITEST = path.join(WEB_ROOT, "scripts/run-vitest-tests.mjs");
 
 const DEFAULT_PER_FILE_TIMEOUT_MS = 60_000;
 const DEFAULT_TOTAL_TIMEOUT_MS = 15 * 60_000;
@@ -80,7 +79,7 @@ Options:
   --per-file-timeout-ms <ms>     File wall deadline. Default: 60000
   --total-timeout-ms <ms>        Per-invocation wall deadline. Default: 900000
   --kill-grace-ms <ms>           SIGTERM to SIGKILL grace. Default: 2000
-  --test-timeout-ms <ms>         Node per-test timeout. Default: 30000
+  --test-timeout-ms <ms>         Vitest per-test timeout. Default: 30000
   --max-files <count>            Bound files attempted per invocation. The same
                                  command can be rerun to resume the next batch.
   --restart                      Explicitly replace an existing checkpoint.
@@ -325,13 +324,12 @@ export function digestEnvironment(environment) {
 
 function buildRunnerConfiguration(options, effectiveTz) {
   const argsTemplate = [
-    "--import",
-    "tsx",
-    "--import",
-    pathToFileURL(DOM_SETUP).href,
-    "--test",
-    "--test-concurrency=1",
-    `--test-timeout=${options.testTimeoutMs}`,
+    RUN_VITEST,
+    "--dom",
+    "--maxWorkers",
+    "1",
+    "--testTimeout",
+    String(options.testTimeoutMs),
     "{file}",
   ];
   return {
@@ -341,7 +339,6 @@ function buildRunnerConfiguration(options, effectiveTz) {
     argsTemplate,
     environment: {
       TZ: effectiveTz,
-      TSX_TSCONFIG_PATH: TEST_TSCONFIG,
     },
     perFileTimeoutMs: options.perFileTimeoutMs,
     totalTimeoutMs: options.totalTimeoutMs,

@@ -11,7 +11,6 @@
  * agreement cannot catch on its own.
  */
 import { strict as assert } from "node:assert";
-import test from "node:test";
 import vectors from "@botiverse/raft-shared/src/testVectors/threadRepliesReadModel.vectors.json" with { type: "json" };
 import {
   applyThreadReplyFrame,

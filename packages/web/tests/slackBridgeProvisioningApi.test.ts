@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import test from "node:test";
 import {
   SLACK_BRIDGE_PROVISIONING_PROTOCOL_VERSION,
   slackBridgeChannelPairRemovalsRequestSchema,
@@ -352,7 +351,13 @@ test("production adapter rejects duplicate or orphan health authority", async ()
     rawHealth: {
       install: null,
       credential: null,
-      bindings: [{ id: "binding-one", state: "active", bindingEpoch: 1 }],
+      bindings: [{
+        id: "binding-one",
+        state: "active",
+        bindingEpoch: 1,
+        stateReason: null,
+        recoveryAction: "none",
+      }],
       audiences: [{ bindingId: "binding-orphan", status: "matched" }],
       lastVerifiedAt: null,
       failingSurface: "audience",

@@ -1,13 +1,13 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { createAgent } from "../services/agentService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { createChannel } from "../services/channelService.js";
-import { createServer } from "../services/serverService.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { createAgent } from "../services/agentService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { createChannel } from "../services/channelService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

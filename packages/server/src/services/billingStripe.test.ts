@@ -1,8 +1,7 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 import type Stripe from "stripe";
 import { eq } from "drizzle-orm";
 import {
@@ -13,11 +12,11 @@ import {
   MemoryTraceSink,
   type TraceEvent,
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { subscriptions, servers, users, webhookEvents } from "../db/schema.js";
-import { runWithTraceSpan } from "../tracing/semanticTrace.js";
-import { createServer } from "./serverService.js";
-import { createAgent } from "./agentService.js";
+import { getDb } from "../db/index";
+import { subscriptions, servers, users, webhookEvents } from "../db/schema";
+import { runWithTraceSpan } from "../tracing/semanticTrace";
+import { createServer } from "./serverService";
+import { createAgent } from "./agentService";
 import {
   __resetBillingPreviewClockForTests,
   __resetStripeForTests,
@@ -29,8 +28,8 @@ import {
   handleWebhookEvent,
   previewProPackQuantityUpdate,
   updateProPackQuantity,
-} from "./billingService.js";
-import { getServerBillingEntitlement, requireTeamBillingFeature } from "./planService.js";
+} from "./billingService";
+import { getServerBillingEntitlement, requireTeamBillingFeature } from "./planService";
 
 
 const ENV_KEYS = [

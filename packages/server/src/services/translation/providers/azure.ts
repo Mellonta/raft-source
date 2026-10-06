@@ -1,15 +1,15 @@
 import { z } from "zod";
-import { assertTranslationPlaceholders } from "../placeholderValidator.js";
-import type { TranslationPlaceholderPolicy } from "../placeholderPolicy.js";
+import { assertTranslationPlaceholders } from "../placeholderValidator";
+import type { TranslationPlaceholderPolicy } from "../placeholderPolicy";
 import type {
   TranslationBatchItem,
   TranslationBatchResult,
   TranslationProvider,
   TranslationProviderVersion,
   TranslationResultItem,
-} from "../types.js";
-import { translationBatchResultSchema, translationBatchItemSchema } from "../types.js";
-import { TranslationProviderError } from "../errors.js";
+} from "../types";
+import { translationBatchResultSchema, translationBatchItemSchema } from "../types";
+import { TranslationProviderError } from "../errors";
 
 const DEFAULT_AZURE_TRANSLATOR_API_VERSION = "3.0";
 const DEFAULT_AZURE_TRANSLATOR_POLICY_VERSION = "azure-translator-v2";

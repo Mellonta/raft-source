@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createRefreshCoordinator } from "../src/utils/refreshCoordinator";
 import type { RefreshTokens } from "../src/utils/refreshCoordinator";
 

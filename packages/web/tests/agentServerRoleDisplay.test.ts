@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { resolveAgentServerRoleDisplay } from "../src/utils/agentServerRoleDisplay.js";
+import { resolveAgentServerRoleDisplay } from "../src/utils/agentServerRoleDisplay";
 
 // task #261 (artin, 2026-09-03): ① unrecognized role -> show the server's name, first letter
 // upper-cased; ②A no role (no membership row) -> no chip; ②B deleted -> no chip.

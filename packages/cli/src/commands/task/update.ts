@@ -4,19 +4,19 @@
 import type { Command } from "commander";
 import { type AgentApiTaskUpdateStatusBody } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText, NL } from "../../core/renderer.js";
-import { requireTargetAlias, type TargetAliasOpts } from "../_target.js";
-import { formatFreshnessHoldOutput, isFreshnessHeldResponse } from "../freshness/_format.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText, NL } from "../../core/renderer";
+import { PEER_KIND_OPTION, requireTargetAlias, type TargetAliasOpts } from "../_target";
+import { formatFreshnessHoldOutput, isFreshnessHeldResponse } from "../freshness/_format";
 import {
   reviewerIsolationEnabled,
   reviewerIsolationOption,
   type ReviewerIsolationOpts,
-} from "../reviewerIsolation.js";
-import { formatTaskStatusUpdated } from "./_format.js";
+} from "../reviewerIsolation";
+import { formatTaskStatusUpdated } from "./_format";
 
 const STATUSES = ["todo", "in_progress", "in_review", "done", "closed"] as const;
 type Status = (typeof STATUSES)[number];
@@ -76,6 +76,7 @@ export const taskUpdateCommand = defineCommand(
     options: [
       { flags: "--target <target>", description: "Channel target: '#channel'" },
       { flags: "--channel <target>", description: "Legacy alias for --target (accepted during transition)" },
+      PEER_KIND_OPTION,
       {
         flags: "--number <n>",
         description: "Task number to update",

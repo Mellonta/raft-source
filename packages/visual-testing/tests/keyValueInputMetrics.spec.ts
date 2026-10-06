@@ -29,8 +29,7 @@ async function primeConnections(page: import("@playwright/test").Page) {
 async function openRows(page: import("@playwright/test").Page, theme: Theme) {
   await primeConnections(page);
   await page.goto(CASE(theme));
-  await page.waitForSelector('[title="Edit runtime config"]', { timeout: 10_000 });
-  await page.click('[title="Edit runtime config"]');
+  await page.getByRole("button", { name: "Edit runtime config" }).click({ timeout: 10_000 });
   // Agent Details uses an inline editor surface (not an ARIA dialog).  Readiness
   // is the editor's real combobox, matching the existing provider-connection
   // metrics spec; waiting for role=dialog makes the tooth fail before measuring.

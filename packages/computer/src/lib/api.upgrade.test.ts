@@ -2,11 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { createComputerApi } from "./api.js";
-import { ComputerError } from "./errors.js";
-import { ServiceClientError, type ServiceClient } from "./types.js";
+import { createComputerApi } from "./api";
+import { ComputerError } from "./errors";
+import { ServiceClientError, type ServiceClient } from "./types";
 
 const TARGET_VERSION = "1.0.25";
 

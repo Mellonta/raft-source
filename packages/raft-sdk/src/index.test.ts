@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { createRaftClient, RaftSdkConfigurationError } from "./index.js";
+import { createRaftClient, RaftSdkConfigurationError } from "./index";
 
 test("createRaftClient sends through the typed Agent API without CLI state", async () => {
   const calls: Array<{ url: string; init: RequestInit }> = [];

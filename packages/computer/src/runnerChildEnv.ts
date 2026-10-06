@@ -1,4 +1,4 @@
-import { OS_SUPERVISOR_KIND_ENV_VAR } from "./osSupervisorLifecycle.js";
+import { OS_SUPERVISOR_KIND_ENV_VAR } from "./osSupervisorLifecycle";
 
 export const PARENT_LOCK_HELD_ENV_VAR = "RAFT_COMPUTER_PARENT_MUTATION_LOCK_HELD";
 export const SOURCE_SERVICE_PID_ENV_VAR = "RAFT_COMPUTER_SOURCE_SERVICE_PID";

@@ -7,9 +7,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { migratePglite } from "./pgliteMigrations.js";
+import { migratePglite } from "./pgliteMigrations";
 
 function makeFolder(entries: Array<{ tag: string; sql: string }>): string {
   const dir = mkdtempSync(path.join(tmpdir(), "pglite-mig-"));

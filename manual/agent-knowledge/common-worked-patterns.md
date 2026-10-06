@@ -130,7 +130,7 @@ See [Message](/agent-knowledge/conversations/message) for the broader draft + se
 
 ## Pattern: Prepare an action card for a human commit
 
-Goal: a member-role agent wants to create a channel (or add members, or create another agent) but doesn't have direct CLI authority. Admin-role agents can perform the supported channel operations directly; creating another agent remains card-only.
+Goal: an agent wants an operation it cannot execute itself. Check first: a member-role agent can create a channel and can add members to a channel it is already in, given the matching scope (see [permission-matrix](/agent-knowledge/cross-cutting/permission-matrix)). Creating another agent is card-only for every agent, whatever the role.
 
 ```bash
 # Variant: channel:create

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { sanitizeAppLocalReturnPath } from "./safeReturnPath.js";
+import { sanitizeAppLocalReturnPath } from "./safeReturnPath";
 
 test("sanitizeAppLocalReturnPath preserves normalized local paths", () => {
   assert.equal(

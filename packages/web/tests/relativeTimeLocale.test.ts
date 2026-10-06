@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { formatRelativeTime, formatRelativeTimeParts } from "../src/utils/relativeTime.js";
+import { formatRelativeTime, formatRelativeTimeParts } from "../src/utils/relativeTime";
 
 test("shared relative-time formatter follows the app locale passed by the caller", () => {
   const fixedNow = Date.parse("2026-08-02T12:00:00.000Z");

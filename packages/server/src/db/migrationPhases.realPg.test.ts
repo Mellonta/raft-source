@@ -7,13 +7,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
 import {
   runMigrationPhases,
-} from "./migrationPhases.js";
+} from "./migrationPhases";
 
 const LOCK_RELEASE_BOUNDARY_TAG = "0244_ancient_ares";
 const LOCK_SENSITIVE_MIGRATION_TAG = "0245_complete_sharon_ventura";
@@ -185,7 +184,6 @@ test("canonical Drizzle phase runner commits before 0245 and preserves journal o
   const db = drizzle(migration);
   const apply = runMigrationPhases(
     folder,
-    [LOCK_RELEASE_BOUNDARY_TAG, LOCK_SENSITIVE_MIGRATION_TAG],
     async (phase, phaseFolder) => {
       if (!phase.tags.includes(LOCK_SENSITIVE_MIGRATION_TAG)) {
         await migrate(db, { migrationsFolder: phaseFolder, migrationsSchema: migrationSchema });

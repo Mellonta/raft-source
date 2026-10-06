@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { RegisteredIntegrationService } from "./_format.js";
+import type { RegisteredIntegrationService } from "./_format";
 import {
   AgentManifestFetchError,
   AgentManifestResponseFormatError,
   type AgentManifestV0,
-} from "./manifest.js";
-import { probeIntegrationManifest, registryManifestObservation } from "./readiness.js";
+} from "./manifest";
+import { probeIntegrationManifest, registryManifestObservation } from "./readiness";
 
 const NOW = new Date("2026-07-23T01:00:00.000Z");
 

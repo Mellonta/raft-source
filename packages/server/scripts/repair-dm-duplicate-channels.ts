@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -120,9 +120,9 @@ export const DELETE_DUPLICATE_DM_IDENTITIES_SQL =
 function usage() {
   console.error([
     "Usage:",
-    "  pnpm --filter @botiverse/raft-server exec tsx scripts/repair-dm-duplicate-channels.ts --input detailed.tsv [--server-id <uuid>] [--limit <n>] [--json]",
-    "  DATABASE_URL=... pnpm --filter @botiverse/raft-server exec tsx scripts/repair-dm-duplicate-channels.ts [--server-id <uuid>] [--limit <n>] [--json]",
-    "  DATABASE_URL=... pnpm --filter @botiverse/raft-server exec tsx scripts/repair-dm-duplicate-channels.ts --apply --confirm task154-dm-dedupe [--server-id <uuid>] [--limit <n>] [--json]",
+    "  pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/repair-dm-duplicate-channels.ts --input detailed.tsv [--server-id <uuid>] [--limit <n>] [--json]",
+    "  DATABASE_URL=... pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/repair-dm-duplicate-channels.ts [--server-id <uuid>] [--limit <n>] [--json]",
+    "  DATABASE_URL=... pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/repair-dm-duplicate-channels.ts --apply --confirm task154-dm-dedupe [--server-id <uuid>] [--limit <n>] [--json]",
     "",
     "Contract:",
     "  - Defaults to dry-run. With --input, dry-run is artifact-only and needs no database credentials.",

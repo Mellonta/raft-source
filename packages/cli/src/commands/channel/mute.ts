@@ -4,12 +4,12 @@
 import type { Command } from "commander";
 import type { AgentApiResponseByRoute } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { parseRegularChannelTarget } from "./leave.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { parseRegularChannelTarget } from "./leave";
 
 type ChannelMuteAction = "mute" | "unmute";
 type AgentChannelMuteResponse = AgentApiResponseByRoute["channelMute"];
@@ -49,13 +49,13 @@ function makeChannelMuteCommand(action: ChannelMuteAction) {
     {
       name: action,
       description: action === "mute"
-        ? "Mute ordinary Activity delivery for a regular channel"
-        : "Unmute ordinary Activity delivery for a regular channel",
+        ? "Mute ordinary Activity delivery for a public, private, or joint channel"
+        : "Unmute ordinary Activity delivery for a public, private, or joint channel",
       arguments: ["[target]"],
       options: [
         {
           flags: "--target <target>",
-          description: `Regular channel to ${action}, e.g. '#engineering'`,
+          description: `Channel to ${action}, e.g. '#engineering'`,
         },
       ],
     },
@@ -73,7 +73,7 @@ function makeChannelMuteCommand(action: ChannelMuteAction) {
       if (!channelName) {
         throw new CliError({
           code: "INVALID_TARGET",
-          message: "Target must be a regular channel in the form '#channel-name'. DMs and thread targets are not supported.",
+          message: "Target must be a channel in the form '#channel-name'. DMs and thread targets are not supported.",
         });
       }
 

@@ -1,8 +1,9 @@
 import { and, asc, eq, lt } from "drizzle-orm";
 import type { Server as SocketServer } from "socket.io";
-import { clearClockInterval, currentDate, setClockInterval } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { channelMembershipRoleEvents, channels } from "../db/schema.js";
+import { clearClockInterval, currentDate, noopTracer, setClockInterval, type Tracer } from "@botiverse/raft-shared";
+import { getDb } from "../db/index";
+import { channelMembershipRoleEvents, channels } from "../db/schema";
+import { withTraceRoot } from "../tracing/semanticTrace";
 
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_BATCH_SIZE = 50;
@@ -90,15 +91,25 @@ export function startChannelMembershipRoleOutboxWorker(input: {
   intervalMs?: number;
   batchSize?: number;
   drain?: typeof drainChannelMembershipRoleOutbox;
+  tracer?: Tracer;
 }): { stop(): void } {
   let stopped = false;
   let running = false;
   const drain = input.drain ?? drainChannelMembershipRoleOutbox;
+  const tracer = input.tracer ?? noopTracer;
   const tick = async () => {
     if (stopped || running) return;
     running = true;
     try {
-      await drain({ io: input.io, batchSize: input.batchSize });
+      // Each drain is a root span. A failure also records the
+      // `server.channel_membership_role_outbox.error` event inside it.
+      await withTraceRoot(
+        tracer,
+        "server.channel_membership_role_outbox.drain",
+        { surface: "server", kind: "internal" },
+        () => drain({ io: input.io, batchSize: input.batchSize }),
+        "server.channel_membership_role_outbox.error",
+      );
     } catch (error) {
       console.error("[ChannelMembershipRoleOutbox] Drain failed:", error);
     } finally {

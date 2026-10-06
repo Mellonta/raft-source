@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import FormField from "../src/components/ui/FormField.js";
+import FormField from "../src/components/ui/FormField";
 import { createIntl } from "react-intl";
 import {
   AUTH_MESSAGE_IDS,
   authServerErrorMessage,
   isValidEmailFormat,
-} from "../src/components/auth/authErrors.js";
+} from "../src/components/auth/authErrors";
 import { en } from "../src/i18n/messages/en";
 import { zhCn } from "../src/i18n/messages/zh-cn";
 
@@ -64,6 +63,6 @@ test("FormField renders inline red errors next to the input", () => {
 
   assert.match(html, /Email/);
   assert.match(html, /role="alert"/);
-  assert.match(html, /text-brutal-red/);
+  assert.match(html, /text-danger/);
   assert.match(html, /Invalid email format/);
 });

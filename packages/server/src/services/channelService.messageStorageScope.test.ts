@@ -1,12 +1,12 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
-import { getDb } from "../db/index.js";
-import { channels, jointChannels, jointChannelServers, messages, users } from "../db/schema.js";
-import { createServer } from "./serverService.js";
-import { resolveServerMessageStorageChannelIds } from "./channelService.js";
+import { getDb } from "../db/index";
+import { channels, jointChannels, jointChannelServers, messages, users } from "../db/schema";
+import { createServer } from "./serverService";
+import { resolveServerMessageStorageChannelIds } from "./channelService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -17,17 +17,7 @@ function exportedFunctionSource(source: string, name: string): string {
   return source.slice(start, next === -1 ? source.length : next);
 }
 
-function asyncFunctionSource(source: string, name: string): string {
-  const start = source.indexOf(`async function ${name}`);
-  assert.notEqual(start, -1, `${name} must exist`);
-  const next = source.indexOf("\nasync function ", start + 1);
-  const nextExported = source.indexOf("\nexport async function ", start + 1);
-  const candidates = [next, nextExported].filter((index) => index !== -1);
-  const end = candidates.length === 0 ? source.length : Math.min(...candidates);
-  return source.slice(start, end);
-}
-
-test("server message storage scope stays set-based and Wiki keeps a narrower public-only scope", () => {
+test("server message storage scope stays set-based", () => {
   const channelSource = readFileSync(new URL("./channelService.ts", import.meta.url), "utf8");
   const resolverSource = exportedFunctionSource(channelSource, "resolveServerMessageStorageChannelIds");
   assert.equal((resolverSource.match(/\.execute\(sql`/g) ?? []).length, 1);
@@ -41,50 +31,7 @@ test("server message storage scope stays set-based and Wiki keeps a narrower pub
   assert.match(resolverSource, /parent_projection\.status = 'active'/);
   assert.match(resolverSource, /canonical_thread\.type = 'thread'/);
 
-  const wikiSource = readFileSync(new URL("./wikiService.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(wikiSource, /resolveServerMessageStorageChannelIds/);
-  assert.doesNotMatch(wikiSource, /runWikiCoverageRefresh|getBoundedRoundUpperSeq/);
 
-  const publicSource = asyncFunctionSource(wikiSource, "listEligibleWikiPublicChannelIds");
-  assert.match(publicSource, /eq\(channels\.serverId, space\.serverId\)/);
-  assert.match(publicSource, /eq\(channels\.type, "channel"\)/);
-  assert.match(publicSource, /ne\(channels\.name, "all"\)/);
-  assert.match(publicSource, /ne\(channels\.id, space\.wikiChannelId\)/);
-  assert.match(publicSource, /isNull\(channels\.archivedAt\)/);
-  assert.match(publicSource, /isNull\(channels\.deletedAt\)/);
-
-  const threadSource = asyncFunctionSource(wikiSource, "listActiveWikiThreadScopes");
-  assert.match(threadSource, /eq\(channels\.serverId, serverId\)/);
-  assert.match(threadSource, /eq\(channels\.type, "thread"\)/);
-  assert.match(threadSource, /isNotNull\(channels\.parentMessageId\)/);
-  assert.match(threadSource, /isNull\(channels\.archivedAt\)/);
-  assert.match(threadSource, /isNull\(channels\.deletedAt\)/);
-
-  const parentSource = asyncFunctionSource(wikiSource, "loadWikiParentMessageChannels");
-  assert.match(parentSource, /\.from\(messages\)/);
-  assert.match(parentSource, /inArray\(messages\.id, parentMessageIds\)/);
-  assert.doesNotMatch(parentSource, /channels\.serverId/);
-
-  // The eligible scope is resolved in one place and expressed in two keys:
-  // storage channel ids, and the coverage channel each one belongs to. Threads
-  // fold into their parent, which is what lets a channel's coverage stand for
-  // its threads at every site that measures source.
-  const scopeSource = asyncFunctionSource(wikiSource, "getEligibleWikiSourceScope");
-  assert.equal((scopeSource.match(/listEligibleWikiPublicChannelIds\(/g) ?? []).length, 1);
-  assert.equal((scopeSource.match(/listActiveWikiThreadScopes\(/g) ?? []).length, 1);
-  assert.equal((scopeSource.match(/loadWikiParentMessageChannels\(/g) ?? []).length, 1);
-  // Public-only teeth: a thread is attached only when its parent message sits
-  // in the eligible public set, and it is keyed to that parent.
-  assert.match(scopeSource, /parentById\.get\(channel\.parentMessageId\) \?\? ""/);
-  assert.match(scopeSource, /if \(!publicChannelIds\.has\(parentChannelId\)\) continue;/);
-  assert.match(scopeSource, /coverageIdByStorageId\.set\(channel\.id, parentChannelId\)/);
-
-  const eligibleSource = asyncFunctionSource(wikiSource, "getEligibleWikiSourceChannelIds");
-  assert.match(eligibleSource, /getEligibleWikiSourceScope\(space\)/);
-
-  const upperSeqSource = asyncFunctionSource(wikiSource, "getEligibleWikiSourceUpperSeq");
-  assert.match(upperSeqSource, /MAX\(\$\{messages\.seq\}\)/);
-  assert.match(upperSeqSource, /inArray\(messages\.channelId, scope\.storageChannelIds\)/);
 });
 
 test("server message storage scope maps active joint channels and threads and fails closed", async ({ app }) => {

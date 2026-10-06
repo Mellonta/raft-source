@@ -1,28 +1,28 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { chunkForBindParameters, insertParametersPerRow } from "../db/bindParameterBudget";
 import {
   agentChannelReadCursors,
   channels,
   inboxNotificationFacts,
-  inboxServingRows,
   inboxSuppressionStates,
   inboxTargetMuteStates,
   userChannelReadCursors,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
-  projectInboxServingRowsFromNotificationFacts,
   type InboxPolicyNotificationFact,
-} from "./inboxPolicyModel.js";
-import { isActivityPromotionSuppressedByMute } from "./inboxMutePolicy.js";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
-import { enqueueMobilePushForInboxFacts } from "./pushService.js";
+} from "./inboxPolicyModel";
+import { isActivityPromotionSuppressedByMute } from "./inboxMutePolicy";
+import { addTraceEvent } from "../tracing/semanticTrace";
+import { enqueueMobilePushForInboxFacts } from "./pushService";
 
 export type InboxNotificationReceiverType = "user" | "agent";
 export type InboxNotificationTargetKind = "channel" | "dm" | "thread";
 type InboxTraceDecisionState = "activity_promoted" | "activity_not_promoted";
 type InboxTraceDecisionReason = "eligible" | "muted" | "personal_mention_pierced" | "thread_independent" | "unfollowed_thread_ordinary";
 type InboxTraceRebuildState = "row_upserted" | "row_deleted" | "row_skipped";
+type InboxTraceIncrementState = "row_upserted" | "row_skipped";
 type InboxTraceNegativeEvidenceBucket =
   | "does_not_prove_read_state_or_ui_rendered"
   | "muted_not_unfollowed_or_not_eligible"
@@ -161,186 +161,186 @@ function traceInboxServingRowRebuild(
   });
 }
 
-async function getLastReadSeq(target: InboxServingTarget, executor: DatabaseExecutor = getDb()): Promise<number> {
-  if (target.receiverType === "user") {
-    const [row] = await executor
-      .select({ lastReadSeq: userChannelReadCursors.lastReadSeq })
-      .from(userChannelReadCursors)
-      .where(and(
-        eq(userChannelReadCursors.userId, target.receiverId),
-        eq(userChannelReadCursors.channelId, target.sourceChannelId),
-      ))
-      .limit(1);
-    return row?.lastReadSeq ?? 0;
-  }
+type InboxServingRowIncrementTraceAttrs = {
+  state: InboxTraceIncrementState;
+  reason: "inserted_facts" | "suppressed_by_done_watermark" | "inactive_channel";
+  factsCount: number;
+  unreadCount: number;
+  hasAnyMention: boolean;
+  kind: InboxNotificationTargetKind;
+};
 
-  const [row] = await executor
-    .select({ lastReadSeq: agentChannelReadCursors.lastReadSeq })
-    .from(agentChannelReadCursors)
-    .where(and(
-      eq(agentChannelReadCursors.agentId, target.receiverId),
-      eq(agentChannelReadCursors.channelId, target.sourceChannelId),
-    ))
-    .limit(1);
-  return row?.lastReadSeq ?? 0;
+function traceInboxServingRowIncrement(
+  target: InboxServingTarget,
+  attrs: InboxServingRowIncrementTraceAttrs,
+) {
+  addTraceEvent("inbox.serving_row.increment", {
+    "inbox.trace_contract_version": INBOX_TRACE_CONTRACT_VERSION,
+    "inbox.trace_join_key": targetTraceJoinKey(target),
+    receiver_type: target.receiverType,
+    receiver_id: target.receiverId,
+    source_channel_id: target.sourceChannelId,
+    state: attrs.state,
+    reason: attrs.reason,
+    negative_evidence_bucket: "does_not_prove_read_state_or_ui_rendered",
+    facts_count: attrs.factsCount,
+    unread_count: attrs.unreadCount,
+    has_any_mention: attrs.hasAnyMention,
+    target_kind: attrs.kind,
+  });
 }
 
-export async function rebuildInboxServingRowsForReceiverTargets(
+type SuppressionDoneTargetKind = "channel" | "dm" | "followed_thread" | "public_channel_mention" | "public_thread_mention";
+
+// Suppression target kinds whose `done_through_seq` watermark suppresses Activity promotion
+// for the target channel. Declared once, beside the reader that consumes it, so the batched
+// and single-target lookups cannot drift apart.
+const DONE_TARGET_KINDS: SuppressionDoneTargetKind[] = [
+  "channel",
+  "dm",
+  "followed_thread",
+  "public_channel_mention",
+  "public_thread_mention",
+];
+
+/**
+ * Batched read-frontier lookup: one statement per principal class, not one per (receiver,
+ * channel) target. `targets` is the fan-out of the send being recorded, so the cost stays
+ * proportional to that fan-out and never to the accumulated history of any receiver.
+ *
+ * The source query may return pairs outside `targets`; results are keyed by the exact pair,
+ * so only requested pairs are ever read back.
+ */
+async function getLastReadSeqByTarget(
   targets: readonly InboxServingTarget[],
-  executor: DatabaseExecutor = getDb(),
-): Promise<void> {
-  for (const target of uniqueTargets(targets)) {
-    const facts = await executor
+  executor: DatabaseExecutor,
+): Promise<Map<string, number>> {
+  const lastReadSeqByTarget = new Map<string, number>();
+  const userTargets = targets.filter((target) => target.receiverType === "user");
+  const agentTargets = targets.filter((target) => target.receiverType === "agent");
+  const channelIds = [...new Set(targets.map((target) => target.sourceChannelId))];
+
+  if (userTargets.length > 0) {
+    const rows = await executor
       .select({
-        receiverType: inboxNotificationFacts.receiverType,
-        receiverId: inboxNotificationFacts.receiverId,
-        kind: inboxNotificationFacts.kind,
-        sourceChannelId: inboxNotificationFacts.sourceChannelId,
-        seq: inboxNotificationFacts.messageSeq,
-        messageId: inboxNotificationFacts.messageId,
-        activityAt: inboxNotificationFacts.activityAt,
-        personalMention: inboxNotificationFacts.personalMention,
-        unreadEligible: inboxNotificationFacts.unreadEligible,
-        serverId: inboxNotificationFacts.serverId,
+        receiverId: userChannelReadCursors.userId,
+        sourceChannelId: userChannelReadCursors.channelId,
+        lastReadSeq: userChannelReadCursors.lastReadSeq,
       })
-      .from(inboxNotificationFacts)
-      .innerJoin(channels, and(
-        eq(channels.id, inboxNotificationFacts.sourceChannelId),
-        isNull(channels.deletedAt),
-        isNull(channels.archivedAt),
-      ))
+      .from(userChannelReadCursors)
       .where(and(
-        eq(inboxNotificationFacts.receiverType, target.receiverType),
-        eq(inboxNotificationFacts.receiverId, target.receiverId),
-        eq(inboxNotificationFacts.sourceChannelId, target.sourceChannelId),
-      ))
-      .orderBy(inboxNotificationFacts.messageSeq);
-    const lastReadSeq = await getLastReadSeq(target, executor);
-    const suppressionRows = target.receiverType === "user"
-      ? await executor
-        .select({ doneThroughSeq: inboxSuppressionStates.doneThroughSeq })
-        .from(inboxSuppressionStates)
-        .where(and(
-          eq(inboxSuppressionStates.receiverType, "user"),
-          eq(inboxSuppressionStates.receiverId, target.receiverId),
-          inArray(inboxSuppressionStates.targetKind, [
-            "channel",
-            "dm",
-            "followed_thread",
-            "public_channel_mention",
-            "public_thread_mention",
-          ]),
-          eq(inboxSuppressionStates.targetChannelId, target.sourceChannelId),
-        ))
-      : [];
-    const doneThroughSeq = suppressionRows.reduce<number | null>((maxSeq, row) => {
-      if (row.doneThroughSeq == null) return maxSeq;
+        inArray(userChannelReadCursors.userId, [...new Set(userTargets.map((target) => target.receiverId))]),
+        inArray(userChannelReadCursors.channelId, channelIds),
+      ));
+    for (const row of rows) {
+      lastReadSeqByTarget.set(targetKey({
+        receiverType: "user",
+        receiverId: row.receiverId,
+        sourceChannelId: row.sourceChannelId,
+      }), row.lastReadSeq);
+    }
+  }
+
+  if (agentTargets.length > 0) {
+    const rows = await executor
+      .select({
+        receiverId: agentChannelReadCursors.agentId,
+        sourceChannelId: agentChannelReadCursors.channelId,
+        lastReadSeq: agentChannelReadCursors.lastReadSeq,
+      })
+      .from(agentChannelReadCursors)
+      .where(and(
+        inArray(agentChannelReadCursors.agentId, [...new Set(agentTargets.map((target) => target.receiverId))]),
+        inArray(agentChannelReadCursors.channelId, channelIds),
+      ));
+    for (const row of rows) {
+      lastReadSeqByTarget.set(targetKey({
+        receiverType: "agent",
+        receiverId: row.receiverId,
+        sourceChannelId: row.sourceChannelId,
+      }), row.lastReadSeq);
+    }
+  }
+
+  return lastReadSeqByTarget;
+}
+
+// Single-target wrappers keep the rebuild path's call sites and semantics unchanged.
+async function getLastReadSeq(
+  target: InboxServingTarget,
+  executor: DatabaseExecutor = getDb(),
+): Promise<number> {
+  return (await getLastReadSeqByTarget([target], executor)).get(targetKey(target)) ?? 0;
+}
+
+/**
+ * Batched Done-frontier lookup. Rows for pairs outside `targets` are ignored before the
+ * unsafe-sequence guard runs, so the guard still fires on exactly the pairs the
+ * single-target version checked.
+ */
+async function getDoneThroughSeqByTarget(
+  targets: readonly InboxServingTarget[],
+  executor: DatabaseExecutor,
+): Promise<Map<string, number | null>> {
+  const doneThroughSeqByTarget = new Map<string, number | null>();
+  const userTargets = targets.filter((target) => target.receiverType === "user");
+  const requestedKeys = new Set(userTargets.map((target) => targetKey(target)));
+
+  if (userTargets.length > 0) {
+    const suppressionRows = await executor
+      .select({
+        receiverId: inboxSuppressionStates.receiverId,
+        sourceChannelId: inboxSuppressionStates.targetChannelId,
+        doneThroughSeq: inboxSuppressionStates.doneThroughSeq,
+      })
+      .from(inboxSuppressionStates)
+      .where(and(
+        eq(inboxSuppressionStates.receiverType, "user"),
+        inArray(inboxSuppressionStates.receiverId, [...new Set(userTargets.map((target) => target.receiverId))]),
+        inArray(inboxSuppressionStates.targetKind, [...DONE_TARGET_KINDS]),
+        inArray(inboxSuppressionStates.targetChannelId, [...new Set(userTargets.map((target) => target.sourceChannelId))]),
+      ));
+    for (const row of suppressionRows) {
+      const key = targetKey({
+        receiverType: "user",
+        receiverId: row.receiverId,
+        sourceChannelId: row.sourceChannelId,
+      });
+      if (!requestedKeys.has(key)) continue;
+      if (row.doneThroughSeq == null) continue;
       const seq = Number(row.doneThroughSeq);
       if (!Number.isSafeInteger(seq)) throw new Error(`unsafe suppression sequence: ${String(row.doneThroughSeq)}`);
-      return maxSeq == null || seq > maxSeq ? seq : maxSeq;
-    }, null);
-    const unsuppressedFacts = doneThroughSeq == null
-      ? facts
-      : facts.filter((fact) => fact.seq > doneThroughSeq);
-
-    const projected = projectInboxServingRowsFromNotificationFacts({
-      receiverType: target.receiverType,
-      receiverId: target.receiverId,
-      facts: unsuppressedFacts satisfies readonly (InboxPolicyNotificationFact & { serverId: string })[],
-      lastReadSeqByChannel: { [target.sourceChannelId]: lastReadSeq },
-    })[0];
-
-    if (!projected) {
-      traceInboxServingRowRebuild(target, {
-        state: "row_deleted",
-        reason: "no_projected_notification_facts",
-        factsCount: facts.length,
-        lastReadSeq,
-      });
-      await executor
-        .delete(inboxServingRows)
-        .where(and(
-          eq(inboxServingRows.receiverType, target.receiverType),
-          eq(inboxServingRows.receiverId, target.receiverId),
-          eq(inboxServingRows.sourceChannelId, target.sourceChannelId),
-        ));
-      continue;
+      const previous = doneThroughSeqByTarget.get(key);
+      if (previous == null || seq > previous) doneThroughSeqByTarget.set(key, seq);
     }
-
-    const latestFact = facts.find((fact) => fact.messageId === projected.latestMessageId);
-    if (!latestFact) {
-      traceInboxServingRowRebuild(target, {
-        state: "row_skipped",
-        reason: "latest_fact_missing",
-        factsCount: facts.length,
-        lastReadSeq,
-        latestNotifiedSeq: projected.latestNotifiedSeq,
-        unreadCount: projected.unreadCount,
-        hasAnyMention: projected.hasAnyMention,
-        kind: projected.kind,
-      });
-      continue;
-    }
-    const now = new Date();
-    const values: typeof inboxServingRows.$inferInsert = {
-      receiverType: target.receiverType,
-      receiverId: target.receiverId,
-      serverId: latestFact.serverId,
-      kind: projected.kind,
-      sourceChannelId: target.sourceChannelId,
-      latestNotifiedMessageId: projected.latestMessageId,
-      latestNotifiedSeq: projected.latestNotifiedSeq,
-      latestNotifiedAt: latestFact.activityAt,
-      lastActivityAt: latestFact.activityAt,
-      firstUnreadMessageId: projected.firstUnreadMessageId,
-      firstUnreadSeq: projected.firstUnreadSeq,
-      unreadCount: projected.unreadCount,
-      latestPersonalMentionMessageId: projected.latestPersonalMentionSeq == null
-        ? null
-        : facts.find((fact) => fact.seq === projected.latestPersonalMentionSeq)?.messageId ?? null,
-      latestPersonalMentionSeq: projected.latestPersonalMentionSeq,
-      unreadMentionCount: projected.unreadMentionCount,
-      hasAnyMention: projected.hasAnyMention,
-      updatedAt: now,
-    };
-
-    await executor
-      .insert(inboxServingRows)
-      .values(values)
-      .onConflictDoUpdate({
-        target: [
-          inboxServingRows.receiverType,
-          inboxServingRows.receiverId,
-          inboxServingRows.sourceChannelId,
-        ],
-        set: {
-          serverId: values.serverId,
-          kind: values.kind,
-          latestNotifiedMessageId: values.latestNotifiedMessageId,
-          latestNotifiedSeq: values.latestNotifiedSeq,
-          latestNotifiedAt: values.latestNotifiedAt,
-          lastActivityAt: values.lastActivityAt,
-          firstUnreadMessageId: values.firstUnreadMessageId,
-          firstUnreadSeq: values.firstUnreadSeq,
-          unreadCount: values.unreadCount,
-          latestPersonalMentionMessageId: values.latestPersonalMentionMessageId,
-          latestPersonalMentionSeq: values.latestPersonalMentionSeq,
-          unreadMentionCount: values.unreadMentionCount,
-          hasAnyMention: values.hasAnyMention,
-          updatedAt: values.updatedAt,
-        },
-      });
-    traceInboxServingRowRebuild(target, {
-      state: "row_upserted",
-      reason: "projected",
-      factsCount: facts.length,
-      lastReadSeq,
-      latestNotifiedSeq: projected.latestNotifiedSeq,
-      unreadCount: projected.unreadCount,
-      hasAnyMention: projected.hasAnyMention,
-      kind: projected.kind,
-    });
   }
+
+  for (const key of requestedKeys) {
+    if (!doneThroughSeqByTarget.has(key)) doneThroughSeqByTarget.set(key, null);
+  }
+  return doneThroughSeqByTarget;
+}
+
+async function getDoneThroughSeq(
+  target: InboxServingTarget,
+  executor: DatabaseExecutor,
+): Promise<number | null> {
+  return (await getDoneThroughSeqByTarget([target], executor)).get(targetKey(target)) ?? null;
+}
+
+function inboxFactInsertValues(fact: InboxNotificationFactInput): typeof inboxNotificationFacts.$inferInsert {
+  return {
+    receiverType: fact.receiverType,
+    receiverId: fact.receiverId,
+    serverId: fact.serverId,
+    kind: fact.kind,
+    sourceChannelId: fact.sourceChannelId,
+    messageId: fact.messageId,
+    messageSeq: fact.messageSeq,
+    activityAt: fact.activityAt,
+    personalMention: fact.personalMention === true,
+    unreadEligible: fact.unreadEligible !== false,
+  };
 }
 
 export async function recordInboxNotificationFacts(
@@ -380,42 +380,74 @@ export async function recordInboxNotificationFacts(
     return !suppressedByMute && !isSuppressedByUnfollowedThreadOrdinary(fact);
   });
   if (filteredFacts.length === 0) return 0;
-  await executor
-    .insert(inboxNotificationFacts)
-    .values(filteredFacts.map((fact) => ({
-      receiverType: fact.receiverType,
-      receiverId: fact.receiverId,
-      serverId: fact.serverId,
-      kind: fact.kind,
-      sourceChannelId: fact.sourceChannelId,
-      messageId: fact.messageId,
-      messageSeq: fact.messageSeq,
-      activityAt: fact.activityAt,
-      personalMention: fact.personalMention === true,
-      unreadEligible: fact.unreadEligible !== false,
-    })))
-    .onConflictDoUpdate({
-      target: [
-        inboxNotificationFacts.receiverType,
-        inboxNotificationFacts.receiverId,
-        inboxNotificationFacts.sourceChannelId,
-        inboxNotificationFacts.messageId,
-      ],
-      set: {
-        serverId: sql`excluded.server_id`,
-        kind: sql`excluded.kind`,
-        messageSeq: sql`excluded.message_seq`,
-        activityAt: sql`excluded.activity_at`,
-        personalMention: sql`${inboxNotificationFacts.personalMention} OR excluded.personal_mention`,
-        unreadEligible: sql`${inboxNotificationFacts.unreadEligible} AND excluded.unread_eligible`,
-      },
-    });
+  const factsByIdentity = new Map<string, InboxNotificationFactInput>();
+  for (const fact of filteredFacts) {
+    const previous = factsByIdentity.get(factTraceJoinKey(fact));
+    factsByIdentity.set(factTraceJoinKey(fact), previous
+      ? {
+        ...fact,
+        personalMention: previous.personalMention === true || fact.personalMention === true,
+        unreadEligible: previous.unreadEligible !== false && fact.unreadEligible !== false,
+      }
+      : fact);
+  }
+  const uniqueFacts = [...factsByIdentity.values()];
+  // One statement per bind-parameter chunk: a single multi-row VALUES for a large channel's
+  // fan-out would exceed PostgreSQL's 65,535-parameter limit (≈5,957 receivers at 11 per row).
+  // `uniqueFacts` is unique per conflict key, so chunks never conflict with each other.
+  const factParametersPerRow = insertParametersPerRow(inboxNotificationFacts);
+  const insertedRows: { receiverType: InboxNotificationReceiverType; receiverId: string; sourceChannelId: string; messageId: string }[] = [];
+  for (const chunk of chunkForBindParameters(uniqueFacts, factParametersPerRow)) {
+    insertedRows.push(...await executor
+      .insert(inboxNotificationFacts)
+      .values(chunk.map(inboxFactInsertValues))
+      .onConflictDoNothing({
+        target: [
+          inboxNotificationFacts.receiverType,
+          inboxNotificationFacts.receiverId,
+          inboxNotificationFacts.sourceChannelId,
+          inboxNotificationFacts.messageId,
+        ],
+      })
+      .returning({
+        receiverType: inboxNotificationFacts.receiverType,
+        receiverId: inboxNotificationFacts.receiverId,
+        sourceChannelId: inboxNotificationFacts.sourceChannelId,
+        messageId: inboxNotificationFacts.messageId,
+      }));
+  }
+  // A retry after facts committed but serving-row maintenance failed lands in
+  // the conflict bucket and takes the authoritative rebuild path. Normal new
+  // facts avoid reading target history altogether.
+  const insertedKeys = new Set(insertedRows.map(factTraceJoinKey));
+  const insertedFacts = uniqueFacts.filter((fact) => insertedKeys.has(factTraceJoinKey(fact)));
+  const conflictingFacts = uniqueFacts.filter((fact) => !insertedKeys.has(factTraceJoinKey(fact)));
+  const conflictingTargetKeys = new Set(conflictingFacts.map(factTargetKey));
 
-  await rebuildInboxServingRowsForReceiverTargets(filteredFacts.map((fact) => ({
-    receiverType: fact.receiverType,
-    receiverId: fact.receiverId,
-    sourceChannelId: fact.sourceChannelId,
-  })), executor);
+  if (conflictingFacts.length > 0) {
+    for (const chunk of chunkForBindParameters(conflictingFacts, factParametersPerRow)) {
+      await executor
+        .insert(inboxNotificationFacts)
+        .values(chunk.map(inboxFactInsertValues))
+        .onConflictDoUpdate({
+          target: [
+            inboxNotificationFacts.receiverType,
+            inboxNotificationFacts.receiverId,
+            inboxNotificationFacts.sourceChannelId,
+            inboxNotificationFacts.messageId,
+          ],
+          set: {
+            serverId: sql`excluded.server_id`,
+            kind: sql`excluded.kind`,
+            messageSeq: sql`excluded.message_seq`,
+            activityAt: sql`excluded.activity_at`,
+            personalMention: sql`${inboxNotificationFacts.personalMention} OR excluded.personal_mention`,
+            unreadEligible: sql`${inboxNotificationFacts.unreadEligible} AND excluded.unread_eligible`,
+          },
+        });
+    }
+  }
+
   await enqueueMobilePushForInboxFacts(filteredFacts, executor);
   return filteredFacts.length;
 }

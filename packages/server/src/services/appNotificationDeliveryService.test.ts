@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
-import type { Database } from "../db/index.js";
-import { migratePglite } from "../db/pgliteMigrations.js";
-import * as schema from "../db/schema.js";
+import type { Database } from "../db/index";
+import { migratePglite } from "../db/pgliteMigrations";
+import * as schema from "../db/schema";
 import {
   channels,
+  externalAppRegistrations,
   notificationDeliveries,
   notificationEvents,
   notificationRecipients,
@@ -17,25 +17,25 @@ import {
   oauthClients,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   appWebhookDeliveryErrorCode,
   appWebhookDeliveryOutcomeForStatus,
   createAppWebhookPinnedLookup,
   drainAppNotificationDeliveries,
   emitAppFacingNotificationEvent,
-} from "./appNotificationDeliveryService.js";
+} from "./appNotificationDeliveryService";
 import {
   __resetOAuthServiceDbForTests,
   __setOAuthServiceDbForTests,
   uninstallMarketplaceOAuthClient,
-} from "./oauthService.js";
+} from "./oauthService";
 import {
   __setAppWebhookEncryptionKeyForTests,
   AppWebhookConfigError,
   configureAppWebhook,
   rotateAppWebhookSecret,
-} from "./appWebhookConfigService.js";
+} from "./appWebhookConfigService";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const SERVER_ID = "22222222-2222-4222-8222-222222222222";
@@ -350,6 +350,85 @@ test("canonical fanout signs exact bodies and revalidates authority before retri
     assert.equal(privateEvents.length, 0, "private channel events must not enter the app-facing stream");
   } finally {
     __resetOAuthServiceDbForTests();
+    __setAppWebhookEncryptionKeyForTests(null);
+    await client.close();
+  }
+});
+
+test("retired and platform-managed clients cannot receive new App Notifications or drain queued delivery", async () => {
+  const { client, db } = await createTestDb();
+  __setAppWebhookEncryptionKeyForTests(Buffer.alloc(32, 9));
+  try {
+    await configureAppWebhook({
+      clientId: CLIENT_ID,
+      actorUserId: USER_ID,
+      endpointUrl: "https://hooks.example.com/raft",
+    }, db);
+    const queuedEventId = "abababab-abab-4bab-8bab-abababababab";
+    assert.deepEqual(await emitAppFacingNotificationEvent({
+      id: queuedEventId,
+      serverId: SERVER_ID,
+      eventType: "server.config_updated",
+      subjectType: "server",
+      subjectId: SERVER_ID,
+    }, db), { eventId: queuedEventId, recipientCount: 1 });
+
+    await db.update(oauthClients).set({ appType: "slock_builtin" }).where(eq(oauthClients.id, CLIENT_ID));
+    const retiredEventId = "bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc";
+    assert.deepEqual(await emitAppFacingNotificationEvent({
+      id: retiredEventId,
+      serverId: SERVER_ID,
+      eventType: "server.config_updated",
+      subjectType: "server",
+      subjectId: SERVER_ID,
+    }, db), { eventId: retiredEventId, recipientCount: 0 });
+    assert.deepEqual(
+      await db.select({ id: notificationRecipients.id }).from(notificationRecipients)
+        .where(eq(notificationRecipients.eventId, retiredEventId)),
+      [],
+    );
+
+    let postCount = 0;
+    assert.deepEqual(await drainAppNotificationDeliveries({
+      executor: db,
+      post: async () => {
+        postCount += 1;
+        return { status: 204 };
+      },
+      now: new Date("2030-01-01T00:00:00.000Z"),
+    }), { claimed: 1, delivered: 0, retried: 0, suppressed: 1, deadLettered: 0 });
+    assert.equal(postCount, 0, "a queued notification must be suppressed before any HTTP POST after retirement");
+    const [queuedDelivery] = await db.select({ status: notificationDeliveries.status }).from(notificationDeliveries)
+      .innerJoin(notificationRecipients, eq(notificationRecipients.id, notificationDeliveries.notificationId))
+      .where(eq(notificationRecipients.eventId, queuedEventId));
+    assert.equal(queuedDelivery?.status, "suppressed");
+
+    await db.update(oauthClients).set({ appType: "third_party_global" }).where(eq(oauthClients.id, CLIENT_ID));
+    await db.insert(externalAppRegistrations).values({
+      oauthClientId: CLIENT_ID,
+      provider: "slack",
+      environment: "test",
+      state: "active",
+      providerAppId: "A_PLATFORM_NOTIFICATION",
+      providerOAuthClientId: "platform-notification-client",
+      capabilityManifestVersion: 1,
+      capabilityManifestHash: "b".repeat(64),
+      requiredCapabilities: ["channel_events"],
+    });
+    const platformEventId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+    assert.deepEqual(await emitAppFacingNotificationEvent({
+      id: platformEventId,
+      serverId: SERVER_ID,
+      eventType: "server.config_updated",
+      subjectType: "server",
+      subjectId: SERVER_ID,
+    }, db), { eventId: platformEventId, recipientCount: 0 });
+    assert.deepEqual(
+      await db.select({ id: notificationRecipients.id }).from(notificationRecipients)
+        .where(eq(notificationRecipients.eventId, platformEventId)),
+      [],
+    );
+  } finally {
     __setAppWebhookEncryptionKeyForTests(null);
     await client.close();
   }

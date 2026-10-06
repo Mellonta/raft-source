@@ -1,18 +1,18 @@
 import { and, count, eq, isNull, sql } from "drizzle-orm";
 import { createHash, randomBytes } from "node:crypto";
 import { PLAN_CONFIG, formatBillingCapacityLimitMessage, getBillingCapacityLimitState, validateEmailAddress } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { agents, serverInvites, serverJoinLinks, serverMembers, servers, users } from "../db/schema.js";
-import { sendInviteEmail } from "./emailService.js";
-import { normalizeEmail } from "./emailNormalization.js";
-import * as serverService from "./serverService.js";
-import * as serverAgreementService from "./serverAgreementService.js";
-import { refreshSubscriptionForServerIfStale } from "./billingService.js";
+import { getDb } from "../db/index";
+import { agents, serverInvites, serverJoinLinks, serverMembers, servers, users } from "../db/schema";
+import { sendInviteEmail } from "./emailService";
+import { normalizeEmail } from "./emailNormalization";
+import * as serverService from "./serverService";
+import * as serverAgreementService from "./serverAgreementService";
+import { refreshSubscriptionForServerIfStale } from "./billingService";
 import {
   assertHumanCapacityAvailable,
   getServerBillingEntitlement,
   getServerBillingUsage,
-} from "./planService.js";
+} from "./planService";
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -211,7 +211,7 @@ export async function createInvite(
     throw new Error("An invite has already been sent to this email");
   }
 
-  await assertServerCanInviteHuman(serverId);
+  if (role !== "guest") await assertServerCanInviteHuman(serverId);
 
   if (existing) {
     await db.delete(serverInvites).where(eq(serverInvites.id, existing.id));
@@ -339,6 +339,7 @@ export async function getInviteInfo(token: string): Promise<InviteInfo | null> {
       expiresAt: serverInvites.expiresAt,
       serverId: serverInvites.serverId,
       invitedByUserId: serverInvites.invitedByUserId,
+      role: serverInvites.role,
     })
     .from(serverInvites)
     .where(eq(serverInvites.tokenHash, tokenHash));
@@ -361,7 +362,9 @@ export async function getInviteInfo(token: string): Promise<InviteInfo | null> {
     const counts = await getServerMemberAgentCounts(emailInvite.serverId, {
       hideInsideCounts: server.hideHumansFromMembers,
     });
-    const humanSeatLimit = await getHumanSeatLimitState(emailInvite.serverId);
+    const humanSeatLimit = emailInvite.role === "guest"
+      ? { humanSeatLimitReached: false, humanSeatLimitMessage: null }
+      : await getHumanSeatLimitState(emailInvite.serverId);
     return {
       kind: "email",
       serverName: server.name,

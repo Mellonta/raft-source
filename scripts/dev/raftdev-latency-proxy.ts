@@ -1,4 +1,4 @@
-#!/usr/bin/env -S node --import tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 /**
  * slockdev-latency-proxy — Phase 0 of #proj-dx task #19. A tiny HTTP proxy
  * that sits between the web dev server and the slockdev server and delays
@@ -14,7 +14,7 @@
  * behavior is byte-for-byte unchanged.
  *
  * Invocation:
- *   node --import tsx scripts/dev/raftdev-latency-proxy.ts \
+ *   node --import @oxc-node/core/register scripts/dev/raftdev-latency-proxy.ts \
  *     --port <listen> --target-port <slockdev-server> \
  *     --min-ms <n> --max-ms <n> [--label "<text>"]
  *

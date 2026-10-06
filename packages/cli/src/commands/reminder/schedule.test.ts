@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { buildScheduleBody } from "./schedule.js";
+import { buildScheduleBody } from "./schedule";
 
 const FIXED_TZ = () => "UTC";
 

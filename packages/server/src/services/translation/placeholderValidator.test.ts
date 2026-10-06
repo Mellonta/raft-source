@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { createRegexPlaceholderPolicy } from "./placeholderPolicy.js";
-import { validateTranslationPlaceholders } from "./placeholderValidator.js";
+import { createRegexPlaceholderPolicy } from "./placeholderPolicy";
+import { validateTranslationPlaceholders } from "./placeholderValidator";
 
 const policy = createRegexPlaceholderPolicy({
   name: "test-placeholder-policy",

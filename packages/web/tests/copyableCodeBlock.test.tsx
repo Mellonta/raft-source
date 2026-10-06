@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { createElement } from "react";
 import { cleanup, screen } from "@testing-library/react";
 import { normalizeCodeLanguage } from "../src/components/markdown/codeBlockLanguages";

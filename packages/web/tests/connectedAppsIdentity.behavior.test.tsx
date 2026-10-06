@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 // SettingsPanel → ConnectedApps mounts the react-intl-migrated ConfirmDialog
@@ -33,6 +32,7 @@ import { en as enMessages } from "../src/i18n/messages/en";
 import HumanLoginSetupPage, { initialsForApp } from "../src/pages/HumanLoginSetupPage";
 import IntegrationInvitePage from "../src/pages/IntegrationInvitePage";
 import { useAuthStore } from "../src/store/authStore";
+import { resetServerFeatureFlagsForTests } from "../src/store/serverFeatureFlags";
 import { useServerStore } from "../src/store/serverStore";
 import type { Server } from "../src/store/serverStore";
 
@@ -154,8 +154,8 @@ test("AvatarSlot renders app logos full-frame and deterministic app/server fallb
   assert.equal(fallbackLayer?.classList.contains("z-0"), true);
   assert.equal(logo?.classList.contains("relative"), true);
   assert.equal(logo?.classList.contains("z-[1]"), true);
-  assert.equal(logo?.parentElement?.classList.contains("bg-soft-signal"), true);
-  assert.equal(logo?.parentElement?.classList.contains("font-black"), true);
+  assert.equal(logo?.closest('[data-slot="avatar"]')?.classList.contains("theme-brutal:bg-soft-signal"), true);
+  assert.equal(logo?.closest('[data-slot="avatar"]')?.classList.contains("font-black"), true);
   assert.equal(logo?.parentElement?.className.endsWith(" "), false);
   assert.equal(document.body.textContent?.trim(), "ON");
 
@@ -183,7 +183,7 @@ test("AvatarSlot renders app logos full-frame and deterministic app/server fallb
 
   rerender(<AvatarSlot context="surface-list" type="server" serverInitial=" beacon " />);
   assert.equal(document.body.textContent?.trim(), "B");
-  assert.ok(document.querySelector(".bg-black.text-soft-signal.font-bold"));
+  assert.ok(document.querySelector('[data-avatar-type="server"].font-bold'));
 
   rerender(
     <AvatarSlot
@@ -199,7 +199,7 @@ test("AvatarSlot renders app logos full-frame and deterministic app/server fallb
   assert.equal(document.body.textContent?.trim(), "B");
 
   rerender(<AvatarSlot context="surface-list" type="human" humanPlaceholder />);
-  assert.ok(document.querySelector(".bg-brutal-lavender.text-black"));
+  assert.ok(document.querySelector('[data-avatar-type="human"] [data-slot="avatar-fallback"] svg.lucide-user'));
   assert.equal(document.body.textContent?.trim(), "");
 });
 
@@ -382,15 +382,12 @@ test("RequestedScopeConsent expands only agent messaging for mixed scopes", () =
   assert.equal(agentMessagingRows[0]?.classList.contains("bg-white"), false);
 });
 
-test("Connected Apps renders app logos, descriptions, homepage links, and built-in open state", async () => {
+test("Connected Apps loads registered surfaces without depending on the retired built-in endpoint", async () => {
   resetStores();
-  const opened: Array<{ url?: string; target?: string; features?: string }> = [];
-  window.open = ((url?: string | URL, target?: string, features?: string) => {
-    opened.push({ url: String(url), target, features });
-    return null;
-  }) as typeof window.open;
+  const getCalls: string[] = [];
 
   api.get = (async (url: string) => {
+    getCalls.push(url);
     if (url === "/integrations/clients") {
       return {
         data: [
@@ -463,42 +460,7 @@ test("Connected Apps renders app logos, descriptions, homepage links, and built-
       };
     }
     if (url === "/integrations/built-in") {
-      return {
-        data: [
-          {
-            id: "survey",
-            clientId: "slock-survey",
-            appType: "slock_builtin",
-            name: "Raft Survey",
-            description: "Collect meetup responses.",
-            homepageUrl: "https://survey.slock.ai",
-            returnUrl: "https://survey.slock.ai/callback",
-            logoUrl: "https://cdn.example.com/survey.png",
-            category: "Productivity & Collaboration",
-            dataAccessSummary: "First-party survey responses.",
-            publisherName: "Raft",
-            allowedScopes: ["openid", "profile", "identity"],
-            createdAt: "2026-06-25T00:00:00.000Z",
-            updatedAt: "2026-06-25T00:00:00.000Z",
-          },
-          {
-            id: "draft",
-            clientId: "raft-draft",
-            appType: "slock_builtin",
-            name: "Raft Draft",
-            description: "Internal draft surface.",
-            homepageUrl: null,
-            returnUrl: null,
-            logoUrl: null,
-            category: "Other",
-            dataAccessSummary: null,
-            publisherName: "Raft",
-            allowedScopes: ["openid", "profile"],
-            createdAt: "2026-06-25T00:00:00.000Z",
-            updatedAt: "2026-06-25T00:00:00.000Z",
-          },
-        ],
-      };
+      throw new Error("retired built-in endpoint must not be requested");
     }
     if (url === "/integrations/marketplace") {
       return {
@@ -506,6 +468,8 @@ test("Connected Apps renders app logos, descriptions, homepage links, and built-
           {
             id: "market-client",
             clientId: "market-client",
+            official: true,
+            purpose: "Publish and retrieve durable Raft artifacts.",
             name: "Marketplace Notes",
             description: "Reviewed shared notes.",
             homepageUrl: "https://notes.example.com/app",
@@ -593,9 +557,9 @@ test("Connected Apps renders app logos, descriptions, homepage links, and built-
     </TestIntlProvider>,
   );
 
-  const builtInBand = await screen.findByTestId("connected-apps-built-in-band");
-  assert.ok(within(builtInBand).getByText("RS"));
-  assert.ok(within(builtInBand).getByText("RD"));
+  assert.ok(await screen.findByTestId("connected-apps-marketplace-tab"));
+  assert.equal(screen.queryByTestId("connected-apps-built-in-band"), null);
+  assert.equal(getCalls.includes("/integrations/built-in"), false);
   const viewToggle = screen.getByTestId("connected-apps-view-toggle");
   const gridViewButton = within(viewToggle).getByRole("button", { name: "Grid view" });
   const listViewButton = within(viewToggle).getByRole("button", { name: "List view" });
@@ -607,28 +571,22 @@ test("Connected Apps renders app logos, descriptions, homepage links, and built-
   assert.ok(searchFilter.classList.contains("box-border"));
   assert.ok(searchFilter.classList.contains("h-10"));
   assert.ok(filters.classList.contains("items-stretch"));
-  assert.ok(viewToggle.classList.contains("h-10"));
+  assert.ok(viewToggle.classList.contains("box-border"));
+  assert.ok(within(viewToggle).getByRole("button", { name: "Grid view" }).classList.contains("h-8"));
   assert.equal(gridViewButton.getAttribute("aria-pressed"), "true");
-  const builtInCollection = screen.getByTestId("connected-apps-built-in-collection");
   const marketplaceCollection = screen.getByTestId("connected-apps-marketplace-collection");
-  assert.equal(builtInCollection.getAttribute("data-view"), "grid");
   assert.equal(marketplaceCollection.getAttribute("data-view"), "grid");
   assert.ok(within(marketplaceCollection).getByText("100+ installs"));
   assert.ok(within(marketplaceCollection).getByText("New"));
-  assert.equal(within(builtInCollection).queryByText("Collect meetup responses."), null);
   assert.equal(within(marketplaceCollection).queryByText("Reviewed shared notes."), null);
   fireEvent.click(listViewButton);
   assert.equal(listViewButton.getAttribute("aria-pressed"), "true");
-  assert.equal(builtInCollection.getAttribute("data-view"), "list");
   assert.equal(marketplaceCollection.getAttribute("data-view"), "list");
-  assert.ok(Array.from(builtInCollection.children).every((card) => card.classList.contains("w-full")));
   assert.ok(Array.from(marketplaceCollection.children).every((card) => card.classList.contains("w-full")));
-  assert.ok(within(builtInCollection).getByText("Collect meetup responses."));
   assert.ok(within(marketplaceCollection).getByText("Reviewed shared notes."));
   assert.equal(window.localStorage.getItem("raft:connected-apps:view-mode"), "list");
   fireEvent.click(gridViewButton);
   assert.equal(gridViewButton.getAttribute("aria-pressed"), "true");
-  assert.equal(within(builtInCollection).queryByText("Collect meetup responses."), null);
   assert.equal(within(marketplaceCollection).queryByText("Reviewed shared notes."), null);
   assert.equal(window.localStorage.getItem("raft:connected-apps:view-mode"), "grid");
 
@@ -649,6 +607,10 @@ test("Connected Apps renders app logos, descriptions, homepage links, and built-
   assert.equal(within(installedTab).getAllByText("Published Reports").length, 1);
   assert.equal(within(installedTab).getAllByRole("button", { name: "Edit" }).length, 3);
   assert.equal(within(installedTab).getAllByRole("button", { name: "Uninstall" }).length, 1);
+  fireEvent.click(within(installedTab).getByRole("button", { name: "Uninstall" }));
+  const uninstallDialog = await screen.findByRole("dialog");
+  assert.ok(uninstallDialog.textContent?.includes(enMessages["settings.connectedApps.uninstallOfficialOptOut"]));
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   assert.ok(within(installedTab).getAllByText("This server").length >= 1);
   assert.ok(within(installedTab).getByText("Infrastructure"));
   const installedLink = within(installedTab).getByRole("link", { name: "notes.example.com" });
@@ -759,14 +721,17 @@ test("Connected Apps renders app logos, descriptions, homepage links, and built-
   };
   fireEvent.scroll(editorContent);
   assert.equal(notificationsRailButton.getAttribute("aria-current"), "true");
-  assert.ok(notificationsRailButton.classList.contains("bg-soft-signal"));
+  assert.ok(notificationsRailButton.classList.contains("bg-primary-soft"));
   assert.ok((railScrollLeft ?? 0) > 0);
   const dangerRailButton = within(editorRail).getByRole("button", { name: /^Danger zone/ });
   fireEvent.click(dangerRailButton);
   assert.equal(dangerRailButton.getAttribute("aria-current"), "true");
   const deleteCard = within(editor).getByTestId("connected-app-delete-card");
-  assert.ok(deleteCard.classList.contains("border-black"));
-  assert.ok(deleteCard.classList.contains("shadow-brutal-sm"));
+  assert.ok(deleteCard.classList.contains("border-line-muted"));
+  assert.ok(deleteCard.classList.contains("bg-layer-panel"));
+  assert.ok(deleteCard.classList.contains("shadow-raft-sm"));
+  assert.ok(deleteCard.classList.contains("theme-brutal:border-black"));
+  assert.ok(deleteCard.classList.contains("theme-brutal:shadow-brutal-sm"));
   assert.ok(within(deleteCard).getByText("Delete app"));
   assert.ok(within(deleteCard).getByText("Permanently deletes this app registration and its current credentials."));
   const deleteButton = within(deleteCard).getByRole("button", { name: "Delete" });
@@ -779,7 +744,7 @@ test("Connected Apps renders app logos, descriptions, homepage links, and built-
   fireEvent.click(screen.getByTestId("connected-apps-tab-marketplace"));
   fireEvent.click(await screen.findByText("Marketplace Notes"));
   const privateDetail = await screen.findByText("Requestable (declared)");
-  const privateModal = privateDetail.closest(".card-brutal");
+  const privateModal = privateDetail.closest('[data-slot="card"]');
   assert.ok(privateModal, "marketplace app detail should open in a modal card");
   assert.ok(within(privateModal as HTMLElement).getByText("100+ installs"));
   assert.ok(within(privateModal as HTMLElement).getByText("Profile"));
@@ -796,41 +761,12 @@ test("Connected Apps renders app logos, descriptions, homepage links, and built-
   assert.ok(within(privateModal as HTMLElement).getByText("profile"));
   assert.ok(within(privateModal as HTMLElement).getByText("identity"));
   const notificationChip = within(privateModal as HTMLElement).getByText("agent:notification:write");
-  assert.equal(
-    notificationChip.getAttribute("title"),
-    "Sends notification messages to the one agent you authorize.",
-  );
-  assert.ok(notificationChip.classList.contains("bg-soft-signal/20"));
+  assert.equal(notificationChip.getAttribute("title"), null);
+  assert.ok(notificationChip.hasAttribute("data-base-ui-tooltip-trigger"), "scope chip description now rides the RUI tooltip trigger");
+  assert.ok(notificationChip.classList.contains("bg-accent-soft/30"));
   assert.ok(within(privateModal as HTMLElement).getByRole("button", { name: "Uninstall from this server" }));
   fireEvent.click(within(privateModal as HTMLElement).getByRole("button", { name: "Close app detail" }));
 
-  fireEvent.click(await screen.findByText("Raft Survey"));
-  const sourcePanel = await screen.findByText("Profile");
-  const modal = sourcePanel.closest(".card-brutal");
-  assert.ok(modal, "built-in details should open in a modal card");
-  assert.ok(within(modal as HTMLElement).getByText("Collect meetup responses."));
-  assert.ok(within(modal as HTMLElement).getByText("Requestable (declared)"));
-  assert.ok(within(modal as HTMLElement).getByText("Scopes this built-in app may ask for when a human or agent connects."));
-  assert.ok(within(modal as HTMLElement).getByText("openid"));
-  assert.ok(within(modal as HTMLElement).getByText("profile"));
-  assert.ok(within(modal as HTMLElement).getByText("identity"));
-  const detailLink = within(modal as HTMLElement).getByRole("link", { name: /https:\/\/survey\.slock\.ai/ });
-  assert.equal(detailLink.getAttribute("href"), "https://survey.slock.ai");
-  assert.equal(detailLink.getAttribute("target"), "_blank");
-  assert.equal(detailLink.getAttribute("rel"), "noreferrer");
-  assert.ok(detailLink.classList.contains("inline-flex"));
-  assert.ok(detailLink.classList.contains("font-mono"));
-  const openButton = within(modal as HTMLElement).getByRole("button", { name: "Open" });
-  assert.equal(openButton.classList.contains("bg-brutal-pink"), true);
-  fireEvent.click(openButton);
-  assert.deepEqual(opened, [{ url: "https://survey.slock.ai", target: "_blank", features: "noopener,noreferrer" }]);
-
-  fireEvent.click(within(modal as HTMLElement).getByRole("button", { name: "Close built-in app detail" }));
-  fireEvent.click(await screen.findByText("Raft Draft"));
-  const draftModal = (await screen.findByText("Not configured")).closest(".card-brutal");
-  assert.ok(draftModal, "built-in details without homepage should still show source metadata");
-  assert.equal(within(draftModal as HTMLElement).getByRole("button", { name: "Open" }).hasAttribute("disabled"), true);
-  fireEvent.click(within(draftModal as HTMLElement).getByRole("button", { name: "Close built-in app detail" }));
 
   const search = screen.getByRole("searchbox", { name: "Search connected apps" });
   fireEvent.change(search, { target: { value: "Private Reports" } });
@@ -907,7 +843,7 @@ test("Connected Apps detail modal renders cataloged zh-cn headings and App Notif
   );
 
   fireEvent.click(await screen.findByText("Approved Notes"));
-  const approvedModal = (await screen.findByText("可请求（已声明）")).closest(".card-brutal") as HTMLElement;
+  const approvedModal = (await screen.findByText("可请求（已声明）")).closest('[data-slot="card"]') as HTMLElement;
   assert.ok(approvedModal, "approved marketplace app detail should open in a modal card");
   assert.ok(within(approvedModal).getByText("资料"));
   assert.ok(within(approvedModal).getByText("使用 Raft 登录"));
@@ -921,7 +857,7 @@ test("Connected Apps detail modal renders cataloged zh-cn headings and App Notif
   fireEvent.click(within(approvedModal).getByRole("button", { name: "关闭应用详情" }));
 
   fireEvent.click(await screen.findByText("Pending Notes"));
-  const pendingModal = (await screen.findByText("请求的 App Notifications 权限仍在审核中；批准前无法启用投递。")).closest(".card-brutal") as HTMLElement;
+  const pendingModal = (await screen.findByText("请求的 App Notifications 权限仍在审核中；批准前无法启用投递。")).closest('[data-slot="card"]') as HTMLElement;
   assert.ok(pendingModal, "pending marketplace app detail should open in a modal card");
   assert.ok(within(pendingModal).getByText("App Review 待审核"));
 });
@@ -965,24 +901,7 @@ test("Connected Apps gives members the full read surface without management acti
       };
     }
     if (url === "/integrations/built-in") {
-      return {
-        data: [{
-          id: "member-visible-built-in",
-          clientId: "member-visible-built-in",
-          appType: "slock_builtin",
-          name: "Raft Survey",
-          description: "Built-in surveys.",
-          homepageUrl: "https://survey.raft.test",
-          returnUrl: null,
-          logoUrl: null,
-          category: "Productivity & Collaboration",
-          dataAccessSummary: null,
-          publisherName: "Raft",
-          allowedScopes: ["openid", "profile"],
-          createdAt: "2026-06-25T00:00:00.000Z",
-          updatedAt: "2026-06-25T00:00:00.000Z",
-        }],
-      };
+      throw new Error("retired built-in endpoint must not be requested");
     }
     if (url === "/integrations/marketplace") {
       return {
@@ -1016,22 +935,22 @@ test("Connected Apps gives members the full read surface without management acti
     </TestIntlProvider>,
   );
 
-  await screen.findByText("Raft Survey");
+  await screen.findByText("Marketplace Notes");
   const marketplaceTab = screen.getByTestId("connected-apps-marketplace-tab");
   assert.deepEqual(new Set(getCalls), new Set([
     "/integrations/clients",
-    "/integrations/built-in",
     "/integrations/marketplace",
     "/integrations/overview",
   ]));
-  assert.ok(within(marketplaceTab).getByText("Raft Survey"));
+  assert.equal(within(marketplaceTab).queryByText("Raft Survey"), null);
+  assert.equal(within(marketplaceTab).queryByTestId("connected-apps-built-in-band"), null);
   assert.ok(within(marketplaceTab).getByText("Marketplace Notes"));
   assert.ok(within(marketplaceTab).getByText("Available"));
   assert.equal(screen.queryByRole("button", { name: "Register app" }), null);
   assert.equal(within(marketplaceTab).queryByText("Install", { exact: true }), null);
 
   fireEvent.click(within(marketplaceTab).getByText("Marketplace Notes"));
-  const detail = (await screen.findByText("Profile")).closest(".card-brutal");
+  const detail = (await screen.findByText("Profile")).closest('[data-slot="card"]');
   assert.ok(detail);
   assert.ok(within(detail as HTMLElement).getByText("Login with Raft"));
   assert.ok(within(detail as HTMLElement).getByText("Distribution"));
@@ -1056,6 +975,7 @@ test("Connected Apps gives members the full read surface without management acti
 
 test("Connected Apps edit drawer regenerates a client secret and reveals it once", async () => {
   resetStores();
+  resetServerFeatureFlagsForTests();
   const client = {
     id: "private-client",
     clientId: "private-client",
@@ -1073,7 +993,7 @@ test("Connected Apps edit drawer regenerates a client secret and reveals it once
     createdAt: "2026-06-25T00:00:00.000Z",
     updatedAt: "2026-06-25T00:00:00.000Z",
   };
-  const postCalls: string[] = [];
+  const regenerateCalls: Array<{ url: string; body: unknown }> = [];
 
   api.get = (async (url: string) => {
     if (url === "/integrations/clients") return { data: [client] };
@@ -1086,9 +1006,12 @@ test("Connected Apps edit drawer regenerates a client secret and reveals it once
     throw new Error(`unexpected GET ${url}`);
   }) as typeof api.get;
 
-  api.post = (async (url: string) => {
-    postCalls.push(url);
+  api.post = (async (url: string, body?: unknown) => {
+    if (url === "/feature-flags/evaluate") {
+      return { data: { evaluations: [] } };
+    }
     if (url === "/integrations/clients/private-client/regenerate-secret") {
+      regenerateCalls.push({ url, body });
       return {
         data: {
           client: {
@@ -1122,8 +1045,10 @@ test("Connected Apps edit drawer regenerates a client secret and reveals it once
   fireEvent.click(confirmButton);
 
   assert.ok(await screen.findByText("raft_secret_regenerated_once"));
-  assert.equal(postCalls.length, 1);
-  assert.equal(postCalls[0], "/integrations/clients/private-client/regenerate-secret");
+  assert.deepEqual(regenerateCalls, [{
+    url: "/integrations/clients/private-client/regenerate-secret",
+    body: undefined,
+  }]);
   assert.ok(screen.getByTestId("connected-app-secret-copy-button"));
 });
 
@@ -1422,6 +1347,7 @@ test("Connected Apps saves category and declared scopes before requesting market
     homepageUrl: "https://storage.example.com",
     returnUrl: "https://storage.example.com/callback",
     agentManifestUrl: null,
+    whenToUse: null,
     allowedScopes: ["openid", "profile", "agent:event:write"],
     category: "Infrastructure",
   }]);
@@ -1456,25 +1382,25 @@ test("Connected Apps register form locks identity scopes and toggles agent messa
   assert.ok(within(picker).getByText("openid"));
   assert.ok(within(picker).getByText("profile"));
   assert.ok(within(picker).getByText("identity"));
-  const emailScope = within(picker).getByLabelText("email") as HTMLInputElement;
-  assert.equal(emailScope.checked, false);
+  const emailScope = within(picker).getByRole("checkbox", { name: "email" });
+  assert.equal(emailScope.getAttribute("aria-checked"), "false");
   fireEvent.click(emailScope);
-  assert.equal(emailScope.checked, true);
+  assert.equal(emailScope.getAttribute("aria-checked"), "true");
   assert.ok(within(picker).getByText("Agent messaging"));
-  assert.ok(within(picker).getByLabelText("agent:event:write"));
-  assert.ok(within(picker).getByLabelText("agent:notification:write"));
+  assert.ok(within(picker).getByRole("checkbox", { name: "agent:event:write" }));
+  assert.ok(within(picker).getByRole("checkbox", { name: "agent:notification:write" }));
   assert.equal(within(picker).queryByText("Requires resource: this server's agent inbound."), null);
 
-  fireEvent.click(within(picker).getByLabelText("agent:event:write"));
+  fireEvent.click(within(picker).getByRole("checkbox", { name: "agent:event:write" }));
   assert.ok(await within(picker).findByText("Requires resource: this server's agent inbound."));
 
-  fireEvent.click(within(picker).getByLabelText("agent:notification:write"));
+  fireEvent.click(within(picker).getByRole("checkbox", { name: "agent:notification:write" }));
   assert.ok(within(picker).getByText("Requires resource: this server's agent inbound."));
 
-  fireEvent.click(within(picker).getByLabelText("agent:event:write"));
+  fireEvent.click(within(picker).getByRole("checkbox", { name: "agent:event:write" }));
   assert.ok(within(picker).getByText("Requires resource: this server's agent inbound."));
 
-  fireEvent.click(within(picker).getByLabelText("agent:notification:write"));
+  fireEvent.click(within(picker).getByRole("checkbox", { name: "agent:notification:write" }));
   assert.equal(within(picker).queryByText("Requires resource: this server's agent inbound."), null);
 });
 
@@ -1622,23 +1548,23 @@ test("Login with Raft setup page renders fetched app identity details", async ()
 
   assert.ok((await screen.findAllByText("Orbital Notes")).length >= 2);
   const description = screen.getByText("Review launch notes from Raft.");
-  assert.equal(description.getAttribute("class"), "text-xs text-black/60");
+  assert.equal(description.getAttribute("class"), "text-xs text-foreground-muted");
   assert.equal(screen.queryByText("https://orbital.example.com/docs"), null);
   const detailLink = screen.getByRole("link", { name: "Open Orbital Notes" });
   assert.equal(detailLink.getAttribute("href"), "https://orbital.example.com/docs");
   assert.equal(detailLink.getAttribute("target"), "_blank");
   assert.equal(detailLink.getAttribute("rel"), "noreferrer");
   assert.equal(detailLink.getAttribute("title"), null);
-  assert.equal(detailLink.classList.contains("hover:shadow-brutal"), true);
+  assert.equal(detailLink.classList.contains("hover:shadow-raft-md"), true);
 
   const logo = document.querySelector('img[src="https://cdn.example.com/orbital-notes.png"]');
   assert.equal(logo?.getAttribute("class"), "relative z-[1] h-full w-full object-cover");
 
   const loginButton = screen.getByRole("button", { name: "Login with Raft" }) as HTMLButtonElement;
   await waitFor(() => assert.equal(loginButton.disabled, false));
-  assert.equal(loginButton.classList.contains("btn-brutal-sm"), true);
-  assert.equal(loginButton.classList.contains("bg-brutal-pink"), true);
-  assert.equal(loginButton.classList.contains("bg-soft-signal"), false);
+  assert.equal(loginButton.getAttribute("data-slot"), "button");
+  assert.ok(loginButton.className.includes("bg-brutal-pink"));
+  assert.equal(loginButton.classList.contains("bg-primary-soft"), false);
   assert.equal(document.querySelector('button img[src="/brand/raft-logo.svg"]'), null);
   assert.equal(document.querySelector('button source[srcset="/brand/raft-logo-mono-light.svg"]'), null);
   assert.equal(loginButton.parentElement?.classList.contains("justify-end"), true);
@@ -1647,7 +1573,7 @@ test("Login with Raft setup page renders fetched app identity details", async ()
   assert.equal(backLink.classList.contains("btn-flat-sm"), true);
   assert.equal(backLink.classList.contains("underline"), false);
   const logoutButton = screen.getByRole("button", { name: "Log out" });
-  assert.equal(logoutButton.classList.contains("btn-brutal-sm"), true);
+  assert.equal(logoutButton.getAttribute("data-slot"), "button");
 
   api.post = (async () => new Promise(() => {})) as typeof api.post;
   fireEvent.click(screen.getByRole("button", { name: "Login with Raft" }));
@@ -1856,18 +1782,20 @@ test("public Marketplace setup always lists installed and uninstalled Servers to
   assert.ok((await screen.findAllByText("Orbital Notes")).length >= 2);
   assert.ok(screen.getByText("Marketplace"));
   const installed = screen.getByTestId("login-server-status-server-1");
-  assert.equal(installed.getAttribute("title"), "Installed and ready to use.");
+  assert.equal(installed.getAttribute("title"), null);
+  assert.ok(installed.hasAttribute("data-base-ui-tooltip-trigger"), "status hint now rides the RUI tooltip trigger");
   assert.equal(within(installed).queryByText("Installed"), null);
   assert.equal(installed.getAttribute("aria-label"), "Use this Server: Launch Server");
-  assert.equal(installed.parentElement?.parentElement?.classList.contains("bg-brutal-cyan/15"), true);
+  assert.equal(installed.closest('[data-selected="true"]') !== null, true);
   assert.match(screen.getByTestId("marketplace-login-commit-zone").textContent ?? "", /Selected Launch Server\./);
   assert.ok(screen.getByRole("button", { name: "Continue login" }));
   const installable = screen.getByTestId("login-server-status-server-2");
-  assert.equal(installable.getAttribute("title"), "Not installed on this Server. You can install it here.");
+  assert.equal(installable.getAttribute("title"), null);
+  assert.ok(installable.hasAttribute("data-base-ui-tooltip-trigger"), "status hint now rides the RUI tooltip trigger");
   assert.ok(within(installable).getByText("Not installed"));
   fireEvent.click(installable);
-  assert.equal(installed.parentElement?.parentElement?.classList.contains("bg-brutal-cyan/15"), false);
-  assert.equal(installable.parentElement?.parentElement?.classList.contains("bg-brutal-cyan/15"), true);
+  assert.equal(installed.closest('[data-selected="true"]') !== null, false);
+  assert.equal(installable.closest('[data-selected="true"]') !== null, true);
   assert.match(screen.getByTestId("marketplace-login-commit-zone").textContent ?? "", /Build Server has not installed Orbital Notes/);
   assert.ok(screen.getByText("Access granted: openid · profile"));
   fireEvent.click(screen.getByRole("button", { name: "Install and continue" }));
@@ -1883,8 +1811,8 @@ test("public Marketplace setup always lists installed and uninstalled Servers to
   assert.equal((installed as HTMLButtonElement).disabled, true);
   fireEvent.click(installed);
   fireEvent.click(pendingButton);
-  assert.equal(installed.parentElement?.parentElement?.classList.contains("bg-brutal-cyan/15"), false);
-  assert.equal(installable.parentElement?.parentElement?.classList.contains("bg-brutal-cyan/15"), true);
+  assert.equal(installed.closest('[data-selected="true"]') !== null, false);
+  assert.equal(installable.closest('[data-selected="true"]') !== null, true);
   assert.deepEqual(postUrls, ["/integrations/marketplace/app-1/install"]);
   await act(async () => {
     resolveInstall();
@@ -1898,7 +1826,8 @@ test("public Marketplace setup always lists installed and uninstalled Servers to
   assert.equal(within(installedAfterClick).queryByText("Not installed"), null);
   assert.equal(installedAfterClick.getAttribute("aria-label"), "Use this Server: Build Server");
   const memberOnly = screen.getByTestId("login-server-status-server-3");
-  assert.equal(memberOnly.getAttribute("title"), "Not installed on this Server. Ask a Server owner or admin to install it.");
+  assert.equal(memberOnly.getAttribute("title"), null);
+  assert.ok(memberOnly.hasAttribute("data-base-ui-tooltip-trigger"), "status hint now rides the RUI tooltip trigger");
   assert.ok(within(memberOnly).getByText("Admin needed"));
   fireEvent.click(memberOnly);
   assert.match(screen.getByTestId("marketplace-login-commit-zone").textContent ?? "", /Only an owner or admin of this Server can install it/);
@@ -1906,10 +1835,11 @@ test("public Marketplace setup always lists installed and uninstalled Servers to
   const findAdmin = screen.getByRole("link", { name: "Find a Server admin" });
   assert.equal(findAdmin.getAttribute("href"), "/s/member/members");
   assert.ok(findAdmin.classList.contains("btn-brutal-sm"));
-  assert.ok(findAdmin.classList.contains("bg-white"));
-  assert.ok(findAdmin.classList.contains("shadow-brutal-sm"));
+  assert.ok(findAdmin.classList.contains("bg-layer-panel"));
+  assert.ok(findAdmin.classList.contains("shadow-raft-sm"));
   const unavailable = screen.getByTestId("login-server-status-server-4");
-  assert.equal(unavailable.getAttribute("title"), "Installation status could not be loaded. Reload this page to try again.");
+  assert.equal(unavailable.getAttribute("title"), null);
+  assert.ok(unavailable.hasAttribute("data-base-ui-tooltip-trigger"), "status hint now rides the RUI tooltip trigger");
   assert.ok(within(unavailable).getByText("Unavailable"));
   assert.equal(screen.getAllByTestId(/^login-server-status-/).length, 22);
   const search = screen.getByRole("searchbox", { name: "Search Servers" });

@@ -3,17 +3,19 @@ import { createReadStream, createWriteStream } from "node:fs";
 import {
   access,
   chmod,
+  type FileHandle,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
+  readlink,
   rename,
-  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { Readable, Transform } from "node:stream";
+import { Readable, Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import { extract, pack, type Headers, type Pack } from "tar-stream";
@@ -26,7 +28,7 @@ import {
   AGENT_MIGRATION_MAX_CHUNKS,
   AGENT_MIGRATION_MAX_CONTROL_MANIFEST_BYTES,
   AGENT_MIGRATION_MIN_CHUNK_BYTES,
-  AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
+  AGENT_MIGRATION_CAPABILITY,
   AGENT_MIGRATION_RESUMABLE_PROTOCOL,
   agentMigrationTransferSummarySchema,
   currentDate,
@@ -34,23 +36,24 @@ import {
   type AgentMigrationControlManifest,
 } from "@botiverse/raft-shared";
 import {
-  buildAgentMigrationExportPlan,
+  agentMigrationTopLevelPath,
+  isNotesPath,
+  listAgentMigrationWorkspace,
   normalizeAgentMigrationSymlinkTarget,
-  summarizeAgentMigrationExportManifest,
-  type AgentMigrationSourceBundleFileEntry,
-} from "./agentMigrationExport.js";
-import { assertAgentMigrationObjectStoreEntryLimit } from "./agentMigrationObjectStoreBundle.js";
+  summarizeAgentMigrationTransfer,
+  type AgentMigrationExportProgress,
+} from "./agentMigrationExport";
+import { assertAgentMigrationObjectStoreEntryLimit } from "./agentMigrationObjectStoreBundle";
 
 export {
   AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
   AGENT_MIGRATION_COMMIT_MARKER_PATH,
   AGENT_MIGRATION_CONTROL_SCHEMA_VERSION,
   AGENT_MIGRATION_DEFAULT_CHUNK_BYTES,
-  AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES,
   AGENT_MIGRATION_MAX_CHUNKS,
   AGENT_MIGRATION_MAX_CONTROL_MANIFEST_BYTES,
   AGENT_MIGRATION_MIN_CHUNK_BYTES,
-  AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
+  AGENT_MIGRATION_CAPABILITY,
   AGENT_MIGRATION_RESUMABLE_PROTOCOL,
   type AgentMigrationControlChunk,
   type AgentMigrationControlManifest,
@@ -58,29 +61,6 @@ export {
 
 const ARCHIVE_WORKSPACE_PREFIX = "workspace/";
 const CONTROL_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
-
-export interface BuildAgentMigrationResumableBundleInput {
-  agentId: string;
-  migrationId: string;
-  migrationGeneration: string;
-  leaseId: string;
-  sourceMachineId: string;
-  targetMachineId: string;
-  slockHome: string;
-  workspacePath: string;
-  maxBytes: number;
-  chunkSizeBytes?: number;
-  spoolParentPath: string;
-}
-
-export interface BuiltAgentMigrationResumableBundle {
-  spoolDirectory: string;
-  bundlePath: string;
-  control: AgentMigrationControlManifest;
-  controlSha256: string;
-  controlBytes: number;
-  openChunk(chunkIndex: number): Readable;
-}
 
 export type AgentMigrationTargetResidueClass =
   | "idle"
@@ -125,8 +105,12 @@ export interface StageAgentMigrationResumableBundleResult {
   extractedBytes: number;
 }
 
+/** The target's local placement steps, in order. Each one is traced separately. */
+export type AgentMigrationPlacementStep = "verify" | "unpack" | "commit";
+
 export interface StageAgentMigrationResumableBundleDependencies {
   renameWorkspace?: (sourcePath: string, targetPath: string) => Promise<void>;
+  traceStep?: <T>(step: AgentMigrationPlacementStep, work: () => Promise<T>) => Promise<T>;
 }
 
 export class AgentMigrationControlManifestError extends Error {
@@ -177,111 +161,445 @@ export class AgentMigrationWorkspaceConflictError extends Error {
   }
 }
 
-export async function buildAgentMigrationResumableBundle(
-  input: BuildAgentMigrationResumableBundleInput,
-): Promise<BuiltAgentMigrationResumableBundle> {
+export interface StreamAgentMigrationResumableBundleInput {
+  agentId: string;
+  migrationId: string;
+  migrationGeneration: string;
+  leaseId: string;
+  sourceMachineId: string;
+  targetMachineId: string;
+  workspacePath: string;
+  maxBytes: number;
+  /** Test seam; defaults to AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES. */
+  maxEntries?: number;
+  chunkSizeBytes?: number;
+  /** Chunks uploading at once; each one holds its bytes in memory. */
+  uploadConcurrency?: number;
+  signal?: AbortSignal;
+  onProgress?: (progress: AgentMigrationExportProgress) => void;
+  /** Uploads one sealed chunk (retrying is up to the caller); a rejection fails the bundle. */
+  uploadChunk(chunk: AgentMigrationControlChunk, bytes: Buffer): Promise<void>;
+}
+
+export interface StreamedAgentMigrationResumableBundle {
+  control: AgentMigrationControlManifest;
+  controlSha256: string;
+  controlBytes: number;
+  /** Files whose size changed while packing (first few); each was cut or zero-padded to its listed size. */
+  resizedEntries: string[];
+  resizedEntryCount: number;
+}
+
+const STREAMED_UPLOAD_CONCURRENCY = 3;
+const READ_AHEAD_ENTRIES = 16;
+// Read whole into memory ahead of the tar writer; larger files are streamed.
+const READ_AHEAD_MAX_FILE_BYTES = 1024 * 1024;
+const RESIZED_ENTRIES_REPORTED = 20;
+const SCAN_PROGRESS_EVERY_ENTRIES = 1_000;
+
+/**
+ * Builds the bundle in one pass and uploads it as it goes: no temp file and no
+ * per-file list in memory. The workspace is listed once to check the entry
+ * limit (nothing is read), then listed again in the same order while each file
+ * is read once into tar+gzip; every full chunk of output is hashed and handed
+ * to `uploadChunk` right away. A failed upload fails the whole bundle; the
+ * migration is retried from scratch.
+ */
+export async function streamAgentMigrationResumableBundle(
+  input: StreamAgentMigrationResumableBundleInput,
+): Promise<StreamedAgentMigrationResumableBundle> {
   assertPositiveSafeInteger(input.maxBytes, "MIGRATION_OBJECT_STORE_MAX_BYTES_INVALID");
+  const maxEntries = input.maxEntries ?? AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES;
+  assertPositiveSafeInteger(maxEntries, "MIGRATION_OBJECT_STORE_MAX_ENTRIES_INVALID");
   const chunkSizeBytes = input.chunkSizeBytes ?? AGENT_MIGRATION_DEFAULT_CHUNK_BYTES;
   assertChunkSize(chunkSizeBytes);
   assertIdentityFields(input);
-
   const workspacePath = path.resolve(input.workspacePath);
-  const buildPlan = await buildAgentMigrationExportPlan({
-    agentId: input.agentId,
-    slockHome: input.slockHome,
-    workspacePath,
-    mode: "forensic",
-  });
-  const sourceEntries = buildPlan.files.filter((entry) => {
-    return entry.workspaceRelativePath !== AGENT_MIGRATION_COMMIT_MARKER_PATH;
-  }).map((entry) => {
-    if (entry.source !== "workspace" || !entry.workspaceRelativePath) {
-      throw new Error("MIGRATION_OBJECT_STORE_UNSUPPORTED_ENTRY");
-    }
-    return entry;
-  });
-  assertAgentMigrationObjectStoreEntryLimit(sourceEntries, AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES);
-  const expandedBytes = sourceEntries.reduce((total, entry) => {
-    const next = total + (entry.kind === "file" ? checkedEntrySize(entry) : 0);
-    if (!Number.isSafeInteger(next)) throw new Error("MIGRATION_OBJECT_STORE_FILE_SIZE_INVALID");
-    return next;
-  }, 0);
-  const maxEntryBytes = sourceEntries.reduce(
-    (largest, entry) => Math.max(largest, entry.kind === "file" ? checkedEntrySize(entry) : 0),
-    0,
-  );
 
-  await mkdir(path.resolve(input.spoolParentPath), { recursive: true });
-  const spoolDirectory = await mkdtemp(path.join(path.resolve(input.spoolParentPath), "bundle-"));
-  const bundlePath = path.join(spoolDirectory, "bundle.tar.gz");
+  let listedEntries = 0;
+  let measuredIgnoredEntries = 0;
+  const countByTopLevelPath = new Map<string, number>();
+  const reportScan = () => input.onProgress?.({
+    phase: "scanning",
+    files: listedEntries + measuredIgnoredEntries,
+    bytes: 0,
+  });
+  const listing = await listAgentMigrationWorkspace({
+    workspacePath,
+    onProgress(progress) {
+      measuredIgnoredEntries = progress.files;
+      reportScan();
+    },
+    onEntry(relativePath) {
+      input.signal?.throwIfAborted();
+      if (relativePath === AGENT_MIGRATION_COMMIT_MARKER_PATH) return;
+      listedEntries += 1;
+      const topLevelPath = agentMigrationTopLevelPath(relativePath);
+      countByTopLevelPath.set(topLevelPath, (countByTopLevelPath.get(topLevelPath) ?? 0) + 1);
+      if (listedEntries % SCAN_PROGRESS_EVERY_ENTRIES === 0) reportScan();
+    },
+  });
+  assertAgentMigrationObjectStoreEntryLimit([], maxEntries, {
+    entryCount: listedEntries,
+    countByTopLevelPath,
+  });
+
+  const chunkWriter = new StreamedChunkWriter(
+    chunkSizeBytes,
+    input.uploadConcurrency ?? STREAMED_UPLOAD_CONCURRENCY,
+    input.uploadChunk,
+  );
   const tarPack = pack();
-  const gzip = createGzip({ level: 6 });
-  const limit = createByteLimit(input.maxBytes);
   const archiveWrite = pipeline(
     tarPack,
-    gzip,
-    limit,
-    createWriteStream(bundlePath, { flags: "wx", mode: 0o600 }),
+    createGzip({ level: 6 }),
+    createByteLimit(input.maxBytes),
+    chunkWriter,
   );
-  void writeSourceArchive(tarPack, sourceEntries).catch((error: unknown) => {
+  const totals = { entries: 0, bytes: 0, maxEntryBytes: 0, memoryMdPresent: false, notesPresent: false };
+  const resizedEntries: string[] = [];
+  let resizedEntryCount = 0;
+  let stopped = false;
+  // Small files are read a few entries ahead of the tar writer; they are still
+  // written in walk order, so the bundle bytes do not depend on read timing.
+  const readAhead: Array<{ relativePath: string; prepared: Promise<PreparedWorkspaceEntry | null> }> = [];
+  const writeNext = async () => {
+    const next = readAhead.shift()!;
+    const prepared = await next.prepared;
+    if (!prepared) return;
+    const packed = await writePreparedWorkspaceEntry(tarPack, prepared);
+    if (!packed) return;
+    const relativePath = next.relativePath;
+    totals.entries += 1;
+    // The workspace grew between the two walks.
+    if (totals.entries > maxEntries) {
+      assertAgentMigrationObjectStoreEntryLimit([], maxEntries, {
+        entryCount: totals.entries,
+        countByTopLevelPath,
+      });
+    }
+    totals.bytes += packed.sizeBytes;
+    totals.maxEntryBytes = Math.max(totals.maxEntryBytes, packed.sizeBytes);
+    if (relativePath === "MEMORY.md") totals.memoryMdPresent = true;
+    if (isNotesPath(relativePath)) totals.notesPresent = true;
+    if (packed.resized) {
+      resizedEntryCount += 1;
+      if (resizedEntries.length < RESIZED_ENTRIES_REPORTED) resizedEntries.push(relativePath);
+    }
+    input.onProgress?.({ phase: "packing", files: totals.entries, bytes: totals.bytes });
+  };
+  const packing = (async () => {
+    await listAgentMigrationWorkspace({
+      workspacePath,
+      measureIgnored: false,
+      async onEntry(relativePath) {
+        if (stopped) throw new Error("MIGRATION_OBJECT_STORE_BUNDLE_ABORTED");
+        input.signal?.throwIfAborted();
+        if (relativePath === AGENT_MIGRATION_COMMIT_MARKER_PATH) return;
+        const prepared = prepareWorkspaceEntry(workspacePath, relativePath);
+        // Awaited later, in order; this only keeps an early failure from going unhandled.
+        prepared.catch(() => undefined);
+        readAhead.push({ relativePath, prepared });
+        if (readAhead.length >= READ_AHEAD_ENTRIES) await writeNext();
+      },
+    });
+    while (readAhead.length > 0) await writeNext();
+    tarPack.finalize();
+  })();
+  packing.catch((error: unknown) => {
     tarPack.destroy(error instanceof Error ? error : new Error(String(error)));
   });
-  await archiveWrite;
+  try {
+    await Promise.all([archiveWrite, packing]);
+  } finally {
+    stopped = true;
+  }
 
-  const totalBytes = (await stat(bundlePath)).size;
-  const { sha256, chunks } = await hashBundleChunks(bundlePath, totalBytes, chunkSizeBytes);
-  const control: AgentMigrationControlManifest = {
+  const control = buildControlManifest(input, {
+    bundle: {
+      totalBytes: chunkWriter.totalBytes,
+      sha256: chunkWriter.bundleSha256(),
+      chunkSizeBytes,
+      chunks: chunkWriter.chunks,
+    },
+    archive: { entryCount: totals.entries, expandedBytes: totals.bytes, maxEntryBytes: totals.maxEntryBytes },
+    transferSummary: summarizeAgentMigrationTransfer({
+      includedFileCount: totals.entries,
+      includedBytes: totals.bytes,
+      memoryMdPresent: totals.memoryMdPresent,
+      notesPresent: totals.notesPresent,
+      excludedRegenerable: listing.excludedRegenerable,
+      excludedIgnored: listing.excludedIgnored,
+    }),
+  });
+  const { sha256: controlSha256, bytes: controlBytes } = validateAgentMigrationControlManifest(control);
+  return { control, controlSha256, controlBytes, resizedEntries, resizedEntryCount };
+}
+
+type PreparedWorkspaceEntry =
+  | { kind: "buffered"; header: Headers; bytes: Buffer; resized: boolean }
+  | { kind: "streamed"; header: Headers; sourcePath: string; sizeBytes: number };
+
+/**
+ * Stats one listed workspace path and reads it if it is small. Returns null
+ * for a path that vanished, is no longer a file or symlink, or links outside
+ * the workspace; such paths are not moved, as with a full export.
+ */
+async function prepareWorkspaceEntry(
+  workspacePath: string,
+  relativePath: string,
+): Promise<PreparedWorkspaceEntry | null> {
+  const archiveRelativePath = normalizeArchiveRelativePath(relativePath);
+  const name = `${ARCHIVE_WORKSPACE_PREFIX}${archiveRelativePath}`;
+  const sourcePath = path.join(workspacePath, ...archiveRelativePath.split("/"));
+  let entryStat;
+  try {
+    entryStat = await lstat(sourcePath);
+  } catch {
+    return null;
+  }
+  const mode = archiveMode(entryStat.mode);
+  const mtime = archiveMtime(entryStat.mtimeMs);
+  if (entryStat.isSymbolicLink()) {
+    let linkname: string;
+    try {
+      linkname = normalizeAgentMigrationSymlinkTarget(archiveRelativePath, await readlink(sourcePath));
+    } catch {
+      return null;
+    }
+    return { kind: "buffered", header: { name, type: "symlink", size: 0, mode, mtime, linkname }, bytes: Buffer.alloc(0), resized: false };
+  }
+  if (!entryStat.isFile()) return null;
+  const sizeBytes = entryStat.size;
+  const header: Headers = { name, type: "file", size: sizeBytes, mode, mtime };
+  if (sizeBytes > READ_AHEAD_MAX_FILE_BYTES) return { kind: "streamed", header, sourcePath, sizeBytes };
+  const read = await readFileExactly(sourcePath, sizeBytes);
+  return read ? { kind: "buffered", header, ...read } : null;
+}
+
+async function writePreparedWorkspaceEntry(
+  tarPack: Pack,
+  prepared: PreparedWorkspaceEntry,
+): Promise<{ sizeBytes: number; resized: boolean } | null> {
+  if (prepared.kind === "buffered") {
+    await writeBufferedEntry(tarPack, prepared.header, prepared.bytes);
+    return { sizeBytes: prepared.bytes.byteLength, resized: prepared.resized };
+  }
+  // Open before the tar entry exists, so a file that vanished is skipped like a small one.
+  const handle = await openIfPresent(prepared.sourcePath);
+  if (!handle) return null;
+  try {
+    const { readBytes, sizeAfterRead } = await pipeFileExactly(
+      handle,
+      prepared.sizeBytes,
+      tarPack.entry(prepared.header),
+    );
+    return {
+      sizeBytes: prepared.sizeBytes,
+      resized: readBytes !== prepared.sizeBytes || sizeAfterRead !== prepared.sizeBytes,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Null if the file vanished after it was listed. */
+async function openIfPresent(sourcePath: string): Promise<FileHandle | null> {
+  try {
+    return await open(sourcePath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+/**
+ * Reads exactly `sizeBytes` (zero-padded if the file shrank, cut if it grew).
+ * Returns null if the file vanished after it was listed.
+ */
+export async function readFileExactly(
+  sourcePath: string,
+  sizeBytes: number,
+): Promise<{ bytes: Buffer; resized: boolean } | null> {
+  const handle = await openIfPresent(sourcePath);
+  if (!handle) return null;
+  try {
+    const bytes = Buffer.alloc(sizeBytes);
+    let readBytes = 0;
+    while (readBytes < sizeBytes) {
+      const { bytesRead } = await handle.read(bytes, readBytes, sizeBytes - readBytes, readBytes);
+      if (bytesRead === 0) break;
+      readBytes += bytesRead;
+    }
+    const sizeAfterRead = (await handle.stat()).size;
+    return { bytes, resized: readBytes !== sizeBytes || sizeAfterRead !== sizeBytes };
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * The tar header already promised `sizeBytes`, so exactly that many bytes are
+ * written: a file that grew is cut, one that shrank is padded with zeros.
+ * Either way the archive stays valid.
+ */
+export async function pipeFileExactly(
+  handle: FileHandle,
+  sizeBytes: number,
+  destination: Writable,
+): Promise<{ readBytes: number; sizeAfterRead: number }> {
+  let readBytes = 0;
+  const exactBytes = async function* (): AsyncGenerator<Buffer> {
+    if (sizeBytes > 0) {
+      for await (const value of handle.createReadStream({ start: 0, end: sizeBytes - 1, autoClose: false })) {
+        const chunk = value as Buffer;
+        readBytes += chunk.byteLength;
+        yield chunk;
+      }
+    }
+    for (let missing = sizeBytes - readBytes; missing > 0;) {
+      const padding = Math.min(missing, 64 * 1024);
+      yield Buffer.alloc(padding);
+      missing -= padding;
+    }
+  };
+  await pipeline(Readable.from(exactBytes()), destination);
+  return { readBytes, sizeAfterRead: (await handle.stat()).size };
+}
+
+/**
+ * Cuts the compressed stream into fixed-size chunks, hashes each, and uploads
+ * up to `concurrency` at a time; writing waits for a free slot, so packing
+ * never runs more than that far ahead of the upload.
+ */
+class StreamedChunkWriter extends Writable {
+  readonly chunks: AgentMigrationControlChunk[] = [];
+  totalBytes = 0;
+  private readonly wholeHash = createHash("sha256");
+  private pending: Buffer[] = [];
+  private pendingBytes = 0;
+  private readonly inFlight = new Set<Promise<void>>();
+  private failure: unknown = null;
+
+  constructor(
+    private readonly chunkSizeBytes: number,
+    private readonly concurrency: number,
+    private readonly upload: (chunk: AgentMigrationControlChunk, bytes: Buffer) => Promise<void>,
+  ) {
+    super();
+  }
+
+  bundleSha256(): string {
+    return this.wholeHash.digest("hex");
+  }
+
+  override _write(data: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    this.accept(data).then(() => callback(), callback);
+  }
+
+  override _final(callback: (error?: Error | null) => void): void {
+    this.finish().then(() => callback(), callback);
+  }
+
+  private async accept(data: Buffer): Promise<void> {
+    this.wholeHash.update(data);
+    let rest = data;
+    while (rest.byteLength > 0) {
+      const piece = rest.subarray(0, this.chunkSizeBytes - this.pendingBytes);
+      this.pending.push(piece);
+      this.pendingBytes += piece.byteLength;
+      rest = rest.subarray(piece.byteLength);
+      if (this.pendingBytes === this.chunkSizeBytes) await this.seal();
+    }
+  }
+
+  private async finish(): Promise<void> {
+    if (this.pendingBytes > 0) await this.seal();
+    if (this.chunks.length === 0) throw new Error("MIGRATION_OBJECT_STORE_BUNDLE_EMPTY");
+    await Promise.all(this.inFlight);
+    this.throwIfFailed();
+  }
+
+  private async seal(): Promise<void> {
+    const bytes = Buffer.concat(this.pending, this.pendingBytes);
+    this.pending = [];
+    this.pendingBytes = 0;
+    const chunk: AgentMigrationControlChunk = {
+      index: this.chunks.length,
+      offsetBytes: this.totalBytes,
+      sizeBytes: bytes.byteLength,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    };
+    if (chunk.index >= AGENT_MIGRATION_MAX_CHUNKS) {
+      throw new Error("MIGRATION_CONTROL_CHUNK_COUNT_LIMIT_EXCEEDED");
+    }
+    this.chunks.push(chunk);
+    this.totalBytes += bytes.byteLength;
+    while (this.inFlight.size >= this.concurrency) {
+      await Promise.race(this.inFlight);
+      this.throwIfFailed();
+    }
+    this.throwIfFailed();
+    const uploading: Promise<void> = this.upload(chunk, bytes)
+      .catch((error: unknown) => {
+        this.failure ??= error;
+      })
+      .finally(() => {
+        this.inFlight.delete(uploading);
+      });
+    this.inFlight.add(uploading);
+  }
+
+  private throwIfFailed(): void {
+    if (this.failure !== null) {
+      throw this.failure instanceof Error ? this.failure : new Error(String(this.failure));
+    }
+  }
+}
+
+function buildControlManifest(
+  identity: {
+    migrationId: string;
+    migrationGeneration: string;
+    leaseId: string;
+    agentId: string;
+    sourceMachineId: string;
+    targetMachineId: string;
+  },
+  input: {
+    bundle: { totalBytes: number; sha256: string; chunkSizeBytes: number; chunks: AgentMigrationControlChunk[] };
+    archive: { entryCount: number; expandedBytes: number; maxEntryBytes: number };
+    transferSummary: AgentMigrationControlManifest["transferSummary"];
+  },
+): AgentMigrationControlManifest {
+  return {
     schemaVersion: AGENT_MIGRATION_CONTROL_SCHEMA_VERSION,
     protocol: AGENT_MIGRATION_RESUMABLE_PROTOCOL,
     identity: {
-      migrationId: input.migrationId,
-      migrationGeneration: input.migrationGeneration,
-      leaseId: input.leaseId,
-      agentId: input.agentId,
-      sourceMachineId: input.sourceMachineId,
-      targetMachineId: input.targetMachineId,
+      migrationId: identity.migrationId,
+      migrationGeneration: identity.migrationGeneration,
+      leaseId: identity.leaseId,
+      agentId: identity.agentId,
+      sourceMachineId: identity.sourceMachineId,
+      targetMachineId: identity.targetMachineId,
     },
-    capability: { required: AGENT_MIGRATION_RESUMABLE_CAPABILITIES },
+    capability: { required: [AGENT_MIGRATION_CAPABILITY] },
     bundle: {
       contentType: AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
-      totalBytes,
-      sha256,
-      chunkSizeBytes,
-      chunks,
+      ...input.bundle,
     },
     archive: {
       format: "tar+gzip",
-      entryCount: sourceEntries.length,
-      expandedBytes,
-      maxEntryBytes,
+      ...input.archive,
       allowedEntryTypes: ["file", "symlink"],
     },
-    transferSummary: summarizeAgentMigrationExportManifest({
-      files: sourceEntries,
-      excludedRegenerable: buildPlan.manifest.excludedRegenerable,
-    }),
+    transferSummary: input.transferSummary,
     commit: {
       mode: "atomic-rename",
       markerPath: AGENT_MIGRATION_COMMIT_MARKER_PATH,
       requireWholeBundleDigest: true,
       requireAllChunkDigests: true,
       existingWorkspace: "idle-or-same-commit",
-    },
-  };
-  const { sha256: controlSha256, bytes: controlBytes } = validateAgentMigrationControlManifest(control);
-  return {
-    spoolDirectory,
-    bundlePath,
-    control,
-    controlSha256,
-    controlBytes,
-    openChunk(chunkIndex: number): Readable {
-      const chunk = control.bundle.chunks[chunkIndex];
-      if (!chunk || chunk.index !== chunkIndex) throw new Error("MIGRATION_CHUNK_INDEX_INVALID");
-      return createReadStream(bundlePath, {
-        start: chunk.offsetBytes,
-        end: chunk.offsetBytes + chunk.sizeBytes - 1,
-      });
     },
   };
 }
@@ -307,9 +625,8 @@ export function validateAgentMigrationControlManifest(control: AgentMigrationCon
   }
   assertIdentityFields(control.identity);
   if (
-    control.capability.required.length !== AGENT_MIGRATION_RESUMABLE_CAPABILITIES.length
-    || !AGENT_MIGRATION_RESUMABLE_CAPABILITIES.every((capability) =>
-      control.capability.required.includes(capability))
+    control.capability.required.length !== 1
+    || control.capability.required[0] !== AGENT_MIGRATION_CAPABILITY
   ) {
     throw new AgentMigrationControlManifestError("MIGRATION_CONTROL_CAPABILITY_UNSUPPORTED");
   }
@@ -522,21 +839,49 @@ export async function stageAndCommitAgentMigrationResumableBundle(
   if (residue.classification === "user-owned") {
     throw new AgentMigrationWorkspaceConflictError("MIGRATION_WORKSPACE_ALREADY_EXISTS");
   }
-  const missing = await missingAgentMigrationChunks({
-    control: input.control,
-    chunksDirectory: input.chunksDirectory,
+  const traceStep: NonNullable<StageAgentMigrationResumableBundleDependencies["traceStep"]> =
+    dependencies.traceStep ?? ((_step, work) => work());
+  await traceStep("verify", async () => {
+    const missing = await missingAgentMigrationChunks({
+      control: input.control,
+      chunksDirectory: input.chunksDirectory,
+    });
+    if (missing.length > 0) throw new Error(`MIGRATION_CHUNKS_MISSING:${missing.join(",")}`);
   });
-  if (missing.length > 0) throw new Error(`MIGRATION_CHUNKS_MISSING:${missing.join(",")}`);
 
-  await mkdir(residue.generationRootPath, { recursive: true });
-  const attemptRoot = await mkdtemp(path.join(residue.generationRootPath, "extracting-"));
-  const stagingWorkspacePath = path.join(attemptRoot, "workspace");
-  await mkdir(stagingWorkspacePath, { recursive: true });
-  const extraction = await extractVerifiedArchive({
-    control: input.control,
-    chunksDirectory: input.chunksDirectory,
-    stagingWorkspacePath,
+  const { stagingWorkspacePath, extraction } = await traceStep("unpack", async () => {
+    await mkdir(residue.generationRootPath, { recursive: true });
+    const attemptRoot = await mkdtemp(path.join(residue.generationRootPath, "extracting-"));
+    const stagingWorkspacePath = path.join(attemptRoot, "workspace");
+    await mkdir(stagingWorkspacePath, { recursive: true });
+    const extraction = await extractVerifiedArchive({
+      control: input.control,
+      chunksDirectory: input.chunksDirectory,
+      stagingWorkspacePath,
+    });
+    return { stagingWorkspacePath, extraction };
   });
+  return traceStep("commit", () => commitStagedWorkspace({
+    control: input.control,
+    controlSha256,
+    now: input.now,
+    stagingWorkspacePath,
+    finalWorkspacePath: residue.finalWorkspacePath,
+    extraction,
+    renameWorkspace: dependencies.renameWorkspace ?? rename,
+  }));
+}
+
+async function commitStagedWorkspace(input: {
+  control: AgentMigrationControlManifest;
+  controlSha256: string;
+  now?: Date;
+  stagingWorkspacePath: string;
+  finalWorkspacePath: string;
+  extraction: { entries: number; bytes: number };
+  renameWorkspace: (sourcePath: string, targetPath: string) => Promise<void>;
+}): Promise<StageAgentMigrationResumableBundleResult> {
+  const { controlSha256, stagingWorkspacePath, finalWorkspacePath, extraction } = input;
   const marker: AgentMigrationCommitMarker = {
     schemaVersion: "agent-migration-commit/v1",
     ...input.control.identity,
@@ -547,16 +892,16 @@ export async function stageAndCommitAgentMigrationResumableBundle(
   const markerPath = path.join(stagingWorkspacePath, ...AGENT_MIGRATION_COMMIT_MARKER_PATH.split("/"));
   await mkdir(path.dirname(markerPath), { recursive: true });
   await writeFile(markerPath, `${canonicalJson(marker)}\n`, { flag: "wx", mode: 0o600 });
-  await mkdir(path.dirname(residue.finalWorkspacePath), { recursive: true });
+  await mkdir(path.dirname(finalWorkspacePath), { recursive: true });
   try {
-    await (dependencies.renameWorkspace ?? rename)(stagingWorkspacePath, residue.finalWorkspacePath);
+    await input.renameWorkspace(stagingWorkspacePath, finalWorkspacePath);
   } catch (error) {
-    if (await pathExists(residue.finalWorkspacePath)) {
-      const existing = await readCommitMarker(residue.finalWorkspacePath);
+    if (await pathExists(finalWorkspacePath)) {
+      const existing = await readCommitMarker(finalWorkspacePath);
       if (existing && commitMarkerMatches(existing, input.control, controlSha256)) {
         return {
           outcome: "already-committed",
-          finalWorkspacePath: residue.finalWorkspacePath,
+          finalWorkspacePath,
           marker: existing,
           extractedEntries: extraction.entries,
           extractedBytes: extraction.bytes,
@@ -570,50 +915,11 @@ export async function stageAndCommitAgentMigrationResumableBundle(
   }
   return {
     outcome: "committed",
-    finalWorkspacePath: residue.finalWorkspacePath,
+    finalWorkspacePath,
     marker,
     extractedEntries: extraction.entries,
     extractedBytes: extraction.bytes,
   };
-}
-
-async function writeSourceArchive(
-  tarPack: Pack,
-  sourceEntries: AgentMigrationSourceBundleFileEntry[],
-): Promise<void> {
-  for (const entry of sourceEntries) {
-    const relativePath = normalizeArchiveRelativePath(entry.workspaceRelativePath ?? "");
-    if (relativePath === AGENT_MIGRATION_COMMIT_MARKER_PATH) {
-      throw new Error("MIGRATION_OBJECT_STORE_RESERVED_PATH");
-    }
-    const sourcePath = path.resolve(entry.sourcePath);
-    const archivePath = `${ARCHIVE_WORKSPACE_PREFIX}${relativePath}`;
-    if (entry.kind === "symlink") {
-      const linkTarget = assertSafeSymlink(relativePath, entry.linkTarget);
-      await writeBufferedEntry(tarPack, {
-        name: archivePath,
-        type: "symlink",
-        size: 0,
-        mode: archiveMode(entry.mode),
-        mtime: archiveMtime(entry.mtimeMs),
-        linkname: linkTarget,
-      }, Buffer.alloc(0));
-      continue;
-    }
-    const sourceStat = await lstat(sourcePath);
-    if (!sourceStat.isFile() || sourceStat.size !== entry.sizeBytes) {
-      throw new Error(`MIGRATION_OBJECT_STORE_FILE_CHANGED:${relativePath}`);
-    }
-    const tarEntry = tarPack.entry({
-      name: archivePath,
-      type: "file",
-      size: sourceStat.size,
-      mode: archiveMode(entry.mode),
-      mtime: archiveMtime(entry.mtimeMs),
-    });
-    await pipeline(createReadStream(sourcePath), tarEntry);
-  }
-  tarPack.finalize();
 }
 
 async function extractVerifiedArchive(input: {
@@ -696,8 +1002,10 @@ async function extractArchiveEntry(input: {
     throw new Error("MIGRATION_OBJECT_STORE_RESERVED_PATH");
   }
   if (input.seen.has(relativePath)) throw new Error("MIGRATION_ARCHIVE_ENTRY_DUPLICATE");
-  for (const symlinkPath of input.symlinkPaths) {
-    if (relativePath.startsWith(`${symlinkPath}/`)) {
+  // Check each ancestor rather than each symlink: linear in path depth, not in
+  // the number of symlinks seen so far.
+  for (let slash = relativePath.indexOf("/"); slash !== -1; slash = relativePath.indexOf("/", slash + 1)) {
+    if (input.symlinkPaths.has(relativePath.slice(0, slash))) {
       throw new Error("MIGRATION_ARCHIVE_SYMLINK_ANCESTOR");
     }
   }
@@ -750,55 +1058,6 @@ async function* readVerifiedChunkSequence(
   }
 }
 
-async function hashBundleChunks(
-  bundlePath: string,
-  totalBytes: number,
-  chunkSizeBytes: number,
-): Promise<{ sha256: string; chunks: AgentMigrationControlChunk[] }> {
-  const wholeHash = createHash("sha256");
-  const chunks: AgentMigrationControlChunk[] = [];
-  let chunkHash = createHash("sha256");
-  let chunkBytes = 0;
-  let offsetBytes = 0;
-  for await (const value of createReadStream(bundlePath, { highWaterMark: Math.min(chunkSizeBytes, 1024 * 1024) })) {
-    let buffer = Buffer.from(value);
-    wholeHash.update(buffer);
-    while (buffer.byteLength > 0) {
-      const remaining = chunkSizeBytes - chunkBytes;
-      const piece = buffer.subarray(0, remaining);
-      chunkHash.update(piece);
-      chunkBytes += piece.byteLength;
-      buffer = buffer.subarray(piece.byteLength);
-      if (chunkBytes === chunkSizeBytes) {
-        chunks.push({
-          index: chunks.length,
-          offsetBytes,
-          sizeBytes: chunkBytes,
-          sha256: chunkHash.digest("hex"),
-        });
-        offsetBytes += chunkBytes;
-        chunkBytes = 0;
-        chunkHash = createHash("sha256");
-      }
-    }
-  }
-  if (chunkBytes > 0) {
-    chunks.push({
-      index: chunks.length,
-      offsetBytes,
-      sizeBytes: chunkBytes,
-      sha256: chunkHash.digest("hex"),
-    });
-  }
-  if (chunks.length === 0 && totalBytes === 0) {
-    throw new Error("MIGRATION_OBJECT_STORE_BUNDLE_EMPTY");
-  }
-  if (chunks.length > AGENT_MIGRATION_MAX_CHUNKS) {
-    throw new Error("MIGRATION_CONTROL_CHUNK_COUNT_LIMIT_EXCEEDED");
-  }
-  return { sha256: wholeHash.digest("hex"), chunks };
-}
-
 function assertIdentityFields(input: {
   migrationId: string;
   migrationGeneration: string;
@@ -836,13 +1095,6 @@ function assertPositiveSafeInteger(value: number, code: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(code);
 }
 
-function checkedEntrySize(entry: AgentMigrationSourceBundleFileEntry): number {
-  if (!Number.isSafeInteger(entry.sizeBytes) || (entry.sizeBytes ?? -1) < 0) {
-    throw new Error("MIGRATION_OBJECT_STORE_FILE_SIZE_INVALID");
-  }
-  return entry.sizeBytes ?? 0;
-}
-
 function createByteLimit(maxBytes: number): Transform {
   let bytes = 0;
   return new Transform({
@@ -861,12 +1113,12 @@ function generationRoot(slockHome: string, control: AgentMigrationControlManifes
   return path.join(
     path.resolve(slockHome),
     "migrations",
-    sanitizeSegment(control.identity.migrationId),
-    sanitizeSegment(control.identity.migrationGeneration),
+    migrationStatePathSegment(control.identity.migrationId),
+    migrationStatePathSegment(control.identity.migrationGeneration),
   );
 }
 
-function commitMarkerMatches(
+export function commitMarkerMatches(
   marker: AgentMigrationCommitMarker,
   control: AgentMigrationControlManifest,
   controlSha256: string,
@@ -882,7 +1134,7 @@ function commitMarkerMatches(
     && marker.bundleSha256 === control.bundle.sha256;
 }
 
-async function readCommitMarker(finalWorkspacePath: string): Promise<AgentMigrationCommitMarker | undefined> {
+export async function readCommitMarker(finalWorkspacePath: string): Promise<AgentMigrationCommitMarker | undefined> {
   const markerPath = path.join(
     finalWorkspacePath,
     ...AGENT_MIGRATION_COMMIT_MARKER_PATH.split("/"),
@@ -996,6 +1248,7 @@ function sortJsonValue(value: unknown): unknown {
     }, {});
 }
 
-function sanitizeSegment(value: string): string {
+/** Directory name for a migration id or generation; existing on-disk state paths depend on it. */
+export function migrationStatePathSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "migration";
 }

@@ -1,3 +1,4 @@
+import { Button } from "raft-ui";
 import { BellRing, Clock3, Link2, RefreshCw, Repeat } from "lucide-react";
 import type { MouseEvent } from "react";
 import { useIntl } from "react-intl";
@@ -46,9 +47,9 @@ function ReminderCard({
   return (
     <SurfaceListItem>
       <div className="min-w-0">
-        <div className="text-sm font-bold text-black break-words">{reminder.title}</div>
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-black/50">
-          <span className="inline-flex items-center gap-1 font-medium text-black/60">
+        <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black break-words">{reminder.title}</div>
+        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-foreground-muted theme-brutal:text-black/50">
+          <span className="inline-flex items-center gap-1 font-medium text-foreground-muted theme-brutal:text-black/60">
             <Clock3 size={12} />
             {(() => {
               const parts = getRelativeTimeParts(reminder.fireAt);
@@ -58,8 +59,7 @@ function ReminderCard({
           <span className="font-mono">{formatShortDateTime(reminder.fireAt)}</span>
           {reminder.recurrence && (
             <span
-              title={reminder.recurrence.description}
-              className="inline-flex items-center gap-1 border border-black bg-brutal-lavender/30 px-1.5 py-0.5 font-mono text-[11px] text-black"
+              className="inline-flex items-center gap-1 border border-line-muted theme-brutal:border-black bg-accent-soft theme-brutal:bg-brutal-lavender/30 px-1.5 py-0.5 font-mono text-[11px] text-foreground-strong theme-brutal:text-black"
             >
               <Repeat size={11} />
               {reminder.recurrence.description}
@@ -72,13 +72,13 @@ function ReminderCard({
               <a
                 href={reminder.msgPermalink}
                 onClick={handleMsgRefClick}
-                className="inline-flex max-w-full cursor-default items-center gap-1 truncate border border-black bg-white px-1.5 py-0.5 font-mono text-[11px] text-black hover:bg-soft-signal/30"
+                className="inline-flex max-w-full cursor-default items-center gap-1 truncate border border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-1.5 py-0.5 font-mono text-[11px] text-foreground-strong theme-brutal:text-black hover:bg-fill-muted theme-brutal:hover:bg-soft-signal/30"
               >
                 <Link2 size={11} className="shrink-0" />
                 <span className="truncate">{reminder.msgRef}</span>
               </a>
             ) : (
-              <span className="inline-flex max-w-full items-center gap-1 truncate border border-black bg-white px-1.5 py-0.5 font-mono text-[11px] text-black/70">
+              <span className="inline-flex max-w-full items-center gap-1 truncate border border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-1.5 py-0.5 font-mono text-[11px] text-foreground-muted theme-brutal:text-black/70">
                 <Link2 size={11} className="shrink-0" />
                 <span className="truncate">{reminder.msgRef}</span>
               </span>
@@ -111,21 +111,21 @@ export default function AgentRemindersSection({
     <div
       className={
         isTab
-          ? "flex-1 overflow-y-auto bg-white px-5 py-5"
-          : "px-5 py-4 border-t border-black/10"
+          ? "flex-1 overflow-y-auto bg-layer-panel theme-brutal:bg-white px-5 py-5"
+          : "px-5 py-4 border-t border-line-muted theme-brutal:border-black/10"
       }
     >
       {isTab ? (
-        loading ? <div className="mb-3 text-xs font-bold text-black/50">{formatMessage({ id: "common.loading" })}</div> : null
+        loading ? <div className="mb-3 text-xs font-bold text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "common.loading" })}</div> : null
       ) : (
         <SectionHeader
           className="mb-3"
-          icon={<BellRing size={14} className="text-black/50" />}
+          icon={<BellRing size={14} className="text-foreground-muted theme-brutal:text-black/50" />}
           label={formatMessage({ id: "agent.reminders.pendingLabel" })}
           count={reminders.length}
           action={
             loading ? (
-              <span className="text-xs font-bold text-black/50">{formatMessage({ id: "common.loading" })}</span>
+              <span className="text-xs font-bold text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "common.loading" })}</span>
             ) : null
           }
         />
@@ -135,28 +135,28 @@ export default function AgentRemindersSection({
         <Banner intent="warning" density="sm" className="font-bold">
           <div>{error}</div>
           {onRetry && (
-            <button
+            <Button variant="outline" size="sm"
               type="button"
               onClick={() => void onRetry()}
-              className="btn-brutal-sm mt-2 bg-white px-2 py-1 text-[11px] font-bold"
+              className="mt-2 text-[11px]"
             >
               <span className="inline-flex items-center gap-1">
                 <RefreshCw size={12} />
                 {formatMessage({ id: "agent.reminders.retry" })}
               </span>
-            </button>
+            </Button>
           )}
         </Banner>
       ) : reminders.length === 0 ? (
         isTab ? (
           <EmptyState
-            className="flex h-full flex-col items-center justify-center bg-white"
+            className="flex h-full flex-col items-center justify-center bg-layer-panel theme-brutal:bg-white"
             icon={<BellRing size={28} />}
             title={formatMessage({ id: "emptyState.noRemindersTitle" })}
             description={formatMessage({ id: "emptyState.noRemindersDesc" })}
           />
         ) : (
-          <div className="text-sm text-black/50">{formatMessage({ id: "agent.reminders.noPending" })}</div>
+          <div className="text-sm text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "agent.reminders.noPending" })}</div>
         )
       ) : (
         <div className="space-y-3">

@@ -13,10 +13,12 @@ import {
   authStatusBucket,
   emitAuthTrace,
   emitAuthTraceAndFlush,
+  startWebSpan,
 } from "./webAuthTrace";
 import type {
   TokenObservation,
   WaitElapsedBucket,
+  WebSpanHandle,
 } from "./webAuthTrace";
 import { assertValidDesktopRuntimeEnvironment, RUNTIME_API_BASE } from "../desktopRuntimeEnvironment";
 
@@ -107,7 +109,10 @@ export function createRefreshCoordinator(params: {
       retryIndex?: 0 | 1 | 2 | 3;
     } = {},
     urgent = false,
+    waitSpan: WebSpanHandle | null = null,
   ): void {
+    // The wait phases are attached to the running cross_tab_wait span.
+    const spanContext = waitSpan ? { traceId: waitSpan.traceId, spanId: waitSpan.spanId } : {};
     const payload = {
       routeFamily: "auth_refresh",
       crossTabSyncPhase: phase,
@@ -121,9 +126,9 @@ export function createRefreshCoordinator(params: {
       retryIndex: attrs.retryIndex,
     } as const;
     if (urgent) {
-      emitAuthTraceAndFlush("slock.auth.cross_tab_sync", payload);
+      emitAuthTraceAndFlush("slock.auth.cross_tab_sync", payload, spanContext);
     } else {
-      emitAuthTrace("slock.auth.cross_tab_sync", payload);
+      emitAuthTrace("slock.auth.cross_tab_sync", payload, spanContext);
     }
   }
 
@@ -152,12 +157,13 @@ export function createRefreshCoordinator(params: {
     authRefreshAttemptId: string | undefined,
   ): Promise<RotatedTokenObservation> {
     const startedAt = Date.now();
+    const waitSpan = startWebSpan("slock.auth.cross_tab_wait");
     emitCrossTabSync("wait_start", {
       authRefreshAttemptId,
       tokenObservation: "none",
       rotatedTokenWaitMs: timeoutMs,
       retryIndex,
-    });
+    }, false, waitSpan);
     return new Promise((resolve) => {
       let completed = false;
       let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -174,18 +180,28 @@ export function createRefreshCoordinator(params: {
         if (timeoutTimer) clearTimeout(timeoutTimer);
         unsubscribe?.();
         const observation = tokenObservationKind(tokens);
+        const timedOut = reason === "timeout" && !tokens;
+        const elapsedBucket = waitElapsedBucket(Date.now() - startedAt);
         emitCrossTabSync(
-          reason === "timeout" && !tokens ? "wait_timeout" : "wait_observed",
+          timedOut ? "wait_timeout" : "wait_observed",
           {
-            status: reason === "timeout" && !tokens ? 401 : undefined,
+            status: timedOut ? 401 : undefined,
             authRefreshAttemptId,
             tokenObservation: observation,
-            waitElapsedBucket: waitElapsedBucket(Date.now() - startedAt),
+            waitElapsedBucket: elapsedBucket,
             rotatedTokenWaitMs: timeoutMs,
             retryIndex,
           },
-          reason === "timeout" && !tokens,
+          timedOut,
+          waitSpan,
         );
+        waitSpan.end(timedOut ? "error" : "ok", {
+          routeFamily: "auth_refresh",
+          tokenObservation: observation,
+          waitElapsedBucket: elapsedBucket,
+          rotatedTokenWaitMs: timeoutMs,
+          retryIndex,
+        });
         resolve(tokens);
       };
 

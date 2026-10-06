@@ -1,0 +1,1 @@
+ALTER TABLE "external_message_author_facts" ADD COLUMN "workspace_name" text;

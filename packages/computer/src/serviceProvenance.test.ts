@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
-import { residentCoreIdentity } from "./residentCoreIdentity.js";
-import { BUNDLED_DAEMON_VERSION, COMPUTER_VERSION } from "./version.js";
+import { residentCoreIdentity } from "./residentCoreIdentity";
+import { BUNDLED_DAEMON_VERSION, COMPUTER_VERSION } from "./version";
 
 test("residentCoreIdentity returns the exact managed DaemonCore identity", () => {
   assert.deepEqual(

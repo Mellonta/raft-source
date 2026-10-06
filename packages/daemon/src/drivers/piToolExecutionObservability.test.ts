@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { test } from "vitest";
 
 import {
   BasicTracer,
   createSpanAttrContractTracer,
   MemoryTraceSink,
 } from "@botiverse/raft-shared";
-import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core.js";
+import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core";
 import {
   createPiToolExecutionObserver,
   PI_TOOL_PROGRESS_COALESCE_MS,
-} from "./piToolExecutionObservability.js";
+} from "./piToolExecutionObservability";
+import { traceRows } from "../testing/traceRows";
 
 class FakeChildProcess extends EventEmitter {
   readonly pid = 4242;
@@ -62,8 +62,7 @@ function testObserver(input: {
 }
 
 function lastSnapshotAttrs(sink: MemoryTraceSink): Record<string, unknown> {
-  const snapshots = sink
-    .getAllSpans()
+  const snapshots = traceRows(sink)
     .filter((span) => span.name === "daemon.runtime.tool.diagnostic.snapshot");
   assert.ok(snapshots.length > 0, "expected a diagnostic snapshot fact");
   return { ...(snapshots.at(-1)?.attrs ?? {}) };
@@ -115,8 +114,8 @@ test("Pi tool diagnostics classify recent and stale positive process evidence wi
   assert.equal(attrs.process_liveness_source, "child_handle_and_os_probe");
   assert.equal(attrs.runtime_tool_call_id_present, true);
   assert.equal(attrs.schema_version, "stuck_tool_v0");
-  assert.doesNotMatch(JSON.stringify(sink.getAllSpans()), /upstream-call-secret/);
-  assert.doesNotMatch(JSON.stringify(sink.getAllSpans()), /command|args|cwd|stdout|stderr|pid/i);
+  assert.doesNotMatch(JSON.stringify(traceRows(sink)), /upstream-call-secret/);
+  assert.doesNotMatch(JSON.stringify(traceRows(sink)), /command|args|cwd|stdout|stderr|pid/i);
 
   hold.resolve();
   await running;
@@ -213,7 +212,7 @@ test("Pi tool diagnostics keep duplicate upstream IDs independent and ignore amb
     })[0]?.toolPending,
     false,
   );
-  assert.doesNotMatch(JSON.stringify(sink.getAllSpans()), new RegExp(rawRuntimeToolCallId));
+  assert.doesNotMatch(JSON.stringify(traceRows(sink)), new RegExp(rawRuntimeToolCallId));
 });
 
 test("Pi tool diagnostics keep empty upstream IDs independent and unindexed", async () => {
@@ -260,8 +259,7 @@ test("Pi tool diagnostics keep empty upstream IDs independent and unindexed", as
     })[0]?.toolPending,
     false,
   );
-  const executionSpans = sink
-    .getAllSpans()
+  const executionSpans = traceRows(sink)
     .filter((span) => span.name === "daemon.runtime.tool.execution.started");
   assert.equal(executionSpans.length, 2);
   for (const span of executionSpans) {
@@ -412,7 +410,7 @@ test("Pi tool success emits ordered lifecycle facts with no residual pending dia
     observer.observeProcessExit({ code: 0, signal: null });
   });
 
-  const names = sink.getAllSpans().map((span) => span.name);
+  const names = traceRows(sink).map((span) => span.name);
   assert.deepEqual(names, [
     "daemon.runtime.tool.execution.started",
     "daemon.runtime.tool.process.spawned",
@@ -452,13 +450,13 @@ test("Pi progress facts coalesce to at most one per minute plus a final flush", 
   });
 
   assert.equal(
-    sink.getAllSpans().filter((span) => span.name === "daemon.runtime.tool.progress.observed").length,
+    traceRows(sink).filter((span) => span.name === "daemon.runtime.tool.progress.observed").length,
     2,
   );
   hold.resolve();
   await running;
   assert.equal(
-    sink.getAllSpans().filter((span) => span.name === "daemon.runtime.tool.progress.observed").length,
+    traceRows(sink).filter((span) => span.name === "daemon.runtime.tool.progress.observed").length,
     3,
     "the final dirty window is flushed before execution.finished",
   );

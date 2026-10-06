@@ -1,11 +1,14 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
+import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { productEvents, users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
+import { getDb } from "../db/index";
+import { productEvents, userAnalyticsIds, users } from "../db/schema";
+import { PRODUCT_EVENT_SINK_APP_KEY } from "../services/productEventIngest";
+import type { ProductEventRow, ProductEventSink } from "../services/productEventScopeDbWriter";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -105,4 +108,96 @@ test("POST /product-events/onboarding-wizard rejects untracked push-notification
 
   const rows = await getDb().select().from(productEvents).where(eq(productEvents.subjectId, server.id));
   assert.equal(rows.length, 0);
+});
+
+// RFC-067 client behavior events.
+
+function memoryProductEventSink() {
+  const rows: ProductEventRow[] = [];
+  return {
+    rows,
+    sink: {
+      enqueue(batch: readonly ProductEventRow[]) {
+        rows.push(...batch);
+      },
+      async flush() {},
+    } satisfies ProductEventSink,
+  };
+}
+
+function clientEvent(event: string, properties: Record<string, unknown>, timestamp = new Date().toISOString()) {
+  return { uuid: randomUUID(), event, timestamp, client_session_id: "tab-1", properties };
+}
+
+test("client events: nothing is accepted until the user shares usage data", async ({ app }) => {
+  const user = await seedVerifiedUser("client-events-default@slock.test", "client-events-default");
+  const server = await createServer("Client Events Default", "client-events-default", user.id);
+  const token = await tokenForHuman(user.email);
+  const store = memoryProductEventSink();
+  app.app.set(PRODUCT_EVENT_SINK_APP_KEY, store.sink);
+
+  const config = await fetch(`${app.baseUrl}/api/product-events/config`, { headers: authHeaders(token, server.id) });
+  assert.deepEqual(await config.json(), { clientEventsAllowed: false });
+
+  const res = await fetch(`${app.baseUrl}/api/product-events/batch`, {
+    method: "POST",
+    headers: authHeaders(token, server.id),
+    body: JSON.stringify({ source: "web", events: [clientEvent("activity_open", { from: "rail" })] }),
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(await res.json(), { accepted: 0 });
+  assert.equal(store.rows.length, 0);
+});
+
+test("client events: registered events are stored under the analytics id only", async ({ app }) => {
+  const user = await seedVerifiedUser("client-events-on@slock.test", "client-events-on");
+  const server = await createServer("Client Events On", "client-events-on", user.id);
+  await getDb().update(users).set({ shareUsageData: true }).where(eq(users.id, user.id));
+  const token = await tokenForHuman(user.email);
+  const store = memoryProductEventSink();
+  app.app.set(PRODUCT_EVENT_SINK_APP_KEY, store.sink);
+
+  const config = await fetch(`${app.baseUrl}/api/product-events/config`, { headers: authHeaders(token, server.id) });
+  assert.deepEqual(await config.json(), { clientEventsAllowed: true });
+
+  const res = await fetch(`${app.baseUrl}/api/product-events/batch`, {
+    method: "POST",
+    headers: authHeaders(token, server.id),
+    body: JSON.stringify({
+      source: "web",
+      app_version: "1.2.3",
+      events: [
+        clientEvent("activity_open", { from: "rail" }),
+        clientEvent("activity_open", { from: "rail", text: "hello" }), // unknown property
+        clientEvent("button_clicked", {}), // unregistered
+        clientEvent("activity_mark", { action: "done" }, "2020-01-01T00:00:00.000Z"), // stale
+      ],
+    }),
+  });
+  assert.equal(res.status, 202);
+  assert.deepEqual(await res.json(), { accepted: 1 });
+
+  const [mapping] = await getDb().select().from(userAnalyticsIds).where(eq(userAnalyticsIds.userId, user.id));
+  assert.equal(store.rows.length, 1);
+  const [row] = store.rows;
+  assert.equal(row.event, "activity_open");
+  assert.equal(row.analytics_id, mapping.analyticsId);
+  assert.equal(row.server_id, server.id);
+  assert.equal(row.source, "web");
+  assert.equal(row.client_session_id, "tab-1");
+  assert.equal(row.app_version, "1.2.3");
+  assert.deepEqual(row.properties, { from: "rail" });
+  assert.doesNotMatch(JSON.stringify(store.rows), new RegExp(user.id), "the Raft user id must not reach the store");
+});
+
+test("client events: a malformed batch is rejected", async ({ app }) => {
+  const user = await seedVerifiedUser("client-events-bad@slock.test", "client-events-bad");
+  const server = await createServer("Client Events Bad", "client-events-bad", user.id);
+  const token = await tokenForHuman(user.email);
+  const res = await fetch(`${app.baseUrl}/api/product-events/batch`, {
+    method: "POST",
+    headers: authHeaders(token, server.id),
+    body: JSON.stringify({ source: "web", events: [{ event: "activity_open" }] }),
+  });
+  assert.equal(res.status, 400);
 });

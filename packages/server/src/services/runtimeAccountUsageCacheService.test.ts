@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   createRuntimeAccountUsageRoutingBackend,
   RuntimeAccountUsageCacheService,
   type RuntimeAccountUsageCacheBackend,
-} from "./runtimeAccountUsageCacheService.js";
+} from "./runtimeAccountUsageCacheService";
 
 function makeBackend(): RuntimeAccountUsageCacheBackend & { values: Map<string, string> } {
   const values = new Map<string, string>();

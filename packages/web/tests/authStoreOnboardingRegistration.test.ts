@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import "./helpers/domSetup";
 import api from "../src/api/client";
 import { useAuthStore } from "../src/store/authStore";
@@ -48,11 +47,11 @@ test.afterEach(() => {
   useAuthStore.setState(initialAuthState, true);
 });
 
-test("register creates the credential account without sending identity fields", async (t) => {
+test("register creates the credential account without sending identity fields", async () => {
   const registered = user({ emailVerified: false });
   let requestBody: unknown;
 
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     assert.equal(url, "/auth/register");
     requestBody = body;
     return { data: { user: registered, accessToken: "access-1", refreshToken: "refresh-1" } };
@@ -70,7 +69,7 @@ test("register creates the credential account without sending identity fields", 
   assert.equal(useAuthStore.getState().user?.profileSetupCompletedAt, null);
 });
 
-test("completeOnboardingProfile uploads a selected avatar before atomically completing identity", async (t) => {
+test("completeOnboardingProfile uploads a selected avatar before atomically completing identity", async () => {
   const calls: Array<{ method: "post"; url: string; body?: unknown }> = [];
   const avatarFile = new File(["avatar"], "avatar.png", { type: "image/png" });
   const withAvatar = user({ avatarUrl: "/api/avatars/users/new.webp" });
@@ -83,7 +82,7 @@ test("completeOnboardingProfile uploads a selected avatar before atomically comp
   });
   useAuthStore.setState({ user: user(), loading: false });
 
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     calls.push({ method: "post", url, body });
     if (url === "/auth/me/avatar") {
       assert.ok(body instanceof FormData);
@@ -108,12 +107,12 @@ test("completeOnboardingProfile uploads a selected avatar before atomically comp
   assert.equal(useAuthStore.getState().loading, false);
 });
 
-test("completeOnboardingProfile keeps identity incomplete when avatar upload fails", async (t) => {
+test("completeOnboardingProfile keeps identity incomplete when avatar upload fails", async () => {
   const avatarFile = new File(["bad"], "bad.exe", { type: "application/octet-stream" });
   let completeCalled = false;
   useAuthStore.setState({ user: user(), loading: false });
 
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     if (url === "/auth/me/avatar") {
       const err = new Error("bad avatar") as Error & { response?: unknown };
       err.response = { data: { error: "Only image files are allowed (JPEG, PNG, GIF, WebP)" } };

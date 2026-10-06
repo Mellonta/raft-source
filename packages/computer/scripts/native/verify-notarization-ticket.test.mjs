@@ -4,7 +4,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import {
   NotarizationTicketError,
   verifyNotarizationTicket,

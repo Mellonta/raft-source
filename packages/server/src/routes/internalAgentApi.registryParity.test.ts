@@ -1,8 +1,7 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
 import { agentApiContract } from "@botiverse/raft-shared";
-import { routeAuthPolicy } from "../middleware/routeAuthPolicy.js";
+import { routeAuthPolicy } from "../middleware/routeAuthPolicy";
 
 /**
  * Every contract-declared agent-api route must also be registered in

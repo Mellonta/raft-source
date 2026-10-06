@@ -1,15 +1,14 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 import type { ManagedMcpCallRequest } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { integrationAuditEvents, managedMcpCredentials, managedMcpServers, users } from "../db/schema.js";
-import { createAgent } from "./agentService.js";
-import { createServer } from "./serverService.js";
-import { decryptManagedMcpHeaders } from "./managedMcpCredentialService.js";
+import { getDb } from "../db/index";
+import { integrationAuditEvents, managedMcpCredentials, managedMcpServers, users } from "../db/schema";
+import { createAgent } from "./agentService";
+import { createServer } from "./serverService";
+import { decryptManagedMcpHeaders } from "./managedMcpCredentialService";
 import {
   applyManagedMcpAssignments,
   createManagedMcpServer,
@@ -21,7 +20,7 @@ import {
   setManagedMcpAssignment,
   testManagedMcpConfiguration,
   updateManagedMcpServer,
-} from "./managedMcpService.js";
+} from "./managedMcpService";
 
 
 const originalCredentialKey = process.env.SLOCK_MCP_CREDENTIAL_KEY;

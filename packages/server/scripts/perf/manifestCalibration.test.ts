@@ -12,14 +12,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 import {
   assessCalibration,
   evaluateCalibrationGate,
   type CalibrationBaseline,
   type FileTiming,
-} from "./manifestCalibration.js";
+} from "./manifestCalibration";
 
 function baselineFrom(timings: FileTiming[]): CalibrationBaseline {
   return {
@@ -195,7 +194,7 @@ test(
   { skip: process.platform === "win32" },
   () => {
     // Execute the real CLI source in a two-file fixture instead of re-running
-    // the full corpus. The parent process uses the real Node+tsx entrypoint;
+    // the full corpus. The parent process uses the real Node+oxc-node entrypoint;
     // only the CLI's child `pnpm` and Vitest `node` command are deterministic
     // fakes. This proves both the list/profile/gate/write boundary and that all
     // files share one Vitest process.
@@ -209,10 +208,12 @@ test(
 
       const profileSource = new URL("./profileTestShards.ts", import.meta.url);
       const calibrationSource = new URL("./manifestCalibration.ts", import.meta.url);
+      const vitestCommandSource = new URL("./profileVitestCommand.ts", import.meta.url);
       const profilePath = path.join(perfDir, "profileTestShards.ts");
       const baselinePath = path.join(perfDir, "calibration-baseline.json");
       copyFileSync(profileSource, profilePath);
       copyFileSync(calibrationSource, path.join(perfDir, "manifestCalibration.ts"));
+      copyFileSync(vitestCommandSource, path.join(perfDir, "profileVitestCommand.ts"));
 
       const fixtureTimings: FileTiming[] = [
         { file: "src/fixture-a.test.ts", durationMs: 1000 },
@@ -239,7 +240,7 @@ test(
           "#!/bin/sh",
           "for arg in \"$@\"; do",
           "  case \"$arg\" in",
-          "    --outputFile=*) output=${arg#--outputFile=} ;;",
+          "    --outputFile.json=*) output=${arg#--outputFile.json=} ;;",
           "  esac",
           "done",
           "printf 'x' >> \"$FAKE_NODE_CALLS\"",
@@ -257,9 +258,10 @@ test(
         ...process.env,
         PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
         FAKE_NODE_CALLS: fakeNodeCalls,
+        SERVER_PROFILE_DIAGNOSTICS: path.join(fixtureRoot, "profile-diagnostics.json"),
       };
       const run = (args: string[] = []) =>
-        spawnSync(process.execPath, ["--import", "tsx", profilePath, ...args], {
+        spawnSync(process.execPath, ["--import", "@oxc-node/core/register", profilePath, ...args], {
           cwd: repoRoot,
           env,
           encoding: "utf8",
@@ -273,6 +275,15 @@ test(
       assert.equal(existsSync(manifestPath), false, "refusal must happen before manifest write");
       assert.match(refused.stderr, /REFUSING to write manifest/);
       assert.equal(readFileSync(fakeNodeCalls, "utf8"), "x", "all files must share one Vitest process");
+
+      const diagnostic = JSON.parse(readFileSync(env.SERVER_PROFILE_DIAGNOSTICS, "utf8"));
+      assert.equal(diagnostic.outcome, "calibration_refused");
+      assert.equal(diagnostic.calibration.status, "invalid");
+      assert.equal(diagnostic.calibration.medianRatio, 1.5);
+      assert.deepEqual(diagnostic.fileTimings, fixtureTimings.map((t) => ({ ...t, durationMs: 1500, ok: true })));
+      assert.equal(diagnostic.nodeVersion, process.version);
+      assert.equal(diagnostic.calibration.baselineSourceCommit, baseline.sourceCommit);
+      assert.equal(diagnostic.manifestWritten, false);
 
       const bypassed = run(["--allow-uncalibrated"]);
       assert.equal(bypassed.error, undefined);
@@ -297,6 +308,27 @@ test(
       assert.equal(manifest.calibration?.overlap, 1);
       assert.equal(manifest.calibration?.baselineSourceCommit, baseline.sourceCommit);
       assert.equal(manifest.calibration?.bypass, true);
+
+      // A broken diagnostics destination must preserve the calibration error,
+      // rather than replace it or alter an already existing manifest.
+      const oldManifest = readFileSync(manifestPath, "utf8");
+      env.SERVER_PROFILE_DIAGNOSTICS = fixtureRoot;
+      const refusedWithoutDiagnostics = run();
+      assert.equal(refusedWithoutDiagnostics.status, 3);
+      assert.match(refusedWithoutDiagnostics.stderr, /Could not save profile diagnostics/);
+      assert.equal(readFileSync(manifestPath, "utf8"), oldManifest);
+
+      // A real failed-file report still exits 1 and saves only normalized
+      // timing fields; reporter details/stdout never become an artifact.
+      env.SERVER_PROFILE_DIAGNOSTICS = path.join(fixtureRoot, "failed-diagnostics.json");
+      writeFileSync(fakeNode, readFileSync(fakeNode, "utf8").replaceAll('"status":"passed"', '"status":"failed"').replace("exit 0", "exit 1"));
+      const failed = run();
+      assert.equal(failed.status, 1);
+      const failedDiagnostic = JSON.parse(readFileSync(env.SERVER_PROFILE_DIAGNOSTICS, "utf8"));
+      assert.equal(failedDiagnostic.outcome, "failed_tests");
+      assert.equal(failedDiagnostic.calibration, null);
+      assert.ok(failedDiagnostic.fileTimings.every((t: { ok: boolean }) => !t.ok));
+      assert.equal(readFileSync(manifestPath, "utf8"), oldManifest);
     } finally {
       rmSync(fixtureRoot, { recursive: true, force: true });
     }

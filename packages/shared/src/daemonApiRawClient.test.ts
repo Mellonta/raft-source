@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { agentApiContract } from "./agentApiContract.js";
-import { daemonApiContract } from "./daemonApiContract.js";
-import { createDaemonApiFetchTransport } from "./daemonApiClient.js";
+import { agentApiContract } from "./agentApiContract";
+import { daemonApiContract } from "./daemonApiContract";
+import { createDaemonApiFetchTransport } from "./daemonApiClient";
 import {
   buildDaemonApiRawRoutePath,
   createDaemonApiRawClient,
   requestDaemonApiRawRoute,
   type DaemonApiRawTransport,
   type DaemonApiRawTransportRequest,
-} from "./daemonApiRawClient.js";
+} from "./daemonApiRawClient";
 
 test("daemon-api routes stay out of the server-registered agent-api contract", () => {
   const agentApiFullPaths = new Set(Object.values(agentApiContract).map((route) => route.fullPath));

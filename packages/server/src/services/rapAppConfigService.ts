@@ -1,15 +1,15 @@
 import { and, eq, sql } from "drizzle-orm";
 import { currentTimeMs } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { agents, rapAppConfigs } from "../db/schema.js";
-import { BUILT_IN_RAP_APPS } from "./rapBuiltinAppManifests.js";
+import { getDb } from "../db/index";
+import { agents, rapAppConfigs } from "../db/schema";
+import { BUILT_IN_RAP_APPS } from "./rapBuiltinAppManifests";
 import type {
   AppConfigField,
   AppConfigPublicField,
   AppConfigSchema,
   AppId,
-} from "./rapRegistry.js";
-import type { BuiltInRapAppDefinition } from "./rapBuiltinAppManifests.js";
+} from "./rapRegistry";
+import type { BuiltInRapAppDefinition } from "./rapBuiltinAppManifests";
 
 export type RapAppConfigValue = boolean | number;
 

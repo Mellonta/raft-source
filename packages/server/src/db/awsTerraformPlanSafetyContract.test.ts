@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 

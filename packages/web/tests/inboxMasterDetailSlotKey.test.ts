@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { getInboxItemKey } from "../src/store/inboxStore";
 import type { InboxItem } from "../src/store/inboxStore";
 import {

@@ -1,18 +1,18 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   labDefinitions,
   serverLabAccess,
   serverLabEnrollments,
   users,
-} from "../db/schema.js";
-import { getServerLabsForActor } from "./serverLabService.js";
-import { createServer } from "./serverService.js";
+} from "../db/schema";
+import { getServerLabsForActor } from "./serverLabService";
+import { createServer } from "./serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

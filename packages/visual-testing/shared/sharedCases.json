@@ -2955,11 +2955,11 @@
         "interactions": [
           {
             "type": "click",
-            "target": "button[title='View participants']"
+            "target": "[data-testid='channel-members-open']"
           },
           {
             "type": "click",
-            "target": "button:has-text('Add Member')"
+            "target": "[data-testid='add-member-open'], button:has-text('Add Member')"
           },
           {
             "type": "wait",
@@ -4083,7 +4083,7 @@
         "interactions": [
           {
             "type": "click",
-            "target": "button[title='More actions']"
+            "target": "button[aria-label='More actions']"
           },
           {
             "type": "wait",
@@ -4128,7 +4128,7 @@
         "interactions": [
           {
             "type": "click",
-            "target": "button[title='Change avatar']"
+            "target": "[data-testid='agent-change-avatar']"
           },
           {
             "type": "wait",

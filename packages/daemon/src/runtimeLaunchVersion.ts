@@ -1,5 +1,5 @@
 import type { AgentConfig } from "@botiverse/raft-shared";
-import type { RuntimeDriver, RuntimeLaunchVersionPolicy } from "./drivers/types.js";
+import type { RuntimeDriver, RuntimeLaunchVersionPolicy } from "./drivers/types";
 
 type ComparableVersion = readonly [major: number, minor: number, patch: number];
 

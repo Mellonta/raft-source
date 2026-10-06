@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 
@@ -34,8 +34,8 @@ const APPLY_CONFIRMATION = "task180-empty-thread-cleanup";
 function usage() {
   console.error([
     "Usage:",
-    "  DATABASE_URL=... pnpm --filter @botiverse/raft-server exec tsx scripts/cleanup-empty-thread-channels.ts [--server-id <uuid>] [--limit <n>] [--json]",
-    "  DATABASE_URL=... pnpm --filter @botiverse/raft-server exec tsx scripts/cleanup-empty-thread-channels.ts --apply --confirm task180-empty-thread-cleanup [--server-id <uuid>] [--limit <n>] [--json]",
+    "  DATABASE_URL=... pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/cleanup-empty-thread-channels.ts [--server-id <uuid>] [--limit <n>] [--json]",
+    "  DATABASE_URL=... pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/cleanup-empty-thread-channels.ts --apply --confirm task180-empty-thread-cleanup [--server-id <uuid>] [--limit <n>] [--json]",
     "",
     "Contract:",
     "  - Defaults to a READ ONLY dry-run.",

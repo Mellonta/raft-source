@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import type { Channel } from "../src/store/channelStore.js";
-import { sortSidebarChannels, sortSidebarDms, sortSidebarPinnedItems } from "../src/components/layout/sidebarSort.js";
+import type { Channel } from "../src/store/channelStore";
+import { sortSidebarChannels, sortSidebarDms, sortSidebarPinnedItems } from "../src/components/layout/sidebarSort";
 
 function channel(overrides: Partial<Channel> & Pick<Channel, "id" | "name">): Channel {
   return {

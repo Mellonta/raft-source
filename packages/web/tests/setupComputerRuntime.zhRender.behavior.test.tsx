@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, screen, within } from "@testing-library/react";
 
@@ -23,8 +22,6 @@ const BASE = {
   computerInstallCommand: "npm i -g @botiverse/raft-computer",
   windowsComputerSetupCommand: "raft-computer setup",
   windowsComputerInstallCommand: "npm i -g @botiverse/raft-computer",
-  macLinuxDaemonCommand: "raft-daemon start",
-  windowsDaemonCommand: "raft-daemon start",
   runtimeAnswered: false,
   ready: false,
   loading: false,
@@ -99,7 +96,8 @@ test("the copy button's tooltip and accessible name are both translated", () => 
   assert.ok(row);
   const button = within(row).getByRole("button");
   assert.equal(button.getAttribute("aria-label"), "复制 raft-computer start");
-  assert.equal(button.getAttribute("title"), "复制 raft-computer start");
+  assert.equal(button.getAttribute("title"), null);
+  assert.ok(button.hasAttribute("data-base-ui-tooltip-trigger"));
 });
 
 test("english still renders english", () => {

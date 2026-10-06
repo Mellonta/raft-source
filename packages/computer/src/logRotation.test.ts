@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, writeFile, readFile, rm, stat, utimes } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { rotateLogIfNeeded } from "./logRotation.js";
+import { rotateLogIfNeeded } from "./logRotation";
 
 async function withTmp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await mkdtemp(join(tmpdir(), "slock-logrot-"));

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -48,6 +47,16 @@ afterEach(() => {
   useAgentStore.setState({ agents: [], activityLogs: {} } as never);
   useServerStore.setState({ current: null, members: [] } as never);
   useAuthStore.setState({ user: null } as never);
+});
+
+test("XX1138 mounted model failure shows the localized model name", async () => {
+  const agent = { id: "agent-sf-render", name: "sf", runtime: "codex", status: "inactive", createdBy: "user-1" };
+  useAgentStore.setState({agentActivities: {[agent.id]: {
+    activity: "offline", detailKind: "runtime_unavailable", activityDetail: "Synthetic failure detail",
+    spawnFailure: {reason: "model_not_found", model: "missing-model-test"},
+  }}} as never);
+  renderAgentZh(agent);
+  assert.ok(await screen.findByText('该运行时没有模型「missing-model-test」——请在 Agent 设置里换一个模型'));
 });
 
 test("known runtime error renders the classified zh in the agent banner", async () => {

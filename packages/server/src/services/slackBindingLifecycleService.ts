@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 
 import { and, eq, isNull } from "drizzle-orm";
 
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   externalAppInstalls,
   externalBindingAudienceSnapshots,
   externalChannelBindings,
-} from "../db/schema.js";
+} from "../db/schema";
+import { resolveExternalInstallServerGrantAuthority } from "./externalInstallServerGrantAuthority";
 
 export type SlackBindingProductState = "connected" | "paused" | "disconnected";
 
@@ -17,6 +18,7 @@ export type SlackBindingRecoveryAction =
   | "select_replacement_slack_channel"
   | "reinstall_slack_app"
   | "reauthorize_slack_app"
+  | "migrate_slack_channel_audience"
   | "review_and_resume_binding";
 
 export interface SlackBindingLifecycleProjection {
@@ -115,6 +117,8 @@ export function projectSlackBindingLifecycle(input: {
       ? "unarchive_slack_channel"
       : input.bindingStateReason === "provider_channel_deleted"
         ? "select_replacement_slack_channel"
+        : input.bindingStateReason === "privacy_changed_audience_migration_required"
+          ? "migrate_slack_channel_audience"
         : "review_and_resume_binding";
     return {
       state: "paused",
@@ -165,11 +169,18 @@ export async function reconcileSlackChannelLifecycle(input: {
     const [install] = await tx.select().from(externalAppInstalls).where(and(
       eq(externalAppInstalls.id, input.installId),
       eq(externalAppInstalls.registrationId, input.registrationId),
-      eq(externalAppInstalls.serverId, input.serverId),
       eq(externalAppInstalls.providerAuthorityId, input.providerAuthorityId),
       eq(externalAppInstalls.connectionEpoch, input.expectedConnectionEpoch),
     )).for("update").limit(1);
     if (!install) return { kind: "fence_mismatch" } as const;
+    const installServerGrant = await resolveExternalInstallServerGrantAuthority(tx, {
+      installId: install.id,
+      serverId: input.serverId,
+      registrationId: input.registrationId,
+    }, { lock: true });
+    if (!installServerGrant.current || binding.grantEpoch !== installServerGrant.grant.grantEpoch) {
+      return { kind: "fence_mismatch" } as const;
+    }
 
     const reason = input.event === "channel_archived"
       ? "provider_channel_archived"
@@ -281,6 +292,10 @@ export async function reconcileSlackPrivateAudience(input: {
   const nextAudienceRevision = input.expectedAudienceRevision + 1;
   return getDb().transaction(async (tx) => {
     const [binding] = await tx.select({
+      serverId: externalChannelBindings.serverId,
+      registrationId: externalChannelBindings.registrationId,
+      installId: externalChannelBindings.installId,
+      grantEpoch: externalChannelBindings.grantEpoch,
       privacyClass: externalChannelBindings.privacyClass,
       audienceRevision: externalChannelBindings.audienceRevision,
     }).from(externalChannelBindings).where(and(
@@ -292,6 +307,14 @@ export async function reconcileSlackPrivateAudience(input: {
     )).for("update").limit(1);
     if (!binding) return { kind: "fence_mismatch" } as const;
     if (binding.privacyClass !== "private") return { kind: "not_private" } as const;
+    const serverAuthority = await resolveExternalInstallServerGrantAuthority(tx, {
+      installId: binding.installId,
+      serverId: binding.serverId,
+      registrationId: binding.registrationId,
+    }, { lock: true });
+    if (!serverAuthority.current || binding.grantEpoch !== serverAuthority.grant.grantEpoch) {
+      return { kind: "fence_mismatch" } as const;
+    }
 
     const [updated] = await tx.update(externalChannelBindings).set({
       audienceRevision: nextAudienceRevision,

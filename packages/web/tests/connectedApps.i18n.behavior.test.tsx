@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -37,6 +36,11 @@ test("catalog pins connected-apps read-only MessageIds", () => {
   assert.equal(en["settings.connectedApps.marketplaceInstallCount"], "{count} installs");
   assert.equal(zh["settings.connectedApps.marketplaceNew"], "新上架");
   assert.equal(zh["settings.connectedApps.marketplaceInstallCount"], "{count} 个有效安装");
+  assert.equal(
+    en["settings.connectedApps.uninstallOfficialOptOut"],
+    "This also opts this server out of automatic installation. It stays uninstalled until an owner or admin explicitly installs it again.",
+  );
+  assert.match(zh["settings.connectedApps.uninstallOfficialOptOut"], /自动安装/u);
 });
 
 test("SettingsPanel renders connected-apps member copy from the zh-cn catalog", async () => {

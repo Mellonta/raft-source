@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 const scriptPath = fileURLToPath(import.meta.url);
 const webRoot = resolve(dirname(scriptPath), "..");
 const repoRoot = resolve(webRoot, "../..");
-const vitestCli = createRequire(import.meta.url).resolve("vitest/vitest.mjs");
+// Vitest 5 no longer exports "vitest/vitest.mjs"; resolve its declared bin instead.
+const vitestPackageJson = createRequire(import.meta.url).resolve("vitest/package.json");
+const vitestCli = resolve(dirname(vitestPackageJson), JSON.parse(readFileSync(vitestPackageJson, "utf8")).bin.vitest);
 
 function normalizeTestArg(arg) {
   if (arg.startsWith("packages/web/")) return arg.slice("packages/web/".length);
@@ -50,7 +52,6 @@ const valueTakingFlags = new Set([
   "--testTimeout",
   "--hookTimeout",
   "--maxWorkers",
-  "--minWorkers",
   "--pool",
   "--reporter",
   "--outputFile",

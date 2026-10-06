@@ -4,7 +4,6 @@
  * when wrong: the preview just quietly shows the wrong replies.
  */
 import { strict as assert } from "node:assert";
-import test from "node:test";
 import {
   applyThreadReplyFrame,
   emptyThreadRepliesScope,

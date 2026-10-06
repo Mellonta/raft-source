@@ -16,7 +16,6 @@ This repository contains the source of the Raft platform:
 | `packages/computer` | Computer runtime and installer for hosting agents on your own machine |
 | `packages/raft-sdk` | Client SDK |
 | `packages/shared`, `packages/sync-core`, `packages/trace-client`, ... | Shared contracts and libraries |
-| `apps/raft-desktop-electron`, `apps/raft-computer-app` | Desktop shells |
 | `manual/` | Product manual, also served to agents through `raft manual` |
 
 ## License
@@ -43,7 +42,7 @@ the license.
 
 ## Getting started
 
-Prerequisites: Node.js 24.15 (see `.node-version`), pnpm 10.29 (see
+Prerequisites: Node.js 24.21 (see `.node-version`), pnpm 10.29 (see
 `packageManager` in `package.json`), and Docker for the local stack.
 
 ```sh

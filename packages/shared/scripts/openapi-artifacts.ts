@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 
 import openapiTS, { astToString, COMMENT_HEADER } from "openapi-typescript";
 
-import { buildOpenApiDocument } from "../src/openApiContract.js";
+import { buildOpenApiDocument } from "../src/openApiContract";
 
 export interface OpenApiArtifacts {
   openApiJson: string;

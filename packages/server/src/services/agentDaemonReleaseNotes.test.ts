@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
 import {
   getAgentDaemonReleaseNotesBetween,
   getAgentDaemonReleaseNotice,
   renderAgentDaemonReleaseNotice,
-} from "./agentDaemonReleaseNotes.js";
+} from "./agentDaemonReleaseNotes";
 
 const repoRoot = new URL("../../../../", import.meta.url);
 
@@ -239,7 +238,7 @@ test("agent-facing release notice: public Alpha 1.0.24 -> 1.0.25 carries the exa
   const notice = getAgentDaemonReleaseNotice("1.0.24", "1.0.25");
   assert.ok(notice);
   assert.deepEqual(notice.notes.map((note) => note.version), ["1.0.25"]);
-  assert.equal(notice.notes[0]?.entries.length, 6);
+  assert.equal(notice.notes[0]?.entries.length, 7);
 
   const allCopy = notice.notes
     .flatMap((note) => note.entries)
@@ -273,11 +272,26 @@ test("agent-facing release notice: public Alpha 1.0.24 -> 1.0.25 carries the exa
   assert.match(allCopy, /server and channel roles separately/);
   assert.match(allCopy, /does not grant server-profile or visibility control/);
 
+  // Correction entry: the 0.66.0 note claimed all four channel commands need the
+  // server admin role, which stopped being true when channel capabilities were
+  // split by action. It must name the superseded note, and it must state what did
+  // NOT change, so "some of these work" is not read as "permissions were opened up".
+  assert.match(allCopy, /0\.66\.0 note said/);
+  assert.match(allCopy, /split by action/);
+  assert.match(allCopy, /still require a server owner or admin/);
+
   assert.doesNotMatch(allCopy, /policy_row_missing|policyRevision|raw response body/);
   assert.doesNotMatch(allCopy, /stable promotion|production deployment/);
 });
 
-test("Computer Alpha 1.0.28 closes the Computer, CLI, and daemon carrier tuple", () => {
+// Repository carrier tuple after the Computer 1.0.42 stable promotion moved the
+// staging line forward (stable floor 1.0.42): Computer 1.0.43 is the next
+// carrier, CLI 0.0.33. The daemon carries the Computer number: it is not
+// released on its own (docs/operations/computer-release-version.md). This does
+// not describe the CLI inside an already-published Computer artifact.
+// Deliberate package bumps must update this snapshot, so an unaccounted
+// version change goes red here.
+test("Computer 1.0.43 closes the Computer, CLI, and daemon carrier tuple", () => {
   assert.deepEqual(
     {
       computer: readPackageVersion("computer"),
@@ -285,9 +299,9 @@ test("Computer Alpha 1.0.28 closes the Computer, CLI, and daemon carrier tuple",
       daemon: readPackageVersion("daemon"),
     },
     {
-      computer: "1.0.28",
-      cli: "0.0.24",
-      daemon: "1.0.25",
+      computer: "1.0.43",
+      cli: "0.0.33",
+      daemon: "1.0.43",
     },
   );
 });

@@ -1,23 +1,24 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
 import {
+  findOrCreateDM,
   createChannel,
   addAgent,
   addHuman,
   canAgentAccessChannel,
   getOrCreateThread,
-} from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
+} from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { mintAgentCredential } from "../services/agentCredentialService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -34,6 +35,12 @@ const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardi
  *   D  short id belongs to another channel  -/  apart is an existence oracle
  *   C  anchor is here, but has no replies   -> the only case we may say so
  *   E  the thread exists                    -> ordinary success
+ *   F  suffix is the thread's own id        -> resolves the same as E
+ *
+ * F is the `threadId=` field the header prints (first 8 chars of the thread
+ * channel's UUID) pasted into the `#channel:<id>` slot. Before the resolver
+ * learned it, that pasted id always answered B — "not found" for a thread that
+ * plainly exists. It must resolve to the SAME thread, not merely any 200.
  *
  * ⚠️ B and D use REAL fixtures on purpose. If D's id simply did not exist, the
  * B/D equality would be true by construction and no change to the lookup could
@@ -105,6 +112,7 @@ async function seedFixture() {
     apiKey: credential.apiKey,
     anchorNoReplies,
     anchorWithThread,
+    thread,
     elsewhere,
     hidden,
     hiddenAnchor,
@@ -167,6 +175,38 @@ test("a thread ref reports which entity is actually missing", async ({ onTestFin
   const e = await read(`#dx-parent:${shortIdOf(fx.anchorWithThread.id)}`);
   assert.equal(e.status, 200, "a thread that exists must still read normally");
   assert.ok(Array.isArray(e.body.messages), "control returned no message window");
+  assert.equal(
+    e.body.target,
+    `#dx-parent:${shortIdOf(fx.anchorWithThread.id)}`,
+    "history must return the resolver-owned canonical thread target",
+  );
+
+  // F — the thread's own id (the `threadId=` header field) resolves the same
+  // thread. Asserting on the reply content rather than "any 200" so a resolver
+  // that landed on the wrong thread still fails.
+  const f = await read(`#dx-parent:${fx.thread.id.slice(0, 8)}`);
+  assert.equal(f.status, 200, "a threadId suffix must resolve the thread it names");
+  assert.equal(
+    f.body.target,
+    e.body.target,
+    "the thread-channel-id spelling must resolve to the same canonical evidence target",
+  );
+  const fMessages = Array.isArray(f.body.messages) ? f.body.messages as Array<Record<string, unknown>> : [];
+  assert.ok(
+    fMessages.some((m) => String(m.content).includes("a reply, so the thread exists")),
+    "the threadId suffix resolved a thread that does not contain its own reply",
+  );
+
+  // F-miss — an id that is not a message short id here and not a thread id
+  // either must read EXACTLY like B; distinguishing them would hand the caller
+  // a "is this id a real thread?" oracle.
+  const fMiss = await read("#dx-parent:cafebabe");
+  assert.equal(fMiss.status, 404);
+  assert.deepEqual(
+    fMiss.body,
+    (await read("#dx-parent:deadbeef")).body,
+    "a threadId miss must be indistinguishable from a message-id miss",
+  );
 
   // A-missing — parent channel does not exist.
   const aMissing = await read(`#dx-nonexistent:${shortIdOf(fx.anchorNoReplies.id)}`);
@@ -262,4 +302,46 @@ test("the executed Next action discriminates on the short id it names", async ({
     false,
     "a wrong short id still produced a usable window: this assertion cannot detect a wrong command",
   );
+});
+
+
+test("authorized DM history supplies consumption identity for DM and DM thread only", async ({
+  onTestFinished,
+}) => {
+  const app = await openTestApp("pglite://", 0, {
+    humanActivityMuteFlagDefaultEnabled: true,
+    onboardingOpenerFlagDefaultEnabled: false,
+  });
+  onTestFinished(() => app.close());
+  const fx = await seedFixture();
+  const dm = await findOrCreateDM(fx.server.id, fx.owner.id, fx.agent.id);
+  assert.ok(dm);
+  const parent = await createMessage(dm.id, "user", fx.owner.id, "DM parent");
+  const thread = await getOrCreateThread(parent.id, fx.owner.id, "user");
+  await createMessage(thread.id, "user", fx.owner.id, "DM reply");
+  for (const [target, channelId, channelType] of [
+    [`dm:@${fx.owner.name}`, dm.id, "dm"],
+    [`dm:@${fx.owner.name}:${parent.id.slice(0, 8)}`, thread.id, "thread"],
+  ]) {
+    const result = await readTarget(app.baseUrl, fx.apiKey, target);
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body.consumption_scope, {
+      agent_id: fx.agent.id,
+      channel_id: channelId,
+      channel_type: channelType,
+      target,
+    });
+    assert.ok(
+      (result.body.messages as any[]).every((m) => m.channelId === channelId),
+    );
+  }
+  const ordinary = await readTarget(app.baseUrl, fx.apiKey, "#dx-parent");
+  assert.equal(ordinary.body.consumption_scope, undefined);
+  const unavailable = await readTarget(
+    app.baseUrl,
+    fx.apiKey,
+    "dm:@nonexistent-peer",
+  );
+  assert.equal(unavailable.status, 404);
+  assert.equal(unavailable.body.consumption_scope, undefined);
 });

@@ -13,7 +13,7 @@ import {
   emitWebTraceRecord,
 } from "./webAuthTrace";
 import type {
-  WebTraceEventName,
+  WebSpanName,
 } from "./webAuthTrace";
 
 export type WebHttpStatusBucket = "2xx" | "3xx" | "4xx" | "5xx" | "network_error" | "other";
@@ -114,7 +114,7 @@ function statusBucket(statusCode: number | undefined): WebHttpStatusBucket {
 }
 
 function recordCompletedHttpSpan(span: CompletedTraceSpan): void {
-  emitWebTraceRecord(buildWebTraceRecord(span.name as WebTraceEventName, span.attrs, {
+  emitWebTraceRecord(buildWebTraceRecord(span.name as WebSpanName, span.attrs ?? {}, {
     traceId: span.context.traceId,
     spanId: span.context.spanId,
     parentSpanId: span.context.parentSpanId,

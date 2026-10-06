@@ -1,16 +1,16 @@
 import { createHash } from "node:crypto";
 import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
-import type { Database, DatabaseTransaction } from "../db/index.js";
+import type { Database, DatabaseTransaction } from "../db/index";
 import {
   attachmentObjects,
   attachments,
   attachmentUploadReservations,
   channels,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   ATTACHMENT_RESERVATION_TTL_MS,
   resolveAttachmentLifecycleDatabaseNow,
-} from "./attachmentLifecycleService.js";
+} from "./attachmentLifecycleService";
 
 export type AttachmentObjectBackfillHooks = {
   afterObjectInsert?: (projectionId: string, tx: DatabaseTransaction) => Promise<void>;

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   canRemoveAdminPrincipal,
   canRemoveAdminMember,
@@ -10,11 +9,11 @@ import {
   getAdminPrincipalRoleOptions,
   getAdminPrincipals,
   getAdminRoleOptions,
-} from "../src/utils/serverAdminSettings.js";
+} from "../src/utils/serverAdminSettings";
 import type {
   ServerAdminSettingsAgent,
   ServerAdminSettingsMember,
-} from "../src/utils/serverAdminSettings.js";
+} from "../src/utils/serverAdminSettings";
 
 const members: ServerAdminSettingsMember[] = [
   { userId: "owner-1", name: "owner", displayName: "Owner", email: "owner@slock.ai", role: "owner" },

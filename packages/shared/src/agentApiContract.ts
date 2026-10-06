@@ -1,13 +1,15 @@
 import { z } from "zod";
+
+import { AGENT_API_ROUTE_META, type AgentApiAudience, type AgentApiIdempotency, type AgentApiSideEffect } from "./agentApiRouteMeta";
 import {
   actionCardActionSchema,
   integrationRegisterAppOperationSchema,
   integrationUpdateAppRegistrationOperationSchema,
-} from "./actionCards.js";
-import { ATTENTION_HINT_SCHEMA } from "./attentionDependencyOracle.js";
-import { asChannelId, asMessageId } from "./brandedIds.js";
-import type { ProfileView, TaskResourceReceipt, TaskStatus } from "./index.js";
-import { MAX_KNOWLEDGE_CONTEXT_LENGTH, MIN_KNOWLEDGE_CONTEXT_LENGTH } from "./knowledgeContext.js";
+} from "./actionCards";
+import { ATTENTION_HINT_SCHEMA } from "./attentionDependencyOracle";
+import { asChannelId, asMessageId } from "./brandedIds";
+import type { ProfileView, TaskResourceReceipt, TaskStatus } from "./index";
+import { MAX_KNOWLEDGE_CONTEXT_LENGTH, MIN_KNOWLEDGE_CONTEXT_LENGTH } from "./knowledgeContext";
 import {
   attachmentUploadCapabilitiesSchema,
   attachmentUploadPathParamsSchema,
@@ -15,14 +17,15 @@ import {
   completeAttachmentUploadSessionResponseSchema,
   createAttachmentUploadSessionRequestSchema,
   createAttachmentUploadSessionResponseSchema,
-} from "./attachmentUploadContract.js";
-import type { AgentInboxSourceRef } from "./agentInboxApp.js";
-import { AGENT_API_BASE_PATH } from "./agentApiPaths.js";
+} from "./attachmentUploadContract";
+import type { AgentInboxSourceRef } from "./agentInboxApp";
+import { AGENT_API_BASE_PATH } from "./agentApiPaths";
 import {
   agentApiFreshnessContextModeSchema,
   agentApiHeldFreshnessResponseSchema,
   agentApiMessageEnvelopeSchema,
   agentApiSendBodySchema,
+  agentApiSendCommittedResponseSchema,
   agentApiSendV2BodySchema,
   agentApiSendResponseSchema,
   agentApiTaskCurrentProjectionSchema,
@@ -33,7 +36,7 @@ import {
   type AgentApiSendBody,
   type AgentApiSendV2Body,
   type AgentApiSendResponse,
-} from "./agentApiMessageContract.js";
+} from "./agentApiMessageContract";
 
 export {
   agentApiAttachmentEnvelopeSchema,
@@ -49,23 +52,24 @@ export {
   AGENT_API_EXTERNAL_MESSAGE_FORBIDDEN_AUTHORITY_FIELDS,
   isAgentApiExternalMessageForbiddenAuthorityField,
   legacyAgentSendBodySchema,
-} from "./agentApiMessageContract.js";
+} from "./agentApiMessageContract";
 export {
   AGENT_API_BASE_PATH,
   AGENT_API_MESSAGE_SEND_PATH,
   AGENT_API_MESSAGE_SEND_V2_PATH,
-} from "./agentApiPaths.js";
+} from "./agentApiPaths";
 export type {
   AgentApiAttachmentEnvelope,
   AgentApiHeldFreshnessResponse,
   AgentApiMessageEnvelope,
   AgentApiSendBody,
+  AgentApiSendCommittedResponse,
   AgentApiSendV2Body,
   AgentApiSendResponse,
   AgentApiSendSentResponse,
   AgentApiStructuredMention,
   LegacyAgentSendBody,
-} from "./agentApiMessageContract.js";
+} from "./agentApiMessageContract";
 
 /**
  * Uniform public failure for agent attachment downloads. The response must not
@@ -85,7 +89,24 @@ export const AGENT_API_ATTACHMENT_DOWNLOAD_UNAVAILABLE_RESPONSE = {
   suggestedNextAction: AGENT_API_ATTACHMENT_DOWNLOAD_UNAVAILABLE_NEXT_ACTION,
 } as const;
 
-export const agentApiMethods = ["GET", "POST", "PATCH", "DELETE"] as const;
+/**
+ * Lifetime of the presigned URLs the agent attachment routes mint: the
+ * download route's 302 target and the download-URL route's `url`.
+ */
+export const AGENT_API_ATTACHMENT_DOWNLOAD_URL_TTL_SECONDS = 300;
+
+/**
+ * The download-URL route's answer (409) when this Server's storage backend
+ * cannot presign (local disk): the attachment is readable, but only through
+ * the binary download route, which streams it.
+ */
+export const AGENT_API_ATTACHMENT_DOWNLOAD_URL_UNAVAILABLE_RESPONSE = {
+  error: "This Server's file storage cannot mint download URLs.",
+  code: "download_url_unavailable",
+  suggestedNextAction: "Download the attachment bytes instead: GET /internal/agent-api/attachments/:attachmentId (`raft attachment view --id <attachmentId> --output <path>`).",
+} as const;
+
+export const agentApiMethods = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 export type AgentApiMethod = (typeof agentApiMethods)[number];
 
 export const agentApiCapabilities = [
@@ -165,9 +186,20 @@ const passthroughObject = <T extends z.ZodRawShape>(shape: T) => z.object(shape)
 
 export const taskStatusSchema = z.enum(["todo", "in_progress", "in_review", "done", "closed"]);
 
+// Task #178: a managed-runner CLI that will acknowledge leased third-party
+// events after writing them out declares it on the /events request. The CLI
+// sends it only from the code path that performs the ack, so "declared but
+// never acked" cannot occur. Daemons without lease support ignore the header.
+export const AGENT_API_EVENTS_ACK_HEADER = "x-raft-events-ack";
+export const AGENT_API_EVENTS_ACK_LEASE = "lease";
+
 export const agentApiEventsQuerySchema = passthroughObject({
   since: optionalStringSchema,
   limit: optionalStringSchema,
+  // "cursor": durable inbox rows are acknowledged by the NEXT request's
+  // `since` instead of before this response is sent. Omitted = "immediate"
+  // (the behavior every published client relies on).
+  ack: z.enum(["cursor", "immediate"]).optional(),
 });
 
 export const agentApiHistoryQuerySchema = passthroughObject({
@@ -176,6 +208,21 @@ export const agentApiHistoryQuerySchema = passthroughObject({
   after: optionalStringSchema,
   around: optionalStringSchema,
   limit: optionalStringSchema,
+  /**
+   * `"false"` reads without consuming: the Server returns the page but does
+   * not advance the agent's read cursor, and reports no
+   * `model_seen_up_to_seq`. For reads whose output may never reach the model
+   * (code a hosted agent wrote). Absent or `"true"` keeps the default.
+   */
+  consume: z.enum(["true", "false"]).optional(),
+  /**
+   * `"true"` reads this conversation's unread messages: the page starts right
+   * after the agent's read position (the one `raft inbox check` counts unread
+   * from) and the read advances it. Cannot be combined with before/after/around.
+   * The response echoes `unread_after_seq`; a Server that omits it ignored the
+   * flag.
+   */
+  unread: z.enum(["true", "false"]).optional(),
 });
 
 export const agentApiKnowledgeGetQuerySchema = passthroughObject({
@@ -219,62 +266,6 @@ export const agentApiKnowledgeSearchResponseSchema = passthroughObject({
   query: z.string(),
   scope: z.string().nullable(),
   results: z.array(agentApiKnowledgeSearchResultSchema),
-});
-
-export const agentApiWikiManifestResponseSchema = passthroughObject({
-  configured: z.literal(true),
-  wikiSpaceId: z.string().uuid(),
-  etag: z.string().nullable(),
-  manifest: z.unknown().nullable(),
-});
-
-export const agentApiWikiArtifactReadParamsSchema = passthroughObject({
-  artifactId: z.string().uuid(),
-});
-
-const agentApiWikiSourceRefSchema = passthroughObject({
-  channelId: z.string().uuid(),
-  messageId: z.string().uuid(),
-  seq: z.number().int().positive(),
-  slockRef: z.string().min(1),
-});
-
-const agentApiWikiArtifactSchema = passthroughObject({
-  id: z.string().uuid(),
-  artifactType: z.enum(["index", "log", "page"]),
-  slug: z.string().min(1),
-  title: z.string().min(1),
-  summary: z.string().nullable(),
-  currentUnderstanding: z.string().nullable(),
-  status: z.enum(["current", "tentative", "contested", "superseded", "stale", "archived"]),
-  confidence: z.enum(["low", "medium", "high"]),
-  sourcePolicy: z.enum(["cached_summary", "prefer_live_source"]),
-  sourceRefs: z.array(agentApiWikiSourceRefSchema),
-  revision: passthroughObject({
-    id: z.string().uuid(),
-    key: z.string().min(1),
-    sha256: z.string().regex(/^[0-9a-f]{64}$/),
-    bytes: z.number().int().positive(),
-  }),
-  updatedAt: z.string().datetime(),
-});
-
-export const agentApiWikiArtifactReadResponseSchema = passthroughObject({
-  configured: z.literal(true),
-  wikiSpaceId: z.string().uuid(),
-  etag: z.string().min(1),
-  artifact: agentApiWikiArtifactSchema,
-  markdown: z.string().min(1),
-});
-
-export const agentApiWikiPublishBodySchema = passthroughObject({
-  expectedEtag: z.string().min(1).nullable(),
-  manifest: z.unknown(),
-  revisionBodies: z.array(passthroughObject({
-    artifactId: z.string().uuid(),
-    revisionId: z.string().uuid(),
-    markdown: z.string().min(1),
-  })).max(100),
 });
 
 const agentApiManagedMcpJsonSchema = z.object({
@@ -363,6 +354,19 @@ export const agentApiAttachmentDownloadParamsSchema = passthroughObject({
   attachmentId: z.string().trim().min(1),
 });
 
+/**
+ * Short-lived download URL for an attachment visible to the bound agent
+ * credential (`GET /attachments/:attachmentId/url`). For runtimes that cannot
+ * take binary tool results: the agent fetches the bytes itself from `url`
+ * before `expiresAt`. The URL is a bearer capability; never log it.
+ */
+export const agentApiAttachmentDownloadUrlResponseSchema = passthroughObject({
+  url: z.string().min(1),
+  expiresAt: z.string().datetime(),
+  filename: z.string(),
+  mimeType: z.string(),
+});
+
 export const agentApiAttachmentCommentsParamsSchema = passthroughObject({
   attachmentId: z.string().trim().min(1),
 });
@@ -436,6 +440,57 @@ export const agentApiThreadUnfollowBodySchema = passthroughObject({
   reason: z.string().trim().min(1).max(200).optional(),
 });
 
+export const agentApiThreadListItemSchema = passthroughObject({
+  target: z.string().trim().min(1),
+  threadChannelId: z.string().uuid(),
+  parentChannelRef: z.string().trim().min(1),
+  parentMessageId: z.string().uuid(),
+  parentMessageShortId: z.string().trim().length(8),
+  followedAt: z.string().datetime(),
+  reason: z.string().trim().min(1),
+  doneAt: z.string().datetime().nullable(),
+});
+
+export const agentApiThreadListResponseSchema = passthroughObject({
+  threads: z.array(agentApiThreadListItemSchema),
+});
+
+export const AGENT_API_INBOX_VIEWS = ["unread", "mentions"] as const;
+export type AgentApiInboxView = (typeof AGENT_API_INBOX_VIEWS)[number];
+export const AGENT_API_INBOX_DEFAULT_LIMIT = 20;
+export const AGENT_API_INBOX_MAX_LIMIT = 50;
+
+const positiveIntegerStringSchema = z.string().trim().regex(/^[1-9][0-9]*$/, "must be a positive integer");
+
+export const agentApiInboxListQuerySchema = passthroughObject({
+  view: z.enum(AGENT_API_INBOX_VIEWS).optional(),
+  before_seq: positiveIntegerStringSchema.optional(),
+  limit: positiveIntegerStringSchema.optional(),
+});
+
+export const agentApiInboxConversationSchema = passthroughObject({
+  target: z.string().trim().min(1),
+  kind: z.enum(["dm", "channel", "thread"]),
+  unread: z.number().int().nonnegative(),
+  mentions: z.number().int().nonnegative(),
+  lastReadSeq: z.number().int().nonnegative(),
+  activitySeq: z.number().int().nonnegative(),
+  latestSenderName: z.string().nullable(),
+  latestAt: z.string().datetime().nullable(),
+});
+
+export const agentApiInboxListResponseSchema = passthroughObject({
+  view: z.enum(AGENT_API_INBOX_VIEWS),
+  items: z.array(agentApiInboxConversationSchema),
+  hasMore: z.boolean(),
+  nextBeforeSeq: z.number().int().positive().nullable(),
+  totals: passthroughObject({
+    conversations: z.number().int().nonnegative(),
+    dms: z.number().int().nonnegative(),
+    mentions: z.number().int().nonnegative(),
+  }),
+});
+
 export const agentApiTaskClaimBodySchema = passthroughObject({
   channel: z.string().trim().min(1),
   task_numbers: z.array(z.number().int().positive()).optional(),
@@ -467,6 +522,14 @@ export const agentApiTaskCreateBodySchema = passthroughObject({
     (value) => value.startsWith("@") && value.slice(1).trim().length > 0,
     { message: "assignee must be an @handle" },
   ).optional(),
+  /**
+   * Retry key (same rules as message send's): a repeat with the same key and
+   * the same request replays the first response without creating anything;
+   * the same key with a different request is refused (409
+   * `idempotency_key_reused`). Scoped to the agent and this route, and valid
+   * for 24 hours; after that the key is forgotten and is a new request.
+   */
+  idempotencyKey: optionalStringSchema,
 });
 
 export const agentApiTaskUnclaimBodySchema = passthroughObject({
@@ -681,6 +744,17 @@ export const agentApiProfileViewSchema: z.ZodType<ProfileView> = z.discriminated
   }),
 ]);
 
+export const agentApiIntegrationTokenBodySchema = z.object({
+  service: z.string().trim().regex(/^[a-z][a-z0-9-]{2,63}$/),
+}).strict();
+export const agentApiIntegrationTokenResponseSchema = z.object({
+  access_token: z.string().min(1),
+  token_type: z.literal("Bearer"),
+  audience: z.string().min(1),
+  expires_in: z.literal(300),
+  expires_at: z.string(),
+}).strict();
+
 export const agentApiIntegrationLoginBodySchema = passthroughObject({
   service: z.string().trim().min(1),
   scopes: optionalStringArraySchema,
@@ -731,6 +805,9 @@ export const agentApiIntegrationAppUpdateBodySchema = passthroughObject({
   clientKey: z.string().trim().min(1),
   name: optionalStringSchema,
   description: optionalStringSchema,
+  // task #319: agent-facing "when to use this app" hint; nullable, at most
+  // 160 code points, single line, no control characters, no bare @scope/pkg.
+  whenToUse: optionalStringSchema,
   category: z.string().trim().min(1).optional(),
   homepageUrl: optionalStringSchema,
   returnUrl: optionalStringSchema,
@@ -761,6 +838,14 @@ export const agentApiIntegrationAppStatusQuerySchema = passthroughObject({
 export const agentApiActionPrepareBodySchema = passthroughObject({
   target: z.string().trim().min(1),
   action: actionCardActionSchema,
+  /**
+   * Retry key (same rules as message send's): a repeat with the same key and
+   * the same request replays the first response (same card messageId)
+   * without preparing another card; the same key with a different request is
+   * refused (409 `idempotency_key_reused`). Scoped to the agent and this
+   * route, and valid for 24 hours; after that the key is forgotten.
+   */
+  idempotencyKey: optionalStringSchema,
 });
 
 export const agentApiServerUpdateBodySchema = passthroughObject({
@@ -773,6 +858,51 @@ export const agentApiServerUpdateResponseSchema = passthroughObject({
   name: z.string(),
   hideHumansFromMembers: z.boolean().nullable().optional(),
   avatarUrl: z.string().nullable().optional(),
+});
+
+export const agentApiAgentContextResponseSchema = passthroughObject({
+  agent: passthroughObject({
+    id: z.string(),
+    name: z.string(),
+    displayName: z.string().nullable(),
+    description: z.string().nullable(),
+    runtime: z.string(),
+    external: z.boolean(),
+  }),
+  server: passthroughObject({
+    id: z.string(),
+    slug: z.string(),
+    name: z.string(),
+  }),
+  credential: passthroughObject({
+    capabilities: z.array(z.string()),
+  }),
+  // The self-hosted-runner guide rendered for this agent by the same builder
+  // the daemon uses (`buildRaftCliGuideMarkdown`). Null for managed agents:
+  // their standing prompt comes from the daemon that runs them.
+  prompt: passthroughObject({
+    audience: z.literal("self-hosted-runner"),
+    text: z.string(),
+  }).nullable(),
+});
+
+export const agentApiServerInfoChannelSchema = passthroughObject({
+  id: z.string().transform(asChannelId),
+  name: z.string(),
+  joined: z.boolean(),
+});
+
+export const agentApiServerInfoAgentSchema = passthroughObject({
+  name: z.string(),
+  status: z.string().optional(),
+  activity: z.string().nullable().optional(),
+  activityDetail: z.string().nullable().optional(),
+  role: z.enum(["owner", "admin", "member"]).nullable().optional(),
+});
+
+export const agentApiServerInfoHumanSchema = passthroughObject({
+  name: z.string(),
+  role: z.enum(["owner", "admin", "member", "guest"]).nullable().optional(),
 });
 
 export const agentApiServerInfoResponseSchema = passthroughObject({
@@ -792,23 +922,55 @@ export const agentApiServerInfoResponseSchema = passthroughObject({
   }),
   serverRole: z.string().nullable().optional(),
   serverCapabilities: passthroughObject({}).optional(),
-  channels: z.array(passthroughObject({
-    id: z.string().transform(asChannelId),
-    name: z.string(),
-    joined: z.boolean(),
-  })),
-  agents: z.array(passthroughObject({
-    name: z.string(),
-    status: z.string().optional(),
-    activity: z.string().nullable().optional(),
-    activityDetail: z.string().nullable().optional(),
-    role: z.enum(["owner", "admin", "member"]).nullable().optional(),
-  })),
-  humans: z.array(passthroughObject({
-    name: z.string(),
-    role: z.enum(["owner", "admin", "member", "guest"]).nullable().optional(),
-  })),
+  channels: z.array(agentApiServerInfoChannelSchema),
+  agents: z.array(agentApiServerInfoAgentSchema),
+  humans: z.array(agentApiServerInfoHumanSchema),
 });
+
+export const AGENT_API_USER_CHANNELS_DEFAULT_LIMIT = 50;
+export const AGENT_API_USER_CHANNELS_MAX_LIMIT = 200;
+
+const nonNegativeIntegerStringSchema = z.string().trim().regex(/^(0|[1-9][0-9]*)$/, "must be a non-negative integer");
+
+export const agentApiUserChannelsParamsSchema = passthroughObject({
+  name: z.string().trim().min(1),
+});
+
+export const agentApiUserChannelsQuerySchema = passthroughObject({
+  offset: nonNegativeIntegerStringSchema.optional(),
+  // 1..AGENT_API_USER_CHANNELS_MAX_LIMIT (200), as a pattern so the description carries the cap.
+  limit: z.string().trim().regex(/^([1-9]|[1-9][0-9]|1[0-9][0-9]|200)$/, "must be an integer from 1 to 200").optional(),
+});
+
+const agentApiUserChannelsPageFields = {
+  // The window's channels whose roster lists the user: each channel's own
+  // facts (its `serverInfo` channel fields) plus the user's membership
+  // (`joined: true`, and the user's `channelRole` where channel roles exist),
+  // none of the caller's role, capability, or attention fields.
+  memberships: z.array(agentApiServerInfoChannelSchema),
+  // Window channels whose roster check the Server would refuse (`channelMembers`
+  // 404). Built-in app conversations are inspected (no one is a member), not unchecked.
+  uncheckedCount: z.number().int().nonnegative(),
+  page: passthroughObject({
+    // Every channel visible to the caller (`serverInfo` channels), not memberships.
+    total: z.number().int().nonnegative(),
+    offset: z.number().int().nonnegative(),
+    limit: z.number().int().positive(),
+  }),
+};
+
+/**
+ * One user's visible facts and their memberships among one window of the
+ * caller's visible channels (`GET /users/:name/channels`). `user` is the
+ * user's `serverInfo` agents / humans entry, unchanged.
+ */
+export const agentApiUserChannelsResponseSchema = z.discriminatedUnion("kind", [
+  passthroughObject({ user: agentApiServerInfoAgentSchema, kind: z.literal("agent"), ...agentApiUserChannelsPageFields }),
+  passthroughObject({ user: agentApiServerInfoHumanSchema, kind: z.literal("human"), ...agentApiUserChannelsPageFields }),
+]);
+
+/** No visible agent or human has this exact name (`404`). */
+export const AGENT_API_USER_NOT_FOUND_CODE = "user_not_found";
 
 export const agentApiMentionActionsPendingQuerySchema = passthroughObject({
   limit: optionalStringSchema,
@@ -844,6 +1006,56 @@ export const agentApiMentionActionsPendingResponseSchema = passthroughObject({
   has_more: z.boolean().optional(),
 });
 
+/**
+ * task #153 — the author's per-target delivery view. Field set is the ruled
+ * allowlist (@Tenny `4a6a06b8`): outcome + a category coarse enough to act on,
+ * and nothing that explains why the seat broke.
+ */
+/**
+ * Single source for the ruled closed sets. Server projection and CLI rendering
+ * both import these rather than restating them — a hand-copied closed set is
+ * exactly the drift hazard task #154 exists to remove, and writing a second copy
+ * here while reporting that hazard would have been the same mistake twice.
+ */
+export const SENDER_MENTION_DELIVERY_OUTCOMES = ["delivered", "pending", "lost", "unknown"] as const;
+export type SenderMentionDeliveryOutcome = (typeof SENDER_MENTION_DELIVERY_OUTCOMES)[number];
+
+export const SENDER_MENTION_DELIVERY_REASON_CATEGORIES = ["quota", "runtime_error", "not_launched", "unclassified"] as const;
+export type SenderMentionDeliveryReasonCategory = (typeof SENDER_MENTION_DELIVERY_REASON_CATEGORIES)[number];
+
+/**
+ * @Stone finding 2: the boundary must fail closed on the SHAPE, not only the
+ * producer. An optional `reasonCategory` on every outcome lets "field absent"
+ * carry meaning again — the exact defect the ruling removed — if a bad response
+ * ever reaches a client. So the row is discriminated on `outcome`:
+ *   lost                       ⇒ category REQUIRED
+ *   delivered | pending | unknown ⇒ category FORBIDDEN (not merely omitted)
+ * `strict()` rather than passthrough on the non-lost arm is what makes
+ * "forbidden" real; passthrough would silently accept a stray category.
+ */
+export const agentApiSenderMentionDeliveryRowSchema = z.discriminatedUnion("outcome", [
+  z.object({
+    targetHandle: z.string(),
+    outcome: z.literal("lost"),
+    reasonCategory: z.enum(SENDER_MENTION_DELIVERY_REASON_CATEGORIES),
+  }).strict(),
+  ...SENDER_MENTION_DELIVERY_OUTCOMES
+    .filter((outcome): outcome is Exclude<SenderMentionDeliveryOutcome, "lost"> => outcome !== "lost")
+    .map((outcome) => z.object({
+      targetHandle: z.string(),
+      outcome: z.literal(outcome),
+    }).strict()),
+]);
+
+export const agentApiSenderMentionDeliveriesParamsSchema = passthroughObject({
+  messageId: z.string().trim().min(1),
+});
+
+export const agentApiSenderMentionDeliveriesResponseSchema = passthroughObject({
+  messageId: z.string(),
+  deliveries: z.array(agentApiSenderMentionDeliveryRowSchema),
+});
+
 export const agentApiMentionActionsExecuteBodySchema = passthroughObject({
   action: z.enum(["notify", "add"]),
   resolutionIds: optionalStringArraySchema,
@@ -862,12 +1074,15 @@ const agentApiIntegrationServiceSchema = passthroughObject({
   appType: z.enum(["server_local", "slock_builtin", "third_party_global"]).optional(),
   name: z.string(),
   description: nullableStringSchema,
+  whenToUse: nullableStringSchema.optional(),
   homepageUrl: nullableStringSchema,
   returnUrl: nullableStringSchema,
   agentManifestUrl: nullableStringSchema,
   agentManifestUrlSource: z.enum(["explicit", "well_known"]).nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  official: z.boolean().default(false),
+  purpose: z.string().default(""),
 });
 
 const agentApiActiveIntegrationLoginSchema = passthroughObject({
@@ -904,6 +1119,8 @@ const agentApiMarketplaceIntegrationAppSchema = passthroughObject({
   logoUrl: nullableStringSchema,
   installedOnServer: z.boolean(),
   updatedAt: z.string(),
+  official: z.boolean().default(false),
+  purpose: z.string().default(""),
 });
 
 export const agentApiIntegrationMarketplaceResponseSchema = passthroughObject({
@@ -1008,6 +1225,7 @@ export const agentApiIntegrationAppLogoResponseSchema = passthroughObject({
 export const agentApiOwnedIntegrationAppSchema = z.object({
   state: z.enum(["card_pending", "committed"]),
   card: nullableStringSchema,
+  installationId: z.string().uuid().nullable().optional(),
   name: z.string(),
   clientKey: nullableStringSchema,
   createdAt: z.string(),
@@ -1206,22 +1424,64 @@ export const agentApiMessageEnvelopeSchema = passthroughObject({
   }
 });
 */
+export const agentApiEventsInboxHintSchema = z.object({
+  unread_conversations: z.number().int().nonnegative(),
+  command: z.literal("raft inbox check"),
+});
+
 export const agentApiEventsResponseSchema = passthroughObject({
   events: z.array(agentApiMessageEnvelopeSchema),
   last_seen_msgId: nullableStringSchema,
   last_seen_seq: nullableNumberSchema,
   reply_target: nullableStringSchema,
-  pending_notice_ids: z.array(z.string()),
-  wake_reason: z.string().nullable(),
+  // Deprecated placeholders: always `[]` / `null`, read by no client. Kept in
+  // the response only because published CLIs/SDKs before this change parse
+  // them as required; optional here so the server can drop them later.
+  pending_notice_ids: z.array(z.string()).optional(),
+  wake_reason: z.string().nullable().optional(),
   has_more: z.boolean(),
+  // External agents: conversations still unread beyond this bounded batch,
+  // present while any remain. Optional so older servers stay valid.
+  inbox_hint: agentApiEventsInboxHintSchema.nullable().optional(),
+  // How this batch is acknowledged: "cursor" = on the next request whose
+  // `since` covers it; "immediate" = already acknowledged. Absent on older servers.
+  ack_mode: z.enum(["cursor", "immediate"]).optional(),
+  // Task #178: managed runners may also receive `third_party_lease` here. It is
+  // injected by the daemon proxy (see `AgentApiEventsResponse`), never by the
+  // server, so it stays out of this server-router manifest and rides on the
+  // passthrough.
 });
 
+// Authenticated history projection only. This is not a general target alias:
+// consumers may reconcile legacy DM queue metadata only for exact returned IDs.
+export const agentApiHistoryConsumptionScopeSchema = z.object({
+  agent_id: z.string().uuid(),
+  channel_id: z.string().uuid(),
+  channel_type: z.enum(["dm", "thread"]),
+  target: z.string().min(1),
+});
+export type AgentApiHistoryConsumptionScope = z.infer<typeof agentApiHistoryConsumptionScopeSchema>;
+
 export const agentApiHistoryResponseSchema = passthroughObject({
+  // Canonical target resolved by the server. Optional for older servers; the
+  // CLI falls back to the requested target and stays fail-closed rather than
+  // trying to reconstruct identity from message-rendering fields.
+  target: z.string().min(1).optional(),
+  consumption_scope: agentApiHistoryConsumptionScopeSchema.optional(),
   messages: z.array(agentApiMessageEnvelopeSchema),
   has_more: z.boolean(),
   has_older: z.boolean(),
   has_newer: z.boolean(),
   last_read_seq: nullableNumberSchema.optional(),
+  model_seen_up_to_seq: nullableNumberSchema.optional(),
+  /** Present only for `unread=true`: the read position the page started after. */
+  unread_after_seq: nullableNumberSchema.optional(),
+  /**
+   * Present only for `unread=true`: the read position after this read. Below
+   * the page's newest seq when the newest rows are too recent to settle (seq
+   * order is not commit order); those rows come again on the next unread read.
+   */
+  read_through_seq: nullableNumberSchema.optional(),
 });
 
 export const agentApiMessageResolveResponseSchema = passthroughObject({
@@ -1266,6 +1526,38 @@ export const agentApiSearchResultSchema = passthroughObject({
   taskNumber: z.number().int().positive().nullable().optional(),
   taskCurrentProjection: agentApiTaskCurrentProjectionSchema.optional(),
 });
+
+/**
+ * Server-side paging bounds for `messages.search`. Note that the two layers that
+ * apply them do NOT agree on one input, and the constants deliberately do not hide
+ * that:
+ *
+ *   `searchService`  `Math.min(params.limit ?? DEFAULT, MAX)`  -- explicit 0 stays 0
+ *   the search routes `Math.min(Number(q.limit) || DEFAULT, MAX)` -- explicit 0 becomes
+ *                     DEFAULT, because 0 is falsy (so does "", NaN, and "abc")
+ *
+ * Every caller that reaches the server over HTTP goes through a route, so the `||`
+ * semantics is the one agents actually observe.
+ *
+ * Exported so the CLI can STATE them in `--help` rather than copy them. Before
+ * this, both numbers were inline magic values at two call sites and appeared
+ * nowhere a caller could read: `--help` said only "server default applies if
+ * omitted". Four agents independently read the 20-row default page as a hard cap
+ * on 2026-09-20, because nothing in the CLI, the help, or the response
+ * distinguishes "this is all there is" from "this is one page".
+ *
+ * Two separate gaps remain, and documenting the bounds fixes neither:
+ *
+ * 1. The schema below DOES carry `hasMore`, and the server populates it -- but
+ *    `formatSearchResults` prints only a bare count of the rows it received and
+ *    discards the flag, so nothing in the CLI's output says more rows exist.
+ *    Surfacing it belongs to #proj-daemon #326 / PR #8054, not here.
+ * 2. Nothing in the payload -- `hasMore` included -- reveals that MAX silently
+ *    reduced the limit the caller asked for. `hasMore` answers "are there more
+ *    rows", never "was your request clamped".
+ */
+export const AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT = 20;
+export const AGENT_API_MESSAGE_SEARCH_MAX_LIMIT = 50;
 
 export const agentApiMessageSearchResponseSchema = passthroughObject({
   results: z.array(agentApiSearchResultSchema),
@@ -1608,70 +1900,52 @@ export const agentApiAppConfigResponseSchema = passthroughObject({
   effective: z.record(z.string(), agentApiAppConfigValueSchema),
 });
 
-const agentApiMigrationStateSchema = z.enum([
-  "provisioning",
-  "prep",
-  "ready",
-  "in_transit",
-  "arriving",
-  "starting",
-  "cancel_requested_pre_flip",
-  "cancel_requested_post_flip",
-  "canceled_pre_flip",
-  "canceled_post_flip",
-  "completed",
-  "aborted",
-  "failed",
-]);
+// ── Routes that were served outside the typed contract until manifest metadata
+// landed (SDK 1.0 Phase 1): inbox push registration and the mention inbox.
+// (`/wake-hints` and `/activity` stay in `daemonApiContract`: the daemon owns
+// those paths for managed runners, and `daemonApiRawClient.test.ts` forbids
+// registering them here as well.) Handlers keep their own strict checks; these
+// schemas are the client-facing shape.
 
-export const agentApiMigrationSummarySchema = passthroughObject({
+export const agentApiPushWebhookRegisterBodySchema = z.object({
+  /** Public HTTPS endpoint that receives `raft-agent-inbox-notice.v1` POSTs. */
+  url: z.string().trim().min(1),
+  /** Receiver-owned HMAC-SHA256 secret; stored encrypted, never returned. */
+  secret: z.string().min(1).max(512),
+}).strict();
+
+export const agentApiPushWebhookStatusResponseSchema = passthroughObject({
+  registered: z.boolean(),
+  url: nullableStringSchema,
+  enabled: z.boolean(),
+  disabledReason: z.enum(["endpoint_rejected", "credential_revoked", "agent_inactive"]).nullable(),
+  disabledAt: nullableStringSchema,
+  lastAttemptAt: nullableStringSchema,
+  lastDeliveryAt: nullableStringSchema,
+  lastError: nullableStringSchema,
+  consecutiveFailures: z.number().int().nonnegative(),
+  nextAttemptAt: nullableStringSchema,
+});
+
+export const agentApiMentionsListQuerySchema = passthroughObject({
+  limit: optionalStringSchema,
+  before_seq: optionalStringSchema,
+});
+
+export const agentApiMentionInboxRowSchema = passthroughObject({
   id: z.string(),
-  agentId: z.string(),
-  sourceMachineId: z.string(),
-  targetMachineId: z.string(),
-  state: agentApiMigrationStateSchema,
-  manifestPath: nullableStringSchema,
-  manifestSha256: nullableStringSchema,
-  arrivalReportPath: nullableStringSchema,
-  arrivalReportSha256: nullableStringSchema,
-  abortReason: nullableStringSchema,
-  failureReason: nullableStringSchema,
-  prepDeadlineAt: z.string().datetime(),
-  transferDeadlineAt: z.string().datetime(),
-  arrivalDeadlineAt: z.string().datetime(),
-  readyAt: nullableStringSchema,
-  flippedAt: nullableStringSchema,
-  arrivedAt: nullableStringSchema,
-  completedAt: nullableStringSchema,
-  abortedAt: nullableStringSchema,
-  revision: z.number().int().positive(),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
+  messageId: z.string(),
+  messageSeq: z.number(),
+  channelId: z.string(),
+  handleAtSendTime: nullableStringSchema.optional(),
+  source: z.string(),
+  confidence: z.unknown().optional(),
+  createdAt: z.string(),
 });
 
-export const agentApiMigrationBeginBodySchema = passthroughObject({
-  targetMachineId: z.string().trim().min(1),
-  prepDeadlineMs: z.number().int().positive().optional(),
-  transferDeadlineMs: z.number().int().positive().optional(),
-  arrivalDeadlineMs: z.number().int().positive().optional(),
-});
-
-export const agentApiMigrationReadyBodySchema = passthroughObject({
-  manifestPath: z.string().trim().min(1),
-  manifestSha256: optionalStringSchema,
-});
-
-export const agentApiMigrationArrivedBodySchema = passthroughObject({
-  reportPath: optionalStringSchema,
-  reportSha256: optionalStringSchema,
-});
-
-export const agentApiMigrationResponseSchema = passthroughObject({
-  migration: agentApiMigrationSummarySchema,
-});
-
-export const agentApiMigrationStatusResponseSchema = passthroughObject({
-  migration: agentApiMigrationSummarySchema.nullable(),
+export const agentApiMentionsListResponseSchema = passthroughObject({
+  mentions: z.array(agentApiMentionInboxRowSchema),
+  has_more: z.boolean(),
 });
 
 export type AgentApiContractResponse =
@@ -1681,6 +1955,10 @@ export type AgentApiContractResponse =
   }
   | {
     kind: "binary";
+  }
+  | {
+    /** A success with no body (for example `204 No Content`). */
+    kind: "empty";
   };
 
 export type AgentApiContractRoute = {
@@ -1769,36 +2047,6 @@ export const agentApiContract = {
     description: "Search Slock Manual for Agents topics from the current server.",
     request: { query: agentApiKnowledgeSearchQuerySchema },
     response: { body: agentApiKnowledgeSearchResponseSchema },
-  }),
-  wikiManifestGet: route({
-    key: "wikiManifestGet",
-    method: "GET",
-    path: "/wiki/manifest",
-    client: { resource: "wiki", method: "manifest" },
-    capability: "knowledge",
-    description: "Read the canonical S3-backed Wiki manifest for the configured Wiki Agent.",
-    request: {},
-    response: { body: agentApiWikiManifestResponseSchema },
-  }),
-  wikiArtifactRead: route({
-    key: "wikiArtifactRead",
-    method: "GET",
-    path: "/wiki/artifacts/:artifactId",
-    client: { resource: "wiki", method: "read" },
-    capability: "knowledge",
-    description: "Read the current manifest-reachable Wiki artifact Markdown for the configured Wiki Agent.",
-    request: { params: agentApiWikiArtifactReadParamsSchema },
-    response: { body: agentApiWikiArtifactReadResponseSchema },
-  }),
-  wikiManifestPublish: route({
-    key: "wikiManifestPublish",
-    method: "POST",
-    path: "/wiki/publish",
-    client: { resource: "wiki", method: "publish" },
-    capability: "knowledge",
-    description: "Publish immutable Wiki revisions and atomically advance the canonical manifest.",
-    request: { body: agentApiWikiPublishBodySchema },
-    response: { body: agentApiWikiManifestResponseSchema },
   }),
   managedMcpTools: route({
     key: "managedMcpTools",
@@ -1970,15 +2218,57 @@ export const agentApiContract = {
     request: { body: agentApiThreadUnfollowBodySchema },
     response: { body: agentApiOkResponseSchema },
   }),
+  threadList: route({
+    key: "threadList",
+    method: "GET",
+    path: "/threads",
+    client: { resource: "threads", method: "list" },
+    capability: "channels",
+    description: "List active threads the bound agent is following.",
+    request: {},
+    response: { body: agentApiThreadListResponseSchema },
+  }),
+  inboxList: route({
+    key: "inboxList",
+    method: "GET",
+    // Not `/inbox`: the managed-runner daemon proxy answers GET /inbox locally
+    // with its volatile pending snapshot (daemonApiContract.inboxCheck).
+    path: "/inbox/conversations",
+    client: { resource: "inbox", method: "list" },
+    capability: "read",
+    description: "List the bound agent's durable unread conversations, newest activity first.",
+    request: { query: agentApiInboxListQuerySchema },
+    response: { body: agentApiInboxListResponseSchema },
+  }),
+  agentContext: route({
+    key: "agentContext",
+    method: "GET",
+    path: "/context",
+    client: { resource: "agent", method: "context" },
+    capability: "read",
+    description: "Identity bootstrap: the bound agent's identity, server, credential capabilities, and (external agents) the rendered operating guide.",
+    request: {},
+    response: { body: agentApiAgentContextResponseSchema },
+  }),
   serverInfo: route({
     key: "serverInfo",
     method: "GET",
     path: "/server",
     client: { resource: "server", method: "info" },
-    capability: "server",
+    capability: "read",
     description: "List channels, agents, humans, and runtime context visible to the bound agent.",
     request: {},
     response: { body: agentApiServerInfoResponseSchema },
+  }),
+  userChannels: route({
+    key: "userChannels",
+    method: "GET",
+    path: "/users/:name/channels",
+    client: { resource: "users", method: "channels" },
+    capability: "channels",
+    description: "One visible agent or human (exact name, agents first; the serverInfo entry) and which of one window of your visible channels (serverInfo order, offset/limit, limit at most 200) list them as a member, in one request. Needs the read capability as well. 404 user_not_found when no visible user has that name.",
+    request: { params: agentApiUserChannelsParamsSchema, query: agentApiUserChannelsQuerySchema },
+    response: { body: agentApiUserChannelsResponseSchema },
   }),
   serverUpdate: route({
     key: "serverUpdate",
@@ -1999,6 +2289,16 @@ export const agentApiContract = {
     description: "List sender-side pending mention actions for unresolved outsider mentions.",
     request: { query: agentApiMentionActionsPendingQuerySchema },
     response: { body: agentApiMentionActionsPendingResponseSchema },
+  }),
+  senderMentionDeliveries: route({
+    key: "senderMentionDeliveries",
+    method: "GET",
+    path: "/messages/:messageId/mention-deliveries",
+    client: { resource: "mentions", method: "senderDeliveries" },
+    capability: "mentions",
+    description: "Per-target delivery outcome for a message the bound agent sent.",
+    request: { params: agentApiSenderMentionDeliveriesParamsSchema },
+    response: { body: agentApiSenderMentionDeliveriesResponseSchema },
   }),
   mentionActionsExecute: route({
     key: "mentionActionsExecute",
@@ -2120,46 +2420,6 @@ export const agentApiContract = {
     request: { query: agentApiTaskHistoryQuerySchema },
     response: { body: agentApiTaskHistoryResponseSchema },
   }),
-  migrationBegin: route({
-    key: "migrationBegin",
-    method: "POST",
-    path: "/migrations",
-    client: { resource: "migrations", method: "begin" },
-    capability: "server",
-    description: "Begin a migration for the bound agent credential.",
-    request: { body: agentApiMigrationBeginBodySchema },
-    response: { body: agentApiMigrationResponseSchema },
-  }),
-  migrationStatus: route({
-    key: "migrationStatus",
-    method: "GET",
-    path: "/migrations/current",
-    client: { resource: "migrations", method: "status" },
-    capability: "read",
-    description: "Read the active migration for the bound agent credential, if any.",
-    request: {},
-    response: { body: agentApiMigrationStatusResponseSchema },
-  }),
-  migrationReady: route({
-    key: "migrationReady",
-    method: "POST",
-    path: "/migrations/ready",
-    client: { resource: "migrations", method: "ready" },
-    capability: "read",
-    description: "Mark the bound agent's active migration prep phase ready.",
-    request: { body: agentApiMigrationReadyBodySchema },
-    response: { body: agentApiMigrationResponseSchema },
-  }),
-  migrationArrived: route({
-    key: "migrationArrived",
-    method: "POST",
-    path: "/migrations/arrived",
-    client: { resource: "migrations", method: "arrived" },
-    capability: "read",
-    description: "Mark the bound agent's active migration arrival phase complete.",
-    request: { body: agentApiMigrationArrivedBodySchema },
-    response: { body: agentApiMigrationResponseSchema },
-  }),
   reminderList: route({
     key: "reminderList",
     method: "GET",
@@ -2265,7 +2525,7 @@ export const agentApiContract = {
     method: "POST",
     path: "/profile",
     client: { resource: "profile", method: "update" },
-    capability: "server",
+    capability: "send",
     description: "Update the bound agent profile metadata.",
     request: { body: agentApiProfileUpdateBodySchema },
     response: { body: agentApiProfileViewSchema },
@@ -2275,7 +2535,7 @@ export const agentApiContract = {
     method: "POST",
     path: "/profile/avatar",
     client: { resource: "profile", method: "updateAvatar" },
-    capability: "server",
+    capability: "send",
     description: "Update the bound agent profile avatar using multipart form data.",
     request: {},
     response: { body: agentApiProfileViewSchema },
@@ -2299,6 +2559,14 @@ export const agentApiContract = {
     description: "Search or list public Marketplace apps without changing the installed integration inventory.",
     request: { query: agentApiIntegrationMarketplaceQuerySchema },
     response: { body: agentApiIntegrationMarketplaceResponseSchema },
+  }),
+  integrationToken: route({
+    key: "integrationToken", method: "POST", path: "/integrations/token",
+    client: { resource: "integrations", method: "token" },
+    capability: "read",
+    description: "Issue a short-lived Agent JWT for an operator-enabled Server-local audience.",
+    request: { body: agentApiIntegrationTokenBodySchema },
+    response: { body: agentApiIntegrationTokenResponseSchema },
   }),
   integrationLogin: route({
     key: "integrationLogin",
@@ -2476,6 +2744,16 @@ export const agentApiContract = {
     request: { params: agentApiAttachmentDownloadParamsSchema },
     response: { kind: "binary" },
   }),
+  attachmentDownloadUrl: route({
+    key: "attachmentDownloadUrl",
+    method: "GET",
+    path: "/attachments/:attachmentId/url",
+    client: { resource: "attachments", method: "downloadUrl" },
+    capability: "read",
+    description: "Mint a short-lived (5 minute) download URL for an attachment visible to the bound agent credential, with its filename and MIME type. 409 download_url_unavailable when this Server's storage cannot presign; use the binary download instead.",
+    request: { params: agentApiAttachmentDownloadParamsSchema },
+    response: { body: agentApiAttachmentDownloadUrlResponseSchema },
+  }),
   attachmentCommentsList: route({
     key: "attachmentCommentsList",
     method: "GET",
@@ -2485,6 +2763,46 @@ export const agentApiContract = {
     description: "List comments scoped to an attachment visible to the bound agent credential.",
     request: { params: agentApiAttachmentCommentsParamsSchema, query: agentApiAttachmentCommentsQuerySchema },
     response: { body: agentApiAttachmentCommentsResponseSchema },
+  }),
+  pushWebhookStatus: route({
+    key: "pushWebhookStatus",
+    method: "GET",
+    path: "/push-webhook",
+    client: { resource: "pushWebhook", method: "status" },
+    capability: "read",
+    description: "Read the bound External Agent's inbox push registration and delivery status.",
+    request: {},
+    response: { body: agentApiPushWebhookStatusResponseSchema },
+  }),
+  pushWebhookRegister: route({
+    key: "pushWebhookRegister",
+    method: "PUT",
+    path: "/push-webhook",
+    client: { resource: "pushWebhook", method: "register" },
+    capability: "read",
+    description: "Register or replace the bound External Agent's inbox push webhook (raft-agent-inbox-notice.v1); a new registration replaces the secret and re-enables delivery.",
+    request: { body: agentApiPushWebhookRegisterBodySchema },
+    response: { body: agentApiPushWebhookStatusResponseSchema },
+  }),
+  pushWebhookDelete: route({
+    key: "pushWebhookDelete",
+    method: "DELETE",
+    path: "/push-webhook",
+    client: { resource: "pushWebhook", method: "unregister" },
+    capability: "read",
+    description: "Remove the bound External Agent's inbox push registration.",
+    request: {},
+    response: { kind: "empty" },
+  }),
+  mentionsList: route({
+    key: "mentionsList",
+    method: "GET",
+    path: "/mentions",
+    client: { resource: "mentions", method: "list" },
+    capability: "mentions",
+    description: "List notifiable @mentions of the bound agent, newest first.",
+    request: { query: agentApiMentionsListQuerySchema },
+    response: { body: agentApiMentionsListResponseSchema },
   }),
 } as const satisfies Record<string, AgentApiContractRoute>;
 
@@ -2502,18 +2820,23 @@ export type AgentApiRouteManifestEntry = {
   };
   capability: AgentApiCapability;
   description: string;
+  /** Operating metadata from `agentApiRouteMeta.ts`; one vocabulary for CLI, SDK, and tool schemas. */
+  sideEffect: AgentApiSideEffect;
+  idempotency: AgentApiIdempotency;
+  destructive: boolean;
+  audience: AgentApiAudience;
   request: {
     params: boolean;
     query: boolean;
     body: boolean;
   };
   response: {
-    kind: "json" | "binary";
+    kind: "json" | "binary" | "empty";
     body: boolean;
   };
 };
 
-export function getAgentApiResponseKind(response: AgentApiContractResponse): "json" | "binary" {
+export function getAgentApiResponseKind(response: AgentApiContractResponse): "json" | "binary" | "empty" {
   return "kind" in response ? response.kind ?? "json" : "json";
 }
 
@@ -2526,6 +2849,7 @@ export function buildAgentApiRouteManifest(): AgentApiRouteManifestEntry[] {
     client: route.client,
     capability: route.capability,
     description: route.description,
+    ...AGENT_API_ROUTE_META[route.key as AgentApiRouteKey],
     request: {
       params: "params" in route.request && Boolean(route.request.params),
       query: "query" in route.request && Boolean(route.request.query),
@@ -2538,10 +2862,33 @@ export function buildAgentApiRouteManifest(): AgentApiRouteManifestEntry[] {
   }));
 }
 
+/**
+ * Content-addressed manifest version: changes whenever any route, its
+ * capability, or its operating metadata changes. Clients compare it against
+ * the Server's to report skew instead of guessing which side is older.
+ * Pure FNV-1a (64-bit, hex) so browsers and Node share one implementation.
+ */
+export function computeAgentApiManifestVersion(manifest: AgentApiRouteManifestEntry[]): string {
+  const text = JSON.stringify(manifest);
+  let hash = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  const mask = 0xffffffffffffffffn;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= BigInt(text.charCodeAt(index));
+    hash = (hash * prime) & mask;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
 export function buildLegacyAgentApiPath(agentId: string, routePath: string): string {
   return `/internal/agent/${encodeURIComponent(agentId)}${routePath}`;
 }
 
+export type AgentApiPushWebhookRegisterBody = z.infer<typeof agentApiPushWebhookRegisterBodySchema>;
+export type AgentApiPushWebhookStatusResponse = z.infer<typeof agentApiPushWebhookStatusResponseSchema>;
+export type AgentApiMentionsListQuery = z.infer<typeof agentApiMentionsListQuerySchema>;
+export type AgentApiMentionInboxRow = z.infer<typeof agentApiMentionInboxRowSchema>;
+export type AgentApiMentionsListResponse = z.infer<typeof agentApiMentionsListResponseSchema>;
 export type AgentApiEventsQuery = z.infer<typeof agentApiEventsQuerySchema>;
 export type AgentApiHistoryQuery = z.infer<typeof agentApiHistoryQuerySchema>;
 export type AgentApiKnowledgeGetQuery = z.infer<typeof agentApiKnowledgeGetQuerySchema>;
@@ -2549,10 +2896,6 @@ export type AgentApiKnowledgeGetResponse = z.infer<typeof agentApiKnowledgeGetRe
 export type AgentApiKnowledgeSearchQuery = z.infer<typeof agentApiKnowledgeSearchQuerySchema>;
 export type AgentApiKnowledgeSearchResult = z.infer<typeof agentApiKnowledgeSearchResultSchema>;
 export type AgentApiKnowledgeSearchResponse = z.infer<typeof agentApiKnowledgeSearchResponseSchema>;
-export type AgentApiWikiManifestResponse = z.infer<typeof agentApiWikiManifestResponseSchema>;
-export type AgentApiWikiArtifactReadParams = z.infer<typeof agentApiWikiArtifactReadParamsSchema>;
-export type AgentApiWikiArtifactReadResponse = z.infer<typeof agentApiWikiArtifactReadResponseSchema>;
-export type AgentApiWikiPublishBody = z.infer<typeof agentApiWikiPublishBodySchema>;
 export type AgentApiManagedMcpToolsResponse = z.infer<typeof agentApiManagedMcpToolsResponseSchema>;
 export type AgentApiManagedMcpCallBody = z.infer<typeof agentApiManagedMcpCallBodySchema>;
 export type AgentApiManagedMcpCallResponse = z.infer<typeof agentApiManagedMcpCallResponseSchema>;
@@ -2566,6 +2909,11 @@ export type AgentApiChannelLifecycleBody = z.infer<typeof agentApiChannelLifecyc
 export type AgentApiAttachmentDownloadParams = z.infer<typeof agentApiAttachmentDownloadParamsSchema>;
 export type AgentApiChannelMembersQuery = z.infer<typeof agentApiChannelMembersQuerySchema>;
 export type AgentApiThreadUnfollowBody = z.infer<typeof agentApiThreadUnfollowBodySchema>;
+export type AgentApiThreadListItem = z.infer<typeof agentApiThreadListItemSchema>;
+export type AgentApiThreadListResponse = z.infer<typeof agentApiThreadListResponseSchema>;
+export type AgentApiInboxListQuery = z.infer<typeof agentApiInboxListQuerySchema>;
+export type AgentApiInboxConversation = z.infer<typeof agentApiInboxConversationSchema>;
+export type AgentApiInboxListResponse = z.infer<typeof agentApiInboxListResponseSchema>;
 export type AgentApiTaskClaimBody = z.infer<typeof agentApiTaskClaimBodySchema>;
 export type AgentApiTaskListQuery = z.infer<typeof agentApiTaskListQuerySchema>;
 export type AgentApiTaskCreateBody = z.infer<typeof agentApiTaskCreateBodySchema>;
@@ -2594,6 +2942,8 @@ export type AgentApiAppConfigPatchBody = z.infer<typeof agentApiAppConfigPatchBo
 export type AgentApiAppConfigResponse = z.infer<typeof agentApiAppConfigResponseSchema>;
 export type AgentApiProfileShowQuery = z.infer<typeof agentApiProfileShowQuerySchema>;
 export type AgentApiProfileUpdateBody = z.infer<typeof agentApiProfileUpdateBodySchema>;
+export type AgentApiIntegrationTokenBody = z.infer<typeof agentApiIntegrationTokenBodySchema>;
+export type AgentApiIntegrationTokenResponse = z.infer<typeof agentApiIntegrationTokenResponseSchema>;
 export type AgentApiIntegrationLoginBody = z.infer<typeof agentApiIntegrationLoginBodySchema>;
 export type AgentApiIntegrationMarketplaceQuery = z.infer<typeof agentApiIntegrationMarketplaceQuerySchema>;
 export type AgentApiIntegrationAppPrepareBody = z.infer<typeof agentApiIntegrationAppPrepareBodySchema>;
@@ -2606,6 +2956,7 @@ export type AgentApiAttachmentUploadSessionCreateResponse = z.infer<typeof creat
 export type AgentApiAttachmentUploadSessionCompleteResponse = z.infer<typeof completeAttachmentUploadSessionResponseSchema>;
 export type AgentApiAttachmentUploadSessionResponse = z.infer<typeof attachmentUploadSessionSchema>;
 export type AgentApiAttachmentDownloadResponse = Uint8Array;
+export type AgentApiAttachmentDownloadUrlResponse = z.infer<typeof agentApiAttachmentDownloadUrlResponseSchema>;
 
 /*
 export interface AgentApiAttachmentEnvelope {
@@ -2649,23 +3000,41 @@ export interface AgentApiMessageEnvelope {
   [key: string]: unknown;
 }
 */
+export interface AgentApiEventsInboxHint {
+  unread_conversations: number;
+  command: "raft inbox check";
+}
+
 export interface AgentApiEventsResponse {
   events: AgentApiMessageEnvelope[];
   last_seen_msgId: string | null;
   last_seen_seq: number | null;
   reply_target: string | null;
-  pending_notice_ids: string[];
-  wake_reason: string | null;
+  /** @deprecated Always `[]`; kept only for older clients that require it. */
+  pending_notice_ids?: string[];
+  /** @deprecated Always `null`; kept only for older clients that require it. */
+  wake_reason?: string | null;
   has_more: boolean;
+  inbox_hint?: AgentApiEventsInboxHint | null;
+  /** "cursor": acknowledged by the next request whose `since` covers it; "immediate": already acknowledged. */
+  ack_mode?: "cursor" | "immediate";
+  /**
+   * Task #178 (managed runners only): third-party events leased to this batch,
+   * injected by the daemon proxy; the CLI acks `batch_id` on the daemon after
+   * writing the bodies out. Not part of the server contract (passthrough).
+   */
+  third_party_lease?: { batch_id: string; event_ids: string[]; expires_at: string } | null;
   [key: string]: unknown;
 }
 
 export interface AgentApiHistoryResponse {
+  consumption_scope?: AgentApiHistoryConsumptionScope;
   messages: AgentApiMessageEnvelope[];
   has_more: boolean;
   has_older: boolean;
   has_newer: boolean;
   last_read_seq?: number | null;
+  model_seen_up_to_seq?: number | null;
   [key: string]: unknown;
 }
 
@@ -2783,11 +3152,18 @@ export type AgentApiTaskHistoryResponse = z.infer<typeof agentApiTaskHistoryResp
 export type AgentApiProfileView = z.infer<typeof agentApiProfileViewSchema>;
 export type AgentApiOkResponse = z.infer<typeof agentApiOkResponseSchema>;
 export type AgentApiActionPrepareResponse = z.infer<typeof agentApiActionPrepareResponseSchema>;
+
+export type AgentApiAgentContextResponse = z.infer<typeof agentApiAgentContextResponseSchema>;
 export type AgentApiServerInfoResponse = z.infer<typeof agentApiServerInfoResponseSchema>;
+export type AgentApiUserChannelsParams = z.infer<typeof agentApiUserChannelsParamsSchema>;
+export type AgentApiUserChannelsQuery = z.infer<typeof agentApiUserChannelsQuerySchema>;
+export type AgentApiUserChannelsResponse = z.infer<typeof agentApiUserChannelsResponseSchema>;
 export type AgentApiServerUpdateBody = z.infer<typeof agentApiServerUpdateBodySchema>;
 export type AgentApiServerUpdateResponse = z.infer<typeof agentApiServerUpdateResponseSchema>;
 export type AgentApiMentionActionsPendingQuery = z.infer<typeof agentApiMentionActionsPendingQuerySchema>;
 export type AgentApiMentionActionsPendingResponse = z.infer<typeof agentApiMentionActionsPendingResponseSchema>;
+export type AgentApiSenderMentionDeliveriesParams = z.infer<typeof agentApiSenderMentionDeliveriesParamsSchema>;
+export type AgentApiSenderMentionDeliveriesResponse = z.infer<typeof agentApiSenderMentionDeliveriesResponseSchema>;
 export type AgentApiMentionActionsExecuteBody = z.infer<typeof agentApiMentionActionsExecuteBodySchema>;
 export type AgentApiMentionActionsExecuteResponse = z.infer<typeof agentApiMentionActionsExecuteResponseSchema>;
 export type AgentApiResolveChannelBody = z.infer<typeof agentApiResolveChannelBodySchema>;
@@ -2814,11 +3190,6 @@ export type AgentApiIntegrationAppStatusResponse = z.infer<typeof agentApiIntegr
 export type AgentApiAttachmentCommentsParams = z.infer<typeof agentApiAttachmentCommentsParamsSchema>;
 export type AgentApiAttachmentCommentsQuery = z.infer<typeof agentApiAttachmentCommentsQuerySchema>;
 export type AgentApiAttachmentCommentsResponse = z.infer<typeof agentApiAttachmentCommentsResponseSchema>;
-export type AgentApiMigrationBeginBody = z.infer<typeof agentApiMigrationBeginBodySchema>;
-export type AgentApiMigrationReadyBody = z.infer<typeof agentApiMigrationReadyBodySchema>;
-export type AgentApiMigrationArrivedBody = z.infer<typeof agentApiMigrationArrivedBodySchema>;
-export type AgentApiMigrationResponse = z.infer<typeof agentApiMigrationResponseSchema>;
-export type AgentApiMigrationStatusResponse = z.infer<typeof agentApiMigrationStatusResponseSchema>;
 export type AgentApiFeedbackLocatorIngestBody = z.infer<typeof agentApiFeedbackLocatorIngestBodySchema>;
 export type AgentApiFeedbackLocatorAcceptance = z.infer<typeof agentApiFeedbackLocatorAcceptanceSchema>;
 export type AgentApiFeedbackLocatorListQuery = z.infer<typeof agentApiFeedbackLocatorListQuerySchema>;
@@ -2831,9 +3202,6 @@ export type AgentApiRequestParamsByRoute = {
   historyRead: never;
   knowledgeGet: never;
   knowledgeSearch: never;
-  wikiManifestGet: never;
-  wikiArtifactRead: AgentApiWikiArtifactReadParams;
-  wikiManifestPublish: never;
   managedMcpTools: never;
   managedMcpCall: never;
   messageSend: never;
@@ -2843,6 +3211,7 @@ export type AgentApiRequestParamsByRoute = {
   messageReactionAdd: AgentApiMessageReactionParams;
   messageReactionRemove: AgentApiMessageReactionParams;
   attachmentDownload: AgentApiAttachmentDownloadParams;
+  attachmentDownloadUrl: AgentApiAttachmentDownloadParams;
   attachmentCommentsList: AgentApiAttachmentCommentsParams;
   channelJoin: AgentApiChannelMembershipParams;
   channelLeave: AgentApiChannelMembershipParams;
@@ -2853,9 +3222,14 @@ export type AgentApiRequestParamsByRoute = {
   channelMembers: never;
   resolveChannel: never;
   threadUnfollow: never;
+  threadList: never;
+  inboxList: never;
+  agentContext: never;
   serverInfo: never;
+  userChannels: AgentApiUserChannelsParams;
   serverUpdate: never;
   mentionActionsPending: never;
+  senderMentionDeliveries: AgentApiSenderMentionDeliveriesParams;
   mentionActionsExecute: never;
   taskClaim: never;
   taskList: never;
@@ -2868,10 +3242,6 @@ export type AgentApiRequestParamsByRoute = {
   taskConvert: never;
   taskAmend: never;
   taskHistory: never;
-  migrationBegin: never;
-  migrationStatus: never;
-  migrationReady: never;
-  migrationArrived: never;
   reminderList: never;
   reminderCreate: never;
   reminderCancel: AgentApiReminderParams;
@@ -2886,6 +3256,7 @@ export type AgentApiRequestParamsByRoute = {
   profileAvatarUpdate: never;
   integrationList: never;
   integrationMarketplaceSearch: never;
+  integrationToken: never;
   integrationLogin: never;
   integrationAppPrepare: never;
   integrationAppRotateSecret: never;
@@ -2902,6 +3273,10 @@ export type AgentApiRequestParamsByRoute = {
   attachmentUploadSessionComplete: z.infer<typeof attachmentUploadPathParamsSchema>;
   attachmentUploadSessionCancel: z.infer<typeof attachmentUploadPathParamsSchema>;
   attachmentUploadSessionStatus: z.infer<typeof attachmentUploadPathParamsSchema>;
+  pushWebhookStatus: never;
+  pushWebhookRegister: never;
+  pushWebhookDelete: never;
+  mentionsList: never;
 };
 
 export type AgentApiRequestQueryByRoute = {
@@ -2911,9 +3286,6 @@ export type AgentApiRequestQueryByRoute = {
   historyRead: AgentApiHistoryQuery;
   knowledgeGet: AgentApiKnowledgeGetQuery;
   knowledgeSearch: AgentApiKnowledgeSearchQuery;
-  wikiManifestGet: never;
-  wikiArtifactRead: never;
-  wikiManifestPublish: never;
   managedMcpTools: never;
   managedMcpCall: never;
   messageSend: never;
@@ -2923,6 +3295,7 @@ export type AgentApiRequestQueryByRoute = {
   messageReactionAdd: never;
   messageReactionRemove: never;
   attachmentDownload: never;
+  attachmentDownloadUrl: never;
   attachmentCommentsList: AgentApiAttachmentCommentsQuery;
   channelJoin: never;
   channelLeave: never;
@@ -2933,9 +3306,14 @@ export type AgentApiRequestQueryByRoute = {
   channelMembers: AgentApiChannelMembersQuery;
   resolveChannel: never;
   threadUnfollow: never;
+  threadList: never;
+  inboxList: AgentApiInboxListQuery;
+  agentContext: never;
   serverInfo: never;
+  userChannels: AgentApiUserChannelsQuery;
   serverUpdate: never;
   mentionActionsPending: AgentApiMentionActionsPendingQuery;
+  senderMentionDeliveries: never;
   mentionActionsExecute: never;
   taskClaim: never;
   taskList: AgentApiTaskListQuery;
@@ -2948,10 +3326,6 @@ export type AgentApiRequestQueryByRoute = {
   taskConvert: never;
   taskAmend: never;
   taskHistory: AgentApiTaskHistoryQuery;
-  migrationBegin: never;
-  migrationStatus: never;
-  migrationReady: never;
-  migrationArrived: never;
   reminderList: AgentApiReminderListQuery;
   reminderCreate: never;
   reminderCancel: never;
@@ -2966,6 +3340,7 @@ export type AgentApiRequestQueryByRoute = {
   profileAvatarUpdate: never;
   integrationList: never;
   integrationMarketplaceSearch: AgentApiIntegrationMarketplaceQuery;
+  integrationToken: never;
   integrationLogin: never;
   integrationAppPrepare: never;
   integrationAppRotateSecret: never;
@@ -2982,6 +3357,10 @@ export type AgentApiRequestQueryByRoute = {
   attachmentUploadSessionComplete: never;
   attachmentUploadSessionCancel: never;
   attachmentUploadSessionStatus: never;
+  pushWebhookStatus: never;
+  pushWebhookRegister: never;
+  pushWebhookDelete: never;
+  mentionsList: AgentApiMentionsListQuery;
 };
 
 export type AgentApiRequestBodyByRoute = {
@@ -2991,9 +3370,6 @@ export type AgentApiRequestBodyByRoute = {
   historyRead: never;
   knowledgeGet: never;
   knowledgeSearch: never;
-  wikiManifestGet: never;
-  wikiArtifactRead: never;
-  wikiManifestPublish: AgentApiWikiPublishBody;
   managedMcpTools: never;
   managedMcpCall: AgentApiManagedMcpCallBody;
   messageSend: AgentApiSendBody;
@@ -3003,6 +3379,7 @@ export type AgentApiRequestBodyByRoute = {
   messageReactionAdd: AgentApiMessageReactionBody;
   messageReactionRemove: AgentApiMessageReactionBody;
   attachmentDownload: never;
+  attachmentDownloadUrl: never;
   attachmentCommentsList: never;
   channelJoin: never;
   channelLeave: never;
@@ -3013,9 +3390,14 @@ export type AgentApiRequestBodyByRoute = {
   channelMembers: never;
   resolveChannel: AgentApiResolveChannelBody;
   threadUnfollow: AgentApiThreadUnfollowBody;
+  threadList: never;
+  inboxList: never;
+  agentContext: never;
   serverInfo: never;
+  userChannels: never;
   serverUpdate: AgentApiServerUpdateBody;
   mentionActionsPending: never;
+  senderMentionDeliveries: never;
   mentionActionsExecute: AgentApiMentionActionsExecuteBody;
   taskClaim: AgentApiTaskClaimBody;
   taskList: never;
@@ -3028,10 +3410,6 @@ export type AgentApiRequestBodyByRoute = {
   taskConvert: AgentApiTaskConvertBody;
   taskAmend: AgentApiTaskAmendBody;
   taskHistory: never;
-  migrationBegin: AgentApiMigrationBeginBody;
-  migrationStatus: never;
-  migrationReady: AgentApiMigrationReadyBody;
-  migrationArrived: AgentApiMigrationArrivedBody;
   reminderList: never;
   reminderCreate: AgentApiReminderScheduleBody;
   reminderCancel: never;
@@ -3046,6 +3424,7 @@ export type AgentApiRequestBodyByRoute = {
   profileAvatarUpdate: never;
   integrationList: never;
   integrationMarketplaceSearch: never;
+  integrationToken: AgentApiIntegrationTokenBody;
   integrationLogin: AgentApiIntegrationLoginBody;
   integrationAppPrepare: AgentApiIntegrationAppPrepareBody;
   integrationAppRotateSecret: AgentApiIntegrationAppRotateSecretBody;
@@ -3062,6 +3441,10 @@ export type AgentApiRequestBodyByRoute = {
   attachmentUploadSessionComplete: never;
   attachmentUploadSessionCancel: never;
   attachmentUploadSessionStatus: never;
+  pushWebhookStatus: never;
+  pushWebhookRegister: AgentApiPushWebhookRegisterBody;
+  pushWebhookDelete: never;
+  mentionsList: never;
 };
 
 export type AgentApiResponseByRoute = {
@@ -3071,9 +3454,6 @@ export type AgentApiResponseByRoute = {
   historyRead: AgentApiHistoryResponse;
   knowledgeGet: AgentApiKnowledgeGetResponse;
   knowledgeSearch: AgentApiKnowledgeSearchResponse;
-  wikiManifestGet: AgentApiWikiManifestResponse;
-  wikiArtifactRead: AgentApiWikiArtifactReadResponse;
-  wikiManifestPublish: AgentApiWikiManifestResponse;
   managedMcpTools: AgentApiManagedMcpToolsResponse;
   managedMcpCall: AgentApiManagedMcpCallResponse;
   messageSend: AgentApiSendResponse;
@@ -3083,6 +3463,7 @@ export type AgentApiResponseByRoute = {
   messageReactionAdd: AgentApiMessageEnvelope;
   messageReactionRemove: AgentApiMessageEnvelope;
   attachmentDownload: AgentApiAttachmentDownloadResponse;
+  attachmentDownloadUrl: AgentApiAttachmentDownloadUrlResponse;
   attachmentCommentsList: AgentApiAttachmentCommentsResponse;
   channelJoin: AgentApiOkResponse;
   channelLeave: AgentApiOkResponse;
@@ -3093,9 +3474,14 @@ export type AgentApiResponseByRoute = {
   channelMembers: AgentApiChannelMembersResponse;
   resolveChannel: AgentApiResolveChannelResponse;
   threadUnfollow: AgentApiOkResponse;
+  threadList: AgentApiThreadListResponse;
+  inboxList: AgentApiInboxListResponse;
+  agentContext: AgentApiAgentContextResponse;
   serverInfo: AgentApiServerInfoResponse;
+  userChannels: AgentApiUserChannelsResponse;
   serverUpdate: AgentApiServerUpdateResponse;
   mentionActionsPending: AgentApiMentionActionsPendingResponse;
+  senderMentionDeliveries: AgentApiSenderMentionDeliveriesResponse;
   mentionActionsExecute: AgentApiMentionActionsExecuteResponse;
   taskClaim: AgentApiTaskClaimResponse;
   taskList: AgentApiTaskListResponse;
@@ -3108,10 +3494,6 @@ export type AgentApiResponseByRoute = {
   taskConvert: AgentApiTaskConvertResponse;
   taskAmend: AgentApiTaskAmendResponse;
   taskHistory: AgentApiTaskHistoryResponse;
-  migrationBegin: AgentApiMigrationResponse;
-  migrationStatus: AgentApiMigrationStatusResponse;
-  migrationReady: AgentApiMigrationResponse;
-  migrationArrived: AgentApiMigrationResponse;
   reminderList: AgentApiReminderListResponse;
   reminderCreate: AgentApiReminderResponse;
   reminderCancel: AgentApiReminderResponse;
@@ -3126,6 +3508,7 @@ export type AgentApiResponseByRoute = {
   profileAvatarUpdate: AgentApiProfileView;
   integrationList: AgentApiIntegrationListResponse;
   integrationMarketplaceSearch: AgentApiIntegrationMarketplaceResponse;
+  integrationToken: AgentApiIntegrationTokenResponse;
   integrationLogin: AgentApiIntegrationLoginResponse;
   integrationAppPrepare: AgentApiIntegrationAppPrepareResponse;
   integrationAppRotateSecret: AgentApiIntegrationAppRotateSecretResponse;
@@ -3142,6 +3525,10 @@ export type AgentApiResponseByRoute = {
   attachmentUploadSessionComplete: AgentApiAttachmentUploadSessionCompleteResponse;
   attachmentUploadSessionCancel: AgentApiAttachmentUploadSessionResponse;
   attachmentUploadSessionStatus: AgentApiAttachmentUploadSessionResponse;
+  pushWebhookStatus: AgentApiPushWebhookStatusResponse;
+  pushWebhookRegister: AgentApiPushWebhookStatusResponse;
+  pushWebhookDelete: null;
+  mentionsList: AgentApiMentionsListResponse;
 };
 
 type AssertNever<T extends never> = T;
@@ -3162,11 +3549,18 @@ export function parseAgentApiResponse<K extends AgentApiRouteKey>(
   value: unknown,
 ): AgentApiResponseByRoute[K] {
   const response = agentApiContract[key].response;
-  if (getAgentApiResponseKind(response) === "binary") {
+  const kind = getAgentApiResponseKind(response);
+  if (kind === "binary") {
     if (!(value instanceof Uint8Array)) {
       throw new TypeError(`Agent API ${key} response did not contain binary bytes`);
     }
     return value as AgentApiResponseByRoute[K];
+  }
+  if (kind === "empty") {
+    if (value !== null && value !== undefined) {
+      throw new TypeError(`Agent API ${key} response must be empty`);
+    }
+    return null as AgentApiResponseByRoute[K];
   }
   if (!("body" in response)) {
     throw new TypeError(`Agent API ${key} response contract is missing a JSON body schema`);

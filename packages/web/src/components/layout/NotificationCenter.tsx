@@ -60,7 +60,7 @@ const NotificationCenter = forwardRef<HTMLDivElement, NotificationCenterProps>(
               <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
                 <CheckCircle2 size={36} />
                 <div className="font-bold">{formatMessage({ id: "ui.notificationCenter.emptyTitle" })}</div>
-                <div className="text-sm text-black/60">{formatMessage({ id: "ui.notificationCenter.emptyBody" })}</div>
+                <div className="text-sm text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "ui.notificationCenter.emptyBody" })}</div>
               </div>
             </NotificationCenterEmptyState>
           ) : (

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import type { ReactElement } from "react";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
@@ -143,7 +142,7 @@ test("the desktop settings sidebar nav (SETTINGS_TAB_NAV_LABEL_ID) renders migra
   // name must now be Chinese too — it previously asserted the un-migrated English.
   assert.equal(nav.getAttribute("aria-label"), "设置分区");
   // Item labels resolve via SETTINGS_TAB_NAV_LABEL_ID → settings.tabs.* (zh-cn).
-  for (const zh of ["账户", "语言与区域", "外观", "通知", "服务器资料", "Wiki 设置", "账单", "管理", "应用", "MCP 服务器"]) {
+  for (const zh of ["账户", "语言与区域", "外观", "通知", "服务器资料", "账单", "管理", "应用", "MCP 服务器"]) {
     assert.ok(within(nav).getByText(zh), `nav label ${zh}`);
   }
 });

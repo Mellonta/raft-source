@@ -1,23 +1,25 @@
 import { createHash } from "node:crypto";
 
-import { and, eq, gt, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lte, sql } from "drizzle-orm";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 
-import { getDb, type Database, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type Database, type DatabaseExecutor } from "../db/index";
 import {
   externalActorProjections,
   externalAddressabilityProjections,
+  externalAppInstallGrantReceipts,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalChannelBindings,
   externalHumanIdentityLinks,
-} from "../db/schema.js";
+  externalInboundEvents,
+} from "../db/schema";
 import {
   resolveExternalBindingAuthority,
-  type ExternalAuthorPolicyRuntimeAuthority,
-} from "./externalAppControlPlaneService.js";
-import type { ExternalIngressRuntimeResolver } from "./externalAppIngressService.js";
-import type { ExternalInboundWorkerDependencies } from "./externalInboundWorkerService.js";
-import { evaluateFeatureFlag } from "./featureFlagService.js";
+} from "./externalAppControlPlaneService";
+import type { ExternalIngressRuntimeResolver } from "./externalAppIngressService";
+import type { ExternalInboundWorkerDependencies } from "./externalInboundWorkerService";
+import { evaluateFeatureFlag } from "./featureFlagService";
 
 type ActiveAuthority = Extract<
   Awaited<ReturnType<typeof resolveExternalBindingAuthority>>,
@@ -51,7 +53,6 @@ function canonicalAuthority(authority: ActiveAuthority): Record<string, unknown>
     channelId: authority.channelId,
     providerAuthorityId: authority.providerAuthorityId,
     providerConversationId: authority.providerConversationId,
-    installGrantReceiptRevision: authority.installGrantReceiptRevision,
     audienceRevision: authority.audienceRevision,
   };
 }
@@ -59,8 +60,25 @@ function canonicalAuthority(authority: ActiveAuthority): Record<string, unknown>
 export function slackBridgeDatabaseRuntimeRevision(authority: ActiveAuthority): string {
   return createHash("sha256")
     .update(JSON.stringify({
-      schema: "slack-bridge-database-runtime-authority.v1",
+      schema: "slack-bridge-database-runtime-authority.v2",
       authority: canonicalAuthority(authority),
+    }), "utf8")
+    .digest("hex");
+}
+
+function legacySlackBridgeDatabaseRuntimeRevisionV1(
+  authority: ActiveAuthority,
+  installGrantReceiptRevision: number,
+): string {
+  const { audienceRevision, ...withoutAudienceRevision } = canonicalAuthority(authority);
+  return createHash("sha256")
+    .update(JSON.stringify({
+      schema: "slack-bridge-database-runtime-authority.v1",
+      authority: {
+        ...withoutAudienceRevision,
+        installGrantReceiptRevision,
+        audienceRevision,
+      },
     }), "utf8")
     .digest("hex");
 }
@@ -90,7 +108,7 @@ function sameIngressAuthority(
     && current.audienceRevision === expected.audienceRevision;
 }
 
-function sameFrozenAuthority(
+function sameFrozenAuthorityCoordinates(
   current: ActiveAuthority,
   frozen: Parameters<ExternalInboundWorkerDependencies["resolveCurrentRuntime"]>[0]["frozenAuthority"],
 ): boolean {
@@ -105,8 +123,53 @@ function sameFrozenAuthority(
     && current.bindingEpoch === frozen.bindingEpoch
     && current.connectionEpoch === frozen.connectionEpoch
     && current.channelId === frozen.raftChannelId
-    && current.privacyClass === frozen.privacyClass
-    && slackBridgeDatabaseRuntimeRevision(current) === frozen.runtimeRevision;
+    && current.privacyClass === frozen.privacyClass;
+}
+
+async function legacyQueuedRuntimeRevisionIsCurrent(input: {
+  executor: DatabaseExecutor;
+  eventId: string;
+  current: ActiveAuthority;
+  frozenRuntimeRevision: string;
+}): Promise<boolean> {
+  const [event] = await input.executor.select({
+    receivedAt: externalInboundEvents.receivedAt,
+  }).from(externalInboundEvents).where(eq(externalInboundEvents.id, input.eventId)).limit(1);
+  if (!event) return false;
+  const [historicalReceipt] = await input.executor.select()
+    .from(externalAppInstallGrantReceipts)
+    .where(and(
+      eq(externalAppInstallGrantReceipts.registrationId, input.current.registrationId),
+      eq(externalAppInstallGrantReceipts.installId, input.current.installId),
+      eq(externalAppInstallGrantReceipts.status, "valid"),
+      lte(externalAppInstallGrantReceipts.observedAt, event.receivedAt),
+      gt(externalAppInstallGrantReceipts.expiresAt, event.receivedAt),
+    ))
+    .orderBy(desc(externalAppInstallGrantReceipts.receiptRevision))
+    .limit(1);
+  const [currentReceipt] = await input.executor.select()
+    .from(externalAppInstallGrantReceipts)
+    .where(and(
+      eq(externalAppInstallGrantReceipts.registrationId, input.current.registrationId),
+      eq(externalAppInstallGrantReceipts.installId, input.current.installId),
+      eq(externalAppInstallGrantReceipts.receiptRevision, input.current.installGrantReceiptRevision),
+      eq(externalAppInstallGrantReceipts.status, "valid"),
+    ))
+    .limit(1);
+  if (
+    !historicalReceipt
+    || !currentReceipt
+    || historicalReceipt.grantHash !== currentReceipt.grantHash
+    || historicalReceipt.connectionEpoch !== input.current.connectionEpoch
+    || historicalReceipt.scopeRevision !== input.current.scopeRevision
+    || historicalReceipt.credentialRevision !== input.current.credentialRevision
+    || historicalReceipt.providerAppId !== input.current.providerAppId
+    || historicalReceipt.providerAuthorityId !== input.current.providerAuthorityId
+  ) return false;
+  return legacySlackBridgeDatabaseRuntimeRevisionV1(
+    input.current,
+    historicalReceipt.receiptRevision,
+  ) === input.frozenRuntimeRevision;
 }
 
 export function createSlackDatabaseIngressRuntimeResolver(
@@ -215,7 +278,17 @@ export function createSlackDatabaseInboundWorkerRuntimeResolver(
         expectedBindingEpoch: frozen.bindingEpoch,
         ...(observedAt ? { now: observedAt } : {}),
       }, tx as ReturnType<typeof getDb>);
-      if (!decision.active || !sameFrozenAuthority(decision.fact, frozen)) return null;
+      if (!decision.active || !sameFrozenAuthorityCoordinates(decision.fact, frozen)) return null;
+      const currentRuntimeRevision = slackBridgeDatabaseRuntimeRevision(decision.fact);
+      if (
+        currentRuntimeRevision !== frozen.runtimeRevision
+        && !await legacyQueuedRuntimeRevisionIsCurrent({
+          executor: tx,
+          eventId: input.eventId,
+          current: decision.fact,
+          frozenRuntimeRevision: frozen.runtimeRevision,
+        })
+      ) return null;
       const launch = await evaluateFeatureFlag({
         key: SLACK_BRIDGE_FEATURE_FLAG_KEYS.master,
         serverId: decision.fact.serverId,
@@ -236,39 +309,6 @@ export function createSlackDatabaseInboundWorkerRuntimeResolver(
         if (!reactionSync.enabled) return null;
       }
       return { ...frozen };
-    }, { isolationLevel: "repeatable read", accessMode: "read only" });
-  };
-}
-
-export function createSlackDatabaseAuthorPolicyAuthorityResolver(
-  db?: Database,
-): (input: { serverId: string; bindingId: string; now: Date }) => Promise<ExternalAuthorPolicyRuntimeAuthority | null> {
-  return async (input) => {
-    if (!validNow(input.now)) return null;
-    const runtimeDb = db ?? getDb();
-    return runtimeDb.transaction(async (tx) => {
-      const bindings = await tx.select().from(externalChannelBindings).where(and(
-        eq(externalChannelBindings.id, input.bindingId),
-        eq(externalChannelBindings.serverId, input.serverId),
-      )).limit(2);
-      if (bindings.length !== 1) return null;
-      const binding = bindings[0]!;
-      const decision = await resolveExternalBindingAuthority({
-        serverId: input.serverId,
-        bindingId: input.bindingId,
-        expectedConnectionEpoch: binding.connectionEpoch,
-        expectedBindingEpoch: binding.bindingEpoch,
-        now: input.now,
-      }, tx as ReturnType<typeof getDb>);
-      if (!decision.active) return null;
-      return {
-        provider: "slack",
-        registrationId: decision.fact.registrationId,
-        installId: decision.fact.installId,
-        bindingId: decision.fact.bindingId,
-        bindingEpoch: decision.fact.bindingEpoch,
-        consentRevision: decision.fact.bindingEpoch,
-      };
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
   };
 }
@@ -344,6 +384,13 @@ export function createSlackDatabaseAudienceIdentityAuthority(): SlackDatabaseAud
           eq(externalAppInstalls.id, externalHumanIdentityLinks.installId),
         )
         .innerJoin(
+          externalAppInstallServerGrants,
+          and(
+            eq(externalAppInstallServerGrants.installId, externalHumanIdentityLinks.installId),
+            eq(externalAppInstallServerGrants.serverId, externalHumanIdentityLinks.serverId),
+          ),
+        )
+        .innerJoin(
           externalActorProjections,
           and(
             eq(externalActorProjections.provider, "slack"),
@@ -372,7 +419,8 @@ export function createSlackDatabaseAudienceIdentityAuthority(): SlackDatabaseAud
           isNull(externalHumanIdentityLinks.revokedAt),
           lte(externalHumanIdentityLinks.observedConnectionEpoch, input.connectionEpoch),
           inArray(externalHumanIdentityLinks.userId, userIds),
-          eq(externalAppInstalls.serverId, input.serverId),
+          eq(externalAppInstallServerGrants.serverId, input.serverId),
+          eq(externalAppInstallServerGrants.state, "active"),
           eq(externalAppInstalls.registrationId, input.registrationId),
           eq(externalAppInstalls.providerAuthorityId, input.providerAuthorityId),
           eq(externalAppInstalls.state, "active"),

@@ -1,4 +1,3 @@
-import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert";
 import { useImageLightboxStore } from "../src/store/imageLightboxStore";
 

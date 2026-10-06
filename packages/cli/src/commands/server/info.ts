@@ -6,19 +6,19 @@
 import type { Command } from "commander";
 import type { AgentApiServerInfoResponse } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { apiFailureError } from "../../core/apiFailure.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { apiFailureError } from "../../core/apiFailure";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
 import {
   formatServerAgents,
   formatServerChannels,
   formatServerHumans,
   formatServerInfo,
   formatServerSummary,
-} from "./_format.js";
+} from "./_format";
 
 interface ServerInfoOpts {
   full?: boolean;

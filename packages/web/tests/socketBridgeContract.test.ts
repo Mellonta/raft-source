@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -13,17 +12,18 @@ const EXPECTED_MAIN_LAYOUT_SOCKET_EVENTS = [
   "read_state:updated",
   "read_state:updated_bulk",
   "agent:activity",
+  "agent:seen",
   "agent:session",
   "dm:new",
   "machine:status",
   "machine:capabilities",
   "machine:updated",
+  "machine:upgrade-request",
   "computer:restart:done",
-  "computer:upgrade:progress",
-  "computer:upgrade:done",
   "daemon:status",
   "agent:created",
   "agent:deleted",
+  "agent:updated",
   "channel:updated",
   "channel:members-updated",
   "notification_prefs:updated",
@@ -34,6 +34,7 @@ const EXPECTED_MAIN_LAYOUT_SOCKET_EVENTS = [
   "server:member-removed",
   "server:member-updated",
   "server:membership-removed",
+  "connect_error",
   "thread:updated",
   "thread:followers-updated",
   "connect",
@@ -118,7 +119,7 @@ test("socketBridge owns live-session recovery paths", () => {
   const recoveryEnd = source.indexOf("\n  const recoverFromBfcache", recoveryStart);
   const recoverySource = source.slice(recoveryStart, recoveryEnd);
 
-  assert.match(source, /const STATUS_RECONCILE_INTERVAL_MS = 60_000;/);
+  assert.match(source, /const STATUS_RECONCILE_INTERVAL_MS = 600_000;/);
   assert.match(
     source,
     /function bootstrapMainLayoutRealtimeBridge\([\s\S]*?void useAnnouncementStore\.getState\(\)\.load\(\);[\s\S]*?\}/s,

@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   narrowReadyReconcileStatus,
   planReadyReconcileAction,
   type ReadyReconcilePlanAction,
   type ReadyReconcilePlanInput,
-} from "./agentOrchestrator.js";
+} from "./agentOrchestrator";
 
 type ReadyPlanCase = {
   name: string;

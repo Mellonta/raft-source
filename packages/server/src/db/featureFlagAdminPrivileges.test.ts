@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   FEATURE_FLAG_ADMIN_OPERATOR_ROLE,
@@ -10,7 +9,8 @@ import {
   reconcileAndVerifyFeatureFlagAdminPrivileges,
   verifyFeatureFlagAdminPrivileges,
   verifyFeatureFlagAdminPrivilegeReceipt,
-} from "./featureFlagAdminPrivileges.js";
+} from "./featureFlagAdminPrivileges";
+import { verifyFeatureFlagAdminPrivileges as verifySharedFeatureFlagAdminPrivileges } from "@botiverse/raft-shared";
 
 function oracle(options: {
   role?: boolean;
@@ -71,6 +71,11 @@ function oracle(options: {
         "feature_flag_audience_members",
         "users",
         "servers",
+        "subscriptions",
+        "server_lab_enrollments",
+        "server_lab_access",
+        "lab_definitions",
+        "agents",
       ]);
       assert.deepEqual(values[2], [
         "SELECT",
@@ -104,25 +109,71 @@ function oracle(options: {
       }
       return { rows };
     }
+    const answer = (key: string) => {
+      const required = key === "public:USAGE"
+        || REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES.some(
+          (entry) => entry.kind === "column"
+            ? `${entry.object}:${entry.column}:${entry.privilege}` === key
+            : `${entry.object}:${entry.privilege}` === key,
+        );
+      return key === options.unexpected ? true : key === options.missing ? false : required;
+    };
+    if (text.includes("WITH ORDINALITY")) {
+      // Batched matrix oracle: $1 role, $2 kinds, $3 objects, $4 columns, $5 privileges.
+      assert.equal(values[0], FEATURE_FLAG_ADMIN_OPERATOR_ROLE);
+      assert.match(text, /has_schema_privilege\(\$1, checks\.object, checks\.privilege\)/);
+      assert.match(text, /has_table_privilege\(\$1, checks\.object, checks\.privilege\)/);
+      assert.match(text, /has_column_privilege\(\$1, checks\.object, checks\.column_name, checks\.privilege\)/);
+      const kinds = values[1] as string[];
+      const objects = values[2] as string[];
+      const columns = values[3] as string[];
+      const privileges = values[4] as string[];
+      assert.equal(objects.length, kinds.length);
+      assert.equal(columns.length, kinds.length);
+      assert.equal(privileges.length, kinds.length);
+      return {
+        rows: kinds.map((kind, index) => ({
+          idx: index + 1,
+          allowed: answer(
+            kind === "column"
+              ? `${objects[index]}:${columns[index]}:${privileges[index]}`
+              : `${objects[index]}:${privileges[index]}`,
+          ),
+        })),
+      };
+    }
     const key = text.includes("has_column_privilege")
       ? `${String(values[1])}:${String(values[2])}:${String(values[3])}`
       : `${String(values[1])}:${String(values[2])}`;
-    const required = key === "public:USAGE"
-      || REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES.some(
-        (entry) => entry.kind === "column"
-          ? `${entry.object}:${entry.column}:${entry.privilege}` === key
-          : `${entry.object}:${entry.privilege}` === key,
-      );
-    return {
-      rows: [{
-        allowed: key === options.unexpected ? true : key === options.missing ? false : required,
-      }],
-    };
+    return { rows: [{ allowed: answer(key) }] };
   };
 }
 
 test("privilege verifier accepts only the complete operator route matrix", async () => {
   await verifyFeatureFlagAdminPrivileges(oracle());
+});
+
+// Regression tooth for the batched matrix: the readiness probe's latency is
+// the number of sequential round trips (~100 ms each through Hyperdrive).
+// Before batching this path issued 118 queries (139 through the server
+// wrapper); a per-check loop creeping back in would keep every answer test
+// green while quietly restoring the 11-12 s probe.
+test("privilege verifier issues at most four round trips per path", async () => {
+  const worker = { queries: 0 };
+  const workerOracle = oracle();
+  await verifySharedFeatureFlagAdminPrivileges(async (text, values) => {
+    worker.queries += 1;
+    return workerOracle(text, values);
+  }, { requireAuthenticatedUser: true });
+  assert.equal(worker.queries, 4, "identity + role + privilege matrix + column census");
+
+  const server = { queries: 0 };
+  const serverOracle = oracle();
+  await verifyFeatureFlagAdminPrivileges(async (text, values) => {
+    server.queries += 1;
+    return serverOracle(text, values);
+  });
+  assert.equal(server.queries, 4, "role + shared matrix + column census + delete-route matrix");
 });
 
 test("privilege verifier fails closed when the role is absent", async () => {

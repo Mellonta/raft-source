@@ -92,9 +92,8 @@
  */
 
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { CodexEventNormalizer } from "./codexEventNormalizer.js";
-import type { ParsedEvent } from "./types.js";
+import { CodexEventNormalizer } from "./codexEventNormalizer";
+import type { ParsedEvent } from "./types";
 
 const THREAD_ID = "019febf4-0000-7000-8000-000000000000";
 const TURN_ID = "019febf4-3332-7440-9cc7-ee2d7e28708a";

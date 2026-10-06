@@ -29,13 +29,14 @@
 
 import { and, eq, isNull } from "drizzle-orm";
 import argon2 from "argon2";
-import { getDb } from "../db/index.js";
-import { computers, machines, servers } from "../db/schema.js";
-import { clearAuthCache, extractApiKeyPrefix } from "./machineService.js";
-import { generateComputerApiKeyMaterial } from "./computerCredentialService.js";
-import { isMember } from "./serverService.js";
-import { actorHasServerCapabilityInServer, getActorServerRoleInServer } from "../lib/actorPermissions.js";
-import { fenceMachinePrincipalConnections } from "../replicaRouter.js";
+import { getDb } from "../db/index";
+import { computers, machines, servers } from "../db/schema";
+import { clearAuthCache, extractApiKeyPrefix } from "./machineService";
+import { generateComputerApiKeyMaterial } from "./computerCredentialService";
+import { isMember } from "./serverService";
+import { actorHasServerCapabilityInServer, actorRoleHasServerCapability, getActorServerRoleInServer } from "../lib/actorPermissions";
+import { ServerMembershipRevokedError, withActorMembershipFence } from "../lib/actorMembershipFence";
+import { fenceMachinePrincipalConnections } from "../replicaRouter";
 
 export type AdoptLegacyResult =
   | {
@@ -256,62 +257,67 @@ async function adoptMatchedLegacyMachine(input: {
   if (!serverRow) {
     return { ok: false, code: "not_authorized" };
   }
-  const role = await getActorServerRoleInServer(matchedMachine.serverId, "user", input.userId);
-  if (!role) {
+  // Cheap pre-check so non-members and plain members are refused before any argon2 work. It is not the authority:
+  // the fenced transaction below re-evaluates both under the member-row lock.
+  const preRole = await getActorServerRoleInServer(matchedMachine.serverId, "user", input.userId);
+  if (!preRole) {
     return { ok: false, code: "not_authorized" };
   }
-  if (
-    matchedMachine.userId !== input.userId
-    && !await actorHasServerCapabilityInServer(matchedMachine.serverId, "user", input.userId, "registerMachines")
-  ) {
+  if (matchedMachine.userId !== input.userId && !actorRoleHasServerCapability(preRole, "registerMachines")) {
     return { ok: false, code: "requires_admin" };
   }
-
-  // Raw-key replay remains a hard "already migrated" outcome so old machine
-  // credentials cannot be reused. Roster-selected adoption is different: the
-  // logged-in user may be retrying setup after server-side adoption committed
-  // but local state did not finish. In that case rotate and return the
-  // existing linked Computer attachment instead of forcing a legacy key.
-  if (matchedMachine.legacyKeyMigratedAt) {
-    if (!input.allowAlreadyMigratedResume) {
-      return { ok: false, code: "legacy_machine_key_migrated" };
-    }
-    const [existing] = await db
-      .select({ id: computers.id, serverId: computers.serverId })
-      .from(computers)
-      .where(and(eq(computers.machineId, matchedMachine.id), isNull(computers.revokedAt)));
-    if (!existing) {
-      return { ok: false, code: "legacy_machine_key_migrated" };
-    }
-    // The original migration already set `legacy_key_migrated_at` and ran
-    // same-action auth-cache invalidation. Resume only rotates the Computer
-    // credential, so there is no legacy auth cache left to clear here.
-    const material = await generateComputerApiKeyMaterial();
-    const desiredName = sanitizeAdoptedName(input.name, matchedMachine.name);
-    await db
-      .update(computers)
-      .set({
-        apiKeyHash: material.apiKeyHash,
-        apiKeyPrefix: material.apiKeyPrefix,
-        name: desiredName,
-      })
-      .where(eq(computers.id, existing.id));
-    await fenceMachinePrincipalConnections(matchedMachine.id, "legacy_machine");
-    return {
-      ok: true,
-      apiKey: material.apiKey,
-      computerId: existing.id,
-      machineId: matchedMachine.id,
-      serverId: existing.serverId,
-      resumed: true,
-    };
-  }
-
+  // Task #91: membership, the registrant-or-`registerMachines` authority and every adoption write run in one fenced
+  // transaction — the caller's member row is share-locked first, and the CAS UPDATE below then locks the machine row.
+  // Key material is generated before the fence so argon2 hashing never runs while those locks are held. Auth-cache
+  // eviction and connection fencing are effects and run only after commit.
   const material = await generateComputerApiKeyMaterial();
   const desiredName = sanitizeAdoptedName(input.name, matchedMachine.name);
 
+  type FencedAdoption =
+    | { kind: "requires_admin" }
+    | { kind: "migrated" }
+    | { kind: "adopted"; computerId: string; serverId: string; resumed: boolean; clearLegacyAuthCache: boolean };
+
+  let outcome: FencedAdoption;
   try {
-    const txResult = await db.transaction(async (tx) => {
+    outcome = await withActorMembershipFence(matchedMachine.serverId, input.userId, async (tx, lockedRole): Promise<FencedAdoption> => {
+      if (
+        matchedMachine.userId !== input.userId
+        && !actorRoleHasServerCapability(lockedRole, "registerMachines")
+      ) {
+        return { kind: "requires_admin" };
+      }
+
+      // Raw-key replay remains a hard "already migrated" outcome so old machine
+      // credentials cannot be reused. Roster-selected adoption is different: the
+      // logged-in user may be retrying setup after server-side adoption committed
+      // but local state did not finish. In that case rotate and return the
+      // existing linked Computer attachment instead of forcing a legacy key.
+      if (matchedMachine.legacyKeyMigratedAt) {
+        if (!input.allowAlreadyMigratedResume) {
+          return { kind: "migrated" };
+        }
+        const [existing] = await tx
+          .select({ id: computers.id, serverId: computers.serverId })
+          .from(computers)
+          .where(and(eq(computers.machineId, matchedMachine.id), isNull(computers.revokedAt)));
+        if (!existing) {
+          return { kind: "migrated" };
+        }
+        // The original migration already set `legacy_key_migrated_at` and ran
+        // same-action auth-cache invalidation. Resume only rotates the Computer
+        // credential, so there is no legacy auth cache left to clear here.
+        await tx
+          .update(computers)
+          .set({
+            apiKeyHash: material.apiKeyHash,
+            apiKeyPrefix: material.apiKeyPrefix,
+            name: desiredName,
+          })
+          .where(eq(computers.id, existing.id));
+        return { kind: "adopted", computerId: existing.id, serverId: existing.serverId, resumed: true, clearLegacyAuthCache: false };
+      }
+
       // Concurrency guard — atomic mark + select. Only the first caller to
       // flip legacy_key_migrated_at IS NULL → now() gets a row back; later
       // callers (same key, concurrent) see no row and we collapse them to
@@ -327,7 +333,7 @@ async function adoptMatchedLegacyMachine(input: {
         )
         .returning({ id: machines.id });
       if (markRows.length === 0) {
-        return { migrated: true as const };
+        return { kind: "migrated" };
       }
 
       // Resume: a still-live (not revoked) Computer attachment already linked
@@ -353,12 +359,7 @@ async function adoptMatchedLegacyMachine(input: {
             name: desiredName,
           })
           .where(eq(computers.id, existing.id));
-        return {
-          migrated: false as const,
-          computerId: existing.id,
-          serverId: existing.serverId,
-          resumed: true,
-        };
+        return { kind: "adopted", computerId: existing.id, serverId: existing.serverId, resumed: true, clearLegacyAuthCache: true };
       }
 
       const [row] = await tx
@@ -373,38 +374,42 @@ async function adoptMatchedLegacyMachine(input: {
         })
         .returning({ id: computers.id });
 
-      return {
-        migrated: false as const,
-        computerId: row.id,
-        serverId: matchedMachine.serverId,
-        resumed: false,
-      };
+      return { kind: "adopted", computerId: row.id, serverId: matchedMachine.serverId, resumed: false, clearLegacyAuthCache: true };
     });
-
-    if (txResult.migrated) {
-      return { ok: false, code: "legacy_machine_key_migrated" };
-    }
-
-    // Same-action cache invalidation (§5.11.3): legacy key must fail on
-    // the very next auth attempt — no TTL window. The Phase 3 auth path
-    // also consults `legacy_key_migrated_at` so a fresh DB read rejects;
-    // clearing the cache eliminates the in-process gap.
-    clearAuthCache(matchedMachine.id);
-    await fenceMachinePrincipalConnections(matchedMachine.id, "legacy_machine");
-
-    return {
-      ok: true,
-      apiKey: material.apiKey,
-      computerId: txResult.computerId,
-      machineId: matchedMachine.id,
-      serverId: txResult.serverId,
-      resumed: txResult.resumed,
-    };
   } catch (err) {
+    // Removal committed first: identical to "not a member" before the fence existed.
+    if (err instanceof ServerMembershipRevokedError) {
+      return { ok: false, code: "not_authorized" };
+    }
     // Never include the raw key or its prefix in error surface.
     console.error("computerAdoption.adopt error:", err);
     throw err;
   }
+
+  if (outcome.kind === "requires_admin") {
+    return { ok: false, code: "requires_admin" };
+  }
+  if (outcome.kind === "migrated") {
+    return { ok: false, code: "legacy_machine_key_migrated" };
+  }
+
+  // Same-action cache invalidation (§5.11.3): legacy key must fail on
+  // the very next auth attempt — no TTL window. The Phase 3 auth path
+  // also consults `legacy_key_migrated_at` so a fresh DB read rejects;
+  // clearing the cache eliminates the in-process gap.
+  if (outcome.clearLegacyAuthCache) {
+    clearAuthCache(matchedMachine.id);
+  }
+  await fenceMachinePrincipalConnections(matchedMachine.id, "legacy_machine");
+
+  return {
+    ok: true,
+    apiKey: material.apiKey,
+    computerId: outcome.computerId,
+    machineId: matchedMachine.id,
+    serverId: outcome.serverId,
+    resumed: outcome.resumed,
+  };
 }
 
 function sanitizeAdoptedName(supplied: string | undefined, fallback: string): string {

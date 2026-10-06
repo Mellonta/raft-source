@@ -1,12 +1,57 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
+import "./helpers/domSetup";
+import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { createElement } from "react";
+import { MemoryRouter } from "react-router-dom";
+import MachineDetailPanel from "../src/components/machine/MachineDetailPanel";
+import { useAgentStore } from "../src/store/agentStore";
+import { useMachineStore } from "../src/store/machineStore";
+import type { Machine } from "../src/store/machineStore";
+import { useServerStore } from "../src/store/serverStore";
+import type { Server } from "../src/store/serverStore";
+import { getComputerCommands } from "../src/utils/computerSetupCommand";
+import { getServerUrl } from "../src/utils/server";
+import { renderWithIntl } from "./helpers/intl";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 // Asserts on private CI/deploy files that the source-available snapshot does not
 // carry; skipped when an exported snapshot's RELEASE_SOURCE marker is present.
 const inSourceSnapshot = existsSync(resolve(repoRoot, "../../RELEASE_SOURCE"));
+
+const server: Server = {
+  id: "server-1",
+  name: "Acme",
+  avatarUrl: null,
+  slug: "acme",
+  ownerId: "user-1",
+  onboardingAgentId: null,
+  hideHumansFromMembers: false,
+  plan: "free",
+  planDowngradedAt: null,
+  role: "owner",
+  createdAt: "2026-07-13T00:00:00.000Z",
+};
+
+const machine: Machine = {
+  id: "computer-1",
+  name: "Offline Mac",
+  description: null,
+  status: "offline",
+  statusVersion: 1,
+  apiKeyPrefix: null,
+  runtimes: [],
+  hostname: "offline-mac.local",
+  os: "darwin",
+  daemonVersion: "0.45.0",
+  isComputer: true,
+  computerAttachedByCurrentUser: true,
+  computerVersion: "0.45.0",
+  computerUpgradeAvailable: false,
+  lastHeartbeat: null,
+  createdAt: "2026-07-13T00:00:00.000Z",
+};
 
 function backupSourceRoot(): string | null {
   const tmp = resolve(repoRoot, ".stryker-tmp");
@@ -49,13 +94,10 @@ test("add computer dialog uses the shared explicit platform command selector", (
   assert.match(source, /legacyApiKey: apiKey/);
   assert.match(source, /computerCommands\?\.install/);
   assert.match(source, /computerCommands\?\.setup/);
-  assert.match(source, /const macLinuxDaemonCommand = getDaemonConnectCommand\(\{/);
-  assert.match(source, /platform: "mac-linux"/);
-  assert.match(source, /const windowsDaemonCommand = getDaemonConnectCommand\(\{/);
-  assert.match(source, /platform: "windows"/);
   assert.match(source, /<ComputerCommandGuide/);
-  assert.match(source, /macLinuxDaemonCommand=\{macLinuxDaemonCommand\}/);
-  assert.match(source, /windowsDaemonCommand=\{windowsDaemonCommand\}/);
+  // The standalone daemon is retired: no surface builds or renders its connect command.
+  assert.doesNotMatch(source, /getDaemonConnectCommand|DaemonCommand/);
+  assert.doesNotMatch(guideSource, /raft-daemon|DaemonCommand|showLegacyDaemon|daemonLegacy/);
   assert.match(source, /windowsComputerCommand=\{windowsComputerSetupCommand\}/);
   assert.match(source, /windowsComputerInstallCommand=\{windowsComputerInstall\}/);
   assert.match(guideSource, /SegmentedControl<ComputerCommandPlatform>/);
@@ -63,7 +105,6 @@ test("add computer dialog uses the shared explicit platform command selector", (
   assert.match(guideSource, /value="windows"/);
   assert.match(guideSource, /id: "machine\.commandGuide\.windowsX64"/);
   assert.match(guideSource, /id: "machine\.commandGuide\.raftComputerWindowsX64"/);
-  assert.match(guideSource, /id: "machine\.commandGuide\.macLinuxDaemonDescription"/);
   assert.doesNotMatch(guideSource, /Computer CLI setup is not available for this server yet/);
   assert.match(guideSource, /data-testid="windows-computer-command-block"/);
   assert.match(guideSource, /<Badge\.Experimental\s*\/>/);
@@ -72,9 +113,6 @@ test("add computer dialog uses the shared explicit platform command selector", (
   assert.match(guideSource, /const setup = platform === "windows" \? windowsSetup : macLinuxSetup/);
   assert.match(guideSource, /target: `\$\{prefix\}-install`/);
   assert.match(guideSource, /target: `\$\{prefix\}-setup`/);
-  assert.match(guideSource, /data-testid="windows-daemon-command-block"/);
-  assert.match(guideSource, /id: "machine\.commandGuide\.daemonLegacy"/);
-  assert.match(guideSource, /onClick=\{requestWindowsDaemonCommand\}/);
   assert.doesNotMatch(guideSource, /Computer for Windows is in progress|Windows support is in progress/);
   assert.doesNotMatch(guideSource, /computer-windows-interest-button|I'm interested|trackComputerWindowsInterestClick/);
   assert.doesNotMatch(source, /Keep the terminal window open|Keep this process running/);
@@ -84,9 +122,6 @@ test("add computer dialog uses the shared explicit platform command selector", (
 test("machine detail connect command uses the same platform selector and keeps online recovery guide", () => {
   const source = readSource("src/components/machine/MachineDetailPanel.tsx");
 
-  assert.match(source, /const macLinuxConnectCommand = isKeyValid/);
-  assert.match(source, /platform: "mac-linux"/);
-  assert.match(source, /const windowsConnectCommand = isKeyValid/);
   assert.match(source, /platform: "windows"/);
   assert.match(source, /deploymentEnv = import\.meta\.env\?\.VITE_DEPLOYMENT_ENV/);
   assert.match(source, /const computerCommands = getComputerCommands\(serverSlug, deploymentEnv, serverUrl, \{/);
@@ -98,25 +133,23 @@ test("machine detail connect command uses the same platform selector and keeps o
   assert.match(source, /machineComputerCommands\.status/);
   assert.match(source, /machineComputerCommands\.doctor/);
   assert.match(source, /machineComputerCommands\?\.restart/);
-  assert.match(source, /<ComputerCommandGuide/);
-  assert.match(source, /macLinuxDaemonCommand=\{macLinuxConnectCommand\}/);
-  assert.match(source, /windowsDaemonCommand=\{windowsConnectCommand\}/);
+  assert.doesNotMatch(source, /getDaemonConnectCommand|legacy-daemon-block|keepUsingLegacyDaemon|isDaemonOutdated/);
   assert.match(source, /machine\.isComputer && machine\.status !== "online"/);
   assert.match(source, /windowsMachine \? <Badge\.Experimental \/> : null/);
-  assert.match(source, /data-testid="legacy-daemon-block"/);
   assert.doesNotMatch(source, /Computer for Windows is in progress/);
-  assert.match(source, /id: "machine\.detail\.restartIfUnresponsive"/);
+  // The separate "if it looks online but stops responding, restart it" line
+  // became the Restart button's tooltip (Computer upgrade copy rework).
+  assert.match(source, /id: "machine\.detail\.restartTooltip"/);
+  assert.doesNotMatch(source, /machine\.detail\.restartIfUnresponsive/);
   assert.doesNotMatch(source, /service-version skew/);
   assert.match(source, /id: "machine\.detail\.copySetupCommand"/);
   assert.match(source, /\["computer-install", formatMessage\(\{ id: "machine\.detail\.installStep" \}\), computerInstall\]/);
   assert.match(source, /\["computer-setup", formatMessage\(\{ id: "machine\.detail\.setupStep" \}\), computerSetupCommand\]/);
-  assert.match(source, /handleCopy\(target, command\)/);
-  assert.match(source, /copiedCommand === target/);
   assert.doesNotMatch(source, /Keep this process running/);
   assert.doesNotMatch(source, /Download it here/);
 });
 
-test("Windows Computer copy stays x64-scoped to the production manifest and the manual daemon command is executable PowerShell", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("Windows Computer copy stays x64-scoped to the production manifest and the manual no longer offers the retired daemon command", { skip: inSourceSnapshot }, () => {
   const guide = readSource("src/components/machine/ComputerCommandGuide.tsx");
   const detail = readSource("src/components/machine/MachineDetailPanel.tsx");
   const manual = readSource("../../manual/agent-knowledge/computer.md");
@@ -130,11 +163,7 @@ test("Windows Computer copy stays x64-scoped to the production manifest and the 
   assert.doesNotMatch(detail, /\{computerCommands\.install\}/);
 
   assert.match(manual, /\*\*Windows x64 · Experimental\*\*/);
-  assert.match(
-    manual,
-    /npx\.cmd @botiverse\/raft-daemon@latest --server-url https:\/\/api\.raft\.build --api-key sk_machine_<hex>/,
-  );
-  assert.doesNotMatch(manual, /npx\.cmd[^\n]*\\\s*\n/);
+  assert.doesNotMatch(manual, /@botiverse\/raft-daemon|Daemon \/ Legacy/);
 
   assert.match(releaseWorkflow, /--required-targets darwin-arm64,darwin-x64,linux-x64,linux-arm64,win32-x64/);
   assert.doesNotMatch(releaseWorkflow, /win32-arm64/);
@@ -152,8 +181,6 @@ test("machine detail computer actions expose terminal verification and the recov
   assert.match(source, /const terminalStatusCommands = machineComputerCommands[\s\S]*machineComputerCommands\.status[\s\S]*machineComputerCommands\.doctor/);
   assert.match(source, /const terminalRestartCommand = machineComputerCommands\?\.restart/);
   assert.match(source, /terminalStatusCommands\.map/);
-  assert.match(source, /handleCopy\(target, command\)/);
-  assert.match(source, /handleCopy\("terminal-restart", terminalRestartCommand\)/);
   assert.match(source, /data-testid="computer-recovery-guide"/);
   assert.match(source, /aria-expanded=\{showRecoveryGuide\}/);
   assert.match(source, /const recoveryGuideContentId = `computer-recovery-guide-content-\$\{useId\(\)\}`/);
@@ -225,3 +252,49 @@ test("experimental labels remain on explicit experimental features and stay off 
   assert.doesNotMatch(humanLoginSetupSource, /<Badge\.Experimental\b/);
   assert.doesNotMatch(humanLoginSetupSource, /ExperimentalBadge/);
 });
+
+test("machine detail copy buttons copy command to clipboard", async () => {
+  useServerStore.setState({ current: server, members: [] });
+  useAgentStore.setState({ agents: [] });
+  useMachineStore.setState({ computerOperationProgress: {} });
+
+  const commands = getComputerCommands(server.slug, undefined, getServerUrl());
+  assert.ok(commands);
+  const clipboardWrites: string[] = [];
+  const originalClipboard = navigator.clipboard;
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText: async (command: string) => {
+        clipboardWrites.push(command);
+      },
+    },
+  });
+
+  try {
+    renderWithIntl(
+      createElement(
+        MemoryRouter,
+        { initialEntries: ["/s/acme/settings/computers/computer-1"] },
+        createElement(MachineDetailPanel, { machine, workspaceEmbedded: true }),
+      ),
+    );
+
+    const restartCode = screen.getByTestId("computer-recovery-restart");
+    assert.ok(restartCode.closest("code"), "restart command must keep code semantics");
+    const copyButton = restartCode.closest("[data-slot='copyable-code-root']")?.querySelector("button");
+    assert.ok(copyButton, "copy button must render beside code");
+    fireEvent.click(copyButton);
+
+    await waitFor(() => {
+      assert.deepEqual(clipboardWrites, [commands.restart]);
+    });
+  } finally {
+    cleanup();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: originalClipboard,
+    });
+  }
+});
+

@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import {
   isAgentActivity,
   normalizeActivityDetailKind,
@@ -6,8 +6,8 @@ import {
   type AgentActivityDetailKind,
   type TrajectoryEntry,
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { agentActivityEvents } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agentActivityEvents } from "../db/schema";
 
 export interface PersistedTrajectoryLogEntry {
   timestamp: number;
@@ -71,6 +71,19 @@ export async function appendAgentActivityEvent(
     createdAt,
   }).onConflictDoNothing().returning({ id: agentActivityEvents.id });
   return inserted.length > 0;
+}
+
+/** The subset of `dedupeKeys` already recorded for this agent. */
+export async function listExistingAgentActivityDedupeKeys(
+  agentId: string,
+  dedupeKeys: readonly string[],
+): Promise<Set<string>> {
+  if (dedupeKeys.length === 0) return new Set();
+  const db = getDb();
+  const rows = await db.select({ dedupeKey: agentActivityEvents.dedupeKey })
+    .from(agentActivityEvents)
+    .where(and(eq(agentActivityEvents.agentId, agentId), inArray(agentActivityEvents.dedupeKey, [...dedupeKeys])));
+  return new Set(rows.flatMap((row) => (row.dedupeKey ? [row.dedupeKey] : [])));
 }
 
 export async function listRecentAgentTrajectory(

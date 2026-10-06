@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { describe, test } from "node:test";
 import { JSDOM } from "jsdom";
 import {
   installDesktopServerTitleBinding,

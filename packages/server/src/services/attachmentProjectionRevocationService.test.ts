@@ -1,10 +1,10 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { asServerId } from "@botiverse/raft-shared";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   attachmentObjects,
   attachmentProjectionRevocations,
@@ -12,12 +12,12 @@ import {
   channels,
   messages,
   users,
-} from "../db/schema.js";
-import { createServer } from "./serverService.js";
+} from "../db/schema";
+import { createServer } from "./serverService";
 import {
   AttachmentProjectionRevocationError,
   revokeAttachmentProjection,
-} from "./attachmentProjectionRevocationService.js";
+} from "./attachmentProjectionRevocationService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

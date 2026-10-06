@@ -1,5 +1,5 @@
 import type { Response } from "express";
-import * as channelService from "../services/channelService.js";
+import * as channelService from "../services/channelService";
 
 /**
  * The single body used BOTH for "this channel does not exist" and for "it exists

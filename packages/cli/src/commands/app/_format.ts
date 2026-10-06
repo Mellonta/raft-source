@@ -5,7 +5,7 @@
 
 import type { AgentApiAppConfigResponse } from "@botiverse/raft-shared";
 
-import { axSurface } from "../../core/renderer.js";
+import { axSurface } from "../../core/renderer";
 
 export const formatAppConfig = axSurface(
   "Built-in app durable-config snapshot with per-key source and next action.",

@@ -1,5 +1,4 @@
-import { expect, test } from "vitest";
-import { getEditableHumanServerRoles } from "../src/components/member/humanRoleTransitions.js";
+import { getEditableHumanServerRoles } from "../src/components/member/humanRoleTransitions";
 
 test("Guest role options fail closed with server_guest_v0 off", () => {
   expect(getEditableHumanServerRoles({

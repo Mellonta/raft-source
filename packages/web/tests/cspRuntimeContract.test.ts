@@ -1,5 +1,4 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
 
 // The hosted CSP forbids inline script but still grants 'unsafe-eval' because
 // the activity ingress compiles its JSON-schema validators with Ajv at runtime

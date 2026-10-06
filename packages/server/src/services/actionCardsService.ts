@@ -1,5 +1,8 @@
-import { publishChannelUpdate } from "./channelRealtimeEvents.js";
-import { socketUserServerRoom } from "../socket/platformScope.js";
+import type { DatabaseExecutor } from "../db/index";
+import { jointChannels, jointChannelServers } from "../db/schema";
+import { isActionCardReadOnlyInServer } from "@botiverse/raft-shared";
+import { publishChannelUpdate } from "./channelRealtimeEvents";
+import { socketUserServerRoom } from "../socket/platformScope";
 // Operation cards (B-mode approval replacement).
 //
 // `prepareActionCard` is called by an agent: it posts a system message in
@@ -35,24 +38,70 @@ import {
   type ActionCardResult,
   type ActionCardState,
   type ServerId,
+  asServerId,
   asMachineId,
   renderThirdPartyInertText,
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { actionCards, agents, channelAgents, channelHumans, channels, messages, oauthAccessRequests, oauthClientMaintainers, oauthClients, oauthGrants, serverMembers } from "../db/schema.js";
-import * as channelService from "./channelService.js";
-import * as agentService from "./agentService.js";
-import * as serverService from "./serverService.js";
-import * as machineService from "./machineService.js";
-import * as messageService from "./messageService.js";
-import * as oauthService from "./oauthService.js";
-import * as productEventsService from "./productEventsService.js";
-import * as integrationAuditService from "./integrationAuditService.js";
-import { projectMessageSocketPayload } from "./messageRealtimeEvents.js";
-import type { AgentOrchestrator } from "./agentOrchestrator.js";
-import { actorHasServerCapabilityInServer, actorRoleHasServerCapability } from "../lib/actorPermissions.js";
-import { channelActorHasCapability, resolveChannelActorContext } from "../lib/channelActorPermissions.js";
-import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy.js";
+import { getDb } from "../db/index";
+import { actionCards, agents, channelAgents, channelHumans, channels, messages, oauthAccessRequests, oauthClientMaintainers, oauthClients, oauthGrants, serverMembers, users } from "../db/schema";
+import * as channelService from "./channelService";
+import * as agentService from "./agentService";
+import * as serverService from "./serverService";
+import * as machineService from "./machineService";
+import * as messageService from "./messageService";
+import * as oauthService from "./oauthService";
+import * as productEventsService from "./productEventsService";
+import * as integrationAuditService from "./integrationAuditService";
+import { projectRichMessageSocketPayload } from "./messageRealtimeEvents";
+import type { AgentOrchestrator } from "./agentOrchestrator";
+import {
+  ActionCardConversionFrozenError,
+  ActionCardConfirmationRequiredError,
+  ActionCardConfirmationVersionMismatchError,
+  ActionCardReconfirmationRequiredError,
+  assertActionCardConfirmationInTransaction,
+  assertActionCardWritableInTransaction,
+  lockActionCardSourceInTransaction,
+  isActionCardConversionMutationForTest,
+  resolveActionCardSourceChannelId,
+} from "./actionCardConversionService";
+import {
+  assertChannelConversionWritable,
+  getActiveChannelConversionFence,
+  lockActionCardScope,
+} from "./channelConversionFenceService";
+
+let registerAppPreGuardObservationForTest: (() => void) | null = null;
+let beforeExecutionLockForTest: (() => Promise<void>) | null = null;
+let beforeActionCardAttemptAuditForTest: (() => Promise<void>) | null = null;
+
+export function setRegisterAppPreGuardObservationForTest(observer: (() => void) | null): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("action-card observation hooks are test-only");
+  }
+  registerAppPreGuardObservationForTest = observer;
+}
+
+export function setBeforeActionCardExecutionLockForTest(
+  hook: (() => Promise<void>) | null,
+): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("action-card observation hooks are test-only");
+  }
+  beforeExecutionLockForTest = hook;
+}
+
+export function setBeforeActionCardAttemptAuditForTest(
+  hook: (() => Promise<void>) | null,
+): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("action-card observation hooks are test-only");
+  }
+  beforeActionCardAttemptAuditForTest = hook;
+}
+import { actorHasServerCapabilityInServer, actorRoleHasServerCapability, resolveActorContext } from "../lib/actorPermissions";
+import { channelActorHasCapability, resolveChannelActorContext } from "../lib/channelActorPermissions";
+import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy";
 
 export class ActionCardError extends Error {
   status: number;
@@ -71,6 +120,16 @@ export interface PrepareActionCardArgs {
   targetChannelId: string;
   action: ActionCardAction;
   io?: SocketServer | null;
+  /**
+   * Runs on the preparing transaction after the carrier message and the
+   * action_cards row are written and before it commits (keyed Agent API
+   * writes record their idempotency ledger row here). A rejection rolls the
+   * card back.
+   */
+  beforeCommit?: (
+    executor: DatabaseExecutor,
+    result: { messageId: string; metadata: ActionCardMetadata },
+  ) => Promise<void>;
 }
 
 export function bindMarketplaceAppName(rawName: string): {
@@ -120,21 +179,68 @@ async function canonicalizeMarketplaceAppCardDisplay(
   };
 }
 
-async function emitActionCardMessageUpdated(io: SocketServer, row: typeof messages.$inferSelect): Promise<void> {
-  const payload = projectMessageSocketPayload(row, "System");
-  const channel = await channelService.getChannel(row.channelId);
-  if (channel?.type !== "thread") {
-    // message-realtime-producer: action-card.updated.channel
-    io.to(`channel:${row.channelId}`).emit("message:updated", payload);
-    return;
+/**
+ * Every local surface that renders an action-card carrier. Joint carriers live
+ * in canonical storage and are projected to each active participant server;
+ * ordinary carriers have exactly their own channel.
+ */
+async function listActionCardCarrierSurfaces(
+  channel: typeof channels.$inferSelect,
+): Promise<Array<{ channelId: string; serverId: string }>> {
+  const targets: Array<{ channelId: string; serverId: string }> = [];
+  if (channel.type === "thread") {
+    const projections = await channelService.getActiveJointThreadProjectionsByCanonicalThread(channel.id);
+    targets.push(...projections.map(projection => ({ channelId: projection.localThreadChannelId, serverId: projection.localServerId })));
+  } else {
+    const projections = await channelService.getActiveJointChannelProjectionsByLocalChannel(channel.id);
+    targets.push(...projections.map(projection => ({ channelId: projection.localChannelId, serverId: projection.serverId })));
   }
+  if (targets.length === 0) targets.push({ channelId: channel.id, serverId: channel.serverId });
+  return targets;
+}
 
-  const followerIds = await messageService.getHumanThreadFollowerIds(row.channelId);
-  for (const userId of followerIds) {
-    io.in(socketUserServerRoom(userId, channel.serverId)).socketsJoin(`channel:${row.channelId}`);
-    // message-realtime-producer: action-card.updated.thread-follower
-    io.to(`user:${userId}`).emit("message:updated", payload);
+async function emitActionCardCarrierMessage(
+  io: SocketServer,
+  row: Pick<typeof messages.$inferSelect, "id">,
+  event: "message:new" | "message:updated",
+): Promise<void> {
+  const [current] = await messageService.listMessagesByIds([row.id]);
+  if (!current) return;
+  const channel = await channelService.getChannel(current.channelId);
+  if (!channel) return;
+  const targets = await listActionCardCarrierSurfaces(channel);
+  for (const target of targets) {
+    if (event === "message:new") messageService.updateMaxSeq(target.serverId, current.seq);
+    const [projected] = await messageService.projectJointMessagesToLocalChannel([current], target.channelId, target.serverId);
+    const payload = projectRichMessageSocketPayload(messageService.stripViewerScopedAttachmentCommentMetadata(projected));
+    if (channel.type !== "thread") {
+      if (event === "message:new") {
+        // message-realtime-producer: action-card.new.channel
+        io.to(`channel:${target.channelId}`).emit("message:new", payload);
+      } else {
+        // message-realtime-producer: action-card.updated.channel
+        io.to(`channel:${target.channelId}`).emit("message:updated", payload);
+      }
+      continue;
+    }
+    // Private/Joint Thread rooms may contain stale sockets after a membership
+    // change. Use the existing authority-filtered follower audience instead.
+    const followerIds = await messageService.getHumanThreadFollowerIds(target.channelId);
+    for (const userId of followerIds) {
+      if (event === "message:new") {
+        io.in(socketUserServerRoom(userId, target.serverId)).socketsJoin(`channel:${target.channelId}`);
+        // message-realtime-producer: action-card.new.thread-follower
+        io.to(`user:${userId}`).emit("message:new", payload);
+      } else {
+        // message-realtime-producer: action-card.updated.thread-follower
+        io.to(`user:${userId}`).emit("message:updated", payload);
+      }
+    }
   }
+}
+
+export async function emitActionCardMessageUpdated(io: SocketServer, row: Pick<typeof messages.$inferSelect, "id">): Promise<void> {
+  await emitActionCardCarrierMessage(io, row, "message:updated");
 }
 
 /**
@@ -447,8 +553,21 @@ export async function prepareActionCard(args: PrepareActionCardArgs): Promise<{
     throw new ActionCardError(403, "TARGET_NOT_ACCESSIBLE", "Requester agent cannot post to this target");
   }
 
+  // A channel:add_member card may be posted in one carrier while mutating a
+  // different channel.  Its conversion authority is the action target, not
+  // the carrier.  Other cards are scoped to the carrier (with Thread cards
+  // resolving back to their parent source channel).
+  const sourceScopeChannelId = action.type === "channel:add_member"
+    ? action.channel
+    : args.targetChannelId;
+  const sourceChannelId = await resolveActionCardSourceChannelId(getDb(), sourceScopeChannelId);
+  const targetServer = await serverService.getServer(args.serverId);
   const metadata: ActionCardMetadata = {
     kind: "action-card",
+    // Target server is fixed here: the preparing agent's server. Execution
+    // acts on it regardless of which joint projection the confirmer uses.
+    sourceServerId: asServerId(args.serverId),
+    targetServerName: targetServer?.name ?? null,
     action,
     presentation: buildActionCardPresentation(action),
     state: "prepared",
@@ -467,10 +586,38 @@ export async function prepareActionCard(args: PrepareActionCardArgs): Promise<{
   // stdrc msg=22a82192 / msg=174b7e16 — DB persistence, minimum schema).
   const db = getDb();
   const out = await db.transaction(async (tx) => {
+    // Re-resolve and acquire the canonical source lock in this transaction;
+    // the unlocked prepare-time lookup is only a hint.  This closes the
+    // conversion-start ↔ card-insert race and prevents a card from being
+    // persisted with a stale source identity.
+    const freshSourceChannelId = await resolveActionCardSourceChannelId(tx, sourceScopeChannelId);
+    if (freshSourceChannelId !== sourceChannelId) {
+      throw new ActionCardError(409, "ACTION_CARD_SOURCE_CHANGED", "Action card target changed while it was being prepared");
+    }
+    if (freshSourceChannelId) {
+      await lockActionCardScope(tx, args.serverId, freshSourceChannelId);
+    }
+    const activeFence = freshSourceChannelId ? await getActiveChannelConversionFence(tx, freshSourceChannelId) : null;
+    if (freshSourceChannelId && !activeFence) {
+      // A retained pending/running/failed job without its fence is a
+      // migration/repair fault.  Do not persist a card into that ambiguous
+      // authority window; the foundation writer primitive fails closed.
+      await assertChannelConversionWritable(freshSourceChannelId, tx);
+    }
+    const cardState: ActionCardMetadata["state"] = activeFence ? "frozen" : "prepared";
+    if (activeFence) {
+      metadata.state = cardState;
+      metadata.conversionJobId = activeFence.jobId;
+      metadata.conversionEpoch = activeFence.conversionEpoch;
+    }
+    // Joint channels/threads keep one durable row in canonical storage that
+    // every participant server projects; writing the carrier to the local
+    // projection would hide it from peers and from canonical-backed history.
+    const storageChannelId = await channelService.getMessageStorageChannelIdWithExecutor(tx, args.targetChannelId);
     const [msg] = await tx
       .insert(messages)
       .values({
-        channelId: args.targetChannelId,
+        channelId: storageChannelId,
         senderType: "agent",
         senderId: args.requesterAgentId,
         content: summarize(action),
@@ -487,7 +634,12 @@ export async function prepareActionCard(args: PrepareActionCardArgs): Promise<{
         actionType: action.type,
         payload: action,
         state: "prepared",
+        conversionJobId: activeFence?.jobId ?? null,
+        conversionSourceChannelId: freshSourceChannelId,
+        conversionEpoch: activeFence?.conversionEpoch ?? null,
+        freezeState: activeFence ? "frozen" : "ready",
       });
+    if (args.beforeCommit) await args.beforeCommit(tx, { messageId: msg.id, metadata });
     return msg;
   });
 
@@ -501,19 +653,7 @@ export async function prepareActionCard(args: PrepareActionCardArgs): Promise<{
   messageService.updateMaxSeq(args.serverId, out.seq);
 
   if (args.io && out) {
-    const senderName = agent.displayName ?? agent.name;
-    const payload = projectMessageSocketPayload(out, senderName);
-    if (target.type === "thread") {
-      const followerIds = await messageService.getHumanThreadFollowerIds(args.targetChannelId);
-      for (const userId of followerIds) {
-        args.io.in(socketUserServerRoom(userId, target.serverId)).socketsJoin(`channel:${args.targetChannelId}`);
-        // message-realtime-producer: action-card.new.thread-follower
-        args.io.to(`user:${userId}`).emit("message:new", payload);
-      }
-    } else {
-      // message-realtime-producer: action-card.new.channel
-      args.io.to(`channel:${args.targetChannelId}`).emit("message:new", payload);
-    }
+    await emitActionCardCarrierMessage(args.io, out, "message:new");
   }
 
   return { messageId: out.id, metadata };
@@ -524,6 +664,7 @@ export interface ExecuteActionCardArgs {
   serverId: ServerId;
   userId: string;
   expectedState?: ActionCardState;
+  expectedConfirmationVersion?: number;
   io?: SocketServer | null;
   /**
    * Agent orchestrator — used to push private, transient completion notices
@@ -538,24 +679,76 @@ interface ExecutePreflight {
   cardId: string;
   requesterAgentId: string;
   actionType: ActionCardAction["type"];
+  /** Canonical prepared payload (action_cards.payload). */
+  action: ActionCardAction;
   state: ActionCardState;
+  freezeState: "ready" | "frozen" | "reconfirm_required";
+  confirmationVersion: number;
+  conversionJobId: string | null;
 }
 
-async function assertActionCardWritableByUser(input: {
+/** Resolve storage through the caller's active local projection, including Joint Threads. */
+async function resolveActionCardLocalChannelId(channelId: string, serverId: string, executor: DatabaseExecutor): Promise<string | null> {
+  const [projection] = await executor.select({ localChannelId: jointChannelServers.localChannelId })
+    .from(jointChannels).innerJoin(jointChannelServers, and(
+      eq(jointChannelServers.jointChannelId, jointChannels.id),
+      eq(jointChannelServers.serverId, serverId), eq(jointChannelServers.status, "active"),
+    )).where(and(eq(jointChannels.canonicalChannelId, channelId), eq(jointChannels.status, "active"))).limit(1);
+  if (projection) return projection.localChannelId;
+  const channel = await channelService.getChannel(channelId, { executor });
+  if (channel?.serverId === serverId) return channelId;
+  if (channel?.type === "thread") {
+    const threadProjection = (await channelService.getActiveJointThreadProjectionsByCanonicalThread(channelId, executor))
+      .find((candidate) => candidate.localServerId === serverId);
+    if (threadProjection) return threadProjection.localThreadChannelId;
+  }
+  return null;
+}
+
+/**
+ * Authorize a human to operate an action card and return the card's target
+ * server (`action_cards.server_id`, fixed at prepare time). The action always
+ * executes on that server, so every permission check runs there — not on the
+ * server the confirmer happens to view the carrier from. A confirmer viewing a
+ * Joint carrier from a peer server may operate it only when they are also an
+ * eligible member of the target server's projection of that channel. A
+ * carrier the target server cannot see at all (e.g. an agent-migration history
+ * copy) stays read-only outside its source workspace.
+ */
+export async function assertActionCardWritableByUser(input: {
+  messageId: string;
   channelId: string;
   serverId: string;
   userId: string;
   executor: ReturnType<typeof getDb>;
   lock?: boolean;
-}): Promise<void> {
-  const authorityChannelId = await channelService.getChannelMembershipAuthorityChannelId(input.channelId, input.executor);
+}): Promise<ServerId> {
+  const [origin] = await input.executor.select({ serverId: actionCards.serverId })
+    .from(actionCards).where(eq(actionCards.messageId, input.messageId)).limit(1);
+  const targetServerId = origin ? asServerId(origin.serverId) : null;
+  const crossServer = isActionCardReadOnlyInServer(targetServerId, input.serverId);
+  const refuseCrossServer = async (): Promise<never> => {
+    const targetServer = targetServerId ? await serverService.getServer(targetServerId) : null;
+    throw new ActionCardError(
+      403,
+      "ACTION_CARD_SOURCE_WORKSPACE_REQUIRED",
+      targetServer
+        ? `This action card acts on server "${targetServer.name}". Only members of that server who can operate this channel there may confirm it.`
+        : "Historical action cards can only be operated in their source workspace",
+    );
+  };
+  if (!targetServerId) return refuseCrossServer();
+  const localChannelId = await resolveActionCardLocalChannelId(input.channelId, targetServerId, input.executor);
+  const authorityChannelId = localChannelId
+    ? await channelService.getChannelMembershipAuthorityChannelId(localChannelId, input.executor) : null;
   if (!authorityChannelId) {
+    if (crossServer) return refuseCrossServer();
     throw new ActionCardError(403, "FORBIDDEN", "Not allowed to operate action cards in this channel");
   }
   if (input.lock) {
     const [locked] = await input.executor.select({ id: channels.id })
       .from(channels)
-      .where(and(eq(channels.id, authorityChannelId), eq(channels.serverId, input.serverId)))
+      .where(and(eq(channels.id, authorityChannelId), eq(channels.serverId, targetServerId)))
       .for("update")
       .limit(1);
     if (!locked) {
@@ -563,7 +756,7 @@ async function assertActionCardWritableByUser(input: {
     }
   }
   const context = await resolveChannelActorContext(
-    input.serverId,
+    targetServerId,
     authorityChannelId,
     "user",
     input.userId,
@@ -575,8 +768,10 @@ async function assertActionCardWritableByUser(input: {
     && context.serverRole !== "guest"
     && (context.serverRole === "owner" || context.serverRole === "admin" || context.isChannelMember);
   if (!allowed) {
+    if (crossServer) return refuseCrossServer();
     throw new ActionCardError(403, "FORBIDDEN", "Join this channel before operating its action cards");
   }
+  return targetServerId;
 }
 
 async function assertUserCanAddActionCardMembers(input: {
@@ -616,6 +811,20 @@ interface IntegrationAppSecretHandoff {
 interface PerformActionOutput {
   result: ActionCardResult;
   requesterSecretHandoff?: IntegrationAppSecretHandoff;
+  /**
+   * A channel created this action whose realtime broadcast must run AFTER the
+   * surrounding transaction commits. Carried out of the transaction so neither
+   * the cross-replica Redis fanout (fanoutWithAck waits for ACKs, leaving the
+   * transaction idle-in-transaction) NOR the pre-commit local socket emit
+   * (a client would see a channel that rolls back into nonexistence) runs while
+   * the transaction is open. Undefined for non-channel actions.
+   */
+  postCommitChannelPublish?: {
+    channel: { id: string; serverId: string } & Record<string, unknown>;
+    private: boolean;
+    initialUserIds: string[];
+    userId: string;
+  };
 }
 
 /**
@@ -642,7 +851,8 @@ async function preflightExecuteActionCard(
   if (!meta || meta.kind !== "action-card") {
     throw new ActionCardError(400, "NOT_OPERATION_CARD", "Message is not an operation card");
   }
-  const channel = await channelService.getChannel(row.channelId);
+  const localChannelId = await resolveActionCardLocalChannelId(row.channelId, args.serverId, db);
+  const channel = localChannelId ? await channelService.getChannel(localChannelId) : null;
   if (!channel || channel.serverId !== args.serverId) {
     throw new ActionCardError(403, "WRONG_SERVER", "Card not in this server");
   }
@@ -653,7 +863,7 @@ async function preflightExecuteActionCard(
   // mutate card state via mark-executed (Leiysky/Dozy/meichen review
   // 2026-05-13: msg=5cb29566 / msg=e2d25035 / DM e270834b).
   const allowed = await channelService.canUserAccessChannel(
-    row.channelId,
+    channel.id,
     args.userId,
     args.serverId,
   );
@@ -661,6 +871,7 @@ async function preflightExecuteActionCard(
     throw new ActionCardError(403, "FORBIDDEN", "Not allowed to access this card's channel");
   }
   await assertActionCardWritableByUser({
+      messageId: args.messageId,
     channelId: row.channelId,
     serverId: args.serverId,
     userId: args.userId,
@@ -676,6 +887,10 @@ async function preflightExecuteActionCard(
       requesterAgentId: actionCards.requesterAgentId,
       actionType: actionCards.actionType,
       payload: actionCards.payload,
+      state: actionCards.state,
+      freezeState: actionCards.freezeState,
+      confirmationVersion: actionCards.confirmationVersion,
+      conversionJobId: actionCards.conversionJobId,
     })
     .from(actionCards)
     .where(eq(actionCards.messageId, args.messageId));
@@ -689,11 +904,15 @@ async function preflightExecuteActionCard(
     cardId: cardRow.id,
     requesterAgentId: cardRow.requesterAgentId,
     actionType: cardRow.actionType as ActionCardAction["type"],
+    action,
     state: meta.state ?? "prepared",
+    freezeState: cardRow.freezeState,
+    confirmationVersion: cardRow.confirmationVersion,
+    conversionJobId: cardRow.conversionJobId,
   };
 }
 
-async function assertActionCardVisibleToUser(args: {
+export async function assertActionCardVisibleToUser(args: {
   messageId: string;
   serverId: ServerId;
   userId: string;
@@ -703,11 +922,12 @@ async function assertActionCardVisibleToUser(args: {
   if (!row) {
     throw new ActionCardError(404, "NOT_FOUND", "Card message not found");
   }
-  const channel = await channelService.getChannel(row.channelId);
+  const localChannelId = await resolveActionCardLocalChannelId(row.channelId, args.serverId, db);
+  const channel = localChannelId ? await channelService.getChannel(localChannelId) : null;
   if (!channel || channel.serverId !== args.serverId) {
     throw new ActionCardError(404, "NOT_FOUND", "Card message not found");
   }
-  const canAccess = await channelService.canUserAccessChannel(row.channelId, args.userId, args.serverId);
+  const canAccess = await channelService.canUserAccessChannel(channel.id, args.userId, args.serverId);
   if (!canAccess) {
     throw new ActionCardError(404, "NOT_FOUND", "Card message not found");
   }
@@ -733,15 +953,50 @@ export async function executeActionCard(args: ExecuteActionCardArgs): Promise<{
     return await executeActionCardInner(args, db, preflight);
   }
 
-  // Funnel hook: record the attempt now that we've proven this is a real
-  // card. Best-effort; failures swallowed inside the helper.
-  await productEventsService.recordActionCardEvent({
-    cardId: preflight.cardId,
-    eventType: "action_card.execute_attempt",
-    actor: { type: "human", id: args.userId },
-    source: "server",
-    metadata: { action_type: preflight.actionType },
-  });
+  if (preflight.freezeState === "frozen") {
+    throw new ActionCardConversionFrozenError(preflight.confirmationVersion.toString());
+  }
+  if (preflight.freezeState === "reconfirm_required") {
+    throw new ActionCardReconfirmationRequiredError();
+  }
+  if (preflight.conversionJobId !== null && preflight.confirmationVersion > 1 && args.expectedConfirmationVersion === undefined
+    && !isActionCardConversionMutationForTest("confirmation_gate_bypass")) {
+    throw new ActionCardConfirmationRequiredError();
+  }
+  if (args.expectedConfirmationVersion !== undefined && args.expectedConfirmationVersion !== preflight.confirmationVersion
+    && !isActionCardConversionMutationForTest("confirmation_gate_bypass")) {
+    throw new ActionCardConfirmationVersionMismatchError();
+  }
+
+  // The split-lock mutation faithfully restores the rejected predecessor:
+  // validate in one source-lock transaction, release it, and later write the
+  // attempt audit outside the execution transaction.  The permanent race
+  // witness below must observe that audit leak when conversion/reconfirmation
+  // wins the resulting window.
+  if (isActionCardConversionMutationForTest("execute_audit_lock_split")) {
+    await db.transaction((tx) => assertActionCardConfirmationInTransaction(
+      tx,
+      args.messageId,
+      args.expectedConfirmationVersion,
+    ));
+  }
+
+  // Let a deterministic test interleave a real conversion/reconfirmation
+  // before the final execution transaction acquires its lock. The production
+  // path has no work or audit write in this gap; the inner transaction below
+  // performs the authoritative read and holds the lock continuously through
+  // audit + business transition.
+  await beforeExecutionLockForTest?.();
+
+  if (isActionCardConversionMutationForTest("execute_audit_lock_split")) {
+    await productEventsService.recordActionCardEvent({
+      cardId: preflight.cardId,
+      eventType: "action_card.execute_attempt",
+      actor: { type: "human", id: args.userId },
+      source: "server",
+      metadata: { action_type: preflight.actionType },
+    });
+  }
 
   try {
     return await executeActionCardInner(args, db, preflight);
@@ -749,16 +1004,48 @@ export async function executeActionCard(args: ExecuteActionCardArgs): Promise<{
     // Funnel hook: classify + record failure with low-cardinality bucket.
     // `action_type` is derived from the validated card metadata (server-
     // side source of truth), not from anything client-supplied.
-    await productEventsService.recordActionCardEvent({
-      cardId: preflight.cardId,
-      eventType: "action_card.execute_fail",
-      actor: { type: "human", id: args.userId },
-      source: "server",
-      metadata: {
-        action_type: preflight.actionType,
-        ...productEventsService.classifyExecuteError(err),
-      },
-    });
+    // A confirmation mismatch is rejected before the attempt audit boundary
+    // inside the source-lock transaction.  Do not create a failure audit row
+    // for this stale request: the card, audit and business state must remain
+    // byte-for-byte unchanged when a competing cutover/reconfirmation wins.
+    const code = typeof err === "object" && err !== null && "code" in err
+      ? (err as { code?: unknown }).code
+      : undefined;
+    const rejectedBeforeAttempt =
+      code === "CONFIRMATION_VERSION_REQUIRED"
+      || code === "CONFIRMATION_VERSION_MISMATCH"
+      || code === "action_card_conversion_frozen"
+      || code === "action_card_reconfirmation_required"
+      || code === "channel_conversion_in_progress"
+      || code === "channel_conversion_fence_conflict";
+    if (!rejectedBeforeAttempt || isActionCardConversionMutationForTest("execute_audit_lock_split")) {
+      await productEventsService.recordActionCardEvent({
+        cardId: preflight.cardId,
+        eventType: "action_card.execute_fail",
+        actor: { type: "human", id: args.userId },
+        source: "server",
+        metadata: {
+          action_type: preflight.actionType,
+          ...productEventsService.classifyExecuteError(err),
+        },
+      });
+    }
+    // Tell the preparer about a genuine execution failure. Stale races (the
+    // card already resolved) and pre-attempt refusals are not failures of the
+    // card itself.
+    if (!rejectedBeforeAttempt && code !== "STATE_MISMATCH" && code !== "BAD_STATE") {
+      await postActionCardResultReply({
+        io: args.io,
+        orchestrator: args.orchestrator,
+        messageId: args.messageId,
+        confirmerUserId: args.userId,
+        outcome: {
+          kind: "failed",
+          action: preflight.action,
+          reason: err instanceof ActionCardError ? err.message : "internal error",
+        },
+      });
+    }
     throw err;
   }
 }
@@ -769,9 +1056,23 @@ async function executeActionCardInner(
   preflight: ExecutePreflight,
 ): Promise<{ messageId: string; metadata: ActionCardMetadata }> {
   const userName = await loadUserDisplayName(args.userId);
-  // Atomic read + transition: re-read inside the transaction so two
-  // simultaneous clicks don't both succeed.
+  // Atomic read + transition: the canonical source lock is acquired by the
+  // confirmation read and held by this transaction through the authoritative
+  // attempt audit, business writer, card transition, and success audit.  In
+  // particular, never release the lock between credential validation and the
+  // execute_attempt insert: a concurrent cutover/reconfirm must serialize
+  // behind this entire boundary.
   const result = await db.transaction(async (tx) => {
+    // Even idempotent replays must carry the converted-card credential.  This
+    // check is deliberately under the same source lock as the writable gate;
+    // the preflight value is only an early, audit-before-side-effect guard.
+    const sourceLockAuthority = await lockActionCardSourceInTransaction(tx, args.messageId);
+    const lockedConfirmationVersion = await assertActionCardConfirmationInTransaction(
+      tx,
+      args.messageId,
+      args.expectedConfirmationVersion,
+      { sourceLockAuthority },
+    );
     const [row] = await tx.select().from(messages).where(eq(messages.id, args.messageId));
     if (!row) {
       throw new ActionCardError(404, "NOT_FOUND", "Card message not found");
@@ -780,7 +1081,8 @@ async function executeActionCardInner(
     if (!meta || meta.kind !== "action-card") {
       throw new ActionCardError(400, "NOT_OPERATION_CARD", "Message is not an operation card");
     }
-    await assertActionCardWritableByUser({
+    const targetServerId = await assertActionCardWritableByUser({
+      messageId: args.messageId,
       channelId: row.channelId,
       serverId: args.serverId,
       userId: args.userId,
@@ -792,11 +1094,60 @@ async function executeActionCardInner(
     }
     if (meta.state === "executed") {
       // Idempotency: same shape, no re-execute.
-      return { row, metadata: meta as ActionCardMetadata, executed: false };
+      return { row, metadata: meta as ActionCardMetadata, executed: false, confirmationVersion: lockedConfirmationVersion };
     }
     if (meta.state !== "prepared") {
       throw new ActionCardError(409, "BAD_STATE", `Card is ${meta.state}; cannot execute`);
     }
+
+    // Witness-only mutation: run the real register_app business path before
+    // the conversion fence.  The controlled observer proves that moving this
+    // call ahead of the gate is observable even though the surrounding
+    // transaction later rolls back.
+    if (isActionCardConversionMutationForTest("register_app_pre_guard")) {
+      const [preGuardCard] = await tx.select({ payload: actionCards.payload })
+        .from(actionCards).where(eq(actionCards.id, preflight.cardId)).limit(1);
+      const parsedPreGuard = preGuardCard ? actionCardActionSchema.safeParse(preGuardCard.payload) : null;
+      if (parsedPreGuard?.success && parsedPreGuard.data.type === "integration:register_app") {
+        registerAppPreGuardObservationForTest?.();
+        await performAction(
+          targetServerId,
+          args.userId,
+          preflight.requesterAgentId,
+          parsedPreGuard.data,
+          args.io ?? null,
+          tx as ReturnType<typeof getDb>,
+          { messageId: args.messageId, confirmationVersion: preflight.confirmationVersion },
+        );
+        throw new Error("register_app pre-guard mutation must turn RED by reaching the external side-effect boundary");
+      }
+    }
+
+    const writable = await assertActionCardWritableInTransaction(
+      tx,
+      args.messageId,
+      args.expectedConfirmationVersion,
+      { activeFenceError: "conversion", sourceLockAuthority },
+    );
+
+    // Witness the exact lock lifetime required by the conversion contract:
+    // pause after the final persisted credential/fence read but before the
+    // attempt audit insert. A competing conversion/reconfirmation may start,
+    // but it must remain blocked until this transaction commits or rolls back.
+    await beforeActionCardAttemptAuditForTest?.();
+
+    // Funnel hook: this is deliberately inside the canonical source-lock
+    // transaction and after the final persisted credential *and writable
+    // fence* reads. If either gate fails, the transaction rolls back and no
+    // attempt/failure audit row is left behind.
+    await productEventsService.recordActionCardEvent({
+      cardId: preflight.cardId,
+      eventType: "action_card.execute_attempt",
+      actor: { type: "human", id: args.userId },
+      source: "server",
+      metadata: { action_type: preflight.actionType },
+      executor: tx,
+    });
 
     // Authorize + execute under user identity. v1 has no field-level
     // overrides (agent:create's runtime/model/computer moved to the
@@ -826,12 +1177,13 @@ async function executeActionCardInner(
     }
 
     const executionOutput = await performAction(
-      args.serverId,
+      targetServerId,
       args.userId,
       preflight.requesterAgentId,
       finalAction,
       args.io ?? null,
       tx as ReturnType<typeof getDb>,
+      { messageId: args.messageId, confirmationVersion: writable.confirmationVersion },
     );
     const executionResult = executionOutput.result;
 
@@ -840,6 +1192,7 @@ async function executeActionCardInner(
     // what the agent originally prepared).
     const nextMeta: ActionCardMetadata = {
       kind: "action-card",
+    sourceServerId: targetServerId,
       action: finalAction,
       presentation: buildActionCardPresentation(finalAction),
       state: "executed",
@@ -870,7 +1223,7 @@ async function executeActionCardInner(
       finalAction.type === "integration:install_marketplace_app"
     ) {
       await integrationAuditService.recordIntegrationAuditEvent({
-        serverId: args.serverId,
+        serverId: targetServerId,
         clientId: executionResult.kind === "integration-app-registration" || executionResult.kind === "agent-integration-login" || executionResult.kind === "integration-app-owner-recovery" || executionResult.kind === "marketplace-app-installation"
           ? executionResult.clientId
           : null,
@@ -924,23 +1277,6 @@ async function executeActionCardInner(
       .set({ actionMetadata: nextMeta, updatedAt: new Date() })
       .where(eq(messages.id, args.messageId))
       .returning();
-    return {
-      row: updated,
-      metadata: nextMeta,
-      executed: true,
-      requesterSecretHandoff: executionOutput.requesterSecretHandoff,
-    };
-  });
-
-  if (args.io && result.executed && result.row) {
-    await emitActionCardMessageUpdated(args.io, result.row);
-  }
-
-  // Funnel hook: record success. Skip if `executed=false` (idempotent
-  // re-call where the card was already executed) — that's not a new
-  // success in product terms. `action_type` is derived from the
-  // server-validated preflight, not from anything client-supplied.
-  if (result.executed) {
     await productEventsService.recordActionCardEvent({
       cardId: preflight.cardId,
       eventType: "action_card.execute_success",
@@ -949,17 +1285,55 @@ async function executeActionCardInner(
       metadata: {
         action_type: preflight.actionType,
       },
+      executor: tx,
     });
+    return {
+      row: updated,
+      metadata: nextMeta,
+      executed: true,
+      requesterSecretHandoff: executionOutput.requesterSecretHandoff,
+      postCommitChannelPublish: executionOutput.postCommitChannelPublish,
+    };
+  });
+
+  if (args.io && result.executed && result.row) {
+    await emitActionCardMessageUpdated(args.io, result.row);
   }
 
-  if (result.executed && result.row && args.orchestrator) {
-    await wakeRequesterOnExecuted(
-      args.orchestrator,
-      args.serverId,
-      result.row,
-      result.metadata,
-      result.requesterSecretHandoff,
-    );
+  // Run the deferred realtime broadcast AFTER the transaction committed. Both
+  // branches are deferred: the public publish's cross-replica fanout
+  // (fanoutWithAck waits for ACK) must not hold the transaction
+  // idle-in-transaction, and the private local emits must not surface a channel
+  // that could roll back. On rollback we never reach here, so neither happens.
+  if (result.executed && result.postCommitChannelPublish && args.io) {
+    const { channel, private: isPrivate, initialUserIds, userId } = result.postCommitChannelPublish;
+    if (isPrivate) {
+      args.io.to(`channel:${channel.id}`).emit("channel:updated", { channel });
+      for (const uid of initialUserIds) {
+        args.io.to(`user:${uid}`).emit("channel:updated", { channel });
+      }
+      args.io.to(`user:${userId}`).emit("channel:updated", { channel });
+    } else {
+      await publishChannelUpdate(args.io, channel);
+    }
+  }
+
+  if (result.executed && result.row) {
+    if (result.requesterSecretHandoff && args.orchestrator) {
+      await deliverRequesterSecretHandoff(
+        args.orchestrator,
+        result.metadata.sourceServerId ?? args.serverId,
+        preflight.requesterAgentId,
+        result.requesterSecretHandoff,
+      );
+    }
+    await postActionCardResultReply({
+      io: args.io,
+      orchestrator: args.orchestrator,
+      messageId: args.messageId,
+      confirmerUserId: args.userId,
+      outcome: { kind: "executed", action: result.metadata.action, result: result.metadata.result },
+    });
   }
 
   return { messageId: args.messageId, metadata: result.metadata };
@@ -979,6 +1353,7 @@ export interface MarkExecutedArgs {
    * For agent:create this comes from the post-dialog createAgent response.
    */
   result: ActionCardResult;
+  expectedConfirmationVersion?: number;
   io?: SocketServer | null;
   /**
    * Agent orchestrator — used to push a wake to the requesting agent so it
@@ -1045,6 +1420,14 @@ export async function markActionCardExecuted(args: MarkExecutedArgs): Promise<{
   const db = getDb();
   const userName = await loadUserDisplayName(args.userId);
   const result = await db.transaction(async (tx) => {
+    // A converted card's confirmation is required even for an idempotent
+    // mark call.  Keep this read under the canonical source lock so the
+    // route cannot observe a stale version and then mutate the card.
+    const lockedConfirmationVersion = await assertActionCardConfirmationInTransaction(
+      tx,
+      args.messageId,
+      args.expectedConfirmationVersion,
+    );
     const [row] = await tx.select().from(messages).where(eq(messages.id, args.messageId));
     if (!row) {
       throw new ActionCardError(404, "NOT_FOUND", "Card message not found");
@@ -1053,7 +1436,8 @@ export async function markActionCardExecuted(args: MarkExecutedArgs): Promise<{
     if (!meta || meta.kind !== "action-card") {
       throw new ActionCardError(400, "NOT_ACTION_CARD", "Message is not an action card");
     }
-    await assertActionCardWritableByUser({
+    const targetServerId = await assertActionCardWritableByUser({
+      messageId: args.messageId,
       channelId: row.channelId,
       serverId: args.serverId,
       userId: args.userId,
@@ -1061,15 +1445,16 @@ export async function markActionCardExecuted(args: MarkExecutedArgs): Promise<{
       lock: true,
     });
     if (meta.state === "executed") {
-      return { row, metadata: meta as ActionCardMetadata, executed: false };
+      return { row, metadata: meta as ActionCardMetadata, executed: false, confirmationVersion: lockedConfirmationVersion };
     }
     if (meta.state !== "prepared") {
       throw new ActionCardError(409, "BAD_STATE", `Card is ${meta.state}; cannot mark executed`);
     }
+    await assertActionCardWritableInTransaction(tx, args.messageId, args.expectedConfirmationVersion);
     const action = meta.action as ActionCardAction;
     assertActionResultKindMatches(action, args.result);
     if (action.type === "agent:create") {
-      if (!await actorHasServerCapabilityInServer(args.serverId, "user", args.userId, "createAgents", tx)) {
+      if (!await actorHasServerCapabilityInServer(targetServerId, "user", args.userId, "createAgents", tx)) {
         throw new ActionCardError(
           403,
           "MISSING_CREATE_AGENTS_CAPABILITY",
@@ -1087,7 +1472,7 @@ export async function markActionCardExecuted(args: MarkExecutedArgs): Promise<{
       }
       await assertUserCanAddActionCardMembers({
         channelId: action.channel,
-        serverId: args.serverId,
+        serverId: targetServerId,
         userId: args.userId,
         executor: tx as ReturnType<typeof getDb>,
       });
@@ -1128,7 +1513,7 @@ export async function markActionCardExecuted(args: MarkExecutedArgs): Promise<{
         })
         .from(agents)
         .where(eq(agents.id, args.result.id));
-      if (!createdAgent || createdAgent.serverId !== args.serverId) {
+      if (!createdAgent || createdAgent.serverId !== targetServerId) {
         throw new ActionCardError(404, "AGENT_NOT_FOUND", "Created agent not found in this server");
       }
       if (createdAgent.machineId !== action.requiredComputer) {
@@ -1141,6 +1526,7 @@ export async function markActionCardExecuted(args: MarkExecutedArgs): Promise<{
     }
     const nextMeta: ActionCardMetadata = {
       kind: "action-card",
+    sourceServerId: targetServerId,
       action,
       presentation: buildActionCardPresentation(action),
       state: "executed",
@@ -1164,6 +1550,21 @@ export async function markActionCardExecuted(args: MarkExecutedArgs): Promise<{
       .set({ actionMetadata: nextMeta, updatedAt: new Date() })
       .where(eq(messages.id, args.messageId))
       .returning();
+    if (updated) {
+      const [cardRow] = await tx.select({ id: actionCards.id })
+        .from(actionCards).where(eq(actionCards.messageId, args.messageId)).limit(1);
+      if (!cardRow) throw new ActionCardError(404, "NOT_FOUND", "Action card row not found");
+      await productEventsService.recordActionCardEvent({
+        cardId: cardRow.id,
+        eventType: "action_card.execute_success",
+        actor: { type: "human", id: args.userId },
+        source: "server",
+        metadata: {
+          action_type: action.type,
+        },
+        executor: tx,
+      });
+    }
     return { row: updated, metadata: nextMeta, executed: true };
   });
 
@@ -1175,126 +1576,174 @@ export async function markActionCardExecuted(args: MarkExecutedArgs): Promise<{
   // resource was produced. Per stdrc 2026-05-10 #proj-approval msg=9081c5f5:
   // include the *actual* created resource info (since the user may have
   // edited the agent's prefill before submitting the dialog).
-  if (result.executed && result.row && args.orchestrator) {
-    await wakeRequesterOnExecuted(
-      args.orchestrator,
-      args.serverId,
-      result.row,
-      result.metadata,
-    );
-  }
-
-  // Funnel hook: dialog-driven success. The frontend already committed the
-  // underlying create via the regular API; mark-executed records it. We
-  // emit `execute_success` here for the same reason as the inline path —
-  // funnel queries don't need to know which path was taken. Skipped on
-  // idempotent no-op re-call. `subject_id` is the canonical
-  // `action_cards.id` (Dozy + meichen 2026-05-13 msg=174ba78c) and
-  // `action_type` is derived server-side from the validated card metadata.
-  //
-  // Dialog-driven `execute_attempt` and `execute_fail` are emitted by the
-  // client (`POST /api/actions/:id/event`) since failures happen during
-  // the regular create dialog before mark-executed is reached. The
-  // `/event` route validates the card + access before recording, and
-  // re-derives `action_type` server-side, so client emit doesn't open a
-  // spoofing path. `execute_success` stays server-only per Dozy
-  // msg=a1dbc464.
-  if (result.executed) {
-    const [cardRow] = await db
-      .select({ id: actionCards.id })
-      .from(actionCards)
-      .where(eq(actionCards.messageId, args.messageId));
-    if (cardRow) {
-      await productEventsService.recordActionCardEvent({
-        cardId: cardRow.id,
-        eventType: "action_card.execute_success",
-        actor: { type: "human", id: args.userId },
-        source: "server",
-        metadata: {
-          action_type: result.metadata.action.type,
-        },
-      });
-    }
+  if (result.executed && result.row) {
+    await postActionCardResultReply({
+      io: args.io,
+      orchestrator: args.orchestrator,
+      messageId: args.messageId,
+      confirmerUserId: args.userId,
+      outcome: { kind: "executed", action: result.metadata.action, result: result.metadata.result },
+    });
   }
 
   return { messageId: args.messageId, metadata: result.metadata };
 }
 
-async function wakeRequesterOnExecuted(
+function describeActionCardResult(result: ActionCardResult, action: ActionCardAction): string {
+  switch (result.kind) {
+    case "channel": {
+      const visibility = action.type === "channel:create" && action.visibility === "private" ? " (private)" : "";
+      return `created channel #${result.name}${visibility} (id ${result.id.slice(0, 8)})`;
+    }
+    case "agent":
+      return `created agent @${result.name} (id ${result.id.slice(0, 8)})`;
+    case "channel-members": {
+      const count = new Set([...result.addedHumanIds, ...result.addedAgentIds]).size;
+      return `added ${count} member${count === 1 ? "" : "s"} to #${result.channelName}`;
+    }
+    case "agent-integration-login":
+      return `approved the Agent Login request for ${result.clientName}; rerun \`raft integration login --service ${result.clientKey}\` and continue`;
+    case "marketplace-app-installation":
+      return `installed ${result.clientName} on this Server; rerun \`raft integration login --service ${result.clientKey}\` and continue`;
+    case "integration-app-registration":
+      return result.mode === "register"
+        ? `registered Login with Raft app ${result.clientName} (${result.clientKey}). The one-time client secret is delivered only through a private notice to the owning agent and is never posted here; if you did not receive it, run \`raft integration app rotate-secret --client ${result.clientKey} --output <new-private-path>\` as the app owner`
+        : `updated Login with Raft app ${result.clientName} (${result.clientKey})`;
+    case "integration-app-owner-recovery":
+      return `recovered ownership of ${result.clientName} (${result.clientKey}) for @${result.ownerAgentName}`;
+  }
+}
+
+/**
+ * Tell the preparing agent how its card resolved. The receipt is a durable
+ * system reply in the card's own thread (the canonical Joint thread when the
+ * card lives in a Joint channel) that @mentions the requester, so it rides the
+ * ordinary mention path: an unread inbox fact + wake/notice push for managed
+ * and external agents alike, replayable after a missed delivery. Humans in the
+ * channel already see the card, so the reply is transparent to them.
+ *
+ * Never put secret material here — the reply is persisted chat history.
+ */
+async function postActionCardResultReply(input: {
+  io: SocketServer | null | undefined;
+  orchestrator: AgentOrchestrator | null | undefined;
+  messageId: string;
+  confirmerUserId: string;
+  outcome:
+    | { kind: "executed"; action: ActionCardAction; result: ActionCardResult | null | undefined }
+    | { kind: "failed"; action: ActionCardAction; reason: string };
+}): Promise<void> {
+  if (!input.io || !input.orchestrator) return;
+  try {
+    const db = getDb();
+    const [card] = await db.select({
+      requesterAgentId: actionCards.requesterAgentId,
+      serverId: actionCards.serverId,
+      carrierChannelId: messages.channelId,
+    }).from(actionCards)
+      .innerJoin(messages, eq(messages.id, actionCards.messageId))
+      .where(eq(actionCards.messageId, input.messageId))
+      .limit(1);
+    if (!card) return;
+    const [requester] = await db.select({ id: agents.id, name: agents.name, deletedAt: agents.deletedAt })
+      .from(agents).where(eq(agents.id, card.requesterAgentId)).limit(1);
+    if (!requester || requester.deletedAt) return;
+    const carrierChannel = await channelService.getChannel(card.carrierChannelId);
+    if (!carrierChannel) return;
+    // Reply on the requester's own (target-server) surface; for Joint carriers
+    // this persists into canonical storage and projects to every peer.
+    const localCarrierChannelId = await resolveActionCardLocalChannelId(card.carrierChannelId, card.serverId, db);
+    if (!localCarrierChannelId) return;
+    let threadChannelId: string;
+    let threadParentMessageId: string;
+    if (carrierChannel.type === "thread") {
+      if (!carrierChannel.parentMessageId) return;
+      threadChannelId = localCarrierChannelId;
+      threadParentMessageId = carrierChannel.parentMessageId;
+    } else {
+      const thread = await channelService.getOrCreateThreadForChannel(
+        localCarrierChannelId,
+        input.messageId,
+        input.confirmerUserId,
+        "user",
+      );
+      threadChannelId = thread.id;
+      threadParentMessageId = input.messageId;
+    }
+    // Delivery to an agent in a thread follows thread attention; start (or
+    // revive) the requester's follow at the current tail so this reply is the
+    // unread item that wakes it.
+    await channelService.recordThreadFollow(
+      "agent",
+      requester.id,
+      threadChannelId,
+      threadParentMessageId,
+      "mentioned",
+      { reactivateUnfollowed: true, preserveExistingReason: true, joinedThroughSeq: "latest" },
+    );
+
+    const [confirmer] = await db.select({ name: users.name, displayName: users.displayName })
+      .from(users).where(eq(users.id, input.confirmerUserId)).limit(1);
+    const confirmerRef = confirmer?.name ? `@${confirmer.name}` : (confirmer?.displayName ?? "a human");
+    const targetServer = await serverService.getServer(card.serverId);
+    const serverLabel = targetServer?.name ? ` on ${targetServer.name}` : "";
+    const cardRef = `\`${input.messageId.slice(0, 8)}\` (${summarize(input.outcome.action)})`;
+    const content = input.outcome.kind === "executed"
+      ? [
+          `@${requester.name} your action card ${cardRef} was executed by ${confirmerRef}${serverLabel}, acting with ${confirmerRef}'s permissions.`,
+          input.outcome.result ? `Result: ${describeActionCardResult(input.outcome.result, input.outcome.action)}.` : null,
+        ].filter((line): line is string => line !== null).join("\n")
+      : `@${requester.name} your action card ${cardRef} failed when ${confirmerRef} tried to execute it${serverLabel}: ${input.outcome.reason}. The card is still pending and can be retried.`;
+
+    await messageService.broadcastSystemMessageToLocalSurfaces(input.io, input.orchestrator, threadChannelId, content, {
+      inboxFactPolicy: {
+        mode: "record",
+        producer: "action_card.result_reply",
+        reason: "the preparing agent must learn how its action card resolved",
+        causalActor: { type: "user", id: input.confirmerUserId },
+      },
+      personalAttentionTargets: [{ type: "agent", id: requester.id, name: requester.name }],
+    });
+  } catch (err) {
+    console.error("[actionCards] failed to post result reply to requester:", err instanceof Error ? err.message : "unknown error");
+  }
+}
+
+/**
+ * Show-once secret handoff for an app registration. This is the only transient
+ * requester notice left: the secret must never be persisted, so it cannot ride
+ * the durable result reply. Managed agents receive it on their live session;
+ * external runtimes have no transient channel and recover via owner rotation.
+ */
+async function deliverRequesterSecretHandoff(
   orchestrator: AgentOrchestrator,
   serverId: string,
-  carrierMessageRow: { id: string; channelId: string; senderId: string },
-  metadata: ActionCardMetadata,
-  secretHandoff?: IntegrationAppSecretHandoff,
+  requesterAgentId: string,
+  secretHandoff: IntegrationAppSecretHandoff,
 ): Promise<void> {
-  // The carrier message's senderId IS the requesting agent's id (we set it
-  // that way at prepare time). No extra DB lookup needed.
-  const requesterAgentId = carrierMessageRow.senderId;
-  const result = metadata.result;
-  if (!result) return;
-
-  const action = metadata.action;
-  const executor = metadata.executedByUserName ?? "a human";
-  const summary = (() => {
-    if (result.kind === "channel") {
-      const visibilityNote = action.type === "channel:create" && action.visibility === "private" ? " (private)" : "";
-      return `${executor} committed your action card and created channel #${result.name}${visibilityNote} (id ${result.id.slice(0, 8)}). The channel is live now — proceed with whatever you planned next.`;
-    }
-    if (result.kind === "agent") {
-      return `${executor} committed your action card and created agent @${result.name} (id ${result.id.slice(0, 8)}). The agent is set up — proceed with whatever you planned next (e.g. introducing them, posting starter context, etc.).`;
-    }
-    if (result.kind === "agent-integration-login") {
-      return `${executor} approved your Slock Agent Login request for ${result.clientName}. Rerun \`slock integration login --service ${result.clientKey}\` and continue.`;
-    }
-    if (result.kind === "marketplace-app-installation") {
-      return `${executor} installed ${result.clientName} on this Raft Server. Rerun \`raft integration login --service ${result.clientKey}\` and continue.`;
-    }
-    if (result.kind === "integration-app-registration") {
-      const lines = [
-        `${executor} committed your Login with Raft app ${result.mode} card for ${result.clientName} (${result.clientKey}).`,
-      ];
-      if (secretHandoff) {
-        // task #137: the approval path returns the freshly created secret only
-        // through this private, intrinsic, transient notice to the requesting
-        // owner agent. It never enters action-card metadata, message history,
-        // audit rows, or logs. The owner-scoped rotate command remains the
-        // durable recovery path when this show-once delivery is missed.
-        lines.push(
-          "Private one-time client secret. Store it now and never paste it into a public channel.",
-          `client_id: ${secretHandoff.clientKey}`,
-          `client_secret: ${secretHandoff.clientSecret}`,
-          `If you miss or lose this value, run \`raft integration app rotate-secret --client ${result.clientKey} --output <new-private-path>\` as the app owner; that writes a replacement only to the new private file and invalidates the previous secret.`,
-          "You can update or transfer the app without App Admin.",
-        );
-      } else if (result.mode === "register") {
-        lines.push(
-          `The initial show-once secret could not be delivered. Recover without human help by running \`raft integration app rotate-secret --client ${result.clientKey} --output <new-private-path>\` as the app owner; this writes a replacement only to the new private file and invalidates the previous secret.`,
-        );
-      }
-      return lines.join("\n");
-    }
-    return `${executor} committed your action card.`;
-  })();
-
+  const content = [
+    `Private one-time client secret for Login with Raft app ${secretHandoff.clientName} (${secretHandoff.clientKey}). Store it now and never paste it into a public channel.`,
+    `client_id: ${secretHandoff.clientKey}`,
+    `client_secret: ${secretHandoff.clientSecret}`,
+    `If you miss or lose this value, run \`raft integration app rotate-secret --client ${secretHandoff.clientKey} --output <new-private-path>\` as the app owner; that writes a replacement only to the new private file and invalidates the previous secret.`,
+  ].join("\n");
   try {
     await messageService.deliverSystemNoticeToAgent(orchestrator, requesterAgentId, {
       serverId,
       channel_id: "action-cards",
       channel_name: "action-cards",
       channel_type: "channel",
-      content: summary,
+      content,
     }, { transient: true });
   } catch {
-    // This delivery may contain a show-once client secret. Do not log the
-    // thrown value: transport errors can embed the attempted payload. The
-    // committed owner can always recover through owner-scoped rotation.
+    // Do not log the thrown value: transport errors can embed the payload.
     console.error("[actionCards] failed to wake requester on executed");
   }
 }
 
 async function loadUserDisplayName(userId: string): Promise<string | null> {
   const db = getDb();
-  const { users } = await import("../db/schema.js");
+  const { users } = await import("../db/schema");
   const [u] = await db
     .select({ name: users.name, displayName: users.displayName })
     .from(users)
@@ -1388,6 +1837,7 @@ async function performAction(
   action: ActionCardAction,
   io: SocketServer | null | undefined = null,
   dbOrTx: ReturnType<typeof getDb> = getDb(),
+  actionCardContext?: { messageId: string; confirmationVersion: number },
 ): Promise<PerformActionOutput> {
   if (action.type === "integration:install_marketplace_app") {
     await assertUserCanManageIntegrations(dbOrTx, serverId, userId);
@@ -1535,9 +1985,11 @@ async function performAction(
           clientId: row.clientId,
           scopes: row.requestScopes,
           grantedByUserId: userId,
+          grantSource: "person",
         }).returning();
         grantId = grant.id;
       }
+      await oauthService.clearAgentAutoGrantBlock(dbOrTx, row.agentId, row.clientId);
 
       const [updated] = await dbOrTx.update(oauthAccessRequests).set({
         status: "approved",
@@ -1744,21 +2196,22 @@ async function performAction(
   // could do via UI without special elevation. If we later add operations
   // gated to admin (e.g. delete channel), enforce via `requireServerRole`
   // before performing.
-  const isMember = await serverService.isMember(serverId, userId);
+  const isMember = (await resolveActorContext(serverId, "user", userId, dbOrTx)).serverRole;
   if (!isMember) {
     throw new ActionCardError(403, "NOT_A_MEMBER", "You are not a member of this server");
   }
 
   switch (action.type) {
     case "channel:create": {
+      let channelPublicToPublish: { channel: { id: string; serverId: string } & Record<string, unknown>; private: boolean; initialUserIds: string[]; userId: string } | undefined;
       const channelType = action.visibility === "private" ? "private" : "channel";
       const initialUserIds: string[] = [];
       for (const uid of [...new Set(action.initialHumans ?? [])]) {
-        if (uid !== userId && await serverService.isMember(serverId, uid)) initialUserIds.push(uid);
+        if (uid !== userId && (await resolveActorContext(serverId, "user", uid, dbOrTx)).serverRole) initialUserIds.push(uid);
       }
       const initialAgentIds: string[] = [];
       for (const aid of [...new Set(action.initialAgents ?? [])]) {
-        const agent = await agentService.getAgent(aid);
+        const [agent] = await dbOrTx.select().from(agents).where(eq(agents.id, aid)).limit(1);
         if (agent?.serverId === serverId && !agent.deletedAt) initialAgentIds.push(aid);
       }
       const channel = await channelService.createChannel(
@@ -1771,21 +2224,24 @@ async function performAction(
           id: userId,
           initialUserIds,
           initialAgentIds,
+          executor: dbOrTx,
+          actionCardMessageId: actionCardContext?.messageId,
+          actionCardConfirmationVersion: actionCardContext?.confirmationVersion,
         },
       );
       // Mirror the broadcasts that POST /api/channels emits, per stdrc
       // contract: "the click path should be identical to filling the form
-      // and submitting" (#proj-approval msg=2cff5887).
-      if (channel.type === "private") {
-        io?.to(`channel:${channel.id}`).emit("channel:updated", { channel: { ...channel, joined: true } });
-        for (const uid of initialUserIds) {
-          io?.to(`user:${uid}`).emit("channel:updated", { channel: { ...channel, joined: true } });
-        }
-        io?.to(`user:${userId}`).emit("channel:updated", { channel: { ...channel, joined: true } });
-      } else {
-        await publishChannelUpdate(io, { ...channel, joined: true });
-      }
-      return { result: { kind: "channel", id: channel.id, name: channel.name } };
+      // and submitting" (#proj-approval msg=2cff5887). Defer BOTH branches to
+      // after commit: the public publish's cross-replica fanout (fanoutWithAck
+      // waits for ACK) must not hold the transaction idle-in-transaction, and
+      // the private local emits must not surface a channel that could roll back.
+      channelPublicToPublish = {
+        channel: { ...channel, joined: true },
+        private: channel.type === "private",
+        initialUserIds,
+        userId,
+      };
+      return { result: { kind: "channel", id: channel.id, name: channel.name }, postCommitChannelPublish: channelPublicToPublish };
     }
     case "agent:create": {
       // agent:create is NOT one-click executable: the agent only proposes

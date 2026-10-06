@@ -1,12 +1,12 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { currentDate, type ServerId } from "@botiverse/raft-shared";
-import { getDb, type DatabaseTransaction } from "../db/index.js";
+import { getDb, type DatabaseTransaction } from "../db/index";
 import {
   attachmentObjects,
   attachmentProjectionRevocations,
   attachments,
   messages,
-} from "../db/schema.js";
+} from "../db/schema";
 
 export type AttachmentProjectionRevocationActor = {
   type: "user" | "agent" | "machine" | "system";

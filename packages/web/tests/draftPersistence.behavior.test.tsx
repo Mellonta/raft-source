@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import test, { after, before, beforeEach } from "node:test";
 
 type StorageCall = { method: "setItem" | "removeItem"; key: string; value?: string };
 
@@ -82,7 +81,7 @@ const {
   DRAFT_PERSISTENCE_DEBOUNCE_MS,
   DRAFT_PERSISTENCE_MAX_WAIT_MS,
   useMessageStore,
-} = await import("../src/store/messageStore.js");
+} = await import("../src/store/messageStore");
 
 function installClock() {
   globalThis.setTimeout = clock.setTimeout;
@@ -107,9 +106,9 @@ function reset() {
   Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
 }
 
-before(() => installClock());
+beforeAll(() => installClock());
 beforeEach(() => reset());
-after(() => restoreClock());
+afterAll(() => restoreClock());
 
 test("rapid draft updates coalesce to one trailing write of the exact latest snapshot", () => {
   const store = useMessageStore.getState();
@@ -207,7 +206,7 @@ test("maxWait flushes a continuously edited draft even without lifecycle events"
 test("messageStore imports safely when window and document do not exist", () => {
   const result = spawnSync(process.execPath, [
     "--import",
-    "tsx",
+    "@oxc-node/core/register",
     "--input-type=module",
     "--eval",
     'delete globalThis.window; delete globalThis.document; await import("./src/store/messageStore.ts");',

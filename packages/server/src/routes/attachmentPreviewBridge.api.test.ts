@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -7,14 +7,14 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { attachments, users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { addHuman, createChannel } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { resetStorageForTests } from "../services/storageService.js";
-import { ATTACHMENT_PREVIEW_BRIDGE_SCRIPT } from "../services/attachmentPreviewBridge.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { attachments, users } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { addHuman, createChannel } from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { resetStorageForTests } from "../services/storageService";
+import { ATTACHMENT_PREVIEW_BRIDGE_SCRIPT } from "../services/attachmentPreviewBridge";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

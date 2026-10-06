@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
 import {
   BasicTracer,
@@ -10,7 +9,7 @@ import {
   type CompletedTraceSpan,
 } from "@botiverse/raft-shared";
 
-import { createComputerApi } from "./api.js";
+import { createComputerApi } from "./api";
 
 // Span-based replacement for the deleted file-trace tests. The single-writer
 // ops (reset / upgrade routing) now emit spans through the caller-injected
@@ -84,7 +83,7 @@ test("tryUpgradeViaService with a live service pidfile but unreachable socket â†
     // probe sees a live pid â†’ must report "unreachable" so the CLI/menu-bar
     // fail loud instead of swapping the binary under a running service (the
     // exact silent-strand bug task #100 kills).
-    const { servicePidPath, serviceRunDir } = await import("../paths.js");
+    const { servicePidPath, serviceRunDir } = await import("../paths");
     const { mkdir, writeFile } = await import("node:fs/promises");
     await mkdir(serviceRunDir(home), { recursive: true });
     await writeFile(servicePidPath(home), String(process.pid), { mode: 0o600 });

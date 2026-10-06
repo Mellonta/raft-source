@@ -1,13 +1,13 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 
-import { getDb } from "../db/index.js";
-import { oauthAccessTokens, users } from "../db/schema.js";
-import { createOAuthClient } from "../services/oauthService.js";
-import { createServer } from "../services/serverService.js";
-import * as featureFlagService from "../services/featureFlagService.js";
-import { openTestApp } from "../test/integration/app.js";
+import { getDb } from "../db/index";
+import { oauthAccessTokens, users } from "../db/schema";
+import { createOAuthClient } from "../services/oauthService";
+import { createServer } from "../services/serverService";
+import * as featureFlagService from "../services/featureFlagService";
+import { openTestApp } from "../test/integration/app";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

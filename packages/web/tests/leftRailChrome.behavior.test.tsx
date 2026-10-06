@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -65,6 +64,9 @@ function renderRail() {
 test("#750: the server-switcher attention dot outranks the avatar image's explicit z-[1]", async () => {
   seedServers();
   const { container } = renderRail();
+  // Simulate App's single boot-entry fetch (LeftRail itself no longer fetches
+  // on mount) so the summary lands and the dot appears.
+  void useServerStore.getState().loadServerUnreadSummary();
   const switcher = container.querySelector<HTMLButtonElement>('button[aria-label*="Botiverse"]');
   assert.ok(switcher, "server switcher button renders");
 
@@ -72,15 +74,15 @@ test("#750: the server-switcher attention dot outranks the avatar image's explic
   assert.ok(avatar, "avatar image renders");
   assert.match(avatar.className, /z-\[1\]/, "the avatar image keeps its explicit stack level (the element the dot must beat)");
 
-  const dot = await waitFor(() => {
-    const found = switcher.querySelector<HTMLSpanElement>('span[aria-hidden="true"]');
+  await waitFor(() => {
+    const found = switcher.querySelector<HTMLSpanElement>('[data-slot="app-rail-item-indicator"]');
     assert.ok(found, "attention dot appears once the unread summary lands");
     return found;
   });
   assert.match(
-    dot.className,
-    /z-\[2\]/,
-    "the dot must carry an explicit level ABOVE z-[1] — a z-auto positioned element paints under the image regardless of DOM order",
+    switcher.querySelector('[data-slot="app-rail-item-indicator"]')?.parentElement?.className ?? "",
+    /\[&_\[data-slot=app-rail-item-indicator\]\]:z-\[2\]/,
+    "the indicator's parent must establish an explicit level ABOVE z-[1] — a z-auto positioned element paints under the image regardless of DOM order",
   );
 });
 
@@ -91,3 +93,4 @@ test("#751: the rail column keeps bottom padding so the Settings button is not f
   assert.ok(rail, "left rail renders");
   assert.match(rail.className, /pb-2/, "rail column keeps bottom padding for the trailing Settings button");
 });
+

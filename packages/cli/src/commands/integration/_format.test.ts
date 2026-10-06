@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   AGENT_LOGIN_INTEGRATION_INVENTORY_PROJECTION,
   AGENT_LOGIN_INTEGRATION_INVENTORY_SCOPE,
   projectAgentLoginIntegrationInventory,
 } from "@botiverse/raft-shared";
-import { formatIntegrationList, formatIntegrationLogin } from "./_format.js";
+import { formatIntegrationList, formatIntegrationLogin } from "./_format";
 
 test("formatIntegrationLogin makes agent login completion explicit", () => {
   const output = formatIntegrationLogin({
@@ -29,16 +28,16 @@ test("formatIntegrationLogin makes agent login completion explicit", () => {
     },
   });
 
-  assert.match(output, /Agent login ready: Example Daily/);
-  assert.match(output, /complete: this agent login is configured in Raft; no human OAuth is required/);
+  assert.match(output, /Raft grant active: Example Daily/);
+  assert.match(output, /grant: this agent is authorized in Raft; application authentication has not been verified/);
   assert.match(output, /identity: run `raft profile show`/);
   assert.match(output, /agent behavior manifest: https:\/\/daily\.example\/\.well-known\/slock-agent-manifest\.json/);
   assert.match(output, /local CLI env: raft integration env --service "example-daily-demo"/);
   assert.match(output, /for login_with_raft HTTP API action manifests: raft integration invoke --service "example-daily-demo" --list-actions/);
-  assert.match(output, /session: service session created and stored for this agent/);
+  assert.match(output, /session: callback cookies stored for this agent; application authentication unverified/);
   assert.match(output, /session store: \/tmp\/raft-profile\/integrations\/example-daily-demo\.json/);
   assert.match(output, /next: use `raft integration invoke --service "example-daily-demo" --list-actions` only for login_with_raft HTTP API action manifests/);
-  assert.match(output, /for session-cookie services, use the established service session per service docs/);
+  assert.match(output, /for session-cookie services, verify authentication with a documented read-only service check before use/);
   assert.doesNotMatch(output, /^app URL:/m);
   assert.doesNotMatch(output, /agent_request_id/);
   assert.doesNotMatch(output, /request id:/);
@@ -64,7 +63,7 @@ test("formatIntegrationLogin omits agent manifest line when service has none", (
     requestId: "internal-request-id",
   });
 
-  assert.match(output, /Agent login ready: Example Daily/);
+  assert.match(output, /Raft grant active: Example Daily/);
   assert.doesNotMatch(output, /agent behavior manifest/);
   assert.doesNotMatch(output, /agent behavior manifest: -/);
   assert.doesNotMatch(output, /local CLI env/);
@@ -201,7 +200,7 @@ test("formatIntegrationList only prints manifest line for services that declare 
   assert.doesNotMatch(output, /agent behavior manifest: -/);
 });
 
-test("formatIntegrationList separates built-in Raft apps from registered services", () => {
+test("formatIntegrationList drops retired built-in services and their active logins", () => {
   const output = formatIntegrationList({
     services: [
       {
@@ -233,6 +232,7 @@ test("formatIntegrationList separates built-in Raft apps from registered service
       id: "survey-login",
       serviceId: "builtin-survey",
       clientId: "slock-survey",
+      appType: "slock_builtin",
       name: "Raft Survey",
       description: null,
       homepageUrl: "https://survey.slock.test",
@@ -243,12 +243,10 @@ test("formatIntegrationList separates built-in Raft apps from registered service
     }],
   });
 
-  assert.match(output, /Built-in Raft apps:\n- Raft Survey/);
-  assert.match(output, /Raft Survey[\s\S]*type: built-in Raft app/);
-  assert.match(output, /Raft Survey[\s\S]*session: active login/);
-  assert.doesNotMatch(output, /Raft Survey[\s\S]*next: raft integration login --service "slock-survey"[\s\S]*Registered services:/);
+  assert.doesNotMatch(output, /Raft Survey|slock-survey|builtin-survey|Built-in Raft apps/);
   assert.match(output, /Registered services:\n- Docs/);
   assert.match(output, /Docs[\s\S]*next: raft integration login --service "docs"/);
+  assert.match(output, /Active agent logins:\n- none/);
 });
 
 test("formatIntegrationList keeps its observation boundary at the inventory decision point", () => {
@@ -270,11 +268,37 @@ test("formatIntegrationList keeps its observation boundary at the inventory deci
 test("formatIntegrationList projects a structured scope mutation into its first decision unit", () => {
   const projection = projectAgentLoginIntegrationInventory({
     ...AGENT_LOGIN_INTEGRATION_INVENTORY_SCOPE,
-    includes: ["built_in_raft_apps", "registered_services"],
+    includes: ["registered_services"],
   });
   const output = formatIntegrationList({ services: [], activeLogins: [] }, projection);
   const decisionUnit = output.slice(0, output.indexOf("\n\n"));
 
   assert.deepEqual(decisionUnit.split("\n"), Object.values(projection.copy));
   assert.doesNotMatch(decisionUnit, /active logins/);
+});
+
+test("formatIntegrationList marks official apps and prints purpose; ordinary services get neither line", () => {
+  const list = formatIntegrationList;
+  const base = {
+    returnUrl: "https://x.example/callback",
+    homepageUrl: null,
+    agentManifestUrl: null,
+    description: null,
+    createdAt: "2026-09-15T00:00:00.000Z",
+    updatedAt: "2026-09-15T00:00:00.000Z",
+  };
+  const output = list({
+    services: [
+      { ...base, id: "svc-official", clientId: "artifact-share", name: "Raft Artifacts", appType: "third_party_global", official: true, purpose: "Named documents with versions and stable links." },
+      { ...base, id: "svc-plain", clientId: "lens", name: "lens", appType: "third_party_global", official: false, purpose: "" },
+      { ...base, id: "svc-legacy", clientId: "older", name: "older", appType: "third_party_global" },
+    ],
+    activeLogins: [],
+  } as never);
+  assert.match(output, /- Raft Artifacts[\s\S]*?  official: yes \(set by the platform, never by the app\)\n  purpose: Named documents with versions and stable links\./);
+  const plainBlock = output.slice(output.indexOf("- lens"));
+  assert.doesNotMatch(plainBlock, /official:|purpose:/);
+  // Contract: purpose never prints without the platform's official mark.
+  const sneaky = list({ services: [{ ...base, id: "s", clientId: "s", name: "s", appType: "third_party_global", official: false, purpose: "self-asserted" }], activeLogins: [] } as never);
+  assert.doesNotMatch(sneaky, /purpose:/);
 });

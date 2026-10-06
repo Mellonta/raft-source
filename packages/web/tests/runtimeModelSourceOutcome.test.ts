@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { RUNTIME_MODELS } from "@botiverse/raft-shared";
 import {
   builtInCatalogCapabilityIsLive,
@@ -9,10 +8,10 @@ import {
   projectRuntimeModelLabelPresentation,
   projectRuntimeModelSourcePresentation,
   runtimeModelSelectionIsRunnable,
-} from "../src/hooks/useRuntimeModels.js";
+} from "../src/hooks/useRuntimeModels";
 import type {
   RuntimeModelSourceState,
-} from "../src/hooks/useRuntimeModels.js";
+} from "../src/hooks/useRuntimeModels";
 
 const NON_LIVE: RuntimeModelSourceState[] = [
   { kind: "idle" },
@@ -23,10 +22,27 @@ const NON_LIVE: RuntimeModelSourceState[] = [
   { kind: "error", retryable: true },
 ];
 
-test("every non-live state projects models=[]; bundled metadata cannot re-enter options", () => {
+test("failed Grok detection preserves its reason and offers only unverified known models", () => {
+  const source = parseRuntimeModelSourcePayload({ kind: "error", retryable: true, code: "runtime_not_authenticated" });
+  assert.deepEqual(source, { kind: "error", retryable: true, code: "runtime_not_authenticated" });
+  const presentation = projectRuntimeModelSourcePresentation("grok", source);
+  assert.equal(presentation.source.kind, "error");
+  assert.equal(presentation.fromMachine, false);
+  assert.ok(presentation.models.some((m) => m.id === "grok-4.6"));
+  assert.ok(presentation.models.every((m) => m.verified === "suggestion_only"));
+  assert.equal(runtimeModelSelectionIsRunnable({ runtime: "grok", source, model: "grok-4.6", customMode: false, customAllowed: false }), true);
+  assert.equal(runtimeModelSelectionIsRunnable({ runtime: "grok", source, model: "invented-model", customMode: false, customAllowed: false }), false);
+  assert.deepEqual(parseRuntimeModelSourcePayload({ kind: "error", retryable: true, code: "secret arbitrary text" }), { kind: "error", retryable: true });
+});
+
+test("only terminal non-live states offer unverified fallback; pending requests never show stale catalogs", () => {
   for (const source of NON_LIVE) {
     const presentation = projectRuntimeModelSourcePresentation("kimi-sdk", source);
-    assert.deepEqual(presentation.models, [], source.kind);
+    if (source.kind === "idle" || source.kind === "loading") assert.deepEqual(presentation.models, [], source.kind);
+    else {
+      assert.ok(presentation.models.length > 0);
+      assert.ok(presentation.models.every((m) => m.verified === "suggestion_only"));
+    }
     assert.equal(runtimeModelSelectionIsRunnable({
       source,
       model: "kimi-code/kimi-for-coding",
@@ -138,7 +154,7 @@ test("Built-in catalog provenance survives parsing while malformed and legacy pa
   );
 });
 
-test("Built-in options are target-catalog intersections and preserve unavailable stored identity disabled", () => {
+test("Built-in presets remain editable and detection never replaces the selected identity", () => {
   const providerModels = [
     { id: "openrouter/model-a", label: "Model A" },
     { id: "openrouter/model-b", label: "Model B" },
@@ -156,23 +172,22 @@ test("Built-in options are target-catalog intersections and preserve unavailable
   };
   assert.deepEqual(
     projectBuiltInPresetModelOptions({
-      source: live,
       providerModels,
       persistedModel: "openrouter/model-b",
     }),
     [
       { id: "openrouter/model-a", label: "Model A" },
-      { id: "openrouter/model-b", label: "Model B", disabled: true },
+      { id: "openrouter/model-b", label: "Model B" },
     ],
   );
-  assert.deepEqual(
-    projectBuiltInPresetModelOptions({
-      source: { kind: "error", retryable: true },
-      providerModels,
-      persistedModel: "openrouter/model-b",
-    }),
-    [{ id: "openrouter/model-b", label: "Model B", disabled: true }],
-  );
+  for (const source of [...NON_LIVE, { kind: "live", value: { models: [] } } as const]) {
+    assert.equal(runtimeModelSelectionIsRunnable({ source, model: "openrouter/model-a", customMode: false, customAllowed: false, builtInPreset: true }), true);
+  }
+  assert.deepEqual(projectBuiltInPresetModelOptions({ providerModels, persistedModel: "provider/preserved-exact-id" }), [
+    ...providerModels, { id: "provider/preserved-exact-id", label: "provider/preserved-exact-id" },
+  ]);
+  assert.equal(runtimeModelSelectionIsRunnable({ source: live, model: "openrouter/model-b", customMode: false, customAllowed: false, builtInPreset: true }), true,
+    "a successful detection is advisory in the selector; runtime admission owns rejection");
 });
 
 test("dynamic bundled metadata is suggestion-only even when the legacy catalog claimed launchable", () => {
@@ -184,10 +199,8 @@ test("dynamic bundled metadata is suggestion-only even when the legacy catalog c
     suggestions.find((model) => model.id === raw?.id)?.verified,
     "suggestion_only",
   );
-  assert.deepEqual(
-    projectRuntimeModelSourcePresentation("kimi-sdk", { kind: "missing_config", recovery: "kimi_login" }).models,
-    [],
-  );
+  assert.ok(projectRuntimeModelSourcePresentation("kimi-sdk", { kind: "missing_config", recovery: "kimi_login" })
+    .models.every((model) => model.verified === "suggestion_only"));
 
   assert.equal(
     projectBundledRuntimeModelSuggestions("claude").every((model) => model.verified === "launchable"),
@@ -233,10 +246,10 @@ test("only live membership, explicit provider catalogs, or allowed custom overri
       model: "machine/live",
       customMode: false,
       customAllowed: false,
-      requireBuiltInCatalog: true,
+      builtInPreset: true,
     }),
-    false,
-    "a legacy live list is not a Built-in capability",
+    true,
+    "a legacy live list cannot block Built-in preset selection",
   );
   assert.equal(
     runtimeModelSelectionIsRunnable({
@@ -254,7 +267,7 @@ test("only live membership, explicit provider catalogs, or allowed custom overri
       model: "machine/live",
       customMode: false,
       customAllowed: false,
-      requireBuiltInCatalog: true,
+      builtInPreset: true,
     }),
     true,
   );
@@ -265,7 +278,7 @@ test("only live membership, explicit provider catalogs, or allowed custom overri
       customMode: false,
       customAllowed: false,
       persistedModel: "persisted/legacy",
-      requireBuiltInCatalog: true,
+      builtInPreset: true,
     }),
     true,
     "an unchanged stored selection stays editable without becoming a new catalog write",
@@ -273,12 +286,13 @@ test("only live membership, explicit provider catalogs, or allowed custom overri
   assert.equal(runtimeModelSelectionIsRunnable({ source: { kind: "unsupported" }, model: "default", modelIgnored: true, customMode: false, customAllowed: false }), true);
 });
 
-test("Cursor bundled Auto cannot become create or edit authority while its probe is non-live", () => {
+test("Cursor fallback stays suggestion-only and selecting it requires the matching runtime", () => {
   for (const source of [
     { kind: "no_models" } as const,
     { kind: "error", retryable: true } as const,
   ]) {
-    assert.deepEqual(projectRuntimeModelSourcePresentation("cursor", source).models, []);
+    assert.ok(projectRuntimeModelSourcePresentation("cursor", source).models.every((m) => m.verified === "suggestion_only"));
+    assert.equal(runtimeModelSelectionIsRunnable({ runtime: "cursor", source, model: "auto", customMode: false, customAllowed: true }), true);
     assert.equal(
       projectBundledRuntimeModelSuggestions("cursor")
         .find((model) => model.id === "auto")?.verified,

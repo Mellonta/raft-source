@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { getAppUrl } from "../config/appUrl.js";
+import { getAppUrl } from "../config/appUrl";
 
 /**
  * Public redirect to the current mobile build.

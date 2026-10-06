@@ -1,5 +1,9 @@
 node_modules/
+# A symlinked node_modules (worktree setups) is a file, which "node_modules/" does not match.
+node_modules
+.amp/portals/*
 dist/
+h5-bundle/
 dist-electron/
 shim-dist/
 *.log
@@ -33,3 +37,6 @@ scripts/app-name-ratchet-baseline.txt.mutating
 # Written by scripts/source-available/export-snapshot.mjs into exported snapshots only;
 # tests skip private-layout contracts when it exists.
 /RELEASE_SOURCE
+
+# vitest coverage reports (e.g. packages/sync-core test:coverage)
+coverage/

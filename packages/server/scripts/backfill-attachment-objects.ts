@@ -1,14 +1,14 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { eq } from "drizzle-orm";
-import type { Database } from "../src/db/index.js";
-import * as schema from "../src/db/schema.js";
+import type { Database } from "../src/db/index";
+import * as schema from "../src/db/schema";
 import {
   backfillLegacyAttachmentObjectsBatch,
   getAttachmentObjectParityReport,
   runAttachmentObjectBackfill,
-} from "../src/services/attachmentObjectBackfillService.js";
+} from "../src/services/attachmentObjectBackfillService";
 
 type Options = { apply: boolean; batchSize: number; maxRows: number | null; serverId?: string };
 

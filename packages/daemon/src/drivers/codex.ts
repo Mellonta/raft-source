@@ -1,30 +1,31 @@
+import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, runtimeModelSourceOutcomeFromSet, type AgentConfig, type RuntimeModelInfo, type RuntimeModelSet, type RuntimeModelSourceOutcome, type Tracer , type AxSurfaceText } from "@botiverse/raft-shared";
-import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProbeResult } from "./types.js";
-import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport.js";
-import { codexStateRootCandidates, resolveCodexHomeRootFromEnv } from "./codexHome.js";
-import { detectNodeHostKind, NodeHostUnavailableError, resolveNodeHostLaunch } from "./nodeHostLaunch.js";
-import { firstExistingPath, requiresWindowsShell, resolveCommandOnPath, withWindowsUserEnvironment, type ProbeDeps } from "./probe.js";
+import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProbeResult } from "./types";
+import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
+import { codexStateRootCandidates, resolveCodexHomeRootFromEnv } from "./codexHome";
+import { detectNodeHostKind, NodeHostUnavailableError, resolveNodeHostLaunch } from "./nodeHostLaunch";
+import { firstExistingPath, requiresWindowsShell, resolveCommandOnPath, withWindowsUserEnvironment, type ProbeDeps } from "./probe";
 import {
   CodexEventNormalizer,
   parseCodexJsonRpcLine,
   type JsonRpcMessage,
   type JsonRpcId,
-} from "./codexEventNormalizer.js";
-import { prepareManagedMcpRuntimeProxy } from "../managedMcpRuntimeProxy.js";
+} from "./codexEventNormalizer";
+import { prepareManagedMcpRuntimeProxy } from "../managedMcpRuntimeProxy";
 import {
   buildCodexInstructionShapeAttrs,
   buildCodexInstructionShapeStaticAttrs,
   type CodexInstructionObservationPhase,
   type CodexInstructionShapeStaticAttrs,
   type CodexThreadRequestMethod,
-} from "./codexInstructionShape.js";
+} from "./codexInstructionShape";
 
-export { parseCodexJsonRpcLine } from "./codexEventNormalizer.js";
+export { parseCodexJsonRpcLine } from "./codexEventNormalizer";
 
 /**
  * macOS desktop-bundled Codex CLI locations that are still real install surfaces.
@@ -612,21 +613,19 @@ export function resolveCodexSpawn(commandArgs: string[], deps: ProbeDeps = {}): 
   }
 
   if ((deps.platform ?? process.platform) === "win32") {
-    throw new Error(
+    throw new RuntimeExecutableNotFoundError({ runtimeId: "codex", message:
       "Cannot resolve a compatible Codex CLI app-server entry point on Windows. " +
       "Install Codex Desktop or install @openai/codex globally via npm (npm i -g @openai/codex). " +
       "Ignoring .codex/.sandbox-bin/codex-command-runner because it is a sandbox helper, not the Codex CLI." +
       ` (${search}).` +
       rejectedNote +
-      restartNote,
-    );
+      restartNote });
   }
 
-  throw new Error(
+  throw new RuntimeExecutableNotFoundError({ runtimeId: "codex", message:
     `Cannot resolve a compatible Codex CLI app-server entry point (${search}).` +
     rejectedNote +
-    restartNote,
-  );
+    restartNote });
 }
 
 export function buildCodexAppServerArgs(managedMcp?: { name: string; url: string } | null): string[] {
@@ -1316,9 +1315,8 @@ export class CodexDriver implements RuntimeDriver {
     if (!this.instructionShapeRequestAttrs) return;
 
     const sessionId = this.normalizer.threadId || this.instructionShapeConfiguredSessionId;
-    const span = this.instructionShapeTracer.startSpan("daemon.codex.request_instruction_shape", {
+    this.instructionShapeTracer.emitEvent("daemon.codex.request_instruction_shape", {
       surface: "daemon",
-      kind: "internal",
       attrs: {
         ...this.instructionShapeIdentityAttrs,
         session_id: sessionId || undefined,
@@ -1328,9 +1326,9 @@ export class CodexDriver implements RuntimeDriver {
         session_request_method: requestMethod,
         compaction_starts_count: this.instructionShapeCompactionStarts,
         compaction_finishes_count: this.instructionShapeCompactionFinishes,
+        status: "ok",
       },
     });
-    span.end("ok");
   }
 
   private observeInstructionShapeCompactionEvents(events: ParsedEvent[]): void {

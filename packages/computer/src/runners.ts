@@ -8,12 +8,12 @@
 // resolver; the api takes a concrete serverId / attachment. The api throws the
 // RUNNERS_*/RUNNER_* closed-set errors; `present()` maps them to the shared
 // stderr error contract.
-import { resolveTargetServerId, resolveTargetAttachment } from "./targetServer.js";
-import { resolveRaftHome } from "./paths.js";
-import { fail, info, present } from "./output.js";
-import { formatServerSlugDisplay, listServerAttachments } from "./serverState.js";
-import { createComputerApi } from "./lib/api.js";
-import type { RunnerListItem } from "./apiClient.js";
+import { resolveTargetServerId, resolveTargetAttachment } from "./targetServer";
+import { resolveRaftHome } from "./paths";
+import { fail, info, present } from "./output";
+import { formatServerSlugDisplay, listServerAttachments } from "./serverState";
+import { createComputerApi } from "./lib/api";
+import type { RunnerListItem } from "./apiClient";
 
 export async function runRunnersList(opts: {
   server?: string | null;

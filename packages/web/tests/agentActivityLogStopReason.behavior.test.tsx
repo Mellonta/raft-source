@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, render as rtlRender, screen } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
@@ -96,9 +95,22 @@ test("activity ref chips keep the shared line box inside clamped detail rows", (
   );
 
   const ref = screen.getByRole("link", { name: "#artifacts:62b98a34" });
-  assert.ok(ref.classList.contains("inline-block"));
-  assert.ok(ref.classList.contains("align-bottom"));
-  assert.ok(ref.classList.contains("leading-[1.3em]"));
-  assert.ok(ref.classList.contains("overflow-hidden"));
+  // The chip is now a raft-ui MessageReference, so its box rules arrive as
+  // `has-[…]:` variants (the indicator child decides whether it is inline-block)
+  // rather than the bare utilities the pre-raft-ui implementation used. What the
+  // case is actually protecting is unchanged: the chip stays inside the shared
+  // line box instead of stretching the clamped row.
+  const refClasses = [...ref.classList];
+  assert.ok(
+    refClasses.includes("inline-flex") ||
+      refClasses.some((c) => c.endsWith(":inline-block")),
+    `ref chip must lay out inline, got: ${refClasses.join(" ")}`,
+  );
+  // raft-ui 0.5.16 (#319) aligns message references to the text baseline.
+  assert.ok(refClasses.includes("align-baseline"), "ref chip must sit on the shared baseline");
+  assert.ok(
+    refClasses.some((c) => c.includes("max-w-full")),
+    "ref chip must not exceed its column",
+  );
   assert.ok(ref.parentElement?.classList.contains("line-clamp-2"));
 });

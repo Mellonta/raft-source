@@ -30,13 +30,14 @@
  * call and never logged, never written back, never echoed in any response.
  */
 import { Router, type Router as RouterType } from "express";
-import { requireAuth } from "../middleware/auth.js";
+import { requireAuth } from "../middleware/auth";
 import {
   adoptLegacyMachine,
   adoptLegacyMachineByDaemonId,
   adoptLegacyMachineByFingerprint,
-} from "../services/computerAdoptionService.js";
-import { isDeviceAuthSurfaceEnabled } from "../services/deviceAuthService.js";
+} from "../services/computerAdoptionService";
+import { isDeviceAuthSurfaceEnabled } from "../services/deviceAuthService";
+import { sendJsonServerError } from "./errorResponse";
 
 export const computerAdoptRouter: RouterType = Router();
 
@@ -152,7 +153,10 @@ computerAdoptRouter.post("/adopt-legacy", requireAuth, async (req, res) => {
       resumed: result.resumed,
     });
   } catch (err) {
-    console.error("api.computer.adopt-legacy error:", err);
-    res.status(500).json({ error: "Failed to adopt legacy machine" });
+    sendJsonServerError(req, res, {
+      error: "Failed to adopt legacy machine",
+      logPrefix: "api.computer.adopt-legacy error:",
+      err,
+    });
   }
 });

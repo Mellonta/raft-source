@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@botiverse/raft-shared": ["../shared/src/index.ts"],
+      "@botiverse/raft-shared/*": ["../shared/*"],
+      "@botiverse/raft-sync-core": ["../sync-core/src/index.ts"],
+      "@botiverse/raft-sync-core/*": ["../sync-core/*"]
+    }
+  }
+}

@@ -1,6 +1,6 @@
-import { tokenForHuman } from "../test/integration/credentials.js";
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { tokenForHuman } from "../test/integration/credentials";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { and, desc, eq } from "drizzle-orm";
@@ -8,8 +8,8 @@ import {
   BasicTracer,
   MemoryTraceSink
 } from "@botiverse/raft-shared";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
 import {
   users, servers as serversTable,
   serverMembers,
@@ -17,26 +17,26 @@ import {
   channelHumans,
   channelAgents,
   messages, attachments, inboxNotificationFacts
-} from "../db/schema.js";
-import { addMember, removeMember, updateServerOnboardingAgent } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { createChannel, addHuman, addAgent, removeHuman, removeAgent, findOrCreateDM, findOrCreateAgentDM, findOrCreateUserDM, canAgentAccessChannel, canAgentPostToChannel, canUserPostToChannel, isChannelHuman, resolveChannelByName } from "../services/channelService.js";
+} from "../db/schema";
+import { addMember, removeMember, updateServerOnboardingAgent } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { createChannel, addHuman, addAgent, removeHuman, removeAgent, findOrCreateDM, findOrCreateAgentDM, findOrCreateUserDM, canAgentAccessChannel, canAgentPostToChannel, canUserPostToChannel, isChannelHuman, resolveChannelByName } from "../services/channelService";
 import {
   __resetMessageServiceDepsForTests,
   __setMessageServiceDepsForTests,
   createMessage,
-} from "../services/messageService.js";
+} from "../services/messageService";
 import {
   recordInboxNotificationFacts
-} from "../services/inboxNotificationService.js";
-import { registerMachine } from "../services/machineService.js";
-import { assignMachine } from "../services/agentService.js";
+} from "../services/inboxNotificationService";
+import { registerMachine } from "../services/machineService";
+import { assignMachine } from "../services/agentService";
 import {
   __resetOnboardingServiceDepsForTests,
   __setOnboardingServiceDepsForTests,
   triggerAllChannelUnlockOnboarding,
-} from "../services/onboardingService.js";
-import { createServer, installFakeIo, headers, seedUser } from "./channels.api.fixtures.js";
+} from "../services/onboardingService";
+import { createServer, installFakeIo, headers, seedUser } from "./channels.api.fixtures";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -110,13 +110,25 @@ test("GET /api/channels/dm records DM list phases and constant query shape", asy
     headers: headers(ownerToken, server.id),
   });
   assert.equal(res.status, 200);
-  const body = await res.json() as Array<{ id: string; peerType: "agent" | "user"; lastMessageAt: string | null }>;
+  const body = await res.json() as Array<{
+    id: string;
+    peerType: "agent" | "user";
+    lastMessageAt: string | null;
+    lastMessagePreview: string | null;
+    lastMessageSenderName: string | null;
+  }>;
   assert.equal(body.length, 3);
   assert.equal(body.filter((channel) => channel.peerType === "agent").length, 1);
   assert.equal(body.filter((channel) => channel.peerType === "user").length, 2);
   assert.equal(body.find((channel) => channel.id === agentDm.id)?.lastMessageAt, agentDmMessage.createdAt.toISOString());
   assert.equal(body.find((channel) => channel.id === userDm.id)?.lastMessageAt, userDmMessage.createdAt.toISOString());
   assert.equal(body.find((channel) => channel.id === selfDm.id)?.lastMessageAt, null);
+  assert.equal(body.find((channel) => channel.id === agentDm.id)?.lastMessagePreview, "agent dm message");
+  assert.equal(body.find((channel) => channel.id === agentDm.id)?.lastMessageSenderName, owner.displayName);
+  assert.equal(body.find((channel) => channel.id === userDm.id)?.lastMessagePreview, "user dm message");
+  assert.equal(body.find((channel) => channel.id === userDm.id)?.lastMessageSenderName, peer.displayName);
+  assert.equal(body.find((channel) => channel.id === selfDm.id)?.lastMessagePreview, null);
+  assert.equal(body.find((channel) => channel.id === selfDm.id)?.lastMessageSenderName, null);
 
   const span = sink.getAllSpans().find((candidate) =>
     candidate.name === "server.http.request"
@@ -1729,4 +1741,45 @@ test("legacy agent channel-members and server info respect hidden human director
   assert.equal(serverInfo.status, 200);
   const serverInfoBody = await serverInfo.json() as { humans: Array<{ name: string }> };
   assert.deepEqual(serverInfoBody.humans, [], "legacy agent server info must not enumerate humans when the human directory is hidden");
+});
+
+test("saved check ignores client-local message ids instead of failing the whole batch (task #335)", async ({ app, seed }) => {
+  const owner = await seed.human();
+  const server = await seed.server({ owner, members: [] });
+  const ownerToken = await tokenForHuman(owner.email);
+  const ownerHeaders = headers(ownerToken, server.id);
+  const createRes = await fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: ownerHeaders,
+    body: JSON.stringify({ name: "saved-check-local-ids", visibility: "public" }),
+  });
+  assert.equal(createRes.status, 200);
+  const channel = await createRes.json() as { id: string };
+  const savedMessage = await createMessage(channel.id, "user", owner.id, "saved and checked");
+  const unsavedMessage = await createMessage(channel.id, "user", owner.id, "not saved");
+  const save = await fetch(`${app.baseUrl}/api/channels/saved`, {
+    method: "POST",
+    headers: ownerHeaders,
+    body: JSON.stringify({ messageId: savedMessage.id }),
+  });
+  assert.equal(save.status, 200);
+
+  // What mobile sends while an optimistic send is still pending: server ids mixed with local ids.
+  const check = await fetch(`${app.baseUrl}/api/channels/saved/check`, {
+    method: "POST",
+    headers: ownerHeaders,
+    body: JSON.stringify({
+      messageIds: [savedMessage.id, "local-send-thread-7", unsavedMessage.id, "not-a-uuid", "0"],
+    }),
+  });
+  assert.equal(check.status, 200, await check.clone().text());
+  assert.deepEqual((await check.json() as { savedIds: string[] }).savedIds, [savedMessage.id]);
+
+  const onlyLocal = await fetch(`${app.baseUrl}/api/channels/saved/check`, {
+    method: "POST",
+    headers: ownerHeaders,
+    body: JSON.stringify({ messageIds: ["local-send-thread-8"] }),
+  });
+  assert.equal(onlyLocal.status, 200);
+  assert.deepEqual((await onlyLocal.json() as { savedIds: string[] }).savedIds, []);
 });

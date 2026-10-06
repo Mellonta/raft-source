@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { canViewAgentPrivateSurfaces } from "../src/utils/agentVisibility";
 
 test("agent private surfaces are visible to server agent managers", () => {

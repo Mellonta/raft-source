@@ -1,9 +1,8 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { servers, users, agents, channels, channelHumans, channelAgents, serverMembers, messages, messageMentions, mentionDeliveryOccurrences, threadFollows, inboxNotificationFacts, inboxServingRows } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { servers, users, agents, channels, channelHumans, channelAgents, serverMembers, messages, messageMentions, mentionDeliveryOccurrences, threadFollows, inboxNotificationFacts } from "../db/schema";
 import {
   broadcastAndDeliver,
   drainSenderReadReceiptsForTests,
@@ -14,8 +13,8 @@ import {
   MentionValidationError,
   __setMessageServiceDepsForTests,
   __resetMessageServiceDepsForTests,
-} from "./messageService.js";
-import { getInboxItems, markRead } from "./channelService.js";
+} from "./messageService";
+import { getInboxItems, markRead } from "./channelService";
 import { eq, and } from "drizzle-orm";
 
 
@@ -316,7 +315,6 @@ test("mention write: user randomId replay preserves winning mention facts after 
     messages: (await db.select().from(messages)).length,
     mentions: (await db.select().from(messageMentions)).length,
     inboxFacts: (await db.select().from(inboxNotificationFacts)).length,
-    inboxServingRows: (await db.select().from(inboxServingRows)).length,
   };
 
   await db.update(users).set({ name: "Robert" }).where(eq(users.id, user2.id));
@@ -327,7 +325,6 @@ test("mention write: user randomId replay preserves winning mention facts after 
     messages: (await db.select().from(messages)).length,
     mentions: (await db.select().from(messageMentions)).length,
     inboxFacts: (await db.select().from(inboxNotificationFacts)).length,
-    inboxServingRows: (await db.select().from(inboxServingRows)).length,
   }, beforeReplay, "replay must not create new message, mention, or inbox facts");
 
   const [persistedMention] = await db.select().from(messageMentions)
@@ -347,7 +344,6 @@ test("mention write: user randomId replay preserves winning mention facts after 
     .filter((fact) => fact.messageId === fresh.id);
   assert.ok(freshFacts.length > 0, "fresh message still creates ordinary channel inbox facts");
   assert.equal(freshFacts.some((fact) => fact.personalMention), false, "stale identity creates no personal mention fact");
-  assert.ok((await db.select().from(inboxServingRows)).length >= beforeReplay.inboxServingRows);
 });
 
 test("mention write: unmatched handle case does not resolve a target", async ({ db: database }) => {

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { createRaftClient } from "./index.js";
+import { createRaftClient } from "./index";
 
 const credential = "sk_agent_receive_test_sentinel";
 const batch = (events: unknown[] = []) => ({
@@ -29,7 +28,7 @@ test("receive projects typed snake/camel message fields and preserves batch curs
         future_private_field: "discard" },
       { id: "second", seq: 14, senderType: "agent", senderName: "Bot", channelId: "channel",
         content: "reply", createdAt: "2026-09-08T12:01:00Z" },
-    ]), last_seen_msgId: "second", last_seen_seq: 14, has_more: true, reply_target: "channelId:channel" });
+    ]), last_seen_msgId: "second", last_seen_seq: 14, has_more: true, reply_target: "#general" });
   });
   const result = await sdk.events.receive({ since: 12, limit: 100 });
   assert.equal(result.ok, true);
@@ -38,7 +37,7 @@ test("receive projects typed snake/camel message fields and preserves batch curs
   assert.equal(result.data.lastSeenSeq, 14);
   assert.equal(result.data.lastSeenMessageId, "second");
   assert.equal(result.data.hasMore, true);
-  assert.equal(result.data.replyTarget, "channelId:channel");
+  assert.equal(result.data.replyTarget, "#general");
   const [first, second] = result.data.events;
   assert.equal(first.type, "message");
   assert.equal(first.messageId, "first");
@@ -63,7 +62,7 @@ test("empty receive and latest preserve nullable cursor without inventing events
   });
   const result = await sdk.events.receive({ since: "latest" });
   assert.deepEqual(result, { ok: true, status: 200, data: {
-    events: [], lastSeenSeq: null, lastSeenMessageId: null, hasMore: false, replyTarget: null,
+    events: [], lastSeenSeq: null, lastSeenMessageId: null, hasMore: false, replyTarget: null, ackMode: null,
   } });
 });
 
@@ -135,4 +134,27 @@ test("third party provenance stays typed and inert; unknown senders are not huma
     { sender_type: "human", external_message: provenance },
   ]))).events.receive();
   assert.equal(forged.ok, false);
+});
+
+test("cursor ack passes ack=cursor with the previous cursor and reports the Server's ack mode", async () => {
+  const seen: Array<{ since: string | null; ack: string | null }> = [];
+  const sdk = client(async (input) => {
+    const url = new URL(String(input));
+    seen.push({ since: url.searchParams.get("since"), ack: url.searchParams.get("ack") });
+    return Response.json({ ...batch([{ message_id: "m", seq: 21, sender_type: "human", content: "hi" }]),
+      last_seen_seq: 21, ack_mode: "cursor" });
+  });
+  const result = await sdk.events.receive({ since: 20, ack: "cursor" });
+  assert.deepEqual(seen, [{ since: "20", ack: "cursor" }]);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.data.ackMode, "cursor");
+  assert.equal(result.data.lastSeenSeq, 21);
+
+  const failing = client(async () => new Response("nope", { status: 503 }));
+  const failed = await failing.events.receive({ since: 21, ack: "cursor" });
+  assert.equal(failed.ok, false);
+  if (failed.ok) return;
+  assert.match(failed.error.message, /not acknowledged/);
+  assert.equal((await failing.events.receive({ ack: "immediate" as never })).ok, false);
 });

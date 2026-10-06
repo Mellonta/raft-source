@@ -1,6 +1,6 @@
 import {
   FeedbackTransportError,
-} from "@botiverse/hands-feedback-react/source";
+} from "@botiverse/hands-feedback-react";
 import type {
   FeedbackAttachment,
   FeedbackComment,
@@ -8,8 +8,13 @@ import type {
   FeedbackTicketDetail,
   FeedbackTicketSummary,
   HandsFeedbackTransport,
-} from "@botiverse/hands-feedback-react/source";
+} from "@botiverse/hands-feedback-react";
 import api from "../api/client";
+import { captureFeedbackUnreadUpdate } from "./feedbackUnreadState";
+import { desktopFeedbackMetadata } from "./agentIssueTicket";
+
+// Re-exported for existing callers and tests.
+export { desktopFeedbackMetadata };
 
 type ApiTicket = {
   id: string;
@@ -177,6 +182,7 @@ function createUploadProgressReporter(
 async function getTicket(
   input: Parameters<HandsFeedbackTransport["getTicket"]>[0],
 ): Promise<FeedbackTicketDetail> {
+  const updateUnread = captureFeedbackUnreadUpdate();
   try {
     const { data } = await api.get<ApiTicketDetail>(
       `/product-feedback/tickets/${encodeURIComponent(input.ticketId)}`,
@@ -188,6 +194,7 @@ async function getTicket(
         signal: input.signal,
       },
     );
+    updateUnread(data.unread_total);
     return mapDetail(data);
   } catch (error) {
     throw feedbackTransportError(error);
@@ -232,6 +239,8 @@ export const handsFeedbackTransport: HandsFeedbackTransport = {
     const form = new FormData();
     form.set("type", input.kind === "feedback" ? "idea" : "problem");
     form.set("message", input.message);
+    const desktopMetadata = await desktopFeedbackMetadata();
+    if (desktopMetadata) form.set("metadata", JSON.stringify(desktopMetadata));
     form.set("submission_id", input.submissionId);
     form.set("may_contact", "false");
     input.attachments.forEach((attachment) => {

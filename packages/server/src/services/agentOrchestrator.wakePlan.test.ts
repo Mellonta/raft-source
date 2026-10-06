@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { buildAgentLifecycleStateSnapshot, planWakeAction } from "./agentOrchestrator.js";
+import { buildAgentLifecycleStateSnapshot, planWakeAction } from "./agentOrchestrator";
 
 function wakeInput(input: Parameters<typeof buildAgentLifecycleStateSnapshot>[0]) {
   return { state: buildAgentLifecycleStateSnapshot(input) };

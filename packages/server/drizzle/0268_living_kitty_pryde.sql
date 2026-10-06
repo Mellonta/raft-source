@@ -1,0 +1,2 @@
+ALTER TABLE "servers" ADD COLUMN "public_guest_join_enabled" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+ALTER TABLE "servers" ADD CONSTRAINT "servers_public_guest_join_requires_visibility" CHECK (NOT "servers"."public_guest_join_enabled" OR "servers"."publicly_visible");

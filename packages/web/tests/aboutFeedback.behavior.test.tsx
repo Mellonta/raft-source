@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import type { ReactNode } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -105,17 +104,26 @@ function setMobileViewport(matches: boolean) {
 
 test("About content does not duplicate the Settings sidebar Feedback action", () => {
   renderAbout();
-  assert.equal(screen.queryByRole("button", { name: /Feedback/i }), null);
-  assert.equal(screen.queryByRole("dialog", { name: /My feedback/i }), null);
+  assert.ok(screen.queryByRole("button", { name: /Feedback/i }) === null);
+  assert.ok(screen.queryByRole("dialog", { name: /My feedback/i }) === null);
 });
 
 test("feedback entry renders the real Hands SDK inbox and new-feedback route", async () => {
   mockEmptyInbox();
   renderFeedbackPanel();
 
-  assert.equal(screen.queryByRole("dialog"), null);
-  assert.ok(await screen.findByRole("heading", { name: "My Feedback" }));
+  assert.ok(screen.queryByRole("dialog") === null);
+  assert.equal(
+    screen.getByTestId("settings-feedback-panel-header").textContent?.includes("Feedback"),
+    true,
+  );
+  // The settings PanelHeader owns the page title, so the SDK inbox title is
+  // hidden (not just visually) while its actions stay reachable.
+  assert.ok(await screen.findByRole("button", { name: "New feedback" }));
+  assert.ok(screen.queryByRole("heading", { name: "My Feedback" }) === null);
+  assert.equal(screen.getAllByRole("button", { name: "New feedback" }).length, 1);
   fireEvent.click(screen.getByRole("button", { name: "New feedback" }));
+  // The composer keeps its own view title.
   assert.ok(screen.getByRole("heading", { name: "New feedback" }));
   assert.ok(screen.getByRole("textbox", { name: "What would you like us to know?" }));
 });
@@ -292,12 +300,9 @@ test("feedback settings renders one shared page header instead of nested setting
     </MemoryRouter>,
   ));
 
-  await screen.findByRole("heading", { name: "My Feedback" });
+  await screen.findByRole("button", { name: "New feedback" });
   assert.equal(screen.queryByTestId("settings-panel-header"), null);
-  assert.equal(
-    screen.getAllByRole("heading", { name: "My Feedback" }).length,
-    1,
-  );
+  assert.ok(screen.queryByRole("heading", { name: "My Feedback" }) === null);
   assert.equal(
     screen.getAllByRole("button", { name: "New feedback" }).length,
     1,
@@ -309,9 +314,10 @@ test("feedback workspace follows the explicit Raft display locale", async () => 
   mockEmptyInbox();
   renderFeedbackPanel();
 
-  assert.equal(screen.queryByRole("dialog"), null);
-  assert.ok(await screen.findByRole("heading", { name: "我的反馈" }));
+  assert.ok(screen.queryByRole("dialog") === null);
+  assert.ok(await screen.findByRole("button", { name: "新建反馈" }));
   assert.equal(screen.getAllByRole("button", { name: "新建反馈" }).length, 1);
+  assert.ok(screen.queryByRole("button", { name: "New feedback" }) === null);
 });
 
 test("feedback image attachments open an authenticated Lightbox before download", async () => {
@@ -415,7 +421,7 @@ test("feedback image attachments open an authenticated Lightbox before download"
   assert.equal(clicked.href, "blob:feedback-attachment");
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   await waitFor(() => {
-    assert.equal(screen.queryByRole("button", { name: "Download" }), null);
+    assert.ok(screen.queryByRole("button", { name: "Download" }) === null);
     assert.equal(screen.getAllByRole("img", { name: "screen.png" }).length, 1);
   });
   assert.deepEqual(revoked, ["blob:feedback-attachment"]);

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { productFeedbackServerTiming, sanitizeHandsServerTiming } from "./productFeedbackTiming.js";
+import { productFeedbackServerTiming, sanitizeHandsServerTiming } from "./productFeedbackTiming";
 
 test("feedback timing forwards only fixed Hands duration metrics", () => {
   assert.deepEqual(sanitizeHandsServerTiming([

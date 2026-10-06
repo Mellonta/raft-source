@@ -1,23 +1,31 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 import {
+  agentApiSenderMentionDeliveryRowSchema,
   agentApiContract,
+  agentApiIntegrationListResponseSchema,
+  agentApiIntegrationMarketplaceResponseSchema,
   agentApiIntegrationAppStatusResponseSchema,
   agentApiIntegrationAppPrepareBodySchema,
   agentApiIntegrationAppTransferOwnerResponseSchema,
   agentApiSendBodySchema,
+  agentApiSendResponseSchema,
   agentApiSendV2BodySchema,
   agentApiTaskCreateBodySchema,
   agentApiTaskEnvelopeSchema,
   agentApiTaskResourceReceiptBodySchema,
   buildAgentApiRouteManifest,
+  computeAgentApiManifestVersion,
   getAgentApiResponseKind,
   parseAgentApiAppSourceAckReject,
   parseAgentApiResponse,
   type AgentApiRouteKey,
-} from "./agentApiContract.js";
-import { AGENT_API_ROUTE_MANIFEST } from "./generated/agentApiRoutes.js";
+} from "./agentApiContract";
+import { AGENT_API_MANIFEST_VERSION, AGENT_API_ROUTE_MANIFEST } from "./generated/agentApiRoutes";
+import { AGENT_API_ROUTE_META, getAgentApiRetryPolicy, toAgentApiToolAnnotations } from "./agentApiRouteMeta";
+import { AGENT_API_DESCRIPTION_SCHEMA, buildAgentApiDescription } from "./agentApiDescription";
 
 test("agent-api v1 remains passthrough while v2 validates typed mention identity", () => {
   const mention = {
@@ -45,8 +53,133 @@ test("agent-api v1 remains passthrough while v2 validates typed mention identity
   );
 });
 
+test("integration discovery defaults new official metadata closed for older servers", () => {
+  const service = {
+    id: "client-1",
+    clientId: "drive9",
+    name: "Drive9",
+    description: null,
+    homepageUrl: null,
+    returnUrl: null,
+    agentManifestUrl: null,
+    createdAt: "2026-06-27T02:55:01.000Z",
+    updatedAt: "2026-06-27T02:55:01.000Z",
+  };
+  const list = agentApiIntegrationListResponseSchema.parse({ services: [service], activeLogins: [] });
+  assert.equal(list.services[0]?.official, false);
+  assert.equal(list.services[0]?.purpose, "");
+
+  const marketplace = agentApiIntegrationMarketplaceResponseSchema.parse({
+    surface: "public_marketplace",
+    metadataTrust: "untrusted_app_supplied",
+    query: null,
+    limit: 10,
+    apps: [{
+      ...service,
+      category: "Storage",
+      dataAccessSummary: null,
+      allowedScopes: [],
+      logoUrl: null,
+      installedOnServer: false,
+      agentManifestUrlSource: null,
+    }],
+  });
+  assert.equal(marketplace.apps[0]?.official, false);
+  assert.equal(marketplace.apps[0]?.purpose, "");
+});
+
+test("agent-api send contract supports effect-free idempotency reconciliation", () => {
+  assert.deepEqual(agentApiSendV2BodySchema.parse({
+    target: "#proj-message",
+    idempotencyKey: "send-identity",
+    reconcileOnly: true,
+  }), {
+    target: "#proj-message",
+    idempotencyKey: "send-identity",
+    reconcileOnly: true,
+  });
+  assert.deepEqual(agentApiSendResponseSchema.parse({
+    ok: true,
+    state: "not_found",
+    reconciliation: true,
+  }), {
+    ok: true,
+    state: "not_found",
+    reconciliation: true,
+  });
+  assert.deepEqual(agentApiSendResponseSchema.parse({
+    ok: true,
+    state: "committed",
+    messageId: "message-1",
+    messageSeq: 42,
+    reconciliation: true,
+    receiptComplete: false,
+  }), {
+    ok: true,
+    state: "committed",
+    messageId: "message-1",
+    messageSeq: 42,
+    reconciliation: true,
+    receiptComplete: false,
+  });
+});
+
 test("generated agent-api route manifest is fresh", () => {
   assert.deepEqual(AGENT_API_ROUTE_MANIFEST, buildAgentApiRouteManifest());
+  assert.equal(AGENT_API_MANIFEST_VERSION, computeAgentApiManifestVersion(buildAgentApiRouteManifest()));
+  assert.match(AGENT_API_MANIFEST_VERSION, /^[0-9a-f]{16}$/);
+});
+
+test("checked-in language-neutral agent-api description is fresh and complete", () => {
+  const checkedIn = JSON.parse(readFileSync(resolve(import.meta.dirname, "../agent-api/agent-api.v1.json"), "utf8")) as unknown;
+  const built = buildAgentApiDescription();
+  assert.deepEqual(checkedIn, JSON.parse(JSON.stringify(built)));
+  assert.equal(built.schema, AGENT_API_DESCRIPTION_SCHEMA);
+  assert.equal(built.manifestVersion, AGENT_API_MANIFEST_VERSION);
+  assert.deepEqual(built.routes.map((route) => route.key), AGENT_API_ROUTE_MANIFEST.map((route) => route.key));
+  for (const route of built.routes) {
+    const contract = agentApiContract[route.key];
+    assert.equal(route.request.body !== null, "body" in contract.request && Boolean(contract.request.body), `${route.key} body schema presence`);
+    assert.equal(route.response.body !== null, "body" in contract.response && Boolean(contract.response.body), `${route.key} response schema presence`);
+    if (route.request.body) {
+      const body = route.request.body as { type?: unknown; anyOf?: unknown; oneOf?: unknown };
+      assert.ok(body.type === "object" || Array.isArray(body.anyOf) || Array.isArray(body.oneOf), `${route.key} body schema is an object or union schema`);
+    }
+  }
+});
+
+test("agent-api manifest carries operating metadata that is not inferred from the HTTP method", () => {
+  for (const entry of AGENT_API_ROUTE_MANIFEST) {
+    assert.deepEqual(
+      { sideEffect: entry.sideEffect, idempotency: entry.idempotency, destructive: entry.destructive, audience: entry.audience },
+      AGENT_API_ROUTE_META[entry.key],
+      `${entry.key} operating metadata`,
+    );
+  }
+  // GET /events consumes inbox rows under the default ack mode.
+  assert.equal(AGENT_API_ROUTE_META.events.sideEffect, "destructive_read");
+  assert.equal(getAgentApiRetryPolicy(AGENT_API_ROUTE_META.events), "single_attempt");
+  // POST /resolve-channel changes nothing.
+  assert.equal(AGENT_API_ROUTE_META.resolveChannel.sideEffect, "read");
+  assert.equal(getAgentApiRetryPolicy(AGENT_API_ROUTE_META.resolveChannel), "retry");
+  // Keyed writes retry only with a key; unkeyed writes never retry.
+  assert.equal(getAgentApiRetryPolicy(AGENT_API_ROUTE_META.messageSend), "retry_when_keyed");
+  assert.equal(getAgentApiRetryPolicy(AGENT_API_ROUTE_META.taskClaim), "single_attempt");
+  // MCP destructiveHint: additive writes are not destructive; removals, archives, rotations, and overwrites are.
+  assert.deepEqual(toAgentApiToolAnnotations(AGENT_API_ROUTE_META.channelJoin), {
+    readOnlyHint: false, destructiveHint: false, idempotentHint: true,
+  });
+  for (const key of ["messageSend", "messageReactionAdd", "taskCreate", "taskClaim", "channelJoin", "channelMute"] as const) {
+    assert.equal(AGENT_API_ROUTE_META[key].destructive, false, `${key} is an additive write`);
+  }
+  for (const key of ["taskDelete", "channelArchive", "channelLeave", "integrationAppRotateSecret", "integrationAppTransferOwner", "reminderCancel", "pushWebhookDelete", "taskUpdateStatus", "profileUpdate"] as const) {
+    assert.equal(AGENT_API_ROUTE_META[key].destructive, true, `${key} removes or overwrites shared state`);
+  }
+  assert.equal(AGENT_API_ROUTE_META.events.destructive, true);
+  const destructiveCount = Object.values(AGENT_API_ROUTE_META).filter((meta) => meta.destructive).length;
+  assert.ok(destructiveCount < Object.keys(AGENT_API_ROUTE_META).length / 2, "destructive must stay the minority signal");
+  // External Agents get a typed refusal on managed-only routes.
+  assert.equal(AGENT_API_ROUTE_META.reminderCreate.audience, "managed");
 });
 
 test("app-source ACK reject parser accepts only closed Server terminal responses", () => {
@@ -123,6 +256,8 @@ test("integration login contract preserves typed Marketplace install guidance", 
       id: "client-1",
       clientId: "me-build",
       appType: "third_party_global",
+      official: false,
+      purpose: "",
       name: "Me Build",
       description: null,
       homepageUrl: "https://me.build",
@@ -362,43 +497,6 @@ test("agent-api response contracts parse representative envelopes", () => {
         firstScreen: "# Spin up a preview environment",
       }],
     },
-    wikiManifestGet: {
-      configured: true,
-      wikiSpaceId: "11111111-1111-4111-8111-111111111111",
-      etag: null,
-      manifest: null,
-    },
-    wikiArtifactRead: {
-      configured: true,
-      wikiSpaceId: "11111111-1111-4111-8111-111111111111",
-      etag: "\"manifest-v1\"",
-      artifact: {
-        id: "22222222-2222-4222-8222-222222222222",
-        artifactType: "page",
-        slug: "architecture",
-        title: "Architecture",
-        summary: "Summary",
-        currentUnderstanding: "Current understanding",
-        status: "current",
-        confidence: "high",
-        sourcePolicy: "cached_summary",
-        sourceRefs: [],
-        revision: {
-          id: "33333333-3333-4333-8333-333333333333",
-          key: "servers/server/wiki/revisions/artifact/revision.md",
-          sha256: "a".repeat(64),
-          bytes: 15,
-        },
-        updatedAt: "2026-07-26T00:00:00.000Z",
-      },
-      markdown: "# Architecture\n",
-    },
-    wikiManifestPublish: {
-      configured: true,
-      wikiSpaceId: "11111111-1111-4111-8111-111111111111",
-      etag: "\"manifest-v1\"",
-      manifest: {},
-    },
     managedMcpTools: {
       catalogVersion: 1,
       tools: [{
@@ -540,11 +638,45 @@ test("agent-api response contracts parse representative envelopes", () => {
     threadUnfollow: {
       ok: true,
     },
+    threadList: {
+      threads: [{
+        target: "#proj-runtime:abcd1234",
+        threadChannelId: "11111111-1111-4111-8111-111111111111",
+        parentChannelRef: "#proj-runtime",
+        parentMessageId: "22222222-2222-4222-8222-222222222222",
+        parentMessageShortId: "abcd1234",
+        followedAt: "2026-09-10T12:00:00.000Z",
+        reason: "mentioned",
+        doneAt: null,
+      }],
+    },
+    inboxList: {
+      view: "unread",
+      items: [{
+        target: "dm:@richard",
+        kind: "dm",
+        unread: 3,
+        mentions: 0,
+        lastReadSeq: 1199,
+        activitySeq: 1203,
+        latestSenderName: "richard",
+        latestAt: "2026-09-10T12:00:00.000Z",
+      }],
+      hasMore: false,
+      nextBeforeSeq: null,
+      totals: { conversations: 1, dms: 1, mentions: 0 },
+    },
     serverUpdate: {
       id: "server-1",
       name: "Renamed Server",
       hideHumansFromMembers: true,
       avatarUrl: null,
+    },
+    agentContext: {
+      agent: { id: "agent-1", name: "alice", displayName: "Alice", description: "Reviewer", runtime: "external", external: true },
+      server: { id: "server-1", slug: "acme", name: "Acme" },
+      credential: { capabilities: ["read", "send"] },
+      prompt: { audience: "self-hosted-runner", text: "# Raft CLI operating guide" },
     },
     serverInfo: {
       runtimeContext: {
@@ -560,6 +692,17 @@ test("agent-api response contracts parse representative envelopes", () => {
       channels: [{ id: "channel-1", name: "proj-runtime", joined: true }],
       agents: [{ name: "HaoHao", status: "active", role: "admin" }],
       humans: [{ name: "xxchan", role: "owner" }],
+    },
+    userChannels: {
+      user: { name: "HaoHao", status: "active", role: "admin" },
+      kind: "agent",
+      memberships: [{ id: "channel-1", name: "proj-runtime", joined: true }],
+      uncheckedCount: 0,
+      page: { total: 1, offset: 0, limit: 50 },
+    },
+    senderMentionDeliveries: {
+      messageId: "11111111-1111-4111-8111-111111111111",
+      deliveries: [{ targetHandle: "@Noel", outcome: "lost", reasonCategory: "quota" }],
     },
     mentionActionsPending: {
       pendingMentionActions: [{ resolutionId: "res-1", targetHandle: "@Noel" }],
@@ -655,87 +798,6 @@ test("agent-api response contracts parse representative envelopes", () => {
     taskHistory: {
       task: { taskNumber: 24, title: "Current title", description: "Current criteria", revision: 2 },
       events: [],
-    },
-    migrationBegin: {
-      migration: {
-        id: "migration-1",
-        agentId: "agent-1",
-        sourceMachineId: "machine-a",
-        targetMachineId: "machine-b",
-        state: "prep",
-        manifestPath: null,
-        manifestSha256: null,
-        arrivalReportPath: null,
-        arrivalReportSha256: null,
-        abortReason: null,
-        failureReason: null,
-        prepDeadlineAt: "2026-06-27T03:05:00.000Z",
-        transferDeadlineAt: "2026-06-27T03:55:00.000Z",
-        arrivalDeadlineAt: "2026-06-27T04:05:00.000Z",
-        readyAt: null,
-        flippedAt: null,
-        arrivedAt: null,
-        completedAt: null,
-        abortedAt: null,
-        revision: 1,
-        createdAt: "2026-06-27T02:55:00.000Z",
-        updatedAt: "2026-06-27T02:55:00.000Z",
-      },
-    },
-    migrationStatus: {
-      migration: null,
-    },
-    migrationReady: {
-      migration: {
-        id: "migration-1",
-        agentId: "agent-1",
-        sourceMachineId: "machine-a",
-        targetMachineId: "machine-b",
-        state: "ready",
-        manifestPath: "MIGRATION-MANIFEST.json",
-        manifestSha256: "sha256:manifest",
-        arrivalReportPath: null,
-        arrivalReportSha256: null,
-        abortReason: null,
-        failureReason: null,
-        prepDeadlineAt: "2026-06-27T03:05:00.000Z",
-        transferDeadlineAt: "2026-06-27T03:55:00.000Z",
-        arrivalDeadlineAt: "2026-06-27T04:05:00.000Z",
-        readyAt: "2026-06-27T02:58:00.000Z",
-        flippedAt: null,
-        arrivedAt: null,
-        completedAt: null,
-        abortedAt: null,
-        revision: 2,
-        createdAt: "2026-06-27T02:55:00.000Z",
-        updatedAt: "2026-06-27T02:58:00.000Z",
-      },
-    },
-    migrationArrived: {
-      migration: {
-        id: "migration-1",
-        agentId: "agent-1",
-        sourceMachineId: "machine-a",
-        targetMachineId: "machine-b",
-        state: "completed",
-        manifestPath: "MIGRATION-MANIFEST.json",
-        manifestSha256: "sha256:manifest",
-        arrivalReportPath: "MIGRATION-ARRIVED.json",
-        arrivalReportSha256: "sha256:arrived",
-        abortReason: null,
-        failureReason: null,
-        prepDeadlineAt: "2026-06-27T03:05:00.000Z",
-        transferDeadlineAt: "2026-06-27T03:55:00.000Z",
-        arrivalDeadlineAt: "2026-06-27T04:05:00.000Z",
-        readyAt: "2026-06-27T02:58:00.000Z",
-        flippedAt: "2026-06-27T03:00:00.000Z",
-        arrivedAt: "2026-06-27T03:02:00.000Z",
-        completedAt: "2026-06-27T03:02:00.000Z",
-        abortedAt: null,
-        revision: 4,
-        createdAt: "2026-06-27T02:55:00.000Z",
-        updatedAt: "2026-06-27T03:02:00.000Z",
-      },
     },
     reminderList: {
       reminders: [{
@@ -919,6 +981,8 @@ test("agent-api response contracts parse representative envelopes", () => {
         agentManifestUrlSource: "explicit",
         createdAt: "2026-06-27T02:55:01.000Z",
         updatedAt: "2026-06-27T02:55:01.000Z",
+        official: true,
+        purpose: "Publish and retrieve durable Raft artifacts.",
       }],
       activeLogins: [{
         id: "grant-1",
@@ -954,14 +1018,19 @@ test("agent-api response contracts parse representative envelopes", () => {
         logoUrl: null,
         installedOnServer: false,
         updatedAt: "2026-06-27T02:55:01.000Z",
+        official: false,
+        purpose: "",
       }],
     },
+    integrationToken: { access_token: "fixture.jwt.token", token_type: "Bearer", audience: "drive9", expires_in: 300, expires_at: "2026-10-05T00:05:00.000Z" },
     integrationLogin: {
       status: "logged_in",
       service: {
         id: "client-1",
         clientId: "drive9",
         appType: "third_party_global",
+        official: false,
+        purpose: "",
         name: "Drive9",
         description: null,
         homepageUrl: "https://drive9.example",
@@ -1052,6 +1121,7 @@ test("agent-api response contracts parse representative envelopes", () => {
     attachmentUploadSessionCancel: { uploadId: "33333333-3333-4333-8333-333333333333", state: "canceled", expiresAt: "2026-06-29T04:15:00.000Z", attachment: null, terminalReason: "Canceled." },
     attachmentUploadSessionStatus: { uploadId: "33333333-3333-4333-8333-333333333333", state: "pending", expiresAt: "2026-06-29T04:15:00.000Z", attachment: null, terminalReason: null },
     attachmentDownload: new Uint8Array([1, 2, 3]),
+    attachmentDownloadUrl: { url: "https://objects.example.test/a?X-Amz-Signature=sig", expiresAt: "2026-10-04T08:00:00.000Z", filename: "report.pdf", mimeType: "application/pdf" },
     attachmentCommentsList: {
       comments: [{
         id: "msg-comment-1",
@@ -1082,6 +1152,10 @@ test("agent-api response contracts parse representative envelopes", () => {
         resolveAction: { type: "reaction", emoji: "✅" },
       },
     },
+    pushWebhookStatus: { registered: true, url: "https://hooks.example.test/raft", enabled: true, disabledReason: null, disabledAt: null, lastAttemptAt: null, lastDeliveryAt: "2026-06-29T04:00:00.000Z", lastError: null, consecutiveFailures: 0, nextAttemptAt: null },
+    pushWebhookRegister: { registered: true, url: "https://hooks.example.test/raft", enabled: true, disabledReason: null, disabledAt: null, lastAttemptAt: null, lastDeliveryAt: "2026-06-29T04:00:00.000Z", lastError: null, consecutiveFailures: 0, nextAttemptAt: null },
+    pushWebhookDelete: null,
+    mentionsList: { mentions: [], has_more: false },
   };
 
   for (const key of Object.keys(samples) as AgentApiRouteKey[]) {
@@ -1211,4 +1285,73 @@ test("agent-api message envelopes accept toISOString timestamp strings", () => {
     has_newer: false,
     last_read_seq: null,
   });
+});
+
+test("task #153 @Stone finding 2: the delivery row shape fails closed per outcome", () => {
+  const ok = agentApiSenderMentionDeliveryRowSchema.safeParse({
+    targetHandle: "@bob", outcome: "lost", reasonCategory: "quota",
+  });
+  assert.equal(ok.success, true, "lost + category must be accepted");
+
+  // `lost` without a category would make ABSENCE mean "unknown" again — the
+  // exact shape the ruling removed.
+  const lostNoCategory = agentApiSenderMentionDeliveryRowSchema.safeParse({
+    targetHandle: "@bob", outcome: "lost",
+  });
+  assert.equal(lostNoCategory.success, false, "lost without a category must be rejected");
+
+  // A cause-of-failure label on an outcome that did not fail is a claim we
+  // cannot support; `unknown` especially must not carry one.
+  for (const outcome of ["delivered", "pending", "unknown"] as const) {
+    const withCategory = agentApiSenderMentionDeliveryRowSchema.safeParse({
+      targetHandle: "@bob", outcome, reasonCategory: "quota",
+    });
+    assert.equal(withCategory.success, false, `${outcome} must not carry a reasonCategory`);
+    const bare = agentApiSenderMentionDeliveryRowSchema.safeParse({ targetHandle: "@bob", outcome });
+    assert.equal(bare.success, true, `${outcome} without a category must be accepted`);
+  }
+});
+
+test("history DM consumption scope preserves typed identity and is optional for old servers", () => {
+  const body = {
+    messages: [],
+    has_more: false,
+    has_older: false,
+    has_newer: false,
+  };
+  const scope = {
+    agent_id: "11111111-1111-4111-8111-111111111111",
+    channel_id: "22222222-2222-4222-8222-222222222222",
+    channel_type: "dm",
+    target: "dm:@peer",
+  };
+  const schema = agentApiContract.historyRead.response.body;
+  assert.deepEqual(
+    schema.parse({ ...body, consumption_scope: scope }).consumption_scope,
+    scope,
+  );
+  assert.equal(schema.parse(body).consumption_scope, undefined);
+  assert.equal(
+    schema.safeParse({
+      ...body,
+      consumption_scope: { ...scope, channel_id: "not-an-id" },
+    }).success,
+    false,
+  );
+  assert.equal(
+    schema.safeParse({
+      ...body,
+      consumption_scope: { ...scope, channel_type: "channel" },
+    }).success,
+    false,
+  );
+});
+
+
+test("audience JWT issuance rejects identity overrides and is never automatically retried", () => {
+  const body = agentApiContract.integrationToken.request.body;
+  assert.equal(body.safeParse({ service: "test-rp" }).success, true);
+  assert.equal(body.safeParse({ service: "test-rp", agentId: "override" }).success, false);
+  assert.equal(getAgentApiRetryPolicy(AGENT_API_ROUTE_META.integrationToken), "single_attempt");
+  assert.equal(toAgentApiToolAnnotations(AGENT_API_ROUTE_META.integrationToken).idempotentHint, false);
 });

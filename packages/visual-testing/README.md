@@ -41,6 +41,29 @@ loads the canonical `shared/sharedCases.json` and drives capture, while
 `packages/web/visual-testing` stays as the thin Vite render host that imports
 real web components.
 
+## Browser CI
+
+[Visual browser](../../.github/workflows/visual-browser.yml) runs the existing
+React browser suite after relevant web, visual-test, shared dependency, or
+workflow changes land on `staging`, daily at 18:23 UTC, and on manual dispatch.
+It does not run on ordinary PRs and is not a required pre-merge check. The daily
+run also covers gaps in the push path filter; GitHub schedules can be delayed.
+
+The job uses the pinned Playwright image and the existing Vite fixture host,
+with one worker, zero retries, and the default manifest selection. It does not
+start a backend or build/publish an image. Assertions and fixture captures run;
+this is not a cross-platform pixel-parity verdict. On failure, the job remains
+red and retains Playwright JSON/error context and first-attempt traces for seven
+days. Successful capture images are not uploaded. DX owns failure triage and
+first-hosted timing/billing verification; local duration is not a cost promise.
+
+Run the same command locally from `packages/web` after installing dependencies
+and Playwright Chromium:
+
+```bash
+PLAYWRIGHT_JSON_OUTPUT_NAME=test-results/visual-results.json pnpm exec playwright test --config playwright.visual-testing.config.ts --reporter=line,json --trace=retain-on-failure
+```
+
 ## CLI
 
 ```bash
@@ -351,3 +374,21 @@ Providers output raw component content only. The package compositor owns review 
 `slock-visual publish-gh-pages` publishes that static site into the `visual-testing/` subdirectory of the `gh-pages` branch through a temporary git worktree. Use `--repo-dir` when the Pages repository is different from the visual-testing source repository. Existing runs are preserved and the homepage is rebuilt as a commit-index.
 
 Run `publish-gh-pages --dry-run` before pushing. The command only publishes generated report artifacts; it does not commit the app branch or turn pending/fake provider cases into a baseline.
+
+## Analysis model
+
+Analysis defaults to `MiniMax-M3.1-Flash-Preview`; `--model` overrides `PI_MODEL`,
+and `PI_PROVIDER` defaults to `minimax`. The pinned SDK catalog lacks this
+preview, so `src/pi-model.mjs` supplies its actual wire ID using the existing
+MiniMax transport and conservative M3 output limit. It never silently invokes
+M3 instead. Registered models and explicit overrides remain supported.
+
+[MiniMax's model contract](https://platform.minimax.io/docs/guides/text-generation)
+specifies mandatory thinking and the same Anthropic-compatible endpoint.
+Unpublished preview pricing uses zero SDK estimation placeholders, not a claim
+that calls are free; token accounting remains intact. M Plan/Code access is
+required. Local request-construction tests do not prove account entitlement.
+
+Run `pnpm --filter @botiverse/raft-visual-testing test:model`. To include the
+network-free SDK payload check, set `PI_MODEL_SDK_MODULE` to the absolute path
+to the installed SDK's `dist/providers/all.js`; its hook stops before sending.

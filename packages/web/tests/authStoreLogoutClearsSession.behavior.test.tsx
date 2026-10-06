@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import "./helpers/domSetup";
 import { useAuthStore } from "../src/store/authStore";
 import { useAnnouncementStore } from "../src/store/announcementStore";

@@ -2,7 +2,7 @@ import { chmodSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Post-tsup step: write the thin published bin wrapper for
+// Post-tsdown step: write the thin published bin wrapper for
 // @botiverse/raft-computer.
 //
 // The wrappers must CALL runCliAsMain(), not just `import` the entry:

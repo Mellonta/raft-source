@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService.js";
+import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService";
 
 // A runtime DRI read "already assigned to @X", applied this card's
 // "stop unless redirected" literally, and abandoned a lane he owned. The card

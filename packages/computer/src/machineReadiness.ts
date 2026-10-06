@@ -1,4 +1,4 @@
-import type { MachineFacts, RunnerMachineFacts } from "./machineFacts.js";
+import type { MachineFacts, RunnerMachineFacts } from "./machineFacts";
 
 export type MachineReadinessReasonCode =
   | "runner-not-managed"

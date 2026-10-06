@@ -1,13 +1,13 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
-import { openTestApp } from "../test/integration/app.js";
+import { openTestApp } from "../test/integration/app";
 import {
   buildPerfAttributionEvent,
   PERF_ATTRIBUTION_ENV,
   PERF_CALLER_CONTEXT_HEADER,
   PERF_SCENARIO_ID_HEADER,
-} from "./perfAttribution.js";
+} from "./perfAttribution";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

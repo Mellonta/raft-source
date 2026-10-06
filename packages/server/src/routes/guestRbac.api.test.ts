@@ -1,19 +1,19 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { and, eq } from "drizzle-orm";
 
-import { SERVER_GUEST_FEATURE_FLAG_KEY, asServerId } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { agents, attachments, channelHumans, channels, featureFlagRules, featureFlags, messages, serverMembers, users } from "../db/schema.js";
-import { createAgent } from "../services/agentService.js";
-import { prepareActionCard } from "../services/actionCardsService.js";
-import { addAgent, addHuman, createChannel, findOrCreateUserDM, getOrCreateThread, getSystemAllChannel, isChannelHuman } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { createServer, transitionMemberRole } from "../services/serverService.js";
-import { __setStorageForTests, resetStorageForTests } from "../services/storageService.js";
+import { DEFAULT_MAX_GUEST_JOINABLE_CHANNELS_PER_SERVER, SERVER_GUEST_FEATURE_FLAG_KEY, asServerId } from "@botiverse/raft-shared";
+import { getDb } from "../db/index";
+import { agents, attachments, channelHumans, channels, featureFlagRules, featureFlags, messages, serverMembers, users } from "../db/schema";
+import { createAgent } from "../services/agentService";
+import { prepareActionCard } from "../services/actionCardsService";
+import { addAgent, addHuman, archiveChannel, createChannel, findOrCreateUserDM, getOrCreateThread, getSystemAllChannel, isChannelHuman, unarchiveChannel, updateChannel } from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { createServer, transitionMemberRole } from "../services/serverService";
+import { __setStorageForTests, resetStorageForTests } from "../services/storageService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -57,6 +57,84 @@ async function enableGuestFlag(serverId: string): Promise<void> {
     values: [serverId],
   });
 }
+
+test("Guest Join is unlimited per Server, including concurrent enables", async ({ db }) => {
+  assert.equal(DEFAULT_MAX_GUEST_JOINABLE_CHANNELS_PER_SERVER, -1);
+  const owner = await seedUser("guest-joinable-cap-owner@slock.test", "guest-joinable-cap-owner");
+  const server = await createServer("Guest Join cap", `guest-joinable-cap-${randomUUID()}`, owner.id);
+  const channelRows = await Promise.all(Array.from({ length: 6 }, (_, index) =>
+    createChannel(server.id, `guest-joinable-cap-${index}`, undefined, "channel")));
+
+  const results = await Promise.allSettled(channelRows.map((channel) =>
+    updateChannel(channel.id, { guestVisible: true, guestJoinable: true })));
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, channelRows.length);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 0);
+
+  const enabled = await db.select({ id: channels.id }).from(channels).where(and(
+    eq(channels.serverId, server.id),
+    eq(channels.guestJoinable, true),
+  ));
+  assert.equal(enabled.length, channelRows.length);
+});
+
+test("the sixth Guest Join enable succeeds through the API", async ({ app }) => {
+  const owner = await seedUser("guest-joinable-api-owner@slock.test", "guest-joinable-api-owner");
+  const server = await createServer("Guest Join API cap", `guest-joinable-api-${randomUUID()}`, owner.id);
+  await enableGuestFlag(server.id);
+  const channelRows = await Promise.all(Array.from({ length: 6 }, (_, index) =>
+    createChannel(server.id, `guest-joinable-api-${index}`, undefined, "channel", { type: "user", id: owner.id })));
+  for (const channel of channelRows.slice(0, 5)) {
+    await updateChannel(channel.id, { guestVisible: true, guestJoinable: true });
+  }
+
+  const response = await fetch(`${app.baseUrl}/api/channels/${channelRows[5]!.id}`, {
+    method: "PATCH",
+    headers: authHeaders(await login(app.baseUrl, owner.email), server.id),
+    body: JSON.stringify({ guestVisible: true, guestJoinable: true }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json() as { guestJoinable?: boolean }).guestJoinable, true);
+});
+
+test("archive and unarchive preserve Guest Join with unlimited capacity", async ({ db: _db }) => {
+  const owner = await seedUser("guest-unarchive-owner@slock.test", "guest-unarchive-owner");
+  const server = await createServer("Guest unarchive", `guest-unarchive-${randomUUID()}`, owner.id);
+  const channelRows = await Promise.all(Array.from({ length: 6 }, (_, index) =>
+    createChannel(server.id, `guest-unarchive-${index}`, undefined, "channel")));
+  for (const channel of channelRows.slice(0, 5)) {
+    await updateChannel(channel.id, { guestVisible: true, guestJoinable: true });
+  }
+
+  const archived = await archiveChannel(channelRows[4]!.id, owner.id);
+  assert.equal(archived.guestJoinable, true, "archive retains the stored policy while releasing the active slot");
+  await updateChannel(channelRows[5]!.id, { guestVisible: true, guestJoinable: true });
+  const restoredAtCap = await unarchiveChannel(channelRows[4]!.id);
+  assert.equal(restoredAtCap.archivedAt, null);
+  assert.equal(restoredAtCap.guestJoinable, true, "unarchive preserves Guest Join even with many active channels");
+
+  await updateChannel(channelRows[5]!.id, { guestJoinable: false });
+  await archiveChannel(channelRows[3]!.id, owner.id);
+  const restoredBelowCap = await unarchiveChannel(channelRows[3]!.id);
+  assert.equal(restoredBelowCap.guestJoinable, true, "unarchive always preserves Guest Join");
+});
+
+test("Guests share the Server-approved channel set without a per-Guest membership cap", async ({ db }) => {
+  const owner = await seedUser("guest-shared-owner@slock.test", "guest-shared-owner");
+  const guestA = await seedUser("guest-shared-a@slock.test", "guest-shared-a");
+  const guestB = await seedUser("guest-shared-b@slock.test", "guest-shared-b");
+  const server = await createServer("Guest shared channels", `guest-shared-${randomUUID()}`, owner.id);
+  await db.insert(serverMembers).values([
+    { serverId: server.id, userId: guestA.id, role: "guest" },
+    { serverId: server.id, userId: guestB.id, role: "guest" },
+  ]);
+  const channelRows = await Promise.all(Array.from({ length: 5 }, (_, index) =>
+    createChannel(server.id, `guest-shared-${index}`, undefined, "channel")));
+  for (const channel of channelRows) {
+    await updateChannel(channel.id, { guestVisible: true, guestJoinable: true });
+    assert.equal(await addHuman(channel.id, guestA.id), true);
+    assert.equal(await addHuman(channel.id, guestB.id), true);
+  }
+});
 
 test("Guest channel access is gate-scoped, membership-aware, and read-only outside messaging", async ({ app }) => {
   const db = getDb();
@@ -312,6 +390,22 @@ test("Guest channel access is gate-scoped, membership-aware, and read-only outsi
     body: JSON.stringify({ channelId: publicChannel.id, content: "must not send yet" }),
   });
   assert.equal(unjoinedSend.status, 403);
+  const guestThreadParent = await createMessage(publicChannel.id, "user", owner.id, "guest-thread-parent");
+  const guestThreadRows = () => db.select({ id: channels.id }).from(channels).where(eq(channels.parentMessageId, guestThreadParent.id));
+  const unjoinedFirstReply = await fetch(`${app.baseUrl}/api/channels/${publicChannel.id}/threads`, {
+    method: "POST",
+    headers: guestHeaders,
+    body: JSON.stringify({ parentMessageId: guestThreadParent.id, content: "must not open a thread with a reply" }),
+  });
+  assert.equal(unjoinedFirstReply.status, 403, "a readable channel never lets a Guest post a first thread reply");
+  assert.equal((await guestThreadRows()).length, 0, "a refused first reply must not materialize the thread");
+  const guestOpenThread = await fetch(`${app.baseUrl}/api/channels/${publicChannel.id}/threads`, {
+    method: "POST",
+    headers: guestHeaders,
+    body: JSON.stringify({ parentMessageId: guestThreadParent.id }),
+  });
+  assert.equal(guestOpenThread.status, 200, "Guests may still open a thread they can read without posting");
+  assert.equal((await guestThreadRows()).length, 1);
 
   const thread = await getOrCreateThread(parentMessage.id, owner.id, "user");
   const unjoinedThreadRead = await fetch(`${app.baseUrl}/api/messages/channel/${thread.id}`, { headers: guestHeaders });
@@ -350,13 +444,36 @@ test("Guest channel access is gate-scoped, membership-aware, and read-only outsi
     headers: guestHeaders,
     body: JSON.stringify({ channelId: publicChannel.id, content: "joined Guest message" }),
   });
-  assert.equal(joinedSend.status, 200);
+  assert.equal(joinedSend.status, 403, "joining never grants a Guest post authority");
   const joinedThreadSend = await fetch(`${app.baseUrl}/api/messages`, {
     method: "POST",
     headers: guestHeaders,
     body: JSON.stringify({ channelId: thread.id, content: "joined Guest thread reply" }),
   });
-  assert.equal(joinedThreadSend.status, 200);
+  assert.equal(joinedThreadSend.status, 403, "joined Guests cannot reply in threads");
+  const joinedFirstReply = await fetch(`${app.baseUrl}/api/channels/${publicChannel.id}/threads`, {
+    method: "POST",
+    headers: guestHeaders,
+    body: JSON.stringify({ parentMessageId: guestThreadParent.id, content: "joined Guest first reply" }),
+  });
+  assert.equal(joinedFirstReply.status, 403, "joining never grants a Guest first-reply authority");
+  assert.equal(
+    (await db.select({ id: messages.id }).from(messages).where(eq(messages.content, "joined Guest first reply"))).length,
+    0,
+    "a refused Guest first reply must not persist a message",
+  );
+  const joinedReaction = await fetch(`${app.baseUrl}/api/messages/${parentMessage.id}/reactions`, {
+    method: "POST",
+    headers: guestHeaders,
+    body: JSON.stringify({ emoji: "👍" }),
+  });
+  assert.equal(joinedReaction.status, 403, "joined Guests cannot add reactions");
+  const joinedReactionRemoval = await fetch(`${app.baseUrl}/api/messages/${parentMessage.id}/reactions`, {
+    method: "DELETE",
+    headers: guestHeaders,
+    body: JSON.stringify({ emoji: "👍" }),
+  });
+  assert.equal(joinedReactionRemoval.status, 403, "joined Guests cannot remove reactions");
 
   await db.update(featureFlags).set({ killSwitch: true }).where(eq(featureFlags.key, SERVER_GUEST_FEATURE_FLAG_KEY));
   const killedList = await fetch(`${app.baseUrl}/api/channels`, { headers: guestHeaders });
@@ -389,6 +506,12 @@ test("Guest channel access is gate-scoped, membership-aware, and read-only outsi
   await addHuman(privateChannel.id, guest.id);
   const privateRead = await fetch(`${app.baseUrl}/api/messages/channel/${privateChannel.id}`, { headers: guestHeaders });
   assert.equal(privateRead.status, 200, "explicit private membership grants Guest read access");
+  const privateSend = await fetch(`${app.baseUrl}/api/messages`, {
+    method: "POST",
+    headers: guestHeaders,
+    body: JSON.stringify({ channelId: privateChannel.id, content: "must remain read-only" }),
+  });
+  assert.equal(privateSend.status, 403, "private membership never grants Guest post authority");
 
   const roster = await fetch(`${app.baseUrl}/api/channels/${publicChannel.id}/members`, { headers: guestHeaders });
   assert.equal(roster.status, 200);
@@ -412,11 +535,20 @@ test("Guest channel access is gate-scoped, membership-aware, and read-only outsi
     body: JSON.stringify({ userId: owner.id }),
   });
   assert.equal(existingDm.status, 200, "existing Guest DM remains openable");
+  const existingDmSend = await fetch(`${app.baseUrl}/api/messages`, {
+    method: "POST",
+    headers: guestHeaders,
+    body: JSON.stringify({ channelId: existing.id, content: "must remain read-only" }),
+  });
+  assert.equal(existingDmSend.status, 403, "existing Guest DMs are read-only");
 
   await db.update(channels).set({ guestVisible: false, guestJoinable: false }).where(eq(channels.id, publicChannel.id));
   await db.delete(channelHumans).where(eq(channelHumans.channelId, publicChannel.id));
   const revokedRead = await fetch(`${app.baseUrl}/api/messages/channel/${publicChannel.id}`, { headers: guestHeaders });
-  assert.equal(revokedRead.status, 403, "removing both policy and membership revokes stale deep-link reads");
+  // Revoked, and answered 403 rather than 404: the Guest joined, so they already know
+  // the channel exists (joining wrote their read position), and a 404 would only stop
+  // them clearing its stale Activity entry. See hasPriorChannelRelationship.
+  assert.equal(revokedRead.status, 403, "removing both policy and membership revokes a former member's stale deep-link read");
 });
 
 test("joined Guests can read action-card summaries but cannot execute or mark them", async ({ app }) => {

@@ -35,9 +35,12 @@ import {
   emitAuthTraceAndFlush,
   readAuthBootInitTraceAttrs,
   setAuthTracePrincipalIdGetter,
+  startWebSpan,
 } from "../utils/webAuthTrace";
 import type {
+  EmitWebEventOptions,
   LogoutTrigger,
+  WebSpanHandle,
 } from "../utils/webAuthTrace";
 import { seedMessageBodyFontSizeFromProfile } from "./appearanceStore";
 import { resetServerFeatureFlagsForSession } from "./serverFeatureFlags";
@@ -74,6 +77,8 @@ export interface User {
   preferredTranslationDisplay: "translated" | "original" | "bilingual";
   preferredTimeFormat: "12h" | "24h" | null;
   preferredMessageBodyFontSize: "sm" | "md" | "lg" | null;
+  /** RFC-067 "Share usage data"; null = not chosen (SHARE_USAGE_DATA_DEFAULT applies). */
+  shareUsageData?: boolean | null;
   referralSource: string | null;
   referralSourceOther: string | null;
   referralSourceSkippedAt: string | null;
@@ -119,6 +124,7 @@ interface AuthState {
     preferredTranslationMode?: "auto" | "manual" | "off";
     preferredTranslationDisplay?: "translated" | "original" | "bilingual";
     preferredTimeFormat?: "12h" | "24h" | null;
+    shareUsageData?: boolean | null;
     referralSource?: string | null;
     referralSourceOther?: string | null;
     referralSourceSkipped?: boolean;
@@ -134,12 +140,21 @@ interface AuthState {
   acceptInvite: (token: string, agreementId?: string | null) => Promise<{ serverId: string; serverName: string }>;
 }
 
+// The `slock.auth.load_user` span that is running right now, if any. Restore
+// and boot_init events emitted while it runs carry its trace and span ids.
+let activeLoadUserSpan: WebSpanHandle | null = null;
+
+function loadUserSpanContext(): EmitWebEventOptions {
+  if (!activeLoadUserSpan) return {};
+  return { traceId: activeLoadUserSpan.traceId, spanId: activeLoadUserSpan.spanId };
+}
+
 // Choke-point for restore-state transitions: compute the next state, emit a
-// fire-and-forget L4 trace, and return. NO business branches live here — callers
+// fire-and-forget L4 trace, and return. NO business branches live here. Callers
 // keep their own logic; this only adds observability to every transition.
 function transitionRestore(current: AuthRestoreState, event: AuthRestoreEvent): AuthRestoreState {
   const next = nextAuthRestoreState(current, event);
-  emitAuthTrace("slock.auth.restore", { restoreEvent: event.type, restoreState: next });
+  emitAuthTrace("slock.auth.restore", { restoreEvent: event.type, restoreState: next }, loadUserSpanContext());
   return next;
 }
 
@@ -149,7 +164,7 @@ let authBootInitTraceEmitter = emitAuthTrace;
 function emitAuthBootInitTraceOnce(): void {
   if (bootInitTraceEmitted) return;
   bootInitTraceEmitted = true;
-  authBootInitTraceEmitter("slock.auth.boot_init", readAuthBootInitTraceAttrs());
+  authBootInitTraceEmitter("slock.auth.boot_init", readAuthBootInitTraceAttrs(), loadUserSpanContext());
 }
 
 export function __resetAuthBootInitTraceForTest(emitter: typeof emitAuthTrace = emitAuthTrace): void {
@@ -212,6 +227,114 @@ function reportBrowserTimezoneObservation(user: User): void {
     .finally(() => {
       timezoneObservationInFlight.delete(user.id);
     });
+}
+
+type AuthStoreSet = (partial: Partial<AuthState>) => void;
+type AuthStoreGet = () => AuthState;
+
+// The body of loadUser. It runs inside the `slock.auth.load_user` span, so
+// every restore transition it causes is attached to that span.
+async function restoreUserWithinLoadUserSpan(set: AuthStoreSet, get: AuthStoreGet): Promise<void> {
+  emitAuthBootInitTraceOnce();
+  const { accessToken } = get();
+  if (!accessToken) {
+    set({
+      initialized: true,
+      restoreState: transitionRestore(get().restoreState, {
+        type: "BOOT",
+        hasStoredSession: false,
+      }),
+    });
+    return;
+  }
+  set({
+    restoreState: transitionRestore(get().restoreState, { type: "RESTORE_STARTED" }),
+  });
+  try {
+    const { data } = await api.get("/auth/me");
+    seedMessageBodyFontSizeFromProfile(data.preferredMessageBodyFontSize);
+    if (get().user?.id !== data.id) useAnnouncementStore.getState().reset();
+    set({
+      user: data,
+      initialized: true,
+      restoreState: transitionRestore(get().restoreState, { type: "RESTORE_SUCCEEDED" }),
+    });
+    reportBrowserTimezoneObservation(data);
+  } catch (err: any) {
+    const status = err?.response?.status as number | undefined;
+    const hasStoredSession = !!(get().accessToken && get().refreshToken);
+    // Non-auth failures should not force logout.
+    if (shouldKeepSessionAfterLoadUserFailure(status)) {
+      set({
+        initialized: true,
+        restoreState: transitionRestore(get().restoreState, {
+          type: "RESTORE_TRANSIENT_FAILURE",
+          hasStoredSession,
+        }),
+      });
+      return;
+    }
+
+    // Token might be expired. Try refresh.
+    if (!shouldRetryLoadUserAfterError(status)) {
+      set({
+        initialized: true,
+        restoreState: transitionRestore(get().restoreState, {
+          type: "RESTORE_TRANSIENT_FAILURE",
+          hasStoredSession,
+        }),
+      });
+      return;
+    }
+
+    try {
+      const refreshed = await get().refreshAccessToken();
+      if (refreshed) {
+        try {
+          const { data } = await api.get("/auth/me");
+          seedMessageBodyFontSizeFromProfile(data.preferredMessageBodyFontSize);
+          if (get().user?.id !== data.id) useAnnouncementStore.getState().reset();
+          set({
+            user: data,
+            initialized: true,
+            restoreState: transitionRestore(get().restoreState, { type: "RESTORE_SUCCEEDED" }),
+          });
+          reportBrowserTimezoneObservation(data);
+        } catch (meErr: any) {
+          const meStatus = meErr?.response?.status as number | undefined;
+          if (shouldLogoutAfterPostRefreshLoadUserFailure({
+            status: meStatus,
+            initialized: get().initialized,
+            restoreState: get().restoreState,
+          })) {
+            get().logout("terminal_verdict");
+          } else {
+            set({
+              initialized: true,
+              restoreState: transitionRestore(get().restoreState, {
+                type: "RESTORE_TRANSIENT_FAILURE",
+                hasStoredSession: !!(get().accessToken && get().refreshToken),
+              }),
+            });
+          }
+        }
+      } else {
+        // /auth/refresh is authoritative for stored-session viability. If
+        // it returns an auth failure, do not let the bootstrap retry loop
+        // produce repeated /auth/me -> /auth/refresh 401s for 30s.
+        get().logout("terminal_verdict");
+      }
+    } catch {
+      // Transient refresh failure. Keep session and let later calls retry.
+      set({
+        initialized: true,
+        restoreState: transitionRestore(get().restoreState, {
+          type: "RESTORE_TRANSIENT_FAILURE",
+          hasStoredSession: !!(get().accessToken && get().refreshToken),
+        }),
+      });
+    }
+  }
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -356,107 +479,19 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   loadUser: async () => {
-    emitAuthBootInitTraceOnce();
-    const { accessToken } = get();
-    if (!accessToken) {
-      set({
-        initialized: true,
-        restoreState: transitionRestore(get().restoreState, {
-          type: "BOOT",
-          hasStoredSession: false,
-        }),
-      });
-      return;
-    }
-    set({
-      restoreState: transitionRestore(get().restoreState, { type: "RESTORE_STARTED" }),
-    });
+    const loadUserSpan = startWebSpan("slock.auth.load_user");
+    activeLoadUserSpan = loadUserSpan;
+    const hasStoredSession = Boolean(get().accessToken);
     try {
-      const { data } = await api.get("/auth/me");
-      seedMessageBodyFontSizeFromProfile(data.preferredMessageBodyFontSize);
-      if (get().user?.id !== data.id) useAnnouncementStore.getState().reset();
-      set({
-        user: data,
-        initialized: true,
-        restoreState: transitionRestore(get().restoreState, { type: "RESTORE_SUCCEEDED" }),
-      });
-      reportBrowserTimezoneObservation(data);
-    } catch (err: any) {
-      const status = err?.response?.status as number | undefined;
-      const hasStoredSession = !!(get().accessToken && get().refreshToken);
-      // Non-auth failures should not force logout.
-      if (shouldKeepSessionAfterLoadUserFailure(status)) {
-        set({
-          initialized: true,
-          restoreState: transitionRestore(get().restoreState, {
-            type: "RESTORE_TRANSIENT_FAILURE",
-            hasStoredSession,
-          }),
-        });
-        return;
-      }
-
-      // Token might be expired — try refresh.
-      if (!shouldRetryLoadUserAfterError(status)) {
-        set({
-          initialized: true,
-          restoreState: transitionRestore(get().restoreState, {
-            type: "RESTORE_TRANSIENT_FAILURE",
-            hasStoredSession,
-          }),
-        });
-        return;
-      }
-
-      try {
-        const refreshed = await get().refreshAccessToken();
-        if (refreshed) {
-          try {
-            const { data } = await api.get("/auth/me");
-            seedMessageBodyFontSizeFromProfile(data.preferredMessageBodyFontSize);
-            if (get().user?.id !== data.id) useAnnouncementStore.getState().reset();
-            set({
-              user: data,
-              initialized: true,
-              restoreState: transitionRestore(get().restoreState, { type: "RESTORE_SUCCEEDED" }),
-            });
-            reportBrowserTimezoneObservation(data);
-          } catch (meErr: any) {
-            const meStatus = meErr?.response?.status as number | undefined;
-            if (shouldLogoutAfterPostRefreshLoadUserFailure({
-              status: meStatus,
-              initialized: get().initialized,
-              restoreState: get().restoreState,
-            })) {
-              get().logout("terminal_verdict");
-            } else {
-              set({
-                initialized: true,
-                restoreState: transitionRestore(get().restoreState, {
-                  type: "RESTORE_TRANSIENT_FAILURE",
-                  hasStoredSession: !!(get().accessToken && get().refreshToken),
-                }),
-              });
-            }
-          }
-        } else {
-          // /auth/refresh is authoritative for stored-session viability. If
-          // it returns an auth failure, do not let the bootstrap retry loop
-          // produce repeated /auth/me -> /auth/refresh 401s for 30s.
-          get().logout("terminal_verdict");
-        }
-      } catch {
-        // Transient refresh failure — keep session and let later calls retry.
-        set({
-          initialized: true,
-          restoreState: transitionRestore(get().restoreState, {
-            type: "RESTORE_TRANSIENT_FAILURE",
-            hasStoredSession: !!(get().accessToken && get().refreshToken),
-          }),
-        });
-      }
+      await restoreUserWithinLoadUserSpan(set, get);
+    } finally {
+      if (activeLoadUserSpan === loadUserSpan) activeLoadUserSpan = null;
+      const restoreState = get().restoreState;
+      const restored = !hasStoredSession || restoreState === "authenticated";
+      loadUserSpan.end(restored ? "ok" : "error", { routeFamily: "bootstrap", hasStoredSession, restoreState });
     }
   },
+
 
   refreshAccessToken: async () => {
     try {

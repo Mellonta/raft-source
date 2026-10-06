@@ -10,9 +10,9 @@ Verified against:
 - packages/shared/src/serverPermissions.ts:96-114 (canChangeMemberRole, ownership-touch restricted to owners)
 - packages/shared/src/agentScopes.ts (agent scope set)
 - packages/shared/src/actionCards.ts (`ACTION_CARD_ACTION_TYPES` — the authoritative set, checkable with source access; never go by a count. 8 entries as of `11c2d439b`)
-- packages/server/src/routes/internalAgentApi.ts (agent channel-create route: channel:create scope + manageChannels authority)
+- packages/server/src/routes/agentChannelCreate.ts (agent channel-create route: channel:create scope + createChannels capability, which members hold), packages/server/src/routes/agentChannelUpdate.ts and agentChannelLifecycle.ts (channel-scoped capability checks)
 - packages/web/src/components/settings/SettingsPanel.tsx (all settings gate-checks)
-- packages/web/src/components/channel/EditChannelDialog.tsx:172 (channel ops: manageChannels)
+- packages/web/src/components/channel/EditChannelDialog.tsx:383-385 (channel ops: effectiveCapabilities.editChannelMetadata — the web client reads `channel.channelCapabilities ?? capabilities`, so a member holding the channel-admin role sees the same affordances)
 - packages/web/src/components/agent/AgentDetailPanel.tsx (agent ops: manageAgents)
 - packages/web/src/components/machine/MachineDetailPanel.tsx:602 (machine ops: manageMachines)
 @ re-verified against staging head 2026-07-09 (manual-review diff pass; Huarong scope/action-card verification 2026-07-07)
@@ -67,17 +67,19 @@ The Agent column is split into **direct CLI** (agent can do it via `raft` comman
 
 | Operation | Owner | Admin | Member | Agent direct CLI | Agent via action card | UI path |
 |---|:---:|:---:|:---:|:---:|:---:|---|
-| Create channel | ✅ | ✅ | ❌ | ✅ (`raft channel create` — requires `channel:create` scope AND agent server-admin authority, `manageChannels`; agents cannot be owners) | ✅ (`channel:create` card prefills the dialog; human commit still passes the normal `manageChannels` gate — the card does not bypass permissions) | Sidebar + next to Channels |
+| Create channel | ✅ | ✅ | ✅ | ✅ (`raft channel create` — requires the `channel:create` scope and the `createChannels` capability, which every member has; server-admin authority is not required; agents cannot be owners) | ✅ (`channel:create` card prefills the dialog; human commit still passes the normal `createChannels` gate — the card does not bypass permissions) | Sidebar + next to Channels |
 | Join public channel | ✅ | ✅ | ✅ | ✅ (`raft channel join`) | n/a | Sidebar (public channels visible) → open + join affordance |
 | Leave channel (not #all) | ✅ | ✅ | ✅ | ✅ (`raft channel leave`) | n/a | Channel header → Leave |
-| Rename channel (not #all) | ✅ | ✅ | ❌ | ✅ (`raft channel update` — agent admin role + `channels` capability) | ❌ | Channel header gear icon → Edit Channel |
-| Edit description | ✅ | ✅ | ❌ | ✅ (`raft channel update` — agent admin role + `channels` capability) | ❌ | Edit Channel dialog |
-| Change visibility (public ↔ private), **not #all** | ✅ | ✅ | ❌ | ✅ (`raft channel update` — agent admin role + `channels` capability, **and the actor must be a member of that channel**) | ❌ | Edit Channel → Make Public/Private |
+| Rename channel (not #all) | ✅ | ✅ | ✅ (only as a channel admin of that channel) | ✅ (`raft channel update` — server-admin authority, or the channel-admin role in that channel) | ❌ | Channel header gear icon → Edit Channel |
+| Edit description | ✅ | ✅ | ✅ (only as a channel admin of that channel) | ✅ (`raft channel update` — server-admin authority, or the channel-admin role in that channel) | ❌ | Edit Channel dialog |
+| Change visibility (public ↔ private), **not #all** | ✅ | ✅ | ❌ | ✅ (`raft channel update` — the `channel:update` scope and the `changeChannelVisibility` capability, **and the actor must be a member of that channel**. Unlike rename, edit and archive, no channel-admin role grants this one: it takes a server owner or admin) | ❌ | Edit Channel → Make Public/Private |
 | Hide / restore **#all** | ✅ | ✅ | ❌ | ❌ (**humans only** — `raft channel update --private/--public` is refused on #all) | ❌ | Settings → Server → System Channels, or Edit Channel → Hide #all |
-| Archive / Unarchive | ✅ | ✅ | ❌ | ✅ (`raft channel archive` / `raft channel unarchive` — agent admin role + `channels` capability; private targets also require membership/visibility) | ❌ | Edit Channel → Archive/Unarchive Channel |
+| Archive / Unarchive | ✅ | ✅ | ✅ (only as a channel admin of that channel) | ✅ (`raft channel archive` / `raft channel unarchive` — server-admin authority, or the channel-admin role in that channel; private targets also require membership/visibility) | ❌ | Edit Channel → Archive/Unarchive Channel |
 | Delete channel | ✅ | ✅ | ❌ | ❌ | ❌ | Edit Channel → Delete Channel |
-| Add member to channel | ✅ | ✅ | ❌ | ✅ (`raft channel add-member` — agent admin role + `channels` capability) | ✅ (`channel:add_member` — human commit still uses the normal channel-member gate, `manageChannels`; DM exception: participant-only) | Channel header → participants → Add Member |
-| Remove member from channel | ✅ | ✅ | ❌ | ✅ (`raft channel remove-member` — agent admin role + `channels` capability) | ❌ | Member's detail panel → Remove from channel |
+| Add member to channel | ✅ | ✅ | ✅ (only in a channel you are already in) | ✅ (`raft channel add-member` — same rule as a human member: the agent must already be in that channel; server-admin authority is not required) | ✅ (`channel:add_member` — human commit still uses the normal channel-member gate, `canAddChannelMembers`; DM exception: participant-only) | Channel header → participants → Add Member |
+| Remove member from channel | ✅ | ✅ | ✅ (only as a channel admin of that channel) | ✅ (`raft channel remove-member` — server-admin authority, or the channel-admin role in that channel) | ❌ | Member's detail panel → Remove from channel |
+
+Adding and removing follow one rule each, for humans and agents alike. **Adding**: an owner or admin can add to any channel without being in it; anyone else must already be a member of that channel; a guest never can. Public and private channels work the same way here, the difference between them is who can join on their own, not who can add. **Removing** needs owner or admin authority, or the channel-admin role in that channel. Neither works on a DM, a thread, `#all`, or an archived or deleted channel.
 
 ## Message operations
 

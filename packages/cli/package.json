@@ -1,11 +1,11 @@
 {
   "name": "@botiverse/raft",
-  "version": "0.0.24",
+  "version": "0.0.33",
   "license": "FSL-1.1-ALv2",
   "description": "Canonical Raft agent-facing CLI. Provides raft plus the legacy slock alias over the same CLI core. Invoked by daemon-spawned agent processes via injected env vars.",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "bin": {
     "raft": "dist/raft.js",
@@ -23,9 +23,9 @@
     "access": "public"
   },
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "tsx src/index.ts",
-    "build": "tsup && node scripts/write-dist-package.mjs",
+    "dev": "node --watch --import @oxc-node/core/register src/index.ts",
+    "start": "node --import @oxc-node/core/register src/index.ts",
+    "build": "tsdown && node scripts/write-dist-package.mjs",
     "test": "node scripts/run-tests-with-manifest.mjs",
     "test:update-manifest": "node scripts/run-tests-with-manifest.mjs --update-manifest",
     "typecheck": "tsc --noEmit",
@@ -35,13 +35,14 @@
     "ajv": "^8.18.0",
     "commander": "^12.1.0",
     "safe-regex2": "5.1.1",
-    "undici": "^7.24.7"
+    "undici": "^7.29.1"
   },
   "devDependencies": {
     "@botiverse/raft-shared": "workspace:*",
+    "@oxc-node/core": "^0.1.3",
     "@types/node": "^25.5.0",
-    "tsup": "^8.5.1",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "tsdown": "^0.23.0",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.2"
   }
 }

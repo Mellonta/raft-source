@@ -1,20 +1,19 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  buildWebTraceRecord,
+  buildWebEventRecord,
   flushAuthTraces,
   __resetAuthTraceForTest,
   setAuthTraceFetchForTest,
   setAuthTracePrincipalIdGetter,
   setAuthTraceServerIdGetter,
-} from "../src/utils/webAuthTrace.ts";
+} from "../src/utils/webAuthTrace";
 import {
   traceAgentActivitySocketReceived,
   traceAgentActivityStoreDecision,
   traceAgentActivityStatusDotApplied,
   deriveActivityDecisionRelation,
-} from "../src/utils/webAgentActivityTrace.ts";
+} from "../src/utils/webAgentActivityTrace";
 
 function installLocalStorageForTraceTest(): () => void {
   const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
@@ -35,7 +34,7 @@ function installLocalStorageForTraceTest(): () => void {
 }
 
 function captureWebTraceBatches() {
-  const batches: Array<{ records?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
+  const batches: Array<{ events?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
   __resetAuthTraceForTest({ traceUrl: "https://trace.example.test" });
   setAuthTraceServerIdGetter(() => "server-1");
   setAuthTracePrincipalIdGetter(() => "user-1");
@@ -54,8 +53,8 @@ function captureWebTraceBatches() {
   return batches;
 }
 
-test("buildWebTraceRecord accepts web agent activity events and keeps attrs bounded", () => {
-  const record = buildWebTraceRecord("slock.agent_activity.socket_received", {
+test("buildWebEventRecord accepts web agent activity events and keeps attrs bounded", () => {
+  const record = buildWebEventRecord("slock.agent_activity.socket_received", {
     agent_id_present: true,
     activity: "working",
     detail_present: true,
@@ -68,12 +67,11 @@ test("buildWebTraceRecord accepts web agent activity events and keeps attrs boun
     rawDetail: undefined,
   });
 
-  assert.equal(record.type, "span");
+  assert.equal(record.type, "event");
   assert.equal(record.schema_version, 1);
   assert.equal(record.surface, "web");
   assert.equal(record.name, "slock.agent_activity.socket_received");
-  assert.match(record.trace_id, /^[0-9a-f]{32}$/);
-  assert.match(record.span_id, /^[0-9a-f]{16}$/);
+  assert.equal(typeof record.time, "string");
 
   const attrs = record.attrs ?? {};
   assert.equal(attrs.agent_id_present, true);
@@ -172,7 +170,7 @@ test("agent activity trace wrappers preserve non-empty clientEventId only inside
     restoreLocalStorage();
   }
 
-  const records = batches.flatMap((batch) => batch.records ?? []);
+  const records = batches.flatMap((batch) => batch.events ?? []);
   assert.deepEqual(records.map((record) => record.name), [
     "slock.agent_activity.socket_received",
     "slock.agent_activity.store_decision",

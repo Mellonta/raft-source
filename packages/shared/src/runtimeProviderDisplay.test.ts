@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   formatRuntimeProviderModelLabel,
   getRuntimeProviderDisplayName,
   RUNTIME_MODELS,
   RUNTIME_PROVIDER_DISPLAY_NAMES,
-} from "./index.js";
+} from "./index";
 
 test("provider display names come from the generated shared table", () => {
   assert.equal(RUNTIME_PROVIDER_DISPLAY_NAMES.openrouter, "OpenRouter");

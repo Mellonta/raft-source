@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { renderAnchorLabel, renderAgentCommentScopeLine } from "./attachmentCommentAnchorLabel.js";
+import {
+  projectAgentCommentScope,
+  renderAgentCommentScopeBlock,
+  renderAgentCommentScopeLine,
+  renderAgentCommentScopedContent,
+  renderAnchorLabel,
+} from "./attachmentCommentAnchorLabel";
 
 // Agent scope-line contract (task #37): short, stable, honest — quote capped,
 // structural fallback when a quote is missing, null only when there is no
@@ -58,11 +63,37 @@ test("scope line: filename always present; anchor label appended when usable", (
     renderAgentCommentScopeLine("report.html", "lines", { start: 3, end: 7 }),
     "[re: report.html · L3–L7]",
   );
+  assert.equal(
+    renderAgentCommentScopeLine("report.html", "lines", { start: 3, end: 7, quote: "full selection" }),
+    "[re: report.html · L3–L7]",
+    "the Agent header identifies location without duplicating a quote preview",
+  );
   assert.equal(renderAgentCommentScopeLine("report.html", null, null), "[re: report.html]");
   assert.equal(
     renderAgentCommentScopeLine("demo.mp4", "video-timestamp", { time: 95 }),
     "[re: demo.mp4 · 1:35]",
   );
+});
+
+test("agent scope block keeps location in the header and quotation only in the blockquote", () => {
+  const firstLine = `selection-${"x".repeat(120)}`;
+  const fullQuote = `${firstLine}\r\nsecond paragraph\n\nfinal line`;
+  const scope = projectAgentCommentScope(
+    "report.md",
+    "md-section",
+    { headingTitle: "Rollout", quote: fullQuote },
+  );
+  const expectedLine = "[re: report.md · § Rollout]";
+  const expectedQuoteBlock = `> ${firstLine}\n> second paragraph\n>\n> final line`;
+  assert.equal(
+    renderAgentCommentScopeBlock(scope),
+    `${expectedLine}\n${expectedQuoteBlock}`,
+  );
+  assert.equal(
+    renderAgentCommentScopedContent("Please revise this.", scope),
+    `${expectedLine}\n${expectedQuoteBlock}\nPlease revise this.`,
+  );
+  assert.ok(!renderAgentCommentScopeBlock(scope).includes("「"), "Agent header does not duplicate a quote preview");
 });
 
 test("md-section: multiline/long titles stay one-line and dedupe against the quote (Dozy PR #2856 review)", () => {

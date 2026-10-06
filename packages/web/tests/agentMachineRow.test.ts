@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { resolveAgentMachineRow } from "../src/utils/agentMachineRow.js";
+import { resolveAgentMachineRow } from "../src/utils/agentMachineRow";
 
 // task #259 (artin, 2026-09-04, both web and mobile): the Computer row is not rendered while the
 // machine store has no snapshot yet; "No computer assigned" is a conclusion, not a placeholder.

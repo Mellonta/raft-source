@@ -12,7 +12,6 @@
 // the operator-DSN delivery mechanism (not a role-level default), combined with
 // the db head vs the exact manifest — the frozen 5-tooth contract end to end.
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -116,7 +115,7 @@ async function makeRole(name: string, pass: string, baselineMs: number) {
 
 function runPreflight(dsn: string, migrationsFolder: string, timeoutMs: string) {
   const env = { ...process.env, DATABASE_URL: dsn, SERVER_MIGRATION_EXPECTED_STATEMENT_TIMEOUT_MS: timeoutMs, MIGRATIONS_FOLDER: migrationsFolder };
-  return spawnSync(process.execPath, ["--import", "tsx", scriptPath], { cwd: serverRoot, env, encoding: "utf8" });
+  return spawnSync(process.execPath, ["--import", "@oxc-node/core/register", scriptPath], { cwd: serverRoot, env, encoding: "utf8" });
 }
 
 test("real-pg tooth 1: head==target (timeout moot) -> ADMIT no-op", { skip: !enabled }, async () => {

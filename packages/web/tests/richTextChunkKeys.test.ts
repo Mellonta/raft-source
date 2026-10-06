@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import test from "node:test";
 
 // react-intl renders rich-text chunks as an ARRAY, so a chunk function that
 // returns an element without a `key` triggers React's

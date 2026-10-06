@@ -1,21 +1,20 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { FREE_MONTHLY_FILE_UPLOAD_LIMIT_BYTES } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { jointChannels, jointChannelServers, servers, users } from "../db/schema.js";
-import { createChannel } from "./channelService.js";
-import { isChannelReadOnlyByBillingFeature } from "./planService.js";
-import { createServer } from "./serverService.js";
+import { getDb } from "../db/index";
+import { jointChannels, jointChannelServers, servers, users } from "../db/schema";
+import { createChannel } from "./channelService";
+import { isChannelReadOnlyByBillingFeature } from "./planService";
+import { createServer } from "./serverService";
 import {
   FileUploadQuotaExceededError,
   buildFileUploadQuotaExceededResponse,
   getFileUploadQuotaSummary,
   withFileUploadQuota,
-} from "./fileUploadQuotaService.js";
+} from "./fileUploadQuotaService";
 
 
 afterEach(async () => {

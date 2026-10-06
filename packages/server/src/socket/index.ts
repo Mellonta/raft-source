@@ -1,19 +1,21 @@
-import { serializeErrorForLog } from "../tracing/safeErrorLog.js";
+import { serializeErrorForLog } from "../tracing/safeErrorLog";
+import { errorClassOf, safeAddTraceEvent } from "../tracing/semanticTrace";
 import type http from "node:http";
+import { SOCKET_NOT_SERVER_MEMBER_ERROR } from "@botiverse/raft-shared";
 import { hostname } from "node:os";
 import { Server, type Socket } from "socket.io";
 import { createAdapter } from "@socket.io/redis-adapter";
-import { verifyActiveAccessToken, verifyToken } from "../middleware/auth.js";
-import { isRedisAvailable, getRedisPub, getRedisSub } from "../redis.js";
-import * as serverService from "../services/serverService.js";
-import * as channelService from "../services/channelService.js";
-import * as messageService from "../services/messageService.js";
-import { socketConnectedClients, socketDisconnects, syncResumeTotal } from "../metrics.js";
-import { parseSocketClientKind, socketClientKindRoom, socketUserServerRoom, type SocketClientKind } from "./platformScope.js";
-import { fanoutWithAck } from "./fanout.js";
-import { onSocketAccessRevoked, type SocketAccessRevocation } from "./accessRevocation.js";
-import { publishLocalChannelUpdate } from "../services/channelRealtimeEvents.js";
-import { getActorServerRoleInServer } from "../lib/actorPermissions.js";
+import { verifyActiveAccessToken, verifyToken } from "../middleware/auth";
+import { isRedisAvailable, getRedisPub, getRedisSub } from "../redis";
+import * as serverService from "../services/serverService";
+import * as channelService from "../services/channelService";
+import * as messageService from "../services/messageService";
+import { socketConnectedClients, socketDisconnects, syncResumeTotal } from "../metrics";
+import { parseSocketClientKind, socketClientKindRoom, socketServerGuestsRoom, socketUserServerRoom, type SocketClientKind } from "./platformScope";
+import { fanoutWithAck } from "./fanout";
+import { onSocketAccessRevoked, type SocketAccessRevocation } from "./accessRevocation";
+import { publishLocalChannelUpdate } from "../services/channelRealtimeEvents";
+import { getActorServerRoleInServer } from "../lib/actorPermissions";
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const RESUME_LIMIT = 500;
@@ -65,6 +67,12 @@ export function stripSocketTraceMetadata(value: unknown, depth = 0): unknown {
   return output;
 }
 
+/** Every channel type goes through canUserAccessChannel on join:channel;
+ * kept as an explicit contract for the socket tests. */
+export function requiresSocketChannelAccessCheck(_channelType: string): boolean {
+  return true;
+}
+
 export function setupSocket(server: http.Server, corsOrigin: string | string[]) {
   const io = new Server(server, {
     cors: {
@@ -100,7 +108,15 @@ export function setupSocket(server: http.Server, corsOrigin: string | string[]) 
       }
       if (!affected) continue;
       socket.data.accessRevoked = true;
-      if (socket.connected) socket.conn.close();
+      if (!socket.connected) continue;
+      // The route's own membership-removed emit comes after this close and
+      // cannot reach the removed user, so the notice travels with the
+      // eviction. It carries only the server id; the close that follows in
+      // the same tick keeps revocation immediate.
+      if ("userId" in revocation && revocation.removedFromServerId && socket.data.serverId === revocation.removedFromServerId) {
+        socket.emit("server:membership-removed", { serverId: revocation.removedFromServerId });
+      }
+      socket.conn.close();
     }
   };
   io.on("access:revoked", (revocation: SocketAccessRevocation, acknowledge: () => void) => {
@@ -121,6 +137,14 @@ export function setupSocket(server: http.Server, corsOrigin: string | string[]) 
       acknowledge({ ok: true });
     } catch (error) {
       console.error("[Socket] Channel publication failed:", serializeErrorForLog(error));
+      // Socket.IO handlers run outside request-scoped trace roots, so outside
+      // one this is a deliberate no-op (same tradeoff as agentPermalinkRender).
+      safeAddTraceEvent("socket.channel_publish.failed", () => ({
+        event_kind: "socket_channel_publish",
+        outcome: "error",
+        reason: "publish_threw",
+        error_class: errorClassOf(error),
+      }));
       acknowledge({ ok: false });
     }
   });
@@ -159,9 +183,8 @@ export function setupSocket(server: http.Server, corsOrigin: string | string[]) 
         const member = await serverService.isMember(serverId, payload.sub);
         if (!member) {
           pendingHandshakes.delete(socket);
-          return next(new Error("Not a member of this server"));
+          return next(new Error(SOCKET_NOT_SERVER_MEMBER_ERROR));
         }
-        // Scoped revocations (guest policy changes) evict by role.
         socket.data.serverRole = await getActorServerRoleInServer(serverId, "user", payload.sub);
       }
 
@@ -170,7 +193,19 @@ export function setupSocket(server: http.Server, corsOrigin: string | string[]) 
         return next(new Error("Authentication changed; reconnect required"));
       }
       next();
-    } catch {
+    } catch (error) {
+      // The client-visible error stays the generic one; the real failure is
+      // logged and traced first so a throw here is not silently misreported
+      // as an expired token. Socket.IO handshakes run outside request-scoped
+      // trace roots, so the trace event is a deliberate no-op outside one
+      // (same tradeoff as agentPermalinkRender).
+      console.error("[Socket] Auth middleware validation failed:", serializeErrorForLog(error));
+      safeAddTraceEvent("socket.auth.failed", () => ({
+        event_kind: "socket_auth",
+        outcome: "error",
+        reason: "auth_validation_threw",
+        error_class: errorClassOf(error),
+      }));
       pendingHandshakes.delete(socket);
       next(new Error("Invalid or expired token"));
     }
@@ -200,7 +235,7 @@ export function setupSocket(server: http.Server, corsOrigin: string | string[]) 
       socketConnectedClients.labels(newTransport.name).inc();
     });
 
-    const { userId, serverId, clientKind } = socket.data;
+    const { userId, serverId, clientKind, serverRole } = socket.data;
     const userRoom = `user:${userId}`;
     const clientKindRoom = socketClientKindRoom(userId, clientKind);
 
@@ -216,9 +251,13 @@ export function setupSocket(server: http.Server, corsOrigin: string | string[]) 
       clientKindRoom,
     });
 
-    // Auto-join server room + all user's channel/DM rooms
+    // Guests receive resource-scoped events only. The server room carries
+    // metadata for public channels that may be hidden from them.
     if (serverId) {
-      socket.join(`server:${serverId}`);
+      // Guests get their own room so publication paths that authorize per
+      // socket (channelRealtimeEvents) can still reach every connection of
+      // the server without exposing the server-room broadcasts to them.
+      socket.join(serverRole === "guest" ? socketServerGuestsRoom(serverId) : `server:${serverId}`);
       socket.join(socketUserServerRoom(userId, serverId));
 
       // Join all channels and DMs so the client receives message:new for unread tracking

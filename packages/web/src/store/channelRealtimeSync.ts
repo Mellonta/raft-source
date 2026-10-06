@@ -1,5 +1,6 @@
 import { useChannelStore } from "./channelStore";
 import type { ApiChannel } from "./channelStore";
+import { useServerStore } from "./serverStore";
 import { useMessageStore } from "./messageStore";
 import type { Message } from "./messageStore";
 
@@ -77,20 +78,37 @@ export function createChannelRealtimeBindings(
   const channelUpdated = (payload: unknown) => {
     const channel = readApiChannel(payload);
     if (channel) {
+      // Some events go to the user's room, which spans every server they have
+      // open. A joint channel has one row per participating server, so a row
+      // from another server must not land in this server's list.
+      const currentServerId = useServerStore.getState().current?.id;
+      if (channel.serverId && currentServerId && channel.serverId !== currentServerId) return;
       useChannelStore.getState().applyChannelPatch(channel);
       return;
     }
 
+    // An id-only event means "this channel changed, re-read it" (e.g. a joint
+    // participant disconnected, which can end the over-limit lock). A cached
+    // row is exactly what is stale, so refetch rather than return it.
     const channelId = readChannelId(payload);
     if (channelId) {
-      void useChannelStore.getState().ensureChannel(channelId);
+      void useChannelStore.getState().ensureChannel(channelId, { refresh: true });
       return;
     }
 
     void useChannelStore.getState().loadChannels();
   };
 
-  const channelMembersUpdated = () => {
+  const channelMembersUpdated = (payload: unknown) => {
+    // Members of one channel changed — refresh only that channel's row (its
+    // member count and members list), never the whole 300KB channel list.
+    // useChannelMembers re-fetches its own member page on the same event.
+    const channelId = readChannelId(payload);
+    if (channelId) {
+      void useChannelStore.getState().ensureChannel(channelId, { refresh: true });
+      return;
+    }
+
     void useChannelStore.getState().loadChannels();
   };
 

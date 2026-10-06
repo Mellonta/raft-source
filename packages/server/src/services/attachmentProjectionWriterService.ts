@@ -1,17 +1,18 @@
 import { eq } from "drizzle-orm";
-import type { DatabaseTransaction } from "../db/index.js";
+import type { DatabaseTransaction } from "../db/index";
 import {
   type AttachmentUploaderType,
   attachmentObjectCharges,
   attachmentObjects,
   attachmentUploadReservations,
   attachments,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   createAttachmentLifecycleFoundationWithExecutor,
   ATTACHMENT_RESERVATION_TTL_MS,
   resolveAttachmentLifecycleDatabaseNow,
-} from "./attachmentLifecycleService.js";
+} from "./attachmentLifecycleService";
+import { assertChannelWritableInTransaction } from "./channelConversionFenceService";
 
 export type PendingAttachmentProjectionInput = {
   id: string;
@@ -72,6 +73,7 @@ export async function createPendingAttachmentProjectionWithExecutor(
   input: PendingAttachmentProjectionInput,
   explicitNow?: Date,
 ): Promise<typeof attachments.$inferSelect> {
+  await assertChannelWritableInTransaction(executor, input.channelId);
   const now = await resolveAttachmentLifecycleDatabaseNow(executor, explicitNow);
   const projectionId = input.id;
   const objectId = input.objectId;
@@ -320,6 +322,7 @@ export async function createIdempotentPendingAttachmentProjectionWithExecutor(
   input: PendingAttachmentProjectionInput & { id: string; objectId: string },
   explicitNow?: Date,
 ): Promise<typeof attachments.$inferSelect> {
+  await assertChannelWritableInTransaction(executor, input.channelId);
   const now = await resolveAttachmentLifecycleDatabaseNow(executor, explicitNow);
   const [existing] = await executor.select().from(attachments)
     .where(eq(attachments.id, input.id)).limit(1).for("update");

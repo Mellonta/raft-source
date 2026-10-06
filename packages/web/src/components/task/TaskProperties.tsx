@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect, useLayoutEffect, useRef } from "react";
+import { authorizeTaskAction } from "@botiverse/raft-shared";
 import { useIntl } from "react-intl";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
@@ -15,7 +16,7 @@ import { Badge, DescriptionDetails, DescriptionItem, DescriptionList, Descriptio
 import InlineBadgeEditor from "../InlineBadgeEditor";
 import Timeline from "../ui/Timeline";
 
-import { STATUS_STYLES, canEditTaskStatus, getTaskStatusOptions } from "./taskStatusUi";
+import { getTaskStatusBadgeClassName, TASK_STATUS_UI, STATUS_STYLES, canEditTaskStatus, getTaskStatusOptions } from "./taskStatusUi";
 import { StatusBadge } from "./StatusBadge";
 import { dedupeTaskAssigneeMembers } from "./taskAssigneeCandidates";
 
@@ -93,7 +94,16 @@ export default function TaskProperties({ task }: { task: Task }) {
 
   const canManageServer = capabilities.deleteAnyTask;
   const canEditStatus = canEditTaskStatus(task, currentUser?.id, canManageServer, role);
-  const canEditAssignee = role !== "guest";
+  // Completed tasks are immutable by contract: the server freezes their
+  // assignee so the completion record remains historically accurate. Keep the
+  // control read-only here too, instead of showing a picker that can only fail
+  // with `task is done` after the user makes a selection.
+  const canEditAssignee = task.status !== "done" && authorizeTaskAction({ action: "assign", serverRole: role, canReadChannel: true, canWriteChannel: true, readOnlyReason: task.readOnlyReason });
+  const assigneeReadOnlyTitle = task.readOnlyReason
+    ? formatMessage({ id: "task.permissions.historicalJoint" })
+    : task.status === "done"
+      ? formatMessage({ id: "task.permissions.done" })
+      : undefined;
   const statusOptions = getTaskStatusOptions(task, currentUser?.id, canManageServer)
     .map((option) => ({ id: option.id, label: formatMessage({ id: option.labelId }) }));
 
@@ -152,6 +162,7 @@ export default function TaskProperties({ task }: { task: Task }) {
     ?? mentionLabel(task.createdByName || formatMessage({ id: "task.properties.unknown" }));
 
   const handleStatusSelect = async (id: string) => {
+    if (!canEditStatus) return;
     const next = id as TaskStatus;
     if (next === task.status) {
       setOpenEditor(null);
@@ -169,6 +180,7 @@ export default function TaskProperties({ task }: { task: Task }) {
   };
 
   const handleAssigneeSelect = async (id: string) => {
+    if (!canEditAssignee) return;
     if (id === selectedAssigneeId) {
       setOpenEditor(null);
       return;
@@ -196,24 +208,26 @@ export default function TaskProperties({ task }: { task: Task }) {
   // @artin asked for one horizontal facts row in #proj-task:142b9b9a. Keep
   // each label/value pair together, but let the row wrap on narrow panels.
   return (<>
-    <div className="mb-4 border-b border-black/10 pb-3"><button type="button" className="mb-1 flex w-full items-center gap-1 text-left text-xs font-bold" aria-expanded={historyOpen} onClick={() => setHistoryOpen((v) => !v)}><span>{formatMessage({ id: "task.properties.history" })}</span>{historyOpen ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}</button>
-      {historyOpen && <div className="mt-3 w-full">{historyError ? <p className="text-xs text-red-700">{formatMessage({ id: "task.history.error" })}</p> : visibleHistory.length === 0 ? <p className="text-xs text-black/50">{formatMessage({ id: "task.history.empty" })}</p> : <Timeline items={timelineItems.map(({ event, pointColor, lineColor }) => ({ id: event.id, title: <TimelineText text={historyTitle(event, formatMessage)} bold />, meta: `${event.actorName ?? event.actorType} · ${formatShortDateTime(event.createdAt)}`, colorClass: pointColor, lineColorClass: lineColor, children: <TimelineDetail event={event} resolveName={(type, id) => displayNameFor(type, id)} formatMessage={formatMessage} /> }))} />}</div>}
+    <div className="mb-4 border-b border-line-muted theme-brutal:border-black/10 pb-3"><button type="button" className="mb-1 flex w-full items-center gap-1 text-left text-xs font-bold" aria-expanded={historyOpen} onClick={() => setHistoryOpen((v) => !v)}><span>{formatMessage({ id: "task.properties.history" })}</span>{historyOpen ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}</button>
+      {historyOpen && <div className="mt-3 w-full">{historyError ? <p className="text-xs text-warning-strong">{formatMessage({ id: "task.history.error" })}</p> : visibleHistory.length === 0 ? <p className="text-xs text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "task.history.empty" })}</p> : <Timeline items={timelineItems.map(({ event, pointColor, lineColor }) => ({ id: event.id, title: <TimelineText text={historyTitle(event, formatMessage)} bold />, meta: `${event.actorName ?? event.actorType} · ${formatShortDateTime(event.createdAt)}`, colorClass: pointColor, lineColorClass: lineColor, children: <TimelineDetail event={event} resolveName={(type, id) => displayNameFor(type, id)} formatMessage={formatMessage} /> }))} />}</div>}
     </div>
     <DescriptionList
       className="flex flex-wrap items-center gap-x-6 gap-y-2"
       data-testid="task-properties"
     >
       <PropertyRow label={formatMessage({ id: "task.properties.status" })}>
-        {canEditStatus ? <InlineBadgeEditor
+        {canEditStatus || task.readOnlyReason ? <InlineBadgeEditor
           displayValue={formatMessage({ id: STATUS_STYLES[task.status].labelId })}
           selectedId={task.status}
           options={statusOptions}
           onSelect={handleStatusSelect}
-          open={openEditor === "status"}
+          open={canEditStatus && openEditor === "status"}
           onToggle={() => setOpenEditor((cur) => (cur === "status" ? null : "status"))}
           onRequestClose={() => setOpenEditor(null)}
-          badgeClassName={STATUS_STYLES[task.status].bg}
-          disabled={busy}
+          badgeClassName={getTaskStatusBadgeClassName(task.status)}
+          badgeVariant={TASK_STATUS_UI[task.status].variant}
+          disabled={busy || !canEditStatus}
+          buttonTitle={task.readOnlyReason ? formatMessage({ id: "task.permissions.historicalJoint" }) : undefined}
           buttonTestId="task-properties-status"
           optionTestIdPrefix="task-properties-status-option"
         /> : <StatusBadge status={task.status} data-testid="task-properties-status-readonly">
@@ -227,20 +241,21 @@ export default function TaskProperties({ task }: { task: Task }) {
           are assignable too, so this one has to be typed into; Status never
           will be (@stdrc msg=c8c890d2, msg=4c357cb1). */}
       <PropertyRow label={formatMessage({ id: "task.properties.assignee" })}>
-        {canEditAssignee ? <InlineBadgeEditor
+        <InlineBadgeEditor
           displayValue={assigneeDisplay}
           selectedId={selectedAssigneeId}
           options={assigneeOptions}
           onSelect={handleAssigneeSelect}
-          open={openEditor === "assignee"}
+          open={canEditAssignee && openEditor === "assignee"}
           onToggle={() => {
             setAssigneeSearch("");
             setOpenEditor((cur) => (cur === "assignee" ? null : "assignee"));
           }}
           onRequestClose={() => setOpenEditor(null)}
-          badgeClassName="bg-white"
+          badgeClassName="bg-layer-panel text-foreground-strong theme-brutal:bg-white theme-brutal:text-black"
           uppercase={false}
-          disabled={busy}
+          disabled={busy || !canEditAssignee}
+          buttonTitle={assigneeReadOnlyTitle}
           buttonTestId="task-properties-assignee"
           dropdownTestId="task-assignee-dropdown"
           searchable
@@ -248,15 +263,16 @@ export default function TaskProperties({ task }: { task: Task }) {
           onSearchChange={setAssigneeSearch}
           searchPlaceholder={formatMessage({ id: "task.assignee.searchPlaceholder" })}
           popoverTitle={formatMessage({ id: "task.properties.assignee" })}
-        /> : <Badge uppercase={false} data-testid="task-properties-assignee-readonly">
-          {assigneeDisplay}
-        </Badge>}
+        />
       </PropertyRow>
 
       <PropertyRow label={formatMessage({ id: "task.properties.createdBy" })}>
         <span>{createdByDisplay}</span>
       </PropertyRow>
     </DescriptionList>
+    {task.readOnlyReason && <p className="mt-2 text-xs text-black/60" data-testid="task-readonly-reason">
+      {formatMessage({ id: "task.permissions.historicalJoint" })}
+    </p>}
   </>);
 }
 
@@ -268,8 +284,8 @@ function TimelineText({ text, bold = false, className = "" }: { text: string; bo
 
 function TimelineDetail({ event, resolveName, formatMessage }: { event: TaskHistoryEvent; resolveName: (type: "agent" | "user", id: string) => string | null; formatMessage: ReturnType<typeof useIntl>["formatMessage"] }) {
   const p = event.payload;
-  if (["status_changed", "closed", "reopened"].includes(event.eventType) && p.from && p.to) { const from = String(p.from) as TaskStatus; const to = String(p.to) as TaskStatus; return <div className="mt-1 flex items-center gap-1 text-black/60"><Badge variant="accent" uppercase={false} className={STATUS_STYLES[from]?.bg}>{formatMessage({ id: STATUS_STYLES[from]?.labelId ?? "task.status.todo" })}</Badge> → <Badge variant="accent" uppercase={false} className={STATUS_STYLES[to]?.bg}>{formatMessage({ id: STATUS_STYLES[to]?.labelId ?? "task.status.todo" })}</Badge></div>; }
-  return <TimelineText text={historyDetail(event, resolveName, formatMessage)} className="mt-1 text-black/60" />;
+  if (["status_changed", "closed", "reopened"].includes(event.eventType) && p.from && p.to) { const from = String(p.from) as TaskStatus; const to = String(p.to) as TaskStatus; return <div className="mt-1 flex items-center gap-1 text-foreground-muted theme-brutal:text-black/60"><Badge variant="accent" uppercase={false} appearance="soft" className={getTaskStatusBadgeClassName(from)}>{formatMessage({ id: STATUS_STYLES[from]?.labelId ?? "task.status.todo" })}</Badge> → <Badge variant="accent" uppercase={false} appearance="soft" className={getTaskStatusBadgeClassName(to)}>{formatMessage({ id: STATUS_STYLES[to]?.labelId ?? "task.status.todo" })}</Badge></div>; }
+  return <TimelineText text={historyDetail(event, resolveName, formatMessage)} className="mt-1 text-foreground-muted theme-brutal:text-black/60" />;
 }
 
 function historyTitle(event: TaskHistoryEvent, formatMessage: ReturnType<typeof useIntl>["formatMessage"]): string {

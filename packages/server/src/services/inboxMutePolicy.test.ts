@@ -1,13 +1,13 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { sql } from "drizzle-orm";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
 import {
   activityPromotionAllowedByMuteSql,
   isActivityPromotionSuppressedByMute,
-} from "./inboxMutePolicy.js";
+} from "./inboxMutePolicy";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

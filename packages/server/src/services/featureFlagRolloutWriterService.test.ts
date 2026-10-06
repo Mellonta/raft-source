@@ -1,7 +1,7 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
+import { dbTest as test } from "../test/integration/dbTest";
 import assert from "node:assert/strict";
 
-import { runNamedCase } from "../test/runNamedCase.js";
+import { runNamedCase } from "../test/runNamedCase";
 import { and, eq, sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
@@ -10,18 +10,18 @@ import {
   FEATURE_FLAG_ROLLOUT_GUARDRAIL_SCHEMA,
   type FeatureFlagRolloutGuardrailReceiptV1,
 } from "@botiverse/raft-shared";
-import { getDb, type Database } from "../db/index.js";
+import { getDb, type Database } from "../db/index";
 import {
   featureFlagConfigVersions,
   featureFlagRolloutAuditEvents,
   featureFlagRules,
   featureFlags,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   createFeatureFlagRolloutWriterService,
   FeatureFlagRolloutWriteConflictError,
   type FeatureFlagRolloutWriteInput,
-} from "./featureFlagRolloutWriterService.js";
+} from "./featureFlagRolloutWriterService";
 
 
 const CONTROL_PLANE_ID = "production";

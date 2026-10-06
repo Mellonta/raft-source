@@ -1,34 +1,33 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
 import {
-  PRO_AGENT_SEAT_BLOCK_SIZE,
-  THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY
+  PRO_AGENT_SEAT_BLOCK_SIZE
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { legacyDoneFrontierFallbacksTotal } from "../metrics.js";
+import { getDb } from "../db/index";
+import { legacyDoneFrontierFallbacksTotal } from "../metrics";
 import {
   users, servers as serversTable,
   serverMembers, messages, threadFollows, subscriptions,
   featureFlags,
   featureFlagRules
-} from "../db/schema.js";
-import { createServer as createServerService } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { createChannel, getOrCreateThread, addHuman, addAgent } from "../services/channelService.js";
+} from "../db/schema";
+import { createServer as createServerService } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { createChannel, getOrCreateThread, addHuman, addAgent } from "../services/channelService";
 import {
   createMessage
-} from "../services/messageService.js";
+} from "../services/messageService";
 import {
   recordInboxNotificationFacts
-} from "../services/inboxNotificationService.js";
-import { READ_RECEIPTS_FEATURE_FLAG_KEY } from "../services/featureFlagService.js";
+} from "../services/inboxNotificationService";
+import { READ_RECEIPTS_FEATURE_FLAG_KEY } from "../services/featureFlagService";
 import {
   resolveChannelSuppressionTarget,
   resolveThreadSuppressionTarget,
-} from "../services/inboxSuppressionWriters.js";
+} from "../services/inboxSuppressionWriters";
 
 
 export type Fixtures = {
@@ -88,7 +87,7 @@ export async function createServer(name: string, slug: string, ownerId: string) 
   // isTrialActive vs TRIAL_END_DATE) and tighten once the trial ends — message
   // history gains a 30-day cutoff and pro-gated features (joint channels) stop
   // being allowed. Tests asserting history_cutoff_present=false /
-  // fallback_reason="feature_disabled" / that the RisingWave stats backend is
+  // fallback_reason="none" / that the RisingWave stats backend is
   // reached (a cutoff short-circuits stats to Postgres before RW is tried) /
   // that joint-channel create succeeds silently flipped red the moment
   // TRIAL_END_DATE elapsed in real time. `founder` (unlimited, no subscription
@@ -115,7 +114,10 @@ export function installFakeIo(app: { set: (key: string, value: unknown) => void 
     // still evaluates read authority; transport eviction is covered by real
     // Socket tests in securityLifecycle.api.test.ts.
     local: {
-      in(room: string) {
+      in(rooms: string | string[]) {
+        // Production addresses the member room and the guest room together;
+        // the fake models one connected socket per server member either way.
+        const room = (Array.isArray(rooms) ? rooms : [rooms]).find((entry) => /^server:[^:]+$/.test(entry)) ?? "server:";
         return { async fetchSockets() {
           const members = await getDb().select({ userId: serverMembers.userId })
             .from(serverMembers).where(eq(serverMembers.serverId, room.slice("server:".length)));
@@ -166,36 +168,6 @@ export async function enableReadReceiptsForServer(serverId: string): Promise<voi
   });
   await db.insert(featureFlagRules).values({
     flagKey: READ_RECEIPTS_FEATURE_FLAG_KEY,
-    stage: "server",
-    priority: 0,
-    decision: "allow",
-    values: [serverId],
-  });
-}
-
-
-export async function enableThreadAgentFollowerManagementForServer(serverId: string): Promise<void> {
-  const db = getDb();
-  await db.insert(featureFlags).values({
-    key: THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY,
-    description: "test thread Agent follower management",
-    enabled: true,
-    killSwitch: false,
-    randomizationUnit: "server",
-    defaultEnabled: false,
-    salt: "thread-agent-follower-management-test",
-  }).onConflictDoUpdate({
-    target: featureFlags.key,
-    set: {
-      enabled: true,
-      killSwitch: false,
-      randomizationUnit: "server",
-      defaultEnabled: false,
-      salt: "thread-agent-follower-management-test",
-    },
-  });
-  await db.insert(featureFlagRules).values({
-    flagKey: THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY,
     stage: "server",
     priority: 0,
     decision: "allow",

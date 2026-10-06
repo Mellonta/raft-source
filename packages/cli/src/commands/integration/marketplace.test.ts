@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import type { AgentApiIntegrationMarketplaceResponse } from "@botiverse/raft-shared";
 
-import type { AgentContext } from "../../auth/env.js";
-import type { ApiResponse } from "../../client.js";
-import { createCommandContext } from "../../core/context.js";
-import type { CliIo } from "../../core/io.js";
-import { formatMarketplaceApps, integrationMarketplaceCommand } from "./marketplace.js";
+import type { AgentContext } from "../../auth/env";
+import type { ApiResponse } from "../../client";
+import { createCommandContext } from "../../core/context";
+import type { CliIo } from "../../core/io";
+import { formatMarketplaceApps, integrationMarketplaceCommand } from "./marketplace";
 
 function memoryIo(): { io: CliIo; stdout: string[] } {
   const stdout: string[] = [];
@@ -39,6 +38,8 @@ function marketplaceResponse(): AgentApiIntegrationMarketplaceResponse {
     apps: [{
       id: "app-1",
       clientId: "me-build-homepage",
+      official: false,
+      purpose: "",
       name: "Me.Build Homepage",
       description: "Publish a personal homepage for an Agent",
       category: "Productivity",

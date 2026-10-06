@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { emitPlatformScopedUserEvent, socketClientKindRoom } from "./platformScope.js";
+import { emitPlatformScopedUserEvent, socketClientKindRoom } from "./platformScope";
 
 function createIoRecorder() {
   const events: { room: string; event: string; payload: unknown }[] = [];

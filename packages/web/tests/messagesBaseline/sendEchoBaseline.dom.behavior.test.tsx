@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "../helpers/domSetup";
 import { act } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
@@ -17,7 +16,7 @@ import { useServerStore } from "../../src/store/serverStore";
 import { useTaskStore } from "../../src/store/taskStore";
 import { useThreadStore } from "../../src/store/threadStore";
 
-const SERIAL = { concurrency: false };
+const SERIAL = {};
 const CHANNEL_ID = "t4a-j1-send-echo-dom";
 const originalGet = api.get.bind(api);
 

@@ -6,7 +6,6 @@
 //
 // Run: pnpm --filter @botiverse/raft-web test tests/activityConsumer.behavior.test.ts
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   ACTIVITY_DOMAIN,
   createActivityDomain,

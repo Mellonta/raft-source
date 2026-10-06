@@ -1,4 +1,4 @@
-ARG NODE_VERSION=24.15.0
+ARG NODE_VERSION=24.21.0
 FROM node:${NODE_VERSION}-bookworm-slim AS builder
 
 RUN corepack enable
@@ -7,11 +7,11 @@ WORKDIR /app
 
 # Copy workspace root files
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
-COPY patches/ patches/
 
 # Copy package manifests
 COPY packages/desktop-contract/package.json packages/desktop-contract/
 COPY packages/sync-core/package.json packages/sync-core/
+COPY packages/runtime-form/package.json packages/runtime-form/
 COPY packages/shared/package.json packages/shared/
 COPY packages/web/package.json packages/web/
 
@@ -22,6 +22,7 @@ RUN pnpm install --frozen-lockfile
 # Copy source
 COPY packages/desktop-contract/ packages/desktop-contract/
 COPY packages/sync-core/ packages/sync-core/
+COPY packages/runtime-form/ packages/runtime-form/
 COPY packages/shared/ packages/shared/
 COPY packages/visual-testing/shared/ packages/visual-testing/shared/
 COPY packages/web/ packages/web/

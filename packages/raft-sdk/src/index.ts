@@ -1,7 +1,7 @@
 export {
   createRaftClient,
   RaftSdkConfigurationError,
-} from "./client.js";
+} from "./client";
 export type {
   CreateRaftClientOptions,
   RaftClient,
@@ -12,11 +12,11 @@ export type {
   RaftClientThrottleOptions,
   RaftClientTransportRequest,
   RaftSdkConfigurationErrorCode,
-} from "./client.js";
+} from "./client";
 export {
   joinRaftChannelByTarget,
   parseRaftRegularChannelTarget,
-} from "./channelJoin.js";
+} from "./channelJoin";
 export type {
   RaftChannelJoinClient,
   RaftChannelJoinClientResult,
@@ -27,12 +27,12 @@ export type {
   RaftChannelJoinResult,
   RaftChannelJoinSuccess,
   RaftChannelJoinTransportError,
-} from "./channelJoin.js";
+} from "./channelJoin";
 export {
   bootstrapRaftCredential,
   createRaftClientFromStore,
   RaftCredentialError,
-} from "./credential.js";
+} from "./credential";
 export type {
   BootstrapRaftCredentialOptions,
   CreateRaftClientFromStoreOptions,
@@ -40,8 +40,10 @@ export type {
   RaftCredentialIdentity,
   RaftCredentialStore,
   StoredRaftCredential,
-} from "./credential.js";
-export { createFileCredentialStore } from "./fileCredentialStore.js";
+} from "./credential";
+export { createFileCredentialStore } from "./fileCredentialStore";
+export { readLatestReadThread } from "./latestReadThread";
+export type { RaftLatestReadThread, ReadLatestReadThreadOptions } from "./latestReadThread";
 export type {
   RaftEvent,
   RaftEventAttachment,
@@ -50,4 +52,200 @@ export type {
   RaftEventsReceiveError,
   RaftEventsReceiveRequest,
   RaftEventsReceiveResult,
-} from "./events.js";
+} from "./events";
+export type {
+  RaftContextAgent,
+  RaftContextData,
+  RaftContextError,
+  RaftContextResult,
+  RaftContextServer,
+} from "./context";
+export type {
+  RaftActionPrepared,
+  RaftActionPrepareRequest,
+  RaftApiError,
+  RaftApiResult,
+  RaftAppConfig,
+  RaftAppConfigPatch,
+  RaftAvatarUpload,
+  RaftManageClient,
+  RaftProfile,
+  RaftProfileUpdate,
+  RaftServerProfile,
+  RaftServerUpdate,
+} from "./manage";
+export {
+  createRaftRoutes,
+  describeRaftRoute,
+  listRaftRoutes,
+} from "./routes";
+export type {
+  CreateRaftRoutesOptions,
+  RaftRouteAnnotations,
+  RaftRouteInfo,
+  RaftRouteKey,
+  RaftRouteMeta,
+  RaftRouteResult,
+  RaftRouteRetryPolicy,
+  RaftRoutes,
+} from "./routes";
+export { createRaft } from "./raft";
+export type { CreateRaftOptions, Raft, RaftInboxCommitResult, RaftInvokeCaller, RaftInvokeResult } from "./raft";
+export {
+  RAFT_OPERATIONS,
+  RAFT_OPERATIONS_SCHEMA,
+  RAFT_OPERATIONS_VERSION,
+  raftToolNameFor,
+} from "./operations";
+export type {
+  RaftConsumption,
+  RaftOperationIdempotency,
+  RaftOperationName,
+  RaftOperationSpec,
+  RaftOperationsDocument,
+} from "./operations";
+export { RAFT_JSON_SCHEMA_KEYWORDS } from "./toolSchema";
+export type { RaftJsonSchema, RaftJsonSchemaType } from "./toolSchema";
+export { commitInboxRequestSchema, whoamiRequestSchema } from "./operationSchemas";
+// The zod request schema each operation validates its input with (the
+// manifest's inputSchema is projected from these).
+export {
+  amendTaskRequestSchema,
+  assignTaskRequestSchema,
+  attachmentCommentsRequestSchema,
+  channelInfoRequestSchema,
+  channelMembersRequestSchema,
+  channelTargetRequestSchema,
+  checkInboxRequestSchema,
+  claimTasksRequestSchema,
+  convertMessageToTaskRequestSchema,
+  createTasksRequestSchema,
+  downloadAttachmentUrlRequestSchema,
+  drainInboxRequestSchema,
+  getManualTopicRequestSchema,
+  listInboxRequestSchema,
+  listTasksRequestSchema,
+  listThreadsRequestSchema,
+  mentionResolutionIdsRequestSchema,
+  pendingMentionActionsRequestSchema,
+  prepareActionCardRequestSchema,
+  reactRequestSchema,
+  readHistoryRequestSchema,
+  replyToRequestSchema,
+  resolveMessageRequestSchema,
+  searchManualRequestSchema,
+  searchMessagesRequestSchema,
+  sendMessageRequestSchema,
+  senderMentionDeliveriesRequestSchema,
+  serverInfoRequestSchema,
+  showProfileRequestSchema,
+  taskRefSchema,
+  unfollowThreadRequestSchema,
+  updateProfileRequestSchema,
+  updateTaskStatusRequestSchema,
+  userInfoRequestSchema,
+} from "@botiverse/raft-shared/src/agentOps/index";
+export {
+  hashRaftSendContent,
+  parseRaftState,
+  RAFT_STATE_CONTINUATIONS_PER_TARGET,
+  RAFT_STATE_CONTINUATIONS_TOTAL,
+  RAFT_STATE_SCHEMA,
+  SeenFrontier,
+  hasAgentMessageIdentity,
+  isInterrupted,
+  projectRaftMessage,
+  projectRaftMessages,
+  verifyInboxNotice,
+  RAFT_INBOX_NOTICE_SCHEMA,
+  RAFT_NOTICE_DELIVERY_ID_HEADER,
+  RAFT_NOTICE_SIGNATURE_HEADER,
+} from "@botiverse/raft-shared/src/agentOps/index";
+
+export type {
+  CheckInboxOutcome,
+  CheckInboxRequest,
+  ClaimTasksOutcome,
+  ClaimTasksRequest,
+  DrainInboxRequest,
+  ListInboxRequest,
+  RaftAckMode,
+  RaftClaimResult,
+  RaftClaimRow,
+  RaftClaimRowState,
+  RaftFailure,
+  RaftHistoryPage,
+  RaftInterrupt,
+  RaftInterruptCancel,
+  RaftInterruptReason,
+  RaftInterruptResume,
+  RaftInterrupted,
+  RaftInboxBatch,
+  RaftInboxConversation,
+  RaftInboxDrainSummary,
+  RaftInboxListing,
+  RaftInboxNotice,
+  RaftMessage,
+  RaftMessageAttachment,
+  RaftMessageTask,
+  RaftNextStep,
+  RaftNoticeFlag,
+  RaftNoticeTarget,
+  RaftOpError,
+  RaftOpErrorCode,
+  RaftOutcome,
+  RaftState,
+  RaftStateContinuation,
+  RaftStateSaveErrorHandler,
+  RaftStateStore,
+  RaftSenderType,
+  RaftSent,
+  RaftWebhookStatus,
+  ReadHistoryRequest,
+  SeenAttestation,
+  SeenFrontierSnapshot,
+  SendMessageOutcome,
+  SendMessageRequest,
+  VerifyNoticeInput,
+  VerifyNoticeRejection,
+  VerifyNoticeResult,
+  AmendTaskOutcome,
+  AmendTaskRequest,
+  AssignTaskRequest,
+  CreateTasksRequest,
+  ListTasksRequest,
+  RaftChannelInfo,
+  RaftChannelMuteState,
+  RaftChannelRef,
+  RaftServerInfo,
+  RaftUserInfo,
+  RaftUserRef,
+  UserInfoRequest,
+  RaftTaskBoard,
+  RaftTaskStatus,
+  RaftTasksCreated,
+  ServerInfoRequest,
+  ServerInfoSection,
+  TaskRef,
+  UpdateTaskStatusOutcome,
+  UpdateTaskStatusRequest,
+  MentionResolutionIdsRequest,
+  RaftMentionActionOutcome,
+  PrepareActionCardRequest,
+  RaftPreparedCard,
+  ManualContext,
+  RaftAttachmentBytes,
+  RaftAttachmentDownloadUrl,
+  RaftAttachmentUploaded,
+  RaftHintStyle,
+  RaftNextOperation,
+  RaftPendingMentions,
+  RaftSearchPage,
+  ReactRequest,
+  SearchMessagesRequest,
+  UploadAttachmentRequest,
+  ConvertMessageToTaskRequest,
+  RaftInboxDrained,
+  ReplyToRequest,
+} from "@botiverse/raft-shared/src/agentOps/index";
+export { inferAttachmentMimeType } from "@botiverse/raft-shared/src/agentOps/index";

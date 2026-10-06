@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   buildRuntimeErrorActivityDiagnostic,
   buildRuntimeErrorDiagnosticEnvelope,
+  formatRuntimeBillingExhaustedMessage,
   formatRuntimeInputTooLargeMessage,
   formatRuntimeLoginRequiredMessage,
+  formatRuntimePlanAccessMessage,
   formatRuntimeStartTimeoutMessage,
-} from "./runtimeErrorDiagnostics.js";
+  isRuntimePlanAccessErrorText,
+} from "./runtimeErrorDiagnostics";
 
 test("buildRuntimeErrorDiagnosticEnvelope classifies and bounds provider errors", () => {
   const envelope = buildRuntimeErrorDiagnosticEnvelope(
@@ -125,6 +127,19 @@ test("buildRuntimeErrorDiagnosticEnvelope classifies provider stream failures", 
   const decodingFailure = buildRuntimeErrorDiagnosticEnvelope("error decoding response body");
   assert.equal(decodingFailure.spanAttrs.runtime_error_class, "ProviderStreamError");
   assert.equal(decodingFailure.spanAttrs.turn_reason, "provider_stream_error");
+});
+
+test("buildRuntimeErrorActivityDiagnostic preserves exact compaction failure classes without raw text", () => {
+  const providerFailure = buildRuntimeErrorActivityDiagnostic("Compaction failed: 503: synthetic upstream unavailable");
+  assert.equal(providerFailure.errorClass, "ProviderServerError");
+  assert.equal(providerFailure.errorReason, "provider_server_error");
+  assert.match(providerFailure.fingerprint, /^[0-9a-f]{16}$/);
+  assert.equal(Object.values(providerFailure).some(value => String(value).includes("synthetic upstream")), false);
+
+  const aborted = buildRuntimeErrorActivityDiagnostic("This operation was aborted");
+  assert.equal(aborted.errorClass, "OperationAbortedError");
+  assert.equal(aborted.errorReason, "operation_aborted");
+  assert.match(aborted.fingerprint, /^[0-9a-f]{16}$/);
 });
 
 test("buildRuntimeErrorDiagnosticEnvelope treats Codex provider capacity as recoverable rate limiting", () => {
@@ -301,9 +316,143 @@ test("formatRuntimeStartTimeoutMessage gives bounded-startup guidance", () => {
   );
 });
 
+test("Grok's input-too-large message names the control that starts a new session", () => {
+  const message = formatRuntimeInputTooLargeMessage("grok");
+  // No compaction exists for Grok and Restart reloads the same session, so the
+  // text must point at the real control by its web labels, not "compact it".
+  assert.doesNotMatch(message, /compact/i);
+  assert.match(message, /^Grok Build reported input that is too large for the selected model\./);
+  assert.match(message, /Restart keeps the existing session\./);
+  assert.match(message, /open Restart \/ Reset and choose Reset Session & Restart \(shown as Reset Model for members\)/);
+  assert.match(message, /keeping Raft messages and workspace files, including MEMORY\.md/);
+  assert.match(message, /If the error persists in a new session, reduce the prompt or configured startup context\.$/);
+});
+
+test("other runtimes keep the generic input-too-large text", () => {
+  for (const runtime of ["claude", "codex", "pi", "kimi", "gemini", "opencode"]) {
+    const message = formatRuntimeInputTooLargeMessage(runtime);
+    assert.match(message, /For a resumed session, compact it or start a new session before retrying\.$/, runtime);
+    assert.doesNotMatch(message, /Reset Session & Restart/, runtime);
+  }
+});
+
 test("formatRuntimeInputTooLargeMessage gives bounded action guidance", () => {
   assert.equal(
     formatRuntimeInputTooLargeMessage("claude"),
     "Claude Code reported input that is too large for the selected model. Reduce the current prompt or injected startup context. For a resumed session, compact it or start a new session before retrying.",
   );
+});
+
+// task #917 — a Grok Build 402 "usage balance exhausted" was classified as a
+// retryable ProviderApiError (or unclassified), so nothing ever stopped it.
+test("buildRuntimeErrorDiagnosticEnvelope classifies billing exhaustion as BillingError", () => {
+  for (const message of [
+    "402 Grok Build usage balance exhausted",
+    "HTTP 402: usage balance exhausted",
+    "API Error: 402 Payment Required",
+    "Request failed: insufficient credits for this request",
+    "Your credit balance is too low to access the API",
+  ]) {
+    const envelope = buildRuntimeErrorDiagnosticEnvelope(message);
+    assert.equal(envelope.spanAttrs.runtime_error_class, "BillingError", message);
+    assert.equal(envelope.spanAttrs.turn_reason, "billing_exhausted", message);
+    assert.equal(envelope.spanAttrs.runtime_error_action_required, false, message);
+    assert.equal(buildRuntimeErrorActivityDiagnostic(message).errorReason, "billing_exhausted", message);
+  }
+});
+
+test("billing classification leaves existing quota and rate-limit wording alone", () => {
+  assert.notEqual(
+    buildRuntimeErrorDiagnosticEnvelope("You've hit your usage limit. Upgrade your plan or try again later.").spanAttrs.runtime_error_class,
+    "BillingError",
+  );
+  assert.equal(buildRuntimeErrorDiagnosticEnvelope("API Error: 429 Too Many Requests").spanAttrs.runtime_error_class, "RateLimitError");
+  assert.equal(buildRuntimeErrorDiagnosticEnvelope("API Error: 400 Bad Request: bad input").spanAttrs.runtime_error_class, "ProviderApiError");
+});
+
+test("formatRuntimeBillingExhaustedMessage names billing, not input size, and says waiting messages are kept", () => {
+  const message = formatRuntimeBillingExhaustedMessage("grok");
+  assert.match(message, /billing or credit balance is exhausted/);
+  assert.match(message, /kept and will be delivered/);
+  assert.doesNotMatch(message, /too large/i);
+});
+
+test("task #352: provider plan-without-model is action-required; plain 429 and timeouts are not", () => {
+  // Cell 1 — the field sample (z.ai code 1311) and two other provider phrasings.
+  for (const message of [
+    '429: {"code":"1311","message":"Your current subscription plan does not yet include access to GLM-5.3-Highspeed"}',
+    "HTTP 403: Your plan does not include the model gpt-5-pro",
+    "Model claude-opus-5-5 is not available on your current subscription tier",
+  ]) {
+    const envelope = buildRuntimeErrorDiagnosticEnvelope(message);
+    assert.equal(isRuntimePlanAccessErrorText(message), true, message);
+    assert.equal(envelope.spanAttrs.runtime_error_class, "ModelConfigError", message);
+    assert.equal(envelope.spanAttrs.turn_reason, "model_config_error", message);
+    assert.equal(envelope.spanAttrs.runtime_error_action, "user_model_access", message);
+    assert.equal(envelope.spanAttrs.runtime_error_action_required, true, message);
+    assert.equal(buildRuntimeErrorActivityDiagnostic(message).errorReason, "model_config_error", message);
+  }
+  assert.equal(
+    buildRuntimeErrorDiagnosticEnvelope('429: {"code":"1311","message":"Your current subscription plan does not yet include access to GLM-5.3-Highspeed"}').spanAttrs.runtime_error_http_status,
+    429,
+  );
+
+  // Cell 2 — ordinary rate limiting stays recoverable, never action-required.
+  for (const message of [
+    "API Error: 429 Too Many Requests",
+    "429: rate limit exceeded, retry after 30s",
+    '429: {"code":"1302","message":"High concurrency usage, please try again later"}',
+    "The selected model is at capacity, please try again later",
+  ]) {
+    const envelope = buildRuntimeErrorDiagnosticEnvelope(message);
+    assert.equal(isRuntimePlanAccessErrorText(message), false, message);
+    assert.equal(envelope.spanAttrs.runtime_error_class, "RateLimitError", message);
+    assert.equal(envelope.spanAttrs.runtime_error_action, "none", message);
+    assert.equal(envelope.spanAttrs.runtime_error_action_required, false, message);
+  }
+
+  // Cell 2b — Stone's review (#proj-daemon:f7ef2e8b a262fe8c): limit wording
+  // that also mentions plan/model is a transient limit, not missing access.
+  for (const message of [
+    "429 Your current plan does not support more requests to this model right now, please retry later",
+    "429 Too many requests: concurrency for this model is not available on the free tier at the moment, retry in 30s",
+    "Rate limit exceeded for model gpt-5: requests are not allowed on your plan until the window resets",
+  ]) {
+    const envelope = buildRuntimeErrorDiagnosticEnvelope(message);
+    assert.equal(isRuntimePlanAccessErrorText(message), false, message);
+    assert.notEqual(envelope.spanAttrs.runtime_error_class, "ModelConfigError", message);
+    assert.equal(envelope.spanAttrs.runtime_error_action, "none", message);
+    assert.equal(envelope.spanAttrs.runtime_error_action_required, false, message);
+  }
+  assert.equal(
+    buildRuntimeErrorDiagnosticEnvelope("429 Too many requests: concurrency for this model is not available on the free tier at the moment, retry in 30s").spanAttrs.runtime_error_class,
+    "RateLimitError",
+  );
+
+  // Cell 3 — timeouts stay recoverable, never action-required.
+  for (const message of ["Request timed out.", "ETIMEDOUT", "request timeout after 60000ms"]) {
+    const envelope = buildRuntimeErrorDiagnosticEnvelope(message);
+    assert.equal(isRuntimePlanAccessErrorText(message), false, message);
+    assert.equal(envelope.spanAttrs.runtime_error_class, "TimeoutError", message);
+    assert.equal(envelope.spanAttrs.runtime_error_action, "none", message);
+    assert.equal(envelope.spanAttrs.runtime_error_action_required, false, message);
+  }
+
+  // Neighbours keep their existing classification.
+  assert.equal(buildRuntimeErrorDiagnosticEnvelope("Authentication failed: missing API token").spanAttrs.runtime_error_action, "user_reauth");
+  assert.equal(
+    buildRuntimeErrorDiagnosticEnvelope("You've hit your usage limit. Upgrade your plan or try again later.").spanAttrs.runtime_error_action_required,
+    false,
+  );
+  const unsupported = buildRuntimeErrorDiagnosticEnvelope("model gpt-99 is not supported by this runtime");
+  assert.equal(unsupported.spanAttrs.runtime_error_class, "ModelConfigError");
+  assert.equal(unsupported.spanAttrs.runtime_error_action_required, false, "other ModelConfigError texts keep the sticky-terminal path");
+});
+
+test("formatRuntimePlanAccessMessage names the plan and the model, not a login", () => {
+  const message = formatRuntimePlanAccessMessage("builtin", "glm-5.3-highspeed");
+  assert.match(message, /provider plan for this agent does not include access to the configured model \(glm-5.3-highspeed\)/);
+  assert.match(message, /Switch this agent to a model the plan includes, or upgrade the plan, then retry starting this agent\./);
+  assert.doesNotMatch(message, /log in/i);
+  assert.doesNotMatch(formatRuntimePlanAccessMessage("codex", null), /\(\)/);
 });

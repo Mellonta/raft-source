@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { findClientRuleBypassConflicts } from "./featureFlagClientRules";
 
 /**
  * Phase-3 progressive-delivery contract for feature-flag writes.
@@ -29,13 +30,24 @@ const basisPointsSchema = z.number().int().min(0).max(10_000);
 const ruleSchema = z.object({
   id: uuidSchema,
   flagKey: flagKeySchema.optional(),
-  stage: z.enum(["user", "platform", "server", "audience", "lab", "plan", "percentage"]),
+  stage: z.enum(["user", "platform", "client", "server", "audience", "lab", "plan", "percentage"]),
   priority: z.number().int(),
   decision: z.enum(["allow", "deny"]),
   values: z.array(z.string().min(1)).refine((values) => new Set(values).size === values.length),
   percentageBasisPoints: basisPointsSchema.nullable(),
   variant: z.string().min(1).nullable(),
+  // `client`-stage constraints (task #1144). Rows written before the column existed omit them.
+  clientOs: z.array(z.string().min(1)).nullable().optional(),
+  minClientBuild: z.number().int().nullable().optional(),
+  clientBuildTypes: z.array(z.string().min(1)).nullable().optional(),
 });
+
+/** A rule carrying client constraints is never a canonical server/percentage rule to rewrite. */
+function hasClientConstraints(rule: FeatureFlagRolloutRuleInput): boolean {
+  return (rule.clientOs ?? null) !== null
+    || (rule.minClientBuild ?? null) !== null
+    || (rule.clientBuildTypes ?? null) !== null;
+}
 
 export type FeatureFlagRolloutRuleInput = z.infer<typeof ruleSchema>;
 
@@ -112,7 +124,8 @@ export type FeatureFlagRolloutBlockedReason =
   | "config_version_required"
   | "config_version_mismatch"
   | "unsupported_server_allowlist_shape"
-  | "unsupported_percentage_shape";
+  | "unsupported_percentage_shape"
+  | "client_rule_bypass";
 
 export type FeatureFlagRolloutClassification =
   | {
@@ -201,6 +214,16 @@ function parseAllRules(state: ParsedState): FeatureFlagRolloutRuleInput[] | null
   return parsed.data;
 }
 
+/**
+ * Widening a server allowlist or a percentage must not create a rule that a client failing a client allow
+ * rule would fall through to (task #1144). Narrowing is never blocked by this.
+ */
+function wouldBypassClientRule(state: ParsedState, candidate: FeatureFlagRolloutRuleInput): boolean {
+  const rules = parseAllRules(state);
+  if (!rules) return true;
+  return findClientRuleBypassConflicts({ rules: [...rules, candidate] }).length > 0;
+}
+
 function deriveServerAllowlist(state: ParsedState):
   | { shape: "canonical"; ruleId: string | null; serverIds: string[] }
   | { shape: "unsupported" } {
@@ -216,6 +239,7 @@ function deriveServerAllowlist(state: ParsedState):
     || rule.percentageBasisPoints !== null
     || rule.variant !== null
     || rule.values.some((serverId) => !UUID_RE.test(serverId))
+    || hasClientConstraints(rule)
   ) return { shape: "unsupported" };
   return { shape: "canonical", ruleId: rule.id, serverIds: [...rule.values] };
 }
@@ -236,6 +260,7 @@ function derivePercentage(state: ParsedState):
     || rule.values.length !== 0
     || rule.percentageBasisPoints === null
     || rule.variant !== null
+    || hasClientConstraints(rule)
   ) return { shape: "unsupported" };
   return { shape: "canonical_allow", ruleId: rule.id, basisPoints: rule.percentageBasisPoints };
 }
@@ -283,6 +308,17 @@ export function classifyFeatureFlagRollout(
       const present = allowlist.serverIds.includes(intent.serverId);
       if ((intent.desired === "present") === present) return { kind: "no_op" };
       if (intent.desired === "present") {
+        if (wouldBypassClientRule(state, {
+          id: "00000000-0000-4000-8000-000000000000",
+          stage: "server",
+          priority: 0,
+          decision: "allow",
+          values: [intent.serverId],
+          percentageBasisPoints: null,
+          variant: null,
+        })) {
+          return { kind: "blocked", reason: "client_rule_bypass" };
+        }
         return classifyWidening(state, intent, {
           kind: "server_allowlist_add",
           ruleId: allowlist.ruleId,
@@ -322,6 +358,17 @@ export function classifyFeatureFlagRollout(
             toBasisPoints: intent.desiredBasisPoints,
           },
         };
+      }
+      if (wouldBypassClientRule(state, {
+        id: "00000000-0000-4000-8000-000000000000",
+        stage: "percentage",
+        priority: 0,
+        decision: "allow",
+        values: [],
+        percentageBasisPoints: intent.desiredBasisPoints,
+        variant: null,
+      })) {
+        return { kind: "blocked", reason: "client_rule_bypass" };
       }
       return classifyWidening(state, intent, {
         kind: "percentage_increase",

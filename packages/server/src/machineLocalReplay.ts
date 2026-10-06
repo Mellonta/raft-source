@@ -6,8 +6,8 @@ import {
   getFlyInstanceForMachine,
   getMachineReplicaReplayTarget,
   type MachineReplicaReplayTarget,
-} from "./replicaRouter.js";
-import { addTraceEvent, getCurrentTraceContext } from "./tracing/semanticTrace.js";
+} from "./replicaRouter";
+import { addTraceEvent, errorClassOf, getCurrentTraceContext } from "./tracing/semanticTrace";
 
 const REPLAY_MARKER_HEADER = "x-raft-replica-replay";
 const REPLAY_MACHINE_HEADER = "x-raft-replica-replay-machine";
@@ -54,6 +54,7 @@ const MACHINE_LOCAL_ROUTE_ALLOWLIST: Array<{ method: string; path: RegExp }> = [
   { method: "GET", path: /^\/api\/servers\/[^/]+\/machines\/[^/]+\/workspaces$/ },
   { method: "GET", path: /^\/api\/servers\/[^/]+\/machines\/[^/]+\/runtime-models\/[^/]+$/ },
   { method: "GET", path: /^\/api\/servers\/[^/]+\/machines\/[^/]+\/runtime-form-definitions\/[^/]+\/option-sources\/[^/]+$/ },
+  { method: "GET", path: /^\/api\/servers\/[^/]+\/machines\/[^/]+\/runtime-forms\/v2\/[^/]+\/option-sources\/[^/]+$/ },
   { method: "GET", path: /^\/api\/servers\/[^/]+\/machines\/[^/]+\/agents\/[^/]+\/diagnostic\/session-transcript$/ },
   { method: "POST", path: /^\/api\/servers\/[^/]+\/machines\/[^/]+\/agents\/[^/]+\/feedback\/[^/]+\/transcript$/ },
   { method: "DELETE", path: /^\/api\/servers\/[^/]+\/machines\/[^/]+\/workspaces\/[^/]+$/ },
@@ -267,7 +268,7 @@ async function replayToReplica(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REPLAY_TIMEOUT_MS);
   try {
-    const targetUrl = new URL(req.originalUrl || req.url, target.endpoint);
+    const targetUrl = buildReplayTargetUrl(req.originalUrl || req.url, target.endpoint);
     const body = serializeReplayBody(req);
     const response = await deps.fetch(targetUrl, {
       method: req.method,
@@ -284,7 +285,7 @@ async function replayToReplica(
     if (error instanceof Error && error.name === "AbortError") {
       return { kind: "timeout" };
     }
-    return { kind: "replay_failed", errorClass: error instanceof Error ? error.name : typeof error };
+    return { kind: "replay_failed", errorClass: errorClassOf(error) };
   } finally {
     clearTimeout(timer);
   }
@@ -515,6 +516,21 @@ function getHeader(req: Request, name: string): string | null {
   const value = req.headers[name.toLowerCase()];
   if (Array.isArray(value)) return value[0] ?? null;
   return value ?? null;
+}
+
+/**
+ * The replay target: the owner replica's endpoint with only the incoming path
+ * and query. Never `new URL(originalUrl, endpoint)`: an absolute-form request
+ * line ("GET http://host/path") or a "//host/path" path would replace the
+ * endpoint's host and send this replica's request to an arbitrary host.
+ */
+export function buildReplayTargetUrl(originalUrl: string, endpoint: string): URL {
+  const incoming = new URL(originalUrl, "http://localhost");
+  const target = new URL(endpoint);
+  target.pathname = incoming.pathname;
+  target.search = incoming.search;
+  target.hash = "";
+  return target;
 }
 
 function getPathname(originalUrl: string): string {

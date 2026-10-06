@@ -1,6 +1,6 @@
 /** task #364 S2 — production ThreadsInbox consumes the receiver bundle. */
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -34,7 +34,7 @@ import { useThreadStore } from "../src/store/threadStore";
 
 type TestFn = () => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn);
+  nodeTest(name,  fn);
 
 const originalGet = api.get;
 const originalPost = api.post;
@@ -284,6 +284,7 @@ function seedStores(label: string, options: { receipts?: boolean | "preserve"; l
     loaded: true,
     hasMore: options.legacyHasMore ?? true,
     totalCount: 40,
+    allCount: 40,
     totalUnreadCount: 17,
     activeUnreadCount: 17,
     focusedItemKey: null,
@@ -349,7 +350,7 @@ test("Activity sidebar uses the finalized Chinese Saved label", async () => {
   renderInbox({ locale: "zh-cn" });
 
   const savedNav = await screen.findByTestId("activity-nav-saved");
-  assert.equal(savedNav.getAttribute("title"), "已保存");
+  assert.equal(savedNav.getAttribute("title"), null);
   assert.ok(within(savedNav).getByText("已保存"));
   assert.equal(within(savedNav).queryByText("已收藏"), null);
 });
@@ -726,7 +727,7 @@ test("Activity done actions stay quiet until their row is active, focused, or ho
   assert.match(inactiveActions.className, /(?:^|\s)top-3(?:\s|$)/);
   assert.doesNotMatch(inactiveActions.className, /(?:^|\s)shrink-0(?:\s|$)/);
   assert.match(inactiveActions.className, /(?:^|\s)bg-transparent(?:\s|$)/);
-  assert.match(inactiveActions.className, /(?:^|\s)group-hover:bg-white(?:\s|$)/);
+  assert.match(inactiveActions.className, /(?:^|\s)group-hover:bg-layer-panel(?:\s|$)/);
   assert.match(inactiveTimestamp.className, /(?:^|\s)group-hover:opacity-0(?:\s|$)/);
   assert.match(inactiveTimestamp.className, /(?:^|\s)group-focus-within:opacity-0(?:\s|$)/);
   assert.equal(within(rows[0]).queryByTestId("inbox-row-save"), null);
@@ -745,7 +746,7 @@ test("Activity done actions stay quiet until their row is active, focused, or ho
   assert.match(activeDone.className, /(?:^|\s)pointer-events-auto(?:\s|$)/);
   assert.match(activeDone.className, /(?:^|\s)opacity-100(?:\s|$)/);
   assert.match(activeTimestamp.className, /(?:^|\s)opacity-0(?:\s|$)/);
-  assert.match(within(rows[1]).getByTestId("conversation-card-actions").className, /(?:^|\s)bg-white(?:\s|$)/);
+  assert.match(within(rows[1]).getByTestId("conversation-card-actions").className, /(?:^|\s)bg-layer-panel(?:\s|$)/);
   assert.equal(within(rows[1]).queryByTestId("inbox-row-save"), null);
 });
 
@@ -984,13 +985,57 @@ test("Activity search stays hidden until the local find shortcut opens it", asyn
   assert.equal(screen.queryByTestId("activity-search-input"), null);
 
   await act(async () => {
-    fireEvent.keyDown(window, { key: "f", metaKey: true });
+    fireEvent.keyDown(screen.getByTestId("inbox-header"), { key: "f", metaKey: true });
   });
   const searchInput = await screen.findByTestId("activity-search-input") as HTMLInputElement;
   await waitFor(() => assert.ok(
     document.activeElement === searchInput,
     "Activity find shortcut should focus the local search input",
   ));
+});
+
+test("Activity find leaves Cmd/Ctrl+F to an adjacent focused conversation panel", async () => {
+  setDesktopViewport();
+  resetServerFeatureFlagsForTests();
+  const { serverId } = seedStores("search-shortcut-adjacent-panel", { legacyHasMore: false });
+  publishActivitySidebarInboxFlag(serverId, true);
+  setActivityGateForTests("off");
+  useInboxStore.setState({
+    items: [threadItem("search-shortcut-adjacent-panel", { parentMessagePreview: "conversation owns find" })],
+    groups: [],
+    hasMore: false,
+    totalCount: 1,
+    totalUnreadCount: 1,
+  });
+
+  renderInbox();
+  await waitFor(() => assert.ok(screen.getByText("conversation owns find")));
+
+  const conversationPanel = document.createElement("button");
+  conversationPanel.type = "button";
+  conversationPanel.setAttribute("data-testid", "adjacent-conversation-panel");
+  document.body.append(conversationPanel);
+  try {
+    await act(async () => {
+      conversationPanel.focus();
+      fireEvent.focusIn(conversationPanel);
+    });
+
+    const findEvent = new KeyboardEvent("keydown", {
+      key: "f",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      conversationPanel.dispatchEvent(findEvent);
+    });
+
+    assert.equal(findEvent.defaultPrevented, false, "Activity must not consume find outside its own panel");
+    assert.ok(screen.queryByTestId("activity-search-input") === null);
+  } finally {
+    conversationPanel.remove();
+  }
 });
 
 test("Activity sidebar keeps a compact rail at narrow desktop widths", async () => {
@@ -1022,12 +1067,12 @@ test("Activity sidebar keeps a compact rail at narrow desktop widths", async () 
 
   const allNav = screen.getByTestId("activity-nav-all");
   const allNavLabel = within(allNav).getByText("All");
-  assert.equal(allNav.getAttribute("title"), "All");
+  assert.equal(allNav.getAttribute("title"), null);
   assert.ok(allNavLabel.className.includes("sr-only"));
   assert.ok(allNavLabel.className.includes("lg:not-sr-only"));
 
   const channelGroup = screen.getByTestId("activity-group-parent-channel-narrow-sidebar");
-  assert.equal(channelGroup.getAttribute("title"), "Narrow Sidebar Channel");
+  assert.equal(channelGroup.getAttribute("title"), null);
   const channelGroupLabel = within(channelGroup).getByText("Narrow Sidebar Channel");
   assert.ok(channelGroupLabel.className.includes("sr-only"));
   assert.ok(channelGroupLabel.className.includes("lg:not-sr-only"));
@@ -1035,11 +1080,12 @@ test("Activity sidebar keeps a compact rail at narrow desktop widths", async () 
   await act(async () => {
     fireEvent.click(screen.getByTestId("inbox-row"));
   });
-  assert.equal(
+  await waitFor(() => assert.equal(
     useThreadStore.getState().openThreadChannelId,
-    null,
-    "narrow desktop should not open the embedded thread pane and crush the Activity list",
-  );
+    "thread-narrow-sidebar",
+    "new Inbox keeps its thread embedded at narrow desktop widths",
+  ));
+  assert.equal(useSearchContentStore.getState().slot?.kind, "thread");
 });
 
 test("Activity master-detail uses a top switcher that opens the complete Activity sidebar modal", async () => {
@@ -1233,9 +1279,112 @@ test("Activity sidebar keeps DMs and channels in one pinnable source list with c
   const channelGroup = within(sourceList).getByTestId("activity-group-channel-current-sidebar");
   assert.ok(within(channelGroup).getByTestId("activity-group-channel-icon-channel-current-sidebar"));
   const channelCount = within(channelGroup).getByTestId("activity-group-count-channel-current-sidebar");
-  assert.equal(channelCount.textContent, "99+");
+  assert.equal(channelCount.textContent, "104");
   assert.equal(channelCount.getAttribute("aria-label"), "104");
 });
+
+for (const compact of [false, true]) {
+  test(`Activity ${compact ? "switcher" : "sidebar"} prioritizes unread sources across DM and channel types and reacts to reads`, async () => {
+    setDesktopViewport();
+    const { serverId } = seedStores(`unread-sources-${compact}`, { legacyHasMore: false });
+    publishActivitySidebarInboxFlag(serverId, true);
+    setActivityGateForTests("off");
+    useInboxStore.setState({ items: [], groups: [
+      { channelId: "read-dm", channelName: "Read DM", channelType: "dm", count: 99 },
+      { channelId: "unread-dm", channelName: "Unread DM", channelType: "dm", count: 1 },
+      { channelId: "read-channel", channelName: "Read channel", channelType: "channel", count: 88 },
+      { channelId: "unread-channel", channelName: "Unread channel", channelType: "channel", count: 1 },
+    ] });
+    useMessageStore.setState({ unreadCounts: { "unread-dm": 2, "unread-channel": 3 } });
+    renderInbox({ compactActivitySidebar: compact });
+    if (compact) await act(async () => { fireEvent.click(screen.getByTestId("activity-scope-switcher")); });
+    const prefix = compact ? "activity-switcher" : "activity";
+    const list = screen.getByTestId(compact ? "activity-switcher-group-list" : "activity-current-group-list");
+    const order = () => Array.from(list.children).map(row => row.getAttribute("data-testid")?.replace(`${prefix}-group-row-`, ""));
+    assert.deepEqual(order(), ["unread-dm", "unread-channel", "read-dm", "read-channel"]);
+    assert.equal(screen.queryByTestId(`${prefix}-group-unread-read-dm`), null, "group totals are not unread counts");
+    assert.equal(screen.queryByTestId(`${prefix}-group-unread-unread-channel`), null);
+    assert.equal(screen.getByTestId(`${prefix}-group-count-unread-channel`).textContent, "1", "source total keeps its original neutral presentation");
+    await act(async () => { useMessageStore.setState({ unreadCounts: { "unread-channel": 3, "read-channel": 1 } }); });
+    assert.deepEqual(order(), ["read-channel", "unread-channel", "read-dm", "unread-dm"]);
+    assert.equal(screen.queryByTestId(`${prefix}-group-unread-unread-dm`), null);
+    await act(async () => { useMessageStore.setState({ unreadCounts: {} }); });
+    assert.deepEqual(order(), ["read-dm", "unread-dm", "read-channel", "unread-channel"]);
+  });
+}
+
+for (const compact of [false, true]) {
+  test(`Activity ${compact ? "switcher" : "sidebar"} pins the selected source above unread priority`, async () => {
+    setDesktopViewport();
+    const { serverId } = seedStores(`pinned-source-${compact}`, { legacyHasMore: false });
+    publishActivitySidebarInboxFlag(serverId, true);
+    setActivityGateForTests("off");
+    useInboxStore.setState({ items: [], channelFilterId: "read-channel", groups: [
+      { channelId: "read-dm", channelName: "Read DM", channelType: "dm", count: 99 },
+      { channelId: "unread-dm", channelName: "Unread DM", channelType: "dm", count: 1 },
+      { channelId: "read-channel", channelName: "Read channel", channelType: "channel", count: 88 },
+      { channelId: "unread-channel", channelName: "Unread channel", channelType: "channel", count: 1 },
+    ] });
+    useMessageStore.setState({ unreadCounts: { "unread-dm": 2, "unread-channel": 3 } });
+    renderInbox({ compactActivitySidebar: compact });
+    if (compact) await act(async () => { fireEvent.click(screen.getByTestId("activity-scope-switcher")); });
+    const prefix = compact ? "activity-switcher" : "activity";
+    const list = screen.getByTestId(compact ? "activity-switcher-group-list" : "activity-current-group-list");
+    const order = () => Array.from(list.children).map(row => row.getAttribute("data-testid")?.replace(`${prefix}-group-row-`, ""));
+    // Reading the open source is exactly what used to drop it: it has no unread
+    // while two other sources do, yet it must stay first.
+    assert.deepEqual(order(), ["read-channel", "unread-dm", "unread-channel", "read-dm"]);
+    await act(async () => { useMessageStore.setState({ unreadCounts: { "unread-dm": 2, "unread-channel": 3, "read-dm": 5 } }); });
+    assert.deepEqual(
+      order(),
+      ["read-channel", "read-dm", "unread-dm", "unread-channel"],
+      "new unread activity elsewhere must not displace the selected source",
+    );
+    await act(async () => { useInboxStore.setState({ channelFilterId: null }); });
+    await act(async () => { useMessageStore.setState({ unreadCounts: { "unread-dm": 2, "unread-channel": 3 } }); });
+    assert.deepEqual(
+      order(),
+      ["unread-dm", "unread-channel", "read-dm", "read-channel"],
+      "clearing the selection restores plain unread-first ordering",
+    );
+  });
+}
+
+for (const compact of [false, true]) {
+  test(`Activity ${compact ? "switcher" : "sidebar"} clears source filters and reloads while preserving other facets`, async () => {
+    setDesktopViewport();
+    const { serverId } = seedStores(`clear-source-${compact}`, { legacyHasMore: false });
+    publishActivitySidebarInboxFlag(serverId, true);
+    setActivityGateForTests("off");
+    useInboxStore.setState({ channelFilterId: "selected-source", filter: "mentions", searchQuery: "needle", sortDirection: "asc", groups: [{ channelId: "selected-source", channelName: "Selected source", channelType: "channel", count: 1, lastActivityAt: "2026-08-01T00:00:00.000Z" }] });
+    const requests: Array<Record<string, unknown>> = [];
+    const restoredItem = channelItem("restored-source");
+    api.get = (async (url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url !== "/channels/inbox") return { data: { items: [], total: 0 } };
+      requests.push(config?.params ?? {});
+      return { data: { items: [restoredItem], groups: [], hasMore: false, totalCount: 1, totalUnreadCount: 1 } };
+    }) as typeof api.get;
+    renderInbox({ compactActivitySidebar: compact });
+    if (compact) await act(async () => { fireEvent.click(screen.getByTestId("activity-scope-switcher")); });
+    const clearId = compact ? "activity-switcher-clear-channel-filter" : "activity-clear-channel-filter";
+    const clear = screen.getByTestId(clearId);
+    assert.equal(clear.textContent, "Clear filters");
+    await act(async () => { fireEvent.click(clear); });
+    await waitFor(() => assert.equal(useInboxStore.getState().loaded, true));
+    const state = useInboxStore.getState();
+    assert.equal(state.channelFilterId, null);
+    assert.equal(state.filter, "mentions");
+    assert.equal(state.searchQuery, "needle");
+    assert.equal(state.sortDirection, "asc");
+    assert.ok(requests.some(params => params.filter === "mentions" && params.q === "needle" && params.sort === "asc" && !params.channelId));
+    assert.ok(state.items.some(item => item.channelId === restoredItem.channelId));
+    if (compact) {
+      assert.equal(screen.queryByTestId("activity-switcher-dialog"), null);
+      await act(async () => { fireEvent.click(screen.getByTestId("activity-scope-switcher")); });
+    }
+    assert.equal(screen.queryByTestId(clearId), null);
+  });
+}
 
 test("Activity sidebar chrome stays behind its server flag and ignores hidden channel filters", async () => {
   setDesktopViewport();
@@ -1350,6 +1499,7 @@ test("principal switch cannot re-authorize the old Core scope while new receipts
       }],
       hasMore: false,
       totalCount: 40,
+    allCount: 40,
       totalUnreadCount: 17,
       activeUnreadCount: 17,
       loaded: true,
@@ -1397,4 +1547,135 @@ test("principal switch cannot re-authorize the old Core scope while new receipts
 
   await waitFor(() => assert.ok(screen.getByText("principal-b-core preview")));
   assert.equal(screen.queryByText(principalBLegacy.lastMessagePreview), null);
+});
+
+
+test("All navigation keeps its unfiltered total through unread, mentions, source and search changes", async () => {
+  setDesktopViewport();
+  const { serverId } = seedStores("stable-all", { legacyHasMore: false });
+  publishActivitySidebarInboxFlag(serverId, true);
+  setActivityGateForTests("off");
+  let globalTotal = 2324;
+  api.get = (async (url: string, config?: { params?: Record<string, unknown> }) => {
+    if (url !== "/channels/inbox") return { data: { items: [], total: 0 } };
+    const params = config?.params ?? {};
+    const unfiltered = params.filter === "all" && !params.channelId && !params.q;
+    return { data: {
+      items: [], groups: [{ channelId: "channel-only", channelName: "Only", channelType: "channel", count: 1, lastActivityAt: "2026-08-01T00:00:00.000Z" }], hasMore: false,
+      totalCount: unfiltered ? globalTotal : 1, totalUnreadCount: 1,
+    } };
+  }) as typeof api.get;
+  await act(async () => { await originalLoadInbox({ reset: true }); });
+  renderInbox();
+  const all = screen.getByTestId("activity-nav-all");
+  assert.ok(within(all).getByLabelText("2,324"));
+  for (const filter of ["unread", "mentions", "all"] as const) {
+    await act(async () => { fireEvent.click(screen.getByTestId(`activity-nav-${filter}`)); });
+    await waitFor(() => assert.equal(useInboxStore.getState().loaded, true));
+    assert.ok(within(all).getByLabelText("2,324"));
+  }
+  await act(async () => { useInboxStore.getState().setChannelFilterId("channel-only"); });
+  await waitFor(() => assert.equal(useInboxStore.getState().loaded, true));
+  assert.equal(useInboxStore.getState().totalCount, 1);
+  assert.ok(within(all).getByLabelText("2,324"));
+  await act(async () => { useInboxStore.getState().setSearchQuery("needle"); });
+  await waitFor(() => assert.equal(useInboxStore.getState().loaded, true));
+  assert.ok(within(all).getByLabelText("2,324"));
+  globalTotal = 2325;
+  await act(async () => { await originalLoadInbox({ reset: true }); });
+  assert.ok(within(all).getByLabelText("2,325"), "refresh updates the true total rather than freezing it");
+});
+
+test("a filtered first load obtains All independently and server reset discards it", async () => {
+  seedStores("first-unread", { legacyHasMore: false });
+  setActivityGateForTests("off");
+  useInboxStore.setState({ filter: "unread", allCount: null });
+  api.get = (async (_url: string, config?: { params?: Record<string, unknown> }) => ({ data: {
+    items: [], groups: [], hasMore: false,
+    totalCount: config?.params?.filter === "all" ? 99 : 1,
+    totalUnreadCount: 1,
+  } })) as typeof api.get;
+  await originalLoadInbox({ reset: true });
+  assert.equal(useInboxStore.getState().allCount, 99);
+  assert.equal(useInboxStore.getState().totalCount, 1);
+  api.get = (async () => ({ data: { items: [], groups: [], totalCount: 0, totalUnreadCount: 0, hasMore: false } })) as typeof api.get;
+  await originalLoadInbox({ reset: true });
+  assert.equal(useInboxStore.getState().allCount, 0, "an authoritative zero replaces the previous count");
+  triggerServerReset();
+  assert.equal(useInboxStore.getState().allCount, null);
+});
+
+test("a late All count cannot cross a server reset and a failed count read cannot become a filtered total", async () => {
+  seedStores("count-race", { legacyHasMore: false });
+  setActivityGateForTests("off");
+  useInboxStore.setState({ filter: "unread", allCount: 99 });
+  const lateCount = deferred<{ data: { totalCount: number } }>();
+  api.get = (async (_url: string, config?: { params?: Record<string, unknown> }) => {
+    if (config?.params?.filter === "all") return lateCount.promise;
+    return { data: { items: [], groups: [], hasMore: false, totalCount: 1, totalUnreadCount: 1 } };
+  }) as typeof api.get;
+  const oldLoad = originalLoadInbox({ reset: true });
+  triggerServerReset();
+  lateCount.resolve({ data: { totalCount: 9999 } });
+  await oldLoad;
+  assert.equal(useInboxStore.getState().allCount, null);
+
+  seedStores("count-failure", { legacyHasMore: false });
+  useInboxStore.setState({ filter: "unread", allCount: 99 });
+  api.get = (async (_url: string, config?: { params?: Record<string, unknown> }) => {
+    if (config?.params?.filter === "all") throw new Error("summary unavailable");
+    return { data: { items: [], groups: [], hasMore: false, totalCount: 1, totalUnreadCount: 1 } };
+  }) as typeof api.get;
+  await originalLoadInbox({ reset: true });
+  assert.equal(useInboxStore.getState().totalCount, 1);
+  assert.equal(useInboxStore.getState().allCount, 99);
+});
+
+
+test("search keystrokes reuse the known All count while explicit refreshes reconcile it", async () => {
+  setDesktopViewport();
+  const { serverId } = seedStores("search-count-cache", { legacyHasMore: false });
+  publishActivitySidebarInboxFlag(serverId, true);
+  setActivityGateForTests("off");
+  useInboxStore.setState({ allCount: 2324, searchQuery: "start" });
+  const requests: Record<string, unknown>[] = [];
+  api.get = (async (url: string, config?: { params?: Record<string, unknown> }) => {
+    if (url !== "/channels/inbox") return { data: { items: [], total: 0 } };
+    const params = config?.params ?? {};
+    requests.push(params);
+    return { data: { items: [], groups: [], hasMore: false,
+      totalCount: params.limit === 1 ? 2325 : 1, totalUnreadCount: 0 } };
+  }) as typeof api.get;
+  renderInbox();
+  requests.length = 0;
+  const input = screen.getByTestId("activity-search-input");
+  await act(async () => {
+    for (const value of ["n", "ne", "new"]) fireEvent.change(input, { target: { value } });
+  });
+  assert.deepEqual(requests.map((params) => params.q), ["n", "ne", "new"]);
+  assert.equal(useInboxStore.getState().allCount, 2324);
+  assert.ok(within(screen.getByTestId("activity-nav-all")).getByLabelText("2,324"));
+  for (const background of [false, true]) {
+    requests.length = 0;
+    await act(async () => { await useInboxStore.getState().refreshInbox({ background }); });
+    assert.equal(requests.filter((params) => params.limit === 1 && params.filter === "all").length, 1);
+    assert.equal(useInboxStore.getState().allCount, 2325);
+  }
+});
+
+test("first search without a known All count requests one summary", async () => {
+  seedStores("search-count-unknown", { legacyHasMore: false });
+  setActivityGateForTests("off");
+  useInboxStore.setState({ allCount: null });
+  const requests: Record<string, unknown>[] = [];
+  api.get = (async (_url: string, config?: { params?: Record<string, unknown> }) => {
+    const params = config?.params ?? {};
+    requests.push(params);
+    return { data: { items: [], groups: [], hasMore: false,
+      totalCount: params.limit === 1 ? 99 : 1, totalUnreadCount: 0 } };
+  }) as typeof api.get;
+  await act(async () => { useInboxStore.getState().setSearchQuery("first"); });
+  assert.equal(requests.filter((params) => params.limit === 1 && params.filter === "all").length, 1);
+  assert.equal(requests.filter((params) => params.q === "first").length, 1);
+  assert.equal(useInboxStore.getState().allCount, 99);
 });

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
@@ -24,7 +24,7 @@ import { TestIntlProvider } from "./helpers/intl";
 
 type TestFn = () => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn);
+  nodeTest(name,  fn);
 
 const originalGet = api.get;
 const originalPost = api.post;
@@ -181,9 +181,8 @@ test("free plan renders the contract plan card with included/not-included featur
   assert.ok(screen.getByText("Free"));
   assert.ok(screen.getByText("Start building with agents."));
 
-  const included = screen.getByText("Included");
-  const card = included.closest("div.border-2");
-  assert.ok(card instanceof HTMLElement, "plan card container not found");
+  const card = screen.getByTestId("billing-current-plan-card");
+  assert.ok(within(card).getByText("Included"));
   for (const feature of [
     "Channels",
     "Tasks",
@@ -192,7 +191,7 @@ test("free plan renders the contract plan card with included/not-included featur
     "Basic observability",
     "30 days of message history",
     "100 MB file uploads/month",
-    "1 free Joint Channel for a limited time",
+    "Use Joint Channels (each Joint Channel has 2 free-server slots)",
   ]) {
     assert.ok(within(card).getByText(feature), `free plan must list "${feature}" as included`);
   }
@@ -200,7 +199,6 @@ test("free plan renders the contract plan card with included/not-included featur
   for (const feature of [
     "Higher file upload limits",
     "Unlimited message history",
-    "Unlimited Joint Channels",
     "More professional features coming soon",
   ]) {
     assert.ok(within(card).getByText(feature), `free plan must list "${feature}" as not included`);
@@ -214,10 +212,10 @@ test("free plan renders the contract plan card with included/not-included featur
   // Seat usage is pro-only.
   assert.ok(screen.queryByText("Seat") === null, "the free plan must not render the seat usage row");
 
-  const compare = screen.getByRole("link", { name: "See all features and compare plans" });
+  const compare = screen.getByRole("button", { name: "See all features and compare plans" });
   assert.equal(compare.getAttribute("href"), "https://raft.build/#pricing");
-  assert.ok(compare.classList.contains("btn-brutal-sm"));
-  assert.ok(compare.classList.contains("bg-white"));
+  assert.equal(compare.tagName, "A");
+  assert.equal(compare.getAttribute("data-slot"), "button");
 
   // Retired copy stays retired (was doesNotMatch source regexes).
   for (const stale of [
@@ -365,10 +363,15 @@ test("pro plan renders seat usage, manage-seats copy, and the subscription summa
     (_content, el) => el instanceof HTMLElement && el.textContent === "1.5 / 2 used",
   );
   assert.ok(usageValue);
-  const humansSwatch = screen.getByTitle("1 human using 1 seat");
-  assert.ok(humansSwatch.classList.contains("bg-soft-signal"));
-  const agentsSwatch = screen.getByTitle("5 agents using 0.5 seats");
-  assert.ok(agentsSwatch.classList.contains("bg-brutal-pink"));
+  const seatProgress = screen.getByRole("progressbar", { name: "Seat" });
+  const humansSwatch = seatProgress.querySelector(".bg-primary-400");
+  assert.ok(humansSwatch, "human seat segment renders inside the stacked bar");
+  assert.equal(humansSwatch.getAttribute("title"), null);
+  assert.ok(humansSwatch.hasAttribute("data-base-ui-tooltip-trigger"), "seat breakdown hint now rides the RUI tooltip trigger");
+  const agentsSwatch = seatProgress.querySelector(".bg-accent-400");
+  assert.ok(agentsSwatch, "agent seat segment renders inside the stacked bar");
+  assert.equal(agentsSwatch.getAttribute("title"), null);
+  assert.ok(agentsSwatch.hasAttribute("data-base-ui-tooltip-trigger"), "seat breakdown hint now rides the RUI tooltip trigger");
   assert.ok(screen.getByText("Humans"));
   assert.ok(screen.getByText("Agents"));
   // The free-plan usage rows stay off the pro surface.
@@ -462,7 +465,8 @@ test("billing controls gate on the manage-billing permission and Stripe configur
 
   const checkout = screen.getByRole("button", { name: "Upgrade to Pro" });
   assert.ok((checkout as HTMLButtonElement).disabled);
-  assert.equal(checkout.getAttribute("title"), "Only server owners can change billing.");
+  assert.equal(checkout.getAttribute("title"), null);
+  assert.ok(checkout.hasAttribute("data-base-ui-tooltip-trigger"), "checkout disabled reason now rides the RUI tooltip trigger");
   assert.ok(screen.getByText("Only server owners can change billing."));
 
   cleanup();

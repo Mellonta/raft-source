@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   detectLegacyDaemonSupervisorWithProbe,
   type LegacyDaemonSupervisorProbe,
-} from "./legacySupervisor.js";
+} from "./legacySupervisor";
 
 function probe(
   overrides: Partial<LegacyDaemonSupervisorProbe> = {},

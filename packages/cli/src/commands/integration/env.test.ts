@@ -2,20 +2,21 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import type { CliIo } from "../../core/io.js";
-import type { RegisteredIntegrationService } from "./_format.js";
+import { setCanonicalFetchImplForTests } from "../../proxy";
+
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import { CliError } from "../../core/errors";
+import type { CliIo } from "../../core/io";
+import type { RegisteredIntegrationService } from "./_format";
 import {
   IntegrationEnvError,
   integrationEnvCommand,
   resolveIntegrationEnv,
-} from "./env.js";
-import { validateAgentManifestV0 } from "./manifest.js";
+} from "./env";
+import { validateAgentManifestV0 } from "./manifest";
 
 const agentContext: AgentContext = {
   agentId: "agent-123",
@@ -60,8 +61,7 @@ async function withMockFetchResponse<T>(input: {
   status?: number;
   contentType?: string;
 }, fn: () => Promise<T>): Promise<T> {
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (async (url: string | URL | Request) => {
+  const previousFetch = setCanonicalFetchImplForTests((async (url: string | URL | Request) => {
     const responseBody = typeof input.body === "string" ? input.body : JSON.stringify(input.body);
     const response = new Response(responseBody, {
       status: input.status ?? 200,
@@ -70,11 +70,11 @@ async function withMockFetchResponse<T>(input: {
     const resolvedUrl = typeof url === "string" || url instanceof URL ? url.toString() : url.url;
     Object.defineProperty(response, "url", { value: resolvedUrl });
     return response;
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     return await fn();
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 }
 
@@ -427,7 +427,7 @@ test("resolveIntegrationEnv treats HTTP 404 manifests as no-op success", async (
     ctx: agentContext,
     service: service({ clientId: "well-known-only", name: "Well Known Only" }),
     fetchManifest: async () => {
-      const { AgentManifestFetchError } = await import("./manifest.js");
+      const { AgentManifestFetchError } = await import("./manifest");
       throw new AgentManifestFetchError("manifest fetch failed with HTTP 404", 404);
     },
   });

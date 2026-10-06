@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { LegacyDaemonKeyAdoptedByComputerError } from "./computerMigrationGuard.js";
+import { LegacyDaemonKeyAdoptedByComputerError } from "./computerMigrationGuard";
 
 const match = {
   attachmentPath: "/tmp/runner.state.json",

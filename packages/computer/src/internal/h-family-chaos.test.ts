@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { access, chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
 import {
   type HFamilyAssertionObservation,
@@ -18,12 +17,12 @@ import {
   identityAuthorityPilotCases,
   injectHFamilyCase,
   injectHFamilyQaFixture,
-} from "./h-family-chaos.js";
+} from "./h-family-chaos";
 import {
   serverAttachmentPath,
   servicePidPath,
   userSessionPath,
-} from "../paths.js";
+} from "../paths";
 
 async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "raft-computer-h-family-"));

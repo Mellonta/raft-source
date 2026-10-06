@@ -1,32 +1,32 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   createMessageWindowHarness,
   flushAsyncWork,
-} from "./messageWindowHarness.js";
-import { buildOptimisticMessageId } from "../src/components/message/optimisticMessageDraft.js";
+} from "./messageWindowHarness";
+import { buildOptimisticMessageId } from "../src/components/message/optimisticMessageDraft";
 import {
+  CONTEXT_BEYOND_HISTORY_ERROR,
   compareMessagesForDisplay,
   isMatchingOptimisticMessage,
   selectChannelMessageBucket,
   selectChannelWindowMeta,
   useMessageStore,
-} from "../src/store/messageStore.js";
+} from "../src/store/messageStore";
 import type {
   Message,
   MessageAttachment,
-} from "../src/store/messageStore.js";
-import { useThreadStore } from "../src/store/threadStore.js";
-import type { ThreadSummary } from "../src/store/threadStore.js";
-import type { ThreadReplyPreview } from "../src/store/threadRepliesReadModel.js";
+} from "../src/store/messageStore";
+import { useThreadStore } from "../src/store/threadStore";
+import type { ThreadSummary } from "../src/store/threadStore";
+import type { ThreadReplyPreview } from "../src/store/threadRepliesReadModel";
 import {
   hydrateThreadRepliesSnapshotWithSyncCore,
   resetThreadRepliesSyncCoreForTests,
-} from "../src/store/threadRepliesSyncDomain.js";
-import { useServerStore } from "../src/store/serverStore.js";
+} from "../src/store/threadRepliesSyncDomain";
+import { useServerStore } from "../src/store/serverStore";
 
 const CHANNEL_ID = "channel-1";
-const SERIAL = { concurrency: false };
+const SERIAL = {};
 
 function message(seq: number): Message {
   return {
@@ -2151,6 +2151,24 @@ test("falls back to the channel timeline when focused message context is missing
       "/messages/context/missing-message",
       "/messages/channel/channel-1?limit=50",
     ]);
+  } finally {
+    harness.restore();
+  }
+});
+
+test("a focused message hidden by the plan history cutoff reports beyond-history, not not-found (task #14)", SERIAL, async () => {
+  const harness = createMessageWindowHarness();
+  try {
+    // The context route 404s for a target behind the cutoff; the fallback page
+    // reports the channel as history-limited.
+    harness.enqueueChannelPages({ messages: [message(20), message(21)], historyLimited: true });
+
+    await harness.loadMessageContext(CHANNEL_ID, "old-message");
+
+    const snapshot = harness.snapshot(CHANNEL_ID);
+    assert.deepEqual(snapshot.messageIds, ["m-20", "m-21"]);
+    assert.equal(snapshot.contextLoadError, CONTEXT_BEYOND_HISTORY_ERROR);
+    assert.equal(harness.windowMeta(CHANNEL_ID).contextLoadError, CONTEXT_BEYOND_HISTORY_ERROR);
   } finally {
     harness.restore();
   }

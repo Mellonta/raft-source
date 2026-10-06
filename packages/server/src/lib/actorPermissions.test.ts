@@ -1,15 +1,15 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { eq } from "drizzle-orm";
 
-import { serverAgentMembers, serverMembers, users } from "../db/schema.js";
-import { getDb } from "../db/index.js";
-import { createAgent } from "../services/agentService.js";
-import { createServer } from "../services/serverService.js";
-import { actorHasServerCapabilityInServer, resolveActorContext } from "./actorPermissions.js";
-import { assertActorServerCapabilityMatrix } from "../test/actorCapabilityMatrix.js";
+import { serverAgentMembers, serverMembers, users } from "../db/schema";
+import { getDb } from "../db/index";
+import { createAgent } from "../services/agentService";
+import { createServer } from "../services/serverService";
+import { actorHasServerCapabilityInServer, decideAgentConnectorAuthority, resolveActorContext } from "./actorPermissions";
+import { assertActorServerCapabilityMatrix } from "../test/actorCapabilityMatrix";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -84,4 +84,17 @@ test("actor permissions resolve human and agent server roles through the shared 
     serverRole: null,
   });
   assert.equal(await actorHasServerCapabilityInServer(server.id, "agent", agent.id, "joinPublicChannels"), false);
+});
+
+test("connector authority: creator first, then owner/admin; members and guests only as non-guest creator", () => {
+  const me = "11111111-1111-4111-8111-111111111111";
+  const other = "22222222-2222-4222-8222-222222222222";
+  assert.equal(decideAgentConnectorAuthority("member", me, me), "creator");
+  assert.equal(decideAgentConnectorAuthority("admin", me, me), "creator");
+  assert.equal(decideAgentConnectorAuthority("owner", me, other), "admin");
+  assert.equal(decideAgentConnectorAuthority("admin", me, null), "admin");
+  assert.equal(decideAgentConnectorAuthority("member", me, other), null);
+  assert.equal(decideAgentConnectorAuthority("member", me, null), null);
+  assert.equal(decideAgentConnectorAuthority("guest", me, me), null);
+  assert.equal(decideAgentConnectorAuthority(null, me, me), null);
 });

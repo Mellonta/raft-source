@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   MAX_AGENT_MIGRATION_EXCLUDED_REGENERABLE_COUNT,
   MAX_AGENT_MIGRATION_TRANSPORT_BYTES,
   MAX_AGENT_MIGRATION_TRANSFER_BYTES,
   MAX_AGENT_MIGRATION_TRANSFER_FILE_COUNT,
   agentMigrationTransferSummarySchema,
-} from "./agentMigration.js";
+} from "./agentMigration";
 
 const VALID_SUMMARY = {
   includedFileCount: 2,

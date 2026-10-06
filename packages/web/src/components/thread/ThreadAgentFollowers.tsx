@@ -1,19 +1,29 @@
-import { THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
+import { Button, Popover, PopoverContent, PopoverTrigger, toast } from "raft-ui";
 import { AlertCircle, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useIntl } from "react-intl";
-import { Popover, PopoverContent, PopoverTrigger, toast } from "raft-ui";
 import { getSocket } from "../../api/socket";
-import { useServerFeatureFlag } from "../../store/serverFeatureFlags";
 import {
   requestThreadAgentFollowers,
   useThreadAgentFollowerStore,
 } from "../../store/threadAgentFollowerStore";
 import { useProfileStore } from "../../store/profileStore";
 import { useServerStore } from "../../store/serverStore";
-import { JointPeerBadge } from "../agent/ChannelMembers";
+import { AgentActivityInfo, JointPeerBadge, agentStatusFallbackActivity } from "../agent/ChannelMembers";
+import { ChannelMemberRow } from "../channel/ChannelMemberList";
+import type { Agent } from "../../store/agentStore";
 import { setCachedAgentProfile } from "../profile/profileFallbackCache";
-import { AgentAvatar } from "../agent/PixelAvatar";
+import AvatarSlot from "../ui/AvatarSlot";
+import Tooltip from "../ui/Tooltip";
+
+/** The follower endpoint reports transport-ish statuses (for example
+ *  "online"); normalize to the shared AgentStatus union the activity stores
+ *  and profiles speak (task #701). */
+function followerAgentStatus(status: string | null | undefined): Agent["status"] {
+  return status === "active" || status === "online"
+    ? "active"
+    : status === "stopped" ? "stopped" : "inactive";
+}
 
 export default function ThreadAgentFollowers({
   threadChannelId,
@@ -23,10 +33,6 @@ export default function ThreadAgentFollowers({
   variant: "card" | "header";
 }) {
   const { formatMessage } = useIntl();
-  const enabled = useServerFeatureFlag(
-    THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY,
-    { prefetch: false },
-  ).enabled;
   const roster = useThreadAgentFollowerStore((state) => state.rosters[threadChannelId]);
   const load = useThreadAgentFollowerStore((state) => state.load);
   const remove = useThreadAgentFollowerStore((state) => state.remove);
@@ -37,11 +43,10 @@ export default function ThreadAgentFollowers({
   const [removingId, setRemovingId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (enabled) requestThreadAgentFollowers(threadChannelId);
-  }, [enabled, threadChannelId]);
+    requestThreadAgentFollowers(threadChannelId);
+  }, [threadChannelId]);
 
   useEffect(() => {
-    if (!enabled) return;
     const socket = getSocket();
     const handleMessageNew = (message: { channelId?: string } | null | undefined) => {
       if (message?.channelId !== threadChannelId) return;
@@ -51,9 +56,8 @@ export default function ThreadAgentFollowers({
     return () => {
       socket.off("message:new", handleMessageNew);
     };
-  }, [enabled, threadChannelId]);
+  }, [threadChannelId]);
 
-  if (!enabled) return null;
   const agents = roster?.agents ?? [];
   const label = roster?.error
     ? formatMessage({ id: "thread.followers.loadFailed" })
@@ -95,30 +99,33 @@ export default function ThreadAgentFollowers({
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
+      <Tooltip content={label}>
       <PopoverTrigger
         render={(
-          <button
+          <Button
             type="button"
             onClick={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
+            size={variant === "header" ? "sm" : undefined}
+            variant="outline"
             className={variant === "header"
-              ? "btn-brutal-sm flex h-7 items-center gap-1 bg-white px-1.5 text-xs font-bold"
-              : "inline-flex h-5 items-center gap-1 rounded border border-black/25 bg-white px-1.5 text-[10px] font-bold text-black/60 hover:border-black"}
+              ? "h-7 gap-1 px-1.5 text-xs font-bold"
+              : "inline-flex h-5 items-center gap-1 rounded border border-line-muted theme-brutal:border-black/25 bg-layer-panel theme-brutal:bg-white px-1.5 text-[10px] font-bold text-foreground-muted theme-brutal:text-black/60 hover:border-line-muted theme-brutal:hover:border-black"}
             aria-label={label}
-            title={label}
             data-testid={`thread-followers-${variant}-trigger`}
           >
             <span className="flex -space-x-1" aria-hidden="true">
               {roster.error ? (
                 <AlertCircle size={variant === "header" ? 14 : 12} />
               ) : agents.slice(0, 3).map((agent) => (
-                <AgentAvatar key={agent.id} avatarUrl={agent.avatarUrl} size={variant === "header" ? 18 : 14} className="border border-white" />
+                <AvatarSlot key={agent.id} context={variant === "header" ? "sidebar-list" : "preview-mini"} type="agent" agentAvatarUrl={agent.avatarUrl} />
               ))}
             </span>
             {roster.error ? null : <span>{agents.length}</span>}
-          </button>
+          </Button>
         )}
       />
+      </Tooltip>
       <PopoverContent
         side="bottom"
         align="end"
@@ -131,24 +138,24 @@ export default function ThreadAgentFollowers({
         className="w-72 p-0"
         data-testid="thread-followers-popover"
       >
-        <div className="border-b-2 border-black bg-brutal-cream px-3 py-2 text-sm font-bold">
+        <div className="border-b-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-brutal-cream px-3 py-2 text-sm font-bold">
           {formatMessage({ id: "thread.followers.title" })}
         </div>
         <div className="max-h-72 overflow-y-auto p-2">
           {roster?.loading && !roster.loaded ? (
-            <div className="px-2 py-4 text-center text-xs font-bold text-black/45" data-testid="thread-followers-loading">
+            <div className="px-2 py-4 text-center text-xs font-bold text-foreground-placeholder theme-brutal:text-black/45" data-testid="thread-followers-loading">
               {formatMessage({ id: "thread.followers.loading" })}
             </div>
           ) : roster?.error ? (
-            <div className="flex flex-col items-center gap-2 px-2 py-4 text-center text-xs font-bold text-black/60" data-testid="thread-followers-error">
+            <div className="flex flex-col items-center gap-2 px-2 py-4 text-center text-xs font-bold text-foreground-muted theme-brutal:text-black/60" data-testid="thread-followers-error">
               <AlertCircle size={18} />
               {formatMessage({ id: "thread.followers.loadFailed" })}
-              <button type="button" className="btn-brutal-sm bg-white px-2 py-1" onClick={() => void load([threadChannelId], true)}>
+              <Button variant="outline" size="sm" type="button" className="bg-layer-panel theme-brutal:bg-white px-2 py-1" onClick={() => void load([threadChannelId], true)}>
                 {formatMessage({ id: "thread.followers.retry" })}
-              </button>
+              </Button>
             </div>
           ) : agents.length === 0 ? (
-            <div className="px-2 py-4 text-center text-xs font-bold text-black/45" data-testid="thread-followers-empty">
+            <div className="px-2 py-4 text-center text-xs font-bold text-foreground-placeholder theme-brutal:text-black/45" data-testid="thread-followers-empty">
               {formatMessage({ id: "thread.followers.empty" })}
             </div>
           ) : agents.map((agent) => {
@@ -164,13 +171,9 @@ export default function ThreadAgentFollowers({
             const openAgentProfile = () => {
               setCachedAgentProfile(currentServerId, {
                 ...agent,
-                // The follower endpoint exposes transport/display statuses
-                // (for example, "online"), while Agent profiles use the
-                // shared AgentStatus union. Normalize before seeding the
-                // fallback cache so peer rows can open a complete profile.
-                status: agent.status === "active" || agent.status === "online"
-                  ? "active"
-                  : agent.status === "stopped" ? "stopped" : "inactive",
+                // Normalize before seeding the fallback cache so peer rows
+                // can open a complete profile.
+                status: followerAgentStatus(agent.status),
                 description: null,
                 model: "",
                 runtime: "",
@@ -189,43 +192,47 @@ export default function ThreadAgentFollowers({
               openProfile("agent", agent.id);
             };
             return (
-              <div key={agent.id} className="flex items-center gap-2 px-1 py-1.5" data-testid="thread-follower-row">
-                <button
-                  type="button"
-                  className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-1 text-left hover:bg-black/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-black"
-                  onClick={openAgentProfile}
-                  aria-label={agentLabel}
-                  title={agentLabel}
-                  data-testid="thread-follower-profile-row"
-                >
-                  <AgentAvatar avatarUrl={agent.avatarUrl} size={28} />
-                  <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                    <span className="truncate text-sm font-bold" title={agentLabel}>
-                      {agentLabel}
+              // artin (task #701): reuse the members list's row wholesale, so
+              // the avatar's activity badge and the status sub-line stay
+              // structurally identical to that surface.
+              <div key={agent.id} data-testid="thread-follower-row">
+                <ChannelMemberRow
+                  type="agent"
+                  agentId={agent.id}
+                  agentAvatarUrl={agent.avatarUrl}
+                  agentFallbackActivity={agentStatusFallbackActivity(followerAgentStatus(agent.status))}
+                  name={(
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate">{agentLabel}</span>
+                      {agent.isCurrentServer === false && serverLabel ? (
+                        <span className="min-w-0">
+                          <JointPeerBadge label={serverLabel} />
+                        </span>
+                      ) : null}
                     </span>
-                    {agent.isCurrentServer === false && serverLabel ? (
-                      <span className="min-w-0" title={serverLabel}>
-                        <JointPeerBadge label={serverLabel} />
-                      </span>
-                    ) : null}
-                  </span>
-                </button>
-                {roster?.canManage ? (
-                  <button
-                    type="button"
-                    className={`btn-brutal-sm flex size-7 items-center justify-center bg-white ${canRemoveAgent ? "" : "cursor-not-allowed opacity-45"}`}
-                    disabled={!canRemoveAgent || removingId === agent.id}
-                    onClick={() => {
-                      if (!canRemoveAgent) return;
-                      void handleRemove(agent.id, agentLabel);
-                    }}
-                    aria-label={removeLabel}
-                    title={removeLabel}
-                    data-testid="thread-follower-remove"
-                  >
-                    <X size={14} />
-                  </button>
-                ) : null}
+                  )}
+                  secondary={<AgentActivityInfo agentId={agent.id} fallbackStatus={followerAgentStatus(agent.status)} />}
+                  onRowClick={openAgentProfile}
+                  trailing={roster?.canManage ? (
+                    <Tooltip content={removeLabel}>
+                      <Button
+                        type="button"
+                        size="icon-sm"
+                        variant="ghost"
+                        className={`size-7 ${canRemoveAgent ? "" : "cursor-not-allowed opacity-45"}`}
+                        disabled={!canRemoveAgent || removingId === agent.id}
+                        onClick={() => {
+                          if (!canRemoveAgent) return;
+                          void handleRemove(agent.id, agentLabel);
+                        }}
+                        aria-label={removeLabel}
+                        data-testid="thread-follower-remove"
+                      >
+                        <X size={14} />
+                      </Button>
+                    </Tooltip>
+                  ) : undefined}
+                />
               </div>
             );
           })}

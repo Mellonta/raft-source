@@ -21,16 +21,14 @@ import {
   completeExternalOAuthAttempt,
   ExternalAppControlPlaneError,
   markExternalOAuthExchangeUnknown,
-  setExternalAuthorPolicyState,
-  type ExternalAuthorPolicyRuntimeAuthority,
-} from "../services/externalAppControlPlaneService.js";
+} from "../services/externalAppControlPlaneService";
 import {
   ExternalAppIngressError,
   type ExternalAppIngressErrorCode,
   type ExternalIngressPayloadSealer,
   type ExternalIngressRuntimeResolver,
   type ExternalIngressSecretResolver,
-} from "../services/externalAppIngressService.js";
+} from "../services/externalAppIngressService";
 import {
   createSlackEventsHttpAdapter,
   SLACK_OAUTH_APP_CREDENTIAL_HANDLE_SCHEMA,
@@ -42,14 +40,13 @@ import {
   type SlackOAuthExchangeRequest,
   type SlackIngressAuthorityAdapter,
   type SlackIngressEventStatus,
-} from "../services/slackProviderAdapter.js";
-import { slackBridgeIngressObservationsTotal } from "../metrics.js";
-import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../services/slackBridgeProductionAppContract.js";
+} from "../services/slackProviderAdapter";
+import { slackBridgeIngressObservationsTotal } from "../metrics";
+import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../services/slackBridgeProductionAppContract";
 
-export { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../services/slackBridgeProductionAppContract.js";
+export { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../services/slackBridgeProductionAppContract";
 
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+import { UUID_RE as UUID_PATTERN } from "../lib/messageId";
 const OAUTH_CODE_MAX_LENGTH = 4_096;
 const OAUTH_STATE_MAX_LENGTH = 1_024;
 const OAUTH_LEASE_AUDIENCE = "slack-oauth-exchange";
@@ -169,12 +166,6 @@ export interface SlackBridgeRouteDependencies {
   runtimeResolver?: ExternalIngressRuntimeResolver;
   admitSlackIngress?: SlackIngressAuthorityAdapter;
   provisioning?: SlackBridgeProvisioningControlPlane;
-  resolveAuthorPolicyAuthority?(input: {
-    serverId: string;
-    bindingId: string;
-    now: Date;
-  }): Promise<ExternalAuthorPolicyRuntimeAuthority | null>;
-  materializeAuthorAvatar?(policyId: string): Promise<unknown>;
   requestLifecycleReconcile?(): Promise<unknown> | void;
   onLifecycleError?(error: unknown): void;
   now?(): Date;
@@ -190,7 +181,6 @@ export interface SlackBridgeRouteHandlers {
   enable: RequestHandler;
   startOAuth: RequestHandler;
   completeOAuth: RequestHandler;
-  setAuthorPolicy: RequestHandler;
   observeEventsArrival: RequestHandler;
   handleEventsRawBodyError: ErrorRequestHandler;
   receiveEvents: RequestHandler;
@@ -488,6 +478,22 @@ function sendOAuthOutcome(
   res.status(503).json({ ok: false, code: "slack_oauth_preflight_rejected" });
 }
 
+function redirectOAuthProviderRejection(
+  res: Response,
+  completionRedirectUri: string | null,
+): void {
+  if (!completionRedirectUri) {
+    noStore(res);
+    res.status(400).json({ ok: false, code: "slack_oauth_provider_rejected" });
+    return;
+  }
+  const redirect = new URL(completionRedirectUri);
+  redirect.searchParams.set("slack_oauth", "error");
+  redirect.searchParams.set("code", "slack_oauth_provider_rejected");
+  noStore(res);
+  res.redirect(302, redirect.toString());
+}
+
 function ingressError(error: ExternalAppIngressError, res: Response): void {
   const status = error.code === "external_ingress_signature_invalid"
     ? 401
@@ -570,87 +576,6 @@ export function createSlackBridgeRouteHandlers(
   const enable: RequestHandler = async (req, res) => {
     await handleProvisioningOperation(req, res, dependencies, (controlPlane, authority) =>
       controlPlane.enable(authority));
-  };
-
-  const setAuthorPolicy: RequestHandler = async (req, res) => {
-    if (
-      !runtimeReady(dependencies)
-      || typeof dependencies.resolveAuthorPolicyAuthority !== "function"
-    ) {
-      unavailable(res);
-      return;
-    }
-    const now = safeNow(dependencies);
-    const body = objectBody(req);
-    const bindingId = uuid(body.bindingId);
-    const authorId = uuid(body.authorId);
-    const authorType = body.authorType === "user" || body.authorType === "agent"
-      ? body.authorType
-      : null;
-    const state = body.state === "granted" || body.state === "revoked"
-      ? body.state
-      : null;
-    if (!now || !req.userId || !req.serverId || !bindingId || !authorId || !authorType || !state) {
-      noStore(res);
-      res.status(400).json({ ok: false, code: "slack_author_policy_invalid" });
-      return;
-    }
-    if (
-      state === "granted"
-      && !await launchEnabled(dependencies, req.serverId, now)
-    ) {
-      launchDisabled(res);
-      return;
-    }
-
-    try {
-      const authority = await dependencies.resolveAuthorPolicyAuthority({
-        serverId: req.serverId,
-        bindingId,
-        now,
-      });
-      if (!authority) {
-        throw new ExternalAppControlPlaneError(
-          "External author policy runtime authority is unavailable",
-          "external_app_not_authorized",
-        );
-      }
-      const result = await setExternalAuthorPolicyState({
-        serverId: req.serverId,
-        requestingUserId: req.userId,
-        authority,
-        authorType,
-        authorId,
-        state,
-      });
-      if (state === "granted" && dependencies.materializeAuthorAvatar) {
-        try {
-          await dependencies.materializeAuthorAvatar(result.policy.id);
-        } catch (error) {
-          dependencies.onLifecycleError?.(error);
-        }
-      }
-      noStore(res);
-      res.status(result.created ? 201 : 200).json({
-        ok: true,
-        policy: {
-          id: result.policy.id,
-          bindingId: result.policy.bindingId,
-          bindingEpoch: result.policy.bindingEpoch,
-          authorType: result.policy.authorType,
-          authorId: result.policy.authorId,
-          displayName: result.policy.displayName,
-          consentRevision: result.policy.consentRevision,
-          state: result.policy.state,
-        },
-      });
-    } catch (error) {
-      if (error instanceof ExternalAppControlPlaneError) {
-        controlPlaneError(error, res);
-        return;
-      }
-      unavailable(res);
-    }
   };
 
   const startOAuth: RequestHandler = async (req, res) => {
@@ -746,15 +671,6 @@ export function createSlackBridgeRouteHandlers(
       return;
     }
 
-    const providerError = queryString(req.query.error, 256);
-    const authorizationCode = queryString(req.query.code, OAUTH_CODE_MAX_LENGTH);
-    if (providerError || !authorizationCode) {
-      await fenceUnknown(claimed.attemptId);
-      noStore(res);
-      res.status(400).json({ ok: false, code: "slack_oauth_provider_rejected" });
-      return;
-    }
-
     let completionRedirectPath: string | null;
     try {
       completionRedirectPath = await dependencies.resolveOAuthCompletionRedirectPath({
@@ -772,6 +688,14 @@ export function createSlackBridgeRouteHandlers(
       completionRedirectPath,
       dependencies.appOrigin,
     ).toString();
+
+    const providerError = queryString(req.query.error, 256);
+    const authorizationCode = queryString(req.query.code, OAUTH_CODE_MAX_LENGTH);
+    if (providerError || !authorizationCode) {
+      await fenceUnknown(claimed.attemptId);
+      redirectOAuthProviderRejection(res, completionRedirectUri);
+      return;
+    }
 
     const leaseRequestedAt = safeNow(dependencies);
     if (!leaseRequestedAt) {
@@ -862,6 +786,7 @@ export function createSlackBridgeRouteHandlers(
         providerTeamId: outcome.providerTeamId,
         providerEnterpriseId: outcome.providerEnterpriseId,
         providerUserId: outcome.providerUserId,
+        providerInstallerIsWorkspaceAdmin: outcome.installerIsWorkspaceAdmin,
         botUserId: outcome.botUserId,
         providerBotId: outcome.providerBotId,
         workspaceName: outcome.workspaceName,
@@ -962,7 +887,6 @@ export function createSlackBridgeRouteHandlers(
     enable,
     startOAuth,
     completeOAuth,
-    setAuthorPolicy,
     observeEventsArrival,
     handleEventsRawBodyError,
     receiveEvents,

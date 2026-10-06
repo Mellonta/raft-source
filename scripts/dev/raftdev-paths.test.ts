@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { raftdevStoragePaths } from "./raftdev-paths.js";
+import { raftdevStoragePaths } from "./raftdev-paths";
 
 test("legacy state and seed locations are unchanged when unset", () => {
   assert.deepEqual(raftdevStoragePaths("/workspace/raft", {}), {

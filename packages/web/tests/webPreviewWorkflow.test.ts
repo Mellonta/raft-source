@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "../../..");
 // Asserts on private CI/deploy files that the source-available snapshot does not
@@ -11,7 +10,7 @@ const workflow = inSourceSnapshot
   ? ""
   : readFileSync(resolve(repoRoot, ".github/workflows/deploy-web-preview.yml"), "utf8");
 
-test("untrusted preview code only crosses the credential boundary as an inert artifact", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("untrusted preview code only crosses the credential boundary as an inert artifact", { skip: inSourceSnapshot }, () => {
   assert.match(workflow, /pull_request_target:/);
   assert.match(workflow, /head\.repo\.full_name == github\.repository/);
   assert.match(workflow, /persist-credentials: false/);
@@ -22,7 +21,7 @@ test("untrusted preview code only crosses the credential boundary as an inert ar
   assert.doesNotMatch(buildJob, /CLOUDFLARE_API_TOKEN|RAFT_ENV_MANAGER_DEPLOYMENTS_KV_NAMESPACE_ID/);
 });
 
-test("credentialed jobs execute only the immutable standalone Action", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("credentialed jobs execute only the immutable standalone Action", { skip: inSourceSnapshot }, () => {
   const credentialedJobs = workflow.slice(workflow.indexOf("  deploy:"));
   assert.match(
     credentialedJobs,
@@ -77,7 +76,7 @@ test("credentialed jobs execute only the immutable standalone Action", { skip: i
   assert.doesNotMatch(credentialedJobs, /CF_ACCESS|RAFT_ENV_MANAGER_ACCESS|CF-Access-Client/);
 });
 
-test("deployment infrastructure uses one credential boundary and an explicit data target", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("deployment infrastructure uses one credential boundary and an explicit data target", { skip: inSourceSnapshot }, () => {
   assert.match(workflow, /name: Deploy Branch Preview/);
   assert.match(workflow, /branch-preview-staging-data/);
   assert.doesNotMatch(workflow, /branch-preview-prod-data/);
@@ -90,12 +89,12 @@ test("deployment infrastructure uses one credential boundary and an explicit dat
   assert.doesNotMatch(workflow, /web-preview-(?:staging|prod|gateway)/);
 });
 
-test("deployment consumers read the composite Action preview-url output", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("deployment consumers read the composite Action preview-url output", { skip: inSourceSnapshot }, () => {
   assert.equal(workflow.match(/steps\.deployment\.outputs\['preview-url'\]/g)?.length, 3);
   assert.doesNotMatch(workflow, /steps\.deployment\.outputs\.preview_url/);
 });
 
-test("cleanup is workflow-dispatch-only and carries Env Manager correlation", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("cleanup is workflow-dispatch-only and carries Env Manager correlation", { skip: inSourceSnapshot }, () => {
   assert.match(workflow, /operation_id:[\s\S]*Optional Env Manager operation correlation ID/);
   assert.match(workflow, /run-name: Branch preview/);
   const cleanupJob = workflow.slice(workflow.indexOf("  cleanup:"));
@@ -104,7 +103,7 @@ test("cleanup is workflow-dispatch-only and carries Env Manager correlation", { 
   assert.doesNotMatch(cleanupJob, /pull_request_target|github\.event\.action == 'unlabeled'/);
 });
 
-test("workflow declares and forwards the authoritative preview_host to deploy and disable", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("workflow declares and forwards the authoritative preview_host to deploy and disable", { skip: inSourceSnapshot }, () => {
   // Live-wiring tooth (Env Manager P0-3): the workflow must declare the
   // preview_host input and forward it to BOTH the deploy and disable action
   // invocations. Removing any of these turns this test RED.

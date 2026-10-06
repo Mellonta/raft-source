@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
 import { Navigate } from "react-router-dom";
+import { Button } from "raft-ui";
 import { useMachineStore } from "../../store/machineStore";
 import { useComputerConnectionWatch } from "../../hooks/useComputerConnectionWatch";
 import Modal from "../Modal";
@@ -12,7 +13,7 @@ import ServerSetupComputerRuntimeStep from "./ServerSetupComputerRuntimeStep";
 import type { ServerSetupComputer } from "./ServerSetupComputerRuntimeStep";
 import ServerSetupHandoffStep from "./ServerSetupHandoffStep";
 import ServerSetupSurveyStep from "./ServerSetupSurveyStep";
-import { getComputerCommands, getDaemonConnectCommand } from "../../utils/computerSetupCommand";
+import { getComputerCommands } from "../../utils/computerSetupCommand";
 import { getServerUrl } from "../../utils/server";
 import { emitHostEvent, hasRaftHostEventBridge, readRaftHostOnboardingContext } from "../../embed/hostBridge";
 import { NATIVE_ONBOARDING_CONTRACT_VERSION } from "../../embed/nativeOnboarding";
@@ -89,25 +90,8 @@ export default function ServerSetupProjectionGate({
   const { formatMessage } = useIntl();
   const machines = useMachineStore((state) => state.machines);
   const loadMachines = useMachineStore((state) => state.loadMachines);
-  const registerMachine = useMachineStore((state) => state.registerMachine);
-  // The Windows Computer path uses device authorization and must not mint a legacy
-  // machine row. A raw machine/key is created only after the user explicitly asks to
-  // reveal the retained Daemon / Legacy fallback.
-  const [windowsApiKey, setWindowsApiKey] = useState("");
-  const [windowsKeyPending, setWindowsKeyPending] = useState(false);
-
-  const ensureWindowsApiKey = useCallback(async () => {
-    if (windowsApiKey || windowsKeyPending) return;
-    setWindowsKeyPending(true);
-    try {
-      const { apiKey } = await registerMachine("Windows computer");
-      setWindowsApiKey(apiKey);
-    } catch {
-      setError(formatMessage({ id: "layout.onboarding.windowsCommandFailed" }));
-    } finally {
-      setWindowsKeyPending(false);
-    }
-  }, [formatMessage, registerMachine, windowsApiKey, windowsKeyPending]);
+  // Every platform connects through Raft Computer's device authorization; the
+  // retired standalone-daemon path (which minted a raw machine row + key) is gone.
   const [projection, setProjection] = useState<ServerSetupProjection | null>(null);
   // Whether the CURRENT projection state came back from the server, as opposed
   // to closeCompletedSetup's locally-synthesized completion (which spreads the
@@ -299,7 +283,7 @@ export default function ServerSetupProjectionGate({
     if (!dedicatedSurface) return null;
     return (
       <div className="flex min-h-full w-full items-center justify-center p-6" data-testid="native-onboarding-loading">
-        <p className="text-sm font-bold text-black/60">{formatMessage({ id: "onboarding.native.loading" })}</p>
+        <p className="text-sm font-bold text-foreground-muted">{formatMessage({ id: "onboarding.native.loading" })}</p>
       </div>
     );
   }
@@ -316,11 +300,11 @@ export default function ServerSetupProjectionGate({
       : "onboarding.native.unavailable";
     return (
       <div className="flex min-h-full w-full items-center justify-center p-6" data-testid="native-onboarding-unavailable">
-        <div className="w-full max-w-md border-2 border-black bg-white p-5 text-center shadow-brutal">
-          <p className="text-sm font-bold text-black">{formatMessage({ id: messageId })}</p>
+        <div className="w-full max-w-md rounded-lg border border-line-muted bg-layer-panel p-5 text-center shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal">
+          <p className="text-sm font-bold text-foreground-strong">{formatMessage({ id: messageId })}</p>
           <button
             type="button"
-            className="mt-4 border-2 border-black bg-soft-signal px-4 py-2 text-sm font-bold shadow-brutal-sm active:translate-x-0.5 active:translate-y-0.5 active:shadow-none"
+            className="mt-4 rounded-md border border-line-muted bg-primary-soft px-4 py-2 text-sm font-bold text-foreground-strong shadow-raft-sm active:translate-x-0.5 active:translate-y-0.5 active:shadow-none theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm"
             onClick={retryProjection}
           >
             {formatMessage({ id: "onboarding.native.retry" })}
@@ -382,7 +366,7 @@ export default function ServerSetupProjectionGate({
         // app shell inside the onboarding page.
         return (
           <div className="flex min-h-full w-full items-center justify-center p-6" data-testid="native-onboarding-complete">
-            <p className="text-sm font-bold text-black/60">{formatMessage({ id: "onboarding.native.complete" })}</p>
+            <p className="text-sm font-bold text-foreground-muted">{formatMessage({ id: "onboarding.native.complete" })}</p>
           </div>
         );
       }
@@ -393,21 +377,23 @@ export default function ServerSetupProjectionGate({
         className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center px-4 pb-4"
         data-testid="server-setup-resume-bar"
       >
-        <div className="pointer-events-auto flex w-full max-w-[560px] flex-wrap items-center justify-between gap-3 border-2 border-black bg-soft-signal px-4 py-3 shadow-brutal">
+        <div className="pointer-events-auto flex w-full max-w-[560px] flex-wrap items-center justify-between gap-3 rounded-lg border border-line-muted bg-primary-soft text-foreground-strong px-4 py-3 shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal">
           <p className="min-w-0 text-sm font-bold">
             {formatMessage({ id: "layout.onboarding.notSetUpYet" })}
           </p>
-          <button
+          <Button
             type="button"
             onClick={() => void handleResume()}
             disabled={loading}
-            className="btn-brutal shrink-0 bg-white px-4 py-2 text-sm disabled:opacity-50"
+            size="md"
+            variant="outline"
+            className="shrink-0"
             data-testid="server-setup-resume"
           >
             {loading
               ? formatMessage({ id: "layout.onboarding.opening" })
               : formatMessage({ id: "layout.onboarding.resumeSetup" })}
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -456,13 +442,6 @@ export default function ServerSetupProjectionGate({
   const computerCommands = getComputerCommands(serverSlug, deploymentEnv, serverUrl);
   const windowsComputerCommands = getComputerCommands(serverSlug, deploymentEnv, serverUrl, {
     platform: "windows",
-  });
-  const daemonDistTag = deploymentEnv === "staging" ? "staging" : "latest";
-  const daemonCommandFor = (platform: "mac-linux" | "windows") => getDaemonConnectCommand({
-    apiKey: windowsApiKey,
-    distTag: daemonDistTag,
-    platform,
-    serverUrl,
   });
 
   // The confirm dialog. Rendered ALONGSIDE whichever surface is up (Meet Cindy or Screen B),
@@ -536,10 +515,6 @@ export default function ServerSetupProjectionGate({
         computerInstallCommand={computerCommands?.install}
         windowsComputerSetupCommand={windowsComputerCommands?.setup ?? null}
         windowsComputerInstallCommand={windowsComputerCommands?.install}
-        macLinuxDaemonCommand={daemonCommandFor("mac-linux")}
-        windowsDaemonCommand={windowsApiKey ? daemonCommandFor("windows") : ""}
-        onRequestWindowsDaemonCommand={() => void ensureWindowsApiKey()}
-        windowsDaemonCommandPending={windowsKeyPending}
         onCopyInstallCommand={(runtimeId, command) => void handleCopyInstallCommand(runtimeId, command)}
         canReset={projection.allowedExits.includes("reset")}
         onStartOver={() => setConfirmStartOver(true)}

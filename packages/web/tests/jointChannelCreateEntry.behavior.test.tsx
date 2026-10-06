@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -27,7 +27,7 @@ import { TestIntlProvider } from "./helpers/intl";
 
 type TestFn = () => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn);
+  nodeTest(name,  fn);
 
 const originalGet = api.get;
 const originalPatch = api.patch;
@@ -222,7 +222,7 @@ function renderDialog() {
   );
 }
 
-test("the dialog collects at most two server invites and submits visibility joint with jointInvites", async () => {
+test("the dialog collects several server invites and submits visibility joint with jointInvites", async () => {
   seedDialogStores();
   const created: Array<{ args: unknown[] }> = [];
   useChannelStore.setState({
@@ -235,18 +235,18 @@ test("the dialog collects at most two server invites and submits visibility join
 
   renderDialog();
 
-  // Three servers total, including this one: the dialog starts with one
-  // invite draft and allows at most TWO (MAX_JOINT_CHANNEL_SERVERS - 1).
+  // Contract v0.3 §18.6: up to 30 servers including this one, so the dialog
+  // allows up to 29 invite drafts; two drafts leave "Add server" enabled.
   assert.ok(screen.getByPlaceholderText("partner-workspace"), "the initial invite draft renders");
   const addServer = screen.getByRole("button", { name: "Add server" });
   fireEvent.click(addServer);
   assert.ok(screen.getByText("Server invite 1"));
   assert.ok(screen.getByText("Server invite 2"));
   assert.ok(
-    (screen.getByRole("button", { name: "Add server" }) as HTMLButtonElement).disabled,
-    "the third invite draft is capped by MAX_JOINT_CHANNEL_SERVERS - 1",
+    !(screen.getByRole("button", { name: "Add server" }) as HTMLButtonElement).disabled,
+    "more invite drafts are allowed below MAX_JOINT_CHANNEL_SERVERS - 1",
   );
-  assert.ok(screen.getByText("Joint channels support a maximum of 3 servers, including this server."));
+  assert.ok(screen.queryByTestId("create-joint-max-servers-hint") === null, "the cap hint only shows at the cap");
 
   fireEvent.change(screen.getByPlaceholderText("e.g. partner-launch"), { target: { value: "partner-launch" } });
   const slugInputs = screen.getAllByPlaceholderText("partner-workspace");
@@ -275,20 +275,20 @@ test("the dialog collects at most two server invites and submits visibility join
   ]);
 });
 
-test("a free server sees the limited-time allowance with creation left enabled", () => {
+test("a free server sees the two-free-server hint with creation left enabled", () => {
   seedDialogStores({ plan: "free" });
   useChannelStore.setState({ channels: [] } as never);
 
   renderDialog();
 
-  assert.ok(screen.getByText("Free can create one Joint Channel for free for a limited time."));
+  assert.ok(screen.getByText("Free servers can create and join Joint Channels. Each Joint Channel can have up to 30 servers, at most 2 of them free."));
   assert.ok(
     !(screen.getByRole("button", { name: "Create Joint Channel" }) as HTMLButtonElement).disabled,
-    "the limited-time Free allowance must leave submit enabled",
+    "Free servers may create joint channels",
   );
 });
 
-test("the free-limit error renders localized recovery with a billing route", async () => {
+test("the free-server limit error renders localized recovery with a billing route", async () => {
   seedDialogStores({ plan: "free" });
   useChannelStore.setState({
     channels: [],
@@ -296,8 +296,8 @@ test("the free-limit error renders localized recovery with a billing route", asy
       throw {
         response: {
           data: {
-            code: "joint_channel_free_limit_reached",
-            error: "Creating a second Joint Channel requires the Pro plan.",
+            code: "joint_free_server_limit",
+            error: "This joint channel already has 2 free servers; one side needs to upgrade.",
           },
         },
       };
@@ -311,10 +311,35 @@ test("the free-limit error renders localized recovery with a billing route", asy
   fireEvent.change(screen.getByPlaceholderText("@admin or admin@example.com"), { target: { value: "admin@example.com" } });
   fireEvent.click(screen.getByRole("button", { name: "Create Joint Channel" }));
 
-  assert.ok(await screen.findByText("A second Joint Channel requires the Pro plan."));
+  assert.ok(await screen.findByText("This Joint Channel already has 2 free servers. Upgrade either side to Pro, or have a free server leave, to continue (30 servers max)."));
   assert.ok(screen.getByRole("button", { name: "View Billing" }));
   assert.ok(
-    !(document.body.textContent ?? "").includes("Creating a second Joint Channel"),
+    !(document.body.textContent ?? "").includes("one side needs to upgrade."),
     "the raw server error must not leak past the localized recovery copy",
   );
+
+  // Changing the invite list makes that error stale, so it goes away.
+  fireEvent.change(screen.getByPlaceholderText("partner-workspace"), { target: { value: "partner-paid" } });
+  assert.ok(!(document.body.textContent ?? "").includes("already has 2 free servers"), "stale limit error clears");
+  assert.ok(!screen.queryByRole("button", { name: "View Billing" }), "stale billing link clears");
+});
+
+test("the 30-server hint follows the current invite count: shown at the cap, gone after removing one", () => {
+  seedDialogStores();
+  useChannelStore.setState({ channels: [] } as never);
+  renderDialog();
+
+  const addServer = () => screen.getByRole("button", { name: "Add server" }) as HTMLButtonElement;
+  // 29 invites + this server = 30.
+  for (let drafts = 1; drafts < 29; drafts += 1) fireEvent.click(addServer());
+  assert.ok(screen.getByText("Server invite 29"));
+  assert.ok(addServer().disabled, "Add server is disabled at 30 servers");
+  assert.ok(screen.getByText("Joint channels support a maximum of 30 servers, including this server."));
+
+  fireEvent.click(screen.getByRole("button", { name: "Remove server invite 29" }));
+  assert.ok(!addServer().disabled, "Add server is enabled again");
+  assert.ok(screen.queryByTestId("create-joint-max-servers-hint") === null, "the hint leaves with the cap");
+
+  fireEvent.click(addServer());
+  assert.ok(screen.getByText("Joint channels support a maximum of 30 servers, including this server."), "and comes back at the cap");
 });

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { seedSparseAnchorReplies } from "./e2e/fixtures/sparseAnchorReplies.js";
+import { seedSparseAnchorReplies } from "./e2e/fixtures/sparseAnchorReplies";
 
 function nextTurn(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -42,7 +41,9 @@ test("sparse-anchor schedule seeds reply 00 first, then bounded 10, and preserve
 });
 
 test("sparse-anchor schedule reaches UI assertions inside a controlled latency window", async () => {
-  const replyCount = 100;
+  // Match the largest consumer so this tooth catches a serial regression in
+  // the title-jump case, not only the shorter scroll-to-beginning fixture.
+  const replyCount = 125;
   const responseLatencyMs = 300;
   const testTimeoutMs = 30_000;
   let boundedComplete = false;
@@ -52,12 +53,12 @@ test("sparse-anchor schedule reaches UI assertions inside a controlled latency w
   const postReply = () => new Promise<void>((resolve) => {
     pendingResponses.push(resolve);
   });
-  const bounded = seedSparseAnchorReplies(
-    Array.from({ length: replyCount }, (_, index) => index),
-    postReply,
-  ).then(() => {
+  const items = Array.from({ length: replyCount }, (_, index) => index);
+  const bounded = (async () => {
+    await seedSparseAnchorReplies(items.slice(0, -1), postReply);
+    await postReply();
     boundedComplete = true;
-  });
+  })();
   const serial = (async () => {
     for (let index = 0; index < replyCount; index += 1) {
       await postReply();
@@ -66,7 +67,7 @@ test("sparse-anchor schedule reaches UI assertions inside a controlled latency w
   })();
 
   await nextTurn();
-  const assertionWindowRounds = 1 + Math.ceil((replyCount - 1) / 10);
+  const assertionWindowRounds = 2 + Math.ceil((replyCount - 2) / 10);
   for (let round = 0; round < assertionWindowRounds; round += 1) {
     const currentResponses = pendingResponses;
     pendingResponses = [];
@@ -87,8 +88,8 @@ test("sparse-anchor schedule reaches UI assertions inside a controlled latency w
 
   assert.equal(
     assertionWindowRounds * responseLatencyMs,
-    3_300,
-    "the production schedule reaches UI assertions after eleven response rounds",
+    4_500,
+    "the production schedule reaches UI assertions after fifteen response rounds",
   );
   assert.ok(
     replyCount * responseLatencyMs >= testTimeoutMs,

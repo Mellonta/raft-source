@@ -155,9 +155,10 @@ test.describe("Inbox Mentions filter (Plan A)", () => {
     await page.getByTestId("inbox-filter-mentions").click();
     const mentionRow = page.getByTestId("inbox-row").filter({ hasText: mentionText });
     await expect(mentionRow).toBeVisible();
-    // The card reveals pointer actions on hover.
+    // The card reveals pointer actions on hover; the done affordance is a RUI
+    // icon Button keyed by testid (aria-label "Mark as Done", no title attr).
     await mentionRow.hover();
-    await mentionRow.getByTitle("Mark as Done").click();
+    await mentionRow.getByTestId("inbox-row-done").click();
     await expect(page.getByTestId("inbox-row").filter({ hasText: mentionText })).toHaveCount(0);
   });
 });

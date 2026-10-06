@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { planMachineReachability } from "./agentOrchestrator.js";
+import { planMachineReachability } from "./agentOrchestrator";
 
 test("planMachineReachability returns none when the agent has no machineId", () => {
   assert.equal(

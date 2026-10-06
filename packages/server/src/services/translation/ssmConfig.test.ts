@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   CachedTranslationSsmConfig,
   loadTranslationSsmConfig,
   translationSsmEnvironment,
   translationSsmParameterNames,
   type TranslationSsmReader,
-} from "./ssmConfig.js";
+} from "./ssmConfig";
 
 function fakeReader(values: Record<string, string>, calls: Array<{ names: string[]; withDecryption: boolean }>): TranslationSsmReader {
   return {

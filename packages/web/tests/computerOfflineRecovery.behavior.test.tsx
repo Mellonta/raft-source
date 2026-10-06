@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -18,8 +17,9 @@ const initialMachineState = useMachineStore.getState();
 const initialServerState = useServerStore.getState();
 
 function clickCopyButtonForCode(container: HTMLElement, command: string) {
-  const code = within(container).getByText(command, { exact: true, selector: "code" });
-  const button = code.parentElement?.querySelector("button");
+  const code = within(container).getByText(command);
+  assert.ok(code.closest("code"), `${command} must keep code semantics`);
+  const button = code.closest("[data-slot='copyable-code-root']")?.querySelector("button");
   assert.ok(button, `copy button for ${command} should render beside its code row`);
   fireEvent.click(button);
 }
@@ -168,7 +168,7 @@ test("offline Windows Computer recovery uses PowerShell and the Windows executab
   assert.doesNotMatch(`${commands.install}\n${commands.setup}`, /install\.sh|RAFT_HOME="\$HOME/);
 });
 
-test("legacy Windows machine page offers Experimental Computer migration and keeps the daemon block", () => {
+test("legacy Windows machine page offers Experimental Computer migration and no daemon block", () => {
   useServerStore.setState({ current: server, members: [] });
   useAgentStore.setState({ agents: [] });
   useMachineStore.setState({ computerOperationProgress: {} });
@@ -196,13 +196,17 @@ test("legacy Windows machine page offers Experimental Computer migration and kee
   const migrate = screen.getByTestId("computer-migrate-block");
   assert.ok(within(migrate).getByText("Experimental"));
   assert.ok(within(migrate).getByText("Migrate to Computer · Windows x64"));
-  assert.ok(within(migrate).getByText(commands.install, { exact: true, selector: "code" }));
-  assert.ok(within(migrate).getByText(commands.setup, { exact: true, selector: "code" }));
-  assert.ok(screen.getByTestId("legacy-daemon-block"));
+  const installCode = within(migrate).getByText(commands.install);
+  assert.ok(installCode.closest("code"), `${commands.install} must keep code semantics`);
+  const setupCode = within(migrate).getByText(commands.setup);
+  assert.ok(setupCode.closest("code"), `${commands.setup} must keep code semantics`);
+  // The retired standalone daemon has no connect command left to offer.
+  assert.equal(screen.queryByTestId("legacy-daemon-block"), null);
+  assert.equal(document.body.innerHTML.includes("raft-daemon"), false);
   assert.equal(screen.queryByText(/Computer for Windows is in progress/), null);
 });
 
-test("online Computer without remote Upgrade shows a version-pinned fresh-install then restart path", async () => {
+test("online Computer with a newer version and no web upgrade shows the install-latest then restart commands", async () => {
   useServerStore.setState({ current: server, members: [] });
   useAgentStore.setState({ agents: [] });
   useMachineStore.setState({
@@ -214,7 +218,7 @@ test("online Computer without remote Upgrade shows a version-pinned fresh-instal
     server.slug,
     "staging",
     getServerUrl(),
-    { version: "1.0.14" },
+    {},
   );
   assert.ok(commands);
   const clipboardWrites: string[] = [];
@@ -242,7 +246,7 @@ test("online Computer without remote Upgrade shows a version-pinned fresh-instal
     const actions = screen.getByTestId("computer-service-actions");
     assert.match(
       actions.textContent ?? "",
-      /Restart remains available; this source is not currently eligible for an upgrade\./,
+      /v1\.0\.14 is available\. Run these two commands on that machine to upgrade:/,
     );
     assert.equal(
       screen.getByTestId("computer-upgrade-fresh-install").textContent,
@@ -252,13 +256,15 @@ test("online Computer without remote Upgrade shows a version-pinned fresh-instal
       screen.getByTestId("computer-upgrade-fresh-restart").textContent,
       commands.restartService,
     );
-    assert.match(commands.install, /RAFT_COMPUTER_VERSION=1\.0\.14/);
+    // The installer resolves the latest release itself; a pin copied from a
+    // stale page would install an older version.
+    assert.doesNotMatch(commands.install, /RAFT_COMPUTER_VERSION/);
     assert.match(commands.restartService, /raft-computer"? restart$/);
     assert.doesNotMatch(commands.restartService, /\/acme/);
 
     fireEvent.click(
       within(actions).getByRole("button", {
-        name: "Copy fresh install for upgrade command",
+        name: "Copy install command",
       }),
     );
     fireEvent.click(
@@ -338,9 +344,15 @@ for (const deploymentEnv of ["staging", "slockdev"] as const) {
         screen.getByTestId("computer-recovery-guide-restart-after-install").textContent,
         commands.restartService,
       );
-      assert.equal(within(terminalVerification).getByText(commands.status, { exact: true, selector: "code" }).textContent, commands.status);
-      assert.equal(within(terminalVerification).getByText(commands.doctor, { exact: true, selector: "code" }).textContent, commands.doctor);
-      assert.equal(within(terminalVerification).getByText(commands.restart, { exact: true, selector: "code" }).textContent, commands.restart);
+      const statusCode = within(terminalVerification).getByText(commands.status);
+      assert.ok(statusCode.closest("code"), `${commands.status} must keep code semantics`);
+      assert.equal(statusCode.textContent, commands.status);
+      const doctorCode = within(terminalVerification).getByText(commands.doctor);
+      assert.ok(doctorCode.closest("code"), `${commands.doctor} must keep code semantics`);
+      assert.equal(doctorCode.textContent, commands.doctor);
+      const restartCode = within(terminalVerification).getByText(commands.restart);
+      assert.ok(restartCode.closest("code"), `${commands.restart} must keep code semantics`);
+      assert.equal(restartCode.textContent, commands.restart);
       assert.doesNotMatch(guide.textContent ?? "", /clear state|remove credentials|delete identity/i);
 
       clickCopyButtonForCode(terminalVerification, commands.status);

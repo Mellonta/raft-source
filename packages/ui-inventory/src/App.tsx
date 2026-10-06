@@ -31,6 +31,8 @@ import {
 } from "lucide-react";
 import {
   Badge,
+  Button,
+  Checkbox,
   SegmentedControl,
   SegmentedControlCount,
   SegmentedControlItem,
@@ -44,11 +46,10 @@ import {
   SelectList,
   SelectTrigger,
   SelectValue,
+  Textarea,
+  TextareaCounter,
 } from "raft-ui";
 import Banner from "@botiverse/raft-web/src/components/ui/Banner";
-import Button from "@botiverse/raft-web/src/components/ui/Button";
-import Textarea from "@botiverse/raft-web/src/components/ui/Textarea";
-import Checkbox from "@botiverse/raft-web/src/components/ui/Checkbox";
 import CheckMarker from "@botiverse/raft-web/src/components/ui/CheckMarker";
 import EmptyState from "@botiverse/raft-web/src/components/ui/EmptyState";
 import FormField from "@botiverse/raft-web/src/components/ui/FormField";
@@ -343,7 +344,7 @@ function PageShellSamples() {
             icon={<Search size={18} />}
             actions={(
               <div className="flex items-center gap-1.5">
-                <Button size="sm" shape="icon" aria-label="Close">
+                <Button size="icon-sm" variant="ghost" aria-label="Close">
                   <X size={14} />
                 </Button>
               </div>
@@ -584,7 +585,7 @@ function PageInventoryGrid() {
               avatar={<AvatarSlot context="surface-list" type="agent" agentAvatarUrl="pixel:flame" />}
               name="Agent on this computer"
               subtitle="working"
-              rightContent={<StatusDot tone="bg-brutal-yellow" pulse />}
+              rightContent={<StatusDot tone="bg-brutal-yellow" />}
             />
           </div>
         </div>
@@ -776,12 +777,12 @@ export default function UIInventoryPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <Button size="xs">Extra small</Button>
                   <Button size="sm">Small</Button>
-                  <Button size="md" tone="pink">Primary</Button>
-                  <Button size="lg" shape="iconText" tone="yellow">
+                  <Button size="md" variant="primary">Primary</Button>
+                  <Button size="lg" variant="primary">
                     <Plus size={16} />
                     New
                   </Button>
-                  <Button shape="icon" tone="red" aria-label="Delete">
+                  <Button size="icon-sm" variant="danger" aria-label="Delete">
                     <Trash2 size={14} />
                   </Button>
                 </div>
@@ -821,15 +822,21 @@ export default function UIInventoryPage() {
                   <Textarea
                     value="Keep the terminal window open, and don't stop the command you just ran."
                     readOnly
-                    showCounter
-                    limit={120}
-                    hint="Helper text and counter stay inside the same primitive."
                   />
+                  <div className="flex items-start justify-between gap-3">
+                    <span className="text-xs text-foreground-muted">
+                      Helper text and counter use the shared Textarea pieces.
+                    </span>
+                    <TextareaCounter
+                      value="Keep the terminal window open, and don't stop the command you just ran."
+                      limit={120}
+                    />
+                  </div>
                   {/* Match the real MessageInput "As Task" composer affordance:
                       inline-flex + items-center + gap-1.5 — same row, vertical-center
                       box + text. */}
                   <label className="inline-flex items-center gap-1.5 select-none text-sm font-bold">
-                    <Checkbox checked={checked} onChange={(event) => setChecked(event.currentTarget.checked)} size="md" />
+                    <Checkbox checked={checked} onCheckedChange={setChecked} size="md" />
                     <span>Send this as a task</span>
                   </label>
                   <div className="flex items-center gap-2">
@@ -868,7 +875,7 @@ export default function UIInventoryPage() {
                 <div className="grid gap-3">
                   <div className="flex items-center gap-4">
                     <StatusDot tone="bg-brutal-lime" />
-                    <StatusDot tone="bg-brutal-yellow" pulse />
+                    <StatusDot tone="bg-brutal-yellow" />
                     <StatusDot tone="bg-gray-400" />
                     <AttentionDot />
                     <AttentionDot size="sm" />
@@ -908,7 +915,7 @@ export default function UIInventoryPage() {
                     avatar={<AvatarSlot context="surface-list" type="agent" agentAvatarUrl="pixel:robot" />}
                     name="Wug"
                     subtitle="codex / gpt-5.5"
-                    rightContent={<><StatusDot tone="bg-brutal-yellow" pulse /><span className="text-xs font-mono text-black/50">working</span></>}
+                    rightContent={<><StatusDot tone="bg-brutal-yellow" /><span className="text-xs font-mono text-black/50">working</span></>}
                     onClick={() => {}}
                   />
                   <AvatarListRow

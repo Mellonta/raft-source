@@ -1,6 +1,6 @@
 /**
  * Generate `manual/agent-knowledge/raft-cli-overview.md` from the canonical builder in
- * `packages/daemon/src/drivers/raftCliGuide.ts`.
+ * `packages/shared/src/raftCliGuide.ts`.
  *
  * `systemPrompt.ts` (managed-runner audience) and this script
  * (manual topic / self-hosted-runner audience) consume the same builder, so shared
@@ -16,14 +16,14 @@
  *   pnpm --filter @botiverse/raft-daemon generate:raft-cli-guide
  *
  * Do not edit `manual/agent-knowledge/raft-cli-overview.md` directly — edit
- * `packages/daemon/src/drivers/raftCliGuide.ts` and rerun this script.
+ * `packages/shared/src/raftCliGuide.ts` and rerun this script.
  */
 
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildRaftCliOverviewMdx } from "../src/drivers/raftCliGuide.js";
+import { buildRaftCliOverviewMdx } from "../src/drivers/raftCliGuide";
 
 const SCRIPT_DIR = resolve(fileURLToPath(import.meta.url), "..");
 const REPO_ROOT = resolve(SCRIPT_DIR, "..", "..", "..");

@@ -4,9 +4,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test, vi } from "vitest";
-import { prepareManagedMcpRuntimeProxy } from "./managedMcpRuntimeProxy.js";
-import { DaemonTraceBundleUploader } from "./traceBundleUpload.js";
-import { uploadWithSignedCapability } from "./directUploadCapability.js";
+import { prepareManagedMcpRuntimeProxy } from "./managedMcpRuntimeProxy";
+import { DaemonTraceBundleUploader } from "./traceBundleUpload";
+import { uploadWithSignedCapability } from "./directUploadCapability";
 
 afterEach(() => {
   vi.restoreAllMocks();

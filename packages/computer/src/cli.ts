@@ -49,47 +49,42 @@ import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 import { Command } from "commander";
 
-import { runLogin, runLogout } from "./login.js";
-import { runAttach } from "./attach.js";
-import { runSetup } from "./setup.js";
-import { formatStatusReport } from "./status.js";
-import { runRunnersList, runRunnersStop } from "./runners.js";
-import { runStart, runStop } from "./startStop.js";
-import { runResident, runService, isSeaBinary, OS_SUPERVISOR_KIND_ENV_VAR, RESIDENT_CLI_PATH_ENV_VAR } from "./service.js";
-import type { OsSupervisorKind } from "./osSupervisor.js";
-import { runDoctor, runDoctorMigrationDetails } from "./doctorCli.js";
-import { runLogs } from "./logs.js";
-import { CliExit, info, fail, present } from "./output.js";
-import { createComputerApi } from "./lib/api.js";
-import { ComputerError } from "./lib/errors.js";
-import { createComputerTracer } from "./lib/computerTracer.js";
+import { runLogin, runLogout } from "./login";
+import { runAttach } from "./attach";
+import { runSetup } from "./setup";
+import { formatStatusReport } from "./status";
+import { runRunnersList, runRunnersStop } from "./runners";
+import { runStart, runStop } from "./startStop";
+import { runResident, runService, isSeaBinary, OS_SUPERVISOR_KIND_ENV_VAR, RESIDENT_CLI_PATH_ENV_VAR } from "./service";
+import type { OsSupervisorKind } from "./osSupervisor";
+import { runDoctor, runDoctorMigrationDetails } from "./doctorCli";
+import { runLogs } from "./logs";
+import { CliExit, info, fail, present } from "./output";
+import { createComputerApi } from "./lib/api";
+import { createComputerTracer } from "./lib/computerTracer";
 import { currentDate, currentTimeMs, type Tracer } from "@botiverse/raft-shared";
-import { withMutationLock } from "./concurrency.js";
-import { runChannelShow, runChannelSet, runChannelVersions } from "./channel.js";
-import { parseChannel, readChannel, SEMVER_RE } from "./lib/channelState.js";
+import { withMutationLock } from "./concurrency";
+import { runChannelShow, runChannelSet, runChannelVersions } from "./channel";
+import { installerArgs, runInstallerAttended } from "./externalInstaller";
+import { parseChannel, readChannel, SEMVER_RE } from "./lib/channelState";
 import {
   resolveUpgradeBaseUrl,
-} from "./computerRelease.js";
-import { resolveComputerUpgradeTargetVersion } from "./kReleaseSource.js";
-import { ComputerServiceError } from "./services/errors.js";
-import { resolveRaftHome } from "./paths.js";
-import { resolveTargetServerId } from "./targetServer.js";
-import { DEFAULT_SLOCK_SERVER_URL } from "./serverUrl.js";
-import { BUNDLED_CLI_VERSION, BUNDLED_DAEMON_VERSION, COMPUTER_VERSION } from "./version.js";
-import { listAttachedServerIds, setServerManaged } from "./serverState.js";
-import { prepareLocalLifecycleOperations } from "./localLifecycleIntents.js";
-import { runLegacySupervisorTakeover } from "./legacySupervisorTakeover.js";
-import { migrateLegacyOsSupervisorInstall } from "./legacyOsSupervisorMigration.js";
-import { findLiveServicePidReadOnly } from "./internal/service-pid-fallback.js";
-import { isDegraded } from "./health.js";
-import { resetRunner } from "./reset.js";
-import { requestServiceRestartViaIpc } from "./serviceControl.js";
-import { readKUpgradeCoordinatorRequest } from "./kUpgradeProcess.js";
-import { runKUpgradeCoordinator } from "./kUpgradeCoordinator.js";
-import { requestKTargetConsent } from "./kConsent.js";
-import { createComputerUpgrader } from "./kUpgrader.js";
-import { convergeKInitializedInstaller } from "./kInstallerConvergence.js";
-import { acknowledgeTerminalUpgradeReceipt } from "./kOperationAcknowledgement.js";
+} from "./computerRelease";
+import { ComputerServiceError } from "./services/errors";
+import { resolveRaftHome } from "./paths";
+import { resolveTargetServerId } from "./targetServer";
+import { DEFAULT_SLOCK_SERVER_URL } from "./serverUrl";
+import { BUNDLED_CLI_VERSION, BUNDLED_DAEMON_VERSION, COMPUTER_VERSION } from "./version";
+import { listAttachedServerIds, setServerManaged } from "./serverState";
+import { prepareLocalLifecycleOperations, type PreparedLocalLifecycleOperation } from "./localLifecycleIntents";
+import type { RestartServiceParams } from "./lib/types";
+import { migrateLegacyOsSupervisorInstall } from "./legacyOsSupervisorMigration";
+import { findLiveServicePidReadOnly } from "./internal/service-pid-fallback";
+import { isDegraded } from "./health";
+import { resetRunner } from "./reset";
+import { requestServiceRestartViaIpc } from "./serviceControl";
+import { callerIsRunnerHosted } from "./restartReadiness";
+import { connectService } from "./lib/ipc-client";
 
 function withCliExit<A extends unknown[]>(fn: (...args: A) => Promise<void>) {
   return async (...args: A) => {
@@ -146,7 +141,8 @@ const SERVER_SLUG_OPTIONAL_DESC =
   "optional: scope to one attached server (canonical `/myserver`; bare accepted; default: all attached)";
 const SERVER_URL_ENV_DESC = `SLOCK_SERVER_URL/RAFT_SERVER_URL or ${DEFAULT_SLOCK_SERVER_URL}`;
 const RELEASE_CHANNEL_DESC =
-  "`latest` installs production releases; `alpha` follows staging builds; `pinned:<semver>` stays on one version";
+  "`latest` installs production releases; `alpha` follows staging builds; `pinned:<semver>` stays on one version; "
+  + "a named channel (lowercase letters, digits, hyphens, e.g. `constructed-wake-context`) follows one feature branch's builds";
 const UPGRADE_DESC =
   "Update Raft Computer to the latest version for this machine. " +
   "By default it follows the saved release channel; pass --target-version to install a specific version.";
@@ -174,8 +170,10 @@ export interface RestartCommandDeps {
   prepareLocalLifecycleOperations?: typeof prepareLocalLifecycleOperations;
   findLiveServicePidReadOnly?: typeof findLiveServicePidReadOnly;
   runStart?: typeof runStart;
+  runStop?: typeof runStop;
   prepareTargetsForServiceHandoff?: typeof prepareRestartTargetsForServiceHandoff;
   requestServiceRestartViaIpc?: typeof requestServiceRestartViaIpc;
+  callerIsRunnerHosted?: typeof callerIsRunnerHosted;
   info?: typeof info;
   fail?: typeof fail;
 }
@@ -187,8 +185,10 @@ interface RestartCommandRuntime {
   prepareLifecycle: typeof prepareLocalLifecycleOperations;
   findLiveService: typeof findLiveServicePidReadOnly;
   start: typeof runStart;
+  stop: typeof runStop;
   prepareTargets: typeof prepareRestartTargetsForServiceHandoff;
   requestRestart: typeof requestServiceRestartViaIpc;
+  callerRunnerHosted: typeof callerIsRunnerHosted;
   emitInfo: typeof info;
   emitFail: typeof fail;
 }
@@ -208,8 +208,10 @@ function resolveRestartRuntime(deps: RestartCommandDeps): RestartCommandRuntime 
     prepareLifecycle: deps.prepareLocalLifecycleOperations ?? prepareLocalLifecycleOperations,
     findLiveService: deps.findLiveServicePidReadOnly ?? findLiveServicePidReadOnly,
     start: deps.runStart ?? runStart,
+    stop: deps.runStop ?? runStop,
     prepareTargets: deps.prepareTargetsForServiceHandoff ?? prepareRestartTargetsForServiceHandoff,
     requestRestart: deps.requestServiceRestartViaIpc ?? requestServiceRestartViaIpc,
+    callerRunnerHosted: deps.callerIsRunnerHosted ?? callerIsRunnerHosted,
     emitInfo: deps.info ?? info,
     emitFail: deps.fail ?? fail,
   };
@@ -233,8 +235,26 @@ async function resolveRestartTargetPlan(
 async function recordRestartIntent(
   plan: RestartTargetPlan,
   runtime: Pick<RestartCommandRuntime, "prepareLifecycle">,
-): Promise<void> {
-  await runtime.prepareLifecycle(plan.slockHome, "restart", plan.targets).catch(() => []);
+): Promise<PreparedLocalLifecycleOperation[]> {
+  return runtime.prepareLifecycle(plan.slockHome, "restart", plan.targets).catch(() => []);
+}
+
+/**
+ * Bind the recorded lifecycle operations to the service restart so the
+ * replacement service can acknowledge each server's `ready` phase. Without
+ * this binding the service wrote no pending-restart marker and the operation
+ * stayed pending forever while the Server reported ready_timeout (task #803).
+ */
+function restartServiceParamsFor(
+  prepared: readonly PreparedLocalLifecycleOperation[],
+): RestartServiceParams | undefined {
+  const [first] = prepared;
+  if (!first) return undefined;
+  return {
+    requestId: first.operationId,
+    originServerId: first.serverId,
+    requestIds: Object.fromEntries(prepared.map((operation) => [operation.serverId, operation.operationId])),
+  };
 }
 
 async function runColdBootRestart(
@@ -259,13 +279,17 @@ async function requestLiveServiceRestart(
   plan: RestartTargetPlan,
   liveServicePid: number,
   signal: AbortSignal,
-  runtime: Pick<RestartCommandRuntime, "prepareTargets" | "requestRestart" | "emitFail" | "emitInfo">,
+  runtime: Pick<
+    RestartCommandRuntime,
+    "prepareTargets" | "requestRestart" | "emitFail" | "emitInfo"
+  >,
+  prepared: readonly PreparedLocalLifecycleOperation[] = [],
 ): Promise<void> {
   await runtime.prepareTargets(plan.slockHome, plan.targets, signal);
   signal.throwIfAborted();
 
   try {
-    await runtime.requestRestart(plan.slockHome);
+    await runtime.requestRestart(plan.slockHome, restartServiceParamsFor(prepared));
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     runtime.emitFail(
@@ -277,6 +301,45 @@ async function requestLiveServiceRestart(
   runtime.emitInfo(
     `Service restart requested (pid ${liveServicePid}); replacement service will take over without relying on this shell.`,
   );
+
+  // Only an agent-hosted caller reaches this handoff (see runRestartCommand).
+  // Restarting tears down the caller's own runner, so the shell may not
+  // survive long enough to observe reconnects.
+  runtime.emitInfo("Running inside an agent process: not waiting for runners to reconnect. Check with `raft-computer status`.");
+}
+
+/**
+ * A restart asked for from a person's own terminal is a stop followed by a
+ * start from that terminal, exactly what `raft-computer stop` then
+ * `raft-computer start` would do. The live-service IPC handoff instead has the
+ * old service launch its own replacement, so the replacement inherits whatever
+ * launch context the old service had; a user report (task #1202) could only
+ * recover with a stop and a start from the new login session. Each half
+ * records its own lifecycle step, as the two commands do. A stop that cannot
+ * finish (the old service does not exit) fails loudly before anything is
+ * started, so the machine is never left with two services.
+ */
+async function runCallerStopThenStart(
+  plan: RestartTargetPlan,
+  liveServicePid: number,
+  opts: { foreground?: boolean },
+  signal: AbortSignal,
+  runtime: Pick<RestartCommandRuntime, "stop" | "start" | "emitInfo">,
+): Promise<void> {
+  runtime.emitInfo(
+    `Restarting from this terminal: stopping the service (pid ${liveServicePid}), then starting it again.`,
+  );
+  await runtime.stop({ signal, hostLifecycleOwner: "cli" });
+  signal.throwIfAborted();
+  await runtime.start(
+    {
+      foreground: opts.foreground,
+      serverId: plan.serverId,
+      serverLabel: plan.serverLabel,
+      hostLifecycleOwner: "cli",
+    },
+    { signal },
+  );
 }
 
 export async function runRestartCommand(
@@ -287,17 +350,24 @@ export async function runRestartCommand(
 ): Promise<void> {
   const runtime = resolveRestartRuntime(deps);
   const plan = await resolveRestartTargetPlan(serverSlug, runtime);
-  await recordRestartIntent(plan, runtime);
 
   const { pid } = await runtime.findLiveService(plan.slockHome);
   signal.throwIfAborted();
 
+  if (pid !== null && !runtime.callerRunnerHosted()) {
+    await runCallerStopThenStart(plan, pid, opts, signal, runtime);
+    return;
+  }
+
+  // Inside an agent process the service must hand off to its own replacement:
+  // stopping it from here would stop the caller's runner with it.
+  const prepared = await recordRestartIntent(plan, runtime);
   if (pid === null) {
     await runColdBootRestart(plan, opts, signal, runtime);
     return;
   }
 
-  await requestLiveServiceRestart(plan, pid, signal, runtime);
+  await requestLiveServiceRestart(plan, pid, signal, runtime, prepared);
 }
 
 export const program = new Command();
@@ -430,10 +500,11 @@ program
 
 // --- restart [serverSlug] ---
 // A clean full restart of the persistent service + all managed per-server
-// server-runners. When a service is live, route through its IPC self-restart
-// seam so a command launched by a managed daemon is not the process responsible
-// for killing that same daemon before the replacement is running. Cold-boot
-// restart stays equivalent to start.
+// server-runners. From a person's terminal it is stop then start from that
+// terminal (task #1202). From inside an agent process, route through the live
+// service's IPC self-restart seam so a command launched by a managed daemon is
+// not the process responsible for killing that same daemon before the
+// replacement is running. Cold-boot restart stays equivalent to start.
 program
   .command("restart")
   .argument("[serverSlug]", SERVER_SLUG_OPTIONAL_DESC)
@@ -449,9 +520,25 @@ program
 program
   .command("status")
   .description("Show whether Raft Computer is logged in, running, and connected to servers.")
-  .action(withCliExit(async () => {
+  .option("--json", "print the live machine status as JSON")
+  .action(withCliExit(async (opts: { json?: boolean }) => {
     const slockHome = resolveRaftHome();
     const api = createComputerApi(slockHome);
+    if (opts.json) {
+      const report = await api.getStatus();
+      let attestation: unknown = null;
+      if (report.service.running) {
+        try {
+          const client = await connectService(slockHome);
+          try { attestation = await client.request("machine-attestation", undefined); } finally { await client.close(); }
+        } catch { /* status remains useful when the service exits during readback */ }
+      }
+      // The installer repeats `nextStep` on its success line: what a person
+      // should do before Computer can run. Nothing to say once logged in.
+      const nextStep = report.loggedIn ? null : "run raft-computer login";
+      process.stdout.write(`${JSON.stringify({ ...report, attestation, nextStep })}\n`);
+      return;
+    }
     await present(async () => {
       formatStatusReport(await api.getStatus());
     });
@@ -464,12 +551,22 @@ program
   .description("Check Raft Computer setup and connection health. Secrets are never printed.")
   .option("--fix", "after diagnosis, clean up stale local state when it is safe")
   .option("--migration-details", "show local legacy migration evidence and server-relative exclusion reasons")
+  .option(
+    "--unread-activity-dump <path>",
+    "save a private bounded unread/Activity self-diagnostic JSON file (never uploaded)",
+  )
   .action(
     withCliExit(
       async (
         serverSlug: string | undefined,
-        opts: { fix?: boolean; migrationDetails?: boolean },
+        opts: { fix?: boolean; migrationDetails?: boolean; unreadActivityDump?: string },
       ) => {
+        if (opts.migrationDetails && opts.unreadActivityDump) {
+          fail(
+            "INVALID_ARGUMENT",
+            "--migration-details and --unread-activity-dump are separate doctor reports; run them as separate commands.",
+          );
+        }
         if (opts.migrationDetails) {
           await runDoctorMigrationDetails({ serverLabel: serverSlug });
           return;
@@ -479,6 +576,7 @@ program
           cleanup: opts.fix,
           serverId: serverId,
           serverLabel: serverSlug,
+          unreadActivityDump: opts.unreadActivityDump,
         });
       },
     ),
@@ -555,231 +653,32 @@ channel
     }),
   );
 
-const operation = program
-  .command("operation")
-  .description("Inspect or acknowledge durable Computer upgrade receipts.");
-operation
-  .command("acknowledge")
-  .argument("<operationId>", "exact K operation id shown by `raft-computer status`")
-  .description("Acknowledge one exact terminal K receipt without deleting its audit record.")
-  .action(
-    withCliExit(async (operationId: string) => {
-      try {
-        const result = await withMutationLock(() =>
-          acknowledgeTerminalUpgradeReceipt(resolveRaftHome(), operationId));
-        info(
-          result.status === "already-acknowledged"
-            ? `Terminal K operation ${result.operationId} was already acknowledged at ${result.acknowledgedAt}.`
-            : `Acknowledged terminal K operation ${result.operationId} (${result.outcome}) at ${result.acknowledgedAt}.`,
-        );
-      } catch (error) {
-        if (error instanceof ComputerError) fail(error.code, error.message, error.exitCode);
-        throw error;
-      }
-    }),
-  );
 
-// --- upgrade (PR-E §2.5) ---
+// --- upgrade: run the external installer ---
 program
   .command("upgrade")
   .description(UPGRADE_DESC)
-  .option("--dry-run", "resolve the update package only; server authorization is not checked and no changes are made")
   .option("--channel <name>", `use a release channel for this invocation only. ${RELEASE_CHANNEL_DESC}.`)
-  // PR-E §2.5: use `--target-version`, not `--version`. Commander treats
-  // `--version` as the root program version flag (prints "0.0.1" and
-  // exits 0), so a subcommand `--version` is unreachable.
+  // Commander treats `--version` as the root program version flag, so a
+  // subcommand `--version` is unreachable; keep `--target-version`.
   .option("--target-version <semver>", "install a specific version")
-  .option(
-    "--rollback",
-    "restore the previous version from the last successful upgrade; mutually exclusive with --target-version/--channel/--dry-run",
-  )
+  .option("--allow-downgrade", "intend an older --target-version; going back to a version that worked is this")
   .action(
-    withCliExit(
-      async (opts: {
-        dryRun?: boolean;
-        channel?: string;
-        targetVersion?: string;
-        rollback?: boolean;
-      }) => {
-        const slockHome = resolveRaftHome();
-        // Trigger-source attribution: the Computer service sets
-        // SLOCK_UPGRADE_TRIGGER=web when it spawns this command on behalf of a
-        // web button; a direct CLI invocation leaves it unset → "cli".
-        const trigger = resolveUpgradeTrigger(process.env.SLOCK_UPGRADE_TRIGGER);
-        const seaBinary = isSeaBinary();
-        if (!seaBinary) {
-          fail("UPGRADE_SEA_ONLY", "Computer self-upgrade requires the installed single-executable binary.");
-        }
-        if (opts.rollback && (opts.dryRun || opts.channel || opts.targetVersion)) {
-          fail("UPGRADE_FLAGS_CONFLICT", "--rollback cannot be combined with --dry-run, --channel, or --target-version.");
-        }
-        if (!opts.rollback && opts.targetVersion !== undefined && !SEMVER_RE.test(opts.targetVersion)) {
-          fail(
-            "UPGRADE_VERSION_INVALID",
-            `Invalid --target-version "${opts.targetVersion}". Expected semver like 0.53.0 or 1.0.0-alpha.`,
-          );
-        }
-        let kTargetVersion = opts.targetVersion;
-        if (opts.rollback) {
-          const operation = await createComputerUpgrader(slockHome, {
-            onProgress: () => {},
-            notificationSink: async () => {},
-          }).operation();
-          if (operation.kind !== "observed" || operation.operation.outcome === null) {
-            fail("UPGRADE_NO_ROLLBACK", "Nothing to roll back: K has no terminal operation with a previous stable version.");
-          }
-          kTargetVersion = operation.operation.previousStableVersion;
-        }
-        if (!kTargetVersion) {
-          const channel = opts.channel
-            ? parseChannel(opts.channel)
-            : await readChannel(slockHome);
-          if (channel === null) {
-            fail(
-              "CHANNEL_INVALID",
-              `Invalid --channel "${opts.channel}". Accepted: latest | alpha | pinned:<semver>.`,
-            );
-          }
-          const baseUrl = resolveUpgradeBaseUrl();
-          try {
-            kTargetVersion = await resolveComputerUpgradeTargetVersion(channel!, {
-              currentVersion: COMPUTER_VERSION,
-              platformKey: `${process.platform}-${process.arch}`,
-            }, baseUrl);
-          } catch (error) {
-            if (error instanceof ComputerServiceError) presentUpgradeTargetResolutionFailure(error);
-            throw error;
-          }
-        }
-        // Hands reports `up_to_date` through the shared resolver as the
-        // current version. Short-circuit before consent or any K/Computer
-        // lifecycle surface so a no-op creates no prompt, intent, or receipt.
-        if (kTargetVersion === COMPUTER_VERSION) {
-          info(`Already at ${COMPUTER_VERSION}.`);
-          return;
-        }
-        if (opts.dryRun) {
-          info(
-            `Package check resolved Computer ${kTargetVersion}. `
-            + "Server authorization was not checked; no changes were made.",
-          );
-          return;
-        }
-        // An explicit target and the durable rollback marker already bind the
-        // operator's action to one version. A moving channel does not: resolve
-        // it first, then ask for this exact version. Non-interactive callers
-        // must pass --target-version instead of silently approving the channel.
-        if (!opts.targetVersion && !opts.rollback) {
-          const consent = await requestKTargetConsent(kTargetVersion!);
-          if (consent === "non-interactive") {
-            fail(
-              "UPGRADE_CONFIRMATION_REQUIRED",
-              `Resolved Computer ${kTargetVersion}. Re-run with --target-version ${kTargetVersion} to approve that exact version in a non-interactive session.`,
-            );
-          }
-          if (consent === "declined") {
-            fail("UPGRADE_CANCELLED", `Upgrade to Computer ${kTargetVersion} was not confirmed.`);
-          }
-        }
-        // ①b single-writer: when a service is running, route the upgrade
-        // through it via IPC (`upgrade-start`) so the supervisor drives the
-        // swap AND re-execs the resident process onto the new binary. Routing
-        // is the ONLY path that makes the version actually take effect — a
-        // standalone swap under a still-running service leaves the old process
-        // reporting the old version (the silent-strand bug, #wg-raft-computer
-        // task #100). The connect→upgrade-start→emit routing lives in
-        // `api.tryUpgradeViaService` so the CLI + menu-bar share one path.
-        //
-        // dry-run stays standalone. Rollback is derived from K's terminal
-        // operation receipt; Computer has no parallel `.prev` or target file.
-        // A plain `--channel`
-        // override DOES route now: `upgrade-start` carries only an explicit
-        // targetVersion, so we resolve the override to a version here first
-        // (the service would otherwise resolve the PERSISTED channel, which
-        // could differ from the one-shot override — e.g. persisted
-        // `pinned:0.0.63` while the user runs `upgrade --channel latest`).
-        const api = createComputerApi(slockHome, { tracer: resolveCliTracer(slockHome) });
-        let routed: Awaited<ReturnType<typeof api.tryUpgradeViaService>>;
-        try {
-          routed = await api.tryUpgradeViaService(kTargetVersion, (event) => {
-            if (event.kind === "log.line") info(event.line);
-          }, { trigger });
-        } catch (error) {
-          if (error instanceof ComputerError) fail(error.code, error.message);
-          throw error;
-        }
-        if (routed.routed) return;
-        if (routed.reason === "unreachable") {
-          fail(
-            "UPGRADE_SERVICE_UNREACHABLE",
-            "A Computer service is running but its control socket could not be reached, " +
-              "so the upgrade could not be applied to the live process. Run " +
-              "`raft-computer restart` (or stop + start) and retry `upgrade`.",
-          );
-        }
-
-        const operationId = randomUUID();
-        try {
-          const result = await runKUpgradeCoordinator(slockHome, {
-            carrier: "k",
-            mode: "upgrade",
-            scope: "local",
-            requestId: operationId,
-            fromVersion: COMPUTER_VERSION,
-            targetVersion: kTargetVersion,
-            startedAt: currentDate().toISOString(),
-            currentBinaryPath: process.execPath,
-            trigger,
-          });
-          const localUpgrader = createComputerUpgrader(slockHome, {
-            onProgress: () => {},
-            notificationSink: async () => {},
-          });
-          if (result === "promoted") {
-            info(`Upgrade promoted to ${kTargetVersion}; waiting for managed runner readback.`);
-            await localUpgrader.acknowledgeOperation(operationId);
-            return;
-          }
-          if (result === "up-to-date") {
-            info(`Already at ${kTargetVersion}.`);
-            await localUpgrader.acknowledgeOperation(operationId);
-            return;
-          }
-          await localUpgrader.acknowledgeOperation(operationId);
-          fail(
-            "UPGRADE_SWAP_FAILED",
-            result === "rolled-back"
-              ? "The new version did not converge, so K restored the previous stable version."
-              : "K held or failed the requested upgrade. Read the K operation receipt and retry after resolving it.",
-          );
-        } catch (error) {
-          if (error instanceof Error && /UPGRADE_IN_PROGRESS|OPERATION_(IN_PROGRESS|RECEIPT_PENDING)/u.test(error.message)) {
-            fail("UPGRADE_ALREADY_RUNNING", "Another K operation or undelivered terminal receipt already owns this Computer.");
-          }
-          // A local cold upgrade has no server runner to deliver K's terminal
-          // receipt. Once this exact command is about to surface the failure,
-          // acknowledge only its own terminal record so the next operation is
-          // not permanently blocked behind an already-delivered CLI error.
-          const localUpgrader = createComputerUpgrader(slockHome, {
-            onProgress: () => {},
-            notificationSink: async () => {},
-          });
-          const observed = await localUpgrader.operation();
-          if (
-            observed.kind === "observed"
-            && observed.operation.id === operationId
-            && observed.operation.outcome !== null
-            && observed.operation.acknowledgedAtMs === null
-          ) {
-            await localUpgrader.acknowledgeOperation(operationId);
-          }
-          throw error;
-        }
-      },
-    ),
+    withCliExit(async (opts: { channel?: string; targetVersion?: string; allowDowngrade?: boolean }) => {
+      if (opts.targetVersion !== undefined && !SEMVER_RE.test(opts.targetVersion)) {
+        fail("UPGRADE_VERSION_INVALID", `Invalid --target-version "${opts.targetVersion}". Expected semver like 1.0.31.`);
+      }
+      let channel = opts.channel === undefined ? await readChannel(resolveRaftHome()) : parseChannel(opts.channel);
+      if (channel === null) {
+        fail("CHANNEL_INVALID", `Invalid channel "${opts.channel}". Accepted: \`latest\`, \`alpha\`, or \`pinned:<semver>\`.`);
+      }
+      // The installer decides everything from here: presence, the question,
+      // settling unfinished work, the transaction, the one printed line.
+      const code = await runInstallerAttended(installerArgs({ targetVersion: opts.targetVersion, channel, allowDowngrade: opts.allowDowngrade }));
+      if (code !== 0) throw new CliExit(code);
+    }),
   );
 
-// --- hidden internal modes (re-execed by `start`) ---
 program
   .command("__service", { hidden: true })
   .option("--slock-home <path>")
@@ -802,61 +701,6 @@ program
   .argument("<serverId>", "server id this daemon child is bound to")
   .action(withCliExit(async (serverId: string) => {
     await runResident(serverId);
-  }));
-program
-  .command("__k-upgrade", { hidden: true })
-  .argument("<request>", "encoded non-secret K coordinator request")
-  .action(withCliExit(async (encoded: string) => {
-    const slockHome = resolveRaftHome();
-    const request = readKUpgradeCoordinatorRequest(encoded);
-    await runKUpgradeCoordinator(slockHome, request);
-  }));
-program
-  .command("__installer-converge", { hidden: true })
-  .argument("<targetVersion>", "manifest-bound installer target")
-  .argument("<sha256>", "manifest-bound candidate digest")
-  .option("--force-downgrade", "allow an explicitly requested verified downgrade")
-  .action(withCliExit(async (
-    targetVersion: string,
-    sha256: string,
-    opts: { forceDowngrade?: boolean },
-  ) => {
-    if (!SEMVER_RE.test(targetVersion)) throw new Error("invalid installer target version");
-    const result = await convergeKInitializedInstaller(
-      resolveRaftHome(),
-      targetVersion,
-      sha256.toLowerCase(),
-      {
-        forceDowngrade: opts.forceDowngrade === true,
-      },
-      {
-        onQuarantine: (quarantine) => {
-          process.stdout.write(
-            `quarantined ${quarantine.quarantinePath} operation=${quarantine.operationId} timestamp=${quarantine.timestampMs} result=${quarantine.status}\n`,
-          );
-        },
-        onServiceState: (state) => {
-          process.stdout.write(
-            state.kind === "not-running"
-              ? "service not-running; run `raft-computer start` to launch the installed version\n"
-              : `service ${state.kind} pid=${state.pid} version=${state.version}\n`,
-          );
-        },
-      },
-    );
-    process.stdout.write(`${result}\n`);
-  }));
-program
-  .command("__legacy-supervisor-takeover", { hidden: true })
-  .argument("<role>", "coordinator or standby")
-  .argument("<oldServicePid>", "attested legacy supervisor pid")
-  .argument("<targetVersion>", "required replacement supervisor version")
-  .argument("[operationId]", "durable machine dispatch id")
-  .action(withCliExit(async (role: string, oldServicePid: string, targetVersion: string, operationId?: string) => {
-    if (role !== "coordinator" && role !== "standby") throw new Error("invalid takeover role");
-    if (!/^\d+$/.test(oldServicePid)) throw new Error("invalid legacy supervisor pid");
-    if (!/^\d+\.\d+\.\d+$/.test(targetVersion)) throw new Error("invalid target version");
-    await runLegacySupervisorTakeover(role, Number(oldServicePid), targetVersion, operationId);
   }));
 
 const supervisorCommand = program.command("__supervisor", { hidden: true });
@@ -882,6 +726,15 @@ async function runCli(): Promise<void> {
       daemonVersion: BUNDLED_DAEMON_VERSION ?? null,
       cliVersion: BUNDLED_CLI_VERSION ?? null,
     })}\n`);
+    return;
+  }
+  // Execute on the injected release artifact, without reading account files or
+  // contacting an OAuth service. A successful --version cannot detect missing
+  // modules behind the SDK's lazy credential-derivation path.
+  if (process.argv[2] === "__verify-bundled-oauth") {
+    const { verifyBundledPiOAuth } = await import("@botiverse/raft-daemon/core");
+    await verifyBundledPiOAuth();
+    process.stdout.write("oauth-bundle-ok\n");
     return;
   }
   // Hidden `__cli` mode (busybox/self-re-exec): run the bundled `slock` CLI

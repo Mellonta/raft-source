@@ -1,5 +1,8 @@
 import { create } from "zustand";
-import { isElectronDesktopShell } from "../utils/desktopShell";
+import {
+  readHideEmptySidebarSections,
+  writeHideEmptySidebarSections,
+} from "../components/layout/sidebarEmptySectionVisibility";
 
 export type MessageBodyFontSize = "sm" | "md" | "lg";
 
@@ -21,6 +24,18 @@ const MESSAGE_BODY_FONT_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
   sm: "text-xs",
   md: "text-sm",
   lg: "text-base",
+};
+
+/**
+ * RUI's MessageItemBody recipe intentionally provides a family default size
+ * (`theme-*:text-sm`). The product preference is a user-owned override, so it
+ * needs a terminal inline value at the shared message-body seam rather than a
+ * class whose cascade position can be changed by a theme recipe.
+ */
+const MESSAGE_BODY_FONT_SIZE_VALUES: Record<MessageBodyFontSize, string> = {
+  sm: "0.75rem",
+  md: "0.875rem",
+  lg: "1rem",
 };
 
 function isMessageBodyFontSize(value: unknown): value is MessageBodyFontSize {
@@ -67,17 +82,16 @@ function persistShowLiveAgentActivityBar(show: boolean) {
   }
 }
 
-// Platform-aware default (@WAWQAQ): ON in the desktop shell, OFF on web/mobile —
-// an explicit stored choice (either way) always wins. It adds a model label next
-// to every agent name, which desktop wants by default but web keeps opt-in.
+// Default ON everywhere (@WAWQAQ 2026-09-10): the model label next to each
+// agent name now shows by default on web AND desktop — previously desktop-only.
+// An explicit stored choice (either way) always wins.
 function readStoredShowAgentModelName(): boolean {
-  const fallback = isElectronDesktopShell();
-  if (typeof localStorage === "undefined") return fallback;
+  if (typeof localStorage === "undefined") return true;
   try {
     const stored = localStorage.getItem(SHOW_AGENT_MODEL_NAME_STORAGE_KEY);
-    return stored === null ? fallback : stored === "true";
+    return stored === null ? true : stored === "true";
   } catch {
-    return fallback;
+    return true;
   }
 }
 
@@ -94,19 +108,29 @@ export function getMessageBodyFontSizeClass(size: MessageBodyFontSize): string {
   return MESSAGE_BODY_FONT_SIZE_CLASSES[size];
 }
 
+export function getMessageBodyFontSizeStyle(size: MessageBodyFontSize): { fontSize: string } {
+  return { fontSize: MESSAGE_BODY_FONT_SIZE_VALUES[size] };
+}
+
 interface AppearanceState {
   messageBodyFontSize: MessageBodyFontSize;
   showLiveAgentActivityBar: boolean;
   showAgentModelName: boolean;
+  hideEmptySidebarSections: boolean;
   setMessageBodyFontSize: (size: MessageBodyFontSize) => void;
   setShowLiveAgentActivityBar: (show: boolean) => void;
   setShowAgentModelName: (show: boolean) => void;
+  setHideEmptySidebarSections: (hide: boolean) => void;
 }
 
 export const useAppearanceStore = create<AppearanceState>((set) => ({
   messageBodyFontSize: readStoredMessageBodyFontSize(),
   showLiveAgentActivityBar: readStoredShowLiveAgentActivityBar(),
   showAgentModelName: readStoredShowAgentModelName(),
+  // Shared with the sidebar section context menu; both read/write this store so
+  // Settings ⇄ right-click stay in sync. Default + storage live in
+  // sidebarEmptySectionVisibility (desktop default-on; stored choice wins).
+  hideEmptySidebarSections: readHideEmptySidebarSections(),
   setMessageBodyFontSize: (size) => {
     const next = normalizeMessageBodyFontSize(size);
     persistMessageBodyFontSize(next);
@@ -119,6 +143,10 @@ export const useAppearanceStore = create<AppearanceState>((set) => ({
   setShowAgentModelName: (show) => {
     persistShowAgentModelName(show);
     set({ showAgentModelName: show });
+  },
+  setHideEmptySidebarSections: (hide) => {
+    writeHideEmptySidebarSections(hide);
+    set({ hideEmptySidebarSections: hide });
   },
 }));
 

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import type { AgentMessage } from "@botiverse/raft-shared";
-import { AgentStartPendingDeliveryBuffer } from "./agentStartPendingDeliveryBuffer.js";
+import { AgentStartPendingDeliveryBuffer } from "./agentStartPendingDeliveryBuffer";
 
 function message(content: string, messageId = content): AgentMessage {
   return {

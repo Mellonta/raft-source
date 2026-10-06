@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import test from "node:test";
 import { pathToFileURL } from "node:url";
 
-import { normalizeVersion, readCliVersion } from "./version.js";
+import { normalizeVersion, readCliVersion } from "./version";
 
 test("readCliVersion reads the source package version and ignores runtime version env", () => {
   const previous = process.env.RAFT_CLI_VERSION;

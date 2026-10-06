@@ -4,6 +4,7 @@ const optionalStringSchema = z.string().trim().optional();
 const optionalStringArraySchema = z.array(z.string().trim().min(1)).optional();
 const optionalBooleanSchema = z.boolean().optional();
 const optionalNumberSchema = z.number().finite().optional();
+const optionalExactSeqArraySchema = z.array(z.number().int().positive()).max(2_500).optional();
 const optionalIsoTimestampSchema = z.string().datetime().optional();
 const nullableStringSchema = z.string().nullable();
 
@@ -28,12 +29,14 @@ const agentApiSendBodyKnownSchema = z.object({
   content: z.string().optional(),
   attachmentIds: optionalStringArraySchema,
   idempotencyKey: optionalStringSchema,
+  reconcileOnly: optionalBooleanSchema,
   continue: optionalBooleanSchema,
   sendDraft: optionalBooleanSchema,
   continueAnyway: optionalBooleanSchema,
   draftReholdCount: optionalNumberSchema,
   draftReplacedExisting: optionalBooleanSchema,
   seenUpToSeq: optionalNumberSchema,
+  seenExactSeqs: optionalExactSeqArraySchema,
   freshnessContextMode: agentApiFreshnessContextModeSchema.optional(),
 });
 
@@ -191,9 +194,26 @@ export const agentApiSendSentResponseSchema = passthroughObject({
   }).optional(),
 });
 
+export const agentApiSendNotFoundResponseSchema = passthroughObject({
+  ok: z.literal(true),
+  state: z.literal("not_found"),
+  reconciliation: z.literal(true),
+});
+
+export const agentApiSendCommittedResponseSchema = passthroughObject({
+  ok: z.literal(true),
+  state: z.literal("committed"),
+  messageId: z.string(),
+  messageSeq: optionalNumberSchema,
+  reconciliation: z.literal(true),
+  receiptComplete: z.literal(false),
+});
+
 export const agentApiSendResponseSchema = z.discriminatedUnion("state", [
   agentApiSendSentResponseSchema,
   agentApiHeldFreshnessResponseSchema,
+  agentApiSendNotFoundResponseSchema,
+  agentApiSendCommittedResponseSchema,
 ]);
 
 // Keep the exported request projection independent of Zod so downstream SDK
@@ -205,12 +225,14 @@ interface AgentApiSendBodyKnownFields {
   content?: string;
   attachmentIds?: string[];
   idempotencyKey?: string;
+  reconcileOnly?: boolean;
   continue?: boolean;
   sendDraft?: boolean;
   continueAnyway?: boolean;
   draftReholdCount?: number;
   draftReplacedExisting?: boolean;
   seenUpToSeq?: number;
+  seenExactSeqs?: number[];
   freshnessContextMode?: "inline" | "withheld";
 }
 
@@ -335,4 +357,25 @@ export interface AgentApiSendSentResponse {
   [key: string]: unknown;
 }
 
-export type AgentApiSendResponse = AgentApiSendSentResponse | AgentApiHeldFreshnessResponse;
+export interface AgentApiSendNotFoundResponse {
+  ok: true;
+  state: "not_found";
+  reconciliation: true;
+  [key: string]: unknown;
+}
+
+export interface AgentApiSendCommittedResponse {
+  ok: true;
+  state: "committed";
+  messageId: string;
+  messageSeq?: number;
+  reconciliation: true;
+  receiptComplete: false;
+  [key: string]: unknown;
+}
+
+export type AgentApiSendResponse =
+  | AgentApiSendSentResponse
+  | AgentApiHeldFreshnessResponse
+  | AgentApiSendNotFoundResponse
+  | AgentApiSendCommittedResponse;

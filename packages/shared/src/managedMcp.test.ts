@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { formatManagedMcpRuntimeToolName } from "./managedMcp.js";
+import { formatManagedMcpRuntimeToolName } from "./managedMcp";
 
 test("managed MCP runtime tool names are stable, bounded, and server-scoped", () => {
   const first = formatManagedMcpRuntimeToolName("12345678-aaaa-bbbb-cccc-123456789012", "issues/search");

@@ -20,25 +20,26 @@
 //     the inverse of StartService's NEVER-SIGKILL invariant. Stop owns
 //     the service termination path; everything else (terminal close,
 //     UI close, Electron quit) MUST leave the service running.
-//   - AbortSignal honored before the SIGTERM call; once the signal is
-//     sent the service's lifecycle is committed and the wait-for-exit
-//     loop respects abort by returning early (status="stopped" if dead,
-//     re-throwing AbortError if still alive — abort never SIGKILLs).
+//   - AbortSignal honored before the best-effort host-lifecycle record. After
+//     it, stop proceeds to SIGTERM without reopening
+//     an abort gap. The wait-for-exit loop respects abort by returning early
+//     (status="stopped" if dead, re-throwing AbortError if still alive — abort
+//     never SIGKILLs).
 import {
   clearPidfileAt,
   isProcessAlive,
   readPidfileAt,
-} from "../internal/process-primitives.js";
-import { findLiveServicePid } from "../internal/service-pid-fallback.js";
-import type { ComputerApiEvent } from "../lib/events.js";
-import { ComputerServiceError } from "./errors.js";
-import { servicePidPath } from "../paths.js";
+} from "../internal/process-primitives";
+import { findLiveServicePid } from "../internal/service-pid-fallback";
+import type { ComputerApiEvent } from "../lib/events";
+import { ComputerServiceError } from "./errors";
+import { servicePidPath } from "../paths";
 import { currentTimeMs } from "@botiverse/raft-shared";
 import {
   convergeCliHostLifecycle,
-  resolveStableDispatcherPath,
+  hostLifecycleSkipped,
   type MacosHostLifecycleDeps,
-} from "../macosLoginCarrier.js";
+} from "../macosLoginCarrier";
 
 const STOP_POLL_INTERVAL_MS = 200;
 const STOP_TIMEOUT_MS = 5000;
@@ -110,18 +111,18 @@ export async function stop(
   options.signal?.throwIfAborted?.();
 
   const { slockHome } = input;
+  // Best effort: a host-lifecycle failure never blocks the stop.
   const disableHostLifecycle = async (): Promise<void> => {
     if ((input.hostLifecycleOwner ?? "none") === "none") return;
-    const hostDeps = { ...(options.hostLifecycleDeps ?? {}) };
-    if (hostDeps.platform === undefined) hostDeps.platform = process.platform;
-    if (hostDeps.platform === "darwin" && hostDeps.dispatcherPath === undefined) {
-      hostDeps.dispatcherPath = resolveStableDispatcherPath(slockHome);
+    try {
+      await (options.convergeHostLifecycle ?? convergeCliHostLifecycle)(
+        slockHome,
+        "disabled",
+        options.hostLifecycleDeps ?? {},
+      );
+    } catch (error) {
+      emit(options, hostLifecycleSkipped("stop", error));
     }
-    await (options.convergeHostLifecycle ?? convergeCliHostLifecycle)(
-      slockHome,
-      "disabled",
-      hostDeps,
-    );
   };
   const readPidfile = options.readPidfile ?? readPidfileAt;
   const isAlive = options.isProcessAlive ?? isProcessAlive;
@@ -181,12 +182,13 @@ export async function stop(
   }
 
   // 3. Pre-signal AbortSignal check (last opportunity before we commit
-  //    to terminating the service). Once SIGTERM is sent the
-  //    service's lifecycle is committed and an in-flight abort can
-  //    only race with the natural exit.
+  //    to terminating the service).
   options.signal?.throwIfAborted?.();
 
-  // 4. Send SIGTERM. The service's signal handler clears its own
+  // 4. Record the disabled host lifecycle (best effort, never blocks).
+  await disableHostLifecycle();
+
+  // 5. Send SIGTERM. The service's signal handler clears its own
   //    pidfile + process.exit(0). We poll for liveness rather than
   //    pidfile-absence because pidfile clear is best-effort during
   //    emergency shutdown.
@@ -202,7 +204,7 @@ export async function stop(
   }
   emit(options, { kind: "stop.signaled", pid });
 
-  // 5. Wait for the service to exit. AbortSignal aborts the wait
+  // 6. Wait for the service to exit. AbortSignal aborts the wait
   //    early but does NOT escalate to SIGKILL — the kill is already
   //    in flight, and StopService's contract is "ask politely with
   //    SIGTERM then time out", not "force-kill".
@@ -215,7 +217,6 @@ export async function stop(
       options.signal?.throwIfAborted?.();
       await clearPidfileAt(pidfilePath);
       options.signal?.throwIfAborted?.();
-      await disableHostLifecycle();
       emit(options, { kind: "stop.stopped", pid });
       return { status: "stopped", pid, pidfilePath };
     }

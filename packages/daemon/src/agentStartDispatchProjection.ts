@@ -1,10 +1,12 @@
 import type { AgentConfig, AgentMessage } from "@botiverse/raft-shared";
-import type { AgentStartCoordinator } from "./agentStartCoordinator.js";
+import type { AgentStartCoordinator } from "./agentStartCoordinator";
 
 export type AgentStartAcceptance = {
   queueState: "queued" | "starting" | "running" | "rebound";
   queueDepth: number;
   queueAgeMs: number;
+  /** RFC 071 §4.3 rule 2: only on a rebind (`running`/`rebound` with a registered process). */
+  processInstanceId?: string;
 };
 
 export class AgentStartDispatchProjection {

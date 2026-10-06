@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import { loginViaApi } from "../../fixtures/auth";
+import { test as scenarioTest } from "../../fixtures/scenario";
 import { waitForSeedState } from "../../fixtures/seedState";
 import { dismissOwnerOnboarding } from "../../fixtures/session";
 import {
@@ -158,11 +159,11 @@ test("select mode entry + check circles + toolbar render", async ({ page, reques
   await expect(page.getByTestId("select-mode-more-menu")).toHaveCount(0);
 
   // Exactly one message has the filled (yellow) check circle — the one we
-  // entered select mode on. Filter the testid set by the bg-soft-signal
-  // class on the same element (`.has(.bg-soft-signal)` would look at
-  // descendants).
+  // entered select mode on. Since #7347 the circle is RUI's
+  // MessageMultiSelectCheckbox (Base UI): the filled state is the
+  // `data-checked` attribute on the same element, not a bg-soft-signal class.
   const filledCircles = page.locator(
-    '[data-testid^="message-select-circle-"].bg-soft-signal',
+    '[data-testid^="message-select-circle-"][data-checked]',
   );
   await expect(filledCircles).toHaveCount(1);
 
@@ -175,15 +176,10 @@ test("select mode entry + check circles + toolbar render", async ({ page, reques
   await expect(toolbar).toHaveCount(0);
 });
 
-test("sharing grouped continuations keeps one sender avatar for the selected segment", async ({ page, request }) => {
-  const seedState = await waitForSeedState();
-  const login = await loginViaApi(request, seedState);
-  await dismissOwnerOnboarding(request, seedState, login.accessToken);
-
-  await page.goto(`/s/${seedState.server.slug}/channel/${seedState.channel.id}`);
-  await expect(page.getByTestId("message-scroller")).toBeVisible();
-  await expect(page.getByText(seedState.messages.latestContent)).toBeVisible();
-
+// This scenario mutates the channel timeline. Keep it on a disposable tenant
+// so other workers cannot insert a message between the grouped continuations.
+scenarioTest("sharing grouped continuations keeps one sender avatar for the selected segment", async ({ page, request, scenario }) => {
+  const { seed: seedState, login } = scenario;
   const tag = `grouped-share-avatar-${Date.now()}`;
   for (let i = 0; i < 3; i += 1) {
     const response = await request.post(`${seedState.urls.api}/api/messages`, {
@@ -192,6 +188,9 @@ test("sharing grouped continuations keeps one sender avatar for the selected seg
     });
     expect(response.ok()).toBe(true);
   }
+
+  await page.goto(`/s/${seedState.server.slug}/channel/${seedState.channel.id}`);
+  await expect(page.getByTestId("message-scroller")).toBeVisible();
   await expect(page.getByText(`${tag} 2`).first()).toBeVisible();
 
   // Enter selection on the first row, then leave only the continuation row

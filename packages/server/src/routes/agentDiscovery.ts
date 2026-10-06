@@ -47,10 +47,11 @@
 import type { Request, Response } from "express";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { agents, serverMembers, servers } from "../db/schema.js";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
-import { actorRoleHasServerCapability } from "../lib/actorPermissions.js";
+import { getDb } from "../db/index";
+import { agents, serverMembers, servers } from "../db/schema";
+import { addTraceEvent } from "../tracing/semanticTrace";
+import { actorRoleHasServerCapability } from "../lib/actorPermissions";
+import { sendJsonServerError } from "./errorResponse";
 
 export async function listManageableAgentsHandler(req: Request, res: Response): Promise<void> {
   try {
@@ -147,7 +148,10 @@ export async function listManageableAgentsHandler(req: Request, res: Response): 
       },
     });
   } catch (err) {
-    console.error("agents.manageable.list error:", err);
-    res.status(500).json({ error: "Failed to list manageable agents" });
+    sendJsonServerError(req, res, {
+      error: "Failed to list manageable agents",
+      logPrefix: "agents.manageable.list error:",
+      err,
+    });
   }
 }

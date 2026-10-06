@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import type { Database } from "../db/index.js";
-import { migratePglite } from "../db/pgliteMigrations.js";
-import * as schema from "../db/schema.js";
+import type { Database } from "../db/index";
+import { migratePglite } from "../db/pgliteMigrations";
+import * as schema from "../db/schema";
 import {
   attachmentObjectCharges,
   attachmentObjects,
@@ -16,13 +15,13 @@ import {
   messages,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   backfillLegacyAttachmentObjectsBatch,
   evaluateAttachmentObjectCompletionGate,
   evaluateAttachmentObjectPreflight,
   getAttachmentObjectParityReport,
-} from "./attachmentObjectBackfillService.js";
+} from "./attachmentObjectBackfillService";
 
 /** Two servers in one database: the canary target and a bystander. */
 async function twoServerFixture() {
@@ -473,9 +472,11 @@ test("a scoped batch rolls back when a claimed projection leaves the target befo
       backfillLegacyAttachmentObjectsBatch(f.db, 100, {
         afterObjectInsert: async (projectionId, tx) => {
           assert.ok(targetProjectionIds.has(projectionId), "the hook runs after a target projection was claimed");
-          await tx.update(channels)
-            .set({ serverId: f.bystander.serverId })
-            .where(eq(channels.id, f.target.channelId));
+          // Reparent the target's projections into the other server's channel
+          // (channels.server_id itself is immutable since 0310).
+          await tx.update(attachments)
+            .set({ channelId: f.bystander.channelId })
+            .where(eq(attachments.channelId, f.target.channelId));
         },
       }, f.target.serverId),
       (error: Error) => {
@@ -503,7 +504,7 @@ test("a scoped batch rolls back when a claimed projection leaves the target befo
     assert.deepEqual(
       await f.db.select().from(channels).where(eq(channels.id, f.target.channelId)),
       before.channel,
-      "the same-transaction reparent used by the race tooth rolls back too",
+      "the target channel is untouched",
     );
   } finally {
     await f.client.close();

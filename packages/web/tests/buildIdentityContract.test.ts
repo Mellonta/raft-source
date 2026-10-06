@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "../../..");
 // Asserts on private CI/deploy files that the source-available snapshot does not
@@ -39,7 +38,7 @@ test("web bundle exposes build identity through browser-readable globals and DOM
   );
 });
 
-test("web build identity env vars are declared and injected by preview workflow", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("web build identity env vars are declared and injected by preview workflow", { skip: inSourceSnapshot }, () => {
   const envTypes = read("src/vite-env.d.ts");
   assert.match(envTypes, /VITE_COMMIT_SHA/);
   assert.match(envTypes, /VITE_BUILD_AT/);

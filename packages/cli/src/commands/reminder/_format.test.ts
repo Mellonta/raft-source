@@ -1,7 +1,6 @@
 // Snapshot-style tests for agent-facing reminder output format.
 // Pins the exact text shape matching MCP chat-bridge formatReminder output.
 
-import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import type { ReminderRecurrence } from "@botiverse/raft-shared";
@@ -10,7 +9,7 @@ import {
   formatReminderScheduled,
   formatReminderList,
   formatReminderCanceled,
-} from "./_format.js";
+} from "./_format";
 
 // A fixed clock a day before the fixture's fireAt, so the pre-existing snapshots
 // keep meaning "scheduled and still in the future". Passing it explicitly is what

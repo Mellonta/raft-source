@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "producerRegistryAnchor": "slock#4593@b0fcdfd9fae9f0af9b32a87a1d5c3e196d3fdaa1",
   "fields": [
     {
@@ -477,6 +477,11 @@
         "name": "workspaceId",
         "wireType": "string",
         "nullable": false
+      },
+      {
+        "name": "workspaceName",
+        "wireType": "string",
+        "nullable": true
       }
     ]
   },

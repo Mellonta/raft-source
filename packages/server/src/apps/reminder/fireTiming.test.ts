@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { isReminderCatchup } from "./fireTiming.js";
+import { isReminderCatchup } from "./fireTiming";
 
 const DUE_AT_MS = Date.parse("2026-08-25T18:30:00.000Z");
 const TOLERANCE_MS = 1_000;

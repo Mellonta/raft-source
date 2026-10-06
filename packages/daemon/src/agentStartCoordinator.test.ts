@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import type { AgentConfig } from "@botiverse/raft-shared";
-import { AgentStartCoordinator, type AgentStartQueueItem } from "./agentStartCoordinator.js";
+import { AgentStartCoordinator, type AgentStartQueueItem } from "./agentStartCoordinator";
 
 function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
