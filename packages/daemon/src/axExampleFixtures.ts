@@ -3,8 +3,8 @@
 // stubs carry only the fields the runtime-input formatters read.
 import type { AgentConfig, AgentMessage } from "@botiverse/raft-shared";
 
-import type { RuntimeDriver } from "./drivers/types.js";
-import type { SystemPromptOptions } from "./drivers/systemPrompt.js";
+import type { RuntimeDriver } from "./drivers/types";
+import type { SystemPromptOptions } from "./drivers/systemPrompt";
 
 export const EXAMPLE_T = "2026-08-31T08:00:00.000Z";
 

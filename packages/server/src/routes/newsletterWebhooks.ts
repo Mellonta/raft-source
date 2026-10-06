@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { handleNewsletterWebhookPayload } from "../services/newsletterService.js";
+import { handleNewsletterWebhookPayload } from "../services/newsletterService";
 
 // POST /api/webhooks/resend — Resend webhook (registered in app.ts with raw body)
 export async function resendNewsletterWebhookHandler(req: Request, res: Response): Promise<void> {

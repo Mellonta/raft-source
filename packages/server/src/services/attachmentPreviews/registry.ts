@@ -1,14 +1,14 @@
 import type { AttachmentPreviewData, AttachmentPreviewResponse } from "@botiverse/raft-shared";
-import type { attachments } from "../../db/schema.js";
-import { getStorage } from "../storageService.js";
-import { readStreamPrefix } from "./utils.js";
-import type { AttachmentPreviewProvider } from "./types.js";
-import { diffPatchPreviewProvider } from "./providers/diffPatch.js";
-import { csvPreviewProvider } from "./providers/csv.js";
-import { isXlsxAttachment, xlsxPreviewProvider } from "./providers/xlsx.js";
-import { markdownPreviewProvider } from "./providers/markdown.js";
-import { pdfPreviewProvider } from "./providers/pdf.js";
-import { textPreviewProvider } from "./providers/text.js";
+import type { attachments } from "../../db/schema";
+import { getStorage } from "../storageService";
+import { readStreamPrefix } from "./utils";
+import type { AttachmentPreviewProvider } from "./types";
+import { diffPatchPreviewProvider } from "./providers/diffPatch";
+import { csvPreviewProvider } from "./providers/csv";
+import { isXlsxAttachment, xlsxPreviewProvider } from "./providers/xlsx";
+import { markdownPreviewProvider } from "./providers/markdown";
+import { pdfPreviewProvider } from "./providers/pdf";
+import { textPreviewProvider } from "./providers/text";
 
 // Preview providers are ordered by specificity. The first matching provider
 // owns the response shape, so generic text-like previews should stay last.

@@ -9,20 +9,20 @@
 // them. As defense-in-depth EVERY emitted line is additionally run
 // through `redactSecrets()` so even a future bug that drops a credential
 // into a check `detail` cannot leak it.
-import { buildStatusReport } from "./status.js";
-import type { ServerStatusRow } from "./status.js";
+import { buildStatusReport } from "./status";
+import type { ServerStatusRow } from "./status";
 import {
   ComputerAttachClient,
   LegacyMachinesClient,
   ServerMachinesClient,
   type ServerMachinesResult,
-} from "./apiClient.js";
-import { detectLegacyMigration, type LegacyMachineRosterClientFactory } from "./lib/migration.js";
-import type { MigrationDetection } from "./lib/types.js";
-import { readUserSessionAuth } from "./lib/userSession.js";
-import type { ServerAttachment } from "./serverState.js";
-import { formatServerSlugDisplay, listServerAttachments } from "./serverState.js";
-import { hasUnlinkedComputerHandshake, readRunnerLogTail } from "./internal/runner-log-diagnostics.js";
+} from "./apiClient";
+import { detectLegacyMigration, type LegacyMachineRosterClientFactory } from "./lib/migration";
+import type { MigrationDetection } from "./lib/types";
+import { readUserSessionAuth } from "./lib/userSession";
+import type { ServerAttachment } from "./serverState";
+import { formatServerSlugDisplay, listServerAttachments } from "./serverState";
+import { hasUnlinkedComputerHandshake, readRunnerLogTail } from "./internal/runner-log-diagnostics";
 
 // The CLI presenters (`runDoctor` / `runDoctorMigrationDetails`) live in
 // doctorCli.ts (decycle R0, #wg-raft-computer:18ab6541). The pure check
@@ -154,28 +154,6 @@ export async function runDoctorChecks(
           detail: "stopped (run `raft-computer start` when you want background)",
         },
   );
-
-  if (report.hostLifecycle) {
-    checks.push({
-      name: "macOS login carrier",
-      ok: false,
-      detail:
-        `${report.hostLifecycle.status} (${report.hostLifecycle.errorCode ?? "replacement interrupted"}) — `
-        + "the enabled owner marker is not trusted; repair the saved login carrier before retrying start or upgrade",
-    });
-  }
-
-  if (report.upgrade) {
-    const upgrade = report.upgrade;
-    checks.push({
-      name: "K upgrade receipt",
-      ok: false,
-      detail: upgrade.outcome === null
-        ? `${upgrade.scope} operation ${upgrade.requestId} is active in phase ${upgrade.phase}`
-        : `${upgrade.scope} operation ${upgrade.requestId} is terminal ${upgrade.outcome} and unacknowledged; `
-          + `verify the running Computer, then run \`raft-computer operation acknowledge ${upgrade.requestId}\``,
-    });
-  }
 
   // Per-server preflight loop (contract v4 §9): isolated per serverId,
   // uses THAT server's own sk_computer_*; never a shared key.

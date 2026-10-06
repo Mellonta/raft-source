@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   AgentNoProcessResidency,
   AgentNoProcessResidencyTransitions,
   type AgentNoProcessResidencySnapshot,
-} from "./agentNoProcessResidency.js";
+} from "./agentNoProcessResidency";
 
 function snapshot(overrides: Partial<AgentNoProcessResidencySnapshot> = {}): AgentNoProcessResidencySnapshot {
   return {

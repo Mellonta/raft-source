@@ -1,7 +1,6 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { DISPLAY_LOCALES, isDisplayLocale, normalizeDisplayLocale } from "./displayLocales.js";
+import { DISPLAY_LOCALES, isDisplayLocale, normalizeDisplayLocale } from "./displayLocales";
 
 test("DISPLAY_LOCALES is exactly the shipped-catalog set", () => {
   assert.deepEqual([...DISPLAY_LOCALES], ["en", "zh-cn"]);

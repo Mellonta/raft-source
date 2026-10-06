@@ -15,13 +15,14 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import type { NavigateFunction } from "react-router-dom";
-import { failpoints } from "@botiverse/raft-shared";
+import { failpoints, SOCKET_NOT_SERVER_MEMBER_ERROR } from "@botiverse/raft-shared";
+import type { AgentSeenEvent, DeliveryConsumptionActivityDiagnostic, SpawnFailureActivityDiagnostic, WakeCrashLoopActivityDiagnostic } from "@botiverse/raft-shared";
 import {
   getLiveSessionRecoveryPlan,
   planStatusReconcile,
 } from "../utils/browserRecoveryPolicy";
 import { traceAgentActivitySocketReceived } from "../utils/webAgentActivityTrace";
-import { useAgentStore } from "./agentStore";
+import { reloadAgentsAfterServerChange, useAgentStore } from "./agentStore";
 import type { TrajectoryEntry } from "./agentStore";
 import { useAnnouncementStore } from "./announcementStore";
 import { normalizeActivityMuteState, normalizeMessageDisplayPrefs } from "./channelDomain";
@@ -142,7 +143,16 @@ export function installSocketBridge(
 // Status defense-in-depth cadence. Announcement discovery deliberately does not
 // use this timer: it runs only on entry and foreground recovery, so publishing
 // cannot make every open tab present the same account-level row at once.
-const STATUS_RECONCILE_INTERVAL_MS = 60_000;
+//
+// 10 minutes, not 1: agent activity is server-PUSHED (daemon heartbeat every
+// 60s in agentProcessManager + agent:activity events with per-agent serverSeq),
+// machine status is versioned event-driven (machine:status / daemon:status /
+// machine:updated reconcile), and a dead socket is owned by the 90s-silence
+// heartbeat breaker + recoverLiveSession. This blind pull is only the net for
+// a silently-dropped edge event (CC-006), so its job is bounded staleness, not
+// freshness — a full machines+agents reload every 60s per visible tab was the
+// idle request wave, not a feature.
+const STATUS_RECONCILE_INTERVAL_MS = 600_000;
 
 export const MAIN_LAYOUT_SOCKET_EVENT_NAMES = [
   "message:new",
@@ -152,17 +162,18 @@ export const MAIN_LAYOUT_SOCKET_EVENT_NAMES = [
   "read_state:updated",
   "read_state:updated_bulk",
   "agent:activity",
+  "agent:seen",
   "agent:session",
   "dm:new",
   "machine:status",
   "machine:capabilities",
   "machine:updated",
+  "machine:upgrade-request",
   "computer:restart:done",
-  "computer:upgrade:progress",
-  "computer:upgrade:done",
   "daemon:status",
   "agent:created",
   "agent:deleted",
+  "agent:updated",
   "channel:updated",
   "channel:members-updated",
   "notification_prefs:updated",
@@ -173,6 +184,7 @@ export const MAIN_LAYOUT_SOCKET_EVENT_NAMES = [
   "server:member-removed",
   "server:member-updated",
   "server:membership-removed",
+  "connect_error",
   "thread:updated",
   "thread:followers-updated",
   "connect",
@@ -310,6 +322,72 @@ function loadFollowedThreads() {
   void useThreadStore.getState().loadFollowedThreads();
 }
 
+// Boot unread/inbox fallback. rooms:joined is the authoritative owner of the
+// unread-counts + inbox loads (a fetch at connect races the room setup); the
+// fallback exists only so a boot whose socket never joins (offline degraded
+// mode) still loads them exactly once. rooms:joined cancels the timer.
+const BOOT_UNREAD_FALLBACK_MS_DEFAULT = 2_000;
+let bootUnreadFallbackMs = BOOT_UNREAD_FALLBACK_MS_DEFAULT;
+let bootUnreadFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+function armBootUnreadFallback() {
+  cancelBootUnreadFallback();
+  bootUnreadFallbackTimer = setTimeout(() => {
+    bootUnreadFallbackTimer = null;
+    useMessageStore.getState().loadUnreadCounts();
+    loadInboxReset({ background: true });
+  }, bootUnreadFallbackMs);
+}
+
+function cancelBootUnreadFallback() {
+  if (bootUnreadFallbackTimer) {
+    clearTimeout(bootUnreadFallbackTimer);
+    bootUnreadFallbackTimer = null;
+  }
+}
+
+// Boot connect-snapshot fallback. The connect snapshot (reconnectSnapshot) is
+// the single owner of the sidebar order / machines / agents / servers / followed
+// threads loads; this bounded fallback only covers a boot whose socket never
+// connects (e.g. a proxy blocking WebSockets), which would otherwise leave the
+// agent roster empty. A connect cancels it, so a normal boot still loads each
+// set exactly once.
+let bootConnectFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+
+function loadConnectSnapshotSet() {
+  useServerStore.getState().loadSidebarOrder();
+  useMachineStore.getState().loadMachines();
+  useAgentStore.getState().loadAgents();
+  useServerStore.getState().loadServers();
+  loadFollowedThreads();
+}
+
+function armBootConnectFallback() {
+  cancelBootConnectFallback();
+  bootConnectFallbackTimer = setTimeout(() => {
+    bootConnectFallbackTimer = null;
+    loadConnectSnapshotSet();
+  }, bootUnreadFallbackMs);
+}
+
+function cancelBootConnectFallback() {
+  if (bootConnectFallbackTimer) {
+    clearTimeout(bootConnectFallbackTimer);
+    bootConnectFallbackTimer = null;
+  }
+}
+
+/** Test seam: override the fallback delay and restore any stray timer. */
+export function __setBootUnreadFallbackMsForTests(ms?: number): () => void {
+  const previous = bootUnreadFallbackMs;
+  bootUnreadFallbackMs = ms ?? BOOT_UNREAD_FALLBACK_MS_DEFAULT;
+  return () => {
+    bootUnreadFallbackMs = previous;
+    cancelBootUnreadFallback();
+    cancelBootConnectFallback();
+  };
+}
+
 function navigateRootRoute() {
   if (!bridgeNavigate) {
     console.warn(
@@ -336,13 +414,21 @@ function bootstrapMainLayoutRealtimeBridge(
   transport: MainLayoutRealtimeTransport,
 ) {
   transport.reconnectSocket();
-  useMessageStore.getState().loadUnreadCounts();
   useChannelStore.getState().loadChannels();
   useChannelStore.getState().loadDMChannels();
-  useAgentStore.getState().loadAgents();
-  useMachineStore.getState().loadMachines();
-  loadFollowedThreads();
-  loadInboxReset({ background: true });
+  // machines / agents / followedThreads are deliberately NOT loaded here:
+  // the connect snapshot (reconnectSnapshot) is the pinned owner of that set
+  // (reconnectNoDuplicateLoads: "what only it owns"), and it fires on the
+  // first connect too — this copy was the duplicate boot fetch. A bounded
+  // fallback (armBootConnectFallback) covers a socket that never connects.
+  //
+  // unreadCounts / inbox are also NOT fetched inline: they race the room
+  // joins (connect-time copy is strictly worse — rooms:joined is the
+  // authority). Instead we arm a bounded fallback: if no rooms:joined lands
+  // within the window (socket never joins, e.g. offline degraded mode), the
+  // fallback issues exactly one load so the badges/inbox are not empty.
+  armBootUnreadFallback();
+  armBootConnectFallback();
   void useSavedStore.getState().loadSaved();
   void useAnnouncementStore.getState().load();
 }
@@ -451,9 +537,12 @@ export function buildMainLayoutSocketBindings(
     launchId?: string; clientSeq?: number; probeId?: string;
     isHeartbeat?: boolean;
     isRefreshOnly?: boolean;
+    deliveryConsumption?: DeliveryConsumptionActivityDiagnostic;
+    wakeCrashLoop?: WakeCrashLoopActivityDiagnostic;
+    spawnFailure?: SpawnFailureActivityDiagnostic;
   }) => {
     const joinKeys = { launchId: data.launchId, clientSeq: data.clientSeq, probeId: data.probeId };
-    const traceJoin = { clientEventId: mintAgentActivityClientEventId() };
+    const traceJoin = { clientEventId: mintAgentActivityClientEventId(), arrivedAtMs: Date.now() };
     traceAgentActivitySocketReceived({
       agentId: data.agentId,
       activity: data.activity,
@@ -482,6 +571,9 @@ export function buildMainLayoutSocketBindings(
         traceJoin,
         data.isHeartbeat,
         data.isRefreshOnly,
+        data.deliveryConsumption,
+        data.wakeCrashLoop,
+        data.spawnFailure,
       );
     useLiveAgentActivityStore.getState().recordStatusActivity(data, useAgentStore.getState().agents);
     if (data.entries && data.entries.length > 0) {
@@ -566,22 +658,10 @@ export function buildMainLayoutSocketBindings(
       );
   };
 
-  const computerUpgradeProgress = (data: {
-    machineId: string;
-    requestId: string;
-    phase: "downloading" | "verifying" | "applying" | "restarting";
-    message?: string;
-    percent?: number;
-  }) => {
-    useMachineStore
-      .getState()
-      .updateComputerUpgradeProgress(
-        data.machineId,
-        data.requestId,
-        data.phase,
-        data.message,
-        data.percent,
-      );
+  // Remote upgrade v2: the server settled or expired a request; the machine
+  // list projection carries the result, so reload it.
+  const machineUpgradeRequest = (_data: { machineId: string }) => {
+    void useMachineStore.getState().loadMachines();
   };
 
   const computerRestartDone = (data: {
@@ -594,29 +674,6 @@ export function buildMainLayoutSocketBindings(
       .getState()
       .completeComputerRestart(data.machineId, data.requestId, data.ok, data.error);
     if (data.ok) void useMachineStore.getState().loadMachines();
-  };
-
-  const computerUpgradeDone = (data: {
-    machineId: string;
-    requestId: string;
-    ok: boolean;
-    newVersion?: string;
-    rolledBack?: boolean;
-    error?: string;
-  }) => {
-    useMachineStore
-      .getState()
-      .completeComputerUpgrade(
-        data.machineId,
-        data.requestId,
-        data.ok,
-        data.newVersion,
-        data.rolledBack,
-        data.error,
-      );
-    if (data.ok && !data.rolledBack) {
-      void useMachineStore.getState().loadMachines();
-    }
   };
 
   const refreshMembersForServer = (data: { serverId?: string; userId?: string }) => {
@@ -680,6 +737,17 @@ export function buildMainLayoutSocketBindings(
     if (!data?.serverId) return;
     const removedCurrent = await useServerStore.getState().handleMembershipRemoved(data.serverId);
     if (removedCurrent) navigateRootRoute();
+  };
+
+  // Removing a member revokes socket access before the route emits
+  // server:membership-removed, so that event cannot reach the removed user.
+  // The automatic reconnect is then rejected at the handshake, and that
+  // rejection is the removal signal. handleMembershipRemoved re-reads the
+  // server list, so a stale rejection cannot evict a current membership.
+  const connectRejected = (error: { message?: unknown } | null | undefined) => {
+    if (error?.message !== SOCKET_NOT_SERVER_MEMBER_ERROR) return;
+    const serverId = useServerStore.getState().current?.id;
+    if (serverId) void serverMembershipRemoved({ serverId });
   };
 
   const threadUpdated = (data: {
@@ -883,11 +951,8 @@ export function buildMainLayoutSocketBindings(
     // baseline back to the server's authoritative state.
     // (#engineering:72283cf7 task #340 PR B)
     useAgentStore.getState().resetActivitySeq();
-    useServerStore.getState().loadSidebarOrder();
-    useMachineStore.getState().loadMachines();
-    useAgentStore.getState().loadAgents();
-    useServerStore.getState().loadServers();
-    loadFollowedThreads();
+    cancelBootConnectFallback();
+    loadConnectSnapshotSet();
     // Unread counts and the inbox are deliberately NOT loaded here. They are
     // loaded by `roomsJoined` below, and doing it twice per reconnect is not
     // defense in depth — the connect-time copy is strictly worse:
@@ -911,6 +976,7 @@ export function buildMainLayoutSocketBindings(
   };
 
   const roomsJoined = () => {
+    cancelBootUnreadFallback();
     if (typeof window !== "undefined") {
       (window as Window & { __slockRoomsJoined?: boolean }).__slockRoomsJoined =
         true;
@@ -988,6 +1054,15 @@ export function buildMainLayoutSocketBindings(
     { event: "read_state:updated", handler: readStateUpdated },
     { event: "read_state:updated_bulk", handler: readStateUpdatedBulk },
     { event: "agent:activity", handler: agentActivity },
+    {
+      // External-agent presence push (credential seen). Best-effort: `/agents`
+      // serves the same `lastSeenAt` on every reconcile.
+      event: "agent:seen",
+      handler: (data: AgentSeenEvent) => {
+        if (typeof data?.agentId !== "string" || typeof data.lastSeenAt !== "string") return;
+        useAgentStore.getState().applyAgentSeen(data.agentId, data.lastSeenAt);
+      },
+    },
     { event: "agent:session", handler: agentSession },
     ...createChannelRealtimeBindings(socket, scheduleInboxRefresh),
     { event: "notification_prefs:updated", handler: notificationPrefsUpdated },
@@ -998,9 +1073,8 @@ export function buildMainLayoutSocketBindings(
       event: "machine:updated",
       handler: () => machineReconcile("machine-updated"),
     },
+    { event: "machine:upgrade-request", handler: machineUpgradeRequest },
     { event: "computer:restart:done", handler: computerRestartDone },
-    { event: "computer:upgrade:progress", handler: computerUpgradeProgress },
-    { event: "computer:upgrade:done", handler: computerUpgradeDone },
     {
       event: "daemon:status",
       handler: (data: {
@@ -1029,6 +1103,14 @@ export function buildMainLayoutSocketBindings(
         notifyAllChannelMembersChanged();
       },
     },
+    {
+      // A profile edit (name, avatar, description) made in another window or
+      // on another device. Re-read the list so this window stops showing the old one.
+      event: "agent:updated",
+      handler: () => {
+        void reloadAgentsAfterServerChange();
+      },
+    },
     { event: "server:plan-updated", handler: (data: { serverId?: string; plan?: string }) => {
       if (data?.serverId && typeof data.plan === "string") {
         useServerStore.getState().applyServerPatch({ id: data.serverId, plan: data.plan });
@@ -1043,6 +1125,7 @@ export function buildMainLayoutSocketBindings(
     { event: "server:member-removed", handler: refreshMembersForServer },
     { event: "server:member-updated", handler: refreshMembersForServer },
     { event: "server:membership-removed", handler: serverMembershipRemoved },
+    { event: "connect_error", handler: connectRejected },
     { event: "thread:updated", handler: threadUpdated },
     { event: "thread:followers-updated", handler: threadFollowersUpdated },
     { event: "connect", handler: reconnectSnapshot },

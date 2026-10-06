@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { randomUUID } from "node:crypto";
 
 import {
   buildNativeTargetUri,
   resolveNotificationIntents,
-} from "./nativeNotificationService.js";
+} from "./nativeNotificationService";
 
 test("native projection preserves the authoritative recipient set and strips web-only fields", () => {
   const serverId = randomUUID();

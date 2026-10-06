@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import {
   buildMainLayoutSocketBindings,
 } from "../src/store/socketBridge";
@@ -96,7 +95,7 @@ function agentActivityHandler() {
 
 function captureWebTraceBatches() {
   const values = new Map<string, string>();
-  const batches: Array<{ records?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
+  const batches: Array<{ events?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
     value: {
@@ -168,7 +167,7 @@ test("agent:activity socket handler emits a bounded receipt and stores its opaqu
   assert.equal(useLiveAgentActivityStore.getState().items[0]?.text, "Running command");
 
   const receipt = batches
-    .flatMap((batch) => batch.records ?? [])
+    .flatMap((batch) => batch.events ?? [])
     .find((record) => record.name === "slock.agent_activity.socket_received");
   assert.ok(receipt, "the real socket handler must emit the socket receipt trace");
   assert.deepEqual(receipt.attrs?.join, { clientEventId: "client-event-random-1" });

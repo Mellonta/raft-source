@@ -1,4 +1,5 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { Button } from "raft-ui";
 
 /**
  * Pure-action menu row primitive.
@@ -51,19 +52,24 @@ export default function MenuItem({
   // applied unconditionally — harmless on tall viewports and keeps
   // Sidebar / MessageItem / SavedPanel context menus visually uniform
   // in small viewports without per-callsite opt-in.
-  const base = "flex w-full items-center gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-sm text-left transition-colors";
-  const tone = "font-medium text-black hover:bg-soft-signal/30 disabled:cursor-not-allowed disabled:text-black/30";
+  const base = "[&_[data-slot=button-content]]:w-full [&_[data-slot=button-content]]:justify-start flex w-full items-center gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-sm text-left transition-colors";
+  // RUI's ghost Button turns on `hover:border-line-strong`; inside a menu that reads as
+  // a box appearing under the pointer (Artea, task #640). Menu rows highlight by
+  // background only, so cancel the variant's hover border here.
+  const tone = "font-medium text-foreground-strong hover:bg-fill-muted hover:!border-transparent disabled:cursor-not-allowed disabled:text-foreground-muted theme-brutal:text-black theme-brutal:hover:bg-soft-signal/30 theme-brutal:disabled:text-black/30";
 
   return (
-    <button
+    <Button
       type={type}
       role={role}
+      size="sm"
+      variant="ghost"
       className={`${base} ${tone} ${className}`}
       {...rest}
     >
       {icon}
       <span className="min-w-0 flex-1 truncate">{children}</span>
       {trailing}
-    </button>
+    </Button>
   );
 }

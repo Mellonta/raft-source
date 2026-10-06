@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import fc from "fast-check";
 
-import { buildApmFreshnessDecisionProducerFactId } from "./apmStateMachine.js";
+import { buildApmFreshnessDecisionProducerFactId } from "./apmStateMachine";
 import {
   planAgentInboxSideEffect,
   type AgentInboxFreshnessDecision,
   type AgentInboxStateMachineEffect,
   type AgentInboxStateMachineMessage,
-} from "./agentInboxStateMachine.js";
+} from "./agentInboxStateMachine";
 
 function message(seq: number, input: Partial<AgentInboxStateMachineMessage> = {}): AgentInboxStateMachineMessage {
   return {

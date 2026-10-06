@@ -56,6 +56,7 @@ export function projectOwnedIntegrationApp(
   return {
     state: app.state,
     card: app.card,
+    installationId: app.installationId,
     name: app.name,
     clientKey: app.clientKey,
     createdAt: app.createdAt,

@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import * as fc from "fast-check";
 import type { AgentActivity, AgentActivityDetailKind, TrajectoryEntry } from "@botiverse/raft-shared";
-import { createAgentActivityDomain } from "../src/store/agentActivityDomain.js";
+import { createAgentActivityDomain } from "../src/store/agentActivityDomain";
 import {
   MAX_TRAJECTORY_ENTRIES,
-} from "../src/store/events/agentActivityEvents.js";
+} from "../src/store/events/agentActivityEvents";
 import type {
   AgentActivityDomainState,
   AgentActivityEvent,
   AgentActivityState,
   AgentActivityViolationBasis,
-} from "../src/store/events/agentActivityEvents.js";
+} from "../src/store/events/agentActivityEvents";
 
 function emptyState(): AgentActivityDomainState {
   return {
@@ -1068,6 +1067,7 @@ test("fixed-seed property: producer-order fold converges to the canonical anchor
 
 test("fixed-seed property: same-fact dual representations never report producer conflicts", () => {
   const semanticDetailKinds = fc.constantFrom<AgentActivityDetailKind>(
+    "provider_request_status",
     "running_command",
     "checking_messages",
     "compacting_context",

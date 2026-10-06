@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
@@ -7,33 +7,32 @@ import {
   AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
   AGENT_MIGRATION_COMMIT_MARKER_PATH,
   AGENT_MIGRATION_CONTROL_SCHEMA_VERSION,
-  AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
+  AGENT_MIGRATION_CAPABILITY,
   AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-  MAX_AGENT_MIGRATION_TRANSPORT_BYTES,
   type AgentMigrationControlManifest,
 } from "@botiverse/raft-shared";
 
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
-  agentMigrationReceiptOutbox,
   agentMigrations,
   agents,
   computers,
   users,
-} from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { registerMachine } from "../services/machineService.js";
-import { generateComputerApiKeyMaterial } from "../services/computerCredentialService.js";
+} from "../db/schema";
+import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { registerMachine } from "../services/machineService";
+import { generateComputerApiKeyMaterial } from "../services/computerCredentialService";
+import { AgentMigrationSourceArchiveError } from "../services/agentMigrationSourceArchive";
+import { drainAgentMigrationRemediation } from "../services/agentMigrationRemediationWorker";
 import {
-  beginAgentMigration,
   beginAgentMigrationProvisioning,
-  markAgentMigrationReady,
   requestAgentMigrationCancellation,
   type AgentMigrationTargetImportView,
-} from "../services/agentMigrationService.js";
+} from "../services/agentMigrationService";
+import { markTestAgentMigrationReady } from "../test/agentMigrationFixture";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -67,12 +66,11 @@ const TEST_TRANSFER_SUMMARY = {
   },
 } as const;
 
-async function seedMigrationApiFixture(options: { markReady?: boolean; provisioning?: boolean } = {}): Promise<{
+async function seedMigrationApiFixture(options: { provisioning?: boolean } = {}): Promise<{
   targetComputerApiKey: string;
   sourceComputerApiKey: string;
   migrationId: string;
   migrationRef: string;
-  grantKey: string;
   agentId: string;
   serverId: string;
   ownerId: string;
@@ -105,39 +103,19 @@ async function seedMigrationApiFixture(options: { markReady?: boolean; provision
     .set({ sessionId: "source-native-session" })
     .where(eq(agents.id, agent.id));
   const now = new Date();
-  const provisioning = options.provisioning
-    ? await beginAgentMigrationProvisioning({
-      agentId: agent.id,
-      targetMachineId: targetMachine.id,
-      initiatedByUserId: owner.id,
-      now,
-      prepDeadlineMs: 60 * 60 * 1000,
-      transferDeadlineMs: 60 * 60 * 1000,
-      arrivalDeadlineMs: 60 * 60 * 1000,
-      sourceTransferUrl: "https://object-store.example/upload/source",
-      targetTransferUrl: "https://object-store.example/download/target",
-      transportSessionId: `session-${suffix}`,
-    })
-    : null;
-  const migration = provisioning?.migration ?? await beginAgentMigration({
-      agentId: agent.id,
-      targetMachineId: targetMachine.id,
-      initiatedByUserId: owner.id,
-      now,
-      prepDeadlineMs: 60 * 60 * 1000,
-      transferDeadlineMs: 60 * 60 * 1000,
-      arrivalDeadlineMs: 60 * 60 * 1000,
-    });
-  if (!options.provisioning && options.markReady !== false) {
-    const ready = await markAgentMigrationReady({
-      grantKey: migration.grantKey,
-      manifestPath: "bundle/manifest.json",
-      manifestSha256: "sha256:manifest",
-      now,
-    });
-    await db.update(agentMigrations)
-      .set({ transferSummary: TEST_TRANSFER_SUMMARY })
-      .where(eq(agentMigrations.id, ready.id));
+  const provisioning = await beginAgentMigrationProvisioning({
+    agentId: agent.id,
+    targetMachineId: targetMachine.id,
+    initiatedByUserId: owner.id,
+    now,
+    prepDeadlineMs: 60 * 60 * 1000,
+    transferDeadlineMs: 60 * 60 * 1000,
+    arrivalDeadlineMs: 60 * 60 * 1000,
+    transportSessionId: `session-${suffix}`,
+  });
+  const { migration } = provisioning;
+  if (!options.provisioning) {
+    await markTestAgentMigrationReady(provisioning, { now, transferSummary: TEST_TRANSFER_SUMMARY });
   }
 
   const targetComputer = await generateComputerApiKeyMaterial();
@@ -166,34 +144,20 @@ async function seedMigrationApiFixture(options: { markReady?: boolean; provision
     sourceComputerApiKey: sourceComputer.apiKey,
     migrationId: migration.id,
     migrationRef: migration.supportRef,
-    grantKey: migration.grantKey,
     agentId: agent.id,
     serverId: server.id,
     ownerId: owner.id,
     sourceMachineId: sourceMachine.id,
     targetMachineId: targetMachine.id,
-    ...(provisioning ? {
-      sourceMigrationToken: provisioning.source.message.bearerToken,
-      targetMigrationToken: provisioning.target.message.bearerToken,
-      transportGeneration: provisioning.source.message.transportGeneration,
-      transportLeaseId: provisioning.source.message.leaseId,
-      expectedMigrationRevision: provisioning.source.message.expectedMigrationRevision,
-    } : {}),
+    sourceMigrationToken: provisioning.source.message.bearerToken,
+    targetMigrationToken: provisioning.target.message.bearerToken,
+    transportGeneration: provisioning.source.message.transportGeneration,
+    transportLeaseId: provisioning.source.message.leaseId,
+    expectedMigrationRevision: provisioning.source.message.expectedMigrationRevision,
   };
 }
 
-async function readMigration(baseUrl: string, apiKey: string, grantKey: string): Promise<AgentMigrationTargetImportView> {
-  const res = await fetch(`${baseUrl}/internal/computer/agent-migrations/${encodeURIComponent(grantKey)}`, {
-    method: "GET",
-    headers: authHeaders(apiKey),
-  });
-  assert.equal(res.status, 200);
-  const body = await res.json() as { ok: true; migration: AgentMigrationTargetImportView };
-  assert.equal(body.ok, true);
-  return body.migration;
-}
-
-async function readMigrationById(baseUrl: string, apiKey: string, migrationId: string): Promise<AgentMigrationTargetImportView> {
+async function readMigration(baseUrl: string, apiKey: string, migrationId: string): Promise<AgentMigrationTargetImportView> {
   const res = await fetch(`${baseUrl}/internal/computer/agent-migrations/by-id/${encodeURIComponent(migrationId)}`, {
     method: "GET",
     headers: authHeaders(apiKey),
@@ -207,11 +171,11 @@ async function readMigrationById(baseUrl: string, apiKey: string, migrationId: s
 async function postMigrationStep(
   baseUrl: string,
   apiKey: string,
-  grantKey: string,
+  migrationId: string,
   step: "start-transfer" | "flip-machine" | "arrived",
   body: Record<string, unknown>,
 ): Promise<{ status: number; json: Record<string, unknown> }> {
-  const res = await fetch(`${baseUrl}/internal/computer/agent-migrations/${encodeURIComponent(grantKey)}/${step}`, {
+  const res = await fetch(`${baseUrl}/internal/computer/agent-migrations/by-id/${encodeURIComponent(migrationId)}/${step}`, {
     method: "POST",
     headers: authHeaders(apiKey),
     body: JSON.stringify(body),
@@ -233,27 +197,12 @@ async function postMigrationTransportLost(
   return { status: res.status, json: await res.json() as Record<string, unknown> };
 }
 
-async function postMigrationSourceReady(
-  baseUrl: string,
-  apiKey: string,
-  migrationId: string,
-  body: Record<string, unknown>,
-): Promise<{ status: number; json: Record<string, unknown> }> {
-  const res = await fetch(`${baseUrl}/internal/computer/agent-migrations/by-id/${encodeURIComponent(migrationId)}/source-ready`, {
-    method: "POST",
-    headers: authHeaders(apiKey),
-    body: JSON.stringify({ transferSummary: TEST_TRANSFER_SUMMARY, ...body }),
-  });
-  return { status: res.status, json: await res.json() as Record<string, unknown> };
-}
-
 test("agent migration target import API resolves target handoff by migration id", async ({ app }) => {
   const f = await seedMigrationApiFixture();
-  const byGrant = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
-  const byId = await readMigrationById(app.baseUrl, f.targetComputerApiKey, f.migrationId);
+  const byId = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
 
-  assert.equal(byId.grantKey, byGrant.grantKey);
-  assert.equal(byId.migrationGeneration, byGrant.migrationGeneration);
+  assert.equal(byId.migrationId, f.migrationId);
+  assert.equal("grantKey" in byId, false);
   assert.equal(byId.state, "ready");
   assert.equal(byId.canDriveTargetImport, true);
 
@@ -263,59 +212,6 @@ test("agent migration target import API resolves target handoff by migration id"
   });
   assert.equal(sourceAttempt.status, 404);
   assert.equal((await sourceAttempt.json() as { code?: string }).code, "migration_missing");
-});
-
-test("agent migration source-ready API lets the source Computer mark object-store upload ready", async ({ app }) => {
-  const f = await seedMigrationApiFixture({ markReady: false });
-  const maxBoundarySummary = {
-    ...TEST_TRANSFER_SUMMARY,
-    includedBytes: MAX_AGENT_MIGRATION_TRANSPORT_BYTES,
-  };
-
-  const ready = await postMigrationSourceReady(app.baseUrl, f.sourceComputerApiKey, f.migrationId, {
-    manifestPath: "object-store:session-source/manifest.json",
-    manifestSha256: "sha256:manifest",
-    transferSummary: maxBoundarySummary,
-  });
-  assert.equal(ready.status, 200);
-  assert.equal(ready.json.ok, true);
-  assert.equal((ready.json.migration as { state?: string }).state, "ready");
-
-  const targetReadback = await readMigrationById(app.baseUrl, f.targetComputerApiKey, f.migrationId);
-  assert.equal(targetReadback.state, "ready");
-  assert.equal(targetReadback.manifestPath, "object-store:session-source/manifest.json");
-  assert.equal(targetReadback.manifestSha256, "sha256:manifest");
-  const [persisted] = await getDb().select({
-    transferSummary: agentMigrations.transferSummary,
-  }).from(agentMigrations).where(eq(agentMigrations.id, f.migrationId));
-  assert.deepEqual(persisted.transferSummary, maxBoundarySummary);
-
-  const replay = await postMigrationSourceReady(app.baseUrl, f.sourceComputerApiKey, f.migrationId, {
-    manifestPath: "object-store:session-source/manifest.json",
-    manifestSha256: "sha256:manifest",
-    transferSummary: maxBoundarySummary,
-  });
-  assert.equal(replay.status, 200);
-  assert.equal((replay.json.migration as { state?: string }).state, "ready");
-});
-
-test("agent migration source-ready API rejects non-pathless or unbounded summaries", async ({ app }) => {
-  const f = await seedMigrationApiFixture({ markReady: false });
-  for (const transferSummary of [
-    { ...TEST_TRANSFER_SUMMARY, sourcePath: "/private/workspace" },
-    { ...TEST_TRANSFER_SUMMARY, includedBytes: MAX_AGENT_MIGRATION_TRANSPORT_BYTES + 1 },
-    { ...TEST_TRANSFER_SUMMARY, excludedRegenerableCount: 1 },
-  ]) {
-    const response = await postMigrationSourceReady(app.baseUrl, f.sourceComputerApiKey, f.migrationId, {
-      manifestPath: "object-store:session-source/manifest.json",
-      transferSummary,
-    });
-    assert.equal(response.status, 400);
-    assert.equal(response.json.code, "migration_transfer_summary_invalid");
-  }
-  const [migration] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, f.migrationId));
-  assert.equal(migration.state, "prep");
-  assert.equal(migration.transferSummary, null);
 });
 
 test("resumable migration routes enforce source quiescence, immutable generation, and transport-token auth", async ({ app }) => {
@@ -341,7 +237,7 @@ test("resumable migration routes enforce source quiescence, immutable generation
       sourceMachineId: f.sourceMachineId,
       targetMachineId: f.targetMachineId,
     },
-    capability: { required: [...AGENT_MIGRATION_RESUMABLE_CAPABILITIES] },
+    capability: { required: [AGENT_MIGRATION_CAPABILITY] },
     bundle: {
       contentType: AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
       totalBytes: 2,
@@ -413,6 +309,29 @@ test("resumable migration routes enforce source quiescence, immutable generation
   });
   assert.equal(quiesced.status, 200, await quiesced.text());
 
+  const invalidProgress = await fetch(`${base}/source-progress`, {
+    method: "POST",
+    headers: sourceHeaders,
+    body: JSON.stringify({ migrationGeneration: f.transportGeneration, phase: "uploading", files: 1, bytes: 1 }),
+  });
+  assert.equal(invalidProgress.status, 400);
+  assert.equal((await invalidProgress.json() as { code?: string }).code, "migration_source_progress_invalid");
+  const progress = await fetch(`${base}/source-progress`, {
+    method: "POST",
+    headers: sourceHeaders,
+    body: JSON.stringify({ migrationGeneration: f.transportGeneration, phase: "scanning", files: 12, bytes: 3_400 }),
+  });
+  const progressBody = await progress.json() as { advanced?: boolean; prepDeadlineAt?: string };
+  assert.equal(progress.status, 200, JSON.stringify(progressBody));
+  assert.equal(progressBody.advanced, true);
+  assert.ok(progressBody.prepDeadlineAt);
+  const repeatedProgress = await fetch(`${base}/source-progress`, {
+    method: "POST",
+    headers: sourceHeaders,
+    body: JSON.stringify({ migrationGeneration: f.transportGeneration, phase: "scanning", files: 12, bytes: 3_400 }),
+  });
+  assert.equal((await repeatedProgress.json() as { advanced?: boolean }).advanced, false);
+
   const registered = await fetch(`${base}/control`, {
     method: "POST",
     headers: sourceHeaders,
@@ -438,58 +357,11 @@ test("resumable migration routes enforce source quiescence, immutable generation
   assert.equal((await staleReceipt.json() as { code?: string }).code, "migration_generation_stale");
 });
 
-test("agent migration source-ready API promotes provisioning object-store migration to ready", async ({ app }) => {
-  const f = await seedMigrationApiFixture({ markReady: false, provisioning: true });
+test("agent migration transport-lost API clears provisioning and ready participant migrations", async ({ app }) => {
+  const provisioning = await seedMigrationApiFixture({ provisioning: true });
+  const ready = await seedMigrationApiFixture();
 
-  const ready = await postMigrationSourceReady(app.baseUrl, f.sourceComputerApiKey, f.migrationId, {
-    manifestPath: "object-store:session-source/manifest.json",
-    manifestSha256: "sha256:manifest",
-  });
-  assert.equal(ready.status, 200);
-  assert.equal(ready.json.ok, true);
-  assert.equal((ready.json.migration as { state?: string }).state, "ready");
-
-  const targetReadback = await readMigrationById(app.baseUrl, f.targetComputerApiKey, f.migrationId);
-  assert.equal(targetReadback.state, "ready");
-  assert.equal(targetReadback.manifestPath, "object-store:session-source/manifest.json");
-  assert.equal(targetReadback.manifestSha256, "sha256:manifest");
-
-  const [migrationRow] = await getDb()
-    .select({
-      state: agentMigrations.state,
-      transportProvisionedAt: agentMigrations.transportProvisionedAt,
-      transportErrorCode: agentMigrations.transportErrorCode,
-    })
-    .from(agentMigrations)
-    .where(eq(agentMigrations.id, f.migrationId));
-  assert.equal(migrationRow.state, "ready");
-  assert.ok(migrationRow.transportProvisionedAt);
-  assert.equal(migrationRow.transportErrorCode, null);
-});
-
-test("agent migration source-ready API rejects non-source Computers", async ({ app }) => {
-  const f = await seedMigrationApiFixture({ markReady: false });
-
-  const targetAttempt = await postMigrationSourceReady(app.baseUrl, f.targetComputerApiKey, f.migrationId, {
-    manifestPath: "object-store:session-source/manifest.json",
-    manifestSha256: "sha256:manifest",
-  });
-  assert.equal(targetAttempt.status, 404);
-  assert.equal(targetAttempt.json.code, "migration_missing");
-
-  const [migrationRow] = await getDb()
-    .select({ state: agentMigrations.state, manifestPath: agentMigrations.manifestPath })
-    .from(agentMigrations)
-    .where(eq(agentMigrations.id, f.migrationId));
-  assert.equal(migrationRow.state, "prep");
-  assert.equal(migrationRow.manifestPath, null);
-});
-
-test("agent migration transport-lost API clears provisioning and prep participant migrations", async ({ app }) => {
-  const provisioning = await seedMigrationApiFixture({ markReady: false, provisioning: true });
-  const prep = await seedMigrationApiFixture({ markReady: false });
-
-  for (const f of [provisioning, prep]) {
+  for (const f of [provisioning, ready]) {
     const lost = await postMigrationTransportLost(app.baseUrl, f.sourceComputerApiKey, f.migrationId, {
       message: "MIGRATION_TEST_CLEAR_STUCK",
     });
@@ -722,14 +594,14 @@ test("agent migration target import API drives read/start/flip/arrive with gener
       return "archived" as const;
     },
   });
-  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
+  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
   assert.equal(ready.canDriveTargetImport, true);
   assert.equal(ready.state, "ready");
   assert.equal(ready.sourceMachineId, f.sourceMachineId);
   assert.equal(ready.targetMachineId, f.targetMachineId);
   assert.ok(ready.migrationGeneration);
 
-  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "start-transfer", {
+  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "start-transfer", {
     migrationGeneration: ready.migrationGeneration,
   });
   assert.equal(started.status, 200);
@@ -737,7 +609,7 @@ test("agent migration target import API drives read/start/flip/arrive with gener
   assert.equal(startedMigration.state, "in_transit");
   assert.notEqual(startedMigration.migrationGeneration, ready.migrationGeneration);
 
-  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
     migrationGeneration: startedMigration.migrationGeneration,
   });
   assert.equal(flipped.status, 200);
@@ -747,7 +619,7 @@ test("agent migration target import API drives read/start/flip/arrive with gener
   const [agentAfterFlip] = await getDb().select({ machineId: agents.machineId }).from(agents).where(eq(agents.id, f.agentId));
   assert.equal(agentAfterFlip.machineId, f.targetMachineId);
 
-  const arrived = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "arrived", {
+  const arrived = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "arrived", {
     migrationGeneration: flippedMigration.migrationGeneration,
     reportPath: "migrations/arrival-report.json",
     reportSha256: "sha256:arrival",
@@ -790,11 +662,11 @@ test("arrival observation rechecks the idempotent source archive while target au
       },
     });
 
-    const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
-    const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "start-transfer", {
+    const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
+    const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "start-transfer", {
       migrationGeneration: ready.migrationGeneration,
     });
-    const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+    const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
       migrationGeneration: (started.json.migration as AgentMigrationTargetImportView).migrationGeneration,
     });
     const arrivalBody = {
@@ -806,7 +678,7 @@ test("arrival observation rechecks the idempotent source archive while target au
     firstArrival = postMigrationStep(
       app.baseUrl,
       f.targetComputerApiKey,
-      f.grantKey,
+      f.migrationId,
       "arrived",
       arrivalBody,
     );
@@ -815,7 +687,7 @@ test("arrival observation rechecks the idempotent source archive while target au
     const observed = await postMigrationStep(
       app.baseUrl,
       f.targetComputerApiKey,
-      f.grantKey,
+      f.migrationId,
       "arrived",
       arrivalBody,
     );
@@ -854,14 +726,14 @@ test("agent migration target import API keeps arrival retryable when automatic s
       return "archived" as const;
     },
   });
-  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
-  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "start-transfer", {
+  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
+  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "start-transfer", {
     migrationGeneration: ready.migrationGeneration,
   });
-  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
     migrationGeneration: (started.json.migration as AgentMigrationTargetImportView).migrationGeneration,
   });
-  const arrived = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "arrived", {
+  const arrived = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "arrived", {
     migrationGeneration: (flipped.json.migration as AgentMigrationTargetImportView).migrationGeneration,
     reportPath: "migrations/arrival-report.json",
     reportSha256: "sha256:arrival",
@@ -893,7 +765,7 @@ test("agent migration target import API keeps arrival retryable when automatic s
       return "archived" as const;
     },
   });
-  const retried = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "arrived", {
+  const retried = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "arrived", {
     migrationGeneration: (flipped.json.migration as AgentMigrationTargetImportView).migrationGeneration,
     reportPath: "migrations/arrival-report.json",
     reportSha256: "sha256:arrival",
@@ -905,13 +777,12 @@ test("agent migration target import API keeps arrival retryable when automatic s
   assert.equal(sourceWorkspaceBytes, "");
 });
 
-test("arrival stays pending when the source archive response is lost or late and retries idempotently", async ({ app }) => {
+test("a failed source archive after the flip no longer fails the migration; the archive is retried in the background", async ({ app }) => {
   const f = await seedMigrationApiFixture();
   let startCalls = 0;
   let archiveCalls = 0;
-  let sourceWorkspaceBytes = "source-workspace-exact\n";
   const orchestrator = app.app.get("agentOrchestrator") as Record<string, unknown>;
-  app.app.set("agentOrchestrator", {
+  const fakeOrchestrator = {
     ...orchestrator,
     startAgent: async () => {
       startCalls += 1;
@@ -919,17 +790,17 @@ test("arrival stays pending when the source archive response is lost or late and
     },
     archiveAgentMigrationSourceWorkspace: async () => {
       archiveCalls += 1;
-      sourceWorkspaceBytes = "";
-      if (archiveCalls === 1) throw new Error("source archive response lost after atomic rename");
-      return "already_archived" as const;
+      if (archiveCalls === 1) throw new AgentMigrationSourceArchiveError("NODE_EXDEV");
+      return "archived" as const;
     },
-  });
+  };
+  app.app.set("agentOrchestrator", fakeOrchestrator);
 
-  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
-  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "start-transfer", {
+  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
+  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "start-transfer", {
     migrationGeneration: ready.migrationGeneration,
   });
-  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
     migrationGeneration: (started.json.migration as AgentMigrationTargetImportView).migrationGeneration,
   });
   const arrivalBody = {
@@ -938,42 +809,33 @@ test("arrival stays pending when the source archive response is lost or late and
     reportSha256: "sha256:arrival",
   };
 
-  const first = await postMigrationStep(
-    app.baseUrl,
-    f.targetComputerApiKey,
-    f.grantKey,
-    "arrived",
-    arrivalBody,
-  );
-  assert.equal(first.status, 503);
-  assert.equal(first.json.code, "migration_source_workspace_archive_failed");
-  assert.equal(startCalls, 0, "target start must wait for a confirmed source archive receipt");
-  assert.equal(archiveCalls, 1);
-  assert.equal(sourceWorkspaceBytes, "", "lost response may arrive after the source was already atomically archived");
-  const [pending] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, f.migrationId));
-  assert.equal(pending.state, "arriving", "unconfirmed archive must remain retryable and non-terminal");
-  assert.equal(pending.sourceWorkspaceArchivedAt, null, "a lost archive response must not forge a durable receipt");
-  assert.equal(pending.completedAt, null);
-  const completedReceipts = await getDb()
-    .select({ id: agentMigrationReceiptOutbox.id })
-    .from(agentMigrationReceiptOutbox)
-    .where(eq(agentMigrationReceiptOutbox.migrationId, f.migrationId));
-  assert.equal(completedReceipts.length, 0, "unconfirmed archive must not enqueue completion receipt");
-
-  const retried = await postMigrationStep(
-    app.baseUrl,
-    f.targetComputerApiKey,
-    f.grantKey,
-    "arrived",
-    arrivalBody,
-  );
-  assert.equal(retried.status, 200);
-  assert.equal((retried.json.migration as AgentMigrationTargetImportView).state, "completed");
-  assert.equal(startCalls, 1, "confirmed archive retry must start target exactly once");
-  assert.equal(archiveCalls, 2);
-  assert.equal(sourceWorkspaceBytes, "");
+  const first = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "arrived", arrivalBody);
+  assert.equal(first.status, 200);
+  assert.equal((first.json.migration as AgentMigrationTargetImportView).state, "completed");
+  assert.equal(startCalls, 1, "the agent starts on the target without waiting for source cleanup");
   const [completed] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, f.migrationId));
-  assert.ok(completed.sourceWorkspaceArchivedAt, "already_archived must durably close the archive gate");
+  assert.equal(completed.sourceWorkspaceArchivedAt, null, "an unconfirmed archive is not forged as done");
+  assert.equal(completed.sourceWorkspaceArchiveAttempts, 1);
+  assert.equal(completed.sourceWorkspaceArchiveLastError, "NODE_EXDEV");
+  assert.ok(completed.sourceWorkspaceArchiveRetryAt);
+
+  // A replay with the pre-arrival generation must not trigger another archive request.
+  const replayed = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "arrived", arrivalBody);
+  assert.equal(replayed.status, 409);
+  assert.equal(archiveCalls, 1);
+  assert.equal(startCalls, 1);
+
+  const result = await drainAgentMigrationRemediation({
+    io: app.app.get("io") ?? ({ to: () => ({ emit: () => undefined }) } as never),
+    orchestrator: fakeOrchestrator as never,
+    workerId: "archive-retry",
+    now: new Date(completed.sourceWorkspaceArchiveRetryAt!.getTime() + 1_000),
+  });
+  assert.equal(result.sourceArchive, true);
+  const [archived] = await getDb().select().from(agentMigrations).where(eq(agentMigrations.id, f.migrationId));
+  assert.ok(archived.sourceWorkspaceArchivedAt, "background retry durably records the archive");
+  assert.equal(archived.state, "completed");
+  assert.equal(archiveCalls, 2);
 });
 
 test("agent migration target import API does not complete a reclaimed wake-lock-skipped start", async ({ app }) => {
@@ -1000,11 +862,11 @@ test("agent migration target import API does not complete a reclaimed wake-lock-
     },
   });
 
-  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
-  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "start-transfer", {
+  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
+  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "start-transfer", {
     migrationGeneration: ready.migrationGeneration,
   });
-  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
     migrationGeneration: (started.json.migration as AgentMigrationTargetImportView).migrationGeneration,
   });
   const arrivalBody = {
@@ -1016,7 +878,7 @@ test("agent migration target import API does not complete a reclaimed wake-lock-
   const originalArrival = postMigrationStep(
     app.baseUrl,
     f.targetComputerApiKey,
-    f.grantKey,
+    f.migrationId,
     "arrived",
     arrivalBody,
   );
@@ -1028,7 +890,7 @@ test("agent migration target import API does not complete a reclaimed wake-lock-
   const reclaimed = await postMigrationStep(
     app.baseUrl,
     f.targetComputerApiKey,
-    f.grantKey,
+    f.migrationId,
     "arrived",
     arrivalBody,
   );
@@ -1052,19 +914,19 @@ test("agent migration target import API does not complete a reclaimed wake-lock-
 
 test("agent migration target import API rejects old generations without mutating holder", async ({ app }) => {
   const f = await seedMigrationApiFixture();
-  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
-  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "start-transfer", {
+  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
+  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "start-transfer", {
     migrationGeneration: ready.migrationGeneration,
   });
   assert.equal(started.status, 200);
 
-  const staleFlip = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+  const staleFlip = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
     migrationGeneration: ready.migrationGeneration,
   });
   assert.equal(staleFlip.status, 409);
   assert.equal(staleFlip.json.code, "migration_generation_stale");
 
-  const current = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
+  const current = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
   assert.equal(current.state, "in_transit");
   const [agentRow] = await getDb().select({ machineId: agents.machineId }).from(agents).where(eq(agents.id, f.agentId));
   assert.equal(agentRow.machineId, f.sourceMachineId);
@@ -1072,18 +934,18 @@ test("agent migration target import API rejects old generations without mutating
 
 test("agent migration target import API treats repeated flip callbacks as idempotent success", async ({ app }) => {
   const f = await seedMigrationApiFixture();
-  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
-  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "start-transfer", {
+  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
+  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "start-transfer", {
     migrationGeneration: ready.migrationGeneration,
   });
   assert.equal(started.status, 200);
   const startedMigration = started.json.migration as AgentMigrationTargetImportView;
 
   const [firstFlip, replayedFlip] = await Promise.all([
-    postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+    postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
       migrationGeneration: startedMigration.migrationGeneration,
     }),
-    postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+    postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
       migrationGeneration: startedMigration.migrationGeneration,
     }),
   ]);
@@ -1096,7 +958,7 @@ test("agent migration target import API treats repeated flip callbacks as idempo
   assert.equal(agentRow.machineId, f.targetMachineId);
   const [migrationRow] = await getDb().select({ state: agentMigrations.state, failureReason: agentMigrations.failureReason })
     .from(agentMigrations)
-    .where(eq(agentMigrations.grantKey, f.grantKey));
+    .where(eq(agentMigrations.id, f.migrationId));
   assert.equal(migrationRow.state, "arriving");
   assert.equal(migrationRow.failureReason, null);
 });
@@ -1113,24 +975,24 @@ test("agent migration target import API treats repeated arrive callbacks as idem
       return archiveCalls === 1 ? "archived" as const : "already_archived" as const;
     },
   });
-  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
-  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "start-transfer", {
+  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
+  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "start-transfer", {
     migrationGeneration: ready.migrationGeneration,
   });
   assert.equal(started.status, 200);
-  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
     migrationGeneration: (started.json.migration as AgentMigrationTargetImportView).migrationGeneration,
   });
   assert.equal(flipped.status, 200);
   const flippedMigration = flipped.json.migration as AgentMigrationTargetImportView;
 
   const [firstArrive, replayedArrive] = await Promise.all([
-    postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "arrived", {
+    postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "arrived", {
       migrationGeneration: flippedMigration.migrationGeneration,
       reportPath: "migrations/arrival-report.json",
       reportSha256: "sha256:arrival",
     }),
-    postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "arrived", {
+    postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "arrived", {
       migrationGeneration: flippedMigration.migrationGeneration,
       reportPath: "migrations/arrival-report.json",
       reportSha256: "sha256:arrival",
@@ -1159,14 +1021,14 @@ test("target Computer explicitly reconciles a legacy completed row with the auth
     },
   });
 
-  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
-  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "start-transfer", {
+  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
+  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "start-transfer", {
     migrationGeneration: ready.migrationGeneration,
   });
-  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+  const flipped = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
     migrationGeneration: (started.json.migration as AgentMigrationTargetImportView).migrationGeneration,
   });
-  const completed = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "arrived", {
+  const completed = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "arrived", {
     migrationGeneration: (flipped.json.migration as AgentMigrationTargetImportView).migrationGeneration,
     reportPath: "migrations/arrival-report.json",
     reportSha256: "sha256:arrival",
@@ -1177,7 +1039,7 @@ test("target Computer explicitly reconciles a legacy completed row with the auth
   await getDb().update(agentMigrations)
     .set({ sourceWorkspaceArchivedAt: null })
     .where(eq(agentMigrations.id, f.migrationId));
-  const staleReconciliation = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "arrived", {
+  const staleReconciliation = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "arrived", {
     migrationGeneration: (flipped.json.migration as AgentMigrationTargetImportView).migrationGeneration,
     reportPath: "migrations/arrival-report.json",
     reportSha256: "sha256:arrival",
@@ -1185,9 +1047,9 @@ test("target Computer explicitly reconciles a legacy completed row with the auth
   assert.equal(staleReconciliation.status, 409);
   assert.equal(staleReconciliation.json.code, "migration_generation_stale");
   assert.equal(archiveInputs.length, 1, "stale recovery authority must fail before another source archive request");
-  const legacy = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
+  const legacy = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
   assert.equal(legacy.state, "completed");
-  const reconciled = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "arrived", {
+  const reconciled = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "arrived", {
     migrationGeneration: legacy.migrationGeneration,
     reportPath: "migrations/arrival-report.json",
     reportSha256: "sha256:arrival",
@@ -1210,14 +1072,14 @@ test("agent migration target import API rejects flip when holder moved to anothe
     f.ownerId,
     "other-machine",
   );
-  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
-  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "start-transfer", {
+  const ready = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
+  const started = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "start-transfer", {
     migrationGeneration: ready.migrationGeneration,
   });
   assert.equal(started.status, 200);
   await getDb().update(agents).set({ machineId: otherMachine.id }).where(eq(agents.id, f.agentId));
 
-  const mismatchedFlip = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.grantKey, "flip-machine", {
+  const mismatchedFlip = await postMigrationStep(app.baseUrl, f.targetComputerApiKey, f.migrationId, "flip-machine", {
     migrationGeneration: (started.json.migration as AgentMigrationTargetImportView).migrationGeneration,
   });
   assert.equal(mismatchedFlip.status, 409);
@@ -1225,20 +1087,20 @@ test("agent migration target import API rejects flip when holder moved to anothe
 
   const [agentRow] = await getDb().select({ machineId: agents.machineId }).from(agents).where(eq(agents.id, f.agentId));
   assert.equal(agentRow.machineId, otherMachine.id);
-  const [migrationRow] = await getDb().select({ state: agentMigrations.state }).from(agentMigrations).where(eq(agentMigrations.grantKey, f.grantKey));
+  const [migrationRow] = await getDb().select({ state: agentMigrations.state }).from(agentMigrations).where(eq(agentMigrations.id, f.migrationId));
   assert.equal(migrationRow.state, "in_transit");
 });
 
 test("agent migration target import API rejects source-machine Computer drive attempts", async ({ app }) => {
   const f = await seedMigrationApiFixture();
-  const res = await fetch(`${app.baseUrl}/internal/computer/agent-migrations/${encodeURIComponent(f.grantKey)}`, {
+  const res = await fetch(`${app.baseUrl}/internal/computer/agent-migrations/by-id/${encodeURIComponent(f.migrationId)}`, {
     method: "GET",
     headers: authHeaders(f.sourceComputerApiKey),
   });
   assert.equal(res.status, 404);
   assert.equal((await res.json() as { code?: string }).code, "migration_missing");
 
-  const targetReadback = await readMigration(app.baseUrl, f.targetComputerApiKey, f.grantKey);
+  const targetReadback = await readMigration(app.baseUrl, f.targetComputerApiKey, f.migrationId);
   assert.equal(targetReadback.state, "ready");
   const [agentRow] = await getDb().select({ machineId: agents.machineId }).from(agents).where(eq(agents.id, f.agentId));
   assert.equal(agentRow.machineId, f.sourceMachineId);

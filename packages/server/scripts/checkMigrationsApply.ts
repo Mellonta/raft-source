@@ -19,7 +19,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
-import { migratePglite } from "../src/db/pgliteMigrations.js";
+import { migratePglite } from "../src/db/pgliteMigrations";
 
 const DRIZZLE_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -188,6 +188,70 @@ async function verifyAgentMigrationSupportRefBackfillFixture() {
   }
 }
 
+async function verifyChannelConversionFoundationBackfillFixture() {
+  const client = new PGlite();
+  try {
+    await client.exec(`
+      CREATE TABLE servers (id uuid PRIMARY KEY);
+      CREATE TABLE users (id uuid PRIMARY KEY);
+      CREATE TABLE channels (id uuid PRIMARY KEY, server_id uuid NOT NULL, type text NOT NULL);
+      CREATE TABLE feature_flags (
+        key text PRIMARY KEY,
+        description text,
+        enabled boolean NOT NULL DEFAULT false,
+        kill_switch boolean NOT NULL DEFAULT false,
+        randomization_unit text,
+        default_enabled boolean NOT NULL DEFAULT false,
+        default_variant text,
+        salt text
+      );
+      CREATE TABLE action_cards (id uuid PRIMARY KEY);
+      CREATE TABLE channel_conversion_jobs (
+        id uuid PRIMARY KEY,
+        server_id uuid NOT NULL,
+        source_channel_id uuid NOT NULL,
+        source_channel_type text NOT NULL,
+        status text NOT NULL,
+        phase text NOT NULL,
+        canonical_channel_id uuid,
+        progress jsonb NOT NULL DEFAULT '{}'
+      );
+      INSERT INTO servers VALUES ('10000000-0000-4000-8000-000000000001');
+      INSERT INTO channels VALUES
+        ('20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'channel'),
+        ('20000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000001', 'private'),
+        ('20000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000001', 'private');
+      INSERT INTO channel_conversion_jobs (id, server_id, source_channel_id, source_channel_type, status, phase) VALUES
+        ('30000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', 'channel', 'pending', 'prepare'),
+        ('30000000-0000-4000-8000-000000000002', '10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', 'private', 'running', 'move_parent_messages'),
+        ('30000000-0000-4000-8000-000000000003', '10000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000003', 'private', 'failed', 'prepare_threads');
+    `);
+
+    for (const migrationFile of ["0266_channel_joint_conversion.sql"]) {
+      const sqlText = await readFile(path.join(DRIZZLE_DIR, migrationFile), "utf8");
+      for (const statement of splitStatements(sqlText)) await client.exec(statement);
+    }
+
+    const rows = await client.query<{ status: string; state: string; fence_count: number }>(`
+      SELECT job.status, job.state, count(fence.id)::int AS fence_count
+        FROM channel_conversion_jobs job
+        LEFT JOIN channel_conversion_fences fence ON fence.job_id = job.id AND fence.status = 'active'
+       GROUP BY job.id, job.status, job.state
+       ORDER BY job.id
+    `);
+    const expected = [
+      { status: "pending", state: "fenced", fence_count: 1 },
+      { status: "running", state: "copying", fence_count: 1 },
+      { status: "failed", state: "retry_waiting", fence_count: 1 },
+    ];
+    if (JSON.stringify(rows.rows) !== JSON.stringify(expected)) {
+      throw new Error(`channel conversion foundation backfill mismatch: ${JSON.stringify(rows.rows)}`);
+    }
+  } finally {
+    await client.close();
+  }
+}
+
 async function main() {
   const journal = JSON.parse(
     await readFile(path.join(DRIZZLE_DIR, "meta", "_journal.json"), "utf8"),
@@ -212,6 +276,7 @@ async function main() {
 
   await verifySecondAgentBackfillFixture();
   await verifyAgentMigrationSupportRefBackfillFixture();
+  await verifyChannelConversionFoundationBackfillFixture();
 
   if (appliedCount !== expectedCount) {
     console.error(
@@ -231,6 +296,9 @@ async function main() {
   );
   console.log(
     "✓ Migration 0219 backfilled distinct support refs for retained migration rows before enforcing NOT NULL.",
+  );
+  console.log(
+    "✓ Migration 0266 backfilled pending/running/failed retained conversion jobs with state and active fences.",
   );
 }
 

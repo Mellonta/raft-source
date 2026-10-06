@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { DatabaseExecutor } from "../db/index.js";
-import { userLegalAcceptances } from "../db/schema.js";
+import type { DatabaseExecutor } from "../db/index";
+import { userLegalAcceptances } from "../db/schema";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 
 export type LegalAcceptanceSource = "signup" | "oauth" | "invite";

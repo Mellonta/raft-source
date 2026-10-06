@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { cliError } from "../../core/errors.js";
+import { cliError } from "../../core/errors";
 
 export interface PreparedPrivateSecretSink {
   filePath: string;

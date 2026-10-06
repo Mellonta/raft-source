@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
@@ -8,37 +8,33 @@ import {
   type SlackBridgeProvisioningResponse,
   type SlackBridgeSetupStage,
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
-  agents,
   channels,
   externalAppInstalls,
   externalAppRegistrations,
   externalAppServerGrants,
   externalHumanIdentityLinks,
-  externalAuthorPolicies,
   externalChannelBindings,
   externalOAuthAttempts,
   oauthClientInstalls,
   oauthClients,
-  serverMembers,
   users,
-} from "../db/schema.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { slackBridgeIngressObservationsTotal } from "../metrics.js";
-import { createServer } from "../services/serverService.js";
-import type { ExternalAuthorPolicyRuntimeAuthority } from "../services/externalAppControlPlaneService.js";
+} from "../db/schema";
+import { signAccessToken } from "../middleware/auth";
+import { slackBridgeIngressObservationsTotal } from "../metrics";
+import { createServer } from "../services/serverService";
 import {
   SLACK_OAUTH_APP_CREDENTIAL_HANDLE_SCHEMA,
   SLACK_OAUTH_CODE_HANDLE_SCHEMA,
   type SlackOAuthExchangeRequest,
-} from "../services/slackProviderAdapter.js";
-import { openTestApp } from "../test/integration/app.js";
+} from "../services/slackProviderAdapter";
+import { openTestApp } from "../test/integration/app";
 import {
   SLACK_BRIDGE_REQUIRED_BOT_SCOPES,
   type SlackBridgeProvisioningControlPlane,
   type SlackBridgeRouteDependencies,
-} from "./slackBridge.js";
+} from "./slackBridge";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -137,7 +133,6 @@ function runtime(input: {
     ReturnType<SlackBridgeRouteDependencies["exchangeOAuth"]>;
   resolveOAuthCompletionRedirectPath?: SlackBridgeRouteDependencies["resolveOAuthCompletionRedirectPath"];
   isLaunchEnabled?: SlackBridgeRouteDependencies["isLaunchEnabled"];
-  resolveAuthorPolicyAuthority?: SlackBridgeRouteDependencies["resolveAuthorPolicyAuthority"];
   provisioning?: SlackBridgeProvisioningControlPlane;
   requestLifecycleReconcile?: SlackBridgeRouteDependencies["requestLifecycleReconcile"];
   onLifecycleError?: SlackBridgeRouteDependencies["onLifecycleError"];
@@ -197,6 +192,7 @@ function runtime(input: {
         providerTeamId: "T_ROUTE_TEST",
         providerEnterpriseId: null,
         providerUserId: "U_ROUTE_OWNER",
+        installerIsWorkspaceAdmin: true,
         botUserId: "U_ROUTE_BOT",
         providerBotId: "B_ROUTE_BOT",
         workspaceName: "Route Test",
@@ -246,9 +242,6 @@ function runtime(input: {
         signingSecretRevision: 1,
       };
     },
-    ...(input.resolveAuthorPolicyAuthority
-      ? { resolveAuthorPolicyAuthority: input.resolveAuthorPolicyAuthority }
-      : {}),
     ...(input.provisioning ? { provisioning: input.provisioning } : {}),
     ...(input.requestLifecycleReconcile
       ? { requestLifecycleReconcile: input.requestLifecycleReconcile }
@@ -275,92 +268,6 @@ async function beginOAuth(input: {
       // Client-supplied scope/intent fields must be ignored.
       requestedScopes: ["admin", "tokens:write"],
       grantIntent: "caller-controlled",
-    }),
-  });
-}
-
-async function seedAuthorPolicySurface() {
-  const suffix = randomUUID();
-  const seeded = await seedControlPlane({
-    providerAppId: `A_ROUTE_AUTHOR_${suffix}`,
-    providerOAuthClientId: `111.222.${suffix}`,
-  });
-  const [channel] = await getDb().insert(channels).values({
-    serverId: seeded.server.id,
-    name: `slack-author-${randomUUID()}`,
-    type: "channel",
-  }).returning();
-  const [install] = await getDb().insert(externalAppInstalls).values({
-    serverId: seeded.server.id,
-    registrationId: seeded.registration.id,
-    serverGrantId: seeded.grant.id,
-    grantEpoch: seeded.grant.grantEpoch,
-    state: "active",
-    connectionEpoch: 3,
-    scopeRevision: 2,
-    credentialRevision: 4,
-    installedScopes: [...SLACK_BRIDGE_REQUIRED_BOT_SCOPES],
-    providerAppId: seeded.registration.providerAppId,
-    providerTeamId: "T_AUTHOR_POLICY",
-    providerEnterpriseId: null,
-    authorityType: "team",
-    providerAuthorityId: "T_AUTHOR_POLICY",
-  }).returning();
-  const [binding] = await getDb().insert(externalChannelBindings).values({
-    serverId: seeded.server.id,
-    registrationId: seeded.registration.id,
-    installId: install.id,
-    channelId: channel.id,
-    providerConversationId: "C_AUTHOR_POLICY",
-    providerConversationKind: "public_channel",
-    privacyClass: "public",
-    state: "active",
-    grantEpoch: seeded.grant.grantEpoch,
-    connectionEpoch: install.connectionEpoch,
-    bindingEpoch: 5,
-    consentedByType: "human",
-    consentedById: seeded.owner.id,
-    consentedAt: new Date(),
-  }).returning();
-  const [agent] = await getDb().insert(agents).values({
-    serverId: seeded.server.id,
-    name: `slack-agent-${randomUUID().slice(0, 8)}`,
-    displayName: "Slack Agent Before Rename",
-    status: "active",
-  }).returning();
-  const [member] = await getDb().insert(users).values({
-    email: `slack-member-${randomUUID()}@raft.test`,
-    name: `slack-member-${randomUUID().slice(0, 8)}`,
-    displayName: "Slack Ordinary Member",
-    passwordHash: "not-used",
-    emailVerified: true,
-    profileSetupCompletedAt: new Date(),
-  }).returning();
-  await getDb().insert(serverMembers).values({
-    serverId: seeded.server.id,
-    userId: member.id,
-    role: "member",
-  });
-  return { ...seeded, channel, install, binding, agent, member };
-}
-
-async function putAuthorPolicy(input: {
-  baseUrl: string;
-  token: string;
-  serverId: string;
-  bindingId: string;
-  authorType: "user" | "agent";
-  authorId: string;
-  state: "granted" | "revoked";
-}) {
-  return fetch(`${input.baseUrl}/api/slack-bridge/author-policies`, {
-    method: "PUT",
-    headers: headers(input),
-    body: JSON.stringify({
-      bindingId: input.bindingId,
-      authorType: input.authorType,
-      authorId: input.authorId,
-      state: input.state,
     }),
   });
 }
@@ -595,8 +502,6 @@ test("typed provisioning routes preserve principal authority and the 1:1 mutatio
 
 test("launch gate fail-closes new setup and OAuth while preserving removal and disconnect", async () => {
   const calls: string[] = [];
-  let authorAuthority: ExternalAuthorPolicyRuntimeAuthority | null = null;
-  let authorAuthorityCalls = 0;
   const provisioning: SlackBridgeProvisioningControlPlane = {
     async load() { calls.push("load"); return provisioningResponse("connect"); },
     async connect() { calls.push("connect"); return provisioningResponse("oauth"); },
@@ -609,10 +514,6 @@ test("launch gate fail-closes new setup and OAuth while preserving removal and d
   const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false, slackBridge: runtime({
       provisioning,
       isLaunchEnabled: async () => false,
-      resolveAuthorPolicyAuthority: async ({ bindingId }) => {
-        authorAuthorityCalls += 1;
-        return authorAuthority?.bindingId === bindingId ? authorAuthority : null;
-      },
     }) });
   try {
     const seeded = await seedControlPlane();
@@ -649,38 +550,6 @@ test("launch gate fail-closes new setup and OAuth while preserving removal and d
     assert.equal(oauth.status, 403);
     assert.deepEqual(await oauth.json(), { ok: false, code: "slack_bridge_disabled" });
     assert.equal((await getDb().select().from(externalOAuthAttempts)).length, 0);
-
-    const authorSurface = await seedAuthorPolicySurface();
-    authorAuthority = {
-      provider: "slack",
-      registrationId: authorSurface.registration.id,
-      installId: authorSurface.install.id,
-      bindingId: authorSurface.binding.id,
-      bindingEpoch: authorSurface.binding.bindingEpoch,
-      consentRevision: 1,
-    };
-    const grant = await putAuthorPolicy({
-      baseUrl: app.baseUrl,
-      token: signAccessToken(authorSurface.owner.id),
-      serverId: authorSurface.server.id,
-      bindingId: authorSurface.binding.id,
-      authorType: "agent",
-      authorId: authorSurface.agent.id,
-      state: "granted",
-    });
-    assert.equal(grant.status, 403);
-    assert.equal(authorAuthorityCalls, 0);
-    const revoke = await putAuthorPolicy({
-      baseUrl: app.baseUrl,
-      token: signAccessToken(authorSurface.owner.id),
-      serverId: authorSurface.server.id,
-      bindingId: authorSurface.binding.id,
-      authorType: "agent",
-      authorId: authorSurface.agent.id,
-      state: "revoked",
-    });
-    assert.equal(revoke.status, 201);
-    assert.equal(authorAuthorityCalls, 1);
 
     const removal = await fetch(`${app.baseUrl}/api/slack-bridge/provisioning/channel-pairs`, {
       method: "DELETE",
@@ -812,156 +681,6 @@ test("provisioning rejects malformed pairs and invalid backend projections witho
   }
 });
 
-test("owner-managed author policy grant, refresh, revoke, and replay stay binding- and revision-scoped", async () => {
-  let authority: Awaited<ReturnType<NonNullable<SlackBridgeRouteDependencies["resolveAuthorPolicyAuthority"]>>> = null;
-  const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false, slackBridge: runtime({
-      resolveAuthorPolicyAuthority: async ({ bindingId }) =>
-        authority?.bindingId === bindingId ? authority : null,
-    }) });
-  try {
-    const seeded = await seedAuthorPolicySurface();
-    authority = {
-      provider: "slack",
-      registrationId: seeded.registration.id,
-      installId: seeded.install.id,
-      bindingId: seeded.binding.id,
-      bindingEpoch: seeded.binding.bindingEpoch,
-      consentRevision: 7,
-    };
-    const memberDenied = await putAuthorPolicy({
-      baseUrl: app.baseUrl,
-      token: signAccessToken(seeded.member.id),
-      serverId: seeded.server.id,
-      bindingId: seeded.binding.id,
-      authorType: "agent",
-      authorId: seeded.agent.id,
-      state: "granted",
-    });
-    assert.equal(memberDenied.status, 403);
-    assert.equal((await getDb().select().from(externalAuthorPolicies)).length, 0);
-
-    const ownerToken = signAccessToken(seeded.owner.id);
-    const foreignServer = await createServer(
-      "Slack Author Foreign",
-      `slack-author-foreign-${randomUUID()}`,
-      seeded.owner.id,
-    );
-    const [foreignAgent] = await getDb().insert(agents).values({
-      serverId: foreignServer.id,
-      name: `slack-foreign-agent-${randomUUID().slice(0, 8)}`,
-      displayName: "Slack Foreign Agent",
-      status: "active",
-    }).returning();
-    const foreignDenied = await putAuthorPolicy({
-      baseUrl: app.baseUrl,
-      token: ownerToken,
-      serverId: seeded.server.id,
-      bindingId: seeded.binding.id,
-      authorType: "agent",
-      authorId: foreignAgent.id,
-      state: "granted",
-    });
-    assert.equal(foreignDenied.status, 403);
-    assert.equal((await getDb().select().from(externalAuthorPolicies)).length, 0);
-
-    const granted = await putAuthorPolicy({
-      baseUrl: app.baseUrl,
-      token: ownerToken,
-      serverId: seeded.server.id,
-      bindingId: seeded.binding.id,
-      authorType: "agent",
-      authorId: seeded.agent.id,
-      state: "granted",
-    });
-    assert.equal(granted.status, 201, await granted.text());
-    let [policy] = await getDb().select().from(externalAuthorPolicies);
-    assert.equal(policy.authorType, "agent");
-    assert.equal(policy.authorId, seeded.agent.id);
-    assert.equal(policy.displayName, "Slack Agent Before Rename");
-    assert.equal(policy.fallbackKind, "agent");
-    assert.equal(policy.consentRevision, 7);
-    assert.equal(policy.state, "granted");
-
-    const replay = await putAuthorPolicy({
-      baseUrl: app.baseUrl,
-      token: ownerToken,
-      serverId: seeded.server.id,
-      bindingId: seeded.binding.id,
-      authorType: "agent",
-      authorId: seeded.agent.id,
-      state: "granted",
-    });
-    assert.equal(replay.status, 200);
-    assert.equal((await getDb().select().from(externalAuthorPolicies)).length, 1);
-
-    await getDb().update(agents).set({ displayName: "Slack Agent After Rename" })
-      .where(eq(agents.id, seeded.agent.id));
-    const refreshed = await putAuthorPolicy({
-      baseUrl: app.baseUrl,
-      token: ownerToken,
-      serverId: seeded.server.id,
-      bindingId: seeded.binding.id,
-      authorType: "agent",
-      authorId: seeded.agent.id,
-      state: "granted",
-    });
-    assert.equal(refreshed.status, 200);
-    [policy] = await getDb().select().from(externalAuthorPolicies)
-      .where(eq(externalAuthorPolicies.authorId, seeded.agent.id));
-    assert.equal(policy.displayName, "Slack Agent After Rename");
-
-    const humanGranted = await putAuthorPolicy({
-      baseUrl: app.baseUrl,
-      token: ownerToken,
-      serverId: seeded.server.id,
-      bindingId: seeded.binding.id,
-      authorType: "user",
-      authorId: seeded.member.id,
-      state: "granted",
-    });
-    assert.equal(humanGranted.status, 201);
-    const [humanPolicy] = await getDb().select().from(externalAuthorPolicies)
-      .where(eq(externalAuthorPolicies.authorId, seeded.member.id));
-    assert.equal(humanPolicy.authorType, "user");
-    assert.equal(humanPolicy.displayName, "Slack Ordinary Member");
-    assert.equal(humanPolicy.fallbackKind, "human");
-    assert.equal(humanPolicy.consentRevision, 7);
-    assert.equal(humanPolicy.state, "granted");
-
-    const revoked = await putAuthorPolicy({
-      baseUrl: app.baseUrl,
-      token: ownerToken,
-      serverId: seeded.server.id,
-      bindingId: seeded.binding.id,
-      authorType: "agent",
-      authorId: seeded.agent.id,
-      state: "revoked",
-    });
-    assert.equal(revoked.status, 200);
-    [policy] = await getDb().select().from(externalAuthorPolicies)
-      .where(eq(externalAuthorPolicies.authorId, seeded.agent.id));
-    assert.equal(policy.state, "revoked");
-    assert.equal((await getDb().select().from(externalAuthorPolicies)).length, 2);
-
-    authority = { ...authority, bindingEpoch: authority.bindingEpoch + 1 };
-    const staleRuntime = await putAuthorPolicy({
-      baseUrl: app.baseUrl,
-      token: ownerToken,
-      serverId: seeded.server.id,
-      bindingId: seeded.binding.id,
-      authorType: "agent",
-      authorId: seeded.agent.id,
-      state: "granted",
-    });
-    assert.equal(staleRuntime.status, 403);
-    [policy] = await getDb().select().from(externalAuthorPolicies)
-      .where(eq(externalAuthorPolicies.authorId, seeded.agent.id));
-    assert.equal(policy.state, "revoked");
-  } finally {
-    await app.close();
-  }
-});
-
 test("OAuth route fixes scopes, uses one-time state, leases managed handles, and redirects to trusted IM Bridges", async () => {
   const counters = { leases: 0, captures: 0, exchanges: 0, ingress: 0 };
   const resolvedServerIds: string[] = [];
@@ -1069,18 +788,50 @@ test("OAuth route fixes scopes, uses one-time state, leases managed handles, and
       `${app.baseUrl}/api/slack-bridge/oauth/callback`
       + `?state=${encodeURIComponent(rejectedState)}`
       + "&error=access_denied&error_description=provider-private-detail",
+      { redirect: "manual" },
     );
     const rejectedText = await rejected.text();
-    assert.equal(rejected.status, 400);
-    assert.deepEqual(JSON.parse(rejectedText), {
-      ok: false,
-      code: "slack_oauth_provider_rejected",
-    });
+    assert.equal(rejected.status, 302, rejectedText);
+    assert.equal(
+      rejected.headers.get("location"),
+      "https://app.raft.test/s/slack-route/settings/im-bridges?slack_oauth=error&code=slack_oauth_provider_rejected",
+    );
     assert.equal(rejectedText.includes("access_denied"), false);
     assert.equal(rejectedText.includes("provider-private-detail"), false);
     assert.equal(counters.leases, 1);
     assert.equal(counters.captures, 1);
     assert.equal(counters.exchanges, 1);
+
+    const missingCodeStart = await beginOAuth({
+      baseUrl: app.baseUrl,
+      token,
+      serverId: seeded.server.id,
+      registrationId: seeded.registration.id,
+      serverGrantId: seeded.grant.id,
+      grantEpoch: 1,
+    });
+    const missingCodeState = new URL(
+      (await missingCodeStart.json() as { authorizationUrl: string }).authorizationUrl,
+    ).searchParams.get("state")!;
+    const missingCode = await fetch(
+      `${app.baseUrl}/api/slack-bridge/oauth/callback`
+      + `?state=${encodeURIComponent(missingCodeState)}`,
+      { redirect: "manual" },
+    );
+    assert.equal(missingCode.status, 302);
+    assert.equal(
+      missingCode.headers.get("location"),
+      "https://app.raft.test/s/slack-route/settings/im-bridges?slack_oauth=error&code=slack_oauth_provider_rejected",
+    );
+    assert.equal(counters.leases, 1, "missing-code rejection must not lease credentials");
+    assert.equal(counters.captures, 1, "missing-code rejection must not capture a code");
+    assert.equal(counters.exchanges, 1, "missing-code rejection must not call the provider");
+    const missingCodeReplay = await fetch(
+      `${app.baseUrl}/api/slack-bridge/oauth/callback`
+      + `?state=${encodeURIComponent(missingCodeState)}`,
+      { redirect: "manual" },
+    );
+    assert.equal(missingCodeReplay.status, 400, "the missing-code callback remains single-use");
   } finally {
     await app.close();
   }

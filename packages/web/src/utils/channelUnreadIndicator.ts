@@ -2,10 +2,17 @@ export function getChannelUnreadIndicatorState(opts: {
   unread: number;
   joined: boolean;
   showMutedIcon: boolean;
-}): { showLoudUnreadBadge: boolean; showQuietUnreadCount: boolean } {
+  /**
+   * The unread summary's `hasNew`: a non-joined public channel with messages past
+   * the cursor. It has no exact count (unread is 0), so it only lights the quiet
+   * indicator of a non-joined row.
+   */
+  hasNew?: boolean;
+}): { showLoudUnreadBadge: boolean; showQuietUnreadCount: boolean; showQuietNewDot: boolean } {
   const showLoudUnreadBadge = opts.unread > 0 && opts.joined && !opts.showMutedIcon;
   const showQuietUnreadCount = opts.unread > 0 && (!opts.joined || opts.showMutedIcon);
-  return { showLoudUnreadBadge, showQuietUnreadCount };
+  const showQuietNewDot = !showQuietUnreadCount && !opts.joined && opts.hasNew === true;
+  return { showLoudUnreadBadge, showQuietUnreadCount, showQuietNewDot };
 }
 
 export function shouldShowActivityMutedIcon(opts: {

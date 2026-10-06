@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import type { ReactElement } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
@@ -131,13 +130,10 @@ test("the declared-scopes picker renders migrated Chinese copy", () => {
   seed();
   renderInZh(<DeclaredScopesPicker value={[]} onChange={() => {}} />);
 
-  assert.ok(screen.getByText("声明的权限范围"), "declared scopes title");
-  assert.ok(
-    screen.getByText(
-      "选择此应用可以请求哪些权限。已有连接会保留已授予的权限，直到重新连接或被撤销。",
-    ),
-    "declared scopes description",
-  );
+  assert.ok(screen.getByText("身份"));
+  assert.ok(screen.getByText("Agent 消息"));
+  assert.equal(screen.getByRole("checkbox", { name: "email" }).closest("details:not([open])"), null);
+
 });
 
 test("every id this sub-batch added is present and actually translated in both catalogs", () => {

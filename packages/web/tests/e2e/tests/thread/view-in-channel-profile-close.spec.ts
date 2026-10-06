@@ -51,14 +51,14 @@ test.describe("thread view-in-channel profile close", () => {
 
     await seedAgentMessages(
       seedState,
-      seedState.agent.id,
+      seedState.externalAgent.id,
       login.accessToken,
       `#${seedState.channel.name}:${parentMessage.id.slice(0, 8)}`,
       [agentReply],
     );
     await seedAgentMessages(
       seedState,
-      seedState.agent.id,
+      seedState.externalAgent.id,
       login.accessToken,
       `#${seedState.channel.name}`,
       [channelAgentReply],
@@ -125,7 +125,8 @@ test.describe("thread view-in-channel profile close", () => {
     await expect(threadPanel.getByText(firstReply)).toBeVisible();
     await expect(threadPanel.getByText(channelFollowup)).toHaveCount(0);
 
-    await page.getByRole("button", { name: "View in channel" }).click();
+    await page.getByTestId("thread-overflow-trigger").click();
+    await page.getByTestId("thread-overflow-view-in-channel").click();
     await expect(page).toHaveURL(new RegExp(`msg=${parentMessage.id}`));
     await expect(page.getByTestId("thread-message-scroller")).toHaveCount(0);
 

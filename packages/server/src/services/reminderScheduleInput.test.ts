@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { resolveScheduleInput } from "./reminderScheduleInput.js";
+import { resolveScheduleInput } from "./reminderScheduleInput";
 
 // R4 deterministic contract: fake `now` pins the math.
 // Pick a value that is not a round second, to catch accidental rounding.

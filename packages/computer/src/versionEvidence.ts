@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { isShellEnvOutcome } from "./shellEnvCapture.js";
+import { isShellEnvOutcome } from "./shellEnvCapture";
 
 export interface ProcessVersionEvidence {
   version: string | null;

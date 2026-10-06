@@ -6,6 +6,17 @@ const stableTagPattern = new RegExp(`^computer-v(${baseVersionPattern})$`);
 const rcTagPattern = new RegExp(
   `^computer-v((${baseVersionPattern})-rc\\.([1-9][0-9]*))$`,
 );
+// task #816 — feature-branch channel tags: computer-v<base>-<channel>.<n>.
+// The channel slug follows the Computer CLI's named-channel grammar
+// (packages/computer/src/lib/channelState.ts) and refuses cohort words so a
+// feature tag can never be read as an RC or a stable release.
+const featureChannelSlugPattern = "[a-z0-9][a-z0-9-]{1,62}[a-z0-9]";
+const featureTagPattern = new RegExp(
+  `^computer-v((${baseVersionPattern})-(${featureChannelSlugPattern})\\.([1-9][0-9]*))$`,
+);
+export const RESERVED_CHANNEL_WORDS = new Set([
+  "main", "alpha", "latest", "stable", "rc", "release", "staging", "production", "prod", "nightly", "preview", "pinned", "default",
+]);
 
 export function classifyComputerReleaseTag(tag, packageVersion) {
   if (typeof tag !== "string" || typeof packageVersion !== "string") {
@@ -46,8 +57,32 @@ export function classifyComputerReleaseTag(tag, packageVersion) {
     };
   }
 
+  const feature = featureTagPattern.exec(tag);
+  if (feature) {
+    const [, tagVersion, baseVersion, featureChannel, sequence] = feature;
+    if (RESERVED_CHANNEL_WORDS.has(featureChannel)) {
+      throw new Error(`Feature channel '${featureChannel}' is a reserved cohort word`);
+    }
+    if (baseVersion !== packageVersion) {
+      throw new Error(
+        `Feature base version ${baseVersion} does not match Computer package ${packageVersion}`,
+      );
+    }
+    return {
+      channel: "feature",
+      // Unlike an RC, a feature build's binary is stamped with the full
+      // channel-suffixed version so machines on the feature channel can tell
+      // it apart from every stable/alpha build of the same base.
+      version: tagVersion,
+      baseVersion,
+      featureChannel,
+      sequence: Number(sequence),
+      packageVersion,
+    };
+  }
+
   throw new Error(
-    "Tag must match computer-v<semver> or computer-v<semver>-rc.<positive integer>",
+    "Tag must match computer-v<semver>, computer-v<semver>-rc.<positive integer>, or computer-v<semver>-<channel>.<positive integer>",
   );
 }
 

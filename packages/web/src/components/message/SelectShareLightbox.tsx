@@ -1,8 +1,9 @@
+import { Card, Button } from "raft-ui";
+import CloseButton from "../ui/CloseButton";
 import { useEffect, useState } from "react";
 import type { SyntheticEvent } from "react";
 import { useIntl } from "react-intl";
 import { Check, Copy, Download, Share2, X } from "lucide-react";
-import { Button } from "raft-ui";
 import { downloadDataUrl, resolveCapturePixelRatio } from "../../utils/selectScreenshot";
 import {
   copyPngDataUrlToClipboard,
@@ -184,33 +185,33 @@ export default function SelectShareLightbox({
       className="flex items-center justify-center p-4"
       data-testid="select-share-lightbox"
     >
-      <div
-        className="card-brutal flex max-h-[90vh] w-full max-w-3xl flex-col"
+      <Card
+        className=" flex max-h-[90vh] w-full max-w-3xl flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex h-panel-header shrink-0 items-center justify-between border-b-2 border-black bg-white px-5">
-          <h2 className="text-base font-bold text-black">{formatMessage({ id: "message.selectShare.title" })}</h2>
-          <Button
+        <div className="flex h-panel-header shrink-0 items-center justify-between border-b-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-5">
+          <h2 className="text-base font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "message.selectShare.title" })}</h2>
+          <CloseButton
             type="button"
             onClick={onClose}
-            size="icon-sm"
-            variant="default"
+
+
             aria-label={formatMessage({ id: "common.close" })}
             data-testid="select-share-lightbox-close"
           >
             <X size={14} />
-          </Button>
+          </CloseButton>
         </div>
-        <div className="flex-1 overflow-auto bg-white p-4">
+        <div className="flex-1 overflow-auto bg-layer-panel theme-brutal:bg-white p-4">
           <img
             src={dataUrl}
             alt={formatMessage({ id: "message.selectShare.alt" })}
-            className="mx-auto block max-w-full border-2 border-black shadow-brutal"
+            className="mx-auto block max-w-full border-2 border-line-muted theme-brutal:border-black shadow-raft-md theme-brutal:shadow-brutal"
             onLoad={handlePreviewImageLoad}
             style={previewSourceWidth ? { width: `${previewSourceWidth}px` } : undefined}
           />
         </div>
-        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t-2 border-black bg-white px-4 py-3 sm:px-5">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-4 py-3 sm:px-5">
           {copyError && (
             <p
               role="alert"
@@ -225,7 +226,7 @@ export default function SelectShareLightbox({
               <Button
                 type="button"
                 size="sm"
-                variant="default"
+                variant="outline"
                 onClick={() => void handleCopyImage()}
                 disabled={sharingToX || savingImage || copyingImage}
                 loading={copyingImage}
@@ -241,7 +242,7 @@ export default function SelectShareLightbox({
             <Button
               type="button"
               size="sm"
-              variant="default"
+              variant="outline"
               onClick={() => void handleDownload()}
               disabled={sharingToX || savingImage || copyingImage}
               loading={savingImage}
@@ -270,7 +271,7 @@ export default function SelectShareLightbox({
             )}
           </div>
         </div>
-      </div>
+      </Card>
     </Lightbox>
   );
 }

@@ -2,15 +2,18 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import type { CliIo } from "../../core/io.js";
-import { messageReadCommand } from "./read.js";
-import { getConsumedReadOrder, getConsumedSeq, recordConsumedSeqs } from "./_consumedSeqState.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import { CliError } from "../../core/errors";
+import type { CliIo } from "../../core/io";
+import { messageReadCommand } from "./read";
+import { getConsumedExactSeqs, getConsumedReadOrder, getConsumedSeq, recordConsumedSeqs } from "./_consumedSeqState";
+
+// Hermetic regardless of test order: anything that resolves through the Raft
+// home (legacy import, the published read record) stays in a temp directory.
+process.env.RAFT_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "raft-cli-test-home-"));
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -99,6 +102,11 @@ test("message read command uses injected ApiClient and writes canonical history"
     undefined,
     "around reads must not look like the latest local target context for send attestation",
   );
+  assert.deepEqual(
+    getConsumedExactSeqs(agentContext.agentId, "#proj-runtime"),
+    [7],
+    "around reads may prove only the exact bodies they rendered, never a high-water boundary",
+  );
 });
 
 test("message read command records consumed boundary for ordinary history reads", async () => {
@@ -138,6 +146,86 @@ test("message read command records consumed boundary for ordinary history reads"
     7,
     "ordinary history rows returned to the agent are an active client-seen boundary",
   );
+});
+
+test("message read keeps channel, thread, and DM evidence on distinct resolver targets", async () => {
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-read-targets-"));
+  const cases = [
+    { requested: "#alpha", resolved: "#alpha", seq: 101 },
+    { requested: "#alpha:feedbeef", resolved: "#alpha:feedbeef", seq: 202 },
+    { requested: "dm:@peer", resolved: "dm:@peer", seq: 303 },
+  ];
+
+  for (const item of cases) {
+    const { io } = memoryIo();
+    const ctx = createCommandContext({
+      io,
+      loadAgentContext: () => agentContext,
+      createApiClient: () => ({
+        request: async (): Promise<ApiResponse<unknown>> => ({
+          ok: true,
+          status: 200,
+          error: null,
+          data: {
+            target: item.resolved,
+            // The real history envelope has no channel identity fields. That
+            // absence must never turn the target into `#undefined`.
+            messages: [{
+              seq: item.seq,
+              id: `${String(item.seq).padStart(8, "0")}-0000-0000-0000-000000000000`,
+              content: `body ${item.seq}`,
+            }],
+            has_more: false,
+            has_older: false,
+            has_newer: false,
+            model_seen_up_to_seq: item.seq,
+          },
+        }),
+      }) as any,
+    });
+    await messageReadCommand.handler(ctx, { target: item.requested });
+  }
+
+  for (const item of cases) {
+    assert.equal(
+      getConsumedSeq(agentContext.agentId, item.resolved),
+      item.seq,
+      `${item.resolved} must retain only its own consumed boundary`,
+    );
+  }
+  assert.equal(getConsumedSeq(agentContext.agentId, "#undefined"), undefined);
+});
+
+test("message read records a gapped latest window as exact seqs instead of skipping older unread", async () => {
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-read-gap-"));
+  const { io } = memoryIo();
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (): Promise<ApiResponse<unknown>> => ({
+        ok: true,
+        status: 200,
+        error: null,
+        data: {
+          messages: [
+            { seq: 51, id: "00000051-0000-0000-0000-000000000000", content: "newer one" },
+            { seq: 52, id: "00000052-0000-0000-0000-000000000000", content: "newer two" },
+          ],
+          has_more: true,
+          has_older: true,
+          has_newer: false,
+          last_read_seq: 1,
+          model_seen_up_to_seq: null,
+        },
+      }),
+    }) as any,
+  });
+
+  await messageReadCommand.handler(ctx, { target: "#proj-runtime" });
+
+  assert.equal(getConsumedSeq(agentContext.agentId, "#proj-runtime"), undefined);
+  assert.deepEqual(getConsumedExactSeqs(agentContext.agentId, "#proj-runtime"), [51, 52]);
 });
 
 test("message read marks a transport failure as retryable without calling it an unknown write", async () => {
@@ -216,10 +304,10 @@ test("message read prints server-projected forwarded snapshots without re-parsin
 
   assert.deepEqual(stderr, []);
   const output = stdout.join("");
-  assert.match(output, /@cindyz: Forwarded 2 messages\n\nForwarded content snapshot:/);
+  assert.match(output, /@cindyz: Forwarded 2 messages\n  │ \n  │ Forwarded content snapshot:/);
   assert.ok(output.indexOf("first decision") < output.indexOf("second decision"));
-  assert.match(output, /From: @alice\nSource: Private source/);
-  assert.match(output, /From: @bob\nSource: #public-source/);
+  assert.match(output, /From: @alice\n  │ Source: Private source/);
+  assert.match(output, /From: @bob\n  │ Source: #public-source/);
 });
 
 test("message read command accepts legacy --channel alias during target transition", async () => {
@@ -437,4 +525,190 @@ test("message read command preserves fail-closed anchor error codes", async () =
       return true;
     },
   );
+});
+
+test("message read records evidence under the canonical thread target, not the spelling it was called with", async () => {
+  // `#proj-runtime:<threadChannelId8>` and `#proj-runtime:<parentMsgShortId>`
+  // name the same thread. Keying the consumed-seq evidence under the raw
+  // --target string splits one target's store across spellings: a send under
+  // the other spelling then freshness-holds on bodies the agent demonstrably
+  // read. The server resolver returns the canonical key, so read/check/send
+  // meet on one target without reconstructing identity from a rendered row.
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-read-alias-"));
+  const { io } = memoryIo();
+  const threadRow = {
+    seq: 11,
+    id: "abcd1234-0000-0000-0000-000000000000",
+    createdAt: "2026-05-28T00:00:00.000Z",
+    senderType: "human",
+    senderName: "xxchan",
+    content: "inside the thread",
+    channel_type: "thread",
+    channel_name: "thread-beefcafe",
+    parent_channel_name: "proj-runtime",
+    parent_channel_type: "channel",
+  };
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (): Promise<ApiResponse<unknown>> => ({
+        ok: true,
+        status: 200,
+        error: null,
+        data: {
+          target: "#proj-runtime:beefcafe",
+          messages: [threadRow],
+          has_more: false,
+          has_older: false,
+          has_newer: false,
+          model_seen_up_to_seq: 11,
+        },
+      }),
+    }) as any,
+  });
+
+  // Called with the thread's own channel-id short form — a different spelling
+  // than the canonical `thread-beefcafe` parent-message short id.
+  await messageReadCommand.handler(ctx, { target: "#proj-runtime:0c1d2e3f" });
+
+  // The evidence landed under the canonical spelling, and the raw spelling is
+  // translated to the same record — one key, both spellings.
+  assert.equal(getConsumedSeq(agentContext.agentId, "#proj-runtime:beefcafe"), 11);
+  assert.equal(getConsumedSeq(agentContext.agentId, "#proj-runtime:0c1d2e3f"), 11,
+    "the raw threadId spelling must resolve to the canonical record");
+});
+
+function unreadContext(data: Record<string, unknown>, requests: string[] = []) {
+  const { io, stdout } = memoryIo();
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (_method: string, path: string): Promise<ApiResponse<unknown>> => {
+        requests.push(path);
+        return { ok: true, status: 200, error: null, data };
+      },
+    }) as any,
+  });
+  return { ctx, stdout };
+}
+
+const unreadMessage = (seq: number, content: string) => ({
+  seq,
+  id: `abcd${seq}000-0000-0000-0000-000000000000`,
+  createdAt: "2026-10-05T00:00:00.000Z",
+  senderType: "human",
+  senderName: "xxchan",
+  content,
+});
+
+test("message read --unread asks the Server for unread and prints the same command to continue", async () => {
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-unread-"));
+  const requests: string[] = [];
+  const { ctx, stdout } = unreadContext({
+    target: "#wg-ax:b365e91f",
+    messages: [unreadMessage(11, "three"), unreadMessage(12, "four")],
+    has_more: true,
+    has_older: true,
+    has_newer: true,
+    last_read_seq: 10,
+    unread_after_seq: 10,
+    model_seen_up_to_seq: 12,
+  }, requests);
+
+  await messageReadCommand.handler(ctx, { target: "#wg-ax:b365e91f", unread: true });
+
+  assert.equal(requests.length, 1);
+  assert.match(requests[0], /[?&]unread=true(&|$)/);
+  assert.doesNotMatch(requests[0], /[?&](after|before|around)=/);
+  const out = stdout.join("");
+  assert.match(out, /^Unread window: 2 returned, seq 11-12, oldest to newest, starting after your read position \(seq 10\)\./);
+  assert.match(out, /Read position: seq 10 → 12\. To re-read these: raft message read --target "#wg-ax:b365e91f" --after 10/);
+  assert.match(out, /More unread remain\. Next: raft message read --target "#wg-ax:b365e91f" --unread\n$/);
+  assert.equal(getConsumedSeq("agent-1", "#wg-ax:b365e91f"), 12);
+});
+
+test("message read --unread with nothing unread says where the read position is", async () => {
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-unread-empty-"));
+  const { ctx, stdout } = unreadContext({
+    messages: [], has_more: false, has_older: true, has_newer: false, last_read_seq: 12, unread_after_seq: 12,
+  });
+  await messageReadCommand.handler(ctx, { target: "#general", unread: true });
+  assert.match(stdout.join(""), /No unread messages in #general\. You have read through seq 12\./);
+});
+
+test("message read --unread fails closed on a Server that ignored the flag", async () => {
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-unread-old-"));
+  const { ctx, stdout } = unreadContext({
+    messages: [unreadMessage(40, "latest page, not unread")], has_more: true, has_older: true, has_newer: false, last_read_seq: 10,
+  });
+  await assert.rejects(
+    async () => { await messageReadCommand.handler(ctx, { target: "#general", unread: true }); },
+    (error: unknown) => error instanceof CliError && error.code === "UNSUPPORTED_BY_SERVER" && /raft inbox check/.test(String(error.suggestedNextAction)),
+  );
+  assert.equal(stdout.join(""), "", "the latest page must not be printed as unread");
+});
+
+test("message read --unread refuses an anchor before calling the Server", async () => {
+  const requests: string[] = [];
+  const { ctx } = unreadContext({}, requests);
+  for (const anchor of [{ after: "10" }, { before: "10" }, { around: "abcd1234" }]) {
+    await assert.rejects(
+      async () => { await messageReadCommand.handler(ctx, { target: "#general", unread: true, ...anchor }); },
+      (error: unknown) => error instanceof CliError && error.code === "INVALID_ARG",
+    );
+  }
+  assert.deepEqual(requests, []);
+});
+
+test("message read --unread says when the newest messages were too recent to mark read", async () => {
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-unread-settle-"));
+  const { ctx, stdout } = unreadContext({
+    messages: [unreadMessage(11, "settled"), unreadMessage(12, "just committed")],
+    has_more: false, has_older: true, has_newer: false,
+    last_read_seq: 10, unread_after_seq: 10, read_through_seq: 11, model_seen_up_to_seq: 12,
+  });
+  await messageReadCommand.handler(ctx, { target: "#general", unread: true });
+  const out = stdout.join("");
+  assert.match(out, /Read position: seq 10 → 11\./);
+  assert.match(out, /1 newest message is too recent to mark read; it will come back on your next --unread, folded into one line\.\n$/);
+  assert.doesNotMatch(out, /No more unread/);
+});
+
+test("message read --unread folds a message it already showed instead of repeating it as new", async () => {
+  process.env.SLOCK_CLI_CONSUMED_SEQ_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-consumed-unread-fold-"));
+  // First read: 12 was too recent to mark read, so the Server will return it again.
+  const first = unreadContext({
+    target: "#general",
+    messages: [unreadMessage(11, "settled"), unreadMessage(12, "just committed")],
+    has_more: false, has_older: true, has_newer: false,
+    last_read_seq: 10, unread_after_seq: 10, read_through_seq: 11, model_seen_up_to_seq: 12,
+  });
+  await messageReadCommand.handler(first.ctx, { target: "#general", unread: true });
+  assert.match(first.stdout.join(""), /just committed/);
+
+  const second = unreadContext({
+    target: "#general",
+    messages: [unreadMessage(12, "just committed"), unreadMessage(13, "brand new")],
+    has_more: false, has_older: true, has_newer: false,
+    last_read_seq: 11, unread_after_seq: 11, read_through_seq: 13, model_seen_up_to_seq: 13,
+  });
+  await messageReadCommand.handler(second.ctx, { target: "#general", unread: true });
+  const out = second.stdout.join("");
+  assert.doesNotMatch(out, /just committed/, "the repeat must not be printed as a new message");
+  assert.match(out, /^Unread window: 1 returned, seq 13,/);
+  assert.match(out, /1 message you were already shown \(seq 12\) is not repeated\.\n/);
+  assert.equal(out.match(/--after 11/g)?.length, 1, "the re-read command is printed once");
+  assert.match(out, /\[1\/1 seq=13 [^\n]*brand new/);
+
+  // Only the repeat came back: say there is nothing new.
+  const third = unreadContext({
+    target: "#general",
+    messages: [unreadMessage(13, "brand new")],
+    has_more: false, has_older: true, has_newer: false,
+    last_read_seq: 12, unread_after_seq: 12, read_through_seq: 13, model_seen_up_to_seq: 13,
+  });
+  await messageReadCommand.handler(third.ctx, { target: "#general", unread: true });
+  assert.match(third.stdout.join(""), /No new unread messages in #general\. 1 message you were already shown \(seq 13\) is not repeated\. To see it again: raft message read --target "#general" --after 12/);
 });

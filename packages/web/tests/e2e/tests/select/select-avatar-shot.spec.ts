@@ -23,7 +23,7 @@ test("share screenshot keeps pixel, uploaded, gravatar, and fallback avatar case
   const pixelMessageContent = `select-avatar-pixel-${Date.now()}`;
   await seedAgentMessages(
     seedState,
-    seedState.agent.id,
+    seedState.externalAgent.id,
     login.accessToken,
     `#${seedState.channel.name}`,
     [pixelMessageContent],
@@ -51,9 +51,10 @@ test("share screenshot keeps pixel, uploaded, gravatar, and fallback avatar case
       return originalFetch(input, init);
     };
     const pixelRow = document.getElementById(pixelMessageId);
-    const pixelAvatar = pixelRow?.querySelector<HTMLElement>("[data-agent-pixel-avatar]");
-    if (!pixelRow || !pixelAvatar || pixelAvatar.children.length !== 64) {
-      throw new Error("real PixelAvatar was not present in the agent MessageItem");
+    const pixelAvatar = pixelRow?.querySelector<HTMLImageElement>("[data-agent-pixel-avatar]");
+    // PixelAvatar is ONE <img> with an SVG data URL (task #137), not a grid.
+    if (!pixelRow || !pixelAvatar || pixelAvatar.tagName !== "IMG" || !pixelAvatar.src.startsWith("data:image/svg+xml")) {
+      throw new Error("real PixelAvatar <img> was not present in the agent MessageItem");
     }
     const rowRect = pixelRow.getBoundingClientRect();
     const avatarRect = pixelAvatar.getBoundingClientRect();
@@ -64,29 +65,15 @@ test("share screenshot keeps pixel, uploaded, gravatar, and fallback avatar case
       height: avatarRect.height,
     };
 
-    // Make one real PixelAvatar cell uniquely observable and make the known
-    // foreignObject failure deterministic: if inlining is removed, this
-    // capture-only style hides CSS-grid children, leaving no unique cell.
-    // The production tree and AvatarSlot remain untouched outside this export.
+    // Make one real PixelAvatar cell uniquely observable: swap the live
+    // avatar's sprite for one with a grey background and a single uniquely
+    // colored cell (x=3, y=3), then wait for it to decode. The oracle below
+    // requires that color inside the avatar's box in the captured PNG.
     const uniquePixel = "rgb(1, 250, 83)";
-    pixelAvatar.style.backgroundColor = "rgb(210, 210, 210)";
-    Array.from(pixelAvatar.children).forEach((cell) => {
-      (cell as HTMLElement).style.backgroundColor = "transparent";
-    });
-    (pixelAvatar.children[27] as HTMLElement).style.backgroundColor = uniquePixel;
-    // html-to-image's foreignObject path can lose CSS-grid children. Model
-    // that serialization-only loss in the observer microtask; the production
-    // inliner replaces the children synchronously before this callback runs,
-    // while removing that call makes this oracle deterministically RED without
-    // changing the live component.
-    const captureFailureObserver = new MutationObserver(() => {
-      document
-        .querySelectorAll<HTMLElement>('[data-select-screenshot-root="true"] [data-agent-pixel-avatar] > div')
-        .forEach((cell) => {
-          cell.style.visibility = "hidden";
-        });
-    });
-    captureFailureObserver.observe(document.body, { childList: true, subtree: true });
+    pixelAvatar.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" shape-rendering="crispEdges"><rect width="8" height="8" fill="rgb(210, 210, 210)"/><rect x="3" y="3" width="1" height="1" fill="${uniquePixel}"/></svg>`,
+    )}`;
+    await pixelAvatar.decode();
 
     const host = document.createElement("div");
     host.style.width = "620px";
@@ -119,7 +106,6 @@ test("share screenshot keeps pixel, uploaded, gravatar, and fallback avatar case
       "avatar-gravatar-fixture",
       "avatar-fallback-fixture",
     ], { backgroundColor: "#FFFFFF", pixelRatio: 2 });
-    captureFailureObserver.disconnect();
 
     const preview = new Image();
     await new Promise<void>((resolve, reject) => {

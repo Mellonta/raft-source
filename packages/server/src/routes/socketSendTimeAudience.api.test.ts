@@ -9,9 +9,9 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { and, eq } from "drizzle-orm";
 import WebSocket from "ws";
-import { createApiTest } from "../test/integration/apiTest.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { inboxNotificationFacts, pushRegistrations } from "../db/schema.js";
+import { createApiTest } from "../test/integration/apiTest";
+import { signAccessToken } from "../middleware/auth";
+import { inboxNotificationFacts, pushRegistrations } from "../db/schema";
 
 const test = createApiTest({ onboardingOpenerFlagDefaultEnabled: false });
 

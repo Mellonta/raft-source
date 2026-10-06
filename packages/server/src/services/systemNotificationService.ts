@@ -1,7 +1,6 @@
 import {
   MACHINE_SYSTEM_NOTIFICATION_SCHEMA_VERSION,
   SERVER_SYSTEM_NOTIFICATIONS_CONTRACT_VERSION,
-  isDaemonOutdated,
   type MachineSystemNotification,
   type ServerSystemNotificationsResponse,
 } from "@botiverse/raft-shared";
@@ -18,7 +17,6 @@ export interface MachineNotificationReadModel {
 export interface ProjectMachineSystemNotificationsInput {
   machines: MachineNotificationReadModel[];
   activeAgentCountByMachine: ReadonlyMap<string, number>;
-  latestDaemonVersion: string | null;
   evaluatedAt: Date;
 }
 
@@ -32,6 +30,8 @@ function evaluationAt(evaluatedAt: Date) {
     offlineAfterMs: 0 as const,
     statusAuthority: "canonical_machine_read_model" as const,
     runKind: "raw_daemon" as const,
+    // Wire-compatible stamp. The daemon is no longer released on its own, so
+    // no notice is ever derived from a version authority any more.
     versionAuthority: "latest_daemon_release" as const,
   };
 }
@@ -63,14 +63,15 @@ function canonicalMachineOrder(
 export function projectMachineSystemNotifications({
   machines,
   activeAgentCountByMachine,
-  latestDaemonVersion,
   evaluatedAt,
 }: ProjectMachineSystemNotificationsInput): MachineSystemNotification[] {
   const notifications: MachineSystemNotification[] = [];
-  // Product contract: these two named notifications are the legacy/raw daemon
-  // surface. Managed Computers use their source-aware broadcast decision and
-  // anonymous aggregate attention UI; daemonVersion must never make one leak
-  // back into this feed.
+  // Product contract: the offline notice is the legacy/raw daemon surface.
+  // Managed Computers use their source-aware broadcast decision and anonymous
+  // aggregate attention UI and must never leak back into this feed. The
+  // `machine.outdated` notice is retired: the daemon ships only inside
+  // Computer, so there is no standalone release to compare against. The type
+  // stays in the shared contract so older clients keep parsing.
   const rawDaemonMachines = machines.filter((machine) => !machine.isComputer);
   const offlineMachines = canonicalMachineOrder(
     rawDaemonMachines.filter((machine) => machine.status === "offline"),
@@ -115,50 +116,6 @@ export function projectMachineSystemNotifications({
         machines: machineRefs(offlineMachines),
         activeAgentCount: activeCount,
         targetDaemonVersion: null,
-        evaluation: evaluationAt(evaluatedAt),
-      },
-    });
-  }
-
-  const outdatedMachines = canonicalMachineOrder(
-    rawDaemonMachines.filter(
-      (machine) => machine.status === "online"
-        && isDaemonOutdated(machine.daemonVersion, latestDaemonVersion),
-    ),
-  );
-
-  if (outdatedMachines.length > 0 && latestDaemonVersion) {
-    const names = outdatedMachines.map((machine) => machine.name).join(", ");
-    const singular = outdatedMachines.length === 1;
-    const activeCount = activeAgentCount(outdatedMachines, activeAgentCountByMachine);
-    notifications.push({
-      id: `machine-outdated:${latestDaemonVersion}:${machineSetIdentity(outdatedMachines)}`,
-      type: "machine.outdated",
-      schemaVersion: MACHINE_SYSTEM_NOTIFICATION_SCHEMA_VERSION,
-      state: "active",
-      kind: "warning",
-      title: `${names} ${singular ? "is running an outdated daemon" : "are running outdated daemons"}`,
-      body: "Stop the daemon and reconnect to update.",
-      copy: {
-        titleKey: singular ? "machine.outdated.title.one" : "machine.outdated.title.many",
-        bodyKey: "machine.outdated.body",
-        actionLabelKey: "common.view",
-        params: {
-          machineNames: names,
-          machineCount: outdatedMachines.length,
-          activeAgentCount: activeCount,
-          targetDaemonVersion: latestDaemonVersion,
-        },
-      },
-      action: {
-        label: "View",
-        targetType: "machine",
-        targetId: outdatedMachines[0]!.id,
-      },
-      payload: {
-        machines: machineRefs(outdatedMachines),
-        activeAgentCount: activeCount,
-        targetDaemonVersion: latestDaemonVersion,
         evaluation: evaluationAt(evaluatedAt),
       },
     });

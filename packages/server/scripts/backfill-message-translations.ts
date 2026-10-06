@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 /**
  * Backfill shared message translation cache rows.
  *
@@ -25,12 +25,12 @@ import {
   type ResolvedTranslationProvider,
   type Detection,
   type LedgerProviderInfo,
-} from "../src/services/messageTranslationService.js";
+} from "../src/services/messageTranslationService";
 import {
   TranslationPlaceholderValidationError,
   TranslationProviderError,
   type TranslationBatchItem,
-} from "../src/services/translation/index.js";
+} from "../src/services/translation/index";
 
 type MessageRow = {
   id: string;

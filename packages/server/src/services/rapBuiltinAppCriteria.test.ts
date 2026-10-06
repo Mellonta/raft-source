@@ -1,5 +1,5 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 /**
  * task #138 criteria re-run, on the v1 HARDCODED built-in arrangement.
  *
@@ -17,13 +17,12 @@ import { closeTestDatabase, openTestDatabase } from "../test/integration/databas
  * every shipped built-in rather than for one hand-picked entry.
  */
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { agents, servers, users } from "../db/schema.js";
-import { BUILT_IN_RAP_APPS } from "./rapBuiltinAppManifests.js";
-import type { AppId } from "./rapRegistry.js";
-import { getInstalledApp, resolveConversation } from "./rapRegistryStore.js";
-import { notify, type DeliverySeam, type NotifyOutcome } from "./rapSyscalls.js";
+import { getDb } from "../db/index";
+import { agents, servers, users } from "../db/schema";
+import { BUILT_IN_RAP_APPS } from "./rapBuiltinAppManifests";
+import type { AppId } from "./rapRegistry";
+import { getInstalledApp, resolveConversation } from "./rapRegistryStore";
+import { notify, type DeliverySeam, type NotifyOutcome } from "./rapSyscalls";
 
 
 const ABSENT_APP = "x.not-a-built-in" as AppId;

@@ -18,25 +18,15 @@ import {
   serverRunnerPidReadFallback,
   serverRunnerLogReadFallback,
   serverConnectedMarkerPath,
-} from "./paths.js";
-import { formatServerSlugDisplay, listServerAttachments } from "./serverState.js";
-import { canonicalizeServerUrl } from "./serverUrl.js";
-import { readPidfileAt, isProcessAlive } from "./internal/process-primitives.js";
-import { findLiveServicePidReadOnly } from "./internal/service-pid-fallback.js";
-import { isDegraded, readTerminalUnlinked } from "./health.js";
-import { info } from "./output.js";
-import { COMPUTER_VERSION } from "./version.js";
-import { readProcessVersionEvidence } from "./versionEvidence.js";
-import {
-  loadOperation,
-  type OperationOutcome,
-  type OperationPhase,
-} from "@botiverse/k-carrier";
-import { kStateDir } from "./kPaths.js";
-import {
-  readHostLifecycleRecoveryStatus,
-  type HostLifecycleRecoveryStatus,
-} from "./macosLoginCarrier.js";
+} from "./paths";
+import { formatServerSlugDisplay, listServerAttachments } from "./serverState";
+import { canonicalizeServerUrl } from "./serverUrl";
+import { readPidfileAt, isProcessAlive } from "./internal/process-primitives";
+import { findLiveServicePidReadOnly } from "./internal/service-pid-fallback";
+import { isDegraded, readTerminalUnlinked } from "./health";
+import { info } from "./output";
+import { COMPUTER_VERSION } from "./version";
+import { readProcessVersionEvidence } from "./versionEvidence";
 
 type UserSessionReadResult =
   | { state: "missing"; session: null; error: null }
@@ -86,22 +76,6 @@ export interface ProcessVersionStatus {
   shellEnvironment: string | null;
 }
 
-export interface ComputerUpgradeStatus {
-  requestId: string;
-  fromVersion: string;
-  targetVersion: string;
-  /** Exact K phase; terminal phases are never rewritten as in-flight aliases. */
-  phase: OperationPhase;
-  /** Exact terminal result, or null while the operation is active. */
-  outcome: OperationOutcome | null;
-  startedAt: string;
-  updatedAt: string;
-  source: "k";
-  /** Versioned origin scope. Unmarked historical receipts remain explicit. */
-  scope: "local" | "remote" | "legacy";
-  message: string | null;
-  percent: number | null;
-}
 
 async function pidStatus(pidfile: string): Promise<DaemonState> {
   const pid = await readPidfileAt(pidfile);
@@ -152,32 +126,6 @@ async function processVersionStatus(
   };
 }
 
-async function upgradeStatus(slockHome: string): Promise<ComputerUpgradeStatus | null> {
-  const kOperation = await loadOperation(kStateDir(slockHome));
-  if (
-    kOperation.kind === "observed"
-    && (kOperation.operation.outcome === null || kOperation.operation.acknowledgedAtMs === null)
-  ) {
-    return {
-      requestId: kOperation.operation.id,
-      fromVersion: kOperation.operation.fromVersion,
-      targetVersion: kOperation.operation.targetVersion,
-      phase: kOperation.operation.phase,
-      outcome: kOperation.operation.outcome,
-      startedAt: new Date(kOperation.operation.startedAtMs).toISOString(),
-      updatedAt: new Date(kOperation.operation.updatedAtMs).toISOString(),
-      source: "k",
-      scope: kOperation.operation.metadata.upgradeScopeVersion === "1"
-        && (kOperation.operation.metadata.upgradeScope === "local"
-          || kOperation.operation.metadata.upgradeScope === "remote")
-        ? kOperation.operation.metadata.upgradeScope
-        : "legacy",
-      message: kOperation.operation.reason,
-      percent: null,
-    };
-  }
-  return null;
-}
 
 /**
  * Derive `health` enum from daemon liveness + recent crash history.
@@ -254,8 +202,6 @@ export interface ComputerStatusReport {
   // Global per-Computer service (one per SLOCK_HOME).
   cliVersion: string;
   service: DaemonState & { logPath: string; version: ProcessVersionStatus };
-  upgrade: ComputerUpgradeStatus | null;
-  hostLifecycle: HostLifecycleRecoveryStatus | null;
   // One row per attached server (v4 §6 aggregate). Empty array when the
   // Computer has no attachments yet.
   servers: ServerStatusRow[];
@@ -318,8 +264,6 @@ export async function buildStatusReport(installRoot: string): Promise<ComputerSt
     userSessionError: sessionRead.state === "invalid" ? sessionRead.error : null,
     cliVersion: COMPUTER_VERSION,
     service: serviceWithVersion,
-    upgrade: await upgradeStatus(installRoot),
-    hostLifecycle: await readHostLifecycleRecoveryStatus(installRoot),
     servers,
   };
 }
@@ -371,34 +315,6 @@ export function formatStatusReport(report: ComputerStatusReport): void {
     );
   }
   info(`Service log: ${report.service.logPath}`);
-  if (report.upgrade) {
-    const percent = report.upgrade.percent === null ? "" : ` (${report.upgrade.percent}%)`;
-    info(
-      report.upgrade.outcome === null
-        ? `Upgrade: K operation in flight (id ${report.upgrade.requestId})`
-        : `Upgrade: K terminal receipt, unacknowledged (id ${report.upgrade.requestId})`,
-    );
-    info(`  Target: ${report.upgrade.fromVersion} -> ${report.upgrade.targetVersion}`);
-    info(`  Phase:  ${report.upgrade.phase}${percent}`);
-    if (report.upgrade.outcome !== null) {
-      info(`  Outcome: ${report.upgrade.outcome}`);
-      info(
-        `  Acknowledge: raft-computer operation acknowledge ${report.upgrade.requestId}`,
-      );
-    }
-    if (report.upgrade.message) info(`  Detail: ${report.upgrade.message}`);
-    info(`  Updated: ${report.upgrade.updatedAt}`);
-  } else {
-    info("Upgrade: none in flight");
-  }
-  if (report.hostLifecycle) {
-    info(
-      `Host lifecycle: ${report.hostLifecycle.status} (${report.hostLifecycle.errorCode ?? "replacement interrupted"})`,
-    );
-    info("  Run `raft-computer doctor` before retrying start or upgrade.");
-  } else {
-    info("Host lifecycle: healthy");
-  }
   info("");
   if (report.servers.length === 0) {
     info("Attachments:  none — run `raft-computer attach /<serverSlug>` (e.g. `/myserver`).");

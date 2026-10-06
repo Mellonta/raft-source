@@ -5,7 +5,6 @@ import {
 } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { test } from "vitest";
 
 import {
   BasicTracer,
@@ -13,18 +12,19 @@ import {
   MemoryTraceSink,
 } from "@botiverse/raft-shared";
 
-import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core.js";
-import { buildRaftCliGuideSections } from "./raftCliGuide.js";
+import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core";
+import { buildRaftCliGuideSections } from "./raftCliGuide";
 import {
   buildPiPowerShellScript,
   createPiCommandTool,
   createPiPosixOperations,
   createPiPowerShellOperations,
-} from "./piCommandTool.js";
+} from "./piCommandTool";
 import {
   createPiToolExecutionObserver,
   type PiToolExecutionObserver,
-} from "./piToolExecutionObservability.js";
+} from "./piToolExecutionObservability";
+import { traceRows } from "../testing/traceRows";
 
 class FakeChildProcess extends EventEmitter {
   readonly pid = 4242;
@@ -144,7 +144,7 @@ test(
     const result = await tool.execute(rawToolCallId, { command: rawCommand });
     assert.match(result.content[0]?.type === "text" ? result.content[0].text : "", /fixture-output/);
 
-    const spans = sink.getAllSpans();
+    const spans = traceRows(sink);
     assert.deepEqual(spans.map((span) => span.name), [
       "daemon.runtime.tool.execution.started",
       "daemon.runtime.tool.process.spawned",
@@ -257,13 +257,15 @@ test("PowerShell operations use fixed argv, stream output, and inject the launch
   assert.deepEqual(result, { exitCode: 0 });
 });
 
-test("PowerShell stdin payload is padded base64 even for an empty user command", () => {
+test("PowerShell stdin payload is well-formed padded base64 even for an empty user command", () => {
   const wrapped = buildPiPowerShellScript("");
   const encoded = Buffer.from(wrapped, "utf16le").toString("base64");
 
   assert.notEqual(encoded, "");
-  assert.match(encoded, /^[A-Za-z0-9+/]+=*$/);
-  assert.match(encoded, /=+$/);
+  assert.match(encoded, /^[A-Za-z0-9+/]+={0,2}$/);
+  // Whether `=` appears depends on the wrapper's length; what the loader's
+  // FromBase64String needs is complete 4-character groups.
+  assert.equal(encoded.length % 4, 0);
   assert.equal(Buffer.from(encoded, "base64").toString("utf16le"), wrapped);
 });
 
@@ -441,6 +443,36 @@ test(
     assert.equal(result.exitCode, 0);
   },
 );
+
+test(
+  "Pi PowerShell pipes CJK into a native command as UTF-8",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const hexer = "process.stdin.on('data',d=>process.stdout.write(Buffer.from(d).toString('hex')))";
+    const output: Buffer[] = [];
+    const result = await createPiPowerShellOperations().exec(
+      `@'\r\n中文测试\r\n'@ | node -e "${hexer}"`,
+      process.cwd(),
+      {
+        env: process.env,
+        onData: (data) => output.push(data),
+      },
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(
+      Buffer.concat(output).toString("utf8").trim(),
+      Buffer.from("中文测试\r\n", "utf8").toString("hex"),
+    );
+  },
+);
+
+test("PowerShell script builds a raw UTF-8 encoding for native pipes", () => {
+  const script = buildPiPowerShellScript("");
+  assert.match(script, /\$utf8NoBom = \[System\.Text\.UTF8Encoding\]::new\(\$false\)/);
+  assert.doesNotMatch(script, /New-Object System\.Text\.UTF8Encoding/);
+  assert.match(script, /\$OutputEncoding = \$utf8NoBom/);
+});
 
 test("Windows CLI guide uses PowerShell here-strings instead of Bash heredocs", () => {
   const sections = buildRaftCliGuideSections({

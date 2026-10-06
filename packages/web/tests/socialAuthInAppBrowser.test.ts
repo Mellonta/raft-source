@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   isEmbeddedBrowserUserAgent,
   isEmbeddedUserAgentProviderError,
   sanitizeReturnTo,
-} from "../src/utils/socialAuth.js";
+} from "../src/utils/socialAuth";
 
 test("embedded browser detection covers common app webviews", () => {
   assert.equal(isEmbeddedBrowserUserAgent("Mozilla/5.0 MicroMessenger/8.0.49 Mobile/15E148"), true);

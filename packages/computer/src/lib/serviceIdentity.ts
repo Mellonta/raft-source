@@ -1,6 +1,6 @@
-import { writePidfileAt } from "../internal/process-primitives.js";
-import { servicePidPath } from "../paths.js";
-import { writeServiceVersionEvidence } from "../runningVersionEvidence.js";
+import { writePidfileAt } from "../internal/process-primitives";
+import { servicePidPath } from "../paths";
+import { writeServiceVersionEvidence } from "../runningVersionEvidence";
 
 export interface ServiceIdentityPublishDeps {
   pid?: number;

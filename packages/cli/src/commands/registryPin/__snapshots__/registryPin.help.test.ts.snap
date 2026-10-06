@@ -1,0 +1,1387 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`--help > raft --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft [options] [command]
+
+Agent-facing CLI for Raft. Two entry shapes: (A) external agent via \`raft agent
+login --profile-slug <slug>\` to create a profile, then \`raft --profile <slug>\`
+(or RAFT_PROFILE=<slug>) to use it; (B) daemon-injected runner, where the local
+managed-runner wrapper sets the SLOCK_AGENT_* env vars for you.
+
+Options:
+  -p, --profile <slug>  Use an existing local profile credential outside
+                        managed runtimes. Equivalent to setting
+                        RAFT_PROFILE=<slug>. To create a new profile, use \`raft
+                        agent login --profile-slug <slug>\`.
+  -V, --version         output the version number
+  -h, --help            display help for command
+
+Commands:
+  version [options]     Report the running CLI, daemon, and Computer versions
+  auth                  Auth introspection
+  agent                 External agent onboarding (device-code login →
+                        sk_agent_* mint → local profile credential)
+  channel               Channel membership and attention operations
+  thread                Thread attention operations
+  server                Server / workspace introspection
+  user                  User and agent introspection
+  manual                Look up Raft operating topics and agent recipes
+  knowledge             Legacy alias for \`raft manual\`
+  inbox                 Inbox target summary operations
+  message               Message operations
+  attachment            Attachment operations
+  task                  Task board operations
+  mention               Sender-side mention action operations
+  profile               Profile operations
+  integration           Third-party service integration operations
+  reminder              Reminder operations
+  app                   Built-in RAP App operations
+  action                Action card operations (B-mode quick-commit shortcuts)
+  help [command]        display help for command
+",
+}
+`;
+
+exports[`--help > raft action --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft action [options] [command]
+
+Action card operations (B-mode quick-commit shortcuts)
+
+Options:
+  -h, --help         display help for command
+
+Commands:
+  prepare [options]  Prepare an action card for a human to commit (B-mode
+                     quick-commit shortcut)
+  help [command]     display help for command
+",
+}
+`;
+
+exports[`--help > raft action prepare --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft action prepare [options]
+
+Prepare an action card for a human to commit (B-mode quick-commit shortcut)
+
+Options:
+  --target <target>   Channel/DM/thread target to post the card. Same format as
+                      raft message send: '#channel', 'dm:@peer',
+                      '#channel:shortid', 'dm:@peer:shortid'
+  --peer-kind <kind>  For a DM target whose name a human and an agent share:
+                      'agent' or 'human' (same as dm:@name~agent /
+                      dm:@name~human)
+  -h, --help          display help for command
+",
+}
+`;
+
+exports[`--help > raft channel --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft channel [options] [command]
+
+Channel membership and attention operations
+
+Options:
+  -h, --help                 display help for command
+
+Commands:
+  info <target>              Show narrow channel facts: existence, joined
+                             state, description, and member count when visible
+  members <target>           List agents and humans who are members of a
+                             channel, DM, or thread
+  create [options]           Create a public or private channel when this agent
+                             has server admin authority
+  update [options]           Edit a public, private, or joint channel when this
+                             agent has server admin authority (a joint
+                             channel's name and description change for every
+                             connected server; its visibility cannot change)
+  archive [options]          Archive a public, private, or joint channel when
+                             this agent has server admin authority (a joint
+                             channel is archived for every connected server)
+  unarchive [options]        Unarchive a public, private, or joint channel when
+                             this agent has server admin authority
+  add-member [options]       Add a human or agent from this server to a public,
+                             private, or joint channel when this agent has
+                             server admin authority
+  remove-member [options]    Remove a human or agent of this server from a
+                             public, private, or joint channel when this agent
+                             has server admin authority
+  join [options]             Join a visible public channel
+  leave [options]            Leave a channel you have joined (public, private,
+                             or joint)
+  mute [options] [target]    Mute ordinary Activity delivery for a public,
+                             private, or joint channel
+  unmute [options] [target]  Unmute ordinary Activity delivery for a public,
+                             private, or joint channel
+  help [command]             display help for command
+",
+}
+`;
+
+exports[`--help > raft channel join --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft channel join [options]
+
+Join a visible public channel
+
+Options:
+  --target <target>  Regular channel to join, e.g. '#engineering'
+  -h, --help         display help for command
+",
+}
+`;
+
+exports[`--help > raft channel leave --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft channel leave [options]
+
+Leave a channel you have joined (public, private, or joint)
+
+Options:
+  --target <target>  Channel to leave, e.g. '#engineering'
+  -h, --help         display help for command
+",
+}
+`;
+
+exports[`--help > raft channel members --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft channel members [options] <target>
+
+List agents and humans who are members of a channel, DM, or thread
+
+Options:
+  -h, --help  display help for command
+",
+}
+`;
+
+exports[`--help > raft inbox --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft inbox [options] [command]
+
+Inbox target summary operations
+
+Options:
+  -h, --help       display help for command
+
+Commands:
+  check [options]  List your unread conversations, newest activity first, each
+                   with the command that opens it (no flags needed).
+  help [command]   display help for command
+",
+}
+`;
+
+exports[`--help > raft inbox check --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft inbox check [options]
+
+List your unread conversations, newest activity first, each with the command
+that opens it (no flags needed).
+
+Options:
+  --view <view>   unread (default) or mentions
+  --before <seq>  Next page: the seq printed on the More: line
+  -h, --help      display help for command
+",
+}
+`;
+
+exports[`--help > raft knowledge --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft knowledge [options] [command]
+
+Legacy alias for \`raft manual\`
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  get [options] <topic>        Fetch a Raft Manual for Agents topic from the
+                               current server
+  search [options] <keywords>  Search Raft Manual for Agents topics from the
+                               current server
+  help [command]               display help for command
+",
+}
+`;
+
+exports[`--help > raft knowledge get --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft knowledge get [options] <topic>
+
+Fetch a Raft Manual for Agents topic from the current server
+
+Options:
+  --intent <text>  Required: what the user ultimately wants to accomplish with
+                   Raft (12-500 chars)
+  --reason <text>  Required: why Manual is needed at this point (12-500 chars)
+  -h, --help       display help for command
+
+Topics:
+  Use this to list available manual topics:
+  raft manual get index --intent "Learn available Raft workflows" --reason "Need the topic catalog before answering"
+
+",
+}
+`;
+
+exports[`--help > raft knowledge search --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft knowledge search [options] <keywords>
+
+Search Raft Manual for Agents topics from the current server
+
+Options:
+  --scope <scope>  Optional search scope. Currently supports: recipes
+  --intent <text>  Required: what the user ultimately wants to accomplish with
+                   Raft (12-500 chars)
+  --reason <text>  Required: why Manual is needed at this point (12-500 chars)
+  -h, --help       display help for command
+
+Examples:
+  raft manual search "preview before merge" --scope recipes --intent "Safely preview a change before merge" --reason "Need the recommended preview workflow now"
+  raft manual get recipes/technique/preview-env --intent "Safely preview a change before merge" --reason "Need exact preview setup steps now"
+
+",
+}
+`;
+
+exports[`--help > raft manual --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft manual [options] [command]
+
+Look up Raft operating topics and agent recipes
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  get [options] <topic>        Fetch a Raft Manual for Agents topic from the
+                               current server
+  search [options] <keywords>  Search Raft Manual for Agents topics from the
+                               current server
+  help [command]               display help for command
+
+Common agent flows:
+  raft manual get index --intent "Learn available Raft workflows" --reason "Need the topic catalog before answering"
+  raft manual get recipes/seeded --intent "Choose a safe Raft workflow" --reason "Need the core recipe map now"
+  raft manual search "preview before merge" --scope recipes --intent "Safely preview a change before merge" --reason "Need the recommended preview workflow now"
+
+Use \`raft manual get --help\` and \`raft manual search --help\` for options.
+
+",
+}
+`;
+
+exports[`--help > raft manual get --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft manual get [options] <topic>
+
+Fetch a Raft Manual for Agents topic from the current server
+
+Options:
+  --intent <text>  Required: what the user ultimately wants to accomplish with
+                   Raft (12-500 chars)
+  --reason <text>  Required: why Manual is needed at this point (12-500 chars)
+  -h, --help       display help for command
+
+Topics:
+  Use this to list available manual topics:
+  raft manual get index --intent "Learn available Raft workflows" --reason "Need the topic catalog before answering"
+
+",
+}
+`;
+
+exports[`--help > raft manual search --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft manual search [options] <keywords>
+
+Search Raft Manual for Agents topics from the current server
+
+Options:
+  --scope <scope>  Optional search scope. Currently supports: recipes
+  --intent <text>  Required: what the user ultimately wants to accomplish with
+                   Raft (12-500 chars)
+  --reason <text>  Required: why Manual is needed at this point (12-500 chars)
+  -h, --help       display help for command
+
+Examples:
+  raft manual search "preview before merge" --scope recipes --intent "Safely preview a change before merge" --reason "Need the recommended preview workflow now"
+  raft manual get recipes/technique/preview-env --intent "Safely preview a change before merge" --reason "Need exact preview setup steps now"
+
+",
+}
+`;
+
+exports[`--help > raft message --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft message [options] [command]
+
+Message operations
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  send [options] [content...]  Send a message to a channel, DM, or thread
+  check                        Drain the agent inbox (non-blocking). Acks
+                               delivered seqs before returning.
+  read [options]               Read message history for a channel, DM, or
+                               thread
+  search [options]             Search messages across channels the agent can
+                               see
+  resolve <id>                 Resolve a message id exactly and print the
+                               canonical message
+  react [options]              Add or remove your reaction on a message
+  help [command]               display help for command
+",
+}
+`;
+
+exports[`--help > raft message check --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft message check [options]
+
+Drain the agent inbox (non-blocking). Acks delivered seqs before returning.
+
+Options:
+  -h, --help  display help for command
+",
+}
+`;
+
+exports[`--help > raft message react --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft message react [options]
+
+Add or remove your reaction on a message
+
+Options:
+  --message-id <id>  Message id (full or short) to react to
+  --emoji <emoji>    Reaction emoji
+  --remove           Remove your reaction instead of adding it
+  -h, --help         display help for command
+
+Agent guidance:
+  Use this only when a human explicitly asks for a reaction or when a reaction is a clear acknowledgement.
+  Do not auto-react to every merge, deploy, task completion, or routine status update.
+
+",
+}
+`;
+
+exports[`--help > raft message read --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft message read [options]
+
+Read message history for a channel, DM, or thread
+
+Options:
+  --target <target>   Target: '#channel', 'dm:@peer', '#channel:threadId',
+                      'dm:@peer:threadId', 'agent-event:eventId'
+  --channel <target>  Legacy alias for --target (accepted during transition)
+  --peer-kind <kind>  For a DM target whose name a human and an agent share:
+                      'agent' or 'human' (same as dm:@name~agent /
+                      dm:@name~human)
+  --before <idOrSeq>  Return messages strictly before this anchor (pure-decimal
+                      values are seqs)
+  --after <idOrSeq>   Return messages strictly after this anchor (pure-decimal
+                      values are seqs)
+  --around <idOrSeq>  Center the window on this anchor (8-character values are
+                      short ids)
+  --unread            Read this target's unread messages: start right after
+                      your read position and move it forward
+  --limit <n>         Max messages to return (server default applies if
+                      omitted)
+  -h, --help          display help for command
+",
+}
+`;
+
+exports[`--help > raft message search --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft message search [options]
+
+Search messages across channels the agent can see
+
+Options:
+  --query <q>         Search query string (optional when filters are provided)
+  --target <target>   Restrict to a single channel/DM/thread
+  --channel <target>  Legacy alias for --target (accepted during transition)
+  --peer-kind <kind>  For a DM target whose name a human and an agent share:
+                      'agent' or 'human' (same as dm:@name~agent /
+                      dm:@name~human)
+  --sender <handle>   Restrict to messages by sender handle, e.g. @alice
+  --sort <mode>       Sort results by relevance or recent (default: relevance;
+                      filter-only searches use recent)
+  --before <iso>      Only messages before this ISO datetime
+  --after <iso>       Only messages after this ISO datetime
+  --limit <n>         Max results (default 20, capped at 50; a full page of 50
+                      does not mean there are no more)
+  --offset <n>        Skip this many results (default 0). Not a stable cursor
+                      in either sort mode: under relevance the ordering
+                      re-ranks as the corpus changes; under recent (including
+                      filter-only searches) new messages shift every later row,
+                      so the same offset can repeat rows. For recent, page with
+                      --before
+  -h, --help          display help for command
+",
+}
+`;
+
+exports[`--help > raft message send --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft message send [options] [content...]
+
+Send a message to a channel, DM, or thread
+
+Options:
+  --target <target>           Target: '#channel', 'dm:@peer',
+                              '#channel:threadId', 'dm:@peer:threadId'
+  --peer-kind <kind>          For a DM target whose name a human and an agent
+                              share: 'agent' or 'human' (same as dm:@name~agent
+                              / dm:@name~human)
+  --send-draft                Send the saved draft when no stdin bytes are
+                              detected within 1000ms
+  --discard-draft             Delete the saved draft for --target without
+                              sending it (with --expected-draft-key: only that
+                              draft)
+  --expected-draft-key <key>  Fail closed unless the saved draft still has this
+                              idempotency key (requires --send-draft or
+                              --discard-draft)
+  --anyway                    Escape hatch: send a saved draft even if
+                              freshness re-check is still stale
+  --target-confirmed          Confirm that the top-level --target is
+                              intentional even if the latest local read context
+                              was a thread
+  --reviewer-isolation        Blind-review seat: keep freshness holds body-free
+                              (also enabled by RAFT_REVIEWER_ISOLATION=1)
+  --json                      Emit the Agent API send response as JSON
+  --content <content>         Unsupported. Pipe message content to stdin
+                              instead.
+  --attachment-id <id>        Attachment id to link (repeatable). Get one from
+                              \`raft attachment upload\`.
+  --mention <actor>           Bind an @handle to one actor (repeatable):
+                              human:<uuid>:<handle> or agent:<uuid>:<handle>.
+  -h, --help                  display help for command
+",
+}
+`;
+
+exports[`--help > raft reminder --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft reminder [options] [command]
+
+Reminder operations
+
+Options:
+  -h, --help          display help for command
+
+Commands:
+  schedule [options]  Schedule a reminder that fires at a future time
+  list [options]      List your own reminders (defaults to scheduled and fired)
+  cancel [options]    Cancel a scheduled reminder by id (full uuid or 8-char
+                      prefix)
+  snooze [options]    Snooze a scheduled or fired reminder
+  update [options]    Update one field on a scheduled reminder
+  log [options]       Show lifecycle events for one reminder
+  ack [options]       Acknowledge one exact fired reminder Inbox item
+  dismiss [options]   Dismiss one exact fired reminder Inbox item
+  seal [options]      Seal a local reminder id against destructive actions
+  unseal [options]    Remove a local reminder Inbox seal
+  help [command]      display help for command
+",
+}
+`;
+
+exports[`--help > raft reminder cancel --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft reminder cancel [options]
+
+Cancel a scheduled reminder by id (full uuid or 8-char prefix)
+
+Options:
+  --id <id>   Reminder id (full uuid or short prefix)
+  -h, --help  display help for command
+",
+}
+`;
+
+exports[`--help > raft reminder list --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft reminder list [options]
+
+List your own reminders (defaults to scheduled and fired)
+
+Options:
+  --all         Include canceled reminders
+  --status <s>  Comma-separated statuses (scheduled,fired,canceled). Default:
+                scheduled,fired
+  -h, --help    display help for command
+",
+}
+`;
+
+exports[`--help > raft reminder schedule --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft reminder schedule [options]
+
+Schedule a reminder that fires at a future time
+
+Options:
+  --title <t>          Short description of what the reminder is about
+  --delay-seconds <n>  Preferred for relative times. Fires this many seconds
+                       from now (server-computed, timezone-safe)
+  --fire-at <iso>      ISO-8601 UTC timestamp, e.g. 2026-04-21T09:00:00Z. Use
+                       only for absolute calendar times
+  --repeat <rule>      Recurrence rule: every:15m | every:2h | every:1d |
+                       daily@09:00 | weekly:mon,fri@09:00
+  --tz <iana>          IANA timezone for --repeat (e.g. Asia/Shanghai).
+                       Overrides this host's timezone.
+  --channel <ref>      Optional channel, DM, or thread to anchor this reminder
+                       to (e.g. #general, dm:@alice). The fire notifies the
+                       author; to tell someone else, @mention them in a
+                       follow-up after it fires.
+  --peer-kind <kind>   For a DM target whose name a human and an agent share:
+                       'agent' or 'human' (same as dm:@name~agent /
+                       dm:@name~human)
+  --message-id <id>    Message id (full or short) this reminder is anchored to.
+                       Required for agent-created reminders.
+  --msg-id <id>        Deprecated alias for --message-id.
+  -h, --help           display help for command
+",
+}
+`;
+
+exports[`--help > raft reminder snooze --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft reminder snooze [options]
+
+Snooze a scheduled or fired reminder
+
+Options:
+  --id <id>        Reminder id (full uuid or short prefix)
+  --by <duration>  Snooze duration, e.g. 30m, 2h, 1d
+  -h, --help       display help for command
+",
+}
+`;
+
+exports[`--help > raft reminder update --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft reminder update [options]
+
+Update one field on a scheduled reminder
+
+Options:
+  --id <id>         Reminder id (full uuid or short prefix)
+  --fire-at <iso>   New absolute next fire time
+  --in <duration>   New relative next fire time, e.g. 30m, 2h
+  --cadence <rule>  New recurrence rule: every:15m | daily@09:00 |
+                    weekly:mon,fri@09:00
+  --title <text>    New reminder title
+  -h, --help        display help for command
+",
+}
+`;
+
+exports[`--help > raft server --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft server [options] [command]
+
+Server / workspace introspection
+
+Options:
+  -h, --help        display help for command
+
+Commands:
+  info [options]    Show bounded server facts; use --full for the legacy full
+                    inventory
+  update [options]  Update the current server profile when this agent has
+                    server admin authority
+  help [command]    display help for command
+",
+}
+`;
+
+exports[`--help > raft server info --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft server info [options]
+
+Show bounded server facts; use --full for the legacy full inventory
+
+Options:
+  --full          Print the full channels, agents, humans, and runtime
+                  inventory
+  --channels      List visible channels only
+  --agents        List agents only
+  --humans        List humans only
+  --joined        With --channels, show only joined channels
+  --query <text>  Filter the selected list by visible text
+  --limit <n>     Maximum rows for list output (default: 50)
+  --offset <n>    Rows to skip for list output (default: 0)
+  -h, --help      display help for command
+",
+}
+`;
+
+exports[`--help > raft task --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft task [options] [command]
+
+Task board operations
+
+Options:
+  -h, --help          display help for command
+
+Commands:
+  list [options]      List tasks in a channel
+  create [options]    Create one or more tasks in a channel
+  claim [options]     Claim one or more tasks (by task number or message id)
+  unclaim [options]   Release a previously-claimed task
+  assign [options]    Assign a task to a human or agent
+  unassign [options]  Clear a task's assignee, leaving it open for anyone
+  update [options]    Update task status
+  receipt [options]   Record the structured receipt for a resource-creating
+                      task
+  delete [options]    Delete a task (creator or server admin only)
+  convert [options]   Convert a message into a task without claiming it
+  amend [options]     Amend task card fields with append-only audit history
+  history [options]   Read a task's append-only lifecycle and amendment history
+  show [options]      Read one task's current title and description
+  help [command]      display help for command
+",
+}
+`;
+
+exports[`--help > raft task claim --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft task claim [options]
+
+Claim one or more tasks (by task number or message id)
+
+Options:
+  --target <target>     Channel target: '#channel'
+  --channel <target>    Legacy alias for --target (accepted during transition)
+  --peer-kind <kind>    For a DM target whose name a human and an agent share:
+                        'agent' or 'human' (same as dm:@name~agent /
+                        dm:@name~human)
+  --number <n>          Task number to claim (repeatable)
+  --message-id <id>     Message id (full or short) to claim (repeatable)
+  --reviewer-isolation  Blind-review seat: keep freshness holds body-free (also
+                        enabled by RAFT_REVIEWER_ISOLATION=1)
+  -h, --help            display help for command
+",
+}
+`;
+
+exports[`--help > raft task create --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Atomic assignment:
+  --assignee applies to every --title. Self-assignment starts work; owner/admin assignment to someone else reserves todo work for them.
+  To undo an accidental self-start, run \`raft task update --target <channel> --number <N> --status todo\`; the task stays assigned to you.
+  The handle must resolve uniquely and be able to claim in the target channel.
+  If handle resolution or channel authorization fails, no task-message is created.
+Resource receipt gate:
+  --creates-resource marks every --title. The task cannot move to done until \`raft task receipt\` records all required fields and creates an owner-anchored expiry follow-up.
+
+Usage: raft task create [options]
+
+Create one or more tasks in a channel
+
+Options:
+  --target <target>    Channel target: '#channel'
+  --channel <target>   Legacy alias for --target (accepted during transition)
+  --peer-kind <kind>   For a DM target whose name a human and an agent share:
+                       'agent' or 'human' (same as dm:@name~agent /
+                       dm:@name~human)
+  --title <title>      Task title (repeatable for batch create)
+  --assignee <handle>  Assign every created task atomically to an eligible
+                       '@handle'
+  --creates-resource   Require a structured resource receipt and expiry
+                       follow-up before completion
+  -h, --help           display help for command
+",
+}
+`;
+
+exports[`--help > raft task list --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft task list [options]
+
+List tasks in a channel
+
+Options:
+  --target <target>   Channel target: '#channel'
+  --channel <target>  Legacy alias for --target (accepted during transition)
+  --peer-kind <kind>  For a DM target whose name a human and an agent share:
+                      'agent' or 'human' (same as dm:@name~agent /
+                      dm:@name~human)
+  --mine              List tasks assigned to this agent across its visible task
+                      scope
+  --status <s>        Filter: all|todo|in_progress|in_review|done|closed
+                      (--mine defaults to unfinished)
+  -h, --help          display help for command
+",
+}
+`;
+
+exports[`--help > raft task update --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft task update [options]
+
+Update task status
+
+Options:
+  --target <target>     Channel target: '#channel'
+  --channel <target>    Legacy alias for --target (accepted during transition)
+  --peer-kind <kind>    For a DM target whose name a human and an agent share:
+                        'agent' or 'human' (same as dm:@name~agent /
+                        dm:@name~human)
+  --number <n>          Task number to update
+  --status <status>     New status. One of: todo, in_progress, in_review, done,
+                        closed
+  --reviewer-isolation  Blind-review seat: keep freshness holds body-free (also
+                        enabled by RAFT_REVIEWER_ISOLATION=1)
+  -h, --help            display help for command
+",
+}
+`;
+
+exports[`--help > raft thread --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft thread [options] [command]
+
+Thread attention operations
+
+Options:
+  -h, --help          display help for command
+
+Commands:
+  list                List threads this agent is currently following
+  unfollow [options]  Stop following a thread you no longer need ordinary
+                      delivery for
+  help [command]      display help for command
+",
+}
+`;
+
+exports[`--help > raft thread unfollow --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft thread unfollow [options]
+
+Stop following a thread you no longer need ordinary delivery for
+
+Options:
+  --target <target>   Thread target, e.g. '#engineering:abcd1234' or
+                      'dm:@alice:abcd1234'
+  --peer-kind <kind>  For a DM target whose name a human and an agent share:
+                      'agent' or 'human' (same as dm:@name~agent /
+                      dm:@name~human)
+  --reason <reason>   Short reason shown in the thread-local unfollow notice
+  -h, --help          display help for command
+",
+}
+`;
+
+exports[`--help > raft user --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft user [options] [command]
+
+User and agent introspection
+
+Options:
+  -h, --help             display help for command
+
+Commands:
+  info [options] <name>  Show narrow visible facts for a human or agent and its
+                         visible channel memberships
+  help [command]         display help for command
+",
+}
+`;
+
+exports[`--help > raft user info --help 1`] = `
+{
+  "exitCode": 0,
+  "requests": [],
+  "stderr": "",
+  "stdout": "Usage: raft user info [options] <name>
+
+Show narrow visible facts for a human or agent and its visible channel
+memberships
+
+Options:
+  --limit <n>   Maximum visible channels to inspect (default: 50)
+  --offset <n>  Visible channels to skip before inspection (default: 0)
+  -h, --help    display help for command
+",
+}
+`;
+
+exports[`--peer-kind > raft action prepare --target dm:@richard --peer-kind agent 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "action": {
+          "description": "Drafts release notes",
+          "name": "release-bot",
+          "type": "agent:create",
+        },
+        "target": "dm:@richard~agent",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/prepare-action",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Action card posted to dm:@richard~agent as message 99990000-1111-4222-8333-444455556666 (short 99990000). The human can click the action verb to commit.
+",
+}
+`;
+
+exports[`--peer-kind > raft message read --target dm:@richard --peer-kind agent 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/history?channel=dm%3A%40richard%7Eagent",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Read window: 1 returned, seq 7, oldest to newest. No older. No newer.
+Coverage: top-level messages in this target only; thread replies are excluded and must be read from their thread targets.
+Server unread cursor before this read: seq 6. Use raft message read --target "dm:@richard~agent" --after 6 to browse newer messages.
+
+[1/1 seq=7 msg=eeeeffff-1111-4222-8333-444455556666 time=2026-10-03 10:00:00Z type=agent replyTarget=dm:@richard~agent:eeeeffff] @richard: hey, can you help with the release notes?
+
+End of window: 1/1 shown.
+",
+}
+`;
+
+exports[`--peer-kind > raft message send --target dm:@richard --peer-kind human 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "body": {
+        "content": "hello",
+        "draftReholdCount": 0,
+        "draftReplacedExisting": false,
+        "idempotencyKey": "<uuid>",
+        "target": "dm:@richard~human",
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/v2/send",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Message sent to dm:@richard~human. Message ID: 12345678-9abc-4def-8123-456789abcdef (to reply in this message's thread, use target "dm:@richard~human")
+",
+}
+`;
+
+exports[`managed runner: inbox check > raft inbox check (daemon pending rows, app item and seal) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/inbox/conversations",
+    },
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/inbox",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Inbox: 1 unread conversation (1 DM, 0 with mentions). Newest activity first.
+
+dm:@richard · 3 unread · 2 new, not yet delivered · latest @richard 12m ago
+  open: raft message read --target "dm:@richard" --after 1200
+
+Next: open the first conversation above: raft message read --target "dm:@richard" --after 1200
+
+App items: 1
+
+app=system.reminder · class=due · item=reminder · retention=until_explicit_ack · sourceRef=reminder:76d9397d-1111-4222-8333-444455556666:1 · action=raft reminder ack --id 76d9397d --revision 1
+
+Seal registry:
+seal app=system.reminder · class=due · source=reminder:76d9397d-1111-4222-8333-444455556666 · status=SEALED(exact) · owner=@Stone · unseal_when=explicit release
+",
+}
+`;
+
+exports[`managed runner: inbox check > raft inbox check (daemon snapshot unavailable) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/inbox/conversations",
+    },
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/inbox",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Inbox: nothing unread.
+
+Next: nothing to do; new messages will reach you as they arrive.
+
+Daemon pending buffer unavailable (daemon unavailable); not-yet-delivered counts and app items are not shown.
+",
+}
+`;
+
+exports[`managed runner: message check > raft message check (channel message, no lease) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "headers": {
+        "x-raft-events-ack": "lease",
+      },
+      "method": "GET",
+      "path": "/internal/agent-api/events?since=latest",
+    },
+  ],
+  "stderr": "",
+  "stdout": "[target=#general msg=aaaabbbb time=2026-10-03 11:40:00Z type=human] @richard: @agent-pin can you look at the deploy failure?
+No more new inbox messages.
+",
+}
+`;
+
+exports[`managed runner: message check > raft message check (empty inbox, app items pending) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "headers": {
+        "x-raft-events-ack": "lease",
+      },
+      "method": "GET",
+      "path": "/internal/agent-api/events?since=latest",
+    },
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/inbox",
+    },
+  ],
+  "stderr": "",
+  "stdout": "No new inbox messages.
+
+App items pending: 1. Run \`raft inbox check\` to inspect them.
+",
+}
+`;
+
+exports[`managed runner: message check > raft message check (leased third-party event, acked after output) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "headers": {
+        "x-raft-events-ack": "lease",
+      },
+      "method": "GET",
+      "path": "/internal/agent-api/events?since=latest",
+    },
+    {
+      "body": {
+        "batchId": "batch-1",
+        "eventIds": [
+          "0f3b6c2e-8d41-4a7b-9c55-1e2f3a4b5c6d",
+        ],
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/third-party-events/ack",
+    },
+  ],
+  "stderr": "",
+  "stdout": "[target=agent-event:0f3b6c2e msg=0f3b6c2e time=2026-10-03 11:59:00Z type=third_party_app] @stamp — Stamp: kind=pr_approved; payload_hash=sha256:0123abcd
+Third-party event: pr approved
+payload:
+{
+  "pr": 42,
+  "state": "approved"
+}
+No more new inbox messages.
+",
+}
+`;
+
+exports[`message search --before naive timestamp > raft message search --query deploy --before 2026-10-01 10:00 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/search?q=deploy&before=2026-10-01T10%3A00%3A00.000%2B08%3A00",
+    },
+  ],
+  "stderr": "",
+  "stdout": "No search results. (truncated=false)
+",
+}
+`;
+
+exports[`no stdin > raft action prepare --target #general (TTY stdin, no action JSON) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [],
+  "stderr": "Error: No action JSON received on stdin.
+Pipe a JSON ActionCardAction object (for example channel:create / agent:create / channel:add_member) into raft action prepare:
+  raft action prepare --target "#channel" <<'RAFTACTION'
+  {"type":"channel:create","name":"demo","visibility":"public"}
+  RAFTACTION
+Code: MISSING_ACTION
+",
+  "stdout": "",
+}
+`;
+
+exports[`no stdin > raft message send --target #general (TTY stdin, no content) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [],
+  "stderr": "Error: No message content received on stdin.
+Use a heredoc or pipe content into raft message send:
+  raft message send --target "#channel" <<'RAFTMSG'
+  message body
+  RAFTMSG
+Code: MISSING_CONTENT
+Draft saved: no
+",
+  "stdout": "",
+}
+`;
+
+exports[`parse errors > raft channel members (missing required argument) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [],
+  "stderr": "Error: missing required argument 'target'
+Code: INVALID_ARG
+Next action: Run \`raft channel members --help\` for syntax.
+",
+  "stdout": "",
+}
+`;
+
+exports[`parse errors > raft frobnicate (unknown group) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [],
+  "stderr": "Error: unknown command 'frobnicate'
+Code: INVALID_ARG
+Next action: Run \`raft --help\` to list valid subcommands: version, auth, agent, channel, thread, server, user, manual, knowledge, inbox, message, attachment, task, mention, profile, integration, reminder, app, action.
+",
+  "stdout": "",
+}
+`;
+
+exports[`parse errors > raft manual get (missing topic: manual-specific next action) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [],
+  "stderr": "Error: missing required argument 'topic'
+Code: INVALID_ARG
+Next action: Run \`raft manual get index\` for the topic index, or \`raft manual get --help\` for syntax.
+",
+  "stdout": "",
+}
+`;
+
+exports[`parse errors > raft message (group without a subcommand) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [],
+  "stderr": "Usage: raft message [options] [command]
+
+Message operations
+
+Options:
+  -h, --help                   display help for command
+
+Commands:
+  send [options] [content...]  Send a message to a channel, DM, or thread
+  check                        Drain the agent inbox (non-blocking). Acks
+                               delivered seqs before returning.
+  read [options]               Read message history for a channel, DM, or
+                               thread
+  search [options]             Search messages across channels the agent can
+                               see
+  resolve <id>                 Resolve a message id exactly and print the
+                               canonical message
+  react [options]              Add or remove your reaction on a message
+  help [command]               display help for command
+Error: (outputHelp)
+Code: INVALID_ARG
+Next action: Run \`raft message --help\` for syntax.
+",
+  "stdout": "",
+}
+`;
+
+exports[`parse errors > raft message frobnicate (unknown subcommand) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [],
+  "stderr": "Error: unknown command 'frobnicate'
+Code: INVALID_ARG
+Next action: Run \`raft message --help\` to list valid subcommands: send, check, read, search, resolve, react.
+",
+  "stdout": "",
+}
+`;
+
+exports[`parse errors > raft message read --bogus (unknown option) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [],
+  "stderr": "Error: unknown option '--bogus'
+Code: INVALID_ARG
+Next action: Run \`raft message read --help\` to list supported flags.
+",
+  "stdout": "",
+}
+`;
+
+exports[`reminder cancel seal guard > raft reminder cancel --id 76d9397d (managed runner: no seal) 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/inbox",
+    },
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/reminders?status=scheduled%2Cfired",
+    },
+    {
+      "method": "DELETE",
+      "path": "/internal/agent-api/reminders/76d9397d-1111-4222-8333-444455556666",
+    },
+  ],
+  "stderr": "",
+  "stdout": "Reminder canceled: #76d9397d [canceled] "check deploy status"
+",
+}
+`;
+
+exports[`reminder cancel seal guard > raft reminder cancel --id 76d9397d (managed runner: sealed) 1`] = `
+{
+  "exitCode": 1,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/inbox",
+    },
+  ],
+  "stderr": "Error: Reminder 76d9397d-1111-4222-8333-444455556666 revision 1 is sealed by @Stone until explicit release; run raft reminder unseal explicitly first
+Code: UPDATE_FAILED
+",
+  "stdout": "",
+}
+`;
+
+exports[`reminder snooze / update > raft reminder snooze --id 76d9397d --by 30m 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/reminders?status=scheduled%2Cfired",
+    },
+    {
+      "body": {
+        "delaySeconds": 1800,
+      },
+      "method": "POST",
+      "path": "/internal/agent-api/reminders/76d9397d-1111-4222-8333-444455556666/snooze",
+    },
+  ],
+  "stderr": "Reminder seals: not checked (not available for external agents).
+",
+  "stdout": "Reminder snoozed: #76d9397d (one-time) "check deploy status"
+Next: 2026-10-03T13:00:00.000Z
+(to modify: snooze/update/cancel; raft reminder --help)
+",
+}
+`;
+
+exports[`reminder snooze / update > raft reminder update --id 76d9397d --cadence daily@09:00 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/reminders?all=true",
+    },
+    {
+      "body": {
+        "repeat": "daily@09:00",
+        "tz": "Asia/Singapore",
+      },
+      "method": "PATCH",
+      "path": "/internal/agent-api/reminders/76d9397d-1111-4222-8333-444455556666",
+    },
+  ],
+  "stderr": "Reminder seals: not checked (not available for external agents).
+",
+  "stdout": "Reminder updated: #76d9397d (recurring · daily at 09:00 Asia/Singapore) "check deploy status"
+Next: 2026-10-04T01:00:00.000Z
+(to modify: snooze/update/cancel; raft reminder --help)
+",
+}
+`;
+
+exports[`reminder snooze / update > raft reminder update --id 76d9397d --in 2h 1`] = `
+{
+  "exitCode": 0,
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/internal/agent-api/reminders?all=true",
+    },
+    {
+      "body": {
+        "delaySeconds": 7200,
+      },
+      "method": "PATCH",
+      "path": "/internal/agent-api/reminders/76d9397d-1111-4222-8333-444455556666",
+    },
+  ],
+  "stderr": "Reminder seals: not checked (not available for external agents).
+",
+  "stdout": "Reminder updated: #76d9397d (one-time) "check deploy status"
+Next: 2026-10-03T14:00:00.000Z
+(to modify: snooze/update/cancel; raft reminder --help)
+",
+}
+`;

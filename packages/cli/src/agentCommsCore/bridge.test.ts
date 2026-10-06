@@ -2,15 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
 import {
   EXTERNAL_AGENT_ACTIVITY_DRAIN_SCHEMA,
   EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
   type ExternalAgentWakeEventEnvelope,
 } from "@botiverse/raft-shared";
-import type { AgentContext } from "../auth/env.js";
-import { buildRaftChannelWakeInjectedEvent } from "../external/raftChannelWakeAdapter.js";
+import type { AgentContext } from "../auth/env";
+import { buildRaftChannelWakeInjectedEvent } from "../external/raftChannelWakeAdapter";
 import {
   AgentCommsBridgeLockError,
   acquireAgentCommsBridgeLock,
@@ -22,7 +21,7 @@ import {
   type AgentCommsHandoffEvent,
   type AgentCommsProofEvent,
   type AgentCommsWakeHintSource,
-} from "./bridge.js";
+} from "./bridge";
 
 const fixedNow = () => new Date("2026-06-08T05:00:00.000Z");
 
@@ -410,6 +409,27 @@ test("activity sanitizer preserves plugin 0.3.0 event-level truncation provenanc
   assert.equal(sanitized.rejectedCount, 0);
   assert.equal(sanitized.events.length, 1);
   assert.equal(sanitized.events[0]?.toolOutputTruncated, true);
+});
+
+test("activity sanitizer forwards raft-agent-status.v1 status and detail, including status-only events", () => {
+  const sanitized = sanitizeExternalAgentActivityEvents([
+    { eventId: "status-only", status: "working", detail: "  Running   tests ", occurredAt: "2026-06-12T01:02:03.000Z" },
+    { eventId: "hook-status", hookEventName: "PreToolUse", toolName: "Bash", status: "thinking" },
+    { eventId: "legacy", hookEventName: "PostToolUseFailure", toolName: "Bash", status: "failed", detail: "ignored" },
+    { eventId: "unknown", hookEventName: "PostToolUse", toolName: "Bash", status: "running" },
+    { eventId: "no-hook-no-status", detail: "nothing to report" },
+  ] as any, fixedNow);
+
+  assert.equal(sanitized.rejectedCount, 1);
+  assert.deepEqual(
+    sanitized.events.map((event) => [event.eventId, event.hookEventName, event.status, event.detail]),
+    [
+      ["status-only", undefined, "working", "Running tests"],
+      ["hook-status", "PreToolUse", "thinking", undefined],
+      ["legacy", "PostToolUseFailure", "failed", undefined],
+      ["unknown", "PostToolUse", undefined, undefined],
+    ],
+  );
 });
 
 

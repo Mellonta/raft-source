@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { ApiResponse } from "./client.js";
-import { CliError } from "./core/errors.js";
-import { createDaemonApiSurfaceClient } from "./daemonApiPath.js";
+import type { ApiResponse } from "./client";
+import { CliError } from "./core/errors";
+import { createDaemonApiSurfaceClient } from "./daemonApiPath";
 
 test("daemon API CLI errors include sanitized contract rejection localization", async () => {
   const client = createDaemonApiSurfaceClient({

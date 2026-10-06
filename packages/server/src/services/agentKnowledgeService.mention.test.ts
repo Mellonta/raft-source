@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService.js";
+import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService";
 
 // Manual telemetry surfaced recovery-seeking queries (`reply mention`,
 // `mention pending resolve undelivered`) missing while canonical `mention`

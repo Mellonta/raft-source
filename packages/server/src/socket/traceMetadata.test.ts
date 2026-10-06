@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { stripSocketTraceMetadata } from "./index.js";
+import { stripSocketTraceMetadata } from "./index";
 
 test("stripSocketTraceMetadata removes tracing envelope without mutating payload semantics", () => {
   const payload = {

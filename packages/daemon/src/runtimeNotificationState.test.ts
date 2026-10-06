@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { computeInboxNoticeFingerprint, RuntimeNotificationState } from "./runtimeNotificationState.js";
+import { computeInboxNoticeFingerprint, RuntimeNotificationState } from "./runtimeNotificationState";
 
 test("runtime notification state tracks pending notification debt separately from scheduling", () => {
   const state = new RuntimeNotificationState();

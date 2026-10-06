@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import {
   generateKeyPairSync,
@@ -11,7 +11,7 @@ import type { KeyObject } from "node:crypto";
 
 import { asc, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   nativeNotificationCredentials,
   nativeNotificationDevices,
@@ -19,17 +19,17 @@ import {
   nativeNotificationEvents,
   sessionFamilies,
   users,
-} from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { __setNativeNotificationLiveWriteHookForTests } from "./notifications.js";
+} from "../db/schema";
+import { createServer } from "../services/serverService";
+import { __setNativeNotificationLiveWriteHookForTests } from "./notifications";
 import {
   __setNativeNotificationAttestationVerifierForTests,
   buildEnrollmentProofTranscript,
   buildRotationProofTranscript,
   persistNativeNotificationIntents,
   revokeCurrentNativeCredential,
-} from "../services/nativeNotificationService.js";
-import { openTestApp } from "../test/integration/app.js";
+} from "../services/nativeNotificationService";
+import { openTestApp } from "../test/integration/app";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

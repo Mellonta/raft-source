@@ -1,5 +1,5 @@
 import type { PdfAttachmentPreviewData } from "@botiverse/raft-shared";
-import type { AttachmentPreviewProvider } from "../types.js";
+import type { AttachmentPreviewProvider } from "../types";
 
 export const PDF_PREVIEW_BYTE_LIMIT = 4;
 export const PDF_PREVIEW_PAYLOAD_BYTE_LIMIT = 512;

@@ -1,0 +1,25 @@
+{
+  "protocolVersion": 1,
+  "runtimeId": "pi",
+  "schemaVersion": "pi.create.v1",
+  "sourceId": "model",
+  "kind": "select",
+  "pointer": "/model",
+  "options": [
+    {
+      "value": "default",
+      "label": "Configured Default / Auto",
+      "supportedReasoningEfforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ]
+    }
+  ],
+  "defaultValue": "default",
+  "customValueAllowed": true,
+  "status": "fallback",
+  "reason": "missing_config",
+  "retryable": false
+}

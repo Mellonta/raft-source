@@ -19,9 +19,8 @@ import { isPreviewableImageAttachment } from "./urlImageFallback";
 import {
   isAudioPreviewAttachment as isPreviewableAudioAttachment,
   isDocumentPreviewAttachment as isPreviewableDocumentAttachment,
-  isVideoPreviewAttachment as isPreviewableVideoAttachment,
+  isVideoPreviewAttachment as isPreviewableVideoAttachment, isHtmlPreviewAttachment
 } from "./attachmentPreview";
-import { isHtmlPreviewAttachment } from "./attachmentPreview";
 import { openMediaPreview } from "./openMediaPreview";
 import { openDocumentPreview } from "./openDocumentPreview";
 import { downloadAttachmentById } from "./downloadAttachment";

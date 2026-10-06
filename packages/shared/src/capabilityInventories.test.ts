@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   AGENT_LOGIN_INTEGRATION_INVENTORY_PROJECTION,
   AGENT_LOGIN_INTEGRATION_INVENTORY_SCOPE,
   projectAgentLoginIntegrationInventory,
   type AgentLoginIntegrationInventoryScope,
-} from "./capabilityInventories.js";
+} from "./capabilityInventories";
 
 test("default projected exclusion preserves the exact negative-list boundary", () => {
   assert.equal(
@@ -18,17 +17,16 @@ test("default projected exclusion preserves the exact negative-list boundary", (
 test("structured inventory fields project into both machine scope and human boundary copy", () => {
   const scopeWithoutActiveLogins = {
     ...AGENT_LOGIN_INTEGRATION_INVENTORY_SCOPE,
-    includes: ["built_in_raft_apps", "registered_services"],
+    includes: ["registered_services"],
   } satisfies AgentLoginIntegrationInventoryScope;
 
   const projection = projectAgentLoginIntegrationInventory(scopeWithoutActiveLogins);
 
   assert.equal(projection.observationScope, scopeWithoutActiveLogins);
   assert.deepEqual(projection.observationScope.includes, [
-    "built_in_raft_apps",
     "registered_services",
   ]);
-  assert.match(projection.copy.scope, /built-in Raft apps and installed registered Agent Login services/);
+  assert.match(projection.copy.scope, /installed registered Agent Login services/);
   assert.doesNotMatch(projection.copy.scope, /active logins/);
 });
 

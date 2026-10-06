@@ -1,10 +1,9 @@
 import { createHash, createHmac } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import assert from "node:assert/strict";
-import test from "node:test";
 import { TRACE_EVENT_ROW_V2_PROJECTION_COLUMNS } from "@botiverse/raft-shared";
 import type { Client } from "scopedb";
-import { handleRequest, ingestTraceBundleObject, type TraceUploadWorkerEnv } from "./index.js";
+import { handleRequest, ingestTraceBundleObject, type TraceUploadWorkerEnv } from "./index";
 
 const SECRET = "scope-secret-for-tests";
 
@@ -21,7 +20,14 @@ class MockR2Bucket {
   };
   }> = [];
 
+  /** When set, `put` throws this error (simulates an R2 5xx outage). */
+  putError: Error | null = null;
+  /** Counts every put attempt, including failing ones (tests poll on this). */
+  putAttempts = 0;
+
   async put(key: string, value: ArrayBuffer | string, options?: MockR2Bucket["puts"][number]["options"]) {
+    this.putAttempts += 1;
+    if (this.putError) throw this.putError;
     this.puts.push({ key, body: value, options });
     return { etag: "mock-etag" };
   }
@@ -145,6 +151,7 @@ function webTraceClaims(overrides: Record<string, unknown> = {}) {
     scope: "web-trace-batch:create",
     sub: "user-1",
     actorType: "user",
+    traceUserId: "trace-user-1",
     serverId: "server-1",
     aud: "trace-ingest-worker",
     resource: "servers/server-1/web-traces",
@@ -221,12 +228,14 @@ test("web trace endpoint verifies attestation and forwards browser spans to OTLP
   const resourceAttrs = payload.resourceSpans[0].resource.attributes;
   assert.ok(resourceAttrs.some((attr: any) => attr.key === "service.name" && attr.value.stringValue === "slock-web"));
   assert.ok(resourceAttrs.some((attr: any) => attr.key === "slock.server_id" && attr.value.stringValue === "server-1"));
-  assert.ok(resourceAttrs.some((attr: any) => attr.key === "slock.user_id" && attr.value.stringValue === "user-1"));
+  assert.ok(resourceAttrs.some((attr: any) => attr.key === "slock.trace_user_id" && attr.value.stringValue === "trace-user-1"));
+  assert.ok(!fetchCalls[0].init?.body?.toString().includes('"user-1"'), "the raw user id (sub) is never forwarded");
+  assert.ok(!resourceAttrs.some((attr: any) => attr.key === "slock.user_id"));
   const span = payload.resourceSpans[0].scopeSpans[0].spans[0];
   assert.equal(span.name, "web.interaction.message_send");
   assert.ok(span.attributes.some((attr: any) =>
     attr.key === "slock.trace_ingest.span_key" &&
-    attr.value.stringValue === "server-1:user-1:web-batch-1:0123456789abcdef0123456789abcdef:0123456789abcdef"));
+    attr.value.stringValue === "server-1:trace-user-1:web-batch-1:0123456789abcdef0123456789abcdef:0123456789abcdef"));
 });
 
 test("web trace endpoint projects V2 rows after the canonical OTLP write", async () => {
@@ -497,9 +506,9 @@ test("feedback report endpoint stores raw report artifact and ledger without tra
   assert.ok(bucket.puts.some((put) => put.key === `feedback-report-ledgers/server-1/${createBody.id}/${createBody.artifactId}.complete.json`));
 });
 
-// TOOTH-2 (transport F1–F4 propagation). The daemon already computes transcript
+// TOOTH-2 (transport six coverage keys propagation). The daemon already computes transcript
 // window coverage and sends it in the upload body.metadata. These tests pin that
-// (a) F1–F4 survive into R2 customMetadata + ledger + webhook claim, and
+// (a) the six coverage keys survive into R2 customMetadata + ledger + webhook claim, and
 // (b) R1/R4: an out-of-enum anchor source (e.g. createdAt) or a contradictory
 // payload never defaults to "covered".
 async function uploadFeedbackReportWithMetadata(
@@ -536,7 +545,7 @@ async function uploadFeedbackReportWithMetadata(
   return { objectPut, createBody };
 }
 
-test("tooth-2 transports transcript window F1–F4 into R2 customMetadata + ledger metadata", async () => {
+test("tooth-2 transports transcript window coverage keys into R2 customMetadata + ledger metadata", async () => {
   const { env, bucket } = baseEnv();
   const { objectPut } = await uploadFeedbackReportWithMetadata(env, bucket, {
     feedbackTranscriptWindowCoverage: "outside_report_window",
@@ -544,7 +553,10 @@ test("tooth-2 transports transcript window F1–F4 into R2 customMetadata + ledg
     feedbackTranscriptLastEventAt: "2026-08-03T15:11:33.397Z",
     feedbackTranscriptTruncated: "true",
     feedbackTranscriptTruncationDirection: "tail",
-    feedbackReportTimeSource: "model_read_at",
+    // REAL producer value (shared FeedbackTranscriptReportTimeSource). The prior
+    // fixture used "model_read_at", a value no producer emits, so this test was
+    // green for 35 days against a non-existent input path (#6243 enum divergence).
+    feedbackReportTimeSource: "server_request_received",
   });
   const cm = objectPut.options?.customMetadata as Record<string, string>;
   assert.equal(cm.transcriptCoverage, "outside_report_window");
@@ -552,7 +564,24 @@ test("tooth-2 transports transcript window F1–F4 into R2 customMetadata + ledg
   assert.equal(cm.transcriptLastEventAt, "2026-08-03T15:11:33.397Z");
   assert.equal(cm.transcriptTruncated, "true");
   assert.equal(cm.transcriptTruncationDirection, "tail");
-  assert.equal(cm.transcriptAnchorSource, "model_read_at");
+  assert.equal(cm.transcriptAnchorSource, "server_request_received");
+});
+
+// Regression tooth for the #6243 anchor-source enum divergence: the worker guard
+// must accept the real producer values. With the diverging literal pair this REDs
+// (coverage keys dropped, customMetadata absent).
+test("tooth-2 accepts the real producer anchor source (web_report_bundle) and propagates coverage keys", async () => {
+  const { env, bucket } = baseEnv();
+  const { objectPut } = await uploadFeedbackReportWithMetadata(env, bucket, {
+    feedbackTranscriptWindowCoverage: "covered",
+    feedbackTranscriptFirstEventAt: "2026-08-03T05:23:32.871Z",
+    feedbackTranscriptLastEventAt: "2026-08-03T15:11:33.397Z",
+    feedbackReportTimeSource: "web_report_bundle",
+  });
+  const cm = objectPut.options?.customMetadata as Record<string, string>;
+  assert.equal(cm.transcriptCoverage, "covered");
+  assert.equal(cm.transcriptAnchorSource, "web_report_bundle");
+  assert.equal(cm.transcriptFirstEventAt, "2026-08-03T05:23:32.871Z");
 });
 
 test("tooth-2 R1/R4: out-of-enum anchor source (createdAt) is NOT defaulted to covered", async () => {
@@ -929,8 +958,14 @@ test("trace upload worker verifies attestation and stores bundle at signed R2 ke
     bundleSizeBytes: bundle.byteLength,
     bundleContentType: "application/x-ndjson",
     bundleContentEncoding: "gzip",
-    feedbackReportId: "report-abc",
-    agentId: "agent-xyz",
+    feedbackReportId: "3f8b2d9c-5e4a-4c7b-9a0f-7b6d5c4e3a03",
+    agentId: "4a9c3e0d-6f5b-4d8c-8b1a-8c7e6d5f4b04",
+    feedbackTranscriptWindowCoverage: "outside_report_window",
+    feedbackTranscriptFirstEventAt: "2026-08-03T05:23:32.871Z",
+    feedbackTranscriptLastEventAt: "2026-08-03T15:11:33.397Z",
+    feedbackTranscriptTruncated: "true",
+    feedbackTranscriptTruncationDirection: "tail",
+    feedbackReportTimeSource: "server_request_received",
     maxBytes: 1024 * 1024,
   };
   const attestation = signAttestation(traceUploadClaims(metadata));
@@ -961,7 +996,9 @@ test("trace upload worker verifies attestation and stores bundle at signed R2 ke
   assert.equal(putRes.status, 200);
   assert.equal(putRes.headers.get("etag"), "mock-etag");
 
-  assert.equal(bucket.puts.length, 2);
+  // raw bundle + its trace ledger + the same ledger filed under that report
+  assert.equal(bucket.puts.length, 3);
+  assert.ok(bucket.puts.some((put) => put.key === "feedback-report-ledgers/server-1/3f8b2d9c-5e4a-4c7b-9a0f-7b6d5c4e3a03/trace-upload-1.json"));
   const rawPut = bucket.puts.find((put) => put.key === metadata.objectKey);
   assert.ok(rawPut);
   assert.equal(putBodyToString(rawPut.body), bundle.toString("utf8"));
@@ -977,8 +1014,14 @@ test("trace upload worker verifies attestation and stores bundle at signed R2 ke
       bundleSizeBytes: String(bundle.byteLength),
       serverId: "server-1",
       machineId: "machine-1",
-      feedbackReportId: "report-abc",
-      agentId: "agent-xyz",
+      feedbackReportId: "3f8b2d9c-5e4a-4c7b-9a0f-7b6d5c4e3a03",
+      agentId: "4a9c3e0d-6f5b-4d8c-8b1a-8c7e6d5f4b04",
+      transcriptCoverage: "outside_report_window",
+      transcriptFirstEventAt: "2026-08-03T05:23:32.871Z",
+      transcriptLastEventAt: "2026-08-03T15:11:33.397Z",
+      transcriptTruncated: "true",
+      transcriptTruncationDirection: "tail",
+      transcriptAnchorSource: "server_request_received",
     },
   });
   const ledgerPut = bucket.puts.find((put) => put.key === "trace-ledgers/server-1/machine-1/upload-1.json");
@@ -987,8 +1030,14 @@ test("trace upload worker verifies attestation and stores bundle at signed R2 ke
   assert.equal(ledger.r2_status, "success");
   assert.equal(ledger.scopedb_status, "skipped");
   assert.equal(ledger.object_key, metadata.objectKey);
-  assert.equal(ledger.feedback_report_id, "report-abc");
-  assert.equal(ledger.agent_id, "agent-xyz");
+  assert.equal(ledger.feedback_report_id, "3f8b2d9c-5e4a-4c7b-9a0f-7b6d5c4e3a03");
+  assert.equal(ledger.agent_id, "4a9c3e0d-6f5b-4d8c-8b1a-8c7e6d5f4b04");
+  assert.equal(ledger.transcript_coverage, "outside_report_window");
+  assert.equal(ledger.transcript_first_event_at, "2026-08-03T05:23:32.871Z");
+  assert.equal(ledger.transcript_last_event_at, "2026-08-03T15:11:33.397Z");
+  assert.equal(ledger.transcript_truncated, "true");
+  assert.equal(ledger.transcript_truncation_direction, "tail");
+  assert.equal(ledger.transcript_anchor_source, "server_request_received");
   assert.equal(ledger.span_key_identity, "serverId:machineId:bundleSha256:trace_id:span_id");
   assert.deepEqual(ledgerPut.options?.customMetadata, {
     uploadId: "upload-1",
@@ -997,8 +1046,8 @@ test("trace upload worker verifies attestation and stores bundle at signed R2 ke
     serverId: "server-1",
     machineId: "machine-1",
     ledgerType: "daemon-trace-upload",
-    feedbackReportId: "report-abc",
-    agentId: "agent-xyz",
+    feedbackReportId: "3f8b2d9c-5e4a-4c7b-9a0f-7b6d5c4e3a03",
+    agentId: "4a9c3e0d-6f5b-4d8c-8b1a-8c7e6d5f4b04",
   });
 });
 
@@ -1250,7 +1299,145 @@ test("trace upload worker schedules async R2 to OTLP ingest after successful upl
   assert.equal(spans[0].events[0].name, "daemon.agent.stdin.written");
 });
 
+// Task #426 red-first: an R2 5xx on a background-path ledger PUT must never
+// escape the detached ingest chain as an unhandledRejection (that killed both
+// prod tasks in the same second). The failure is logged + counted instead.
+test("trace upload worker survives an R2 503 on the success-path ledger write", async () => {
+  const { env, bucket } = baseEnv();
+  env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test";
+  env.TRACE_INGEST_SERVICE_NAME = "slock-daemon-test";
+  env.DEPLOYMENT_ENV = "production";
+  env.TRACE_INGEST_FETCH = async () => new Response(null, { status: 200 });
+  const bundle = Buffer.from(`${JSON.stringify(spanRecord())}\n`);
+  const metadata = {
+    uploadId: "upload-r2-503-success",
+    objectKey: "trace-bundles/server-1/machine-1/upload-r2-503-success.jsonl",
+    bundleId: "bundle-r2-503-success",
+    bundleSha256: sha256Hex(bundle),
+    bundleSizeBytes: bundle.byteLength,
+    bundleContentType: "application/x-ndjson",
+    deploymentEnvironment: "staging",
+    maxBytes: 1024 * 1024,
+  };
+  const attestation = signAttestation(traceUploadClaims(metadata));
+  const ctx = new MockExecutionContext();
+
+  const createRes = await handleRequest(new Request("https://trace-worker.test/api/trace-bundles", {
+    method: "POST",
+    body: JSON.stringify({
+      attestation,
+      bundleSha256: metadata.bundleSha256,
+      bundleSizeBytes: metadata.bundleSizeBytes,
+    }),
+  }), env, ctx);
+  const createBody = await createRes.json() as { upload: { url: string } };
+  const putRes = await handleRequest(new Request(createBody.upload.url, {
+    method: "PUT",
+    body: bundle,
+  }), env, ctx);
+  assert.equal(putRes.status, 200);
+  assert.equal(ctx.promises.length, 1);
+
+  // R2 goes down only after the upload completes — the background ingest
+  // succeeds, but its success-path ledger PUT gets a 503.
+  bucket.putError = new Error("R2 PUT failed with status 503");
+
+  const ledgerFailures: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    if (typeof args[0] === "string") ledgerFailures.push(args[0]);
+  };
+  let unhandled = 0;
+  const onUnhandled = () => { unhandled += 1; };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    // Do NOT await or observe ctx.promises — the old node.ts never did, and
+    // observing here would attach a handler that masks a real unobserved
+    // rejection (a vacuous spy). Instead wait until the background ledger PUT
+    // has actually been attempted (attempt #3 = bundle + initial ledger + this
+    // one), then flush so any unhandledRejection would have fired.
+    for (let i = 0; i < 500 && bucket.putAttempts < 3; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(bucket.putAttempts, 3);
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(unhandled, 0);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+    console.error = originalError;
+  }
+  assert.equal(ledgerFailures.filter((line) => line === "[TraceUploadLedger] write_failed").length, 1);
+});
+
+test("trace upload worker survives an R2 503 on the catch-path ledger write (incident repro)", async () => {
+  const { env, bucket } = baseEnv();
+  env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test";
+  env.TRACE_INGEST_SERVICE_NAME = "slock-daemon-test";
+  env.DEPLOYMENT_ENV = "production";
+  // Ingest fails (ScopeDB down), then the ledger PUT inside the .catch handler
+  // hits the same R2 outage — the exact 2026-09-29 crash chain.
+  env.TRACE_INGEST_FETCH = async () => new Response(null, { status: 503 });
+  const bundle = Buffer.from(`${JSON.stringify(spanRecord())}\n`);
+  const metadata = {
+    uploadId: "upload-r2-503-catch",
+    objectKey: "trace-bundles/server-1/machine-1/upload-r2-503-catch.jsonl",
+    bundleId: "bundle-r2-503-catch",
+    bundleSha256: sha256Hex(bundle),
+    bundleSizeBytes: bundle.byteLength,
+    bundleContentType: "application/x-ndjson",
+    deploymentEnvironment: "staging",
+    maxBytes: 1024 * 1024,
+  };
+  const attestation = signAttestation(traceUploadClaims(metadata));
+  const ctx = new MockExecutionContext();
+
+  const createRes = await handleRequest(new Request("https://trace-worker.test/api/trace-bundles", {
+    method: "POST",
+    body: JSON.stringify({
+      attestation,
+      bundleSha256: metadata.bundleSha256,
+      bundleSizeBytes: metadata.bundleSizeBytes,
+    }),
+  }), env, ctx);
+  const createBody = await createRes.json() as { upload: { url: string } };
+  const putRes = await handleRequest(new Request(createBody.upload.url, {
+    method: "PUT",
+    body: bundle,
+  }), env, ctx);
+  assert.equal(putRes.status, 200);
+  assert.equal(ctx.promises.length, 1);
+
+  bucket.putError = new Error("R2 PUT failed with status 503");
+
+  const ledgerFailures: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    if (typeof args[0] === "string") ledgerFailures.push(args[0]);
+  };
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  let unhandled = 0;
+  const onUnhandled = () => { unhandled += 1; };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    // Same non-observing discipline as the success-path test: poll until the
+    // catch-path ledger PUT has been attempted, then flush.
+    for (let i = 0; i < 500 && bucket.putAttempts < 3; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(bucket.putAttempts, 3);
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(unhandled, 0);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+    console.error = originalError;
+    console.warn = originalWarn;
+  }
+  assert.equal(ledgerFailures.filter((line) => line === "[TraceUploadLedger] write_failed").length, 1);
+});
+
 test("trace upload worker records ScopeDB ingest failure in the upload ledger", async () => {
+
   const { env, bucket } = baseEnv();
   env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test";
   env.TRACE_INGEST_FETCH = async () => new Response("scope down", { status: 503 });
@@ -1514,7 +1701,7 @@ test("trace bundle ingest shadows every successful OTLP batch into V2", async ()
     serverId: "server-1",
     machineId: "machine-1",
     deploymentEnvironment: "production",
-    agentId: "agent-metadata",
+    agentId: "8e3a7c4b-0d9f-4bc0-8f5e-2a1c0b9d8f08",
   };
   await bucket.put(metadata.objectKey, bufferToArrayBuffer(bundle), {
     httpMetadata: { contentType: "application/x-ndjson" },
@@ -1539,167 +1726,30 @@ test("trace bundle ingest shadows every successful OTLP batch into V2", async ()
   assert.ok(rows.every((row) => row.machine_id === "machine-1"));
 });
 
-// --- slock-feedback-admin webhook fan-out (best-effort) ---
-//
-// trace-upload-worker fans `feedback-report:created` and `trace-bundle:created`
-// to the slock-feedback-admin mini-app for D1 projection. The fan-out must:
-// (1) be no-op when either env var is unset, (2) include linkage fields in the
-// payload, (3) NEVER block the user-facing PUT — the test asserts on the
-// emitted call shape, not its result.
+test("a trace bundle collected for a feedback report is also filed under that report's ledger folder", async () => {
+  const { env, bucket } = baseEnv();
 
-function withStubbedGlobalFetch<T>(
-  stub: (url: string, init?: RequestInit) => Promise<Response>,
-  body: () => Promise<T>,
-): Promise<T> {
-  const original = globalThis.fetch;
-  // @ts-expect-error - replacing global fetch for the duration of the test
-  globalThis.fetch = stub;
-  return body().finally(() => {
-    globalThis.fetch = original;
-  });
-}
+  async function uploadTrace(claims: Record<string, unknown>, body: Buffer) {
+    const createRes = await handleRequest(new Request("https://trace-worker.test/api/trace-bundles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        attestation: signAttestation(traceUploadClaims(claims)),
+        bundleSha256: sha256Hex(body),
+        bundleSizeBytes: body.byteLength,
+      }),
+    }), env);
+    const createBody = await createRes.json() as { upload: { url: string } };
+    const putRes = await handleRequest(new Request(createBody.upload.url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/x-ndjson", "Content-Length": String(body.byteLength) },
+      body: bufferToArrayBuffer(body),
+    }), env);
+    assert.equal(putRes.status, 200);
+  }
 
-test("feedback-report complete fans out webhook to slock-feedback-admin when configured", async () => {
-  const { env } = baseEnv();
-  env.TRACE_WEB_CORS_ORIGIN = "https://app.slock.ai";
-  env.FEEDBACK_ADMIN_WEBHOOK_URL = "https://feedback-admin.test/internal/r2-write-event";
-  env.FEEDBACK_ADMIN_WEBHOOK_SECRET = "test-ingest-secret";
-  env.DEPLOYMENT_ENV = "staging";
-
-  const bundle = Buffer.from(JSON.stringify({ schemaVersion: "slock-feedback-export-v2", ok: true }));
-  const attestation = signAttestation(feedbackReportClaims());
-
-  const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
-  await withStubbedGlobalFetch(
-    async (url, init) => {
-      fetchCalls.push({ url: String(url), init });
-      return new Response(JSON.stringify({ ok: true }), { status: 201 });
-    },
-    async () => {
-      const createRes = await handleRequest(new Request("https://trace-worker.test/api/feedback-reports", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          attestation,
-          agentId: "agent-1",
-          source: "slock-web",
-          bundleFilename: "feedback.json",
-          bundleContentType: "application/json",
-          bundleSizeBytes: bundle.byteLength,
-          bundleSha256: sha256Hex(bundle),
-          metadata: { schemaVersion: "slock-feedback-export-v2" },
-        }),
-      }), env);
-      assert.equal(createRes.status, 200);
-      const createBody = await createRes.json() as {
-        id: string;
-        artifactId: string;
-        completeToken: string;
-        upload: { url: string };
-      };
-
-      const putRes = await handleRequest(new Request(createBody.upload.url, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", "Content-Length": String(bundle.byteLength) },
-        body: bundle,
-      }), env);
-      assert.equal(putRes.status, 200);
-
-      // The PUT path stores the artifact and ledgers; webhook only fires on
-      // /complete after the worker has confirmed the uploaded ledger.
-      assert.equal(fetchCalls.length, 0, "webhook must not fire before complete");
-
-      const completeRes = await handleRequest(new Request(`https://trace-worker.test/api/feedback-reports/${createBody.id}/complete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ completeToken: createBody.completeToken }),
-      }), env);
-      assert.equal(completeRes.status, 200);
-
-      assert.equal(fetchCalls.length, 1, "complete should fire exactly one webhook");
-      const call = fetchCalls[0]!;
-      assert.equal(call.url, "https://feedback-admin.test/internal/r2-write-event");
-      assert.equal(call.init?.method, "POST");
-      const headers = new Headers(call.init?.headers as HeadersInit);
-      assert.equal(headers.get("authorization"), "Bearer test-ingest-secret");
-      assert.equal(headers.get("content-type"), "application/json");
-      const payload = JSON.parse(String(call.init?.body));
-      assert.equal(payload.event, "feedback-report:created");
-      assert.equal(payload.serverId, "server-1");
-      assert.equal(payload.reportId, createBody.id);
-      assert.equal(payload.artifactId, createBody.artifactId);
-      assert.equal(payload.agentId, "agent-1");
-      assert.equal(payload.subjectId, "user-1");
-      assert.equal(payload.actorType, "user");
-      assert.equal(payload.source, "slock-web");
-      assert.equal(payload.bundleSizeBytes, bundle.byteLength);
-      assert.equal(typeof payload.bundleSha256, "string");
-      assert.equal(payload.objectKey.startsWith(`feedback-reports/server-1/${createBody.id}/`), true);
-      assert.equal(payload.deploymentEnvironment, "staging");
-      // Webhook must include r2LastModified so the receiver can populate the
-      // admin D1 row's `r2_last_modified` column (the user-visible "Created"
-      // timestamp) without a head-object round-trip. Caught 2026-06-21 when
-      // tygg's first prod feedback row showed an empty Created column.
-      assert.equal(typeof payload.r2LastModified, "string");
-      assert.match(payload.r2LastModified as string, /^\d{4}-\d{2}-\d{2}T/);
-    },
-  );
-});
-
-test("feedback-report complete is a no-op for the webhook when admin URL is unset", async () => {
-  const { env } = baseEnv();
-  env.TRACE_WEB_CORS_ORIGIN = "https://app.slock.ai";
-  // FEEDBACK_ADMIN_WEBHOOK_URL deliberately not set — fan-out must not fire.
-
-  const bundle = Buffer.from(JSON.stringify({ ok: true }));
-  const attestation = signAttestation(feedbackReportClaims());
-
-  const fetchCalls: Array<{ url: string }> = [];
-  await withStubbedGlobalFetch(
-    async (url) => {
-      fetchCalls.push({ url: String(url) });
-      return new Response(null, { status: 204 });
-    },
-    async () => {
-      const createRes = await handleRequest(new Request("https://trace-worker.test/api/feedback-reports", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          attestation,
-          agentId: "agent-1",
-          source: "slock-web",
-          bundleFilename: "feedback.json",
-          bundleContentType: "application/json",
-          bundleSizeBytes: bundle.byteLength,
-          bundleSha256: sha256Hex(bundle),
-        }),
-      }), env);
-      const createBody = await createRes.json() as { id: string; completeToken: string; upload: { url: string } };
-
-      await handleRequest(new Request(createBody.upload.url, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json", "Content-Length": String(bundle.byteLength) },
-        body: bundle,
-      }), env);
-      const completeRes = await handleRequest(new Request(`https://trace-worker.test/api/feedback-reports/${createBody.id}/complete`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ completeToken: createBody.completeToken }),
-      }), env);
-      assert.equal(completeRes.status, 200);
-      assert.equal(fetchCalls.length, 0, "no webhook should fire when URL env is unset");
-    },
-  );
-});
-
-test("trace-bundle PUT fans out webhook only when feedbackReportId is bound", async () => {
-  const { env } = baseEnv();
-  env.FEEDBACK_ADMIN_WEBHOOK_URL = "https://feedback-admin.test/internal/r2-write-event";
-  env.FEEDBACK_ADMIN_WEBHOOK_SECRET = "test-ingest-secret";
-
-  // First: trace-bundle WITHOUT feedbackReportId (= ordinary daemon trace).
   const ordinaryBody = Buffer.from(`${JSON.stringify(spanRecord())}\n`);
-  const ordinaryAttestation = signAttestation(traceUploadClaims({
+  await uploadTrace({
     uploadId: "upload-ord-1",
     objectKey: "trace-bundles/server-1/machine-1/upload-ord-1.jsonl",
     bundleId: "bundle-1",
@@ -1707,78 +1757,129 @@ test("trace-bundle PUT fans out webhook only when feedbackReportId is bound", as
     bundleSizeBytes: ordinaryBody.byteLength,
     bundleContentType: "application/x-ndjson",
     maxBytes: 1024 * 1024,
-  }));
-
-  const fetchCalls: Array<{ url: string; payload: Record<string, unknown> }> = [];
-  await withStubbedGlobalFetch(
-    async (url, init) => {
-      const payload = init?.body ? JSON.parse(String(init.body)) : {};
-      fetchCalls.push({ url: String(url), payload });
-      return new Response(JSON.stringify({ ok: true }), { status: 201 });
-    },
-    async () => {
-      const createRes = await handleRequest(new Request("https://trace-worker.test/api/trace-bundles", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          attestation: ordinaryAttestation,
-          bundleSha256: sha256Hex(ordinaryBody),
-          bundleSizeBytes: ordinaryBody.byteLength,
-        }),
-      }), env);
-      const createBody = await createRes.json() as { upload: { url: string } };
-      await handleRequest(new Request(createBody.upload.url, {
-        method: "PUT",
-        headers: { "Content-Type": "application/x-ndjson", "Content-Length": String(ordinaryBody.byteLength) },
-        body: ordinaryBody,
-      }), env);
-      assert.equal(fetchCalls.length, 0, "ordinary trace-bundle without feedbackReportId must not fan out");
-
-      // Then: trace-bundle WITH feedbackReportId = bound to a feedback report.
-      const linkedBody = Buffer.from(`${JSON.stringify(spanRecord({ name: "daemon.agent.delivery.routed.linked" }))}\n`);
-      const linkedAttestation = signAttestation(traceUploadClaims({
-        uploadId: "upload-linked-2",
-        objectKey: "trace-bundles/server-1/machine-1/upload-linked-2.jsonl",
-        bundleId: "bundle-2",
-        bundleSha256: sha256Hex(linkedBody),
-        bundleSizeBytes: linkedBody.byteLength,
-        bundleContentType: "application/x-ndjson",
-        maxBytes: 1024 * 1024,
-        feedbackReportId: "feedback-report-2",
-        agentId: "agent-2",
-        deploymentEnvironment: "production",
-      }));
-      const linkedCreateRes = await handleRequest(new Request("https://trace-worker.test/api/trace-bundles", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          attestation: linkedAttestation,
-          bundleSha256: sha256Hex(linkedBody),
-          bundleSizeBytes: linkedBody.byteLength,
-        }),
-      }), env);
-      const linkedCreateBody = await linkedCreateRes.json() as { upload: { url: string } };
-      const linkedPutRes = await handleRequest(new Request(linkedCreateBody.upload.url, {
-        method: "PUT",
-        headers: { "Content-Type": "application/x-ndjson", "Content-Length": String(linkedBody.byteLength) },
-        body: linkedBody,
-      }), env);
-      assert.equal(linkedPutRes.status, 200);
-
-      assert.equal(fetchCalls.length, 1, "linked trace-bundle must fan out exactly once");
-      const call = fetchCalls[0]!;
-      assert.equal(call.url, "https://feedback-admin.test/internal/r2-write-event");
-      assert.equal(call.payload.event, "trace-bundle:created");
-      assert.equal(call.payload.serverId, "server-1");
-      assert.equal(call.payload.feedbackReportId, "feedback-report-2");
-      assert.equal(call.payload.agentId, "agent-2");
-      assert.equal(call.payload.machineId, "machine-1");
-      assert.equal(call.payload.bundleId, "bundle-2");
-      assert.equal(call.payload.deploymentEnvironment, "production");
-      assert.equal(typeof call.payload.r2LastModified, "string");
-      assert.match(call.payload.r2LastModified as string, /^\d{4}-\d{2}-\d{2}T/);
-    },
+  }, ordinaryBody);
+  assert.equal(
+    bucket.puts.some((put) => put.key.startsWith("feedback-report-ledgers/")),
+    false,
+    "a routine trace bundle must not appear under any report",
   );
+
+  const linkedBody = Buffer.from(`${JSON.stringify(spanRecord({ name: "daemon.agent.delivery.routed.linked" }))}\n`);
+  await uploadTrace({
+    uploadId: "upload-linked-2",
+    objectKey: "trace-bundles/server-1/machine-1/upload-linked-2.jsonl",
+    bundleId: "bundle-2",
+    bundleSha256: sha256Hex(linkedBody),
+    bundleSizeBytes: linkedBody.byteLength,
+    bundleContentType: "application/x-ndjson",
+    maxBytes: 1024 * 1024,
+    feedbackReportId: "5b0d4f1e-7a6c-4e9d-9c2b-9d8f7e6a5c05",
+    agentId: "6c1e5a2f-8b7d-4fae-8d3c-0e9a8f7b6d06",
+    deploymentEnvironment: "production",
+    feedbackTranscriptWindowCoverage: "covered",
+    feedbackTranscriptFirstEventAt: "2026-08-03T05:23:32.871Z",
+    feedbackTranscriptLastEventAt: "2026-08-03T15:11:33.397Z",
+    feedbackTranscriptTruncated: "false",
+    feedbackTranscriptTruncationDirection: "window",
+    feedbackReportTimeSource: "web_report_bundle",
+  }, linkedBody);
+
+  const pointerKey = "feedback-report-ledgers/server-1/5b0d4f1e-7a6c-4e9d-9c2b-9d8f7e6a5c05/trace-upload-linked-2.json";
+  const canonicalKey = "trace-ledgers/server-1/machine-1/upload-linked-2.json";
+  const pointer = await bucket.get(pointerKey);
+  const canonical = await bucket.get(canonicalKey);
+  assert.ok(pointer?.body, "the report folder must list the bundle");
+  assert.ok(canonical?.body);
+  const record = JSON.parse(await new Response(pointer.body).text()) as Record<string, unknown>;
+  assert.deepEqual(record, JSON.parse(await new Response(canonical.body).text()));
+  assert.equal(record.object_key, "trace-bundles/server-1/machine-1/upload-linked-2.jsonl");
+  assert.equal(record.feedback_report_id, "5b0d4f1e-7a6c-4e9d-9c2b-9d8f7e6a5c05");
+  assert.equal(record.agent_id, "6c1e5a2f-8b7d-4fae-8d3c-0e9a8f7b6d06");
+  assert.equal(record.transcript_coverage, "covered");
+  assert.equal(record.transcript_first_event_at, "2026-08-03T05:23:32.871Z");
+  assert.equal(record.transcript_last_event_at, "2026-08-03T15:11:33.397Z");
+  assert.equal(record.transcript_truncated, "false");
+  assert.equal(record.transcript_truncation_direction, "window");
+  assert.equal(record.transcript_anchor_source, "web_report_bundle");
+  const pointerPut = bucket.puts.filter((put) => put.key === pointerKey).at(-1);
+  assert.equal(pointerPut?.options?.customMetadata?.ledgerType, "daemon-trace-upload");
+  assert.equal(pointerPut?.options?.customMetadata?.feedbackReportId, "5b0d4f1e-7a6c-4e9d-9c2b-9d8f7e6a5c05");
+  assert.equal("feedback_attachment_kind" in record, false, "no kind is invented when none was signed");
+});
+
+test("the report-folder ledger records the signed attachment kind and keeps every fact through the ingest rewrite", async () => {
+  const { env, bucket } = baseEnv();
+  env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test/v1/traces";
+  env.TRACE_INGEST_FETCH = async () => new Response(null, { status: 200 });
+  const ctx = new MockExecutionContext();
+
+  async function upload(claims: Record<string, unknown>, body: Buffer) {
+    const createRes = await handleRequest(new Request("https://trace-worker.test/api/trace-bundles", {
+      method: "POST",
+      body: JSON.stringify({
+        attestation: signAttestation(traceUploadClaims(claims)),
+        bundleSha256: sha256Hex(body),
+        bundleSizeBytes: body.byteLength,
+      }),
+    }), env, ctx);
+    const createBody = await createRes.json() as { upload: { url: string } };
+    const putRes = await handleRequest(new Request(createBody.upload.url, {
+      method: "PUT",
+      body: bufferToArrayBuffer(body),
+    }), env, ctx);
+    assert.equal(putRes.status, 200);
+  }
+  async function finalRecord(key: string) {
+    const stored = await bucket.get(key);
+    assert.ok(stored?.body, key);
+    return JSON.parse(await new Response(stored.body).text()) as Record<string, unknown>;
+  }
+
+  const transcript = Buffer.from(`${JSON.stringify(spanRecord())}\n`);
+  await upload({
+    uploadId: "upload-transcript",
+    objectKey: "trace-bundles/server-1/machine-1/upload-transcript.jsonl",
+    bundleId: "bundle-transcript",
+    bundleSha256: sha256Hex(transcript),
+    bundleSizeBytes: transcript.byteLength,
+    bundleContentType: "application/x-ndjson",
+    maxBytes: 1024 * 1024,
+    feedbackReportId: "7d2f6b3a-9c8e-4abf-9e4d-1f0b9a8c7e07",
+    feedbackAttachmentKind: "session_transcript",
+    feedbackTranscriptWindowCoverage: "covered",
+    feedbackTranscriptFirstEventAt: "2026-08-03T05:23:32.871Z",
+    feedbackTranscriptLastEventAt: "2026-08-03T15:11:33.397Z",
+    feedbackTranscriptTruncated: "false",
+    feedbackTranscriptTruncationDirection: "window",
+    feedbackReportTimeSource: "web_report_bundle",
+  }, transcript);
+  const tail = Buffer.from(`${JSON.stringify(spanRecord({ span_id: "2222222222222222" }))}\n`);
+  await upload({
+    uploadId: "upload-tail",
+    objectKey: "trace-bundles/server-1/machine-1/upload-tail.jsonl",
+    bundleId: "bundle-tail",
+    bundleSha256: sha256Hex(tail),
+    bundleSizeBytes: tail.byteLength,
+    bundleContentType: "application/x-ndjson",
+    maxBytes: 1024 * 1024,
+    feedbackReportId: "7d2f6b3a-9c8e-4abf-9e4d-1f0b9a8c7e07",
+    feedbackAttachmentKind: "machine_log_tail",
+  }, tail);
+  await Promise.all(ctx.promises);
+
+  const transcriptKey = "feedback-report-ledgers/server-1/7d2f6b3a-9c8e-4abf-9e4d-1f0b9a8c7e07/trace-upload-transcript.json";
+  assert.equal(bucket.puts.filter((put) => put.key === transcriptKey).length, 2, "written at upload and again by the ingest outcome");
+  const transcriptRecord = await finalRecord(transcriptKey);
+  assert.equal(transcriptRecord.scopedb_status, "success");
+  assert.equal(transcriptRecord.feedback_attachment_kind, "session_transcript");
+  assert.equal(transcriptRecord.transcript_coverage, "covered");
+  assert.equal(transcriptRecord.transcript_first_event_at, "2026-08-03T05:23:32.871Z");
+  assert.equal(transcriptRecord.transcript_anchor_source, "web_report_bundle");
+  assert.deepEqual(transcriptRecord, await finalRecord("trace-ledgers/server-1/machine-1/upload-transcript.json"));
+
+  const tailRecord = await finalRecord("feedback-report-ledgers/server-1/7d2f6b3a-9c8e-4abf-9e4d-1f0b9a8c7e07/trace-upload-tail.json");
+  assert.equal(tailRecord.scopedb_status, "success");
+  assert.equal(tailRecord.feedback_attachment_kind, "machine_log_tail");
 });
 
 function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
@@ -1790,3 +1891,99 @@ function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
 function putBodyToString(body: ArrayBuffer | string): string {
   return typeof body === "string" ? body : Buffer.from(body).toString("utf8");
 }
+
+test("trace bundle ingest posts event lines to OTLP logs and keeps them out of the span path", async () => {
+  const { env, bucket } = baseEnv();
+  const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test/v1/traces";
+  env.TRACE_INGEST_FETCH = async (input, init) => {
+    fetchCalls.push({ input, init });
+    return new Response(null, { status: 200 });
+  };
+  const eventRecord = {
+    type: "event",
+    schema_version: 1,
+    name: "daemon.agent.stdin.written",
+    surface: "daemon",
+    time: "2026-05-07T08:00:00.010Z",
+    trace_id: "0123456789abcdef0123456789abcdef",
+    span_id: "0123456789abcdef",
+    attrs: { bytes_bucket: "1-1k" },
+  };
+  const bundle = Buffer.from([
+    JSON.stringify(spanRecord()),
+    JSON.stringify(eventRecord),
+    "",
+  ].join("\n"));
+  const metadata = {
+    uploadId: "upload-event",
+    objectKey: "trace-bundles/server-1/machine-1/upload-event.jsonl",
+    bundleId: "bundle-event",
+    bundleSha256: sha256Hex(bundle),
+    bundleSizeBytes: bundle.byteLength,
+    serverId: "server-1",
+    machineId: "machine-1",
+  };
+  await bucket.put(metadata.objectKey, bufferToArrayBuffer(bundle));
+
+  const result = await ingestTraceBundleObject(env, metadata);
+
+  assert.equal(result.spans_ingested, 1);
+  assert.equal(result.events_ingested, 1);
+  assert.equal(fetchCalls.length, 2);
+  assert.equal(String(fetchCalls[0].input), "https://telescope.test/v1/traces");
+  const spanPayload = JSON.parse(fetchCalls[0].init?.body as string);
+  assert.equal(spanPayload.resourceSpans[0].scopeSpans[0].spans.length, 1);
+  assert.equal(String(fetchCalls[1].input), "https://telescope.test/v1/logs");
+  const logPayload = JSON.parse(fetchCalls[1].init?.body as string);
+  const logRecord = logPayload.resourceLogs[0].scopeLogs[0].logRecords[0];
+  assert.equal(logRecord.body.stringValue, "daemon.agent.stdin.written");
+  assert.equal(logRecord.traceId, eventRecord.trace_id);
+  assert.equal(logRecord.spanId, eventRecord.span_id);
+  assert.ok(logRecord.attributes.some((attr: any) =>
+    attr.key === "slock.trace_ingest.event_key" &&
+    attr.value.stringValue === `${metadata.bundleSha256}:1`));
+});
+
+test("web trace endpoint forwards event only batches to OTLP logs", async () => {
+  const { env } = baseEnv();
+  const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test/v1/traces";
+  env.TRACE_INGEST_FETCH = async (input, init) => {
+    fetchCalls.push({ input, init });
+    return new Response(null, { status: 200 });
+  };
+
+  const res = await handleRequest(new Request("https://trace-worker.test/api/web-traces", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      attestation: signAttestation(webTraceClaims()),
+      batchId: "web-batch-events",
+      events: [{
+        type: "event",
+        schema_version: 1,
+        name: "web.page.visible",
+        surface: "web",
+        time: "2026-05-07T08:00:00.000Z",
+        attrs: { page: "chat" },
+      }],
+    }),
+  }), env);
+
+  assert.equal(res.status, 200);
+  const body = await res.json() as Record<string, unknown>;
+  assert.equal(body.spansIngested, 0);
+  assert.equal(body.eventsIngested, 1);
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(String(fetchCalls[0].input), "https://telescope.test/v1/logs");
+  const payload = JSON.parse(fetchCalls[0].init?.body as string);
+  const resourceAttrs = payload.resourceLogs[0].resource.attributes;
+  assert.ok(resourceAttrs.some((attr: any) => attr.key === "service.name" && attr.value.stringValue === "slock-web"));
+  const logRecord = payload.resourceLogs[0].scopeLogs[0].logRecords[0];
+  assert.equal(logRecord.body.stringValue, "web.page.visible");
+  assert.equal(logRecord.traceId, "");
+  assert.ok(logRecord.attributes.some((attr: any) =>
+    attr.key === "slock.trace_ingest.event_key" &&
+    attr.value.stringValue === "web-batch-events:0"));
+});

@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   PENDING_INVITE_STORAGE_KEY,
   takePendingInviteRedirectPath,
-} from "../src/utils/socialAuth.js";
+} from "../src/utils/socialAuth";
 
 class MemoryStorage implements Storage {
   private readonly map = new Map<string, string>();

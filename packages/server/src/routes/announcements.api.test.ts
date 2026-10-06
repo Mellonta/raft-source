@@ -1,16 +1,16 @@
-import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { createHash, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { oauthAccessTokens, users } from "../db/schema.js";
-import { verifyToken } from "../middleware/auth.js";
-import * as announcementService from "../services/announcementService.js";
-import { createOAuthClient } from "../services/oauthService.js";
-import { createServer } from "../services/serverService.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { oauthAccessTokens, users } from "../db/schema";
+import { verifyToken } from "../middleware/auth";
+import * as announcementService from "../services/announcementService";
+import { createOAuthClient } from "../services/oauthService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

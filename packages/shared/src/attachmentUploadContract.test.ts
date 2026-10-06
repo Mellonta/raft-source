@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 
 import { z } from "zod";
 
@@ -12,16 +11,16 @@ import {
   attachmentUploadSessionSchema,
   completeAttachmentUploadSessionResponseSchema,
   getAttachmentUploadResponseSchema,
-} from "./attachmentUploadContract.js";
+} from "./attachmentUploadContract";
 import {
   assertOpenApiRegistryIsValid,
   buildOpenApiDocument,
   openApiContractModules,
   type OpenApiContractModule,
-} from "./openApiContract.js";
+} from "./openApiContract";
 
 const fixtureSchema = z.strictObject({
-  operation: z.enum(["create", "complete", "cancel", "status"]),
+  operation: z.enum(["list", "create", "complete", "cancel", "status"]),
   status: z.int().positive(),
   body: z.record(z.string(), z.unknown()),
 });
@@ -41,9 +40,9 @@ const readFixtureFile = (filename: string) => {
 test("central OpenAPI registry keeps the attachment module additive, unmounted, and explicit by status", () => {
   assert.deepEqual(Object.keys(openApiContractModules), ["attachmentUploads"]);
   assert.equal(openApiContractModules.attachmentUploads.operations, attachmentUploadContract);
-  assert.deepEqual(Object.keys(attachmentUploadContract), ["capabilities", "create", "complete", "cancel", "status"]);
+  assert.deepEqual(Object.keys(attachmentUploadContract), ["capabilities", "list", "create", "complete", "cancel", "status"]);
   const operations = Object.values(attachmentUploadContract);
-  assert.equal(new Set(operations.map(({ operationId }) => operationId)).size, 5, "operation ids are unique");
+  assert.equal(new Set(operations.map(({ operationId }) => operationId)).size, 6, "operation ids are unique");
   for (const operation of operations) {
     const placeholders = [...operation.path.matchAll(/\{([^}]+)\}/g)].map((match) => match[1]);
     const pathParams = "requestParams" in operation
@@ -65,6 +64,7 @@ test("central OpenAPI registry keeps the attachment module additive, unmounted, 
     ),
     {
       capabilities: [200],
+      list: [200, 400, 403],
       create: [201, 400, 403, 409, 413, 429],
       complete: [200, 403, 404, 409, 410, 422],
       cancel: [200, 403, 404, 409],
@@ -86,7 +86,7 @@ test("central OpenAPI registry keeps the attachment module additive, unmounted, 
 
 test("central OpenAPI registry rejects collisions before document generation", () => {
   const module = openApiContractModules.attachmentUploads;
-  const [create, complete] = Object.values(attachmentUploadContract);
+  const { create, complete } = attachmentUploadContract;
   const assertInvalid = (contractModules: readonly OpenApiContractModule[], expected: RegExp) => {
     assert.throws(() => assertOpenApiRegistryIsValid(contractModules), expected);
   };

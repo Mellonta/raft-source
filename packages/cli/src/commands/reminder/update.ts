@@ -1,13 +1,15 @@
 import type { Command } from "commander";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { parseDurationSeconds } from "./_duration.js";
-import { formatReminderUpdated } from "./_format.js";
-import { resolveReminderId } from "./_resolve.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { apiFailureError } from "../../core/apiFailure";
+import { cliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { parseDurationSeconds } from "./_duration";
+import { formatReminderUpdated } from "./_format";
+import { resolveReminderId } from "./_resolve";
+import { assertReminderNotSealed } from "../../apps/reminder/sealGuard";
 
 interface UpdateOpts {
   id: string;
@@ -56,6 +58,7 @@ export const reminderUpdateCommand = defineCommand(
 
       const agentContext = ctx.loadAgentContext();
       const client = ctx.createApiClient(agentContext);
+      await assertReminderNotSealed(ctx, opts.id.trim(), "update");
       const fullId = await resolveReminderId(client, opts.id, {
         all: true,
         failureCode: "UPDATE_FAILED",
@@ -66,8 +69,8 @@ export const reminderUpdateCommand = defineCommand(
         body,
       );
       if (!res.ok || !res.data?.reminder) {
-        const code = res.status >= 500 ? "SERVER_5XX" : "UPDATE_FAILED";
-        throw cliError(code, res.error ?? `HTTP ${res.status}`);
+        // Carries the server's code, e.g. reminders_unsupported_for_external_agents.
+        throw apiFailureError(res, "UPDATE_FAILED");
       }
       writeText(ctx.io, adoptCliReplyText(formatReminderUpdated(res.data.reminder, res.data.warning ?? null) + "\n"));
   },

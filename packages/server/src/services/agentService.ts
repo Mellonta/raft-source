@@ -1,17 +1,20 @@
 import { createHash } from "crypto";
 import { isDeepStrictEqual } from "node:util";
-import { eq, and, inArray, isNull, sql, asc, ne } from "drizzle-orm";
-import { getDb, withDbTraceAttributes, type DatabaseExecutor, type DatabaseTransaction } from "../db/index.js";
-import { agents, machines, channels, channelAgents, servers, serverMembers, serverAgentMembers, users, agentRuntimeProfiles, messages, tasks, taskEvents, agentProviderConnections } from "../db/schema.js";
-import { ALL_CHANNEL_TEAM_THRESHOLD, EXTERNAL_AGENT_RUNTIME_ID, PLAN_CONFIG, currentDate, getEffectiveLimits, type AgentRuntimeErrorState, type AgentStatus, type ServerPlan, type ReasoningEffort, type RuntimeConfig, getDefaultModel, isExternalAgentRuntime, validateAgentName } from "@botiverse/raft-shared";
-import { assertAgentCapacityAvailable, getServerBillingEntitlement, getServerBillingUsage, withAgentCreateLock } from "./planService.js";
-import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace.js";
-import { assertAgentHandleAvailableInServer, lockServerPrincipalHandles, PrincipalHandleConflictError } from "./principalHandleService.js";
-import { refreshSubscriptionForServerIfStale } from "./billingService.js";
-import { evaluateFeatureFlag } from "./featureFlagService.js";
-import { recordSecondAgentCreatedEvent } from "./productEventsService.js";
-import { emitAppFacingNotificationEvent } from "./appNotificationDeliveryService.js";
-import { requestExternalAuthorAvatarSync } from "./externalAuthorAvatarSyncRuntime.js";
+import { eq, and, inArray, isNull, isNotNull, sql, asc, ne } from "drizzle-orm";
+import { getDb, withDbTraceAttributes, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
+import { actorRoleHasServerCapability } from "../lib/actorPermissions";
+import { FencedAuthorizationDeniedError, ServerMembershipRevokedError } from "../lib/actorMembershipFence";
+import { agents, machines, channels, channelAgents, servers, serverMembers, serverAgentMembers, users, agentRuntimeProfiles, messages, tasks, taskEvents, agentProviderConnections, providerConnections, providerConnectionCredentials } from "../db/schema";
+import { ALL_CHANNEL_TEAM_THRESHOLD, EXTERNAL_AGENT_RUNTIME_ID, PLAN_CONFIG, currentDate, getEffectiveLimits, type AgentRuntimeErrorState, type AgentStatus, type ServerPlan, type ReasoningEffort, type RuntimeConfig, getDefaultModel, isExternalAgentRuntime, validateAgentName, type ServerRole } from "@botiverse/raft-shared";
+import { assertAgentCapacityAvailable, getServerBillingEntitlement, getServerBillingUsage, withAgentCreateLock } from "./planService";
+import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace";
+import { assertAgentHandleAvailableInServer, lockServerPrincipalHandles, PrincipalHandleConflictError } from "./principalHandleService";
+import { refreshSubscriptionForServerIfStale } from "./billingService";
+import { evaluateFeatureFlag } from "./featureFlagService";
+import { recordSecondAgentCreatedEvent } from "./productEventsService";
+import { emitAppFacingMemberEvents, emitAppFacingNotificationEvent, kickAppNotificationDelivery } from "./appNotificationDeliveryService";
+import { assertActionCardWritable, assertActionCardWritableInTransaction } from "./actionCardConversionService";
+import { recordIntegrationAuditEvent } from "./integrationAuditService";
 
 export type CreatorType = "user" | "agent";
 
@@ -73,6 +76,20 @@ export async function createAgent(
       credentialVersion: number;
       updatedByUserId: string;
     };
+    actionCardMessageId?: string;
+    actionCardConfirmationVersion?: number;
+    /**
+     * Task #93 line G: the acting human and the capability that authorizes this create. When set, the create re-checks
+     * it under row locks taken as the first step inside the agent-create lock, so a removal or demotion that commits
+     * first leaves zero created Agents. See lockCreatorAndOwnerForAgentCreate for the lock order.
+     */
+    actorCapabilityFence?: { userId: string; capability: "createAgents" };
+    /**
+     * Runs inside the create transaction right after the agent row exists
+     * (e.g. hosted-runtime provisioning mints the credential and records the
+     * provisioning intent atomically with the agent).
+     */
+    afterInsert?: (tx: DatabaseTransaction, agent: typeof agents.$inferSelect) => Promise<void>;
   } = {}
 ) {
   const nameError = validateAgentName(name, "Agent name");
@@ -80,10 +97,28 @@ export async function createAgent(
     throw new Error(nameError);
   }
 
+  // This refresh persists subscription state.  For a dialog launched from an
+  // action card, conversion authority must be checked before that first side
+  // effect; the transactional gate below remains the final create/commit
+  // guard for the TOCTOU window.
+  if (opts.actionCardMessageId) {
+    await assertActionCardWritable(opts.actionCardMessageId, opts.actionCardConfirmationVersion);
+  }
   await refreshSubscriptionForServerIfStale(serverId);
 
   // Atomic quota check + insert under advisory lock (namespace 1 = agents)
   const agent = await withAgentCreateLock(serverId, async (tx) => {
+    let ownerSetupStamp: OwnerSetupStamp = { kind: "unfenced" };
+    if (opts.actorCapabilityFence) {
+      const locked = await lockCreatorAndOwnerForAgentCreate(tx, serverId, opts.actorCapabilityFence.userId);
+      if (!actorRoleHasServerCapability(locked.creatorRole, opts.actorCapabilityFence.capability)) {
+        throw new FencedAuthorizationDeniedError("forbidden");
+      }
+      ownerSetupStamp = locked.ownerMemberLocked ? { kind: "owner_row_locked" } : { kind: "owner_row_missing" };
+    }
+    if (opts.actionCardMessageId) {
+      await assertActionCardWritableInTransaction(tx, opts.actionCardMessageId, opts.actionCardConfirmationVersion);
+    }
     // Capture/compare setup state around the lock. A create request that started before Start
     // over may queue behind reset; after reset writes not_started it must fail/retry, not
     // resurrect an Agent on revoked Computer credentials. A fresh direct API request made
@@ -152,11 +187,24 @@ export async function createAgent(
       })
       .returning();
 
-    await tx.insert(serverAgentMembers).values({
+    const [joined] = await tx.insert(serverAgentMembers).values({
       serverId,
       agentId: newAgent.id,
       role: "member",
-    }).onConflictDoNothing();
+    }).onConflictDoNothing().returning({ role: serverAgentMembers.role });
+    if (joined) {
+      // Same commit as the insert: the event row is the outbox.
+      await emitAppFacingMemberEvents({
+        serverId,
+        eventType: "server.member_added",
+        members: [{ principalType: "agent", principalId: newAgent.id, role: joined.role }],
+        provenance: { source: "agent_service", actor_type: opts.creatorType === "agent" ? "agent" : "human", reason: "created" },
+      }, tx);
+    }
+
+    if (opts.afterInsert) {
+      await opts.afterInsert(tx, newAgent);
+    }
 
     if (opts.providerConnection) {
       await tx.insert(agentProviderConnections).values({
@@ -248,12 +296,77 @@ export async function createAgent(
     // `transitionServerSetupState("complete")` is deliberately not used: it requires a
     // USABLE official onboarding agent, and this path is precisely the one where the agent
     // may not be Cindy. Someone running a non-Cindy agent has still set their server up.
-    await markServerSetupCompleteOnFirstAgent(tx, serverId);
+    await markServerSetupCompleteOnFirstAgent(tx, serverId, ownerSetupStamp);
 
     return newAgent;
   });
 
+  kickAppNotificationDelivery();
   return agent;
+}
+
+/**
+ * How a fenced Agent create reached the owner's setup row: `owner_row_locked` — locked FOR UPDATE before any write;
+ * `owner_row_missing` — the Server owner has no member row, so there is nothing to stamp; `unfenced` — creator-less and
+ * agent-created paths, unchanged.
+ */
+type OwnerSetupStamp = { kind: "owner_row_locked" } | { kind: "owner_row_missing" } | { kind: "unfenced" };
+
+/**
+ * Task #93 line G lock acquisition for a human-created Agent (see `actorCapabilityFence`).
+ *
+ * Order, compatible with transitionMemberRole and owner promotion (both lock `servers` FOR UPDATE, then member rows):
+ *   1. `servers` row FOR SHARE — role transitions and owner promotion serialize with this create instead of interleaving
+ *      on member rows. Member removal (removeMember) deliberately takes no `servers` lock: it conflicts with this create
+ *      only on the removed member's own row, which step 2 locks directly.
+ *   2. The creator's and the owner's `server_members` rows through this one routine, in ascending user-id order: the
+ *      creator FOR SHARE, the owner FOR UPDATE (markServerSetupCompleteOnFirstAgent updates it later in this transaction),
+ *      and a single FOR UPDATE when they are the same person. No row is upgraded from share to update later.
+ *
+ * A missing creator row throws ServerMembershipRevokedError before any write. A missing owner row is reported as
+ * `ownerMemberLocked: false`.
+ */
+async function lockCreatorAndOwnerForAgentCreate(
+  tx: DatabaseTransaction,
+  serverId: string,
+  creatorId: string,
+): Promise<{ creatorRole: ServerRole; ownerMemberLocked: boolean }> {
+  const serverRows = await tx.execute(sql`
+    SELECT owner_id
+    FROM servers
+    WHERE id = ${serverId}
+    FOR SHARE
+  `);
+  const ownerId = (serverRows.rows[0] as { owner_id: string | null } | undefined)?.owner_id ?? null;
+  const userIds = [...new Set([creatorId, ownerId].filter((id): id is string => Boolean(id)))].sort();
+  let creatorRole: ServerRole | null = null;
+  let ownerMemberLocked = false;
+  for (const userId of userIds) {
+    const mode = userId === ownerId ? "update" : "share";
+    const rows = mode === "update"
+      ? await tx.execute(sql`
+        SELECT role
+        FROM server_members
+        WHERE server_id = ${serverId}
+          AND user_id = ${userId}
+        FOR UPDATE
+      `)
+      : await tx.execute(sql`
+        SELECT role
+        FROM server_members
+        WHERE server_id = ${serverId}
+          AND user_id = ${userId}
+        FOR SHARE
+      `);
+    const row = rows.rows[0] as { role: ServerRole } | undefined;
+    if (userId === ownerId && row) ownerMemberLocked = true;
+    if (userId === creatorId) {
+      if (!row) throw new ServerMembershipRevokedError(serverId, creatorId);
+      creatorRole = row.role;
+    }
+  }
+  if (!creatorRole) throw new ServerMembershipRevokedError(serverId, creatorId);
+  return { creatorRole, ownerMemberLocked };
 }
 
 /**
@@ -274,7 +387,11 @@ export async function createAgent(
 async function markServerSetupCompleteOnFirstAgent(
   tx: DatabaseTransaction,
   serverId: string,
+  stamp: OwnerSetupStamp = { kind: "unfenced" },
 ): Promise<void> {
+  // Task #93 line G: a fenced create whose Server owner has no member row has nothing to stamp. Skipping is the explicit
+  // result; issuing an UPDATE that silently affects zero rows is not.
+  if (stamp.kind === "owner_row_missing") return;
   const [server] = await tx.select({ ownerId: servers.ownerId }).from(servers).where(eq(servers.id, serverId));
   if (!server?.ownerId) return;
 
@@ -745,31 +862,67 @@ export async function invalidateAgentSessionFromSignal(
   });
 }
 
+// A runtime error the agent reports again (crash loop: relaunch, same error)
+// within this window keeps the stored row instead of rewriting it.
+export const AGENT_RUNTIME_ERROR_REWRITE_WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * Persist the agent's runtime error and return the error state that is now
+ * durable, or null when the agent is gone (deleted / missing).
+ *
+ * The same error (message, errorClass, actionRequired; launchId and at are
+ * ignored) reported again within AGENT_RUNTIME_ERROR_REWRITE_WINDOW_MS of the
+ * stored one's `at` is not rewritten: the stored state is returned instead, so
+ * callers publish exactly what the row holds. Agents in an error loop wrote
+ * the same error on every relaunch (~18 writes/min on prod, 29 agents).
+ */
 export async function setAgentLastRuntimeError(
   agentId: string,
   lastRuntimeError: AgentRuntimeErrorState,
-): Promise<boolean> {
+): Promise<AgentRuntimeErrorState | null> {
   const db = getDb();
+  const stored = agents.lastRuntimeError;
+  const sameRecentError = sql`(
+    ${stored} IS NOT NULL
+    AND ${stored}->>'message' IS NOT DISTINCT FROM ${lastRuntimeError.message}
+    AND ${stored}->>'errorClass' IS NOT DISTINCT FROM ${lastRuntimeError.errorClass ?? null}::text
+    AND (${stored}->>'actionRequired')::boolean IS NOT DISTINCT FROM ${lastRuntimeError.actionRequired}
+    AND (${stored}->>'at')::timestamptz > ${lastRuntimeError.at}::timestamptz - make_interval(secs => ${AGENT_RUNTIME_ERROR_REWRITE_WINDOW_MS / 1000})
+  )`;
   const [updated] = await db.update(agents)
     .set({
       lastRuntimeError,
       updatedAt: new Date(),
     })
-    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)))
+    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt), sql`NOT ${sameRecentError}`))
     .returning({ id: agents.id });
-  return Boolean(updated);
+  if (updated) return lastRuntimeError;
+
+  // Not written: either the agent is gone, or the same error is already stored.
+  const [current] = await db.select({ lastRuntimeError: agents.lastRuntimeError })
+    .from(agents)
+    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)))
+    .limit(1);
+  return current?.lastRuntimeError ?? null;
 }
 
 export async function clearAgentLastRuntimeError(agentId: string): Promise<boolean> {
   const db = getDb();
+  // Called on every new daemon session, error or not: only write when there is
+  // an error to clear, so a no-op does not lock and rewrite the agents row.
   const [updated] = await db.update(agents)
     .set({
       lastRuntimeError: null,
       updatedAt: new Date(),
     })
-    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)))
+    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt), isNotNull(agents.lastRuntimeError)))
     .returning({ id: agents.id });
-  return Boolean(updated);
+  if (updated) return true;
+  const [existing] = await db.select({ id: agents.id })
+    .from(agents)
+    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)))
+    .limit(1);
+  return Boolean(existing);
 }
 
 export async function updateAgent(
@@ -790,9 +943,10 @@ export async function updateAgent(
       credentialVersion: number;
       updatedByUserId: string;
     } | null;
-  }
+  },
+  options: { executor?: DatabaseExecutor } = {},
 ) {
-  const db = getDb();
+  const db = options.executor ?? getDb();
   const result = await db.transaction(async (tx) => {
     const [existing] = await tx.select().from(agents)
       .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)))
@@ -865,9 +1019,6 @@ export async function updateAgent(
     }
     return updated;
   });
-  if (fields.avatarUrl !== undefined && result) {
-    await requestExternalAuthorAvatarSync({ authorType: "agent", authorId: agentId });
-  }
   return result;
 }
 
@@ -881,8 +1032,9 @@ export async function adoptOfficialOnboardingAgentIdentity(
     avatarUrl: string;
     serverRole: "admin";
   },
+  options: { executor?: DatabaseExecutor } = {},
 ) {
-  const db = getDb();
+  const db = options.executor ?? getDb();
   return db.transaction(async (tx) => {
     await lockServerPrincipalHandles(tx, serverId);
 
@@ -984,8 +1136,8 @@ export async function clearAllChannelIntroSentClaim(agentId: string, claimedAt: 
     ));
 }
 
-export async function deleteAgent(agentId: string) {
-  const db = getDb();
+export async function deleteAgent(agentId: string, options: { executor?: DatabaseExecutor } = {}) {
+  const db = options.executor ?? getDb();
   const deletedAt = new Date();
 
   await db.transaction(async (tx) => {
@@ -1002,8 +1154,63 @@ export async function deleteAgent(agentId: string) {
     await tx.delete(agentRuntimeProfiles)
       .where(eq(agentRuntimeProfiles.agentId, agentId));
 
-    await tx.delete(serverAgentMembers)
-      .where(eq(serverAgentMembers.agentId, agentId));
+    const removedMemberships = await tx.delete(serverAgentMembers)
+      .where(eq(serverAgentMembers.agentId, agentId))
+      .returning({ serverId: serverAgentMembers.serverId, role: serverAgentMembers.role });
+    // Same commit as the delete: the event row is the outbox. The caller
+    // kicks app delivery after its own commit.
+    for (const membership of removedMemberships) {
+      await emitAppFacingMemberEvents({
+        serverId: membership.serverId,
+        eventType: "server.member_removed",
+        members: [{ principalType: "agent", principalId: agentId, role: membership.role }],
+        occurredAt: deletedAt,
+        provenance: { source: "agent_service", actor_type: "human", reason: "removed" },
+      }, tx);
+    }
+
+    // A deleted Agent can never launch again, so its provider connection
+    // assignment is dead weight. Keeping the row would leave the connection
+    // permanently undeletable with no reachable Agent to unbind it from —
+    // the same release already applied to task claims below.
+    const [releasedProviderAssignment] = await tx.select({
+      serverId: agentProviderConnections.serverId,
+      connectionId: agentProviderConnections.connectionId,
+      providerId: providerConnections.providerId,
+      configVersion: providerConnections.configVersion,
+      credentialVersion: providerConnectionCredentials.credentialVersion,
+    }).from(agentProviderConnections)
+      .innerJoin(providerConnections, and(
+        eq(providerConnections.serverId, agentProviderConnections.serverId),
+        eq(providerConnections.id, agentProviderConnections.connectionId),
+      ))
+      .leftJoin(providerConnectionCredentials, and(
+        eq(providerConnectionCredentials.serverId, agentProviderConnections.serverId),
+        eq(providerConnectionCredentials.connectionId, agentProviderConnections.connectionId),
+      ))
+      .where(eq(agentProviderConnections.agentId, agentId))
+      .limit(1);
+
+    if (releasedProviderAssignment) {
+      await tx.delete(agentProviderConnections)
+        .where(eq(agentProviderConnections.agentId, agentId));
+      await recordIntegrationAuditEvent({
+        serverId: releasedProviderAssignment.serverId,
+        eventType: "provider_connection.assignment_detached",
+        outcome: "success",
+        source: "system",
+        actor: { type: "system" },
+        subject: { type: "agent", id: agentId },
+        target: { type: "provider_connection", id: releasedProviderAssignment.connectionId },
+        metadata: {
+          providerId: releasedProviderAssignment.providerId,
+          configVersion: releasedProviderAssignment.configVersion,
+          credentialVersion: releasedProviderAssignment.credentialVersion,
+          agentId,
+          reason: "agent_deleted",
+        },
+      }, tx);
+    }
 
     // Tasks reference agents via `taskAssigneeId` (text column, no FK).
     // Soft-deleting the agent leaves those tasks claimed by a deleted
@@ -1134,11 +1341,28 @@ export async function resetAgentSession(agentId: string, status: AgentStatus = "
   });
 }
 
-export async function assignMachine(agentId: string, machineId: string | null) {
-  const db = getDb();
+export async function assignMachine(
+  agentId: string,
+  machineId: string | null,
+  options: { executor?: DatabaseExecutor } = {},
+) {
+  const db = options.executor ?? getDb();
   await db.update(agents)
     .set({ machineId, updatedAt: new Date() })
     .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)));
+}
+
+/**
+ * Where each of these agents is placed now, deleted ones included (an id with
+ * no row at all is absent from the result). Reads the primary.
+ */
+export async function getAgentPlacements(agentIds: string[]) {
+  if (agentIds.length === 0) return [];
+  const db = getDb();
+  return db
+    .select({ id: agents.id, machineId: agents.machineId, deletedAt: agents.deletedAt })
+    .from(agents)
+    .where(inArray(agents.id, agentIds));
 }
 
 export async function getAgentsForMachine(machineId: string) {
@@ -1187,4 +1411,34 @@ export async function resetAllAgentStatuses() {
       await emitAgentNotificationEvent(tx, agent, "agent.status_changed", ["status"], now);
     }
   });
+}
+
+/**
+ * raft-agent-status.v1 adoption flag. Returns when the agent first had a
+ * status report accepted, or null when it never adopted the standard.
+ */
+export async function getAgentStatusProtocolAdoptedAt(agentId: string): Promise<Date | null> {
+  const db = getDb();
+  const [row] = await db
+    .select({ adoptedAt: agents.statusProtocolAdoptedAt })
+    .from(agents)
+    .where(eq(agents.id, agentId))
+    .limit(1);
+  return row?.adoptedAt ?? null;
+}
+
+/**
+ * Durably mark the agent as a raft-agent-status.v1 reporter. Idempotent: the
+ * first accepted report wins and later calls leave the timestamp unchanged.
+ * Returns the stored adoption time.
+ */
+export async function markAgentStatusProtocolAdopted(agentId: string, adoptedAt: Date): Promise<Date> {
+  const db = getDb();
+  const [updated] = await db
+    .update(agents)
+    .set({ statusProtocolAdoptedAt: adoptedAt })
+    .where(and(eq(agents.id, agentId), isNull(agents.statusProtocolAdoptedAt)))
+    .returning({ adoptedAt: agents.statusProtocolAdoptedAt });
+  if (updated?.adoptedAt) return updated.adoptedAt;
+  return (await getAgentStatusProtocolAdoptedAt(agentId)) ?? adoptedAt;
 }

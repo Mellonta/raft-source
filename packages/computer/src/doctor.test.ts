@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
-import { persistOperation } from "@botiverse/k-carrier";
 
-import { redactSecrets, runDoctorChecks } from "./doctor.js";
-import { runDoctor, runDoctorMigrationDetails, renderMigrationDetailsBody } from "./doctorCli.js";
-import type { LocalCandidateEvidence } from "./lib/types.js";
+import {
+  UNREAD_ACTIVITY_DIAGNOSTIC_SCHEMA_DIGEST,
+  UNREAD_ACTIVITY_DIAGNOSTIC_SCHEMA_VERSION,
+  UNREAD_ACTIVITY_DIAGNOSTIC_SYSTEM_IDENTIFIER_NOTE,
+} from "@botiverse/raft-shared/unread-activity-diagnostic";
+
+import { redactSecrets, runDoctorChecks } from "./doctor";
+import { runDoctor, runDoctorMigrationDetails, renderMigrationDetailsBody } from "./doctorCli";
+import type { LocalCandidateEvidence } from "./lib/types";
 import {
   serverAttachmentPath,
   serverConnectedMarkerPath,
@@ -16,11 +20,10 @@ import {
   serverRunnerPidPath,
   servicePidPath,
   userSessionPath,
-} from "./paths.js";
-import { writePidfileAt } from "./internal/process-primitives.js";
-import { markTerminalUnlinked, recordCrash } from "./health.js";
-import { kStateDir } from "./kPaths.js";
-import type { MigrationDetection } from "./lib/types.js";
+} from "./paths";
+import { writePidfileAt } from "./internal/process-primitives";
+import { markTerminalUnlinked, recordCrash } from "./health";
+import type { MigrationDetection } from "./lib/types";
 
 // task #30 PR-G regression guard — per-server `doctor` (v4 §7).
 // Decisive: the SECRET REDLINE — inject sk_computer_* + JWT into the
@@ -139,43 +142,66 @@ async function stop(server: Server): Promise<void> {
   await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
 }
 
+async function startUnreadActivityDiagnosticServer(): Promise<{
+  server: Server;
+  baseUrl: string;
+  requests: Array<{ method?: string; url?: string; authorization?: string }>;
+}> {
+  const requests: Array<{ method?: string; url?: string; authorization?: string }> = [];
+  const server = await new Promise<Server>((resolve) => {
+    const s = createServer((req: IncomingMessage, res: ServerResponse) => {
+      requests.push({
+        method: req.method,
+        url: req.url,
+        authorization: req.headers.authorization,
+      });
+      if (req.method !== "GET" || req.url !== "/api/diagnostics/unread-activity") {
+        res.writeHead(404).end();
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        schema_version: UNREAD_ACTIVITY_DIAGNOSTIC_SCHEMA_VERSION,
+        manifest_digest: UNREAD_ACTIVITY_DIAGNOSTIC_SCHEMA_DIGEST,
+        diagnostic_correlation_id: "0123456789abcdef0123456789abcdef",
+        build_id: "doctor-server-fixture",
+        value_at: "2026-09-25T00:00:00.000Z",
+        membership_truncated: 0,
+        views: [{
+          requested_name: "activity_v1",
+          served_name: "activity_v1",
+          catalog_fingerprint: "catalog-fixture",
+          system_identifier_note: UNREAD_ACTIVITY_DIAGNOSTIC_SYSTEM_IDENTIFIER_NOTE,
+        }],
+        totals: [{
+          row_present: true,
+          status: "ok",
+          value: 0,
+          generation: "generation-fixture",
+          value_at: "2026-09-25T00:00:00.000Z",
+        }],
+        aggregates: {
+          served_row_count: 1,
+          suppressed_row_count: 0,
+          watermark: 0,
+          mute_rows_before: 0,
+          mute_rows_at_or_after: 0,
+          structural_target_count: 1,
+          generation_gap_bucket: "same",
+        },
+      }));
+    });
+    s.listen(0, "127.0.0.1", () => resolve(s));
+  });
+  const address = server.address();
+  if (!address || typeof address !== "object") throw new Error("no test server address");
+  return { server, baseUrl: `http://127.0.0.1:${address.port}`, requests };
+}
+
 test("redactSecrets: masks sk_* / JWT / long hex", () => {
   assert.equal(redactSecrets(`key=${SECRET_KEY} done`), "key=***REDACTED*** done");
   assert.equal(redactSecrets(`tok ${SECRET_JWT}`), "tok ***REDACTED***");
   assert.equal(redactSecrets("nothing secret here"), "nothing secret here");
-});
-
-test("doctor exposes an unacknowledged local K terminal receipt without any Server attachment", async () => {
-  await withHome(async (home) => {
-    await persistOperation(kStateDir(home), {
-      formatVersion: 1,
-      id: "local-upgrade-failed",
-      startedAtMs: 1,
-      updatedAtMs: 2,
-      fromVersion: "1.0.24",
-      targetVersion: "1.0.25",
-      previousStableVersion: "1.0.24",
-      phase: "failed",
-      outcome: "failed",
-      reason: "replacement did not become ready",
-      provenance: { who: "local", carrier: "cli" },
-      metadata: {
-        trigger: "cli",
-        upgradeScopeVersion: "1",
-        upgradeScope: "local",
-      },
-      acknowledgedAtMs: null,
-    });
-
-    const checks = await runDoctorChecks(home);
-    assert.deepEqual(checks.find((check) => check.name === "K upgrade receipt"), {
-      name: "K upgrade receipt",
-      ok: false,
-      detail:
-        "local operation local-upgrade-failed is terminal failed and unacknowledged; "
-        + "verify the running Computer, then run `raft-computer operation acknowledge local-upgrade-failed`",
-    });
-  });
 });
 
 test("doctor: fresh home → login + attachments checks fail (actionable)", async () => {
@@ -187,6 +213,37 @@ test("doctor: fresh home → login + attachments checks fail (actionable)", asyn
     assert.equal(byName["attachments"].ok, false);
     assert.match(byName["attachments"].detail, /raft-computer attach/);
     assert.equal(byName["OS supervisor"], undefined);
+  });
+});
+
+test("doctor unread/Activity dump stays human-readable and saves a private canonical JSON file", async () => {
+  await withHome(async (home) => {
+    const ctx = await startUnreadActivityDiagnosticServer();
+    const outputPath = join(home, "exports", "unread-activity.json");
+    await writeUserSessionForServer(home, SECRET_JWT, ctx.baseUrl);
+    const cap = captureOut();
+    try {
+      await runDoctor({ unreadActivityDump: outputPath });
+      const output = cap.text();
+      const saved = await readFile(outputPath, "utf8");
+      const parsed = JSON.parse(saved) as Record<string, unknown>;
+
+      assert.match(output, /Unread\/Activity diagnostic saved to/);
+      assert.match(output, /This private local file was not uploaded\./);
+      assert.doesNotMatch(output, /diagnostic_correlation_id|0123456789abcdef/);
+      assert.doesNotMatch(output, /^\s*\{/m, "doctor must not grow a JSON stdout mode");
+      assert.equal(parsed.diagnostic_correlation_id, "0123456789abcdef0123456789abcdef");
+      assert.equal(ctx.requests.length, 1);
+      assert.deepEqual(ctx.requests[0], {
+        method: "GET",
+        url: "/api/diagnostics/unread-activity",
+        authorization: `Bearer ${SECRET_JWT}`,
+      });
+      if (process.platform !== "win32") assert.equal((await stat(outputPath)).mode & 0o777, 0o600);
+    } finally {
+      cap.restore();
+      await stop(ctx.server);
+    }
   });
 });
 
@@ -843,10 +900,10 @@ test("doctor --fix: residue cleaned + per-category structured output", async () 
     // Set up two residue categories: stale pidfile + tmp file (>24h)
     await mkdir(join(home, "computer"), { recursive: true });
     await writePidfileAt(servicePidPath(home), 999999999); // dead pid
-    const snap = join(home, "computer", "upgrade-snapshot.json");
-    await writeFile(snap, "{}");
+    const staged = join(home, "computer", "upgrade-staging", "1.0.0");
+    await mkdir(staged, { recursive: true });
     const { utimes } = await import("node:fs/promises");
-    await utimes(snap, new Date(Date.now() - 25 * 60 * 60 * 1000), new Date(Date.now() - 25 * 60 * 60 * 1000));
+    await utimes(staged, new Date(Date.now() - 25 * 60 * 60 * 1000), new Date(Date.now() - 25 * 60 * 60 * 1000));
 
     const cap = captureOut();
     try {

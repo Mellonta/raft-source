@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { inspect } from "node:util";
 import { DrizzleQueryError } from "drizzle-orm";
-import { test } from "vitest";
-import { serializeErrorForLog } from "./safeErrorLog.js";
+import { serializeErrorForLog } from "./safeErrorLog";
 
 test("real Drizzle query errors cannot put bound message content in console output", () => {
   const secret = "private-message-body-audit-sentinel";

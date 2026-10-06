@@ -27,7 +27,6 @@
  * the operator provisions the DSN. Not simulated here.
  */
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";

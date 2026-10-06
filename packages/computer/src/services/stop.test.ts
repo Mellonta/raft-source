@@ -7,12 +7,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { ComputerServiceError } from "./errors.js";
-import { stop } from "./stop.js";
-import type { ComputerApiEvent } from "../lib/events.js";
-import { servicePidPath } from "../paths.js";
+import { ComputerServiceError } from "./errors";
+import { stop } from "./stop";
+import type { ComputerApiEvent } from "../lib/events";
+import { servicePidPath } from "../paths";
 
 async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "raft-computer-stop-svc-"));
@@ -117,25 +116,22 @@ test("stop service: missing pidfile → status='not_running' + emits not_running
   });
 });
 
-test("stop service: successful no-process stop durably disables the macOS CLI carrier", async () => {
+test("stop service: successful no-process stop records the disabled macOS CLI host lifecycle", async () => {
   await withHome(async (home) => {
     const order: string[] = [];
     const result = await stop(
       { slockHome: home, hostLifecycleOwner: "cli" },
       {
-        hostLifecycleDeps: {
-          platform: "darwin",
-          dispatcherPath: "/usr/local/bin/raft-computer",
-        },
+        hostLifecycleDeps: { platform: "darwin" },
         convergeHostLifecycle: async (_actualHome, desired) => {
-          order.push(`carrier:${desired}`);
+          order.push(`lifecycle:${desired}`);
           return {
             owner: "cli",
             enabled: false,
-            status: "converged",
-            label: "build.raft.computer.login.test",
-            definitionPath: "/tmp/test.plist",
-            definition: "plist",
+            status: "not-applicable",
+            label: null,
+            definitionPath: null,
+            definition: null,
           };
         },
         readPidfile: async () => {
@@ -146,8 +142,80 @@ test("stop service: successful no-process stop durably disables the macOS CLI ca
       },
     );
     assert.equal(result.status, "not_running");
-    assert.equal(order.at(-1), "carrier:disabled");
+    assert.equal(order.at(-1), "lifecycle:disabled");
     assert.ok(order.slice(0, -1).every((entry) => entry === "pid-read"));
+  });
+});
+
+test("stop service: a host-lifecycle failure never blocks the stop", async () => {
+  await withHome(async (home) => {
+    await writePidfile(home, 12345);
+    let alive = true;
+    const order: string[] = [];
+    const events: ComputerApiEvent[] = [];
+
+    const result = await stop(
+      { slockHome: home, hostLifecycleOwner: "cli" },
+      {
+        hostLifecycleDeps: { platform: "darwin" },
+        convergeHostLifecycle: async (_actualHome, desired) => {
+          order.push(`lifecycle:${desired}`);
+          throw new ComputerServiceError("HOST_LIFECYCLE_OWNER_UNREADABLE", "owner record unreadable");
+        },
+        isProcessAlive: () => alive,
+        killService: () => {
+          order.push("kill");
+          alive = false;
+        },
+        sleep: async () => undefined,
+        onEvent: (event) => events.push(event),
+      },
+    );
+
+    assert.equal(result.status, "stopped");
+    assert.deepEqual(order, ["lifecycle:disabled", "kill"]);
+    const skipped = events.find((event) => event.kind === "host_lifecycle.skipped");
+    assert.deepEqual(skipped, {
+      kind: "host_lifecycle.skipped",
+      operation: "stop",
+      code: "HOST_LIFECYCLE_OWNER_UNREADABLE",
+      message: "owner record unreadable",
+    });
+  });
+});
+
+test("stop service: live macOS CLI service records the disabled host lifecycle before SIGTERM", async () => {
+  await withHome(async (home) => {
+    await writePidfile(home, 12345);
+    let alive = true;
+    const order: string[] = [];
+
+    const result = await stop(
+      { slockHome: home, hostLifecycleOwner: "cli" },
+      {
+        hostLifecycleDeps: { platform: "darwin" },
+        convergeHostLifecycle: async (_actualHome, desired) => {
+          order.push(`lifecycle:${desired}`);
+          return {
+            owner: "cli",
+            enabled: false,
+            status: "not-applicable",
+            label: null,
+            definitionPath: null,
+            definition: null,
+          };
+        },
+        isProcessAlive: () => alive,
+        killService: () => {
+          order.push("kill");
+          alive = false;
+        },
+        sleep: async () => undefined,
+      },
+    );
+
+    assert.equal(result.status, "stopped");
+    assert.deepEqual(order, ["lifecycle:disabled", "kill"]);
   });
 });
 

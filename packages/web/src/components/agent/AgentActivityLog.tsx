@@ -114,16 +114,16 @@ function ThinkingEntry({ text, timestamp, formatTimestamp }: { text: string; tim
   const isLong = text.length > 200;
 
   return (
-    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-black/5 transition-colors">
-      <span className="shrink-0 font-mono text-xs text-black/40 mt-0.5 whitespace-nowrap">
+    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-fill-muted theme-brutal:hover:bg-black/5 transition-colors">
+      <span className="shrink-0 font-mono text-xs text-foreground-placeholder theme-brutal:text-black/40 mt-0.5 whitespace-nowrap">
         {formatTimestamp(timestamp)}
       </span>
-      <StatusDot size="sm" tone="bg-status-busy" pulse className="mt-1.5" />
+      <StatusDot size="sm" tone="bg-status-busy" className="mt-1.5" />
       <div className="text-sm min-w-0 flex-1">
         <button
           type="button"
           onClick={() => isLong && setExpanded(!expanded)}
-          className={`flex items-center gap-1 font-medium text-black ${isLong ? "hover:text-black/70" : "cursor-default"}`}
+          className={`flex items-center gap-1 font-medium text-foreground-strong theme-brutal:text-black ${isLong ? "hover:text-foreground-muted theme-brutal:hover:text-black/70" : "cursor-default"}`}
         >
           {formatMessage({ id: "activity.log.thinking" })}
           {isLong && (
@@ -134,7 +134,7 @@ function ThinkingEntry({ text, timestamp, formatTimestamp }: { text: string; tim
           )}
         </button>
         <p
-          className={`text-black/50 text-xs font-mono mt-0.5 whitespace-pre-wrap break-words ${
+          className={`text-foreground-muted theme-brutal:text-black/50 text-xs font-mono mt-0.5 whitespace-pre-wrap break-words ${
             !expanded && isLong ? "line-clamp-2" : ""
           }`}
         >
@@ -147,16 +147,16 @@ function ThinkingEntry({ text, timestamp, formatTimestamp }: { text: string; tim
 
 function ToolStartEntry({ toolName, toolInput, timestamp, formatTimestamp, subagent }: { toolName: string; toolInput: string; timestamp: number; formatTimestamp: FormatTimestamp; subagent?: SubagentLineage["subagent"] }) {
   return (
-    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-black/5 transition-colors">
-      <span className="shrink-0 font-mono text-xs text-black/40 mt-0.5 whitespace-nowrap">
+    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-fill-muted theme-brutal:hover:bg-black/5 transition-colors">
+      <span className="shrink-0 font-mono text-xs text-foreground-placeholder theme-brutal:text-black/40 mt-0.5 whitespace-nowrap">
         {formatTimestamp(timestamp)}
       </span>
       <StatusDot size="sm" tone="bg-status-busy" className="mt-1.5" />
       <div className="min-w-0 flex-1 text-sm">
-        <span className="font-medium text-black">{getToolLogLabel(toolName)}</span>
+        <span className="font-medium text-foreground-strong theme-brutal:text-black">{getToolLogLabel(toolName)}</span>
         {subagent && <SubagentBadge subagentType={subagent.subagentType} />}
         {toolInput && (
-          <span className="text-black/50 ml-1.5 font-mono text-xs break-all">{toolInput}</span>
+          <span className="text-foreground-muted theme-brutal:text-black/50 ml-1.5 font-mono text-xs break-all">{toolInput}</span>
         )}
       </div>
     </div>
@@ -169,8 +169,8 @@ function TextEntry({ text, timestamp, formatTimestamp }: { text: string; timesta
   const isLong = text.length > 200;
 
   return (
-    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-black/5 transition-colors">
-      <span className="shrink-0 font-mono text-xs text-black/40 mt-0.5 whitespace-nowrap">
+    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-fill-muted theme-brutal:hover:bg-black/5 transition-colors">
+      <span className="shrink-0 font-mono text-xs text-foreground-placeholder theme-brutal:text-black/40 mt-0.5 whitespace-nowrap">
         {formatTimestamp(timestamp)}
       </span>
       <StatusDot size="sm" tone="bg-brutal-cyan" className="mt-1.5" />
@@ -178,7 +178,7 @@ function TextEntry({ text, timestamp, formatTimestamp }: { text: string; timesta
         <button
           type="button"
           onClick={() => isLong && setExpanded(!expanded)}
-          className={`flex items-center gap-1 font-medium text-black ${isLong ? "hover:text-black/70" : "cursor-default"}`}
+          className={`flex items-center gap-1 font-medium text-foreground-strong theme-brutal:text-black ${isLong ? "hover:text-foreground-muted theme-brutal:hover:text-black/70" : "cursor-default"}`}
         >
           {formatMessage({ id: "activity.log.output" })}
           {isLong && (
@@ -189,7 +189,7 @@ function TextEntry({ text, timestamp, formatTimestamp }: { text: string; timesta
           )}
         </button>
         <p
-          className={`text-black/50 text-xs font-mono mt-0.5 whitespace-pre-wrap break-words ${
+          className={`text-foreground-muted theme-brutal:text-black/50 text-xs font-mono mt-0.5 whitespace-pre-wrap break-words ${
             !expanded && isLong ? "line-clamp-2" : ""
           }`}
         >
@@ -205,8 +205,8 @@ function SystemEntry({ title, text, timestamp, formatTimestamp }: { title: strin
   const isLong = text.length > 200;
 
   return (
-    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-black/5 transition-colors">
-      <span className="shrink-0 font-mono text-xs text-black/40 mt-0.5 whitespace-nowrap">
+    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-fill-muted theme-brutal:hover:bg-black/5 transition-colors">
+      <span className="shrink-0 font-mono text-xs text-foreground-placeholder theme-brutal:text-black/40 mt-0.5 whitespace-nowrap">
         {formatTimestamp(timestamp)}
       </span>
       <StatusDot size="sm" tone="bg-brutal-orange" className="mt-1.5" />
@@ -214,7 +214,7 @@ function SystemEntry({ title, text, timestamp, formatTimestamp }: { title: strin
         <button
           type="button"
           onClick={() => isLong && setExpanded(!expanded)}
-          className={`flex items-center gap-1 font-medium text-black ${isLong ? "hover:text-black/70" : "cursor-default"}`}
+          className={`flex items-center gap-1 font-medium text-foreground-strong theme-brutal:text-black ${isLong ? "hover:text-foreground-muted theme-brutal:hover:text-black/70" : "cursor-default"}`}
         >
           {title}
           {isLong && (
@@ -225,7 +225,7 @@ function SystemEntry({ title, text, timestamp, formatTimestamp }: { title: strin
           )}
         </button>
         <p
-          className={`text-black/50 text-xs font-mono mt-0.5 whitespace-pre-wrap break-words ${
+          className={`text-foreground-muted theme-brutal:text-black/50 text-xs font-mono mt-0.5 whitespace-pre-wrap break-words ${
             !expanded && isLong ? "line-clamp-2" : ""
           }`}
         >
@@ -241,8 +241,8 @@ function SlockActionEntry({ title, text, timestamp, formatTimestamp }: { title: 
   const isLong = text.length > 200;
 
   return (
-    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-black/5 transition-colors">
-      <span className="shrink-0 font-mono text-xs text-black/40 mt-0.5 whitespace-nowrap">
+    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-fill-muted theme-brutal:hover:bg-black/5 transition-colors">
+      <span className="shrink-0 font-mono text-xs text-foreground-placeholder theme-brutal:text-black/40 mt-0.5 whitespace-nowrap">
         {formatTimestamp(timestamp)}
       </span>
       <StatusDot size="sm" tone="bg-blue-300" className="mt-1.5" />
@@ -250,7 +250,7 @@ function SlockActionEntry({ title, text, timestamp, formatTimestamp }: { title: 
         <button
           type="button"
           onClick={() => isLong && setExpanded(!expanded)}
-          className={`flex items-center gap-1 font-medium text-black ${isLong ? "hover:text-black/70" : "cursor-default"}`}
+          className={`flex items-center gap-1 font-medium text-foreground-strong theme-brutal:text-black ${isLong ? "hover:text-foreground-muted theme-brutal:hover:text-black/70" : "cursor-default"}`}
         >
           {title}
           {isLong && (
@@ -261,7 +261,7 @@ function SlockActionEntry({ title, text, timestamp, formatTimestamp }: { title: 
           )}
         </button>
         <p
-          className={`text-black/50 text-xs font-mono mt-0.5 whitespace-pre-wrap break-words ${
+          className={`text-foreground-muted theme-brutal:text-black/50 text-xs font-mono mt-0.5 whitespace-pre-wrap break-words ${
             !expanded && isLong ? "line-clamp-2" : ""
           }`}
         >
@@ -283,16 +283,16 @@ function StatusEntry({ activity, detail, detailKind, timestamp, formatTimestamp,
   const { primary, secondary } = resolveStatusDisplay(activity, detail, detailKind);
   const primaryText = typeof primary === "string" ? formatMessage({ id: primary }) : primary.raw;
   return (
-    <div className="flex items-start gap-2 py-1 px-3 hover:bg-black/5 transition-colors">
-      <span className="shrink-0 font-mono text-xs text-black/40 mt-0.5 whitespace-nowrap">
+    <div className="flex items-start gap-2 py-1 px-3 hover:bg-fill-muted theme-brutal:hover:bg-black/5 transition-colors">
+      <span className="shrink-0 font-mono text-xs text-foreground-placeholder theme-brutal:text-black/40 mt-0.5 whitespace-nowrap">
         {formatTimestamp(timestamp)}
       </span>
       <StatusDot size="sm" activity={activity} className="mt-1.5" />
-      <span className="min-w-0 flex-1 text-sm text-black">
+      <span className="min-w-0 flex-1 text-sm text-foreground-strong theme-brutal:text-black">
         <span className="font-medium">{primaryText}</span>
         {subagent && <SubagentBadge subagentType={subagent.subagentType} />}
         {secondary && (
-          <span className="ml-1.5 break-words text-black/60">
+          <span className="ml-1.5 break-words text-foreground-muted theme-brutal:text-black/60">
             <RefText text={secondary} />
           </span>
         )}
@@ -306,8 +306,8 @@ function CompactionEntry({ phase, timestamp, formatTimestamp }: { phase: "starte
   const isStarted = phase === "started";
 
   return (
-    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-black/5 transition-colors">
-      <span className="shrink-0 font-mono text-xs text-black/40 mt-0.5 whitespace-nowrap">
+    <div className="flex items-start gap-2 py-1.5 px-3 hover:bg-fill-muted theme-brutal:hover:bg-black/5 transition-colors">
+      <span className="shrink-0 font-mono text-xs text-foreground-placeholder theme-brutal:text-black/40 mt-0.5 whitespace-nowrap">
         {formatTimestamp(timestamp)}
       </span>
       <StatusDot
@@ -315,7 +315,7 @@ function CompactionEntry({ phase, timestamp, formatTimestamp }: { phase: "starte
         tone={isStarted ? "bg-brutal-orange" : "bg-brutal-lime"}
         className="mt-1.5"
       />
-      <span className="text-sm text-black font-medium">
+      <span className="text-sm text-foreground-strong theme-brutal:text-black font-medium">
         {formatMessage({ id: isStarted ? "activity.log.compactionStarted" : "activity.log.compactionFinished" })}
       </span>
     </div>
@@ -401,7 +401,7 @@ export default function AgentActivityLog({ agentId }: { agentId: string }) {
   if (visibleLog.length === 0) {
     return (
       <EmptyState
-        className="flex flex-1 flex-col items-center justify-center bg-white"
+        className="flex flex-1 flex-col items-center justify-center bg-layer-panel theme-brutal:bg-white"
         icon={<Activity size={36} />}
         title={formatMessage({ id: "emptyState.noActivityTitle" })}
         description={formatMessage({ id: "emptyState.noActivityDesc" })}
@@ -411,7 +411,7 @@ export default function AgentActivityLog({ agentId }: { agentId: string }) {
 
   return (
     <ThreadRefNoticeProvider onNotice={showThreadRefNotice}>
-      <div className="flex flex-1 flex-col min-h-0 bg-white">
+      <div className="flex flex-1 flex-col min-h-0 bg-layer-panel theme-brutal:bg-white">
         <div className="flex-1 overflow-y-auto py-2">
           {visibleLog.map((item, i) => (
             <TrajectoryItem key={`${item.timestamp}-${i}`} item={item} formatTimestamp={formatTimestamp} />
@@ -419,7 +419,7 @@ export default function AgentActivityLog({ agentId }: { agentId: string }) {
           <div ref={bottomRef} />
         </div>
         {threadRefNotice ? (
-          <div className="shrink-0 border-t-2 border-black bg-brutal-orange/20 px-3 py-1.5 text-xs font-mono text-black">
+          <div className="shrink-0 border-t theme-brutal:border-t-2 border-line-muted theme-brutal:border-black bg-warning-soft theme-brutal:bg-brutal-orange/20 px-3 py-1.5 text-xs font-mono text-foreground-strong theme-brutal:text-black">
             {formatMessage({ id: threadRefNotice })}
           </div>
         ) : null}

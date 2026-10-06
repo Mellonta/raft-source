@@ -244,7 +244,7 @@ export default function CollapsibleMessageContent({
           <div
             aria-hidden="true"
             data-message-collapse-fade="true"
-            className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-white to-transparent"
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-layer-panel to-transparent theme-brutal:from-white"
           />
         ) : null}
       </div>

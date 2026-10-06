@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, render } from "@testing-library/react";
 
@@ -49,7 +48,7 @@ test("the permission picker renders in Chinese, with no English left but the pro
   const text = document.body.textContent ?? "";
 
   // Wiring: these are the H2b strings on this component's path.
-  for (const zh of ["需要 Agent + Computer", "服务器", "成员已添加"]) {
+  for (const zh of ["需要 Agent + Computer", "服务器 · 只读", "成员已添加"]) {
     assert.ok(text.includes(zh), `picker should render ${zh}`);
   }
 
@@ -58,7 +57,7 @@ test("the permission picker renders in Chinese, with no English left but the pro
   // string escaped both scanners. This is what catches ternary-split sentences
   // and catch-block fallbacks, which no static sweep can see.
   const runs = new Set(text.match(/[A-Za-z][A-Za-z ]{6,}/g) ?? []);
-  const allowed = /^(Computer|Agent)[A-Za-z ]*$/;
+  const allowed = /^(Computer|Agent|webhook)[A-Za-z ]*$/;
   const unexpected = [...runs].filter((r) => !allowed.test(r.trim()));
   assert.deepEqual(unexpected, [], `untranslated English reached the DOM: ${unexpected.join(" | ")}`);
 });
@@ -103,7 +102,7 @@ test("the developer webhook panel renders in Chinese — the path the picker tes
   );
 
   const text = document.body.textContent ?? "";
-  for (const zh of ["此应用可接收的 Raft 事件。", "投递", "启用 App 通知"]) {
+  for (const zh of ["此应用可接收的 Raft 事件。", "投递", "启用 Webhook"]) {
     assert.ok(text.includes(zh), `developer panel should render ${zh}`);
   }
 

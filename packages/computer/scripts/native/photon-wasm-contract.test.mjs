@@ -4,7 +4,6 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { test } from "vitest";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);

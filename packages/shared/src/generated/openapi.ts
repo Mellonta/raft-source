@@ -38,6 +38,23 @@ export type paths = {
         patch?: never;
         trace?: never;
     };
+    "/api/attachments/upload-sessions/{channelId}/active": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List active attachment uploads for a channel */
+        get: operations["listAttachmentUploadSessions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attachments/upload-sessions/{uploadId}": {
         parameters: {
             query?: never;
@@ -117,6 +134,19 @@ export type components = {
             /** @constant */
             retryable: true;
             retryAfterMs: number;
+        };
+        AttachmentUploadRecoveryList: {
+            uploads: components["schemas"]["AttachmentUploadRecoveryView"][];
+        };
+        AttachmentUploadRecoveryView: {
+            /** Format: date-time */
+            expiresAt: string;
+            filename: string;
+            mimeType: string;
+            sizeBytes: number;
+            /** @enum {string} */
+            state: "pending" | "verifying";
+            uploadId: components["schemas"]["AttachmentUploadId"];
         };
         AttachmentUploadResponse: {
             filename: string;
@@ -318,6 +348,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AttachmentUploadRateLimitedError"];
+                };
+            };
+        };
+    };
+    listAttachmentUploadSessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                channelId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active uploads owned by the current member */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentUploadRecoveryList"];
+                };
+            };
+            /** @description Invalid channel id */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InvalidUploadRequestError"];
+                };
+            };
+            /** @description Upload is forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentUploadForbiddenError"];
                 };
             };
         };

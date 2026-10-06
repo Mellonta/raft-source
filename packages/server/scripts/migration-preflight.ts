@@ -8,7 +8,7 @@
 // local/dev/e2e. MIGRATIONS_FOLDER overrides the default folder (tests).
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { runPreflight } from "../src/db/migrationPreflight.js";
+import { runPreflight } from "../src/db/migrationPreflight";
 
 const migrationsFolder =
   process.env.MIGRATIONS_FOLDER ??

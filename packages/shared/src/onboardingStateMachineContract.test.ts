@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   ONBOARDING_EVIDENCE,
@@ -9,7 +8,7 @@ import {
   ONBOARDING_STATES,
   ONBOARDING_STATE_MACHINE_CONTRACT,
   ONBOARDING_TRANSITIONS,
-} from "./onboardingStateMachineContract.js";
+} from "./onboardingStateMachineContract";
 
 const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 // Asserts on private CI/deploy files that the source-available snapshot does not
@@ -133,7 +132,7 @@ test("every onboarding evidence anchor still names a real executable test", asyn
   }
 });
 
-test("staging audit is scheduled, artifact-exact, locale-independent, pull-request runnable, repo-Node pinned, and evidence preserving", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, async () => {
+test("staging audit is scheduled, artifact-exact, locale-independent, staging-push runnable, repo-Node pinned, and evidence preserving", { skip: inSourceSnapshot }, async () => {
   const workflow = await readFile(`${repoRoot}.github/workflows/onboarding-staging-audit.yml`, "utf8");
   const stagingSpec = await readFile(
     `${repoRoot}packages/web/tests/e2e/staging/onboarding-entry.staging.spec.ts`,
@@ -145,7 +144,8 @@ test("staging audit is scheduled, artifact-exact, locale-independent, pull-reque
   );
 
   assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /pull_request:/);
+  // PR #7935 moves browser validation to staging; retain its real execution entry.
+  assert.match(workflow, /^  push:\n    branches: \[staging\]/m);
   assert.match(workflow, /cron: "23 18 \* \* \*"/);
   assert.match(workflow, /node-version-file: \.node-version/);
   assert.match(workflow, /playwright install --with-deps chromium/);

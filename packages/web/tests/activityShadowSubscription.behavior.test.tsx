@@ -31,7 +31,7 @@
  *  - make the notifier catch only synchronous throws   -> async tooth RED
  */
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -58,7 +58,7 @@ import { useActivityShadowVersion } from "../src/store/activityPanel/useActivity
 // These share global zustand stores; serialize them.
 type TestFn = (t: unknown) => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn as never);
+  nodeTest(name,  fn as never);
 
 const SERVER_ID = "server-1";
 const PRINCIPAL_ID = "user-1";

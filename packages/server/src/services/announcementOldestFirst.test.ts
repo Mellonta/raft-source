@@ -1,5 +1,5 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 /**
  * Selection contract for `listUndismissedForUser` after the 2026-08-07 change:
  * the OLDEST still-live announcement the user has not finished reading wins.
@@ -11,10 +11,9 @@ import { closeTestDatabase } from "../test/integration/database.js";
  * should NOT treat `oldest-first` as a regression to be fixed back.
  */
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { dismiss, listUndismissedForUser, publish } from "./announcementService.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { dismiss, listUndismissedForUser, publish } from "./announcementService";
 
 
 afterEach(async () => {

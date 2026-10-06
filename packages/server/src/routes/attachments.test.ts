@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
 import sharp from "sharp";
 import {
   buildAttachmentTooLargeResponse,
@@ -11,11 +10,13 @@ import {
   buildAttachmentInlinePreviewContentSecurityPolicy,
   buildAttachmentResponseContentType,
   buildHtmlPreviewContentSecurityPolicy,
+  buildSvgRasterPreviewKey,
   canGenerateImagePreview,
   generateSvgRasterPreview,
   generateThumbnail,
   getAttachmentFileSizeLimitBytes,
   getLegacyAttachmentFileSizeLimitBytes,
+  getThumbnailUrl,
   isEmptyUploadedFile,
   isOversizedUploadedFile,
   MAX_ATTACHMENT_FILE_SIZE_BYTES,
@@ -24,8 +25,46 @@ import {
   normalizeUploadedMimeType,
   parseAttachmentByteRange,
   resolveAttachmentMimeType,
-} from "./attachments.js";
-import { getAttachmentDirectUploadThresholdBytes } from "../services/attachmentUploadPolicy.js";
+} from "./attachments";
+import { getAttachmentDirectUploadThresholdBytes } from "../services/attachmentUploadPolicy";
+
+test("thumbnail URLs preserve the public CDN base while absent previews emit no CDN URL", () => {
+  const previous = process.env.CDN_BASE_URL;
+  try {
+    process.env.CDN_BASE_URL = "https://cdn.raft.build";
+    assert.equal(
+      getThumbnailUrl("thumbs/server/attachment.webp"),
+      "https://cdn.raft.build/thumbs/server/attachment.webp",
+    );
+    assert.equal(getThumbnailUrl(null), null);
+  } finally {
+    if (previous === undefined) delete process.env.CDN_BASE_URL;
+    else process.env.CDN_BASE_URL = previous;
+  }
+});
+
+test("content/v2 thumbnail URLs use the public-content domain and keep SVG previews in the same generation", () => {
+  const previousCdn = process.env.CDN_BASE_URL;
+  const previousContent = process.env.PUBLIC_CONTENT_BASE_URL;
+  try {
+    process.env.CDN_BASE_URL = "https://cdn.raft.build";
+    process.env.PUBLIC_CONTENT_BASE_URL = "https://content.raft.build";
+    assert.equal(
+      getThumbnailUrl("content/v2/thumbs/server/attachment.webp"),
+      "https://content.raft.build/content/v2/thumbs/server/attachment.webp",
+    );
+    assert.equal(buildSvgRasterPreviewKey("thumbs/server/attachment.webp"), "previews/server/attachment.webp");
+    assert.equal(
+      buildSvgRasterPreviewKey("content/v2/thumbs/server/attachment.webp"),
+      "content/v2/previews/server/attachment.webp",
+    );
+  } finally {
+    if (previousCdn === undefined) delete process.env.CDN_BASE_URL;
+    else process.env.CDN_BASE_URL = previousCdn;
+    if (previousContent === undefined) delete process.env.PUBLIC_CONTENT_BASE_URL;
+    else process.env.PUBLIC_CONTENT_BASE_URL = previousContent;
+  }
+});
 
 test("normalizeAttachmentFilename repairs mojibake UTF-8 filenames", () => {
   const original = "这文件里有什么.pdf";
@@ -191,8 +230,29 @@ test("HTML preview CSP allows external subresources but blocks privileged channe
   assert.match(csp, /base-uri 'none'/);
   assert.match(csp, /form-action 'none'/);
   assert.match(csp, /object-src 'none'/);
+  // Directly opened previews get an opaque origin too, not only framed ones.
+  assert.match(csp, /(^|; )sandbox allow-scripts(;|$)/);
+  assert.doesNotMatch(csp, /allow-same-origin/);
   assert.match(csp, /worker-src 'none'/);
   assert.doesNotMatch(csp, /allow-same-origin/);
+});
+
+test("both framed preview responses (HTML preview AND API-served inline preview) admit the Raft Desktop app://raft origin by default", () => {
+  // The DEFAULT getters (not the explicit-arg form above) are what the endpoints
+  // use. The desktop shell frames both: the interactive HTML preview and the
+  // API-served inline preview (PDF viewer on local-storage / proxy deployments).
+  // Asserting the exact origin token — not list length — so dropping it from
+  // either default list turns this red (mutation-verified: removing the token from the shared default list turns this red).
+  const htmlFrameAncestors = /frame-ancestors ([^;]+)/.exec(buildHtmlPreviewContentSecurityPolicy())?.[1] ?? "";
+  assert.match(htmlFrameAncestors, /(^|\s)app:\/\/raft(\s|$)/, "HTML preview must let the desktop shell embed it");
+  assert.match(htmlFrameAncestors, /(^|\s)'self'(\s|$)/, "web origins/'self' remain allowed (no CORS/web loosening)");
+
+  const inlineFrameAncestors = /frame-ancestors ([^;]+)/.exec(buildAttachmentInlinePreviewContentSecurityPolicy())?.[1] ?? "";
+  assert.match(inlineFrameAncestors, /(^|\s)app:\/\/raft(\s|$)/, "the API-served inline preview must let the desktop shell embed it too (self-hosted / local-storage PDF frame)");
+  assert.match(inlineFrameAncestors, /(^|\s)'self'(\s|$)/);
+  // Both defaults derive from one list: the desktop token appears exactly once per policy.
+  assert.equal((inlineFrameAncestors.match(/app:\/\/raft/g) ?? []).length, 1);
+  assert.equal((htmlFrameAncestors.match(/app:\/\/raft/g) ?? []).length, 1);
 });
 
 test("normalizeUploadedMimeType keeps explicit image mime types", () => {

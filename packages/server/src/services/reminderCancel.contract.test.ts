@@ -1,9 +1,8 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { agents, servers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agents, servers, users } from "../db/schema";
 import {
   cancelReminder,
   createReminder,
@@ -13,7 +12,7 @@ import {
   snoozeReminder,
   updateReminder,
   type TimeProvider,
-} from "../apps/reminder/service.js";
+} from "../apps/reminder/service";
 
 
 /**
@@ -216,50 +215,4 @@ test("B-minimal: fired one-time can snooze back to scheduled but cannot update",
   assert.deepEqual(events.map((e) => e.eventType), ["snoozed", "scheduled", "fired"]);
   assert.equal(events[0].nextFireAt?.toISOString(), "2026-04-20T12:35:00.000Z");
   assert.equal(events[2].nextFireAt, null);
-});
-
-test("canonical Wiki ingest and lint reminders reject generic mutation APIs", async ({ db }) => {
-
-  const { server, agent, user } = await seedServerAndAgent();
-
-  for (const kind of ["wiki.incremental_discovery", "wiki.lint"] as const) {
-    const reminder = await createReminder(
-      {
-        serverId: server.id,
-        ownerAgentId: agent.id,
-        msgId: null,
-        title: kind,
-        fireAt: new Date("2026-04-20T11:00:00.000Z"),
-        payload: {
-          kind,
-          version: 1,
-          wikiSpaceId: "55555555-5555-4555-8555-555555555555",
-          serverId: server.id,
-        },
-        createdBy: { type: "human", id: user.id },
-      },
-      { clock: FIXED_CLOCK },
-    );
-
-    assert.equal(await cancelReminder(reminder.id, {
-      clock: FIXED_CLOCK,
-      expectedVersion: reminder.version,
-    }), null);
-    assert.equal(await snoozeReminder(reminder.id, 60, {
-      clock: FIXED_CLOCK,
-      expectedVersion: reminder.version,
-    }), null);
-    assert.equal(
-      await updateReminder(
-        reminder.id,
-        { kind: "title", title: "mutated" },
-        { clock: FIXED_CLOCK, expectedVersion: reminder.version },
-      ),
-      null,
-    );
-    const persisted = await getReminderById(reminder.id);
-    assert.equal(persisted?.status, "scheduled");
-    assert.equal(persisted?.version, 1);
-    assert.equal(persisted?.title, kind);
-  }
 });

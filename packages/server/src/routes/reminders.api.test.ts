@@ -1,12 +1,12 @@
-import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { createReminder } from "../apps/reminder/service.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { addMember, createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { createReminder } from "../apps/reminder/service";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -120,4 +120,61 @@ test("GET /api/reminders still returns the read-only listing", async ({ app }) =
   const body = (await res.json()) as { reminders: Array<{ title: string }> };
   assert.equal(body.reminders.length, 1);
   assert.equal(body.reminders[0].title, "standup");
+});
+
+// Reminders are a private surface of their owner agent (same rule as the
+// agent's workspace/activity tabs). Without `ownerAgentId` the listing must
+// not widen into every agent of the server.
+test("GET /api/reminders without ownerAgentId lists only reminders of agents the caller may inspect", async ({ app }) => {
+  const db = getDb();
+  const [owner, creator, bystander] = await db
+    .insert(users)
+    .values(await Promise.all(["owner", "creator", "bystander"].map(async (name) => ({
+      email: `reminders-scope-${name}@slock.test`,
+      name: `reminders-scope-${name}`,
+      displayName: name,
+      passwordHash: await fixturePasswordHash("password123"),
+      emailVerified: true,
+      profileSetupCompletedAt: new Date(),
+    }))))
+    .returning();
+  const server = await createServer("Reminders Scope", "reminders-scope", owner.id);
+  await addMember(server.id, creator.id);
+  await addMember(server.id, bystander.id);
+  const agentX = await createAgent(server.id, "r-agent-x", { runtime: "claude" });
+  const agentY = await createAgent(server.id, "r-agent-y", {
+    runtime: "claude",
+    creatorType: "user",
+    creatorId: creator.id,
+  });
+  for (const [agent, title] of [[agentX, "x-standup"], [agentY, "y-review"]] as const) {
+    await createReminder({
+      serverId: server.id,
+      ownerAgentId: agent.id,
+      msgId: null,
+      title,
+      fireAt: new Date(Date.now() + 60_000),
+      payload: null,
+      createdBy: { type: "agent", id: agent.id },
+    });
+  }
+
+  const visibleTitles = async (user: { email: string }, query = ""): Promise<string[] | number> => {
+    const res = await fetch(`${app.baseUrl}/api/reminders${query}`, {
+      headers: authHeaders(await tokenForHuman(user.email), server.id),
+    });
+    if (res.status !== 200) return res.status;
+    const body = (await res.json()) as { reminders: Array<{ title: string }> };
+    return body.reminders.map((r) => r.title).sort();
+  };
+
+  // Server owner holds `editAgents`: every agent's reminders.
+  assert.deepEqual(await visibleTitles(owner), ["x-standup", "y-review"]);
+  // A plain member sees exactly the agents they created.
+  assert.deepEqual(await visibleTitles(creator), ["y-review"]);
+  // A plain member with no agents sees nothing rather than the whole server.
+  assert.deepEqual(await visibleTitles(bystander), []);
+  // The explicit filter keeps refusing an agent the caller may not inspect.
+  assert.equal(await visibleTitles(bystander, `?ownerAgentId=${agentX.id}`), 403);
+  assert.deepEqual(await visibleTitles(creator, `?ownerAgentId=${agentY.id}`), ["y-review"]);
 });

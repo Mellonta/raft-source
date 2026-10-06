@@ -1,11 +1,11 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import type { TrajectoryEntry } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { agents, servers, users } from "../db/schema.js";
-import { appendAgentActivityEvent, listRecentAgentTrajectory } from "./agentActivityLogService.js";
+import { getDb } from "../db/index";
+import { agents, servers, users } from "../db/schema";
+import { appendAgentActivityEvent, listRecentAgentTrajectory } from "./agentActivityLogService";
+import { rewriteDaemonActivityEntries } from "./agentLifecycleReducer";
 
 
 afterEach(async () => {
@@ -39,6 +39,39 @@ async function seedAgent(agentId: string, suffix: string) {
     runtime: "codex",
   });
 }
+
+test("compaction terminal facts survive daemon normalization, database persistence and history readback", async ({ db }) => {
+  void db;
+  const agentId = "30000000-0000-4000-8000-000000000099";
+  await seedAgent(agentId, "99");
+  const entries = rewriteDaemonActivityEntries(
+    (["compaction_failed", "input_too_large", "recovery_exhausted"] as const).map(failureReason => ({
+      kind: "status" as const,
+      detailKind: "runtime_error" as const,
+      detail: "Context compaction interrupted",
+      compaction: {
+        outcome: "compaction_failed_or_exhausted" as const,
+        reason: "overflow" as const,
+        failureReason,
+        willRetry: false,
+        failureDiagnostic: {
+          errorClass: "ProviderServerError" as const,
+          errorReason: "provider_server_error" as const,
+          fingerprint: "0123456789abcdef",
+          reasonProvenance: "runtime_error_event" as const,
+        },
+      },
+    })),
+    { activity: "error", detailKind: "runtime_error", source: "canonical" },
+  );
+  assert.ok(entries);
+  await appendAgentActivityEvent(agentId, "error", "Context compaction interrupted", entries, new Date("2026-09-14T00:00:00Z"), "compaction-terminal");
+  const persisted = await listRecentAgentTrajectory(agentId);
+  assert.equal(persisted.length, 3);
+  assert.deepEqual(persisted.map(row => row.entry), entries);
+  assert.deepEqual(persisted.map(row => row.entry.kind === "status" ? row.entry.compaction?.failureReason : undefined),
+    ["compaction_failed", "input_too_large", "recovery_exhausted"]);
+});
 
 test("activity log dedupes projection writes per agent and dedupe key", async ({ db }) => {
 

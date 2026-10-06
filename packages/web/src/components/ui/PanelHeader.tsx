@@ -1,7 +1,16 @@
 import { ArrowLeft } from "lucide-react";
 import { isHostShell } from "../../embed";
 import type { HTMLAttributes, ReactNode } from "react";
-import Button from "./Button";
+import {
+  PanelAction,
+  PanelActions,
+  PanelHeader,
+  PanelHeaderContent,
+  PanelHeaderIcon,
+  PanelHeading,
+  PanelMeta,
+  PanelTitle,
+} from "raft-ui";
 
 // React's `HTMLAttributes` doesn't expose `data-*` keys in TS, so widen
 // passthrough prop types with a string-key index signature so callsites
@@ -24,7 +33,7 @@ type ButtonPassthroughProps = HTMLAttributes<HTMLButtonElement> & Record<`data-$
  * Same component, different prop combinations for each surface.
  *
  * **API design**:
- * - `iconBg` accepts a className token (e.g. `"bg-soft-signal"`),
+ * - `iconBg` accepts a className token (e.g. `"bg-primary"`),
  *   not a raw color value. Future theme upgrades can swap the token
  *   map without touching call sites (Joy 2026-05-10 design API note).
  * - `titleSlot` replaces the H2+subtitle stack entirely — for
@@ -39,7 +48,7 @@ type ButtonPassthroughProps = HTMLAttributes<HTMLButtonElement> & Record<`data-$
  *   attributes through to specific elements without leaking the
  *   internal DOM structure into PanelHeader's API surface.
  */
-export interface PanelHeaderProps {
+export interface AppPanelHeaderProps {
   /** Title — primary text or custom node. Wrapped in `<h2 truncate>`.
    *  Use `titleSlot` instead for non-text titles. */
   title?: ReactNode;
@@ -52,7 +61,7 @@ export interface PanelHeaderProps {
    *  it never gets cut off. Inside the same flex row as the H2. */
   titleSuffix?: ReactNode;
   /** Optional subtitle line below the title (font-mono, text-xs,
-   *  text-black/50). Truncated to single line by default. */
+   *  text-foreground-muted). Truncated to single line by default. */
   subtitle?: ReactNode;
   /** When true, subtitle is allowed to wrap to multiple lines instead
    *  of single-line truncation. Used for channel descriptions. */
@@ -61,7 +70,7 @@ export interface PanelHeaderProps {
    *  inside the size-icon-header container, desktop-only (md:flex). */
   icon?: ReactNode;
   /** ClassName for the icon container background. Defaults to
-   *  `bg-soft-signal`. Pass tokens like `bg-brutal-cyan` for
+   *  `bg-primary`. Pass tokens like `bg-info` for
    *  agent/DM surfaces. */
   iconBg?: string;
   /** Pre-wrapped icon slot — bypasses the size-icon-header /
@@ -108,14 +117,14 @@ export interface PanelHeaderProps {
   actions?: ReactNode;
 }
 
-export default function PanelHeader({
+export default function AppPanelHeader({
   title,
   titleSlot,
   titleSuffix,
   subtitle,
   subtitleMultiline = false,
   icon,
-  iconBg = "bg-soft-signal",
+  iconBg = "bg-primary",
   iconSlot,
   iconAlwaysVisible = false,
   onMobileBack,
@@ -125,7 +134,7 @@ export default function PanelHeader({
   titleClickProps,
   containerProps,
   actions,
-}: PanelHeaderProps) {
+}: AppPanelHeaderProps) {
   // HOST-SHELL EMBED: the native WebView already draws a title bar, so web must not
   // draw a second one. But the ACTIONS must not die with the title — Computers' "+"
   // and Connected Apps' "Register app" live in this slot, and dropping the whole
@@ -155,13 +164,18 @@ export default function PanelHeader({
       ? "lg:hidden"
       : "md:hidden";
   const iconVisibilityClass = iconAlwaysVisible
-    ? "flex"
+    ? `flex ${onMobileBack ? "" : "max-md:col-start-1"}`
     : mobileBreakpoint === "lg"
     ? "hidden lg:flex"
     : "hidden md:flex";
+  // RUI's mobile header has four explicit columns: Back / identity / title /
+  // actions. Hidden identity slots must not leave the title in the Back cell.
+  const mobileContentClass = (icon || iconSlot) && iconAlwaysVisible
+    ? onMobileBack ? "max-md:col-start-3" : "max-md:col-start-2 max-md:col-span-2"
+    : onMobileBack ? "max-md:col-start-2 max-md:col-span-2" : "max-md:col-span-3";
   const { className: containerExtraClass, ...containerRest } = containerProps ?? {};
   return (
-    <div
+    <PanelHeader
       {...containerRest}
       // stdrc 2026-05-14 #wg-theme:16123203 "确保同类页面用的组件都是
       // 长得左边 (BEFORE) 那样" — flat `gap-3 px-5` everywhere, no narrow-
@@ -170,55 +184,61 @@ export default function PanelHeader({
       // the old hand-rolled MobileComputersPanel, so every Settings sub-page
       // (Account / Browser / Server / Computers) now reads the same width
       // at every breakpoint.
-      className={`flex h-panel-header items-center gap-3 border-b-2 border-black bg-white px-5 ${containerExtraClass ?? ""}`}
+      className={containerExtraClass}
     >
       {onMobileBack && (
-        <Button
+        <PanelAction
           {...mobileBackProps}
           onClick={onMobileBack}
-          shape="icon"
-          className={`${mobileHiddenClass} ${mobileBackProps?.className ?? ""}`}
+          className={`max-md:col-start-1 max-md:row-start-1 ${mobileHiddenClass} ${mobileBackProps?.className ?? ""}`}
         >
           <ArrowLeft size={14} />
-        </Button>
+        </PanelAction>
       )}
       {icon && (
-        <div
-          className={`${iconVisibilityClass} size-icon-header shrink-0 items-center justify-center border-2 border-black ${iconBg}`}
+        <PanelHeaderIcon
+          className={`${iconVisibilityClass} ${iconBg} in-data-[theme=elegant]:border-0 in-data-[theme=elegant]:bg-fill-muted`}
         >
           {icon}
-        </div>
+        </PanelHeaderIcon>
       )}
       {iconSlot && (
-        <div className={`${iconVisibilityClass} shrink-0`}>{iconSlot}</div>
+        <PanelHeaderIcon className={iconVisibilityClass}>
+          {iconSlot}
+        </PanelHeaderIcon>
       )}
       {titleSlot ? (
-        <div className="min-w-0 flex-1">{titleSlot}</div>
+        <PanelHeaderContent className={`min-w-0 flex-1 ${mobileContentClass}`}>{titleSlot}</PanelHeaderContent>
       ) : (
-        <div
+        <PanelHeaderContent
           {...titleClickProps}
-          className={`min-w-0 flex-1 ${titleClickProps?.className ?? ""}`}
+          className={`min-w-0 flex-1 ${mobileContentClass} ${titleClickProps?.className ?? ""}`}
         >
-          <div className="flex items-center gap-2 min-w-0">
-            <h2 className="truncate font-bold text-base leading-tight text-black">
-              {title}
-            </h2>
-            {titleSuffix && <div className="shrink-0">{titleSuffix}</div>}
-          </div>
+          <PanelHeading>
+            <PanelTitle
+              render={(
+                <h2>
+                  {title}
+                </h2>
+              )}
+            />
+            {titleSuffix && <PanelMeta>{titleSuffix}</PanelMeta>}
+          </PanelHeading>
           {subtitle && (
-            <p
-              className={`text-xs text-black/50 font-mono ${
+            <PanelMeta
+              render={<p />}
+              className={`${
                 subtitleMultiline ? "" : "truncate"
               }`}
             >
               {subtitle}
-            </p>
+            </PanelMeta>
           )}
-        </div>
+        </PanelHeaderContent>
       )}
       {actions && (
-        <div className="flex shrink-0 items-center gap-1.5">{actions}</div>
+        <PanelActions>{actions}</PanelActions>
       )}
-    </div>
+    </PanelHeader>
   );
 }

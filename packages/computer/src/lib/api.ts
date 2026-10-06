@@ -18,53 +18,53 @@
 import { randomUUID } from "node:crypto";
 import { readFile, unlink } from "node:fs/promises";
 
-import type { ComputerStatusReport } from "../status.js";
-import { buildStatusReport } from "../status.js";
+import type { ComputerStatusReport } from "../status";
+import { buildStatusReport } from "../status";
 import {
   ServiceClientError,
   type ResetRunnerResult,
   type ResetServiceResult,
   type LegacyMachineCandidate,
-} from "./types.js";
-import { ServersClient, type UserServerEntry, type UserServersResult } from "../apiClient.js";
+} from "./types";
+import { ServersClient, type UserServerEntry, type UserServersResult } from "../apiClient";
 import {
   resetRunner as resetRunnerDisk,
   resetService as resetServiceDisk,
   resetViaServiceOrDisk,
-} from "../reset.js";
-import { connectService } from "./ipc-client.js";
+} from "../reset";
+import { connectService } from "./ipc-client";
 import { noopTracer } from "@botiverse/raft-shared";
-import type { ComputerTracer } from "./traceTypes.js";
-import { ComputerError } from "./errors.js";
-import { ComputerServiceError } from "../services/errors.js";
+import type { ComputerTracer } from "./traceTypes";
+import { ComputerError } from "./errors";
+import { ComputerServiceError } from "../services/errors";
 import {
   resolveRaftHome,
   userSessionPath,
   serverRunnerLogReadFallback,
   serviceLogPath,
-} from "../paths.js";
-import { resolveServerUrl, resolveServerUrlEnv } from "../serverUrl.js";
-import { login as loginService, type LoginResult } from "../services/login.js";
-import { attach as attachService, type AttachResult } from "../services/attach.js";
-import { start as startService, type StartResult, type StartDeps } from "../services/start.js";
-import { stop as stopService, type StopResult, type StopDeps, type StopStatus } from "../services/stop.js";
+} from "../paths";
+import { resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
+import { login as loginService, type LoginResult } from "../services/login";
+import { attach as attachService, type AttachResult } from "../services/attach";
+import { start as startService, type StartResult, type StartDeps } from "../services/start";
+import { stop as stopService, type StopResult, type StopDeps, type StopStatus } from "../services/stop";
 import {
   diagnosticsPush as diagnosticsPushService,
   type DiagnosticsPushResult,
-} from "../services/diagnosticsPush.js";
-import type { ComputerApiEvent } from "./events.js";
-import { runDoctorChecks, type DoctorCheck, redactSecrets } from "../doctor.js";
-import { runFullCleanup, type CleanupReport } from "../cleanup.js";
-import { readCrashHistory } from "../health.js";
-import { clearServerManaged, formatServerSlugDisplay, listAttachedServerIds } from "../serverState.js";
-import { RunnersClient } from "../apiClient.js";
-import { listRunners } from "./readers.js";
-import { parseChannel, readChannel, writeChannel, type Channel } from "./channelState.js";
-import { setupCore, type SetupOptions, type SetupDeps } from "../setup.js";
-import { findLiveServicePidReadOnly } from "../internal/service-pid-fallback.js";
-import type { RunnerListItem } from "../apiClient.js";
-import { ensureUsableUserSession, refreshUserSession } from "./userSession.js";
-import { prepareLocalLifecycleOperations } from "../localLifecycleIntents.js";
+} from "../services/diagnosticsPush";
+import type { ComputerApiEvent } from "./events";
+import { runDoctorChecks, type DoctorCheck, redactSecrets } from "../doctor";
+import { runFullCleanup, type CleanupReport } from "../cleanup";
+import { readCrashHistory } from "../health";
+import { clearServerManaged, formatServerSlugDisplay, listAttachedServerIds } from "../serverState";
+import { RunnersClient } from "../apiClient";
+import { listRunners } from "./readers";
+import { parseChannel, readChannel, writeChannel, type Channel } from "./channelState";
+import { setupCore, type SetupOptions, type SetupDeps } from "../setup";
+import { findLiveServicePidReadOnly } from "../internal/service-pid-fallback";
+import type { RunnerListItem } from "../apiClient";
+import { ensureUsableUserSession, refreshUserSession } from "./userSession";
+import { prepareLocalLifecycleOperations } from "../localLifecycleIntents";
 
 /**
  * Helper: run a `services/*` call whose failures are `ComputerServiceError`,
@@ -650,7 +650,7 @@ export function createComputerApi(slockHome: string, opts?: CreateComputerApiOpt
           onEvent?.({
             kind: "log.line",
             line:
-              `Upgrade to ${r.targetVersion} started (id ${r.upgradeId}). The service downloads, ` +
+              `Upgrade to ${r.targetVersion} started (id ${r.upgradeId}). The installer downloads, ` +
               `verifies, swaps the binary, and restarts on it; run \`raft-computer status\` to confirm.`,
           });
         }

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import sharp from "sharp";
+import { resolveAnalysisModel } from "./pi-model.mjs";
 
 const packageRoot = path.resolve(import.meta.dirname, "..");
 const repoRoot = path.resolve(process.env.SLOCK_VISUAL_REPO_ROOT || findRepoRoot(process.cwd()));
@@ -1488,10 +1489,14 @@ async function analyzeCaseWithPi(item, context) {
   } catch (error) {
     return { ...base, error: `pi-ai SDK unavailable (install @earendil-works/pi-ai): ${trimForJson(error.message, 300)}` };
   }
-  const providerId = String(process.env.PI_PROVIDER || "minimax");
-  const modelId = String(context.flags.model || process.env.PI_MODEL || "MiniMax-M3");
-  const model = models.getModel(providerId, modelId);
-  if (!model) return { ...base, error: `pi-ai model not found: ${providerId}/${modelId}` };
+  let model;
+  try {
+    model = resolveAnalysisModel(models, context.flags);
+  } catch (error) {
+    return { ...base, error: trimForJson(error.message, 300) };
+  }
+  const providerId = model.provider;
+  const modelId = model.id;
   const prompt = [
     visualAnalysisPrompt(item, context),
     "",
@@ -3650,7 +3655,7 @@ Comparison pairs:
 
 Analysis model env:
   MINIMAX_API_KEY / PI_API_KEY  use the pi SDK (@earendil-works/pi-ai) directly; unset -> codex CLI fallback
-  PI_MODEL                      pi model id (default MiniMax-M3); --model wins
+  PI_MODEL                      pi model id (default MiniMax-M3.1-Flash-Preview); --model wins
   PI_PROVIDER                   pi provider id (default minimax)
 
 External provider env:

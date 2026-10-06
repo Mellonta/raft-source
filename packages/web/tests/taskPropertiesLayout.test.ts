@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { JSDOM } from "jsdom";
 import { createElement } from "react";
 import { IntlProvider } from "react-intl";

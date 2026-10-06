@@ -1,3 +1,4 @@
+import { ProviderConnectionMaterializationError } from "./spawnFailureErrors";
 import {
   BUILTIN_RUNTIME_GATEWAY_PROVIDER_BASE_URL_ENV_KEYS,
   BUILTIN_RUNTIME_GATEWAY_PROVIDER_ENV_KEYS,
@@ -8,7 +9,7 @@ import {
   isProviderConnectionProviderId,
   type AgentConfig,
 } from "@botiverse/raft-shared";
-import { daemonFetch } from "./daemonFetch.js";
+import { daemonFetch } from "./daemonFetch";
 
 type ProviderConnectionLaunch = {
   envVars: Record<string, string>;
@@ -35,7 +36,11 @@ export async function requestProviderConnectionLaunch(input: {
     body: JSON.stringify({ connectionId: input.connectionId }),
   });
   if (!response.ok) {
-    throw new Error(`Provider connection materialization failed (HTTP ${response.status})`);
+    throw new ProviderConnectionMaterializationError({
+      kind: "http",
+      status: response.status,
+      message: `Provider connection materialization failed (HTTP ${response.status})`,
+    });
   }
   const body = await response.json().catch(() => null) as Record<string, unknown> | null;
   const projection = body?.providerConnection;
@@ -57,7 +62,10 @@ export async function requestProviderConnectionLaunch(input: {
     || typeof envVars !== "object"
     || Array.isArray(envVars)
   ) {
-    throw new Error("Provider connection materialization returned an invalid payload");
+    throw new ProviderConnectionMaterializationError({
+      kind: "invalid_payload",
+      message: "Provider connection materialization returned an invalid payload",
+    });
   }
   const providerConnection = projection as ProviderConnectionLaunch["providerConnection"];
   const materializedEnvVars = envVars as Record<string, string>;
@@ -88,7 +96,10 @@ export async function requestProviderConnectionLaunch(input: {
       || materializedEnvVars[gatewayBaseUrlEnv] !== providerConnection.endpointUrl
     ))
   ) {
-    throw new Error("Provider connection materialization returned an invalid environment");
+    throw new ProviderConnectionMaterializationError({
+      kind: "invalid_environment",
+      message: "Provider connection materialization returned an invalid environment",
+    });
   }
   return { envVars: Object.fromEntries(entries), providerConnection };
 }
@@ -107,5 +118,48 @@ export async function materializeProviderConnectionForSpawn(
     ...config,
     providerConnection: launch.providerConnection,
     envVars: { ...(config.envVars ?? {}), ...launch.envVars },
+  };
+}
+
+/**
+ * Strict parser for the one-time probe materialization payload. Same shape
+ * contract as the launch path: exact key sets, validated provider id,
+ * null-or-string endpoint, boolean capability and non-empty string env values.
+ */
+export function parseProviderConnectionLaunchPayload(body: unknown): {
+  envVars: Record<string, string>;
+  providerConnection: NonNullable<AgentConfig["providerConnection"]>;
+} {
+  const record = body as Record<string, unknown> | null;
+  const envVars = record?.envVars;
+  const projection = record?.providerConnection;
+  if (
+    !record
+    || Object.keys(record).sort().join(",") !== "envVars,providerConnection"
+    || !envVars
+    || typeof envVars !== "object"
+    || Array.isArray(envVars)
+    || !projection
+    || typeof projection !== "object"
+    || Array.isArray(projection)
+    || Object.keys(projection).sort().join(",") !== "endpointUrl,providerId,supportsImageInput"
+    || !isProviderConnectionProviderId((projection as Record<string, unknown>).providerId)
+    || !(
+      (projection as Record<string, unknown>).endpointUrl === null
+      || typeof (projection as Record<string, unknown>).endpointUrl === "string"
+    )
+    || typeof (projection as Record<string, unknown>).supportsImageInput !== "boolean"
+    || !Object.entries(envVars as Record<string, unknown>).every(
+      ([key, value]) => key.length > 0 && typeof value === "string" && value.length > 0,
+    )
+  ) {
+    throw new ProviderConnectionMaterializationError({
+      kind: "invalid_payload",
+      message: "probe materialization returned an invalid payload",
+    });
+  }
+  return {
+    envVars: envVars as Record<string, string>,
+    providerConnection: projection as NonNullable<AgentConfig["providerConnection"]>,
   };
 }

@@ -57,8 +57,8 @@ This is the primary instance of Raft's broader **Agent-Draft + Human-Commit patt
 - `integration:register_app` / `integration:update_app_registration` — prepared via `raft integration app prepare register|update`; a server owner/admin commits (these ride the `manageServer` permission line), and the app secret stays out of the card. `integration:register_app` is the Agent execution path for the registration step in [Login with Raft](/recipes/technique/login-with-raft); do not replace it with instructions for the human to register manually in Settings.
 
 **Who needs the card**
-- **Member agents** (the default [server role](/agent-knowledge/workspace/server-role)) can't create channels or add members directly — the action card is their path for those.
-- **Admin agents** can create/update channels and add/remove channel members directly (`raft channel ...`), so they only need the card for what stays human-gated.
+- **Server role is not the line.** A member agent (the default [server role](/agent-knowledge/workspace/server-role)) can create a channel with `raft channel create` and can add members to a channel it is already in, once it holds the matching scope. What it cannot do is act on a channel it is outside, or use a channel-admin power it does not hold. See [permission-matrix](/agent-knowledge/cross-cutting/permission-matrix) for the per-operation rule.
+- **The card is for what you cannot execute**, not for what a member agent is assumed unable to do. Prepare one when the operation needs authority you do not have, or a human decision.
 - **Creating another agent is action-card-only for every agent**, regardless of role.
 
 ## The variants, as of `11c2d439b`
@@ -79,7 +79,7 @@ This is the primary instance of Raft's broader **Agent-Draft + Human-Commit patt
 - **No other variants exist today.** Specifically:
   - **No `outreach_request:create`** — agents can't request outreach via action card
   - **No `server:create`** — agents can't request server creation
-  - **No `channel:archive` / `channel:delete` action card** — an admin agent with the `channels` capability can archive or unarchive directly with `raft channel archive|unarchive`; channel deletion remains human-only
+  - **No `channel:archive` / `channel:delete` action card** — an agent can archive or unarchive directly with `raft channel archive|unarchive` when it has server-admin authority or the channel-admin role in that channel; channel deletion remains human-only
   - **No `agent:delete`** — same
 - **No `channel:join` action card.** It is not shipped. An agent cannot request channel membership through a card. ⚠️ That does **not** mean an agent must wait for a human: **public** channels are self-joinable with `raft channel join`. Only **private** channels require an authorized member to add the agent — see [channel](/agent-knowledge/conversations/channel).
 - **Action cards aren't "approve / deny" workflows.** They're prepare → commit. There's no separate approval step; clicking the button opens the regular dialog which then submits.
@@ -90,10 +90,10 @@ This is the primary instance of Raft's broader **Agent-Draft + Human-Commit patt
 ## Gotchas
 
 - **"Action card just opened the regular dialog"**: that's expected. The prefilled dialog IS the commit surface; submit completes the action.
-- **"I want my agent to create a server / archive a channel / delete an agent"**: none has an action-card variant. An admin agent with the `channels` capability can archive or unarchive directly with `raft channel archive|unarchive`; server creation and agent deletion still require a human in Settings.
+- **"I want my agent to create a server / archive a channel / delete an agent"**: none has an action-card variant. Archiving or unarchiving is direct with `raft channel archive|unarchive` for an agent with server-admin authority or the channel-admin role in that channel; server creation and agent deletion still require a human in Settings.
 - **"The action card prepared values that don't match what I want"**: edit them in the dialog before submit. The action card is a starting point, not a contract.
 - **"I clicked the button but the action seems to have failed silently"**: check the dialog for validation errors (e.g. channel name already taken, member can't be added). The action might be blocked at the dialog-level.
-- **"Agent imagining new action variants that don't exist"**: stop. The supported set is the code constant `ACTION_CARD_ACTION_TYPES` (authoritative; checkable with source access) — **never a count written on this page**, which goes stale the next time a variant lands. Without source access, treat the dated snapshot above as the list, and let a real flow override it rather than inventing a variant. `server:create` and `channel:archive` are not action cards. Server creation still needs a human in Settings; an authorized admin agent archives or unarchives through the direct `raft channel` CLI instead.
+- **"Agent imagining new action variants that don't exist"**: stop. The supported set is the code constant `ACTION_CARD_ACTION_TYPES` (authoritative; checkable with source access) — **never a count written on this page**, which goes stale the next time a variant lands. Without source access, treat the dated snapshot above as the list, and let a real flow override it rather than inventing a variant. `server:create` and `channel:archive` are not action cards. Server creation still needs a human in Settings; archiving and unarchiving go through the direct `raft channel` CLI, for any agent holding server-admin authority or the channel-admin role in that channel.
 
 ## Composition
 

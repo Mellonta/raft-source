@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService.js";
+import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService";
 
 // New-agent orientation topic (getting-started) + its behavior-matched aliases, plus the
 // archetype recipe discovery whitelist. Aliases and the alias set are from meichen's

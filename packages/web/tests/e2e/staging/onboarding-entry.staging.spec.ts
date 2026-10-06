@@ -12,9 +12,12 @@ test("staging onboarding auth entry is branded, usable, and leads to account cre
   await page.goto("/login");
 
   await expect(page).toHaveTitle("Raft");
-  const environmentBadge = page.getByTestId("environment-badge");
-  await expect(environmentBadge).toBeVisible();
-  const environmentBadgeText = (await environmentBadge.textContent())?.trim() ?? "";
+  // The environment marker moved to the RUI dev-overlay trigger (raft-ui integration,
+  // PR #7347): the old `environment-badge` span was intentionally removed and its label
+  // (environment + short commit SHA) now lives on the trigger's aria-label.
+  const environmentTrigger = page.getByTestId("raftdev-debug-trigger");
+  await expect(environmentTrigger).toBeVisible();
+  const environmentBadgeText = (await environmentTrigger.getAttribute("aria-label"))?.trim() ?? "";
   const releaseIdentityBytes = await page.locator("#raft-frontend-release-identity").textContent();
   expect(releaseIdentityBytes, "the deployed page must embed its frontend release identity").not.toBeNull();
   const releaseIdentity = JSON.parse(releaseIdentityBytes ?? "null") as {

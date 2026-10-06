@@ -1,15 +1,15 @@
 import type { MachineToServerMessage } from "@botiverse/raft-shared";
-import type { AgentApiRequestBodyByRoute, AgentApiResponseByRoute } from "@botiverse/raft-shared/src/agentApiContract.js";
-import type { AgentOrchestrator } from "./services/agentOrchestrator.js";
-import { REMINDER_DUE_NOTIFICATION_CLASS, REMINDER_INBOX_APP_ID } from "./apps/reminder/sourceAck.js";
-import { handleLegacyReminderFireAttempt } from "./apps/reminder/legacyFireAttempt.js";
-import { handleReminderFireRequest } from "./apps/reminder/fireRequest.js";
-import { handleReminderSourceAck } from "./apps/reminder/sourceAck.js";
+import type { AgentApiRequestBodyByRoute, AgentApiResponseByRoute } from "@botiverse/raft-shared/src/agentApiContract";
+import type { AgentOrchestrator } from "./services/agentOrchestrator";
+import { REMINDER_DUE_NOTIFICATION_CLASS, REMINDER_INBOX_APP_ID } from "./apps/reminder/sourceAck";
+import { handleLegacyReminderFireAttempt } from "./apps/reminder/legacyFireAttempt";
+import { handleReminderFireRequest } from "./apps/reminder/fireRequest";
+import { handleReminderSourceAck } from "./apps/reminder/sourceAck";
 import {
   createTaskResourceExpiryFollowup,
   getTaskResourceExpiryFollowup,
   publishTaskResourceExpiryFollowup,
-} from "./apps/reminder/taskResourceExpiry.js";
+} from "./apps/reminder/taskResourceExpiry";
 
 export const taskResourceExpiryFollowups = {
   create: createTaskResourceExpiryFollowup,
@@ -32,8 +32,11 @@ export interface BuiltInMachineMessageContext {
   capabilities: ReadonlySet<string>;
   nowMs: number;
   send(message: import("@botiverse/raft-shared").ServerToMachineMessage): Promise<boolean>;
-  trace(
-    name: string,
+  /**
+   * Set the outcome of the receipt span that wraps this handler. The last call
+   * wins. The span ends when the handler returns.
+   */
+  setReceiptOutcome(
     attrs: Record<string, unknown>,
     status?: "ok" | "error",
   ): void;

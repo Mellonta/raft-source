@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { TestIntlProvider } from "./helpers/intl";
@@ -97,4 +96,40 @@ test("the conversation finder element exists and carries its stable testid", () 
     screen.getByTestId("sidebar-conversation-finder-input"),
     "the finder input must render (positive control for the testid used by the gate assertion)",
   );
+});
+
+// Task #100: in a narrow finder the channel NAME is the identifier and must not
+// be the part that truncates first — "proj-frontend" and "proj-frontend-perf"
+// both read "proj-fr…" while a shrink-0 45% description column kept its width.
+// The label takes its natural width; the description is the flexible part.
+test("finder rows give the channel name width priority over its description", () => {
+  setDesktopFlag(true);
+  const longDescription = "Frontend performance working group — budgets, traces and regressions";
+  render(
+    <TestIntlProvider>
+      <MemoryRouter>
+        <SidebarConversationFinder
+          {...finderProps}
+          channels={[
+            { id: "c1", name: "proj-frontend", description: "Raft web frontend", type: "channel" },
+            { id: "c2", name: "proj-frontend-perf", description: longDescription, type: "channel" },
+          ] as never}
+        />
+      </MemoryRouter>
+    </TestIntlProvider>,
+  );
+  const input = screen.getByTestId("sidebar-conversation-finder-input");
+  fireEvent.focus(input);
+  fireEvent.change(input, { target: { value: "front" } });
+
+  const label = screen.getByText("proj-frontend-perf");
+  const row = label.closest("button");
+  assert.ok(row, "result row must render");
+  const sublabel = within(row).getByText(longDescription);
+  const group = label.parentElement;
+  assert.ok(group && group === sublabel.parentElement, "label and sublabel share one text group");
+  for (const cls of ["grid", "min-w-0", "flex-1", "grid-cols-[minmax(0,auto)_minmax(0,1fr)]"]) assert.ok(group.classList.contains(cls), `text group needs ${cls}`);
+  for (const cls of ["min-w-0", "truncate"]) assert.ok(label.classList.contains(cls), `label needs ${cls}`);
+  for (const cls of ["min-w-0", "truncate"]) assert.ok(sublabel.classList.contains(cls), `sublabel needs ${cls}`);
+  assert.ok(!sublabel.classList.contains("shrink-0") && !sublabel.classList.contains("max-w-[45%]"), "description must yield, not reserve width");
 });

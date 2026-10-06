@@ -1,6 +1,7 @@
-import { installFakeIo } from "./channels.api.fixtures.js";
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { installFakeIo } from "./channels.api.fixtures";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
+import { cliChildEnv } from "../test/cliChildEnv";
 import assert from "node:assert/strict";
 
 import { execFile, spawn } from "node:child_process";
@@ -19,22 +20,24 @@ import {
   type AgentMessage,
 } from "@botiverse/raft-shared";
 import { and, desc, eq, isNull } from "drizzle-orm";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { channelAgents, channelHumans, channels, inboxNotificationFacts, jointChannels, jointChannelServers, messages, serverAgentMembers, servers, threadFollows, users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
-import { AgentOrchestrator } from "../services/agentOrchestrator.js";
-import { registerMachine, updateMachine } from "../services/machineService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import * as channelService from "../services/channelService.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { channelAgents, channelHumans, channels, inboxNotificationFacts, jointChannels, jointChannelServers, messages, serverAgentMembers, servers, threadFollows, users } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { createAgent, assignMachine } from "../services/agentService";
+import { AgentOrchestrator } from "../services/agentOrchestrator";
+import { registerMachine, updateMachine } from "../services/machineService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import * as channelService from "../services/channelService";
 import {
   __resetMessageServiceDepsForTests,
+  __setExternalAgentInboxChainSelectorForTests,
   __setMessageServiceDepsForTests,
   createMessage,
-} from "../services/messageService.js";
-import { recordInboxNotificationFacts } from "../services/inboxNotificationService.js";
-import * as taskService from "../services/taskService.js";
+} from "../services/messageService";
+import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
+import { recordInboxNotificationFacts } from "../services/inboxNotificationService";
+import * as taskService from "../services/taskService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -188,25 +191,13 @@ async function runSlockCli(
     ...(env.SLOCK_AGENT_TOKEN && !env.RAFT_AGENT_TOKEN ? { RAFT_AGENT_TOKEN: env.SLOCK_AGENT_TOKEN } : {}),
     ...(env.SLOCK_SERVER_ID && !env.RAFT_SERVER_ID ? { RAFT_SERVER_ID: env.SLOCK_SERVER_ID } : {}),
   };
-  const childEnv = {
-    ...process.env,
-    SLOCK_AGENT_ID: "",
-    SLOCK_SERVER_URL: "",
-    SLOCK_SERVER_ID: "",
-    SLOCK_AGENT_TOKEN_FILE: "",
-    SLOCK_AGENT_TOKEN: "",
-    SLOCK_AGENT_PROXY_URL: "",
-    SLOCK_AGENT_PROXY_TOKEN: "",
-    SLOCK_AGENT_PROXY_TOKEN_FILE: "",
-    ...raftEnv,
-    ...env,
-  };
+  const childEnv = cliChildEnv({ ...raftEnv, ...env });
   if (input === undefined) {
-    return execFileAsync(process.execPath, ["--import", "tsx", cliEntry, ...args], { env: childEnv });
+    return execFileAsync(process.execPath, ["--import", "@oxc-node/core/register", cliEntry, ...args], { env: childEnv });
   }
 
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--import", "tsx", cliEntry, ...args], {
+    const child = spawn(process.execPath, ["--import", "@oxc-node/core/register", cliEntry, ...args], {
       env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -766,6 +757,16 @@ test("CLI e2e: parent-muted followed thread travels from message send through se
     // deliverMessage stub. External agents are deliberate here: the server
     // must queue their events without trying to spawn a managed runtime.
     app.app.set("agentOrchestrator", new AgentOrchestrator());
+    // External agents read persisted messages from their durable inbox pull
+    // (#8341); CI has no RisingWave, so the test-only reference derivation of
+    // the agent inbox view serves the chain read. It queries the real messages,
+    // membership, mute and follow rows created below; it pre-seeds no inbox item.
+    let chainReads = 0;
+    __setExternalAgentInboxChainSelectorForTests(async (agentId: string) => {
+      chainReads += 1;
+      return { source: "chain" as const, rows: await referenceAgentInboxChain(agentId) };
+    });
+    cleanups.push(() => __setExternalAgentInboxChainSelectorForTests(null));
 
     const senderProfile = await createAgentProfileEnv(app.baseUrl, server.id, sender.id);
     const receiverProfile = await createAgentProfileEnv(app.baseUrl, server.id, receiver.id);
@@ -789,7 +790,7 @@ test("CLI e2e: parent-muted followed thread travels from message send through se
 
     const afterMutedRoot = await runSlockCli(["message", "check"], receiverProfile.env);
     assert.equal(afterMutedRoot.stderr, "");
-    assert.equal(afterMutedRoot.stdout, "No new inbox messages.\n");
+    assert.equal(afterMutedRoot.stdout, "No new inbox messages.\n\nApp items: not available for external agents.\n");
 
     const threadContent = `followed thread delivery ${randomUUID()}`;
     const threadSend = await runSlockCli(
@@ -810,7 +811,8 @@ test("CLI e2e: parent-muted followed thread travels from message send through se
 
     const afterAck = await runSlockCli(["message", "check"], receiverProfile.env);
     assert.equal(afterAck.stderr, "");
-    assert.equal(afterAck.stdout, "No new inbox messages.\n");
+    assert.equal(afterAck.stdout, "No new inbox messages.\n\nApp items: not available for external agents.\n");
+    assert.ok(chainReads >= 4, "each external-agent check must read the durable inbox chain");
 
     const persistedThreadMessages = await getDb()
       .select({ content: messages.content })
@@ -881,11 +883,13 @@ test("agent internal route can join a visible public channel", async ({ app }) =
   assert.equal(systemMessage.content, "@channel-agent joined this channel.");
   assert.equal(systemMessage.senderId, "system");
 
-  const delivery = deliveries.find((item) => item.agentId === agent.id);
-  assert.ok(delivery, "joining agent should receive the channel system message");
-  assert.equal(delivery.message.sender_type, "system");
-  assert.equal(delivery.message.content, "@channel-agent joined this channel.");
-  assert.ok(delivery.message.seq, "delivery should carry the persisted message seq");
+  assert.equal(systemMessage.causalActorType, "agent");
+  assert.equal(systemMessage.causalActorId, agent.id);
+  // The join is born-read for the agent that caused it (its inbox never counts
+  // it unread, so its pull never returns it): it must not be delivered either,
+  // or a managed agent is woken / an external agent notified for nothing.
+  // Every other channel agent still receives it (inboxUnreadEligibility).
+  assert.equal(deliveries.find((item) => item.agentId === agent.id), undefined, "the joining agent's own join is not delivered to it");
   assert.deepEqual(events.at(-1), {
     room: `server:${agent.serverId}`,
     event: "channel:members-updated",

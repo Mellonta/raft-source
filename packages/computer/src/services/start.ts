@@ -27,38 +27,39 @@
 import { setTimeout as delay } from "node:timers/promises";
 
 import { currentTimeMs } from "@botiverse/raft-shared";
-import { isProcessAlive, readPidfileAt } from "../internal/process-primitives.js";
-import { findLiveServicePid } from "../internal/service-pid-fallback.js";
+import { isProcessAlive, readPidfileAt } from "../internal/process-primitives";
+import { findLiveServicePid } from "../internal/service-pid-fallback";
 import {
   PARENT_LOCK_HELD_ENV_VAR,
   readServiceVersionEvidence,
   runService,
   spawnDetachedService,
-} from "../service.js";
-import { connectService } from "../lib/ipc-client.js";
+} from "../service";
+import { connectService } from "../lib/ipc-client";
 import {
   serverRunnerLogReadFallback,
   serviceLogPath,
   serviceVersionPath,
-} from "../paths.js";
-import { listAttachedServerIds, readServerAttachment, setServerManaged } from "../serverState.js";
-import { isDegraded, readTerminalUnlinked } from "../health.js";
-import { resetRunner } from "../reset.js";
-import type { ComputerApiEvent } from "../lib/events.js";
-import { ComputerServiceError } from "./errors.js";
-import { COMPUTER_VERSION } from "../version.js";
-import { hasUnlinkedComputerHandshake, readRunnerLogTail } from "../internal/runner-log-diagnostics.js";
-import { collectMachineFacts } from "../machineFacts.js";
-import { machineReadiness } from "../machineReadiness.js";
+} from "../paths";
+import { listAttachedServerIds, readServerAttachment, setServerManaged } from "../serverState";
+import { isDegraded, readTerminalUnlinked } from "../health";
+import { resetRunner } from "../reset";
+import type { ComputerApiEvent } from "../lib/events";
+import { ComputerServiceError } from "./errors";
+import { COMPUTER_VERSION } from "../version";
+import { hasUnlinkedComputerHandshake, readRunnerLogTail } from "../internal/runner-log-diagnostics";
+import { collectMachineFacts } from "../machineFacts";
+import { machineReadiness } from "../machineReadiness";
 import {
   convergeCliHostLifecycle,
-  resolveStableDispatcherPath,
-  type HostLifecycleConvergenceResult,
+  hostLifecycleSkipped,
   type MacosHostLifecycleDeps,
-} from "../macosLoginCarrier.js";
+} from "../macosLoginCarrier";
 
 const START_ENSURE_TIMEOUT_MS = 15_000;
 const START_ENSURE_POLL_INTERVAL_MS = 100;
+const SERVICE_IDENTITY_SETTLE_ATTEMPTS = 20;
+const SERVICE_IDENTITY_SETTLE_POLL_MS = 100;
 const inFlightStartByHome = new Map<string, Promise<StartResult>>();
 
 export interface StartInput {
@@ -188,8 +189,37 @@ async function waitForManagedDaemonPids(
   }
 }
 
-async function assertNoServiceVersionSkew(slockHome: string, servicePid: number): Promise<void> {
-  const evidence = await readServiceVersionEvidence(slockHome);
+/** A starting service publishes its pidfile before its version evidence
+ * (`publishServiceIdentityAfterIpcBind`), so a `start` that polls the pidfile
+ * can see the new pid beside the previous service's evidence, or beside none.
+ * That is publication in progress, not skew: re-read a bounded number of times
+ * before judging. A matching pid with a different version is never retried. */
+async function readSettledServiceVersionEvidence(
+  slockHome: string,
+  servicePid: number,
+  opts: StartOptions,
+) {
+  const sleep = opts.sleep ?? ((ms: number) => delay(ms));
+  let evidence = await readServiceVersionEvidence(slockHome);
+  for (
+    let attempt = 0;
+    attempt < SERVICE_IDENTITY_SETTLE_ATTEMPTS
+      && (evidence === null || evidence.pid !== servicePid);
+    attempt += 1
+  ) {
+    opts.signal?.throwIfAborted?.();
+    await sleep(SERVICE_IDENTITY_SETTLE_POLL_MS);
+    evidence = await readServiceVersionEvidence(slockHome);
+  }
+  return evidence;
+}
+
+async function assertNoServiceVersionSkew(
+  slockHome: string,
+  servicePid: number,
+  opts: StartOptions,
+): Promise<void> {
+  const evidence = await readSettledServiceVersionEvidence(slockHome, servicePid, opts);
   if (!evidence) {
     throw new ComputerServiceError(
       "SERVICE_VERSION_SKEW_SUSPECT",
@@ -255,20 +285,37 @@ function buildTerminalUnlinkedMessage(slockHome: string, serverId: string, label
   );
 }
 
-async function assertNoTerminalUnlinkedTargets(
+/**
+ * Drop attachments the server has terminally unlinked from an unscoped start.
+ * One unlinked server must not keep the rest offline: the upgrade engine
+ * restarts the service with an unscoped `start`, so refusing here fails both
+ * the candidate start and the rollback. A scoped start of an unlinked server,
+ * or an unscoped start where every target is unlinked, still refuses.
+ */
+async function selectStartableTargets(
   slockHome: string,
   serverIds: string[],
   input: StartInput,
-): Promise<void> {
+): Promise<{ startable: string[]; unlinked: string[] }> {
+  const startable: string[] = [];
+  const unlinked: string[] = [];
   for (const serverId of serverIds) {
     const attachment = await readServerAttachment(slockHome, serverId);
-    if (!(await readTerminalUnlinked(slockHome, serverId, attachment?.serverMachineId ?? null))) continue;
+    if (await readTerminalUnlinked(slockHome, serverId, attachment?.serverMachineId ?? null)) {
+      unlinked.push(serverId);
+    } else {
+      startable.push(serverId);
+    }
+  }
+  if (unlinked.length > 0 && (input.serverId || startable.length === 0)) {
+    const serverId = unlinked[0]!;
     const label = input.serverId === serverId ? input.serverLabel ?? serverId : serverId;
     throw new ComputerServiceError(
       "COMPUTER_MACHINE_UNLINKED",
       buildTerminalUnlinkedMessage(slockHome, serverId, label),
     );
   }
+  return { startable, unlinked };
 }
 
 async function buildTimeoutMessage(
@@ -351,15 +398,22 @@ async function startInner(input: StartInput, options: StartOptions = {}): Promis
   // reconcile picks up the correct managed intent. Scoped start is additive:
   // it must not clear another server that the user already brought online.
   // Use `stop <server>` to clear that server's managed intent explicitly.
-  const managedTargets = input.serverId ? [input.serverId] : attached;
+  const requestedTargets = input.serverId ? [input.serverId] : attached;
   emit(options, {
     kind: "start.starting",
-    managedTargets,
+    managedTargets: requestedTargets,
     attachedCount: attached.length,
     foreground: !!input.foreground,
   });
 
-  await assertNoTerminalUnlinkedTargets(slockHome, managedTargets, input);
+  const { startable: managedTargets, unlinked } = await selectStartableTargets(
+    slockHome,
+    requestedTargets,
+    input,
+  );
+  if (unlinked.length > 0) {
+    emit(options, { kind: "start.skipped_unlinked", serverIds: unlinked });
+  }
   options.signal?.throwIfAborted?.();
 
   for (const id of managedTargets) {
@@ -367,25 +421,20 @@ async function startInner(input: StartInput, options: StartOptions = {}): Promis
     await setServerManaged(slockHome, id);
   }
 
-  const hostLifecycleOwner = input.hostLifecycleOwner ?? "none";
-  let hostLifecycle: HostLifecycleConvergenceResult | null = null;
-  if (hostLifecycleOwner !== "none") {
-    if (hostLifecycleOwner === "cli" && input.foreground && process.platform === "darwin") {
-      throw new ComputerServiceError(
-        "HOST_LIFECYCLE_FOREGROUND_UNSUPPORTED",
-        "macOS post-login recovery cannot be verified for `--foreground`. Run `raft-computer start` without `--foreground`.",
+  // The CLI no longer autostarts at login: this only removes a leftover macOS
+  // LaunchAgent from older releases and records the owner. It never starts
+  // the service (step 3 below does) and a failure never blocks the start.
+  if ((input.hostLifecycleOwner ?? "none") !== "none") {
+    try {
+      await (options.convergeHostLifecycle ?? convergeCliHostLifecycle)(
+        slockHome,
+        "enabled",
+        options.hostLifecycleDeps ?? {},
       );
+    } catch (error) {
+      emit(options, hostLifecycleSkipped("start", error));
     }
-    const hostDeps = { ...(options.hostLifecycleDeps ?? {}) };
-    if (hostDeps.platform === undefined) hostDeps.platform = process.platform;
-    if (hostDeps.platform === "darwin" && hostDeps.dispatcherPath === undefined) {
-      hostDeps.dispatcherPath = resolveStableDispatcherPath(slockHome);
-    }
-    hostLifecycle = await (options.convergeHostLifecycle ?? convergeCliHostLifecycle)(
-      slockHome,
-      "enabled",
-      hostDeps,
-    );
+    options.signal?.throwIfAborted?.();
   }
 
   // 3. Idempotent live-service pidfile check. Walk the on-disk
@@ -397,37 +446,15 @@ async function startInner(input: StartInput, options: StartOptions = {}): Promis
   //    Computer (RFC v9.8 §1) — the symmetry has to hold across stop /
   //    upgrade / start / status. The helper clears stale candidates in
   //    place so they do not haunt later reads.
-  let { pid: existing } = await findLiveServicePid(slockHome, {
+  const { pid: existing } = await findLiveServicePid(slockHome, {
     readPidfile: options.readPidfile,
     isProcessAlive: options.isProcessAlive,
   });
-  if (
-    existing === null
-    && hostLifecycle?.status === "converged"
-    && hostLifecycle.owner === "cli"
-    && hostLifecycle.enabled
-  ) {
-    const sleep = options.sleep ?? delay;
-    const deadline = currentTimeMs() + (options.ensureTimeoutMs ?? START_ENSURE_TIMEOUT_MS);
-    while (existing === null && currentTimeMs() < deadline) {
-      await sleep(Math.min(options.ensurePollIntervalMs ?? START_ENSURE_POLL_INTERVAL_MS, deadline - currentTimeMs()));
-      ({ pid: existing } = await findLiveServicePid(slockHome, {
-        readPidfile: options.readPidfile,
-        isProcessAlive: options.isProcessAlive,
-      }));
-    }
-    if (existing === null) {
-      throw new ComputerServiceError(
-        "HOST_LIFECYCLE_START_FAILED",
-        "launchd accepted the macOS post-login carrier, but its service did not become live before the startup deadline. Inspect `raft-computer logs --service` and retry.",
-      );
-    }
-  }
   options.signal?.throwIfAborted?.();
   await clearDegradedRecoveryStateForStart(slockHome, managedTargets, existing, options);
   options.signal?.throwIfAborted?.();
   if (existing !== null) {
-    await assertNoServiceVersionSkew(slockHome, existing);
+    await assertNoServiceVersionSkew(slockHome, existing, options);
     options.signal?.throwIfAborted?.();
     emit(options, {
       kind: "start.already_running",

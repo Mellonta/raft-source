@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import type {
   AgentCreateFormDefinition,
   AgentCreateFormOptionSource,
@@ -11,9 +10,9 @@ import {
   parseAgentCreateFormDefinition,
   parseAgentCreateFormOptionSource,
   resolveAgentCreateFormDefinition,
-} from "../src/hooks/useRuntimeFormDefinition.js";
-import { buildRuntimeConfig, builtInProviderDefaultModel } from "../src/utils/runtimeConfigForm.js";
-import { buildSchemaDrivenBuiltInConfig, buildSchemaDrivenKimiConfig } from "../src/utils/schemaRuntimeConfigForm.js";
+} from "../src/hooks/useRuntimeFormDefinition";
+import { buildRuntimeConfig, builtInProviderDefaultModel } from "../src/utils/runtimeConfigForm";
+import { buildSchemaDrivenBuiltInConfig, buildSchemaDrivenKimiConfig } from "../src/utils/schemaRuntimeConfigForm";
 
 const ref: RuntimeFormDefinitionRef = {
   protocolVersion: 1,
@@ -299,4 +298,24 @@ test("Kimi schema uses model-scoped live effort metadata and rejects cross-model
     reasoningEffort: null,
     envVars: null,
   }).reasoningEffort, null);
+});
+
+test("v3 local plugin capability is explicit and preserves the opt-in in built config", () => {
+  const definition = definitionFixture();
+  const nextRef = { ...ref, schemaVersion: "builtin-pi.create.v3" };
+  Object.assign(definition, nextRef);
+  definition.dataSchema.properties.loadLocalPlugins = { type: "boolean", title: "Load local Pi extensions" };
+  definition.uiSchema.order.push("loadLocalPlugins");
+  definition.uiSchema.layout.advanced.push("/loadLocalPlugins");
+  for (const source of Object.values(definition.optionSources)) source.schemaVersion = nextRef.schemaVersion;
+  assert.ok(parseAgentCreateFormDefinition(definition, nextRef));
+  const missingField = structuredClone(definition);
+  delete missingField.dataSchema.properties.loadLocalPlugins;
+  assert.equal(parseAgentCreateFormDefinition(missingField, nextRef), null);
+  for (const loadLocalPlugins of [false, true]) {
+    const config = buildRuntimeConfig({ runtime: "builtin", model: builtInProviderDefaultModel("deepseek"), customModelMode: false,
+      builtInProviderMode: "deepseek", builtInProviderApiKey: "test-key", loadLocalPlugins });
+    assert.ok(config.runtime === "builtin");
+    assert.equal(config.loadLocalPlugins, loadLocalPlugins);
+  }
 });

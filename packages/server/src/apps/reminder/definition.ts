@@ -1,5 +1,5 @@
-import type { AppId } from "../../services/rapRegistry.js";
-import type { BuiltInRapAppDefinition } from "../../services/rapBuiltinAppManifests.js";
+import type { AppId } from "../../services/rapRegistry";
+import type { BuiltInRapAppDefinition } from "../../services/rapBuiltinAppManifests";
 
 /**
  * App-owned production declaration. The OS registry consumes this definition

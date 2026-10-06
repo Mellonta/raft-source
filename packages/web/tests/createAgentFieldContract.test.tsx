@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, render as rtlRender } from "@testing-library/react";
 import StableField from "../src/components/agent/StableField";
@@ -144,4 +143,23 @@ test("required and optional both render their marker through the library", () =>
   cleanup();
   const opt = render(<StableField label="Name" optional><input /></StableField>);
   assert.match(opt.container.textContent ?? "", /optional/i, "optional renders its word");
+});
+
+test("a declared value control keeps its place among its siblings", () => {
+  // The custom-model field renders a mode Select, then the Input that holds the
+  // value. The Input is the adopted control; adoption must not move it above
+  // the Select that reveals it (artin 2026-09-28).
+  const { getByTestId } = render(
+    <StableField label="Model" required>
+      <button type="button" data-testid="mode-select">Custom</button>
+      <input data-field-adopt data-testid="value-input" />
+      <p data-testid="notice">Required by the action card</p>
+    </StableField>,
+  );
+  const select = getByTestId("mode-select");
+  const input = getByTestId("value-input");
+  const notice = getByTestId("notice");
+  assert.ok(select.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING, "the Input comes after the Select");
+  assert.ok(input.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING, "siblings after it stay after it");
+  assert.ok(input.id, "the Input is still the adopted, wired control");
 });

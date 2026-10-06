@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
-import { imageGalleryBackgroundClass, transparentImageBackgroundClass } from "../src/utils/imagePreviewStyles.js";
+import { imageGalleryBackgroundClass, transparentImageBackgroundClass } from "../src/utils/imagePreviewStyles";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const srcRoot = resolve(repoRoot, "src");
@@ -47,11 +46,19 @@ test("message gallery uses a quiet background instead of checkerboard", () => {
   const css = readSource("src/index.css");
 
   assert.equal(imageGalleryBackgroundClass, "image-gallery-bg");
-  assert.match(source, /imageGalleryBackgroundClass/);
+  // MessageItem's gallery no longer paints the quiet background itself: it
+  // rides the shared raft-ui item layout (`[&_img]:bg-white`), so the local
+  // class must not come back here.
+  assert.match(source, /layout=\{item\}/);
+  assert.doesNotMatch(source, /imageGalleryBackgroundClass/);
   assert.doesNotMatch(source, /transparentImageBackgroundClass/);
   assert.match(source, /bg-brutal-cream\/60/);
   assert.doesNotMatch(source, /border-2 border-black bg-transparent/);
-  assert.match(source, /const imageBackgroundClass = fitClass === "object-contain" \? imageGalleryBackgroundClass : "";/);
+  // ChannelFilesPanel still paints the class on its own image surface.
+  assert.match(
+    readSource("src/components/message/ChannelFilesPanel.tsx"),
+    /imageGalleryBackgroundClass/,
+  );
   assert.match(css, /\.image-gallery-bg\s*\{[\s\S]*?background:\s*#fff;/);
 });
 

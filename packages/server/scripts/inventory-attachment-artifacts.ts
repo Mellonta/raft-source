@@ -1,14 +1,14 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import { randomUUID } from "node:crypto";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import type { Database } from "../src/db/index.js";
-import * as schema from "../src/db/schema.js";
+import type { Database } from "../src/db/index";
+import * as schema from "../src/db/schema";
 import {
   inspectAttachmentArtifactInventory,
   inventoryAttachmentArtifacts,
-} from "../src/services/attachmentArtifactInventoryService.js";
-import { getCdnStorage, getStorage } from "../src/services/storageService.js";
+} from "../src/services/attachmentArtifactInventoryService";
+import { getCdnStorage, getStorage } from "../src/services/storageService";
 
 type Options = Readonly<{
   apply: boolean;

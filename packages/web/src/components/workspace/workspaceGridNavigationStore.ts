@@ -6,7 +6,6 @@ export type WorkspaceGridRailMode =
   | "saved"
   | "activity"
   | "tasks"
-  | "wiki"
   | "members"
   | "humans"
   | "computers"
@@ -38,7 +37,7 @@ export interface WorkspaceGridRailDragState {
 }
 
 export const DEFAULT_WORKSPACE_GRID_RAIL_LAYOUT: WorkspaceGridRailLayout = {
-  left: ["search", "chat", "activity", "tasks", "wiki", "saved", "members", "computers"],
+  left: ["search", "chat", "activity", "tasks", "saved", "members", "computers"],
   right: [],
 };
 
@@ -105,7 +104,6 @@ export function normalizeWorkspaceGridRailLayout(value: unknown): WorkspaceGridR
     ? candidate[side].filter((item): item is WorkspaceGridRailItem => {
         if (typeof item !== "string" || !WORKSPACE_GRID_RAIL_ITEMS.has(item as WorkspaceGridRailItem)) return false;
         const railItem = item as WorkspaceGridRailItem;
-        if (railItem === "wiki" && side === "right") return false;
         if (seen.has(railItem)) return false;
         seen.add(railItem);
         return true;
@@ -114,18 +112,6 @@ export function normalizeWorkspaceGridRailLayout(value: unknown): WorkspaceGridR
   const left = readSide("left");
   const right = readSide("right");
 
-  // Wiki is a gated, fixed left-rail entry. Existing saved layouts predate it,
-  // so hydrate it immediately below Tasks (or before Members as a fallback)
-  // instead of appending it after the user's existing navigation.
-  if (!seen.has("wiki")) {
-    const tasksIndex = left.indexOf("tasks");
-    const membersIndex = left.indexOf("members");
-    const wikiIndex = tasksIndex >= 0 ? tasksIndex + 1 : membersIndex;
-    if (wikiIndex >= 0) {
-      left.splice(wikiIndex, 0, "wiki");
-      seen.add("wiki");
-    }
-  }
   for (const item of DEFAULT_WORKSPACE_GRID_RAIL_LAYOUT.left) {
     if (!seen.has(item)) left.push(item);
   }
@@ -138,7 +124,6 @@ export function moveWorkspaceGridRailItem(
   side: WorkspaceGridRailSide,
   index: number,
 ): WorkspaceGridRailLayout {
-  if (item === "wiki") return layout;
   const source = layout.left.includes(item) ? "left" : "right";
   const sourceIndex = layout[source].indexOf(item);
   const left = layout.left.filter((candidate) => candidate !== item);

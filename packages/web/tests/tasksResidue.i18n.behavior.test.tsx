@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { createIntl } from "react-intl";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -66,6 +65,8 @@ afterEach(() => {
     serverTasksLoaded: false,
     loadTasks: async () => undefined,
     loadServerTasks: async () => undefined,
+    loadActiveTaskSummaries: async () => undefined,
+    loadServerTaskStatusPage: async () => undefined,
     registerServerTasksConsumer: () => undefined,
     unregisterServerTasksConsumer: () => undefined,
     createTasks: async () => undefined,
@@ -189,10 +190,21 @@ test("mounted TasksPanel channel empty-state and new-task chrome are Chinese", (
 });
 
 test("mounted TasksPanel server empty-state excludes DM boards in Chinese", () => {
+  // Every lane loaded + zero tasks: the blanket empty state only appears once
+  // no lazy done/closed page could still hold tasks (task #8).
+  const loadedLane = { nextCursor: null, loading: false, loaded: true };
   useTaskStore.setState({
     serverTasks: [],
     serverLoading: false,
+    serverTaskPages: {
+      todo: { ...loadedLane },
+      in_progress: { ...loadedLane },
+      in_review: { ...loadedLane },
+      done: { ...loadedLane },
+      closed: { ...loadedLane },
+    },
     loadServerTasks: async () => undefined,
+    loadActiveTaskSummaries: async () => undefined,
     registerServerTasksConsumer: () => undefined,
     unregisterServerTasksConsumer: () => undefined,
   } as never);
@@ -212,7 +224,7 @@ test("mounted TasksPanel server empty-state excludes DM boards in Chinese", () =
   );
 });
 
-test("mounted TasksPanel preserves an explicit list choice across channel routes and remounts", (t) => {
+test("mounted TasksPanel preserves an explicit list choice across channel routes and remounts", () => {
   const previousMatchMedia = window.matchMedia;
   window.matchMedia = ((query: string) => ({
     matches: query === "(min-width: 768px)",
@@ -224,7 +236,7 @@ test("mounted TasksPanel preserves an explicit list choice across channel routes
     removeListener() {},
     dispatchEvent: () => false,
   })) as never;
-  t.after(() => {
+  onTestFinished(() => {
     window.matchMedia = previousMatchMedia;
   });
 
@@ -266,7 +278,7 @@ test("mounted TasksPanel preserves an explicit list choice across channel routes
   );
 });
 
-test("mounted TasksPanel applies a live transform while a board card is pointer-dragged", async (t) => {
+test("mounted TasksPanel applies a live transform while a board card is pointer-dragged", async () => {
   const previousMatchMedia = window.matchMedia;
   const previousOffsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth");
   const previousOffsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
@@ -292,7 +304,7 @@ test("mounted TasksPanel applies a live transform while a board card is pointer-
       return this.hasAttribute("data-task-virtual-scroll") ? 720 : 116;
     },
   });
-  t.after(() => {
+  onTestFinished(() => {
     window.matchMedia = previousMatchMedia;
     if (previousOffsetWidth) Object.defineProperty(HTMLElement.prototype, "offsetWidth", previousOffsetWidth);
     else delete (HTMLElement.prototype as Partial<HTMLElement>).offsetWidth;

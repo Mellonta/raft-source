@@ -1,16 +1,16 @@
 import { z } from "zod";
 import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
-import { assertTranslationPlaceholders } from "../placeholderValidator.js";
-import type { TranslationPlaceholderPolicy } from "../placeholderPolicy.js";
+import { assertTranslationPlaceholders } from "../placeholderValidator";
+import type { TranslationPlaceholderPolicy } from "../placeholderPolicy";
 import type {
   TranslationBatchItem,
   TranslationBatchResult,
   TranslationProvider,
   TranslationProviderVersion,
   TranslationResultItem,
-} from "../types.js";
-import { translationBatchItemSchema, translationBatchResultSchema } from "../types.js";
-import { TranslationProviderError } from "../errors.js";
+} from "../types";
+import { translationBatchItemSchema, translationBatchResultSchema } from "../types";
+import { TranslationProviderError } from "../errors";
 
 const DEFAULT_OPENAI_COMPATIBLE_ENDPOINT = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_COMPATIBLE_API_VERSION = "v1";

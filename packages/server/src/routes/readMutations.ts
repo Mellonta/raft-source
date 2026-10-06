@@ -2,9 +2,11 @@ import { Router, type Response, type Router as RouterType } from "express";
 import {
   admitReadMutation,
   getReadMutationFrontier,
+  isReadMutationFenceRefusal,
   ReadMutationError,
   type ReadMutationPayload,
-} from "../services/readMutationSequencer.js";
+} from "../services/readMutationSequencer";
+import { sendJsonServerError } from "./errorResponse";
 
 export const readMutationRouter: RouterType = Router();
 
@@ -55,6 +57,11 @@ function parsePayload(body: unknown): { mutationId: string; mutation: ReadMutati
 }
 
 function sendReadMutationError(res: Response, error: unknown): boolean {
+  if (isReadMutationFenceRefusal(error)) {
+    // Task #93 line B: the admission fence refused after the request-level checks (membership removed or changed).
+    res.status(403).json({ error: error.message, code: "READ_MUTATION_FENCE_REFUSED" });
+    return true;
+  }
   if (!(error instanceof ReadMutationError)) return false;
   if (error.code === "MUTATION_ID_PAYLOAD_MISMATCH") {
     res.status(409).json({ error: error.message, code: error.code });
@@ -77,8 +84,7 @@ readMutationRouter.post("/", async (req, res) => {
     res.status(receipt.outcome === "ADMITTED" ? 201 : 200).json(receipt);
   } catch (error) {
     if (sendReadMutationError(res, error)) return;
-    console.error("Failed to admit read mutation:", error);
-    res.status(500).json({ error: "Failed to admit read mutation", code: "READ_MUTATION_ADMISSION_FAILED" });
+    sendJsonServerError(req, res, { error: "Failed to admit read mutation", code: "READ_MUTATION_ADMISSION_FAILED", logPrefix: "Failed to admit read mutation:", err: error });
   }
 });
 

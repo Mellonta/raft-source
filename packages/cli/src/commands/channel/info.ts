@@ -2,13 +2,13 @@
 
 import type { Command } from "commander";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText } from "../../core/renderer.js";
-import { formatChannelInfo } from "../server/_format.js";
-import { parseRegularChannelTarget } from "./leave.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText } from "../../core/renderer";
+import { formatChannelInfo } from "../server/_format";
+import { parseRegularChannelTarget } from "./leave";
 
 function normalizeChannelInfoTarget(target: string | undefined): { input: string; name: string } {
   const input = target?.trim() ?? "";

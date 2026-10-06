@@ -81,7 +81,14 @@ export function useAuthProviders() {
     };
   }, []);
 
-  const enabledProviders = useMemo(() => providers.filter((provider) => provider.enabled), [providers]);
+  // Desktop shell now runs OAuth through the native PKCE + loopback flow, and the
+  // backend supporting it is live in production (PR #7450, verified deployed
+  // 2026-09-15), so the 2026-09-10 desktop hide is removed — social providers show
+  // in every shell.
+  const enabledProviders = useMemo(
+    () => providers.filter((provider) => provider.enabled),
+    [providers],
+  );
 
   return { providers, enabledProviders, loading };
 }

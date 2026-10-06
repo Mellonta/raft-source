@@ -852,7 +852,15 @@ const MessageTimeline = forwardRef<MessageTimelineHandle, MessageTimelineProps>(
           }
         });
       };
-      const markUserScrollIntent = () => {
+      const markUserScrollIntent = (event: Event) => {
+        // Pointerdown bubbles from every message control. Those descendant
+        // presses are actions inside the timeline (for example, the inline
+        // reply button that synchronously captures a pre-thread-layout
+        // anchor), not evidence that the user is taking over scrolling.
+        // A native scrollbar/track press targets the scroller itself, so it
+        // remains an explicit scroll owner; wheel and touch keep their normal
+        // bubbling semantics.
+        if (event.type === "pointerdown" && event.target !== scroller) return;
         userScrollGestureGenerationRef.current += 1;
         userScrollIntentRef.current = true;
       };

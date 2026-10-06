@@ -1,4 +1,5 @@
 import type { HTMLAttributes, ReactNode } from "react";
+import { Card } from "raft-ui";
 
 export default function SurfaceListItem({
   children,
@@ -12,20 +13,25 @@ export default function SurfaceListItem({
   interactive?: boolean;
 }) {
   return (
-    <div
+    <Card
+      variant="default"
       className={[
-        "border-2 px-4 py-3 transition-colors",
-        selected
-          ? "border-black bg-brutal-cyan/15 shadow-brutal-sm"
-          : [
-              "border-black/30 bg-white",
-              interactive ? "hover:border-black hover:shadow-brutal-sm" : "",
-            ].join(" "),
-        className,
-      ].join(" ")}
+ "min-w-0 w-full px-4 py-3 transition-colors",
+ selected
+ ? "border-info bg-info-muted shadow-raft-sm"
+ : [
+ "border-line-muted bg-layer-card",
+ interactive ? "hover:border-line-strong hover:shadow-raft-sm" : "",
+ ].join(" "),
+ "theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white",
+ selected ? "theme-brutal:border-black theme-brutal:bg-brutal-cyan/15 theme-brutal:shadow-brutal-sm" : "",
+ interactive ? "theme-brutal:hover:border-black theme-brutal:hover:shadow-brutal-sm" : "",
+ className,
+ ].join(" ")}
       {...props}
+      data-selected={selected ? "true" : undefined}
     >
       {children}
-    </div>
+    </Card>
   );
 }

@@ -1,13 +1,12 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import type { ServerId } from "@botiverse/raft-shared";
-import type { AttachmentUploadSessionContext } from "../routes/attachmentUploadSessions.js";
-import { getDb } from "../db/index.js";
+import type { AttachmentUploadSessionContext } from "../routes/attachmentUploadSessions";
+import { getDb } from "../db/index";
 import {
   attachmentObjectCharges,
   attachmentTransferArtifacts,
@@ -16,26 +15,28 @@ import {
   attachments,
   attachmentUploadSessions,
   messages,
+  featureFlags,
   servers,
   users,
-} from "../db/schema.js";
-import type { StorageBackend } from "./storageService.js";
+} from "../db/schema";
+import type { StorageBackend } from "./storageService";
 import {
-  ATTACHMENT_DIRECT_UPLOAD_STORAGE_KEY_PREFIX,
+  ATTACHMENT_STORAGE_KEY_PREFIX,
   __setDirectUploadStorageForTests,
   __setStorageForTests,
   resetStorageForTests,
-} from "./storageService.js";
-import { createChannel } from "./channelService.js";
-import { createServer } from "./serverService.js";
-import { getFileUploadQuotaSummary } from "./fileUploadQuotaService.js";
+} from "./storageService";
+import { createChannel } from "./channelService";
+import { createServer } from "./serverService";
+import { getFileUploadQuotaSummary } from "./fileUploadQuotaService";
 import {
   type AttachmentUploadSessionServiceHooks,
   DurableAttachmentUploadSessionService,
   createDurableAttachmentUploadSessionService,
   isAttachmentDirectUploadEnabled,
-} from "./attachmentUploadSessionService.js";
-import { linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService.js";
+} from "./attachmentUploadSessionService";
+import { linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService";
+import { ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY } from "./featureFlagService";
 
 
 afterEach(async () => {
@@ -124,13 +125,17 @@ test("create reserves quota once and replays one write-once presigned session", 
   assert.equal(storage.presigns[0]?.options.ifNoneMatch, "*");
   assert.equal(storage.presigns[0]?.options.contentType, "text/plain");
 
+  await getDb().update(featureFlags)
+    .set({ killSwitch: true })
+    .where(eq(featureFlags.key, ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY));
+
   const replay = await service.create(context, request);
   assert.equal(replay.status, 201);
   assert.equal((replay.body as { uploadId: string }).uploadId, created.uploadId);
   assert.equal((replay.body as { attachmentId: string }).attachmentId, created.attachmentId);
 
   const [session] = await getDb().select().from(attachmentUploadSessions);
-  assert.ok(session.storageKey.startsWith(ATTACHMENT_DIRECT_UPLOAD_STORAGE_KEY_PREFIX));
+  assert.ok(session.storageKey.startsWith(`${ATTACHMENT_STORAGE_KEY_PREFIX}${server.id}/direct/${created.uploadId}/`));
   assert.equal(session.filename, " demo.txt ", "direct uploads preserve the existing attachment filename contract");
   assert.equal(session.quotaState, "reserved");
   const [intent] = await getDb().select().from(attachmentTransferIntents)
@@ -144,6 +149,23 @@ test("create reserves quota once and replays one write-once presigned session", 
   const quota = await getFileUploadQuotaSummary(server.id, new Date("2026-07-27T00:00:00Z"));
   assert.equal(quota.reservedBytes, request.sizeBytes);
   assert.equal(quota.usedBytes, 0);
+});
+
+test("the attachment-original kill switch returns fresh direct sessions to the stable v1 namespace", async () => {
+  const { server, channel, context } = await fixture();
+  await getDb().update(featureFlags)
+    .set({ killSwitch: true })
+    .where(eq(featureFlags.key, ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY));
+  const storage = new FakeDirectStorage();
+  const service = createEnabledService(storage, () => new Date("2026-07-27T00:00:00Z"));
+
+  const created = await service.create(context, input(channel.id));
+  assert.equal(created.status, 201);
+  const body = created.body as { uploadId: string };
+  const [session] = await getDb().select().from(attachmentUploadSessions);
+  assert.ok(session.storageKey.startsWith(`attachments/v1/${server.id}/${body.uploadId}/`));
+  assert.equal(session.storageKey.startsWith(ATTACHMENT_STORAGE_KEY_PREFIX), false);
+  assert.equal(storage.presigns[0]?.key, session.storageKey);
 });
 
 test("complete HEAD-verifies, creates one attachment, and finalizes quota exactly once", async () => {

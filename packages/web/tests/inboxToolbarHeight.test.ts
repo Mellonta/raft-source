@@ -13,7 +13,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -44,7 +43,7 @@ test("main panel surfaces keep the canonical PanelHeader adoption contract", () 
   const legacySource = readFileSync(resolve(repoRoot, "src/components/task/LegacyTaskPanel.tsx"), "utf8");
   assert.match(
     legacySource,
-    /className="flex h-panel-header items-center gap-3 border-b-2 border-black bg-(?:white|soft-signal) px-5/,
-    "LegacyTaskPanel should keep the legacy px-5 header contract until migrated",
+    /className="flex h-panel-header items-center gap-3 border-b border-line-hairline bg-layer-panel px-5 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white"/,
+    "LegacyTaskPanel should keep the legacy px-5 header contract until migrated (now on semantic tokens)",
   );
 });

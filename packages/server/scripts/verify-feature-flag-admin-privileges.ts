@@ -5,7 +5,7 @@ import {
   FORBIDDEN_FEATURE_FLAG_ADMIN_PRIVILEGES,
   REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES,
   reconcileAndVerifyFeatureFlagAdminPrivileges,
-} from "../src/db/featureFlagAdminPrivileges.js";
+} from "../src/db/featureFlagAdminPrivileges";
 
 const rawRequired = process.env.FEATURE_FLAG_ADMIN_PRIVILEGE_GUARD_REQUIRED;
 

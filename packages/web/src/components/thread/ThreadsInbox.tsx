@@ -1,14 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useShallow } from "zustand/react/shallow";
 import { useIntl } from "react-intl";
+import Tooltip from "../ui/Tooltip";
 import { formatRelativeTime } from "../../utils/relativeTime";
-import { Activity, ArrowDownUp, ArrowUp, AtSign, Bell, BellOff, Bookmark, Check, CheckCircle2, ChevronDown, Hash, Inbox, Mail, MessageSquare, MessageSquareCheck, MessageSquareDot, MessageSquareText, Pencil, RotateCcw, Search } from "lucide-react";
+import { Activity, ArrowDownUp, ArrowUp, AtSign, Bell, BellOff, Bookmark, Check, CheckCircle2, ChevronDown, Hash, Inbox, Mail, MessageSquareCheck, MessageSquareDot, MessageSquareText, Pencil, RotateCcw, Search } from "lucide-react";
 import { getInboxItemKey, useInboxStore } from "../../store/inboxStore";
 import type { ActivitySortDirection, InboxItem, InboxFilter, InboxGroupCount } from "../../store/inboxStore";
 import { useActivityPanelWindowBundle } from "../../store/activityPanel/useActivityShadow";
 import {
   Badge,
+  Button,
+  Card,
+  ActivityInboxPanel,
+  ContextMenuPopup,
+  DirectMessageIcon,
   SegmentedControl,
   SegmentedControlItem,
   SegmentedControlLabel,
@@ -21,6 +28,7 @@ import {
   SelectList,
   SelectTrigger,
   SelectValue,
+  ThreadIcon,
 } from "raft-ui";
 import { useMessageStore } from "../../store/messageStore";
 import { captureReceiverPrivateIngressContext } from "../../store/receiverPrivateIngress";
@@ -230,7 +238,7 @@ function highlightActivitySearchText(value: string, query: string): ReactNode {
     if (index > cursor) parts.push(value.slice(cursor, index));
     const match = value.slice(index, index + needle.length);
     parts.push(
-      <mark key={`${index}-${match}`} className="bg-soft-signal px-0.5 text-black">
+      <mark key={`${index}-${match}`} className="bg-primary-soft px-0.5 text-primary-strong theme-brutal:bg-soft-signal theme-brutal:text-black">
         {match}
       </mark>,
     );
@@ -272,10 +280,10 @@ function ActivityGroupIcon({ group, dmChannel }: { group: InboxGroupCount; dmCha
   const isDm = group.channelType === "dm";
   return (
     <span
-      className={`flex size-5 shrink-0 items-center justify-center border-2 border-black/20 ${isDm ? "bg-soft-signal" : "bg-black/[0.04]"}`}
+      className={`flex size-5 shrink-0 items-center justify-center border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20 ${isDm ? "bg-primary-soft text-primary-strong theme-brutal:bg-soft-signal theme-brutal:text-black" : "bg-fill-muted"}`}
       data-testid={isDm ? `activity-group-dm-fallback-${group.channelId}` : `activity-group-channel-icon-${group.channelId}`}
     >
-      {isDm ? <AtSign size={12} /> : <Hash size={12} />}
+      {isDm ? <DirectMessageIcon width={12} height={12} /> : <Hash size={12} />}
     </span>
   );
 }
@@ -377,29 +385,29 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
       ? "dm"
       : "channel";
   const titleIcon = (() => {
-    const className = "mr-1.5 inline-block align-[-2px] text-black/45";
-    if (titleIconKind === "thread") return <MessageSquare size={13} className={className} />;
-    if (titleIconKind === "dm") return <AtSign size={13} className={className} />;
+    const className = "mr-1.5 inline-block align-[-2px] text-foreground-placeholder theme-brutal:text-black/45";
+    if (titleIconKind === "thread") return <ThreadIcon width={13} height={13} className={className} />;
+    if (titleIconKind === "dm") return <DirectMessageIcon width={13} height={13} className={className} />;
     return <Hash size={13} className={className} />;
   })();
   const subtitleContent = item.kind === "thread" ? channelLabel : null;
   const bodyContent = (
     <>
-      {activitySenderLabel ? <span className="font-bold text-black/70">{activitySenderLabel}: </span> : null}
+      {activitySenderLabel ? <span className="font-bold text-foreground-muted theme-brutal:text-black/70">{activitySenderLabel}: </span> : null}
       {renderActivityPreview(activityPreview, searchQuery)}
     </>
   );
-  const rowClassName = `group relative flex w-full items-start gap-3 border-2 p-3 text-left transition-colors hover:border-black hover:shadow-brutal-sm active:border-black active:shadow-brutal-sm ${
+  const rowClassName = `group relative flex w-full items-start gap-3 rounded-md border p-3 theme-brutal:rounded-none text-left transition-colors hover:border-line-muted hover:bg-fill-muted hover:shadow-raft-sm active:border-line-muted active:shadow-raft-sm theme-brutal:border-2 theme-brutal:hover:border-black theme-brutal:hover:shadow-brutal-sm theme-brutal:active:border-black theme-brutal:active:shadow-brutal-sm ${
     focused
-      ? "border-black bg-brutal-cyan/25 shadow-brutal"
+      ? "border-info bg-info-muted shadow-raft-md theme-brutal:border-black theme-brutal:bg-brutal-cyan/25 theme-brutal:shadow-brutal"
       : active
-      ? "border-black bg-white shadow-brutal-sm"
-      : "border-black/30 bg-white"
+      ? "border-line-muted bg-fill-muted shadow-raft-sm theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
+      : "border-line-muted bg-layer-card theme-brutal:border-black/30 theme-brutal:bg-white"
   }`;
   const rowActionVisibilityClassName = active
     ? "pointer-events-auto opacity-100"
     : "pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-visible:pointer-events-auto group-focus-visible:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100";
-  const doneActionClassName = `btn-brutal-sm relative z-10 shrink-0 bg-white p-1.5 transition-opacity ${
+  const doneActionClassName = `relative z-10 shrink-0 transition-opacity theme-brutal:bg-white ${
     rowActionVisibilityClassName
   }`;
   const hasRowAction = doneAction !== "none";
@@ -409,11 +417,11 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
       ? "opacity-0"
       : "transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 [@media(hover:none)]:opacity-0";
   const rowActionBackgroundClassName = active
-    ? "bg-white"
-    : "bg-transparent group-hover:bg-white group-focus-visible:bg-white group-focus-within:bg-white [@media(hover:none)]:bg-white";
+    ? "bg-layer-panel theme-brutal:bg-white"
+    : "bg-transparent group-hover:bg-layer-panel group-focus-visible:bg-layer-panel group-focus-within:bg-layer-panel [@media(hover:none)]:bg-layer-panel theme-brutal:group-hover:bg-white theme-brutal:group-focus-visible:bg-white theme-brutal:group-focus-within:bg-white theme-brutal:[@media(hover:none)]:bg-white";
 
   return (
-    <div
+    <Card
       ref={focusRef}
       role="button"
       tabIndex={0}
@@ -435,7 +443,7 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
       <div className="min-w-0 w-full" data-testid="conversation-card-content">
         {subtitleContent ? (
           <div
-            className="mb-0.5 min-w-0 text-[11px] font-bold leading-3 text-black/45"
+            className="mb-0.5 min-w-0 text-[11px] font-bold leading-3 text-foreground-placeholder theme-brutal:text-black/45"
             data-testid="conversation-card-subtitle"
           >
             {subtitleContent}
@@ -443,7 +451,7 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
         ) : null}
         <div className="mb-0.5 flex min-w-0 items-start gap-2">
           <div
-            className={`line-clamp-2 min-w-0 flex-1 text-sm leading-5 ${unreadCount > 0 ? "font-bold text-black" : "font-semibold text-black/55"}`}
+            className={`line-clamp-2 min-w-0 flex-1 text-sm leading-5 ${unreadCount > 0 ? "font-bold text-foreground-strong theme-brutal:text-black" : "font-semibold text-foreground-muted theme-brutal:text-black/55"}`}
             data-testid="conversation-card-primary"
           >
             <span aria-hidden="true" data-testid="conversation-card-title-icon" data-kind={titleIconKind}>
@@ -453,7 +461,7 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
           </div>
           {timestamp ? (
             <span
-              className={`shrink-0 font-mono text-xs leading-5 text-black/40 ${timestampVisibilityClassName}`}
+              className={`shrink-0 font-mono text-xs leading-5 text-foreground-placeholder theme-brutal:text-black/40 ${timestampVisibilityClassName}`}
               data-testid="conversation-card-timestamp"
             >
               {timestamp}
@@ -461,7 +469,7 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
           ) : null}
         </div>
         <p
-          className={`line-clamp-2 text-xs leading-4 ${unreadCount > 0 ? "text-black" : "text-black/55"}`}
+          className={`line-clamp-2 text-xs leading-4 ${unreadCount > 0 ? "text-foreground-strong theme-brutal:text-black" : "text-foreground-muted theme-brutal:text-black/55"}`}
           data-testid="conversation-card-body"
         >
           {bodyContent}
@@ -501,15 +509,17 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
             </Badge>
           )}
           {shouldShowMentionBadge && (
+            <Tooltip content={formatMessage({ id: "thread.row.mentionBadgeTitle" })}>
             <Badge
               variant="primary"
               uppercase={false}
+              data-slot="badge"
               data-testid="inbox-mention-badge"
-              title={formatMessage({ id: "thread.row.mentionBadgeTitle" })}
             >
               <AtSign size={10} />
               {formatMessage({ id: "thread.row.mentionBadgeLabel" })}
             </Badge>
+            </Tooltip>
           )}
           {unreadCount > 0 && (
             <Badge
@@ -521,44 +531,47 @@ function InboxRow({ item, filter, searchQuery, onOpen, onDone, onContextMenu, on
             </Badge>
           )}
           {hasThreadDraft && (
+            <Tooltip content={formatMessage({ id: "thread.row.draftTitle" })}>
             <Badge
               appearance="outline"
               variant="muted"
               uppercase={false}
+              data-slot="badge"
               data-testid="inbox-thread-draft-badge"
-              title={formatMessage({ id: "thread.row.draftTitle" })}
               aria-label={formatMessage({ id: "thread.row.draftTitle" })}
             >
               <Pencil size={12} />
             </Badge>
+            </Tooltip>
           )}
         </div>
       </div>
       {hasRowAction ? (
         <div
-          className={`pointer-events-none absolute right-3 top-3 z-10 flex items-center pl-1 ${rowActionBackgroundClassName}`}
+          className={`pointer-events-none absolute right-3 top-3 z-10 flex items-center rounded-md theme-brutal:rounded-none ${rowActionBackgroundClassName}`}
           data-testid="conversation-card-actions"
         >
-          <button
+          <Tooltip content={formatMessage({ id: doneAction === "restore" ? "activity.current.restore" : "thread.row.markAsDone" })}>
+          <Button variant="ghost" size="icon-sm"
             type="button"
             onClick={(e) => { e.stopPropagation(); onDone(); }}
             onKeyDown={(event) => handleNestedRowActionKeyDown(event, onDone)}
             className={doneActionClassName}
-            title={formatMessage({ id: doneAction === "restore" ? "activity.current.restore" : "thread.row.markAsDone" })}
             aria-label={formatMessage({ id: doneAction === "restore" ? "activity.current.restore" : "thread.row.markAsDone" })}
             data-testid="inbox-row-done"
           >
             {doneAction === "restore" ? <RotateCcw size={14} /> : <Check size={14} />}
-          </button>
+          </Button>
+          </Tooltip>
         </div>
       ) : null}
-    </div>
+    </Card>
   );
 }
 
-function isDesktopMasterDetailViewport(): boolean {
+function isDesktopMasterDetailViewport(newInbox = false): boolean {
   if (typeof window === "undefined") return true;
-  return window.matchMedia("(min-width: 1024px)").matches;
+  return window.matchMedia(newInbox ? "(min-width: 768px)" : "(min-width: 1024px)").matches;
 }
 
 export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySidebar = false }: {
@@ -568,6 +581,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
 } = {}) {
   const { formatMessage, formatNumber } = useIntl();
   const serverSlug = useServerStore((s) => s.current?.slug);
+  const serverId = useServerStore((s) => s.current?.id);
   const onMobileBack = useMobileBack(serverSlug ? `/s/${serverSlug}` : "/");
   const legacyStoreItems = useInboxStore((s) => s.items);
   const acceptedWindowGeneration = useInboxStore((s) => s.acceptedWindowGeneration);
@@ -578,6 +592,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
   const loaded = useInboxStore((s) => s.loaded);
   const loadingMore = useInboxStore((s) => s.loadingMore);
   const legacyHasMore = useInboxStore((s) => s.hasMore);
+  const allCount = useInboxStore((s) => s.allCount);
   const legacyTotalCount = useInboxStore((s) => s.totalCount);
   const legacyTotalUnreadCount = useInboxStore((s) => s.totalUnreadCount);
   const sortDirection = useInboxStore((s) => s.sortDirection);
@@ -626,6 +641,8 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
   const focusedRowRef = useRef<HTMLDivElement>(null);
   const autoScrolledFocusKeyRef = useRef<string | null>(null);
   const activitySearchInputRef = useRef<HTMLInputElement>(null);
+  const activityPanelRef = useRef<HTMLDivElement>(null);
+  const activitySearchScopeActiveRef = useRef(false);
   const isNearTopRef = useRef(true);
   const [newUpdateCount, setNewUpdateCount] = useState(0);
   const restoredScrollRef = useRef(false);
@@ -688,7 +705,6 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
   const hasMore = activityWindow.hasMore;
   const nextCursor = activityWindow.nextCursor;
   const activityGroups = activityWindow.groups;
-  const activityGroupTotal = activityGroups.reduce((sum, group) => sum + group.count, 0);
   const savedActivityItems = useMemo(() => savedEntries.map(savedEntryToInboxItem), [savedEntries]);
   const visibleItems = activityView === "saved"
     ? savedActivityItems
@@ -714,6 +730,22 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     () => activityFacetGroups.filter((group) => group.channelType !== "dm"),
     [activityFacetGroups],
   );
+  const sourceGroups = useMemo(() => [...dmActivityGroups, ...channelActivityGroups], [dmActivityGroups, channelActivityGroups]);
+  // Ordering only depends on displayed sources' unread membership.
+  const unreadSourceIds = useMessageStore(useShallow((state) => sourceGroups
+    .filter((group) => (state.unreadCounts[group.channelId] ?? 0) > 0)
+    .map((group) => group.channelId)));
+  const unreadSources = useMemo(() => new Set(unreadSourceIds), [unreadSourceIds]);
+  // The selected source outranks unread priority: opening a source marks it
+  // read, which would otherwise drop the row the reader is currently looking at
+  // below every still-unread source. Pinning it keeps the current scope anchored
+  // at the top of the mixed DM/channel list until the selection itself changes.
+  const orderedSourceGroups = useMemo(() => [...sourceGroups].sort((left, right) => {
+    const selectedRank = Number(right.channelId === effectiveChannelFilterId)
+      - Number(left.channelId === effectiveChannelFilterId);
+    if (selectedRank !== 0) return selectedRank;
+    return Number(unreadSources.has(right.channelId)) - Number(unreadSources.has(left.channelId));
+  }), [sourceGroups, unreadSources, effectiveChannelFilterId]);
   const dmChannelById = useMemo(
     () => new Map(dmChannels.map((channel) => [channel.id, channel])),
     [dmChannels],
@@ -834,9 +866,12 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
   ]);
 
   useEffect(() => {
-    if (!activitySidebarInboxEnabled || activityView !== "saved") return;
+    // Saved is server-scoped.  The inbox can render one frame while the URL's
+    // ServerResolver is still selecting its server; do not issue an unscoped
+    // request that can temporarily replace the saved view with an empty page.
+    if (!activitySidebarInboxEnabled || activityView !== "saved" || !serverId) return;
     void loadSaved({ query: inboxSearchQuery, sortDirection, channelId: effectiveChannelFilterId ?? undefined });
-  }, [activitySidebarInboxEnabled, activityView, effectiveChannelFilterId, inboxSearchQuery, loadSaved, sortDirection]);
+  }, [activitySidebarInboxEnabled, activityView, effectiveChannelFilterId, inboxSearchQuery, loadSaved, serverId, sortDirection]);
 
   useEffect(() => {
     if (!activitySidebarInboxEnabled || activityView !== "done") return;
@@ -850,12 +885,34 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
 
   useEffect(() => {
     if (!activitySidebarInboxEnabled) return;
+    const updateActivitySearchScope = (event: Event) => {
+      const target = event.target;
+      activitySearchScopeActiveRef.current =
+        target instanceof Node && !!activityPanelRef.current?.contains(target);
+    };
+    window.addEventListener("pointerdown", updateActivitySearchScope, true);
+    window.addEventListener("focusin", updateActivitySearchScope, true);
+    return () => {
+      window.removeEventListener("pointerdown", updateActivitySearchScope, true);
+      window.removeEventListener("focusin", updateActivitySearchScope, true);
+    };
+  }, [activitySidebarInboxEnabled]);
+
+  useEffect(() => {
+    if (!activitySidebarInboxEnabled) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if ((!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey) return;
       if (event.key.toLowerCase() !== "f") return;
+      if (event.defaultPrevented) return;
+      const target = event.target;
+      const targetInsideActivity = target instanceof Node && !!activityPanelRef.current?.contains(target);
+      const targetIsDocumentBody = target === document.body;
+      if (!targetInsideActivity && !(targetIsDocumentBody && activitySearchScopeActiveRef.current)) return;
       event.preventDefault();
       setActivitySearchVisible(true);
     };
+    // Activity only owns Cmd/Ctrl+F while its own surface has focus, leaving
+    // an opened conversation panel to its local finder or browser fallback.
     // keydown-focus-on-open
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -1019,7 +1076,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     // Activity needs enough horizontal room for both the inbox list and the
     // detail pane. Tablet/narrow desktop keeps the rail but opens the target
     // route directly instead of crushing the middle column.
-    if (!isDesktopMasterDetailViewport()) {
+    if (!isDesktopMasterDetailViewport(activitySidebarInboxEnabled)) {
       if (activateTimerRef.current !== null) {
         window.clearTimeout(activateTimerRef.current);
         activateTimerRef.current = null;
@@ -1057,7 +1114,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     // clicking a /search result (stdrc #proj-activity:171042a3 2026-06-23).
     // Mobile keeps the original full-page push behaviour. (The rail-vs-sidebar
     // placement A/B was dropped 2026-06-30 — rail master/detail is the default.)
-    const desktopMasterDetail = isDesktopMasterDetailViewport();
+    const desktopMasterDetail = isDesktopMasterDetailViewport(activitySidebarInboxEnabled);
 
     if (item.kind === "thread") {
       const targetMessageId = item.unreadCount > 0
@@ -1164,10 +1221,10 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
 
   const sidebarResponsiveSuffix = " lg:justify-start lg:gap-2 lg:px-2.5";
   const sidebarLabelClassName = "sr-only lg:not-sr-only lg:min-w-0 lg:flex-1 lg:truncate";
-  const sidebarCountClassName = "hidden font-mono text-[11px] tabular-nums text-black/40 lg:inline";
-  const sidebarSectionLabelClassName = "hidden flex-1 text-[10px] font-black uppercase text-black/40 lg:block";
+  const sidebarCountClassName = "hidden font-mono text-[11px] tabular-nums text-foreground-placeholder theme-brutal:text-black/40 lg:inline";
+  const sidebarSectionLabelClassName = "hidden flex-1 text-[10px] font-black uppercase text-foreground-placeholder theme-brutal:text-black/40 lg:block";
   const activityViewOptions = [
-    { value: "all" as const, label: formatMessage({ id: "thread.filter.all" }), icon: <Inbox size={14} />, count: activityGroupTotal || totalCount },
+    { value: "all" as const, label: formatMessage({ id: "thread.filter.all" }), icon: <Inbox size={14} />, count: allCount },
     { value: "unread" as const, label: formatMessage({ id: "thread.filter.unread" }), icon: <Mail size={14} />, count: totalUnreadCount },
     { value: "mentions" as const, label: formatMessage({ id: "thread.filter.mentions" }), icon: <AtSign size={14} />, count: null },
     { value: "saved" as const, label: formatMessage({ id: "activity.current.saved" }), icon: <Bookmark size={14} />, count: savedTotal },
@@ -1188,15 +1245,14 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     const isDialog = variant === "dialog";
     const testIdPrefix = isDialog ? "activity-switcher" : "activity";
     const navButtonClass = (active: boolean) => isDialog
-      ? `flex w-full items-center gap-3 px-3 py-3 text-left text-sm font-bold transition-colors ${active ? "bg-black/[0.06]" : "hover:bg-black/[0.04]"}`
-      : `flex w-full items-center justify-center gap-0 border-2 px-2 py-2 text-left text-xs font-bold transition-colors${sidebarResponsiveSuffix} ${active ? "border-black bg-soft-signal shadow-brutal-sm" : "border-transparent hover:border-black/30 hover:bg-black/5"}`;
+      ? `flex w-full items-center gap-3 px-3 py-3 text-left text-sm font-bold transition-colors ${active ? "bg-fill-muted" : "hover:bg-fill-muted/60"}`
+      : `flex w-full items-center justify-center gap-0 border px-2 py-2 text-left text-xs font-bold transition-colors${sidebarResponsiveSuffix} ${active ? "border-line-strong bg-primary-soft text-foreground-strong shadow-raft-sm theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm" : "border-transparent hover:border-line-muted hover:bg-fill-muted theme-brutal:border-transparent theme-brutal:hover:border-black/30 theme-brutal:hover:bg-black/5"} theme-brutal:border-2`;
     const labelClass = isDialog ? "min-w-0 flex-1 truncate" : sidebarLabelClassName;
-    const countClass = isDialog ? "font-mono text-black/50" : sidebarCountClassName;
-    const sectionClass = isDialog ? "flex-1 text-xs font-black uppercase text-black/45" : sidebarSectionLabelClassName;
-    const formatSidebarCount = (count: number) => count > 99 ? "99+" : formatNumber(count);
+    const countClass = isDialog ? "font-mono text-foreground-muted theme-brutal:text-black/50" : sidebarCountClassName;
+    const sectionClass = isDialog ? "flex-1 text-xs font-black uppercase text-foreground-placeholder theme-brutal:text-black/45" : sidebarSectionLabelClassName;
     const groupRowClass = (active: boolean) => isDialog
-      ? `flex w-full border-2 transition-colors ${active ? "border-black bg-black/[0.08]" : "border-transparent hover:border-black/30 hover:bg-black/[0.04]"}`
-      : `flex w-full border-2 transition-colors ${active ? "border-black bg-black/[0.08]" : "border-transparent hover:border-black/30 hover:bg-black/5"}`;
+      ? `flex w-full border transition-colors theme-brutal:border-2 ${active ? "border-line-strong bg-fill-muted theme-brutal:border-black theme-brutal:bg-black/[0.08]" : "border-transparent hover:border-line-muted hover:bg-fill-muted/60 theme-brutal:hover:border-black/30 theme-brutal:hover:bg-black/[0.04]"}`
+      : `flex w-full border transition-colors theme-brutal:border-2 ${active ? "border-line-strong bg-fill-muted theme-brutal:border-black theme-brutal:bg-black/[0.08]" : "border-transparent hover:border-line-muted hover:bg-fill-muted/60 theme-brutal:hover:border-black/30 theme-brutal:hover:bg-black/5"}`;
     const groupButtonClass = isDialog
       ? "flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left text-sm font-bold"
       : `flex min-w-0 flex-1 items-center justify-center gap-0 px-2 py-2 text-left text-xs font-bold${sidebarResponsiveSuffix}`;
@@ -1219,7 +1275,6 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
             className={groupButtonClass}
             onClick={() => handleGroupClick(group.channelId)}
             data-testid={`${testIdPrefix}-group-${group.channelId}`}
-            title={stripActivityTitlePrefix(group.channelName)}
           >
             <ActivityGroupIcon group={group} dmChannel={dmChannel} />
             <span className={labelClass}>{stripActivityTitlePrefix(group.channelName)}</span>
@@ -1230,9 +1285,8 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                   aria-label={formatNumber(group.count)}
                   className={countClass}
                   data-testid={`${testIdPrefix}-group-count-${group.channelId}`}
-                  title={formatNumber(group.count)}
                 >
-                  {formatSidebarCount(group.count)}
+                  {formatNumber(group.count)}
                 </span>
               )}
           </button>
@@ -1242,39 +1296,51 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
     return (
       <>
         <div className="flex flex-col gap-1">
-          <button type="button" className={navButtonClass(activityView === "all")} onClick={() => handleViewClick("all")} data-testid={`${testIdPrefix}-nav-all`} title={formatMessage({ id: "thread.filter.all" })}>
+          <button type="button" className={navButtonClass(activityView === "all")} onClick={() => handleViewClick("all")} data-testid={`${testIdPrefix}-nav-all`}>
             <Inbox size={iconSize} className="shrink-0" />
             <span className={labelClass}>{formatMessage({ id: "thread.filter.all" })}</span>
-            <span aria-label={formatNumber(activityGroupTotal || totalCount)} className={countClass} title={formatNumber(activityGroupTotal || totalCount)}>{formatSidebarCount(activityGroupTotal || totalCount)}</span>
+            {allCount !== null ? <Tooltip content={formatNumber(allCount)}><span aria-label={formatNumber(allCount)} className={countClass}>{formatNumber(allCount)}</span></Tooltip> : null}
           </button>
-          <button type="button" className={navButtonClass(activityView === "unread")} onClick={() => handleViewClick("unread")} data-testid={`${testIdPrefix}-nav-unread`} title={formatMessage({ id: "thread.filter.unread" })}>
+          <button type="button" className={navButtonClass(activityView === "unread")} onClick={() => handleViewClick("unread")} data-testid={`${testIdPrefix}-nav-unread`}>
             <Mail size={iconSize} className="shrink-0" />
             <span className={labelClass}>{formatMessage({ id: "thread.filter.unread" })}</span>
-            {totalUnreadCount > 0 ? <span aria-label={formatNumber(totalUnreadCount)} className={countClass} title={formatNumber(totalUnreadCount)}>{formatSidebarCount(totalUnreadCount)}</span> : null}
+            {totalUnreadCount > 0 ? <Tooltip content={formatNumber(totalUnreadCount)}><span aria-label={formatNumber(totalUnreadCount)} className={countClass}>{formatNumber(totalUnreadCount)}</span></Tooltip> : null}
           </button>
-          <button type="button" className={navButtonClass(activityView === "mentions")} onClick={() => handleViewClick("mentions")} data-testid={`${testIdPrefix}-nav-mentions`} title={formatMessage({ id: "thread.filter.mentions" })}>
+          <button type="button" className={navButtonClass(activityView === "mentions")} onClick={() => handleViewClick("mentions")} data-testid={`${testIdPrefix}-nav-mentions`}>
             <AtSign size={iconSize} className="shrink-0" />
             <span className={labelClass}>{formatMessage({ id: "thread.filter.mentions" })}</span>
           </button>
-          <button type="button" className={navButtonClass(activityView === "saved")} onClick={() => handleViewClick("saved")} data-testid={`${testIdPrefix}-nav-saved`} title={formatMessage({ id: "activity.current.saved" })}>
+          <button type="button" className={navButtonClass(activityView === "saved")} onClick={() => handleViewClick("saved")} data-testid={`${testIdPrefix}-nav-saved`}>
             <Bookmark size={iconSize} className="shrink-0" />
             <span className={labelClass}>{formatMessage({ id: "activity.current.saved" })}</span>
-            {savedTotal > 0 ? <span aria-label={formatNumber(savedTotal)} className={countClass} title={formatNumber(savedTotal)}>{formatSidebarCount(savedTotal)}</span> : null}
+            {savedTotal > 0 ? <Tooltip content={formatNumber(savedTotal)}><span aria-label={formatNumber(savedTotal)} className={countClass}>{formatNumber(savedTotal)}</span></Tooltip> : null}
           </button>
-          <button type="button" className={navButtonClass(activityView === "done")} onClick={() => handleViewClick("done")} data-testid={`${testIdPrefix}-nav-done`} title={formatMessage({ id: "activity.current.done" })}>
+          <button type="button" className={navButtonClass(activityView === "done")} onClick={() => handleViewClick("done")} data-testid={`${testIdPrefix}-nav-done`}>
             <CheckCircle2 size={iconSize} className="shrink-0" />
             <span className={labelClass}>{formatMessage({ id: "activity.current.done" })}</span>
-            {doneItems.length > 0 ? <span aria-label={formatNumber(doneItems.length)} className={countClass} title={formatNumber(doneItems.length)}>{formatSidebarCount(doneItems.length)}</span> : null}
+            {doneItems.length > 0 ? <Tooltip content={formatNumber(doneItems.length)}><span aria-label={formatNumber(doneItems.length)} className={countClass}>{formatNumber(doneItems.length)}</span></Tooltip> : null}
           </button>
         </div>
 
         <div className="mt-5 flex min-h-0 flex-col" data-testid={isDialog ? "activity-switcher-groups" : "activity-current-groups"}>
           <div className={`mb-1 flex items-center gap-2 px-2 ${isDialog ? "" : "justify-center lg:justify-start"}`}>
             <span className={sectionClass} data-testid={isDialog ? "activity-switcher-group-section-label" : "activity-current-group-section-label"}>{formatMessage({ id: "activity.current.dmAndChannels" })}</span>
+            {effectiveChannelFilterId !== null && (
+              <button
+                type="button"
+                className="shrink-0 rounded px-1 py-1 text-[10px] font-bold text-foreground-muted hover:bg-fill-muted hover:text-foreground-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-line-strong"
+                onClick={() => {
+                  setChannelFilterId(null);
+                  if (closeAfterSelect) setActivitySwitcherOpen(false);
+                }}
+                data-testid={`${testIdPrefix}-clear-channel-filter`}
+              >
+                {formatMessage({ id: "activity.current.clearChannelFilter" })}
+              </button>
+            )}
           </div>
           <div className="flex min-h-0 flex-col gap-1" data-testid={isDialog ? "activity-switcher-group-list" : "activity-current-group-list"}>
-            {dmActivityGroups.map((group) => renderGroup(group, dmChannelById.get(group.channelId) ?? null))}
-            {channelActivityGroups.map((group) => renderGroup(group))}
+            {orderedSourceGroups.map((group) => renderGroup(group, dmChannelById.get(group.channelId) ?? null))}
           </div>
         </div>
       </>
@@ -1282,8 +1348,8 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
   };
 
   const contextMenuPortal = ctxMenu ? createPortal(
-    <div
-      className="card-brutal fixed z-[60] overflow-y-auto overflow-x-hidden"
+    <ContextMenuPopup
+      className="fixed z-[60] overflow-y-auto overflow-x-hidden select-none"
       style={{
         left: ctxMenu.x,
         top: ctxMenu.y,
@@ -1365,17 +1431,23 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
           {formatMessage({ id: "thread.contextMenu.follow" })}
         </MenuItem>
       )}
-    </div>,
+    </ContextMenuPopup>,
     document.body,
   ) : null;
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div
+      ref={activityPanelRef}
+      className="contents"
+      onPointerDownCapture={() => { activitySearchScopeActiveRef.current = true; }}
+      onFocusCapture={() => { activitySearchScopeActiveRef.current = true; }}
+    >
+    <ActivityInboxPanel edge="attached" className="theme-brutal:!border-l">
       <PanelHeader
         title={formatMessage({ id: "thread.header.title" })}
         subtitle={formatMessage({ id: "thread.header.subtitle" }, { activeCount: totalCount, unreadCount: totalUnreadCount })}
         icon={<Activity size={18} />}
-        iconBg="bg-soft-signal"
+        iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
         onMobileBack={onMobileBack}
         containerProps={{
           "data-testid": "inbox-header",
@@ -1391,7 +1463,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
       <div className="flex min-h-0 flex-1">
         {activitySidebarInboxEnabled && !compactActivitySidebar ? (
           <aside
-            className="scrollbar-quiet hidden w-16 shrink-0 flex-col overflow-y-auto border-r-2 border-black bg-white px-2 py-3 md:flex lg:w-56 lg:p-3"
+            className="scrollbar-quiet hidden w-16 shrink-0 flex-col overflow-y-auto border-r border-line-muted bg-layer-panel px-2 py-3 md:flex lg:w-56 lg:p-3 theme-brutal:border-black theme-brutal:bg-white"
             data-testid="activity-current-sidebar"
             aria-label={formatMessage({ id: "thread.filter.ariaLabel" })}
           >
@@ -1402,7 +1474,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
         <section className="flex min-w-0 flex-1 flex-col">
           <div
             data-testid="inbox-toolbar"
-            className={`shrink-0 border-b-2 border-black bg-white px-4 ${activitySidebarInboxEnabled && compactActivitySidebar
+            className={`shrink-0 border-b border-line-muted bg-layer-panel px-4 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white ${activitySidebarInboxEnabled && compactActivitySidebar
               ? "flex min-h-[88px] flex-col items-stretch justify-center gap-2 py-2"
               : "flex h-[54px] items-center justify-between gap-3"}`}
           >
@@ -1411,27 +1483,26 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                 <div className="flex min-w-0 items-center" data-testid="activity-master-primary-controls">
                   <button
                     type="button"
-                    className="flex h-8 w-full min-w-0 items-center gap-2 border-2 border-black bg-white px-2 text-xs font-bold shadow-brutal-sm"
+                    className="flex h-8 w-full min-w-0 items-center gap-2 border border-line-muted bg-layer-panel px-2 text-xs font-bold shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
                     aria-expanded={activitySwitcherOpen}
                     onClick={() => setActivitySwitcherOpen(true)}
                     data-testid="activity-scope-switcher"
-                    title={selectedActivityGroup ? compactScopeLabel : activeActivityViewOption.label}
                   >
                     <span className="shrink-0" aria-hidden="true">{activeActivityViewOption.icon}</span>
                     <span className="shrink-0 text-left">{activeActivityViewOption.label}</span>
                     {selectedActivityGroup ? (
                       <>
-                        <span className="h-4 w-px shrink-0 bg-black/25" aria-hidden="true" />
+                        <span className="h-4 w-px shrink-0 bg-line-muted" aria-hidden="true" />
                         <span className="min-w-0 flex-1 truncate text-left">{compactScopeLabel}</span>
                       </>
                     ) : null}
-                    <ChevronDown size={14} className="shrink-0 text-black/55" />
+                    <ChevronDown size={14} className="shrink-0 text-foreground-muted theme-brutal:text-black/55" />
                   </button>
                 </div>
                 <div className="flex min-w-0 items-center justify-end gap-2" data-testid="activity-master-scope-controls">
                   {(activitySearchVisible || inboxSearchQuery.trim()) ? (
-                    <label className="hidden h-8 min-w-[150px] flex-[1.2] items-center gap-2 border-2 border-black bg-white px-2 shadow-brutal-sm md:flex">
-                      <Search size={14} className="shrink-0 text-black/55" />
+                    <label className="hidden h-8 min-w-[150px] flex-[1.2] items-center gap-2 border border-line-muted bg-layer-panel px-2 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm md:flex">
+                      <Search size={14} className="shrink-0 text-foreground-muted theme-brutal:text-black/55" />
                       <input
                         ref={activitySearchInputRef}
                         value={inboxSearchQuery}
@@ -1440,7 +1511,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                           if (event.key !== "Escape" || inboxSearchQuery) return;
                           setActivitySearchVisible(false);
                         }}
-                        className="min-w-0 flex-1 bg-transparent text-xs font-bold outline-none placeholder:text-black/35"
+                        className="min-w-0 flex-1 bg-transparent text-xs font-bold outline-none placeholder:text-foreground-placeholder theme-brutal:placeholder:text-black/35"
                         placeholder={formatMessage({ id: "activity.current.searchPlaceholder" })}
                         aria-label={formatMessage({ id: "activity.current.searchAria" })}
                         data-testid="activity-search-input"
@@ -1454,11 +1525,11 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                       items={activitySortOptions}
                     >
                       <SelectTrigger
-                        className="h-8 w-full border-2 border-black bg-white px-2 text-xs font-bold shadow-brutal-sm"
+                        className="h-8 w-full border border-line-muted bg-layer-panel px-2 text-xs font-bold shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
                         aria-label={formatMessage({ id: "activity.current.sortAria" })}
                         data-testid="activity-sort-select"
                       >
-                        <ArrowDownUp size={14} className="mr-1.5 shrink-0 text-black/55" />
+                        <ArrowDownUp size={14} className="mr-1.5 shrink-0 text-foreground-muted theme-brutal:text-black/55" />
                         <SelectValue />
                         <SelectIcon />
                       </SelectTrigger>
@@ -1475,14 +1546,17 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                     </Select>
                   </div>
                   {showMarkAllRead && (
-                    <button
+                  <Tooltip content={formatMessage({ id: "thread.markAllRead.title" })}>
+                    <Button
                       onClick={() => void markAllRead()}
-                      className="btn-brutal-sm inline-flex h-8 shrink-0 items-center whitespace-nowrap bg-white px-2 text-xs font-bold"
-                      title={formatMessage({ id: "thread.markAllRead.title" })}
+                      size="sm"
+                      variant="outline"
+                      className="h-8 shrink-0 whitespace-nowrap px-2 text-xs font-bold"
                       data-testid="inbox-mark-all-read"
                     >
                       {formatMessage({ id: "thread.markAllRead.label" })}
-                    </button>
+                    </Button>
+                  </Tooltip>
                   )}
                 </div>
               </>
@@ -1501,7 +1575,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                     <button
                       key={entry.value}
                       type="button"
-                      className={`h-8 shrink-0 border-2 px-2 text-xs font-bold ${activityView === entry.value ? "border-black bg-soft-signal shadow-brutal-sm" : "border-black/20 bg-white"}`}
+                      className={`h-8 shrink-0 border px-2 text-xs font-bold theme-brutal:border-2 ${activityView === entry.value ? "border-line-strong bg-primary-soft shadow-raft-sm text-primary-strong theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm" : "border-line-muted bg-layer-panel theme-brutal:border-black/20 theme-brutal:bg-white"}`}
                       onClick={() => setSidebarView(entry.value)}
                       data-testid={`inbox-filter-${entry.value}`}
                     >
@@ -1529,24 +1603,25 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                 </div>
               )}
               {activitySidebarInboxEnabled && selectedActivityGroup ? (
+                <Tooltip content={formatMessage({ id: "activity.channelFilter.clearTitle" }, { channel: stripActivityTitlePrefix(selectedActivityGroup.channelName) })}>
                 <button
                   type="button"
-                  className="hidden min-w-0 items-center gap-1.5 text-xs font-bold text-black/60 hover:text-black md:flex"
-                  title={formatMessage({ id: "activity.channelFilter.clearTitle" }, { channel: stripActivityTitlePrefix(selectedActivityGroup.channelName) })}
+                  className="hidden min-w-0 items-center gap-1.5 text-xs font-bold text-foreground-muted hover:text-foreground-strong theme-brutal:text-black/60 theme-brutal:hover:text-black md:flex"
                   onClick={() => setChannelFilterId(null)}
                   data-testid="activity-selected-channel-filter"
                 >
                   <ActivityGroupIcon group={selectedActivityGroup} dmChannel={dmChannelById.get(selectedActivityGroup.channelId) ?? null} />
                   <span className="truncate">{stripActivityTitlePrefix(selectedActivityGroup.channelName)}</span>
                 </button>
+                </Tooltip>
               ) : null}
             </div>
             <div className="flex shrink-0 items-center gap-2">
               {activitySidebarInboxEnabled ? (
                 <>
                   {(activitySearchVisible || inboxSearchQuery.trim()) ? (
-                    <label className="hidden h-8 w-[min(260px,24vw)] min-w-[180px] items-center gap-2 border-2 border-black bg-white px-2 shadow-brutal-sm md:flex">
-                      <Search size={14} className="shrink-0 text-black/55" />
+                    <label className="hidden h-8 w-[min(260px,24vw)] min-w-[180px] items-center gap-2 border border-line-muted bg-layer-panel px-2 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm md:flex">
+                      <Search size={14} className="shrink-0 text-foreground-muted theme-brutal:text-black/55" />
                       <input
                         ref={activitySearchInputRef}
                         value={inboxSearchQuery}
@@ -1555,7 +1630,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                           if (event.key !== "Escape" || inboxSearchQuery) return;
                           setActivitySearchVisible(false);
                         }}
-                        className="min-w-0 flex-1 bg-transparent text-xs font-bold outline-none placeholder:text-black/35"
+                        className="min-w-0 flex-1 bg-transparent text-xs font-bold outline-none placeholder:text-foreground-placeholder theme-brutal:placeholder:text-black/35"
                         placeholder={formatMessage({ id: "activity.current.searchPlaceholder" })}
                         aria-label={formatMessage({ id: "activity.current.searchAria" })}
                         data-testid="activity-search-input"
@@ -1569,11 +1644,11 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                       items={activitySortOptions}
                     >
                       <SelectTrigger
-                        className="h-8 min-w-[116px] border-2 border-black bg-white px-2 text-xs font-bold shadow-brutal-sm"
+                        className="h-8 min-w-[116px] border border-line-muted bg-layer-panel px-2 text-xs font-bold shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
                         aria-label={formatMessage({ id: "activity.current.sortAria" })}
                         data-testid="activity-sort-select"
                       >
-                        <ArrowDownUp size={14} className="mr-1.5 shrink-0 text-black/55" />
+                        <ArrowDownUp size={14} className="mr-1.5 shrink-0 text-foreground-muted theme-brutal:text-black/55" />
                         <SelectValue />
                         <SelectIcon />
                       </SelectTrigger>
@@ -1592,14 +1667,17 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                 </>
               ) : null}
               {showMarkAllRead && (
-                <button
-                  onClick={() => void markAllRead()}
-                  className="btn-brutal-sm inline-flex h-8 shrink-0 items-center whitespace-nowrap bg-white px-2 text-xs font-bold"
-                  title={formatMessage({ id: "thread.markAllRead.title" })}
-                  data-testid="inbox-mark-all-read"
-                >
-                  {formatMessage({ id: "thread.markAllRead.label" })}
-                </button>
+                <Tooltip content={formatMessage({ id: "thread.markAllRead.title" })}>
+                  <Button
+                    onClick={() => void markAllRead()}
+                    size="sm"
+                    variant="outline"
+                    className="h-8 shrink-0 whitespace-nowrap px-2 text-xs font-bold"
+                    data-testid="inbox-mark-all-read"
+                  >
+                    {formatMessage({ id: "thread.markAllRead.label" })}
+                  </Button>
+                </Tooltip>
               )}
             </div>
               </>
@@ -1609,20 +1687,22 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
           <div
             ref={scrollRef}
             data-testid="inbox-scroll"
-            className="scrollbar-quiet relative flex-1 overflow-y-overlay bg-white p-4 safe-bottom"
+            className="scrollbar-quiet relative flex-1 overflow-y-overlay bg-layer-canvas-muted p-4 safe-bottom theme-brutal:bg-white"
             onScroll={(e) => handleScroll(e.currentTarget)}
           >
             {newUpdateCount > 0 && (
-              <button
+              <Button
                 onClick={() => {
                   scrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
                   setNewUpdateCount(0);
                 }}
-                className="btn-brutal-sm sticky top-0 left-1/2 -translate-x-1/2 z-10 mb-2 flex items-center gap-1.5 bg-white px-3 py-1.5 text-xs font-bold"
+                size="sm"
+                variant="outline"
+                className="sticky top-0 left-1/2 -translate-x-1/2 z-10 mb-2 flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold"
               >
                 <ArrowUp size={14} />
                 {formatMessage({ id: "thread.newUpdates" }, { count: newUpdateCount })}
-              </button>
+              </Button>
             )}
             {visibleLoading && visibleItems.length === 0 ? (
               <ConversationCardSkeleton />
@@ -1690,7 +1770,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
                   );
                 })}
                 {visibleLoadingMore && (
-                  <div className="py-3 text-center text-xs font-bold text-black/40">{formatMessage({ id: "thread.loadingMore" })}</div>
+                  <div className="py-3 text-center text-xs font-bold text-foreground-muted">{formatMessage({ id: "thread.loadingMore" })}</div>
                 )}
               </div>
             )}
@@ -1712,6 +1792,7 @@ export default function ThreadsInbox({ onOpenItem, onDragItem, compactActivitySi
       ) : null}
       {contextMenuBackdrop}
       {contextMenuPortal}
+    </ActivityInboxPanel>
     </div>
   );
 }

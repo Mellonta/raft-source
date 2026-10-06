@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 import {
   legacySettingsRouteRedirectSlug,
   normalizeSettingsTab,
@@ -52,7 +51,7 @@ test("Server MCP configuration lives in global Settings while Agent MCP shows re
   assert.match(mcpPanel, /aria-label=\{formatMessage\(\{ id: "agent\.mcp\.aboutTool" \}, \{ name: label \}\)\}/u);
   assert.match(englishMessages, /"agent\.mcp\.aboutTool": "About \{name\}"/u);
   assert.match(mcpPanel, /normalizeManagedMcpToolDescription\(tool\.description\)/u);
-  assert.match(mcpPanel, /max-h-64 w-80[\s\S]*?bg-white[\s\S]*?font-normal/u);
+  assert.match(mcpPanel, /max-h-64 w-80[\s\S]*?font-normal/u);
   assert.match(mcpPanel, /new BroadcastChannel\(MANAGED_MCP_OAUTH_RESULT_CHANNEL\)/u);
   assert.match(mcpPanel, /event\.data[\s\S]*MANAGED_MCP_OAUTH_RESULT_CHANNEL[\s\S]*void load\(\)/u);
   assert.doesNotMatch(mcpPanel, /waitForPopupClose|Date\.now|setInterval/u);

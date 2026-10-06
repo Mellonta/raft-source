@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { resolveAttachmentPreviewUnified } from "./attachmentPreviewUnified.js";
+import { resolveAttachmentPreviewUnified } from "./attachmentPreviewUnified";
 
 // This gate is a kill switch over behaviour the chat body already shipped, so
 // the load-bearing case is the one nobody creates a flag row for. The first

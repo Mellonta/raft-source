@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   assertRegistrationEnabled,
   getRegistrationBlockedReason,
-} from "./registrationPolicy.js";
+} from "./registrationPolicy";
 
 test("registration policy allows staging", () => {
   const previousDeploymentEnv = process.env.DEPLOYMENT_ENV;

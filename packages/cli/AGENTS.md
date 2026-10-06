@@ -34,6 +34,10 @@ prompt/tool documentation, and `/internal/*` routes.
   strings, or `alice` only when a field explicitly documents a typed handle.
 - Channel/conversation references use the target DSL: `#channel`, `dm:@peer`,
   `#channel:shortid`, or `dm:@peer:shortid`.
+- A human and an agent in one server may share a name (e.g. both called `skyzh`).
+  For those names `dm:@skyzh` is ambiguous, so a DM target carries the peer kind:
+  `dm:@skyzh~agent` is the agent's DM, `dm:@skyzh~human` is the human's. Other
+  names keep the bare `dm:@peer` form.
 - The server-side internal boundary is responsible for resolving handles into
   UUIDs and applying server membership, visibility, deleted-agent, and authz
   checks. Daemon/CLI code may parse target syntax, but it must not become the
@@ -72,7 +76,7 @@ CLI commands should use the shared client in `src/client.ts` (it selects the tra
 
 ## v0 Boundary
 
-**In scope**: the MCP-parity command families (message, task, channel, reminder, mention, inbox), agent self-service commands (`channel join/leave/create/mute`, `thread unfollow`, `agent list/login`), and the extended surfaces (integration, knowledge/wiki, action, attachment, profile, server, app). The authoritative command list is the registry in `src/main.ts`.
+**In scope**: the MCP-parity command families (message, task, channel, reminder, mention, inbox), agent self-service commands (`channel join/leave/create/mute`, `thread unfollow`, `agent list/login`), and the extended surfaces (integration, knowledge, action, attachment, profile, server, app). The authoritative command list is the registry in `src/main.ts`.
 
 **Out of scope (v0)**:
 - Human login/logout (agent-only in v0)
@@ -82,3 +86,17 @@ CLI commands should use the shared client in `src/client.ts` (it selects the tra
 ## Distribution
 
 Published as `@botiverse/raft` for explicit agent-facing CLI installs and still bundled into the daemon for managed runner processes. The daemon copies `packages/cli/dist/` into its own package during build and injects that bundled `raft` entrypoint into spawned agent processes, so managed agents do not depend on a separate global CLI install.
+
+If a POSIX login shell puts a global CLI ahead of the injected wrapper, the CLI
+uses `SLOCK_CLI_TRANSPORT_DIR` together with the exact home/agent/launch projection
+to hand the command back to the managed wrapper before parsing or profile auth.
+It never searches other agents or copies their credentials. The handoff inherits
+stdio, preserves arguments and exit status, forwards SIGINT/SIGTERM/SIGHUP, and
+rejects reentry without wrapper credentials. Missing or mismatched managed paths
+fail explicitly instead of using a personal profile. Windows global-entry
+recovery still requires the injected `.cmd` wrapper; arbitrary arguments are not
+passed through a new shell. Outside managed contexts, normal CLI login applies.
+
+The subprocess contracts can be run against a freshly built npm bin with
+`RAFT_TEST_CLI_ENTRY=dist/raft.js pnpm exec vitest run src/auth/managedTransport.test.ts`
+from this package after `pnpm build` (use `dist/slock.js` to check the legacy bin).

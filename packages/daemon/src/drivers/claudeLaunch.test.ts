@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { test } from "vitest";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
+import os from "node:os";
 import {
   buildClaudeArgs,
   buildClaudeSpawnSpec,
   CLAUDE_DESKTOP_CLI_RELATIVE_PATH,
   CLAUDE_DISALLOWED_TOOLS,
+  writeClaudeSystemPromptFile,
   probeClaude,
   probeClaudeLaunch,
   resolveClaudeCommand,
   resolveClaudeLaunchCommand,
-} from "./claudeLaunch.js";
+} from "./claudeLaunch";
 
 const config = {
   name: "hao",
@@ -180,33 +182,43 @@ test("claude launch args do not pass chat-MCP config flags", () => {
   assert.ok(!args.includes("--runtime-actions-only"));
 });
 
-test("claude spawn spec uses shell for unresolved command on Windows", () => {
-  assert.deepEqual(buildClaudeSpawnSpec(null, "win32"), {
-    command: "claude",
-    shell: true,
-  });
-});
+test("claude spawn spec never uses a shell on Windows", () => {
+  const npmBin = "C:\\Users\\tester\\AppData\\Roaming\\npm";
+  const shim = `${npmBin}\\claude.cmd`;
+  const exe = `${npmBin}\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`;
+  const args = ["--settings", JSON.stringify({ fastMode: true }), "--model", "opus & echo x"];
+  const deps = {
+    platform: "win32" as const,
+    existsSyncFn: (file: string) => file === shim || file === exe,
+    readFileSyncFn: () => 'CALL :find_dp0\r\n"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n',
+    windowsEnvironmentReaderFn: () => ({}),
+    execFileSyncFn: ((command: string) => {
+      assert.equal(command, "powershell.exe");
+      return Buffer.from(`${shim}\r\n`);
+    }) as any,
+  };
 
-test("claude spawn spec uses shell for Windows batch shims", () => {
-  assert.deepEqual(buildClaudeSpawnSpec("C:\\Users\\tester\\AppData\\Roaming\\npm\\claude.cmd", "win32"), {
-    command: "C:\\Users\\tester\\AppData\\Roaming\\npm\\claude.cmd",
-    shell: true,
-  });
-  assert.deepEqual(buildClaudeSpawnSpec("C:\\tools\\claude.BAT", "win32"), {
-    command: "C:\\tools\\claude.BAT",
-    shell: true,
-  });
-});
-
-test("claude spawn spec does not use shell for executable paths or non-Windows platforms", () => {
-  assert.deepEqual(buildClaudeSpawnSpec("C:\\tools\\claude.exe", "win32"), {
+  assert.deepEqual(buildClaudeSpawnSpec(shim, args, deps), { command: exe, args, shell: false });
+  assert.deepEqual(buildClaudeSpawnSpec(null, args, deps), { command: exe, args, shell: false });
+  assert.deepEqual(buildClaudeSpawnSpec("claude", args, deps), { command: exe, args, shell: false });
+  assert.deepEqual(buildClaudeSpawnSpec("C:\\tools\\claude.exe", args, deps), {
     command: "C:\\tools\\claude.exe",
+    args,
     shell: false,
   });
-  assert.deepEqual(buildClaudeSpawnSpec("/usr/local/bin/claude", "darwin"), {
+  assert.throws(
+    () => buildClaudeSpawnSpec("C:\\tools\\claude.BAT", args, { ...deps, readFileSyncFn: () => "@echo off\r\n" }),
+    /batch wrapper/,
+  );
+});
+
+test("claude spawn spec passes the command through off Windows", () => {
+  assert.deepEqual(buildClaudeSpawnSpec("/usr/local/bin/claude", ["--model", "opus"], { platform: "darwin" }), {
     command: "/usr/local/bin/claude",
+    args: ["--model", "opus"],
     shell: false,
   });
+  assert.deepEqual(buildClaudeSpawnSpec(null, [], { platform: "linux" }), { command: "claude", args: [], shell: false });
 });
 
 test("resolveClaudeCommand falls back to Claude Desktop URL handler on macOS", () => {
@@ -302,4 +314,19 @@ test("probeClaude recovers on the next Windows detection after a command lookup 
     available: true,
     version: "2.1.210 (Claude Code)",
   });
+});
+
+
+// task #302 sibling arm: kimi.ts was the file that lacked an explicit mode, but
+// the invariant belongs to the whole runtime prompt-file family, so pin it here
+// too rather than leaving the sibling unguarded.
+test("claude system prompt file is written owner-only (task #302)", () => {
+  if (process.platform === "win32") return; // POSIX permission bits do not apply
+  const dir = mkdtempSync(path.join(os.tmpdir(), "claude-mode-"));
+  try {
+    const promptPath = writeClaudeSystemPromptFile("standing prompt body", dir);
+    assert.equal(statSync(promptPath).mode & 0o777, 0o600, "claude system prompt file must be 0600");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

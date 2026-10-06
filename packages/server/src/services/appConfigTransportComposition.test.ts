@@ -1,5 +1,5 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 /**
  * Composition integration teeth (task #204).
  *
@@ -14,12 +14,11 @@ import { closeTestDatabase, openTestDatabase } from "../test/integration/databas
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 
-import { getDb } from "../db/index.js";
-import { agents, servers, users } from "../db/schema.js";
-import { listBuiltInAppConfigSnapshotsForAgent } from "./appConfigTransportComposition.js";
-import { patchRapAppConfig } from "./rapAppConfigService.js";
+import { getDb } from "../db/index";
+import { agents, servers, users } from "../db/schema";
+import { listBuiltInAppConfigSnapshotsForAgent } from "./appConfigTransportComposition";
+import { patchRapAppConfig } from "./rapAppConfigService";
 
 
 const CLEANER = "system.cleaner";

@@ -2,11 +2,10 @@ import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { relative, resolve } from "node:path";
-import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
-import Spinner from "../src/components/ui/Spinner";
+import { Spinner } from "raft-ui";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const read = (path: string) => readFileSync(resolve(repoRoot, path), "utf8");
@@ -44,11 +43,15 @@ test("Spinner exposes xs/sm/md/lg + default/inverse + ring visual", () => {
   assert.match(mdDefault, /animate-spin/);
   assert.match(mdDefault, /border-2/);
 
-  // Default tone is black-on-light: faded black track with solid black tip.
-  assert.match(mdDefault, /border-black\/20 border-t-black/);
+  // Tone is owned by the RUI recipe: the ring paints with currentColor and the
+  // root carries the tone (black on light, white on dark).
+  assert.match(mdDefault, /text-black/);
+  assert.match(mdDefault, /border-current\/20 border-t-current/);
 
-  // Inverse tone is white-on-dark: faded white track with solid white tip.
-  assert.match(lgInverse, /border-white\/40 border-t-white/);
+  assert.match(lgInverse, /text-white/);
+  assert.match(lgInverse, /border-current\/40 border-t-current/);
+  // The adapter keeps the public RUI Spinner recipe wired in.
+  assert.match(mdDefault, /data-slot="spinner"|data-spinner-ring|relative inline-flex/);
 
   // role=status + aria-label so screen readers announce the loading state
   // (the inline div spinners this replaces had no a11y at all).
@@ -56,11 +59,11 @@ test("Spinner exposes xs/sm/md/lg + default/inverse + ring visual", () => {
   assert.match(mdDefault, /aria-label="Loading"/);
 });
 
-test("Spinner accepts custom label and merges className", () => {
+test("Spinner accepts an aria-label override and merges className", () => {
   const html = renderToStaticMarkup(
     createElement(Spinner, {
       size: "sm",
-      label: "Uploading",
+      "aria-label": "Uploading",
       className: "absolute bottom-2 right-2",
     }),
   );
@@ -164,22 +167,22 @@ test("migrated callsites import and use Spinner", () => {
   const selectModeToolbar = read("src/components/message/SelectModeToolbar.tsx");
   const agentWorkspace = read("src/components/agent/AgentWorkspace.tsx");
 
-  assert.match(imageLightbox, /import Spinner from "\.\/ui\/Spinner"/);
+  assert.match(imageLightbox, /import\s*\{[^}]*\bSpinner\b[^}]*\}\s*from\s*"raft-ui"/);
   assert.match(imageLightbox, /<Spinner size="lg" variant="inverse"/);
 
-  assert.match(attachmentChip, /import Spinner from "\.\.\/ui\/Spinner"/);
+  assert.match(attachmentChip, /import\s*\{[^}]*\bSpinner\b[^}]*\}\s*from\s*"raft-ui"/);
   assert.match(attachmentChip, /<Spinner size="sm"/);
 
-  assert.match(messageItem, /import Spinner from "\.\.\/ui\/Spinner"/);
+  assert.match(messageItem, /import\s*\{[^}]*\bSpinner\b[^}]*\}\s*from\s*"raft-ui"/);
   assert.match(messageItem, /<Spinner size="xs"/);
   assert.match(messageItem, /<Spinner size="md" variant="inverse"/);
 
-  assert.match(messageInput, /import Spinner from "\.\.\/ui\/Spinner"/);
+  assert.match(messageInput, /import\s*\{[^}]*\bSpinner\b[^}]*\}\s*from\s*"raft-ui"/);
   assert.match(messageInput, /<Spinner size="sm"/);
 
-  assert.match(selectModeToolbar, /import Spinner from "\.\.\/ui\/Spinner"/);
+  assert.match(selectModeToolbar, /import\s*\{[^}]*\bSpinner\b[^}]*\}\s*from\s*"raft-ui"/);
   assert.match(selectModeToolbar, /<Spinner size="sm"/);
 
-  assert.match(agentWorkspace, /import Spinner from "\.\.\/ui\/Spinner"/);
+  assert.match(agentWorkspace, /import\s*\{[^}]*\bSpinner\b[^}]*\}\s*from\s*"raft-ui"/);
   assert.match(agentWorkspace, /<Spinner size="xs"/);
 });

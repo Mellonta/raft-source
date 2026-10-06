@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import type { AppId } from "./rapRegistry.js";
+import type { AppId } from "./rapRegistry";
 import {
   MentionValidationError,
   validateStructuredResourceReferences,
-} from "./messageService.js";
+} from "./messageService";
 
 const COMPUTER_ID = "550e8400-e29b-41d4-a716-446655440000";
 

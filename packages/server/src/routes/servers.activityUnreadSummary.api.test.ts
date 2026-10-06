@@ -1,5 +1,5 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 /**
  * task #235 Phase 1 contract tests: additive per-server `activityUnreadCount`
  * in GET /api/servers/unread-summary.
@@ -19,12 +19,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { serverMembers, users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { addHuman, createChannel } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { computeActivityUnreadCounts } from "../services/activityUnreadSummaryService.js";
+import { getDb } from "../db/index";
+import { serverMembers, users } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { addHuman, createChannel } from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { computeActivityUnreadCounts } from "../services/activityUnreadSummaryService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

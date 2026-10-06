@@ -1,13 +1,13 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { and, eq, sql } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, serverMembers, servers, users } from "./schema.js";
-import { createServer } from "../services/serverService.js";
+import { getDb } from "../db/index";
+import { agents, serverMembers, servers, users } from "./schema";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

@@ -1,6 +1,6 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
-import type { DatabaseExecutor } from "../db/index.js";
-import { agents } from "../db/schema.js";
+import type { DatabaseExecutor } from "../db/index";
+import { agents } from "../db/schema";
 
 export class PrincipalHandleConflictError extends Error {
   constructor(message: string) {

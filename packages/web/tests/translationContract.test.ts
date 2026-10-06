@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { createElement } from "react";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 
@@ -20,7 +19,7 @@ import {
   normalizeTranslationLanguageCode,
   useTranslationStore,
 } from "../src/store/translationStore";
-import { shouldHideTranslationIndicator } from "../src/utils/translationContract.js";
+import { shouldHideTranslationIndicator } from "../src/utils/translationContract";
 
 const originalGet = api.get;
 
@@ -176,6 +175,7 @@ test("new users default off while the settings loader preserves the legacy auto 
   assert.equal(useTranslationStore.getInitialState().settings.preferredTranslationMode, "off");
   assert.equal(useTranslationStore.getInitialState().settings.autoTranslationEnabled, false);
 
+  useAuthStore.setState({ user: null } as never); // no signed-in user yet: the loader fetches it
   api.get = (async (url: string) => {
     if (url === "/auth/me") {
       return { data: { id: "legacy-user", preferredTranslationMode: null, autoTranslationEnabled: true } };
@@ -189,4 +189,38 @@ test("new users default off while the settings loader preserves the legacy auto 
   await useTranslationStore.getState().loadSettings("server-1");
   assert.equal(useTranslationStore.getState().settings.preferredTranslationMode, "auto");
   assert.equal(useTranslationStore.getState().settings.autoTranslationEnabled, true);
+});
+
+test("settings reuse the signed-in user from the auth store instead of re-fetching /auth/me (task #17)", async () => {
+  useTranslationStore.setState(useTranslationStore.getInitialState(), true);
+  useAuthStore.setState({
+    user: { id: "viewer-1", preferredLanguage: "ja", preferredTranslationMode: "auto", autoTranslationEnabled: true },
+  } as never);
+  const gets: string[] = [];
+  api.get = (async (url: string) => {
+    gets.push(url);
+    if (url === "/servers/server-1/translation-settings") {
+      return { data: { translationEnabled: true, translationAvailable: true } };
+    }
+    throw new Error(`Unexpected GET ${url}`);
+  }) as typeof api.get;
+
+  await useTranslationStore.getState().loadSettings("server-1");
+  assert.deepEqual(gets, ["/servers/server-1/translation-settings"], "no second /auth/me while the user is known");
+  assert.equal(useTranslationStore.getState().settings.preferredTranslationMode, "auto");
+  assert.equal(useTranslationStore.getState().settings.preferredLanguage, "ja");
+});
+
+test("settings fetch the user when the auth store has none and publish it there", async () => {
+  useTranslationStore.setState(useTranslationStore.getInitialState(), true);
+  useAuthStore.setState({ user: null } as never);
+  api.get = (async (url: string) => {
+    if (url === "/auth/me") return { data: { id: "viewer-2", preferredLanguage: "fr" } };
+    if (url === "/servers/server-1/translation-settings") return { data: { translationEnabled: false } };
+    throw new Error(`Unexpected GET ${url}`);
+  }) as typeof api.get;
+
+  await useTranslationStore.getState().loadSettings("server-1");
+  assert.equal(useTranslationStore.getState().settings.preferredLanguage, "fr");
+  assert.equal(useAuthStore.getState().user?.id, "viewer-2");
 });

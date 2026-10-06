@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { DaemonCore, DAEMON_CLI_USAGE, parseDaemonCliArgs } from "./core.js";
+import { DaemonCore, DAEMON_CLI_USAGE, parseDaemonCliArgs } from "./core";
 
 const parsedArgs = parseDaemonCliArgs(process.argv.slice(2));
 

@@ -1,11 +1,11 @@
-import { dbTest as test } from "../../test/integration/dbTest.js";
-import { closeTestDatabase } from "../../test/integration/database.js";
+import { dbTest as test } from "../../test/integration/dbTest";
+import { closeTestDatabase } from "../../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
-import { getDb } from "../../db/index.js";
-import { agents, channelAgents, channels, messages, reminderEvents, reminders, servers, users } from "../../db/schema.js";
-import { reminderSourceAcknowledgements } from "./sourceAckSchema.js";
+import { getDb } from "../../db/index";
+import { agents, channelAgents, channels, jointChannels, jointChannelServers, messages, reminderEvents, reminders, servers, users } from "../../db/schema";
+import { reminderSourceAcknowledgements } from "./sourceAckSchema";
+import * as channelService from "../../services/channelService";
 import {
   ackAuthorizedReminderFire,
   cancelReminder,
@@ -15,9 +15,9 @@ import {
   listReminders,
   toReminderSummaries,
   type TimeProvider,
-} from "./service.js";
-import { ackBuiltInAppSource } from "../../registry.manifest.js";
-import type { Recurrence } from "../../services/recurrence.js";
+} from "./service";
+import { ackBuiltInAppSource } from "../../registry.manifest";
+import type { Recurrence } from "../../services/recurrence";
 
 
 /**
@@ -423,9 +423,59 @@ test("reminder exact ACK writes one source-event-bound tombstone and repeats whi
   assert.equal(acknowledgements[0]?.ackAttemptId, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
 });
 
-test("reminder exact ACK treats newer fired source as stale before old tombstone idempotency", async ({ db }) => {
-
+test("reminder exact ACK can retire an older fired occurrence after recurring source advances", async ({ db }) => {
   const { server, agent, reminder, firstFire } = await seedFiredRecurringReminder();
+  const secondFire = firedOk(await fireReminder(
+    reminder.id,
+    firstFire.row.version,
+    { clock: clockAt(firstFire.row.fireAt) },
+  ));
+  assert.equal(secondFire.row.version, firstFire.row.version + 1);
+
+  const older = await ackAuthorizedReminderFire({
+    serverId: server.id,
+    actingAgentId: agent.id,
+    reminderId: reminder.id,
+    sourceVersion: reminder.version,
+    ackAttemptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  });
+  assert.equal(older.ok, true);
+  assert.equal(older.ok && older.sourceVersion, reminder.version);
+
+  const latest = await ackAuthorizedReminderFire({
+    serverId: server.id,
+    actingAgentId: agent.id,
+    reminderId: reminder.id,
+    sourceVersion: firstFire.row.version,
+    ackAttemptId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  });
+  assert.equal(latest.ok, true);
+  assert.equal(latest.ok && latest.sourceVersion, firstFire.row.version);
+
+  const acknowledgements = await getDb()
+    .select()
+    .from(reminderSourceAcknowledgements)
+    .where(eq(reminderSourceAcknowledgements.reminderId, reminder.id));
+  assert.deepEqual(
+    acknowledgements.map((ack) => ack.sourceVersion).sort((a, b) => a - b),
+    [reminder.version, firstFire.row.version],
+  );
+});
+
+test("canceled recurring reminder keeps each historical fire independently ACKable", async ({ db }) => {
+  const { server, agent, reminder, firstFire } = await seedFiredRecurringReminder();
+  const secondFire = firedOk(await fireReminder(
+    reminder.id,
+    firstFire.row.version,
+    { clock: clockAt(firstFire.row.fireAt) },
+  ));
+  const canceled = await cancelReminder(reminder.id, {
+    expectedVersion: secondFire.row.version,
+    clock: clockAt(secondFire.row.fireAt),
+  });
+  assert.ok(canceled);
+  assert.equal(canceled.status, "canceled");
+
   const firstAck = await ackAuthorizedReminderFire({
     serverId: server.id,
     actingAgentId: agent.id,
@@ -434,26 +484,34 @@ test("reminder exact ACK treats newer fired source as stale before old tombstone
     ackAttemptId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
   });
   assert.equal(firstAck.ok, true);
-
-  const secondFire = firedOk(await fireReminder(
-    reminder.id,
-    firstFire.row.version,
-    { clock: clockAt(firstFire.row.fireAt) },
-  ));
-  assert.equal(secondFire.row.version, firstFire.row.version + 1);
-
-  const stale = await ackAuthorizedReminderFire({
+  const secondAck = await ackAuthorizedReminderFire({
     serverId: server.id,
     actingAgentId: agent.id,
     reminderId: reminder.id,
-    sourceVersion: reminder.version,
+    sourceVersion: firstFire.row.version,
     ackAttemptId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
   });
-  assert.deepEqual(stale, {
-    ok: false,
-    reason: "stale_source_revision",
-    latestFiredSourceVersion: firstFire.row.version,
-  });
+  assert.equal(secondAck.ok, true);
+  assert.notEqual(
+    firstAck.ok && firstAck.sourceEventId,
+    secondAck.ok && secondAck.sourceEventId,
+    "each occurrence must bind a distinct fired event",
+  );
+
+  const acknowledgements = await getDb()
+    .select()
+    .from(reminderSourceAcknowledgements)
+    .where(eq(reminderSourceAcknowledgements.reminderId, reminder.id));
+  assert.deepEqual(
+    acknowledgements
+      .map((ack) => [ack.sourceVersion, ack.sourceEventId] as const)
+      .sort(([a], [b]) => a - b),
+    [
+      [reminder.version, firstAck.ok && firstAck.sourceEventId],
+      [firstFire.row.version, secondAck.ok && secondAck.sourceEventId],
+    ],
+  );
+  assert.equal((await getReminderById(reminder.id))?.status, "canceled");
 });
 
 test("same reminder ACK attempt can complete locally after Server accepted before a newer fire", async ({ db }) => {
@@ -624,6 +682,85 @@ test("toReminderSummaries returns anchored summaries without crashing on anchor 
   assert.ok(summary);
   assert.equal(summary.reminderId, anchored.id);
   assert.equal(summary.msgRef, "#general:55555555");
+});
+
+type PgliteLike = { query: (...args: unknown[]) => Promise<unknown> };
+
+async function countQueries<T>(fn: () => Promise<T>): Promise<{ result: T; count: number }> {
+  const client = (getDb() as unknown as { $client: PgliteLike }).$client;
+  const originalQuery = client.query.bind(client);
+  let count = 0;
+  client.query = ((...args: unknown[]) => {
+    count += 1;
+    return originalQuery(...args);
+  }) as PgliteLike["query"];
+  try {
+    return { result: await fn(), count };
+  } finally {
+    client.query = originalQuery;
+  }
+}
+
+test("toReminderSummaries resolves target channels in a constant number of queries, with resolveChannelAccess's visibility", async ({ db }) => {
+  const { server, agent, user } = await seedServerAndAgent();
+  const [otherServer] = await db.insert(servers).values({ name: "Other", slug: "other-reminder-batch", ownerId: user.id }).returning();
+  const [alpha, beta, projectedJoint, unprojectedJoint, deleted, foreign] = await db.insert(channels).values([
+    { serverId: server.id, name: "alpha", type: "channel" },
+    { serverId: server.id, name: "beta", type: "private" },
+    { serverId: server.id, name: "shared-room", type: "joint" },
+    { serverId: server.id, name: "left-room", type: "joint" },
+    { serverId: server.id, name: "gone", type: "channel", deletedAt: new Date() },
+    { serverId: otherServer.id, name: "elsewhere", type: "channel" },
+  ]).returning();
+  const [canonical] = await db.insert(channels).values({ serverId: otherServer.id, name: "canonical", type: "joint" }).returning();
+  const [joint] = await db.insert(jointChannels).values({
+    canonicalChannelId: canonical.id, createdByServerId: server.id, createdByUserId: user.id,
+  }).returning();
+  await db.insert(jointChannelServers).values([
+    { jointChannelId: joint.id, serverId: server.id, localChannelId: projectedJoint.id, role: "host", status: "active", joinedByUserId: user.id },
+    { jointChannelId: joint.id, serverId: otherServer.id, localChannelId: unprojectedJoint.id, role: "participant", status: "active", joinedByUserId: user.id },
+  ]);
+
+  const create = (targetChannelId: string, i: number) => createReminder({
+    serverId: server.id,
+    ownerAgentId: agent.id,
+    msgId: null,
+    targetChannelId,
+    title: `batch reminder ${i}`,
+    fireAt: new Date(Date.parse("2026-04-20T11:00:00.000Z") + i * 60_000),
+    payload: null,
+    createdBy: { type: "human", id: user.id },
+  }, { clock: FIXED_CLOCK });
+  const targets = [alpha, beta, projectedJoint, unprojectedJoint, deleted, foreign];
+  const rows: Array<Awaited<ReturnType<typeof createReminder>>> = [];
+  for (let i = 0; i < 24; i += 1) rows.push(await create(targets[i % targets.length]!.id, i));
+
+  const one = await countQueries(() => toReminderSummaries(rows.slice(0, 1), server.id));
+  const all = await countQueries(() => toReminderSummaries(rows, server.id));
+  assert.ok(one.count > 0, "the counter must observe queries, or the equality below proves nothing");
+  // servers + channels + joint projections, whatever the number of reminders.
+  assert.ok(all.count <= one.count + 1, `24 reminders took ${all.count} queries vs ${one.count} for one`);
+
+  const refById = new Map(all.result.map((summary) => [summary.reminderId, summary.msgRef]));
+  const refFor = (channelId: string) => refById.get(rows.find((r) => r.targetChannelId === channelId)!.id);
+  assert.equal(refFor(alpha.id), "#alpha");
+  assert.equal(refFor(beta.id), "#beta");
+  // A joint channel resolves (no top-level #ref for joint) only with an active projection in this server.
+  assert.equal(refFor(projectedJoint.id), null);
+  assert.equal(refFor(unprojectedJoint.id), null);
+  assert.equal(refFor(deleted.id), null, "a deleted target does not resolve");
+  assert.equal(refFor(foreign.id), null, "a target in another server does not resolve");
+  // The batch rule is channelService's single entry point: it agrees with
+  // resolveChannelAccess channel by channel.
+  const many = await channelService.resolveChannelAccessMany({ serverId: server.id, channelIds: targets.map((t) => t.id) });
+  for (const target of targets) {
+    const single = await channelService.resolveChannelAccess({ serverId: server.id, channelId: target.id });
+    assert.deepEqual(many.get(target.id) ?? null, single, target.name ?? target.id);
+  }
+  assert.ok(many.has(projectedJoint.id) && !many.has(unprojectedJoint.id));
+  const permalinkFor = (channelId: string) =>
+    all.result.find((summary) => summary.reminderId === rows.find((r) => r.targetChannelId === channelId)!.id)!.msgPermalink;
+  assert.equal(permalinkFor(deleted.id), null);
 });
 
 test("listReminders multi-status + anchored row can be summarized without malformed array binding", async ({ db }) => {

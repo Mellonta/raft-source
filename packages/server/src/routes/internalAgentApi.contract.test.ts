@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import { agentApiContract } from "@botiverse/raft-shared";
-import { internalAgentApiRouter } from "./internalAgentApi.js";
+import { internalAgentApiRouter } from "./internalAgentApi";
 
 function registeredRouteCounts(): Map<string, number> {
   const stack = (internalAgentApiRouter as unknown as { stack?: unknown[] }).stack ?? [];

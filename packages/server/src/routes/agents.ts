@@ -1,5 +1,7 @@
-import { Router, type Response, type Router as RouterType } from "express";
+import { Router, type Request, type Response, type Router as RouterType } from "express";
+import type { RuntimeFormV2SubmitRef } from "@botiverse/raft-runtime-form";
 import type { Server as SocketServer } from "socket.io";
+import { broadcastAgentUpdated } from "./agentUpdatedBroadcast";
 import { and, eq, inArray, isNull, or } from "drizzle-orm";
 import multer from "multer";
 import {
@@ -7,27 +9,26 @@ import {
   currentDate,
   type AgentMigrationUserErrorCode,
 } from "@botiverse/raft-shared";
-import * as agentService from "../services/agentService.js";
-import * as agentMigrationService from "../services/agentMigrationService.js";
-import { OFFICIAL_ONBOARDING_AGENT_IDENTITY } from "../services/officialOnboardingAgentIdentity.js";
-import * as agentRuntimeProfileService from "../services/agentRuntimeProfileService.js";
-import * as machineService from "../services/machineService.js";
-import * as onboardingService from "../services/onboardingService.js";
-import * as serverService from "../services/serverService.js";
-import { getDb } from "../db/index.js";
-import { agentMigrations, agents, machines, serverMembers, servers } from "../db/schema.js";
+import * as agentService from "../services/agentService";
+import * as agentMigrationService from "../services/agentMigrationService";
+import { OFFICIAL_ONBOARDING_AGENT_IDENTITY } from "../services/officialOnboardingAgentIdentity";
+import * as agentRuntimeProfileService from "../services/agentRuntimeProfileService";
+import * as machineService from "../services/machineService";
+import * as onboardingService from "../services/onboardingService";
+import * as serverService from "../services/serverService";
+import { getDb, type DatabaseTransaction } from "../db/index";
+import { FencedAuthorizationDeniedError, ServerMembershipRevokedError, withActorMembershipFence } from "../lib/actorMembershipFence";
+import { agentMigrations, agents, machines, serverMembers, servers, serverAgentMembers } from "../db/schema";
 import {
   AgentOrchestrator,
   KimiReasoningEffortUpgradeRequiredError,
   type MachineMigrationTransportState,
-} from "../services/agentOrchestrator.js";
-import { emitAgentMigrationUpdated } from "../services/agentMigrationRealtime.js";
-import { handleMachineLocalRouting, sendMachineAffinityUnavailable } from "../machineLocalReplay.js";
+} from "../services/agentOrchestrator";
+import { emitAgentMigrationUpdated } from "../services/agentMigrationRealtime";
+import { handleMachineLocalRouting, sendMachineAffinityUnavailable } from "../machineLocalReplay";
 import {
   buildLaunchPlan,
-  AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
-  AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-  AGENT_MIGRATION_SOURCE_WORKSPACE_ARCHIVE_CAPABILITY,
+  AGENT_MIGRATION_CAPABILITY,
   EXTERNAL_AGENT_RUNTIME_ID,
   EXTERNAL_AGENT_RUNTIME_MODEL,
   hydrateRuntimeConfig,
@@ -41,6 +42,7 @@ import {
   REASONING_EFFORTS,
   RUNTIME_CONFIG_VERSION,
   RUNTIMES,
+  type AgentCreateFormIssue,
   type LaunchPlan,
   type ReasoningEffort,
   type RuntimeConfig,
@@ -48,11 +50,11 @@ import {
   type ServerRole,
   asMachineId,
 } from "@botiverse/raft-shared";
-import { parseBrandedUuidFromBody } from "../lib/brandedParse.js";
-import { actorCanChangeServerMemberRole, actorHasServerCapabilityInServer, actorRoleHasServerCapability, getActorServerRoleInServer, userCanActOnAgentResource } from "../lib/actorPermissions.js";
-import { getCdnStorage } from "../services/storageService.js";
-import { streamStorageResponse } from "../services/storageResponseStream.js";
-import { decodePixelAvatarKey, renderPixelAvatarSvg } from "../services/pixelAvatarService.js";
+import { parseBrandedUuidFromBody } from "../lib/brandedParse";
+import { actorCanChangeServerMemberRole, actorHasServerCapabilityInServer, decideAgentConnectorAuthority, actorRoleHasServerCapability, getActorServerRoleInServer, roleCanInspectAgentPrivateSurfaces, userCanActOnAgentResource } from "../lib/actorPermissions";
+import { getCdnStorage } from "../services/storageService";
+import { streamStorageResponse } from "../services/storageResponseStream";
+import { decodePixelAvatarKey, renderPixelAvatarSvg } from "../services/pixelAvatarService";
 import {
   createAvatarUpload,
   MAX_PROFILE_AVATAR_BYTES,
@@ -60,49 +62,159 @@ import {
   PROFILE_AVATAR_TOO_LARGE_MESSAGE,
   runSingleAvatarUpload,
   storeAgentAvatar,
-} from "../services/avatarService.js";
-import * as channelService from "../services/channelService.js";
-import { addTraceEvent, createTraceDbQueryTracer, getCurrentTraceContext, tracePhase } from "../tracing/semanticTrace.js";
-import { RouteFailureError, resolveRouteFailureKind, resolveRouteFailureSubkind, sanitizeRouteErrorMessage, traceRouteFailure } from "../tracing/routeFailure.js";
-import { isPrincipalHandleConflictError } from "../services/principalHandleService.js";
-import * as agentScopesService from "../services/agentScopesService.js";
+} from "../services/avatarService";
+import * as channelService from "../services/channelService";
+import { addTraceEvent, createTraceDbQueryTracer, errorClassOf, getCurrentTraceContext, tracePhase } from "../tracing/semanticTrace";
+import { RouteFailureError, resolveRouteFailureKind, resolveRouteFailureSubkind, traceRouteFailure } from "../tracing/routeFailure";
+import { isPrincipalHandleConflictError } from "../services/principalHandleService";
+import * as agentScopesService from "../services/agentScopesService";
 import {
-  ALLOWED_AGENT_CAPABILITIES,
+  DEFAULT_EXTERNAL_AGENT_CAPABILITIES,
   getLatestActiveAgentCredential,
+  getAgentsLastSeenAt,
   isAgentBootstrapSurfaceEnabled,
   issueAgentBootstrapToken,
-  normalizeAgentCapabilities,
-  type AgentCapability,
-} from "../services/agentCredentialService.js";
+  resolveRequestedAgentCapabilities,
+} from "../services/agentCredentialService";
+import { broadcastAgentCredentialRevocation } from "../replicaRouter";
 import {
   AGENT_MIGRATION_FEATURE_FLAG_KEY,
   evaluateFeatureFlag,
-} from "../services/featureFlagService.js";
+} from "../services/featureFlagService";
 import {
   projectExistingAgentRuntimeOptions,
   resolveRuntimeAdmissionPolicy,
-} from "../services/runtimeAdmissionService.js";
-import { requireTeamBillingFeature } from "../services/planService.js";
+} from "../services/runtimeAdmissionService";
+import { requireTeamBillingFeature } from "../services/planService";
 import {
   buildKimiSdkFormOptionSource,
   runtimeConfigIssue,
   validateKimiSdkSelection,
   validateRuntimeFormDefinitionRef,
-} from "../services/runtimeFormDefinitionService.js";
-import { sendJsonServerError } from "./errorResponse.js";
+} from "../services/runtimeFormDefinitionService";
+import {
+  buildRuntimeConfigFromFormValues,
+  formValuesPointerForRuntimeConfigPointer,
+  reconcileRuntimeFormV2SubmissionWithLiveModels,
+  redactWriteOnlyRuntimeConfig,
+  retainOmittedWriteOnlySecrets,
+  runtimeFormV2Entry,
+  runtimeFormValuesFromRuntimeConfig,
+  validateRuntimeFormV2SubmitRef,
+  type RuntimeFormValuesOptions,
+} from "../services/runtimeFormV2Registry";
+import { sendJsonServerError } from "./errorResponse";
 import {
   assertProviderConnectionModelCompatible,
   ProviderConnectionError,
   resolveProviderConnectionSelection,
-} from "../services/providerConnectionService.js";
-import { isProviderConnectionsEnabled } from "../services/providerConnectionFeature.js";
+} from "../services/providerConnectionService";
+import { isProviderConnectionsEnabled } from "../services/providerConnectionFeature";
+import { isAgentRuntimeProviderKind } from "@botiverse/raft-shared";
+import { AgentRuntimeProviderError } from "../services/agentRuntimeProviderService";
+import {
+  assertProviderProvisioningAvailable,
+  beginProvisionedAgentDeletion,
+  fetchProviderAgentStatus,
+  getHostedRuntimeSummaries,
+  getHostedRuntimeSummary,
+  kickAgentRuntimeProvisionWorker,
+  noteProvisionedAgentProfileEdit,
+  recordAgentProvisioning,
+  retryAgentProvisioning,
+} from "../services/agentRuntimeProvisionService";
+import { kickAppNotificationDelivery } from "../services/appNotificationDeliveryService";
+import {
+  fetchHostedAgentUsage,
+  listHostedAgentWorkspaceFiles,
+  parseHostedUsageQuery,
+  readHostedAgentWorkspaceFile,
+  type ProviderSurfaceResult,
+} from "../services/agentRuntimeProviderSurfaceService";
+import { getExternalAgentDiagnostics } from "../services/externalAgentDiagnosticsService";
+import { serializeErrorForLog } from "../tracing/safeErrorLog";
+import { sendAgentRuntimeProviderError } from "./agentRuntimeProviders";
+import {
+  assignAgentConnectionConnector,
+  confirmAgentConnection,
+  disconnectAgentConnection,
+  disconnectAgentConnectionConnector,
+  findAgentConnectionConnector,
+  getAgentConnectionStatus,
+  startAgentConnection,
+  type AgentConnectionFailure,
+  type AgentConnectionViewer,
+} from "../services/agentConnectionService";
+import { recordIntegrationAuditEventBestEffort } from "../services/integrationAuditService";
+import { isAgentConnectionProvider, type AgentConnectionProvider } from "@botiverse/raft-shared";
+import { isAgentRuntimeProviderEnabledForServer } from "../services/agentRuntimeProviderFeature";
+
+function hostedRuntimeDisabledError(kind: string): AgentRuntimeProviderError {
+  return new AgentRuntimeProviderError(`The ${kind} hosted runtime is not enabled for this server`, "agent_runtime_provider_disabled");
+}
+
+/**
+ * A failed hosted-runtime surface proxy (workspace or usage): provider 400/404
+ * pass through as 400/404; not provisioned/active or provider not configured is
+ * 409 `hosted_runtime_<surface>_not_ready`; provider errors and network failures
+ * are 502 `hosted_runtime_<surface>_unavailable`.
+ */
+function sendHostedSurfaceFailure(
+  res: Response,
+  failure: Exclude<ProviderSurfaceResult<unknown>, { kind: "ok" }>,
+  surface: "workspace" | "usage",
+): { status: number; code: string; reason: string } {
+  let response: { status: number; code: string; reason: string; body: Record<string, unknown> };
+  switch (failure.kind) {
+    case "bad_request":
+      response = {
+        status: 400,
+        code: `hosted_runtime_${surface}_bad_request`,
+        reason: failure.error?.code ?? "bad_request",
+        body: { error: failure.error?.message || "The provider rejected the request", providerCode: failure.error?.code ?? null },
+      };
+      break;
+    case "not_found":
+      response = {
+        status: 404,
+        code: `hosted_runtime_${surface}_not_found`,
+        reason: failure.error?.code ?? "not_found",
+        body: { error: failure.error?.message || "Not found", providerCode: failure.error?.code ?? null },
+      };
+      break;
+    case "unavailable":
+      // Not provisioned or not active yet, or no provider on this deployment.
+      response = {
+        status: 409,
+        code: `hosted_runtime_${surface}_not_ready`,
+        reason: failure.reason,
+        body: { error: "The hosted runtime is not ready", reason: failure.reason },
+      };
+      break;
+    case "upstream_unavailable":
+      response = {
+        status: 502,
+        code: `hosted_runtime_${surface}_unavailable`,
+        reason: failure.reason,
+        body: { error: "The hosted runtime is unavailable right now", reason: failure.reason },
+      };
+      break;
+  }
+  res.status(response.status).json({ ...response.body, code: response.code });
+  return { status: response.status, code: response.code, reason: response.reason };
+}
 import {
   BuiltInModelCatalogError,
   builtInPresetSelectionChanged,
-} from "../services/builtinModelCatalogCompatibility.js";
-import { MachineCatalogStaleError } from "../services/machineCatalogAuthority.js";
+} from "../services/builtinModelCatalogCompatibility";
+import { MachineCatalogStaleError } from "../services/machineCatalogAuthority";
+import { guardUuidPathParams } from "../lib/uuidPathParams";
+import { mapWithConcurrency } from "../lib/mapWithConcurrency";
 
 export const agentRouter: RouterType = Router();
+
+// Uniform 404 for a non-UUID agent :id (task #12), before any handler runs.
+guardUuidPathParams(agentRouter, { id: "Agent" });
 
 // Guest conversations use a channel-scoped public profile projection. Permit
 // only the two reads which apply that projection below; every operational or
@@ -120,7 +232,6 @@ agentRouter.use(async (req, res, next) => {
 });
 export const agentAvatarRouter: RouterType = Router();
 const MAX_AGENT_DESCRIPTION_LENGTH = 3000;
-const MIN_MIGRATION_DAEMON_VERSION = "0.72.7";
 const KNOWN_REASONING_EFFORT_IDS = new Set<string>(REASONING_EFFORTS.map((effort) => effort.id));
 
 function persistedAgentReasoningEffort(
@@ -209,6 +320,54 @@ function sendBuiltInCatalogUnavailable(
     ),
   );
 }
+
+/**
+ * Catalog-missing is a diagnostic on the write paths, not a rejection.
+ *
+ * Ruled by @artin (#proj-daemon task #322): a model id absent from the target Computer's catalog
+ * must not, on its own, refuse a write. The catalog reports what one machine currently advertises;
+ * it is not the backend's final statement of what can run. Each machine upgrades on its own
+ * schedule, so rejecting on absence blocks agents one machine at a time rather than failing once,
+ * loudly.
+ *
+ * DELIBERATELY NARROW -- only `builtin_model_unsupported_by_target` is demoted:
+ *   - `builtin_catalog_unavailable` still rejects. That code means the catalog could not be read at
+ *     all, i.e. UNKNOWN, not KNOWN-ABSENT. Treating unknown as permission is a separate decision
+ *     and nobody has made it. (Scope confirmed by @Huaihuai before this change was written.)
+ *   - every other error, and every other config/permission check on these routes, is untouched:
+ *     this only removes catalog absence as a *sufficient* reason to reject.
+ *
+ * Returning null puts the caller on the exact path it already takes for a non-preset config, so no
+ * catalog authority is leased -- there is no catalog-supported model to pin.
+ */
+async function validateBuiltInPresetForWrite(
+  agentOrchestrator: AgentOrchestrator,
+  machineId: string,
+  runtimeConfig: RuntimeConfig,
+): Promise<
+  Awaited<ReturnType<AgentOrchestrator["validateBuiltInPresetForMachine"]>>
+> {
+  try {
+    return await agentOrchestrator.validateBuiltInPresetForMachine(
+      machineId,
+      runtimeConfig,
+    );
+  } catch (error) {
+    if (
+      error instanceof BuiltInModelCatalogError &&
+      error.code === "builtin_model_unsupported_by_target"
+    ) {
+      console.warn(
+        `[agents] Built-in catalog on machine ${machineId} does not list ${
+          error.requestedModel ?? "the requested model"
+        }; accepting the write (task #322). Start-time behaviour is unchanged.`,
+      );
+      return null;
+    }
+    throw error;
+  }
+}
+
 type MigrationTransferProvisioner = typeof agentMigrationService.provisionAgentMigrationObjectStoreTransfer;
 type MigrationLeaseDelivery = agentMigrationService.AgentMigrationTransportLeaseDelivery;
 
@@ -224,7 +383,7 @@ class MigrationRoutePreflightError extends Error {
 }
 
 function getErrorClass(error: unknown): string {
-  return error instanceof Error ? error.name : typeof error;
+  return errorClassOf(error);
 }
 
 function getErrorMessage(error: unknown): string {
@@ -254,40 +413,17 @@ function agentSkillsListErrorExcerpt(reason: AgentSkillsListFailureReason): stri
   }
 }
 
-function parseSemverTriple(value: string | null | undefined): [number, number, number] | null {
-  if (!value) return null;
-  const match = value.trim().match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
-  if (!match) return null;
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-function daemonVersionAtLeast(value: string | null | undefined, minimum: string): boolean {
-  const current = parseSemverTriple(value);
-  const floor = parseSemverTriple(minimum);
-  if (!current || !floor) return false;
-  for (let i = 0; i < 3; i += 1) {
-    if (current[i] > floor[i]) return true;
-    if (current[i] < floor[i]) return false;
-  }
-  return true;
-}
-
 function machineSupportsRuntime(runtimes: string[] | null, runtime: string): boolean {
   return Array.isArray(runtimes) && runtimes.includes(runtime);
 }
 
 type MigrationComputerCapabilitySide = "source" | "target";
-type MigrationComputerCapabilityReason =
-  | "daemon_version_unconfirmed"
-  | "daemon_version_too_old"
-  | "runtime_unconfirmed"
-  | "runtime_missing";
+type MigrationComputerCapabilityReason = "runtime_unconfirmed" | "runtime_missing";
 
 interface MigrationComputerCapabilityFailure {
   side: MigrationComputerCapabilitySide;
   reason: MigrationComputerCapabilityReason;
-  minimumDaemonVersion?: string;
-  runtime?: string;
+  runtime: string;
 }
 
 interface MigrationComputerCapabilityDetails {
@@ -299,57 +435,19 @@ type MigrationErrorDetails = (
   | MigrationComputerCapabilityDetails
 );
 
-function computerCapabilityFailures(args: {
-  sourceDaemonVersion: string | null | undefined;
-  targetDaemonVersion: string | null | undefined;
+function computerRuntimeFailures(args: {
   sourceRuntimes: string[] | null;
   targetRuntimes: string[] | null;
   runtime: string;
 }): MigrationComputerCapabilityFailure[] {
   const failures: MigrationComputerCapabilityFailure[] = [];
-  const computers = [
-    {
-      side: "source" as const,
-      daemonVersion: args.sourceDaemonVersion,
-      runtimes: args.sourceRuntimes,
-    },
-    {
-      side: "target" as const,
-      daemonVersion: args.targetDaemonVersion,
-      runtimes: args.targetRuntimes,
-    },
-  ];
-
-  for (const computer of computers) {
-    if (!parseSemverTriple(computer.daemonVersion)) {
-      failures.push({
-        side: computer.side,
-        reason: "daemon_version_unconfirmed",
-        minimumDaemonVersion: MIN_MIGRATION_DAEMON_VERSION,
-      });
-    } else if (!daemonVersionAtLeast(computer.daemonVersion, MIN_MIGRATION_DAEMON_VERSION)) {
-      failures.push({
-        side: computer.side,
-        reason: "daemon_version_too_old",
-        minimumDaemonVersion: MIN_MIGRATION_DAEMON_VERSION,
-      });
-    }
-
-    if (!Array.isArray(computer.runtimes)) {
-      failures.push({
-        side: computer.side,
-        reason: "runtime_unconfirmed",
-        runtime: args.runtime,
-      });
-    } else if (!machineSupportsRuntime(computer.runtimes, args.runtime)) {
-      failures.push({
-        side: computer.side,
-        reason: "runtime_missing",
-        runtime: args.runtime,
-      });
+  for (const [side, runtimes] of [["source", args.sourceRuntimes], ["target", args.targetRuntimes]] as const) {
+    if (!Array.isArray(runtimes)) {
+      failures.push({ side, reason: "runtime_unconfirmed", runtime: args.runtime });
+    } else if (!machineSupportsRuntime(runtimes, args.runtime)) {
+      failures.push({ side, reason: "runtime_missing", runtime: args.runtime });
     }
   }
-
   return failures;
 }
 
@@ -371,44 +469,23 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
-type MigrationResumableCapabilitySide = "source" | "target";
-type MigrationResumableCapabilityReason =
-  | "protocol_missing"
-  | "protocol_old"
-  | "capability_missing";
-
+/**
+ * Migration needs AGENT_MIGRATION_CAPABILITY on both computers; an older
+ * daemon must be upgraded first. `side` names the computer(s) to upgrade.
+ */
 interface MigrationResumableCapabilityDetail {
-  side: MigrationResumableCapabilitySide;
-  reason: MigrationResumableCapabilityReason;
+  side: "source" | "target" | "both";
+  reason: "capability_missing";
 }
 
-function resumableCapabilityReason(
-  transport: Pick<MachineMigrationTransportState, "protocol" | "capabilities"> | null,
-  side: MigrationResumableCapabilitySide,
-): MigrationResumableCapabilityReason | null {
-  if (!transport?.protocol) return "protocol_missing";
-  if (transport.protocol !== AGENT_MIGRATION_RESUMABLE_PROTOCOL) return "protocol_old";
-  if (!AGENT_MIGRATION_RESUMABLE_CAPABILITIES.every((capability) =>
-    transport.capabilities?.includes(capability))) {
-    return "capability_missing";
-  }
-  if (
-    side === "source"
-    && !transport.capabilities?.includes(AGENT_MIGRATION_SOURCE_WORKSPACE_ARCHIVE_CAPABILITY)
-  ) {
-    return "capability_missing";
-  }
-  return null;
-}
-
-function resumableCapabilityDetail(
-  source: Pick<MachineMigrationTransportState, "protocol" | "capabilities"> | null,
-  target: Pick<MachineMigrationTransportState, "protocol" | "capabilities"> | null,
+function migrationCapabilityDetail(
+  source: Pick<MachineMigrationTransportState, "capabilities"> | null,
+  target: Pick<MachineMigrationTransportState, "capabilities"> | null,
 ): MigrationResumableCapabilityDetail | null {
-  const sourceReason = resumableCapabilityReason(source, "source");
-  if (sourceReason) return { side: "source", reason: sourceReason };
-  const targetReason = resumableCapabilityReason(target, "target");
-  return targetReason ? { side: "target", reason: targetReason } : null;
+  const sourceMissing = !source?.capabilities?.includes(AGENT_MIGRATION_CAPABILITY);
+  const targetMissing = !target?.capabilities?.includes(AGENT_MIGRATION_CAPABILITY);
+  if (!sourceMissing && !targetMissing) return null;
+  return { side: sourceMissing && targetMissing ? "both" : sourceMissing ? "source" : "target", reason: "capability_missing" };
 }
 
 function sendMigrationError(
@@ -444,11 +521,17 @@ function serializeOwnerMigrationStatus(row: agentMigrationService.AgentMigration
     abortReason: row.abortReason,
     transportErrorCode: row.transportErrorCode,
     transportErrorMessage: row.transportErrorMessage,
+    sourceWorkspaceArchivedAt: row.sourceWorkspaceArchivedAt?.toISOString() ?? null,
+    sourceWorkspaceArchiveAbandonedAt: row.sourceWorkspaceArchiveAbandonedAt?.toISOString() ?? null,
+    sourceWorkspaceArchiveLastError: row.sourceWorkspaceArchiveLastError,
+    sourceQuiescedAt: isoOrNull(row.sourceQuiescedAt),
+    sourceBuildProgress: row.sourceBuildProgress ?? null,
     prepDeadlineAt: row.prepDeadlineAt.toISOString(),
     transferDeadlineAt: row.transferDeadlineAt.toISOString(),
     arrivalDeadlineAt: row.arrivalDeadlineAt.toISOString(),
     transportProvisioningStartedAt: isoOrNull(row.transportProvisioningStartedAt),
     transportProvisionedAt: isoOrNull(row.transportProvisionedAt),
+    transportControlRegisteredAt: isoOrNull(row.transportControlRegisteredAt),
     transportProvisionFailedAt: isoOrNull(row.transportProvisionFailedAt),
     transportLostAt: isoOrNull(row.transportLostAt),
     transportTeardownAt: isoOrNull(row.transportTeardownAt),
@@ -740,53 +823,8 @@ function withHydratedRuntimeConfig<
   };
 }
 
-function redactWriteOnlyRuntimeConfig(config: RuntimeConfig): RuntimeConfig {
-  if (config.runtime !== "builtin") return config;
-  if (config.provider.kind === "connection") return config;
-  return {
-    ...config,
-    provider: { ...config.provider, apiKey: "" },
-  };
-}
-
 function isRecordValue(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-/**
- * Update-only writeOnly semantics: omitting a Built-in provider secret keeps
- * the existing secret, but only while runtime/provider identity is unchanged.
- * Explicit blank/null values and provider switches still reach the parser and
- * fail closed; clients can never recover the retained value.
- */
-function retainOmittedBuiltInProviderSecret(
-  incoming: unknown,
-  existing: RuntimeConfig,
-): unknown {
-  if (
-    !isRecordValue(incoming)
-    || typeof incoming.runtime !== "string"
-    || incoming.runtime.trim() !== "builtin"
-    || existing.runtime !== "builtin"
-  ) return incoming;
-  if (!isRecordValue(incoming.provider) || Object.hasOwn(incoming.provider, "apiKey")) return incoming;
-  if (incoming.provider.kind === "connection" || existing.provider.kind === "connection") return incoming;
-  if (
-    incoming.provider.kind !== existing.provider.kind
-    || incoming.provider.providerId !== existing.provider.providerId
-    || !existing.provider.apiKey
-  ) return incoming;
-  if (
-    existing.provider.kind === "gateway"
-    && (
-      typeof incoming.provider.baseUrl !== "string"
-      || incoming.provider.baseUrl.trim() !== existing.provider.baseUrl.trim()
-    )
-  ) return incoming;
-  return {
-    ...incoming,
-    provider: { ...incoming.provider, apiKey: existing.provider.apiKey },
-  };
 }
 
 type LegacyKimiRuntimeConfigResult =
@@ -804,6 +842,24 @@ type LegacyKimiRuntimeConfigResult =
  *   schema-aware client so an incompatible value is neither leaked nor erased;
  * - no existing effort: a no-ref client may continue to submit only null.
  */
+
+/**
+ * Installed mobile clients send `loadLocalPlugins: null` for "not set" on every
+ * PATCH (kotlinx.serialization with explicit nulls). A model-only edit must not
+ * silently switch local extensions off, so null keeps the stored choice for a
+ * Built-in agent staying on Built-in; otherwise it is dropped (not set). An
+ * explicit true/false is left for parseRuntimeConfig to validate.
+ */
+function retainNullLoadLocalPlugins(runtimeConfig: unknown, existing: RuntimeConfig): unknown {
+  if (!runtimeConfig || typeof runtimeConfig !== "object" || Array.isArray(runtimeConfig)) return runtimeConfig;
+  const incoming = runtimeConfig as Record<string, unknown>;
+  if (incoming.loadLocalPlugins !== null) return runtimeConfig;
+  const { loadLocalPlugins: _dropped, ...rest } = incoming;
+  if (incoming.runtime === "builtin" && existing.runtime === "builtin" && typeof existing.loadLocalPlugins === "boolean") {
+    return { ...rest, loadLocalPlugins: existing.loadLocalPlugins };
+  }
+  return rest;
+}
 function retainLegacyKimiReasoningEffort(
   incoming: unknown,
   existing: RuntimeConfig,
@@ -1106,7 +1162,79 @@ export async function canInspectAgentPrivateSurfaces(
   agent: { creatorType: string | null; creatorId: string | null },
 ): Promise<boolean> {
   const callerRole = await getActorServerRoleInServer(serverId, "user", userId);
-  return userCanActOnAgentResource(callerRole, userId, agent, "editAgents");
+  return roleCanInspectAgentPrivateSurfaces(callerRole, userId, agent);
+}
+
+/**
+ * Protocol v2 submit (create and edit alike): the client sends field values and
+ * the server assembles the runtimeConfig, which then goes through the same
+ * validation as any request. The envelope is checked against the v2 registry
+ * (runtimeFormV2Registry), never the v1 refs: a runtime may have a v2 form and
+ * no v1 form. Issues from the later validation point at /runtimeConfig/...; a v2
+ * client only has field values, so they are rewritten to /formValues/<field>.
+ * Returns undefined for a non-v2 request, "handled" when a 400 was sent.
+ */
+function adoptRuntimeFormV2Submission(
+  req: Request,
+  res: Response,
+  options: RuntimeFormValuesOptions & { editing: boolean },
+): { runtimeConfig: Record<string, unknown>; formDefinitionRef: RuntimeFormV2SubmitRef } | "handled" | undefined {
+  const ref = req.body?.formDefinitionRef as { protocolVersion?: unknown; runtimeId?: unknown } | undefined;
+  if (ref?.protocolVersion !== 2) return undefined;
+  const refIssues = validateRuntimeFormV2SubmitRef(ref);
+  if (refIssues.length > 0) {
+    res.status(400).json({ error: "This runtime has no v2 runtime form", issues: refIssues });
+    return "handled";
+  }
+  const built = buildRuntimeConfigFromFormValues(ref.runtimeId, req.body?.formValues, options);
+  if (!built.ok) {
+    res.status(400).json({ error: "Runtime form values are invalid", issues: [built.issue] });
+    return "handled";
+  }
+  const sendJson = res.json.bind(res);
+  res.json = (payload: unknown) => {
+    const issues = (payload as { issues?: unknown } | null)?.issues;
+    if (Array.isArray(issues)) {
+      for (const issue of issues as Array<{ pointer?: unknown }>) {
+        if (typeof issue?.pointer === "string") {
+          issue.pointer = formValuesPointerForRuntimeConfigPointer(ref.runtimeId, issue.pointer);
+        }
+      }
+    }
+    return sendJson(payload);
+  };
+  return { runtimeConfig: built.runtimeConfig, formDefinitionRef: built.formDefinitionRef };
+}
+
+/**
+ * v2 submit: let the Computer's live model list decide what the static
+ * validation could not (reconcileRuntimeFormV2SubmissionWithLiveModels): keep a
+ * reasoning effort the live option offers, refuse one it does not, and store a
+ * live-listed model as a preset. Updates `normalized` in place; returns the 400
+ * body when the selection is refused.
+ */
+async function applyRuntimeFormV2LiveModels(
+  req: Request,
+  normalized: { runtimeConfig: RuntimeConfig | null; launch: LaunchPlan | null },
+  submittedReasoningEffort: unknown,
+  machineId: string | null | undefined,
+): Promise<{ error: string; issues: AgentCreateFormIssue[] } | null> {
+  if (!normalized.runtimeConfig) return null;
+  const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+  const result = await reconcileRuntimeFormV2SubmissionWithLiveModels({
+    runtimeConfig: normalized.runtimeConfig,
+    submittedReasoningEffort,
+    machineId,
+    detect: (id, runtime) => agentOrchestrator.detectMachineRuntimeModels(id, runtime),
+  });
+  if (result.kind === "rejected") {
+    return { error: "This reasoning effort is not available for the selected model on this computer", issues: [result.issue] };
+  }
+  if (result.kind === "updated") {
+    normalized.runtimeConfig = result.runtimeConfig;
+    normalized.launch = buildLaunchPlan(result.runtimeConfig);
+  }
+  return null;
 }
 
 async function currentUserCanActOnAgent(
@@ -1120,6 +1248,13 @@ async function currentUserCanActOnAgent(
 }
 
 // List all agents in server
+// Activity is resolved per agent and can fall back to Postgres (agent rows,
+// latest persisted activity) when the cache and Redis miss. An unbounded
+// Promise.all over a large server (362 agents, 133 deleted) borrowed 139 pool
+// connections at once on prod (2026-10-06 01:45Z). Bounded until resolution is
+// batched.
+const AGENT_LIST_ACTIVITY_CONCURRENCY = 8;
+
 agentRouter.get("/", async (req, res) => {
   try {
     addTraceEvent("agents.list.started");
@@ -1151,12 +1286,13 @@ agentRouter.get("/", async (req, res) => {
       ? list.filter((agent) => guestVisibleAgentIds.has(agent.id))
       : list;
     if (callerRole === "guest") {
-      const publicProfiles = await Promise.all(scopedList.map(async (agent) => {
+      const publicProfiles = await mapWithConcurrency(scopedList, AGENT_LIST_ACTIVITY_CONCURRENCY, async (agent) => {
         const { activity, activityDetail } = await agentOrchestrator.getActivity(agent.id, {
           parent: getCurrentTraceContext(),
+          persistedAgent: agent,
         });
         return toGuestChannelAgentProfile({ ...agent, activity, activityDetail });
-      }));
+      });
       addTraceEvent("response.ready", {
         agents_count: publicProfiles.length,
         profile_projection: "channel_summary",
@@ -1185,21 +1321,35 @@ agentRouter.get("/", async (req, res) => {
         },
       }),
     );
+    // External-agent presence: max(credential last_used_at) per external
+    // agent, one batched query for the page (managed agents have none).
+    const externalAgentIds = scopedList.filter((a) => isExternalAgentRuntime(a.runtime)).map((a) => a.id);
+    const lastSeenByAgent = externalAgentIds.length > 0
+      ? await getAgentsLastSeenAt(externalAgentIds)
+      : new Map<string, Date>();
     // Fetch activities (in-memory orchestrator lookup, fast) per-agent then
     // batch-enrich creator + createdAgents via one combined DB pass instead
     // of 2N queries. See agentService.batchEnrichAgentsWithCreatorProfile.
     const withActivity = await tracePhase(
-      () => Promise.all(scopedList.map(async (a) => {
-        const { activity, activityDetail } = await agentOrchestrator.getActivity(a.id, {
+      () => mapWithConcurrency(scopedList, AGENT_LIST_ACTIVITY_CONCURRENCY, async (a) => {
+        const { activity, activityDetail, activityDetailKind, deliveryConsumption, wakeCrashLoop } = await agentOrchestrator.getActivity(a.id, {
           parent: getCurrentTraceContext(),
+          persistedAgent: a,
         });
         return {
           ...withServerRoleProjection(withAgentProjection(a), roleByAgent.get(a.id) ?? null),
           activity,
           activityDetail,
+          // task #1116: typed detail kind + delivery-consumption carrier survive a refresh.
+          ...(activityDetailKind !== undefined ? { activityDetailKind } : {}),
+          ...(deliveryConsumption !== undefined ? { deliveryConsumption } : {}),
+          ...(wakeCrashLoop !== undefined ? { wakeCrashLoop } : {}),
           runtimeProfile: runtimeProfileByAgent.get(a.id) ?? null,
+          ...(isExternalAgentRuntime(a.runtime)
+            ? { lastSeenAt: lastSeenByAgent.get(a.id)?.toISOString() ?? null }
+            : {}),
         };
-      })),
+      }),
       (durationMs, result) => ({
         name: "activities.loaded",
         attrs: {
@@ -1222,12 +1372,12 @@ agentRouter.get("/", async (req, res) => {
         },
       }),
     );
-    const enriched = enrichedAll.map((agent) => userCanActOnAgentResource(
-      callerRole,
-      req.userId!,
-      agent,
-      "editAgents",
-    ) ? agent : stripEnvVars(agent));
+    const hostedRuntimeByAgent = await getHostedRuntimeSummaries(externalAgentIds);
+    const enriched = enrichedAll.map((agent) => {
+      if (!userCanActOnAgentResource(callerRole, req.userId!, agent, "editAgents")) return stripEnvVars(agent);
+      const hostedRuntime = hostedRuntimeByAgent.get(agent.id);
+      return hostedRuntime ? { ...agent, hostedRuntime } : agent;
+    });
     const strippedCount = enrichedAll.filter((agent) => !userCanActOnAgentResource(
       callerRole,
       req.userId!,
@@ -1264,8 +1414,18 @@ agentRouter.post("/", async (req, res) => {
       .where(eq(servers.id, req.serverId!))
       .limit(1);
     const expectedSetupStatus = ownerSetupAtRequestStart?.status ?? null;
-    const { name, description, model, runtime, runtimeConfig, formDefinitionRef, reasoningEffort, machineId, envVars, avatarUrl } = req.body;
+    const { name, description, model, runtime, reasoningEffort, machineId, envVars, avatarUrl, actionCardMessageId, actionCardConfirmationVersion } = req.body;
+    let { runtimeConfig, formDefinitionRef } = req.body;
     const external = req.body?.external === true;
+    let v2Submitted = false;
+    let v2SubmittedReasoningEffort: unknown = null;
+    if (!external) {
+      const v2 = adoptRuntimeFormV2Submission(req, res, { editing: false });
+      if (v2 === "handled") return;
+      if (v2) ({ runtimeConfig, formDefinitionRef } = v2);
+      v2Submitted = v2 !== undefined;
+      v2SubmittedReasoningEffort = v2 ? v2.runtimeConfig.reasoningEffort : null;
+    }
     const onboarding = req.body?.onboarding === true;
     if (external && onboarding) {
       res.status(400).json({ error: "Onboarding agent cannot be external" });
@@ -1316,7 +1476,8 @@ agentRouter.post("/", async (req, res) => {
     // envelope before consulting the runtime parser, and never fall back to
     // the legacy/external request shape for an unknown/stale version.
     if (formDefinitionRef !== undefined) {
-      const refIssues = validateRuntimeFormDefinitionRef(formDefinitionRef);
+      // A v2 envelope was already checked against the v2 registry.
+      const refIssues = v2Submitted ? [] : validateRuntimeFormDefinitionRef(formDefinitionRef);
       if (refIssues.length > 0) {
         res.status(409).json({ error: "Runtime form definition is stale or invalid", issues: refIssues });
         return;
@@ -1338,6 +1499,22 @@ agentRouter.post("/", async (req, res) => {
         });
         return;
       }
+    }
+    // Hosted runtime provider (raft-agent-provider.v1): only for external agents.
+    const rawProvider = req.body?.provider;
+    if (rawProvider !== undefined && rawProvider !== null) {
+      if (!external) {
+        res.status(400).json({ error: "provider is only valid for external agents", code: "agent_runtime_provider_invalid" });
+        return;
+      }
+      if (!isAgentRuntimeProviderKind(rawProvider)) {
+        res.status(400).json({ error: `Unknown runtime provider: ${String(rawProvider).slice(0, 40)}`, code: "agent_runtime_provider_invalid" });
+        return;
+      }
+    }
+    const hostedProvider = external && isAgentRuntimeProviderKind(rawProvider) ? rawProvider : null;
+    if (hostedProvider) {
+      await assertProviderProvisioningAvailable(req.serverId!, hostedProvider);
     }
     if (external) {
       const externalInput = buildExternalAgentCreateInput({
@@ -1363,8 +1540,20 @@ agentRouter.post("/", async (req, res) => {
         avatarUrl: createAvatarUrl || undefined,
         creatorType: "user",
         creatorId: req.userId!,
+        // Task #93 line G: re-check `createAgents` under a share lock on the creator's member row inside the create lock.
+        actorCapabilityFence: { userId: req.userId!, capability: "createAgents" },
         expectedSetupStatus,
+        actionCardMessageId: typeof actionCardMessageId === "string" ? actionCardMessageId : undefined,
+        actionCardConfirmationVersion: typeof actionCardConfirmationVersion === "number" ? actionCardConfirmationVersion : undefined,
+        ...(hostedProvider ? {
+          afterInsert: (tx, created) => recordAgentProvisioning(tx, {
+            agent: created,
+            provider: hostedProvider,
+            createdByUserId: req.userId!,
+          }),
+        } : {}),
       });
+      if (hostedProvider) kickAgentRuntimeProvisionWorker();
       const io = req.app.get("io") as SocketServer | undefined;
       await ensureCreatorAgentDmVisible({
         serverId: req.serverId!,
@@ -1374,7 +1563,8 @@ agentRouter.post("/", async (req, res) => {
       });
       const result = await agentService.enrichAgentWithCreatorProfile(withServerRoleProjection(withAgentProjection(agent), "member"));
       io?.to(`server:${req.serverId}`).emit("agent:created", { agent: stripEnvVars(result) });
-      res.json(result);
+      const hostedRuntime = hostedProvider ? await getHostedRuntimeSummary(agent.id) : null;
+      res.json(hostedRuntime ? { ...result, hostedRuntime } : result);
       return;
     }
 
@@ -1434,6 +1624,13 @@ agentRouter.post("/", async (req, res) => {
     if (normalizedConfig.error || !normalizedConfig.launch || !normalizedConfig.runtimeConfig) {
       res.status(400).json({ error: normalizedConfig.error });
       return;
+    }
+    if (v2Submitted) {
+      const live = await applyRuntimeFormV2LiveModels(req, normalizedConfig, v2SubmittedReasoningEffort, assignedMachine?.id);
+      if (live) {
+        res.status(400).json(live);
+        return;
+      }
     }
     if (
       normalizedConfig.runtimeConfig.runtime === "kimi-sdk"
@@ -1581,7 +1778,8 @@ agentRouter.post("/", async (req, res) => {
         return;
       }
       const validation =
-        await agentOrchestrator.validateBuiltInPresetForMachine(
+        await validateBuiltInPresetForWrite(
+          agentOrchestrator,
           assignedMachine.id,
           normalizedConfig.runtimeConfig,
         );
@@ -1613,7 +1811,11 @@ agentRouter.post("/", async (req, res) => {
         avatarUrl: createAvatarUrl || undefined,
         creatorType: "user",
         creatorId: req.userId!,
+        // Task #93 line G: re-check `createAgents` under a share lock on the creator's member row inside the create lock.
+        actorCapabilityFence: { userId: req.userId!, capability: "createAgents" },
         expectedSetupStatus,
+        actionCardMessageId: typeof actionCardMessageId === "string" ? actionCardMessageId : undefined,
+        actionCardConfirmationVersion: typeof actionCardConfirmationVersion === "number" ? actionCardConfirmationVersion : undefined,
         ...(providerConnection ? {
           providerConnection: {
             ...providerConnection,
@@ -1686,7 +1888,13 @@ agentRouter.post("/", async (req, res) => {
     res.json(result);
   } catch (err: any) {
     const msg = err?.message || "";
-    if (
+    if (err instanceof ServerMembershipRevokedError) {
+      // Task #93 line G: the creator's removal committed after the request-level check; nothing was created.
+      res.status(403).json({ error: err.message });
+    } else if (err instanceof FencedAuthorizationDeniedError) {
+      // Task #93 line G: the creator lost `createAgents` (demotion) before the create committed; nothing was created.
+      res.status(403).json({ error: "The `createAgents` capability is required to create agents" });
+    } else if (
       err instanceof BuiltInModelCatalogError ||
       err instanceof MachineCatalogStaleError
     ) {
@@ -1695,6 +1903,8 @@ agentRouter.post("/", async (req, res) => {
       res.status(409).json({ error: err.code });
     } else if (err instanceof ProviderConnectionError) {
       res.status(err.code === "provider_connection_invalid" ? 400 : 409).json({ error: err.message, code: err.code });
+    } else if (err instanceof AgentRuntimeProviderError) {
+      sendAgentRuntimeProviderError(res, err);
     } else if (isPrincipalHandleConflictError(err) || msg.includes("already taken")) {
       res.status(409).json({ error: msg });
     } else if (msg.includes("limit reached")) {
@@ -1710,13 +1920,11 @@ agentRouter.post("/", async (req, res) => {
         response_code: "internal_error",
         server_id: req.serverId,
       });
-      console.error(
-        "agent.create error:",
-        `server=${req.serverId}`,
-        err?.constructor?.name,
-        sanitizeRouteErrorMessage(msg),
-      );
-      res.status(500).json({ error: "Failed to create agent" });
+      sendJsonServerError(req, res, {
+        error: "Failed to create agent",
+        logPrefix: "agent.create error:",
+        err,
+      });
     }
   }
 });
@@ -1769,12 +1977,15 @@ agentRouter.post("/:id/onboarding-identity-adoption", async (req, res) => {
     const currentServerRole = await getActorServerRoleInServer(req.serverId!, "agent", existing.id);
     const adoption = buildOfficialOnboardingIdentityAdoption(existing, currentServerRole);
     const updated = adoption.canAdopt
-      ? await agentService.adoptOfficialOnboardingAgentIdentity(req.serverId!, existing.id, OFFICIAL_ONBOARDING_AGENT_IDENTITY)
+      ? await withFencedAgentAuthority(req.serverId!, req.userId!, existing.id, "editAgents", (tx) =>
+        agentService.adoptOfficialOnboardingAgentIdentity(req.serverId!, existing.id, OFFICIAL_ONBOARDING_AGENT_IDENTITY, { executor: tx }))
       : existing;
     if (!updated) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
+    // Adoption rewrites the name, display name, description and avatar: other open clients must re-read.
+    if (adoption.canAdopt) broadcastAgentUpdated(req, req.serverId!, updated.id);
     const runtimeProfile = await agentRuntimeProfileService.getAgentRuntimeProfileSummary(updated.id);
     const projectedServerRole = await getActorServerRoleInServer(req.serverId!, "agent", updated.id);
     const agent = await agentService.enrichAgentWithCreatorProfile({
@@ -1787,6 +1998,18 @@ agentRouter.post("/:id/onboarding-identity-adoption", async (req, res) => {
       agent,
     });
   } catch (err: unknown) {
+    if (err instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") {
+        res.status(404).json({ error: "Agent not found" });
+      } else {
+        res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to edit agents" });
+      }
+      return;
+    }
     if (isPrincipalHandleConflictError(err)) {
       res.status(409).json({ error: err instanceof Error ? err.message : "Agent name is already taken" });
       return;
@@ -1819,7 +2042,7 @@ agentRouter.get("/:id", async (req, res) => {
     const canManage = agent.serverId === req.serverId
       && userCanActOnAgentResource(callerRole, req.userId!, agent, "editAgents");
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
-    const { activity, activityDetail } = await agentOrchestrator.getActivity(agent.id, {
+    const { activity, activityDetail, activityDetailKind, deliveryConsumption, wakeCrashLoop } = await agentOrchestrator.getActivity(agent.id, {
       parent: getCurrentTraceContext(),
     });
     if (canViewViaJoint) {
@@ -1843,9 +2066,18 @@ agentRouter.get("/:id", async (req, res) => {
       ...withServerRoleProjection(withAgentProjection(agent), serverRole),
       activity,
       activityDetail,
+      // task #1116: typed detail kind + delivery-consumption carrier survive a refresh.
+      ...(activityDetailKind !== undefined ? { activityDetailKind } : {}),
+      ...(deliveryConsumption !== undefined ? { deliveryConsumption } : {}),
+      ...(wakeCrashLoop !== undefined ? { wakeCrashLoop } : {}),
       runtimeProfile,
     });
-    res.json(canManage ? result : stripEnvVars(result));
+    if (!canManage) {
+      res.json(stripEnvVars(result));
+      return;
+    }
+    const hostedRuntime = isExternalAgentRuntime(agent.runtime) ? await getHostedRuntimeSummary(agent.id) : null;
+    res.json(hostedRuntime ? { ...result, hostedRuntime } : result);
   } catch {
     res.status(500).json({ error: "Failed to get agent" });
   }
@@ -1909,13 +2141,525 @@ agentRouter.get("/:id/external-status", async (req, res) => {
       : "waiting_for_login";
     const recentActivity = await agentOrchestrator.listRecentActivityLog(agent.id, 1);
     const lastActivityAt = recentActivity.length > 0 ? recentActivity[0].timestamp : null;
+    const hostedRuntime = await getHostedRuntimeSummary(agent.id);
     res.json({
       setupState,
       credentialLastUsedAt: credential?.lastUsedAt ? credential.lastUsedAt.toISOString() : null,
       lastActivityAt,
+      ...(hostedRuntime ? { hostedRuntime } : {}),
     });
   } catch {
     res.status(500).json({ error: "Failed to get external agent status" });
+  }
+});
+
+// Diagnostics for external agents (the agent panel's "Copy diagnostic info"):
+// presence, reported status, push webhook, cursor pulls, provisioning and
+// account connections. Same access as the other private agent surfaces; the
+// view carries no secrets (the push endpoint is reduced to its host).
+agentRouter.get("/:id/external-diagnostics", async (req, res) => {
+  try {
+    const agent = await agentService.getAgent(req.params.id);
+    if (!agent || agent.serverId !== req.serverId) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    if (!isExternalAgentRuntime(agent.runtime)) {
+      res.status(400).json({ error: "Agent is not external", code: "agent_not_external" });
+      return;
+    }
+    const callerRole = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+    if (!roleCanInspectAgentPrivateSurfaces(callerRole, req.userId!, agent)) {
+      res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to view external agent diagnostics" });
+      return;
+    }
+    const diagnostics = await getExternalAgentDiagnostics({
+      agent,
+      agentOrchestrator: req.app.get("agentOrchestrator") as AgentOrchestrator,
+      viewer: { userId: req.userId!, role: callerRole },
+    });
+    res.setHeader("Cache-Control", "no-store");
+    res.json(diagnostics);
+  } catch (err) {
+    console.error("[agents] external diagnostics failed", serializeErrorForLog(err));
+    res.status(500).json({ error: "Failed to get external agent diagnostics" });
+  }
+});
+
+// Hosted runtime provisioning (raft-agent-provider.v1): our record plus, when
+// provisioned, the provider's own view (push status) as a passthrough.
+agentRouter.get("/:id/hosted-runtime", async (req, res) => {
+  try {
+    const agent = await agentService.getAgent(req.params.id);
+    if (!agent || agent.serverId !== req.serverId) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    if (!await canInspectAgentPrivateSurfaces(req.serverId!, req.userId!, agent)) {
+      res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to view hosted runtime status" });
+      return;
+    }
+    const hostedRuntime = await getHostedRuntimeSummary(agent.id);
+    if (!hostedRuntime) {
+      res.status(404).json({ error: "Agent does not run on a hosted runtime provider", code: "hosted_runtime_missing" });
+      return;
+    }
+    if (!await isAgentRuntimeProviderEnabledForServer(req.serverId!, hostedRuntime.provider)) {
+      sendAgentRuntimeProviderError(res, hostedRuntimeDisabledError(hostedRuntime.provider));
+      return;
+    }
+    const provider = req.query.live === "1"
+      ? await fetchProviderAgentStatus(agent.id)
+      : null;
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      hostedRuntime,
+      ...(provider ? { provider: provider.kind === "ok" ? { status: provider.status } : { unavailable: provider.reason } } : {}),
+    });
+  } catch {
+    res.status(500).json({ error: "Failed to get hosted runtime status" });
+  }
+});
+
+// Usage of a hosted agent (tokens, tool calls) as reported by its provider, in
+// time buckets. Default: the last 7 days, daily buckets; at most 31 days.
+agentRouter.get("/:id/hosted-runtime/usage", async (req, res) => {
+  try {
+    const agent = await agentService.getAgent(req.params.id);
+    if (!agent || agent.serverId !== req.serverId) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    if (!await canInspectAgentPrivateSurfaces(req.serverId!, req.userId!, agent)) {
+      res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to view hosted runtime usage" });
+      return;
+    }
+    const hostedRuntime = await getHostedRuntimeSummary(agent.id);
+    if (!hostedRuntime) {
+      res.status(404).json({ error: "Agent does not run on a hosted runtime provider", code: "hosted_runtime_missing" });
+      return;
+    }
+    if (!await isAgentRuntimeProviderEnabledForServer(req.serverId!, hostedRuntime.provider)) {
+      sendAgentRuntimeProviderError(res, hostedRuntimeDisabledError(hostedRuntime.provider));
+      return;
+    }
+    const query = parseHostedUsageQuery(req.query, new Date());
+    if (!query.ok) {
+      res.status(400).json({ error: query.error, code: "hosted_runtime_usage_invalid_query" });
+      return;
+    }
+    const result = await fetchHostedAgentUsage(agent.id, { from: query.from, to: query.to, bucket: query.bucket });
+    res.setHeader("Cache-Control", "no-store");
+    if (result.kind !== "ok") {
+      const failure = sendHostedSurfaceFailure(res, result, "usage");
+      addTraceEvent("agent.hosted_runtime.usage.failed", {
+        route_action: "hosted_runtime_usage",
+        outcome: "error",
+        reason: failure.reason,
+        http_status: failure.status,
+        response_code: failure.code,
+      });
+      return;
+    }
+    res.json(result.body);
+  } catch {
+    res.status(500).json({ error: "Failed to get hosted runtime usage" });
+  }
+});
+
+agentRouter.post("/:id/hosted-runtime/retry", async (req, res) => {
+  try {
+    const agent = await agentService.getAgent(req.params.id);
+    if (!agent || agent.serverId !== req.serverId) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    if (!await currentUserCanActOnAgent(req.serverId!, req.userId!, agent, "editAgents")) {
+      res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to retry provisioning" });
+      return;
+    }
+    const existingHostedRuntime = await getHostedRuntimeSummary(agent.id);
+    if (existingHostedRuntime && !await isAgentRuntimeProviderEnabledForServer(req.serverId!, existingHostedRuntime.provider)) {
+      sendAgentRuntimeProviderError(res, hostedRuntimeDisabledError(existingHostedRuntime.provider));
+      return;
+    }
+    const outcome = await withFencedAgentAuthority(req.serverId!, req.userId!, agent.id, "editAgents", (tx) =>
+      retryAgentProvisioning(tx, agent.id));
+    if (outcome === "not_found") {
+      res.status(404).json({ error: "Agent does not run on a hosted runtime provider", code: "hosted_runtime_missing" });
+      return;
+    }
+    if (outcome === "nothing_to_retry") {
+      res.status(409).json({ error: "Nothing to retry", code: "hosted_runtime_nothing_to_retry" });
+      return;
+    }
+    kickAgentRuntimeProvisionWorker();
+    res.json({ hostedRuntime: await getHostedRuntimeSummary(agent.id) });
+  } catch (err) {
+    if (err instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") res.status(404).json({ error: "Agent not found" });
+      else res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to retry provisioning" });
+      return;
+    }
+    res.status(500).json({ error: "Failed to retry provisioning" });
+  }
+});
+
+// Account connections of provider-backed agents (raft-agent-provider.v1
+// connections extension): the provider runs the OAuth flow and keeps the token;
+// Raft starts it, reads status and disconnects. Only the agent's human creator
+// or a server owner/admin (`editAgents`) may act; guests never.
+const AGENT_CONNECTION_FORBIDDEN = "Only the agent's creator or a server owner/admin can manage its connections";
+
+// Connections are tenant-level connectors shared by the server's agents:
+// assigning one to an agent or disconnecting it additionally needs the
+// connector's creator or a server owner/admin (decideAgentConnectorAuthority).
+const AGENT_CONNECTION_CONNECTOR_FORBIDDEN = "Only the connection's creator or a server admin can assign or disconnect it";
+
+async function loadAgentForConnection(req: Request, res: Response): Promise<{ agent: { id: string; serverId: string }; provider: AgentConnectionProvider; viewer: AgentConnectionViewer } | null> {
+  const provider = req.params.provider;
+  if (!isAgentConnectionProvider(provider)) {
+    res.status(404).json({ error: "Unknown connection provider", code: "agent_connection_provider_unknown" });
+    return null;
+  }
+  const agent = await agentService.getAgent(String(req.params.id));
+  if (!agent || agent.serverId !== req.serverId) {
+    res.status(404).json({ error: "Agent not found" });
+    return null;
+  }
+  const callerRole = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+  if (!callerRole || callerRole === "guest" || !roleCanInspectAgentPrivateSurfaces(callerRole, req.userId!, agent)) {
+    res.status(403).json({ error: AGENT_CONNECTION_FORBIDDEN, code: "agent_connection_forbidden" });
+    return null;
+  }
+  return { agent: { id: agent.id, serverId: agent.serverId }, provider, viewer: { userId: req.userId!, role: callerRole } };
+}
+
+/**
+ * Loads the agent (agent-level permission) and the connector the request
+ * names, then decides the caller's authority over that connector. Answers the
+ * request itself and returns null when refused; never calls the provider's
+ * mutating routes without an acting role.
+ */
+async function loadConnectorAction(
+  req: Request,
+  res: Response,
+  connectorId: unknown,
+): Promise<{ agent: { id: string; serverId: string }; provider: AgentConnectionProvider; viewer: AgentConnectionViewer; connectorId: string; actingRole: "creator" | "admin" } | null> {
+  const loaded = await loadAgentForConnection(req, res);
+  if (!loaded) return null;
+  if (typeof connectorId !== "string" || !connectorId) {
+    res.status(400).json({ error: "connectorId is required", code: "agent_connection_invalid" });
+    return null;
+  }
+  const found = await findAgentConnectionConnector(loaded.agent, loaded.provider, connectorId);
+  if (!found.ok) {
+    sendAgentConnectionFailure(res, found.failure);
+    return null;
+  }
+  const actingRole = decideAgentConnectorAuthority(loaded.viewer.role, loaded.viewer.userId, found.value.creatorRaftUserId);
+  if (!actingRole) {
+    res.status(403).json({ error: AGENT_CONNECTION_CONNECTOR_FORBIDDEN, code: "agent_connection_connector_forbidden" });
+    return null;
+  }
+  return { ...loaded, connectorId: found.value.id, actingRole };
+}
+
+function sendAgentConnectionFailure(res: Response, failure: AgentConnectionFailure): void {
+  switch (failure.kind) {
+    case "not_hosted":
+      res.status(400).json({ error: "Agent does not run on a hosted runtime provider", code: "agent_connection_not_provider_backed" });
+      return;
+    case "disabled":
+      sendAgentRuntimeProviderError(res, hostedRuntimeDisabledError(failure.provider));
+      return;
+    case "not_configured":
+      res.status(409).json({ error: "The hosted runtime provider is not configured on this deployment", code: "agent_runtime_provider_not_configured" });
+      return;
+    case "not_active":
+      res.status(409).json({ error: "The agent is not provisioned on its provider yet", code: "agent_connection_agent_not_active", state: failure.state });
+      return;
+    case "unsupported":
+      res.status(409).json({ error: "The provider does not support connections", code: "agent_connection_unsupported" });
+      return;
+    case "agent_missing_at_provider":
+      res.status(409).json({
+        error: "This agent no longer exists at its provider; connections are unavailable. Recreate the agent.",
+        code: "agent_connection_agent_missing_at_provider",
+        providerMessage: failure.message,
+      });
+      return;
+    case "connector_disconnect_partial":
+      res.status(502).json({
+        error: "Disconnect partially completed; retry to finish",
+        code: "agent_connection_connector_disconnect_partial",
+        failedCount: failure.failedCount,
+      });
+      return;
+    case "connector_not_found":
+      res.status(404).json({ error: "That connection does not exist on this server", code: "agent_connection_connector_not_found" });
+      return;
+    case "pending_invalid":
+      res.status(404).json({
+        error: "The connection link expired or is invalid; start again",
+        code: "agent_connection_pending_invalid",
+        providerCode: failure.providerCode,
+        providerMessage: failure.message,
+      });
+      return;
+    case "provider_error":
+      // A provider 4xx is a refusal with a reason the user can act on (e.g. the
+      // agent has no or several GitHub plugin mounts): pass it through, sanitized.
+      if (failure.httpStatus !== null && failure.httpStatus >= 400 && failure.httpStatus < 500) {
+        res.status(409).json({
+          error: failure.message ?? "The provider refused the request",
+          code: "agent_connection_provider_refused",
+          providerCode: failure.code,
+          providerMessage: failure.message,
+          providerStatus: failure.httpStatus,
+        });
+        return;
+      }
+      res.status(502).json({
+        error: "The provider could not complete the request",
+        code: "agent_connection_provider_error",
+        providerCode: failure.code,
+        providerMessage: failure.message,
+        providerStatus: failure.httpStatus,
+      });
+      return;
+  }
+}
+
+function agentConnectionFailureCode(failure: AgentConnectionFailure): string {
+  return failure.kind === "provider_error" ? failure.code : failure.kind;
+}
+
+agentRouter.get("/:id/connections/:provider", async (req, res) => {
+  try {
+    const loaded = await loadAgentForConnection(req, res);
+    if (!loaded) return;
+    const outcome = await getAgentConnectionStatus(loaded.agent, loaded.provider, loaded.viewer);
+    if (!outcome.ok) {
+      sendAgentConnectionFailure(res, outcome.failure);
+      return;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.json(outcome.value);
+  } catch {
+    res.status(500).json({ error: "Failed to get connection status" });
+  }
+});
+
+agentRouter.post("/:id/connections/:provider", async (req, res) => {
+  try {
+    const loaded = await loadAgentForConnection(req, res);
+    if (!loaded) return;
+    const rawAccess = req.body?.access;
+    if (rawAccess !== undefined && rawAccess !== null && rawAccess !== "private") {
+      res.status(400).json({ error: "access must be \"private\" when present", code: "agent_connection_invalid" });
+      return;
+    }
+    const access = rawAccess === "private" ? "private" : null;
+    const outcome = await startAgentConnection(loaded.agent, loaded.provider, { initiatedByUserId: req.userId!, access });
+    addTraceEvent("agent.connection.connect_initiated", {
+      connection_provider: loaded.provider,
+      access: access ?? "public",
+      outcome: outcome.ok ? "success" : "failure",
+      ...(outcome.ok ? {} : { error_code: agentConnectionFailureCode(outcome.failure) }),
+    });
+    await recordIntegrationAuditEventBestEffort({
+      serverId: loaded.agent.serverId,
+      eventType: "agent_connection.connect_initiated",
+      outcome: outcome.ok ? "success" : "failure",
+      source: "web",
+      actor: { type: "human", id: req.userId! },
+      subject: { type: "agent", id: loaded.agent.id },
+      target: { type: "agent", id: loaded.agent.id },
+      metadata: {
+        connectionProvider: loaded.provider,
+        access: access ?? "public",
+        ...(outcome.ok ? { scopes: outcome.value.scopes } : { errorCode: agentConnectionFailureCode(outcome.failure) }),
+      },
+    });
+    if (!outcome.ok) {
+      sendAgentConnectionFailure(res, outcome.failure);
+      return;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.json(outcome.value);
+  } catch {
+    res.status(500).json({ error: "Failed to start connection" });
+  }
+});
+
+// The provider parked the OAuth result as pending; confirm it for the signed-in
+// user (re-authorized here), never for the `by` the browser brought back.
+agentRouter.post("/:id/connections/:provider/confirm", async (req, res) => {
+  try {
+    const loaded = await loadAgentForConnection(req, res);
+    if (!loaded) return;
+    const pending = req.body?.pending;
+    if (typeof pending !== "string" || !pending) {
+      res.status(400).json({ error: "pending is required", code: "agent_connection_invalid" });
+      return;
+    }
+    const outcome = await confirmAgentConnection(loaded.agent, loaded.provider, { pending, confirmedByUserId: req.userId! }, loaded.viewer);
+    addTraceEvent("agent.connection.confirmed", {
+      connection_provider: loaded.provider,
+      outcome: outcome.ok ? "success" : "failure",
+      ...(outcome.ok ? {} : { error_code: agentConnectionFailureCode(outcome.failure) }),
+    });
+    await recordIntegrationAuditEventBestEffort({
+      serverId: loaded.agent.serverId,
+      eventType: "agent_connection.confirmed",
+      outcome: outcome.ok ? "success" : "failure",
+      source: "web",
+      actor: { type: "human", id: req.userId! },
+      subject: { type: "agent", id: loaded.agent.id },
+      target: { type: "agent", id: loaded.agent.id },
+      metadata: {
+        connectionProvider: loaded.provider,
+        ...(outcome.ok
+          ? outcome.value.supported
+            ? { account: outcome.value.account, connectorId: outcome.value.connectorId }
+            : { account: null }
+          : { errorCode: agentConnectionFailureCode(outcome.failure) }),
+      },
+    });
+    if (!outcome.ok) {
+      sendAgentConnectionFailure(res, outcome.failure);
+      return;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.json(outcome.value);
+  } catch {
+    res.status(500).json({ error: "Failed to confirm connection" });
+  }
+});
+
+// Point this agent at one of the server's connectors (creator or owner/admin of
+// the connector, on top of managing the agent).
+agentRouter.put("/:id/connections/:provider", async (req, res) => {
+  try {
+    const loaded = await loadConnectorAction(req, res, req.body?.connectorId);
+    if (!loaded) return;
+    const outcome = await assignAgentConnectionConnector(
+      loaded.agent,
+      loaded.provider,
+      { connectorId: loaded.connectorId, actingRaftUserId: req.userId!, actingRole: loaded.actingRole },
+      loaded.viewer,
+    );
+    addTraceEvent("agent.connection.connector_assigned", {
+      connection_provider: loaded.provider,
+      acting_role: loaded.actingRole,
+      outcome: outcome.ok ? "success" : "failure",
+      ...(outcome.ok ? {} : { error_code: agentConnectionFailureCode(outcome.failure) }),
+    });
+    await recordIntegrationAuditEventBestEffort({
+      serverId: loaded.agent.serverId,
+      eventType: "agent_connection.connector_assigned",
+      outcome: outcome.ok ? "success" : "failure",
+      source: "web",
+      actor: { type: "human", id: req.userId! },
+      subject: { type: "agent", id: loaded.agent.id },
+      target: { type: "agent", id: loaded.agent.id },
+      metadata: {
+        connectionProvider: loaded.provider,
+        connectorId: loaded.connectorId,
+        actingRole: loaded.actingRole,
+        ...(outcome.ok ? {} : { errorCode: agentConnectionFailureCode(outcome.failure) }),
+      },
+    });
+    if (!outcome.ok) {
+      sendAgentConnectionFailure(res, outcome.failure);
+      return;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.json(outcome.value);
+  } catch {
+    res.status(500).json({ error: "Failed to switch connection" });
+  }
+});
+
+// Disconnect a whole connector: every agent using it loses access. Addressed
+// through an agent the caller can manage (the connector list comes from that
+// agent's status), plus creator or owner/admin of the connector.
+agentRouter.delete("/:id/connections/:provider/connectors/:connectorId", async (req, res) => {
+  try {
+    const loaded = await loadConnectorAction(req, res, req.params.connectorId);
+    if (!loaded) return;
+    const outcome = await disconnectAgentConnectionConnector(loaded.agent, {
+      connectorId: loaded.connectorId,
+      actingRaftUserId: req.userId!,
+      actingRole: loaded.actingRole,
+    });
+    addTraceEvent("agent.connection.connector_disconnected", {
+      connection_provider: loaded.provider,
+      acting_role: loaded.actingRole,
+      outcome: outcome.ok ? "success" : "failure",
+      ...(outcome.ok ? {} : { error_code: agentConnectionFailureCode(outcome.failure) }),
+    });
+    await recordIntegrationAuditEventBestEffort({
+      serverId: loaded.agent.serverId,
+      eventType: "agent_connection.connector_disconnected",
+      outcome: outcome.ok ? "success" : "failure",
+      source: "web",
+      actor: { type: "human", id: req.userId! },
+      subject: { type: "agent", id: loaded.agent.id },
+      target: { type: "agent", id: loaded.agent.id },
+      metadata: {
+        connectionProvider: loaded.provider,
+        connectorId: loaded.connectorId,
+        actingRole: loaded.actingRole,
+        ...(outcome.ok ? {} : { errorCode: agentConnectionFailureCode(outcome.failure) }),
+      },
+    });
+    if (!outcome.ok) {
+      sendAgentConnectionFailure(res, outcome.failure);
+      return;
+    }
+    res.status(204).end();
+  } catch {
+    res.status(500).json({ error: "Failed to disconnect the connection" });
+  }
+});
+
+// Detach this agent from its connector; the connector stays for other agents.
+agentRouter.delete("/:id/connections/:provider", async (req, res) => {
+  try {
+    const loaded = await loadAgentForConnection(req, res);
+    if (!loaded) return;
+    const outcome = await disconnectAgentConnection(loaded.agent, loaded.provider);
+    addTraceEvent("agent.connection.disconnected", {
+      connection_provider: loaded.provider,
+      outcome: outcome.ok ? "success" : "failure",
+      ...(outcome.ok ? {} : { error_code: agentConnectionFailureCode(outcome.failure) }),
+    });
+    await recordIntegrationAuditEventBestEffort({
+      serverId: loaded.agent.serverId,
+      eventType: "agent_connection.disconnected",
+      outcome: outcome.ok ? "success" : "failure",
+      source: "web",
+      actor: { type: "human", id: req.userId! },
+      subject: { type: "agent", id: loaded.agent.id },
+      target: { type: "agent", id: loaded.agent.id },
+      metadata: {
+        connectionProvider: loaded.provider,
+        ...(outcome.ok ? {} : { errorCode: agentConnectionFailureCode(outcome.failure) }),
+      },
+    });
+    if (!outcome.ok) {
+      sendAgentConnectionFailure(res, outcome.failure);
+      return;
+    }
+    res.status(204).end();
+  } catch {
+    res.status(500).json({ error: "Failed to disconnect" });
   }
 });
 
@@ -1980,6 +2724,35 @@ agentRouter.get("/:id/channels", async (req, res) => {
   }
 });
 
+// Runtime form protocol v2 for editing: the same form create uses, plus this
+// agent's current values (writeOnly fields omitted). Clients never map a
+// stored runtimeConfig back to fields themselves.
+agentRouter.get("/:id/runtime-form", async (req, res) => {
+  try {
+    const existing = await agentService.getAgent(req.params.id);
+    if (!existing || existing.serverId !== req.serverId) {
+      res.status(404).json({ error: "Agent not found" });
+      return;
+    }
+    if (!await currentUserCanActOnAgent(req.serverId!, req.userId!, existing, "editAgents")) {
+      res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to edit agents" });
+      return;
+    }
+    const values = runtimeFormValuesFromRuntimeConfig(existing.runtimeConfig);
+    const definition = runtimeFormV2Entry(existing.runtime)?.buildForm() ?? null;
+    if (!definition || !values) {
+      res.status(404).json({
+        error: "This agent's runtime configuration has no editable runtime form",
+        issues: [{ code: "no_runtime_form", pointer: "/runtimeConfig" }],
+      });
+      return;
+    }
+    res.json({ ...definition, values });
+  } catch {
+    res.status(500).json({ error: "Failed to load runtime form" });
+  }
+});
+
 // Update agent profile
 agentRouter.patch("/:id", async (req, res) => {
   try {
@@ -1992,7 +2765,21 @@ agentRouter.patch("/:id", async (req, res) => {
       res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to edit agents" });
       return;
     }
-    const { displayName, description, avatarUrl, model, runtime, runtimeConfig, formDefinitionRef, reasoningEffort, envVars, restartMode, serverRole: requestedServerRole } = req.body;
+    const { displayName, description, avatarUrl, model, runtime, reasoningEffort, envVars, restartMode, serverRole: requestedServerRole } = req.body;
+    let { runtimeConfig, formDefinitionRef } = req.body;
+    let v2Submitted = false;
+    let v2SubmittedReasoningEffort: unknown = null;
+    if (!isExternalAgentRuntime(existing.runtime)) {
+      const v2 = adoptRuntimeFormV2Submission(req, res, {
+        editing: true,
+        // Fields a v2 form does not show keep their stored value (Antigravity's model).
+        existing: hydrateRuntimeConfig(existing),
+      });
+      if (v2 === "handled") return;
+      if (v2) ({ runtimeConfig, formDefinitionRef } = v2);
+      v2Submitted = v2 !== undefined;
+      v2SubmittedReasoningEffort = v2 ? v2.runtimeConfig.reasoningEffort : null;
+    }
     if (isExternalAgentRuntime(existing.runtime) && isManagedRuntimeFieldTouched(req.body ?? {})) {
       res.status(400).json({ error: "External agent runtime fields are immutable" });
       return;
@@ -2080,7 +2867,7 @@ agentRouter.patch("/:id", async (req, res) => {
       : runtime ?? existing.runtime;
     const updatedRuntime = typeof rawUpdatedRuntime === "string" ? rawUpdatedRuntime.trim() : rawUpdatedRuntime;
     const existingRuntimeConfig = hydrateRuntimeConfig(existing);
-    let requestRuntimeConfig = runtimeConfig;
+    let requestRuntimeConfig = retainNullLoadLocalPlugins(runtimeConfig, existingRuntimeConfig);
     if (runtimeConfigTouched && updatedRuntime === "kimi-sdk" && formDefinitionRef === undefined) {
       if (reasoningEffort !== undefined && reasoningEffort !== null) {
         sendKimiReasoningEffortUpgradeRequired(res, "/formDefinitionRef");
@@ -2112,7 +2899,8 @@ agentRouter.patch("/:id", async (req, res) => {
       }
     }
     if (formDefinitionRef !== undefined) {
-      const refIssues = validateRuntimeFormDefinitionRef(formDefinitionRef);
+      // A v2 envelope was already checked against the v2 registry.
+      const refIssues = v2Submitted ? [] : validateRuntimeFormDefinitionRef(formDefinitionRef);
       if (refIssues.length > 0) {
         res.status(409).json({ error: "Runtime form definition is stale or invalid", issues: refIssues });
         return;
@@ -2128,7 +2916,7 @@ agentRouter.patch("/:id", async (req, res) => {
     const normalizedConfig = runtimeConfigTouched
       ? normalizeRequestRuntimeConfig({
           runtimeConfig: requestRuntimeConfig !== undefined
-            ? retainOmittedBuiltInProviderSecret(requestRuntimeConfig, existingRuntimeConfig)
+            ? retainOmittedWriteOnlySecrets(requestRuntimeConfig, existingRuntimeConfig)
             : existing.runtimeConfig,
           runtime: runtime ?? existing.runtime,
           model: model ?? existing.model,
@@ -2141,6 +2929,13 @@ agentRouter.patch("/:id", async (req, res) => {
     if (normalizedConfig?.error || (normalizedConfig && (!normalizedConfig.launch || !normalizedConfig.runtimeConfig))) {
       res.status(400).json({ error: normalizedConfig.error });
       return;
+    }
+    if (v2Submitted && normalizedConfig) {
+      const live = await applyRuntimeFormV2LiveModels(req, normalizedConfig, v2SubmittedReasoningEffort, existing.machineId);
+      if (live) {
+        res.status(400).json(live);
+        return;
+      }
     }
     const normalizedLaunch = normalizedConfig?.launch ?? null;
     if (normalizedLaunch && isRuntimeDeprecated(normalizedLaunch.runtime) && normalizedLaunch.runtime !== existing.runtime) {
@@ -2282,7 +3077,8 @@ agentRouter.patch("/:id", async (req, res) => {
         return;
       }
       const validation =
-        await agentOrchestrator.validateBuiltInPresetForMachine(
+        await validateBuiltInPresetForWrite(
+          agentOrchestrator,
           existing.machineId,
           normalizedRuntimeConfig,
         );
@@ -2297,24 +3093,45 @@ agentRouter.patch("/:id", async (req, res) => {
     const runtimeChanged = normalizedLaunch !== null && normalizedLaunch.runtime !== existing.runtime;
     const profileFieldsTouched = displayName !== undefined || description !== undefined || avatarUrl !== undefined;
     const updateAgentRow = profileFieldsTouched || runtimeChanged || normalizedConfig !== null;
+    const runtimeConfigChanged = normalizedRuntimeConfig !== null
+      && JSON.stringify(normalizedRuntimeConfig) !== JSON.stringify(existingRuntimeConfig);
+    const runtimeProfileIdentityChanged =
+      runtimeChanged
+      || (normalizedLaunch !== null && normalizedLaunch.model !== existing.model)
+      || (normalizedLaunch !== null && (normalizedLaunch.reasoningEffort ?? null) !== (existing.reasoningEffort ?? null))
+      || runtimeConfigChanged;
+    // RFC 071 §5 (F3): the terminal-failure breaker lifts only when a runtime,
+    // model, reasoning or env VALUE differs from the stored one.
+    const runtimeValuesChanged = runtimeProfileIdentityChanged
+      || (normalizedConfig !== null
+        && JSON.stringify(normalizedConfig.persistedEnvVars ?? null) !== JSON.stringify(existing.envVars ?? null));
     let updated: Awaited<ReturnType<typeof agentService.updateAgent>>;
+    // Task #91: the Agent role change, the agent row update and the runtime-profile migration enqueue commit in one
+    // fenced transaction: caller member row (share) → agent row (update) → agent member row. The request-level checks
+    // above stay as fast refusals; the predicates are re-evaluated here under the locks. Telemetry, cache eviction
+    // and the restart run only after commit (the restart is a runtime effect that task #93 fences).
+    const afterCommit: Array<() => void> = [];
     try {
-      if (nextServerRole !== undefined) {
-        const currentRole = await getActorServerRoleInServer(
-          req.serverId!,
-          "agent",
-          existing.id,
-        );
-        if (currentRole && currentRole !== nextServerRole) {
-          await serverService.updateAgentMemberRole(
-            req.serverId!,
-            existing.id,
-            nextServerRole,
-          );
+      updated = await withFencedAgentAuthority(req.serverId!, req.userId!, req.params.id, "editAgents", async (tx, lockedRole) => {
+        if (nextServerRole !== undefined) {
+          const [agentMembership] = await tx
+            .select({ role: serverAgentMembers.role })
+            .from(serverAgentMembers)
+            .where(and(eq(serverAgentMembers.serverId, req.serverId!), eq(serverAgentMembers.agentId, existing.id)))
+            .for("update");
+          if (!agentMembership) throw new FencedAuthorizationDeniedError("not_found");
+          if (
+            !actorRoleHasServerCapability(lockedRole, "changeMemberRoles")
+            || !actorCanChangeServerMemberRole(lockedRole, agentMembership.role, nextServerRole)
+          ) {
+            throw new FencedAuthorizationDeniedError("forbidden");
+          }
+          if (agentMembership.role !== nextServerRole) {
+            await serverService.updateAgentMemberRole(req.serverId!, existing.id, nextServerRole, { executor: tx });
+          }
         }
-      }
-      updated = updateAgentRow
-        ? await agentService.updateAgent(req.params.id, {
+        const row = updateAgentRow
+          ? await agentService.updateAgent(req.params.id, {
             displayName,
             description,
             avatarUrl,
@@ -2334,26 +3151,33 @@ agentRouter.patch("/:id", async (req, res) => {
                     : null,
                 }
               : {}),
-          })
-        : existing;
+          }, { executor: tx })
+          : existing;
+        if (row && restartMode && runtimeProfileIdentityChanged) {
+          await agentRuntimeProfileService.queueRuntimeProfileMigrationForAgentSettings(req.params.id, { executor: tx, afterCommit });
+        }
+        // Hosted runtime: name/instructions edits reach the provider as an ordered PATCH.
+        if (row && (displayName !== undefined || description !== undefined)
+          && await noteProvisionedAgentProfileEdit(tx, req.params.id)) {
+          afterCommit.push(kickAgentRuntimeProvisionWorker);
+        }
+        return row;
+      });
     } finally {
       releaseCatalogAuthority();
     }
+    for (const effect of afterCommit) effect();
     if (!updated) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    const runtimeConfigChanged = normalizedRuntimeConfig !== null
-      && JSON.stringify(normalizedRuntimeConfig) !== JSON.stringify(existingRuntimeConfig);
-    const runtimeProfileIdentityChanged =
-      runtimeChanged
-      || (normalizedLaunch !== null && normalizedLaunch.model !== existing.model)
-      || (normalizedLaunch !== null && (normalizedLaunch.reasoningEffort ?? null) !== (existing.reasoningEffort ?? null))
-      || runtimeConfigChanged;
-    if (restartMode && runtimeProfileIdentityChanged) {
-      await agentRuntimeProfileService.queueRuntimeProfileMigrationForAgentSettings(req.params.id);
-    }
     agentOrchestrator.evictCache(req.params.id);
+    broadcastAgentUpdated(req, req.serverId!, req.params.id);
+    // task #1221: a runtime-config/model change may fix what blocked automatic
+    // wakes after a non-retryable start failure; lift it so the next wake starts.
+    if (runtimeConfigTouched || model !== undefined || runtime !== undefined) {
+      await agentOrchestrator.liftWakeBlockForConfigChange(req.params.id, { runtimeValuesChanged });
+    }
     if (restartMode) {
       // Runtime switches intentionally reset the native runtime session. So does
       // a Codex MODEL switch (tygg/Tenny 2026-07-10): Codex `thread/resume` pins
@@ -2371,7 +3195,10 @@ agentRouter.patch("/:id", async (req, res) => {
         && normalizedLaunch !== null
         && normalizedLaunch.model !== existing.model;
       const effectiveRestartMode = runtimeChanged || codexModelChanged ? "session" : restartMode;
-      await agentOrchestrator.resetAgent(req.params.id, effectiveRestartMode, { restartIfStopped: false });
+      await agentOrchestrator.resetAgent(req.params.id, effectiveRestartMode, {
+        restartIfStopped: false,
+        ...(runtimeValuesChanged ? { terminalControl: "runtime_config_changed" as const } : {}),
+      });
     }
     const runtimeProfile = await agentRuntimeProfileService.getAgentRuntimeProfileSummary(req.params.id);
     const refreshed = await agentService.getAgent(req.params.id) ?? updated;
@@ -2381,6 +3208,18 @@ agentRouter.patch("/:id", async (req, res) => {
       runtimeProfile,
     }));
   } catch (error) {
+    if (error instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: error.message });
+      return;
+    }
+    if (error instanceof FencedAuthorizationDeniedError) {
+      if (error.reason === "not_found") {
+        res.status(404).json({ error: "Agent not found" });
+      } else {
+        res.status(403).json({ error: "Not authorized to update this agent" });
+      }
+      return;
+    }
     if (error instanceof BuiltInModelCatalogError ||
       error instanceof MachineCatalogStaleError
     ) {
@@ -2398,13 +3237,11 @@ agentRouter.patch("/:id", async (req, res) => {
       server_id: req.serverId,
       agent_id: req.params.id,
     });
-    console.error(
-      "agent.update error:",
-      `server=${req.serverId} agent=${req.params.id}`,
-      (error as Error)?.constructor?.name,
-      sanitizeRouteErrorMessage((error as Error)?.message ?? ""),
-    );
-    res.status(500).json({ error: "Failed to update agent" });
+    sendJsonServerError(req, res, {
+      error: "Failed to update agent",
+      logPrefix: "agent.update error:",
+      err: error,
+    });
   }
 });
 
@@ -2431,10 +3268,26 @@ agentRouter.post("/:id/avatar", async (req, res) => {
     const avatarUrl = await storeAgentAvatar(req.serverId!, agent.avatarUrl, file.buffer);
 
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+    // Task #91: the avatar URL write is re-authorized inside the write transaction. The stored image grants no authority.
+    // The agent cache is evicted after commit so a concurrent read cannot re-cache the pre-write row.
+    const updated = await withFencedAgentAuthority(req.serverId!, req.userId!, agentId, "editAgents", (tx) =>
+      agentService.updateAgent(agentId, { avatarUrl }, { executor: tx }));
     agentOrchestrator.evictCache(agentId);
-    const updated = await agentService.updateAgent(agentId, { avatarUrl });
+    broadcastAgentUpdated(req, req.serverId!, agentId);
     res.json(updated);
   } catch (err: any) {
+    if (err instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") {
+        res.status(404).json({ error: "Agent not found" });
+      } else {
+        res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to edit agents" });
+      }
+      return;
+    }
     if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
       res.status(400).json({
         error: PROFILE_AVATAR_TOO_LARGE_MESSAGE,
@@ -2450,8 +3303,11 @@ agentRouter.post("/:id/avatar", async (req, res) => {
       });
       return;
     }
-    console.error("Avatar upload error:", err);
-    res.status(500).json({ error: "Failed to upload avatar" });
+    sendJsonServerError(req, res, {
+      error: "Failed to upload avatar",
+      logPrefix: "Avatar upload error:",
+      err,
+    });
   }
 });
 
@@ -2580,6 +3436,8 @@ agentRouter.post("/:id/migration/cancel", async (req, res) => {
       migrationRef: migrationRefResult.data,
       expectedRevision,
       initiatedByUserId: req.userId!,
+      // Task #93 line C: re-authorize the canceller under row locks inside the cancellation transaction.
+      actorFence: { serverId: req.serverId!, userId: req.userId!, capability: "migrateAgents" },
       reason: typeof req.body?.reason === "string" && req.body.reason.trim()
         ? req.body.reason.trim().slice(0, 200)
         : "owner_cancel",
@@ -2638,6 +3496,18 @@ agentRouter.post("/:id/migration/cancel", async (req, res) => {
       migration: serializeOwnerMigrationStatus(current),
     });
   } catch (err) {
+    if (err instanceof ServerMembershipRevokedError) {
+      sendMigrationError(res, 403, "not_supported", err.message);
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") {
+        sendMigrationError(res, 404, "AGENT_NOT_FOUND", "Agent not found");
+      } else {
+        sendMigrationError(res, 403, "not_supported", "The `migrateAgents` capability or human creator authority is required to cancel an agent migration");
+      }
+      return;
+    }
     const message = err instanceof Error ? err.message : String(err);
     if (message === "MIGRATION_NOT_FOUND") {
       sendMigrationError(res, 404, "MIGRATION_NOT_FOUND", "Migration not found");
@@ -2721,11 +3591,7 @@ agentRouter.post("/:id/migrate", async (req, res) => {
         return { status: 409, code: "AGENT_HAS_NO_SOURCE_MACHINE", error: "Agent source computer is not available" } as const;
       }
 
-      const sourceDaemonVersion = agentOrchestrator?.getMachineDaemonVersion(agent.machineId) ?? sourceMachine.daemonVersion;
-      const targetDaemonVersion = agentOrchestrator?.getMachineDaemonVersion(targetMachine.id) ?? targetMachine.daemonVersion;
-      const capabilityFailures = computerCapabilityFailures({
-        sourceDaemonVersion,
-        targetDaemonVersion,
+      const capabilityFailures = computerRuntimeFailures({
         sourceRuntimes: sourceMachine.runtimes,
         targetRuntimes: targetMachine.runtimes,
         runtime: agent.runtime,
@@ -2734,7 +3600,7 @@ agentRouter.post("/:id/migrate", async (req, res) => {
         return {
           status: 422,
           code: "COMPUTER_CAPABILITY_INSUFFICIENT",
-          error: `Both source and target computers must run daemon >= ${MIN_MIGRATION_DAEMON_VERSION} with compatible runtime support`,
+          error: "Both source and target computers must support the agent's runtime",
           details: { failures: capabilityFailures },
         } as const;
       }
@@ -2743,15 +3609,12 @@ agentRouter.post("/:id/migrate", async (req, res) => {
         agentOrchestrator?.getMachineMigrationTransport(sourceMachine.id) ?? null,
         agentOrchestrator?.getMachineMigrationTransport(targetMachine.id) ?? null,
       ]);
-      const capabilityDetail = resumableCapabilityDetail(
-        sourceMigrationTransport,
-        targetMigrationTransport,
-      );
+      const capabilityDetail = migrationCapabilityDetail(sourceMigrationTransport, targetMigrationTransport);
       if (capabilityDetail) {
         return {
           status: 422,
           code: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
-          error: "Both source and target computers must advertise the resumable migration protocol; mixed or old versions cannot downgrade",
+          error: `Both source and target computers must run a Raft Computer that supports ${AGENT_MIGRATION_CAPABILITY}; upgrade the ${capabilityDetail.side === "both" ? "source and target computers" : `${capabilityDetail.side} computer`}`,
           details: capabilityDetail,
         } as const;
       }
@@ -2765,15 +3628,7 @@ agentRouter.post("/:id/migrate", async (req, res) => {
         return { status: 409, code: "TARGET_COMPUTER_OFFLINE", error: "Target computer is not online" } as const;
       }
 
-      const [activeMigration] = await tx
-        .select({ id: agentMigrations.id })
-        .from(agentMigrations)
-        .where(and(
-          eq(agentMigrations.agentId, agent.id),
-          inArray(agentMigrations.state, [...agentMigrationService.ACTIVE_AGENT_MIGRATION_STATES]),
-        ))
-        .limit(1);
-      if (activeMigration) {
+      if (await hasActiveAgentMigration(tx, agent.id)) {
         return { status: 409, code: "MIGRATION_ALREADY_IN_PROGRESS", error: "Agent already has an active migration" } as const;
       }
 
@@ -2823,7 +3678,8 @@ agentRouter.post("/:id/migrate", async (req, res) => {
         return;
       }
       const catalogValidation =
-        await agentOrchestrator.validateBuiltInPresetForMachine(
+        await validateBuiltInPresetForWrite(
+          agentOrchestrator,
           validatedMigration.targetMachineId,
           validatedMigration.runtimeConfig,
         );
@@ -2869,11 +3725,11 @@ agentRouter.post("/:id/migrate", async (req, res) => {
           agentId: validatedMigration.agentId,
           targetMachineId: validatedMigration.targetMachineId,
           initiatedByUserId: req.userId!,
+          // Task #93 line C: re-authorize the initiator under row locks inside this write transaction.
+          actorFence: { serverId: req.serverId!, userId: req.userId!, capability: "migrateAgents" },
           now,
           transportProvider: transferProvision.provider,
           transportSessionId: transferProvision.sessionId,
-          sourceTransferUrl: transferProvision.sourceTransferUrl,
-          targetTransferUrl: transferProvision.targetTransferUrl,
           transportLeaseMs: transferProvision.leaseMs,
           transportMaxBytes: transferProvision.maxBytes,
         }, tx);
@@ -2948,6 +3804,18 @@ agentRouter.post("/:id/migrate", async (req, res) => {
       sendMigrationError(res, err.status, err.code, err.message);
       return;
     }
+    if (err instanceof ServerMembershipRevokedError) {
+      sendMigrationError(res, 403, "not_supported", err.message);
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") {
+        sendMigrationError(res, 404, "AGENT_NOT_FOUND", "Agent not found");
+      } else {
+        sendMigrationError(res, 403, "not_supported", "The `migrateAgents` capability or human creator authority is required to start an agent migration");
+      }
+      return;
+    }
     console.error("[agents] migrate error:", err);
     sendMigrationError(
       res,
@@ -2996,15 +3864,19 @@ agentRouter.post("/:id/start", async (req, res) => {
         return;
       }
     }
-    const startResult = await agentOrchestrator.startAgent(req.params.id);
+    // RFC 071 §5: a person pressed Start/Resume: the explicit human start (E3).
+    const startResult = await agentOrchestrator.startAgent(req.params.id, { control: "human_start" });
     const migration = startResult.outcome === "dispatched"
       ? await agentMigrationService.getLatestAgentMigration(agent.id, undefined, currentDate())
       : null;
     if (migration?.state === "starting" && migration.targetMachineId === agent.machineId) {
       const completed = await agentMigrationService.completeAgentMigrationAutoStart({
-        grantKey: migration.grantKey,
+        migrationId: migration.id,
         agentId: agent.id,
         targetMachineId: migration.targetMachineId,
+        // Task #93 line C: the completion write re-authorizes the starter under row locks. The runtime start above was
+        // already dispatched; fencing that effect is line A's membership epoch, not this write.
+        actorFence: { serverId: req.serverId!, userId: req.userId!, capability: "controlAgentRuntime" },
       });
       await emitAgentMigrationUpdated(req.app.get("io") as SocketServer | undefined, completed);
     }
@@ -3024,6 +3896,18 @@ agentRouter.post("/:id/start", async (req, res) => {
       err instanceof MachineCatalogStaleError
     ) {
       sendBuiltInCatalogError(res, err);
+      return;
+    }
+    if (err instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") {
+        res.status(404).json({ error: "Agent not found" });
+      } else {
+        res.status(403).json({ error: "The `controlAgentRuntime` capability or human creator authority is required to control agents" });
+      }
       return;
     }
     const failure = responseForAgentRouteFailure(err);
@@ -3058,8 +3942,10 @@ agentRouter.post("/:id/stop", async (req, res) => {
       return;
     }
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
-    await agentOrchestrator.stopAgent(req.params.id);
-    res.json({ ok: true });
+    const stopped = await agentOrchestrator.stopAgent(req.params.id);
+    // Undelivered: the agent is recorded stopped and its Computer stops it
+    // when it reconnects.
+    res.json(stopped?.delivered === false ? { ok: true, appliesOnReconnect: true } : { ok: true });
   } catch {
     res.status(500).json({ error: "Failed to stop agent" });
   }
@@ -3094,8 +3980,18 @@ agentRouter.post("/:id/reset", async (req, res) => {
       return;
     }
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
-    await agentOrchestrator.resetAgent(req.params.id, mode);
-    res.json({ ok: true });
+    // Reset is a lifecycle command, not a request for the runtime to be fully
+    // healthy before the HTTP response can complete.  The UI can project the
+    // agent into its existing "starting" state immediately and receive the
+    // eventual lifecycle/activity updates over the normal realtime channel.
+    // Keep the authorization/external-runtime checks above synchronous so
+    // invalid requests still fail before acknowledging the command.
+    // RFC 071 §5: a human reset (restart / session / full) is E3.
+    void agentOrchestrator.resetAgent(req.params.id, mode, { terminalControl: "human_reset" }).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[Agents] Background reset failed for ${req.params.id}: ${msg}`);
+    });
+    res.status(202).json({ ok: true, status: "accepted" });
   } catch (err: any) {
     if (err instanceof KimiReasoningEffortUpgradeRequiredError) {
       res.status(409).json({ error: err.message, code: err.code });
@@ -3126,15 +4022,39 @@ agentRouter.delete("/:id", async (req, res) => {
     if (!isExternalAgentRuntime(agent.runtime)) {
       await stopAgentBeforeDelete(agentOrchestrator, req.params.id);
     }
+    // Task #91: the delete itself is re-authorized inside the write transaction. Stopping the runtime above is a runtime
+    // effect whose ordering is task #93's contract. Cache eviction happens after commit.
+    // Hosted runtime: the agent's credentials are revoked inside this transaction, before the
+    // provisioning worker can issue the provider DELETE (it only sees the tombstone after commit).
+    const hostedDeletion = await withFencedAgentAuthority(req.serverId!, req.userId!, req.params.id, "deleteAgents", async (tx) => {
+      await agentService.deleteAgent(req.params.id, { executor: tx });
+      return beginProvisionedAgentDeletion(tx, req.params.id, req.userId!);
+    });
+    if (hostedDeletion) kickAgentRuntimeProvisionWorker();
+    kickAppNotificationDelivery();
     agentOrchestrator.evictCache(req.params.id);
-    await agentService.deleteAgent(req.params.id);
+    // After commit: the agent's sk_agent_* credentials are now unusable; close
+    // its open wake-hint streams on every replica.
+    await broadcastAgentCredentialRevocation(req.params.id);
 
     // Notify all clients in this server
     const io = req.app.get("io");
     io?.to(`server:${req.serverId}`).emit("agent:deleted", { agentId: req.params.id });
 
     res.json({ ok: true });
-  } catch {
+  } catch (err) {
+    if (err instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") {
+        res.status(404).json({ error: "Agent not found" });
+      } else {
+        res.status(403).json({ error: "The `deleteAgents` capability or human creator authority is required to delete agents" });
+      }
+      return;
+    }
     res.status(500).json({ error: "Failed to delete agent" });
   }
 });
@@ -3191,7 +4111,8 @@ agentRouter.post("/:id/assign-machine", async (req, res) => {
           return;
         }
         const validation =
-          await agentOrchestrator.validateBuiltInPresetForMachine(
+          await validateBuiltInPresetForWrite(
+          agentOrchestrator,
             targetMachine.id,
             config,
           );
@@ -3205,13 +4126,39 @@ agentRouter.post("/:id/assign-machine", async (req, res) => {
       }
     }
     try {
+      // Task #91: the assignment write is re-authorized inside the write transaction; cache eviction after commit.
+      // The active-migration check runs under the agent row lock taken by the fence, the same lock every migration
+      // writer takes first, so a migration cannot start or flip between the check and the machine write.
+      const assigned = await withFencedAgentAuthority(req.serverId!, req.userId!, req.params.id, "migrateAgents", async (tx) => {
+        if (await hasActiveAgentMigration(tx, req.params.id)) return false;
+        await agentService.assignMachine(req.params.id, machineId || null, { executor: tx });
+        return true;
+      });
+      if (!assigned) {
+        res.status(409).json({
+          error: "Agent has an active migration. Wait for it to finish or cancel it before changing its Computer.",
+          code: "MIGRATION_ALREADY_IN_PROGRESS",
+        });
+        return;
+      }
       agentOrchestrator.evictCache(req.params.id);
-      await agentService.assignMachine(req.params.id, machineId || null);
     } finally {
       releaseCatalogAuthority();
     }
     res.json({ ok: true });
   } catch (err) {
+    if (err instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") {
+        res.status(404).json({ error: "Agent not found" });
+      } else {
+        res.status(403).json({ error: "The `migrateAgents` capability or human creator authority is required to assign agent machines" });
+      }
+      return;
+    }
     if (
       err instanceof BuiltInModelCatalogError ||
       err instanceof MachineCatalogStaleError
@@ -3233,6 +4180,30 @@ agentRouter.get("/:id/workspace-files", async (req, res) => {
     }
     if (!await canInspectAgentPrivateSurfaces(req.serverId!, req.userId!, agent)) {
       res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to view agent workspace" });
+      return;
+    }
+    // A hosted agent has no machine: its provider serves the workspace.
+    const hostedRuntime = isExternalAgentRuntime(agent.runtime) ? await getHostedRuntimeSummary(agent.id) : null;
+    if (hostedRuntime) {
+      if (!await isAgentRuntimeProviderEnabledForServer(req.serverId!, hostedRuntime.provider)) {
+        sendAgentRuntimeProviderError(res, hostedRuntimeDisabledError(hostedRuntime.provider));
+        return;
+      }
+      const dirPath = typeof req.query.dirPath === "string" && req.query.dirPath ? req.query.dirPath : undefined;
+      const result = await listHostedAgentWorkspaceFiles(agent.id, { dirPath, includeHidden: req.query.includeHidden === "true" });
+      if (result.kind !== "ok") {
+        const failure = sendHostedSurfaceFailure(res, result, "workspace");
+        addTraceEvent("agent.workspace.list.failed", {
+          route_action: "workspace_list",
+          outcome: "error",
+          runtime_host: "hosted",
+          reason: failure.reason,
+          http_status: failure.status,
+          response_code: failure.code,
+        });
+        return;
+      }
+      res.json(result.body);
       return;
     }
     if (!agent.machineId) {
@@ -3308,6 +4279,38 @@ agentRouter.get("/:id/workspace-files/read", async (req, res) => {
     const filePath = req.query.path as string;
     if (!filePath) {
       res.status(400).json({ error: "path query parameter is required" });
+      return;
+    }
+    // A hosted agent has no machine: its provider serves the workspace.
+    const hostedRuntime = isExternalAgentRuntime(agent.runtime) ? await getHostedRuntimeSummary(agent.id) : null;
+    if (hostedRuntime) {
+      if (!await isAgentRuntimeProviderEnabledForServer(req.serverId!, hostedRuntime.provider)) {
+        sendAgentRuntimeProviderError(res, hostedRuntimeDisabledError(hostedRuntime.provider));
+        return;
+      }
+      const result = await readHostedAgentWorkspaceFile(agent.id, filePath);
+      if (result.kind !== "ok") {
+        const failure = sendHostedSurfaceFailure(res, result, "workspace");
+        addTraceEvent("agent.workspace.read.failed", {
+          route_action: "workspace_read",
+          outcome: "error",
+          runtime_host: "hosted",
+          reason: failure.reason,
+          http_status: failure.status,
+          response_code: failure.code,
+        });
+        return;
+      }
+      const file = result.body;
+      res.json({
+        path: file.path ?? filePath,
+        content: file.content,
+        binary: file.binary,
+        size: file.size,
+        mimeType: file.mimeType ?? undefined,
+        encoding: file.encoding ?? undefined,
+        modifiedAt: file.modifiedAt ?? new Date().toISOString(),
+      });
       return;
     }
     if (!agent.machineId) {
@@ -3456,8 +4459,11 @@ agentRouter.get("/:id/scopes", async (req, res) => {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    console.error("agents.scopes.read error:", err);
-    res.status(500).json({ error: "Failed to load agent scopes" });
+    sendJsonServerError(req, res, {
+      error: "Failed to load agent scopes",
+      logPrefix: "agents.scopes.read error:",
+      err,
+    });
   }
 });
 
@@ -3474,10 +4480,11 @@ agentRouter.put("/:id/scopes", async (req, res) => {
     }
     const body = (req.body ?? {}) as { scopes?: unknown; mode?: unknown };
     if (body.mode === "default") {
-      const set = await agentScopesService.resetAgentScopesToDefault({
-        agentId: req.params.id,
-        updatedByUserId: req.userId!,
-      });
+      const set = await withFencedAgentAuthority(req.serverId!, req.userId!, req.params.id, "editAgents", (tx) =>
+        agentScopesService.resetAgentScopesToDefault({
+          agentId: req.params.id,
+          updatedByUserId: req.userId!,
+        }, { executor: tx }));
       res.json(set);
       return;
     }
@@ -3485,24 +4492,81 @@ agentRouter.put("/:id/scopes", async (req, res) => {
       res.status(400).json({ error: "scopes must be an array of scope literals" });
       return;
     }
-    const set = await agentScopesService.updateAgentScopes({
-      agentId: req.params.id,
-      scopes: body.scopes as readonly string[],
-      updatedByUserId: req.userId!,
-    });
+    const set = await withFencedAgentAuthority(req.serverId!, req.userId!, req.params.id, "editAgents", (tx) =>
+      agentScopesService.updateAgentScopes({
+        agentId: req.params.id,
+        scopes: body.scopes as readonly string[],
+        updatedByUserId: req.userId!,
+      }, { executor: tx }));
     // TODO(noel): emit `agent:scope-updated` over ws so daemon caches hot-swap
     // without the next CLI/MCP call paying the DB read. Wire is the
     // `AgentScopeSet` wire shape, sent verbatim. Tracked at #proj-permission:10bdc2c9.
     res.json(set);
   } catch (err) {
+    if (err instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") {
+        res.status(404).json({ error: "Agent not found" });
+      } else {
+        res.status(403).json({ error: "The `editAgents` capability or human creator authority is required to update agent scopes" });
+      }
+      return;
+    }
     if (err instanceof agentScopesService.AgentScopesNotFoundError) {
       res.status(404).json({ error: "Agent not found" });
       return;
     }
-    console.error("agents.scopes.update error:", err);
-    res.status(500).json({ error: "Failed to update agent scopes" });
+    sendJsonServerError(req, res, {
+      error: "Failed to update agent scopes",
+      logPrefix: "agents.scopes.update error:",
+      err,
+    });
   }
 });
+
+/**
+ * Whether the agent has a non-terminal migration. The answer is race-free only under the agent row lock (assign-machine)
+ * or when a constraint backs it (/migrate inserts against the one-active-migration-per-agent unique index).
+ */
+async function hasActiveAgentMigration(tx: DatabaseTransaction, agentId: string): Promise<boolean> {
+  const [activeMigration] = await tx
+    .select({ id: agentMigrations.id })
+    .from(agentMigrations)
+    .where(and(
+      eq(agentMigrations.agentId, agentId),
+      inArray(agentMigrations.state, [...agentMigrationService.ACTIVE_AGENT_MIGRATION_STATES]),
+    ))
+    .limit(1);
+  return Boolean(activeMigration);
+}
+
+// Task #91: agent authority writes re-authorize inside the write transaction under a share lock on the caller's membership
+// row (member row first), then an update lock on the agent row (agent row second). The role and creator relation used for
+// the decision are the ones read under those locks. The agent row is locked FOR UPDATE, not FOR SHARE, because several
+// callers update that row next: upgrading a shared lock would let two concurrent writers deadlock.
+async function withFencedAgentAuthority<T>(
+  serverId: string,
+  userId: string,
+  agentId: string,
+  capability: Parameters<typeof userCanActOnAgentResource>[3],
+  run: (tx: DatabaseTransaction, lockedRole: Parameters<typeof userCanActOnAgentResource>[0]) => Promise<T>,
+): Promise<T> {
+  return withActorMembershipFence(serverId, userId, async (tx, lockedRole) => {
+    const [locked] = await tx
+      .select({ id: agents.id, serverId: agents.serverId, creatorType: agents.creatorType, creatorId: agents.creatorId })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)))
+      .for("update");
+    if (!locked || locked.serverId !== serverId) throw new FencedAuthorizationDeniedError("not_found");
+    if (!userCanActOnAgentResource(lockedRole, userId, locked, capability)) {
+      throw new FencedAuthorizationDeniedError("forbidden");
+    }
+    return run(tx, lockedRole);
+  });
+}
 
 // Issue a one-time bootstrap token for an agent (web-session mint).
 //
@@ -3517,8 +4581,9 @@ agentRouter.put("/:id/scopes", async (req, res) => {
 // when the surface is explicitly enabled.
 //
 // Request body: { scopes?: string[], ttlMs?: number }
-//   - scopes: subset of ALLOWED_AGENT_CAPABILITIES. Defaults to ALL caps when
-//     omitted — the operator should narrow at issuance time when known.
+//   - scopes: subset of ALLOWED_AGENT_CAPABILITIES. Defaults to
+//     DEFAULT_EXTERNAL_AGENT_CAPABILITIES (least privilege) when omitted.
+//   - External agents only: 400 `agent_not_external` for managed agents.
 //   - ttlMs: optional override (default 30 minutes via service layer).
 agentRouter.post("/:id/bootstrap-tokens", async (req, res) => {
   if (!isAgentBootstrapSurfaceEnabled()) {
@@ -3549,36 +4614,26 @@ agentRouter.post("/:id/bootstrap-tokens", async (req, res) => {
       return;
     }
 
-    const body = (req.body ?? {}) as { scopes?: unknown; ttlMs?: unknown };
-
-    // Default scope = all allowed caps. Narrow if caller passes a subset.
-    let scopes: AgentCapability[];
-    if (body.scopes === undefined) {
-      scopes = [...ALLOWED_AGENT_CAPABILITIES];
-    } else if (!Array.isArray(body.scopes)) {
+    // The token exchanges for an `sk_agent_*`: external agents only (a
+    // managed agent's credentials come from its Computer).
+    if (!isExternalAgentRuntime(agent.runtime)) {
       res.status(400).json({
-        error: "scopes must be an array of capability literals",
-        code: "scopes_invalid",
+        error: "Bootstrap tokens can only be issued for external agents; a managed agent's credentials come from its computer",
+        code: "agent_not_external",
       });
       return;
-    } else {
-      try {
-        scopes = normalizeAgentCapabilities(body.scopes as readonly string[]);
-      } catch {
-        res.status(400).json({
-          error: `scopes must each be one of: ${ALLOWED_AGENT_CAPABILITIES.join(", ")}`,
-          code: "scopes_invalid",
-        });
-        return;
-      }
-      if (scopes.length === 0) {
-        res.status(400).json({
-          error: "scopes must include at least one capability",
-          code: "scopes_empty",
-        });
-        return;
-      }
     }
+
+    const body = (req.body ?? {}) as { scopes?: unknown; ttlMs?: unknown };
+
+    // Default scope = the least-privilege external-agent set; elevated
+    // scopes (`server`, `mcp`) must be named explicitly.
+    const requested = resolveRequestedAgentCapabilities(body.scopes, DEFAULT_EXTERNAL_AGENT_CAPABILITIES);
+    if (!requested.ok) {
+      res.status(400).json({ error: requested.error, code: requested.code });
+      return;
+    }
+    const scopes = requested.scopes;
 
     let ttlMs: number | undefined;
     if (body.ttlMs !== undefined) {
@@ -3601,13 +4656,15 @@ agentRouter.post("/:id/bootstrap-tokens", async (req, res) => {
       ttlMs = body.ttlMs;
     }
 
-    const issued = await issueAgentBootstrapToken({
-      agentId: agent.id,
-      serverId: req.serverId!,
-      issuedByUserId: req.userId!,
-      scopes,
-      ttlMs,
-    });
+    // The raw token is generated inside the fenced transaction and returned only after it commits.
+    const issued = await withFencedAgentAuthority(req.serverId!, req.userId!, agent.id, "issueAgentCredentials", (tx) =>
+      issueAgentBootstrapToken({
+        agentId: agent.id,
+        serverId: req.serverId!,
+        issuedByUserId: req.userId!,
+        scopes,
+        ttlMs,
+      }, { executor: tx }));
 
     res.status(201).json({
       tokenId: issued.tokenId,
@@ -3621,9 +4678,31 @@ agentRouter.post("/:id/bootstrap-tokens", async (req, res) => {
       serverId: req.serverId!,
     });
   } catch (err) {
+    if (err instanceof ServerMembershipRevokedError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    if (err instanceof FencedAuthorizationDeniedError) {
+      if (err.reason === "not_found") {
+        res.status(404).json({ error: "Agent not found", code: "agent_missing" });
+      } else {
+        res.status(403).json({
+          error: "The `issueAgentCredentials` capability or human creator authority is required to issue agent bootstrap tokens",
+          code: "insufficient_role",
+        });
+      }
+      return;
+    }
     if (err instanceof Error) {
       if (err.message === "agent_missing") {
         res.status(404).json({ error: "Agent not found", code: "agent_missing" });
+        return;
+      }
+      if (err.message === "agent_not_external") {
+        res.status(400).json({
+          error: "Bootstrap tokens can only be issued for external agents; a managed agent's credentials come from its computer",
+          code: "agent_not_external",
+        });
         return;
       }
       if (err.message === "agent_server_mismatch") {
@@ -3632,8 +4711,11 @@ agentRouter.post("/:id/bootstrap-tokens", async (req, res) => {
         return;
       }
     }
-    console.error("agents.bootstrap-tokens.issue error:", err);
-    res.status(500).json({ error: "Failed to issue bootstrap token" });
+    sendJsonServerError(req, res, {
+      error: "Failed to issue bootstrap token",
+      logPrefix: "agents.bootstrap-tokens.issue error:",
+      err,
+    });
   }
 });
 

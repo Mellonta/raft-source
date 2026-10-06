@@ -3,10 +3,9 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 
-import { withComputerMutationLock, withMutationLock } from "./concurrency.js";
-import { CliExit } from "./output.js";
+import { withComputerMutationLock, withMutationLock } from "./concurrency";
+import { CliExit } from "./output";
 
 // PR-H §3.2 regression guard — concurrency lock.
 
@@ -155,7 +154,7 @@ test("withComputerMutationLock: external lock deletion becomes typed process fai
     await writeFile(agentSentinel, '{"agent":"unchanged"}\n', "utf8");
 
     const fixture = join(import.meta.dirname, "test-fixtures", "mutationLockCompromiseChild.ts");
-    const child = spawn(process.execPath, ["--import", "tsx", fixture, home], {
+    const child = spawn(process.execPath, ["--import", "@oxc-node/core/register", fixture, home], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";

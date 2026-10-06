@@ -1,12 +1,12 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 
 import argon2 from "argon2";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { createFeatureFlag, createFeatureFlagRule } from "../services/featureFlagService.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { createFeatureFlag, createFeatureFlagRule } from "../services/featureFlagService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

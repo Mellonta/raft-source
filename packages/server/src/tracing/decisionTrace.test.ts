@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { buildDecisionEventAttrs } from "./decisionTrace.js";
+import { buildDecisionEventAttrs } from "./decisionTrace";
 
 const contract = {
   name: "server.test.decision",

@@ -26,6 +26,7 @@ import type {
 } from "./activityReadState";
 import {
   consumeReadStateSnapshotRows,
+  getAcceptedReadState,
   getAcceptedReadStateProjection,
   getReadStateLedgerGeneration,
   registerChannelReadListener,
@@ -218,6 +219,12 @@ interface InboxState {
    * sortable counter nor a server cursor.
    */
   acceptedWindowGeneration: string;
+  /**
+   * True after this principal/server/filter identity has accepted at least one
+   * reset-window response. Unlike the generation receipt, this remains true
+   * while a background refresh temporarily invalidates that receipt.
+   */
+  hasAcceptedWindow: boolean;
   unfollowedItems: ThreadInboxItem[];
   unfollowedLoading: boolean;
   unfollowedLoaded: boolean;
@@ -233,6 +240,8 @@ interface InboxState {
   loaded: boolean;
   hasMore: boolean;
   totalCount: number;
+  /** Server-wide All navigation total; never the currently filtered page total. */
+  allCount: number | null;
   totalUnreadCount: number;
   /** Unread messages across every active Activity row, independent of the selected list filter. */
   activeUnreadCount: number;
@@ -251,7 +260,7 @@ interface InboxState {
   setScrollTop: (scrollTop: number) => void;
   setFocusedItemKey: (key: string | null) => void;
   setPendingFocusKind: (kind: "first-unread" | null) => void;
-  loadInbox: (opts?: { reset?: boolean; background?: boolean }) => Promise<void>;
+  loadInbox: (opts?: { reset?: boolean; background?: boolean; reuseAllCount?: boolean }) => Promise<void>;
   loadUnfollowed: () => Promise<void>;
   refreshInbox: (opts?: { background?: boolean }) => Promise<void>;
   markRead: (item: InboxItem) => Promise<void>;
@@ -522,6 +531,57 @@ function forgetInboxLocalReadSuppression(item: ActivityPersistedItem) {
   inboxLocalReadSuppressedMarkers.delete(getInboxItemKey(item));
 }
 
+/**
+ * A served Activity row is one consistent generation (RisingWave reads are
+ * checkpoint-consistent), but it can be OLDER than what this client already
+ * knows: the client's own read reaches the ledger through its ack before
+ * RisingWave has ingested the cursor. An older generation must not override a
+ * newer one, so the ledger adjudicates such rows: when its cursor already
+ * covers the row's latest activity, the row is read. A row the ledger knows
+ * nothing newer about, or whose latest activity is beyond the ledger's cursor,
+ * is served as-is (there is genuinely unread content).
+ */
+function adjudicateServedUnreadAgainstLedger(
+  serverId: string | null,
+  items: InboxItem[],
+  servedFrontiers: readonly (InboxScopeReadFrontier | undefined)[],
+  filter: InboxFilter,
+): { items: InboxItem[]; suppressedCount: number; suppressedUnreadCount: number } {
+  let suppressedCount = 0;
+  let suppressedUnreadCount = 0;
+  const nextItems: InboxItem[] = [];
+  items.forEach((item, index) => {
+    const served = servedFrontiers[index];
+    const scopeId = item.kind === "mention_action" ? null : inboxItemChannelId(item);
+    const ledger = scopeId ? getAcceptedReadState(serverId, scopeId) : null;
+    const latestSeq = served?.kind === "present" ? served.latestActivity?.seq ?? null : null;
+    if (
+      !ledger
+      || served?.kind !== "present"
+      || ledger.readStateVersion <= served.readStateVersion
+      || latestSeq === null
+      || BigInt(ledger.maxReadSeq) < BigInt(latestSeq)
+      || item.unreadCount === 0
+    ) {
+      nextItems.push(item);
+      return;
+    }
+    suppressedUnreadCount += item.unreadCount;
+    if (isUnreadInboxFilter(filter)) {
+      suppressedCount += 1;
+      return;
+    }
+    nextItems.push({
+      ...item,
+      unreadCount: 0,
+      firstUnreadMessageId: null,
+      firstMentionMessageId: null,
+      hasMention: false,
+    } as InboxItem);
+  });
+  return { items: nextItems, suppressedCount, suppressedUnreadCount };
+}
+
 function applyInboxLocalReadSuppressions(
   items: InboxItem[],
   filter: InboxFilter,
@@ -751,6 +811,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
   // pulled into the mutation diff by extracting the task metadata updater.
   items: [],
   acceptedWindowGeneration: "",
+  hasAcceptedWindow: false,
   unfollowedItems: [],
   unfollowedLoading: false,
   unfollowedLoaded: false,
@@ -765,6 +826,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
   loaded: false,
   hasMore: true,
   totalCount: 0,
+  allCount: null,
   totalUnreadCount: 0,
   activeUnreadCount: 0,
   scrollTop: 0,
@@ -772,29 +834,29 @@ export const useInboxStore = create<InboxState>((set, get) => ({
   pendingFocusKind: null,
   setFilter: (filter) => {
     if (get().filter === filter) return;
-    set({ filter, items: [], acceptedWindowGeneration: "", loaded: false, hasMore: true, totalCount: 0, totalUnreadCount: 0, scrollTop: 0 });
-    void get().loadInbox({ reset: true });
+    set({ filter, items: [], acceptedWindowGeneration: "", hasAcceptedWindow: false, loaded: false, hasMore: true, totalCount: 0, totalUnreadCount: 0, scrollTop: 0 });
+    void get().loadInbox({ reset: true, reuseAllCount: true });
   },
 
   setChannelFilterId: (channelFilterId) => {
     if (get().channelFilterId === channelFilterId) return;
     inboxUnfollowedLoadGeneration += 1;
-    set({ channelFilterId, items: [], acceptedWindowGeneration: "", unfollowedItems: [], unfollowedLoading: false, unfollowedLoaded: false, unfollowedWindowGeneration: null, loaded: false, hasMore: true, totalCount: 0, totalUnreadCount: 0, scrollTop: 0 });
-    void get().loadInbox({ reset: true });
+    set({ channelFilterId, items: [], acceptedWindowGeneration: "", hasAcceptedWindow: false, unfollowedItems: [], unfollowedLoading: false, unfollowedLoaded: false, unfollowedWindowGeneration: null, loaded: false, hasMore: true, totalCount: 0, totalUnreadCount: 0, scrollTop: 0 });
+    void get().loadInbox({ reset: true, reuseAllCount: true });
   },
 
   setSortDirection: (sortDirection) => {
     if (get().sortDirection === sortDirection) return;
     inboxUnfollowedLoadGeneration += 1;
-    set({ sortDirection, items: [], acceptedWindowGeneration: "", unfollowedItems: [], unfollowedLoading: false, unfollowedLoaded: false, unfollowedWindowGeneration: null, loaded: false, hasMore: true, totalCount: 0, totalUnreadCount: 0, scrollTop: 0 });
-    void get().loadInbox({ reset: true });
+    set({ sortDirection, items: [], acceptedWindowGeneration: "", hasAcceptedWindow: false, unfollowedItems: [], unfollowedLoading: false, unfollowedLoaded: false, unfollowedWindowGeneration: null, loaded: false, hasMore: true, totalCount: 0, totalUnreadCount: 0, scrollTop: 0 });
+    void get().loadInbox({ reset: true, reuseAllCount: true });
   },
 
   setSearchQuery: (searchQuery) => {
     if (get().searchQuery === searchQuery) return;
     inboxUnfollowedLoadGeneration += 1;
-    set({ searchQuery, items: [], acceptedWindowGeneration: "", unfollowedItems: [], unfollowedLoading: false, unfollowedLoaded: false, unfollowedWindowGeneration: null, loaded: false, hasMore: true, totalCount: 0, totalUnreadCount: 0, scrollTop: 0 });
-    void get().loadInbox({ reset: true });
+    set({ searchQuery, items: [], acceptedWindowGeneration: "", hasAcceptedWindow: false, unfollowedItems: [], unfollowedLoading: false, unfollowedLoaded: false, unfollowedWindowGeneration: null, loaded: false, hasMore: true, totalCount: 0, totalUnreadCount: 0, scrollTop: 0 });
+    void get().loadInbox({ reset: true, reuseAllCount: true });
   },
 
   setScrollTop: (scrollTop) => set({ scrollTop }),
@@ -914,6 +976,18 @@ export const useInboxStore = create<InboxState>((set, get) => ({
       const requestLimit = preserveLoadedWindowOnReset
         ? Math.min(100, Math.max(PAGE_SIZE, state.items.length))
         : PAGE_SIZE;
+      const allScope = requestFilter === "all" && !requestChannelFilterId && !requestSearchQuery;
+      const pendingDoneAtStart = new Map(
+        currentTimeMs() <= inboxLocalDoneSuppressionUntil ? inboxLocalDoneSuppressedMarkers : [],
+      );
+      // Navigation owns an unfiltered total, separate from the selected window.
+      // Facet changes reuse a known total. Ordinary refreshes still reconcile it.
+      // Reuse an All response; otherwise fetch only one row to obtain its total.
+      const allCountRequest = reset && !allScope && (!opts.reuseAllCount || state.allCount === null)
+        ? api.get("/channels/inbox", { params: { filter: "all", limit: 1, offset: 0 } })
+          .then(({ data }) => typeof data.totalCount === "number" ? data.totalCount : null)
+          .catch(() => null)
+        : Promise.resolve(null);
       const { data } = await api.get("/channels/inbox", {
         params: {
           filter: requestFilter,
@@ -924,6 +998,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
           offset: reset ? 0 : state.items.length,
         },
       });
+      const unfilteredCount = await allCountRequest;
       // Same active request, but read-state moved under it: collect our own
       // loading flags and return with ZERO data side effects.
       if (requestReadStateRevision !== getActivityReadStateRevision()) {
@@ -977,7 +1052,17 @@ export const useInboxStore = create<InboxState>((set, get) => ({
             readStateLatestActivitySeq: readStateOutcomes[index]?.latestActivitySeq ?? null,
           } as InboxItem;
         });
-      const readSuppression = applyInboxLocalReadSuppressions(incomingItems, requestFilter);
+      const ledgerAdjudicated = adjudicateServedUnreadAgainstLedger(
+        requestServerId,
+        incomingItems,
+        rawRows.map((row) => row.readState),
+        requestFilter,
+      );
+      const readSuppression = applyInboxLocalReadSuppressions(ledgerAdjudicated.items, requestFilter);
+      // Capture settlement before this response can retire a marker because
+      // newer activity arrived. Expired markers no longer constrain counts.
+      const doneSettledDuringRequest = currentTimeMs() <= inboxLocalDoneSuppressionUntil
+        && [...pendingDoneAtStart].some(([key, marker]) => inboxLocalDoneSuppressedMarkers.get(key) !== marker);
       const doneSuppression = applyInboxLocalDoneSuppressions(readSuppression.items);
       const acceptedReadHold = applyActivityReadStateHolds(
         doneSuppression.items,
@@ -987,10 +1072,12 @@ export const useInboxStore = create<InboxState>((set, get) => ({
       const nextItems = acceptedReadHold.items;
       const acceptedKeys = new Set(nextItems.map(getInboxItemKey));
       const suppressedItems = incomingItems.filter((item) => !acceptedKeys.has(getInboxItemKey(item)));
-      const suppressedCount = readSuppression.suppressedCount
+      const suppressedCount = ledgerAdjudicated.suppressedCount
+        + readSuppression.suppressedCount
         + doneSuppression.suppressedCount
         + acceptedReadHold.suppressedCount;
-      const suppressedUnreadCount = readSuppression.suppressedUnreadCount
+      const suppressedUnreadCount = ledgerAdjudicated.suppressedUnreadCount
+        + readSuppression.suppressedUnreadCount
         + doneSuppression.suppressedUnreadCount
         + acceptedReadHold.suppressedUnreadCount;
       set((current) => {
@@ -1073,6 +1160,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
           acceptedWindowGeneration: reset
             ? requestWindowGeneration
             : current.acceptedWindowGeneration,
+          hasAcceptedWindow: reset ? true : current.hasAcceptedWindow,
           groups: preserveSelectedInboxGroup(
             decrementInboxGroupCounts(
               Array.isArray(data.groups) ? data.groups : [],
@@ -1083,6 +1171,13 @@ export const useInboxStore = create<InboxState>((set, get) => ({
           ),
           hasMore: Boolean(data.hasMore),
           totalCount,
+          // A count-only response cannot tell whether a pending Done is already
+          // reflected on the server. Keep the optimistic total until a read
+          // outside that suppression window can reconcile. Newer activity and
+          // expiry retire their markers above and must restore totals immediately.
+          allCount: doneSettledDuringRequest || inboxLocalDoneSuppressedMarkers.size > 0
+            ? current.allCount
+            : (allScope ? totalCount : (unfilteredCount ?? current.allCount)),
           totalUnreadCount,
           activeUnreadCount,
           loaded: true,
@@ -1387,6 +1482,7 @@ export const useInboxStore = create<InboxState>((set, get) => ({
       items: state.items.filter((existing) => getInboxItemKey(existing) !== key),
       groups: decrementInboxGroupCounts(state.groups, [item], state.channelFilterId),
       totalCount: Math.max(0, state.totalCount - 1),
+      allCount: state.allCount === null ? null : Math.max(0, state.allCount - 1),
       totalUnreadCount: Math.max(0, state.totalUnreadCount - item.unreadCount),
       activeUnreadCount: Math.max(0, state.activeUnreadCount - item.unreadCount),
     }));
@@ -1663,6 +1759,7 @@ useMessageStore.subscribe((state) => {
   inboxUnfollowedLoadGeneration += 1;
   useInboxStore.setState({
     acceptedWindowGeneration: "",
+    hasAcceptedWindow: false,
     unfollowedWindowGeneration: null,
   });
 });
@@ -1689,6 +1786,7 @@ registerServerReset(() => {
   useInboxStore.setState({
     items: [],
     acceptedWindowGeneration: "",
+    hasAcceptedWindow: false,
     unfollowedItems: [],
     unfollowedLoading: false,
     unfollowedLoaded: false,
@@ -1703,6 +1801,7 @@ registerServerReset(() => {
     loaded: false,
     hasMore: true,
     totalCount: 0,
+    allCount: null,
     totalUnreadCount: 0,
     activeUnreadCount: 0,
     scrollTop: 0,

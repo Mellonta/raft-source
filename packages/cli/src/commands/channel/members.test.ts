@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import type { CliIo } from "../../core/io.js";
-import { channelMembersCommand } from "./members.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import { CliError } from "../../core/errors";
+import type { CliIo } from "../../core/io";
+import { channelMembersCommand } from "./members";
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];

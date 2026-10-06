@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { mobileDownloadUrl } from "../src/utils/mobileDownloadUrl";
 import { deriveRuntimeEndpoints } from "../src/desktopRuntimeEnvironment";
 

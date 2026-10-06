@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "vitest";
 import {
   __setEmailDeliveryObserverForTests,
   APP_ADMIN_REVIEW_URL,
@@ -7,10 +6,8 @@ import {
   MOBILE_APP_EMAIL_LOCALES,
   MOBILE_APP_DOWNLOAD_URL,
   type EmailDelivery,
-  isFeedbackReportReceiptEmailEnabled,
   parseAppReviewNotificationRecipients,
   renderAppReviewRequestEmailHtml,
-  renderFeedbackReportReceiptEmailHtml,
   renderInviteEmailHtml,
   renderJointChannelInviteEmailHtml,
   renderMobileAppDownloadEmailHtml,
@@ -25,9 +22,11 @@ import {
   sendOnboardingWelcomeEmail,
   sendPasswordResetEmail,
   sendVerificationEmail,
-} from "./emailService.js";
+} from "./emailService";
 
 const LOGO_URL = "http://localhost:5173/brand/raft-logo.png";
+const MOBILE_APP_UNSUBSCRIBE_URL =
+  "https://api.raft.test/api/email/mobile-app/unsubscribe?token=test-token";
 
 afterEach(() => {
   __setEmailDeliveryObserverForTests(null);
@@ -44,7 +43,6 @@ function renderAllTemplates(): string[] {
     renderVerificationEmailHtml("Avery", "verify-token"),
     renderPasswordResetEmailHtml("Avery", "reset-token"),
     renderInviteEmailHtml("Cindy", "Raft HQ", "invite-token"),
-    renderFeedbackReportReceiptEmailHtml({ recipientName: "Avery", locale: "en-US" }),
     renderAppReviewRequestEmailHtml({
       requestKind: "publish",
       appName: "Example App",
@@ -63,7 +61,7 @@ function renderAllTemplates(): string[] {
       channelName: "partners",
       inviteId: "joint-invite-id",
     }),
-    renderMobileAppDownloadEmailHtml(),
+    renderMobileAppDownloadEmailHtml(undefined, MOBILE_APP_UNSUBSCRIBE_URL),
   ];
 }
 
@@ -72,7 +70,6 @@ function renderDefaultFooterTemplates(): string[] {
     renderVerificationEmailHtml("Avery", "verify-token"),
     renderPasswordResetEmailHtml("Avery", "reset-token"),
     renderInviteEmailHtml("Cindy", "Raft HQ", "invite-token"),
-    renderFeedbackReportReceiptEmailHtml({ recipientName: "Avery", locale: "en-US" }),
     renderAppReviewRequestEmailHtml({
       requestKind: "publish",
       appName: "Example App",
@@ -91,7 +88,7 @@ function renderDefaultFooterTemplates(): string[] {
       channelName: "partners",
       inviteId: "joint-invite-id",
     }),
-    renderMobileAppDownloadEmailHtml(),
+    renderMobileAppDownloadEmailHtml(undefined, MOBILE_APP_UNSUBSCRIBE_URL),
   ];
 }
 
@@ -100,7 +97,6 @@ function renderButtonTemplates(): string[] {
     renderVerificationEmailHtml("Avery", "verify-token"),
     renderPasswordResetEmailHtml("Avery", "reset-token"),
     renderInviteEmailHtml("Cindy", "Raft HQ", "invite-token"),
-    renderFeedbackReportReceiptEmailHtml({ recipientName: "Avery", locale: "en-US" }),
     renderAppReviewRequestEmailHtml({
       requestKind: "publish",
       appName: "Example App",
@@ -198,61 +194,6 @@ test("onboarding emails use a plain founder shell instead of the transactional c
     assert.match(html, /Botiverse, Inc\. · 1111B S Governors Ave, Suite 95905, Dover, DE 19904, US/);
     assert.doesNotMatch(html, /<hr/i);
     assert.doesNotMatch(html, /border-top/i);
-  }
-});
-
-test("feedback receipt email is ack-only and points users to the community", () => {
-  const html = renderFeedbackReportReceiptEmailHtml({
-    recipientName: "<Avery>",
-    locale: "en-US",
-  });
-
-  assert.match(html, /We got your feedback 🙏/);
-  assert.match(html, /Hi &lt;Avery&gt;,/);
-  assert.match(html, /your report came through and it's with our team/);
-  assert.match(html, /Have a question or want to reach us\? Come say hi in our community\./);
-  assert.match(html, /href="https:\/\/app\.raft\.build\/join\/2ygbinDD9pvXuySuJrSEjg"/);
-  assert.match(html, />Join the Raft community</);
-  assert.match(html, /Cindy &amp; the Raft team/);
-  assert.doesNotMatch(html, /serverId/);
-  assert.doesNotMatch(html, /reportId/);
-  assert.doesNotMatch(html, /diagnostic/i);
-  assert.doesNotMatch(html, /<Avery>/);
-});
-
-test("feedback receipt email stays English even when locale is Chinese", () => {
-  const html = renderFeedbackReportReceiptEmailHtml({
-    recipientName: "小林",
-    locale: "zh-CN",
-  });
-
-  assert.match(html, /We got your feedback 🙏/);
-  assert.match(html, /Hi 小林,/);
-  assert.match(html, /your report came through and it's with our team/);
-  assert.match(html, /href="https:\/\/app\.raft\.build\/join\/2ygbinDD9pvXuySuJrSEjg"/);
-  assert.match(html, />Join the Raft community</);
-  assert.match(html, /Cindy &amp; the Raft team/);
-  assert.doesNotMatch(html, /收到你的反馈啦/);
-  assert.doesNotMatch(html, /community-cn/);
-  assert.doesNotMatch(html, /serverId/);
-  assert.doesNotMatch(html, /reportId/);
-  assert.doesNotMatch(html, /diagnostic/i);
-});
-
-test("feedback receipt email is disabled unless explicitly enabled", () => {
-  const previous = process.env.FEEDBACK_RECEIPT_EMAIL_ENABLED;
-  try {
-    delete process.env.FEEDBACK_RECEIPT_EMAIL_ENABLED;
-    assert.equal(isFeedbackReportReceiptEmailEnabled(), false);
-
-    process.env.FEEDBACK_RECEIPT_EMAIL_ENABLED = "false";
-    assert.equal(isFeedbackReportReceiptEmailEnabled(), false);
-
-    process.env.FEEDBACK_RECEIPT_EMAIL_ENABLED = "true";
-    assert.equal(isFeedbackReportReceiptEmailEnabled(), true);
-  } finally {
-    if (previous === undefined) delete process.env.FEEDBACK_RECEIPT_EMAIL_ENABLED;
-    else process.env.FEEDBACK_RECEIPT_EMAIL_ENABLED = previous;
   }
 });
 
@@ -379,7 +320,7 @@ test("app review send targets the configured recipient list and includes the req
   assert.match(devEmail, /slock-internal-app-admin\.botiverse\.dev\/reviews/);
 });
 
-test("onboarding welcome email uses RC founder voice and escapes recipient text", () => {
+test("onboarding welcome email uses Richard founder voice and escapes recipient text", () => {
   const html = renderOnboardingWelcomeEmailHtml({ recipientName: "<Avery>" });
 
   assert.match(html, /Hi &lt;Avery&gt;,/);
@@ -391,7 +332,8 @@ test("onboarding welcome email uses RC founder voice and escapes recipient text"
   assert.doesNotMatch(html, />https:\/\/docs\.raft\.build\/meet-your-onboarding-agent\//);
   assert.doesNotMatch(html, /It'll help you set things up as you go/);
   assert.match(html, /Grab 30 minutes with me/);
-  assert.match(html, /RC<br>Founder of Raft/);
+  assert.match(html, /Richard<br>Founder of Raft/);
+  assert.doesNotMatch(html, /RC<br>Founder of Raft/);
   assert.doesNotMatch(html, /<Avery>/);
   assert.doesNotMatch(html, /I'm really glad/);
   assert.doesNotMatch(html, /Grab 15 minutes/);
@@ -408,7 +350,8 @@ test("onboarding check-in email avoids behavior-surveillance wording", () => {
   // must not promise a single person. Cindy's option C.
   assert.match(html, /just reply and tell us/);
   assert.match(html, /grab 30 minutes/);
-  assert.match(html, /RC<br>Founder of Raft/);
+  assert.match(html, /Richard<br>Founder of Raft/);
+  assert.doesNotMatch(html, /RC<br>Founder of Raft/);
   assert.doesNotMatch(html, /we saw/i);
   assert.doesNotMatch(html, /noticed you/i);
   assert.doesNotMatch(html, /you haven't/i);
@@ -435,7 +378,7 @@ test("onboarding day-one send uses the final spec subject", async () => {
 });
 
 test("mobile-app lifecycle email has one download action and no founder identity", () => {
-  const html = renderMobileAppDownloadEmailHtml();
+  const html = renderMobileAppDownloadEmailHtml(undefined, MOBILE_APP_UNSUBSCRIBE_URL);
   const renderedBody = html.replace(/<style>[\s\S]*?<\/style>/g, "");
 
   assert.match(html, /Check in on your agents from anywhere/);
@@ -447,6 +390,11 @@ test("mobile-app lifecycle email has one download action and no founder identity
   assert.match(html, /font-family: 'Space Grotesk', Arial, sans-serif; font-size: 16px/);
   assert.match(html, /background-color: #FE7DA8;[^>]+font-size: 14px/);
   assert.equal((html.match(new RegExp(MOBILE_APP_DOWNLOAD_URL.replaceAll(".", "\\."), "g")) ?? []).length, 1);
+  assert.match(
+    html,
+    new RegExp(`href="${MOBILE_APP_UNSUBSCRIBE_URL.replaceAll(".", "\\.").replaceAll("?", "\\?")}"`),
+  );
+  assert.match(html, />Unsubscribe from mobile-app emails<\/a>/);
   assert.doesNotMatch(html, /RC|Founder|Cindy/);
   assert.doesNotMatch(renderedBody, /App Store|Google Play/);
 });
@@ -454,17 +402,18 @@ test("mobile-app lifecycle email has one download action and no founder identity
 test("mobile-app lifecycle email has complete English and Simplified Chinese catalogs", () => {
   assert.deepEqual(Object.keys(MOBILE_APP_EMAIL_COPY).sort(), [...MOBILE_APP_EMAIL_LOCALES].sort());
 
-  const chinese = renderMobileAppDownloadEmailHtml("zh-CN");
+  const chinese = renderMobileAppDownloadEmailHtml("zh-CN", MOBILE_APP_UNSUBSCRIBE_URL);
   assert.match(chinese, /随时随地查看你的 Agent/);
   assert.match(chinese, /无论身在何处，你都可以用手机查看 Agent 正在做什么、回答问题，并批准下一步操作。/);
   assert.match(chinese, />获取移动端应用<\/a>/);
   assert.match(chinese, /下载 Android 版，或加入 iOS 测试版。/);
   assert.match(chinese, /你会收到这封邮件，是因为它与你的 Raft 账户相关。/);
+  assert.match(chinese, />退订移动端应用邮件<\/a>/);
   assert.match(chinese, /display: none; max-height: 0;[^>]+>Android 和 iOS 测试版现已上线。<\/div>/);
   assert.doesNotMatch(chinese, /You're receiving this because this email is tied to your Raft account\./);
   assert.equal((chinese.match(new RegExp(MOBILE_APP_DOWNLOAD_URL.replaceAll(".", "\\."), "g")) ?? []).length, 1);
 
-  const unsupportedFallback = renderMobileAppDownloadEmailHtml("fr-FR");
+  const unsupportedFallback = renderMobileAppDownloadEmailHtml("fr-FR", MOBILE_APP_UNSUBSCRIBE_URL);
   assert.match(unsupportedFallback, /Check in on your agents from anywhere/);
   assert.doesNotMatch(unsupportedFallback, /随时随地/);
 });
@@ -476,6 +425,7 @@ test("mobile-app lifecycle send uses the system sender, monitored reply path, an
   await sendMobileAppDownloadEmail("avery@example.com", {
     idempotencyKey: "mobile-app-test",
     scheduledAt,
+    unsubscribeUrl: MOBILE_APP_UNSUBSCRIBE_URL,
   });
 
   assert.equal(deliveries.length, 1);
@@ -484,12 +434,22 @@ test("mobile-app lifecycle send uses the system sender, monitored reply path, an
   assert.equal(deliveries[0]?.replyTo, "contact@raft.build");
   assert.equal(deliveries[0]?.subject, "Take Raft with you");
   assert.equal(deliveries[0]?.scheduledAt, "2026-08-24T00:00:00.000Z");
+  assert.deepEqual(deliveries[0]?.headers, {
+    "List-Unsubscribe": `<${MOBILE_APP_UNSUBSCRIBE_URL}>`,
+    "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+  });
 });
 
 test("mobile-app lifecycle send localizes the subject and falls back to English", async () => {
   const deliveries = captureEmailDeliveries();
-  await sendMobileAppDownloadEmail("zh@example.com", { locale: "zh-cn" });
-  await sendMobileAppDownloadEmail("fallback@example.com", { locale: "fr-FR" });
+  await sendMobileAppDownloadEmail("zh@example.com", {
+    locale: "zh-cn",
+    unsubscribeUrl: MOBILE_APP_UNSUBSCRIBE_URL,
+  });
+  await sendMobileAppDownloadEmail("fallback@example.com", {
+    locale: "fr-FR",
+    unsubscribeUrl: MOBILE_APP_UNSUBSCRIBE_URL,
+  });
 
   assert.equal(deliveries[0]?.subject, "带上 Raft，随时查看");
   assert.match(deliveries[0]?.html ?? "", /获取移动端应用/);
@@ -501,10 +461,14 @@ test("onboarding emails use Hi there fallback, here booking href, and newsletter
   const previousBookingUrl = process.env.ONBOARDING_EMAIL_BOOKING_URL;
   try {
     delete process.env.ONBOARDING_EMAIL_BOOKING_URL;
-    const fallbackHtml = renderOnboardingWelcomeEmailHtml();
-    assert.match(fallbackHtml, /Hi there,/);
-    assert.match(fallbackHtml, /href="https:\/\/cal\.com\/stdrc\/quick-chat"[^>]*>here<\/a>/);
-    assert.doesNotMatch(fallbackHtml, /Hi,/);
+    const fallbackWelcomeHtml = renderOnboardingWelcomeEmailHtml();
+    const fallbackCheckInHtml = renderOnboardingDayOneCheckInEmailHtml();
+    assert.match(fallbackWelcomeHtml, /Hi there,/);
+    assert.doesNotMatch(fallbackWelcomeHtml, /Hi,/);
+    for (const html of [fallbackWelcomeHtml, fallbackCheckInHtml]) {
+      assert.match(html, /href="https:\/\/cal\.com\/raft-build\/quick-chat-about-raft"[^>]*>here<\/a>/);
+      assert.doesNotMatch(html, /cal\.com\/stdrc\/quick-chat/);
+    }
 
     process.env.ONBOARDING_EMAIL_BOOKING_URL = "https://cal.example.com/cindy?source=welcome&team=raft";
     const welcomeHtml = renderOnboardingWelcomeEmailHtml({ recipientName: "Avery" });
@@ -557,7 +521,6 @@ test("transactional email links and brand asset use configured APP_URL", () => {
   process.env.APP_URL = "https://chat.example.com";
   try {
     const verifyHtml = renderVerificationEmailHtml("Avery", "verify-token");
-    const feedbackHtml = renderFeedbackReportReceiptEmailHtml({ recipientName: "Avery" });
     const inviteHtml = renderJointChannelInviteEmailHtml({
       recipientName: "Avery",
       inviterName: "Cindy",
@@ -570,8 +533,6 @@ test("transactional email links and brand asset use configured APP_URL", () => {
 
     assert.match(verifyHtml, /src="https:\/\/chat\.example\.com\/brand\/raft-logo\.png"/);
     assert.match(verifyHtml, /href="https:\/\/chat\.example\.com\?verify=verify-token"/);
-    assert.match(feedbackHtml, /src="https:\/\/chat\.example\.com\/brand\/raft-logo\.png"/);
-    assert.match(feedbackHtml, /href="https:\/\/app\.raft\.build\/join\/2ygbinDD9pvXuySuJrSEjg"/);
     assert.match(inviteHtml, /href="https:\/\/chat\.example\.com\/s\/target\?jointInvite=joint-invite-id"/);
   } finally {
     if (previousAppUrl === undefined) delete process.env.APP_URL;
@@ -707,6 +668,51 @@ test("onboarding mail replies go to the shared inbox, and the copy promises the 
   }
   assert.match(deliveries[1]?.html ?? "", /just reply and tell us\./);
   assert.doesNotMatch(deliveries[1]?.html ?? "", /just reply and tell me\./);
+});
+
+test("onboarding and transactional mail use the approved default sender identities", async () => {
+  const previousOnboardingFrom = process.env.ONBOARDING_EMAIL_FROM_EMAIL;
+  const previousOnboardingReplyTo = process.env.ONBOARDING_EMAIL_REPLY_TO;
+  delete process.env.ONBOARDING_EMAIL_FROM_EMAIL;
+  delete process.env.ONBOARDING_EMAIL_REPLY_TO;
+  const deliveries = captureEmailDeliveries();
+
+  try {
+    await sendOnboardingWelcomeEmail("welcome@example.com", { recipientName: "Avery" });
+    await sendOnboardingDayOneCheckInEmail("day-one@example.com", { recipientName: "Avery" });
+    await sendVerificationEmail("verify@example.com", "Avery", "verify-token");
+  } finally {
+    if (previousOnboardingFrom === undefined) delete process.env.ONBOARDING_EMAIL_FROM_EMAIL;
+    else process.env.ONBOARDING_EMAIL_FROM_EMAIL = previousOnboardingFrom;
+    if (previousOnboardingReplyTo === undefined) delete process.env.ONBOARDING_EMAIL_REPLY_TO;
+    else process.env.ONBOARDING_EMAIL_REPLY_TO = previousOnboardingReplyTo;
+  }
+
+  assert.equal(deliveries.length, 3);
+  assert.equal(deliveries[0]?.from, "Richard from Raft <richard@raft.build>");
+  assert.equal(deliveries[1]?.from, "Richard from Raft <richard@raft.build>");
+  assert.equal(deliveries[0]?.replyTo, "contact@raft.build");
+  assert.equal(deliveries[1]?.replyTo, "contact@raft.build");
+  assert.equal(deliveries[2]?.from, "Raft <noreply@raft.build>");
+  assert.equal(Object.hasOwn(deliveries[2] ?? {}, "replyTo"), false);
+});
+
+test("onboarding sender environment override remains authoritative", async () => {
+  const previousOnboardingFrom = process.env.ONBOARDING_EMAIL_FROM_EMAIL;
+  process.env.ONBOARDING_EMAIL_FROM_EMAIL = "Onboarding Override <onboarding-override@example.com>";
+  const deliveries = captureEmailDeliveries();
+
+  try {
+    await sendOnboardingWelcomeEmail("welcome@example.com");
+    await sendOnboardingDayOneCheckInEmail("day-one@example.com");
+  } finally {
+    if (previousOnboardingFrom === undefined) delete process.env.ONBOARDING_EMAIL_FROM_EMAIL;
+    else process.env.ONBOARDING_EMAIL_FROM_EMAIL = previousOnboardingFrom;
+  }
+
+  assert.equal(deliveries.length, 2);
+  assert.equal(deliveries[0]?.from, "Onboarding Override <onboarding-override@example.com>");
+  assert.equal(deliveries[1]?.from, "Onboarding Override <onboarding-override@example.com>");
 });
 
 test("replyTo is only sent when set, so transactional mail is unchanged", async () => {

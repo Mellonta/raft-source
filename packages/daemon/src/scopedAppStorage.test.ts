@@ -10,13 +10,12 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 
 import {
   classifyScopedAppStorageFailureReason,
   createScopedAppStorageFactory,
   type ScopedAppStorageFailureEvent,
-} from "./scopedAppStorage.js";
+} from "./scopedAppStorage";
 
 test("scoped storage classifies every retryable lock code as lock_contention", () => {
   for (const code of ["EAGAIN", "EBUSY", "EEXIST"]) {

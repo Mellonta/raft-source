@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { getBillingControlsState } from "../src/utils/billingControls";
 
 test("billing controls allow checkout for non-entitling subscription rows", () => {

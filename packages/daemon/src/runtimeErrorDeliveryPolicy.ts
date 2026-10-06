@@ -1,5 +1,5 @@
-import type { ParsedEvent } from "./drivers/index.js";
-import { buildRuntimeErrorDiagnosticEnvelope } from "./runtimeErrorDiagnostics.js";
+import type { ParsedEvent } from "./drivers/index";
+import { buildRuntimeErrorDiagnosticEnvelope } from "./runtimeErrorDiagnostics";
 
 export interface RuntimeErrorFingerprintFenceSummary {
   fingerprint: string;

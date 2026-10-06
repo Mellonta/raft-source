@@ -1,11 +1,10 @@
 import { useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
-import type { ReactNode } from "react";
+import { Button, Input } from "raft-ui";
 import { useAuthStore } from "../../store/authStore";
 import { ArrowLeft } from "lucide-react";
 import AuthPageFrame, { AuthPageIntro } from "./AuthPageFrame";
-import Button from "../ui/Button";
 import Banner from "../ui/Banner";
 import FormField from "../ui/FormField";
 
@@ -40,7 +39,7 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
       <AuthPageFrame>
         <div className="w-full">
           <AuthPageIntro title={formatMessage({ id: "pages.forgotPassword.checkEmailTitle" })}>
-            <p className="mt-2 text-sm text-black/60">
+            <p className="mt-2 text-sm text-foreground-muted theme-brutal:text-black/60">
               {formatMessage(
                 { id: "pages.forgotPassword.sentTo" },
                 {
@@ -61,8 +60,7 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
           <Button
             onClick={onBack}
             size="lg"
-            shape="iconText"
-            tone="pink"
+            variant="accent"
             className="w-full"
           >
             <ArrowLeft size={16} />
@@ -87,11 +85,10 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <FormField label={formatMessage({ id: "pages.forgotPassword.emailLabel" })} labelStyle="plain">
-            <input
+            <Input
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full border-2 border-black p-2 text-base shadow-brutal-sm focus:shadow-brutal focus:outline-none"
               required
             />
           </FormField>
@@ -99,7 +96,7 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
             type="submit"
             disabled={loading}
             size="lg"
-            tone="pink"
+            variant="accent"
             className="w-full"
           >
             {loading
@@ -109,7 +106,7 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
         </form>
 
         <p className="mt-4 text-center text-sm">
-          <button onClick={onBack} className="font-bold text-brutal-pink underline">
+          <button onClick={onBack} className="font-bold text-accent-strong underline theme-brutal:text-brutal-pink">
             {formatMessage({ id: "auth.backToSignIn.link" })}
           </button>
         </p>

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 
 const messageInputSource = readFileSync(
   new URL("../src/components/message/MessageInput.tsx", import.meta.url),
@@ -22,7 +21,7 @@ test("mobile activation slot is first in MessageInput and only ChatPanel opts in
   );
   assert.match(
     chatPanelSource,
-    /\/>\s*\{primaryComposerEligible && !isMobileComposer \? \(\s*<NotificationActivationBanner placement="desktop" \/>/,
+    /\{primaryComposerEligible && !isMobileComposer \? \(\s*<NotificationActivationBanner placement="desktop" \/>\s*\) : null\}\s*<MessageInput/,
   );
 
   for (const relativePath of [
@@ -42,7 +41,11 @@ test("desktop activation actions center vertically without changing the mobile f
   );
   assert.match(
     bannerSource,
-    /isMobile\s*\? "flex-wrap \[&>div:last-child\]:contents"\s*:\s*"\[&>div:last-child\]:self-center"/,
+    /className=\{`\[&>div:last-child\]:self-center \$\{placementClassName\}`\}/,
+  );
+  assert.doesNotMatch(
+    bannerSource,
+    /\[&>div:last-child\]:contents/,
   );
 });
 
@@ -67,4 +70,20 @@ test("dismiss progress is 4px, three seconds, and static under reduced motion", 
     cssSource,
     /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.notification-activation-progress \{\s*animation: none;\s*width: 100%;/,
   );
+});
+
+test("desktop banner keeps symmetric 8px open bands above and below", () => {
+  const bannerSource = readFileSync(
+    new URL("../src/components/message/NotificationActivationBanner.tsx", import.meta.url),
+    "utf8",
+  );
+  const placement = bannerSource.match(/placement === "desktop" \? "([^"]+)"/)?.[1] ?? "";
+  assert.ok(placement, "desktop placement className not found");
+  // Top band: an explicit 8px margin under the message surface edge.
+  assert.match(placement, /(?:^|\s)mt-2(?:\s|$)/);
+  // Bottom band: no extra margin — the banner defers to the composer column's
+  // own 8px gap, so both bands ride the same scale step. Carrying spacing in
+  // composer padding instead made the rendered gap asymmetric (a measured
+  // "22px" bottom hid a visible 8px band behind the form's top border).
+  assert.match(placement, /(?:^|\s)mb-0(?:\s|$)/);
 });

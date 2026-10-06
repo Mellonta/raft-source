@@ -1,3 +1,4 @@
+import { channelConversionState, conversionResponseState } from "./channelConversionState";
 import { create } from "zustand";
 import api from "../api/client";
 import {
@@ -12,8 +13,8 @@ import {
   toChannel,
   touchChannelActivity as reduceChannelActivity,
 } from "./channelDomain";
-import type { ChannelAdminBasis, ChannelRole, InboxScopeReadFrontier, ServerCapability } from "@botiverse/raft-shared";
-import { useServerStore } from "./serverStore";
+import type { ChannelConversionCommandView, ChannelConversionJobView, ChannelConversionState, ChannelAdminBasis, ChannelRole, InboxScopeReadFrontier, ServerCapability } from "@botiverse/raft-shared";
+import { coalesce, useServerStore } from "./serverStore";
 import { consumeReadStateSnapshotRows, getReadStateLedgerGeneration } from "./readStateSync";
 import { registerServerReset } from "./serverResetRegistry";
 import { emitStateTransitionTrace } from "../utils/stateTransitionTrace";
@@ -56,6 +57,8 @@ export interface Channel {
     role: "host" | "participant" | null;
     status: "active" | "pending";
     isCurrentServer?: boolean;
+    /** Free or paid as the joint's free-server cap counts it; absent from older servers. */
+    plan?: "free" | "paid";
   }>;
   jointPendingInvites?: Array<{
     id: string;
@@ -67,6 +70,12 @@ export interface Channel {
     status: "pending";
   }>;
   jointBillingLocked?: boolean | null;
+  /** Contract v0.3 §18.8: grace deadline while over the free-server cap; null otherwise. */
+  jointOverLimitGraceEndsAt?: string | null;
+  conversionState?: ChannelConversionState;
+  // Rolling API compatibility; conversion readers use the shared state adapter.
+  conversionCommand?: ChannelConversionCommandView | null;
+  conversionJob?: ChannelConversionJobView | null;
   // Channel membership
   joined?: boolean;
   channelRole?: ChannelRole | null;
@@ -148,7 +157,7 @@ interface ChannelState {
   loading: boolean;
   loadChannels: () => Promise<void>;
   loadDMChannels: () => Promise<void>;
-  ensureChannel: (channelId: string) => Promise<Channel | null>;
+  ensureChannel: (channelId: string, opts?: { refresh?: boolean }) => Promise<Channel | null>;
   addOrRefreshDM: (channelId: string) => Promise<void>;
   touchChannelActivity: (channelId: string, lastMessageAt?: string | null) => void;
   applyChannelPatch: (channel: ApiChannel, defaultType?: Channel["type"]) => void;
@@ -159,11 +168,16 @@ interface ChannelState {
     targetServerSlug?: string;
     invitedPeople?: string[];
     jointInvites?: Array<{ targetServerSlug: string; invitedPeople: string[] }>;
+    actionCardMessageId?: string;
+    actionCardConfirmationVersion?: number;
   }) => Promise<Channel>;
   updateChannel: (channelId: string, updates: { name?: string; description?: string; visibility?: "public" | "private"; guestVisible?: boolean; guestJoinable?: boolean }) => Promise<Channel>;
   restoreAllChannel: () => Promise<Channel>;
   hideAllChannel: () => Promise<Channel>;
-  convertChannelToJoint: (channelId: string, opts?: { confirmTaskIdentityDrop?: boolean }) => Promise<Channel>;
+  convertChannelToJoint: (channelId: string, opts?: { observeProgress?: boolean; commandId?: string }) => Promise<Channel>;
+  getChannelConversionJob: (jobId: string) => Promise<{ conversionState?: ChannelConversionState; channel?: ApiChannel; conversionJob: NonNullable<Channel["conversionJob"]> }>;
+  retryChannelConversionJob: (jobId: string, commandId?: string) => Promise<{ conversionState?: ChannelConversionState; channel?: ApiChannel; conversionJob: NonNullable<Channel["conversionJob"]>; conversionCommand?: Channel["conversionCommand"] }>;
+  cancelChannelConversionJob: (jobId: string, commandId?: string) => Promise<{ conversionState?: ChannelConversionState; channel?: ApiChannel; conversionJob: NonNullable<Channel["conversionJob"]>; conversionCommand?: Channel["conversionCommand"] }>;
   deleteChannel: (channelId: string) => Promise<void>;
   disconnectJointChannel: (channelId: string) => Promise<void>;
   resendJointChannelInvite: (channelId: string) => Promise<{ resentCount: number }>;
@@ -195,28 +209,32 @@ export const useChannelStore = create<ChannelState>((set, get) => ({
     const serverId = useServerStore.getState().current?.id;
     const readLedgerGeneration = getReadStateLedgerGeneration();
     if (!serverId) return;
-    // Never set loading here — it starts as true (store init / server reset)
-    // and goes to false after the first successful fetch. This keeps existing
-    // data (or a legitimate empty state) visible during refreshes.
-    try {
-      const { data } = await api.get("/channels", { params: { archived: "include" } });
-      if (useServerStore.getState().serverEpoch !== epoch) return;
-      // API returns channels without type field for existing data — default to "channel"
-      const apiChannels = data as ApiChannel[];
-      // #632 C1: fold this authority response through the single adapter —
-      // raw response, after the epoch/identity check, before the domain reducer.
-      consumeReadStateSnapshotRows(serverId, apiChannels.map((c) => ({ scopeId: c.id, readState: c.readState })), { ledgerGenerationAtRequest: readLedgerGeneration });
-      set((state) => reduceChannelWithTrace(
-        state,
-        "hydrate",
-        "channel-list",
-        (current) => ({ ...hydrateChannels(current, apiChannels), loading: false }),
-      ));
-    } catch (err) {
-      console.error("Failed to load channels:", err);
-      if (useServerStore.getState().serverEpoch !== epoch) return;
-      set({ loading: false });
-    }
+    // Coalesce concurrent triggers (bootstrap + realtime fallbacks + manual
+    // refreshes) onto one request; the epoch in the key keeps an epoch change
+    // from piggybacking on a stale-epoch fetch. Never set loading here — it
+    // starts as true (store init / server reset) and goes to false after the
+    // first successful fetch, keeping existing data visible during refreshes.
+    return coalesce(`channels:${serverId}:${epoch}`, async () => {
+      try {
+        const { data } = await api.get("/channels", { params: { archived: "include" } });
+        if (useServerStore.getState().serverEpoch !== epoch) return;
+        // API returns channels without type field for existing data — default to "channel"
+        const apiChannels = data as ApiChannel[];
+        // #632 C1: fold this authority response through the single adapter —
+        // raw response, after the epoch/identity check, before the domain reducer.
+        consumeReadStateSnapshotRows(serverId, apiChannels.map((c) => ({ scopeId: c.id, readState: c.readState })), { ledgerGenerationAtRequest: readLedgerGeneration });
+        set((state) => reduceChannelWithTrace(
+          state,
+          "hydrate",
+          "channel-list",
+          (current) => ({ ...hydrateChannels(current, apiChannels), loading: false }),
+        ));
+      } catch (err) {
+        console.error("Failed to load channels:", err);
+        if (useServerStore.getState().serverEpoch !== epoch) return;
+        set({ loading: false });
+      }
+    });
   },
 
   loadDMChannels: async () => {
@@ -224,28 +242,30 @@ export const useChannelStore = create<ChannelState>((set, get) => ({
     const serverId = useServerStore.getState().current?.id;
     const readLedgerGeneration = getReadStateLedgerGeneration();
     if (!serverId) return;
-    try {
-      const { data } = await api.get("/channels/dm");
-      if (useServerStore.getState().serverEpoch !== epoch) return;
-      const apiDms = data as ApiChannel[];
-      // #632 C1: fold this authority response through the single adapter —
-      // raw response, after the epoch/identity check, before the domain reducer.
-      consumeReadStateSnapshotRows(serverId, apiDms.map((c) => ({ scopeId: c.id, readState: c.readState })), { ledgerGenerationAtRequest: readLedgerGeneration });
-      set((state) => reduceChannelWithTrace(
-        state,
-        "hydrate:dm",
-        "dm-list",
-        (current) => hydrateDmChannels(current, apiDms),
-      ));
-    } catch (err) {
-      console.error("Failed to load DM channels:", err);
-    }
+    return coalesce(`dm-channels:${serverId}:${epoch}`, async () => {
+      try {
+        const { data } = await api.get("/channels/dm");
+        if (useServerStore.getState().serverEpoch !== epoch) return;
+        const apiDms = data as ApiChannel[];
+        // #632 C1: fold this authority response through the single adapter —
+        // raw response, after the epoch/identity check, before the domain reducer.
+        consumeReadStateSnapshotRows(serverId, apiDms.map((c) => ({ scopeId: c.id, readState: c.readState })), { ledgerGenerationAtRequest: readLedgerGeneration });
+        set((state) => reduceChannelWithTrace(
+          state,
+          "hydrate:dm",
+          "dm-list",
+          (current) => hydrateDmChannels(current, apiDms),
+        ));
+      } catch (err) {
+        console.error("Failed to load DM channels:", err);
+      }
+    });
   },
 
-  ensureChannel: async (channelId) => {
+  ensureChannel: async (channelId, opts) => {
     const existing = get().channels.find((c) => c.id === channelId)
       ?? get().dmChannels.find((c) => c.id === channelId);
-    if (existing) return existing;
+    if (existing && !opts?.refresh) return existing;
 
     const epoch = useServerStore.getState().serverEpoch;
     const serverId = useServerStore.getState().current?.id;
@@ -383,6 +403,8 @@ export const useChannelStore = create<ChannelState>((set, get) => ({
       targetServerSlug: opts?.targetServerSlug,
       invitedPeople: opts?.invitedPeople ?? [],
       jointInvites: opts?.jointInvites,
+      ...(opts?.actionCardMessageId ? { actionCardMessageId: opts.actionCardMessageId } : {}),
+      ...(opts?.actionCardConfirmationVersion !== undefined ? { actionCardConfirmationVersion: opts.actionCardConfirmationVersion } : {}),
     });
     const apiChannel = data as ApiChannel;
     const channel = toChannel(apiChannel);
@@ -410,23 +432,6 @@ export const useChannelStore = create<ChannelState>((set, get) => ({
     return updated;
   },
 
-  // #all is hidden through its own endpoint, never through the generic channel
-  // visibility field -- the server refuses that field for #all outright. Both
-  // directions are id-free because a hidden #all is absent from channel lists,
-  // so the caller cannot be expected to know its id.
-  hideAllChannel: async () => {
-    const { data } = await api.post("/channels/system/all/hide");
-    const apiChannel = data as ApiChannel;
-    const hidden = toChannel(apiChannel);
-    set((state) => reduceChannelWithTrace(
-      state,
-      "hide-all",
-      hidden.id,
-      (current) => patchChannel(current, apiChannel),
-    ));
-    return hidden;
-  },
-
   restoreAllChannel: async () => {
     const { data } = await api.post("/channels/system/all/restore");
     const apiChannel = data as ApiChannel;
@@ -440,19 +445,109 @@ export const useChannelStore = create<ChannelState>((set, get) => ({
     return restored;
   },
 
-  convertChannelToJoint: async (channelId, opts) => {
-    const { data } = await api.post(`/channels/${channelId}/convert-to-joint`, opts?.confirmTaskIdentityDrop
-      ? { confirmTaskIdentityDrop: true }
-      : undefined);
-    const apiChannel = ((data as { channel?: ApiChannel }).channel ?? data) as ApiChannel;
-    const converted = toChannel(apiChannel);
+  // #all is hidden through its dedicated endpoint; the generic visibility
+  // update intentionally cannot target this system channel.
+  hideAllChannel: async () => {
+    const { data } = await api.post("/channels/system/all/hide");
+    const apiChannel = data as ApiChannel;
+    const hidden = toChannel(apiChannel);
     set((state) => reduceChannelWithTrace(
       state,
-      "convert-to-joint",
-      channelId,
+      "hide-all",
+      hidden.id,
       (current) => patchChannel(current, apiChannel),
     ));
-    return converted;
+    return hidden;
+  },
+
+  convertChannelToJoint: async (channelId, opts) => {
+    const requestBody = opts ? { observeProgress: opts.observeProgress, ...(opts.commandId ? { commandId: opts.commandId } : {}) } : undefined;
+    const { data } = await api.post(`/channels/${channelId}/convert-to-joint`, requestBody);
+    const payload = data as { channel?: ApiChannel; conversionState?: ChannelConversionState; conversionJob?: Channel["conversionJob"]; conversionCommand?: Channel["conversionCommand"] };
+    const conversionState = conversionResponseState(payload);
+    const conversionJob = payload.conversionJob;
+    if (payload.channel) {
+      const apiChannel = { ...payload.channel, conversionState, ...(conversionJob ? { conversionJob } : {}) };
+      const converted = toChannel(apiChannel);
+      set((state) => reduceChannelWithTrace(
+        state,
+        "convert-to-joint",
+        channelId,
+        (current) => patchChannel(current, apiChannel),
+      ));
+      return converted;
+    }
+
+    // Observable starts intentionally return the durable job before the
+    // converted channel exists. Preserve the current channel identity until
+    // the terminal poll supplies the authority row.
+    const current = [...get().channels, ...get().dmChannels].find((channel) => channel.id === channelId);
+    if (!current) throw new Error("Channel conversion start response was incomplete");
+    if (!conversionJob && payload.conversionCommand) {
+      return { ...current, conversionState, conversionCommand: payload.conversionCommand };
+    }
+    if (!conversionJob) throw new Error("Channel conversion start response was incomplete");
+    return { ...current, conversionState, conversionJob, conversionCommand: payload.conversionCommand ?? null };
+  },
+
+  getChannelConversionJob: async (jobId) => {
+    const { data } = await api.get(`/channels/conversion-jobs/${jobId}`);
+    const payload = data as { conversionState?: ChannelConversionState; channel?: ApiChannel; conversionJob: NonNullable<Channel["conversionJob"]> };
+    payload.conversionState = conversionResponseState(payload);
+    if (payload.channel) {
+      const apiChannel = { ...payload.channel, conversionState: payload.conversionState, conversionJob: payload.conversionJob };
+      // A polling GET may have been in flight when Cancel committed. Do not
+      // let that stale running/failed snapshot overwrite the canceled receipt
+      // already written by cancelChannelConversionJob; doing so would make a
+      // later Settings mount resurrect a job that the user explicitly stopped.
+      const current = [...get().channels, ...get().dmChannels]
+        .find((channel) => channel.id === apiChannel.id);
+      const currentJob = channelConversionState(current).job;
+      const nextJob = payload.conversionState.job;
+      const sameCanceledJob = currentJob?.status === "canceled" && currentJob.id === nextJob?.id
+        && nextJob.status !== "canceled";
+      if (!sameCanceledJob) {
+        set((state) => reduceChannelWithTrace(
+          state,
+          "conversion-progress",
+          apiChannel.id,
+          (currentState) => patchChannel(currentState, apiChannel),
+        ));
+      }
+    }
+    return payload;
+  },
+
+  retryChannelConversionJob: async (jobId, commandId) => {
+    const { data } = await api.post(`/channels/conversion-jobs/${jobId}/retry`, commandId ? { commandId } : undefined);
+    const payload = data as { conversionState?: ChannelConversionState; channel?: ApiChannel; conversionJob: NonNullable<Channel["conversionJob"]> };
+    payload.conversionState = conversionResponseState(payload);
+    if (payload.channel) {
+      const apiChannel = { ...payload.channel, conversionState: payload.conversionState, conversionJob: payload.conversionJob };
+      set((state) => reduceChannelWithTrace(
+        state,
+        "conversion-retry",
+        apiChannel.id,
+        (current) => patchChannel(current, apiChannel),
+      ));
+    }
+    return payload;
+  },
+
+  cancelChannelConversionJob: async (jobId, commandId) => {
+    const { data } = await api.post(`/channels/conversion-jobs/${jobId}/cancel`, commandId ? { commandId } : undefined);
+    const payload = data as { conversionState?: ChannelConversionState; channel?: ApiChannel; conversionJob: NonNullable<Channel["conversionJob"]> };
+    payload.conversionState = conversionResponseState(payload);
+    if (payload.channel) {
+      const apiChannel = { ...payload.channel, conversionState: payload.conversionState, conversionJob: payload.conversionJob };
+      set((state) => reduceChannelWithTrace(
+        state,
+        "conversion-cancel",
+        apiChannel.id,
+        (current) => patchChannel(current, apiChannel),
+      ));
+    }
+    return payload;
   },
 
   deleteChannel: async (channelId) => {

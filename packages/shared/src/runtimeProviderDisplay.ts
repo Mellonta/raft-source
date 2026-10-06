@@ -1,7 +1,7 @@
-import { RUNTIME_PROVIDER_DISPLAY_NAMES } from "./generated/runtimeProviderDisplayNames.js";
+import { RUNTIME_PROVIDER_DISPLAY_NAMES } from "./generated/runtimeProviderDisplayNames";
 
 export { RUNTIME_PROVIDER_DISPLAY_NAMES };
-export type { RuntimeProviderId } from "./generated/runtimeProviderDisplayNames.js";
+export type { RuntimeProviderId } from "./generated/runtimeProviderDisplayNames";
 
 export function getRuntimeProviderDisplayName(providerId: string): string {
   return RUNTIME_PROVIDER_DISPLAY_NAMES[providerId as keyof typeof RUNTIME_PROVIDER_DISPLAY_NAMES]

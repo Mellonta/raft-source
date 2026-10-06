@@ -51,6 +51,23 @@ export interface TraceSpanFactRecord {
   span: CompletedTraceSpan;
 }
 
+// A point in time fact that is not tied to a span duration. `context` is the
+// active span when the event happened, or null when no span was active.
+export interface TraceLogEvent {
+  name: string;
+  timeMs: number;
+  surface: TraceSurface;
+  context: TraceContext | null;
+  attrs?: TraceAttributes;
+}
+
+export interface EmitEventOptions {
+  surface: TraceSurface;
+  attrs?: TraceAttributes;
+  parent?: TraceContext | null;
+  timeMs?: number;
+}
+
 export interface StartSpanOptions {
   parent?: TraceContext | null;
   surface: TraceSurface;
@@ -71,12 +88,14 @@ export interface ActiveSpan {
 
 export interface Tracer {
   startSpan(name: string, options: StartSpanOptions): ActiveSpan;
+  emitEvent(name: string, options: EmitEventOptions): void;
 }
 
 export interface TraceSink {
   record(span: CompletedTraceSpan): void;
   recordEvent?(record: TraceEventRecord): void;
   recordSpanFact?(record: TraceSpanFactRecord): void;
+  recordLogEvent?(event: TraceLogEvent): void;
 }
 
 export type TraceClock = () => number;
@@ -172,6 +191,8 @@ export class NoopTracer implements Tracer {
   startSpan(_name: string, options: StartSpanOptions): ActiveSpan {
     return new NoopActiveSpan(createTraceContext({ parent: options.parent ?? null }));
   }
+
+  emitEvent(): void {}
 }
 
 class NoopActiveSpan implements ActiveSpan {
@@ -187,6 +208,87 @@ class NoopActiveSpan implements ActiveSpan {
 }
 
 export const noopTracer: Tracer = new NoopTracer();
+
+/**
+ * Bounded classification for an unknown throw (Tracing V2: errors carry a
+ * cause, and an undecidable value must be a sentinel, never a blank).
+ *
+ * - `Error` with a non-empty `name` → the name. `name` is a plain writable
+ *   property and can be `""`; that routes to the `"unknown"` sentinel so the
+ *   column never carries a value that reads as "not populated".
+ * - Anything else → its `typeof` string. Note `typeof null === "object"` is
+ *   reachable here (a thrown `null`) and looks like a class name to a casual
+ *   reader — it is the typeof sentinel, not a real class.
+ */
+export function errorClassOf(error: unknown): string {
+  if (error instanceof Error) return error.name || "unknown";
+  return typeof error;
+}
+
+/**
+ * Bounded error codes, reported ALONGSIDE `error_class` — never instead of it.
+ *
+ * `errorClassOf` returns `err.name`, which is the literal `"Error"` for every
+ * fs failure and `"TypeError"` for every `fetch` failure. ENOSPC and EACCES,
+ * or ECONNREFUSED and ENOTFOUND, are indistinguishable through it. That is not
+ * a bug in `errorClassOf` — existing queries and alarms are written against
+ * those values, so changing what it returns would silently break them. The code
+ * gets its own attribute instead (task #421).
+ *
+ * Membership is an allowlist because the value lands in a trace attribute:
+ * `err.code` is attacker-influenceable in some paths and unbounded in all of
+ * them, and an unbounded attribute is a cardinality problem, not just an ugly
+ * one. Anything unrecognised folds to `"other"`, and a non-string code (some
+ * libraries use numbers) folds the same way rather than being stringified.
+ */
+const REPORTED_ERROR_CODES: ReadonlySet<string> = new Set([
+  // fs / process
+  "EACCES", "EBADF", "EBUSY", "EDQUOT", "EEXIST", "EFBIG", "EINTR", "EIO",
+  "EISDIR", "ELOOP", "EMFILE", "ENAMETOOLONG", "ENFILE", "ENOENT", "ENOSPC",
+  "ENOTDIR", "ENOTEMPTY", "EPERM", "EROFS", "EXDEV",
+  // network
+  "EADDRINUSE", "EAI_AGAIN", "ECONNABORTED", "ECONNREFUSED", "ECONNRESET",
+  "EHOSTUNREACH", "ENETDOWN", "ENETUNREACH", "ENOTFOUND", "EPIPE", "EPROTO",
+  "ETIMEDOUT",
+  // TLS / undici
+  "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT", "ERR_TLS_CERT_ALTNAME_INVALID",
+  "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+  // abort
+  "ABORT_ERR", "ERR_CANCELED",
+]);
+
+/** `cause` chains are walked to this depth; deeper is treated as absent. */
+const ERROR_CAUSE_MAX_DEPTH = 4;
+
+/**
+ * The bounded code for an error, or `null` when there is none to report.
+ *
+ * The cause chain is walked because **`fetch` puts nothing useful on the top
+ * level**: a failed request is a `TypeError` with `message: "fetch failed"` and
+ * NO `code`; the real code (`ECONNREFUSED`, …) sits on `err.cause`. Reading
+ * only `err.code` would fold the single largest class of upload failures into
+ * `"other"` — 20,658 `TypeError`s in one day were measured that way (@Tracey).
+ *
+ * Returns `null` rather than `"other"` when nothing is present at all, so a
+ * caller can omit the attribute entirely instead of publishing a value that
+ * reads as "we looked and it was unrecognised".
+ */
+export function errorCodeOf(error: unknown): string | null {
+  let current: unknown = error;
+  let sawCode = false;
+  for (let depth = 0; depth < ERROR_CAUSE_MAX_DEPTH && current !== null && typeof current === "object"; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) {
+      if (REPORTED_ERROR_CODES.has(code)) return code;
+      sawCode = true;
+    } else if (code !== undefined) {
+      sawCode = true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return sawCode ? "other" : null;
+}
 
 export type TraceScopeAttrCategory = "resource" | "request" | "actor";
 export type TraceScopeAttrValueKind = "closed_enum" | "identity" | "presence" | "version" | "route" | "method";
@@ -342,6 +444,13 @@ class ScopedTracer implements Tracer {
     return new ScopedActiveSpan(span, this.scopeAttrs, this.attrPrecedence);
   }
 
+  emitEvent(name: string, options: EmitEventOptions): void {
+    this.tracer.emitEvent(name, {
+      ...options,
+      attrs: this.mergeScopeAttrs(options.attrs),
+    });
+  }
+
   private mergeScopeAttrs(attrs: TraceAttributes | undefined): TraceAttributes | undefined {
     return this.attrPrecedence === "caller"
       ? mergeAttrs(this.scopeAttrs, attrs)
@@ -415,6 +524,21 @@ class SpanAttrContractTracer implements Tracer {
       attrs: filterTraceAttrs(options.attrs, contract.spanAttrs),
     });
     return new SpanAttrContractActiveSpan(span, contract);
+  }
+
+  emitEvent(name: string, options: EmitEventOptions): void {
+    const contract = this.contracts[name];
+    if (!contract) {
+      this.tracer.emitEvent(name, options);
+      return;
+    }
+    // Events have no status field, so callers put the outcome in the
+    // `status` attr. It is always kept so readers can find failed events.
+    const allowedKeys = ["status", ...(contract.spanAttrs ?? []), ...(contract.endAttrs ?? [])];
+    this.tracer.emitEvent(name, {
+      ...options,
+      attrs: filterTraceAttrs(options.attrs, allowedKeys),
+    });
   }
 }
 
@@ -491,6 +615,16 @@ export class BasicTracer implements Tracer {
       startTimeMs,
       clock: this.clock,
       sink: this.sink,
+    });
+  }
+
+  emitEvent(name: string, options: EmitEventOptions): void {
+    this.sink.recordLogEvent?.({
+      name,
+      timeMs: options.timeMs ?? this.clock(),
+      surface: options.surface,
+      context: options.parent ?? null,
+      ...(options.attrs ? { attrs: options.attrs } : {}),
     });
   }
 }

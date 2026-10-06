@@ -1,13 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
-  ARCHIVED_CHANNEL_BADGE_CLASS,
   ARCHIVED_CHANNEL_ICON_CLASS,
   ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
   ARCHIVED_CHANNEL_TEXT_CLASS,
-} from "../src/components/channel/channelArchiveVisual.js";
-import { buildSearchEntityResults } from "../src/components/search/searchEntities.js";
-import type { Channel } from "../src/store/channelStore.js";
+} from "../src/components/channel/channelArchiveVisual";
+import { buildSearchEntityResults } from "../src/components/search/searchEntities";
+import type { Channel } from "../src/store/channelStore";
 
 /**
  * UI contract pins for the archive feature.
@@ -205,11 +203,7 @@ test("entity search returns archived channels (same ranking rules, no archive fi
 });
 
 test("archived channel muted treatment tokens stay pinned", () => {
-  assert.equal(ARCHIVED_CHANNEL_TEXT_CLASS, "text-black/45");
-  assert.equal(ARCHIVED_CHANNEL_MUTED_TEXT_CLASS, "text-black/30");
-  assert.equal(ARCHIVED_CHANNEL_ICON_CLASS, "border-black/40 bg-black/5 text-black/45");
-  assert.equal(
-    ARCHIVED_CHANNEL_BADGE_CLASS,
-    "border border-black/40 bg-black/5 px-1 py-0.5 text-[9px] font-bold leading-none text-black/45",
-  );
+  assert.equal(ARCHIVED_CHANNEL_TEXT_CLASS, "text-foreground-muted");
+  assert.equal(ARCHIVED_CHANNEL_MUTED_TEXT_CLASS, "text-foreground-muted");
+  assert.equal(ARCHIVED_CHANNEL_ICON_CLASS, "border-line-muted bg-fill-muted text-foreground-muted");
 });

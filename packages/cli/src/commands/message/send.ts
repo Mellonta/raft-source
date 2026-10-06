@@ -1,54 +1,67 @@
 // `raft message send --target <t> [--attachment-id <id>...]`
 // → POST /internal/agent-api/send
 
+import { applyDmPeerKind, PEER_KIND_OPTION } from "../_target";
+import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
 import type { Command } from "commander";
 import {
   currentTimeMs,
   structuredRaftMentionStillAppears,
   type AgentApiHeldFreshnessResponse,
+  type AgentApiSendCommittedResponse,
   type AgentApiSendV2Body,
   type AgentApiSendSentResponse,
   type AgentApiStructuredMention,
 } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import {
   getConsumedReadOrder,
   getConsumedSeq,
+  getConsumedExactSeqs,
   getMostRecentConsumedThreadForParent,
   getParentTargetForThread,
   recordConsumedSeqs,
+  wasConsumedEvidenceWithheldForContext,
   type ConsumedThreadTarget,
-} from "./_consumedSeqState.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandContext, CommandRuntimeOptions } from "../../core/context.js";
-import { CliError, cliError } from "../../core/errors.js";
-import { adoptCliReplyText, writeDiagnostic, writeJson, writeText, NL, type CliReplyText } from "../../core/renderer.js";
+} from "./_consumedSeqState";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandContext, CommandRuntimeOptions } from "../../core/context";
+import { incrementMetaCounter } from "../../state/agentLedger";
+import { CliError, cliError } from "../../core/errors";
+import { adoptCliReplyText, writeDiagnostic, writeJson, writeText, NL, type CliReplyText } from "../../core/renderer";
 import {
   formatFreshnessHoldOutput,
   redactFreshnessHoldForReviewerIsolation,
   type FreshnessHoldOutputData,
-} from "../freshness/_format.js";
+} from "../freshness/_format";
 import {
   formatPendingMentionActions,
   normalizePendingMentionActions,
   normalizeUnresolvedMentionHandles,
   toSenderPendingMentionAction,
   toSenderUnresolvedMentionWarning,
-} from "../mention/_format.js";
+} from "../mention/_format";
 import {
   reviewerIsolationEnabled,
   reviewerIsolationOption,
   type ReviewerIsolationOpts,
-} from "../reviewerIsolation.js";
-import { clearSavedDraft, getSavedDraft, setSavedDraft } from "./_continueDraftState.js";
+} from "../reviewerIsolation";
+import {
+  clearSavedDraftIfIdempotencyKeyMatches,
+  clearSavedDraftIfSavedAt,
+  getSavedDraft,
+  LOCAL_DRAFT_TTL_MINUTES,
+  lookupSavedDraft,
+  setSavedDraft,
+} from "./_continueDraftState";
 import {
   SEND_DRAFT_STDIN_OBSERVATION_MS,
   formatDraftReplacedWarning,
   formatMessages,
   formatSendDraftStdinDeadlineDiagnostic,
-} from "./_format.js";
+} from "./_format";
 
 // Re-exports for existing imports; canonical home is message/_format.ts.
 export {
@@ -56,7 +69,7 @@ export {
   SEND_DRAFT_STDIN_OBSERVATION_MS,
   formatDraftReplacedWarning,
   formatSendDraftStdinDeadlineDiagnostic,
-} from "./_format.js";
+} from "./_format";
 
 interface SendOpts extends ReviewerIsolationOpts {
   target: string;
@@ -64,8 +77,11 @@ interface SendOpts extends ReviewerIsolationOpts {
   attachmentId?: string[];
   mention?: string[];
   sendDraft?: boolean;
+  discardDraft?: boolean;
+  expectedDraftKey?: string;
   anyway?: boolean;
   targetConfirmed?: boolean;
+  peerKind?: string;
   json?: boolean;
 }
 
@@ -81,6 +97,7 @@ interface OptionalSendContentOptions {
 
 type MessageSendOutcome =
   | { kind: "held"; data: AgentApiHeldFreshnessResponse }
+  | { kind: "committed"; data: AgentApiSendCommittedResponse }
   | { kind: "sent"; data: AgentApiSendSentResponse };
 
 export class SendContentError extends Error {
@@ -137,6 +154,9 @@ export function classifyMessageSendOutcome(data: unknown): MessageSendOutcome {
   }
   if (state === "sent") {
     return { kind: "sent", data: data as AgentApiSendSentResponse };
+  }
+  if (state === "committed") {
+    return { kind: "committed", data: data as AgentApiSendCommittedResponse };
   }
   throw cliError(
     "INVALID_JSON_RESPONSE",
@@ -277,7 +297,21 @@ export function rejectArgContent(positionalContent: string[], opts: Pick<SendOpt
   }
 }
 
-export function validateDraftSendFlags(opts: Pick<SendOpts, "sendDraft" | "anyway" | "attachmentId">): void {
+export function validateDraftSendFlags(
+  opts: Pick<SendOpts, "sendDraft" | "discardDraft" | "expectedDraftKey" | "anyway" | "attachmentId" | "mention">,
+): void {
+  if (opts.discardDraft && opts.sendDraft) {
+    throw new SendContentError(
+      "DISCARD_DRAFT_WITH_SEND_DRAFT",
+      "--discard-draft and --send-draft cannot be used together: one sends the saved draft, the other deletes it.",
+    );
+  }
+  if (opts.discardDraft && ((opts.attachmentId?.length ?? 0) > 0 || (opts.mention?.length ?? 0) > 0)) {
+    throw new SendContentError(
+      "DISCARD_DRAFT_OPTIONS_UNSUPPORTED",
+      "--attachment-id and --mention cannot be used with --discard-draft, which only deletes the saved draft.",
+    );
+  }
   if (opts.anyway && !opts.sendDraft) {
     throw new SendContentError(
       "SEND_DRAFT_ANYWAY_REQUIRES_SEND_DRAFT",
@@ -288,6 +322,12 @@ export function validateDraftSendFlags(opts: Pick<SendOpts, "sendDraft" | "anywa
     throw new SendContentError(
       "SEND_DRAFT_ATTACHMENTS_UNSUPPORTED",
       "--attachment-id cannot be used with --send-draft. Use a normal send to replace the draft.",
+    );
+  }
+  if (opts.expectedDraftKey !== undefined && !opts.sendDraft && !opts.discardDraft) {
+    throw new SendContentError(
+      "EXPECTED_DRAFT_KEY_REQUIRES_SEND_DRAFT",
+      "--expected-draft-key can only be used together with --send-draft or --discard-draft.",
     );
   }
 }
@@ -310,11 +350,25 @@ export function formatHeldSendOutput(
   target: string,
   data: FreshnessHoldOutputData,
   reviewerIsolation = false,
+  draftSaved = true,
 ): CliReplyText {
-  if (reviewerIsolation || data.freshnessContextMode === "withheld") {
+  const withholdContext = reviewerIsolation || data.freshnessContextMode === "withheld";
+  if (!draftSaved) {
+    return formatFreshnessHoldOutput(target, data, {
+      ...(withholdContext ? { withholdContext: true } : {}),
+      heldAction: "Your message was not delivered, and no draft was kept: this agent's local record cannot be written.",
+      draftInstructions:
+        `After reviewing, send the full content again${withholdContext ? " (with --reviewer-isolation)" : ""}:\n` +
+        `  raft message send --target "${target}" <<'${MESSAGE_HEREDOC_DELIMITER}'\n` +
+        `  message\n` +
+        `  ${MESSAGE_HEREDOC_DELIMITER}\n` +
+        `You can also choose not to send anything.\n`,
+    });
+  }
+  if (withholdContext) {
     return formatFreshnessHoldOutput(target, data, {
       withholdContext: true,
-      heldAction: "Your message has been saved as a draft.",
+      heldAction: `Your message has been saved as a draft (kept for ${LOCAL_DRAFT_TTL_MINUTES} minutes).`,
       draftInstructions:
         `To preserve reviewer isolation and send this exact draft despite unseen context:\n` +
         `  raft message send --reviewer-isolation --send-draft --anyway --target "${target}"\n` +
@@ -323,13 +377,13 @@ export function formatHeldSendOutput(
     });
   }
   return formatFreshnessHoldOutput(target, data, {
-    heldAction: "Your message has been saved as a draft.",
+    heldAction: `Your message has been saved as a draft (kept for ${LOCAL_DRAFT_TTL_MINUTES} minutes).`,
     draftInstructions:
       `To update the draft, send revised content normally:\n` +
       `  raft message send --target "${target}" <<'${MESSAGE_HEREDOC_DELIMITER}'\n` +
       `  revised message\n` +
       `  ${MESSAGE_HEREDOC_DELIMITER}\n` +
-      `To send the current draft unchanged:\n` +
+      `To send the current draft unchanged (within ${LOCAL_DRAFT_TTL_MINUTES} minutes; after that the draft is discarded and --send-draft reports SEND_DRAFT_EXPIRED):\n` +
       `  raft message send --send-draft --target \"${target}\"\n` +
       `  (this sends the stored copy — do not use it if you meant to change the content)\n` +
       `You can also choose not to send anything.\n`,
@@ -393,23 +447,27 @@ export function formatThreadContextParentSendMessage(
   ].join("\n");
 }
 
-export function markSendFailureDraftSaved(err: unknown, draftSaved: boolean): Error {
-  const transportAmbiguous = err instanceof CliError
+export function markSendFailureDraftSaved(
+  err: unknown,
+  draftSaved: boolean,
+  forceDeliveryUnknown = false,
+): Error {
+  const transportAmbiguous = forceDeliveryUnknown || (err instanceof CliError
     ? err.fault_domain === "agent_api_transport"
-    : true;
+    : true);
   const suggestedNextAction = draftSaved && transportAmbiguous
-    ? "Delivery state is UNKNOWN: the send failed after the draft was saved, so the message may or may not have been committed. Reading CANNOT settle this. Only an authoritative identity reconciliation can — an idempotency/request/correlation identity bound by the failed request or by a server receipt, confirmed committed by an authoritative record. This CLI does not currently expose such a lookup for message send, so the honest state is CANNOT_CONFIRM. Reading is still worth doing, but it settles nothing on its own: `raft message read --target <target>` can only show that A message matching what you looked for is present, which is not the same as YOUR send having been committed unless you identified it by an authoritative identity — and this CLI does not expose that here. Wait about 90s before looking, because delivery to readable lags; that is a hint against looking too early, not a bound on visibility and not a safety gate. Not seeing it proves nothing: absence is equally consistent with committed-but-not-yet-visible, however many times and however far apart you read, and however wide the window. Matching your own text is not identity either: a hit can be someone else quoting the same string, and a miss can be a committed message you cannot see yet. So the outcome stays unknown and not retryable. Do not resend on this evidence. You may keep waiting, or reconcile out of band. Sending the draft again is a decision by a person to accept a duplicate, not a finding that the original failed, so this guidance does not direct you to it."
+    ? "Delivery state is UNKNOWN: the send failed after the draft was saved, so the message may or may not have been committed. Reading CANNOT settle this. Only an authoritative identity reconciliation can — an idempotency/request/correlation identity bound by the failed request or by a server receipt, confirmed committed by an authoritative record. The CLI attempted its keyed reconciliation, but the lookup was unavailable or did not return an authoritative result, so the honest state is CANNOT_CONFIRM. Reading is still worth doing, but it settles nothing on its own: `raft message read --target <target>` can only show that A message matching what you looked for is present, which is not the same as YOUR send having been committed unless you identified it by an authoritative identity. Wait about 90s before looking, because delivery to readable lags; that is a hint against looking too early, not a bound on visibility and not a safety gate. Not seeing it proves nothing: absence is equally consistent with committed-but-not-yet-visible, however many times and however far apart you read, and however wide the window. Matching your own text is not identity either: a hit can be someone else quoting the same string, and a miss can be a committed message you cannot see yet. So the outcome stays unknown and not retryable. Do not resend on this evidence. You may keep waiting, or reconcile out of band. Sending the draft again is a decision by a person to accept a duplicate, not a finding that the original failed, so this guidance does not direct you to it."
     : undefined;
   if (err instanceof CliError) {
-    if (err.draftSaved !== undefined) return err;
+    if (err.draftSaved !== undefined && !forceDeliveryUnknown) return err;
     return new CliError({
       code: err.code,
       message: err.message,
       exitCode: err.exitCode,
       cause: err.cause,
-      suggestedNextAction: err.suggestedNextAction ?? suggestedNextAction,
+      suggestedNextAction: forceDeliveryUnknown ? suggestedNextAction : (err.suggestedNextAction ?? suggestedNextAction),
       textDetailMode: err.textDetailMode,
-      draftSaved,
+      draftSaved: err.draftSaved ?? draftSaved,
       effect: err.effect,
       layer: err.layer,
       correlationId: err.correlationId,
@@ -420,7 +478,7 @@ export function markSendFailureDraftSaved(err: unknown, draftSaved: boolean): Er
       proxyUpstreamStatus: err.proxyUpstreamStatus,
       proxyResponseStarted: err.proxyResponseStarted,
       proxyResponseComplete: err.proxyResponseComplete,
-      retryable: transportAmbiguous ? false : err.retryable,
+      retryable: forceDeliveryUnknown ? false : (err.retryable ?? (transportAmbiguous ? false : undefined)),
       faultDomain: err.fault_domain,
       effectState: err.effect_state,
       details: err.details,
@@ -439,16 +497,128 @@ export function markSendFailureDraftSaved(err: unknown, draftSaved: boolean): Er
   });
 }
 
+function isPreResponseTransportAmbiguity(err: unknown): boolean {
+  return err instanceof CliError
+    && err.fault_domain === "agent_api_transport"
+    && err.proxyResponseStarted !== true
+    && (err.proxyFailureClass === undefined || err.proxyFailureClass === "pre_response_transport");
+}
+
+function markIdempotentReplayFailure(
+  err: unknown,
+  target: string,
+  idempotencyKey: string,
+  originalDraftStillSaved: boolean,
+): CliError {
+  const suggestedNextAction = originalDraftStillSaved
+    ? "Delivery is still UNKNOWN after the server authoritatively reported the idempotency key absent and the same-key replay then failed. "
+      + "The saved draft retains that same key, so retrying the saved draft cannot create a second message: "
+      + `\`raft message send --send-draft --expected-draft-key "${idempotencyKey}" --target "${target}"\`. `
+      + "The command verifies the expected key again before making any request and refuses if another send replaced the draft."
+    : "Delivery is still UNKNOWN after the server authoritatively reported the idempotency key absent and the same-key replay then failed. "
+      + "The saved draft slot no longer contains this send's idempotency key, so the CLI cannot preserve or safely retry this logical send. "
+      + "The current draft, if any, belongs to a different send. The honest state is CANNOT_CONFIRM and not retryable; do not resend on this evidence.";
+  if (err instanceof CliError) {
+    return new CliError({
+      code: err.code,
+      message: err.message,
+      exitCode: err.exitCode,
+      cause: err.cause,
+      suggestedNextAction,
+      textDetailMode: err.textDetailMode,
+      draftSaved: originalDraftStillSaved,
+      effect: err.effect,
+      layer: err.layer,
+      correlationId: err.correlationId,
+      proxyFailureClass: err.proxyFailureClass,
+      proxyCauseCode: err.proxyCauseCode,
+      proxyRouteFamily: err.proxyRouteFamily,
+      proxyUpstreamLayer: err.proxyUpstreamLayer,
+      proxyUpstreamStatus: err.proxyUpstreamStatus,
+      proxyResponseStarted: err.proxyResponseStarted,
+      proxyResponseComplete: err.proxyResponseComplete,
+      retryable: originalDraftStillSaved,
+      faultDomain: err.fault_domain,
+      effectState: err.effect_state,
+      details: err.details,
+      outputMode: err.outputMode,
+    });
+  }
+  return cliError("CHECK_FAILED", err instanceof Error ? err.message : String(err), {
+    cause: err,
+    suggestedNextAction,
+    draftSaved: originalDraftStillSaved,
+    retryable: originalDraftStillSaved,
+    faultDomain: "agent_api_transport",
+  });
+}
+
+/**
+ * `--discard-draft`: delete the target's saved draft without sending it. With
+ * `--expected-draft-key` it is compare-and-clear: only the draft carrying that
+ * key is deleted, a different one is left untouched
+ * (SAVED_DRAFT_IDENTITY_CHANGED, exit 1). Without a key it clears the current
+ * draft, as `--send-draft` without a key sends it. No draft (or an expired
+ * one) is not an error: nothing to discard, exit 0, so a repeated cancel is
+ * harmless. No stdin is read and no request is made.
+ */
+function discardSavedDraft(
+  ctx: CommandContext,
+  target: string,
+  opts: Pick<SendOpts, "expectedDraftKey" | "json">,
+): void {
+  const agentContext = ctx.loadAgentContext();
+  const draft = getSavedDraft(agentContext.agentId, target);
+  const report = (state: "discarded" | "no_draft", text: string): void => {
+    if (opts.json) writeJson(ctx.io, { ok: true, state, target });
+    else writeText(ctx.io, adoptCliReplyText(`${text}\n`));
+  };
+  if (!draft) {
+    report("no_draft", `No saved draft for ${target}; nothing was discarded.`);
+    return;
+  }
+  const identityChanged = () => cliError(
+    "SAVED_DRAFT_IDENTITY_CHANGED",
+    [
+      "The saved draft no longer matches the expected idempotency key.",
+      "Nothing was discarded: the current draft belongs to a different logical send.",
+    ].join(" "),
+    {
+      draftSaved: true,
+      retryable: false,
+      suggestedNextAction: "Review the current draft before deciding whether to send or discard it; do not treat it as the earlier logical send.",
+    },
+  );
+  if (opts.expectedDraftKey !== undefined && draft.idempotencyKey !== opts.expectedDraftKey) throw identityChanged();
+  let deleted: boolean;
+  try {
+    // Compare-and-clear: with a key only that draft; without one only the draft just read (not a fresher one).
+    deleted = opts.expectedDraftKey !== undefined
+      ? clearSavedDraftIfIdempotencyKeyMatches(agentContext.agentId, target, opts.expectedDraftKey)
+      : clearSavedDraftIfSavedAt(agentContext.agentId, target, draft.savedAt);
+  } catch (err) {
+    throw cliError("LOCAL_WRITE_FAILED", "The saved draft could not be discarded: this agent's local record cannot be written.", {
+      cause: err,
+      draftSaved: true,
+      retryable: true,
+      suggestedNextAction: "Nothing was sent and the draft is still saved; run the same --discard-draft command again.",
+    });
+  }
+  if (!deleted) throw identityChanged();
+  report("discarded", `Discarded the saved draft for ${target}. Nothing was sent.`);
+}
+
 async function handleMessageSend(
   ctx: CommandContext,
   positionalContent: string[],
   opts: SendOpts,
   setFailureDraftSaved: (draftSaved: boolean) => void,
 ): Promise<void> {
-  const target = opts.target?.trim() ?? "";
-  if (!target) {
+  const rawTarget = opts.target?.trim() ?? "";
+  if (!rawTarget) {
     throw cliError("INVALID_ARG", "--target is required");
   }
+  const target = applyDmPeerKind(rawTarget, opts.peerKind);
   const reviewerIsolation = reviewerIsolationEnabled(opts, ctx.env);
 
   try {
@@ -464,6 +634,10 @@ async function handleMessageSend(
     if (err instanceof SendContentError) throw cliError(err.code, err.message, { cause: err });
     throw err;
   }
+  if (opts.discardDraft) {
+    discardSavedDraft(ctx, target, opts);
+    return;
+  }
   let explicitMentions: AgentApiStructuredMention[];
   try {
     explicitMentions = parseMentionSelectors(opts.mention);
@@ -477,6 +651,8 @@ async function handleMessageSend(
   let outgoingMentions: AgentApiStructuredMention[] = explicitMentions;
   let previousDraftReholdCount = 0;
   let seenUpToSeq: number | undefined;
+  let seenExactSeqs: number[] = [];
+  let idempotencyKey: string = randomUUID();
   let sendDraftStdinDeadlineExpired = false;
   if (opts.sendDraft) {
     content = await resolveOptionalSendContent(ctx.io.stdin ?? process.stdin, {
@@ -485,7 +661,7 @@ async function handleMessageSend(
       },
     });
     try {
-      rejectSendDraftStdin(content, opts.target);
+      rejectSendDraftStdin(content, target);
     } catch (err) {
       if (err instanceof SendContentError) throw cliError(err.code, err.message, { cause: err });
       throw err;
@@ -503,7 +679,28 @@ async function handleMessageSend(
 
   const agentContext = ctx.loadAgentContext();
   if (opts.sendDraft) {
-    const savedDraft = getSavedDraft(agentContext.agentId, target);
+    const draftLookup = lookupSavedDraft(agentContext.agentId, target);
+    if (draftLookup.status === "expired") {
+      throw cliError(
+        "SEND_DRAFT_EXPIRED",
+        [
+          `The saved draft for this target expired and was discarded: drafts are kept for ${LOCAL_DRAFT_TTL_MINUTES} minutes, `
+          + `and this one was saved at ${new Date(draftLookup.savedAt).toISOString()}.`,
+          "This command did not send anything.",
+          "If this draft came from a failed send whose outcome was never confirmed, the original message may already have been",
+          "delivered under its idempotency key: read the target and confirm before resending, or you may post it twice.",
+          "To send it, resend the content normally:",
+          `  raft message send --target "${target}" <<'${MESSAGE_HEREDOC_DELIMITER}'`,
+          "  message body",
+          `  ${MESSAGE_HEREDOC_DELIMITER}`,
+          "The discarded draft body is no longer stored anywhere; this is its last copy:",
+          "---",
+          draftLookup.content.replace(/\n$/u, ""),
+          "---",
+        ].join("\n"),
+      );
+    }
+    const savedDraft = draftLookup.status === "found" ? draftLookup.draft : null;
     if (!savedDraft) {
       throw cliError(
         "SEND_DRAFT_NOT_FOUND",
@@ -516,11 +713,34 @@ async function handleMessageSend(
         ].join("\n"),
       );
     }
+    if (opts.expectedDraftKey !== undefined && savedDraft.idempotencyKey !== opts.expectedDraftKey) {
+      throw cliError(
+        "SAVED_DRAFT_IDENTITY_CHANGED",
+        [
+          "The saved draft no longer matches the expected idempotency key.",
+          "No request was made and the current draft was left unchanged because it belongs to a different logical send.",
+        ].join(" "),
+        {
+          draftSaved: false,
+          retryable: false,
+          suggestedNextAction: "Review the current draft before deciding whether to send it; do not treat it as the earlier logical send.",
+        },
+      );
+    }
     outgoingContent = savedDraft.content;
     outgoingAttachmentIds = savedDraft.attachmentIds;
     outgoingMentions = explicitMentions.length > 0 ? explicitMentions : (savedDraft.mentions ?? []);
+    idempotencyKey = savedDraft.idempotencyKey ?? idempotencyKey;
     previousDraftReholdCount = savedDraft.reholdCount;
     seenUpToSeq = savedDraft.seenUpToSeq;
+    seenExactSeqs = savedDraft.seenExactSeqs ?? [];
+    if (!savedDraft.idempotencyKey) {
+      setSavedDraft(agentContext.agentId, target, {
+        ...savedDraft,
+        idempotencyKey,
+        mentions: outgoingMentions,
+      });
+    }
     setFailureDraftSaved(true);
     if (sendDraftStdinDeadlineExpired) {
       writeDiagnostic(ctx.io, formatSendDraftStdinDeadlineDiagnostic(), NL);
@@ -529,6 +749,7 @@ async function handleMessageSend(
     const previousDraft = getSavedDraft(agentContext.agentId, target);
     previousDraftReholdCount = previousDraft?.reholdCount ?? 0;
     seenUpToSeq = previousDraft?.seenUpToSeq;
+    seenExactSeqs = previousDraft?.seenExactSeqs ?? [];
     if (previousDraft && previousDraft.content.trim().length > 0) {
       // Keyed on "a draft with a body exists", NOT on draftReplacedExisting
       // below: that flag is `reholdCount > 0`, so a draft held exactly once
@@ -552,10 +773,12 @@ async function handleMessageSend(
       setSavedDraft(agentContext.agentId, target, {
         content: outgoingContent,
         attachmentIds: outgoingAttachmentIds,
+        idempotencyKey,
         mentions: outgoingMentions,
         savedAt: currentTimeMs(),
         reholdCount: previousDraftReholdCount,
         seenUpToSeq,
+        seenExactSeqs,
       });
       setFailureDraftSaved(true);
       throw cliError(
@@ -572,19 +795,31 @@ async function handleMessageSend(
     }
   }
 
-  if (seenUpToSeq === undefined) {
-    // FH-001 full-body advance contract (A), send side: attest only the
-    // local per-target cursor recorded by active body-returning operations
-    // that safely advance a contiguous boundary (`message read` in this
-    // slice). Target keys stay isolated (thread != parent); passive wake/inbox
-    // notices and sparse `message check` drains never record this cursor.
-    // Absent cursor means omit `seenUpToSeq` so the server freshness gate fails
-    // closed.
-    seenUpToSeq = getConsumedSeq(agentContext.agentId, target);
+  // FH-001 full-body advance contract (A), send side: attest only the
+  // local per-target cursor recorded by active body-returning operations
+  // that safely advance a contiguous boundary (`message read` in this
+  // slice). Target keys stay isolated (thread != parent); passive wake/inbox
+  // notices and sparse `message check` drains never record this cursor.
+  // Absent cursor means omit `seenUpToSeq` so the server freshness gate fails
+  // closed.
+  // A saved draft's cursor is a floor, not a pin: reads after the hold move
+  // the ledger cursor past it and fold exact seqs into it, so pinning the
+  // draft value would drop what those reads attested.
+  const ledgerSeenUpToSeq = getConsumedSeq(agentContext.agentId, target);
+  if (ledgerSeenUpToSeq !== undefined && (seenUpToSeq === undefined || ledgerSeenUpToSeq > seenUpToSeq)) {
+    seenUpToSeq = ledgerSeenUpToSeq;
   }
+  seenExactSeqs = [...new Set([
+    ...seenExactSeqs,
+    ...getConsumedExactSeqs(agentContext.agentId, target),
+  ])]
+    .filter((seq) => Number.isInteger(seq) && seq > (seenUpToSeq ?? 0))
+    .sort((a, b) => a - b)
+    .slice(-2_500);
   const body: AgentApiSendV2Body = {
     target,
     content: outgoingContent,
+    idempotencyKey,
     draftReholdCount: previousDraftReholdCount,
   };
   if (reviewerIsolation) {
@@ -592,6 +827,9 @@ async function handleMessageSend(
   }
   if (seenUpToSeq !== undefined) {
     body.seenUpToSeq = seenUpToSeq;
+  }
+  if (seenExactSeqs.length > 0) {
+    body.seenExactSeqs = seenExactSeqs;
   }
   if (opts.sendDraft) {
     body.sendDraft = true;
@@ -606,30 +844,112 @@ async function handleMessageSend(
     body.mentions = outgoingMentions;
   }
   if (!opts.sendDraft) {
-    setSavedDraft(agentContext.agentId, target, {
-      content: outgoingContent,
-      attachmentIds: outgoingAttachmentIds,
-      mentions: outgoingMentions,
-      savedAt: currentTimeMs(),
-      reholdCount: previousDraftReholdCount,
-      seenUpToSeq,
-    });
-    setFailureDraftSaved(true);
+    // The pre-send copy only exists to survive a failed send. The ledger is
+    // loss-tolerant: if it cannot be written, send anyway and report honestly
+    // that no draft was kept, rather than refusing to send at all.
+    try {
+      setSavedDraft(agentContext.agentId, target, {
+        content: outgoingContent,
+        attachmentIds: outgoingAttachmentIds,
+        idempotencyKey,
+        mentions: outgoingMentions,
+        savedAt: currentTimeMs(),
+        reholdCount: previousDraftReholdCount,
+        seenUpToSeq,
+        seenExactSeqs,
+      });
+      setFailureDraftSaved(true);
+    } catch {
+      setFailureDraftSaved(false);
+    }
   }
   const client = ctx.createApiClient(agentContext);
   const agentApi = createAgentApiSurfaceClient(client);
   let res;
   try {
-    res = await agentApi.messages.sendV2(body);
+    let initialFailure: unknown;
+    try {
+      res = await agentApi.messages.sendV2(body);
+    } catch (err) {
+      if (!isPreResponseTransportAmbiguity(err)) throw err;
+      initialFailure = err;
+    }
+
+    if (initialFailure !== undefined || (res && !res.ok && res.status >= 500)) {
+      const originalResponse = res;
+      let reconciliation;
+      try {
+        reconciliation = await agentApi.messages.sendV2({
+          target,
+          idempotencyKey,
+          reconcileOnly: true,
+        });
+      } catch {
+        if (initialFailure !== undefined) throw initialFailure;
+      }
+
+      if (!reconciliation?.ok || !reconciliation.data) {
+        if (initialFailure !== undefined) throw initialFailure;
+        throw markSendFailureDraftSaved(
+          cliError(
+            originalResponse && originalResponse.status >= 500 ? "SERVER_5XX" : "SEND_FAILED",
+            originalResponse?.error ?? `HTTP ${originalResponse?.status ?? 500}`,
+          ),
+          true,
+          true,
+        );
+      } else if (reconciliation.data.state === "committed") {
+        res = reconciliation;
+      } else if (reconciliation.data.state === "not_found") {
+        try {
+          res = await agentApi.messages.sendV2(body);
+        } catch (err) {
+          const originalDraftStillSaved =
+            getSavedDraft(agentContext.agentId, target)?.idempotencyKey === idempotencyKey;
+          throw markIdempotentReplayFailure(err, target, idempotencyKey, originalDraftStillSaved);
+        }
+        if (!res.ok) {
+          const originalDraftStillSaved =
+            getSavedDraft(agentContext.agentId, target)?.idempotencyKey === idempotencyKey;
+          throw markIdempotentReplayFailure(
+            cliError(res.status >= 500 ? "SERVER_5XX" : "SEND_FAILED", res.error ?? `HTTP ${res.status}`),
+            target,
+            idempotencyKey,
+            originalDraftStillSaved,
+          );
+        }
+      } else {
+        if (initialFailure !== undefined) throw initialFailure;
+        throw markSendFailureDraftSaved(
+          cliError(
+            originalResponse && originalResponse.status >= 500 ? "SERVER_5XX" : "SEND_FAILED",
+            originalResponse?.error ?? `HTTP ${originalResponse?.status ?? 500}`,
+          ),
+          true,
+          true,
+        );
+      }
+    }
   } catch (err) {
     if (reviewerIsolation) {
+      const retryable = err instanceof CliError && err.retryable === true;
       throw cliError(
         "SEND_FAILED",
         "Reviewer-isolation send failed; upstream response detail was withheld.",
-        { cause: err },
+        {
+          cause: err,
+          draftSaved: retryable ? true : undefined,
+          retryable: retryable ? true : undefined,
+          suggestedNextAction: retryable
+            ? `The saved draft retains the same idempotency key, so retrying it cannot create a second message: \`raft message send --reviewer-isolation --send-draft --expected-draft-key "${idempotencyKey}" --target "${target}"\`. The command verifies the expected key again before making any request and refuses if another send replaced the draft.`
+            : undefined,
+        },
       );
     }
     throw err;
+  }
+  if (!res) {
+    throw cliError("INVALID_JSON_RESPONSE", "Agent API messageSend did not return a response");
   }
   if (!res.ok) {
     const code = res.status >= 500 ? "SERVER_5XX" : "SEND_FAILED";
@@ -647,6 +967,14 @@ async function handleMessageSend(
   const outcome = classifyMessageSendOutcome(rawData);
 
   if (outcome.kind === "held") {
+    // RFC 072 §7.10 observability: a hold because this context has not read
+    // the thread (evidence from another context withheld) vs. a hold that
+    // came with evidence (there really were newer messages).
+    if (seenUpToSeq !== undefined) {
+      incrementMetaCounter(agentContext.agentId, "freshnessHold.withEvidence");
+    } else if (wasConsumedEvidenceWithheldForContext(agentContext.agentId, target)) {
+      incrementMetaCounter(agentContext.agentId, "freshnessHold.contextSwitch");
+    }
     const data = outcome.data;
     const contextWasWithheld = reviewerIsolation || data.freshnessContextMode === "withheld";
     // The held bounded context was just rendered to the agent — that
@@ -655,17 +983,36 @@ async function handleMessageSend(
     if (!contextWasWithheld && typeof data.seenUpToSeq === "number" && Number.isFinite(data.seenUpToSeq)) {
       recordConsumedSeqs(agentContext.agentId, { [target]: data.seenUpToSeq });
     }
-    setSavedDraft(agentContext.agentId, target, {
-      content: outgoingContent,
-      attachmentIds: outgoingAttachmentIds,
-      mentions: outgoingMentions,
-      savedAt: currentTimeMs(),
-      reholdCount: previousDraftReholdCount + 1,
-      seenUpToSeq: contextWasWithheld ? seenUpToSeq : data.seenUpToSeq,
-    });
+    let heldDraftSaved = true;
+    try {
+      setSavedDraft(agentContext.agentId, target, {
+        content: outgoingContent,
+        attachmentIds: outgoingAttachmentIds,
+        idempotencyKey,
+        mentions: outgoingMentions,
+        savedAt: currentTimeMs(),
+        reholdCount: previousDraftReholdCount + 1,
+        seenUpToSeq: contextWasWithheld ? seenUpToSeq : data.seenUpToSeq,
+        seenExactSeqs: contextWasWithheld ? seenExactSeqs : [],
+      });
+    } catch {
+      heldDraftSaved = false;
+    }
+    setFailureDraftSaved(heldDraftSaved);
     const heldDetails = contextWasWithheld ? redactFreshnessHoldForReviewerIsolation(data) : data;
     if (!opts.json) {
-      writeText(ctx.io, formatHeldSendOutput(target, data, contextWasWithheld));
+      writeText(ctx.io, formatHeldSendOutput(target, data, contextWasWithheld, heldDraftSaved));
+    }
+    if (!heldDraftSaved) {
+      throw cliError("SEND_HELD", "Message held; no target delivery occurred and no draft was kept.", {
+        draftSaved: false,
+        effect: "not_executed",
+        textDetailMode: "omit_restated_lines",
+        retryable: false,
+        outputMode: opts.json ? "json" : "text",
+        details: { held: heldDetails as unknown as Record<string, unknown> },
+        suggestedNextAction: "Review the held context, then send the full content again.",
+      });
     }
     throw cliError(
       "SEND_HELD_AS_DRAFT",
@@ -685,8 +1032,32 @@ async function handleMessageSend(
     );
   }
 
+  // The server has committed: the receipt must reach the agent whatever the
+  // ledger does. A failed clear leaves a draft carrying this same idempotency
+  // key, so a later send only reports it replaced (safe); throwing here would
+  // hide the Message ID and invite a duplicate resend.
+  try {
+    clearSavedDraftIfIdempotencyKeyMatches(agentContext.agentId, target, idempotencyKey);
+  } catch {
+    // Swallow: see above.
+  }
+  if (outcome.kind === "committed") {
+    const data = outcome.data;
+    if (opts.json) {
+      writeJson(ctx.io, data);
+      return;
+    }
+    writeText(
+      ctx.io,
+      adoptCliReplyText(
+        `Message commit confirmed for ${target}. Message ID: ${data.messageId}\n`
+        + "The original response was lost, so delivery-side receipt details (including mention delivery warnings and recent unread context) are unavailable; no message was replayed.",
+      ),
+      NL,
+    );
+    return;
+  }
   const data = outcome.data;
-  clearSavedDraft(agentContext.agentId, target);
   const shortId = data.messageId ? data.messageId.slice(0, 8) : null;
   const replyHint = shortId
     ? ` (to reply in this message's thread, use target "${target.includes(":") ? target : target + ":" + shortId}")`
@@ -772,10 +1143,19 @@ export const messageSendCommand = defineCommand(
     arguments: ["[content...]"],
     options: [
       { flags: "--target <target>", description: "Target: '#channel', 'dm:@peer', '#channel:threadId', 'dm:@peer:threadId'" },
+      PEER_KIND_OPTION,
       {
         flags: "--send-draft",
         description:
           `Send the saved draft when no stdin bytes are detected within ${SEND_DRAFT_STDIN_OBSERVATION_MS}ms`,
+      },
+      {
+        flags: "--discard-draft",
+        description: "Delete the saved draft for --target without sending it (with --expected-draft-key: only that draft)",
+      },
+      {
+        flags: "--expected-draft-key <key>",
+        description: "Fail closed unless the saved draft still has this idempotency key (requires --send-draft or --discard-draft)",
       },
       { flags: "--anyway", description: "Escape hatch: send a saved draft even if freshness re-check is still stale" },
       {

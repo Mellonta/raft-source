@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { Input, Button } from "raft-ui";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { validateNameReason } from "@botiverse/raft-shared";
@@ -8,9 +9,8 @@ import { useAuthStore } from "../../store/authStore";
 import type { User } from "../../store/authStore";
 import type { MessageId } from "../../i18n/messages";
 import api from "../../api/client";
-import GravatarAvatar from "../member/GravatarAvatar";
+import AvatarSlot from "../ui/AvatarSlot";
 import Banner from "../ui/Banner";
-import Button from "../ui/Button";
 import FormField from "../ui/FormField";
 import { AuthPageIntro } from "./AuthPageFrame";
 import OnboardingCreateShell from "./OnboardingCreateShell";
@@ -53,7 +53,6 @@ function PreviewAvatar({
   email,
   safeOnly,
   size,
-  iconSize,
 }: {
   avatarPreviewUrl: string | null;
   persistedAvatarUrl: string | null;
@@ -61,17 +60,18 @@ function PreviewAvatar({
   email: string | null;
   safeOnly: boolean;
   size: number;
-  iconSize: number;
 }) {
   const src = !safeOnly && avatarPreviewUrl ? avatarPreviewUrl : persistedAvatarUrl;
-  if (src) return <img src={src} alt="" className="h-full w-full object-cover" />;
-  // The app's human default avatar: Gravatar when the account has one, otherwise
-  // a User icon on the lavender placeholder background (same look as AvatarSlot
-  // type="human"). Sized to its container so all avatars stay consistent.
   return (
-    <div className="flex h-full w-full items-center justify-center bg-brutal-lavender text-black">
-      <GravatarAvatar gravatarHash={gravatarHash} email={email} size={size} iconSize={iconSize} />
-    </div>
+    <AvatarSlot
+      context={size === 28 ? "members-row" : "account-tile"}
+      type="human"
+      humanAvatarUrl={src}
+      gravatarHash={gravatarHash}
+      email={email}
+    >
+      {src ? <img src={src} alt="" className="h-full w-full object-cover" /> : undefined}
+    </AvatarSlot>
   );
 }
 
@@ -165,7 +165,7 @@ function IdentityImpactPreview({
                 >
                   <div
                     key={`${previewDisplayName}:${previewAvatarKey}:message-avatar`}
-                    className="onboarding-identity-pop mt-px size-7 shrink-0 overflow-hidden border-2 border-black"
+                    className="onboarding-identity-pop mt-px size-7 shrink-0"
                     data-testid="identity-user-message-avatar"
                   >
                     <PreviewAvatar
@@ -175,7 +175,7 @@ function IdentityImpactPreview({
                       email={email}
                       safeOnly={safeOnly}
                       size={28}
-                      iconSize={14}
+
                     />
                   </div>
                   <div className="min-w-0 flex-1">
@@ -206,7 +206,7 @@ function IdentityImpactPreview({
               <div className="flex items-start gap-3">
                 <div
                   key={`${previewDisplayName}:${previewAvatarKey}:profile-avatar`}
-                  className="onboarding-identity-pop size-14 shrink-0 overflow-hidden border-2 border-black"
+                  className="onboarding-identity-pop size-14 shrink-0"
                   data-testid="identity-profile-avatar"
                 >
                   <PreviewAvatar
@@ -216,7 +216,7 @@ function IdentityImpactPreview({
                     email={email}
                     safeOnly={safeOnly}
                     size={56}
-                    iconSize={26}
+
                   />
                 </div>
                 <div className="min-w-0 flex-1">
@@ -435,12 +435,13 @@ export default function AccountIdentitySetupPage({
 
         <form onSubmit={handleSubmit} className="space-y-4" noValidate>
               <FormField label={formatMessage({ id: "pages.identitySetup.usernameLabel" })} labelStyle="plain" error={fieldErrors.handle} htmlFor="identity-handle">
-                <div className="flex border-2 border-black bg-white shadow-brutal-sm transition-shadow duration-100 focus-within:shadow-brutal">
-                  <span className="flex items-center border-r-2 border-black bg-soft-signal px-3 font-mono text-base font-bold text-black/60">@</span>
-                  <input
+                <div className="flex items-stretch overflow-hidden rounded-md border border-line-field bg-layer-panel transition-shadow duration-100 focus-within:border-line-field-hover theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm theme-brutal:focus-within:shadow-brutal">
+                  <span className="flex items-center border-r border-line-hairline bg-soft-signal px-3 font-mono text-base font-bold text-foreground-muted theme-brutal:border-r-2 theme-brutal:border-black theme-brutal:text-black/60">@</span>
+                  <Input
                     id="identity-handle"
                     name="username"
                     type="text"
+                    className="min-w-0 flex-1 border-0 bg-transparent shadow-none focus-visible:ring-0 dark:bg-transparent dark:shadow-none"
                     value={handle}
                     onChange={(event) => {
                       const nextHandle = event.target.value.replace(/^@+/, "");
@@ -453,19 +454,18 @@ export default function AccountIdentitySetupPage({
                       setFieldErrors((current) => ({ ...current, handle: undefined }));
                     }}
                     onBlur={() => void handleUsernameBlur()}
-                    className="min-w-0 flex-1 p-2 text-base focus:outline-none"
                     placeholder={formatMessage({ id: "pages.identitySetup.previewSampleHandle" })}
                     autoComplete="username"
                     required
                   />
                 </div>
-                <p className="mt-1 text-xs text-black/55">
+                <p className="mt-1 text-xs text-foreground-muted">
                   {formatMessage({ id: "pages.identitySetup.usernameHelper" })}
                 </p>
               </FormField>
 
               <FormField label={formatMessage({ id: "pages.identitySetup.displayNameLabel" })} labelStyle="plain" error={fieldErrors.displayName} htmlFor="identity-display-name">
-                <input
+                <Input
                   id="identity-display-name"
                   name="name"
                   type="text"
@@ -478,23 +478,22 @@ export default function AccountIdentitySetupPage({
                     setFieldErrors((current) => ({ ...current, displayName: undefined }));
                   }}
                   onBlur={handleDisplayNameBlur}
-                  className="w-full border-2 border-black p-2 text-base shadow-brutal-sm focus:shadow-brutal focus:outline-none"
                   placeholder={formatMessage({ id: "pages.identitySetup.displayNamePlaceholder" })}
                   autoComplete="name"
                   required
                 />
-                <p className="mt-1 text-xs text-black/50">
+                <p className="mt-1 text-xs text-foreground-hint">
                   {formatMessage({ id: "pages.identitySetup.displayNameHelper" })}
                 </p>
               </FormField>
 
               <div>
-                <div className="mb-1 text-sm font-bold text-black">
+                <div className="mb-1 text-sm font-bold text-foreground-strong">
                   {formatMessage({ id: "pages.identitySetup.avatarLabel" })}
                 </div>
                 <div>
                   <div className="flex items-center gap-3">
-                    <div className="size-14 shrink-0 overflow-hidden border-2 border-black shadow-brutal-sm">
+                    <div className="size-14 shrink-0 theme-brutal:shadow-brutal-sm">
                       <PreviewAvatar
                         avatarPreviewUrl={avatarPreviewUrl}
                         persistedAvatarUrl={user.avatarUrl}
@@ -502,13 +501,13 @@ export default function AccountIdentitySetupPage({
                         email={user.email}
                         safeOnly={avatarUploadFailed}
                         size={56}
-                        iconSize={26}
+
                       />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <button
-                        type="button"
-                        className="btn-brutal-sm inline-flex items-center gap-1.5 bg-white px-3 py-1.5 text-sm disabled:opacity-50"
+                      <Button size="sm"
+                        variant="outline"
+                        className="gap-1.5"
                         disabled={loading}
                         // Stryker disable next-line OptionalChaining: the visible button and hidden file input mount together; this stays defensive for ref timing.
                         onClick={() => avatarInputRef.current?.click()}
@@ -519,7 +518,7 @@ export default function AccountIdentitySetupPage({
                             ? "pages.identitySetup.avatarUploading"
                             : "pages.identitySetup.avatarCta",
                         })}
-                      </button>
+                      </Button>
                       <input
                         ref={avatarInputRef}
                         id={avatarInputId}
@@ -528,7 +527,7 @@ export default function AccountIdentitySetupPage({
                         className="sr-only"
                         onChange={handleAvatarChange}
                       />
-                      <p className="mt-1 text-xs text-black/50">
+                      <p className="mt-1 text-xs text-foreground-hint">
                         {formatMessage({
                           id: provider
                             ? "pages.identitySetup.avatarOauthHelper"
@@ -545,7 +544,7 @@ export default function AccountIdentitySetupPage({
                 type="submit"
                 disabled={loading}
                 size="lg"
-                tone="pink"
+                variant="accent"
                 className="w-full"
               >
                 {formatMessage({

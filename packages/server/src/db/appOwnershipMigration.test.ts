@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
 
 const migration = readFileSync(
   new URL("../../drizzle/0168_sudden_black_tarantula.sql", import.meta.url),

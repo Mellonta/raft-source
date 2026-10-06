@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 
-import { CLEANER_CONFIG_DEFAULTS } from "@botiverse/raft-shared/src/apps/cleaner/configProtocol.js";
+import { noopTracer } from "@botiverse/raft-shared";
+import { CLEANER_CONFIG_DEFAULTS } from "@botiverse/raft-shared/src/apps/cleaner/configProtocol";
 
-import { createAgentAppInboxStore } from "./agentAppInbox.js";
-import { createBuiltInLocalScheduleRuntime } from "./registry.manifest.js";
-import { createScopedAppStorageFactory } from "./scopedAppStorage.js";
+import { createAgentAppInboxStore } from "./agentAppInbox";
+import { createBuiltInLocalScheduleRuntime } from "./registry.manifest";
+import { createScopedAppStorageFactory } from "./scopedAppStorage";
 
 const cleanerClock = {
   now: () => 0,
@@ -29,6 +29,7 @@ test("daemon config receiver emits truthful stale, invalid, and empty-removal te
     getInbox: () => createAgentAppInboxStore(),
     notifyInbox: async () => false,
     send: () => {},
+    tracer: noopTracer,
     trace: (name, attrs, status) =>
       traces.push({ name, attrs: { ...attrs }, status }),
   });
@@ -106,6 +107,47 @@ test("daemon config receiver emits truthful stale, invalid, and empty-removal te
         },
       ],
     );
+  } finally {
+    runtime.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("agent start asks for app config only while the owner has none, once per connection", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "app-config-start-"));
+  const sent: Array<{ type: string; agentId?: string }> = [];
+  const runtime = createBuiltInLocalScheduleRuntime({
+    agentsDataDir: root,
+    cleanerClock,
+    getInbox: () => createAgentAppInboxStore(),
+    notifyInbox: async () => false,
+    send: (message) => sent.push(message as { type: string; agentId?: string }),
+    tracer: noopTracer,
+  });
+  const configRequests = () =>
+    sent.filter((message) => message.type === "app_config.snapshot.request")
+      .map((message) => message.agentId);
+
+  try {
+    assert.equal(runtime.requestAppConfigSnapshotIfMissing("agent-a"), true);
+    assert.equal(runtime.requestAppConfigSnapshotIfMissing("agent-a"), false);
+    assert.deepEqual(configRequests(), ["agent-a"]);
+
+    runtime.handleServerMessage({
+      type: "app_config.snapshot",
+      agentId: "agent-b",
+      configs: [{
+        appId: "system.cleaner",
+        ownerAgentId: "agent-b",
+        revision: 1,
+        effective: { ...CLEANER_CONFIG_DEFAULTS },
+      }],
+    });
+    assert.equal(runtime.requestAppConfigSnapshotIfMissing("agent-b"), false);
+
+    runtime.onConnect();
+    assert.equal(runtime.requestAppConfigSnapshotIfMissing("agent-a"), true);
+    assert.deepEqual(configRequests(), ["agent-a", "agent-a"]);
   } finally {
     runtime.stop();
     rmSync(root, { recursive: true, force: true });

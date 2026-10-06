@@ -11,12 +11,11 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import type { ChildProcess } from "node:child_process";
 import type { AgentConfig } from "@botiverse/raft-shared";
-import { GrokDriver, resolveGrokCommand } from "./grok.js";
-import { waitForCount, waitForState } from "../testing/drydock.js";
-import type { ParsedEvent, SpawnContext } from "./types.js";
+import { GrokDriver, resolveGrokCommand } from "./grok";
+import { waitForCount, waitForState } from "../testing/drydock";
+import type { ParsedEvent, SpawnContext } from "./types";
 
 function hasGrokAuth(): boolean {
   const authPath = path.join(process.env.GROK_HOME ?? path.join(os.homedir(), ".grok"), "auth.json");

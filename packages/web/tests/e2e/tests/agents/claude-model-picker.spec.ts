@@ -20,7 +20,6 @@ async function routeClaudeOnlyMachine(
     const response = await route.fetch();
     const payload = await response.json() as {
       machines: Array<Record<string, unknown> & { id: string }>;
-      latestDaemonVersion?: string | null;
     };
     await route.fulfill({
       response,

@@ -4,11 +4,11 @@ import {
 import type {
   StateViolationTraceInput,
 } from "@botiverse/raft-shared";
-import { emitWebTrace } from "./webAuthTrace";
+import { emitWebEvent } from "./webAuthTrace";
 
-type StateViolationEmitter = typeof emitWebTrace;
+type StateViolationEmitter = typeof emitWebEvent;
 
-let emitter: StateViolationEmitter = emitWebTrace;
+let emitter: StateViolationEmitter = emitWebEvent;
 
 const COALESCE_WINDOW_MS = 60_000;
 
@@ -20,7 +20,7 @@ interface ViolationBucket {
 const bucketsBySignature = new Map<string, ViolationBucket>();
 
 export function __setStateViolationEmitterForTest(next: StateViolationEmitter | null): void {
-  emitter = next ?? emitWebTrace;
+  emitter = next ?? emitWebEvent;
 }
 
 export function __resetStateViolationCoalescerForTest(): void {

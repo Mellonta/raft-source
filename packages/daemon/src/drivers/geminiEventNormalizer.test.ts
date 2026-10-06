@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { extractGeminiUsageAttrs, buildGeminiTokenUsageEvent } from "./geminiEventNormalizer.js";
+import { extractGeminiUsageAttrs, buildGeminiTokenUsageEvent } from "./geminiEventNormalizer";
 
 test("extractGeminiUsageAttrs: present numeric total_tokens is extracted", () => {
   assert.deepEqual(extractGeminiUsageAttrs({ total_tokens: 1000 }), { total_tokens: 1000 });

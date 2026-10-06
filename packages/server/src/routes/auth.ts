@@ -1,17 +1,20 @@
-import { serializeErrorForLog } from "../tracing/safeErrorLog.js";
+import { serializeErrorForLog } from "../tracing/safeErrorLog";
+import { kickAppNotificationDelivery } from "../services/appNotificationDeliveryService";
 import { Router, urlencoded, type NextFunction, type Request, type Response, type Router as RouterType } from "express";
 import type { Server as SocketServer } from "socket.io";
 import multer from "multer";
 import { z } from "zod";
-import * as userService from "../services/userService.js";
-import * as sessionService from "../services/sessionService.js";
-import * as inviteService from "../services/inviteService.js";
-import * as onboardingService from "../services/onboardingService.js";
-import * as serverService from "../services/serverService.js";
-import * as featureFlagService from "../services/featureFlagService.js";
-import * as legalAcceptanceService from "../services/legalAcceptanceService.js";
-import * as serverAgreementService from "../services/serverAgreementService.js";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
+import * as userService from "../services/userService";
+import { getDb } from "../db/index";
+import { setProductAnalyticsOptOut } from "../services/productAnalyticsGate";
+import * as sessionService from "../services/sessionService";
+import * as inviteService from "../services/inviteService";
+import * as onboardingService from "../services/onboardingService";
+import * as serverService from "../services/serverService";
+import * as featureFlagService from "../services/featureFlagService";
+import * as legalAcceptanceService from "../services/legalAcceptanceService";
+import * as serverAgreementService from "../services/serverAgreementService";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
 import {
   getBearerAccessUserId,
   signAccessToken,
@@ -19,15 +22,16 @@ import {
   requireRetirementAuth,
   requireProfileSetupComplete,
   respondInvalidOrExpiredToken,
-} from "../middleware/auth.js";
-import { attachAuthTraceIdentity } from "../middleware/requestObservability.js";
-import { recordEmailLoginRejectedTrace } from "./authLoginTrace.js";
+} from "../middleware/auth";
+import { attachAuthTraceIdentity } from "../middleware/requestObservability";
+import { recordEmailLoginRejectedTrace } from "./authLoginTrace";
 import {
   authRefreshAttemptIdFromHeader,
   authRefreshInstallationIdFromHeader,
   recordAuthRefreshTrace,
   recordAuthSessionIssuedTrace,
-} from "./authRefreshTrace.js";
+} from "./authRefreshTrace";
+import { sendJsonServerError } from "./errorResponse";
 import {
   isReservedAgentName,
   isSignupRoleId,
@@ -39,7 +43,7 @@ import {
   validateName,
   type TimeFormatPreference,
 } from "@botiverse/raft-shared";
-import { getRegistrationBlockedReason } from "../services/registrationPolicy.js";
+import { getRegistrationBlockedReason } from "../services/registrationPolicy";
 import {
   createAvatarUpload,
   MAX_PROFILE_AVATAR_BYTES,
@@ -47,7 +51,7 @@ import {
   PROFILE_AVATAR_TOO_LARGE_MESSAGE,
   runSingleAvatarUpload,
   storeUserAvatar,
-} from "../services/avatarService.js";
+} from "../services/avatarService";
 import {
   assertVerifiedSocialAuthProfile,
   buildAuthorizationUrl,
@@ -74,8 +78,8 @@ import {
   signSocialAuthState,
   validateSocialAuthCallbackState,
   verifySocialAuthState,
-} from "../services/socialAuthService.js";
-import type { SocialAuthMode, SocialAuthProfile, SocialAuthProvider } from "../services/socialAuthService.js";
+} from "../services/socialAuthService";
+import type { SocialAuthMode, SocialAuthProfile, SocialAuthProvider } from "../services/socialAuthService";
 
 export const authRouter: RouterType = Router();
 const MAX_USER_DESCRIPTION_LENGTH = 3000;
@@ -237,6 +241,16 @@ function parseAutoTranslationEnabled(raw: unknown): boolean | undefined {
   if (raw === undefined) return undefined;
   if (typeof raw !== "boolean") {
     throw new Error("autoTranslationEnabled must be a boolean");
+  }
+  return raw;
+}
+
+// RFC-067 "Share usage data": true / false, or null to go back to "not chosen"
+// (the regional default, productAnalyticsGate.SHARE_USAGE_DATA_DEFAULT).
+function parseShareUsageData(raw: unknown): boolean | null | undefined {
+  if (raw === undefined) return undefined;
+  if (raw !== null && typeof raw !== "boolean") {
+    throw new Error("shareUsageData must be a boolean or null");
   }
   return raw;
 }
@@ -572,6 +586,10 @@ authRouter.post("/register", async (req, res) => {
         res.status(400).json({ error: nameError });
         return;
       }
+      if (isReservedAgentName(name)) {
+        res.status(400).json({ error: "This username is reserved. Choose another name." });
+        return;
+      }
     }
     if (password.length < 8) {
       res.status(400).json({ error: "Password must be at least 8 characters" });
@@ -613,8 +631,11 @@ authRouter.post("/register", async (req, res) => {
     } else if (msg.includes("already registered") || msg.includes("already taken")) {
       res.status(409).json({ error: msg });
     } else {
-      console.error("Register error:", serializeErrorForLog(err));
-      res.status(500).json({ error: "Registration failed" });
+      sendJsonServerError(req, res, {
+        error: "Registration failed",
+        logPrefix: "Register error:",
+        err,
+      });
     }
   }
 });
@@ -652,8 +673,11 @@ authRouter.get("/identities", requireAuth, async (req, res) => {
     }
     res.json(methods);
   } catch (err) {
-    console.error("List auth identities error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to load linked accounts" });
+    sendJsonServerError(req, res, {
+      error: "Failed to load linked accounts",
+      logPrefix: "List auth identities error:",
+      err,
+    });
   }
 });
 
@@ -676,8 +700,11 @@ authRouter.delete("/identities/:provider", requireAuth, async (req, res) => {
       respondInvalidOrExpiredToken(res);
       return;
     }
-    console.error("Unlink auth identity error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to disconnect linked account" });
+    sendJsonServerError(req, res, {
+      error: "Failed to disconnect linked account",
+      logPrefix: "Unlink auth identity error:",
+      err,
+    });
   }
 });
 
@@ -711,8 +738,12 @@ authRouter.post("/mobile/oauth/apple/native/start", async (req, res) => {
     });
   } catch (err: unknown) {
     if (nativeAppleOAuthErrorResponse(res, err) || mobileOAuthErrorResponse(res, err, "start")) return;
-    console.error("Native Apple OAuth start error:", serializeErrorForLog(err));
-    res.status(500).json({ code: "native_apple_start_failed", error: "Failed to start Apple sign-in" });
+    sendJsonServerError(req, res, {
+      error: "Failed to start Apple sign-in",
+      code: "native_apple_start_failed",
+      logPrefix: "Native Apple OAuth start error:",
+      err,
+    });
   }
 });
 
@@ -752,8 +783,12 @@ authRouter.post("/mobile/oauth/start", async (req, res) => {
     });
   } catch (err: unknown) {
     if (mobileOAuthErrorResponse(res, err, "start")) return;
-    console.error("Mobile OAuth start error:", serializeErrorForLog(err));
-    res.status(500).json({ code: "mobile_oauth_start_failed", error: "Failed to start mobile OAuth" });
+    sendJsonServerError(req, res, {
+      error: "Failed to start mobile OAuth",
+      code: "mobile_oauth_start_failed",
+      logPrefix: "Mobile OAuth start error:",
+      err,
+    });
   }
 });
 
@@ -774,8 +809,12 @@ authRouter.post("/mobile/oauth/:provider/link/start", requireAuth, async (req, r
     });
   } catch (err: unknown) {
     if (mobileOAuthErrorResponse(res, err, "start")) return;
-    console.error("Mobile OAuth link start error:", serializeErrorForLog(err));
-    res.status(500).json({ code: "mobile_oauth_link_start_failed", error: "Failed to start mobile OAuth link" });
+    sendJsonServerError(req, res, {
+      error: "Failed to start mobile OAuth link",
+      code: "mobile_oauth_link_start_failed",
+      logPrefix: "Mobile OAuth link start error:",
+      err,
+    });
   }
 });
 
@@ -792,8 +831,12 @@ authRouter.post("/mobile/oauth/complete", async (req, res) => {
       return;
     }
     if (mobileOAuthErrorResponse(res, err, "complete")) return;
-    console.error("Mobile OAuth completion error:", serializeErrorForLog(err));
-    res.status(500).json({ code: "mobile_oauth_complete_failed", error: "Failed to complete mobile OAuth" });
+    sendJsonServerError(req, res, {
+      error: "Failed to complete mobile OAuth",
+      code: "mobile_oauth_complete_failed",
+      logPrefix: "Mobile OAuth completion error:",
+      err,
+    });
   }
 });
 
@@ -814,8 +857,12 @@ authRouter.post("/mobile/oauth/:provider/link/complete", requireAuth, async (req
     });
   } catch (err: unknown) {
     if (mobileOAuthErrorResponse(res, err, "complete")) return;
-    console.error("Mobile OAuth link completion error:", serializeErrorForLog(err));
-    res.status(500).json({ code: "mobile_oauth_link_complete_failed", error: "Failed to complete mobile OAuth link" });
+    sendJsonServerError(req, res, {
+      error: "Failed to complete mobile OAuth link",
+      code: "mobile_oauth_link_complete_failed",
+      logPrefix: "Mobile OAuth link completion error:",
+      err,
+    });
   }
 });
 
@@ -1088,8 +1135,11 @@ authRouter.post("/:provider/complete", async (req, res, next) => {
       res.status(400).json({ error: message });
       return;
     }
-    console.error(`${provider.label} auth completion error:`, serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to complete sign-in" });
+    sendJsonServerError(req, res, {
+      error: "Failed to complete sign-in",
+      logPrefix: `${provider.label} auth completion error:`,
+      err,
+    });
   }
 });
 
@@ -1118,8 +1168,11 @@ authRouter.post("/login", async (req, res) => {
       }
       res.status(401).json({ code: "AUTH_INVALID_CREDENTIALS", error: err.message });
     } else {
-      console.error("Login error:", serializeErrorForLog(err));
-      res.status(500).json({ error: "Login failed" });
+      sendJsonServerError(req, res, {
+        error: "Login failed",
+        logPrefix: "Login error:",
+        err,
+      });
     }
   }
 });
@@ -1217,8 +1270,11 @@ authRouter.post("/me/timezone-observation", requireAuth, async (req, res) => {
     }
     res.json(observation);
   } catch (err) {
-    console.error("Record timezone observation error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to record timezone observation" });
+    sendJsonServerError(req, res, {
+      error: "Failed to record timezone observation",
+      logPrefix: "Record timezone observation error:",
+      err,
+    });
   }
 });
 
@@ -1266,8 +1322,11 @@ authRouter.post("/me/complete-profile", requireAuth, async (req, res) => {
       res.status(status).json({ error: err.message, code: err.code });
       return;
     }
-    console.error("Complete profile error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to complete profile setup" });
+    sendJsonServerError(req, res, {
+      error: "Failed to complete profile setup",
+      logPrefix: "Complete profile error:",
+      err,
+    });
   }
 });
 
@@ -1337,6 +1396,7 @@ authRouter.patch("/me", requireAuth, async (req, res) => {
       preferredTranslationDisplay?: PreferredTranslationDisplay;
       preferredTimeFormat?: TimeFormatPreference | null;
       preferredMessageBodyFontSize?: MessageBodyFontSizePreference | null;
+      shareUsageData?: boolean | null;
       referralSource?: string | null;
       referralSourceOther?: string | null;
       referralSourceSkippedAt?: Date | null;
@@ -1375,6 +1435,8 @@ authRouter.patch("/me", requireAuth, async (req, res) => {
       if (preferredTimeFormat !== undefined) profileFields.preferredTimeFormat = preferredTimeFormat;
       const preferredMessageBodyFontSize = parsePreferredMessageBodyFontSize(req.body?.preferredMessageBodyFontSize);
       if (preferredMessageBodyFontSize !== undefined) profileFields.preferredMessageBodyFontSize = preferredMessageBodyFontSize;
+      const shareUsageData = parseShareUsageData(req.body?.shareUsageData);
+      if (shareUsageData !== undefined) profileFields.shareUsageData = shareUsageData;
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : "Invalid account preference" });
       return;
@@ -1421,6 +1483,12 @@ authRouter.patch("/me", requireAuth, async (req, res) => {
       }
     }
 
+    // RFC-067: turning "Share usage data" off unlinks everything recorded so
+    // far (deletes the analytics-id mapping); turning it on mints a fresh id.
+    if (profileFields.shareUsageData === false || profileFields.shareUsageData === true) {
+      await setProductAnalyticsOptOut(getDb(), req.userId!, !profileFields.shareUsageData);
+    }
+
     let user;
     if (Object.keys(profileFields).length > 0) {
       user = await userService.updateUser(req.userId!, profileFields);
@@ -1457,8 +1525,11 @@ authRouter.patch("/me", requireAuth, async (req, res) => {
     if (msg.includes("Current password is incorrect")) {
       res.status(401).json({ code: "AUTH_CURRENT_PASSWORD_INCORRECT", error: msg });
     } else {
-      console.error("Update profile error:", serializeErrorForLog(err));
-      res.status(500).json({ error: "Failed to update profile" });
+      sendJsonServerError(req, res, {
+        error: "Failed to update profile",
+        logPrefix: "Update profile error:",
+        err,
+      });
     }
   }
 });
@@ -1502,8 +1573,11 @@ authRouter.post("/me/avatar", requireAuth, async (req, res) => {
       });
       return;
     }
-    console.error("User avatar upload error:", serializeErrorForLog(err));
-    res.status(500).json({ error: "Failed to upload avatar" });
+    sendJsonServerError(req, res, {
+      error: "Failed to upload avatar",
+      logPrefix: "User avatar upload error:",
+      err,
+    });
   }
 });
 
@@ -1540,8 +1614,11 @@ authRouter.post("/resend-verification", requireAuth, async (req, res) => {
     } else if (msg.includes("Too many") || msg.includes("Please wait")) {
       res.status(429).json({ error: msg });
     } else {
-      console.error("Resend verification error:", serializeErrorForLog(err));
-      res.status(500).json({ error: "Failed to resend verification email" });
+      sendJsonServerError(req, res, {
+        error: "Failed to resend verification email",
+        logPrefix: "Resend verification error:",
+        err,
+      });
     }
   }
 });
@@ -1603,6 +1680,8 @@ authRouter.post("/accept-invite", requireAuth, requireProfileSetupComplete, asyn
       agreementId: typeof agreementId === "string" ? agreementId : null,
       ...getAgreementRequestMetadata(req),
     });
+    // Committed: deliver the server.member_added App Notification now.
+    kickAppNotificationDelivery();
     const io = req.app.get("io") as SocketServer | undefined;
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
     if (io) {
@@ -1642,8 +1721,11 @@ authRouter.post("/accept-invite", requireAuth, requireProfileSetupComplete, asyn
     ) {
       res.status(400).json({ error: msg });
     } else {
-      console.error("Accept invite error:", serializeErrorForLog(err));
-      res.status(500).json({ error: "Failed to accept invite" });
+      sendJsonServerError(req, res, {
+        error: "Failed to accept invite",
+        logPrefix: "Accept invite error:",
+        err,
+      });
     }
   }
 });

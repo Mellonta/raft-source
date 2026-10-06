@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   getSocketAuthErrorRecoveryAction,
   resolveSocketRefreshOutcome,
   shouldAttemptSocketTokenRefresh,
-} from "../src/utils/socketSessionPolicy.js";
+} from "../src/utils/socketSessionPolicy";
 
 test("socket auth-looking connect_error triggers a token refresh attempt", () => {
   assert.equal(

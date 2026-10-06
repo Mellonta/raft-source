@@ -3,7 +3,7 @@ import {
   type ExternalAttachmentProviderFailure,
   type ExternalInboundAttachmentProviderAdapter,
   validateExternalAttachmentCapabilityManifest,
-} from "./externalAttachmentProviderAdapter.js";
+} from "./externalAttachmentProviderAdapter";
 
 export type SlackInboundAttachmentInspection = Readonly<{
   id: string;

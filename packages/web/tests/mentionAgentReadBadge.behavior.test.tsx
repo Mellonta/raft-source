@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, render, screen } from "@testing-library/react";
 import MentionLink from "../src/components/message/MentionLink";

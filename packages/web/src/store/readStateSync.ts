@@ -9,7 +9,7 @@ import type { InboxScopeReadFrontier } from "@botiverse/raft-shared";
 // braces, not the load-bearing part — it keeps the startup path's dependency
 // explicit so a future heavy addition to the barrel cannot quietly re-enter
 // this closure.
-import { isUInt64String } from "@botiverse/raft-sync-core/src/uint64.js";
+import { isUInt64String } from "@botiverse/raft-sync-core/src/uint64";
 import { registerServerReset } from "./serverResetRegistry";
 
 // #632 C0 — read-state ingress FAILURE OBSERVABILITY. Deliberately nothing more.

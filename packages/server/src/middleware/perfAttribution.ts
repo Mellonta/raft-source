@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
-import { normalizeRequestRoutePattern } from "./requestRoutePattern.js";
+import { normalizeRequestRoutePattern } from "./requestRoutePattern";
 
 export const PERF_ATTRIBUTION_ENV = "PERF_ATTRIBUTION_LOGS";
 export const PERF_CALLER_CONTEXT_HEADER = "x-perf-caller-context";

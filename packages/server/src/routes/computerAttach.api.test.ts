@@ -1,23 +1,22 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { asMachineId } from "@botiverse/raft-shared";
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach } from "vitest";
 
 import argon2 from "argon2";
 
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { users, computers, onboardingEmailJourneys } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { createServer, addMember, transitionMemberRole } from "../services/serverService.js";
-import { getMachine } from "../services/machineService.js";
+import { getDb } from "../db/index";
+import { users, computers, onboardingEmailJourneys } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { signAccessToken } from "../middleware/auth";
+import { createServer, addMember, transitionMemberRole } from "../services/serverService";
+import { getMachine } from "../services/machineService";
 import {
   resetComputerMobileAppEmailJourneyTestOverrides,
   setComputerMobileAppEmailJourneyConfigForTest,
-} from "../services/computerMobileAppEmailJourneyService.js";
+} from "../services/computerMobileAppEmailJourneyService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -158,17 +157,13 @@ test("attach: member → sk_computer_* issued; same-user same-name collides with
     assert.equal(a.serverSlug, server.slug);
     assert.equal(a.resumed, false);
 
-    const [mobileJourney] = await getDb().select()
+    const mobileJourneys = await getDb().select()
       .from(onboardingEmailJourneys)
       .where(and(
         eq(onboardingEmailJourneys.userId, userId),
         eq(onboardingEmailJourneys.journeyKey, "first_computer_mobile_app_48h"),
       ));
-    assert.equal(mobileJourney?.day1Status, "dry_run");
-    assert.equal(
-      mobileJourney?.day1ScheduledAt?.getTime(),
-      (mobileJourney?.qualifiedAt.getTime() ?? 0) + 48 * 60 * 60 * 1000,
-    );
+    assert.equal(mobileJourneys.length, 0);
 
     // Re-attach same (server, user, display-name) must not prove identity.
     // The server rejects it instead of rotating the existing row by name.
@@ -209,97 +204,25 @@ test("attach: member → sk_computer_* issued; same-user same-name collides with
   });
 });
 
-test("attach remains successful when the mobile lifecycle email provider fails", async () => {
+test("attach no longer starts the retired mobile-download email journey", async () => {
   setComputerMobileAppEmailJourneyConfigForTest({
     mode: "all",
     sendEmail: async () => {
-      throw new Error("provider unavailable");
+      throw new Error("retired mobile-download sender must be unreachable");
     },
   });
 
   await withEnv(true, async (app) => {
     const { id: userId, bearer } = await seedUser();
-    const server = await createServer("Attach Email Failure", `attach-email-${randomUUID()}`, userId);
+    const server = await createServer("Attach Retired Email", `attach-retired-email-${randomUUID()}`, userId);
     const response = await fetch(`${app.baseUrl}/api/computer/attach`, {
       method: "POST",
       headers: jsonHeaders({ Authorization: `Bearer ${bearer}` }),
-      body: JSON.stringify({ serverSlug: server.slug, name: "email-failure-computer" }),
+      body: JSON.stringify({ serverSlug: server.slug, name: "retired-email-computer" }),
     });
 
     assert.equal(response.status, 201);
-    const [journey] = await getDb().select()
-      .from(onboardingEmailJourneys)
-      .where(and(
-        eq(onboardingEmailJourneys.userId, userId),
-        eq(onboardingEmailJourneys.journeyKey, "first_computer_mobile_app_48h"),
-      ));
-    assert.equal(journey?.day1Status, "failed");
-    assert.equal(journey?.lastError, "provider unavailable");
-  });
-});
-
-test("attach succeeds and compensates when the ledger fails after provider acceptance", async () => {
-  const canceled: string[] = [];
-  setComputerMobileAppEmailJourneyConfigForTest({
-    mode: "all",
-    sendEmail: async () => "accepted-provider-email",
-    persistAcceptedEmail: async () => {
-      throw new Error("ledger unavailable after provider acceptance");
-    },
-    cancelEmail: async (emailId) => {
-      canceled.push(emailId);
-    },
-  });
-
-  await withEnv(true, async (app) => {
-    const { id: userId, bearer } = await seedUser();
-    const server = await createServer("Attach Accepted Ledger Failure", `attach-accepted-ledger-${randomUUID()}`, userId);
-    const response = await fetch(`${app.baseUrl}/api/computer/attach`, {
-      method: "POST",
-      headers: jsonHeaders({ Authorization: `Bearer ${bearer}` }),
-      body: JSON.stringify({ serverSlug: server.slug, name: "accepted-ledger-failure-computer" }),
-    });
-
-    assert.equal(response.status, 201);
-    assert.deepEqual(canceled, ["accepted-provider-email"]);
-    const [journey] = await getDb().select()
-      .from(onboardingEmailJourneys)
-      .where(and(
-        eq(onboardingEmailJourneys.userId, userId),
-        eq(onboardingEmailJourneys.journeyKey, "first_computer_mobile_app_48h"),
-      ));
-    assert.equal(journey?.day1Status, "failed");
-    assert.equal(journey?.day1EmailId, "accepted-provider-email");
-    assert.equal(journey?.cancelReason, "schedule_persist_failed");
-    assert.ok(journey?.canceledAt);
-  });
-});
-
-test("attach remains successful when lifecycle enqueue throws before its own failure boundary", async () => {
-  setComputerMobileAppEmailJourneyConfigForTest({
-    mode: "all",
-    beforeEnqueue: () => {
-      throw new Error("ledger unavailable");
-    },
-  });
-
-  await withEnv(true, async (app) => {
-    const { id: userId, bearer } = await seedUser();
-    const server = await createServer("Attach Ledger Failure", `attach-ledger-${randomUUID()}`, userId);
-    const response = await fetch(`${app.baseUrl}/api/computer/attach`, {
-      method: "POST",
-      headers: jsonHeaders({ Authorization: `Bearer ${bearer}` }),
-      body: JSON.stringify({ serverSlug: server.slug, name: "ledger-failure-computer" }),
-    });
-
-    assert.equal(response.status, 201);
-    const body = await response.json() as { serverMachineId?: string };
-    assert.ok(body.serverMachineId);
-    const [computer] = await getDb().select({ id: computers.id })
-      .from(computers)
-      .where(eq(computers.id, body.serverMachineId!));
-    assert.equal(computer?.id, body.serverMachineId);
-    const journeys = await getDb().select({ id: onboardingEmailJourneys.id })
+    const journeys = await getDb().select()
       .from(onboardingEmailJourneys)
       .where(and(
         eq(onboardingEmailJourneys.userId, userId),

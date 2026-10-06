@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { dbTest as test } from "../test/integration/dbTest.js";
+import { dbTest as test } from "../test/integration/dbTest";
 import { eq } from "drizzle-orm";
-import { machines, servers, users } from "../db/schema.js";
-import { recordMachineComputerVersion } from "./machineService.js";
+import { machines, servers, users } from "../db/schema";
+import { recordMachineComputerVersion } from "./machineService";
 
 test("Computer version inventory writes changes immediately and refreshes unchanged reports after 24 hours", async ({ db }) => {
   const [user] = await db.insert(users).values({

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { TASK_ACTIONS, authorizeTaskAction } from "./taskPermissions.js";
+import { TASK_ACTIONS, authorizeTaskAction } from "./taskPermissions";
 
 test("Guest task access is read-only even in a joined writable channel", () => {
   for (const action of TASK_ACTIONS) {

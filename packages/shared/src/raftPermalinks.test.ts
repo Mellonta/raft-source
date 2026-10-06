@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { parseRaftPermalink } from "./raftPermalinks.js";
+import { parseRaftPermalink } from "./raftPermalinks";
 
 test("parseRaftPermalink parses standard app.slock.ai permalinks", () => {
   const parsed = parseRaftPermalink(

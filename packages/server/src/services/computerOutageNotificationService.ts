@@ -1,12 +1,12 @@
 import { clearClockInterval, currentDate, setClockInterval } from "@botiverse/raft-shared";
 import { and, asc, eq, inArray, isNull, lte } from "drizzle-orm";
-import { getDb, type Database, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type Database, type DatabaseExecutor } from "../db/index";
 import {
   computerLifecycleOperations,
   computerOutageOccurrences,
   computers,
-} from "../db/schema.js";
-import { emitAppFacingNotificationEvent } from "./appNotificationDeliveryService.js";
+} from "../db/schema";
+import { emitAppFacingNotificationEvent } from "./appNotificationDeliveryService";
 
 export const COMPUTER_OUTAGE_ALERT_DWELL_MS = 60_000;
 const COMPUTER_OUTAGE_DRAIN_BATCH_SIZE = 25;

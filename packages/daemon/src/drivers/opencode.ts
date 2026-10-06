@@ -1,13 +1,14 @@
+import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { formatRuntimeProviderModelLabel, hydrateRuntimeConfig, runtimeConfigToLaunchFields, runtimeModelSourceOutcomeFromSet, type AgentConfig, type AgentMessage, type RuntimeModelInfo, type RuntimeModelSet, type RuntimeModelSourceOutcome , type AxSurfaceText } from "@botiverse/raft-shared";
-import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport.js";
-import { resolveNodeHostLaunch } from "./nodeHostLaunch.js";
-import { resolveCommandOnPath, readCommandVersion, type ProbeDeps } from "./probe.js";
-import type { ParsedEvent, RuntimeDriver, RuntimeProbeResult, SpawnContext, SpawnResult } from "./types.js";
-import { prepareManagedMcpRuntimeProxy } from "../managedMcpRuntimeProxy.js";
+import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
+import { resolveNodeHostLaunch } from "./nodeHostLaunch";
+import { resolveCommandOnPath, readCommandVersion, type ProbeDeps } from "./probe";
+import type { ParsedEvent, RuntimeDriver, RuntimeProbeResult, SpawnContext, SpawnResult } from "./types";
+import { prepareManagedMcpRuntimeProxy } from "../managedMcpRuntimeProxy";
 
 const SLOCK_AGENT_NAME = "slock";
 const NO_MESSAGE_PROMPT = "No new messages are pending. Stop now.";
@@ -43,8 +44,7 @@ interface OpenCodeModelsCommandResult {
 
 type OpenCodeModelsCommand = (home: string) => OpenCodeModelsCommandResult;
 
-export interface OpenCodeModelsCommandDeps {
-  platform?: NodeJS.Platform;
+export interface OpenCodeModelsCommandDeps extends OpenCodeProbeDeps {
   spawnSyncFn?: typeof spawnSync;
 }
 
@@ -286,11 +286,20 @@ export function runOpenCodeModelsCommand(
 ): OpenCodeModelsCommandResult {
   const platform = deps.platform ?? process.platform;
   const spawnSyncFn = deps.spawnSyncFn ?? spawnSync;
-  const result = spawnSyncFn("opencode", ["models"], {
-    env: { ...process.env, HOME: home, FORCE_COLOR: "0", NO_COLOR: "1" },
+  const env = { ...process.env, HOME: home, FORCE_COLOR: "0", NO_COLOR: "1" };
+  let launch: { command: string; args: string[]; env?: NodeJS.ProcessEnv } = { command: "opencode", args: ["models"] };
+  if (platform === "win32") {
+    try {
+      launch = resolveOpenCodeSpawn(["models"], { ...deps, env });
+    } catch (error) {
+      return { status: null, stdout: "", error: error as Error };
+    }
+  }
+  const result = spawnSyncFn(launch.command, launch.args, {
+    env: launch.env ?? env,
     encoding: "utf8",
     timeout: 5000,
-    shell: platform === "win32",
+    shell: false,
   });
   return {
     status: result.status,
@@ -392,7 +401,7 @@ export function resolveOpenCodeSpawn(commandArgs: string[], deps: OpenCodeProbeD
   if (platform !== "win32") {
     const command = resolveCommandOnPath("opencode", deps);
     if (!command) {
-      throw new Error("Cannot resolve OpenCode CLI on PATH.");
+      throw new RuntimeExecutableNotFoundError({ runtimeId: "opencode", message: "Cannot resolve OpenCode CLI on PATH." });
     }
     return {
       command,
@@ -413,11 +422,10 @@ export function resolveOpenCodeSpawn(commandArgs: string[], deps: OpenCodeProbeD
     return { command, args: commandArgs, shell: false };
   }
 
-  throw new Error(
+  throw new RuntimeExecutableNotFoundError({ runtimeId: "opencode", message:
     "Cannot resolve OpenCode CLI entry point on Windows without cmd.exe. " +
     "Install the native OpenCode executable or install opencode-ai globally so Slock can launch " +
-    "node_modules/opencode-ai/bin/opencode.exe directly.",
-  );
+    "node_modules/opencode-ai/bin/opencode.exe directly." });
 }
 
 function readOpenCodeVersion(deps: OpenCodeProbeDeps = {}): string | null {

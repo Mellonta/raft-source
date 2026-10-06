@@ -5,8 +5,8 @@
 // The shapes in this file are the PUBLIC LIBRARY CONTRACT exported via
 // `@botiverse/raft-computer/lib`. The IPC transport that satisfies them lives in
 // PR-impl-2 §4 (liuliu-owned); this commit lands only the type surface so
-// G-stage (`apps/raft-computer-app`) and other library consumers can
-// type-check against the locked shape before the implementation ships.
+// library consumers can type-check against the locked shape before the
+// implementation ships.
 //
 // Naming convention (§5.5):
 //   - Wire literals (RequestMethodMap keys, ServiceEvent.topic, IPC frame
@@ -130,8 +130,6 @@ export type ServiceEvent =
   | { kind: "runner-attached"; payload: unknown }
   | { kind: "runner-detached"; payload: unknown }
   | { kind: "upgrade-log-appended"; payload: unknown }
-  | { kind: "upgrade-progressed"; payload: UpgradeProgressEvent }
-  | { kind: "upgrade-completed"; payload: UpgradeCompletedEvent }
   | { kind: "heartbeat"; payload: unknown };
 
 /**
@@ -189,8 +187,7 @@ export interface ConnectServiceOptions {
  * Open a typed IPC connection to the Computer service. Throws
  * `ServiceClientError` on handshake failure. Concrete implementation
  * lands in PR-impl-2 §4 (liuliu-owned); the type is locked here so
- * `apps/raft-computer-app` and other library consumers can type-check
- * call sites before the transport ships.
+ * library consumers can type-check call sites before the transport ships.
  */
 export type ConnectService = (
   installRoot: string,
@@ -211,11 +208,11 @@ export type {
   DaemonState,
   ServerHealth,
   ServerStatusRow,
-} from "../status.js";
-export type { RunnerListItem as RunnerInfo } from "../apiClient.js";
+} from "../status";
+export type { RunnerListItem as RunnerInfo } from "../apiClient";
 
-import type { ComputerStatusReport, ServerStatusRow } from "../status.js";
-import type { RunnerListItem } from "../apiClient.js";
+import type { ComputerStatusReport, ServerStatusRow } from "../status";
+import type { RunnerListItem } from "../apiClient";
 
 /**
  * Canonical lib-side name for the `service-status` reader result, aligned
@@ -294,7 +291,7 @@ export class StateReaderError extends Error {
 // D-stage IPC handlers `satisfies RequestMethodMap[M]["result"]` against
 // these concrete shapes via mechanical delegation.
 
-import type { RunnerState, ServiceState } from "./state.js";
+import type { RunnerState, ServiceState } from "./state";
 
 /**
  * Result of the service-level restart mutation. `accepted` means a replacement
@@ -310,6 +307,13 @@ export interface RestartServiceParams {
   requestId: string;
   /** Only this server's runner may report the post-restart completion. */
   originServerId: string;
+  /**
+   * Local CLI restarts record one lifecycle operation per attached server.
+   * Each server's runner reports its own operation after the restart; the
+   * legacy single `requestId`/`originServerId` pair stays the first entry so
+   * older readers keep working (task #803).
+   */
+  requestIds?: Record<string, string>;
 }
 
 export type UpgradeStartParams =
@@ -331,22 +335,6 @@ export type UpgradeStartParams =
       trigger: "web";
     };
 
-export interface UpgradeProgressEvent {
-  requestId: string;
-  phase: "downloading" | "verifying" | "applying" | "restarting";
-  message?: string;
-  percent?: number;
-  fromVersion?: string;
-  targetVersion?: string;
-}
-
-export interface UpgradeCompletedEvent {
-  requestId: string;
-  ok: boolean;
-  newVersion?: string;
-  rolledBack?: boolean;
-  error?: string;
-}
 
 /**
  * Result of the internal `reset-service` IPC mutation. Clears the
@@ -398,7 +386,9 @@ export type ResetRunnerResult =
 export interface UpgradeStartResult {
   status: "started" | "already-running";
   upgradeId: string;
-  targetVersion: string;
+  /** Exact requested version; absent while the installer resolves a channel. */
+  targetVersion?: string;
+  channel?: string;
 }
 
 // --- §X migration detection (lib consumer surface) ---

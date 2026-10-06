@@ -1,5 +1,6 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
+import { cliChildEnv } from "../test/cliChildEnv";
 import assert from "node:assert/strict";
 
 import { execFile } from "node:child_process";
@@ -10,15 +11,17 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { agents, messages, serverMembers, users } from "../db/schema.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
-import { addHuman, createChannel, getOrCreateThread } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { registerMachine } from "../services/machineService.js";
-import { createServer } from "../services/serverService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import * as taskService from "../services/taskService.js";
+import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
+import { getDb } from "../db/index";
+import { traceAgentIdHash, traceServerIdHash } from "../tracing/traceIdentity";
+import { agents, messages, serverMembers, users } from "../db/schema";
+import { createAgent, assignMachine } from "../services/agentService";
+import { addHuman, createChannel, getOrCreateThread } from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { registerMachine } from "../services/machineService";
+import { createServer } from "../services/serverService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import * as taskService from "../services/taskService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -65,19 +68,8 @@ async function runSlockCli(
   args: string[],
   env: Record<string, string>,
 ): Promise<{ stdout: string; stderr: string }> {
-  return execFileAsync(process.execPath, ["--import", "tsx", cliEntry, ...args], {
-    env: {
-      ...process.env,
-      SLOCK_AGENT_ID: "",
-      SLOCK_SERVER_URL: "",
-      SLOCK_SERVER_ID: "",
-      SLOCK_AGENT_TOKEN_FILE: "",
-      SLOCK_AGENT_TOKEN: "",
-      SLOCK_AGENT_PROXY_URL: "",
-      SLOCK_AGENT_PROXY_TOKEN: "",
-      SLOCK_AGENT_PROXY_TOKEN_FILE: "",
-      ...env,
-    },
+  return execFileAsync(process.execPath, ["--import", "@oxc-node/core/register", cliEntry, ...args], {
+    env: cliChildEnv(env),
   });
 }
 
@@ -111,6 +103,8 @@ async function createAgentProfileEnv(baseUrl: string, serverId: string, agentId:
 
 test("internal agent search resolves sender handle refs and filters by sender", async ({ app }) => {
   const { speaker, agent, apiKey, speakerMessage, ownerMessage } = await seedSearchFixture();
+  const sink = new MemoryTraceSink();
+  app.app.set("serverTracer", new BasicTracer({ sink }));
   const params = new URLSearchParams({
     q: "zebraneedle",
     sender: `@${speaker.name}`,
@@ -125,6 +119,29 @@ test("internal agent search resolves sender handle refs and filters by sender", 
   assert.equal(body.results.some((result) => result.id === ownerMessage.id), false);
   assert.equal(body.results[0]?.senderName, speaker.name);
   assert.equal(body.results[0]?.taskCurrentProjection, undefined);
+
+  // Managed agents (machine key + :id) are traced by the agent's keyed hash,
+  // on the request span and its search spans, never by the raw id.
+  const agentHash = traceAgentIdHash(agent.id);
+  assert.match(agentHash ?? "", /^[0-9a-f]{16}$/);
+  const requestSpan = sink.getAllSpans().find((span) =>
+    span.name === "server.http.request" && span.attrs?.route_pattern === "/internal/agent/:id/search"
+  );
+  assert.ok(requestSpan, "expected managed agent search request span");
+  const childSpans = sink.getAllSpans().filter((span) =>
+    span.context.traceId === requestSpan.context.traceId && span.name !== "server.http.request"
+  );
+  assert.ok(
+    childSpans.some((span) => span.name === "server.db.query" && span.attrs?.query_name === "messages.search"),
+    "expected the messages.search query span",
+  );
+  for (const span of [requestSpan, ...childSpans]) {
+    assert.equal(span.attrs?.agent_id_hash, agentHash, `${span.name} should carry agent_id_hash`);
+    assert.equal(span.attrs?.agent_id_present, true, `${span.name} should mark agent_id_present`);
+    assert.equal(span.attrs?.server_id_hash, traceServerIdHash(agent.serverId), `${span.name} should carry server_id_hash`);
+    assert.equal(JSON.stringify(span).includes(agent.id), false, `${span.name} must not carry the raw agent id`);
+    assert.equal(JSON.stringify(span).includes(agent.serverId), false, `${span.name} must not carry the raw server id`);
+  }
 });
 
 test("internal agent search preserves an amended task host hit and attaches its latest projection", async ({ app }) => {

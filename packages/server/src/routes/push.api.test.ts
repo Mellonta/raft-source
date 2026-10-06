@@ -1,13 +1,14 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import argon2 from "argon2";
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { pushRegistrations, sessionFamilies, sessions, users } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { addMember, createServer } from "../services/serverService.js";
+import { getDb } from "../db/index";
+import { pushRegistrations, pushSubscriptions, sessionFamilies, sessions, users } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { __resetWebPushRuntimeForTests, __setWebPushRuntimeForTests } from "../services/pushService";
+import { addMember, createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -313,6 +314,58 @@ test("online logout marks the entire push family dead while retaining idempotent
     });
     assert.equal(capabilityAck.status, 204);
   } finally {
+    await close();
+  }
+});
+
+test("web push subscribe stores only public HTTPS endpoints", async () => {
+  const { baseUrl, close } = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+  __setWebPushRuntimeForTests({ enabled: true });
+  try {
+    const owner = await seedVerifiedUser("push-subscribe@slock.test", "push-subscribe");
+    const token = await login(baseUrl, owner.email);
+    const keys = { p256dh: "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM", auth: "tBHItJI5svbpez7KI4CCXg" };
+    const subscribe = (endpoint: unknown) => fetch(`${baseUrl}/api/push/subscribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ endpoint, keys }),
+    });
+
+    const rejected = [
+      "http://fcm.googleapis.com/fcm/send/plain-http",
+      "https://8.8.8.8/push/ip-literal",
+      "https://127.0.0.1:8080/push/loopback",
+      "https://[::1]/push/loopback-v6",
+      "https://10.0.0.5/push/private-range",
+      "https://169.254.169.254/latest/meta-data",
+      "https://localhost/push",
+      "https://printer.local/push",
+      "https://vault.internal/push",
+      "https://user:secret@fcm.googleapis.com/fcm/send/userinfo",
+      "not a url",
+      ["https://fcm.googleapis.com/fcm/send/array"],
+    ];
+    for (const endpoint of rejected) {
+      const res = await subscribe(endpoint);
+      assert.equal(res.status, 400, `${JSON.stringify(endpoint)} must be refused`);
+    }
+    assert.equal((await getDb().select().from(pushSubscriptions)).length, 0, "refused endpoints store nothing");
+
+    const accepted = [
+      "https://fcm.googleapis.com/fcm/send/abc",
+      "https://updates.push.services.mozilla.com/wpush/v2/abc",
+      "https://web.push.apple.com/abc",
+      "https://db5p.notify.windows.com/w/?token=abc",
+    ];
+    for (const endpoint of accepted) {
+      const res = await subscribe(endpoint);
+      assert.equal(res.status, 200, `${endpoint} must be accepted: ${await res.clone().text()}`);
+    }
+    const stored = (await getDb().select({ endpoint: pushSubscriptions.endpoint }).from(pushSubscriptions)
+      .where(eq(pushSubscriptions.userId, owner.id))).map((row) => row.endpoint).sort();
+    assert.deepEqual(stored, [...accepted].sort());
+  } finally {
+    __resetWebPushRuntimeForTests();
     await close();
   }
 });

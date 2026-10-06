@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -15,6 +14,7 @@ import { useMachineStore } from "../src/store/machineStore";
 import { useServerStore } from "../src/store/serverStore";
 import { en as enMessages } from "../src/i18n/messages/en";
 import { zhCn as zhMessages } from "../src/i18n/messages/zh-cn";
+import { builtInProviderModels } from "../src/utils/runtimeConfigForm";
 
 const originalGet = api.get.bind(api);
 const originalPost = api.post.bind(api);
@@ -75,6 +75,7 @@ function seedAgent(overrides: {
   model: string;
   status: string;
   runtimes: string[];
+  provider?: { kind: "preset"; providerId: string; apiKey: string };
 }) {
   const agent = {
     id: "agent-1",
@@ -89,6 +90,7 @@ function seedAgent(overrides: {
       model: { kind: "preset", id: overrides.model },
       mode: { kind: "default" },
       reasoningEffort: null,
+      ...(overrides.provider ? { provider: overrides.provider, hostUserState: "forbidden" } : {}),
     },
   };
   useAuthStore.setState({ user: { id: "user-1", name: "Owner" } } as never);
@@ -112,6 +114,7 @@ function seedAgent(overrides: {
       ? { data: { evaluations: [] } }
       : { data: {} }) as typeof api.post;
   api.get = (async (url: string) => {
+    if (url.includes("/runtime-account-usage/")) return { data: { state: "missing", snapshot: null } } as never;
     if (url === "/agents/agent-1/runtime-options") {
       return {
         data: {
@@ -154,7 +157,7 @@ function renderPanel(agent: ReturnType<typeof seedAgent>, locale: Locale) {
 async function openRuntimeEditor(locale: Locale) {
   const catalog = CATALOGS[locale];
   const opener = await waitFor(() => {
-    const el = document.querySelector(`[title="${catalog["agent.detail.editRuntimeConfig"]}"]`);
+    const el = document.querySelector(`[aria-label="${catalog["agent.detail.editRuntimeConfig"]}"]`);
     assert.ok(el);
     return el as HTMLElement;
   });
@@ -190,6 +193,50 @@ test("runtime confirmation catalogs never declare an unsupplied placeholder name
   assert.match(en["agent.detail.switchModelResetMessage"], /\{reasoning, select, none \{\}/);
   assert.match(zh["agent.detail.switchModelResetMessage"], /\{reasoning, select, none \{\}/);
 });
+
+for (const source of [
+  { name: "unknown old Computer", data: { kind: "live", value: { models: [] } } },
+  { name: "offline Computer", data: { kind: "error", retryable: true } },
+  { name: "unavailable catalog", data: { kind: "unsupported" } },
+  { name: "pending detection", data: undefined },
+  { name: "successful detection missing the model", data: { kind: "live", value: { models: [], catalog: { protocolVersion: 1, runtime: "builtin", runtimeVersion: "1.0.25" } } } },
+]) {
+  test(`Built-in static presets remain editable with ${source.name}`, async () => {
+    const models = builtInProviderModels("openai")!;
+    const [original, next] = models;
+    assert.ok(original && next);
+    const agent = seedAgent({ runtime: "builtin", model: original.id, status: "active", runtimes: ["builtin"], provider: { kind: "preset", providerId: "openai", apiKey: "synthetic-fixture-key" } });
+    const storedBefore = JSON.stringify(agent.runtimeConfig);
+    const baseGet = api.get;
+    api.get = (async (url: string) => {
+      if (!url.includes("/runtime-models/")) return baseGet(url);
+      if (source.data === undefined) return new Promise(() => {});
+      return { data: source.data };
+    }) as typeof api.get;
+    let configWrites = 0;
+    const basePost = api.post;
+    api.post = (async (...args: Parameters<typeof api.post>) => {
+      if (args[0].includes("runtime-config")) configWrites += 1;
+      return basePost(...args);
+    }) as typeof api.post;
+    renderPanel(agent, "en");
+    const save = await openRuntimeEditor("en");
+    const trigger = await waitFor(() => {
+      const result = screen.getAllByRole("combobox").find((el) => el.textContent?.includes(original.label));
+      assert.ok(result, "stored model stays visible");
+      return result;
+    });
+    assert.equal(document.body.textContent?.includes(en["agent.runtimeModels.builtInUpgradeRequired"]), false);
+    await clickSelectOption(trigger, next.label);
+    await waitFor(() => assert.ok(trigger.textContent?.includes(next.label), "the actual select accepts the new preset"));
+    await waitFor(() => assert.equal(save.disabled, false, "the edit page permits saving without a target catalog"));
+    assert.equal(configWrites, 0, "editing must not persist config before confirmation");
+    assert.equal(JSON.stringify(agent.runtimeConfig), storedBefore, "readback preserves stored identity while editing");
+    await saveEnabledConfig(save);
+    assert.ok(within(confirmDialog()).getByRole("button", { name: en["agent.detail.restartAgent"] }));
+    assert.equal(configWrites, 0, "opening confirmation does not write config");
+  });
+}
 
 for (const locale of ["en", "zh-cn"] as const) {
   const catalog = CATALOGS[locale];

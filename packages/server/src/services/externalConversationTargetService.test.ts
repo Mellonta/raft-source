@@ -1,22 +1,21 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channels,
   jointChannels,
   jointChannelServers,
   messages,
   users,
-} from "../db/schema.js";
-import { createServer } from "./serverService.js";
-import { resolveExternalConversationTarget } from "./externalConversationTargetService.js";
-import { resolveSlackOutboundMessageSurface } from "./slackBridgeDatabaseOutboundRuntime.js";
-import { listSlackBridgeRaftConversationTargets } from "./slackBridgeProvisioningControlPlane.js";
+} from "../db/schema";
+import { createServer } from "./serverService";
+import { resolveExternalConversationTarget } from "./externalConversationTargetService";
+import { resolveSlackOutboundMessageSurface } from "./slackBridgeDatabaseOutboundRuntime";
+import { listSlackBridgeRaftConversationTargets } from "./slackBridgeProvisioningControlPlane";
 
 
 afterEach(async () => {

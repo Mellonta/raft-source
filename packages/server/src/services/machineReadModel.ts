@@ -1,7 +1,8 @@
-import type { AgentOrchestrator } from "./agentOrchestrator.js";
+import type { MachineDiskStatus } from "@botiverse/raft-shared";
+import type { AgentOrchestrator } from "./agentOrchestrator";
 import type {
   ComputerSourceFactProvenance,
-} from "./computerBroadcastPolicyService.js";
+} from "./computerBroadcastPolicyService";
 
 type MachineReadModelInput = {
   id: string;
@@ -49,6 +50,9 @@ export type MachineReadModel = MachineReadModelInput & {
   // Computer has zero agents while another locally-known machine has agents,
   // the latter is probably the user's real Computer.
   agentCount: number;
+  // Latest disk report while connected (null when offline or never
+  // reported). Clients derive the low-disk warning with isMachineDiskLow.
+  diskStatus: MachineDiskStatus | null;
 };
 
 export async function buildMachineReadModel(
@@ -56,7 +60,7 @@ export async function buildMachineReadModel(
   agentOrchestrator: Pick<
     AgentOrchestrator,
     "getMachineStatus" | "getMachineStatusVersion" | "getMachineDaemonVersion"
-  > & Partial<Pick<AgentOrchestrator, "getMachineComputerVersion" | "getMachineComputerVersionFact" | "getMachineRuntimeVersions">>,
+  > & Partial<Pick<AgentOrchestrator, "getMachineComputerVersion" | "getMachineComputerVersionFact" | "getMachineRuntimeVersions" | "getMachineDiskStatus">>,
   opts?: { isComputer?: boolean; computerAttachedByCurrentUser?: boolean; agentCount?: number },
 ): Promise<MachineReadModel> {
   const liveDaemonVersion = agentOrchestrator.getMachineDaemonVersion(machine.id);
@@ -77,11 +81,15 @@ export async function buildMachineReadModel(
   const runtimeVersionsPromise = agentOrchestrator.getMachineRuntimeVersions
     ? agentOrchestrator.getMachineRuntimeVersions(machine.id)
     : Promise.resolve({});
-  const [status, statusVersion, liveComputerFact, runtimeVersions] = await Promise.all([
+  const diskStatusPromise = agentOrchestrator.getMachineDiskStatus
+    ? agentOrchestrator.getMachineDiskStatus(machine.id)
+    : Promise.resolve(null);
+  const [status, statusVersion, liveComputerFact, runtimeVersions, diskStatus] = await Promise.all([
     agentOrchestrator.getMachineStatus(machine.id),
     agentOrchestrator.getMachineStatusVersion(machine.id),
     liveComputerFactPromise,
     runtimeVersionsPromise,
+    diskStatusPromise,
   ]);
   return {
     ...machine,
@@ -99,5 +107,6 @@ export async function buildMachineReadModel(
     isComputer: opts?.isComputer ?? false,
     computerAttachedByCurrentUser: opts?.computerAttachedByCurrentUser ?? false,
     agentCount: opts?.agentCount ?? 0,
+    diskStatus: status === "online" ? diskStatus : null,
   };
 }

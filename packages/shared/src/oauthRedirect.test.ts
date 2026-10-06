@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { appendOAuthAuthorizationParams, isSafeOAuthReturnUrl } from "./oauthRedirect.js";
+import { appendOAuthAuthorizationParams, isSafeOAuthReturnUrl } from "./oauthRedirect";
 
 test("OAuth navigation rejects executable, relative and non-TLS remote callbacks", () => {
   for (const url of [

@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { test } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { channels, messages } from "../db/schema.js";
-import { SlackBridgeFullFlowPreflightError } from "./slackBridgeFullFlowPreflight.js";
+import { getDb } from "../db/index";
+import { channels, messages } from "../db/schema";
+import { SlackBridgeFullFlowPreflightError } from "./slackBridgeFullFlowPreflight";
 
 import {
   runSlackBridgeExecutableBatchCase,
@@ -14,7 +13,7 @@ import {
   type SlackBridgeBatchSendMode,
   type SlackBridgeBatchTopology,
   type SlackBridgeExecutableBatchCase,
-} from "./slackBridgeOutboundBatchHarness.js";
+} from "./slackBridgeOutboundBatchHarness";
 
 type Safety = "continue_same_random" | "stop_prestart" | "stop_ambiguous_provider";
 

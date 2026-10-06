@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Ajv from "ajv";
-import { describe, expect, it } from "vitest";
 
 interface NamedValue {
   name: string;

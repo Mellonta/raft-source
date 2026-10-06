@@ -17,11 +17,14 @@
 // §3.3.1 redline: each per-server sk_computer_* lives only in its own
 // child's memory (loaded from `servers/<serverId>/runner.state.json`);
 // it is never read by the service, never logged, never printed.
+import { readChannel } from "./lib/channelState";
+import type { UpgradeStartParams, UpgradeStartResult } from "./lib/types";
+import { installerArgs, launchInstallerDetached, readLastRemoteUpgradeReceipt, recordRemoteUpgradeLaunch } from "./externalInstaller";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import { COMPUTER_VERSION } from "./version.js";
-import { clearResidentConnectedMarker, readResidentConnectedMarker, writeResidentConnectedMarker } from "./residentConnectionMarker.js";
-import { residentCoreIdentity } from "./residentCoreIdentity.js";
+import { COMPUTER_VERSION } from "./version";
+import { clearResidentConnectedMarker, readResidentConnectedMarker, writeResidentConnectedMarker } from "./residentConnectionMarker";
+import { residentCoreIdentity } from "./residentCoreIdentity";
 import { mkdir, writeFile, open, stat, unlink } from "node:fs/promises";
 import { dirname, join as joinPath } from "node:path";
 import {
@@ -33,14 +36,14 @@ import {
   serverRunnerLogPath,
   assertValidServerId,
   serverConnectedMarkerPath,
-} from "./paths.js";
+} from "./paths";
 import {
   listManagedServerIds,
   readServerAttachment,
-} from "./serverState.js";
-import { fail, formatHumanError, info, present } from "./output.js";
-import { runFullCleanup } from "./cleanup.js";
-import { rotateLogIfNeeded } from "./logRotation.js";
+} from "./serverState";
+import { fail, formatHumanError, info, present } from "./output";
+import { runFullCleanup } from "./cleanup";
+import { rotateLogIfNeeded } from "./logRotation";
 import {
   recordCrash,
   isDegraded,
@@ -49,7 +52,7 @@ import {
   readTerminalUnlinked,
   emitRunnerStateTransition,
   classifyTerminalHandshakeRejection,
-} from "./health.js";
+} from "./health";
 import {
   canSpawn,
   nextRunnerStateOnExit,
@@ -60,83 +63,73 @@ import {
   RUNNER_TRIGGER,
   type RunnerRecord,
   type ChildExitClass,
-} from "./lib/runnerStateMachine.js";
-import type { RunnerState } from "./lib/state.js";
+} from "./lib/runnerStateMachine";
+import type { RunnerState } from "./lib/state";
 import {
   readPidfileAt,
   isProcessAlive,
   writePidfileAt,
   clearPidfileAt,
-} from "./internal/process-primitives.js";
-import { readRunnerLogDiagnosticText } from "./internal/runner-log-diagnostics.js";
-import type { IpcServer } from "./internal/ipc-server.js";
+} from "./internal/process-primitives";
+import { readRunnerLogDiagnosticText } from "./internal/runner-log-diagnostics";
+import type { IpcServer } from "./internal/ipc-server";
 import {
   ServiceClientError,
-} from "./lib/types.js";
-import { resetService, resetRunner } from "./reset.js";
+} from "./lib/types";
+import { resetService, resetRunner } from "./reset";
 import { currentDate } from "@botiverse/raft-shared";
+import { liveSeaExecutablePath } from "./liveExecutable";
+export { executableFileIdentity, liveSeaExecutablePath } from "./liveExecutable";
 import type { DaemonCoreOptions } from "@botiverse/raft-daemon/core";
-import { enqueueLifecycleOperation } from "./lifecycleOperations.js";
-import { shutdownService } from "./lib/serviceShutdown.js";
-import { createReplacementHandoff, type ReplacementHandoffRequest } from "./lib/replacementHandoff.js";
+import { enqueueLifecycleOperation } from "./lifecycleOperations";
+import { shutdownService } from "./lib/serviceShutdown";
+import { createReplacementHandoff, type ReplacementHandoffRequest } from "./lib/replacementHandoff";
 import {
   clearPendingRestartMarker,
   readPendingRestartMarker,
-  shouldReconcilePendingRestart,
+  pendingRestartRequestIdForServer,
+  retirePendingRestartForServer,
   writePendingRestartMarker,
-} from "./restartMarker.js";
-import { readLiveServiceSnapshot, resolveSourceServicePid } from "./machineServiceAttestation.js";
-import { prepareResidentLifecycleBridge } from "./residentLifecycleBridge.js";
-import { writeRunnerVersionEvidence } from "./runningVersionEvidence.js";
-import { startServiceReconcileLoop } from "./serviceReconcileLoop.js";
+} from "./restartMarker";
+import { readLiveServiceSnapshot, resolveSourceServicePid } from "./machineServiceAttestation";
+import { prepareResidentLifecycleBridge } from "./residentLifecycleBridge";
+import { writeRunnerVersionEvidence } from "./runningVersionEvidence";
+import { startServiceReconcileLoop } from "./serviceReconcileLoop";
 import {
   publishServiceIdentityAfterIpcBind,
   type ServiceIdentityPublishDeps,
-} from "./lib/serviceIdentity.js";
-import { OS_SUPERVISOR_KIND_ENV_VAR } from "./osSupervisorLifecycle.js";
-import { buildRunnerChildEnv, PARENT_LOCK_HELD_ENV_VAR, SOURCE_SERVICE_PID_ENV_VAR } from "./runnerChildEnv.js";
-import { handleRunnerLockConflict } from "./runnerLockConflict.js";
+} from "./lib/serviceIdentity";
+import { retireCliLoginCarrier } from "./macosLoginCarrier";
+import { OS_SUPERVISOR_KIND_ENV_VAR } from "./osSupervisorLifecycle";
+import { buildRunnerChildEnv, PARENT_LOCK_HELD_ENV_VAR, SOURCE_SERVICE_PID_ENV_VAR } from "./runnerChildEnv";
+import { handleRunnerLockConflict } from "./runnerLockConflict";
 import {
   checkServiceControlAvailability,
   performServiceSelfRestart,
   requestServiceRestartViaIpc,
-  requestServiceUpgradeViaIpc,
+  requestServiceUpgradeStartViaIpc,
   type InFlightServiceControl,
   type ServiceSelfRestartControlDeps,
-} from "./serviceControl.js";
-import { resolveKResidentBinary } from "./kResidentBinary.js";
-import {
-  spawnPendingKUpgradeRecovery,
-} from "./kUpgradeProcess.js";
-import {
-  createServiceUpgradeStart,
-  type ServiceUpgradeStartSeams,
-} from "./serviceUpgradeStart.js";
-import { readKRunnerHold } from "./kRunnerHold.js";
-import { reconcileKUpgradeOnConnect } from "./kUpgradeReconcile.js";
-import { adoptLegacyKUpgradeOrigin } from "./legacyKOriginAdoption.js";
+} from "./serviceControl";
 import {
   createServiceIpcSeam,
   listenServiceIpcSeam,
   type ServiceIpcMutations,
-} from "./serviceIpcSeam.js";
+} from "./serviceIpcSeam";
 export {
   checkServiceControlAvailability,
   requestServiceRestartViaIpc,
-  requestServiceUpgradeViaIpc,
-} from "./serviceControl.js";
+} from "./serviceControl";
 export type {
   InFlightServiceControl,
-  ManagedUpgradeRelayContext,
-  ManagedUpgradeRelayDeps,
-} from "./serviceControl.js";
-export { OS_SUPERVISOR_KIND_ENV_VAR } from "./osSupervisorLifecycle.js";
-export { startServiceIpcSeam, type ServiceIpcMutations } from "./serviceIpcSeam.js";
-export { buildRunnerChildEnv, PARENT_LOCK_HELD_ENV_VAR, SOURCE_SERVICE_PID_ENV_VAR } from "./runnerChildEnv.js";
+} from "./serviceControl";
+export { OS_SUPERVISOR_KIND_ENV_VAR } from "./osSupervisorLifecycle";
+export { startServiceIpcSeam, type ServiceIpcMutations } from "./serviceIpcSeam";
+export { buildRunnerChildEnv, PARENT_LOCK_HELD_ENV_VAR, SOURCE_SERVICE_PID_ENV_VAR } from "./runnerChildEnv";
 export {
   readServiceVersionEvidence,
   type ServiceVersionEvidence,
-} from "./runningVersionEvidence.js";
+} from "./runningVersionEvidence";
 
 // ---------- self-re-exec argv builder (pure / unit-tested) ----------
 
@@ -166,7 +159,7 @@ export function buildResidentSpawn(
   isSea = isSeaBinary(),
   seaExecutable = process.execPath,
 ): { command: string; args: string[] } {
-  // Carry parent execArgv so the dev-mode tsx loader survives re-exec.
+  // Carry parent execArgv so the dev-mode TS loader survives re-exec.
   const tail = serverId ? [mode, serverId] : [mode];
   // In a SEA binary, process.execPath IS the bundled app — there is no script
   // entry to pass, and `process.argv[1]` is the first user arg (not a script
@@ -256,10 +249,10 @@ export interface SpawnDetachedServiceOptions {
   parentMutationLockHeld?: boolean;
   /** Exact service process that this replacement is taking over from. */
   sourceServicePid?: number;
-  /** Test seam for the SEA-only K resident selector. */
+  /** @deprecated no-op since the external installer; kept so callers compile. */
   isSeaBinaryFn?: typeof isSeaBinary;
   /** Test seam for the K stable/experiment resolver. */
-  resolveKResidentBinaryFn?: typeof resolveKResidentBinary;
+  resolveKResidentBinaryFn?: unknown;
 }
 
 export async function spawnDetachedService(
@@ -272,9 +265,8 @@ export async function spawnDetachedService(
   await rotateLogIfNeeded(serviceLogPath(slockHome));
   const supLogFd = await open(serviceLogPath(slockHome), "a");
   const isSea = (opts.isSeaBinaryFn ?? isSeaBinary)();
-  const residentBinary = await (opts.resolveKResidentBinaryFn ?? resolveKResidentBinary)(slockHome, process.execPath, isSea);
   const { command, args } = buildResidentSpawn(
-    "__service", null, process.argv[1] ?? "", process.execArgv, isSea, residentBinary,
+    "__service", null, process.argv[1] ?? "", process.execArgv, isSea, liveSeaExecutablePath(),
   );
   const child = spawn(command, args, {
     detached: true,
@@ -447,7 +439,7 @@ const defaultCoreFactory: ResidentCoreFactory = async (creds) => {
     //     (runBundledRaftCli). No sidecar script exists to resolve.
     //   - Bundled into a non-SEA host (e.g. the Electron menu-bar app): the
     //     daemon's relative `resolveRaftCliPath` CANNOT work — the daemon core
-    //     is tsup-inlined into the host bundle, so `import.meta.url` points into
+    //     is inlined into the host bundle, so `import.meta.url` points into
     //     the host bundle where no `cli/index.js` is adjacent. The host MUST
     //     hand us the CLI's real location via `RAFT_COMPUTER_CLI_PATH` (env is
     //     the seam: the __run child inherits it from the host process). Without
@@ -455,10 +447,10 @@ const defaultCoreFactory: ResidentCoreFactory = async (creds) => {
     //   - Normal node install (env unset, not SEA): leave undefined → the
     //     daemon resolves the bundled CLI dist relative to its own dist, as before.
     slockCliPath: resolveResidentSlockCliPath(isSeaBinary()),
+    getComputerLastUpgradeReceipt: () => readLastRemoteUpgradeReceipt(resolveRaftHome()),
     getComputerLifecycleAcks: lifecycleBridge.getAcknowledgements,
     getComputerLifecycleReadyAcks: lifecycleBridge.getReadyAcknowledgements,
     onComputerLifecycleReceipt: lifecycleBridge.acknowledgeReceipt,
-    reconcileComputerLifecycleOrigin: () => adoptLegacyKUpgradeOrigin({ slockHome, serverId: creds.serverId }),
     computerControlViaSupervisor: lifecycleBridge.supervisorMutationsAttested,
     // Managed-Computer remote control (server → WS → runner). This runner
     // is the service's in-process `__run` child, so:
@@ -471,7 +463,7 @@ const defaultCoreFactory: ResidentCoreFactory = async (creds) => {
     //     CLI therefore share one machine-wide implementation.
     onComputerControl: async (action, ctx) => {
       const operationId = ctx.operationId ?? ctx.requestId;
-      if (operationId) {
+      if (operationId && action === "restart") {
         await enqueueLifecycleOperation(resolveRaftHome(), creds.serverId, {
           operationId,
           action,
@@ -489,29 +481,27 @@ const defaultCoreFactory: ResidentCoreFactory = async (creds) => {
         return;
       }
       if (ctx.requestId) {
-        return requestServiceUpgradeViaIpc(resolveRaftHome(), creds.serverId, ctx.requestId, ctx);
+        // v2: launch and return; the successor's reconnect is the readback.
+        await requestServiceUpgradeStartViaIpc(resolveRaftHome(), {
+          requestId: ctx.requestId,
+          originServerId: creds.serverId,
+          ...(ctx.targetVersion ? { targetVersion: ctx.targetVersion } : {}),
+        });
+        return;
       }
       console.warn(
         "[Computer] Ignoring upgrade request without requestId; " +
           "managed upgrade requires a requestId for progress and terminal readback.",
       );
     },
-    // Project K's one terminal operation receipt to the exact origin server.
-    onComputerUpgradeReconcile: async (emitDone, emitProgress) => {
-      void emitProgress;
-      await reconcileKUpgradeOnConnect({
-        slockHome,
-        serverId: creds.serverId,
-        runnerVersion: COMPUTER_VERSION,
-        emitDone,
-      });
-    },
     onComputerRestartReconcile: async (emitDone) => {
       const slockHome = resolveRaftHome();
       const marker = await readPendingRestartMarker(slockHome);
-      if (!marker || !shouldReconcilePendingRestart(marker, creds.serverId)) return;
-      emitDone({ requestId: marker.requestId, ok: true });
-      await clearPendingRestartMarker(slockHome);
+      if (!marker) return;
+      const requestId = pendingRestartRequestIdForServer(marker, creds.serverId);
+      if (requestId === null) return;
+      emitDone({ requestId, ok: true });
+      await retirePendingRestartForServer(slockHome, marker, creds.serverId);
     },
   });
 };
@@ -544,7 +534,7 @@ const defaultCoreFactory: ResidentCoreFactory = async (creds) => {
  * Pure function — extracted from the service exit handler so it can
  * be unit-tested without spawning real processes.
  */
-export type { ChildExitClass } from "./lib/runnerStateMachine.js";
+export type { ChildExitClass } from "./lib/runnerStateMachine";
 
 const DAEMON_ALREADY_RUNNING_RE = /Another Slock daemon is already running/i;
 const DAEMON_LOCK_OWNER_PID_RE = /\bpid=(\d+)\b/;
@@ -793,6 +783,19 @@ export async function runServiceStartupRecovery(slockHome: string): Promise<void
       `Service startup recovery pass failed: ${msg}. Continuing; cleanup will retry on next service restart.\n`,
     );
   }
+  // The CLI no longer autostarts at login. An auto-upgraded Mac may never run
+  // `start`/`stop` again, so the first service boot of the new build deletes
+  // the leftover CLI LaunchAgent file (file only; see macosLoginCarrier.ts).
+  try {
+    if ((await retireCliLoginCarrier(slockHome)).removed) {
+      process.stderr.write("Service startup recovery: removed the retired macOS CLI login LaunchAgent.\n");
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `Service startup recovery: could not remove the retired macOS CLI login LaunchAgent: ${msg}. Continuing.\n`,
+    );
+  }
 }
 
 export async function hasRunnerReadyEvidence(
@@ -805,7 +808,7 @@ export async function hasRunnerReadyEvidence(
   return readResidentConnectedMarker(serverConnectedMarkerPath(slockHome, serverId))?.pid === pid;
 }
 
-export interface RunServiceDeps extends ServiceUpgradeStartSeams {
+export interface RunServiceDeps {
   requestSelfRestart?: ReplacementHandoffRequest;
   serviceSelfRestartDeps?: Omit<
     ServiceSelfRestartDeps,
@@ -813,9 +816,8 @@ export interface RunServiceDeps extends ServiceUpgradeStartSeams {
   >;
   serviceIdentityPublishDeps?: ServiceIdentityPublishDeps;
   isSeaBinaryFn?: typeof isSeaBinary;
-  resolveKResidentBinaryFn?: typeof resolveKResidentBinary;
-  spawnPendingKUpgradeRecoveryFn?: typeof spawnPendingKUpgradeRecovery;
-  readKRunnerHoldFn?: typeof readKRunnerHold;
+  resolveKResidentBinaryFn?: unknown;
+  readKRunnerHoldFn?: unknown;
   onMutationsReady?: (mutations: ServiceIpcMutations) => void | Promise<void>;
   stopAfterMutationsReady?: boolean;
   shutdownServiceFn?: typeof shutdownService;
@@ -941,9 +943,8 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
     const logStartOffset = await stat(logPath).then((s) => s.size, () => 0);
     const logFd = await open(logPath, "a");
     const isSea = (deps.isSeaBinaryFn ?? isSeaBinary)();
-    const residentBinary = await (deps.resolveKResidentBinaryFn ?? resolveKResidentBinary)(slockHome, process.execPath, isSea);
     const { command, args } = buildResidentSpawn(
-      "__run", serverId, process.argv[1] ?? "", process.execArgv, isSea, residentBinary,
+      "__run", serverId, process.argv[1] ?? "", process.execArgv, isSea, liveSeaExecutablePath(),
     );
     const child = spawn(command, args, {
       stdio: ["ignore", logFd.fd, logFd.fd],
@@ -1021,9 +1022,9 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
 
   const reconcile = async (): Promise<void> => {
     if (shuttingDown) return;
-    // HostAdapter lifecycle state: resume() removes it only when the successor
-    // may repopulate the parked managed set K attests before promotion.
-    const holdRunnersForK = await (deps.readKRunnerHoldFn ?? readKRunnerHold)(slockHome);
+    // The external installer replaces the whole service; nothing holds
+    // runners back any more.
+    const holdRunnersForK = false;
     // Contract v4 §6 line 80: the service keeps daemons running for servers in
     // the MANAGED subset (attached + managed.flag set), not every attached
     // server. `start [serverId]` writes managed.flag for the targeted
@@ -1051,18 +1052,6 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
       if (!wanted.has(id) && rec.child) killChild(rec);
       if (!wanted.has(id) && rec.externalPid !== undefined) killChild(rec);
     }
-    if (kRecoveryChild === null && (deps.isSeaBinaryFn ?? isSeaBinary)()) {
-      const recovery = await (deps.spawnPendingKUpgradeRecoveryFn ?? spawnPendingKUpgradeRecovery)(
-        slockHome,
-        process.execPath,
-      ).catch(() => null);
-      if (recovery) {
-        kRecoveryChild = recovery;
-        recovery.once("exit", () => {
-          if (kRecoveryChild === recovery) kRecoveryChild = null;
-        });
-      }
-    }
     if (hasPendingReadyProbe || holdRunnersForK) scheduleReconcile(RUNNER_READY_POLL_INTERVAL_MS);
   };
 
@@ -1070,43 +1059,21 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
     setTimeout(() => void reconcile(), Math.max(0, delayMs));
   };
 
-  // Single-writer mutation surface: the supervisor owns reset so its
-  // in-memory runner state is updated, not just disk. After ②, spawn
-  // eligibility is derived from the in-memory RunnerState; a disk-only
-  // reset would clear health.json but leave the cached lifecycle
-  // `degraded`, so canSpawn would never respawn the recovered runner
-  // until the next service restart. Routing reset through here transitions
-  // the cached lifecycle `degraded → stopped` and reconciles, so the runner
-  // comes back live without a restart.
-  const upgradeStart = createServiceUpgradeStart({
-    slockHome,
-    currentBinaryPath: process.execPath,
-    servicePid: process.pid,
-    isSeaBinaryFn: deps.isSeaBinaryFn ?? isSeaBinary,
-    readChannelFn: deps.readChannelFn,
-    resolveUpgradeTargetVersionFn: deps.resolveUpgradeTargetVersionFn,
-    spawnKUpgradeCoordinatorFn: deps.spawnKUpgradeCoordinatorFn,
-    inspectKUpgradeStartFn: deps.inspectKUpgradeStartFn,
-    waitForKUpgradeStartFn: deps.waitForKUpgradeStartFn,
-    priorProcessIdentities: () => [...runners.entries()].flatMap(([serverId, record]) => {
-      const pid = record.child?.pid ?? record.externalPid;
-      return pid ? [`runner:${serverId}:${pid}`] : [];
-    }),
-    checkControlAvailability: (requestId) =>
-      checkServiceControlAvailability(inFlightControl, "upgrade", requestId),
-    claimControl: (requestId) => {
-      const owner = Symbol(`upgrade:${requestId}`);
-      inFlightControl = { action: "upgrade", requestId };
-      inFlightControlOwner = owner;
-      return owner;
-    },
-    releaseControl: (owner) => {
-      if (inFlightControlOwner !== owner) return false;
-      inFlightControl = null;
-      inFlightControlOwner = null;
-      return true;
-    },
-  });
+  // A remote upgrade is the external installer, launched detached so it
+  // outlives this service. The outcome is the installer's receipt and the
+  // live readback, not this acknowledgement.
+  const upgradeStart = async (params: UpgradeStartParams): Promise<UpgradeStartResult> => {
+    const upgradeId = params.requestId;
+    // No exact version means the saved channel's current release; the
+    // installer resolves it and the receipt records what it became.
+    const channel = params.targetVersion ? undefined : await readChannel(slockHome);
+    if (params.scope === "remote") {
+      await recordRemoteUpgradeLaunch(slockHome, { requestId: upgradeId, ...(params.targetVersion ? { targetVersion: params.targetVersion } : {}) });
+    }
+    const pid = await launchInstallerDetached(slockHome, installerArgs({ targetVersion: params.targetVersion, channel }), upgradeId);
+    if (pid === null) throw new Error("external_installer_launch_failed");
+    return { status: "started", upgradeId, ...(params.targetVersion ? { targetVersion: params.targetVersion } : { channel }) };
+  };
   const mutations: ServiceIpcMutations = {
     restartService: async (params) => {
       const requestId = params?.requestId ?? "local-restart";
@@ -1126,6 +1093,7 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
           await writePendingRestartMarker(slockHome, {
             requestId: params.requestId,
             originServerId: params.originServerId,
+            ...(params.requestIds ? { requestIds: params.requestIds } : {}),
             startedAt: currentDate().toISOString(),
             oldServicePid: process.pid,
             oldRunnerPids,

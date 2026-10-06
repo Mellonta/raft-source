@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
 
-import { createAgentAppInboxStore } from "./agentAppInbox.js";
-import { AgentProcessManager } from "./agentProcessManager.js";
-import { REMINDER_AGENT_INBOX_REGISTRY } from "./apps/reminder/inboxDefinition.js";
+import { createAgentAppInboxStore } from "./agentAppInbox";
+import { AgentProcessManager } from "./agentProcessManager";
+import { REMINDER_AGENT_INBOX_REGISTRY } from "./apps/reminder/inboxDefinition";
+import { traceRows } from "./testing/traceRows";
 
 test("real AgentProcessManager wake uses the typed Inbox source correlation", async () => {
   const ownerAgentId = "agent-a";
@@ -35,12 +35,14 @@ test("real AgentProcessManager wake uses the typed Inbox source correlation", as
     },
   );
 
-  assert.equal(await manager.notifyAgentAppInbox(ownerAgentId, minted.item), false);
-  const wake = sink.getAllSpans().find((span) =>
+  // No process and no restart snapshot: since task #1103 the wake is handed to
+  // the Server instead of being reported as a dead end.
+  assert.equal(await manager.notifyAgentAppInbox(ownerAgentId, minted.item), true);
+  const wake = traceRows(sink).find((span) =>
     span.name === "daemon.agent.app_inbox_notice"
   );
-  assert.equal(wake?.attrs?.outcome, "not_idle");
-  assert.equal(wake?.status, "error");
+  assert.equal(wake?.attrs?.outcome, "server_wake_requested");
+  assert.equal(wake?.status, "ok");
   assert.equal(
     wake?.attrs?.app_correlation_id,
     `source:${ownerAgentId}:reminder:${minted.item.sourceRef.id}:7`,

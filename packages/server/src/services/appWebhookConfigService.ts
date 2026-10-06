@@ -2,11 +2,11 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { BlockList, isIP } from "node:net";
 import { currentDate } from "@botiverse/raft-shared";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { oauthAppWebhookConfigs, oauthClients } from "../db/schema.js";
-import { ensureLocalAppSourceInstallation } from "./appSourceInstallationService.js";
-import * as integrationAuditService from "./integrationAuditService.js";
-import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy.js";
+import { getDb } from "../db/index";
+import { oauthAppWebhookConfigs, oauthClients } from "../db/schema";
+import { ensureLocalAppSourceInstallation } from "./appSourceInstallationService";
+import * as integrationAuditService from "./integrationAuditService";
+import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy";
 
 const WEBHOOK_SECRET_PREFIX = "raft_webhook_secret_";
 export const APP_WEBHOOK_REPLAY_WINDOW_MS = 5 * 60 * 1000;
@@ -55,6 +55,20 @@ function decryptSecret(encrypted: EncryptedSecret): string {
   } catch {
     throw new AppWebhookConfigError("Webhook signing secret cannot be decrypted");
   }
+}
+
+// Shared encrypted-at-rest primitive (AES-256-GCM under
+// RAFT_APP_WEBHOOK_ENCRYPTION_KEY) for other webhook signing secrets, such as
+// the agent inbox push. Callers keep their own rows and never return the
+// secret or its encrypted material as API output.
+export type EncryptedWebhookSigningSecret = EncryptedSecret;
+
+export function encryptWebhookSigningSecret(secret: string): EncryptedWebhookSigningSecret {
+  return encryptSecret(secret);
+}
+
+export function decryptWebhookSigningSecret(encrypted: EncryptedWebhookSigningSecret): string {
+  return decryptSecret(encrypted);
 }
 
 const NON_PUBLIC_WEBHOOK_ADDRESSES = new BlockList();

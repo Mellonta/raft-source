@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   arbitrateLifecycleProjection,
@@ -10,7 +9,7 @@ import {
   type LifecycleArbitrationVerdict,
   type LifecycleCanonicalProjection,
   type LifecycleObservationClass,
-} from "./agentLifecycleReducer.js";
+} from "./agentLifecycleReducer";
 
 // Lifecycle-v2 P1 binding tests (task #460, PR-alpha).
 //

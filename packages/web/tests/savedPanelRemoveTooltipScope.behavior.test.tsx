@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, render as rtlRender, screen } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -100,7 +99,7 @@ afterEach(() => {
   localStorage.clear();
 });
 
-test("Saved remove tooltip is scoped to the remove badge hover, not the whole row", () => {
+test("Saved remove action does not render hover or floating tooltips", () => {
   seedStores();
 
   render(
@@ -110,14 +109,14 @@ test("Saved remove tooltip is scoped to the remove badge hover, not the whole ro
   );
 
   const row = screen.getByRole("button", { name: /Saved tooltip scope check/ });
-  const tooltip = screen.getByText("Remove from Saved");
-  const hoverScope = tooltip.closest(".group");
+  assert.equal(row.classList.contains("group"), false, "hovering the saved row must not reveal any group state");
 
-  assert.equal(row.classList.contains("group"), false, "hovering the saved row must not reveal the remove tooltip");
-  assert.ok(hoverScope, "tooltip keeps a hover group");
-  assert.notEqual(hoverScope, row, "tooltip hover group is not the saved row");
+  const removeButton = screen.getByRole("button", { name: "Remove from Saved" });
+  assert.ok(removeButton, "remove action is accessible via aria-label");
+
+  // Per creator direction: both the floating tooltip and the inline hover tooltip are removed
   assert.ok(
-    hoverScope?.querySelector("[aria-label='Remove from Saved']"),
-    "tooltip hover group is the small remove badge wrapper",
+    screen.queryByText("Remove from Saved") === null,
+    "neither floating nor hover tooltip should be rendered in the document",
   );
 });

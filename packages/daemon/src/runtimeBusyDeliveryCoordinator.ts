@@ -2,11 +2,11 @@ import {
   reduceApmGatedAssistantContinuation,
   reduceApmIdleState,
   type ApmGatedSteeringDecisionState,
-} from "./apmStateMachine.js";
+} from "./apmStateMachine";
 import type {
   RuntimeBusyDeliveryReadiness,
   RuntimeTurnAttribution,
-} from "./drivers/index.js";
+} from "./drivers/index";
 
 type RuntimeBusyDeliveryClosedReason =
   Extract<RuntimeBusyDeliveryReadiness, { ready: false }>["reason"];
@@ -48,7 +48,7 @@ export interface RuntimeBusyDeliveryCoordinatorHooks<
   ): void;
   flushDirectNotification(agentId: string, process: Process, source: string): boolean;
   flushIdleDelivery(agentId: string, source: string, traceName: string): boolean;
-  recordDaemonTrace(
+  recordDaemonEvent(
     name: string,
     attrs?: Record<string, unknown>,
     status?: "ok" | "error" | "cancelled",
@@ -112,7 +112,7 @@ export class RuntimeBusyDeliveryCoordinator<
     const reduction = reduceApmIdleState(process.gatedSteering, { isIdle: true });
     this.hooks.commitDecisionState(agentId, process, reduction.nextState);
     const pendingAgeMs = pendingInboxAgeMs(process, this.hooks.nowMs());
-    this.hooks.recordDaemonTrace("daemon.agent.busy_delivery.readiness_reconciled", {
+    this.hooks.recordDaemonEvent("daemon.agent.busy_delivery.readiness_reconciled", {
       agentId,
       runtime: process.config.runtime,
       model: process.config.model,
@@ -219,7 +219,7 @@ export class RuntimeBusyDeliveryCoordinator<
       source,
       "daemon.agent.pending_delivery.flush",
     );
-    this.hooks.recordDaemonTrace(
+    this.hooks.recordDaemonEvent(
       "daemon.agent.pending_delivery.flush_outcome",
       {
         agentId,

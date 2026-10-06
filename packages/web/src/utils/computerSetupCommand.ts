@@ -93,29 +93,6 @@ export interface ComputerCommands {
   start: string;
 }
 
-export interface DaemonConnectCommandOptions {
-  apiKey: string;
-  serverName?: string | null;
-  serverUrl: string;
-  distTag?: string;
-  platform?: ComputerCommandPlatform;
-}
-
-export function getDaemonConnectCommand({
-  apiKey,
-  serverName,
-  serverUrl,
-  distTag = "latest",
-  platform = "mac-linux",
-}: DaemonConnectCommandOptions): string {
-  const packageSpec = `@botiverse/raft-daemon@${distTag}`;
-  if (platform === "windows") {
-    return `npx.cmd ${packageSpec} --server-url ${serverUrl} --api-key ${apiKey}`;
-  }
-  const suffix = serverName ? ` # ${serverName}` : "";
-  return `npx ${packageSpec} --server-url ${serverUrl} --api-key ${apiKey}${suffix}`;
-}
-
 // Non-production deployments (staging / slockdev) are internal test surfaces.
 // A tester frequently runs the connect command on a machine that already runs
 // a real prod Computer; without isolation the command would install over

@@ -1,11 +1,12 @@
 import { parseRaftPermalink } from "@botiverse/raft-shared";
 import { alias } from "drizzle-orm/pg-core";
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { channels, messages } from "../db/schema.js";
-import * as serverService from "./serverService.js";
-import { isMessageShortId, messageIdShortPrefixConditions } from "../lib/messageId.js";
-import { getAppPermalinkHostnames } from "../config/appUrl.js";
+import { getDb } from "../db/index";
+import { channels, messages } from "../db/schema";
+import * as serverService from "./serverService";
+import { isMessageShortId, messageIdShortPrefixConditions } from "../lib/messageId";
+import { getAppPermalinkHostnames } from "../config/appUrl";
+import { errorClassOf, safeAddTraceEvent } from "../tracing/semanticTrace";
 
 const CJK_URL_BOUNDARY_PUNCTUATION = "，。、；：！？）》」』】》〉”’（《「『【〈“‘";
 const URL_PATTERN = new RegExp(`https?:\\/\\/[^\\s<>"'${CJK_URL_BOUNDARY_PUNCTUATION}]+`, "g");
@@ -253,8 +254,16 @@ export async function renderAgentReadablePermalinks(text: string, serverId: stri
     replacements = await loadReplacementMap(serverId, text);
   } catch (err) {
     console.warn("[AgentPermalinkRender] Failed to render permalinks; preserving original content", {
-      errorClass: err instanceof Error ? err.name : typeof err,
+      errorClass: errorClassOf(err),
     });
+    // Renders run inside request-scoped trace roots (requestObservability
+    // middleware); outside one this is a deliberate no-op.
+    safeAddTraceEvent("agent.permalink_render.failed", () => ({
+      event_kind: "permalink_render",
+      outcome: "error",
+      reason: "render_threw",
+      error_class: errorClassOf(err),
+    }));
     return text;
   }
   if (replacements.size === 0) return text;
@@ -290,8 +299,15 @@ export async function renderAgentReadablePermalinksInTexts(
     });
   } catch (err) {
     console.warn("[AgentPermalinkRender] Failed to render permalink batch; preserving original content", {
-      errorClass: err instanceof Error ? err.name : typeof err,
+      errorClass: errorClassOf(err),
     });
+    // See the single-text variant: request-scoped trace event, no-op outside a root.
+    safeAddTraceEvent("agent.permalink_render.failed", () => ({
+      event_kind: "permalink_render",
+      outcome: "error",
+      reason: "render_threw",
+      error_class: errorClassOf(err),
+    }));
     return texts;
   }
 }

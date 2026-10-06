@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
 import ts from "typescript";
 
 const routeSource = readFileSync(new URL("./agents.ts", import.meta.url), "utf8");
@@ -52,7 +51,19 @@ test("typed migration errors always publish a nonempty machine-readable cause", 
 test("Built-in migration validates and leases the target catalog before provisioning", () => {
   assert.ok(migrationStart >= 0 && migrationEnd > migrationStart, "migration route boundary markers must remain present");
   const migration = routeSource.slice(migrationStart, migrationEnd);
-  const validate = migration.indexOf("validateBuiltInPresetForMachine(");
+  // The route may validate directly, or through the write-path wrapper added by #proj-daemon
+  // task #322 (it demotes catalog-missing to a warning and rethrows every other code). Both
+  // spellings discharge the same obligation, so either is accepted here -- but accepting a second
+  // name must not let a pure rename satisfy this contract, which is what the delegation assertion
+  // at the end is for. That is precisely how this test went red: it pins a STRING in the source,
+  // and #8063 moved the string.
+  const validateOffsets = [
+    "validateBuiltInPresetForWrite(",
+    "validateBuiltInPresetForMachine(",
+  ]
+    .map((call) => migration.indexOf(call))
+    .filter((at) => at >= 0);
+  const validate = validateOffsets.length > 0 ? Math.min(...validateOffsets) : -1;
   const acquire = migration.indexOf("acquireBuiltInCatalogAuthority(", validate);
   const provision = migration.indexOf("beginAgentMigrationProvisioning(");
   const release = migration.indexOf("releaseCatalogAuthority();", provision);
@@ -61,4 +72,18 @@ test("Built-in migration validates and leases the target catalog before provisio
   assert.ok(acquire > validate, "migration must bind validation to its connection generation");
   assert.ok(provision > acquire, "catalog authority must be held before migration state is provisioned");
   assert.ok(release > provision, "catalog authority must release from the migration finally path");
+
+  // Validating "through the wrapper" only counts if the wrapper still reaches the orchestrator.
+  // Without this, the obligation could be satisfied by a function that merely has the right name.
+  if (migration.includes("validateBuiltInPresetForWrite(")) {
+    const wrapperStart = routeSource.indexOf("async function validateBuiltInPresetForWrite(");
+    assert.ok(wrapperStart >= 0, "validateBuiltInPresetForWrite must be defined in this file");
+    const wrapperEnd = routeSource.indexOf("\n}\n", wrapperStart);
+    assert.ok(wrapperEnd > wrapperStart, "validateBuiltInPresetForWrite body must be delimitable");
+    assert.match(
+      routeSource.slice(wrapperStart, wrapperEnd),
+      /agentOrchestrator\.validateBuiltInPresetForMachine\(/,
+      "the write-path wrapper must still delegate to the catalog validator",
+    );
+  }
 });

@@ -1,11 +1,11 @@
 import type { Command } from "commander";
 
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeJson, writeText, NL } from "../../core/renderer.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { formatProfile } from "./_format.js";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeJson, writeText, NL } from "../../core/renderer";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { formatProfile } from "./_format";
 
 interface ShowOptions {
   json?: boolean;

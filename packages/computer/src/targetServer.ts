@@ -9,7 +9,7 @@
 //
 // Callers pass the slug from the command's positional `[serverSlug]`
 // argument (no `--server` flag anywhere).
-import { ComputerAttachClient } from "./apiClient.js";
+import { ComputerAttachClient } from "./apiClient";
 import {
   formatServerSlugDisplay,
   listServerAttachments,
@@ -17,9 +17,9 @@ import {
   readServerAttachment,
   writeServerAttachment,
   type ServerAttachment,
-} from "./serverState.js";
-import { resolveRaftHome } from "./paths.js";
-import { fail } from "./output.js";
+} from "./serverState";
+import { resolveRaftHome } from "./paths";
+import { fail } from "./output";
 
 function attachmentLabel(a: ServerAttachment): string {
   return formatServerSlugDisplay(a.serverSlug);

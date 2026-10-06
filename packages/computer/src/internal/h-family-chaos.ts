@@ -14,7 +14,7 @@ import {
   serviceStatePath,
   serviceVersionPath,
   userSessionPath,
-} from "../paths.js";
+} from "../paths";
 
 export const H_FAMILY_SERVER_ID = "11111111-1111-4111-8111-111111111111";
 

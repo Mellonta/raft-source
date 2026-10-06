@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { placeSidebarContextMenu, placeSidebarContextSubmenu } from "../src/components/layout/sidebarContextMenuPosition";
 
 test("sidebar context menu opens upward from a bottom-edge trigger", () => {

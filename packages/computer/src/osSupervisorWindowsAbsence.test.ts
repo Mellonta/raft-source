@@ -1,16 +1,15 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildSupervisorCommandPlan, buildOsSupervisorSpec } from "./osSupervisor.js";
+import { buildSupervisorCommandPlan, buildOsSupervisorSpec } from "./osSupervisor";
 import {
   retireLegacyOsSupervisor,
   isWindowsTaskMissingExitCode,
   supervisorExitCode,
   supervisorFailureDetail,
   type SupervisorCommandRunner,
-} from "./osSupervisorRuntime.js";
+} from "./osSupervisorRuntime";
 
 /**
  * Windows task absence must be decided by the typed `/HRESULT` exit code, never

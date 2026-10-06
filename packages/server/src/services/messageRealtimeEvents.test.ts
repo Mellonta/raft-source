@@ -1,19 +1,18 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, relative } from "node:path";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
-import type { messages } from "../db/schema.js";
-import type * as messageService from "./messageService.js";
+import type { messages } from "../db/schema";
+import type * as messageService from "./messageService";
 import {
   projectMessageSocketPayload,
   projectRichMessageSocketPayload,
-} from "./messageRealtimeEvents.js";
-import { emitTaskMessageNew } from "./taskRealtimeEvents.js";
+} from "./messageRealtimeEvents";
+import { emitTaskMessageNew } from "./taskRealtimeEvents";
 import {
   MESSAGE_REALTIME_PRODUCER_REGISTRY,
   type ProducerRegistryEntry,
-} from "./messageRealtimeProducerRegistry.js";
+} from "./messageRealtimeProducerRegistry";
 
 const srcRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 

@@ -112,6 +112,28 @@ function applyThreadUnreadProjectionToSummaries(
   return next;
 }
 
+/**
+ * `GET /channels/:id/threads/:messageId` 404s both when the message genuinely
+ * has no thread yet (normal "no replies yet" state) and when the lookup itself
+ * failed (channel not visible, server mismatch). Only the former is empty —
+ * identified by `code: "THREAD_NOT_FOUND"`, or on servers that predate the code
+ * by the exact "No thread found for this message" error text. Every other
+ * failure must surface as an error with Retry (task #14).
+ */
+const THREAD_ABSENT_LOOKUP_CODE = "THREAD_NOT_FOUND";
+const THREAD_ABSENT_LOOKUP_ERROR = "No thread found for this message";
+
+export function isThreadAbsentLookupError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("response" in err)) return false;
+  const response = (err as { response?: { status?: unknown; data?: unknown } }).response;
+  if (response?.status !== 404) return false;
+  const data = response.data;
+  if (typeof data !== "object" || data === null) return false;
+  const body = data as { code?: unknown; error?: unknown };
+  if (body.code !== undefined) return body.code === THREAD_ABSENT_LOOKUP_CODE;
+  return body.error === THREAD_ABSENT_LOOKUP_ERROR;
+}
+
 export interface OpenThreadRequest {
   serverSlug?: string;
   parentChannelId: string;
@@ -128,6 +150,24 @@ export interface OpenThreadRequest {
    *  inference cannot tell the two apart, which is how the thread icon started
    *  opening a task modal. */
   intent?: "thread" | "task";
+}
+
+/**
+ * The task modal's identity slot (task #699). A task modal and the side thread
+ * are TWO surfaces that used to share the one `open*` slot, so opening a task
+ * over a side thread clobbered the side thread's identity and remounted it.
+ * The slot is fully independent: opening a task never touches `open*`, and
+ * closing the modal is just `taskModal = null` — no capture/restore dance,
+ * nothing to re-render underneath.
+ */
+interface TaskModalAnchor {
+  parentMessageId: string;
+  parentChannelId: string | null;
+  threadChannelId: string | null;
+  serverSlug: string | null;
+  focusedMessageId: string | null;
+  loading: boolean;
+  error: { parentChannelId: string | null; parentMessageId: string } | null;
 }
 
 interface ThreadState {
@@ -190,6 +230,23 @@ interface ThreadState {
   openThread: (request: OpenThreadRequest) => Promise<void>;
   /** Intent of the currently open thread; null when none is open. */
   openIntent: "thread" | "task" | null;
+  /** The task modal's independent identity slot (task #699). */
+  taskModal: TaskModalAnchor | null;
+  /**
+   * Open a task modal for a message. Never touches `open*` — a side thread
+   * that is open underneath keeps its identity, mount, and scroll.
+   */
+  openTaskModal: (request: OpenThreadRequest) => Promise<void>;
+  /**
+   * Close the task modal (X, backdrop, ESC, mobile back). Just empties the
+   * slot; the side thread was never perturbed, so there is nothing to restore.
+   */
+  closeTaskModal: () => void;
+  /**
+   * Re-run the task modal's thread lookup against the channel's current
+   * accessibility — the slot twin of `retryOpenThread`.
+   */
+  retryTaskModal: () => Promise<void>;
   /**
    * Persist the currently-open thread channel on the first durable action
    * (reply or attachment upload). Merely opening/reading a thread must never
@@ -261,6 +318,7 @@ interface ThreadState {
 export const useThreadStore = create<ThreadState>((set, get) => ({
   openParentMessageId: null,
   openIntent: null,
+  taskModal: null,
   openThreadChannelId: null,
   openParentChannelId: null,
   openServerSlug: null,
@@ -285,6 +343,20 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
     initialThreadChannelId = null,
     intent = "thread",
   }) => {
+    // A task open is a different surface with its own slot — it must never
+    // clobber the side thread's identity (task #699).
+    if (intent === "task") {
+      await get().openTaskModal({
+        serverSlug,
+        parentChannelId,
+        parentMessageId,
+        threadChannelId,
+        focusedMessageId,
+        initialThreadChannelId,
+        intent,
+      });
+      return;
+    }
     const currentServer = useServerStore.getState().current;
     const routeServerSlug = serverSlug ?? currentServer?.slug ?? null;
     if (serverSlug && currentServer?.slug !== serverSlug) {
@@ -302,7 +374,8 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       null;
 
     // Set panel-open state immediately — don't wait for API. Clear any prior
-    // resolution error so a retry/new-open starts from a clean state.
+    // resolution error so a retry/new-open starts from a clean state. Opening
+    // a thread replaces whatever task modal was up.
     set({
       openParentMessageId: parentMessageId,
       openIntent: intent,
@@ -313,12 +386,14 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       openThreadLoading: !knownThreadChannelId,
       focusedMessageId,
       openedAt: Date.now(),
+      taskModal: null,
     });
     if (knownThreadChannelId) return;
 
     try {
       // Opening is a read. Resolve an existing channel if one is already
-      // durable, while a 404 is the normal "no replies yet" state.
+      // durable; only the route's explicit "no thread for this message" 404 is
+      // the normal "no replies yet" state (see isThreadAbsentLookupError).
       const { data } = await api.get(`/channels/${parentChannelId}/threads/${parentMessageId}`);
       if (
         useServerStore.getState().serverEpoch !== serverEpoch
@@ -349,14 +424,7 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
         );
       }
     } catch (err: unknown) {
-      const status =
-        typeof err === "object" &&
-        err !== null &&
-        "response" in err &&
-        typeof (err as { response?: { status?: unknown } }).response?.status === "number"
-          ? (err as { response: { status: number } }).response.status
-          : null;
-      if (status === 404) {
+      if (isThreadAbsentLookupError(err)) {
         set((prev) =>
           prev.openServerSlug === routeServerSlug && prev.openParentMessageId === parentMessageId
             ? { openThreadLoading: false }
@@ -447,6 +515,123 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       openThreadLoading: false,
       focusedMessageId: null,
     }),
+
+  openTaskModal: async ({
+    serverSlug,
+    parentChannelId,
+    parentMessageId,
+    threadChannelId = null,
+    focusedMessageId = null,
+    initialThreadChannelId = null,
+  }) => {
+    const currentServer = useServerStore.getState().current;
+    const routeServerSlug = serverSlug ?? currentServer?.slug ?? null;
+    if (serverSlug && currentServer?.slug !== serverSlug) {
+      console.error("Failed to open task modal: route server is not active");
+      return;
+    }
+    const serverEpoch = useServerStore.getState().serverEpoch;
+    const state = useThreadStore.getState();
+    const knownThreadChannelId =
+      threadChannelId ??
+      initialThreadChannelId ??
+      state.summaries[parentMessageId]?.threadChannelId ??
+      state.followedThreads.find((t) => t.parentMessageId === parentMessageId)?.threadChannelId ??
+      null;
+
+    set({
+      taskModal: {
+        parentMessageId,
+        parentChannelId,
+        threadChannelId: knownThreadChannelId,
+        serverSlug: routeServerSlug,
+        focusedMessageId,
+        loading: !knownThreadChannelId,
+        error: null,
+      },
+    });
+    if (knownThreadChannelId) return;
+
+    try {
+      // Same read-only existing-thread lookup as openThread, mirrored into the
+      // task-modal slot instead of the side-thread fields.
+      const { data } = await api.get(`/channels/${parentChannelId}/threads/${parentMessageId}`);
+      if (
+        useServerStore.getState().serverEpoch !== serverEpoch
+        || (routeServerSlug && useServerStore.getState().current?.slug !== routeServerSlug)
+      ) return;
+      if (data?.threadChannelId) {
+        set((prev) => ({
+          ...(prev.taskModal?.serverSlug === routeServerSlug && prev.taskModal.parentMessageId === parentMessageId
+            ? {
+                taskModal: {
+                  ...prev.taskModal,
+                  threadChannelId: data.threadChannelId,
+                  error: null,
+                  loading: false,
+                },
+              }
+            : {}),
+          summaries: {
+            ...prev.summaries,
+            [parentMessageId]: {
+              threadChannelId: data.threadChannelId,
+              replyCount: data.replyCount ?? 0,
+              lastReplyAt: data.lastReplyAt ?? null,
+              participantIds: data.participantIds ?? [],
+              unreadCount: data.unreadCount ?? 0,
+              firstUnreadMessageId: data.firstUnreadMessageId ?? null,
+            },
+          },
+        }));
+      } else {
+        set((prev) =>
+          prev.taskModal?.serverSlug === routeServerSlug && prev.taskModal.parentMessageId === parentMessageId
+            ? { taskModal: { ...prev.taskModal, loading: false } }
+            : {},
+        );
+      }
+    } catch (err: unknown) {
+      if (isThreadAbsentLookupError(err)) {
+        set((prev) =>
+          prev.taskModal?.serverSlug === routeServerSlug && prev.taskModal.parentMessageId === parentMessageId
+            ? { taskModal: { ...prev.taskModal, loading: false } }
+            : {},
+        );
+        return;
+      }
+      console.error("Failed to open task modal:", err);
+      if (
+        useServerStore.getState().serverEpoch !== serverEpoch
+        || (routeServerSlug && useServerStore.getState().current?.slug !== routeServerSlug)
+      ) return;
+      set((prev) =>
+        prev.taskModal?.serverSlug === routeServerSlug
+          && prev.taskModal.parentMessageId === parentMessageId
+          && !prev.taskModal.threadChannelId
+          ? { taskModal: { ...prev.taskModal, error: { parentChannelId, parentMessageId }, loading: false } }
+          : {},
+      );
+    }
+  },
+
+  closeTaskModal: () => set({ taskModal: null }),
+
+  /**
+   * Re-run the task modal's thread lookup against the channel's current
+   * accessibility — the slot twin of `retryOpenThread`.
+   */
+  retryTaskModal: async () => {
+    const slot = get().taskModal;
+    if (!slot || !slot.parentChannelId) return;
+    await get().openTaskModal({
+      parentChannelId: slot.parentChannelId,
+      parentMessageId: slot.parentMessageId,
+      threadChannelId: slot.threadChannelId,
+      focusedMessageId: slot.focusedMessageId,
+      intent: "task",
+    });
+  },
 
   clearFocusedMessage: () => set({ focusedMessageId: null }),
 

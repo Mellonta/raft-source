@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import type { ReactNode } from "react";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
+import { installForwardFoldMeasurementStub } from "./helpers/forwardFoldMeasurement";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { ToastProvider, toast } from "raft-ui";
@@ -27,9 +28,10 @@ import { useTaskStore } from "../src/store/taskStore";
 import { useThreadStore } from "../src/store/threadStore";
 
 const originalPost = api.post.bind(api);
+let restoreForwardFoldMeasurement: (() => void) | null = null;
 const originalGet = api.get.bind(api);
 const test = ((name: string, fn: Parameters<typeof nodeTest>[1]) =>
-  nodeTest(name, { concurrency: false }, fn)) as typeof nodeTest;
+  nodeTest(name,  fn)) as typeof nodeTest;
 
 window.matchMedia = window.matchMedia ?? (() => ({
   matches: false,
@@ -185,7 +187,6 @@ function renderForwardPanel(
     channelMessages?: Record<string, Message[]>;
     visibleMessages?: Message[];
     withServer?: boolean;
-    serverMessageForwardingEnabled?: boolean | "error";
     highlightedMessageId?: string | null;
     transientFocusRequest?: { channelId: string; messageId: string; nonce: number } | null;
     loadMessages?: (channelId: string) => Promise<void>;
@@ -206,10 +207,6 @@ function renderForwardPanel(
   })];
 
   api.get = (async (url: string) => {
-    if (url === "/messages/forward/enabled") {
-      if (options.serverMessageForwardingEnabled === "error") throw new Error("flag endpoint unavailable");
-      return { data: { enabled: options.serverMessageForwardingEnabled !== false } };
-    }
     if (url.endsWith("/members")) return { data: { humans: [], agents: [] } };
     if (url.endsWith("/notification-settings")) return { data: { activityMuted: false } };
     return { data: {} };
@@ -292,7 +289,6 @@ function renderThreadForwardPanel(options: {
   parentChannelMessages?: Message[];
   replies?: Message[];
   selectedIds?: string[];
-  serverMessageForwardingEnabled?: boolean | Promise<boolean> | "error";
   cacheThreadReplies?: boolean;
   withServer?: boolean;
   includeParentChannel?: boolean;
@@ -396,13 +392,6 @@ function renderThreadForwardPanel(options: {
   );
 
   api.get = (async (url: string) => {
-    if (url === "/messages/forward/enabled") {
-      if (options.serverMessageForwardingEnabled === "error") throw new Error("flag endpoint unavailable");
-      const enabled = options.serverMessageForwardingEnabled instanceof Promise
-        ? await options.serverMessageForwardingEnabled
-        : options.serverMessageForwardingEnabled !== false;
-      return { data: { enabled } };
-    }
     if (url.endsWith("/members")) return { data: { humans: [], agents: [] } };
     if (url.endsWith("/notification-settings")) return { data: { activityMuted: false } };
     if (url.startsWith(`/messages/channel/${threadChannel.id}`)) {
@@ -432,6 +421,8 @@ afterEach(() => {
   api.get = originalGet as typeof api.get;
   api.post = originalPost as typeof api.post;
   window.matchMedia = defaultMatchMedia;
+  restoreForwardFoldMeasurement?.();
+  restoreForwardFoldMeasurement = null;
   HTMLElement.prototype.scrollIntoView = defaultScrollIntoView;
   if (defaultVisualViewport) {
     Object.defineProperty(window, "visualViewport", defaultVisualViewport);
@@ -554,7 +545,8 @@ test("thread and joint source surfaces can forward ordinary messages", async () 
 
   const threadForward = await screen.findByTestId("select-mode-forward") as HTMLButtonElement;
   assert.equal(threadForward.disabled, false);
-  assert.equal(threadForward.getAttribute("title"), "Forward");
+  assert.equal(threadForward.getAttribute("title"), null);
+  assert.ok(threadForward.hasAttribute("data-base-ui-tooltip-trigger"), "forward hint now rides the RUI tooltip trigger");
   fireEvent.click(threadForward);
   await screen.findByTestId("forward-composer-dialog");
   assert.match(screen.getByTestId("forward-composer-dialog").textContent ?? "", /1 selected from #thread/);
@@ -715,6 +707,7 @@ test("forwarded public source label opens the first source position only on sent
 
 
 test("mobile View all uses a route-backed dedicated page and Back preserves other query state", async () => {
+  restoreForwardFoldMeasurement = installForwardFoldMeasurementStub();
   window.matchMedia = ((query: string) => ({
     matches: query === "(max-width: 767px)",
     media: query,
@@ -731,7 +724,9 @@ test("mobile View all uses a route-backed dedicated page and Back preserves othe
     sourceAuthorSnapshot: { type: "user", id: "user-2", name: "Babbage", uniqueName: "babbage" },
     sourceCreatedAt: "2026-06-30T00:00:00.000Z",
     sourceTargetSnapshot: { id: "source-channel", type: "channel", label: "#source", labelVisibility: "public" },
-    contentSnapshot: `mobile forwarded body ${index}`,
+    // Long enough to really overflow the eight-line fold; the stub below
+    // tells jsdom (which has no layout) the same.
+    contentSnapshot: `mobile forwarded body ${index}. ${"Forwarded context sentence. ".repeat(8)}`,
     provenanceState: "available" as const,
   }));
 
@@ -926,7 +921,6 @@ test("thread panel forwards and copies only selected thread replies", async () =
   useSelectionStore.getState().enterThread(threadChannel.id, parent.id, parentChannel.id, [parent.id, reply.id, systemReply.id]);
 
   api.get = (async (url: string) => {
-    if (url === "/messages/forward/enabled") return { data: { enabled: true } };
     if (url.endsWith("/members")) return { data: { humans: [], agents: [] } };
     if (url.endsWith("/notification-settings")) return { data: { activityMuted: false } };
     if (url.startsWith(`/messages/channel/${threadChannel.id}`)) {
@@ -1027,25 +1021,13 @@ test("thread panel forwards and copies only selected thread replies", async () =
   await waitFor(() => assert.match(getDefaultToastText(), /2 links copied\./));
 });
 
-test("thread forward entrypoint stays hidden until the server flag enables it", async () => {
-  let enableForward!: (enabled: boolean) => void;
-  const flagPromise = new Promise<boolean>((resolve) => {
-    enableForward = resolve;
-  });
-
+test("thread forward entrypoint stays available without a rollout flag", async () => {
   renderThreadForwardPanel({
     selectedIds: ["reply-1"],
-    serverMessageForwardingEnabled: flagPromise,
     cacheThreadReplies: false,
   });
 
   await screen.findByTestId("select-mode-toolbar");
-  assert.equal(hasTestId("select-mode-forward"), false);
-
-  await act(async () => {
-    enableForward(true);
-    await flagPromise;
-  });
   await screen.findByTestId("select-mode-forward");
 });
 
@@ -1100,6 +1082,7 @@ test("thread forward excludes selected parent-channel siblings", async () => {
     cacheThreadReplies: false,
   });
 
+  await screen.findByText("reply body");
   fireEvent.click(await screen.findByTestId("select-mode-forward"));
   const dialog = await screen.findByTestId("forward-composer-dialog");
   assert.match(dialog.textContent ?? "", /1 selected from #parent · thread/);

@@ -48,7 +48,7 @@ async function fieldGaps(page: import("@playwright/test").Page) {
 }
 
 const dialogHeight = (page: import("@playwright/test").Page) =>
-  page.evaluate(() => Math.round(document.querySelector(".card-brutal")?.getBoundingClientRect().height ?? 0));
+  page.evaluate(() => Math.round(document.querySelector('[data-testid="create-agent-dialog"]')?.getBoundingClientRect().height ?? 0));
 
 test("field spacing is uniform regardless of a field's internal shape", async ({ page }) => {
   await page.goto(CASE("dialog"));

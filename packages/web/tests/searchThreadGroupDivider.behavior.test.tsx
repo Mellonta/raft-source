@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -190,10 +189,10 @@ test("thread search result groups render only one divider between the pink heade
     });
 
     const title = screen.getByText("Parent thread title for visual testing");
-    const header = title.parentElement;
+    const header = title.closest('[data-slot="search-thread-result-header"]') ?? title.parentElement;
     assert.ok(header instanceof HTMLElement);
     assert.ok(
-      header.classList.contains("border-b-2"),
+      header.classList.contains("border-b-2") || header.classList.contains("border-b"),
       "The rendered pink thread header keeps the strong header divider.",
     );
 
@@ -212,6 +211,74 @@ test("thread search result groups render only one divider between the pink heade
     assert.ok(secondHit instanceof HTMLElement);
     assert.equal(firstHit.classList.contains("border-t-2"), true);
     assert.equal(secondHit.classList.contains("border-t-2"), true);
+  } finally {
+    api.get = originalGet;
+  }
+});
+
+// --- task #710: the search page's thread-semantic icons must be raft-ui's
+// ThreadIcon (single icon source, matching the Activity feed's swap in #698/#8785),
+// not a lucide MessageSquare stand-in. Anchored on the package icon's geometry
+// (viewBox + leading path) per the #8785 convention, so re-anchoring to a lucide
+// class cannot pass. Both rendered surfaces are covered: the per-hit inline
+// `search.threadInline` marker and the `search.threadBadge` group badge. ---
+test("thread search surfaces render the raft-ui ThreadIcon geometry, not a lucide stand-in", async () => {
+  const originalGet = api.get;
+  api.get = async (url: string) => {
+    assert.equal(url, "/messages/search");
+    return {
+      data: {
+        hasMore: false,
+        results: [
+          {
+            id: "message-1",
+            channelId: "thread-1",
+            threadId: "thread-root-1",
+            parentMessageId: "parent-1",
+            parentMessageContent: "Parent thread title for visual testing",
+            parentChannelId: "channel-1",
+            parentChannelName: "visual-testing",
+            parentChannelType: "channel",
+            parentChannelArchivedAt: null,
+            senderId: "user-1",
+            senderType: "user",
+            senderName: "Current User",
+            channelName: "thread",
+            channelType: "thread",
+            channelArchivedAt: null,
+            content: "visual testing first hit",
+            snippet: "visual testing first hit",
+            createdAt: "2026-07-01T04:00:00.000Z",
+          },
+        ],
+      },
+    };
+  };
+
+  const assertThreadIconGeometry = (svg: SVGSVGElement | null, label: string) => {
+    assert.ok(svg instanceof SVGSVGElement, `${label} renders an svg`);
+    assert.equal(svg.getAttribute("viewBox"), "0 0 18 18", `${label} uses raft-ui ThreadIcon geometry`);
+    assert.match(
+      svg.querySelector("path")?.getAttribute("d") ?? "",
+      /^M16\.25 5V4\.25/,
+      `${label} carries the ThreadIcon leading path (lucide MessageSquare would differ)`,
+    );
+  };
+
+  try {
+    await renderSearchPage();
+
+    // Inline per-hit marker (search.threadInline) — svg inside the rui
+    // SearchMessageResultThreadMeta slot.
+    const inlineMeta = document.querySelector('[data-slot="search-message-result-thread-meta"]');
+    assert.ok(inlineMeta instanceof HTMLElement, "inline thread meta renders");
+    assertThreadIconGeometry(inlineMeta.querySelector("svg"), "inline threadIn-line marker");
+
+    // Group badge (search.threadBadge) — svg inside the Badge next to its label.
+    const badgeLabel = screen.getByText("Thread");
+    const badge = badgeLabel.closest('[data-slot="badge"]') ?? badgeLabel.parentElement;
+    assert.ok(badge instanceof HTMLElement, "thread group badge renders");
+    assertThreadIconGeometry(badge.querySelector("svg"), "thread group badge");
   } finally {
     api.get = originalGet;
   }

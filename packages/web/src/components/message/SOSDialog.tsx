@@ -1,8 +1,8 @@
+import { Textarea, Button } from "raft-ui";
 import { useState, useRef, useEffect } from "react";
 import { useIntl } from "react-intl";
 import DialogCard from "../ui/DialogCard";
 import Banner from "../ui/Banner";
-import Button from "../ui/Button";
 import api from "../../api/client";
 
 type Phase = "confirm" | "stopped" | "resuming";
@@ -64,7 +64,7 @@ export default function SOSDialog({
 
         {phase === "confirm" && (
           <>
-            <p className="mb-5 text-sm leading-relaxed text-black/75" data-slot="sos-dialog-content">
+            <p className="mb-5 text-sm leading-relaxed text-foreground-muted theme-brutal:text-black/75" data-slot="sos-dialog-content">
               {formatMessage({ id: "message.sos.confirmWarning" }, { channel: channelName })}
             </p>
 
@@ -73,7 +73,7 @@ export default function SOSDialog({
               <Button
                 onClick={onClose}
                 size="sm"
-                tone="white"
+                variant="outline"
               >
                 {formatMessage({ id: "common.confirm.cancel" })}
               </Button>
@@ -81,7 +81,7 @@ export default function SOSDialog({
                 onClick={handleStop}
                 disabled={stopping}
                 size="sm"
-                tone="orange"
+                variant="warning"
                 className="disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {stopping
@@ -100,12 +100,12 @@ export default function SOSDialog({
             <p className="mb-2 text-sm">
               {formatMessage({ id: "message.sos.guidanceHint" })}
             </p>
-            <textarea
+            <Textarea
               ref={textareaRef}
               value={guidance}
               onChange={(e) => setGuidance(e.target.value)}
               placeholder={formatMessage({ id: "message.sos.guidancePlaceholder" })}
-              className="input-brutal mb-4 w-full resize-none p-3 text-sm"
+              className="mb-4 w-full resize-none p-3 text-sm"
               rows={4}
               disabled={resuming}
             />
@@ -113,7 +113,7 @@ export default function SOSDialog({
               <Button
                 onClick={onClose}
                 size="sm"
-                tone="white"
+                variant="outline"
                 disabled={resuming}
               >
                 {formatMessage({ id: "message.sos.keepStopped" })}
@@ -122,7 +122,7 @@ export default function SOSDialog({
                 onClick={handleResume}
                 disabled={!guidance.trim() || resuming}
                 size="sm"
-                tone="lime"
+                variant="success"
                 className="disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {resuming

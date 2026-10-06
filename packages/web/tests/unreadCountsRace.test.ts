@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   canAutoMarkLiveAppendRead,
   canAutoMarkCurrentChannelRead,
   filterUnreadCountsByLocalReadSuppressions,
-} from "../src/store/messageStore.js";
+} from "../src/store/messageStore";
 
 test("filters stale unread snapshots while a local read is still settling", () => {
   const suppressions = new Map([

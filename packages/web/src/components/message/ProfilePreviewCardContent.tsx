@@ -12,11 +12,12 @@ import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
 import { useAuthStore } from "../../store/authStore";
 import { canViewAgentPrivateSurfaces } from "../../utils/agentVisibility";
-import { formatActivityText } from "../../utils/activity";
+import { formatAgentDisplayStateText } from "../../utils/activity";
 import { hydrateRuntimeConfigForm } from "../../utils/runtimeConfigForm";
 import { projectRuntimeModelLabelPresentation, useRuntimeModels } from "../../hooks/useRuntimeModels";
 import AvatarSlot from "../ui/AvatarSlot";
 import StatusDot from "../ui/StatusDot";
+import Tooltip from "../ui/Tooltip";
 import MentionHoverActivityPreview from "./MentionHoverActivityPreview";
 
 interface ProfilePreviewCardContentProps {
@@ -45,7 +46,8 @@ interface ProfilePreviewCardContentProps {
 }
 
 export default function ProfilePreviewCardContent({ mentionType, mentionId, fallbackAgent, fallbackMember, fallbackLabel, onOpenAgentActivity }: ProfilePreviewCardContentProps) {
-  const { formatMessage } = useIntl();
+  const intl = useIntl();
+  const { formatMessage } = intl;
   const { formatClockWithSeconds } = useTimeFormatter();
   const currentUserId = useAuthStore((s) => s.user?.id);
   const { capabilities } = useServerPermissions();
@@ -86,7 +88,9 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
       ? hydrateRuntimeConfigForm(profileAgent)
       : null
   ), [mentionType, profileAgent]);
-  const runtimeModels = useRuntimeModels(profileAgent?.machineId, runtimeConfig?.runtime ?? "");
+  // Passive surface: share one probe across hovers and reuse a recent live
+  // catalog instead of making the Computer run the runtime's CLI on every hover.
+  const runtimeModels = useRuntimeModels(profileAgent?.machineId, runtimeConfig?.runtime ?? "", { reuseRecentMs: 60_000 });
 
   useEffect(() => {
     if (!canViewPrivateAgentSurfaces || mentionType !== "agent" || trajectoryLog !== undefined) return;
@@ -94,9 +98,22 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
   }, [canViewPrivateAgentSurfaces, loadTrajectoryLog, mentionId, mentionType, trajectoryLog]);
 
   useEffect(() => {
-    if (mentionType !== "agent" || profileAgent) return;
+    // A signed-out visitor on a public server page must never reach for a
+    // private profile. `/agents/:id` answers 401 for them, the shared response
+    // interceptor then finds no refresh token, and "no refresh token" is a hard
+    // failure whose verdict is logout — so it clears storage and sends them to
+    // "/". The visible symptom was that merely HOVERING an agent avatar or an
+    // @agent mention for 200ms bounced a reader off the page to the landing
+    // screen (#wg-rbac task #115).
+    //
+    // Gated here rather than at each call site because the card has two hover
+    // entries — MessageItem's avatar and MentionLink — and both mount it
+    // unconditionally. Without a profile the card already renders its graceful
+    // "unavailable" body, which is what a visitor saw anyway once the request
+    // failed.
+    if (!currentUserId || mentionType !== "agent" || profileAgent) return;
     void ensureAgentProfile(mentionId);
-  }, [ensureAgentProfile, mentionId, mentionType, profileAgent]);
+  }, [currentUserId, ensureAgentProfile, mentionId, mentionType, profileAgent]);
 
   const unavailableHandle = fallbackLabel ? `@${fallbackLabel.replace(/^@/, "")}` : null;
 
@@ -110,8 +127,8 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
           <div className="flex items-start gap-3 px-3 py-3">
             <AvatarSlot context="mention-card" type="agent" />
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-bold text-black">{unavailableHandle ?? formatMessage({ id: "message.profilePreview.fallbackAgent" })}</div>
-              <div className="truncate font-mono text-xs text-black/60">{formatMessage({ id: "message.profilePreview.unavailable" })}</div>
+              <div className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{unavailableHandle ?? formatMessage({ id: "message.profilePreview.fallbackAgent" })}</div>
+              <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "message.profilePreview.unavailable" })}</div>
             </div>
           </div>
         );
@@ -119,21 +136,16 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
       const displayName = profileAgent.displayName || profileAgent.name;
       const activityText = canViewPrivateAgentSurfaces
         ? displayState
-          ? formatActivityText(
-            formatMessage,
-            displayState.activity,
-            displayState.activityDetail,
-            displayState.activityDetailKind,
-          )
+          ? formatAgentDisplayStateText(intl, displayState)
           : undefined
         : displayState
-          ? formatActivityText(formatMessage, displayState.activity, "")
+          ? formatAgentDisplayStateText(intl, displayState, { withDetail: false })
           : formatMessage({ id: "activity.status.offline" });
       const renderedActivityText = activityText || formatMessage({ id: "activity.status.offline" });
       const runtimeId = runtimeConfig?.runtime ?? profileAgent.runtime ?? "unknown";
       const modelId = runtimeConfig ? runtimeConfigModelValue(runtimeConfig) : profileAgent.model || "default";
       const runtimeLabel = formatRuntimeLabelWithStatus(runtimeId, formatMessage);
-      const modelPresentation = projectRuntimeModelLabelPresentation(runtimeId, modelId, runtimeModels);
+      const modelPresentation = projectRuntimeModelLabelPresentation(runtimeId, modelId, runtimeModels, profileAgent.machineId);
       const modelLabel = modelPresentation.kind === "pending"
         ? formatMessage({ id: "common.loading" })
         : modelPresentation.label;
@@ -154,37 +166,39 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
             <AvatarSlot context="mention-card" type="agent" agentAvatarUrl={profileAgent.avatarUrl} className="mt-0.5 self-start" />
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
-                <span className="truncate text-sm font-bold text-black">{displayName}</span>
-                <StatusDot activity={displayState?.activity ?? "offline"} external={displayState?.isExternal} size="sm" />
-                <span className="truncate font-mono text-xs text-black/60">
+                <span className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{displayName}</span>
+                <StatusDot activity={displayState?.activity ?? "offline"} external={displayState?.isExternal && !displayState.isOnline} size="sm" />
+                <span className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">
                   {renderedActivityText}
                 </span>
               </div>
-              <div className="truncate font-mono text-xs text-black/60">@{profileAgent.name}</div>
-              {!isChannelSummaryAgent ? <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 border-t border-black/20 pt-2 text-[11px] leading-tight">
+              <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">@{profileAgent.name}</div>
+              {!isChannelSummaryAgent ? <dl className="mt-2 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 border-t border-line-muted theme-brutal:border-black/20 pt-2 text-[11px] leading-tight">
                 {computerLabel !== null ? (
                   <>
-                    <dt className="font-mono text-black/45">{formatMessage({ id: "message.profilePreview.labelComputer" })}</dt>
-                    <dd className="min-w-0 truncate font-mono text-black/70" title={computerLabel}>{computerLabel}</dd>
+                    <dt className="font-mono text-foreground-placeholder theme-brutal:text-black/45">{formatMessage({ id: "message.profilePreview.labelComputer" })}</dt>
+                    <Tooltip content={computerLabel}><dd className="min-w-0 truncate font-mono text-foreground-muted theme-brutal:text-black/70">{computerLabel}</dd></Tooltip>
                   </>
                 ) : null}
-                <dt className="font-mono text-black/45">{formatMessage({ id: "message.profilePreview.labelRuntime" })}</dt>
-                <dd className="min-w-0 truncate font-mono text-black/70" title={runtimeLabel}>{runtimeLabel}</dd>
-                <dt className="font-mono text-black/45">{formatMessage({ id: "message.profilePreview.labelModel" })}</dt>
-                <dd className="min-w-0 truncate font-mono text-black/70" title={modelLabel}>{modelLabel}</dd>
+                <dt className="font-mono text-foreground-placeholder theme-brutal:text-black/45">{formatMessage({ id: "message.profilePreview.labelRuntime" })}</dt>
+                <Tooltip content={runtimeLabel}><dd className="min-w-0 truncate font-mono text-foreground-muted theme-brutal:text-black/70">{runtimeLabel}</dd></Tooltip>
+                <dt className="font-mono text-foreground-placeholder theme-brutal:text-black/45">{formatMessage({ id: "message.profilePreview.labelModel" })}</dt>
+                <Tooltip content={modelLabel}><dd className="min-w-0 truncate font-mono text-foreground-muted theme-brutal:text-black/70">{modelLabel}</dd></Tooltip>
                 {reasoningLabel ? (
                   <>
-                    <dt className="font-mono text-black/45">{formatMessage({ id: "message.profilePreview.labelReasoning" })}</dt>
-                    <dd className="min-w-0 truncate font-mono capitalize text-black/70" title={reasoningLabel}>{reasoningLabel}</dd>
+                    <dt className="font-mono text-foreground-placeholder theme-brutal:text-black/45">{formatMessage({ id: "message.profilePreview.labelReasoning" })}</dt>
+                    <Tooltip content={reasoningLabel}><dd className="min-w-0 truncate font-mono capitalize text-foreground-muted theme-brutal:text-black/70">{reasoningLabel}</dd></Tooltip>
                   </>
                 ) : null}
               </dl> : null}
             </div>
           </div>
           {profileAgent.description ? (
-            <div className="truncate border-t-2 border-black px-3 py-2 text-xs text-black/70" title={profileAgent.description}>
+            <Tooltip content={profileAgent.description}>
+            <div className="truncate border-t-2 border-line-muted theme-brutal:border-black px-3 py-2 text-xs text-foreground-muted theme-brutal:text-black/70">
               {profileAgent.description}
             </div>
+            </Tooltip>
           ) : null}
           {canViewPrivateAgentSurfaces ? (
             <MentionHoverActivityPreview
@@ -208,8 +222,8 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
         <div className="flex items-start gap-3 px-3 py-3">
           <AvatarSlot context="mention-card" type="human" humanPlaceholder />
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-bold text-black">{unavailableHandle ?? formatMessage({ id: "message.profilePreview.fallbackMember" })}</div>
-            <div className="truncate font-mono text-xs text-black/60">{formatMessage({ id: "message.profilePreview.unavailable" })}</div>
+            <div className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{unavailableHandle ?? formatMessage({ id: "message.profilePreview.fallbackMember" })}</div>
+            <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "message.profilePreview.unavailable" })}</div>
           </div>
         </div>
       );
@@ -220,16 +234,18 @@ export default function ProfilePreviewCardContent({ mentionType, mentionId, fall
         <div className="flex items-start gap-3 px-3 py-3">
           <AvatarSlot context="mention-card" type="human" humanAvatarUrl={profileMember.avatarUrl} gravatarHash={profileMember.gravatarHash} className="mt-0.5 self-start" />
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-bold text-black">{displayName}</div>
-            <div className="truncate font-mono text-xs text-black/60">@{profileMember.name}</div>
+            <div className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{displayName}</div>
+            <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">@{profileMember.name}</div>
           </div>
         </div>
         {profileMember.description ? (
-          <div className="truncate border-t-2 border-black px-3 py-2 text-xs text-black/70" title={profileMember.description}>
+          <Tooltip content={profileMember.description}>
+          <div className="truncate border-t-2 border-line-muted theme-brutal:border-black px-3 py-2 text-xs text-foreground-muted theme-brutal:text-black/70">
             {profileMember.description}
           </div>
+          </Tooltip>
         ) : null}
       </>
     );
-  }, [mentionType, profileAgent, agentMachine, agentMachineRow.kind, runtimeConfig, runtimeModels, canViewPrivateAgentSurfaces, isChannelSummaryAgent, displayState, trajectoryLog, formatClockWithSeconds, profileMember, unavailableHandle, formatMessage, onOpenAgentActivity]);
+  }, [mentionType, profileAgent, agentMachine, agentMachineRow.kind, runtimeConfig, runtimeModels, canViewPrivateAgentSurfaces, isChannelSummaryAgent, displayState, trajectoryLog, formatClockWithSeconds, profileMember, unavailableHandle, formatMessage, intl, onOpenAgentActivity]);
 }

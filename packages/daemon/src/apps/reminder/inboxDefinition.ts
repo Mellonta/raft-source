@@ -7,7 +7,7 @@ import {
 import type {
   AgentAppInboxRegistry,
   AgentAppSourceRefNormalizeResult,
-} from "../../agentAppInbox.js";
+} from "../../agentAppInbox";
 
 const SOURCE_REF_KEYS = new Set(["kind", "id", "revision"]);
 const UUID_PATTERN =

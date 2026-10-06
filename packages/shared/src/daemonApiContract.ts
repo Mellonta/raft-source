@@ -1,7 +1,12 @@
 import { z } from "zod";
 
-import { AGENT_INBOX_FLAGS, type AgentInboxFlag } from "./agentInbox.js";
-import { ATTENTION_HINT_SCHEMA } from "./attentionDependencyOracle.js";
+import { AGENT_INBOX_FLAGS, type AgentInboxFlag } from "./agentInbox";
+import { ATTENTION_HINT_SCHEMA } from "./attentionDependencyOracle";
+import {
+  EXTERNAL_AGENT_ACTIVITY_LEGACY_STATUS_VALUES,
+  RAFT_AGENT_STATUS_DETAIL_LIMIT,
+  RAFT_AGENT_STATUS_VALUES,
+} from "./agentStatusStandard";
 
 export const DAEMON_API_BASE_PATH = "/internal/agent-api";
 
@@ -94,6 +99,11 @@ const daemonApiInboxAppItemSchema = passthroughObject({
   title: optionalStringSchema,
   summary: optionalStringSchema,
   createdAtMs: optionalNonNegativeIntSchema,
+  seal: passthroughObject({
+    owner: z.string().trim().min(1),
+    until: z.string().trim().min(1),
+    sealedAtMs: z.number().int().nonnegative(),
+  }).optional(),
 });
 const daemonApiInboxAcknowledgedAppSourceSchema = passthroughObject({
   appId: z.string().trim().min(1),
@@ -102,6 +112,14 @@ const daemonApiInboxAcknowledgedAppSourceSchema = passthroughObject({
   itemId: z.string().trim().min(1),
   acknowledgedAtMs: z.number().int().nonnegative(),
   ownerAgentId: optionalStringSchema,
+});
+const daemonApiInboxSourceSealSchema = passthroughObject({
+  appId: z.string().trim().min(1),
+  notificationClass: z.string().trim().min(1),
+  sourceRef: daemonApiInboxSourceRefSchema,
+  owner: z.string().trim().min(1),
+  until: z.string().trim().min(1),
+  sealedAtMs: z.number().int().nonnegative(),
 });
 const daemonApiInboxMessageTargetItemSchema = passthroughObject({
   source: z.literal("message_target"),
@@ -115,6 +133,7 @@ export const daemonApiInboxCheckResponseSchema = passthroughObject({
   pending_messages: optionalNonNegativeIntSchema,
   pending_app_items: optionalNonNegativeIntSchema,
   acknowledged_app_sources: z.array(daemonApiInboxAcknowledgedAppSourceSchema).optional(),
+  seals: z.array(daemonApiInboxSourceSealSchema).optional(),
 });
 
 export const daemonApiInboxAckBodySchema = z.object({
@@ -125,6 +144,45 @@ export const daemonApiInboxAckResponseSchema = passthroughObject({
   ok: z.literal(true),
   itemId: z.string().trim().min(1),
   remaining_app_items: z.number().int().nonnegative(),
+});
+
+// Task #178 — application-layer ack for third-party app events served from the
+// daemon Local Inbox. A `/events` request carrying `X-Raft-Events-Ack: lease`
+// only leases the third-party events it returns; the CLI acks the batch here
+// after it has written the bodies to stdout and flushed. Only then does the
+// daemon consume them locally and report them delivered (task #175 reporter).
+export const daemonApiThirdPartyEventsAckBodySchema = z.object({
+  batchId: z.string().trim().min(1),
+  eventIds: z.array(z.string().trim().min(1)).min(1).max(200),
+}).strict();
+
+export const daemonApiThirdPartyEventsAckResponseSchema = passthroughObject({
+  ok: z.literal(true),
+  batchId: z.string(),
+  acked: z.array(z.string()),
+});
+
+export const daemonApiInboxSealBodySchema = z.object({
+  sources: z.array(passthroughObject({
+    appId: z.string().trim().min(1),
+    notificationClass: z.string().trim().min(1),
+    sourceRef: daemonApiInboxSourceRefSchema,
+  })).min(1),
+  owner: z.string().trim().min(1).max(120),
+  until: z.string().trim().min(1).max(500),
+}).strict();
+
+export const daemonApiInboxUnsealBodySchema = z.object({
+  sources: z.array(passthroughObject({
+    appId: z.string().trim().min(1),
+    notificationClass: z.string().trim().min(1),
+    sourceRef: daemonApiInboxSourceRefSchema,
+  })).min(1),
+}).strict();
+
+export const daemonApiInboxSealResponseSchema = passthroughObject({
+  ok: z.literal(true),
+  affected: z.number().int().positive(),
 });
 
 export const daemonApiRuntimeVersionResponseSchema = passthroughObject({
@@ -147,7 +205,7 @@ export const daemonApiWakeHintSchema = passthroughObject({
   message_id: z.string().nullable().optional(),
   seq: optionalNonNegativeIntSchema,
   id: optionalStringSchema,
-  target: optionalStringSchema,
+  target: z.string().trim().nullable().optional(),
   targetType: optionalStringSchema,
   target_type: optionalStringSchema,
   reason: optionalStringSchema,
@@ -167,6 +225,9 @@ export const daemonApiWakeHintsFetchResponseSchema = passthroughObject({
 
 const daemonApiActivityEventSchema = passthroughObject({
   schema: optionalStringSchema,
+  // raft-agent-status.v1 status (or a legacy hook-outcome value) and its detail.
+  status: z.enum([...RAFT_AGENT_STATUS_VALUES, ...EXTERNAL_AGENT_ACTIVITY_LEGACY_STATUS_VALUES]).optional(),
+  detail: z.string().max(RAFT_AGENT_STATUS_DETAIL_LIMIT).optional(),
 });
 
 export const daemonApiActivityForwardBodySchema = passthroughObject({
@@ -252,6 +313,33 @@ export const daemonApiContract = {
     description: "Acknowledge one managed-runner app Inbox item after its source read succeeds.",
     request: { body: daemonApiInboxAckBodySchema },
     response: { body: daemonApiInboxAckResponseSchema },
+  }),
+  thirdPartyEventsAck: route({
+    key: "thirdPartyEventsAck",
+    method: "POST",
+    path: "/third-party-events/ack",
+    client: { resource: "thirdPartyEvents", method: "ack" },
+    description: "Acknowledge a leased batch of third-party app events after the CLI has written them out; intercepted locally by the daemon proxy.",
+    request: { body: daemonApiThirdPartyEventsAckBodySchema },
+    response: { body: daemonApiThirdPartyEventsAckResponseSchema },
+  }),
+  inboxSeal: route({
+    key: "inboxSeal",
+    method: "POST",
+    path: "/inbox/seal",
+    client: { resource: "inbox", method: "seal" },
+    description: "Register one or more local app source seals against destructive actions.",
+    request: { body: daemonApiInboxSealBodySchema },
+    response: { body: daemonApiInboxSealResponseSchema },
+  }),
+  inboxUnseal: route({
+    key: "inboxUnseal",
+    method: "POST",
+    path: "/inbox/unseal",
+    client: { resource: "inbox", method: "unseal" },
+    description: "Remove local seals from one or more app source identities.",
+    request: { body: daemonApiInboxUnsealBodySchema },
+    response: { body: daemonApiInboxSealResponseSchema },
   }),
   wakeHintsFetch: route({
     key: "wakeHintsFetch",

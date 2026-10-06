@@ -1,15 +1,15 @@
-import type { CliReplyText } from "../../core/renderer.js";
-import { formatIntegrationErrorV1, formatIntegrationReceiptV1 } from "./_format.js";
+import type { CliReplyText } from "../../core/renderer";
+import { formatIntegrationErrorV1, formatIntegrationReceiptV1 } from "./_format";
 // Re-export for existing importers; canonical home is integration/_format.ts.
-export { formatIntegrationErrorV1, formatIntegrationReceiptV1 } from "./_format.js";
+export { formatIntegrationErrorV1, formatIntegrationReceiptV1 } from "./_format";
 import { randomUUID } from "node:crypto";
 
 import { currentDate } from "@botiverse/raft-shared";
 
-import type { AgentContext } from "../../auth/env.js";
-import { CliError, type CliErrorCode } from "../../core/errors.js";
-import type { RegisteredIntegrationService } from "./_format.js";
-import { cookieHeaderForUrl, type SessionCookie } from "./_session.js";
+import type { AgentContext } from "../../auth/env";
+import { CliError, type CliErrorCode } from "../../core/errors";
+import type { RegisteredIntegrationService } from "./_format";
+import { cookieHeaderForUrl, type SessionCookie } from "./_session";
 import {
   actionContractDigest,
   buildV1RequestPlan,
@@ -22,20 +22,20 @@ import {
   validateV1Input,
   validateV1Output,
   V1RequestInputError,
-} from "./actionV1.js";
+} from "./actionV1";
 import {
   finalizeInvocationAttemptV1,
   InvocationStoreError,
   prepareInvocationAttemptV1,
   type InvocationRecordV1,
-} from "./invocationStoreV1.js";
-import type { AgentManifestActionV1, AgentManifestV1, JsonValue } from "./manifestV1.js";
+} from "./invocationStoreV1";
+import type { AgentManifestActionV1, AgentManifestV1, JsonValue } from "./manifestV1";
 import type {
   IntegrationAuthorityStatusV1,
   IntegrationReadbackStatusV1,
   IntegrationResponseSchemaStatusV1,
   IntegrationTransportStatusV1,
-} from "./readinessV1.js";
+} from "./readinessV1";
 
 const MAX_ACTION_RESPONSE_BYTES = 1024 * 1024;
 

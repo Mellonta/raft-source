@@ -1,7 +1,7 @@
 import {
   evaluateFeatureFlag,
   ATTACHMENT_PREVIEW_UNIFIED_FEATURE_FLAG_KEY,
-} from "../services/featureFlagService.js";
+} from "../services/featureFlagService";
 
 const ATTACHMENT_PREVIEW_UNIFIED_APP_OVERRIDE = "attachmentPreviewUnifiedEnabled";
 
@@ -11,10 +11,10 @@ type AppSettingsWriter = { set(name: string, value: unknown): unknown };
 /**
  * Gate for the unified attachment preview surfaces.
  *
- * Separate from `message_forwarding_v0` on purpose: forwarding gates a feature
- * (its endpoint 404s when off), while this covers behaviour the chat body also
- * uses. Sharing one switch would mean disabling forwarding silently removed
- * chat-side preview behaviour too.
+ * This remains independent from the historical message-forwarding rollout
+ * switch: attachment preview covers behaviour the chat body also uses, while
+ * forwarding now has no runtime flag. Sharing one switch would silently couple
+ * unrelated chat behaviours.
  *
  * DEFAULTS ON when no flag row exists. This is a kill switch over behaviour
  * that already shipped, so "nobody has created the flag yet" must not mean

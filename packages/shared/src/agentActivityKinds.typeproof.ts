@@ -3,7 +3,7 @@
 // by `pnpm --filter @botiverse/raft-shared typecheck`. If a kind is added to a union
 // without registering it (making the assignment valid), the now-unused
 // directive fails typecheck.
-import type { AgentActivityDetailKind, AgentActivityKind } from "./index.js";
+import type { AgentActivityDetailKind, AgentActivityKind } from "./index";
 
 const activityKind: AgentActivityKind = "working";
 const detailKind: AgentActivityDetailKind = "running_command";

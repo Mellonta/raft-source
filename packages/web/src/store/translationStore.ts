@@ -386,11 +386,16 @@ export const useTranslationStore = create<TranslationState>((set, get) => ({
         : {}),
     }));
     try {
-      const [{ data: user }, { data: serverSettings }] = await Promise.all([
-        api.get("/auth/me"),
+      // The signed-in user (with its language/translation preferences) is
+      // already in the auth store from boot; only fetch it when it is not.
+      const knownUser = useAuthStore.getState().user;
+      const [user, { data: serverSettings }] = await Promise.all([
+        knownUser ?? api.get("/auth/me").then(({ data }) => data),
         api.get(`/servers/${serverId}/translation-settings`),
       ]);
-      useAuthStore.setState((authState) => ({ user: authState.user ? { ...authState.user, ...user } : user }));
+      if (!knownUser) {
+        useAuthStore.setState((authState) => ({ user: authState.user ? { ...authState.user, ...user } : user }));
+      }
       set({
         settings: normalizeSettings({
           preferredLanguage: user?.preferredLanguage ?? null,

@@ -1,28 +1,27 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { afterEach, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { auth } from "@modelcontextprotocol/sdk/client/auth.js";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   managedMcpCredentials,
   managedMcpOAuthAttempts,
   managedMcpServers,
   users,
-} from "../db/schema.js";
-import { createServer } from "./serverService.js";
+} from "../db/schema";
+import { createServer } from "./serverService";
 import {
   __refreshManagedMcpCatalogWithLoaderForTest,
   createManagedMcpServer,
   ManagedMcpServiceError,
   updateManagedMcpServer,
-} from "./managedMcpService.js";
+} from "./managedMcpService";
 import {
   decryptManagedMcpSecret,
   encryptManagedMcpSecret,
-} from "./managedMcpCredentialService.js";
+} from "./managedMcpCredentialService";
 import {
   consumeManagedMcpOAuthAttempt,
   completeManagedMcpOAuthConnection,
@@ -31,12 +30,12 @@ import {
   ManagedMcpOAuthError,
   replacePendingManagedMcpOAuthAttempt,
   withManagedMcpOAuth,
-} from "./managedMcpOAuthService.js";
+} from "./managedMcpOAuthService";
 import {
   ManagedMcpGatewayError,
   normalizeManagedMcpClientError,
-} from "./managedMcpGateway.js";
-import type { ManagedMcpOAuthStorage } from "./managedMcpOAuthProvider.js";
+} from "./managedMcpGateway";
+import type { ManagedMcpOAuthStorage } from "./managedMcpOAuthProvider";
 
 
 const originalCredentialKey = process.env.SLOCK_MCP_CREDENTIAL_KEY;
@@ -346,7 +345,7 @@ test("revoked refresh tokens require reconnect while transient requests keep the
           },
         });
       } catch (error) {
-        throw normalizeManagedMcpClientError(error, false);
+        throw normalizeManagedMcpClientError(error, false, "oauth");
       }
     }),
     ManagedMcpGatewayError,
@@ -376,7 +375,7 @@ test("revoked refresh tokens require reconnect while transient requests keep the
           }), { status: 503, headers: { "Content-Type": "application/json" } }),
         });
       } catch (error) {
-        throw normalizeManagedMcpClientError(error, false);
+        throw normalizeManagedMcpClientError(error, false, "oauth");
       }
     }),
     ManagedMcpGatewayError,

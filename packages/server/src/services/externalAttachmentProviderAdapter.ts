@@ -53,10 +53,9 @@ export type ExternalOutboundFrozenAttachment = Readonly<{
  */
 export type ExternalOutboundAttachmentSnapshot = Readonly<{
   sanitizedText: string;
-  authorPolicy: Readonly<{
+  authorPresentation: Readonly<{
     displayName: string;
     fallbackKind: "human" | "agent";
-    avatar: null | Readonly<{ publicUrl: string }>;
   }>;
   attachments: readonly ExternalOutboundFrozenAttachment[];
   bindingAuthority: ExternalAttachmentAuthority;

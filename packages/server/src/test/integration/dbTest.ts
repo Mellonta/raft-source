@@ -1,10 +1,10 @@
 import { test as base } from "vitest";
 import { setTimeout, clearTimeout } from "node:timers";
-import type { Database } from "../../db/index.js";
-import { openTestDatabase } from "./database.js";
-import { enterIntegrationCase, IntegrationLifecycle, poisonIntegrationEnvironment } from "./lifecycle.js";
+import type { Database } from "../../db/index";
+import { openTestDatabase } from "./database";
+import { enterIntegrationCase, IntegrationLifecycle, poisonIntegrationEnvironment } from "./lifecycle";
 
-import type { createSeed } from "./seed.js";
+import type { createSeed } from "./seed";
 
 interface DatabaseFixtures {
   lifecycle: IntegrationLifecycle;
@@ -17,10 +17,12 @@ export const dbTest = base.extend<DatabaseFixtures>({
     const started = performance.now();
     const lifecycle = new IntegrationLifecycle();
     const leave = enterIntegrationCase(lifecycle);
-    // Vitest 2 skips *all* teardown on context.skip(). Fail normally instead;
+    // context.skip() inside a case skips fixture teardown. Fail normally instead;
     // declare conditional cases with test.skipIf() before acquiring resources.
-    const skip = task.context.skip;
-    task.context.skip = () => { throw new Error("Use test.skipIf before acquiring integration fixtures; Vitest 2 skips teardown on context.skip()"); };
+    // (Vitest types `skip` as read-only; the override is deliberate and restored below.)
+    const mutableContext = task.context as { skip: typeof task.context.skip };
+    const skip = mutableContext.skip;
+    mutableContext.skip = (() => { throw new Error("Use test.skipIf before acquiring integration fixtures; context.skip() skips fixture teardown"); }) as typeof task.context.skip;
     // Vitest's onFinished hook also runs if another afterEach/fixture throws.
     task.context.onTestFinished(async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -37,8 +39,8 @@ export const dbTest = base.extend<DatabaseFixtures>({
       } finally {
         clearTimeout(timer);
         leave();
-        task.context.skip = skip;
-        // Vitest 2 retains task.context after a case; release closed WASM/HTTP
+        mutableContext.skip = skip;
+        // Vitest retains task.context after a case; release closed WASM/HTTP
         // fixtures instead of keeping every database alive until the file ends.
         for (const key of ["db", "app", "seed", "http", "lifecycle"]) {
           Reflect.deleteProperty(task.context, key);
@@ -51,7 +53,7 @@ export const dbTest = base.extend<DatabaseFixtures>({
     await use(lifecycle);
   }, { auto: true }],
   seed: async ({ db }, use) => {
-    const { createSeed } = await import("./seed.js");
+    const { createSeed } = await import("./seed");
     await use(createSeed(db));
   },
   db: async ({ lifecycle }, use) => {

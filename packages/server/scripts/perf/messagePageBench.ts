@@ -1,7 +1,7 @@
 /**
  * Benchmark: GET /api/messages/channel/:channelId page-load path.
  *
- * Run: npx tsx packages/server/scripts/perf/messagePageBench.ts
+ * Run: node --import @oxc-node/core/register packages/server/scripts/perf/messagePageBench.ts
  *
  * Seeds an in-memory PGlite database with N messages in a single channel,
  * mixed user and agent senders, some with attachments, then exercises
@@ -22,7 +22,7 @@
  * flips a per-message query back into the loop shows up as O(N) growth
  * in the latency curve before it surfaces in Telescope.
  */
-import { initDatabase, getDb, closeDatabase } from "../../src/db/index.js";
+import { initDatabase, getDb, closeDatabase } from "../../src/db/index";
 import {
   users,
   servers,
@@ -33,8 +33,8 @@ import {
   agents,
   messages,
   attachments,
-} from "../../src/db/schema.js";
-import { listMessages } from "../../src/services/messageService.js";
+} from "../../src/db/schema";
+import { listMessages } from "../../src/services/messageService";
 
 type Scale = { label: string; messages: number };
 

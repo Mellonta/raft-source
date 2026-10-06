@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { createAgentAppInboxStore } from "../../agentAppInbox.js";
-import { projectReminderInboxTitle, REMINDER_AGENT_INBOX_REGISTRY } from "./inboxDefinition.js";
+import { createAgentAppInboxStore } from "../../agentAppInbox";
+import { projectReminderInboxTitle, REMINDER_AGENT_INBOX_REGISTRY } from "./inboxDefinition";
 
 const REMINDER_ID = "12345678-1234-4123-8123-123456789abc";
 

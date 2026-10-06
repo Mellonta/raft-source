@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { test } from "vitest";
 import ts from "typescript";
 
 const seedSource = readFileSync(resolve(import.meta.dirname, "../../scripts/seed.ts"), "utf8");

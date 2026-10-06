@@ -1,9 +1,8 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { agents, reminders, servers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agents, reminders, servers, users } from "../db/schema";
 import {
   cancelReminder,
   createReminder,
@@ -11,7 +10,7 @@ import {
   fireReminder,
   getReminderById,
   type TimeProvider,
-} from "../apps/reminder/service.js";
+} from "../apps/reminder/service";
 import { eq } from "drizzle-orm";
 
 

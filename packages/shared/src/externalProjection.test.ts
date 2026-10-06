@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   normalizeExternalHandle,
   resolveExternalMention,
   type ExternalAddressabilityContext,
   type ExternalAddressabilityProjection,
-} from "./externalProjection.js";
+} from "./externalProjection";
 import {
   AGENT_API_EXTERNAL_MESSAGE_FORBIDDEN_AUTHORITY_FIELDS,
   agentApiMessageEnvelopeSchema,
   isAgentApiExternalMessageForbiddenAuthorityField,
-} from "./agentApiContract.js";
+} from "./agentApiContract";
 
 const NOW = new Date("2026-07-24T00:00:00.000Z");
 

@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
+import { Input, Button } from "raft-ui";
 import type { FormEvent } from "react";
 import { useIntl } from "react-intl";
 import { useAuthStore } from "../../store/authStore";
 import { RefreshCw, LogOut, KeyRound } from "lucide-react";
 import Banner from "../ui/Banner";
-import Button from "../ui/Button";
 import CenteredCardFrame from "./CenteredCardFrame";
 import { AuthPageIntro } from "./AuthPageFrame";
 
@@ -85,7 +85,7 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
           <Button
             onClick={() => window.location.reload()}
             size="lg"
-            tone="pink"
+            variant="accent"
             className="w-full"
           >
             {formatMessage({ id: "pages.emailVerification.continueToRaft" })}
@@ -99,7 +99,7 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
     <CenteredCardFrame>
       <div className="w-full">
         <AuthPageIntro title={formatMessage({ id: "pages.emailVerification.checkEmailTitle" })}>
-          <p className="mt-2 text-sm text-black/60">
+          <p className="mt-2 text-sm text-foreground-muted">
             {formatMessage({ id: "pages.emailVerification.sentLinkTo" })}
           </p>
           <p className="mt-1 font-mono text-sm font-bold">{user?.email}</p>
@@ -112,13 +112,13 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
         )}
 
         {resendSuccess && (
-          <div className="mb-4 border-2 border-black bg-brutal-lime/30 p-3 text-sm font-bold">
+          <Banner intent="success" className="mb-4 font-bold">
             {formatMessage({ id: "pages.emailVerification.resent" })}
-          </div>
+          </Banner>
         )}
 
         {verifying && (
-          <div className="mb-4 text-center text-sm text-black/60">
+          <div className="mb-4 text-center text-sm text-foreground-muted">
             {formatMessage({ id: "pages.emailVerification.verifying" })}
           </div>
         )}
@@ -128,8 +128,7 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
             onClick={handleResend}
             disabled={resending}
             size="lg"
-            shape="iconText"
-            tone="pink"
+            variant="accent"
             className="w-full"
           >
             <RefreshCw size={16} className={resending ? "animate-spin" : ""} />
@@ -143,7 +142,7 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
             <button
               type="button"
               onClick={() => setShowManualInput(!showManualInput)}
-              className="text-sm text-black/50 underline hover:text-black"
+              className="text-sm text-foreground-muted underline hover:text-foreground-strong"
             >
               <KeyRound size={12} className="inline mr-1" />
               {showManualInput
@@ -154,30 +153,32 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
 
           {showManualInput && (
             <form onSubmit={handleManualSubmit} className="flex gap-2">
-              <input
+              <Input
                 type="text"
+                className="flex-1"
                 value={manualToken}
                 onChange={(e) => setManualToken(e.target.value)}
                 placeholder={formatMessage({ id: "pages.emailVerification.tokenPlaceholder" })}
-                className="flex-1 border-2 border-black p-2 text-base shadow-brutal-sm focus:shadow-brutal focus:outline-none"
               />
-              <button
+              <Button size="sm"
                 type="submit"
+                variant="success"
                 disabled={verifying || !manualToken.trim()}
-                className="btn-brutal border-2 border-black bg-brutal-lime px-3 py-1.5 text-sm font-bold disabled:opacity-50"
               >
                 {verifying ? "…" : formatMessage({ id: "pages.emailVerification.verifyAction" })}
-              </button>
+              </Button>
             </form>
           )}
 
-          <button
+          <Button
+            variant="outline"
+            size="lg"
+            className="w-full"
             onClick={() => logout()}
-            className="flex w-full items-center justify-center gap-2 border-2 border-black bg-white p-2 font-bold text-sm shadow-brutal-sm transition-all duration-100 hover:-translate-y-[1px] hover:shadow-brutal active:translate-x-[1px] active:translate-y-[1px] active:shadow-brutal-active"
           >
             <LogOut size={14} />
             {formatMessage({ id: "pages.emailVerification.logOut" })}
-          </button>
+          </Button>
         </div>
       </div>
     </CenteredCardFrame>

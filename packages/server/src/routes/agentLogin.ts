@@ -27,6 +27,7 @@
  *   403 token_scope_invalid       — reserved
  *   410 token_consumed            — another racer already exchanged it
  *   410 agent_missing             — agent was soft-deleted between issue + exchange
+ *   400 agent_not_external        — target agent is managed (credentials come from its Computer)
  *   500 (no code)                 — unexpected
  *
  * The CLI relies on the `code` field to render the right user-visible
@@ -36,9 +37,10 @@
 
 import { Router, type Router as RouterType } from "express";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { servers } from "../db/schema.js";
-import { consumeAgentBootstrapToken, isAgentBootstrapSurfaceEnabled } from "../services/agentCredentialService.js";
+import { getDb } from "../db/index";
+import { servers } from "../db/schema";
+import { consumeAgentBootstrapToken, isAgentBootstrapSurfaceEnabled } from "../services/agentCredentialService";
+import { sendJsonServerError } from "./errorResponse";
 
 export const agentLoginRouter: RouterType = Router();
 
@@ -83,6 +85,7 @@ agentLoginRouter.post("/login", async (req, res) => {
         result.error === "token_expired" ? 401 :
         result.error === "token_consumed" ? 410 :
         result.error === "agent_missing" ? 410 :
+        result.error === "agent_not_external" ? 400 :
         500;
       res.status(status).json({
         error: result.error,
@@ -117,7 +120,6 @@ agentLoginRouter.post("/login", async (req, res) => {
       });
       return;
     }
-    console.error("agent.login error:", err);
-    res.status(500).json({ error: "Failed to exchange bootstrap token" });
+    sendJsonServerError(req, res, { error: "Failed to exchange bootstrap token", logPrefix: "agent.login error:", err });
   }
 });

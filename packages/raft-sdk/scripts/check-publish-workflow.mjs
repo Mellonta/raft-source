@@ -48,6 +48,10 @@ assert(
   "publish workflow must publish the exact pre-read artifact",
 );
 assert(
+  workflow.includes('case "$VERSION" in *-*) DIST_TAG=next ;; *) DIST_TAG=latest ;; esac'),
+  "publish workflow must route prerelease versions to the next dist-tag",
+);
+assert(
   workflow.includes('test "$(sha256sum "$REGISTRY_TARBALL"'),
   "publish workflow must compare registry bytes with the published tarball",
 );

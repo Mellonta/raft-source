@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   AGENT_MANIFEST_SCHEMA_V1,
@@ -7,7 +6,7 @@ import {
   validateAgentManifestV1,
   V1_MANIFEST_LIMITS,
   V1_SCHEMA_LIMITS,
-} from "./manifestV1.js";
+} from "./manifestV1";
 
 function validManifest(): Record<string, unknown> {
   return {

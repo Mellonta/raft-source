@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -11,13 +11,13 @@ import type { InboxItem } from "../src/store/inboxStore";
 import { useServerStore } from "../src/store/serverStore";
 import { useSearchContentStore } from "../src/store/searchContentStore";
 import { useThreadStore } from "../src/store/threadStore";
-import { resetServerFeatureFlagsForTests } from "../src/store/serverFeatureFlags";
+import { ACTIVITY_SIDEBAR_INBOX_FLAG_KEY, publishServerFeatureFlagValuesFromLabsReadback, resetServerFeatureFlagsForTests } from "../src/store/serverFeatureFlags";
 
 // node:test runs files concurrently by default; these tests share global
 // zustand stores + window.matchMedia, so serialize them.
 type TestFn = (t: unknown) => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn as never);
+  nodeTest(name,  fn as never);
 
 const originalPost = api.post.bind(api);
 const originalGet = api.get.bind(api);
@@ -846,3 +846,26 @@ test("Activity Follow posts the follow endpoint and keeps the same unfollowed ro
   ]);
   assert.equal(screen.queryByRole("menuitem", { name: "Follow" }), null);
 });
+
+for (const viewport of [setDesktopViewport, setNarrowDesktopViewport]) {
+  test(`new Inbox double-click opens full thread route at ${viewport.name}`, async () => {
+    viewport();
+    mockDisabledActivityV2Post();
+    publishServerFeatureFlagValuesFromLabsReadback({
+      serverId: "server-1", serverLabVersion: 1, masterEnabled: true,
+      labs: [{ key: ACTIVITY_SIDEBAR_INBOX_FLAG_KEY, name: "Inbox", description: "Inbox", state: "open", enrolled: true, effective: true }],
+    });
+    seedInbox([makeThreadItem({
+      threadChannelId: "thread-1", parentChannelId: "parent-channel-1", parentMessageId: "parent-1",
+      parentChannelType: "channel", firstUnreadMessageId: "unread-reply", unreadCount: 1,
+    })]);
+    renderInbox();
+    act(() => {
+      fireEvent.click(inboxRows()[0], { detail: 1 });
+      fireEvent.click(inboxRows()[0], { detail: 2 });
+    });
+    assert.equal(currentLocation, "/s/acme/channel/parent-channel-1?msg=unread-reply&thread=parent-channel-1%3Aparent-1");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 260)); });
+    assert.equal(useSearchContentStore.getState().slot, null, "double-click cancels the pending embedded preview");
+  });
+}

@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig, type RuntimeModelSourceOutcome , type AxSurfaceText } from "@botiverse/raft-shared";
-import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport.js";
-import { resolveCommandOnPath, readCommandVersion, requiresWindowsShell, type ProbeDeps } from "./probe.js";
-import type { ParsedEvent, RuntimeDriver, RuntimeProbeResult, SpawnContext, SpawnResult } from "./types.js";
+import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
+import { resolveCommandOnPath, readCommandVersion, type ProbeDeps } from "./probe";
+import { resolveWindowsDirectLaunch, type DirectLaunch } from "./windowsLaunch";
+import type { ParsedEvent, RuntimeDriver, RuntimeProbeResult, SpawnContext, SpawnResult } from "./types";
 import {
   installManagedMcpRuntimeJsonOverlay,
   prepareManagedMcpRuntimeProxy,
-} from "../managedMcpRuntimeProxy.js";
+} from "../managedMcpRuntimeProxy";
 
 const DEFAULT_PRINT_TIMEOUT = "30m";
 export const ANTIGRAVITY_ENV_OVERRIDES = {
@@ -23,13 +24,10 @@ export const ANTIGRAVITY_ENV_OVERRIDES = {
 export function resolveAntigravitySpawn(
   commandArgs: string[],
   deps: ProbeDeps = {},
-): { command: string; args: string[]; shell: boolean } {
+): DirectLaunch {
   const command = resolveCommandOnPath("agy", deps) ?? "agy";
-  return {
-    command,
-    args: commandArgs,
-    shell: requiresWindowsShell(command, deps.platform),
-  };
+  if ((deps.platform ?? process.platform) !== "win32") return { command, args: commandArgs, shell: false };
+  return resolveWindowsDirectLaunch("antigravity", command, commandArgs, deps);
 }
 
 export function buildAntigravityArgs(ctx: SpawnContext): string[] {
@@ -149,17 +147,17 @@ export class AntigravityDriver implements RuntimeDriver {
       });
     }
 
-    const { command, args, shell } = resolveAntigravitySpawn(buildAntigravityArgs(ctx));
+    const launch = resolveAntigravitySpawn(buildAntigravityArgs(ctx));
     const { spawnEnv } = await prepareCliTransport(ctx, {
       NO_COLOR: "1",
       ...ANTIGRAVITY_ENV_OVERRIDES,
     });
 
-    const proc = spawn(command, args, {
+    const proc = spawn(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
-      env: spawnEnv,
-      shell,
+      env: launch.env ?? spawnEnv,
+      shell: false,
     });
 
     proc.stdin?.end(ctx.prompt);

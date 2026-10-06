@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { createSyncViolationBuffer } from "./violations.js";
+import { createSyncViolationBuffer } from "./violations";
 
 test("violation buffer assigns monotonic indexes and drains from requested index", () => {
   const buffer = createSyncViolationBuffer({ capacity: 4 });

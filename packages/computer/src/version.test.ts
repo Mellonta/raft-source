@@ -3,9 +3,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { test } from "vitest";
 
-import { readBundledCliVersion, readBundledDaemonVersion, readComputerVersion } from "./version.js";
+import { readBundledCliVersion, readBundledDaemonVersion, readComputerVersion } from "./version";
 
 type VersionEnv = {
   raft?: string;

@@ -3,12 +3,12 @@
 
 import type { Command } from "commander";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeJson, writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { readAvatarFile } from "../profile/update.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeJson, writeText, adoptCliReplyText } from "../../core/renderer";
+import { readAvatarFile } from "../profile/update";
 
 interface ServerUpdateOpts {
   name?: string;

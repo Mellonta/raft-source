@@ -4,12 +4,14 @@
 import type { Command } from "commander";
 import type { AgentApiRequestBodyByRoute } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { formatReminderScheduled } from "./_format.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { apiFailureError } from "../../core/apiFailure";
+import { CliError, cliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { applyDmPeerKind, PEER_KIND_OPTION } from "../_target";
+import { formatReminderScheduled } from "./_format";
 
 export interface ScheduleOpts {
   title: string;
@@ -20,6 +22,7 @@ export interface ScheduleOpts {
   repeat?: string;
   tz?: string;
   channel?: string;
+  peerKind?: string;
 }
 
 export interface ScheduleBodyResult {
@@ -102,7 +105,14 @@ export function buildScheduleBody(
     }
     body.tz = timezone;
   }
-  if (opts.channel !== undefined) body.channel = opts.channel;
+  if (opts.channel !== undefined || opts.peerKind !== undefined) {
+    try {
+      body.channel = opts.peerKind === undefined ? opts.channel : applyDmPeerKind((opts.channel ?? "").trim(), opts.peerKind);
+    } catch (err) {
+      if (err instanceof CliError) return { body: {}, error: { code: err.code, message: err.message } };
+      throw err;
+    }
+  }
 
   // Agent-created reminders must stay anchored. If we still failed to carry
   // a message anchor, fail closed instead of silently creating a
@@ -132,6 +142,7 @@ export const reminderScheduleCommand = defineCommand(
       { flags: "--repeat <rule>", description: "Recurrence rule: every:15m | every:2h | every:1d | daily@09:00 | weekly:mon,fri@09:00" },
       { flags: "--tz <iana>", description: "IANA timezone for --repeat (e.g. Asia/Shanghai). Overrides this host's timezone." },
       { flags: "--channel <ref>", description: "Optional channel, DM, or thread to anchor this reminder to (e.g. #general, dm:@alice). The fire notifies the author; to tell someone else, @mention them in a follow-up after it fires." },
+      PEER_KIND_OPTION,
       { flags: "--message-id <id>", description: "Message id (full or short) this reminder is anchored to. Required for agent-created reminders." },
       { flags: "--msg-id <id>", description: "Deprecated alias for --message-id." },
     ],
@@ -149,8 +160,8 @@ export const reminderScheduleCommand = defineCommand(
         built.body as AgentApiRequestBodyByRoute["reminderCreate"],
       );
       if (!res.ok || !res.data?.reminder) {
-        const code = res.status >= 500 ? "SERVER_5XX" : "SCHEDULE_FAILED";
-        throw cliError(code, res.error ?? `HTTP ${res.status}`);
+        // Carries the server's code, e.g. reminders_unsupported_for_external_agents.
+        throw apiFailureError(res, "SCHEDULE_FAILED");
       }
       writeText(ctx.io, adoptCliReplyText(
         formatReminderScheduled(res.data.reminder, res.data.warning ?? null) + "\n",

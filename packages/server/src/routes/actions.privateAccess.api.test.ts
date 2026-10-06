@@ -1,20 +1,21 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { agentMigrations, agents, channelAgents, channelHumans, channels, featureFlagRules, messages, serverMembers, threadFollows, users } from "../db/schema.js";
-import { assignMachine, createAgent } from "../services/agentService.js";
-import { addAgent, addHuman, createChannel, getOrCreateThread, removeHuman } from "../services/channelService.js";
-import { ActionCardError, markActionCardExecuted, prepareActionCard } from "../services/actionCardsService.js";
+import { getDb } from "../db/index";
+import { agentMigrations, agents, channelAgents, channelHumans, channels, featureFlagRules, messages, serverMembers, threadFollows, users } from "../db/schema";
+import { assignMachine, createAgent } from "../services/agentService";
+import { addAgent, addHuman, createChannel, getOrCreateThread, removeHuman } from "../services/channelService";
+import { ActionCardError, executeActionCard, markActionCardExecuted, prepareActionCard } from "../services/actionCardsService";
+import { isInTransaction } from "../db/ambientTransaction";
 import { asServerId } from "@botiverse/raft-shared";
-import { AGENT_MIGRATION_FEATURE_FLAG_KEY } from "../services/featureFlagService.js";
-import { registerMachine } from "../services/machineService.js";
-import { createMessage, getMaxSeq } from "../services/messageService.js";
-import { createServer } from "../services/serverService.js";
+import { AGENT_MIGRATION_FEATURE_FLAG_KEY } from "../services/featureFlagService";
+import { registerMachine } from "../services/machineService";
+import { createMessage, getMaxSeq } from "../services/messageService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -785,4 +786,158 @@ test("prepared action cards retain metadata through message sync recovery", asyn
 
   assert.equal(syncedCard?.actionMetadata?.kind, "action-card");
   assert.equal(syncedCard?.actionMetadata?.state, "prepared");
+});
+
+test("channel:create action defers its realtime broadcast until after the transaction commits", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("defer-owner@slock.test", "defer-owner");
+  const server = await createServer("Defer Broadcast Server", `defer-broadcast-${randomUUID()}`, owner.id);
+  const agent = await createAgent(server.id, "defer-agent", { runtime: "codex" });
+  const carrier = await createChannel(server.id, "defer-carrier", undefined, "channel", { type: "user", id: owner.id });
+  await addAgent(carrier.id, agent.id);
+
+  const card = await prepareActionCard({
+    serverId: asServerId(server.id),
+    requesterAgentId: agent.id,
+    targetChannelId: carrier.id,
+    action: {
+      type: "channel:create",
+      name: "defer-created",
+      visibility: "private",
+    },
+  });
+
+  // Fake io whose emit asserts the broadcast fires OUTSIDE a transaction AND
+  // records that it fired at all (so the test cannot pass vacuously if the
+  // refactor silently stops broadcasting).
+  let emittedInsideTransaction = false;
+  let channelUpdatedCount = 0;
+  const io = {
+    to(room: string) {
+      return {
+        emit(event: string, payload: unknown) {
+          if (event === "channel:updated") {
+            emittedInsideTransaction = isInTransaction();
+            channelUpdatedCount += 1;
+          }
+        },
+      };
+    },
+  };
+
+  await executeActionCard({
+    messageId: card.messageId,
+    serverId: asServerId(server.id),
+    userId: owner.id,
+    expectedState: "prepared",
+    io: io as never,
+  });
+
+  assert.ok(channelUpdatedCount >= 1, "the channel:created broadcast must actually be emitted");
+  assert.equal(emittedInsideTransaction, false, "channel:updated must not be emitted while a transaction is open");
+});
+
+test("channel:create action emits no broadcast when the transaction rolls back", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("rollback-owner@slock.test", "rollback-owner");
+  const server = await createServer("Rollback Broadcast Server", `rollback-broadcast-${randomUUID()}`, owner.id);
+  const agent = await createAgent(server.id, "rollback-agent", { runtime: "codex" });
+  const carrier = await createChannel(server.id, "rollback-carrier", undefined, "channel", { type: "user", id: owner.id });
+  await addAgent(carrier.id, agent.id);
+
+  // A channel with this exact name already exists, so createChannel throws
+  // (ArchivedNameCollisionError) inside the transaction — the execute fails and
+  // the deferred publish must never run.
+  await createChannel(server.id, "rollback-dupe", undefined, "channel", { type: "user", id: owner.id });
+
+  const card = await prepareActionCard({
+    serverId: asServerId(server.id),
+    requesterAgentId: agent.id,
+    targetChannelId: carrier.id,
+    action: {
+      type: "channel:create",
+      name: "rollback-dupe",
+      visibility: "private",
+    },
+  });
+
+  const emitted: Array<{ room: string; event: string }> = [];
+  const io = {
+    to(room: string) {
+      return {
+        emit(event: string) {
+          emitted.push({ room, event });
+        },
+      };
+    },
+  };
+
+  await executeActionCard({
+    messageId: card.messageId,
+    serverId: asServerId(server.id),
+    userId: owner.id,
+    expectedState: "prepared",
+    io: io as never,
+  }).catch(() => undefined);
+
+  assert.equal(
+    emitted.filter((e) => e.event === "channel:updated").length,
+    0,
+    "a rolled-back channel:create must not emit channel:updated",
+  );
+});
+
+test("public channel:create defers publishChannelUpdate until after the transaction commits", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("public-defer-owner@slock.test", "public-defer-owner");
+  const server = await createServer("Public Defer Server", `public-defer-${randomUUID()}`, owner.id);
+  const agent = await createAgent(server.id, "public-defer-agent", { runtime: "codex" });
+  const carrier = await createChannel(server.id, "public-defer-carrier", undefined, "channel", { type: "user", id: owner.id });
+  await addAgent(carrier.id, agent.id);
+
+  const card = await prepareActionCard({
+    serverId: asServerId(server.id),
+    requesterAgentId: agent.id,
+    targetChannelId: carrier.id,
+    action: {
+      type: "channel:create",
+      name: "public-defer-created",
+      visibility: "public",
+    },
+  });
+
+  // publishLocalChannelUpdate (reached only by publishChannelUpdate for a public
+  // channel) fetches sockets via io.local.in(...); record whether that happens
+  // while a transaction is open. Before the fix, publishChannelUpdate ran inside
+  // the transaction, so this would be true.
+  let publishRanInsideTransaction: boolean | null = null;
+  const io = {
+    local: {
+      in() {
+        return {
+          async fetchSockets() {
+            publishRanInsideTransaction = isInTransaction();
+            return [];
+          },
+        };
+      },
+    },
+    to() {
+      return { emit() {} };
+    },
+    in() {
+      return { socketsJoin() {} };
+    },
+  };
+
+  await executeActionCard({
+    messageId: card.messageId,
+    serverId: asServerId(server.id),
+    userId: owner.id,
+    expectedState: "prepared",
+    io: io as never,
+  });
+
+  assert.notEqual(publishRanInsideTransaction, null, "publishChannelUpdate must actually be reached for a public channel");
+  assert.equal(publishRanInsideTransaction, false, "publishChannelUpdate must run after the transaction commits");
 });

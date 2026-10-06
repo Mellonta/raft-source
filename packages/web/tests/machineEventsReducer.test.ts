@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   applyMachineEvent,
-} from "../src/store/events/machineEvents.js";
+} from "../src/store/events/machineEvents";
 import type {
   MachineDomainState,
-} from "../src/store/events/machineEvents.js";
-import type { Machine } from "../src/store/machineStore.js";
+} from "../src/store/events/machineEvents";
+import type { Machine } from "../src/store/machineStore";
 
 function seedMachine(overrides: Partial<Machine> = {}): Machine {
   return {
@@ -31,7 +30,6 @@ function seedState(
 ): MachineDomainState {
   return {
     machines: [seedMachine()],
-    latestDaemonVersion: null,
     latestComputerVersion: null,
     computerOperationProgress: {},
     ...overrides,
@@ -184,84 +182,6 @@ test("machine capabilities updates only changed fields and preserves no-op refer
   });
   assert.equal(cleared.transition.touched, 1);
   assert.deepEqual(cleared.state.machines[0].runtimeVersions, {});
-});
-
-test("upgrade progress scales download percent and rejects stale request frames", () => {
-  const first = applyMachineEvent(seedState(), {
-    kind: "upgrade-progress",
-    machineId: "machine-1",
-    requestId: "req-1",
-    phase: "downloading",
-    percent: 50,
-    message: "Downloading",
-  });
-
-  assert.equal(first.transition.touched, 1);
-  assert.equal(
-    first.state.computerOperationProgress["machine-1"]?.progressValue,
-    43,
-  );
-  assert.equal(
-    first.state.computerOperationProgress["machine-1"]?.requestId,
-    "req-1",
-  );
-
-  const stale = applyMachineEvent(first.state, {
-    kind: "upgrade-progress",
-    machineId: "machine-1",
-    requestId: "req-old",
-    phase: "applying",
-  });
-
-  assert.equal(stale.transition.touched, 0);
-  assert.equal(stale.state, first.state);
-  assert.equal(
-    stale.state.computerOperationProgress["machine-1"]?.phase,
-    "downloading",
-  );
-});
-
-test("upgrade done completes the matching request and ignores stale completions", () => {
-  const progress = applyMachineEvent(seedState(), {
-    kind: "upgrade-progress",
-    machineId: "machine-1",
-    requestId: "req-1",
-    phase: "applying",
-  }).state;
-
-  const done = applyMachineEvent(progress, {
-    kind: "upgrade-done",
-    machineId: "machine-1",
-    requestId: "req-1",
-    ok: true,
-    newVersion: "0.0.8",
-  });
-
-  assert.equal(done.transition.touched, 1);
-  assert.equal(done.state.computerOperationProgress["machine-1"]?.done, true);
-  assert.equal(
-    done.state.computerOperationProgress["machine-1"]?.progressValue,
-    100,
-  );
-  assert.equal(
-    done.state.computerOperationProgress["machine-1"]?.newVersion,
-    "0.0.8",
-  );
-
-  const stale = applyMachineEvent(done.state, {
-    kind: "upgrade-done",
-    machineId: "machine-1",
-    requestId: "req-old",
-    ok: false,
-    error: "stale",
-  });
-
-  assert.equal(stale.transition.touched, 0);
-  assert.equal(stale.state, done.state);
-  assert.equal(
-    stale.state.computerOperationProgress["machine-1"]?.error,
-    undefined,
-  );
 });
 
 test("restart done completes only the matching request receipt", () => {

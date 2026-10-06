@@ -29,9 +29,10 @@
  * resume the existing linked Computer through fingerprint adoption.
  */
 import { Router, type Router as RouterType } from "express";
-import { requireAuth } from "../middleware/auth.js";
-import { listLegacyMachineRoster } from "../services/legacyMachineService.js";
-import { isDeviceAuthSurfaceEnabled } from "../services/deviceAuthService.js";
+import { requireAuth } from "../middleware/auth";
+import { listLegacyMachineRoster } from "../services/legacyMachineService";
+import { isDeviceAuthSurfaceEnabled } from "../services/deviceAuthService";
+import { sendJsonServerError } from "./errorResponse";
 
 export const computerLegacyMachinesRouter: RouterType = Router();
 
@@ -69,7 +70,10 @@ computerLegacyMachinesRouter.get("/legacy-machines", requireAuth, async (req, re
     }
     res.status(200).json({ entries: result.entries });
   } catch (err) {
-    console.error("api.computer.legacy-machines error:", err);
-    res.status(500).json({ error: "Failed to list legacy machines" });
+    sendJsonServerError(req, res, {
+      error: "Failed to list legacy machines",
+      logPrefix: "api.computer.legacy-machines error:",
+      err,
+    });
   }
 });

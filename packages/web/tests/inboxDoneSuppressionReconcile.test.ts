@@ -20,9 +20,8 @@
  * result-set/count consistency is meaningful.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
-import type { InboxItem } from "../src/store/inboxStore.js";
-import type { FollowedThread } from "../src/store/threadStore.js";
+import type { InboxItem } from "../src/store/inboxStore";
+import type { FollowedThread } from "../src/store/threadStore";
 
 class MemoryStorage {
   private readonly map = new Map<string, string>();
@@ -33,15 +32,15 @@ class MemoryStorage {
 Object.defineProperty(globalThis, "localStorage", { value: new MemoryStorage(), configurable: true });
 Object.defineProperty(globalThis, "sessionStorage", { value: new MemoryStorage(), configurable: true });
 
-const { useInboxStore, getInboxItemKey } = await import("../src/store/inboxStore.js");
-const { triggerServerReset } = await import("../src/store/serverResetRegistry.js");
+const { useInboxStore, getInboxItemKey } = await import("../src/store/inboxStore");
+const { triggerServerReset } = await import("../src/store/serverResetRegistry");
 const {
   captureActivityShadowGeneration,
   getActivityShadowVersion,
   publishActivityShadowVersion,
-} = await import("../src/store/activityShadowBridge.js");
-const { useServerStore } = await import("../src/store/serverStore.js");
-const { default: api } = await import("../src/api/client.js");
+} = await import("../src/store/activityShadowBridge");
+const { useServerStore } = await import("../src/store/serverStore");
+const { default: api } = await import("../src/api/client");
 
 const originalPost = api.post.bind(api);
 const originalGet = api.get.bind(api);
@@ -493,7 +492,7 @@ test("#5690 T10: a failed read-all cannot produce a second refresh", async () =>
 test("#5690 T11: an ordinary clearThreadUnread still notifies and drives the canonical refresh", async () => {
   // The scoping is markDone-only: every other caller (ThreadPanel, markRead,
   // deep-link) keeps the persisted notification that Activity reconciles on.
-  const { useThreadStore } = await import("../src/store/threadStore.js");
+  const { useThreadStore } = await import("../src/store/threadStore");
   const urls: string[] = [];
   const readAll = deferred<{ data: unknown }>();
   api.post = (() => readAll.promise) as typeof api.post;
@@ -563,7 +562,7 @@ test("#5690 T12: a superseded server's Done ack performs NO side effect against 
   }) as typeof api.get;
 
   try {
-    const { useThreadStore } = await import("../src/store/threadStore.js");
+    const { useThreadStore } = await import("../src/store/threadStore");
     resetInbox([item]);
 
     void useInboxStore.getState().markDone(item);
@@ -614,3 +613,80 @@ test("#5690 T12: a superseded server's Done ack performs NO side effect against 
     );
   } finally { restoreApi(); resetInbox(); }
 });
+
+for (const outcome of ["success", "failure"] as const) {
+  test(`filtered All count preserves pending Done through background refresh and reconciles ${outcome}`, async () => {
+    const item = makeChannelItem({ unreadCount: 1 });
+    const donePost = deferred<{ data: object }>();
+    let refreshFails = false;
+    let serverTotal = 100;
+    api.post = (() => donePost.promise) as typeof api.post;
+    api.get = (async (url: string, config?: { params?: { limit?: number } }) => {
+      if (url !== "/channels/inbox") return { data: [] };
+      if (refreshFails) throw new Error("refresh unavailable");
+      return { data: {
+        items: config?.params?.limit === 1 ? [] : [{ ...item, readState: {
+          kind: "present", readStateVersion: 1, maxReadSeq: "0",
+          latestActivity: { messageId: "message-1", seq: S1 },
+        } }],
+        hasMore: false, totalCount: config?.params?.limit === 1 ? serverTotal : 1,
+        totalUnreadCount: 1,
+      } };
+    }) as typeof api.get;
+    try {
+      resetInbox([item]);
+      useInboxStore.setState({ filter: "unread", allCount: 100 });
+      const done = useInboxStore.getState().markDone(item);
+      assert.equal(useInboxStore.getState().allCount, 99);
+      await useInboxStore.getState().refreshInbox({ background: true });
+      assert.equal(useInboxStore.getState().allCount, 99, "pre-commit All=100 must not undo the local decrement");
+      assert.equal(useInboxStore.getState().items.length, 0);
+      if (outcome === "success") {
+        refreshFails = true;
+        donePost.resolve({ data: {} });
+      } else {
+        donePost.reject(new Error("Done rejected"));
+      }
+      await done;
+      assert.equal(useInboxStore.getState().allCount, outcome === "success" ? 99 : 100);
+      refreshFails = false;
+      serverTotal = 102;
+      await useInboxStore.getState().refreshInbox();
+      assert.equal(useInboxStore.getState().allCount, 102, "after settlement a fresh total is authoritative again");
+    } finally { restoreApi(); resetInbox(); }
+  });
+}
+
+for (const recovery of ["newer activity", "expiry"] as const) {
+  test(`All count recovers on the first response that retires Done via ${recovery}`, async () => {
+    const item = makeChannelItem({ unreadCount: 1 });
+    const donePost = deferred<{ data: object }>();
+    const realNow = Date.now;
+    let now = realNow();
+    Date.now = () => now;
+    api.post = (() => donePost.promise) as typeof api.post;
+    api.get = (async (url: string, config?: { params?: { limit?: number } }) => {
+      if (url !== "/channels/inbox") return { data: [] };
+      return { data: {
+        items: config?.params?.limit === 1 ? [] : [{ ...item, readState: {
+          kind: "present", readStateVersion: 1, maxReadSeq: "0",
+          latestActivity: { messageId: "message-new", seq: recovery === "newer activity" ? S2 : S1 },
+        } }],
+        hasMore: false, totalCount: config?.params?.limit === 1 ? 100 : 1,
+        totalUnreadCount: 1,
+      } };
+    }) as typeof api.get;
+    try {
+      resetInbox([item]);
+      useInboxStore.setState({ filter: "unread", allCount: 100 });
+      const done = useInboxStore.getState().markDone(item);
+      assert.equal(useInboxStore.getState().allCount, 99);
+      if (recovery === "expiry") now += 60_000;
+      await useInboxStore.getState().refreshInbox({ background: true });
+      assert.equal(useInboxStore.getState().items.length, 1);
+      assert.equal(useInboxStore.getState().allCount, 100, "restored row and total must agree in this response");
+      donePost.resolve({ data: {} });
+      await done;
+    } finally { Date.now = realNow; restoreApi(); resetInbox(); }
+  });
+}

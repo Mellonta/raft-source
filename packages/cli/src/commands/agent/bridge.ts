@@ -12,13 +12,13 @@ import type {
   DaemonApiResponseByRoute,
 } from "@botiverse/raft-shared";
 
-import type { ApiResponse, BodyResponse } from "../../client.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeDiagnostic, writeText, NL, adoptCliReplyText } from "../../core/renderer.js";
-import { formatBridgeRecovered, formatBridgeStreamFallback, formatBridgeTransientFailure } from "./_format.js";
-import { createDaemonApiSurfaceClient } from "../../daemonApiPath.js";
+import type { ApiResponse, BodyResponse } from "../../client";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeDiagnostic, writeText, NL, adoptCliReplyText } from "../../core/renderer";
+import { formatBridgeRecovered, formatBridgeStreamFallback, formatBridgeTransientFailure } from "./_format";
+import { createDaemonApiSurfaceClient } from "../../daemonApiPath";
 import {
   AgentCommsBridgeLockError,
   acquireAgentCommsBridgeLock,
@@ -29,8 +29,8 @@ import {
   type AgentCommsActivitySink,
   type AgentCommsWakeHintSource,
   type AgentCommsWakeHintFetchResult,
-} from "../../agentCommsCore/bridge.js";
-import { createRaftChannelWakeAdapter } from "../../external/raftChannelWakeAdapter.js";
+} from "../../agentCommsCore/bridge";
+import { createRaftChannelWakeAdapter } from "../../external/raftChannelWakeAdapter";
 
 interface BridgeOptions {
   expectedAgent?: string;

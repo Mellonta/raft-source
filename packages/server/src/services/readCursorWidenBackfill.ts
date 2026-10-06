@@ -1,5 +1,12 @@
 // RFC 057 Phase B: operator-run keyset backfill of the int8 shadow columns.
 //
+// SCRIPT-ONLY: the sole non-test caller is the operator entrypoint
+// scripts/read-cursor-widen-backfill.ts, which builds its OWN `pg.Pool` (max 1)
+// and passes it in. The server runtime has NO path that reaches this module, so
+// it never touches the app's `getDb()` ambient-transaction scope — its raw
+// `pool.connect()` + `BEGIN` transactions are NOT a runtime hazard and are
+// deliberately out of scope for the runtime sink audit.
+//
 // NEVER automatic: no scheduler imports this module; the only entrypoint is the
 // operator script (scripts/read-cursor-widen-backfill.ts) run under the gate-B
 // authorization. The job refuses to start unless the phase ledger reads

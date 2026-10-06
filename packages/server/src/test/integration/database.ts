@@ -4,8 +4,8 @@ import {
   initDatabase,
   initPgliteDatabase,
   isDatabaseInitialized,
-} from "../../db/index.js";
-import { measureIntegrationPhase, ownIntegrationResource, poisonIntegrationEnvironment } from "./lifecycle.js";
+} from "../../db/index";
+import { measureIntegrationPhase, ownIntegrationResource, poisonIntegrationEnvironment } from "./lifecycle";
 
 // File-local immutable snapshot. Vitest retains file isolation; no cache is
 // persisted between runs, so changed migrations/bootstrap always build afresh.

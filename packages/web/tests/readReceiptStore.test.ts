@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import api from "../src/api/client";
 import { useReadReceiptStore } from "../src/store/readReceiptStore";
 import { useServerStore } from "../src/store/serverStore";

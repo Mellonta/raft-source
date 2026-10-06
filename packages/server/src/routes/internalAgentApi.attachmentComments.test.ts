@@ -1,18 +1,18 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { attachmentCommentRefs, attachments, messageReactions, users } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { createChannel, addAgent, addHuman } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
+import { getDb } from "../db/index";
+import { attachmentCommentRefs, attachments, messageReactions, users } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { createChannel, addAgent, addHuman } from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { mintAgentCredential } from "../services/agentCredentialService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

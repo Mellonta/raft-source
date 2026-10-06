@@ -2,9 +2,8 @@ import { asAxSurfaceText, type AxSurfaceText } from "@botiverse/raft-shared";
 import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { test } from "vitest";
-import { ChildProcessRuntimeSession } from "./runtimeSession.js";
-import type { ParsedEvent, RuntimeDriver, SpawnContext, SpawnResult } from "./types.js";
+import { ChildProcessRuntimeSession } from "./runtimeSession";
+import type { ParsedEvent, RuntimeDriver, SpawnContext, SpawnResult } from "./types";
 
 class FakeChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -85,4 +84,33 @@ test("child-process runtime session decodes split UTF-8 stdout before line parsi
   driver.spawned.stdout.emit("data", bytes.subarray(splitAt));
 
   assert.deepEqual(events, [{ kind: "text", text: "hello 你好" }]);
+});
+
+test("child-process runtime session emits exit exactly once, including for a failed spawn that gets error and close but no exit", async () => {
+  const exitsFor = async (drive: (child: FakeChildProcess) => void) => {
+    const driver = new Utf8Driver();
+    const session = new ChildProcessRuntimeSession(driver, spawnContext);
+    const exits: Array<{ code: number | null; reason?: string }> = [];
+    session.on("exit", (info) => exits.push({ code: info.code, reason: info.reason }));
+    session.on("error", () => {});
+    await session.start({ text: "start" });
+    drive(driver.spawned);
+    return exits;
+  };
+  // What Node does on EACCES / ENOENT.
+  assert.deepEqual(await exitsFor((child) => {
+    child.emit("error", Object.assign(new Error("spawn claude EACCES"), { code: "EACCES" }));
+    child.emit("close", -13, null);
+  }), [{ code: -13, reason: "error" }]);
+  // A process that ran: exit then close.
+  assert.deepEqual(await exitsFor((child) => {
+    child.emit("exit", 1, null);
+    child.emit("close", 1, null);
+  }), [{ code: 1, reason: "runtime_exit" }]);
+  // An error from a process that ran (its exit follows as usual).
+  assert.deepEqual(await exitsFor((child) => {
+    child.emit("error", new Error("kill EPERM"));
+    child.emit("exit", 0, null);
+    child.emit("close", 0, null);
+  }), [{ code: 0, reason: "runtime_exit" }]);
 });

@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { createMessageWindowHarness, flushAsyncWork } from "../messageWindowHarness.js";
-import { useMessageStore } from "../../src/store/messageStore.js";
-import type { Message } from "../../src/store/messageStore.js";
+import { createMessageWindowHarness, flushAsyncWork } from "../messageWindowHarness";
+import { useMessageStore } from "../../src/store/messageStore";
+import type { Message } from "../../src/store/messageStore";
 
-const SERIAL = { concurrency: false };
+const SERIAL = {};
 const CHANNEL_ID = "t4a-j1-send-echo";
 
 function persistedMessage(seq: number, overrides: Partial<Message> = {}): Message {

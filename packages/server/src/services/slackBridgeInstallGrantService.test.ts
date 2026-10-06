@@ -1,28 +1,28 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   externalAppCredentials,
   externalAppInstallGrantReceipts,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalAppRegistrations,
   externalAppServerGrants,
   oauthClients,
   users,
-} from "../db/schema.js";
-import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../routes/slackBridge.js";
-import { createServer } from "./serverService.js";
+} from "../db/schema";
+import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../routes/slackBridge";
+import { createServer } from "./serverService";
 import {
   refreshSlackBridgeInstallGrantReceipts,
   slackBridgeInstallGrantHash,
-} from "./slackBridgeInstallGrantService.js";
-import type { SlackBridgeProvisioningProvider } from "./slackBridgeProvisioningControlPlane.js";
+} from "./slackBridgeInstallGrantService";
+import type { SlackBridgeProvisioningProvider } from "./slackBridgeProvisioningControlPlane";
 
 
 const NOW = new Date("2026-08-12T08:00:00.000Z");
@@ -89,6 +89,16 @@ async function fixture() {
     botUserId: "U_INSTALL_GRANT",
     providerBotId: "B_INSTALL_GRANT",
   }).returning();
+  await db.insert(externalAppInstallServerGrants).values({
+    installId: install.id,
+    serverId: server.id,
+    registrationId: registration.id,
+    serverGrantId: grant.id,
+    grantEpoch: grant.grantEpoch,
+    state: "active",
+    authorizedByType: "human",
+    authorizedById: owner.id,
+  });
   await db.insert(externalAppCredentials).values({
     installId: install.id,
     state: "active",
@@ -121,7 +131,7 @@ async function fixture() {
     observedAt: new Date(NOW.getTime() - 20 * 60_000),
     expiresAt: new Date(NOW.getTime() + 5 * 60_000),
   });
-  return { db, install };
+  return { db, grant, install };
 }
 
 function provider(
@@ -186,6 +196,27 @@ test("fresh provider read repairs a prior receipt whose hash contradicts its bou
   assert.equal(latest.receiptRevision, 2);
   assert.notEqual(latest.grantHash, tamperedHash);
   assert.equal(latest.grantHash, slackBridgeInstallGrantHash(latest));
+});
+
+test("stale server-grant epoch cannot drive provider token introspection", async () => {
+  const { db, grant, install } = await fixture();
+  await db.update(externalAppServerGrants).set({ grantEpoch: grant.grantEpoch + 1 })
+    .where(eq(externalAppServerGrants.id, grant.id));
+  let reads = 0;
+  const result = await refreshSlackBridgeInstallGrantReceipts({
+    db,
+    provider: provider(async () => {
+      reads += 1;
+      return { kind: "fact", fact: FACT };
+    }),
+    now: NOW,
+  });
+
+  assert.deepEqual(result, { considered: 1, renewed: 0, skipped: 1, failed: 0 });
+  assert.equal(reads, 0);
+  assert.equal((await db.select().from(externalAppInstallGrantReceipts).where(
+    eq(externalAppInstallGrantReceipts.installId, install.id),
+  )).length, 1);
 });
 
 test("provider failure never extends an expired receipt", async () => {

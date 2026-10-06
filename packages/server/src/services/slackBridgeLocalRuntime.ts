@@ -15,8 +15,8 @@ import { and, desc, eq, gt, inArray, isNull, lte, or } from "drizzle-orm";
 import { constants } from "node:fs";
 import { open, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
-import { DEFAULT_APP_URL, normalizeAppUrl } from "../config/appUrl.js";
-import { getDb, type Database, type DatabaseExecutor } from "../db/index.js";
+import { DEFAULT_APP_URL, normalizeAppUrl } from "../config/appUrl";
+import { getDb, type Database, type DatabaseExecutor } from "../db/index";
 import {
   agents,
   channels,
@@ -28,31 +28,29 @@ import {
   externalAppManifestReceipts,
   externalAppRegistrations,
   externalAppRegistrationSecrets,
-  externalAuthorPolicies,
   externalChannelBindings,
   externalMessageLinks,
   messages,
   users,
-} from "../db/schema.js";
-import type { SlackBridgeRouteDependencies } from "../routes/slackBridge.js";
-import type { ExternalIngressRuntimeResolver } from "./externalAppIngressService.js";
-import type { ExternalAuthorPolicyRuntimeAuthority } from "./externalAppControlPlaneService.js";
-import { evaluateFeatureFlag } from "./featureFlagService.js";
+} from "../db/schema";
+import type { SlackBridgeRouteDependencies } from "../routes/slackBridge";
+import type { ExternalIngressRuntimeResolver } from "./externalAppIngressService";
+import { evaluateFeatureFlag } from "./featureFlagService";
 import {
   effectiveAgentSenderName,
   effectiveUserSenderName,
-} from "./effectiveSenderName.js";
+} from "./effectiveSenderName";
 import {
   installOrdinaryMessageOutboundRuntime,
   mintSlackBridgeReconciliationMarker,
   type OrdinaryMessageOutboundAuthorizationResolver,
   type ProviderNeutralOutboundBindingAuthority,
-} from "./externalDeliveryOutboxService.js";
+} from "./externalDeliveryOutboxService";
 import {
   processExternalDeliveryPartitionHead,
   type ExternalDeliveryCredentialLease,
   type ExternalDeliveryWorkerDependencies,
-} from "./externalDeliveryWorkerService.js";
+} from "./externalDeliveryWorkerService";
 import {
   resolveSlackBridgeBindingActive,
   SLACK_BRIDGE_ORACLE_RECEIPT_SCHEMA,
@@ -61,8 +59,9 @@ import {
   type SlackBridgeBindingActiveDecision,
   type SlackBridgeReleaseOracleDecision,
   type SlackBridgeRuntimeLevel,
-} from "./slackBridgeRuntimeService.js";
-import { createSlackBridgeOAuthCompletionRedirectPathResolver } from "./slackBridgeOAuthCompletionRedirect.js";
+} from "./slackBridgeRuntimeService";
+import { createSlackBridgeOAuthCompletionRedirectPathResolver } from "./slackBridgeOAuthCompletionRedirect";
+import { slackPrivacyFreshUntil } from "./slackBindingPrivacyFreshnessService";
 import {
   createSlackOAuthExchangeAdapter,
   createSlackProviderPreparation,
@@ -74,7 +73,7 @@ import {
   type SlackOAuthExchangeTransportResult,
   type SlackProviderAuthorityFence,
   type SlackWebApiTransportResult,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
 
 const CONFIG_SCHEMA = "slack-bridge-local-runtime.v1" as const;
 const MANIFEST_MANAGER_CREDENTIAL_SCHEMA = "slack-bridge-local-manifest-manager-credential.v1" as const;
@@ -136,7 +135,6 @@ export interface SlackBridgeLocalOutboundBootstrapInput {
     bindingId: string;
     connectionEpoch: number;
     bindingEpoch: number;
-    consentRevision: number;
     level: SlackBridgeRuntimeLevel;
     membership: {
       registrationId: string;
@@ -179,7 +177,6 @@ interface LocalRealAuthorityReceipt {
   bindingEpoch: number;
   memberRevision: number;
   contextRevision: number;
-  consentRevision: number;
   actorCount: number;
   actorsDigest: string;
   observedAt: Date;
@@ -200,7 +197,6 @@ export interface SlackBridgeLocalRealAuthorityInput {
   bindingEpoch: number;
   memberRevision: number;
   contextRevision: number;
-  consentRevision: number;
   observedAt: string;
   expiresAt: string;
   actors: LocalRealAuthorityActor[];
@@ -223,7 +219,6 @@ export interface SlackBridgeLocalRealAuthorityVerificationReceipt {
   contextRevision: number;
   actorCount: number;
   addressabilityCount: number;
-  authorPolicyCount: number;
   actorsDigest: string;
 }
 
@@ -302,7 +297,6 @@ interface LocalOutboundBinding {
   bindingId: string;
   connectionEpoch: number;
   bindingEpoch: number;
-  consentRevision: number;
   level: SlackBridgeRuntimeLevel;
   membership: LocalMembershipReceipt;
   oracle: LocalOracleReceipt;
@@ -464,7 +458,6 @@ function parseOutboundBinding(value: unknown): LocalOutboundBinding {
     bindingId: requiredNestedString(input, "bindingId"),
     connectionEpoch: requiredPositiveInteger(input, "connectionEpoch"),
     bindingEpoch: requiredPositiveInteger(input, "bindingEpoch"),
-    consentRevision: requiredPositiveInteger(input, "consentRevision"),
     level,
     membership: {
       registrationId: requiredNestedString(membershipInput, "registrationId"),
@@ -609,7 +602,6 @@ function parseRealAuthorityReceipt(value: unknown): LocalRealAuthorityReceipt | 
     bindingEpoch: requiredPositiveInteger(input, "bindingEpoch"),
     memberRevision: requiredPositiveInteger(input, "memberRevision"),
     contextRevision: requiredPositiveInteger(input, "contextRevision"),
-    consentRevision: requiredPositiveInteger(input, "consentRevision"),
     actorCount,
     actorsDigest,
     observedAt,
@@ -701,7 +693,6 @@ function parseConfig(raw: string): LocalRuntimeConfig {
       binding.bindingId === config.realAuthority!.bindingId
       && binding.connectionEpoch === config.realAuthority!.connectionEpoch
       && binding.bindingEpoch === config.realAuthority!.bindingEpoch
-      && binding.consentRevision === config.realAuthority!.consentRevision
       && binding.membership.registrationId === config.realAuthority!.registrationId
       && binding.membership.installId === config.realAuthority!.installId
       && binding.membership.providerAuthorityId === config.realAuthority!.providerAuthorityId
@@ -1071,8 +1062,6 @@ interface SlackBridgeLocalRealAuthorityRows {
   binding: typeof externalChannelBindings.$inferSelect;
   actors: Array<typeof externalActorProjections.$inferSelect>;
   addressability: Array<typeof externalAddressabilityProjections.$inferSelect>;
-  authorPolicies: Array<typeof externalAuthorPolicies.$inferSelect>;
-  effectiveAuthorNames: Map<string, string>;
 }
 
 type SlackBridgeLocalRealAuthorityPhase =
@@ -1105,7 +1094,6 @@ function sameRealAuthorityStaticIdentity(
     && left.privacyClass === right.privacyClass
     && left.bindingId === right.bindingId
     && left.bindingEpoch === right.bindingEpoch
-    && left.consentRevision === right.consentRevision
     && left.actorCount === right.actorCount;
 }
 
@@ -1150,7 +1138,6 @@ function configWithRealAuthority(
     || binding.bindingEpoch !== receipt.bindingEpoch
     || binding.membership.bindingEpoch !== receipt.bindingEpoch
     || binding.oracle.bindingEpoch !== receipt.bindingEpoch
-    || binding.consentRevision !== receipt.consentRevision
     || binding.connectionEpoch > receipt.connectionEpoch
     || binding.membership.connectionEpoch > receipt.connectionEpoch
     || binding.oracle.connectionEpoch > receipt.connectionEpoch
@@ -1360,38 +1347,6 @@ async function loadLocalRealAuthority(
     throw new Error("Slack Bridge local real-authority addressability set is incomplete or has extras");
   }
 
-  const authorPolicyQuery = executor.select().from(externalAuthorPolicies).where(and(
-    eq(externalAuthorPolicies.serverId, bindings[0]!.serverId),
-    eq(externalAuthorPolicies.provider, "slack"),
-    eq(externalAuthorPolicies.appRegistrationId, receipt.registrationId),
-    eq(externalAuthorPolicies.installId, receipt.installId),
-    eq(externalAuthorPolicies.bindingId, receipt.bindingId),
-    eq(externalAuthorPolicies.bindingEpoch, receipt.bindingEpoch),
-    eq(externalAuthorPolicies.consentRevision, receipt.consentRevision),
-    eq(externalAuthorPolicies.state, "granted"),
-  ));
-  const authorPolicies = lock ? await authorPolicyQuery.for("update") : await authorPolicyQuery;
-  const effectiveAuthorNames = new Map<string, string>();
-  for (const authorPolicy of authorPolicies) {
-    const authorQuery = authorPolicy.authorType === "user"
-      ? executor.select({ name: users.name, displayName: users.displayName }).from(users)
-        .where(eq(users.id, authorPolicy.authorId)).limit(2)
-      : executor.select({ name: agents.name, displayName: agents.displayName }).from(agents)
-        .where(and(
-          eq(agents.id, authorPolicy.authorId),
-          isNull(agents.deletedAt),
-        )).limit(2);
-    const authors = lock ? await authorQuery.for("update") : await authorQuery;
-    if (authors.length !== 1) {
-      throw new Error("Slack Bridge local real-authority policy author is missing or duplicated");
-    }
-    effectiveAuthorNames.set(
-      authorPolicy.id,
-      authorPolicy.authorType === "user"
-        ? effectiveUserSenderName(authors[0]!)
-        : effectiveAgentSenderName(authors[0]!),
-    );
-  }
 
   return {
     registration: registrations[0]!,
@@ -1400,8 +1355,6 @@ async function loadLocalRealAuthority(
     binding: bindings[0]!,
     actors,
     addressability,
-    authorPolicies,
-    effectiveAuthorNames,
   };
 }
 
@@ -1410,7 +1363,6 @@ function assertLocalRealAuthority(input: {
   receipt: LocalRealAuthorityReceipt;
   rows: SlackBridgeLocalRealAuthorityRows;
   now: Date;
-  verifyAuthorDisplayName?: boolean;
   verifyReceiptFreshness?: boolean;
 }): SlackBridgeLocalRealAuthorityVerificationReceipt {
   const { config, receipt, rows, now } = input;
@@ -1528,27 +1480,6 @@ function assertLocalRealAuthority(input: {
   if (addressedActorIds.size !== receipt.actorCount) {
     throw new Error("Slack Bridge local real-authority addressability is incomplete");
   }
-  for (const authorPolicy of rows.authorPolicies) {
-    if (
-      authorPolicy.serverId !== rows.binding.serverId
-      || authorPolicy.provider !== "slack"
-      || authorPolicy.appRegistrationId !== receipt.registrationId
-      || authorPolicy.installId !== receipt.installId
-      || authorPolicy.bindingId !== receipt.bindingId
-      || authorPolicy.bindingEpoch !== receipt.bindingEpoch
-      || authorPolicy.consentRevision !== receipt.consentRevision
-      || authorPolicy.state !== "granted"
-      || authorPolicy.fallbackKind !== (authorPolicy.authorType === "user" ? "human" : "agent")
-    ) {
-      throw new Error("Slack Bridge local real-authority author policy mismatch");
-    }
-    if (
-      input.verifyAuthorDisplayName !== false
-      && authorPolicy.displayName !== rows.effectiveAuthorNames.get(authorPolicy.id)
-    ) {
-      throw new Error("Slack Bridge local real-authority author policy display name mismatch");
-    }
-  }
   return {
     registrationId: receipt.registrationId,
     installId: receipt.installId,
@@ -1560,7 +1491,6 @@ function assertLocalRealAuthority(input: {
     contextRevision: receipt.contextRevision,
     actorCount: actors.length,
     addressabilityCount: rows.addressability.length,
-    authorPolicyCount: rows.authorPolicies.length,
     actorsDigest: receipt.actorsDigest,
   };
 }
@@ -1738,7 +1668,6 @@ export async function replaceSlackBridgeLocalRealAuthorityFromEnv(
         receipt,
         rows,
         now,
-        verifyAuthorDisplayName: false,
       });
       alreadyCurrent = true;
     } catch {
@@ -1757,7 +1686,6 @@ export async function replaceSlackBridgeLocalRealAuthorityFromEnv(
           receipt: currentReceipt,
           rows,
           now,
-          verifyAuthorDisplayName: false,
           verifyReceiptFreshness: false,
         });
         await assertLocalRealAuthorityOutboundTargets({ executor: tx, config, rows });
@@ -1820,6 +1748,7 @@ export async function replaceSlackBridgeLocalRealAuthorityFromEnv(
         providerConversationId: receipt.providerConversationId,
         providerConversationKind: receipt.providerConversationKind,
         privacyClass: receipt.privacyClass,
+        privacyFreshUntil: slackPrivacyFreshUntil(now),
         grantEpoch: rows.install.grantEpoch,
         connectionEpoch: receipt.connectionEpoch,
         updatedAt: now,
@@ -1857,6 +1786,16 @@ export async function replaceSlackBridgeLocalRealAuthorityFromEnv(
         }).where(eq(externalAddressabilityProjections.id, addressByProjection.get(actor.id)!.id));
       }
     } else if (freshnessRenewal) {
+      await tx.update(externalChannelBindings).set({
+        privacyFreshUntil: slackPrivacyFreshUntil(now),
+        updatedAt: now,
+      }).where(and(
+        eq(externalChannelBindings.id, receipt.bindingId),
+        eq(externalChannelBindings.connectionEpoch, receipt.connectionEpoch),
+        eq(externalChannelBindings.bindingEpoch, receipt.bindingEpoch),
+        eq(externalChannelBindings.privacyClass, receipt.privacyClass),
+        eq(externalChannelBindings.providerConversationKind, receipt.providerConversationKind),
+      ));
       for (const actor of rows.actors) {
         await tx.update(externalActorProjections).set({
           observedAt: receipt.observedAt,
@@ -2634,7 +2573,6 @@ function providerNeutralAuthority(
     bindingEpoch: authority.bindingEpoch,
     memberRevision: binding.membership.receiptRevision,
     contextRevision: binding.oracle.oracleReceiptRevision,
-    consentRevision: binding.consentRevision,
     privacyClass: authority.privacyClass,
     raftChannelId: authority.channelId,
     providerAuthorityId: authority.providerAuthorityId,
@@ -2671,18 +2609,6 @@ function sameAuthority(
     && left.credentialRevision === right.credentialRevision
     && left.bindingId === right.bindingId
     && left.bindingEpoch === right.bindingEpoch;
-}
-
-function sameAuthorPolicyAuthority(
-  left: ExternalAuthorPolicyRuntimeAuthority,
-  right: ExternalAuthorPolicyRuntimeAuthority,
-): boolean {
-  return left.provider === right.provider
-    && left.registrationId === right.registrationId
-    && left.installId === right.installId
-    && left.bindingId === right.bindingId
-    && left.bindingEpoch === right.bindingEpoch
-    && left.consentRevision === right.consentRevision;
 }
 
 function parseCredentialMaterial(plaintext: string): { accessToken: string } | null {
@@ -2866,7 +2792,7 @@ function createLocalOutboundRuntime(input: {
 
   const liveTransport = {
     evidence: "live" as const,
-    async call(request: import("./slackProviderAdapter.js").SlackWebApiRequest): Promise<SlackWebApiTransportResult> {
+    async call(request: import("./slackProviderAdapter").SlackWebApiRequest): Promise<SlackWebApiTransportResult> {
       const lease = input.credentialLeases.get(request.credentialHandle.leaseId);
       input.credentialLeases.delete(request.credentialHandle.leaseId);
       const at = input.now();
@@ -3327,6 +3253,10 @@ export async function createSlackBridgeLocalRuntimeFromEnv(
             providerTeamId,
             providerEnterpriseId: string(enterprise?.id),
             providerUserId,
+            // The local runtime is test-only and has no workspace-admin
+            // directory probe. Production OAuth proves this before emitting
+            // the authorized outcome.
+            installerIsWorkspaceAdmin: true,
             botUserId,
             providerBotId: string(body.bot_id),
             workspaceName: string(team?.name),
@@ -3457,43 +3387,6 @@ export async function createSlackBridgeLocalRuntimeFromEnv(
           aadVersion: 1,
         };
       },
-    },
-    async resolveAuthorPolicyAuthority(policyInput) {
-      if (
-        stopped
-        || !validNow(policyInput.now)
-        || !config.outbound
-      ) return null;
-      const matches = config.outbound.bindings.filter((binding) =>
-        binding.serverId === policyInput.serverId
-        && binding.bindingId === policyInput.bindingId
-      );
-      if (matches.length === 0) return null;
-      let resolved: ExternalAuthorPolicyRuntimeAuthority | null = null;
-      for (const binding of matches) {
-        const decision = await resolveConfiguredBinding(binding, {
-          now: policyInput.now,
-        });
-        if (!decision.active || stopped) return null;
-        const authority = decision.fact.bindingAuthority;
-        if (
-          authority.registrationId !== binding.membership.registrationId
-          || authority.installId !== binding.membership.installId
-          || authority.bindingId !== binding.bindingId
-          || authority.bindingEpoch !== binding.bindingEpoch
-        ) return null;
-        const candidate: ExternalAuthorPolicyRuntimeAuthority = {
-          provider: "slack",
-          registrationId: authority.registrationId,
-          installId: authority.installId,
-          bindingId: authority.bindingId,
-          bindingEpoch: authority.bindingEpoch,
-          consentRevision: binding.consentRevision,
-        };
-        if (resolved && !sameAuthorPolicyAuthority(resolved, candidate)) return null;
-        resolved = candidate;
-      }
-      return resolved;
     },
     runtimeResolver: config.outbound ? {
       async resolveCurrentRuntime(runtimeInput) {

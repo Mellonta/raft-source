@@ -12,16 +12,16 @@
 // `service-status` / `runner-status` / `list-runners` satisfy the wire
 // surface by delegating directly to these readers — mechanical
 // `satisfies RequestMethodMap[K]["result"]`.
-import { buildStatusReport, type ComputerStatusReport } from "../status.js";
-import { RunnersClient } from "../apiClient.js";
-import { listServerAttachments, readServerAttachment } from "../serverState.js";
+import { buildStatusReport, type ComputerStatusReport } from "../status";
+import { RunnersClient } from "../apiClient";
+import { listServerAttachments, readServerAttachment } from "../serverState";
 import {
   StateReaderError,
   type ListRunnersResult,
   type RunnerListPerServer,
   type RunnerStatusResult,
   type ServiceStatusResult,
-} from "./types.js";
+} from "./types";
 
 /**
  * Read the Computer-level aggregate status from `installRoot`. Identical

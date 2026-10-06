@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import fc from "fast-check";
 import { ATTENTION_HINT_COPY_VERSION, ATTENTION_HINT_SCHEMA } from "@botiverse/raft-shared";
 
@@ -10,7 +9,7 @@ import {
   type AgentInboxProjectionMessage,
   type AgentInboxTargetRow,
   projectAgentInboxSnapshot,
-} from "./agentInboxProjection.js";
+} from "./agentInboxProjection";
 
 type TargetFixture = {
   expectedTarget: string;

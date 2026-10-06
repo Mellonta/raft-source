@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { calculateViewportClampStyle } from "../src/components/layout/useViewportClamp.js";
+import { calculateViewportClampStyle } from "../src/components/layout/useViewportClamp";
 
 // Trigger sits in the middle of the viewport horizontally, with plenty of room
 // both above and below.

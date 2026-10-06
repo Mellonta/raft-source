@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import "dotenv/config";
 import {
   assertMessagesTableExists,
@@ -6,7 +6,7 @@ import {
   createPool,
   describeSenderIndexStatus,
   readSenderIndexStatus,
-} from "./messages-sender-index.js";
+} from "./messages-sender-index";
 
 async function main() {
   const pool = createPool();

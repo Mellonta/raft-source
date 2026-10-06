@@ -2,14 +2,13 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
-import type { Database } from "../db/index.js";
-import { migratePglite } from "../db/pgliteMigrations.js";
-import * as schema from "../db/schema.js";
+import type { Database } from "../db/index";
+import { migratePglite } from "../db/pgliteMigrations";
+import * as schema from "../db/schema";
 import {
   attachmentObjectCharges,
   attachmentObjectArtifacts,
@@ -22,18 +21,18 @@ import {
   messages,
   servers,
   users,
-} from "../db/schema.js";
-import { linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService.js";
+} from "../db/schema";
+import { linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService";
 import {
   createIdempotentPendingAttachmentProjectionForExistingObjectWithExecutor,
   createIdempotentPendingAttachmentProjectionWithExecutor,
   createPendingAttachmentProjectionWithExecutor,
   type PendingAttachmentProjectionInput,
-} from "./attachmentProjectionWriterService.js";
+} from "./attachmentProjectionWriterService";
 import {
   buildAttachmentTransferArtifactPlan,
   createAttachmentTransferIntent,
-} from "./attachmentTransferIntentService.js";
+} from "./attachmentTransferIntentService";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const SERVER_ID = "22222222-2222-4222-8222-222222222222";

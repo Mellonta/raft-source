@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import api from "../src/api/client";
@@ -11,6 +10,7 @@ import Sidebar, {
 } from "../src/components/layout/Sidebar";
 import { TestIntlProvider } from "./helpers/intl";
 import { sidebarJoinedChannelsOnlyStorageKey } from "../src/components/layout/sidebarChannelVisibility";
+import { useAppearanceStore } from "../src/store/appearanceStore";
 import { useAgentStore } from "../src/store/agentStore";
 import { useAuthStore } from "../src/store/authStore";
 import { useChannelStore } from "../src/store/channelStore";
@@ -30,6 +30,7 @@ globalThis.IntersectionObserver = globalThis.IntersectionObserver ?? class {
 } as typeof IntersectionObserver;
 
 afterEach(() => {
+  useAppearanceStore.setState({ hideEmptySidebarSections: false });
   api.get = originalApiGet;
   api.patch = originalApiPatch;
   cleanup();
@@ -568,6 +569,79 @@ test("channel empty states distinguish the all-channel and joined-only views", (
   assert.ok(screen.getByText("No joined channels"));
   assertSectionDescriptionTypography("No joined channels");
   assert.equal(screen.queryByText("No channels yet"), null);
+});
+
+test("hide-empty-sections drops empty system blocks while keeping the populated Channels section", () => {
+  seedSidebar();
+  useAppearanceStore.getState().setHideEmptySidebarSections(true);
+  renderSidebar();
+
+  // Pinned / Joint Channels / DMs are all empty in the seed → gone entirely.
+  assert.equal(screen.queryByTestId("sidebar-section-block-pinned"), null);
+  assert.equal(screen.queryByTestId("sidebar-section-block-joint"), null);
+  assert.equal(screen.queryByTestId("sidebar-section-block-dms"), null);
+  assert.equal(screen.queryByText("No joint channels yet"), null);
+  assert.equal(screen.queryByText("Drag channels or DMs here to pin"), null);
+
+  // Channels has rows → it stays, and its onboarding-bearing empty state is
+  // never auto-hidden even when it is empty.
+  assert.ok(screen.getByTestId("sidebar-section-block-channels"));
+  assert.ok(screen.getByText("joined-channel"));
+});
+
+test("a non-empty section is never hidden by hide-empty-sections", () => {
+  seedSidebar();
+  useChannelStore.setState((state) => ({
+    channels: [
+      ...state.channels,
+      {
+        id: "joint-channel",
+        serverId: "server-1",
+        name: "joint-channel",
+        type: "joint",
+        joined: true,
+        archivedAt: null,
+        createdAt: "2026-07-12T00:00:00.000Z",
+      },
+    ],
+  } as never));
+  useAppearanceStore.getState().setHideEmptySidebarSections(true);
+  renderSidebar();
+
+  assert.ok(screen.getByTestId("sidebar-section-block-joint"));
+  assert.ok(screen.getByText("joint-channel"));
+});
+
+test("the Hide empty sections menu toggle restores hidden empty sections", async () => {
+  seedSidebar();
+  useAppearanceStore.getState().setHideEmptySidebarSections(true);
+  renderSidebar();
+
+  assert.equal(screen.queryByTestId("sidebar-section-block-pinned"), null);
+
+  // The toggle lives on every section's menu, so a visible section (Channels)
+  // can re-show the ones hidden for being empty.
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Create Channel" }));
+  const toggle = screen.getByRole("menuitemcheckbox", { name: "Hide empty sections" });
+  assert.equal(toggle.getAttribute("aria-checked"), "true");
+  fireEvent.click(toggle);
+
+  await waitFor(() => assert.ok(screen.getByTestId("sidebar-section-block-pinned")));
+  assert.ok(screen.getByTestId("sidebar-section-block-joint"));
+  assert.ok(screen.getByTestId("sidebar-section-block-dms"));
+});
+
+test("the context-menu toggle writes the shared appearance store (Settings ⇄ sidebar sync)", () => {
+  seedSidebar();
+  useAppearanceStore.getState().setHideEmptySidebarSections(false);
+  renderSidebar();
+
+  fireEvent.contextMenu(screen.getByRole("button", { name: "Create Channel" }));
+  fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Hide empty sections" }));
+
+  // The sidebar toggle and the Settings → Appearance toggle read/write the same
+  // appearanceStore field, so flipping one is immediately observable to the other.
+  assert.equal(useAppearanceStore.getState().hideEmptySidebarSections, true);
 });
 
 test("direct-message section right-click keeps sorting but omits channel creation", () => {

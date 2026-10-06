@@ -1,5 +1,5 @@
-import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { createHmac, randomUUID } from "node:crypto";
@@ -10,26 +10,28 @@ import {
   AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
   AGENT_MIGRATION_COMMIT_MARKER_PATH,
   AGENT_MIGRATION_CONTROL_SCHEMA_VERSION,
-  AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
+  AGENT_MIGRATION_CAPABILITY,
+  AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES,
   AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-  AGENT_MIGRATION_SOURCE_WORKSPACE_ARCHIVE_CAPABILITY,
   EXTERNAL_AGENT_RUNTIME_ID,
   EXTERNAL_AGENT_RUNTIME_MODEL,
+  hydrateRuntimeConfig,
   KIMI_SDK_FORM_DEFINITION_REF,
   MemoryTraceSink,
   PRO_AGENT_SEAT_BLOCK_SIZE,
   type RuntimeConfig,
 } from "@botiverse/raft-shared";
-import { RouteFailureError } from "../tracing/routeFailure.js";
-import { openTestApp } from "../test/integration/app.js";
-import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness.js";
-import { getDb } from "../db/index.js";
-import { agentMigrations, agents, featureFlagRules, inboxTargetMuteStates, machines, users, serverMembers, servers, subscriptions } from "../db/schema.js";
+import { RouteFailureError } from "../tracing/routeFailure";
+import { openTestApp } from "../test/integration/app";
+import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness";
+import { beginArrivingTestAgentMigration, beginTestAgentMigration } from "../test/agentMigrationFixture";
+import { getDb } from "../db/index";
+import { agentMigrations, agents, featureFlagRules, inboxTargetMuteStates, machines, users, serverMembers, servers, subscriptions } from "../db/schema";
 import {
   AgentOrchestrator,
   KimiReasoningEffortUpgradeRequiredError,
-} from "../services/agentOrchestrator.js";
-import { createServer, getAgentMemberRole, getServer, updateServerOnboardingAgent } from "../services/serverService.js";
+} from "../services/agentOrchestrator";
+import { createServer, getAgentMemberRole, getServer, updateServerOnboardingAgent, removeMember } from "../services/serverService";
 import {
   assignMachine as assignAgentMachine,
   createAgent,
@@ -38,23 +40,25 @@ import {
   listAgents,
   updateAgent,
   updateAgentStatus,
-} from "../services/agentService.js";
-import { createMessage } from "../services/messageService.js";
-import { addAgent, addHuman, createChannel, findOrCreateAgentDM, findOrCreateDM } from "../services/channelService.js";
-import { mintAgentCredential, recordAgentCredentialUse } from "../services/agentCredentialService.js";
+} from "../services/agentService";
+import { createMessage } from "../services/messageService";
+import { addAgent, addHuman, createChannel, findOrCreateAgentDM, findOrCreateDM } from "../services/channelService";
+import { mintAgentCredential, recordAgentCredentialUse } from "../services/agentCredentialService";
 import {
   AGENT_MIGRATION_FEATURE_FLAG_KEY,
   GROK_RUNTIME_FEATURE_FLAG_KEY,
-} from "../services/featureFlagService.js";
-import { MAX_PROFILE_AVATAR_BYTES, PROFILE_AVATAR_TOO_LARGE_MESSAGE } from "../services/avatarService.js";
+} from "../services/featureFlagService";
+import { MAX_PROFILE_AVATAR_BYTES, PROFILE_AVATAR_TOO_LARGE_MESSAGE } from "../services/avatarService";
+import sharp from "sharp";
 import {
   __setCdnStorageForTests,
   __setStorageForTests,
   resetStorageForTests,
   type StorageBackend,
-} from "../services/storageService.js";
-import * as agentMigrationService from "../services/agentMigrationService.js";
-import { BuiltInModelCatalogError } from "../services/builtinModelCatalogCompatibility.js";
+} from "../services/storageService";
+import * as agentMigrationService from "../services/agentMigrationService";
+import { BuiltInModelCatalogError } from "../services/builtinModelCatalogCompatibility";
+import { registerRuntimeFormV2EntryForTests } from "../services/runtimeFormV2Registry";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -79,6 +83,17 @@ function authHeaders(token: string, serverId: string) {
     "X-Server-Id": serverId,
   };
 }
+
+test("GET /agents/:id answers 404, not 500, for an id that is not a uuid (task #12)", async ({ app }) => {
+  const owner = await seedUser("uuid-guard-owner@slock.test", "uuid-guard-owner");
+  const server = await createServer("Uuid Guard Server", "uuid-guard-server", owner.id);
+  const token = await tokenForHuman(owner.email);
+  const res = await fetch(`${app.baseUrl}/api/agents/not-a-uuid`, {
+    headers: authHeaders(token, server.id),
+  });
+  assert.equal(res.status, 404);
+  assert.deepEqual(await res.json(), { error: "Agent not found" });
+});
 
 test("human members can control agent runtime but cannot fully reset its workspace", async ({ app }) => {
     const db = getDb();
@@ -105,7 +120,7 @@ test("human members can control agent runtime but cannot fully reset its workspa
         headers: { ...authHeaders(memberToken, server.id), "Content-Type": "application/json" },
         body: JSON.stringify({ mode }),
       });
-      assert.equal(reset.status, 200, mode);
+      assert.equal(reset.status, 202, mode);
     }
 
     const full = await fetch(`${app.baseUrl}/api/agents/${agent.id}/reset`, {
@@ -115,6 +130,42 @@ test("human members can control agent runtime but cannot fully reset its workspa
     });
     assert.equal(full.status, 403);
     assert.match((await full.json() as { error: string }).error, /resetAgentWorkspace/);
+});
+
+test("reset acknowledges before the lifecycle command finishes", async ({ app }) => {
+  const owner = await seedUser("reset-accepted-owner@slock.test", "reset-accepted-owner");
+  const server = await createServer("Reset Accepted Server", "reset-accepted-server", owner.id);
+  const agent = await createAgent(server.id, "reset-accepted-target", {
+    runtime: "codex",
+    creatorType: "user",
+    creatorId: owner.id,
+  });
+  const ownerToken = await tokenForHuman(owner.email);
+
+  let resetStarted = false;
+  let releaseReset!: () => void;
+  const resetFinished = new Promise<void>((resolve) => {
+    releaseReset = resolve;
+  });
+  app.app.set("agentOrchestrator", {
+    resetAgent: async () => {
+      resetStarted = true;
+      await resetFinished;
+    },
+  });
+
+  const reset = await fetch(`${app.baseUrl}/api/agents/${agent.id}/reset`, {
+    method: "POST",
+    headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "restart" }),
+  });
+
+  assert.equal(reset.status, 202);
+  assert.deepEqual(await reset.json(), { ok: true, status: "accepted" });
+  assert.equal(resetStarted, true);
+
+  releaseReset();
+  await new Promise<void>((resolve) => setImmediate(resolve));
 });
 
 type WorkspaceTestTimer = { id: number };
@@ -832,6 +883,66 @@ test("POST /api/agents/:id/avatar rejects oversized avatars with a clear limit e
     assert.equal(body.maxBytes, MAX_PROFILE_AVATAR_BYTES);
 });
 
+test("an agent profile edit tells the server's other open clients to re-read the agent", async ({ app }) => {
+    const owner = await seedUser("agent-updated-push-owner@slock.test", "agent-updated-push-owner");
+    const server = await createServer("Agent Updated Push Server", "agent-updated-push-server", owner.id);
+    const agent = await createAgent(server.id, "agent-updated-push", { runtime: "codex" });
+  const ownerToken = await tokenForHuman(owner.email);
+    const emitted: Array<{ room: string; event: string; payload: unknown }> = [];
+    const originalTo = app.io.to.bind(app.io);
+    (app.io as any).to = (room: string | string[]) => {
+      const operator = originalTo(room as any) as any;
+      const originalEmit = operator.emit.bind(operator);
+      operator.emit = (event: string, ...args: unknown[]) => {
+        emitted.push({ room: String(room), event, payload: args[0] });
+        return originalEmit(event, ...args);
+      };
+      return operator;
+    };
+    const updatedPushes = () => emitted.filter((entry) => entry.event === "agent:updated");
+    const stored: string[] = [];
+    const storage: StorageBackend = {
+      async put(key) { stored.push(key); },
+      async get() { throw new Error("not read in this test"); },
+      async delete() {},
+    };
+
+  try {
+    __setStorageForTests(storage);
+    __setCdnStorageForTests(storage);
+
+    const patchRes = await fetch(`${app.baseUrl}/api/agents/${agent.id}`, {
+      method: "PATCH",
+      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
+      body: JSON.stringify({ avatarUrl: "pixel:mug" }),
+    });
+    assert.equal(patchRes.status, 200);
+    assert.deepEqual(updatedPushes(), [
+      { room: `server:${server.id}`, event: "agent:updated", payload: { agentId: agent.id } },
+    ]);
+
+    const png = await sharp({ create: { width: 8, height: 8, channels: 3, background: { r: 220, g: 30, b: 30 } } }).png().toBuffer();
+    const formData = new FormData();
+    formData.set("avatar", new Blob([new Uint8Array(png)], { type: "image/png" }), "red.png");
+    const uploadRes = await fetch(`${app.baseUrl}/api/agents/${agent.id}/avatar`, {
+      method: "POST",
+      headers: authHeaders(ownerToken, server.id),
+      body: formData,
+    });
+    assert.equal(uploadRes.status, 200);
+    const uploaded = await uploadRes.json() as { avatarUrl: string | null };
+    assert.equal(stored.length, 1);
+    assert.ok(uploaded.avatarUrl?.endsWith(".webp"));
+    assert.deepEqual(updatedPushes(), [
+      { room: `server:${server.id}`, event: "agent:updated", payload: { agentId: agent.id } },
+      { room: `server:${server.id}`, event: "agent:updated", payload: { agentId: agent.id } },
+    ]);
+  } finally {
+    await app.close();
+    resetStorageForTests();
+  }
+});
+
 test("GET /api/avatars serves avatars from the configured CDN storage", async ({ app }) => {
 
   const avatarKey = "avatars/users/0123456789abcdef0123456789abcdef.webp";
@@ -1042,6 +1153,7 @@ test("external agent rejects managed runtime mutation, lifecycle, and machine as
       },
       stopAgent: async () => {
         stopCalled = true;
+        return { delivered: true };
       },
       resetAgent: async () => {
         resetCalled = true;
@@ -1091,7 +1203,12 @@ test("external agent rejects managed runtime mutation, lifecycle, and machine as
     assert.ok(deleted?.deletedAt, "external agent should be soft-deleted");
 });
 
-test("Built-in preset assignment validates the target catalog before persisting the Computer", async ({ app }) => {
+// #proj-daemon task #322 (@artin's ruling): a model id the target catalog does not list must not by
+// itself refuse the write. This test previously asserted the opposite (409 +
+// builtin_model_unsupported_by_target, machine not persisted); that expectation is the behaviour the
+// ruling removed, so it is inverted here rather than deleted -- keeping the same stub and the same
+// two-agent shape makes the change visible as a behaviour flip, not as a lost test.
+test("Built-in preset assignment still persists when the target catalog does not list the model (task #322)", async ({ app }) => {
     const owner = await seedUser(
       "builtin-assignment-owner@slock.test",
       "builtin-assignment-owner",
@@ -1186,15 +1303,461 @@ test("Built-in preset assignment validates the target catalog before persisting 
     assert.equal(acceptedRes.status, 200, await acceptedRes.clone().text());
     assert.equal((await getAgent(accepted.id))?.machineId, machine.id);
 
+    // Catalog reports the model as absent. Before task #322 this returned 409 and left machineId
+    // null; the ruling makes catalog absence a diagnostic, so the assignment must now go through.
     rejectCatalog = true;
     const rejectedRes = await assign(rejected.id);
-    assert.equal(rejectedRes.status, 409);
-    assert.equal(
-      ((await rejectedRes.json()) as { code: string }).code,
-      "builtin_model_unsupported_by_target",
-    );
-    assert.equal((await getAgent(rejected.id))?.machineId, null);
+    assert.equal(rejectedRes.status, 200, await rejectedRes.clone().text());
+    assert.equal((await getAgent(rejected.id))?.machineId, machine.id);
+    // The catalog is still consulted -- it was demoted, not skipped. A skipped check would also
+    // produce a 200, so without this the test could pass for the wrong reason.
     assert.equal(validationCalls, 2);
+});
+
+// Control for the change above: the demotion is narrow. `builtin_catalog_unavailable` means the
+// catalog could not be read AT ALL (unknown), not that the model is known-absent, so it must still
+// reject on a write path. This test passes both before and after task #322 -- it fails only if the
+// demotion is written too broadly (e.g. catching BuiltInModelCatalogError as a class).
+test("Built-in preset assignment still rejects when the target catalog cannot be read (task #322 scope control)", async ({ app }) => {
+    const owner = await seedUser(
+      "builtin-unavailable-owner@slock.test",
+      "builtin-unavailable-owner",
+    );
+    const server = await createServer(
+      "Built-in Unavailable",
+      "builtin-unavailable",
+      owner.id,
+    );
+    const [machine] = await getDb()
+      .insert(machines)
+      .values({
+        serverId: server.id,
+        userId: owner.id,
+        name: "builtin-unavailable-machine",
+        apiKeyHash: "unused-builtin-unavailable-machine-hash",
+        runtimes: ["builtin"],
+      })
+      .returning();
+    const runtimeConfig = {
+      version: 1 as const,
+      runtime: "builtin" as const,
+      provider: {
+        kind: "preset" as const,
+        providerId: "openai" as const,
+        apiKey: "secret",
+      },
+      model: { kind: "preset" as const, id: "openai/gpt-5.4" },
+      mode: { kind: "default" as const },
+      hostUserState: "forbidden" as const,
+    };
+    const agent = await createAgent(server.id, "builtin-unavailable-agent", {
+      runtime: "builtin",
+      model: runtimeConfig.model.id,
+      runtimeConfig,
+    });
+    await assignAgentMachine(agent.id, null);
+    Object.assign(app.app.get("agentOrchestrator"), {
+      hasMachineLocally: () => true,
+      validateBuiltInPresetForMachine: async () => {
+        throw new BuiltInModelCatalogError(
+          "builtin_catalog_unavailable",
+          "The target Computer's Built-in model catalog is unavailable. Retry after the Computer reconnects.",
+          {
+            requestedModel: runtimeConfig.model.id,
+            daemonVersion: "1.0.23",
+            computerVersion: "1.0.23",
+            recovery: "retry",
+          },
+        );
+      },
+      acquireBuiltInCatalogAuthority: () => () => undefined,
+    });
+    const token = await tokenForHuman(owner.email);
+    const res = await fetch(
+      `${app.baseUrl}/api/agents/${agent.id}/assign-machine`,
+      {
+        method: "POST",
+        headers: {
+          ...authHeaders(token, server.id),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ machineId: machine.id }),
+      },
+    );
+    assert.notEqual(res.status, 200, await res.clone().text());
+    assert.equal(
+      ((await res.json()) as { code: string }).code,
+      "builtin_catalog_unavailable",
+    );
+    assert.equal((await getAgent(agent.id))?.machineId, null);
+});
+
+// The four write paths share one helper, but a shared helper is not evidence that each route's
+// own downstream write actually completes (@Huaihuai). assign-machine is covered above; these
+// cover create and the model change, asserting what was PERSISTED rather than just the status.
+const catalogMissingRuntimeConfig = (modelId: string) => ({
+  version: 1 as const,
+  runtime: "builtin" as const,
+  provider: {
+    kind: "preset" as const,
+    providerId: "openai" as const,
+    apiKey: "secret",
+  },
+  model: { kind: "preset" as const, id: modelId },
+  mode: { kind: "default" as const },
+  hostUserState: "forbidden" as const,
+});
+
+const stubCatalogMissing = (app: { app: { get: (k: string) => unknown } }, modelId: string) => {
+  const counter = { calls: 0 };
+  Object.assign(app.app.get("agentOrchestrator") as object, {
+    hasMachineLocally: () => true,
+    validateBuiltInPresetForMachine: async () => {
+      counter.calls += 1;
+      throw new BuiltInModelCatalogError(
+        "builtin_model_unsupported_by_target",
+        "The selected model is not supported by the target Computer. Upgrade the Computer or explicitly choose a supported model.",
+        {
+          requestedModel: modelId,
+          daemonVersion: "1.0.23",
+          computerVersion: "1.0.23",
+          catalogRuntimeVersion: "0.84.3",
+          recovery: "upgrade_or_reselect",
+        },
+      );
+    },
+    acquireBuiltInCatalogAuthority: () => () => undefined,
+  });
+  return counter;
+};
+
+test("Built-in preset create persists the agent when the target catalog does not list the model (task #322)", async ({ app }) => {
+    const owner = await seedUser(
+      "builtin-create-owner@slock.test",
+      "builtin-create-owner",
+    );
+    const server = await createServer(
+      "Built-in Create",
+      "builtin-create",
+      owner.id,
+    );
+    const [machine] = await getDb()
+      .insert(machines)
+      .values({
+        serverId: server.id,
+        userId: owner.id,
+        name: "builtin-create-machine",
+        apiKeyHash: "unused-builtin-create-machine-hash",
+        runtimes: ["builtin"],
+      })
+      .returning();
+    const counter = stubCatalogMissing(app, "openai/gpt-5.4");
+    const token = await tokenForHuman(owner.email);
+    const res = await fetch(`${app.baseUrl}/api/agents`, {
+      method: "POST",
+      headers: {
+        ...authHeaders(token, server.id),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "builtin-create-agent",
+        machineId: machine.id,
+        formDefinitionRef: {
+          protocolVersion: 1,
+          runtimeId: "builtin",
+          schemaVersion: "builtin-pi.create.v3",
+        },
+        runtimeConfig: catalogMissingRuntimeConfig("openai/gpt-5.4"),
+      }),
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    // The write itself must have completed, not merely returned 200.
+    const created = (await res.json()) as { id: string };
+    const persisted = await getAgent(created.id);
+    assert.equal(persisted?.machineId, machine.id);
+    assert.equal(persisted?.model, "openai/gpt-5.4");
+    assert.equal(counter.calls, 1);
+});
+
+test("Built-in preset model change persists when the target catalog does not list the new model (task #322)", async ({ app }) => {
+    const owner = await seedUser(
+      "builtin-modelchange-owner@slock.test",
+      "builtin-modelchange-owner",
+    );
+    const server = await createServer(
+      "Built-in Model Change",
+      "builtin-modelchange",
+      owner.id,
+    );
+    const [machine] = await getDb()
+      .insert(machines)
+      .values({
+        serverId: server.id,
+        userId: owner.id,
+        name: "builtin-modelchange-machine",
+        apiKeyHash: "unused-builtin-modelchange-machine-hash",
+        runtimes: ["builtin"],
+      })
+      .returning();
+    const agent = await createAgent(server.id, "builtin-modelchange-agent", {
+      runtime: "builtin",
+      model: "openai/gpt-5.3",
+      runtimeConfig: catalogMissingRuntimeConfig("openai/gpt-5.3"),
+    });
+    await assignAgentMachine(agent.id, machine.id);
+    // Stub AFTER the setup assignment so the counter only sees the PATCH.
+    const counter = stubCatalogMissing(app, "openai/gpt-5.4");
+    const token = await tokenForHuman(owner.email);
+    const res = await fetch(`${app.baseUrl}/api/agents/${agent.id}`, {
+      method: "PATCH",
+      headers: {
+        ...authHeaders(token, server.id),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        runtime: "builtin",
+        model: "openai/gpt-5.4",
+        runtimeConfig: catalogMissingRuntimeConfig("openai/gpt-5.4"),
+      }),
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    const updated = await getAgent(agent.id);
+    assert.equal(updated?.model, "openai/gpt-5.4");
+    assert.equal(updated?.machineId, machine.id);
+    // The preset selection really changed, so the catalog path was entered rather than skipped
+    // by builtInPresetSelectionChanged returning false.
+    assert.equal(counter.calls, 1);
+});
+
+test("Built-in preset migrate enqueues the migration when the target catalog does not list the model (task #322)", async ({ app }) => {
+    const db = getDb();
+    const owner = await seedUser(
+      "builtin-migrate-owner@slock.test",
+      "builtin-migrate-owner",
+    );
+    const server = await createServer(
+      "Built-in Migrate",
+      "builtin-migrate",
+      owner.id,
+    );
+    const now = new Date();
+    const [sourceMachine] = await db.insert(machines).values({
+      id: randomUUID(),
+      serverId: server.id,
+      userId: owner.id,
+      name: "builtin-migrate-source",
+      apiKeyHash: "builtin-migrate-source-hash",
+      runtimes: ["builtin"],
+      daemonVersion: "0.72.7",
+      lastHeartbeat: now,
+    }).returning();
+    const [targetMachine] = await db.insert(machines).values({
+      id: randomUUID(),
+      serverId: server.id,
+      userId: owner.id,
+      name: "builtin-migrate-target",
+      apiKeyHash: "builtin-migrate-target-hash",
+      runtimes: ["builtin"],
+      daemonVersion: "0.72.7",
+      lastHeartbeat: now,
+    }).returning();
+    const agent = await createAgent(server.id, "builtin-migrate-agent", {
+      runtime: "builtin",
+      model: "openai/gpt-5.4",
+      runtimeConfig: catalogMissingRuntimeConfig("openai/gpt-5.4"),
+    });
+    await assignAgentMachine(agent.id, sourceMachine.id);
+    await db.update(servers).set({ plan: "founder" }).where(eq(servers.id, server.id));
+    await enableMigrationFlag(server.id);
+
+    const originalOrchestrator = app.app.get("agentOrchestrator");
+    let catalogCalls = 0;
+    app.app.set("agentOrchestrator", {
+      ...originalOrchestrator,
+      hasMachineLocally: () => true,
+      getMachineStatus: async () => "online",
+      getMachineDaemonVersion: () => "0.72.7",
+      getMachineMigrationTransport: async () => ({ capabilities: [AGENT_MIGRATION_CAPABILITY] }),
+      sendAgentMigrationTransportLease: async () => undefined,
+      validateBuiltInPresetForMachine: async () => {
+        catalogCalls += 1;
+        throw new BuiltInModelCatalogError(
+          "builtin_model_unsupported_by_target",
+          "The selected model is not supported by the target Computer. Upgrade the Computer or explicitly choose a supported model.",
+          {
+            requestedModel: "openai/gpt-5.4",
+            daemonVersion: "0.72.7",
+            computerVersion: "0.72.7",
+            catalogRuntimeVersion: "0.84.3",
+            recovery: "upgrade_or_reselect",
+          },
+        );
+      },
+      acquireBuiltInCatalogAuthority: () => () => undefined,
+    });
+    app.app.set("agentMigrationObjectStoreTransferProvisioner", async () => ({
+      provider: "object_store" as const,
+      sessionId: "builtin-migrate-session",
+      leaseMs: 60 * 60 * 1000,
+      maxBytes: 123_456,
+    }));
+
+    const token = await tokenForHuman(owner.email);
+    const res = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
+      method: "POST",
+      headers: {
+        ...authHeaders(token, server.id),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ targetComputer: targetMachine.id }),
+    });
+    assert.equal(res.status, 200, await res.clone().text());
+    // The downstream write must actually have happened: a migration grant row exists.
+    const rows = await db
+      .select()
+      .from(agentMigrations)
+      .where(eq(agentMigrations.agentId, agent.id));
+    assert.equal(rows.length, 1, "catalog-missing must not stop the migration grant");
+    assert.equal(
+      rows[0]!.transportMaxArchiveEntries,
+      AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES,
+      "every migration records the single entry limit",
+    );
+    assert.equal(catalogCalls, 1);
+});
+
+// Scope controls for the SAVE routes. task #322 demoted only builtin_model_unsupported_by_target;
+// builtin_catalog_unavailable means the catalog could not be READ (unknown, not known-absent) and
+// must still reject. The existing control covers assign-machine only, and the user-facing copy that
+// PR #8065 ships describes exactly these two routes -- so the behaviour it promises had code backing
+// it but no test. These pass before and after task #322; they go red only if the demotion is ever
+// widened to catch BuiltInModelCatalogError as a class.
+const stubCatalogUnavailable = (app: { app: { get: (k: string) => unknown } }, modelId: string) => {
+  const counter = { calls: 0 };
+  Object.assign(app.app.get("agentOrchestrator") as object, {
+    hasMachineLocally: () => true,
+    validateBuiltInPresetForMachine: async () => {
+      counter.calls += 1;
+      throw new BuiltInModelCatalogError(
+        "builtin_catalog_unavailable",
+        "The target Computer's Built-in model catalog is unavailable. Retry after the Computer reconnects.",
+        {
+          requestedModel: modelId,
+          daemonVersion: "1.0.23",
+          computerVersion: "1.0.23",
+          recovery: "retry",
+        },
+      );
+    },
+    acquireBuiltInCatalogAuthority: () => () => undefined,
+  });
+  return counter;
+};
+
+test("Built-in preset create still rejects when the target catalog cannot be read (task #322 scope control)", async ({ app }) => {
+    const db = getDb();
+    const owner = await seedUser(
+      "builtin-create-unavail-owner@slock.test",
+      "builtin-create-unavail-owner",
+    );
+    const server = await createServer(
+      "Built-in Create Unavailable",
+      "builtin-create-unavail",
+      owner.id,
+    );
+    const [machine] = await db
+      .insert(machines)
+      .values({
+        serverId: server.id,
+        userId: owner.id,
+        name: "builtin-create-unavail-machine",
+        apiKeyHash: "unused-builtin-create-unavail-machine-hash",
+        runtimes: ["builtin"],
+      })
+      .returning();
+    const before = (
+      await db.select().from(agents).where(eq(agents.serverId, server.id))
+    ).length;
+    const counter = stubCatalogUnavailable(app, "openai/gpt-5.4");
+    const token = await tokenForHuman(owner.email);
+    const res = await fetch(`${app.baseUrl}/api/agents`, {
+      method: "POST",
+      headers: {
+        ...authHeaders(token, server.id),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "builtin-create-unavail-agent",
+        machineId: machine.id,
+        formDefinitionRef: {
+          protocolVersion: 1,
+          runtimeId: "builtin",
+          schemaVersion: "builtin-pi.create.v3",
+        },
+        runtimeConfig: catalogMissingRuntimeConfig("openai/gpt-5.4"),
+      }),
+    });
+    assert.notEqual(res.status, 200, await res.clone().text());
+    assert.equal(
+      ((await res.json()) as { code: string }).code,
+      "builtin_catalog_unavailable",
+    );
+    // Nothing may have been written: the rejection happens before agent creation.
+    const after = (
+      await db.select().from(agents).where(eq(agents.serverId, server.id))
+    ).length;
+    assert.equal(after, before, "an unreadable catalog must not create an agent");
+    assert.equal(counter.calls, 1);
+});
+
+test("Built-in preset model change still rejects when the target catalog cannot be read (task #322 scope control)", async ({ app }) => {
+    const owner = await seedUser(
+      "builtin-patch-unavail-owner@slock.test",
+      "builtin-patch-unavail-owner",
+    );
+    const server = await createServer(
+      "Built-in Patch Unavailable",
+      "builtin-patch-unavail",
+      owner.id,
+    );
+    const [machine] = await getDb()
+      .insert(machines)
+      .values({
+        serverId: server.id,
+        userId: owner.id,
+        name: "builtin-patch-unavail-machine",
+        apiKeyHash: "unused-builtin-patch-unavail-machine-hash",
+        runtimes: ["builtin"],
+      })
+      .returning();
+    const agent = await createAgent(server.id, "builtin-patch-unavail-agent", {
+      runtime: "builtin",
+      model: "openai/gpt-5.3",
+      runtimeConfig: catalogMissingRuntimeConfig("openai/gpt-5.3"),
+    });
+    await assignAgentMachine(agent.id, machine.id);
+    const counter = stubCatalogUnavailable(app, "openai/gpt-5.4");
+    const token = await tokenForHuman(owner.email);
+    const res = await fetch(`${app.baseUrl}/api/agents/${agent.id}`, {
+      method: "PATCH",
+      headers: {
+        ...authHeaders(token, server.id),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        runtime: "builtin",
+        model: "openai/gpt-5.4",
+        runtimeConfig: catalogMissingRuntimeConfig("openai/gpt-5.4"),
+      }),
+    });
+    assert.notEqual(res.status, 200, await res.clone().text());
+    assert.equal(
+      ((await res.json()) as { code: string }).code,
+      "builtin_catalog_unavailable",
+    );
+    // The stored selection must be untouched, not merely the response non-200.
+    assert.equal((await getAgent(agent.id))?.model, "openai/gpt-5.3");
+    assert.equal(counter.calls, 1);
 });
 
 test("POST /api/agents/:id/migrate starts owner migration without target workspace preflight", async ({ app }) => {
@@ -1247,16 +1810,6 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
       daemonVersion: "0.72.6",
       lastHeartbeat: now,
     }).returning();
-    const [mixedCapabilityTargetMachine] = await db.insert(machines).values({
-      id: randomUUID(),
-      serverId: server.id,
-      userId: owner.id,
-      name: "mixed-capability-target",
-      apiKeyHash: "mixed-capability-target-hash",
-      runtimes: ["claude"],
-      daemonVersion: "0.72.6",
-      lastHeartbeat: now,
-    }).returning();
     const [runtimeMissingTargetMachine] = await db.insert(machines).values({
       id: randomUUID(),
       serverId: server.id,
@@ -1285,34 +1838,14 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
   const memberToken = await tokenForHuman(member.email);
     const originalOrchestrator = app.app.get("agentOrchestrator") as Record<string, unknown>;
     const sentLeases: Array<{ machineId: string; message: { role: string; transferKind: string; bearerToken?: string } }> = [];
-    const liveDaemonVersions = new Map<string, string | null>([
-      [sourceMachine.id, "0.0.0-dev"],
-      [otherServerRunner.id, "0.72.7"],
-      [targetMachine.id, "0.72.7"],
-      [oldTargetMachine.id, "0.72.6"],
-      [mixedCapabilityTargetMachine.id, "0.72.6"],
-      [runtimeMissingTargetMachine.id, "0.72.7"],
-      [offlineTargetMachine.id, "0.72.7"],
-    ]);
-    const daemonVersionLookups: string[] = [];
-    const resumableTransport = {
-      protocol: AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-      capabilities: [...AGENT_MIGRATION_RESUMABLE_CAPABILITIES],
-    };
-    const sourceResumableTransport = {
-      protocol: AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-      capabilities: [
-        ...AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
-        AGENT_MIGRATION_SOURCE_WORKSPACE_ARCHIVE_CAPABILITY,
-      ],
-    };
-    const migrationTransports = new Map<string, {
-      protocol: string | null;
-      capabilities: string[] | null;
-    } | null>([
-      [sourceMachine.id, sourceResumableTransport],
+    const transportLookups: string[] = [];
+    const resumableTransport = { capabilities: [AGENT_MIGRATION_CAPABILITY] };
+    const migrationTransports = new Map<string, { capabilities: string[] | null } | null>([
+      [sourceMachine.id, resumableTransport],
       [targetMachine.id, resumableTransport],
+      [otherServerRunner.id, resumableTransport],
       [oldTargetMachine.id, null],
+      [runtimeMissingTargetMachine.id, resumableTransport],
       [offlineTargetMachine.id, resumableTransport],
     ]);
     let provisionerFails = true;
@@ -1321,11 +1854,10 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
     app.app.set("agentOrchestrator", {
       ...originalOrchestrator,
       getMachineStatus: async (machineId: string) => machineId === offlineTargetMachine.id ? "offline" : "online",
-      getMachineDaemonVersion: (machineId: string) => {
-        daemonVersionLookups.push(machineId);
-        return liveDaemonVersions.get(machineId) ?? null;
+      getMachineMigrationTransport: async (machineId: string) => {
+        transportLookups.push(machineId);
+        return migrationTransports.get(machineId) ?? null;
       },
-      getMachineMigrationTransport: async (machineId: string) => migrationTransports.get(machineId) ?? null,
       preflightAgentMigrationTargetWorkspace: async () => {
         removedWorkspacePreflightCalls += 1;
         throw new Error("removed target workspace preflight must not be called");
@@ -1342,11 +1874,8 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
       return {
         provider: "object_store" as const,
         sessionId: "route-session-1",
-        sourceTransferUrl: "https://r2.example.test/agent-migrations/route-session-1/bundle?put=1",
-        targetTransferUrl: "https://r2.example.test/agent-migrations/route-session-1/bundle?get=1",
         leaseMs: 60 * 60 * 1000,
         maxBytes: 123_456,
-        storageKey: "agent-migrations/route-session-1/bundle",
       };
     });
 
@@ -1368,309 +1897,96 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
     assert.equal(memberDenied.status, 403);
     assert.equal((await memberDenied.json() as { code?: string }).code, "not_supported");
 
-    const staleHostingRunner = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
+    const postMigrate = (targetComputer: string) => fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
       method: "POST",
       headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
+      body: JSON.stringify({ targetComputer }),
     });
-    assert.equal(staleHostingRunner.status, 422);
-    assert.deepEqual(await staleHostingRunner.json(), {
-      error: "Both source and target computers must run daemon >= 0.72.7 with compatible runtime support",
-      code: "COMPUTER_CAPABILITY_INSUFFICIENT",
+    const assertNoMigrationSideEffects = async (label: string) => {
+      assert.equal(removedWorkspacePreflightCalls, 0, `${label} must not invoke removed workspace preflight`);
+      assert.equal(provisionerCalls, 0, `${label} must fail before transport provisioning`);
+      assert.equal(sentLeases.length, 0, `${label} must fail before lease dispatch`);
+      assert.equal(
+        (await db.select().from(agentMigrations).where(eq(agentMigrations.agentId, agent.id))).length,
+        0,
+        `${label} must not create migration state`,
+      );
+    };
+
+    // Old daemons do not advertise migration/v3: refused up front with the upgrade error.
+    migrationTransports.set(sourceMachine.id, { capabilities: ["migration:chunk-upload-v1", "migration:streaming-bundle-v1"] });
+    const oldSource = await postMigrate(targetMachine.id);
+    assert.equal(oldSource.status, 422);
+    assert.deepEqual(await oldSource.json(), {
+      error: "Both source and target computers must run a Raft Computer that supports migration/v3; upgrade the source computer",
+      code: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
       details: {
-        failureReason: "COMPUTER_CAPABILITY_INSUFFICIENT",
-        failures: [{
-          side: "source",
-          reason: "daemon_version_too_old",
-          minimumDaemonVersion: "0.72.7",
-        }],
+        side: "source",
+        reason: "capability_missing",
+        failureReason: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
       },
     });
     assert.deepEqual(
-      daemonVersionLookups,
+      transportLookups,
       [sourceMachine.id, targetMachine.id],
       "capability admission must read the exact source and target server-runner machine ids",
     );
-    assert.equal(
-      daemonVersionLookups.includes(otherServerRunner.id),
-      false,
-      "an upgraded runner attachment on the same physical host must not satisfy another server runner's gate",
-    );
-    assert.equal(provisionerCalls, 0, "stale hosting runner must fail before transport provisioning");
-    assert.equal(sentLeases.length, 0, "stale hosting runner must fail before lease dispatch");
-    assert.equal(
-      (await db.select().from(agentMigrations).where(eq(agentMigrations.agentId, agent.id))).length,
-      0,
-      "stale hosting runner must not create migration state",
-    );
+    await assertNoMigrationSideEffects("old source daemon");
 
-    liveDaemonVersions.set(sourceMachine.id, "0.72.7");
-    daemonVersionLookups.length = 0;
-
-    const oldVersion = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: oldTargetMachine.id }),
+    const bothOld = await postMigrate(oldTargetMachine.id);
+    assert.equal(bothOld.status, 422);
+    assert.deepEqual((await bothOld.json() as { details?: unknown }).details, {
+      side: "both",
+      reason: "capability_missing",
+      failureReason: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
     });
-    assert.equal(oldVersion.status, 422);
-    assert.deepEqual(await oldVersion.json(), {
-      error: "Both source and target computers must run daemon >= 0.72.7 with compatible runtime support",
+    migrationTransports.set(sourceMachine.id, resumableTransport);
+
+    const oldTarget = await postMigrate(oldTargetMachine.id);
+    assert.equal(oldTarget.status, 422);
+    assert.deepEqual((await oldTarget.json() as { details?: unknown }).details, {
+      side: "target",
+      reason: "capability_missing",
+      failureReason: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
+    });
+    await assertNoMigrationSideEffects("old target daemon");
+
+    const targetRuntimeMissing = await postMigrate(runtimeMissingTargetMachine.id);
+    assert.equal(targetRuntimeMissing.status, 422);
+    assert.deepEqual(await targetRuntimeMissing.json(), {
+      error: "Both source and target computers must support the agent's runtime",
       code: "COMPUTER_CAPABILITY_INSUFFICIENT",
       details: {
         failureReason: "COMPUTER_CAPABILITY_INSUFFICIENT",
-        failures: [{
-          side: "target",
-          reason: "daemon_version_too_old",
-          minimumDaemonVersion: "0.72.7",
-        }],
+        failures: [{ side: "target", reason: "runtime_missing", runtime: "codex" }],
       },
     });
 
-    const targetRuntimeMissing = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: runtimeMissingTargetMachine.id }),
-    });
-    assert.equal(targetRuntimeMissing.status, 422);
-    assert.deepEqual((await targetRuntimeMissing.json() as { details?: unknown }).details, {
-      failureReason: "COMPUTER_CAPABILITY_INSUFFICIENT",
-      failures: [{ side: "target", reason: "runtime_missing", runtime: "codex" }],
-    });
-
     await db.update(machines).set({ runtimes: ["claude"] }).where(eq(machines.id, sourceMachine.id));
-    const sourceRuntimeMissing = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
-    });
+    const sourceRuntimeMissing = await postMigrate(targetMachine.id);
     assert.equal(sourceRuntimeMissing.status, 422);
     assert.deepEqual((await sourceRuntimeMissing.json() as { details?: unknown }).details, {
       failureReason: "COMPUTER_CAPABILITY_INSUFFICIENT",
       failures: [{ side: "source", reason: "runtime_missing", runtime: "codex" }],
     });
-    await db.update(machines).set({ runtimes: ["codex"] }).where(eq(machines.id, sourceMachine.id));
 
-    const mixedCapabilities = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: mixedCapabilityTargetMachine.id }),
-    });
-    assert.equal(mixedCapabilities.status, 422);
-    assert.deepEqual(await mixedCapabilities.json(), {
-      error: "Both source and target computers must run daemon >= 0.72.7 with compatible runtime support",
-      code: "COMPUTER_CAPABILITY_INSUFFICIENT",
-      details: {
-        failureReason: "COMPUTER_CAPABILITY_INSUFFICIENT",
-        failures: [
-          {
-            side: "target",
-            reason: "daemon_version_too_old",
-            minimumDaemonVersion: "0.72.7",
-          },
-          { side: "target", reason: "runtime_missing", runtime: "codex" },
-        ],
-      },
-    });
-
-    liveDaemonVersions.set(sourceMachine.id, null);
-    await db.update(machines).set({ daemonVersion: null }).where(eq(machines.id, sourceMachine.id));
-    const unconfirmedSourceVersion = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
-    });
-    assert.equal(unconfirmedSourceVersion.status, 422);
-    assert.deepEqual((await unconfirmedSourceVersion.json() as { details?: unknown }).details, {
-      failureReason: "COMPUTER_CAPABILITY_INSUFFICIENT",
-      failures: [{
-        side: "source",
-        reason: "daemon_version_unconfirmed",
-        minimumDaemonVersion: "0.72.7",
-      }],
-    });
-    liveDaemonVersions.set(sourceMachine.id, "0.72.7");
-    await db.update(machines).set({ daemonVersion: "0.72.7", runtimes: null }).where(eq(machines.id, sourceMachine.id));
-    const unconfirmedSourceRuntime = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
-    });
+    await db.update(machines).set({ runtimes: null }).where(eq(machines.id, sourceMachine.id));
+    const unconfirmedSourceRuntime = await postMigrate(targetMachine.id);
     assert.equal(unconfirmedSourceRuntime.status, 422);
     assert.deepEqual((await unconfirmedSourceRuntime.json() as { details?: unknown }).details, {
       failureReason: "COMPUTER_CAPABILITY_INSUFFICIENT",
       failures: [{ side: "source", reason: "runtime_unconfirmed", runtime: "codex" }],
     });
     await db.update(machines).set({ runtimes: ["codex"] }).where(eq(machines.id, sourceMachine.id));
+    await assertNoMigrationSideEffects("runtime mismatch");
 
-    const offline = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: offlineTargetMachine.id }),
-    });
+    const offline = await postMigrate(offlineTargetMachine.id);
     assert.equal(offline.status, 409);
     assert.deepEqual(await offline.json(), {
       error: "Target computer is not online",
       code: "TARGET_COMPUTER_OFFLINE",
       details: { failureReason: "TARGET_COMPUTER_OFFLINE" },
     });
-
-    migrationTransports.set(targetMachine.id, null);
-    const mixedVersion = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
-    });
-    assert.equal(mixedVersion.status, 422);
-    assert.deepEqual(await mixedVersion.json(), {
-      error: "Both source and target computers must advertise the resumable migration protocol; mixed or old versions cannot downgrade",
-      code: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
-      details: {
-        side: "target",
-        reason: "protocol_missing",
-        failureReason: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
-      },
-    });
-    assert.equal(provisionerCalls, 0, "mixed-version fail-closed must run before transport provisioning");
-
-    migrationTransports.set(targetMachine.id, resumableTransport);
-    migrationTransports.set(sourceMachine.id, {
-      protocol: "agent-migration/resumable-v0",
-      capabilities: [...AGENT_MIGRATION_RESUMABLE_CAPABILITIES],
-    });
-    const oldProtocol = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
-    });
-    assert.equal(oldProtocol.status, 422);
-    assert.deepEqual((await oldProtocol.json() as { details?: unknown }).details, {
-      side: "source",
-      reason: "protocol_old",
-      failureReason: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
-    });
-
-    const legacyV1Capabilities = [
-      "migration:chunk-upload-v1",
-      "migration:chunk-download-v1",
-      "migration:staged-atomic-commit-v1",
-    ];
-    const legacyV1Transport = {
-      protocol: "agent-migration/resumable-v1",
-      capabilities: legacyV1Capabilities,
-    };
-    migrationTransports.set(sourceMachine.id, legacyV1Transport);
-    const legacySource = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
-    });
-    assert.equal(legacySource.status, 422);
-    assert.deepEqual((await legacySource.json() as { details?: unknown }).details, {
-      side: "source",
-      reason: "protocol_old",
-      failureReason: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
-    });
-    assert.equal(removedWorkspacePreflightCalls, 0, "legacy source must not invoke removed workspace preflight");
-    assert.equal(provisionerCalls, 0, "legacy source must fail before transport provisioning");
-    assert.equal(sentLeases.length, 0, "legacy source must fail before lease dispatch");
-    assert.equal(
-      (await db.select().from(agentMigrations).where(eq(agentMigrations.agentId, agent.id))).length,
-      0,
-      "legacy source must fail before migration state is created",
-    );
-
-    migrationTransports.set(sourceMachine.id, sourceResumableTransport);
-    migrationTransports.set(targetMachine.id, legacyV1Transport);
-    const legacyTarget = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
-    });
-    assert.equal(legacyTarget.status, 422);
-    assert.deepEqual((await legacyTarget.json() as { details?: unknown }).details, {
-      side: "target",
-      reason: "protocol_old",
-      failureReason: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
-    });
-    assert.equal(removedWorkspacePreflightCalls, 0, "legacy target must not invoke removed workspace preflight");
-    assert.equal(provisionerCalls, 0, "legacy target must fail before transport provisioning");
-    assert.equal(sentLeases.length, 0, "legacy target must fail before lease dispatch");
-    assert.equal(
-      (await db.select().from(agentMigrations).where(eq(agentMigrations.agentId, agent.id))).length,
-      0,
-      "legacy target must fail before migration state is created",
-    );
-    migrationTransports.set(targetMachine.id, resumableTransport);
-
-    migrationTransports.set(sourceMachine.id, {
-      protocol: AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-      capabilities: [
-        ...legacyV1Capabilities,
-        AGENT_MIGRATION_SOURCE_WORKSPACE_ARCHIVE_CAPABILITY,
-      ],
-    });
-    const missingSourceSummaryCapability = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
-    });
-    assert.equal(missingSourceSummaryCapability.status, 422);
-    assert.deepEqual((await missingSourceSummaryCapability.json() as { details?: unknown }).details, {
-      side: "source",
-      reason: "capability_missing",
-      failureReason: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
-    });
-    assert.equal(removedWorkspacePreflightCalls, 0, "summary-incompatible source must not invoke removed workspace preflight");
-    assert.equal(provisionerCalls, 0, "summary-incompatible source must fail before transport provisioning");
-    assert.equal(sentLeases.length, 0, "summary-incompatible source must fail before lease dispatch");
-    assert.equal(
-      (await db.select().from(agentMigrations).where(eq(agentMigrations.agentId, agent.id))).length,
-      0,
-      "summary-incompatible source must fail before migration state is created",
-    );
-
-    migrationTransports.set(sourceMachine.id, {
-      protocol: AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-      capabilities: [...AGENT_MIGRATION_RESUMABLE_CAPABILITIES],
-    });
-    const missingSourceArchiveCapability = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
-    });
-    assert.equal(missingSourceArchiveCapability.status, 422);
-    assert.deepEqual((await missingSourceArchiveCapability.json() as { details?: unknown }).details, {
-      side: "source",
-      reason: "capability_missing",
-      failureReason: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
-    });
-    assert.equal(provisionerCalls, 0, "missing source archive capability must fail before provisioning");
-
-    migrationTransports.set(sourceMachine.id, sourceResumableTransport);
-    migrationTransports.set(targetMachine.id, {
-      protocol: AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-      capabilities: [...legacyV1Capabilities],
-    });
-    const missingTargetSummaryCapability = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
-      method: "POST",
-      headers: { ...authHeaders(ownerToken, server.id), "Content-Type": "application/json" },
-      body: JSON.stringify({ targetComputer: targetMachine.id }),
-    });
-    assert.equal(missingTargetSummaryCapability.status, 422);
-    assert.deepEqual((await missingTargetSummaryCapability.json() as { details?: unknown }).details, {
-      side: "target",
-      reason: "capability_missing",
-      failureReason: "MIGRATION_RESUMABLE_CAPABILITY_REQUIRED",
-    });
-    assert.equal(removedWorkspacePreflightCalls, 0, "summary-incompatible target must not invoke removed workspace preflight");
-    assert.equal(provisionerCalls, 0, "summary-incompatible target must fail before transport provisioning");
-    assert.equal(sentLeases.length, 0, "summary-incompatible target must fail before lease dispatch");
-    assert.equal(
-      (await db.select().from(agentMigrations).where(eq(agentMigrations.agentId, agent.id))).length,
-      0,
-      "typed resumable failures must not create migration state",
-    );
-    migrationTransports.set(targetMachine.id, resumableTransport);
 
     const freeDenied = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
       method: "POST",
@@ -1728,11 +2044,6 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
     assert.match(successBody.migrationRef, /^mig_[A-Za-z0-9_-]{22}$/);
     assert.equal(successBody.sourceMachineId, sourceMachine.id);
     assert.equal(successBody.targetMachineId, targetMachine.id);
-    assert.deepEqual(
-      migrationTransports.get(targetMachine.id)?.capabilities,
-      [...AGENT_MIGRATION_RESUMABLE_CAPABILITIES],
-      "target admission must require only the core resumable capabilities",
-    );
     assert.equal(removedWorkspacePreflightCalls, 0, "successful migration must not invoke target workspace preflight");
     assert.ok(successBody.prepDeadlineAt);
     assert.ok(successBody.transferDeadlineAt);
@@ -1745,10 +2056,11 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
     assert.equal(rows[0]!.state, "provisioning");
     assert.equal(rows[0]!.transportProvider, "object_store");
     assert.equal(rows[0]!.transportSessionId, "route-session-1");
-    assert.equal(rows[0]!.sourceTransportUrl, "https://r2.example.test/agent-migrations/route-session-1/bundle?put=1");
-    assert.equal(rows[0]!.targetTransportUrl, "https://r2.example.test/agent-migrations/route-session-1/bundle?get=1");
+    assert.equal(rows[0]!.sourceTransportUrl, null, "no whole-bundle URL is presigned");
+    assert.equal(rows[0]!.targetTransportUrl, null, "no whole-bundle URL is presigned");
     assert.equal(rows[0]!.transportLeaseSource, "server");
     assert.equal(rows[0]!.transportMaxBytes, 123_456);
+    assert.equal(rows[0]!.transportMaxArchiveEntries, AGENT_MIGRATION_MAX_ARCHIVE_ENTRIES);
     assert.ok(rows[0]!.sourceTransportTokenHash);
     assert.ok(rows[0]!.targetTransportTokenHash);
     assert.equal(sentLeases.length, 2);
@@ -1784,9 +2096,7 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
           sourceMachineId: sourceMachine.id,
           targetMachineId: targetMachine.id,
         },
-        capability: {
-          required: AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
-        },
+        capability: { required: [AGENT_MIGRATION_CAPABILITY] },
         bundle: {
           contentType: AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
           totalBytes: 1_048_576,
@@ -1857,8 +2167,10 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
     assert.equal("sourceTransportTokenHash" in (startedStatusBody.migration ?? {}), false);
     assert.equal("targetTransportTokenHash" in (startedStatusBody.migration ?? {}), false);
     await db.update(servers).set({ plan: "free" }).where(eq(servers.id, server.id));
-    await agentMigrationService.markAgentMigrationTransportLost({
+    await agentMigrationService.markAgentMigrationTransportLostForComputer({
       migrationId: internalMigrationId,
+      serverId: server.id,
+      machineId: sourceMachine.id,
       message: "MIGRATION_OBJECT_STORE_DOWNLOAD_RETRY_EXHAUSTED:404",
     });
 
@@ -1919,8 +2231,6 @@ test("POST /api/agents/:id/migration/cancel is owner-gated and dispatches the fr
       targetMachineId: targetMachine.id,
       initiatedByUserId: owner.id,
       transportSessionId: "route-cancel-session",
-      sourceTransferUrl: "https://r2.example.test/source",
-      targetTransferUrl: "https://r2.example.test/target",
       now,
     });
     const [migration] = await db.update(agentMigrations)
@@ -2034,18 +2344,12 @@ test("manual agent start completes a retryable migration only after a dispatched
       runtime: "codex",
       machineId: sourceMachine!.id,
     });
-    const migration = await agentMigrationService.beginAgentMigration({
+    const migration = await beginArrivingTestAgentMigration({
       agentId: agent.id,
       targetMachineId: targetMachine!.id,
       initiatedByUserId: owner.id,
       now,
-    });
-    await agentMigrationService.markAgentMigrationReady({
-      grantKey: migration.grantKey,
-      manifestPath: "bundle/manifest.json",
-      now,
-    });
-    await db.update(agentMigrations).set({
+    }, {
       transferSummary: {
         includedFileCount: 1,
         includedBytes: 64,
@@ -2058,18 +2362,16 @@ test("manual agent start completes a retryable migration only after a dispatched
         },
         keyWorkspaceEntries: { memoryMdPresent: false, notesPresent: false },
       },
-    }).where(eq(agentMigrations.id, migration.id));
-    await agentMigrationService.startAgentMigrationTransfer(migration.grantKey, now);
-    const arriving = await agentMigrationService.flipAgentMigrationMachine(migration.grantKey, now);
+    });
     const archived = await agentMigrationService.recordAgentMigrationSourceWorkspaceArchived({
-      grantKey: migration.grantKey,
-      migrationGeneration: agentMigrationService.agentMigrationGeneration(arriving),
+      migrationId: migration.id,
+      migrationGeneration: agentMigrationService.agentMigrationGeneration(migration),
       serverId: server.id,
       targetMachineId: targetMachine!.id,
       now,
     });
     const arrival = await agentMigrationService.markAgentMigrationTargetImportArrived({
-      grantKey: migration.grantKey,
+      migrationId: migration.id,
       migrationGeneration: archived.migrationGeneration,
       serverId: server.id,
       targetMachineId: targetMachine!.id,
@@ -2077,7 +2379,7 @@ test("manual agent start completes a retryable migration only after a dispatched
     });
     assert.equal(arrival.migration.state, "starting");
     await agentMigrationService.recordAgentMigrationAutoStartFailure({
-      grantKey: migration.grantKey,
+      migrationId: migration.id,
       agentId: agent.id,
       targetMachineId: targetMachine!.id,
       stage: "start_agent",
@@ -2110,18 +2412,12 @@ test("manual agent start completes a retryable migration only after a dispatched
       runtime: "codex",
       machineId: sourceMachine!.id,
     });
-    const skippedMigration = await agentMigrationService.beginAgentMigration({
+    const skippedMigration = await beginArrivingTestAgentMigration({
       agentId: skippedAgent.id,
       targetMachineId: targetMachine!.id,
       initiatedByUserId: owner.id,
       now,
-    });
-    await agentMigrationService.markAgentMigrationReady({
-      grantKey: skippedMigration.grantKey,
-      manifestPath: "bundle/skipped-manifest.json",
-      now,
-    });
-    await db.update(agentMigrations).set({
+    }, {
       transferSummary: {
         includedFileCount: 1,
         includedBytes: 64,
@@ -2134,25 +2430,23 @@ test("manual agent start completes a retryable migration only after a dispatched
         },
         keyWorkspaceEntries: { memoryMdPresent: false, notesPresent: false },
       },
-    }).where(eq(agentMigrations.id, skippedMigration.id));
-    await agentMigrationService.startAgentMigrationTransfer(skippedMigration.grantKey, now);
-    const skippedArriving = await agentMigrationService.flipAgentMigrationMachine(skippedMigration.grantKey, now);
+    });
     const skippedArchived = await agentMigrationService.recordAgentMigrationSourceWorkspaceArchived({
-      grantKey: skippedMigration.grantKey,
-      migrationGeneration: agentMigrationService.agentMigrationGeneration(skippedArriving),
+      migrationId: skippedMigration.id,
+      migrationGeneration: agentMigrationService.agentMigrationGeneration(skippedMigration),
       serverId: server.id,
       targetMachineId: targetMachine!.id,
       now,
     });
     await agentMigrationService.markAgentMigrationTargetImportArrived({
-      grantKey: skippedMigration.grantKey,
+      migrationId: skippedMigration.id,
       migrationGeneration: skippedArchived.migrationGeneration,
       serverId: server.id,
       targetMachineId: targetMachine!.id,
       now,
     });
     await agentMigrationService.recordAgentMigrationAutoStartFailure({
-      grantKey: skippedMigration.grantKey,
+      migrationId: skippedMigration.id,
       agentId: skippedAgent.id,
       targetMachineId: targetMachine!.id,
       stage: "start_agent",
@@ -2172,6 +2466,64 @@ test("manual agent start completes a retryable migration only after a dispatched
     assert.equal(stillStarting.state, "starting");
     assert.equal(stillStarting.failureReason, "auto_start_failed");
     assert.equal(stillStarting.completedAt, null);
+});
+
+test("POST /api/agents/:id/assign-machine refuses while the agent has an active migration", async ({ app }) => {
+    const db = getDb();
+    const owner = await seedUser("migration-assign-owner@slock.test", "migration-assign-owner");
+    const server = await createServer("Migration Assign", "migration-assign", owner.id);
+    const now = new Date();
+    const [sourceMachine, targetMachine] = await db.insert(machines).values([
+      {
+        serverId: server.id,
+        userId: owner.id,
+        name: "migration-assign-source",
+        apiKeyHash: "migration-assign-source-hash",
+        runtimes: ["codex"],
+        lastHeartbeat: now,
+      },
+      {
+        serverId: server.id,
+        userId: owner.id,
+        name: "migration-assign-target",
+        apiKeyHash: "migration-assign-target-hash",
+        runtimes: ["codex"],
+        lastHeartbeat: now,
+      },
+    ]).returning();
+    const agent = await createAgent(server.id, "migration-assign-agent", {
+      runtime: "codex",
+      machineId: sourceMachine!.id,
+    });
+    const { migration } = await beginTestAgentMigration({
+      agentId: agent.id,
+      targetMachineId: targetMachine!.id,
+      initiatedByUserId: owner.id,
+      now,
+    });
+    const token = await tokenForHuman(owner.email);
+    const assign = (machineId: string | null) =>
+      fetch(`${app.baseUrl}/api/agents/${agent.id}/assign-machine`, {
+        method: "POST",
+        headers: {
+          ...authHeaders(token, server.id),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ machineId }),
+      });
+
+    for (const machineId of [targetMachine!.id, null]) {
+      const res = await assign(machineId);
+      assert.equal(res.status, 409, await res.clone().text());
+      assert.equal(((await res.json()) as { code: string }).code, "MIGRATION_ALREADY_IN_PROGRESS");
+      assert.equal((await getAgent(agent.id))?.machineId, sourceMachine!.id);
+    }
+
+    // Once the migration is terminal the Computer can be changed again.
+    await db.update(agentMigrations).set({ state: "aborted", abortedAt: now }).where(eq(agentMigrations.id, migration.id));
+    const res = await assign(targetMachine!.id);
+    assert.equal(res.status, 200, await res.clone().text());
+    assert.equal((await getAgent(agent.id))?.machineId, targetMachine!.id);
 });
 
 test("DELETE /api/agents/:id soft-deletes even if runtime stop hangs", async () => {
@@ -2346,7 +2698,7 @@ test("PATCH /agents/:id codex model switch forces session reset even when caller
 
     assert.equal(res.status, 200);
     // codex model switch must force session reset, not the caller-requested restart.
-    assert.deepEqual(resetCall, { agentId: agent.id, mode: "session", options: { restartIfStopped: false } });
+    assert.deepEqual(resetCall, { agentId: agent.id, mode: "session", options: { restartIfStopped: false, terminalControl: "runtime_config_changed" } });
 });
 
 test("PATCH /agents/:id codex reasoning-only change honors the caller's restart mode", async ({ app }) => {
@@ -2377,7 +2729,7 @@ test("PATCH /agents/:id codex reasoning-only change honors the caller's restart 
 
     assert.equal(res.status, 200);
     // reasoning-effort-only change stays on the caller-selected restart (context kept).
-    assert.deepEqual(resetCall, { agentId: agent.id, mode: "restart", options: { restartIfStopped: false } });
+    assert.deepEqual(resetCall, { agentId: agent.id, mode: "restart", options: { restartIfStopped: false, terminalControl: "runtime_config_changed" } });
 });
 
 test("POST /agents rejects provider config for Cursor because current Cursor CLI has no API URL contract", async ({ app }) => {
@@ -2600,7 +2952,7 @@ test("schema-backed Built-in Pi create fails closed, preserves parser authority,
     const formDefinitionRef = {
       protocolVersion: 1,
       runtimeId: "builtin",
-      schemaVersion: "builtin-pi.create.v2",
+      schemaVersion: "builtin-pi.create.v3",
     };
     const presetConfig = {
       version: 1,
@@ -2724,13 +3076,63 @@ test("schema-backed Built-in Pi create fails closed, preserves parser authority,
       { code: "stale_form_schema", pointer: "/formDefinitionRef/schemaVersion" },
     ]);
 
+    // Protocol v2 submits field values, never a client-built runtimeConfig.
     const protocolRes = await create({
       name: "schema-protocol-agent",
-      formDefinitionRef: { ...formDefinitionRef, protocolVersion: 2 },
+      formDefinitionRef: { protocolVersion: 2, runtimeId: "builtin" },
       runtimeConfig: presetConfig,
     });
-    assert.equal(protocolRes.status, 409);
-    assert.equal((await protocolRes.json() as { issues: Array<{ code: string }> }).issues[0]?.code, "unsupported_form_protocol");
+    assert.equal(protocolRes.status, 400);
+    assert.deepEqual((await protocolRes.json() as { issues: unknown }).issues, [
+      { code: "form_values_required", pointer: "/formValues" },
+    ]);
+    const v2Res = await create({
+      name: "schema-v2-form-values-agent",
+      machineId: machine.id,
+      formDefinitionRef: { protocolVersion: 2, runtimeId: "builtin" },
+      formValues: { providerId: "openai", apiKey: "v2-secret-key", model: "openai/gpt-5.4", unrenderedByClient: true },
+    });
+    assert.equal(v2Res.status, 200, await v2Res.clone().text());
+    const v2Body = await v2Res.json() as { id: string; runtimeConfig: { provider: { apiKey: string }; model: unknown } };
+    assert.equal(v2Body.runtimeConfig.provider.apiKey, "");
+    assert.deepEqual(v2Body.runtimeConfig.model, { kind: "preset", id: "openai/gpt-5.4" });
+    const v2Stored = await getAgent(v2Body.id);
+    assert.equal((v2Stored?.runtimeConfig as { provider?: { apiKey?: string } } | null)?.provider?.apiKey, "v2-secret-key");
+
+    // Edit is the same form with the agent's current values; writeOnly fields are never read back.
+    const formRes = await fetch(`${app.baseUrl}/api/agents/${v2Body.id}/runtime-form`, { headers });
+    assert.equal(formRes.status, 200);
+    const form = await formRes.json() as { protocolVersion: number; values: Record<string, unknown> };
+    assert.equal(form.protocolVersion, 2);
+    assert.equal(form.values.providerId, "openai");
+    assert.equal(form.values.model, "openai/gpt-5.4");
+    assert.equal("apiKey" in form.values, false);
+    assert.equal(JSON.stringify(form).includes("v2-secret-key"), false);
+    // A blank writeOnly field on edit keeps the stored secret.
+    const v2EditRes = await fetch(`${app.baseUrl}/api/agents/${v2Body.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        formDefinitionRef: { protocolVersion: 2, runtimeId: "builtin" },
+        formValues: { ...form.values, apiKey: "", envVars: { V2_EDIT: "1" } },
+      }),
+    });
+    assert.equal(v2EditRes.status, 200, await v2EditRes.clone().text());
+    const v2Edited = await getAgent(v2Body.id);
+    assert.equal((v2Edited?.runtimeConfig as { provider?: { apiKey?: string } } | null)?.provider?.apiKey, "v2-secret-key");
+    assert.deepEqual((v2Edited?.runtimeConfig as { envVars?: unknown } | null)?.envVars, { V2_EDIT: "1" });
+    // Changing provider with a blank secret is refused, pointed at the field.
+    const v2SwitchRes = await fetch(`${app.baseUrl}/api/agents/${v2Body.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        formDefinitionRef: { protocolVersion: 2, runtimeId: "builtin" },
+        formValues: { ...form.values, providerId: "deepseek", model: "deepseek/deepseek-chat", apiKey: "" },
+      }),
+    });
+    assert.equal(v2SwitchRes.status, 400, await v2SwitchRes.clone().text());
+    const v2SwitchBody = await v2SwitchRes.json() as { issues?: Array<{ pointer: string }> };
+    for (const issue of v2SwitchBody.issues ?? []) assert.match(issue.pointer, /^\/formValues/);
 
     const hostStateRes = await create({
       name: "schema-host-state-agent",
@@ -3437,6 +3839,8 @@ test("grok_runtime_v0 gates new Grok selections while preserving existing Grok a
       availableForNew: false,
       manageableForCurrentAgent: true,
       canSelectInThisContext: true,
+      // Additive (batch 3a): an existing Grok agent stays editable with its v2 form.
+      runtimeFormV2: { protocolVersion: 2 },
     });
 
     const createDisabledRes = await fetch(`${app.baseUrl}/api/agents`, {
@@ -3505,6 +3909,7 @@ test("grok_runtime_v0 gates new Grok selections while preserving existing Grok a
       availableForNew: false,
       manageableForCurrentAgent: false,
       canSelectInThisContext: false,
+      runtimeFormV2: { protocolVersion: 2 },
     });
     const unavailableManagementRes = await fetch(`${app.baseUrl}/api/agents/${existingGrokAgent.id}`, {
       method: "PATCH",
@@ -3750,11 +4155,25 @@ test("onboarding identity adoption previews then applies official Cindy identity
     assert.equal(stillCustom?.description, "Custom setup guide");
     assert.equal(stillCustom?.avatarUrl, "pixel:finch");
 
+    const updatedPushes: Array<{ room: string; payload: unknown }> = [];
+    const originalTo = app.io.to.bind(app.io);
+    (app.io as any).to = (room: string | string[]) => {
+      const operator = originalTo(room as any) as any;
+      const originalEmit = operator.emit.bind(operator);
+      operator.emit = (event: string, ...args: unknown[]) => {
+        if (event === "agent:updated") updatedPushes.push({ room: String(room), payload: args[0] });
+        return originalEmit(event, ...args);
+      };
+      return operator;
+    };
+
     const adoptRes = await fetch(`${app.baseUrl}/api/agents/${customized.id}/onboarding-identity-adoption`, {
       method: "POST",
       headers: authHeaders(ownerToken, server.id),
     });
     assert.equal(adoptRes.status, 200);
+    // Adoption rewrote the name, avatar and description: other open clients are told to re-read.
+    assert.deepEqual(updatedPushes, [{ room: `server:${server.id}`, payload: { agentId: customized.id } }]);
     const adopted = await adoptRes.json() as {
       canAdopt: boolean;
       appliedChanges: Array<{ field: string; before: string | null; after: string | null }>;
@@ -3778,6 +4197,7 @@ test("onboarding identity adoption previews then applies official Cindy identity
       headers: authHeaders(ownerToken, server.id),
     });
     assert.equal(secondAdoptRes.status, 200);
+    assert.equal(updatedPushes.length, 1, "a second adoption changes nothing, so it pushes nothing");
     const secondAdopt = await secondAdoptRes.json() as {
       canAdopt: boolean;
       changes: Array<{ field: string; before: string | null; after: string | null }>;
@@ -3900,6 +4320,60 @@ test("POST /agents rejects unsupported runtimeConfig launch axes", async ({ app 
     }
 });
 
+test("POST /api/agents refuses a creator whose removal commits after the request-level check, creating nothing (task #93 line G)", async ({ app }) => {
+    const owner = await seedUser("create-fence-route-owner@slock.test", "create-fence-route-owner");
+    const admin = await seedUser("create-fence-route-admin@slock.test", "create-fence-route-admin");
+    const server = await createServer("Create Fence Route", "create-fence-route", owner.id);
+    await getDb().insert(serverMembers).values({ serverId: server.id, userId: admin.id, role: "admin" });
+  const adminToken = await tokenForHuman(admin.email);
+    const [builtInMachine] = await getDb()
+      .insert(machines)
+      .values({
+        serverId: server.id,
+        userId: owner.id,
+        name: "create-fence-route-machine",
+        apiKeyHash: "unused-create-fence-route-machine-hash",
+        runtimes: ["builtin"],
+      })
+      .returning();
+    let validationCalls = 0;
+    Object.assign(app.app.get("agentOrchestrator"), {
+      hasMachineLocally: () => true,
+      // Seam between the request-level `createAgents` check and the create transaction: the owner removes the admin.
+      validateBuiltInPresetForMachine: async () => {
+        validationCalls += 1;
+        await removeMember(server.id, admin.id, { reason: "removed", actorUserId: owner.id });
+        return { authority: { connectionEpochId: "epoch-create-fence", replicaGeneration: "generation-create-fence" } };
+      },
+      acquireBuiltInCatalogAuthority: () => () => undefined,
+    });
+
+    const res = await fetch(`${app.baseUrl}/api/agents`, {
+      method: "POST",
+      headers: {
+        ...authHeaders(adminToken, server.id),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: "create-fence-route-agent",
+        machineId: builtInMachine.id,
+        formDefinitionRef: { protocolVersion: 1, runtimeId: "builtin", schemaVersion: "builtin-pi.create.v3" },
+        runtimeConfig: {
+          version: 1,
+          runtime: "builtin",
+          provider: { kind: "preset", providerId: "openai", apiKey: "sk-openai-create-fence" },
+          model: { kind: "preset", id: "openai/gpt-5.4" },
+          mode: { kind: "default" },
+        },
+      }),
+    });
+    assert.equal(validationCalls, 1, "the request reached the seam after the request-level check");
+    assert.equal(res.status, 403, await res.clone().text());
+    assert.equal(((await res.json()) as { error: string }).error, "Not a member of this server");
+    const created = await getDb().select({ id: agents.id }).from(agents).where(eq(agents.serverId, server.id));
+    assert.equal(created.length, 0, "a removed creator creates no Agent");
+});
+
 test("POST /agents records runtimeConfig trace acceptance without secret or raw-field leakage", async ({ app }) => {
     const sink = new MemoryTraceSink();
     const tracer = new BasicTracer({
@@ -3918,7 +4392,7 @@ test("POST /agents records runtimeConfig trace acceptance without secret or raw-
     const formDefinitionRef = {
       protocolVersion: 1,
       runtimeId: "builtin",
-      schemaVersion: "builtin-pi.create.v2",
+      schemaVersion: "builtin-pi.create.v3",
     };
 
     sink.clear();
@@ -4468,7 +4942,7 @@ test("POST /agents rejects reserved mention-like handles", async ({ app }) => {
     const server = await createServer("Reserved Agent API", "reserved-agent-api", owner.id);
   const ownerToken = await tokenForHuman(owner.email);
 
-    for (const name of ["all", "Human", "HUMANS", "agent", "Agents", "here", "Idle", "BUSY", "system"]) {
+    for (const name of ["all", "Human", "HUMANS", "agent", "Agents", "here", "Idle", "BUSY", "system", "reminders", "Reminders"]) {
       const res = await fetch(`${app.baseUrl}/api/agents`, {
         method: "POST",
         headers: {
@@ -5412,6 +5886,55 @@ test("GET /agents records restore-path trace phases with batched creator enrichm
     assert.equal(readyEvent.attrs?.env_vars_stripped, false);
 });
 
+test("GET /agents resolves agent activity with at most 8 lookups in flight", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("agents-concurrency-owner@slock.test", "agents-concurrency-owner");
+  const server = await createServer("Agents Concurrency Server", "agents-concurrency-server", owner.id);
+  await db.insert(serverMembers).values({ serverId: server.id, userId: owner.id, role: "owner" }).onConflictDoNothing();
+  const created = [];
+  for (let i = 0; i < 20; i += 1) {
+    created.push(await createAgent(server.id, `concurrency-agent-${i}`, {
+      runtime: "codex",
+      creatorType: "user",
+      creatorId: owner.id,
+    }));
+  }
+
+  // Each activity lookup may borrow pool connections (cache / Redis miss):
+  // a large server must not resolve them all at once.
+  const orchestrator = app.app.get("agentOrchestrator") as { getActivity: (...args: unknown[]) => Promise<unknown> };
+  const originalGetActivity = orchestrator.getActivity.bind(orchestrator);
+  let inFlight = 0;
+  let peak = 0;
+  let calls = 0;
+  orchestrator.getActivity = async (...args: unknown[]) => {
+    inFlight += 1;
+    calls += 1;
+    peak = Math.max(peak, inFlight);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return await originalGetActivity(...args);
+    } finally {
+      inFlight -= 1;
+    }
+  };
+  try {
+    const ownerToken = await tokenForHuman(owner.email);
+    const res = await fetch(`${app.baseUrl}/api/agents`, {
+      headers: authHeaders(ownerToken, server.id),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as Array<{ id: string; activity: string }>;
+    assert.deepEqual(new Set(body.map((agent) => agent.id)), new Set(created.map((agent) => agent.id)));
+    assert.ok(body.every((agent) => typeof agent.activity === "string"));
+    assert.equal(calls, 20);
+    assert.ok(peak <= 8, `peak ${peak} concurrent activity lookups`);
+    assert.ok(peak > 1, "lookups still overlap");
+  } finally {
+    orchestrator.getActivity = originalGetActivity;
+  }
+});
+
 test("agent-to-agent DM channels are not readable through ordinary human message routes", async ({ app }) => {
     const db = getDb();
 
@@ -5533,4 +6056,563 @@ test("Antigravity permits existing-agent edits but rejects new agents and runtim
     assert.equal((await edit.json() as { runtime: string }).runtime, "antigravity");
   }
   assert.equal((await getAgent(other.id))?.runtime, "codex");
+});
+
+// artin 2026-09-27: installed mobile clients could not save a model — every
+// PATCH was 400 "runtimeConfig.loadLocalPlugins must be a boolean". Their
+// encoder sends every optional field, unset ones as null. Exact wire shape.
+test("PATCH /agents/:id accepts the mobile runtimeConfig shape and keeps an enabled local-extensions choice", async ({ app }) => {
+    const owner = await seedUser("mobile-null-owner@slock.test", "mobile-null-owner");
+    const server = await createServer("Mobile Null Server", "mobile-null-server", owner.id);
+    const token = await tokenForHuman(owner.email);
+    const mobileNulls = { reasoningEffort: null, envVars: null, command: null, loadLocalPlugins: null, hostUserState: null };
+    const patch = (id: string, runtimeConfig: Record<string, unknown>) =>
+      fetch(`${app.baseUrl}/api/agents/${id}`, {
+        method: "PATCH",
+        headers: { ...authHeaders(token, server.id), "Content-Type": "application/json" },
+        body: JSON.stringify({ runtimeConfig }),
+      });
+
+    const claude = await createAgent(server.id, "mobile-null-claude", { runtime: "claude", model: "sonnet" });
+    const claudeRes = await patch(claude.id, {
+      version: 1,
+      runtime: "claude",
+      provider: { kind: "default" },
+      model: { kind: "preset", id: "opus" },
+      mode: { kind: "default" },
+      ...mobileNulls,
+    });
+    assert.equal(claudeRes.status, 200, await claudeRes.clone().text());
+    assert.equal((await getAgent(claude.id))?.model, "opus");
+
+    const provider = { kind: "gateway", providerId: "openai-compatible", baseUrl: "http://localhost:9876/v1", apiKey: "secret", supportsImageInput: false } as const;
+    const builtin = await createAgent(server.id, "mobile-null-builtin", {
+      runtime: "builtin",
+      model: "model-a",
+      runtimeConfig: {
+        version: 1,
+        runtime: "builtin",
+        provider,
+        model: { kind: "custom", name: "model-a" },
+        mode: { kind: "default" },
+        hostUserState: "forbidden",
+        loadLocalPlugins: true,
+      },
+    });
+    await assignAgentMachine(builtin.id, null);
+    const builtinRes = await patch(builtin.id, {
+      version: 1,
+      runtime: "builtin",
+      provider,
+      model: { kind: "custom", name: "model-b" },
+      mode: { kind: "default" },
+      ...mobileNulls,
+    });
+    assert.equal(builtinRes.status, 200, await builtinRes.clone().text());
+    const stored = hydrateRuntimeConfig((await getAgent(builtin.id))!);
+    assert.equal(stored.runtime, "builtin");
+    assert.ok(stored.runtime === "builtin");
+    assert.equal(stored.loadLocalPlugins, true, "a model-only mobile save must not switch local extensions off");
+
+    // An explicit false still turns it off.
+    const offRes = await patch(builtin.id, {
+      version: 1,
+      runtime: "builtin",
+      provider,
+      model: { kind: "custom", name: "model-b" },
+      mode: { kind: "default" },
+      ...mobileNulls,
+      loadLocalPlugins: false,
+    });
+    assert.equal(offRes.status, 200);
+    const off = hydrateRuntimeConfig((await getAgent(builtin.id))!);
+    assert.ok(off.runtime === "builtin");
+    assert.equal(off.loadLocalPlugins, false);
+});
+
+test("a v2 submit is checked against the v2 registry, not the v1 refs", async ({ app }) => {
+  const owner = await seedUser("v2-registry-submit@slock.test", "v2-registry-submit");
+  const server = await createServer("V2 Registry Submit", "v2-registry-submit", owner.id);
+  const headers = { ...authHeaders(await tokenForHuman(owner.email), server.id), "Content-Type": "application/json" };
+  const create = (runtimeId: string, name: string) => fetch(`${app.baseUrl}/api/agents`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name, formDefinitionRef: { protocolVersion: 2, runtimeId }, formValues: { model: "gpt-5.6-sol" } }),
+  });
+
+  // A runtime without a v2 form is refused before any value is read. Every
+  // catalog runtime has a v2 form since batch 4, so the example is an unknown id.
+  const unknownRes = await create("not-a-runtime", "v2-unregistered");
+  assert.equal(unknownRes.status, 400);
+  assert.deepEqual((await unknownRes.json() as { issues: unknown }).issues, [
+    { code: "unknown_form_runtime", pointer: "/formDefinitionRef/runtimeId" },
+  ]);
+
+  // A runtime with a v2 form and no v1 ref is accepted: v2 does not need a v1 form.
+  const unregister = registerRuntimeFormV2EntryForTests({
+    runtimeId: "cursor",
+    buildForm: () => { throw new Error("unused"); },
+    validateProjection: () => [],
+    resolveOptionSource: async () => ({ kind: "source", source: null }),
+    runtimeConfigFromValues: (values, envVars) => ({
+      ok: true,
+      runtimeConfig: {
+        version: 1,
+        runtime: "cursor",
+        model: { kind: "preset", id: String(values.model) },
+        mode: { kind: "default" },
+        reasoningEffort: null,
+        envVars,
+      },
+    }),
+    valuesFromRuntimeConfig: () => null,
+  });
+  try {
+    const res = await create("cursor", "v2-registered");
+    assert.equal(res.status, 200, await res.clone().text());
+    const body = await res.json() as { runtime: string; runtimeConfig: { model: unknown } };
+    assert.equal(body.runtime, "cursor");
+    assert.deepEqual(body.runtimeConfig.model, { kind: "preset", id: "gpt-5.6-sol" }, "the registered entry assembled it");
+  } finally {
+    unregister();
+  }
+});
+
+test("batch 2 v2 create: OpenCode stores the legacy runtimeConfig; Kimi CLI, Gemini and Antigravity are refused like legacy deprecated creates", async ({ app }) => {
+  const owner = await seedUser("v2-batch2-create@slock.test", "v2-batch2-create");
+  const server = await createServer("V2 Batch2 Create", "v2-batch2-create", owner.id);
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id, userId: owner.id, name: "v2-batch2-create-machine",
+    apiKeyHash: "v2-batch2-create", runtimes: ["opencode", "kimi", "gemini", "antigravity"],
+  }).returning();
+  const headers = { ...authHeaders(await tokenForHuman(owner.email), server.id), "Content-Type": "application/json" };
+  const create = (runtimeId: string, name: string, formValues: Record<string, unknown>) => fetch(`${app.baseUrl}/api/agents`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name, machineId: machine.id, formDefinitionRef: { protocolVersion: 2, runtimeId }, formValues }),
+  });
+
+  const res = await create("opencode", "v2-opencode", { model: "deepseek/deepseek-v4-pro", envVars: { OC_FLAG: "1" }, unrenderedByClient: true });
+  assert.equal(res.status, 200, await res.clone().text());
+  const body = await res.json() as { id: string; runtime: string; model: string };
+  assert.equal(body.runtime, "opencode");
+  assert.equal(body.model, "deepseek/deepseek-v4-pro");
+  const stored = await getAgent(body.id);
+  // Exactly what the legacy web form sends for OpenCode (web buildRuntimeConfig).
+  assert.deepEqual(stored?.runtimeConfig, {
+    version: 1,
+    runtime: "opencode",
+    model: { kind: "preset", id: "deepseek/deepseek-v4-pro" },
+    mode: { kind: "default" },
+    reasoningEffort: null,
+    envVars: { OC_FLAG: "1" },
+  });
+
+  const blankRes = await create("opencode", "v2-opencode-blank", { model: "" });
+  assert.equal(blankRes.status, 400);
+  assert.deepEqual((await blankRes.json() as { issues: unknown }).issues, [{ code: "model_required", pointer: "/formValues/model" }]);
+
+  for (const [runtimeId, formValues] of [
+    ["kimi", { model: "default" }],
+    ["gemini", { model: "gemini-2.5-pro" }],
+    ["antigravity", {}],
+  ] as const) {
+    const refused = await create(runtimeId, `v2-${runtimeId}`, formValues);
+    assert.equal(refused.status, 400, runtimeId);
+    assert.deepEqual(await refused.json(), { error: `Runtime is deprecated and cannot be selected: ${runtimeId}` }, runtimeId);
+  }
+});
+
+test("batch 3a v2 create and edit: Codex/Grok store the legacy runtimeConfig; the live list decides reasoning efforts; legacy submits are unchanged", async ({ app }) => {
+  const owner = await seedUser("v2-batch3a-create@slock.test", "v2-batch3a-create");
+  const server = await createServer("V2 Batch3a Create", "v2-batch3a-create", owner.id);
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id, userId: owner.id, name: "v2-batch3a-create-machine",
+    apiKeyHash: "v2-batch3a-create", runtimes: ["codex", "grok"],
+  }).returning();
+  const headers = { ...authHeaders(await tokenForHuman(owner.email), server.id), "Content-Type": "application/json" };
+  const probed: string[] = [];
+  let probe: (runtime: string) => Promise<unknown> = async () => ({ kind: "live", value: { models: [] } });
+  const originalOrchestrator = app.app.get("agentOrchestrator") as Record<string, unknown>;
+  app.app.set("agentOrchestrator", {
+    ...originalOrchestrator,
+    detectMachineRuntimeModels: async (_machineId: string, runtime: string) => {
+      probed.push(runtime);
+      return probe(runtime);
+    },
+  });
+  const liveModels = {
+    codex: [
+      { id: "gpt-7-live", label: "GPT-7", supportedReasoningEfforts: ["medium", "ultra"], defaultReasoningEffort: "medium" },
+      { id: "gpt-5.6-sol", label: "Sol", supportedReasoningEfforts: ["low", "medium"] },
+    ],
+    grok: [{ id: "grok-live-only", label: "Grok live", supportedReasoningEfforts: ["low", "max"] }],
+  } as Record<string, unknown[]>;
+  probe = async (runtime) => ({ kind: "live", value: { models: liveModels[runtime] ?? [] } });
+  const create = (runtimeId: string, name: string, formValues: Record<string, unknown>) => fetch(`${app.baseUrl}/api/agents`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name, machineId: machine.id, formDefinitionRef: { protocolVersion: 2, runtimeId }, formValues }),
+  });
+  const storedConfig = async (id: string) => (await getAgent(id))?.runtimeConfig as unknown as Record<string, unknown>;
+
+  // A live-only Codex model with an effort only the live list offers: kept, and stored as a preset.
+  const live = await create("codex", "v2-codex-live", { model: "gpt-7-live", reasoningEffort: "ultra", fastMode: true, envVars: { K: "v" } });
+  assert.equal(live.status, 200, await live.clone().text());
+  const liveAgent = await live.json() as { id: string };
+  assert.deepEqual(await storedConfig(liveAgent.id), {
+    version: 1, runtime: "codex", model: { kind: "preset", id: "gpt-7-live" }, mode: { kind: "fast" }, reasoningEffort: "ultra", envVars: { K: "v" },
+  });
+  assert.equal((await getAgent(liveAgent.id))?.reasoningEffort, "ultra");
+  assert.deepEqual(probed, ["codex"]);
+
+  // An effort the live list does not offer for that model is refused at the field.
+  const refused = await create("codex", "v2-codex-refused", { model: "gpt-5.6-sol", reasoningEffort: "ultra" });
+  assert.equal(refused.status, 400);
+  assert.deepEqual((await refused.json() as { issues: unknown }).issues, [
+    { code: "reasoning_effort_not_supported", pointer: "/formValues/reasoningEffort" },
+  ]);
+
+  // A typed custom model with fast mode: the legacy custom runtimeConfig.
+  const custom = await create("codex", "v2-codex-custom", { model: "my-org/codex-custom", reasoningEffort: "high", fastMode: true });
+  assert.equal(custom.status, 200, await custom.clone().text());
+  assert.deepEqual(await storedConfig((await custom.json() as { id: string }).id), {
+    version: 1, runtime: "codex", model: { kind: "custom", name: "my-org/codex-custom" }, mode: { kind: "fast" }, reasoningEffort: "high", envVars: null,
+  });
+
+  // Grok is gated by its runtime flag, for v2 exactly like legacy.
+  const grokOff = await create("grok", "v2-grok-off", { model: "grok-4.5", reasoningEffort: "high" });
+  assert.equal(grokOff.status, 403);
+  assert.equal((await grokOff.json() as { code: string }).code, "grok_runtime_disabled");
+  await enableGrokRuntimeFlag(server.id);
+  const grok = await create("grok", "v2-grok-live", { model: "grok-live-only", reasoningEffort: "max" });
+  assert.equal(grok.status, 200, await grok.clone().text());
+  const grokAgent = await grok.json() as { id: string };
+  assert.equal((await storedConfig(grokAgent.id)).reasoningEffort, "max");
+
+  // Probe not live: the static rule stands (an undeclared effort is dropped, as before).
+  probe = async () => ({ kind: "missing_config" });
+  const staticRule = await create("grok", "v2-grok-static", { model: "grok-live-only", reasoningEffort: "max" });
+  assert.equal(staticRule.status, 200, await staticRule.clone().text());
+  assert.equal((await storedConfig((await staticRule.json() as { id: string }).id)).reasoningEffort, null);
+
+  // A legacy (non-v2) submit is never reconciled with the live list: same input, effort dropped, no probe.
+  probe = async (runtime) => ({ kind: "live", value: { models: liveModels[runtime] ?? [] } });
+  probed.length = 0;
+  const legacyRes = await fetch(`${app.baseUrl}/api/agents`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      name: "legacy-codex",
+      machineId: machine.id,
+      runtimeConfig: { version: 1, runtime: "codex", model: { kind: "preset", id: "gpt-7-live" }, mode: { kind: "default" }, reasoningEffort: "ultra", envVars: null },
+    }),
+  });
+  assert.equal(legacyRes.status, 200, await legacyRes.clone().text());
+  assert.equal((await storedConfig((await legacyRes.json() as { id: string }).id)).reasoningEffort, null);
+  assert.deepEqual(probed, []);
+
+  // Edit: the stored values come back through GET runtime-form, and a v2 PATCH follows the same live rule.
+  const formRes = await fetch(`${app.baseUrl}/api/agents/${liveAgent.id}/runtime-form`, { headers });
+  assert.equal(formRes.status, 200);
+  const editForm = await formRes.json() as { runtimeId: string; requiredClientCapabilities: string[]; values: Record<string, unknown> };
+  assert.equal(editForm.runtimeId, "codex");
+  assert.deepEqual(editForm.values, { model: "gpt-7-live", reasoningEffort: "ultra", fastMode: true, envVars: { K: "v" } });
+  const patch = (formValues: Record<string, unknown>) => fetch(`${app.baseUrl}/api/agents/${liveAgent.id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ formDefinitionRef: { protocolVersion: 2, runtimeId: "codex" }, formValues }),
+  });
+  const edited = await patch({ ...editForm.values, reasoningEffort: "medium", fastMode: false });
+  assert.equal(edited.status, 200, await edited.clone().text());
+  assert.deepEqual(await storedConfig(liveAgent.id), {
+    version: 1, runtime: "codex", model: { kind: "preset", id: "gpt-7-live" }, mode: { kind: "default" }, reasoningEffort: "medium", envVars: { K: "v" },
+  });
+  const editRefused = await patch({ ...editForm.values, model: "gpt-5.6-sol", reasoningEffort: "ultra" });
+  assert.equal(editRefused.status, 400);
+  assert.deepEqual((await editRefused.json() as { issues: unknown }).issues, [
+    { code: "reasoning_effort_not_supported", pointer: "/formValues/reasoningEffort" },
+  ]);
+  app.app.set("agentOrchestrator", originalOrchestrator);
+});
+
+test("batch 3b v2 edit: Claude's custom-provider API key never comes back through the v2 form, and saving without it keeps the stored key", async ({ app }) => {
+  const owner = await seedUser("v2-batch3b-claude@slock.test", "v2-batch3b-claude");
+  const server = await createServer("V2 Batch3b Claude", "v2-batch3b-claude", owner.id);
+  const headers = { ...authHeaders(await tokenForHuman(owner.email), server.id), "Content-Type": "application/json" };
+  const SECRET = "sk-claude-stored-secret-3b";
+  const stored = {
+    version: 1,
+    runtime: "claude",
+    provider: { kind: "custom", apiUrl: "https://gateway.example.test", apiKey: SECRET },
+    model: { kind: "preset", id: "sonnet" },
+    mode: { kind: "default" },
+    reasoningEffort: "high",
+    envVars: { KEEP: "1" },
+    command: "/opt/claude",
+  } as unknown as RuntimeConfig;
+  const agent = await createAgent(server.id, "v2-claude-provider", { runtime: "claude", model: "sonnet", runtimeConfig: stored });
+  const storedProvider = async () => (await getAgent(agent.id))?.runtimeConfig as unknown as { provider: Record<string, unknown>; model: unknown; command?: string };
+
+  // The v2 edit read: the form marks the key write-only and the values leave it out.
+  const formRes = await fetch(`${app.baseUrl}/api/agents/${agent.id}/runtime-form`, { headers });
+  assert.equal(formRes.status, 200);
+  const formText = await formRes.text();
+  assert.equal(formText.includes(SECRET), false, "the stored API key is not in the v2 edit response");
+  const form = JSON.parse(formText) as { runtimeId: string; values: Record<string, unknown>; capabilities: { writeOnlyPointers: string[] } };
+  assert.equal(form.runtimeId, "claude");
+  assert.deepEqual(form.capabilities.writeOnlyPointers, ["/apiKey"]);
+  assert.deepEqual(form.values, {
+    provider: "custom", apiUrl: "https://gateway.example.test", model: "sonnet", reasoningEffort: "high", fastMode: false, command: "/opt/claude", envVars: { KEEP: "1" },
+  });
+
+  const patch = (formValues: Record<string, unknown>) => fetch(`${app.baseUrl}/api/agents/${agent.id}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ formDefinitionRef: { protocolVersion: 2, runtimeId: "claude" }, formValues }),
+  });
+  // Saving without touching the key (blank, as the client shows it, or absent) keeps it.
+  const blank = await patch({ ...form.values, apiKey: "", model: "opus" });
+  assert.equal(blank.status, 200, await blank.clone().text());
+  assert.deepEqual((await storedProvider()).provider, { kind: "custom", apiUrl: "https://gateway.example.test", apiKey: SECRET });
+  assert.deepEqual((await storedProvider()).model, { kind: "preset", id: "opus" });
+  assert.equal((await storedProvider()).command, "/opt/claude");
+  const absent = await patch({ ...form.values, model: "haiku" });
+  assert.equal(absent.status, 200, await absent.clone().text());
+  assert.equal((await storedProvider()).provider.apiKey, SECRET);
+
+  // A different API URL never inherits the stored key: asked for at the field, nothing saved.
+  const moved = await patch({ ...form.values, apiUrl: "https://other.example.test", apiKey: "" });
+  assert.equal(moved.status, 400);
+  assert.deepEqual((await moved.json() as { issues: unknown }).issues, [{ code: "api_key_required", pointer: "/formValues/apiKey" }]);
+  assert.deepEqual((await storedProvider()).provider, { kind: "custom", apiUrl: "https://gateway.example.test", apiKey: SECRET });
+
+  // A typed key replaces it; switching to Default drops the provider secret.
+  const replaced = await patch({ ...form.values, apiKey: " sk-new " });
+  assert.equal(replaced.status, 200, await replaced.clone().text());
+  assert.equal((await storedProvider()).provider.apiKey, "sk-new");
+  const toDefault = await patch({ ...form.values, provider: "default" });
+  assert.equal(toDefault.status, 200, await toDefault.clone().text());
+  assert.deepEqual((await storedProvider()).provider, { kind: "default" });
+});
+
+test("batch 4 v2 create and edit: Pi stores the legacy runtimeConfig, its built-in provider key is write-only in v2, and legacy saves are unchanged", async ({ app }) => {
+  const owner = await seedUser("v2-batch4-pi@slock.test", "v2-batch4-pi");
+  const server = await createServer("V2 Batch4 Pi", "v2-batch4-pi", owner.id);
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id, userId: owner.id, name: "v2-batch4-pi-machine",
+    apiKeyHash: "v2-batch4-pi", runtimes: ["pi"],
+  }).returning();
+  const headers = { ...authHeaders(await tokenForHuman(owner.email), server.id), "Content-Type": "application/json" };
+  const originalOrchestrator = app.app.get("agentOrchestrator") as Record<string, unknown>;
+  app.app.set("agentOrchestrator", {
+    ...originalOrchestrator,
+    detectMachineRuntimeModels: async () => ({ kind: "live", value: { models: [{ id: "anthropic/sonnet-live", label: "Sonnet · Anthropic" }] } }),
+  });
+  try {
+    const SECRET = "sk-pi-deepseek-stored-4";
+    const storedConfig = async (id: string) => (await getAgent(id))?.runtimeConfig as unknown as Record<string, unknown>;
+    const create = (name: string, formValues: Record<string, unknown>) => fetch(`${app.baseUrl}/api/agents`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ name, machineId: machine.id, formDefinitionRef: { protocolVersion: 2, runtimeId: "pi" }, formValues }),
+    });
+
+    // Configured: a model only the Computer's live list names is a preset, as legacy stores a picked one.
+    const configured = await create("v2-pi-configured", { provider: "configured", model: "anthropic/sonnet-live", reasoningEffort: "high" });
+    assert.equal(configured.status, 200, await configured.clone().text());
+    assert.deepEqual(await storedConfig((await configured.json() as { id: string }).id), {
+      version: 1, runtime: "pi", provider: { kind: "default" }, model: { kind: "preset", id: "anthropic/sonnet-live" }, mode: { kind: "default" }, reasoningEffort: "high", envVars: null,
+    });
+
+    // DeepSeek: the key and a model from the provider's list.
+    const created = await create("v2-pi-deepseek", { provider: "deepseek", apiKey: SECRET, providerModel: "deepseek/deepseek-v4-pro", providerReasoningEffort: "low", envVars: { KEEP: "1" } });
+    assert.equal(created.status, 200, await created.clone().text());
+    const agentId = (await created.json() as { id: string }).id;
+    const stored = {
+      version: 1, runtime: "pi", provider: { kind: "pi-builtin", providerId: "deepseek", apiKey: SECRET }, model: { kind: "preset", id: "deepseek/deepseek-v4-pro" }, mode: { kind: "default" }, reasoningEffort: "low", envVars: { KEEP: "1" },
+    };
+    assert.deepEqual(await storedConfig(agentId), stored);
+
+    // The v2 edit read: the key is write-only and not in the values.
+    const formRes = await fetch(`${app.baseUrl}/api/agents/${agentId}/runtime-form`, { headers });
+    assert.equal(formRes.status, 200);
+    const formText = await formRes.text();
+    assert.equal(formText.includes(SECRET), false, "the stored API key is not in the v2 edit response");
+    const form = JSON.parse(formText) as { values: Record<string, unknown>; capabilities: { writeOnlyPointers: string[] } };
+    assert.deepEqual(form.capabilities.writeOnlyPointers, ["/apiKey"]);
+    assert.deepEqual(form.values, { provider: "deepseek", providerModel: "deepseek/deepseek-v4-pro", providerReasoningEffort: "low", envVars: { KEEP: "1" } });
+
+    const patch = (body: Record<string, unknown>) => fetch(`${app.baseUrl}/api/agents/${agentId}`, { method: "PATCH", headers, body: JSON.stringify(body) });
+    const patchV2 = (formValues: Record<string, unknown>) => patch({ formDefinitionRef: { protocolVersion: 2, runtimeId: "pi" }, formValues });
+    // Saving without touching the key keeps it.
+    const blank = await patchV2({ ...form.values, apiKey: "", providerModel: "deepseek/deepseek-flash" });
+    assert.equal(blank.status, 200, await blank.clone().text());
+    assert.deepEqual(await storedConfig(agentId), { ...stored, model: { kind: "preset", id: "deepseek/deepseek-flash" } });
+
+    // The v1 agent read still returns the key (legacy web and apps prefill it from here).
+    const read = await fetch(`${app.baseUrl}/api/agents/${agentId}`, { headers });
+    assert.equal(read.status, 200);
+    assert.equal(((await read.json() as { runtimeConfig: { provider: { apiKey: string } } }).runtimeConfig.provider.apiKey), SECRET);
+
+    // A legacy (non-v2) save with the full runtimeConfig is stored exactly as sent.
+    const legacyConfig = { ...stored, provider: { kind: "pi-builtin", providerId: "deepseek", apiKey: "sk-legacy-typed" }, reasoningEffort: "medium" };
+    const legacySave = await patch({ runtimeConfig: legacyConfig });
+    assert.equal(legacySave.status, 200, await legacySave.clone().text());
+    assert.deepEqual(await storedConfig(agentId), legacyConfig);
+    const legacyConfigured = { version: 1, runtime: "pi", provider: { kind: "default" }, model: { kind: "custom", name: "my-org/pi-custom" }, mode: { kind: "default" }, reasoningEffort: "xhigh", envVars: null };
+    const legacyToConfigured = await patch({ runtimeConfig: legacyConfigured });
+    assert.equal(legacyToConfigured.status, 200, await legacyToConfigured.clone().text());
+    assert.deepEqual(await storedConfig(agentId), legacyConfigured);
+
+    // Switching back to DeepSeek needs a key: nothing stored to keep.
+    const noKey = await patchV2({ provider: "deepseek", apiKey: "", providerModel: "deepseek/deepseek-v4-pro" });
+    assert.equal(noKey.status, 400);
+    assert.deepEqual((await noKey.json() as { issues: unknown }).issues, [{ code: "api_key_required", pointer: "/formValues/apiKey" }]);
+    assert.deepEqual(await storedConfig(agentId), legacyConfigured);
+  } finally {
+    app.app.set("agentOrchestrator", originalOrchestrator);
+  }
+});
+
+test("batch 2 v2 edit: Gemini, Kimi CLI and Antigravity round-trip through GET runtime-form and PATCH; Antigravity keeps its stored model", async ({ app }) => {
+  const owner = await seedUser("v2-batch2-edit@slock.test", "v2-batch2-edit");
+  const server = await createServer("V2 Batch2 Edit", "v2-batch2-edit", owner.id);
+  const headers = { ...authHeaders(await tokenForHuman(owner.email), server.id), "Content-Type": "application/json" };
+  const config = (runtime: string, model: Record<string, string>, envVars: Record<string, string> | null) => ({
+    version: 1, runtime, model, mode: { kind: "default" }, reasoningEffort: null, envVars,
+  }) as unknown as RuntimeConfig;
+  const cases = [
+    { runtime: "gemini", stored: config("gemini", { kind: "preset", id: "gemini-2.5-pro" }, { OLD: "1" }), values: { model: "gemini-2.5-pro", envVars: { OLD: "1" } }, edit: { model: "gemini-2.5-flash" } },
+    { runtime: "kimi", stored: config("kimi", { kind: "preset", id: "default" }, null), values: { model: "default", envVars: {} }, edit: { model: "kimi-live-model" } },
+    { runtime: "antigravity", stored: config("antigravity", { kind: "custom", name: "agy-picked" }, { OLD: "1" }), values: { envVars: { OLD: "1" } }, edit: {} },
+  ];
+  for (const { runtime, stored, values, edit } of cases) {
+    const agent = await createAgent(server.id, `v2-edit-${runtime}`, { runtime, model: "x", runtimeConfig: stored });
+    const formRes = await fetch(`${app.baseUrl}/api/agents/${agent.id}/runtime-form`, { headers });
+    assert.equal(formRes.status, 200, runtime);
+    const form = await formRes.json() as { protocolVersion: number; runtimeId: string; values: Record<string, unknown> };
+    assert.equal(form.protocolVersion, 2);
+    assert.equal(form.runtimeId, runtime);
+    assert.deepEqual(form.values, values, runtime);
+
+    const patch = (formValues: Record<string, unknown>) => fetch(`${app.baseUrl}/api/agents/${agent.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ formDefinitionRef: { protocolVersion: 2, runtimeId: runtime }, formValues }),
+    });
+    // Saving the values unchanged stores the same runtimeConfig.
+    const sameRes = await patch(form.values);
+    assert.equal(sameRes.status, 200, `${runtime}: ${await sameRes.clone().text()}`);
+    assert.deepEqual(hydrateRuntimeConfig((await getAgent(agent.id))!), hydrateRuntimeConfig({ runtime, model: "x", runtimeConfig: stored } as never), runtime);
+
+    const editRes = await patch({ ...form.values, ...edit, envVars: { NEW: "2" } });
+    assert.equal(editRes.status, 200, `${runtime}: ${await editRes.clone().text()}`);
+    const after = hydrateRuntimeConfig((await getAgent(agent.id))!);
+    assert.deepEqual(after.envVars, { NEW: "2" }, runtime);
+    assert.deepEqual(after.model, runtime === "antigravity" ? stored.model : { kind: "preset", id: (edit as { model: string }).model }, runtime);
+    assert.equal(after.runtime, runtime);
+  }
+});
+
+test("protocol v2 create points issues found after assembly at the submitted field", async ({ app }) => {
+  const owner = await seedUser("kimi-v2-pointer@slock.test", "kimi-v2-pointer");
+  const server = await createServer("Kimi V2 Pointer", "kimi-v2-pointer", owner.id);
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id, userId: owner.id, name: "kimi-v2-machine",
+    apiKeyHash: "kimi-v2-pointer", runtimes: ["kimi-sdk"],
+  }).returning();
+  const headers = { ...authHeaders(await tokenForHuman(owner.email), server.id), "Content-Type": "application/json" };
+  const orchestrator = app.app.get("agentOrchestrator") as {
+    detectMachineRuntimeModels: (machineId: string, runtime: string) => Promise<unknown>;
+  };
+  orchestrator.detectMachineRuntimeModels = async () => ({
+    kind: "live", value: { default: "kimi-code/k3", models: [{ id: "kimi-code/k3", label: "Kimi K3" }] },
+  });
+  const res = await fetch(`${app.baseUrl}/api/agents`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      name: "V2Kimi",
+      runtime: "kimi-sdk",
+      machineId: machine.id,
+      formDefinitionRef: { protocolVersion: 2, runtimeId: "kimi-sdk" },
+      formValues: { model: "kimi-code/not-on-this-computer" },
+    }),
+  });
+  const body = await res.json() as { issues?: Array<{ pointer: string }> };
+  assert.equal(res.status >= 400, true, JSON.stringify(body));
+  assert.ok(body.issues?.length, JSON.stringify(body));
+  for (const issue of body.issues ?? []) {
+    assert.equal(issue.pointer, "/formValues/model", "a v2 client can only act on /formValues pointers");
+  }
+});
+
+test("RFC 071 §5: Start and Reset are explicit human controls; PATCH lifts the terminal breaker only on a real runtime value change", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("rfc071-controls-owner@slock.test", "rfc071-controls-owner");
+  const server = await createServer("RFC071 Controls Server", "rfc071-controls-server", owner.id);
+  const [machine] = await db.insert(machines).values({
+    serverId: server.id,
+    userId: owner.id,
+    name: "rfc071-controls-machine",
+    apiKeyHash: "rfc071-controls-machine-hash",
+  }).returning();
+  const agent = await createAgent(server.id, "rfc071-controls-agent", {
+    runtime: "codex",
+    model: "gpt-5.6-sol",
+    machineId: machine!.id,
+    creatorType: "user",
+    creatorId: owner.id,
+  });
+  const token = await tokenForHuman(owner.email);
+  const starts: unknown[] = [];
+  const resets: unknown[] = [];
+  const lifts: unknown[] = [];
+  const originalOrchestrator = app.app.get("agentOrchestrator") as Record<string, unknown>;
+  app.app.set("agentOrchestrator", {
+    ...originalOrchestrator,
+    hasMachineLocally: () => true,
+    evictCache: () => {},
+    startAgent: async (agentId: string, options?: unknown) => {
+      starts.push({ agentId, options });
+      return { outcome: "dispatched" as const };
+    },
+    resetAgent: async (agentId: string, mode: string, options?: unknown) => {
+      resets.push({ agentId, mode, options });
+    },
+    liftWakeBlockForConfigChange: async (agentId: string, options?: unknown) => {
+      lifts.push({ agentId, options });
+    },
+  });
+
+  const start = await fetch(`${app.baseUrl}/api/agents/${agent.id}/start`, { method: "POST", headers: authHeaders(token, server.id) });
+  assert.equal(start.status, 200);
+  assert.deepEqual(starts, [{ agentId: agent.id, options: { control: "human_start" } }]);
+
+  const reset = await fetch(`${app.baseUrl}/api/agents/${agent.id}/reset`, {
+    method: "POST",
+    headers: { ...authHeaders(token, server.id), "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "session" }),
+  });
+  assert.equal(reset.status, 202);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(resets, [{ agentId: agent.id, mode: "session", options: { terminalControl: "human_reset" } }]);
+
+  // Same model value: presence alone is not a change (F3).
+  const same = await fetch(`${app.baseUrl}/api/agents/${agent.id}`, {
+    method: "PATCH",
+    headers: { ...authHeaders(token, server.id), "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "gpt-5.6-sol" }),
+  });
+  assert.equal(same.status, 200);
+  assert.deepEqual(lifts.at(-1), { agentId: agent.id, options: { runtimeValuesChanged: false } });
+
+  const changed = await fetch(`${app.baseUrl}/api/agents/${agent.id}`, {
+    method: "PATCH",
+    headers: { ...authHeaders(token, server.id), "Content-Type": "application/json" },
+    body: JSON.stringify({ reasoningEffort: "high" }),
+  });
+  assert.equal(changed.status, 200);
+  assert.deepEqual(lifts.at(-1), { agentId: agent.id, options: { runtimeValuesChanged: true } });
 });

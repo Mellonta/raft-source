@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
+import { buildMessageImageGalleryRows } from "raft-ui";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 import {
   buildImageInlineFallbackKey,
   getImageGalleryPreviewSrc,
@@ -51,29 +51,59 @@ function imageAttachment(overrides: Partial<MessageAttachment> = {}): MessageAtt
   };
 }
 
-test("image gallery layout is ratio-aware instead of count-only", () => {
-  assert.match(source, /export function classifyImageAspect/);
-  assert.match(source, /ratio >= 2\.2/);
-  assert.match(source, /ratio <= 0\.55/);
-  assert.match(source, /export function buildImageGalleryRows/);
-  assert.match(source, /classifyImageAspect\(attachment\) === "wide"[\s\S]*?pushBufferedRows\(\)/);
-  assert.match(source, /getImageGalleryFitClass\(att\)/);
-  assert.match(source, /inline-block w-fit max-w-\[26rem\] justify-self-start/);
-  assert.doesNotMatch(source, /function getImageGalleryGridClass/);
+test("image gallery layout delegates to the shared raft-ui row builder", () => {
+  // The rowing rules (ratio thresholds, wide images taking their own row,
+  // rows of three with a lone four splitting two-and-two, the single-image
+  // reserve box) live in raft-ui's buildMessageImageGalleryRows and are
+  // covered by its own tests. slock keeps only the call and the item slot.
+  assert.match(source, /buildMessageImageGalleryRows/);
+  assert.match(source, /const imageRows = buildMessageImageGalleryRows\(renderedImages\)/);
+  assert.match(source, /<MessageImageGalleryRow/);
+  assert.match(source, /<MessageImageGalleryItem[\s\S]{0,120}layout=\{item\}/);
+  assert.match(source, /const att = renderedImages\[item\.index\]/);
+  // No local builder may creep back in.
+  assert.doesNotMatch(source, /function classifyImageAspect|function buildImageGalleryRows/);
+  assert.doesNotMatch(source, /getImageGalleryRowClasses|getSingleImageReserveStyle|SINGLE_IMAGE_MAX_WIDTH/);
 });
 
-test("single image gallery reserves aspect-ratio space before the image loads", () => {
-  assert.match(source, /const SINGLE_IMAGE_MAX_WIDTH = 416;/);
-  assert.match(source, /const SINGLE_IMAGE_MAX_HEIGHT = 288;/);
-  assert.match(source, /function getSingleImageReserveStyle\(att: MessageImageAttachment\)/);
-  assert.match(source, /return \{ width: "min\(11rem, 100%\)", aspectRatio: "4 \/ 3" \};/);
-  assert.match(source, /const scale = Math\.min\(SINGLE_IMAGE_MAX_WIDTH \/ att\.width, SINGLE_IMAGE_MAX_HEIGHT \/ att\.height, 1\);/);
-  assert.match(source, /const imageReserveStyle = isSingleImage \? getSingleImageReserveStyle\(att\) : undefined;/);
-  assert.match(source, /style=\{imageReserveStyle\}/);
+test("single-image reserve space comes from the shared layout contract", () => {
+  // The reserve box now flows through the builder's per-item layout (which
+  // raft-ui asserts), while the consumer surface and intrinsic size hints
+  // stay here.
+  assert.match(source, /layout=\{item\}/);
+  assert.doesNotMatch(source, /getSingleImageReserveStyle|style=\{imageReserveStyle\}/);
   assert.match(source, /width=\{att\.width \?\? undefined\}/);
   assert.match(source, /height=\{att\.height \?\? undefined\}/);
   assert.match(source, /bg-brutal-cream\/60/);
   assert.doesNotMatch(source, /border-2 border-black bg-transparent/);
+});
+
+test("the migrated builder produces the same rows slock pinned before the port", () => {
+  // Same inputs as the pre-migration suite: the delegation must not change
+  // any rowing result.
+  const rows = buildMessageImageGalleryRows([
+    { width: 800, height: 600 },
+    { width: 300, height: 600 },
+    { width: 1000, height: 200 },
+    { width: 400, height: 400 },
+  ]);
+  assert.deepEqual(rows, [
+    {
+      items: [
+        { index: 0, fit: "cover" },
+        { index: 1, fit: "contain" },
+      ],
+    },
+    { items: [{ index: 2, fit: "contain" }] },
+    { items: [{ index: 3, fit: "cover" }] },
+  ]);
+  assert.deepEqual(buildMessageImageGalleryRows([{ width: 800, height: 600 }]), [
+    {
+      items: [
+        { index: 0, fit: "contain", reserved: { width: "min(384px, 100%)", aspectRatio: "800 / 600" } },
+      ],
+    },
+  ]);
 });
 
 test("optimistic image attachments carry local dimensions when available", () => {

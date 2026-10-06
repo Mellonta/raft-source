@@ -1,17 +1,16 @@
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gt, isNull, ne, or } from "drizzle-orm";
 import { currentDate } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
-  agents,
   channels,
   externalAppCredentials,
   externalAppInstallGrantReceipts,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalAppRegistrationSecrets,
   externalAppRegistrations,
   externalAppServerGrants,
-  externalAuthorPolicies,
   externalBindingAudienceSnapshots,
   externalChannelBindings,
   externalHumanIdentityLinks,
@@ -19,31 +18,16 @@ import {
   oauthClientInstalls,
   serverMembers,
   servers,
-  users,
-} from "../db/schema.js";
-import {
-  effectiveAgentSenderName,
-  effectiveUserSenderName,
-} from "./effectiveSenderName.js";
-import { resolveExternalConversationTarget } from "./externalConversationTargetService.js";
-import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService.js";
+} from "../db/schema";
+import { resolveExternalConversationTarget } from "./externalConversationTargetService";
+import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService";
+import { resolveExternalInstallServerGrantAuthority } from "./externalInstallServerGrantAuthority";
 
 const EXTERNAL_OAUTH_ATTEMPT_TTL_MS = 10 * 60_000;
 
 type DbLike = ReturnType<typeof getDb>;
 type RegistrationRow = typeof externalAppRegistrations.$inferSelect;
 type GrantRow = typeof externalAppServerGrants.$inferSelect;
-
-export interface ExternalAuthorPolicyRuntimeAuthority {
-  provider: "slack";
-  registrationId: string;
-  installId: string;
-  bindingId: string;
-  bindingEpoch: number;
-  consentRevision: number;
-}
-
-export type ExternalAuthorPolicyState = "granted" | "revoked";
 
 export type ExternalAppControlPlaneErrorCode =
   | "external_app_not_authorized"
@@ -60,221 +44,6 @@ export class ExternalAppControlPlaneError extends Error {
     super(message);
     this.name = "ExternalAppControlPlaneError";
   }
-}
-
-function positiveSafeInteger(value: number): boolean {
-  return Number.isSafeInteger(value) && value > 0;
-}
-
-/**
- * Set the desired author-consent state for one exact outbound binding epoch.
- * Runtime supplies the current consent revision; callers cannot mint or widen
- * that authority from request data.
- */
-export async function setExternalAuthorPolicyState(input: {
-  serverId: string;
-  requestingUserId: string;
-  authority: ExternalAuthorPolicyRuntimeAuthority;
-  authorType: "user" | "agent";
-  authorId: string;
-  state: ExternalAuthorPolicyState;
-}, db: DbLike = getDb()): Promise<{
-  created: boolean;
-  policy: typeof externalAuthorPolicies.$inferSelect;
-}> {
-  if (
-    input.authority.provider !== "slack"
-    || !input.serverId
-    || !input.requestingUserId
-    || !input.authorId
-    || !input.authority.registrationId
-    || !input.authority.installId
-    || !input.authority.bindingId
-    || !positiveSafeInteger(input.authority.bindingEpoch)
-    || !positiveSafeInteger(input.authority.consentRevision)
-    || (input.authorType !== "user" && input.authorType !== "agent")
-    || (input.state !== "granted" && input.state !== "revoked")
-  ) {
-    throw new ExternalAppControlPlaneError(
-      "External author policy request is invalid",
-      "external_app_invalid_state",
-    );
-  }
-
-  return db.transaction(async (tx) => {
-    const now = currentDate();
-    const [manager] = await tx.select({ role: serverMembers.role })
-      .from(serverMembers)
-      .where(and(
-        eq(serverMembers.serverId, input.serverId),
-        eq(serverMembers.userId, input.requestingUserId),
-      ))
-      .for("update")
-      .limit(1);
-    if (manager?.role !== "owner" && manager?.role !== "admin") {
-      throw new ExternalAppControlPlaneError(
-        "External author policy operation is not authorized",
-        "external_app_not_authorized",
-      );
-    }
-
-    const [binding] = await tx.select().from(externalChannelBindings)
-      .where(and(
-        eq(externalChannelBindings.id, input.authority.bindingId),
-        eq(externalChannelBindings.serverId, input.serverId),
-      ))
-      .for("update")
-      .limit(1);
-    if (
-      !binding
-      || binding.state !== "active"
-      || binding.registrationId !== input.authority.registrationId
-      || binding.installId !== input.authority.installId
-      || binding.bindingEpoch !== input.authority.bindingEpoch
-    ) {
-      throw new ExternalAppControlPlaneError(
-        "External author policy binding authority is unavailable",
-        "external_app_not_authorized",
-      );
-    }
-
-    const [install] = await tx.select().from(externalAppInstalls)
-      .where(and(
-        eq(externalAppInstalls.id, input.authority.installId),
-        eq(externalAppInstalls.serverId, input.serverId),
-      ))
-      .for("update")
-      .limit(1);
-    const [registration] = await tx.select().from(externalAppRegistrations)
-      .where(eq(externalAppRegistrations.id, input.authority.registrationId))
-      .for("update")
-      .limit(1);
-    if (
-      !install
-      || install.state !== "active"
-      || install.registrationId !== input.authority.registrationId
-      || install.connectionEpoch !== binding.connectionEpoch
-      || install.grantEpoch !== binding.grantEpoch
-      || !registration
-      || registration.state !== "active"
-      || registration.provider !== "slack"
-      || install.providerAppId !== registration.providerAppId
-    ) {
-      throw new ExternalAppControlPlaneError(
-        "External author policy installation authority is unavailable",
-        "external_app_not_authorized",
-      );
-    }
-
-    let displayName: string;
-    if (input.authorType === "user") {
-      const [subjectMembership] = await tx.select({ userId: serverMembers.userId })
-        .from(serverMembers)
-        .where(and(
-          eq(serverMembers.serverId, input.serverId),
-          eq(serverMembers.userId, input.authorId),
-        ))
-        .for("update")
-        .limit(1);
-      const [subject] = await tx.select({ name: users.name, displayName: users.displayName })
-        .from(users)
-        .where(eq(users.id, input.authorId))
-        .for("update")
-        .limit(1);
-      if (!subjectMembership || !subject) {
-        throw new ExternalAppControlPlaneError(
-          "External author policy subject is unavailable",
-          "external_app_not_authorized",
-        );
-      }
-      displayName = effectiveUserSenderName(subject);
-    } else {
-      const [subject] = await tx.select({
-        serverId: agents.serverId,
-        name: agents.name,
-        displayName: agents.displayName,
-        deletedAt: agents.deletedAt,
-      }).from(agents)
-        .where(eq(agents.id, input.authorId))
-        .for("update")
-        .limit(1);
-      if (!subject || subject.serverId !== input.serverId || subject.deletedAt) {
-        throw new ExternalAppControlPlaneError(
-          "External author policy subject is unavailable",
-          "external_app_not_authorized",
-        );
-      }
-      displayName = effectiveAgentSenderName(subject);
-    }
-
-    const policyIdentity = and(
-      eq(externalAuthorPolicies.provider, "slack"),
-      eq(externalAuthorPolicies.installId, input.authority.installId),
-      eq(externalAuthorPolicies.bindingId, input.authority.bindingId),
-      eq(externalAuthorPolicies.bindingEpoch, input.authority.bindingEpoch),
-      eq(externalAuthorPolicies.authorType, input.authorType),
-      eq(externalAuthorPolicies.authorId, input.authorId),
-    );
-    const [existing] = await tx.select().from(externalAuthorPolicies)
-      .where(policyIdentity)
-      .for("update")
-      .limit(1);
-    if (
-      existing
-      && (
-        existing.serverId !== input.serverId
-        || existing.appRegistrationId !== input.authority.registrationId
-        || existing.consentRevision > input.authority.consentRevision
-      )
-    ) {
-      throw new ExternalAppControlPlaneError(
-        "External author policy revision conflicts with current runtime authority",
-        "external_app_invalid_state",
-      );
-    }
-
-    const values = {
-      serverId: input.serverId,
-      provider: "slack",
-      appRegistrationId: input.authority.registrationId,
-      installId: input.authority.installId,
-      bindingId: input.authority.bindingId,
-      bindingEpoch: input.authority.bindingEpoch,
-      authorType: input.authorType,
-      authorId: input.authorId,
-      displayName,
-      avatarArtifactId: existing?.avatarArtifactId ?? null,
-      fallbackKind: input.authorType === "user" ? "human" as const : "agent" as const,
-      consentRevision: input.authority.consentRevision,
-      state: input.state,
-      updatedAt: now,
-    };
-    const [policy] = existing
-      ? await tx.update(externalAuthorPolicies).set(values)
-        .where(eq(externalAuthorPolicies.id, existing.id))
-        .returning()
-      : await tx.insert(externalAuthorPolicies).values({
-          ...values,
-          createdAt: now,
-        }).onConflictDoUpdate({
-          target: [
-            externalAuthorPolicies.provider,
-            externalAuthorPolicies.installId,
-            externalAuthorPolicies.bindingId,
-            externalAuthorPolicies.bindingEpoch,
-            externalAuthorPolicies.authorType,
-            externalAuthorPolicies.authorId,
-          ],
-          set: values,
-        }).returning();
-    if (!policy) {
-      throw new ExternalAppControlPlaneError(
-        "External author policy could not be persisted",
-        "external_app_persist_failed",
-      );
-    }
-    return { created: !existing, policy };
-  });
 }
 
 function sha256(value: string): string {
@@ -676,6 +445,7 @@ export async function completeExternalOAuthAttempt(input: {
   providerTeamId: string;
   providerEnterpriseId?: string | null;
   providerUserId: string;
+  providerInstallerIsWorkspaceAdmin: boolean;
   botUserId: string;
   providerBotId?: string | null;
   workspaceName?: string | null;
@@ -739,6 +509,7 @@ export async function completeExternalOAuthAttempt(input: {
       || !providerTeamId
       || !providerUserId
       || !botUserId
+      || input.providerInstallerIsWorkspaceAdmin !== true
       || providerUserId === botUserId
       || (
         input.providerEnterpriseId !== undefined
@@ -778,19 +549,61 @@ export async function completeExternalOAuthAttempt(input: {
       ))
       .limit(1)
       .for("update");
-    if (existing && existing.serverId !== attempt.serverId) {
+    const [existingCredential] = existing
+      ? await tx.select().from(externalAppCredentials).where(and(
+          eq(externalAppCredentials.installId, existing.id),
+          eq(externalAppCredentials.credentialRevision, existing.credentialRevision),
+        )).for("update").limit(1)
+      : [];
+    const existingCredentialUsable = Boolean(
+      existing
+      && existing.state === "active"
+      && existingCredential?.state === "active"
+      && (existingCredential.expiresAt === null || existingCredential.expiresAt > now),
+    );
+    const sharedInstallIdentityMatches = Boolean(
+      existing
+      && existing.providerAppId === input.providerAppId
+      && existing.providerTeamId === providerTeamId
+      && existing.providerAuthorityId === providerTeamId
+      && existing.botUserId === botUserId
+      && (existing.providerBotId === null || existing.providerBotId === (input.providerBotId ?? null))
+      && sameStrings(existing.installedScopes, installedScopes),
+    );
+    if (
+      existing
+      && existing.serverId !== attempt.serverId
+      && existingCredentialUsable
+      && !sharedInstallIdentityMatches
+    ) {
       throw new ExternalAppControlPlaneError(
-        "External workspace is already owned by another server",
+        "External workspace identity conflicts with the shared installation",
         "external_app_install_conflict",
       );
     }
-
-    const connectionEpoch = existing ? existing.connectionEpoch + 1 : 1;
-    const credentialRevision = existing ? existing.credentialRevision + 1 : 1;
-    const [install] = existing
+    const sharedGrantOnly = Boolean(
+      existing
+      && existing.serverId !== attempt.serverId
+      && existingCredentialUsable
+      && sharedInstallIdentityMatches,
+    );
+    const connectionEpoch = existing
+      ? sharedGrantOnly ? existing.connectionEpoch : existing.connectionEpoch + 1
+      : 1;
+    const credentialRevision = existing
+      ? sharedGrantOnly ? existing.credentialRevision : existing.credentialRevision + 1
+      : 1;
+    const [install] = sharedGrantOnly
+      ? [existing!]
+      : existing
       ? await tx
         .update(externalAppInstalls)
         .set({
+          // The install row's server coordinates are the credential-AAD
+          // steward, not the complete authorization set. The exact set lives
+          // in external_app_install_server_grants below. A fresh OAuth
+          // exchange reseals the one shared token for the authorizing server.
+          serverId: attempt.serverId,
           serverGrantId: attempt.serverGrantId,
           grantEpoch: attempt.grantEpoch,
           state: "active",
@@ -844,34 +657,102 @@ export async function completeExternalOAuthAttempt(input: {
       );
     }
 
+    if (existing && !sharedGrantOnly) {
+      const currentBindings = await tx.select().from(externalChannelBindings).where(and(
+        eq(externalChannelBindings.installId, existing.id),
+        eq(externalChannelBindings.connectionEpoch, existing.connectionEpoch),
+        or(
+          eq(externalChannelBindings.state, "active"),
+          eq(externalChannelBindings.state, "paused"),
+          eq(externalChannelBindings.state, "quarantined"),
+        ),
+      )).for("update");
+      for (const binding of currentBindings) {
+        const [frozen] = await tx.update(externalChannelBindings).set({
+          state: "paused",
+          stateReason: "provider_reauthorized_review_required",
+          connectionEpoch,
+          bindingEpoch: binding.bindingEpoch + 1,
+          updatedAt: now,
+        }).where(and(
+          eq(externalChannelBindings.id, binding.id),
+          eq(externalChannelBindings.state, binding.state),
+          eq(externalChannelBindings.connectionEpoch, binding.connectionEpoch),
+          eq(externalChannelBindings.bindingEpoch, binding.bindingEpoch),
+        )).returning({ id: externalChannelBindings.id });
+        if (!frozen) {
+          throw new ExternalAppControlPlaneError(
+            "External workspace bindings changed during reauthorization",
+            "external_app_install_conflict",
+          );
+        }
+      }
+    }
+
     await tx
-      .insert(externalAppCredentials)
+      .insert(externalAppInstallServerGrants)
       .values({
         installId: install.id,
+        serverId: attempt.serverId,
+        registrationId: registration.id,
+        serverGrantId: attempt.serverGrantId,
+        grantEpoch: attempt.grantEpoch,
         state: "active",
-        encryptedMaterial: input.sealedCredential.encryptedMaterial,
-        envelopeKeyId: input.sealedCredential.envelopeKeyId,
-        aadVersion: input.sealedCredential.aadVersion,
-        credentialRevision,
-        expiresAt: input.sealedCredential.expiresAt ?? null,
+        authorizedByType: "human",
+        authorizedById: attempt.requestingUserId,
+        revokedAt: null,
+        revokeReason: null,
         createdAt: now,
         updatedAt: now,
       })
       .onConflictDoUpdate({
-        target: externalAppCredentials.installId,
+        target: [
+          externalAppInstallServerGrants.installId,
+          externalAppInstallServerGrants.serverId,
+        ],
         set: {
+          registrationId: registration.id,
+          serverGrantId: attempt.serverGrantId,
+          grantEpoch: attempt.grantEpoch,
+          state: "active",
+          authorizedByType: "human",
+          authorizedById: attempt.requestingUserId,
+          revokedAt: null,
+          revokeReason: null,
+          updatedAt: now,
+        },
+      });
+
+    if (!sharedGrantOnly) {
+      await tx
+        .insert(externalAppCredentials)
+        .values({
+          installId: install.id,
           state: "active",
           encryptedMaterial: input.sealedCredential.encryptedMaterial,
           envelopeKeyId: input.sealedCredential.envelopeKeyId,
           aadVersion: input.sealedCredential.aadVersion,
           credentialRevision,
           expiresAt: input.sealedCredential.expiresAt ?? null,
-          leaseOwner: null,
-          leaseExpiresAt: null,
-          revokedAt: null,
+          createdAt: now,
           updatedAt: now,
-        },
-      });
+        })
+        .onConflictDoUpdate({
+          target: externalAppCredentials.installId,
+          set: {
+            state: "active",
+            encryptedMaterial: input.sealedCredential.encryptedMaterial,
+            envelopeKeyId: input.sealedCredential.envelopeKeyId,
+            aadVersion: input.sealedCredential.aadVersion,
+            credentialRevision,
+            expiresAt: input.sealedCredential.expiresAt ?? null,
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            revokedAt: null,
+            updatedAt: now,
+          },
+        });
+    }
 
     const identity = await persistExternalHumanIdentityLink(tx as DbLike, {
       serverId: attempt.serverId,
@@ -940,13 +821,21 @@ export async function revokeExternalHumanIdentityLink(input: {
         externalAppInstalls,
         eq(externalAppInstalls.id, externalHumanIdentityLinks.installId),
       )
+      .innerJoin(
+        externalAppInstallServerGrants,
+        and(
+          eq(externalAppInstallServerGrants.installId, externalHumanIdentityLinks.installId),
+          eq(externalAppInstallServerGrants.serverId, externalHumanIdentityLinks.serverId),
+        ),
+      )
       .where(and(
         eq(externalHumanIdentityLinks.serverId, input.serverId),
         eq(externalHumanIdentityLinks.installId, input.installId),
         eq(externalHumanIdentityLinks.userId, input.userId),
         eq(externalHumanIdentityLinks.state, "active"),
         eq(externalHumanIdentityLinks.linkEpoch, input.expectedLinkEpoch),
-        eq(externalAppInstalls.serverId, input.serverId),
+        eq(externalAppInstallServerGrants.serverId, input.serverId),
+        eq(externalAppInstallServerGrants.state, "active"),
       ))
       .limit(1)
       .for("update");
@@ -996,6 +885,7 @@ export type ExternalBindingAuthorityReason =
   | "install_inactive"
   | "credential_unavailable"
   | "credential_stale"
+  | "privacy_stale"
   | "epoch_mismatch"
   | "channel_unavailable"
   | "install_grant_unavailable"
@@ -1055,6 +945,9 @@ export async function resolveExternalBindingAuthority(input: {
       .limit(1);
     if (!binding) return { active: false, reason: "binding_missing" };
     if (binding.state !== "active") return { active: false, reason: "binding_inactive" };
+    if (!binding.privacyFreshUntil || binding.privacyFreshUntil <= now) {
+      return { active: false, reason: "privacy_stale" };
+    }
 
     const [registration] = await tx
       .select()
@@ -1068,27 +961,25 @@ export async function resolveExternalBindingAuthority(input: {
     const [install] = await tx
       .select()
       .from(externalAppInstalls)
-      .where(and(
-        eq(externalAppInstalls.id, binding.installId),
-        eq(externalAppInstalls.serverId, input.serverId),
-      ))
+      .where(eq(externalAppInstalls.id, binding.installId))
       .limit(1);
     if (!install || install.state !== "active") {
       return { active: false, reason: "install_inactive" };
     }
-    const [currentGrant] = await tx
-      .select()
-      .from(externalAppServerGrants)
-      .where(and(
-        eq(externalAppServerGrants.id, install.serverGrantId),
-        eq(externalAppServerGrants.serverId, input.serverId),
-      ))
-      .limit(1);
+    const serverAuthority = await resolveExternalInstallServerGrantAuthority(tx, {
+      installId: install.id,
+      serverId: input.serverId,
+      registrationId: registration.id,
+    });
+    if (!serverAuthority.current) {
+      return {
+        active: false,
+        reason: serverAuthority.reason === "epoch_mismatch" ? "epoch_mismatch" : "grant_inactive",
+      };
+    }
+    const { association: installServerGrant, grant: currentGrant } = serverAuthority;
     if (
-      !currentGrant
-      || currentGrant.state !== "active"
-      || currentGrant.registrationId !== registration.id
-      || install.registrationId !== registration.id
+      install.registrationId !== registration.id
       || install.providerAppId !== registration.providerAppId
       || currentGrant.grantedManifestVersion !== registration.capabilityManifestVersion
       || currentGrant.grantedManifestHash !== registration.capabilityManifestHash
@@ -1112,7 +1003,7 @@ export async function resolveExternalBindingAuthority(input: {
 
     if (
       binding.grantEpoch !== currentGrant.grantEpoch
-      || install.grantEpoch !== currentGrant.grantEpoch
+      || installServerGrant.grantEpoch !== currentGrant.grantEpoch
       || binding.connectionEpoch !== install.connectionEpoch
       || install.connectionEpoch !== input.expectedConnectionEpoch
       || binding.bindingEpoch !== input.expectedBindingEpoch

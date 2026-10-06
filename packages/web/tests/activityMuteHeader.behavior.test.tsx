@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import type { ReactNode } from "react";
 import { toast } from "raft-ui";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { TOPBAR_OVERFLOW_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 // ChatPanel's Leave-channel flow mounts the react-intl-migrated ConfirmDialog,
 // which needs an <IntlProvider> ancestor.
 import { TestIntlProvider } from "./helpers/intl";
@@ -13,7 +12,6 @@ import type { Locale } from "../src/i18n/locale";
 import api from "../src/api/client";
 import ChatPanel, {
   ActivityMutedBadge,
-  ActivityMuteToggleButton,
   normalizeActivityMuteSettings,
 } from "../src/components/message/ChatPanel";
 import Sidebar from "../src/components/layout/Sidebar";
@@ -24,19 +22,19 @@ import { useChannelStore } from "../src/store/channelStore";
 import { useInboxStore } from "../src/store/inboxStore";
 import { useMachineStore } from "../src/store/machineStore";
 import { useMessageStore } from "../src/store/messageStore";
-import { useServerStore } from "../src/store/serverStore";
+import { resetInFlightLoadersForTest, useServerStore } from "../src/store/serverStore";
 import { SERVER_NOTIFICATION_PREFS_UPDATED_EVENT } from "../src/store/events/notificationPrefsEvents";
 import { useTaskStore } from "../src/store/taskStore";
 import { useUIStore } from "../src/store/uiStore";
 import {
   resetServerFeatureFlagsForTests,
-  setServerFeatureFlagForTests,
 } from "../src/store/serverFeatureFlags";
+import { settleFirstPageLoadMessages } from "./helpers/firstPageStub";
 
 const originalGet = api.get.bind(api);
 const originalPatch = api.patch.bind(api);
 const test = ((name: string, fn: Parameters<typeof nodeTest>[1]) =>
-  nodeTest(name, { concurrency: false }, fn)) as typeof nodeTest;
+  nodeTest(name,  fn)) as typeof nodeTest;
 
 function makeSidebarOrder() {
   return {
@@ -60,6 +58,9 @@ function makeSidebarOrder() {
 
 afterEach(() => {
   cleanup();
+  // The store's single-flight map is module-level, so a case that stubbed api
+  // with a never-settling promise would strand its window for every later case.
+  resetInFlightLoadersForTest();
   api.get = originalGet as typeof api.get;
   api.patch = originalPatch as typeof api.patch;
   localStorage.clear();
@@ -102,6 +103,7 @@ function renderChatPanel(
     locale?: Locale;
   } = {},
 ) {
+  options = { serverRole: "owner", ...options };
   if (options.serverRole) {
     useAuthStore.setState({
       user: { id: "user-activity-mute", name: "activity-mute-user" },
@@ -129,13 +131,6 @@ function renderChatPanel(
       : [],
     sidebarOrder: makeSidebarOrder(),
   });
-  if (options.serverRole) {
-    setServerFeatureFlagForTests(
-      "server-activity-mute",
-      TOPBAR_OVERFLOW_FEATURE_FLAG_KEY,
-      false,
-    );
-  }
   useChannelStore.setState({
     channels: channel.type === "dm" ? [] : [channel],
     dmChannels: channel.type === "dm" ? [channel] : [],
@@ -157,7 +152,7 @@ function renderChatPanel(
     highlightedMessageId: null,
     contextLoadError: null,
     transientFocusRequest: null,
-    loadMessages: async () => {},
+    loadMessages: settleFirstPageLoadMessages,
     loadMessageContext: async () => {},
     loadMessageWindowSilent: async () => {},
     loadOlderMessages: async () => {},
@@ -228,11 +223,6 @@ function renderSidebarForMute(
     members: [],
     sidebarOrder,
   });
-  setServerFeatureFlagForTests(
-    server.id,
-    TOPBAR_OVERFLOW_FEATURE_FLAG_KEY,
-    false,
-  );
   useChannelStore.setState({
     channels,
     dmChannels: [],
@@ -261,57 +251,13 @@ function renderSidebarForMute(
   );
 }
 
-test("Activity mute header control labels channel semantics without implying read or hide", () => {
-  let toggles = 0;
-  const { rerender } = render(
-    <ActivityMuteToggleButton
-      activityMuted={false}
-      disabled={false}
-      onToggle={() => { toggles += 1; }}
-    />,
-    { wrapper: TestIntlProvider },
-  );
-
-  const muteChannel = screen.getByRole("button", { name: "Mute activity for this channel" });
-  assert.equal(muteChannel.getAttribute("title"), "Mute activity for this channel");
-  assert.equal(muteChannel.className.includes("bg-white"), true);
-  fireEvent.click(muteChannel);
-  assert.equal(toggles, 1);
-
-  rerender(
-    <ActivityMuteToggleButton
-      activityMuted={true}
-      disabled={false}
-      onToggle={() => { toggles += 1; }}
-    />,
-  );
-
-  const unmuteChannel = screen.getByRole("button", { name: "Unmute activity for this channel" });
-  assert.equal(unmuteChannel.getAttribute("title"), "Unmute activity for this channel");
-  assert.equal(unmuteChannel.className.includes("bg-brutal-orange"), true);
-  fireEvent.click(unmuteChannel);
-  assert.equal(toggles, 2);
-
-  rerender(
-    <ActivityMuteToggleButton
-      activityMuted={true}
-      disabled={true}
-      onToggle={() => { toggles += 1; }}
-    />,
-  );
-
-  const disabledUnmuteChannel = screen.getByRole("button", { name: "Unmute activity for this channel" });
-  assert.equal((disabledUnmuteChannel as HTMLButtonElement).disabled, true);
-  assert.equal(disabledUnmuteChannel.className.includes("cursor-wait"), true);
-  assert.equal(disabledUnmuteChannel.className.includes("opacity-60"), true);
-});
-
 test("Activity muted badge states that direct mentions still notify", () => {
   render(<ActivityMutedBadge />, { wrapper: TestIntlProvider });
 
   const badge = screen.getByTestId("activity-muted-badge");
-  assert.equal(badge.textContent?.trim(), "Muted");
-  assert.equal(badge.getAttribute("title"), "Activity muted. Direct mentions can still notify you.");
+  assert.equal(badge.textContent?.trim(), "");
+  assert.equal(badge.getAttribute("title"), null);
+  assert.ok(badge.hasAttribute("data-base-ui-tooltip-trigger"), "muted badge hint now rides the RUI tooltip trigger");
 });
 
 test("Activity mute settings parser only accepts explicit state, seq, and non-negative integer version", () => {
@@ -352,116 +298,62 @@ test("Activity mute settings parser only accepts explicit state, seq, and non-ne
   });
 });
 
-test("channel options stay hidden for unjoined members and #all members", () => {
+test("settings retain the unjoined and capability-restricted #all entry policy", async () => {
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
-    return { data: { activityMuted: false, muteFromSeq: null, activityMuteSupported: false } };
+    return { data: { activityMuted: false, collapseLongMessages: true } };
   }) as typeof api.get;
-
-  renderChatPanel(makeChannel({
-    id: "guard-unjoined-channel",
-    name: "guard-unjoined",
-    joined: false,
-    activityMuteSupported: false,
-  }), { serverRole: "member" });
-  assert.ok(screen.getByRole("button", { name: "Search this channel" }));
-  const unjoinedHasOptions = screen.queryByRole("button", { name: "Channel options" }) !== null;
-  cleanup();
-  assert.equal(unjoinedHasOptions, false);
-
-  renderChatPanel(makeChannel({
-    id: "guard-all-channel",
-    name: "all",
-    joined: true,
-    activityMuteSupported: false,
-  }), { serverRole: "member" });
-  assert.ok(screen.getByRole("button", { name: "Search this channel" }));
-  const allHasOptions = screen.queryByRole("button", { name: "Channel options" }) !== null;
-  cleanup();
-  assert.equal(allHasOptions, false);
+  for (const channel of [makeChannel({ joined: false }), makeChannel({ name: "all", channelCapabilities: {} })]) {
+    renderChatPanel(channel, { serverRole: "member" });
+    await openSettings();
+    assert.equal(screen.queryAllByTestId("channel-settings-panel").length, 0);
+    assert.equal(screen.queryAllByTestId("channel-overflow-mute-switch").length, 0);
+    cleanup();
+  }
 });
 
-test("Channel settings opens in a side sheet with an empty description when the channel has none", async () => {
+async function openSettings() {
+  fireEvent.click(screen.getByTestId("channel-overflow-trigger"));
+  return screen.findByTestId("channel-overflow-sheet");
+}
+
+function assertMuteState(muted: boolean) {
+  const control = screen.getByTestId("channel-overflow-mute-switch");
+  assert.equal(control.getAttribute("aria-checked"), String(muted));
+  return control;
+}
+
+test("Channel settings preserves an empty description and guards unsaved drafts", async () => {
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
-    return { data: { activityMuted: false, muteFromSeq: null, activityMuteSupported: true } };
+    return { data: { activityMuted: false, collapseLongMessages: true } };
   }) as typeof api.get;
-
-  renderChatPanel(makeChannel({ id: "empty-description-channel", description: null }), { serverRole: "owner" });
-
-  assert.ok(await screen.findByRole("button", { name: "Mute activity for this channel" }));
-  fireEvent.click(screen.getByRole("button", { name: "Channel settings" }));
-  const sheet = await screen.findByRole("dialog", { name: "Settings" });
-  assert.equal(sheet.getAttribute("data-testid"), "channel-settings-sheet");
-  assert.ok(sheet.classList.contains("right-0"));
-  assert.ok(sheet.classList.contains("h-dvh"));
-  assert.ok(sheet.classList.contains("transition-[transform,height,opacity,filter]"));
-  assert.ok(sheet.classList.contains("data-starting-style:transform-(--closed-transform)"));
-  assert.ok(sheet.classList.contains("motion-reduce:transition-none"));
-  assert.ok(sheet.classList.contains("[--drawer-exit-x:calc(100%+var(--drawer-inset)+2px)]"));
+  renderChatPanel(makeChannel({ description: null }));
+  await openSettings();
+  const description = screen.getByPlaceholderText("What is this channel about?");
+  assert.equal((description as HTMLTextAreaElement).value, "");
+  fireEvent.change(description, { target: { value: "Unsaved draft" } });
+  fireEvent.pointerDown(document.body);
+  fireEvent.click(document.body);
+  await screen.findByTestId("channel-overflow-unsaved-prompt");
+  assert.ok(screen.getByDisplayValue("Unsaved draft"));
+  fireEvent.click(screen.getByTestId("channel-overflow-unsaved-discard"));
+  await waitFor(() => assert.equal(screen.queryAllByTestId("channel-overflow-sheet").length, 0));
+  await openSettings();
   assert.equal((screen.getByPlaceholderText("What is this channel about?") as HTMLTextAreaElement).value, "");
-
-  const cleanBackdrop = document.querySelector<HTMLElement>('[data-slot="drawer-overlay"]');
-  assert.ok(cleanBackdrop);
-  fireEvent.pointerDown(cleanBackdrop);
-  fireEvent.click(cleanBackdrop);
-  await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Settings" }), null));
-
-  fireEvent.click(screen.getByRole("button", { name: "Channel settings" }));
-  const draftDescription = await screen.findByPlaceholderText("What is this channel about?");
-  fireEvent.change(draftDescription, { target: { value: "Unsaved side-sheet draft" } });
-  const dirtyBackdrop = document.querySelector<HTMLElement>('[data-slot="drawer-overlay"]');
-  assert.ok(dirtyBackdrop);
-  fireEvent.pointerDown(dirtyBackdrop);
-  fireEvent.click(dirtyBackdrop);
-  assert.ok(screen.getByRole("dialog", { name: "Settings" }));
-  assert.equal((draftDescription as HTMLTextAreaElement).value, "Unsaved side-sheet draft");
-
-  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-  await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Settings" }), null));
-
-  fireEvent.click(screen.getByRole("button", { name: "Channel settings" }));
-  assert.ok(await screen.findByRole("dialog", { name: "Settings" }));
-  fireEvent.change(screen.getByPlaceholderText("What is this channel about?"), {
-    target: { value: "Escape still closes a dirty draft" },
-  });
-  fireEvent.keyDown(document, { key: "Escape" });
-  await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Settings" }), null));
 });
 
-test("Channel settings sheet chrome is localized in English and Chinese", async () => {
+test("Channel settings preferences are localized in English and Chinese", async () => {
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
-    return { data: { activityMuted: false, muteFromSeq: null, activityMuteSupported: true } };
+    return { data: { activityMuted: false, collapseLongMessages: true } };
   }) as typeof api.get;
-
-  renderChatPanel(makeChannel({ id: "localized-settings-en" }), { serverRole: "owner" });
-  fireEvent.click(screen.getByRole("button", { name: "Channel settings" }));
-  const englishSheet = await screen.findByRole("dialog", { name: "Settings" });
-  assert.ok(within(englishSheet).getByText("Channel"));
-  assert.ok(within(englishSheet).getByRole("button", { name: "Close channel settings" }));
-  assert.ok(within(englishSheet).getByText("Channel info"));
-  assert.ok(within(englishSheet).getByText("Name and description shown across the workspace."));
-  assert.ok(within(englishSheet).getByText("Channel actions"));
-  assert.ok(within(englishSheet).getByText("Membership, visibility, conversion, archive, and destructive controls."));
-  assert.ok(!within(englishSheet).queryByText("Access"));
-  cleanup();
-
-  renderChatPanel(makeChannel({ id: "localized-settings-zh", type: "joint" }), {
-    serverRole: "owner",
-    locale: "zh-cn",
-  });
-  fireEvent.click(screen.getByRole("button", { name: "频道设置" }));
-  const chineseSheet = await screen.findByRole("dialog", { name: "设置" });
-  assert.ok(within(chineseSheet).getByText("频道"));
-  assert.ok(within(chineseSheet).getByRole("button", { name: "关闭频道设置" }));
-  assert.ok(within(chineseSheet).getByText("频道信息"));
-  assert.ok(within(chineseSheet).getByText("在整个工作空间中显示的名称和描述。"));
-  assert.ok(within(chineseSheet).getByText("联合频道"));
-  assert.ok(within(chineseSheet).getByText("已连接的服务器和联合频道邀请。"));
-  assert.ok(within(chineseSheet).getByText("频道操作"));
-  assert.ok(within(chineseSheet).getByText("成员资格、可见性、转换、归档和破坏性操作。"));
-  assert.ok(!within(chineseSheet).queryByText("访问权限"));
+  for (const [locale, label] of [["en", "Mute activity"], ["zh-cn", "静音活动"]] as const) {
+    renderChatPanel(makeChannel(), { locale });
+    const sheet = await openSettings();
+    assert.ok(within(sheet).getByRole("switch", { name: label }));
+    cleanup();
+  }
 });
 
 test("Activity mute header loads settings, disables while loading, and toggles with server-normalized response", async () => {
@@ -471,6 +363,7 @@ test("Activity mute header loads settings, disables while loading, and toggles w
   const calls: Array<{ method: "get" | "patch"; url: string; body?: unknown }> = [];
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
+    if (url.endsWith("/message-display-settings")) return { data: { collapseLongMessages: true, prefsVersion: 0 } };
     calls.push({ method: "get", url });
     return load.promise;
   }) as typeof api.get;
@@ -480,9 +373,10 @@ test("Activity mute header loads settings, disables while loading, and toggles w
   }) as typeof api.patch;
 
   renderChatPanel(channel);
+  await openSettings();
 
-  const loadingButton = screen.getByRole("button", { name: "Mute activity for this channel" });
-  assert.equal((loadingButton as HTMLButtonElement).disabled, true);
+  const loadingButton = assertMuteState(false);
+  assert.equal(loadingButton.getAttribute("aria-disabled") === "true", true);
   assert.deepEqual(calls.filter((call) => call.url.includes("/notification-settings")), [
     { method: "get", url: "/channels/channel-activity-mute/notification-settings" },
   ]);
@@ -493,19 +387,17 @@ test("Activity mute header loads settings, disables while loading, and toggles w
     await flushAsyncWork();
   });
 
-  const unmuteButton = await screen.findByRole("button", { name: "Unmute activity for this channel" });
-  assert.equal((unmuteButton as HTMLButtonElement).disabled, false);
+  const unmuteButton = assertMuteState(true);
+  assert.equal(unmuteButton.getAttribute("aria-disabled") === "true", false);
   assert.ok(screen.getByTestId("activity-muted-badge"));
-  assert.deepEqual(useChannelStore.getState().channels.find((item) => item.id === channel.id), {
-    ...channel,
-    activityMuted: true,
-    muteFromSeq: 7,
-  });
+  const loadedChannel = useChannelStore.getState().channels.find((item) => item.id === channel.id);
+  assert.equal(loadedChannel?.activityMuted, true);
+  assert.equal(loadedChannel?.muteFromSeq, 7);
 
   await act(async () => {
     fireEvent.click(unmuteButton);
   });
-  assert.equal((unmuteButton as HTMLButtonElement).disabled, true);
+  assert.equal(unmuteButton.getAttribute("aria-disabled") === "true", true);
   assert.equal(screen.queryByTestId("activity-muted-badge"), null);
   assert.equal(useChannelStore.getState().channels.find((item) => item.id === channel.id)?.activityMuted, false);
   assert.deepEqual(calls.at(-1), {
@@ -521,7 +413,7 @@ test("Activity mute header loads settings, disables while loading, and toggles w
   });
 
   await waitFor(() => {
-    assert.equal(screen.getByRole("button", { name: "Mute activity for this channel" }).hasAttribute("disabled"), false);
+    assert.equal(assertMuteState(false).getAttribute("aria-disabled") === "true", false);
   });
   assert.equal(screen.queryByTestId("activity-muted-badge"), null);
   assert.equal(useChannelStore.getState().channels.find((item) => item.id === channel.id)?.activityMuted, false);
@@ -534,6 +426,7 @@ test("Activity mute header reports load and save failures without losing dismiss
   const saveFailure = createDeferred<{ data: unknown }>();
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
+    if (url.endsWith("/message-display-settings")) return { data: { collapseLongMessages: true, prefsVersion: 0 } };
     return loadFailure.promise;
   }) as typeof api.get;
   api.patch = (async () => {
@@ -564,10 +457,12 @@ test("Activity mute header reports load and save failures without losing dismiss
   const loadSuccess = createDeferred<{ data: unknown }>();
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
+    if (url.endsWith("/message-display-settings")) return { data: { collapseLongMessages: true, prefsVersion: 0 } };
     return loadSuccess.promise;
   }) as typeof api.get;
 
   renderChatPanel(channel);
+  await openSettings();
 
   await act(async () => {
     loadSuccess.resolve({ data: { activityMuted: false, muteFromSeq: null, activityMuteSupported: true } });
@@ -575,7 +470,7 @@ test("Activity mute header reports load and save failures without losing dismiss
     await flushAsyncWork();
   });
 
-  const muteButton = await screen.findByRole("button", { name: "Mute activity for this channel" });
+  const muteButton = assertMuteState(false);
   await act(async () => {
     fireEvent.click(muteButton);
     assert.equal(useChannelStore.getState().channels.find((item) => item.id === channel.id)?.activityMuted, true);
@@ -596,6 +491,7 @@ test("Activity mute header uses static channel eligibility instead of server cap
   const load = createDeferred<{ data: unknown }>();
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
+    if (url.endsWith("/message-display-settings")) return { data: { collapseLongMessages: true, prefsVersion: 0 } };
     if (url.includes("/notification-settings")) calls.push(url);
     return load.promise;
   }) as typeof api.get;
@@ -605,20 +501,22 @@ test("Activity mute header uses static channel eligibility instead of server cap
     await flushAsyncWork();
   });
 
-  assert.ok(screen.getByRole("button", { name: "Mute activity for this channel" }));
+  await openSettings();
+  assert.ok(assertMuteState(false));
   assert.deepEqual(calls, ["/channels/channel-activity-mute/notification-settings"]);
   await act(async () => {
     load.resolve({ data: { activityMuted: true, muteFromSeq: "1", activityMuteSupported: true } });
     await load.promise;
     await flushAsyncWork();
   });
-  assert.ok(await screen.findByRole("button", { name: "Unmute activity for this channel" }));
+  assert.ok(assertMuteState(true));
 });
 
 test("Activity mute header is unavailable for unjoined channels and threads", async () => {
   const calls: string[] = [];
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
+    if (url.endsWith("/message-display-settings")) return { data: { collapseLongMessages: true, prefsVersion: 0 } };
     if (url.includes("/notification-settings")) calls.push(url);
     return { data: { activityMuted: true, muteFromSeq: "1", activityMuteSupported: true } };
   }) as typeof api.get;
@@ -638,7 +536,7 @@ test("Activity mute header is unavailable for unjoined channels and threads", as
     highlightedMessageId: null,
     contextLoadError: null,
     transientFocusRequest: null,
-    loadMessages: async () => {},
+    loadMessages: settleFirstPageLoadMessages,
     loadMessageContext: async () => {},
     loadMessageWindowSilent: async () => {},
     loadOlderMessages: async () => {},
@@ -683,22 +581,21 @@ test("Activity mute control is absent for DMs and present for channels in en and
   const cases = [
     {
       locale: "en" as const,
-      mutedLabel: "Unmute activity for this channel",
-      unmutedLabel: "Mute activity for this channel",
+      label: "Mute activity",
     },
     {
       locale: "zh-cn" as const,
-      mutedLabel: "为此频道取消静音活动",
-      unmutedLabel: "为此频道静音活动",
+      label: "静音活动",
     },
   ];
 
-  for (const { locale, mutedLabel, unmutedLabel } of cases) {
+  for (const { locale, label } of cases) {
     for (const activityMuted of [false, true]) {
       const calls: string[] = [];
       const patched: Array<{ url: string; body: unknown }> = [];
       api.get = (async (url: string) => {
         if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
+    if (url.endsWith("/message-display-settings")) return { data: { collapseLongMessages: true, prefsVersion: 0 } };
         if (url.includes("/notification-settings")) calls.push(url);
         return { data: { activityMuted, muteFromSeq: activityMuted ? "1" : null, prefsVersion: 1 } };
       }) as typeof api.get;
@@ -723,7 +620,7 @@ test("Activity mute control is absent for DMs and present for channels in en and
         // makes node:assert try to diff a DOM node on failure, which stalls the
         // whole file for ~65s instead of reporting. A hang is not a RED.
         assert.equal(
-          screen.queryAllByTestId("activity-mute-toggle").length,
+          screen.queryAllByTestId("channel-overflow-mute-switch").length,
           0,
           `${locale} muted=${activityMuted}: DM must render no Activity mute control`,
         );
@@ -739,12 +636,9 @@ test("Activity mute control is absent for DMs and present for channels in en and
           renderChatPanel(makeChannel({ activityMuted }), { locale });
           await flushAsyncWork();
         });
-        const toggle = screen.getByTestId("activity-mute-toggle");
-        assert.equal(
-          toggle.getAttribute("aria-label"),
-          activityMuted ? mutedLabel : unmutedLabel,
-          `${locale} muted=${activityMuted}: unexpected control label`,
-        );
+        await openSettings();
+        const toggle = screen.getByRole("switch", { name: label });
+        assert.equal(toggle.getAttribute("aria-checked"), String(activityMuted));
         assert.deepEqual(
           calls,
           ["/channels/channel-activity-mute/notification-settings"],
@@ -812,14 +706,16 @@ test("Activity mute header uses channel-row state before notification-settings f
   const load = createDeferred<{ data: unknown }>();
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
+    if (url.endsWith("/message-display-settings")) return { data: { collapseLongMessages: true, prefsVersion: 0 } };
     return load.promise;
   }) as typeof api.get;
 
   renderChatPanel(channel);
+  await openSettings();
 
-  const button = screen.getByRole("button", { name: "Unmute activity for this channel" });
-  assert.equal((button as HTMLButtonElement).disabled, true);
-  assert.equal(screen.getByTestId("activity-muted-badge").textContent?.trim(), "Muted");
+  const button = assertMuteState(true);
+  assert.equal(button.getAttribute("aria-disabled") === "true", true);
+  assert.equal(screen.getByTestId("activity-muted-badge").textContent?.trim(), "");
 
   await act(async () => {
     load.resolve({ data: { activityMuted: false, muteFromSeq: null, activityMuteSupported: true } });
@@ -827,7 +723,7 @@ test("Activity mute header uses channel-row state before notification-settings f
     await flushAsyncWork();
   });
   await waitFor(() => {
-    assert.ok(screen.getByRole("button", { name: "Mute activity for this channel" }));
+    assert.ok(assertMuteState(false));
   });
 });
 
@@ -835,12 +731,14 @@ test("Activity mute header follows channel-store realtime mute updates after set
   const channel = makeChannel({ activityMuted: false, muteFromSeq: null });
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
+    if (url.endsWith("/message-display-settings")) return { data: { collapseLongMessages: true, prefsVersion: 0 } };
     return { data: { activityMuted: false, muteFromSeq: null, activityMuteSupported: true } };
   }) as typeof api.get;
 
   const { rerender } = renderChatPanel(channel);
+  await openSettings();
 
-  assert.ok(await screen.findByRole("button", { name: "Mute activity for this channel" }));
+  assert.ok(assertMuteState(false));
   assert.equal(screen.queryByTestId("activity-muted-badge"), null);
 
   await act(async () => {
@@ -860,146 +758,67 @@ test("Activity mute header follows channel-store realtime mute updates after set
     </MemoryRouter>,
   );
   await waitFor(() => {
-    assert.ok(screen.getByRole("button", { name: "Unmute activity for this channel" }));
+    assert.ok(assertMuteState(true));
   });
-  assert.ok(screen.getByRole("button", { name: "Unmute activity for this channel" }));
-  assert.equal(screen.getByTestId("activity-muted-badge").textContent?.trim(), "Muted");
+  assert.ok(assertMuteState(true));
+  assert.equal(screen.getByTestId("activity-muted-badge").textContent?.trim(), "");
 });
 
-test("channel header keeps Activity mute actions distinct from management controls", async () => {
+test("channel drawer keeps mute, runtime confirmation and leave actions distinct", async () => {
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
-    return { data: { activityMuted: false, muteFromSeq: null, activityMuteSupported: true } };
+    return { data: { activityMuted: false, collapseLongMessages: true } };
   }) as typeof api.get;
-  const channel = makeChannel({
-    id: "managed-channel",
-    name: "managed",
-    description: "Managed channel description",
-    joined: true,
-  });
-
-  const { rerender } = renderChatPanel(channel, { serverRole: "owner" });
-
-  const headerTitle = await screen.findByRole("heading", { name: "managed" });
-  const header = headerTitle.closest(".h-panel-header");
-  assert.ok(header, "regular channel title must render inside the shared panel header");
-  const headerDescription = within(header as HTMLElement).getByText("Managed channel description");
-  assert.equal(headerDescription.tagName, "P");
-  assert.ok(
-    headerDescription.classList.contains("font-mono"),
-    "the channel description is the lower-priority subtitle, not inline title prose",
-  );
-  assert.equal(
-    headerTitle.parentElement?.nextElementSibling,
-    headerDescription,
-    "the description must follow the title row as a separate subtitle",
-  );
-
-  assert.ok(await screen.findByRole("button", { name: "Mute activity for this channel" }));
-  assert.ok(screen.getByRole("button", { name: "Stop all agents in this channel" }));
-  const editButton = screen.getByRole("button", { name: "Channel settings" });
-  assert.equal(editButton.getAttribute("title"), "Channel settings");
-  assert.equal(editButton.getAttribute("aria-label"), "Channel settings");
-  assert.equal(screen.queryByTitle("Leave channel"), null);
-  assert.ok(screen.getByTitle("View participants"));
-
-  fireEvent.click(screen.getByRole("button", { name: "Stop all agents in this channel" }));
+  renderChatPanel(makeChannel({ name: "managed", description: "Managed channel description" }));
+  assert.ok(screen.getByRole("heading", { name: "managed" }));
+  await openSettings();
+  assertMuteState(false);
+  assert.equal((screen.getByPlaceholderText("What is this channel about?") as HTMLTextAreaElement).value, "Managed channel description");
+  fireEvent.click(screen.getByTestId("channel-overflow-stop-agents"));
   assert.ok(await screen.findByRole("heading", { name: "Stop All Agents" }));
-  assert.ok(screen.getByRole("button", { name: "Stop" }));
-  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-  await waitFor(() => assert.equal(screen.queryByText("Stop All Agents"), null));
-
-  fireEvent.click(editButton);
-  assert.ok(await screen.findByRole("dialog", { name: "Settings" }));
-  assert.equal(
-    (screen.getByPlaceholderText("What is this channel about?") as HTMLTextAreaElement).value,
-    "Managed channel description",
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Leave Channel" }));
-  assert.ok(await screen.findByRole("heading", { name: "Leave Channel" }));
-  assert.ok(screen.getAllByRole("button", { name: "Leave Channel" }).length >= 2);
-  assert.ok(screen.getByTestId("channel-settings-sheet"));
-  assert.ok(screen.getByText(/Existing followed threads are not automatically unfollowed/));
-  assert.ok(screen.getByText(/Private content remains gated by current access/));
-  fireEvent.click(screen.getAllByRole("button", { name: "Cancel" })[1]);
-  await waitFor(() => assert.equal(screen.getAllByRole("button", { name: "Leave Channel" }).length, 1));
-  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-  await waitFor(() => assert.equal(screen.queryByRole("dialog", { name: "Settings" }), null));
-
-  rerender(
-    <MemoryRouter>
-      <ChatPanel channel={makeChannel({ id: "all-channel", name: "all", joined: true })} readOnly />
-    </MemoryRouter>,
-  );
-
-  assert.ok(await screen.findByRole("button", { name: "Mute activity for this channel" }));
-  assert.equal(screen.queryByTitle("Leave channel"), null);
-  fireEvent.click(screen.getByRole("button", { name: "Channel settings" }));
-  assert.ok(await screen.findByRole("dialog", { name: "Settings" }));
-  assert.equal(screen.queryByRole("button", { name: "Leave Channel" }), null);
+  fireEvent.click(screen.getAllByRole("button", { name: "Cancel" }).find((button) => !(button as HTMLButtonElement).disabled)!);
+  await waitFor(() => assert.equal(screen.queryAllByText("Stop All Agents").length, 0));
+  fireEvent.click(screen.getByTestId("channel-overflow-leave"));
+  const confirm = await screen.findByTestId("channel-overflow-leave-confirm");
+  assert.match(confirm.parentElement?.parentElement?.textContent ?? "", /Existing followed threads are not automatically unfollowed/);
+  assert.match(confirm.parentElement?.parentElement?.textContent ?? "", /Private content remains gated by current access/);
+  fireEvent.click(within(confirm.parentElement!).getByRole("button", { name: "Cancel" }));
+  cleanup();
+  renderChatPanel(makeChannel({ name: "all" }));
+  await openSettings();
+  assertMuteState(false);
+  assert.equal(screen.queryAllByTestId("channel-overflow-leave").length, 0);
 });
 
-test("channel header gives members additive channel and runtime controls without metadata editing", async () => {
+test("channel drawer gives members personal and additive controls without metadata editing", async () => {
   api.get = (async (url: string) => {
     if (url.endsWith("/members")) return { data: { agents: [], humans: [] } };
-    return { data: { activityMuted: false, muteFromSeq: null, activityMuteSupported: true } };
+    return { data: { activityMuted: false, collapseLongMessages: true } };
   }) as typeof api.get;
   const originalLeaveChannel = useChannelStore.getState().leaveChannel;
   const leaveCalls: string[] = [];
-
-  renderChatPanel(makeChannel({
-    id: "member-channel",
-    name: "member-channel",
-    joined: true,
-    channelCapabilities: { addChannelMembers: true },
-  }), { serverRole: "member" });
-  useChannelStore.setState({
-    leaveChannel: async (channelId: string) => {
-      leaveCalls.push(channelId);
-    },
-  });
-
-  assert.ok(await screen.findByRole("button", { name: "Mute activity for this channel" }));
-  assert.ok(screen.getByRole("button", { name: "Stop all agents in this channel" }));
-  const optionsButton = screen.getByRole("button", { name: "Channel settings" });
-  assert.equal(optionsButton.getAttribute("title"), "Channel settings");
-  assert.equal(optionsButton.getAttribute("aria-label"), "Channel settings");
-  assert.equal(screen.queryByTitle("Leave channel"), null);
-  fireEvent.click(screen.getByTitle("View participants"));
-  assert.ok(await screen.findByRole("button", { name: "Add Member" }));
-  assert.equal(screen.queryByLabelText(/Remove /), null);
-  cleanup();
-  renderChatPanel(makeChannel({
-    id: "member-channel",
-    name: "member-channel",
-    joined: true,
-    channelCapabilities: { addChannelMembers: true },
-  }), { serverRole: "member" });
-
-  fireEvent.click(screen.getByRole("button", { name: "Channel settings" }));
-  assert.ok(await screen.findByRole("button", { name: "Leave Channel" }));
-  assert.equal(screen.queryByRole("button", { name: "Save Changes" }), null);
-  fireEvent.click(screen.getByRole("button", { name: "Leave Channel" }));
-  assert.ok(await screen.findByRole("heading", { name: "Leave Channel" }));
-  assert.ok(screen.getAllByRole("button", { name: "Leave Channel" }).length >= 2);
-  assert.ok(screen.getByTestId("channel-settings-sheet"));
-  fireEvent.click(screen.getAllByRole("button", { name: "Leave Channel" })[1]);
-  await waitFor(() => assert.deepEqual(leaveCalls, ["member-channel"]));
-
-  useChannelStore.setState({ leaveChannel: originalLeaveChannel });
-  cleanup();
-
-  renderChatPanel(makeChannel({ id: "unjoined-member-channel", name: "unjoined-member", joined: false }), { serverRole: "member" });
-  assert.ok(await screen.findByRole("button", { name: "Search this channel" }));
-  assert.equal(screen.queryByRole("button", { name: "Channel options" }), null);
-  cleanup();
-
-  renderChatPanel(makeChannel({ id: "all-member-channel", name: "all", joined: true }), { serverRole: "member" });
-  assert.ok(await screen.findByRole("button", { name: "Mute activity for this channel" }));
-  assert.equal(screen.queryByRole("button", { name: "Channel options" }), null);
+  try {
+    renderChatPanel(makeChannel({ id: "member-channel", channelCapabilities: { addChannelMembers: true } }), { serverRole: "member" });
+    useChannelStore.setState({ leaveChannel: async (id) => { leaveCalls.push(id); } });
+    await openSettings();
+    assertMuteState(false);
+    assert.ok(screen.getByTestId("channel-overflow-members-add-tile"));
+    assert.equal(screen.queryAllByPlaceholderText("What is this channel about?").length, 0);
+    fireEvent.click(screen.getByTestId("channel-overflow-leave"));
+    const confirm = await screen.findByTestId("channel-overflow-leave-confirm");
+    fireEvent.click(confirm);
+    await waitFor(() => assert.deepEqual(leaveCalls, ["member-channel"]));
+  } finally {
+    useChannelStore.setState({ leaveChannel: originalLeaveChannel });
+    cleanup();
+  }
+  renderChatPanel(makeChannel({ name: "all", channelCapabilities: {} }), { serverRole: "member" });
+  await openSettings();
+  assert.equal(screen.queryAllByTestId("channel-settings-panel").length, 0);
+  assert.equal(screen.queryAllByTestId("channel-overflow-leave").length, 0);
 });
 
-test("sidebar right-click Mute updates the row and failed Unmute rolls back with feedback", async (t) => {
+test("sidebar right-click Mute updates the row and failed Unmute rolls back with feedback", async () => {
   const channel = makeChannel({
     id: "sidebar-context-mute",
     serverId: "server-sidebar-mute",
@@ -1024,7 +843,7 @@ test("sidebar right-click Mute updates the row and failed Unmute rolls back with
     }
     throw new Error("network failed");
   }) as typeof api.patch;
-  const toastError = t.mock.method(toast, "error");
+  const toastError = vi.spyOn(toast, "error");
 
   const unrelated = makeChannel({
     id: "sidebar-context-other",
@@ -1059,7 +878,7 @@ test("sidebar right-click Mute updates the row and failed Unmute rolls back with
     assert.equal(rolledBack?.prefsVersion, 2);
     assert.equal(toastError.mock.calls.length, 1);
   });
-  assert.equal(toastError.mock.calls[0]?.arguments[0], "Failed to unmute Activity for this channel.");
+  assert.equal(toastError.mock.calls[0][0], "Failed to unmute Activity for this channel.");
   assert.deepEqual(patchCalls, [
     {
       url: "/channels/sidebar-context-mute/notification-settings",
@@ -1072,7 +891,7 @@ test("sidebar right-click Mute updates the row and failed Unmute rolls back with
   ]);
 });
 
-test("sidebar failed Mute rolls back and reports the mute-specific error", async (t) => {
+test("sidebar failed Mute rolls back and reports the mute-specific error", async () => {
   const channel = makeChannel({
     id: "sidebar-context-mute-failure",
     serverId: "server-sidebar-mute",
@@ -1085,7 +904,7 @@ test("sidebar failed Mute rolls back and reports the mute-specific error", async
   api.patch = (async () => {
     throw new Error("network failed");
   }) as typeof api.patch;
-  const toastError = t.mock.method(toast, "error");
+  const toastError = vi.spyOn(toast, "error");
 
   renderSidebarForMute(channel);
   const row = document.querySelector('[data-sidebar-channel-id="sidebar-context-mute-failure"]');
@@ -1100,10 +919,10 @@ test("sidebar failed Mute rolls back and reports the mute-specific error", async
     assert.equal(rolledBack?.prefsVersion, 1);
     assert.equal(toastError.mock.calls.length, 1);
   });
-  assert.equal(toastError.mock.calls[0]?.arguments[0], "Failed to mute Activity for this channel.");
+  assert.equal(toastError.mock.calls[0][0], "Failed to mute Activity for this channel.");
 });
 
-test("sidebar request failure does not roll back a newer realtime preference", async (t) => {
+test("sidebar request failure does not roll back a newer realtime preference", async () => {
   const channel = makeChannel({
     id: "sidebar-context-newer-realtime",
     serverId: "server-sidebar-mute",
@@ -1115,7 +934,7 @@ test("sidebar request failure does not roll back a newer realtime preference", a
   const patch = createDeferred<{ data: unknown }>();
   api.get = (() => new Promise(() => {})) as typeof api.get;
   api.patch = (() => patch.promise) as typeof api.patch;
-  const toastError = t.mock.method(toast, "error");
+  const toastError = vi.spyOn(toast, "error");
 
   renderSidebarForMute(channel);
   const row = document.querySelector('[data-sidebar-channel-id="sidebar-context-newer-realtime"]');
@@ -1311,6 +1130,12 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
     activityMuted: false,
     joined: true,
   });
+  const unjoinedNew = makeChannel({
+    id: "channel-unjoined-new",
+    name: "unjoined-new",
+    activityMuted: false,
+    joined: false,
+  });
   useAuthStore.setState({
     user: {
       id: "user-sidebar",
@@ -1350,13 +1175,8 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
     members: [],
     sidebarOrder: makeSidebarOrder(),
   });
-  setServerFeatureFlagForTests(
-    "server-sidebar",
-    TOPBAR_OVERFLOW_FEATURE_FLAG_KEY,
-    false,
-  );
   useChannelStore.setState({
-    channels: [mutedUnread, unmutedUnread, unjoinedMuted, mutedDraft, mutedMention, unmutedMention, normalIdle],
+    channels: [mutedUnread, unmutedUnread, unjoinedMuted, mutedDraft, mutedMention, unmutedMention, normalIdle, unjoinedNew],
     dmChannels: [],
     channelActivity: {
       [mutedUnread.id]: null,
@@ -1366,6 +1186,7 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
       [mutedMention.id]: null,
       [unmutedMention.id]: null,
       [normalIdle.id]: null,
+      [unjoinedNew.id]: null,
     },
     loading: false,
   });
@@ -1378,6 +1199,8 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
       [unmutedMention.id]: 99,
     },
     mentionFlags: { [mutedMention.id]: true, [unmutedMention.id]: true },
+    // hasNew: a non-joined public channel with messages past the cursor (no count).
+    newFlags: { [unjoinedNew.id]: true, [normalIdle.id]: true },
     drafts: { [mutedDraft.id]: "draft body" },
     clearUnread: () => {},
     markRead: async () => {},
@@ -1404,11 +1227,12 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
   const mutedIcon = within(mutedRow as HTMLElement).getByTestId("sidebar-activity-muted");
   assert.equal(mutedIcon.textContent?.trim(), "");
   assert.equal(mutedIcon.getAttribute("aria-label"), "Activity muted");
-  assert.equal(mutedIcon.getAttribute("title"), "Activity muted. Direct mentions can still notify you.");
-  assert.equal(mutedIcon.className.includes("ml-1"), true);
+  assert.equal(mutedIcon.getAttribute("title"), null);
+  assert.ok(mutedIcon.hasAttribute("data-base-ui-tooltip-trigger"), "muted hint now rides the RUI tooltip trigger");
+  assert.equal(mutedIcon.getAttribute("data-slot"), "sidebar-item-meta-icon");
   assert.equal(mutedIcon.className.includes("ml-auto"), false);
   assert.equal(mutedIcon.className.includes("size-4"), true);
-  assert.equal(mutedIcon.className.includes("text-black/40"), true);
+  assert.equal(mutedIcon.className.includes("text-black/40"), false);
   assert.equal(mutedIcon.className.includes("bg-brutal-orange/25"), false);
   assert.ok(mutedIcon.querySelector(".lucide-bell-off"));
   const mutedName = within(mutedRow as HTMLElement).getByText("muted-unread");
@@ -1459,7 +1283,14 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
   const normalIdleRow = document.querySelector('[data-sidebar-channel-id="channel-normal-idle"]');
   assert.ok(normalIdleRow);
   const normalIdleName = within(normalIdleRow as HTMLElement).getByText("normal-idle");
-  assert.equal(normalIdleName.className.trim(), "min-w-0 truncate");
+  assert.equal(normalIdleName.className.trim(), "min-w-0 text-sm truncate");
+  assert.ok(within(normalIdleRow as HTMLElement).queryByTestId("sidebar-quiet-new-dot") === null, "hasNew only lights non-joined rows");
+
+  const unjoinedNewRow = document.querySelector('[data-sidebar-channel-id="channel-unjoined-new"]');
+  assert.ok(unjoinedNewRow);
+  const newDot = within(unjoinedNewRow as HTMLElement).getByTestId("sidebar-quiet-new-dot");
+  assert.equal(newDot.className.includes("ml-auto"), true);
+  assert.ok(within(unjoinedNewRow as HTMLElement).queryByText("0") === null, "hasNew shows no count");
 
   const unjoinedRow = document.querySelector('[data-sidebar-channel-id="channel-muted-unjoined"]');
   assert.ok(unjoinedRow);

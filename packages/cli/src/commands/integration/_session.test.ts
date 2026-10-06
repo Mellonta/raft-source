@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { cookieHeaderForUrl, cookiePathMatches, type SessionCookie } from "./_session.js";
+import { cookieHeaderForUrl, cookiePathMatches, type SessionCookie } from "./_session";
 
 function cookie(overrides: Partial<SessionCookie> = {}): SessionCookie {
   return {

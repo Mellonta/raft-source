@@ -1,11 +1,12 @@
 import { Router, type Request, type Response, type Router as RouterType } from "express";
-import * as featureFlagService from "../services/featureFlagService.js";
-import * as serverService from "../services/serverService.js";
+import { UUID_RE } from "../lib/messageId";
+import * as featureFlagService from "../services/featureFlagService";
+import * as serverService from "../services/serverService";
+import { sendJsonServerError } from "./errorResponse";
 
 export const featureFlagsRouter: RouterType = Router();
 
 const FLAG_KEY_RE = /^[a-z0-9][a-z0-9_.-]{0,127}$/;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PLATFORMS = new Set<featureFlagService.FeatureFlagPlatform>(["web", "mobile"]);
 
 function badRequest(res: Response, error: string) {
@@ -58,13 +59,18 @@ featureFlagsRouter.post("/evaluate", async (req, res) => {
       return;
     }
 
+    // Lenient: unknown / malformed client facts count as "not reported" and never fail the request.
+    const client = featureFlagService.parseFeatureFlagClientFacts(body);
     const uniqueKeys = [...new Set(keys as string[])];
     const evaluations = await featureFlagService.evaluateFeatureFlags(
-      uniqueKeys.map((key) => ({ key, userId: req.userId!, serverId, platform })),
+      uniqueKeys.map((key) => ({ key, userId: req.userId!, serverId, platform, client })),
     );
     res.json({ evaluations });
   } catch (err) {
-    console.error("Feature flag evaluate error:", err);
-    res.status(500).json({ error: "Failed to evaluate feature flags" });
+    sendJsonServerError(req, res, {
+      error: "Failed to evaluate feature flags",
+      logPrefix: "Feature flag evaluate error:",
+      err,
+    });
   }
 });

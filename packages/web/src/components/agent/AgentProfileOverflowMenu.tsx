@@ -1,12 +1,11 @@
-import { EllipsisVertical, MessageSquare, Play, RotateCcw, Square } from "lucide-react";
+import { EllipsisVertical, Play, RotateCcw, Square } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger,
+  DropdownMenuTrigger, Button, DirectMessageIcon
 } from "raft-ui";
 import { useIntl } from "react-intl";
-import Button from "../ui/Button";
 import Tooltip from "../ui/Tooltip";
 
 interface AgentProfileOverflowMenuProps {
@@ -55,7 +54,7 @@ export default function AgentProfileOverflowMenu({
   // can keep the popup inside the viewport by moving it back over the
   // trigger. Use the documented panel-header direction so the label always
   // clears the action button instead of occluding it.
-  const profileTooltipContentProps = { side: "bottom" as const, className: "bg-white" };
+  const profileTooltipContentProps = { side: "bottom" as const };
 
   const inlineActions = (
     <div
@@ -65,12 +64,13 @@ export default function AgentProfileOverflowMenu({
       {canMessageAgent && (
         <Tooltip content={messageLabel} contentProps={profileTooltipContentProps}>
           <Button
-            shape="icon"
-            aria-label={messageLabel}
+            size="icon-sm"
+            variant="outline"
+                        aria-label={messageLabel}
             onClick={onMessage}
             data-testid="agent-profile-inline-message"
           >
-            <MessageSquare size={14} />
+            <DirectMessageIcon width={14} height={14} />
           </Button>
         </Tooltip>
       )}
@@ -78,8 +78,9 @@ export default function AgentProfileOverflowMenu({
         <>
           <Tooltip content={startStopLabel} contentProps={profileTooltipContentProps}>
             <Button
-              shape="icon"
-              aria-label={startStopLabel}
+              size="icon-sm"
+              variant="outline"
+                            aria-label={startStopLabel}
               onClick={onStartStop}
               data-testid="agent-profile-inline-start-stop"
             >
@@ -88,8 +89,9 @@ export default function AgentProfileOverflowMenu({
           </Tooltip>
           <Tooltip content={restartResetLabel} contentProps={profileTooltipContentProps}>
             <Button
-              shape="icon"
-              aria-label={restartResetLabel}
+              size="icon-sm"
+              variant="outline"
+                            aria-label={restartResetLabel}
               onClick={onRestartReset}
               data-testid="agent-profile-inline-restart-reset"
             >
@@ -108,8 +110,9 @@ export default function AgentProfileOverflowMenu({
           <DropdownMenuTrigger
             render={(
               <Button
-                shape="icon"
-                aria-label={menuLabel}
+                size="icon-sm"
+                variant="outline"
+                                aria-label={menuLabel}
                 data-testid="agent-profile-overflow-trigger"
               >
                 <EllipsisVertical size={14} />
@@ -129,7 +132,7 @@ export default function AgentProfileOverflowMenu({
               onClick={onMessage}
               data-testid="agent-profile-overflow-message"
             >
-              <MessageSquare />
+              <DirectMessageIcon />
               {messageLabel}
             </DropdownMenuItem>
           )}

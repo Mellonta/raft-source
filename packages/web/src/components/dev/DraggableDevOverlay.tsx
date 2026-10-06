@@ -7,6 +7,7 @@ import {
 } from "@dnd-kit/core";
 import type { DragEndEvent } from "@dnd-kit/core";
 import { Popover, PopoverContent, PopoverTrigger } from "raft-ui";
+import Tooltip from "../ui/Tooltip";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, SyntheticEvent } from "react";
 import {
@@ -190,7 +191,6 @@ function DraggableDevOverlayNode({
       data-dev-overlay-edge={placement.edge}
       data-dev-overlay-collapsed={placement.collapsed ? "true" : "false"}
       data-testid={testId}
-      title={title}
       tabIndex={collapsible && placement.collapsed ? 0 : undefined}
       role={collapsible && placement.collapsed ? "button" : undefined}
       aria-label={collapsible && placement.collapsed ? title : undefined}
@@ -216,9 +216,10 @@ function DraggableDevOverlayNode({
     </div>
   );
 
+  const popoverTrigger = <PopoverTrigger nativeButton={false} render={trigger} />;
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger nativeButton={false} render={trigger} />
+      {title ? <Tooltip content={title}>{popoverTrigger}</Tooltip> : popoverTrigger}
       {panel ? (
         <PopoverContent
           side={popoverSide}

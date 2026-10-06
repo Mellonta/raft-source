@@ -8,7 +8,7 @@
  *   1. Claude Code must be installed and authenticated.
  *   2. Set `RUN_CLAUDE_INTEGRATION_TESTS=1` to opt in.
  *
- *   Then: `RUN_CLAUDE_INTEGRATION_TESTS=1 pnpm --filter @botiverse/raft-daemon exec tsx --test src/drivers/claude.integration.test.ts`
+ *   Then: `RUN_CLAUDE_INTEGRATION_TESTS=1 pnpm --filter @botiverse/raft-daemon exec vitest run src/drivers/claude.integration.test.ts`
  *
  * Why guarded:
  * - Local dev machines without Claude Code should not fail CI/default tests.
@@ -23,8 +23,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
-import { test } from "vitest";
-import { ClaudeDriver, resolveClaudeCommand } from "./claude.js";
+import { ClaudeDriver, resolveClaudeCommand } from "./claude";
 
 const OPT_IN = process.env.RUN_CLAUDE_INTEGRATION_TESTS === "1";
 const CLAUDE_BIN = resolveClaudeCommand();

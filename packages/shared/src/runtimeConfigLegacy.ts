@@ -12,7 +12,7 @@ import type {
   RuntimeModeConfig,
   RuntimeModelConfig,
   RuntimeModelInfo,
-} from "./index.js";
+} from "./index";
 
 interface RuntimeConfigLegacyHydrationDeps {
   runtimeConfigVersion: RuntimeConfig["version"];
@@ -34,6 +34,7 @@ interface RuntimeConfigLegacyHydrationDeps {
     reasoningEffort?: RuntimeReasoningEffort | null;
     envVars?: Record<string, string> | null;
     command?: string | null;
+    loadLocalPlugins?: boolean;
   }): RuntimeConfig;
 }
 
@@ -354,6 +355,8 @@ export function hydrateLegacyRuntimeConfigWithTrace(
     // launch env.
     envVars: deps.stripControlledRuntimeEnvVars(runtime, stored ? storedEnvVars : legacyEnvVars),
     command,
+    ...(runtime === "builtin" && typeof storedConfig?.loadLocalPlugins === "boolean"
+      ? { loadLocalPlugins: storedConfig.loadLocalPlugins } : {}),
   });
   return {
     config,

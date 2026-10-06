@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   HOST_ACCESS_TOKEN_UPDATED_EVENT,
   accessTokenSubject,
@@ -8,12 +7,12 @@ import {
   parseHostAccessTokenBinding,
   parseHostAccessTokenBindingStorage,
   parseHostAccessTokenEventDetail,
-} from "../src/utils/hostAccessTokenSync.js";
+} from "../src/utils/hostAccessTokenSync";
 import type {
   HostAccessTokenContext,
   HostAccessTokenBinding,
   HostAccessTokenEventDetail,
-} from "../src/utils/hostAccessTokenSync.js";
+} from "../src/utils/hostAccessTokenSync";
 
 const detail = (overrides: Partial<HostAccessTokenEventDetail> = {}): HostAccessTokenEventDetail => ({
   accountId: "account-1",

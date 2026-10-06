@@ -13,7 +13,6 @@
  * while nothing else moves.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   buildActivityWindowBundle,
 } from "../src/store/activityPanel/windowBundle";

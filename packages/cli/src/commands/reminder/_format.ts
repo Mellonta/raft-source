@@ -3,8 +3,8 @@
 // format (the MCP chat-bridge it originally mirrored has been removed) —
 // an AX contract, not an implementation detail. Pinned by `_format.test.ts`.
 
-import { T, sampleReminder } from "../_axExampleFixtures.js";
-import { axSurface } from "../../core/renderer.js";
+import { T, sampleReminder } from "../_axExampleFixtures";
+import { axSurface } from "../../core/renderer";
 import type { ReminderEventSummary, ReminderSummary } from "@botiverse/raft-shared";
 
 const MODIFY_HINT = "(to modify: snooze/update/cancel; raft reminder --help)";
@@ -134,3 +134,16 @@ function formatReminderType(r: ReminderSummary): string {
   if (!r.recurrence) return "(one-time)";
   return `(recurring · ${r.recurrence.description})`;
 }
+
+/**
+ * Reminder seals live in a Raft daemon's inbox; an external agent has none, so
+ * the pre-mutation seal check cannot run. Printed on stderr (stdout stays the
+ * command's result) instead of skipping the check silently.
+ */
+export const formatReminderSealsUnchecked = axSurface(
+  "Reminder mutation diagnostic (stderr) for external agents: the local seal check is unavailable.",
+  (): string => "Reminder seals: not checked (not available for external agents).",
+  {
+    examples: [{ args: [] }],
+  },
+);

@@ -11,7 +11,7 @@
  *   3. Set `PI_INTEGRATION_MODEL` to a configured `<provider>/<model>` id.
  *
  *   Then:
- *   `RUN_PI_INTEGRATION_TESTS=1 pnpm --filter @botiverse/raft-daemon exec tsx --test src/drivers/pi.integration.test.ts`
+ *   `RUN_PI_INTEGRATION_TESTS=1 pnpm --filter @botiverse/raft-daemon exec vitest run src/drivers/pi.integration.test.ts`
  *
  * The tests use temporary agent workspaces and session dirs so model sessions
  * are isolated from normal agent workspaces. They intentionally do not
@@ -23,13 +23,12 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import {
   ModelRegistry,
   ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
-import { PiDriver } from "./pi.js";
-import type { ParsedEvent, RuntimeSession, SpawnContext } from "./types.js";
+import { PiDriver } from "./pi";
+import type { ParsedEvent, RuntimeSession, SpawnContext } from "./types";
 
 const PI_INTEGRATION_MODEL = process.env.PI_INTEGRATION_MODEL;
 

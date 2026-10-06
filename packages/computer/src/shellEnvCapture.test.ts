@@ -2,21 +2,20 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 
 import {
   applyCapturedEnv,
+  bootstrapServiceEnv,
   captureShellEnv,
   parseEnvFrame,
   serializeEnvFrame,
   SHELL_ENV_PROTECTED_KEYS,
-} from "./shellEnvCapture.js";
+} from "./shellEnvCapture";
 import {
   bootstrapSupervisedServiceEnv,
   bootstrapThenRun,
-  dispatchToKResident,
   stripForwardedCarrierName,
-} from "./index.js";
+} from "./index";
 import { pathToFileURL } from "node:url";
 
 const resolveSyntheticRealPath = (file: string): string => path.resolve(file);
@@ -125,7 +124,7 @@ test("modules first-evaluated after bootstrap observe the captured environment",
         durationMs: 1,
       }),
     );
-    const probe = await import("./fixtures/shell-env/envProbePost.js");
+    const probe = await import("./fixtures/shell-env/envProbePost");
     assert.equal(probe.observedSentinel, "post-capture");
   } finally {
     if (before === undefined) delete process.env.B1_ORDER_SENTINEL;
@@ -138,7 +137,7 @@ test("modules first-evaluated before bootstrap keep the stale environment (red-p
   const before = process.env.B1_ORDER_SENTINEL;
   try {
     delete process.env.B1_ORDER_SENTINEL;
-    const probe = await import("./fixtures/shell-env/envProbePre.js");
+    const probe = await import("./fixtures/shell-env/envProbePre");
     process.env.B1_ORDER_SENTINEL = "set-after-first-eval";
     // Module cache froze the first observation — proving import ORDER is what
     // the bootstrap seam must control (a wrong implementation cannot pass the
@@ -154,11 +153,11 @@ test("the thin entry never statically imports the CLI graph (B1 source tooth)", 
   const { readFile } = await import("node:fs/promises");
   const src = await readFile(new URL("./index.ts", import.meta.url), "utf8");
   const codeOnly = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-  assert.doesNotMatch(codeOnly, /import[^;]*from\s+"\.\/cli\.js"/);
+  assert.doesNotMatch(codeOnly, /import[^;]*from\s+"\.\/cli(?:\.js)?"/);
   // Ordering itself is pinned behaviorally by the bootstrapThenRun
   // composition teeth below (task #328); this tooth only bans a static
   // import edge, which would defeat the seam regardless of ordering.
-  assert.match(codeOnly, /import\("\.\/cli\.js"\)/);
+  assert.match(codeOnly, /import\("\.\/cli"\)/);
 });
 
 // ---------------------------------------------------------------------------
@@ -204,389 +203,6 @@ test("bootstrapThenRun: supervised boot settles capture before the CLI graph fir
     delete process.env.RAFT_COMPUTER_OS_SUPERVISOR_KIND;
     delete process.env.RAFT_COMPUTER_SHELL_ENV_STATE;
   }
-});
-
-test("dispatchToKResident: a cold SEA execs K stable with the exact user argv", async () => {
-  let resolvedHome = "";
-  let execCall: { file: string; args: string[]; env: Record<string, string> } | null = null;
-  const env = { SLOCK_HOME: "/tmp/k-dispatch-home", KEEP: "yes" };
-
-  const dispatched = await dispatchToKResident(
-    ["/installed/raft-computer", "status", "--server", "abc"],
-    env,
-    {
-      isSea: () => true,
-      platform: "linux",
-      currentBinary: "/installed/raft-computer",
-      resolveRealPath: resolveSyntheticRealPath,
-      resolveResident: async (home) => {
-        resolvedHome = home;
-        return "/tmp/k-dispatch-home/computer/k/slots/stable/artifact.bin";
-      },
-      execve: (file, args, childEnv) => {
-        execCall = { file, args, env: childEnv };
-      },
-    },
-  );
-
-  assert.equal(dispatched, true);
-  assert.equal(resolvedHome, "/tmp/k-dispatch-home");
-  assert.deepEqual(execCall, {
-    file: "/tmp/k-dispatch-home/computer/k/slots/stable/artifact.bin",
-    args: [
-      "/tmp/k-dispatch-home/computer/k/slots/stable/artifact.bin",
-      "status",
-      "--server",
-      "abc",
-    ],
-    env: {
-      ...env,
-      RAFT_COMPUTER_DISPATCHER_PATH: "/installed/raft-computer",
-    },
-  });
-});
-
-test("dispatchToKResident: installer convergence stays on the verified candidate", async () => {
-  let resolved = false;
-  let spawned = false;
-  const dispatched = await dispatchToKResident(
-    [
-      "/verified/raft-computer",
-      "__installer-converge",
-      "1.0.18",
-      "a".repeat(64),
-    ],
-    { SLOCK_HOME: "/raft-home" },
-    {
-      isSea: () => true,
-      platform: "linux",
-      currentBinary: "/verified/raft-computer",
-      resolveResident: async () => {
-        resolved = true;
-        return "/raft-home/computer/k/slots/stable/artifact.bin";
-      },
-      execve: null,
-      spawnReplacement: async () => { spawned = true; return 0; },
-      setExitCode: () => {},
-    },
-  );
-  assert.equal(dispatched, false);
-  assert.equal(resolved, false);
-  assert.equal(spawned, false);
-});
-
-test("dispatchToKResident: Windows uses a transient wrapper and preserves child exit status", async () => {
-  let spawnCall: { file: string; args: string[]; env: Record<string, string> } | null = null;
-  let exitCode: number | null = null;
-  const env = { SLOCK_HOME: "/raft-home", KEEP: "yes" };
-
-  const dispatched = await dispatchToKResident(
-    ["/installed/raft-computer.exe", "doctor"],
-    env,
-    {
-      isSea: () => true,
-      platform: "win32",
-      currentBinary: "/installed/raft-computer.exe",
-      resolveRealPath: resolveSyntheticRealPath,
-      resolveResident: async () => "/raft-home/computer/k/slots/stable/artifact.bin",
-      spawnReplacement: async (file, args, childEnv) => {
-        spawnCall = { file, args, env: childEnv };
-        return 7;
-      },
-      setExitCode: (code) => { exitCode = code; },
-      execve: () => { throw new Error("Windows must not call POSIX execve"); },
-    },
-  );
-
-  assert.equal(dispatched, true);
-  assert.deepEqual(spawnCall, {
-    file: "/raft-home/computer/k/slots/stable/artifact.bin",
-    args: ["doctor"],
-    env: {
-      ...env,
-      RAFT_COMPUTER_DISPATCHER_PATH: "/installed/raft-computer.exe",
-    },
-  });
-  assert.equal(exitCode, 7);
-});
-
-test("dispatchToKResident: the Node 20 SEA path falls back when execve is unavailable", async () => {
-  let spawned = false;
-  let exitCode = -1;
-  assert.equal(await dispatchToKResident(
-    ["/installed/raft-computer", "status"],
-    { SLOCK_HOME: "/raft-home" },
-    {
-      isSea: () => true,
-      platform: "linux",
-      currentBinary: "/installed/raft-computer",
-      resolveRealPath: resolveSyntheticRealPath,
-      resolveResident: async () => "/raft-home/computer/k/slots/stable/artifact.bin",
-      execve: null,
-      spawnReplacement: async () => { spawned = true; return 3; },
-      setExitCode: (code) => { exitCode = code; },
-    },
-  ), true);
-  assert.equal(spawned, true);
-  assert.equal(exitCode, 3);
-});
-
-test("dispatchToKResident: native SEA self argv is not forwarded as a fake command", async () => {
-  let args: string[] | null = null;
-  await dispatchToKResident(
-    ["/installed/raft-computer", "/installed/raft-computer", "status"],
-    { SLOCK_HOME: "/raft-home" },
-    {
-      isSea: () => true,
-      platform: "linux",
-      currentBinary: "/installed/raft-computer",
-      resolveRealPath: resolveSyntheticRealPath,
-      resolveResident: async () => "/raft-home/computer/k/slots/stable/artifact.bin",
-      execve: null,
-      spawnReplacement: async (_file, forwarded) => { args = forwarded; return 0; },
-      setExitCode: () => {},
-    },
-  );
-  assert.deepEqual(args, ["status"]);
-});
-
-test("dispatchToKResident: a macOS /var resident alias does not hand off to itself", async () => {
-  const canonicalBinary = "/private/var/folders/fixture/raft-computer-darwin-arm64";
-  const residentAlias = "/var/folders/fixture/raft-computer-darwin-arm64";
-  const resolveRealPath = (file: string): string => {
-    if (file === canonicalBinary || file === residentAlias) return canonicalBinary;
-    throw new Error(`unexpected realpath lookup: ${file}`);
-  };
-  let spawned = false;
-
-  const dispatched = await dispatchToKResident(
-    [canonicalBinary, "status"],
-    { SLOCK_HOME: "/raft-home" },
-    {
-      isSea: () => true,
-      platform: "darwin",
-      currentBinary: canonicalBinary,
-      resolveRealPath,
-      resolveResident: async () => residentAlias,
-      execve: null,
-      spawnReplacement: async () => { spawned = true; return 0; },
-      setExitCode: () => {},
-    },
-  );
-
-  assert.equal(dispatched, false);
-  assert.equal(spawned, false);
-});
-
-test("dispatchToKResident: an unresolvable resident identity never hands off", async () => {
-  let spawned = false;
-  const dispatched = await dispatchToKResident(
-    ["/private/var/folders/fixture/raft-computer", "status"],
-    { SLOCK_HOME: "/raft-home" },
-    {
-      isSea: () => true,
-      platform: "darwin",
-      currentBinary: "/private/var/folders/fixture/raft-computer",
-      resolveRealPath: () => { throw new Error("EACCES"); },
-      resolveResident: async () => "/var/folders/fixture/raft-computer",
-      execve: null,
-      spawnReplacement: async () => { spawned = true; return 0; },
-      setExitCode: () => {},
-    },
-  );
-
-  assert.equal(dispatched, false);
-  assert.equal(spawned, false);
-});
-
-test("dispatchToKResident: macOS /var candidate alias stays on installer convergence", async () => {
-  let resolved = false;
-  let spawned = false;
-  const canonicalCandidate = "/private/var/folders/fixture/raft-computer-darwin-arm64";
-  const installerCandidate = "/var/folders/fixture/raft-computer-darwin-arm64";
-  const resolveRealPath = (file: string): string => {
-    if (file === installerCandidate || file === canonicalCandidate) {
-      return canonicalCandidate;
-    }
-    throw new Error(`unexpected realpath lookup: ${file}`);
-  };
-
-  const dispatched = await dispatchToKResident(
-    [canonicalCandidate, installerCandidate, "__installer-converge", "1.0.20", "a".repeat(64)],
-    { SLOCK_HOME: "/raft-home" },
-    {
-      isSea: () => true,
-      platform: "darwin",
-      currentBinary: canonicalCandidate,
-      resolveRealPath,
-      resolveResident: async () => {
-        resolved = true;
-        return "/raft-home/computer/k/slots/stable/artifact.bin";
-      },
-      execve: null,
-      spawnReplacement: async () => { spawned = true; return 0; },
-      setExitCode: () => {},
-    },
-  );
-
-  assert.equal(dispatched, false);
-  assert.equal(resolved, false);
-  assert.equal(spawned, false);
-});
-
-test("dispatchToKResident: real macOS mktemp alias stays on installer convergence", {
-  skip: process.platform !== "darwin",
-}, async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "raft-computer-self-argv-"));
-  try {
-    const installerCandidate = path.join(tempDir, "raft-computer-darwin-arm64");
-    await writeFile(installerCandidate, "fixture");
-    const canonicalCandidate = await realpath(installerCandidate);
-    assert.notEqual(installerCandidate, canonicalCandidate);
-
-    let resolved = false;
-    const dispatched = await dispatchToKResident(
-      [canonicalCandidate, installerCandidate, "__installer-converge", "1.0.20", "a".repeat(64)],
-      { SLOCK_HOME: "/raft-home" },
-      {
-        isSea: () => true,
-        platform: "darwin",
-        currentBinary: canonicalCandidate,
-        resolveResident: async () => {
-          resolved = true;
-          return "/raft-home/computer/k/slots/stable/artifact.bin";
-        },
-        execve: null,
-        spawnReplacement: async () => 0,
-        setExitCode: () => {},
-      },
-    );
-
-    assert.equal(dispatched, false);
-    assert.equal(resolved, false);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("dispatchToKResident: a distinct absolute argv path is never swallowed", async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "raft-computer-other-argv-"));
-  try {
-    const currentBinary = path.join(tempDir, "raft-computer");
-    const otherPath = path.join(tempDir, "other-command");
-    await writeFile(currentBinary, "current");
-    await writeFile(otherPath, "other");
-
-    let args: string[] | null = null;
-    const dispatched = await dispatchToKResident(
-      [currentBinary, otherPath, "status"],
-      { SLOCK_HOME: "/raft-home" },
-      {
-        isSea: () => true,
-        platform: process.platform,
-        currentBinary,
-        resolveRealPath: resolveSyntheticRealPath,
-        resolveResident: async () => "/raft-home/computer/k/slots/stable/artifact.bin",
-        execve: null,
-        spawnReplacement: async (_file, forwarded) => { args = forwarded; return 0; },
-        setExitCode: () => {},
-      },
-    );
-
-    assert.equal(dispatched, true);
-    assert.deepEqual(args, [otherPath, "status"]);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("dispatchToKResident: an unresolvable absolute self spelling fails closed", async () => {
-  const missingBinary = path.join(
-    os.tmpdir(),
-    `raft-computer-missing-${process.pid}-${Date.now()}`,
-  );
-  const argv = [missingBinary, missingBinary, "status"];
-  const dispatched = await dispatchToKResident(
-    argv,
-    { SLOCK_HOME: "/raft-home" },
-    {
-      isSea: () => true,
-      platform: process.platform,
-      currentBinary: missingBinary,
-      resolveResident: async () => "/raft-home/computer/k/slots/stable/artifact.bin",
-      execve: null,
-      spawnReplacement: async () => { throw new Error("unbound identity must not hand off"); },
-      setExitCode: () => {},
-    },
-  );
-
-  assert.equal(dispatched, false);
-  assert.deepEqual(argv, [missingBinary, missingBinary, "status"]);
-});
-
-// task #423 regression: a shell PATH launch puts the BARE command name in the
-// SEA self slot; forwarding it gave the K resident
-// `raft-computer raft-computer restart` and a Commander unknown-command.
-test("dispatchToKResident: bare PATH self name is stripped before handoff (task #423)", async () => {
-  let args: string[] | null = null;
-  await dispatchToKResident(
-    ["/Users/me/.local/bin/raft-computer", "raft-computer", "restart"],
-    { SLOCK_HOME: "/raft-home" },
-    {
-      isSea: () => true,
-      platform: "darwin",
-      currentBinary: "/Users/me/.local/bin/raft-computer",
-      resolveRealPath: resolveSyntheticRealPath,
-      resolveResident: async () => "/raft-home/computer/k/slots/stable/artifact.bin",
-      execve: null,
-      spawnReplacement: async (_file, forwarded) => { args = forwarded; return 0; },
-      setExitCode: () => {},
-    },
-  );
-  assert.deepEqual(args, ["restart"]);
-});
-
-test("dispatchToKResident: a real positional first arg is never dropped", async () => {
-  // The positional-consuming shape (`start <server>`) is the oracle here:
-  // --version/--help succeed with either argv and cannot pin this.
-  let args: string[] | null = null;
-  await dispatchToKResident(
-    ["/installed/raft-computer", "start", "raft-computer"],
-    { SLOCK_HOME: "/raft-home" },
-    {
-      isSea: () => true,
-      platform: "linux",
-      currentBinary: "/installed/raft-computer",
-      resolveRealPath: resolveSyntheticRealPath,
-      resolveResident: async () => "/raft-home/computer/k/slots/stable/artifact.bin",
-      execve: null,
-      spawnReplacement: async (_file, forwarded) => { args = forwarded; return 0; },
-      setExitCode: () => {},
-    },
-  );
-  // "start" is not the binary's name, so nothing is stripped — including the
-  // positional VALUE that happens to spell the product name.
-  assert.deepEqual(args, ["start", "raft-computer"]);
-});
-
-test("dispatchToKResident: bare launch without a K slot neither dispatches nor mutates argv", async () => {
-  const argv = ["/installed/raft-computer", "raft-computer", "restart"];
-  const dispatched = await dispatchToKResident(
-    argv,
-    { SLOCK_HOME: "/raft-home" },
-    {
-      isSea: () => true,
-      platform: "darwin",
-      currentBinary: "/installed/raft-computer",
-      // Empty stable slot resolves to the current binary: fail closed.
-      resolveResident: async (_home, binary) => binary,
-      execve: null,
-      spawnReplacement: async () => { throw new Error("must not hand off without a K slot"); },
-      setExitCode: () => {},
-    },
-  );
-  assert.equal(dispatched, false);
-  assert.deepEqual(argv, ["/installed/raft-computer", "raft-computer", "restart"]);
 });
 
 test("stripForwardedCarrierName: rescues a pre-fix carrier's double-forwarded name", () => {
@@ -704,7 +320,6 @@ test("bootstrapThenRun: double-forwarded name is stripped before the CLI parses"
     undefined,
     async () => ({ runCliAsMain: () => { argvAtCliRun = [...argv]; } }),
     () => {},
-    async () => false,
     (target) => stripForwardedCarrierName(target, {
       isSea: () => true,
       currentBinary: slot,
@@ -713,32 +328,6 @@ test("bootstrapThenRun: double-forwarded name is stripped before the CLI parses"
     }),
   );
   assert.deepEqual(argvAtCliRun, ["/exec", slot, "restart"]);
-});
-
-test("bootstrapThenRun: K dispatch happens before shell capture and stale CLI import", async () => {
-  let captureCalls = 0;
-  let importCalls = 0;
-  let dispatchCalls = 0;
-  await bootstrapThenRun(
-    ["/installed/raft-computer", "status"],
-    {},
-    async () => {
-      captureCalls += 1;
-      throw new Error("K dispatch must happen before capture");
-    },
-    async () => {
-      importCalls += 1;
-      throw new Error("K dispatch must happen before stale CLI import");
-    },
-    () => {},
-    async () => {
-      dispatchCalls += 1;
-      return true;
-    },
-  );
-  assert.equal(dispatchCalls, 1);
-  assert.equal(captureCalls, 0);
-  assert.equal(importCalls, 0);
 });
 
 test("bootstrapThenRun: foreground path never captures and the CLI graph sees inherited env", async () => {
@@ -750,7 +339,7 @@ test("bootstrapThenRun: foreground path never captures and the CLI graph sees in
     delete process.env.RAFT_COMPUTER_OS_SUPERVISOR_KIND;
     process.env.B1_ORDER_SENTINEL = "inherited-baseline";
     await bootstrapThenRun(
-      ["node", "x", "__service"],
+      ["node", "x", "start", "--foreground"],
       process.env,
       async () => {
         captureCalls += 1;
@@ -970,8 +559,8 @@ test("multi-element self-exec vectors are quoted per argv element (npm-wrapper s
   assert.equal((result as { env: Record<string, string> }).env.VEC, "ok");
 });
 
-test("real tsx entry succeeds through the DEFAULT self-exec descriptor shape", async () => {
-  // The truest npm/tsx-form tooth (Hao blocker): node + loader args + the
+test("real TS-loader entry succeeds through the DEFAULT self-exec descriptor shape", async () => {
+  // The truest npm/TS-loader-form tooth (Hao blocker): node + loader args + the
   // actual thin entry, exactly what buildSelfExecArgv() produces in dev — a
   // bare process.execPath here would exit nonzero and this cell would red.
   const entry = new URL("./index.ts", import.meta.url).pathname;
@@ -980,7 +569,7 @@ test("real tsx entry succeeds through the DEFAULT self-exec descriptor shape", a
     ...CAPTURE_OPTS,
     timeoutMs: 15_000,
     resolveShell: () => shell,
-    selfExec: [process.execPath, "--import", "tsx", entry],
+    selfExec: [process.execPath, "--import", "@oxc-node/core/register", entry],
   });
   assert.equal(result.ok, true, JSON.stringify(result));
   const env = (result as { env: Record<string, string> }).env;
@@ -1041,7 +630,7 @@ test("non-POSIX platform is a typed failure before any spawn", async () => {
 // Bootstrap gate (review H1) + outcome recording (review B3, softened gate).
 // ---------------------------------------------------------------------------
 
-test("bootstrap only captures for OS-supervised POSIX service argv", async () => {
+test("bootstrap captures for supervised and unsupervised POSIX service argv only", async () => {
   let captureCalls = 0;
   const capture = async () => {
     captureCalls += 1;
@@ -1049,16 +638,79 @@ test("bootstrap only captures for OS-supervised POSIX service argv", async () =>
   };
   // Not a service boot → skipped, env untouched (foreground H1 cell).
   const fg: NodeJS.ProcessEnv = { KEEP: "1" };
-  assert.equal(await bootstrapSupervisedServiceEnv(["node", "x", "start", "--foreground"], fg, capture), "skipped");
-  // Service boot without a supervised kind (CLI-detached) → skipped.
-  const detached: NodeJS.ProcessEnv = { KEEP: "1" };
-  assert.equal(await bootstrapSupervisedServiceEnv(["node", "x", "__service"], detached, capture), "skipped");
+  assert.equal(await bootstrapServiceEnv(["node", "x", "start", "--foreground"], fg, capture, "linux"), "skipped");
   // Windows task kind → skipped.
   const win: NodeJS.ProcessEnv = { RAFT_COMPUTER_OS_SUPERVISOR_KIND: "windows-task" };
-  assert.equal(await bootstrapSupervisedServiceEnv(["node", "x", "__service"], win, capture), "skipped");
+  assert.equal(await bootstrapServiceEnv(["node", "x", "__service"], win, capture, "win32"), "skipped");
+  // Unsupervised (CLI-detached) service on Windows → skipped, not unavailable.
+  const winDetached: NodeJS.ProcessEnv = { KEEP: "1" };
+  assert.equal(await bootstrapServiceEnv(["node", "x", "__service"], winDetached, capture, "win32"), "skipped");
+  // Unsupervised service with the explicit opt-out → skipped.
+  const optOut: NodeJS.ProcessEnv = { KEEP: "1", RAFT_COMPUTER_SHELL_ENV_IMPORT: "0" };
+  assert.equal(await bootstrapServiceEnv(["node", "x", "__service"], optOut, capture, "linux"), "skipped");
+  // An unknown supervisor kind is not treated as unsupervised.
+  const unknownKind: NodeJS.ProcessEnv = { KEEP: "1" };
+  assert.equal(
+    await bootstrapServiceEnv(["node", "x", "__service", "--os-supervised", "invalid-test-kind"], unknownKind, capture, "linux"),
+    "skipped",
+  );
   assert.equal(captureCalls, 0);
   assert.equal(fg.KEEP, "1");
-  assert.equal(detached.KEEP, "1");
+  assert.equal(winDetached.KEEP, "1");
+  assert.equal(optOut.KEEP, "1");
+
+  // Unsupervised (CLI-detached) service on macOS/Linux → captured: a service
+  // started from a minimal env (non-login ssh, an agent shell, or a restart
+  // that inherits it) still gets the terminal environment.
+  for (const platform of ["linux", "darwin"] as const) {
+    const detached: NodeJS.ProcessEnv = { KEEP: "1", PATH: "/usr/bin:/bin" };
+    assert.equal(await bootstrapServiceEnv(["node", "x", "__service"], detached, capture, platform), "inherited");
+    assert.equal(detached.X, "1");
+    assert.equal(detached.KEEP, undefined, "replace-not-merge applies to unsupervised boots too");
+    assert.equal(detached.RAFT_COMPUTER_SHELL_ENV_STATE, "inherited");
+  }
+  assert.equal(captureCalls, 2);
+});
+
+test("unsupervised capture keeps the detached-spawn control keys the parent set", async () => {
+  const env: NodeJS.ProcessEnv = {
+    PATH: "/usr/bin:/bin",
+    SLOCK_HOME: "/caller/home",
+    RAFT_COMPUTER_PARENT_MUTATION_LOCK_HELD: "1",
+    RAFT_COMPUTER_SOURCE_SERVICE_PID: "4242",
+  };
+  const outcome = await bootstrapServiceEnv(
+    ["node", "x", "__service"],
+    env,
+    async () => ({
+      ok: true as const,
+      // rc output: richer PATH, but it also overrides one control key and
+      // drops the others.
+      env: { PATH: "/home/u/.local/bin:/usr/bin:/bin", SLOCK_HOME: "/rc/evil" },
+      shell: "/bin/bash",
+      durationMs: 1,
+    }),
+    "linux",
+  );
+  assert.equal(outcome, "inherited");
+  assert.equal(env.PATH, "/home/u/.local/bin:/usr/bin:/bin");
+  assert.equal(env.SLOCK_HOME, "/caller/home");
+  assert.equal(env.RAFT_COMPUTER_PARENT_MUTATION_LOCK_HELD, "1");
+  assert.equal(env.RAFT_COMPUTER_SOURCE_SERVICE_PID, "4242");
+});
+
+test("unsupervised capture failure keeps the inherited env and records the outcome", async () => {
+  const env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin", KEEP: "1" };
+  const outcome = await bootstrapServiceEnv(
+    ["node", "x", "__service"],
+    env,
+    async () => ({ ok: false as const, code: "SHELL_ENV_TIMEOUT" as const, detail: "fixture" }),
+    "linux",
+  );
+  assert.equal(outcome, "unavailable:SHELL_ENV_TIMEOUT");
+  assert.equal(env.PATH, "/usr/bin:/bin");
+  assert.equal(env.KEEP, "1");
+  assert.equal(env.RAFT_COMPUTER_SHELL_ENV_STATE, "unavailable:SHELL_ENV_TIMEOUT");
 });
 
 test("bootstrap freezes --slock-home before capture and applies snapshot on success", async () => {
@@ -1097,6 +749,79 @@ test("bootstrap failure records explicit degraded state and keeps baseline env",
   assert.equal(env.RAFT_COMPUTER_SHELL_ENV_STATE, "unavailable:SHELL_ENV_TIMEOUT");
 });
 
+test("bootstrap captures for the macOS login-carrier boot marker", async () => {
+  const env: NodeJS.ProcessEnv = {
+    RAFT_COMPUTER_LOGIN_CARRIER: "1",
+    HTTPS_PROXY: "http://stale-plist-snapshot:1",
+  };
+  let markerSeenByCapture: string | undefined = "not-called";
+  const outcome = await bootstrapSupervisedServiceEnv(
+    ["node", "x", "__service", "--slock-home", "/frozen/home"],
+    env,
+    async () => {
+      // Simulate the real capture shape: the login shell inherits the current
+      // env and returns it (plus its own values) verbatim.
+      markerSeenByCapture = env.RAFT_COMPUTER_LOGIN_CARRIER;
+      return {
+        ok: true as const,
+        env: { ...env, HTTPS_PROXY: "http://fresh-from-shell:2", SLOCK_HOME: "/rc/evil" },
+        shell: "/bin/bash",
+        durationMs: 2,
+      };
+    },
+  );
+  assert.equal(outcome, "inherited");
+  // The one-shot marker is consumed before capture and never re-enters the
+  // long-lived environment through the inherited frame.
+  assert.equal(markerSeenByCapture, undefined);
+  assert.equal(env.RAFT_COMPUTER_LOGIN_CARRIER, undefined);
+  // The fresh login-shell value wins over the plist snapshot.
+  assert.equal(env.HTTPS_PROXY, "http://fresh-from-shell:2");
+  // argv home frozen pre-capture beats the rc's poisoned value.
+  assert.equal(env.SLOCK_HOME, "/frozen/home");
+  // The marker boot does not mint a supervisor kind.
+  assert.equal(env.RAFT_COMPUTER_OS_SUPERVISOR_KIND, undefined);
+});
+
+test("login-carrier boot keeps the plist floor when capture fails", async () => {
+  const env: NodeJS.ProcessEnv = {
+    RAFT_COMPUTER_LOGIN_CARRIER: "1",
+    HTTPS_PROXY: "http://stale-plist-snapshot:1",
+  };
+  const outcome = await bootstrapSupervisedServiceEnv(
+    ["node", "x", "__service", "--slock-home", "/frozen/home"],
+    env,
+    async () => ({
+      ok: false as const,
+      code: "SHELL_ENV_TIMEOUT" as const,
+      detail: "test",
+    }),
+  );
+  assert.equal(outcome, "unavailable:SHELL_ENV_TIMEOUT");
+  // Capture failure leaves the baseline (plist snapshot) untouched and still
+  // does not leave the consumed marker behind.
+  assert.equal(env.HTTPS_PROXY, "http://stale-plist-snapshot:1");
+  assert.equal(env.RAFT_COMPUTER_LOGIN_CARRIER, undefined);
+});
+
+test("the login-carrier marker without a service boot does not capture", async () => {
+  let captureCalls = 0;
+  const env: NodeJS.ProcessEnv = { RAFT_COMPUTER_LOGIN_CARRIER: "1", KEEP: "1" };
+  const outcome = await bootstrapSupervisedServiceEnv(
+    ["node", "x", "start", "--foreground"],
+    env,
+    async () => {
+      captureCalls += 1;
+      return { ok: true as const, env: {}, shell: "/bin/bash", durationMs: 1 };
+    },
+  );
+  assert.equal(outcome, "skipped");
+  assert.equal(captureCalls, 0);
+  // No boot happened, so the marker and the env stay untouched.
+  assert.equal(env.RAFT_COMPUTER_LOGIN_CARRIER, "1");
+  assert.equal(env.KEEP, "1");
+});
+
 // ---------------------------------------------------------------------------
 // ② surface (xxchan ruling b48782f5): the import outcome must be readable by
 // a LATER CLI process via the persisted service version evidence — codes
@@ -1104,7 +829,7 @@ test("bootstrap failure records explicit degraded state and keeps baseline env",
 // ---------------------------------------------------------------------------
 
 test("service version evidence persists the shell env outcome for cross-process status", async () => {
-  const { writeProcessVersionEvidence, readProcessVersionEvidence } = await import("./versionEvidence.js");
+  const { writeProcessVersionEvidence, readProcessVersionEvidence } = await import("./versionEvidence");
   const dir = await mkdtemp(path.join(os.tmpdir(), "raft-evidence-"));
   const file = path.join(dir, "service.version.json");
   await writeProcessVersionEvidence(file, {
@@ -1117,7 +842,7 @@ test("service version evidence persists the shell env outcome for cross-process 
   const back = await readProcessVersionEvidence(file);
   assert.equal(back?.shellEnvironment, "unavailable:SHELL_ENV_TIMEOUT");
   // Closed-set round-trip: every legal outcome survives.
-  const { SHELL_ENV_CAPTURE_FAILURE_CODES } = await import("./shellEnvCapture.js");
+  const { SHELL_ENV_CAPTURE_FAILURE_CODES } = await import("./shellEnvCapture");
   for (const code of ["inherited", ...SHELL_ENV_CAPTURE_FAILURE_CODES.map((c) => `unavailable:${c}`)]) {
     await writeProcessVersionEvidence(file, {
       version: null, installRoot: dir, pid: 1, writtenAt: "t", shellEnvironment: code,

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   formatAlreadyLoggedIn,
@@ -9,7 +8,7 @@ import {
   formatCredentialRemintNotice,
   formatLoginStateMissing,
   formatVerificationHandoff,
-} from "./_format.js";
+} from "./_format";
 
 // Byte pins: expected strings below are copied from the PRE-MOVE inline
 // literals in login.ts/list.ts/bridge.ts (print-seam S3), not from the new

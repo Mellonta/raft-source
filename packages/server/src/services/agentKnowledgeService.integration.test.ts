@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService.js";
+import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService";
 
 // Manual telemetry (meichen 7/28) surfaced Chinese joint-channel discovery
 // missing while the canonical `joint-channel` doc succeeded 26 times. The

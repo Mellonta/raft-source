@@ -31,9 +31,20 @@ import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
-import { clearClockTimeout, currentTimeMs, setClockTimeout } from "@botiverse/raft-shared";
+// Narrow subpath: this module is the pre-service-graph boot seam (shell-env
+// entry), so it must not evaluate the whole shared barrel.
+import { clearClockTimeout, currentTimeMs, setClockTimeout } from "@botiverse/raft-shared/src/clock";
+import { OS_SUPERVISOR_KIND_ENV_VAR } from "./osSupervisorLifecycle";
 
 export const SHELL_ENV_STATE_ENV_VAR = "RAFT_COMPUTER_SHELL_ENV_STATE";
+/** Set to "1" in the macOS login-carrier plist: marks a launchd login boot so
+ * the service re-reads the user's login shell environment (the source of
+ * truth for proxy settings) instead of relying on the plist snapshot. */
+export const LOGIN_CARRIER_ENV_VAR = "RAFT_COMPUTER_LOGIN_CARRIER";
+/** Set to "0" to keep an unsupervised `__service` on the env it was started
+ * with (dev harnesses that configure the service through env and want no rc
+ * involvement). Supervised and login-carrier boots ignore it. */
+export const SHELL_ENV_IMPORT_ENV_VAR = "RAFT_COMPUTER_SHELL_ENV_IMPORT";
 export const SHELL_ENV_CAPTURE_TIMEOUT_MS = 10_000;
 export const SHELL_ENV_CAPTURE_MAX_BYTES = 1024 * 1024;
 
@@ -137,7 +148,7 @@ export function parseEnvFrame(
 export interface CaptureShellEnvDeps {
   /**
    * Argv vector that re-executes THIS Computer entry (Hao blocker fix):
-   * SEA = [execPath]; npm wrapper / tsx dev = [execPath, ...execArgv,
+   * SEA = [execPath]; npm wrapper / TS-loader dev = [execPath, ...execArgv,
    * scriptPath]. Each element is POSIX-quoted individually; a bare
    * process.execPath would exec Node without our entry in non-SEA forms and
    * permanently degrade every npm-form supervised service.
@@ -404,3 +415,92 @@ export function applyCapturedEnv(
     else target[key] = value;
   }
 }
+
+// ── Service boot seam (moved from index.ts so hosts other than the CLI entry —
+// Raft Desktop's app-hosted `__service` — can apply the SAME contract:
+// "the whole Computer process tree = Terminal launch environment", task #326).
+
+const POSIX_SUPERVISED_KINDS = new Set(["launchd-user", "systemd-user"]);
+
+function argvValue(argv: string[], flag: string): string | undefined {
+  const index = argv.indexOf(flag);
+  return index >= 0 ? argv[index + 1] : undefined;
+}
+
+/**
+ * Capture + apply the login-shell environment for a `__service` boot: a
+ * supervised one (launchd/systemd user supervisor, or a host that sets
+ * LOGIN_CARRIER_ENV_VAR), or an unsupervised (CLI-detached) one on macOS and
+ * Linux. Must run BEFORE the service module graph loads.
+ */
+export async function bootstrapServiceEnv(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  capture: () => Promise<ShellEnvCaptureResult>,
+  platform: NodeJS.Platform = process.platform,
+): Promise<"skipped" | "inherited" | `unavailable:${string}`> {
+  if (!argv.includes("__service")) return "skipped";
+  const kind = argv.includes("--os-supervised")
+    ? argvValue(argv, "--os-supervised")
+    : env[OS_SUPERVISOR_KIND_ENV_VAR];
+  // The macOS login carrier is launchd-driven but carries no --os-supervised
+  // marker; its plist sets LOGIN_CARRIER_ENV_VAR so boot still re-reads the
+  // user's login shell environment (fresh proxy config wins over the plist
+  // snapshot, which remains the floor when capture fails).
+  const loginCarrier = env[LOGIN_CARRIER_ENV_VAR] === "1";
+  // An unsupervised service otherwise inherits whatever env started it: a
+  // non-login ssh command, an agent's shell, or (through self-replacement on
+  // restart/upgrade) the env of the service it replaces. One start from a
+  // minimal PATH then hides every runtime installed in ~/.local/bin until a
+  // login-shell stop+start. Read the login shell here too, so the result does
+  // not depend on who started the service.
+  const unsupervised = !kind && !loginCarrier;
+  if (unsupervised) {
+    if (platform !== "darwin" && platform !== "linux") return "skipped";
+    if (env[SHELL_ENV_IMPORT_ENV_VAR] === "0") return "skipped";
+  } else if ((!kind || !POSIX_SUPERVISED_KINDS.has(kind)) && !loginCarrier) {
+    return "skipped";
+  }
+  // One-shot boot control bit: consume it BEFORE capture so the inherited
+  // login-shell frame cannot carry it back into the long-lived service
+  // environment (and from there into every agent/runtime child).
+  delete env[LOGIN_CARRIER_ENV_VAR];
+
+  // H2/S1: freeze the supervisor's truth into the CANONICAL env keys BEFORE
+  // capture, so the protected snapshot carries argv authority — a rc can
+  // neither poison nor omit them.
+  const slockHomeArg = argvValue(argv, "--slock-home") ?? argvValue(argv, "--raft-home");
+  if (slockHomeArg) env.SLOCK_HOME = slockHomeArg;
+  if (kind) env[OS_SUPERVISOR_KIND_ENV_VAR] = kind;
+
+  const result = await capture();
+  if (result.ok) {
+    applyCapturedEnv(env, result.env);
+    env[SHELL_ENV_STATE_ENV_VAR] = "inherited";
+    return "inherited";
+  }
+  env[SHELL_ENV_STATE_ENV_VAR] = `unavailable:${result.code}`;
+  process.stderr.write(
+    `raft-computer: shell environment import failed during service boot (${result.code}: ${result.detail}); ` +
+      `continuing with the ${unsupervised ? "inherited" : "baseline supervisor"} environment. Runtime discovery may ` +
+      "miss tools available in your terminal until this is resolved.\n",
+  );
+  return `unavailable:${result.code}`;
+}
+
+/**
+ * `__print-env`: serialize post-rc env over the parent's private capture
+ * socket and exit. The sink is established HERE, after the rc chain has
+ * fully run — an inherited fd would not survive real rc files (command
+ * substitution reuses/closes descriptors).
+ */
+export function printEnvMode(argv: string[]): void {
+  const nonce = argvValue(argv, "--nonce") ?? "";
+  const sockPath = argvValue(argv, "--sock") ?? "";
+  const frame = serializeEnvFrame(nonce, process.env);
+  const socket = net.connect(sockPath, () => {
+    socket.end(frame, () => process.exit(0));
+  });
+  socket.on("error", () => process.exit(8));
+}
+

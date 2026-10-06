@@ -124,12 +124,13 @@ export function parseAgentCreateFormDefinition(
     return value as unknown as AgentCreateFormDefinition;
   }
   // Protocol v1 supports exact, version-pinned Built-in Pi topologies. This keeps a
-  // new Web client compatible with a v1 server while ensuring the v2 image
-  // capability cannot be silently added to or removed from either schema.
-  const imageInputTopology = ref.schemaVersion === "builtin-pi.create.v2";
+  // new Web client compatible with older servers while versioning the v2 image
+  // and v3 local-plugin capabilities explicitly.
+  const localPluginsTopology = ref.schemaVersion === "builtin-pi.create.v3";
+  const imageInputTopology = localPluginsTopology || ref.schemaVersion === "builtin-pi.create.v2";
   if (!imageInputTopology && ref.schemaVersion !== "builtin-pi.create.v1") return null;
   const expectedProperties = imageInputTopology
-    ? ["providerId", "apiKey", "baseUrl", "supportsImageInput", "model", "envVars"]
+    ? ["providerId", "apiKey", "baseUrl", "supportsImageInput", "model", ...(localPluginsTopology ? ["loadLocalPlugins"] : []), "envVars"]
     : ["providerId", "apiKey", "baseUrl", "model", "envVars"];
   if (!exactKeys(value.dataSchema.properties, expectedProperties)) return null;
   if (!sameStringSet(value.dataSchema.required, ["providerId", "apiKey", "model"])) return null;
@@ -142,10 +143,11 @@ export function parseAgentCreateFormDefinition(
   const envVarsSchema = properties.envVars;
   if (providerIdSchema?.type !== "string" || apiKeySchema?.type !== "string" || baseUrlSchema?.type !== "string" || modelSchema?.type !== "string" || envVarsSchema?.type !== "object") return null;
   if (imageInputTopology && supportsImageInputSchema?.type !== "boolean") return null;
+  if (localPluginsTopology && properties.loadLocalPlugins?.type !== "boolean") return null;
   if (apiKeySchema.writeOnly !== true || providerIdSchema.writeOnly === true || baseUrlSchema.writeOnly === true || modelSchema.writeOnly === true) return null;
   if (baseUrlSchema.format !== "uri") return null;
   if (!sameStringSet(value.uiSchema.order, expectedProperties)) return null;
-  if (!sameStringSet(value.uiSchema.layout.advanced, ["/envVars"])) return null;
+  if (!sameStringSet(value.uiSchema.layout.advanced, localPluginsTopology ? ["/loadLocalPlugins", "/envVars"] : ["/envVars"])) return null;
   if (value.uiSchema.visibility.length !== (imageInputTopology ? 2 : 1)) return null;
   const baseUrlVisibility = value.uiSchema.visibility.find((rule) => rule.pointer === "/baseUrl");
   if (baseUrlVisibility?.pointer !== "/baseUrl" || baseUrlVisibility.when.pointer !== "/providerId") return null;

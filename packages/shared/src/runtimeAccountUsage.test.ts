@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   maskRuntimeAccountEmail,
   safeParseRuntimeAccountUsageSnapshot,
-} from "./runtimeAccountUsage.js";
+} from "./runtimeAccountUsage";
 
 const validSnapshot = {
   protocolVersion: 2,
@@ -33,7 +32,7 @@ test("accepts a closed sanitized runtime-account usage snapshot", () => {
 });
 
 test("masks runtime account emails deterministically without exposing short local parts", () => {
-  assert.equal(maskRuntimeAccountEmail(" lenlongxsasd@GMAIL.com "), "len****xsasd@gmail.com");
+  assert.equal(maskRuntimeAccountEmail(" placeholder1@EXAMPLE.com "), "pla****lder1@example.com");
   assert.equal(maskRuntimeAccountEmail("teamuser@example.com"), "tea****r@example.com");
   assert.equal(maskRuntimeAccountEmail("a@example.com"), "a****@example.com");
   assert.equal(maskRuntimeAccountEmail("ab@example.com"), "a****@example.com");

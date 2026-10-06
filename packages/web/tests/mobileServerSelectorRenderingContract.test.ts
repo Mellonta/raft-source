@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 import { mobileServerSelectorPolygon } from "../src/components/layout/mobileServerSelectorGeometry";
 
 const sidebarSource = readFileSync(new URL("../src/components/layout/Sidebar.tsx", import.meta.url), "utf8");
@@ -18,7 +17,7 @@ test("mobile server selector preserves its dimensions while vectorizing the slan
     "bg-transparent",
     "px-3",
     "py-1",
-    "text-soft-signal",
+    "text-primary-strong",
   ]) {
     assert.match(className, new RegExp(`(?:^|\\s)${originalSurfaceClass.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}(?:\\s|$)`));
   }

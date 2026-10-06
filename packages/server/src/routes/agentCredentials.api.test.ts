@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 /**
  * Integration tests for `POST /api/agents/:id/credentials` — the external-agent
  * credential mint endpoint that consumes a user session and produces
@@ -24,13 +24,13 @@ import assert from "node:assert/strict";
 
 import argon2 from "argon2";
 
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { users, serverMembers, agentCredentials } from "../db/schema.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { users, serverMembers, agentCredentials } from "../db/schema";
 import { eq } from "drizzle-orm";
-import { createServer } from "../services/serverService.js";
-import { createAgent, deleteAgent } from "../services/agentService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
+import { createServer } from "../services/serverService";
+import { createAgent, deleteAgent } from "../services/agentService";
+import { mintAgentCredential } from "../services/agentCredentialService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -81,7 +81,7 @@ test("owner of agent's server mints sk_agent_* without X-Server-Id header", asyn
     try {
       const owner = await seedUser("owner-mint@slock.test", "owner-mint");
       const server = await createServer("Mint Test", "mint-test", owner.id);
-      const agent = await createAgent(server.id, "mint-agent", { runtime: "codex" });
+      const agent = await createAgent(server.id, "mint-agent", { runtime: "external" });
 
       const token = await login(app.baseUrl, owner.email);
       const res = await fetch(`${app.baseUrl}/api/agents/${agent.id}/credentials`, {
@@ -164,7 +164,7 @@ test("agent creator keeps issueAgentCredentials authority after demotion to memb
       const server = await createServer("Creator Mint Test", "creator-mint-test", owner.id);
       await getDb().insert(serverMembers).values({ serverId: server.id, userId: creator.id, role: "member" });
       const agent = await createAgent(server.id, "creator-mint-agent", {
-        runtime: "codex",
+        runtime: "external",
         creatorType: "user",
         creatorId: creator.id,
       });
@@ -197,7 +197,7 @@ test("user who is not a member of agent's server gets 404 agent_missing (anti-en
       const userZ = await seedUser("anti-enum-z@slock.test", "anti-enum-z");
       await createServer("Server X", "anti-enum-x", userA.id);
       const serverZ = await createServer("Server Z", "anti-enum-z", userZ.id);
-      const agentY = await createAgent(serverZ.id, "anti-enum-y", { runtime: "codex" });
+      const agentY = await createAgent(serverZ.id, "anti-enum-y", { runtime: "external" });
 
       const tokenA = await login(app.baseUrl, userA.email);
       const res = await fetch(`${app.baseUrl}/api/agents/${agentY.id}/credentials`, {
@@ -236,7 +236,7 @@ test("server member without issueAgentCredentials or creator authority gets 403 
         userId: member.id,
         role: "member",
       });
-      const agent = await createAgent(server.id, "role-agent", { runtime: "codex" });
+      const agent = await createAgent(server.id, "role-agent", { runtime: "external" });
 
       const token = await login(app.baseUrl, member.email);
       const res = await fetch(`${app.baseUrl}/api/agents/${agent.id}/credentials`, {
@@ -285,7 +285,7 @@ test("soft-deleted agent returns 404 agent_missing — not 403, not 400 (Hao gat
         userId: member.id,
         role: "member",
       });
-      const agent = await createAgent(server.id, "to-be-deleted", { runtime: "codex" });
+      const agent = await createAgent(server.id, "to-be-deleted", { runtime: "external" });
       await deleteAgent(agent.id);
 
       const ownerToken = await login(app.baseUrl, owner.email);

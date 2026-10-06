@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { extractRaftMentionHandles } from "@botiverse/raft-shared";
 
 import {
@@ -9,7 +8,7 @@ import {
   normalizeMentionActionResults,
   normalizePendingMentionActions,
   normalizeUnresolvedMentionHandles,
-} from "./_format.js";
+} from "./_format";
 
 const ACTION_A = "11111111-1111-4111-8111-111111111111";
 const ACTION_B = "22222222-2222-4222-8222-222222222222";
@@ -222,11 +221,34 @@ test("sender formatter preserves a legal non-ASCII authored token byte-for-byte"
   assert.equal(Buffer.from(renderedToken).equals(Buffer.from(authoredToken)), true);
 });
 
-test("formatPendingMentionActions names empty pending state", () => {
+test("formatPendingMentionActions names empty pending state, and says whether it is the whole list", () => {
+  // An empty page is where "is that all of them?" matters MOST, so the verdict is rendered here
+  // too. Without it, "no pending actions" and "no pending actions ON THIS PAGE" are one string.
   assert.equal(
     formatPendingMentionActions([], { source: "pending" }),
-    "Pending mention actions\n\nNo pending mention actions.\n",
+    "Pending mention actions\n\nNo pending mention actions. (shown 0, server default 50 \u2014 truncated=unknown \u00b7 server did not report has_more, so completeness is NOT asserted)\n",
   );
+});
+
+test("pending page verdict has three states and absent never renders as false", () => {
+  const rows = [{
+    resolutionId: "r-1", messageId: "m-1", targetType: "agent", targetHandle: "@a",
+    reason: "not_in_conversation", availableActions: ["notify"], expiresAt: null,
+  }];
+  const unknown = formatPendingMentionActions(rows, { source: "pending" });
+  const complete = formatPendingMentionActions(rows, { source: "pending", hasMore: false });
+  const more = formatPendingMentionActions(rows, { source: "pending", hasMore: true, limit: 1 });
+
+  assert.match(unknown, /truncated=unknown/);
+  // The whole point of the third state: a server that said nothing must not be quoted as
+  // having said "no".
+  assert.doesNotMatch(unknown, /truncated=false/);
+  assert.match(complete, /truncated=false/);
+  assert.match(more, /truncated=true/);
+  // A verdict the reader cannot act on is decoration; name the lever and its ceiling.
+  assert.match(more, /raise --limit \(server caps at 100\)/);
+  assert.match(more, /--limit 1/);
+  assert.match(unknown, /server default 50/);
 });
 
 test("normalizers accept server response aliases without leaking malformed rows", () => {

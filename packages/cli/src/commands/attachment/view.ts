@@ -11,12 +11,12 @@ import {
 } from "@botiverse/raft-shared";
 import type { Command } from "commander";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText,  } from "../../core/renderer.js";
-import { formatAttachmentDownloaded } from "./_format.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText,  } from "../../core/renderer";
+import { formatAttachmentDownloaded } from "./_format";
 
 interface ViewOpts {
   id?: string;

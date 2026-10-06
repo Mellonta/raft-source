@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import { registerHooks } from "node:module";
 
 const INVALID_DESKTOP_RUNTIME_ENVIRONMENT = "INVALID_DESKTOP_RUNTIME_ENVIRONMENT";
@@ -60,7 +59,7 @@ function isInvalidDesktopRuntimeError(error: unknown): boolean {
 }
 
 test("invalid Desktop runtime blocks axios token reads and adapter dispatch", async () => {
-  const { default: api } = await import("../src/api/client.js");
+  const { default: api } = await import("../src/api/client");
   let adapterCalls = 0;
   globalThis.__desktopRuntimeTokenReads = 0;
 
@@ -79,7 +78,7 @@ test("invalid Desktop runtime blocks axios token reads and adapter dispatch", as
 });
 
 test("invalid Desktop runtime blocks socket construction and connect", async () => {
-  const { getSocket } = await import("../src/api/socket.js");
+  const { getSocket } = await import("../src/api/socket");
   globalThis.__desktopRuntimeTokenReads = 0;
   globalThis.__desktopRuntimeSocketConstructs = 0;
   globalThis.__desktopRuntimeSocketConnects = 0;

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, test } from "node:test";
 import { Component, act } from "react";
 import type { ErrorInfo, ReactNode } from "react";
 import { cleanup, render as rtlRender } from "@testing-library/react";

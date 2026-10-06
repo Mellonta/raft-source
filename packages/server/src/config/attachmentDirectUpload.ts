@@ -2,7 +2,7 @@ import type { ServerId } from "@botiverse/raft-shared";
 import {
   ATTACHMENT_DIRECT_UPLOAD_FEATURE_FLAG_KEY,
   evaluateFeatureFlag,
-} from "../services/featureFlagService.js";
+} from "../services/featureFlagService";
 
 export async function isAttachmentDirectUploadEnabledForServer(
   context: Readonly<{ serverId: ServerId; userId?: string }>,

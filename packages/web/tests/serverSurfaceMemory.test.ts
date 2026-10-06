@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { normalizeServerSurfaceMemory } from "../src/hooks/useTabRouteMemory";
 
 test("server surface memory keeps deep server routes with right-panel query", () => {

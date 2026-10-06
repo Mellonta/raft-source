@@ -23,8 +23,8 @@ import {
   clearPidfileAt,
   isProcessAlive as defaultIsProcessAlive,
   readPidfileAt as defaultReadPidfileAt,
-} from "./process-primitives.js";
-import { servicePidReadFallback } from "../paths.js";
+} from "./process-primitives";
+import { servicePidReadFallback } from "../paths";
 
 export interface FindLiveServicePidResult {
   /** First live pid encountered in the fallback walk, or null when the

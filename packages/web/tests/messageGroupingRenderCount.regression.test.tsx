@@ -21,7 +21,6 @@
 // exactly what the memo bailout gates.
 // Run: pnpm --filter @botiverse/raft-web test:dom
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { memo, useState, act } from "react";
 import { cleanup, render as rtlRender } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";

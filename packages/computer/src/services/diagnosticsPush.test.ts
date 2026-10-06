@@ -26,11 +26,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import { gunzipSync } from "node:zlib";
 
-import { diagnosticsPush } from "./diagnosticsPush.js";
-import { getDaemonMachineLockId } from "../../../daemon/src/machineLock.js";
+import { diagnosticsPush } from "./diagnosticsPush";
+import { DIAGNOSTIC_REDACTION_CREDENTIAL_SAMPLES, PEM_PRIVATE_KEY_BEGIN } from "../../../shared/src/test/diagnosticRedactionCredentialSamples";
+import { getDaemonMachineLockId } from "../../../daemon/src/machineLock";
 
 async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(path.join(tmpdir(), "raft-computer-diag-svc-"));
@@ -446,5 +446,233 @@ test("diagnosticsPush: forced upload includes sanitized Computer migration spans
     assert.equal(uploadedText.includes("sk_computer_force_upload"), false);
     assert.equal(uploadedText.includes("ACCESS_TOKEN_VALUE"), false);
     assert.equal(uploadedText.includes("owner.json"), false);
+  });
+});
+
+
+test("diagnosticsPush: uploaded bundle masks every known credential sample (task263)", async () => {
+  await withHome(async (home) => {
+    await seedUserSession(home);
+    const serverId = randomUUID();
+    const apiKey = "sk_computer_cred_sample_upload";
+    await seedRunningRunner(home, serverId, apiKey);
+    const serverDir = path.join(home, "computer", "servers", serverId);
+    // One sample per line: the tail redactor is line-oriented, so each sample
+    // must survive on its own line exactly as a real log would carry it.
+    // Newlines are preserved deliberately. Flattening them would test a
+    // single-line PEM variant and hide that multi-line rules never fire on a
+    // line-oriented path (archer's review catch, task #263).
+    const logText = `${DIAGNOSTIC_REDACTION_CREDENTIAL_SAMPLES
+      .map((entry) => entry.sample)
+      .join("\n")}\n`;
+    await writeFile(path.join(serverDir, "runner.log"), logText, { mode: 0o600 });
+
+    let uploadedText = "";
+    const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
+      if (input.endsWith("/internal/machine/scope-attestation")) {
+        return new Response(JSON.stringify({ attestation: "signed-attestation" }), { status: 200 });
+      }
+      if (input.endsWith("/api/trace-bundles")) {
+        return new Response(JSON.stringify({
+          upload: { method: "PUT", url: "http://upload.local/object", headers: {} },
+        }), { status: 200 });
+      }
+      if (input === "http://upload.local/object") {
+        const body = init?.body;
+        assert.ok(body instanceof Blob);
+        uploadedText = gunzipSync(Buffer.from(await body.arrayBuffer())).toString("utf8");
+        return new Response("", { status: 200 });
+      }
+      return new Response("unexpected", { status: 500 });
+    };
+
+    const r = await diagnosticsPush(
+      { slockHome: home },
+      {
+        forceUploadNow: true,
+        correlationId: "00000000-0000-4000-8000-0000000002 63".replace(" ", ""),
+        workerUrl: "http://worker.local",
+        fetchImpl,
+      },
+    );
+    assert.equal(r.status, "queued", JSON.stringify(r));
+    assert.ok(uploadedText.length > 0, "upload body must have been captured");
+
+    const leaked = DIAGNOSTIC_REDACTION_CREDENTIAL_SAMPLES
+      .filter((entry) => uploadedText.includes(entry.mustNotContain))
+      .map((entry) => entry.label);
+    assert.deepEqual(leaked, [], `credential samples present in uploaded bundle: ${leaked.join(", ")}`);
+
+    // The marker is a Raft-owned on-disk artifact, so it must be clean before
+    // it is written, not merely before it is uploaded (XX's write-before rule).
+    const onDisk = await readFile(r.markerPaths[0], "utf8");
+    const leakedOnDisk = DIAGNOSTIC_REDACTION_CREDENTIAL_SAMPLES
+      .filter((entry) => onDisk.includes(entry.mustNotContain))
+      .map((entry) => entry.label);
+    assert.deepEqual(leakedOnDisk, [], `credential samples present in on-disk marker: ${leakedOnDisk.join(", ")}`);
+  });
+});
+
+
+test("diagnosticsPush: identity and URL handling is unchanged by the shared-redaction swap (task263 invariant)", async () => {
+  await withHome(async (home) => {
+    await seedUserSession(home);
+    const serverId = randomUUID();
+    await seedRunningRunner(home, serverId, "sk_computer_invariant_probe");
+    const serverDir = path.join(home, "computer", "servers", serverId);
+    await writeFile(
+      path.join(serverDir, "runner.log"),
+      [
+        "url line https://raft.example.test/callback?token=query-secret&x=1",
+        "mail line ops.person@example.com reported it",
+        "posix path /Users/richard/.slock/computer/servers/local/server-runner.log",
+        "linux path /home/alice/.slock/token",
+        "windows path C:\\Users\\Alice\\AppData\\Roaming\\Raft\\runner.log",
+      ].join("\n") + "\n",
+      { mode: 0o600 },
+    );
+
+    const r = await diagnosticsPush({ slockHome: home });
+    assert.equal(r.status, "queued");
+    if (r.status !== "queued") return;
+    const markerText = await readFile(r.markerPaths[0], "utf8");
+    const tail = markerText.trim().split("\n").map((line) => JSON.parse(line))
+      .find((record) => record.name === "diagnostics.runner_log_tail");
+    assert.ok(tail, "marker must carry the runner.log tail");
+    const tailText = tail.events.map((e: { attrs: { text: string } }) => e.attrs.text).join("\n");
+
+    // Secrets and identities must be gone...
+    assert.doesNotMatch(tailText, /query-secret/);
+    assert.doesNotMatch(tailText, /ops\.person@example\.com/);
+    assert.doesNotMatch(tailText, /\/Users\/richard/);
+    assert.doesNotMatch(tailText, /\/home\/alice/);
+    assert.doesNotMatch(tailText, /C:\\Users\\Alice/);
+
+    // ...but the URL host+path must SURVIVE. This is the invariant the swap
+    // could silently break: shared defaults to urls:"query" (mask the query,
+    // keep host+path); passing urls:"drop" would replace the whole URL with
+    // "[url]" and destroy the diagnostic value this path exists to carry.
+    assert.match(tailText, /raft\.example\.test\/callback/);
+    assert.doesNotMatch(tailText, /\[url\]/);
+  });
+});
+
+
+test("diagnosticsPush: PEM block straddling the tail window is masked (task263 boundary)", async () => {
+  await withHome(async (home) => {
+    await seedUserSession(home);
+    const serverId = randomUUID();
+    await seedRunningRunner(home, serverId, "sk_computer_pem_boundary");
+    const serverDir = path.join(home, "computer", "servers", serverId);
+    const keyBody = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
+    // 121 lines: the 120-line tail window starts at index 1, so BEGIN (index 0)
+    // falls OUTSIDE the window while the key body and END fall inside. Redacting
+    // after the cut would leave the body with no BEGIN to anchor the rule.
+    const logLines = [
+      // Built at runtime so secret scanners don't flag this test sample.
+      PEM_PRIVATE_KEY_BEGIN,
+      keyBody,
+      "-----END PRIVATE KEY-----",
+      ...Array.from({ length: 118 }, (_, i) => `filler-${String(i).padStart(3, "0")}`),
+    ];
+    assert.equal(logLines.length, 121);
+    await writeFile(path.join(serverDir, "runner.log"), `${logLines.join("\n")}\n`, { mode: 0o600 });
+
+    const r = await diagnosticsPush({ slockHome: home });
+    assert.equal(r.status, "queued");
+    if (r.status !== "queued") return;
+    const markerText = await readFile(r.markerPaths[0], "utf8");
+    assert.equal(markerText.includes(keyBody), false, "PEM body must not reach the marker");
+
+    const tail = markerText.trim().split("\n").map((line) => JSON.parse(line))
+      .find((record) => record.name === "diagnostics.runner_log_tail");
+    assert.ok(tail);
+    // sourceLineCount stays a property of the source file, not of the redacted text.
+    assert.equal(tail.attrs.source_line_count, 121);
+  });
+});
+
+
+// XX (task #263): the acceptance surface of this card is the REAL upload artifact.
+// The shared unit tests prove the RULE; these prove the PATH. Both layers need
+// teeth, because a correct rule can still be bypassed by how the caller slices
+// the text before handing it over.
+async function uploadRunnerLog(home: string, serverId: string, logText: string): Promise<{
+  uploadedText: string;
+  markerText: string;
+}> {
+  const serverDir = path.join(home, "computer", "servers", serverId);
+  await writeFile(path.join(serverDir, "runner.log"), logText, { mode: 0o600 });
+
+  let uploadedText = "";
+  const fetchImpl = async (input: string, init?: RequestInit): Promise<Response> => {
+    if (input.endsWith("/internal/machine/scope-attestation")) {
+      return new Response(JSON.stringify({ attestation: "signed-attestation" }), { status: 200 });
+    }
+    if (input.endsWith("/api/trace-bundles")) {
+      return new Response(JSON.stringify({
+        upload: { method: "PUT", url: "http://upload.local/object", headers: {} },
+      }), { status: 200 });
+    }
+    if (input === "http://upload.local/object") {
+      const body = init?.body;
+      assert.ok(body instanceof Blob);
+      uploadedText = gunzipSync(Buffer.from(await body.arrayBuffer())).toString("utf8");
+      return new Response("", { status: 200 });
+    }
+    return new Response("unexpected", { status: 500 });
+  };
+
+  const r = await diagnosticsPush(
+    { slockHome: home },
+    { forceUploadNow: true, correlationId: randomUUID(), workerUrl: "http://worker.local", fetchImpl },
+  );
+  assert.equal(r.status, "queued", JSON.stringify(r));
+  if (r.status !== "queued") throw new Error("unreachable");
+  assert.ok(uploadedText.length > 0, "upload body must have been captured");
+  return { uploadedText, markerText: await readFile(r.markerPaths[0], "utf8") };
+}
+
+test("diagnosticsPush: orphan BEGIN marker is masked in the uploaded body (task263 orphan-begin)", async () => {
+  await withHome(async (home) => {
+    await seedUserSession(home);
+    const serverId = randomUUID();
+    await seedRunningRunner(home, serverId, "sk_computer_orphan_begin");
+    const keyBody = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
+    // archer's reproduction (msg=47ded091): the END line is absent because the
+    // process is still WRITING the block. Needs no bounded read to occur, so a
+    // paired BEGIN..END rule alone leaves the body in the clear.
+    const logText = [
+      "runner started",
+      PEM_PRIVATE_KEY_BEGIN,
+      keyBody,
+    ].join("\n") + "\n";
+
+    const { uploadedText, markerText } = await uploadRunnerLog(home, serverId, logText);
+    assert.equal(uploadedText.includes(keyBody), false, "PEM body reached the uploaded bundle");
+    assert.equal(markerText.includes(keyBody), false, "PEM body reached the on-disk marker");
+  });
+});
+
+test("diagnosticsPush: orphan END marker is masked in the uploaded body (task263 orphan-end)", async () => {
+  await withHome(async (home) => {
+    await seedUserSession(home);
+    const serverId = randomUUID();
+    await seedRunningRunner(home, serverId, "sk_computer_orphan_end");
+    const keyBody = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7";
+    // Rotation/truncation dropped the head of the file, so the body arrives with
+    // only a trailing END to anchor it.
+    const logText = [
+      keyBody,
+      "-----END PRIVATE KEY-----",
+      "runner continued",
+    ].join("\n") + "\n";
+
+    const { uploadedText, markerText } = await uploadRunnerLog(home, serverId, logText);
+    assert.equal(uploadedText.includes(keyBody), false, "PEM body reached the uploaded bundle");
+    assert.equal(markerText.includes(keyBody), false, "PEM body reached the on-disk marker");
+    // The orphan-END rule masks from the start of text, so prove it stops at the
+    // marker and does not swallow the rest of the log.
+    assert.ok(uploadedText.includes("runner continued"), "text after END must survive");
   });
 });

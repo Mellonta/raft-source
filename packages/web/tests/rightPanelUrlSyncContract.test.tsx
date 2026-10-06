@@ -1,23 +1,27 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 const {
   beginRightPanelSearchTransition,
   hasRightPanelThreadAnchorChanged,
   isCurrentRightPanelSearchSnapshot,
+  openThreadParentMessageRoute,
   subscribeRightPanelThreadAnchor,
   syncRightPanelStoresFromSearch,
   syncRightPanelUrlFromStores,
   transitionThreadToParentMessage,
-} = await import("../src/components/layout/rightPanelUrlSync.js");
-const { useProfileStore } = await import("../src/store/profileStore.js");
-const { useServerStore } = await import("../src/store/serverStore.js");
-const { useThreadStore } = await import("../src/store/threadStore.js");
-const { useLegacyTaskPanelStore } = await import("../src/store/legacyTaskPanelStore.js");
-const { useTaskStore } = await import("../src/store/taskStore.js");
+} = await import("../src/components/layout/rightPanelUrlSync");
+const { useProfileStore } = await import("../src/store/profileStore");
+const { useMessageStore } = await import("../src/store/messageStore");
+const { default: api } = await import("../src/api/client");
+const { useServerStore } = await import("../src/store/serverStore");
+const { useThreadStore } = await import("../src/store/threadStore");
+const { useLegacyTaskPanelStore } = await import("../src/store/legacyTaskPanelStore");
+const { useTaskStore } = await import("../src/store/taskStore");
 
 const originalThreadState = useThreadStore.getState();
 const originalProfileState = useProfileStore.getState();
+const originalMessageState = useMessageStore.getState();
+const originalApiGet = api.get;
 const originalServerState = useServerStore.getState();
 const originalTaskState = useTaskStore.getState();
 const originalWindowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -30,8 +34,11 @@ function resetStores(): void {
     openParentChannelId: null,
     openThreadError: null,
     focusedMessageId: null,
+    taskModal: null,
     openThread: originalThreadState.openThread,
     closeThread: originalThreadState.closeThread,
+    openTaskModal: originalThreadState.openTaskModal,
+    closeTaskModal: originalThreadState.closeTaskModal,
   });
   useLegacyTaskPanelStore.setState({ task: null });
   useTaskStore.setState({
@@ -43,10 +50,19 @@ function resetStores(): void {
   useProfileStore.setState({
     profileType: null,
     profileId: null,
+    externalProfile: null,
+    externalProfileChannelId: null,
     defaultAgentTabIntent: null,
     openProfile: originalProfileState.openProfile,
+    openExternalProfile: originalProfileState.openExternalProfile,
     clearDefaultAgentTabIntent: originalProfileState.clearDefaultAgentTabIntent,
     closeProfile: originalProfileState.closeProfile,
+  });
+  useMessageStore.setState({
+    channelMessages: {},
+    messages: [],
+    currentChannelId: null,
+    loadMessageContext: originalMessageState.loadMessageContext,
   });
   useServerStore.setState({
     sidebarOrder: originalServerState.sidebarOrder,
@@ -84,8 +100,36 @@ function restoreWindow(): void {
 
 test.afterEach(() => {
   resetStores();
+  api.get = originalApiGet;
   restoreWindow();
 });
+
+const externalAuthor = {
+  projectionId: "projection-1",
+  provider: "slack",
+  appRegistrationId: "app-1",
+  installId: "install-1",
+  workspaceId: "opaque-workspace-id",
+  workspaceName: "Analytical Engines",
+  externalActorId: "actor-1",
+  externalConversationId: "conversation-1",
+  externalMessageId: "external-message-1",
+  displayName: "Ada Lovelace",
+  actorKind: "human" as const,
+  avatarUrl: null,
+  avatarDigest: null,
+  actorProjectionRevision: 3,
+};
+
+const externalMessage = {
+  id: "message-1",
+  channelId: "channel-1",
+  senderType: "external_projection" as const,
+  senderId: "projection-1",
+  externalAuthor,
+  content: "hello",
+  createdAt: "2026-09-24T00:00:00.000Z",
+};
 
 test("right-panel URL sync removes closed panel params from the live browser URL", () => {
   resetStores();
@@ -201,6 +245,93 @@ test("right-panel profile open clears stale agentTab so agent overlay uses order
   ]);
 });
 
+test("external identity Back closes and Forward restores the frozen author from message state", async () => {
+  resetStores();
+  installWindowLocation("/s/acme/channel/channel-1", "");
+  useMessageStore.setState({
+    channelMessages: { "channel-1": [externalMessage] },
+  });
+  useProfileStore.getState().openExternalProfile("message-1", externalAuthor, {
+    channelId: "channel-1",
+    openSource: "channel",
+  });
+
+  const navigations: Array<{
+    to: { pathname: string; search: string };
+    options: { replace: boolean };
+  }> = [];
+  syncRightPanelUrlFromStores({
+    fallback: { pathname: "/s/acme/channel/channel-1", search: "" },
+    navigate: (to, options) => navigations.push({ to, options }),
+  });
+  assert.deepEqual(navigations, [{
+    to: {
+      pathname: "/s/acme/channel/channel-1",
+      search: "?profile=external%3Achannel-1%3Amessage-1",
+    },
+    options: { replace: false },
+  }]);
+
+  installWindowLocation("/s/acme/channel/channel-1", "");
+  syncRightPanelStoresFromSearch("");
+  assert.equal(useProfileStore.getState().profileType, null, "Back closes the panel");
+
+  const forwardSearch = "?profile=external%3Achannel-1%3Amessage-1";
+  installWindowLocation("/s/acme/channel/channel-1", forwardSearch);
+  syncRightPanelStoresFromSearch(forwardSearch);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(useProfileStore.getState().profileType, "external");
+  assert.equal(useProfileStore.getState().profileId, "message-1");
+  assert.equal(useProfileStore.getState().externalProfileChannelId, "channel-1");
+  assert.equal(useProfileStore.getState().externalProfile, externalAuthor);
+});
+
+test("cold external identity URL fetches the message context before opening the panel", async () => {
+  resetStores();
+  const search = "?profile=external%3Achannel-1%3Amessage-1";
+  installWindowLocation("/s/acme/channel/channel-1", search);
+  const requests: Array<{ url: string; channelId: unknown }> = [];
+  api.get = (async (url: string, config?: { params?: { channelId?: unknown } }) => {
+    requests.push({ url, channelId: config?.params?.channelId });
+    return {
+      data: {
+        messages: [externalMessage],
+        targetMessageId: "message-1",
+      },
+    };
+  }) as typeof api.get;
+
+  syncRightPanelStoresFromSearch(search);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(requests, [{
+    url: "/messages/context/message-1",
+    channelId: "channel-1",
+  }]);
+  assert.equal(useProfileStore.getState().profileType, "external");
+  assert.equal(useProfileStore.getState().externalProfile, externalAuthor);
+});
+
+test("stale external identity fetch cannot reopen after Browser Back", async () => {
+  resetStores();
+  const search = "?profile=external%3Achannel-1%3Amessage-1";
+  installWindowLocation("/s/acme/channel/channel-1", search);
+  let resolveRequest!: (value: unknown) => void;
+  api.get = (() => new Promise((resolve) => {
+    resolveRequest = resolve;
+  })) as typeof api.get;
+
+  syncRightPanelStoresFromSearch(search);
+  installWindowLocation("/s/acme/channel/channel-1", "");
+  syncRightPanelStoresFromSearch("");
+  resolveRequest({ data: { messages: [externalMessage], targetMessageId: "message-1" } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(useProfileStore.getState().profileType, null);
+  assert.equal(useProfileStore.getState().externalProfile, null);
+});
+
 test("right-panel ordered-first profile intent writes explicit agentTab", () => {
   resetStores();
   installWindowLocation("/s/acme/channel/channel-1", "?keep=1");
@@ -239,7 +370,19 @@ test("right-panel ordered-first profile intent writes explicit agentTab", () => 
   ]);
 });
 
-test("task intent pushes when it replaces an already-open thread so Back restores the origin", () => {
+function makeTaskModalSlot(parentMessageId: string, parentChannelId = "channel-1") {
+  return {
+    parentMessageId,
+    parentChannelId,
+    threadChannelId: `${parentMessageId}-thread`,
+    serverSlug: "acme",
+    focusedMessageId: null,
+    loading: false,
+    error: null,
+  };
+}
+
+test("opening a task modal over a side thread pushes task=<anchor> and keeps the side thread in the URL", () => {
   resetStores();
   installWindowLocation(
     "/s/acme/channel/channel-1",
@@ -247,9 +390,10 @@ test("task intent pushes when it replaces an already-open thread so Back restore
   );
   useThreadStore.setState({
     openParentChannelId: "channel-1",
-    openParentMessageId: "task-parent",
-    openThreadChannelId: "task-thread",
-    openIntent: "task",
+    openParentMessageId: "origin-parent",
+    openThreadChannelId: "origin-thread",
+    openIntent: "thread",
+    taskModal: makeTaskModalSlot("task-parent"),
   });
 
   const navigations: Array<{
@@ -268,11 +412,103 @@ test("task intent pushes when it replaces an already-open thread so Back restore
     {
       to: {
         pathname: "/s/acme/channel/channel-1",
-        search: "?msg=origin-reply&thread=channel-1%3Atask-parent&task=1",
+        search: "?msg=origin-reply&thread=channel-1%3Aorigin-parent&task=channel-1%3Atask-parent",
       },
       options: { replace: false },
     },
   ]);
+});
+
+test("a task modal with no side thread underneath writes its own task=<anchor> deep link", () => {
+  resetStores();
+  installWindowLocation("/s/acme/channel/channel-1", "");
+  useThreadStore.setState({ taskModal: makeTaskModalSlot("task-parent") });
+
+  const navigations: Array<{
+    to: { pathname: string; search: string };
+    options: { replace: boolean };
+  }> = [];
+  const changed = syncRightPanelUrlFromStores({
+    fallback: { pathname: "/s/acme/channel/stale", search: "" },
+    navigate: (to, options) => {
+      navigations.push({ to, options });
+    },
+  });
+
+  assert.equal(changed, true);
+  assert.deepEqual(navigations, [
+    {
+      to: {
+        pathname: "/s/acme/channel/channel-1",
+        search: "?task=channel-1%3Atask-parent",
+      },
+      options: { replace: false },
+    },
+  ]);
+});
+
+test("task=<ch>:<msg> deep link opens the task modal slot without touching the side thread", () => {
+  resetStores();
+  const opened: Array<[string, string]> = [];
+  useThreadStore.setState({
+    openTaskModal: async ({ parentChannelId, parentMessageId }) => {
+      opened.push([parentChannelId, parentMessageId]);
+      useThreadStore.setState({ taskModal: makeTaskModalSlot(parentMessageId, parentChannelId) });
+    },
+  });
+
+  syncRightPanelStoresFromSearch("?task=channel-1:task-parent");
+
+  assert.deepEqual(opened, [["channel-1", "task-parent"]]);
+  assert.equal(useThreadStore.getState().openParentMessageId, null);
+  assert.equal(useThreadStore.getState().taskModal?.parentMessageId, "task-parent");
+});
+
+test("task=<anchor> matching the open side thread opens the modal slot over it, not a retarget", () => {
+  resetStores();
+  const taskOpens: string[] = [];
+  let threadOpens = 0;
+  useThreadStore.setState({
+    openParentChannelId: "channel-1",
+    openParentMessageId: "parent-1",
+    openThreadChannelId: "thread-1",
+    openIntent: "thread",
+    openThread: async () => {
+      threadOpens += 1;
+    },
+    openTaskModal: async ({ parentMessageId }) => {
+      taskOpens.push(parentMessageId);
+      useThreadStore.setState({ taskModal: makeTaskModalSlot(parentMessageId) });
+    },
+  });
+
+  syncRightPanelStoresFromSearch("?thread=channel-1:parent-1&task=channel-1:parent-1");
+
+  assert.deepEqual(taskOpens, ["parent-1"]);
+  assert.equal(threadOpens, 0, "same-anchor thread param must not reopen the side thread");
+  assert.equal(useThreadStore.getState().openParentMessageId, "parent-1");
+});
+
+test("dropping the task param closes the task modal slot and leaves the side thread open", () => {
+  resetStores();
+  let closes = 0;
+  useThreadStore.setState({
+    openParentChannelId: "channel-1",
+    openParentMessageId: "parent-1",
+    openThreadChannelId: "thread-1",
+    openIntent: "thread",
+    taskModal: makeTaskModalSlot("parent-1"),
+    closeTaskModal: () => {
+      closes += 1;
+      useThreadStore.setState({ taskModal: null });
+    },
+  });
+
+  syncRightPanelStoresFromSearch("?thread=channel-1:parent-1");
+
+  assert.equal(closes, 1);
+  assert.equal(useThreadStore.getState().taskModal, null);
+  assert.equal(useThreadStore.getState().openParentMessageId, "parent-1");
 });
 
 test("legacy task permalink survives the async cold-load before its panel store opens", async () => {
@@ -515,6 +751,127 @@ test("View in channel reserves URL ownership and completes the thread teardown s
   assert.equal(isCurrentRightPanelSearchSnapshot("?msg=parent-1"), true);
 });
 
+test("desktop View in channel pushes and blocks stale thread snapshots before route commit", () => {
+  resetStores();
+  installWindowHistoryEntry(
+    "/s/acme/channel/channel-1",
+    "?thread=channel-1%3Aparent-1",
+    { idx: 4, key: "origin-thread" },
+  );
+  useThreadStore.setState({
+    openParentChannelId: "channel-1",
+    openParentMessageId: "parent-1",
+    openThreadChannelId: "thread-1",
+  });
+  const navigations: Array<{ to: string; replace: boolean }> = [];
+  const mobileBackRecords: Array<{ type: "PUSH" | "REPLACE"; path: string }> = [];
+
+  openThreadParentMessageRoute({
+    isDesktop: true,
+    parentRouteKind: "channel",
+    parentChannelId: "channel-1",
+    parentMessageId: "parent-1",
+    serverSlug: "acme",
+    navigate: (to, options) => {
+      navigations.push({ to, replace: options.replace });
+      installWindowHistoryEntry(
+        "/s/acme/channel/channel-1",
+        "?msg=parent-1",
+        { idx: 5, key: "parent-message" },
+      );
+    },
+    recordMobileBackNavigation: (type, path) => {
+      mobileBackRecords.push({ type, path });
+    },
+  });
+
+  assert.deepEqual(navigations, [
+    { to: "/s/acme/channel/channel-1?msg=parent-1", replace: false },
+  ]);
+  assert.deepEqual(mobileBackRecords, []);
+  assert.equal(useThreadStore.getState().openParentMessageId, null);
+  assert.equal(
+    isCurrentRightPanelSearchSnapshot("?thread=channel-1%3Aparent-1"),
+    false,
+    "the stale thread snapshot must not regain ownership after the desktop push",
+  );
+  assert.equal(isCurrentRightPanelSearchSnapshot("?msg=parent-1"), true);
+});
+
+test("desktop DM View in channel keeps push semantics and closes the thread", () => {
+  resetStores();
+  installWindowHistoryEntry(
+    "/s/acme/dm/dm-1",
+    "?thread=dm-1%3Aparent-1",
+    { idx: 7, key: "origin-dm-thread" },
+  );
+  useThreadStore.setState({
+    openParentChannelId: "dm-1",
+    openParentMessageId: "parent-1",
+    openThreadChannelId: "thread-1",
+  });
+  const navigations: Array<{ to: string; replace: boolean }> = [];
+  const mobileBackRecords: Array<{ type: "PUSH" | "REPLACE"; path: string }> = [];
+
+  openThreadParentMessageRoute({
+    isDesktop: true,
+    parentRouteKind: "dm",
+    parentChannelId: "dm-1",
+    parentMessageId: "parent-1",
+    serverSlug: "acme",
+    navigate: (to, options) => {
+      navigations.push({ to, replace: options.replace });
+    },
+    recordMobileBackNavigation: (type, path) => {
+      mobileBackRecords.push({ type, path });
+    },
+  });
+
+  assert.deepEqual(navigations, [
+    { to: "/s/acme/dm/dm-1?msg=parent-1", replace: false },
+  ]);
+  assert.deepEqual(mobileBackRecords, []);
+  assert.equal(useThreadStore.getState().openParentMessageId, null);
+});
+
+test("mobile View in channel replaces and records mobile back state", () => {
+  resetStores();
+  installWindowHistoryEntry(
+    "/s/acme/activity",
+    "?open=channel%3Achannel-1&thread=channel-1%3Aparent-1",
+    { idx: 9, key: "activity-thread" },
+  );
+  useThreadStore.setState({
+    openParentChannelId: "channel-1",
+    openParentMessageId: "parent-1",
+    openThreadChannelId: "thread-1",
+  });
+  const navigations: Array<{ to: string; replace: boolean }> = [];
+  const mobileBackRecords: Array<{ type: "PUSH" | "REPLACE"; path: string }> = [];
+
+  openThreadParentMessageRoute({
+    isDesktop: false,
+    parentRouteKind: "channel",
+    parentChannelId: "channel-1",
+    parentMessageId: "parent-1",
+    serverSlug: "acme",
+    navigate: (to, options) => {
+      navigations.push({ to, replace: options.replace });
+    },
+    recordMobileBackNavigation: (type, path) => {
+      mobileBackRecords.push({ type, path });
+    },
+  });
+
+  assert.deepEqual(navigations, [
+    { to: "/s/acme/channel/channel-1?msg=parent-1", replace: true },
+  ]);
+  assert.deepEqual(mobileBackRecords, [
+    { type: "REPLACE", path: "/s/acme/channel/channel-1?msg=parent-1" },
+  ]);
+  assert.equal(useThreadStore.getState().openParentMessageId, null);
+});
+
 test("right-panel URL subscription reacts only to thread anchor ownership changes", () => {
   const anchor = {
     openParentChannelId: "channel-1",
@@ -532,6 +889,15 @@ test("right-panel URL subscription reacts only to thread anchor ownership change
   assert.equal(
     hasRightPanelThreadAnchorChanged(
       { ...anchor, openParentChannelId: "channel-2" },
+      anchor,
+    ),
+    true,
+  );
+  // The task modal slot is an anchor-owning surface too (task #699): opening
+  // or closing it must trigger the store→URL sync.
+  assert.equal(
+    hasRightPanelThreadAnchorChanged(
+      { ...anchor, taskModal: { parentMessageId: "parent-1" } },
       anchor,
     ),
     true,
@@ -642,6 +1008,31 @@ test("right-panel URL sync restores Activity thread params without a route gate"
   assert.deepEqual(opened, [["channel-1", "parent-1", null]]);
   assert.equal(useThreadStore.getState().openParentChannelId, "channel-1");
   assert.equal(useThreadStore.getState().openParentMessageId, "parent-1");
+});
+
+test("a cold-loaded search thread slot hands its thread channel id to openThread (task #14)", () => {
+  resetStores();
+  const opened: Array<{ parentChannelId: string; parentMessageId: string; threadChannelId: string | null | undefined }> = [];
+  useThreadStore.setState({
+    openThread: async ({ parentChannelId, parentMessageId, threadChannelId }) => {
+      opened.push({ parentChannelId, parentMessageId, threadChannelId });
+    },
+  });
+
+  syncRightPanelStoresFromSearch("?open=thread:thread-1&msg=reply-1&thread=channel-1:parent-1");
+  // A non-thread content slot does not name the thread channel.
+  resetStores();
+  useThreadStore.setState({
+    openThread: async ({ parentChannelId, parentMessageId, threadChannelId }) => {
+      opened.push({ parentChannelId, parentMessageId, threadChannelId });
+    },
+  });
+  syncRightPanelStoresFromSearch("?open=channel:channel-9&thread=channel-1:parent-1");
+
+  assert.deepEqual(opened, [
+    { parentChannelId: "channel-1", parentMessageId: "parent-1", threadChannelId: "thread-1" },
+    { parentChannelId: "channel-1", parentMessageId: "parent-1", threadChannelId: null },
+  ]);
 });
 
 test("task deep link restores task intent on a cold-loaded thread panel", () => {

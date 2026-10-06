@@ -15,23 +15,26 @@ import {
   type SlackBridgeOutboundDeliverySnapshot,
   type SlackBridgeProviderAttemptResult,
 } from "@botiverse/raft-shared";
-import type { Database, DatabaseExecutor } from "../db/index.js";
+import type { Database, DatabaseExecutor } from "../db/index";
 import {
+  agents,
+  channelAgents,
+  channelHumans,
+  channels,
   externalAddressabilityProjections,
-  externalAuthorPolicies,
   externalDeliveryAttempts,
   externalDeliveryOperatorDecisions,
   externalDeliveryPartitions,
   externalMessageLinks,
   externalMentionFacts,
   externalOutboundDeliveries,
-  externalProjectionAvatarArtifacts,
-} from "../db/schema.js";
+  serverMembers,
+} from "../db/schema";
 import type {
   ProviderNeutralOutboundBindingAuthority,
   SlackBridgeRenderSnapshot,
-} from "./externalDeliveryOutboxService.js";
-import { finalizeAcceptedOutboundAttachmentFacts } from "./externalOutboundAttachmentCoordinator.js";
+} from "./externalDeliveryOutboxService";
+import { finalizeAcceptedOutboundAttachmentFacts } from "./externalOutboundAttachmentCoordinator";
 
 const LEASE_DURATION_MS = 60_000;
 const SAFE_PROVIDER_IO_EXCEPTION = "provider_io_exception";
@@ -304,11 +307,10 @@ function parseFrozenSnapshot(delivery: Delivery): SlackBridgeRenderSnapshot | nu
     "senderType",
     "senderId",
     "authorName",
-    "authorAvatarDigest",
-    "authorPolicy",
+    "authorPresentation",
     "sanitizedText",
     "externalMentions",
-    ...(value.schema === "slack-bridge-render-snapshot.v2" ? ["attachments"] : []),
+    "attachments",
     "bindingAuthority",
     "enqueueRuntimeRevision",
   ] as const;
@@ -329,20 +331,32 @@ function parseFrozenSnapshot(delivery: Delivery): SlackBridgeRenderSnapshot | nu
     "bindingEpoch",
     "memberRevision",
     "contextRevision",
-    "consentRevision",
   ] as const;
-  const authorPolicy = isRecord(value.authorPolicy) ? value.authorPolicy : null;
-  const avatar = authorPolicy && isRecord(authorPolicy.avatar) ? authorPolicy.avatar : null;
-  const avatarValid = authorPolicy?.avatar === null || (
-    avatar !== null
-    && hasExactKeys(avatar, ["artifactId", "publicUrl", "sourceDigest", "artifactRevision"])
-    && validBoundedString(avatar.artifactId, 320)
-    && validBoundedString(avatar.publicUrl, 2_048)
-    && avatar.publicUrl.startsWith("https://")
-    && typeof avatar.sourceDigest === "string"
-    && /^[0-9a-f]{64}$/.test(avatar.sourceDigest)
-    && positiveInteger(avatar.artifactRevision)
-  );
+  const authorPresentation = isRecord(value.authorPresentation) ? value.authorPresentation : null;
+  const snapshotV3 = value.schema === "slack-bridge-render-snapshot.v3";
+  const snapshotV4 = value.schema === "slack-bridge-render-snapshot.v4";
+  const authorAvatar = snapshotV4 && authorPresentation && isRecord(authorPresentation.avatar)
+    ? authorPresentation.avatar
+    : null;
+  let authorAvatarValid = snapshotV3 || authorPresentation?.avatar === null;
+  if (authorAvatar) {
+    try {
+      const url = new URL(String(authorAvatar.publicUrl));
+      const digest = typeof authorAvatar.contentDigest === "string"
+        ? authorAvatar.contentDigest
+        : "";
+      authorAvatarValid = hasExactKeys(authorAvatar, ["publicUrl", "contentDigest"])
+        && url.protocol === "https:"
+        && !url.username
+        && !url.password
+        && !url.search
+        && !url.hash
+        && /^[0-9a-f]{32}$/u.test(digest)
+        && url.pathname.endsWith(`/${digest}.webp`);
+    } catch {
+      authorAvatarValid = false;
+    }
+  }
   const mentionsValid = Array.isArray(value.externalMentions)
     && value.externalMentions.every((mention) => {
       if (!isRecord(mention)) return false;
@@ -388,9 +402,7 @@ function parseFrozenSnapshot(delivery: Delivery): SlackBridgeRenderSnapshot | nu
         && mention.memberRevision === authority.memberRevision
         && mention.contextRevision === authority.contextRevision;
     });
-  const attachments = value.schema === "slack-bridge-render-snapshot.v2"
-    ? value.attachments
-    : [];
+  const attachments = value.attachments;
   const attachmentsValid = Array.isArray(attachments)
     && attachments.length <= 10
     && attachments.every((attachment, messagePosition) => (
@@ -420,8 +432,7 @@ function parseFrozenSnapshot(delivery: Delivery): SlackBridgeRenderSnapshot | nu
   if (
     !hasExactKeys(value, topLevelKeys)
     || !hasExactKeys(authority, [...requiredAuthorityStrings, ...requiredAuthorityRevisions])
-    || (value.schema !== "slack-bridge-render-snapshot.v1"
-      && value.schema !== "slack-bridge-render-snapshot.v2")
+    || (!snapshotV3 && !snapshotV4)
     || delivery.renderSnapshotSchema !== value.schema
     || value.sourceMessageId !== delivery.sourceMessageId
     || !positiveInteger(value.sourceMessageSeq)
@@ -435,38 +446,40 @@ function parseFrozenSnapshot(delivery: Delivery): SlackBridgeRenderSnapshot | nu
     || !validBoundedString(value.senderId, 320)
     || !validBoundedString(value.authorName, 320)
     || !validBoundedString(value.sanitizedText, 40_000)
-    || !(value.authorAvatarDigest === null
-      || (typeof value.authorAvatarDigest === "string" && /^[0-9a-f]{64}$/.test(value.authorAvatarDigest)))
     || value.enqueueRuntimeRevision !== delivery.enqueueRuntimeRevision
     || authority.bindingId !== delivery.bindingId
     || authority.bindingEpoch !== delivery.bindingEpoch
     || !requiredAuthorityStrings.every((key) => validBoundedString(authority[key], 320))
     || !requiredAuthorityRevisions.every((key) => positiveInteger(authority[key]))
-    || !authorPolicy
-    || !hasExactKeys(authorPolicy, [
-      "policyId",
-      "serverId",
-      "consentRevision",
-      "displayName",
-      "fallbackKind",
-      "avatar",
-    ])
-    || !validBoundedString(authorPolicy.policyId, 320)
-    || !validBoundedString(authorPolicy.serverId, 320)
-    || !positiveInteger(authorPolicy.consentRevision)
-    || authorPolicy.consentRevision !== authority.consentRevision
-    || !validBoundedString(authorPolicy.displayName, 320)
-    || authorPolicy.displayName !== value.authorName
-    || (authorPolicy.fallbackKind !== "human" && authorPolicy.fallbackKind !== "agent")
-    || !avatarValid
-    || value.authorAvatarDigest !== (avatar?.sourceDigest ?? null)
+    || !authorPresentation
+    || !hasExactKeys(authorPresentation, snapshotV4
+      ? ["displayName", "fallbackKind", "avatar"]
+      : ["displayName", "fallbackKind"])
+    || !validBoundedString(authorPresentation.displayName, 320)
+    || authorPresentation.displayName !== value.authorName
+    || (authorPresentation.fallbackKind !== "human" && authorPresentation.fallbackKind !== "agent")
+    || !authorAvatarValid
     || !mentionsValid
     || !attachmentsValid
   ) return null;
-  return { ...value, attachments } as unknown as SlackBridgeRenderSnapshot;
+  return {
+    ...value,
+    schema: "slack-bridge-render-snapshot.v4",
+    authorPresentation: {
+      ...authorPresentation,
+      avatar: snapshotV4 ? authorPresentation.avatar : null,
+    },
+    attachments,
+  } as unknown as SlackBridgeRenderSnapshot;
 }
 
-function sameAuthority(
+/**
+ * Compare only coordinates that identify the destination of an already
+ * enqueued message. Runtime/audience revisions are refresh metadata: they may
+ * change while a binding remains active and must not turn a normal FIFO head
+ * into a permanent authority failure.
+ */
+function sameHardAuthority(
   left: ProviderNeutralOutboundBindingAuthority,
   right: ProviderNeutralOutboundBindingAuthority,
 ): boolean {
@@ -479,9 +492,6 @@ function sameAuthority(
     "connectionEpoch",
     "bindingId",
     "bindingEpoch",
-    "memberRevision",
-    "contextRevision",
-    "consentRevision",
     "privacyClass",
     "raftChannelId",
     "providerAuthorityId",
@@ -495,39 +505,42 @@ async function frozenRenderAuthorityIsCurrent(
   snapshot: SlackBridgeRenderSnapshot,
   now: Date,
 ): Promise<boolean> {
-  const policy = snapshot.authorPolicy;
-  const authority = snapshot.bindingAuthority;
-  const [currentPolicy] = await executor.select().from(externalAuthorPolicies).where(and(
-    eq(externalAuthorPolicies.id, policy.policyId),
-    eq(externalAuthorPolicies.serverId, policy.serverId),
-    eq(externalAuthorPolicies.provider, authority.provider),
-    eq(externalAuthorPolicies.appRegistrationId, authority.appRegistrationId),
-    eq(externalAuthorPolicies.installId, authority.installId),
-    eq(externalAuthorPolicies.bindingId, authority.bindingId),
-    eq(externalAuthorPolicies.bindingEpoch, authority.bindingEpoch),
-    eq(externalAuthorPolicies.authorType, snapshot.senderType),
-    eq(externalAuthorPolicies.authorId, snapshot.senderId),
-    eq(externalAuthorPolicies.consentRevision, policy.consentRevision),
-    eq(externalAuthorPolicies.state, "granted"),
-  )).for("update").limit(1);
-  if (
-    !currentPolicy
-    || currentPolicy.displayName !== policy.displayName
-    || currentPolicy.fallbackKind !== policy.fallbackKind
-    || currentPolicy.avatarArtifactId !== (policy.avatar?.artifactId ?? null)
-  ) return false;
-
-  if (policy.avatar) {
-    const [avatar] = await executor.select().from(externalProjectionAvatarArtifacts).where(and(
-      eq(externalProjectionAvatarArtifacts.id, policy.avatar.artifactId),
-      eq(externalProjectionAvatarArtifacts.ownerType, snapshot.senderType),
-      eq(externalProjectionAvatarArtifacts.ownerId, snapshot.senderId),
-      eq(externalProjectionAvatarArtifacts.publicUrl, policy.avatar.publicUrl),
-      eq(externalProjectionAvatarArtifacts.sourceDigest, policy.avatar.sourceDigest),
-      eq(externalProjectionAvatarArtifacts.artifactRevision, policy.avatar.artifactRevision),
-      eq(externalProjectionAvatarArtifacts.state, "active"),
-    )).for("update").limit(1);
-    if (!avatar) return false;
+  const [bindingChannel] = await executor.select({
+    serverId: channels.serverId,
+    type: channels.type,
+  }).from(channels).where(and(
+    eq(channels.id, snapshot.bindingAuthority.raftChannelId),
+    isNull(channels.deletedAt),
+    isNull(channels.archivedAt),
+  )).limit(2);
+  if (!bindingChannel) return false;
+  if (snapshot.senderType === "user") {
+    const members = await executor.select({ userId: serverMembers.userId }).from(serverMembers).where(and(
+      eq(serverMembers.serverId, bindingChannel.serverId),
+      eq(serverMembers.userId, snapshot.senderId),
+    )).limit(2);
+    if (members.length !== 1) return false;
+    if (bindingChannel.type === "private") {
+      const channelMembership = await executor.select({ userId: channelHumans.userId })
+        .from(channelHumans).where(and(
+          eq(channelHumans.channelId, snapshot.bindingAuthority.raftChannelId),
+          eq(channelHumans.userId, snapshot.senderId),
+        )).limit(2);
+      if (channelMembership.length !== 1) return false;
+    }
+  } else {
+    const activeAgents = await executor.select({ id: agents.id }).from(agents).innerJoin(
+      channelAgents,
+      and(
+        eq(channelAgents.agentId, agents.id),
+        eq(channelAgents.channelId, snapshot.bindingAuthority.raftChannelId),
+      ),
+    ).where(and(
+      eq(agents.id, snapshot.senderId),
+      eq(agents.serverId, bindingChannel.serverId),
+      isNull(agents.deletedAt),
+    )).limit(2);
+    if (activeAgents.length !== 1) return false;
   }
 
   const frozenFacts = await executor.select().from(externalMentionFacts)
@@ -655,19 +668,33 @@ async function lockPartitionAndHead(
   executor: DatabaseExecutor,
   bindingId: string,
   bindingEpoch: number,
+  options: { skipLocked?: boolean } = {},
 ): Promise<{
   partition: typeof externalDeliveryPartitions.$inferSelect;
   delivery: Delivery | null;
-}> {
+} | null> {
   const [partition] = await executor.select()
     .from(externalDeliveryPartitions)
     .where(and(
       eq(externalDeliveryPartitions.bindingId, bindingId),
       eq(externalDeliveryPartitions.bindingEpoch, bindingEpoch),
     ))
-    .for("update")
+    // Workers pass skipLocked: every replica's worker loop visits every active
+    // binding on each tick, and right after a rolling deploy the new replicas
+    // all start at once. Waiting on a partition another worker already holds
+    // only parks a pooled connection behind that lock (prod 2026-09-26: 13+
+    // sessions queued on one partition row during the bac9696a rollout).
+    // Skipping is correct because the holder is processing the head. Operator
+    // paths must not pass it: a locked partition would read as missing.
+    .for("update", options.skipLocked ? { skipLocked: true } : undefined)
     .limit(1);
-  if (!partition) throw new Error("External delivery partition not found");
+  // With skipLocked, a partition held by another worker also lands here and
+  // reads as zero-work idle for this tick; the holder is draining it.
+  // A binding becomes externally visible before it has necessarily carried
+  // any outbound work. Polling that zero-work state is ordinary idleness, not
+  // a worker failure. Activation now creates the partition atomically, but
+  // retaining this fail-soft read keeps rolling deploys and legacy rows quiet.
+  if (!partition) return null;
 
   const [delivery] = await executor.select()
     .from(externalOutboundDeliveries)
@@ -1053,7 +1080,8 @@ export async function processExternalDeliveryPartitionHead(
         priorStateReason: string | null;
       }
   > => {
-    const locked = await lockPartitionAndHead(executor, input.bindingId, input.bindingEpoch);
+    const locked = await lockPartitionAndHead(executor, input.bindingId, input.bindingEpoch, { skipLocked: true });
+    if (!locked) return { kind: "empty" };
     if (!locked.delivery) return { kind: "empty" };
     let delivery = locked.delivery;
 
@@ -1193,8 +1221,7 @@ export async function processExternalDeliveryPartitionHead(
   });
   if (
     !runtime
-    || runtime.runtimeRevision !== claim.delivery.enqueueRuntimeRevision
-    || !sameAuthority(runtime.bindingAuthority, claim.frozenSnapshot.bindingAuthority)
+    || !sameHardAuthority(runtime.bindingAuthority, claim.frozenSnapshot.bindingAuthority)
     || (claim.frozenSnapshot.attachments.length > 0 && runtime.attachmentTransferEnabled !== true)
   ) {
     return releaseAuthorityBlockedClaim({
@@ -1568,6 +1595,7 @@ export async function consumeExternalDeliverySkipDecision(
   const now = input.now ?? currentDate();
   return input.db.transaction(async (executor) => {
     const locked = await lockPartitionAndHead(executor, input.bindingId, input.bindingEpoch);
+    if (!locked) return { kind: "blocked", reason: "partition_head_missing" };
     const delivery = locked.delivery;
     if (!delivery) return { kind: "blocked", reason: "partition_head_missing" };
     if (delivery.state === "dispatching") return { kind: "blocked", reason: "lease_owned" };

@@ -12,13 +12,27 @@
  */
 
 import { strict as assert } from "node:assert";
-import test from "node:test";
 import {
+  getTaskStatusBadgeClassName,
   getTaskStatusBackgroundStyle,
   TASK_STATUS_UI,
   STATUS_BADGE_CONFIG,
   STATUS_STYLES,
 } from "../src/components/task/taskStatusUi";
+
+test("task status badges pair every solid surface with a readable foreground", () => {
+  const expected = {
+    todo: ["bg-warning-soft", "text-warning-strong", "theme-brutal:bg-brutal-orange"],
+    in_progress: ["bg-info-soft", "text-info-strong", "theme-brutal:bg-brutal-cyan"],
+    in_review: ["bg-accent-soft", "text-accent-strong", "theme-brutal:bg-brutal-lavender"],
+    done: ["bg-success-soft", "text-success-strong", "theme-brutal:bg-brutal-lime"],
+    closed: ["bg-fill-muted", "text-foreground-strong", "theme-brutal:bg-brutal-stone"],
+  } as const;
+  for (const [status, classes] of Object.entries(expected)) {
+    const actual = getTaskStatusBadgeClassName(status as keyof typeof expected);
+    for (const className of classes) assert.ok(actual.split(" ").includes(className), `${status} missing ${className}`);
+  }
+});
 
 test("closed task badge is neutral stone, never destructive red", () => {
   assert.equal(TASK_STATUS_UI.closed.bg, "bg-brutal-stone");

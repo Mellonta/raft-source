@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { and, eq } from "drizzle-orm";
-import { vi } from "vitest";
 import argon2 from "argon2";
-import { createApiTest } from "../test/integration/apiTest.js";
-import { signAccessToken, verifyToken } from "../middleware/auth.js";
-import { attachments, machines, serverMembers } from "../db/schema.js";
-import { clearAuthCache, findMachineByApiKey, registerMachine } from "../services/machineService.js";
+import { createApiTest } from "../test/integration/apiTest";
+import { signAccessToken, verifyToken } from "../middleware/auth";
+import { attachments, machines, serverMembers } from "../db/schema";
+import { clearAuthCache, findMachineByApiKey, registerMachine } from "../services/machineService";
 
 const test = createApiTest({ onboardingOpenerFlagDefaultEnabled: false });
 

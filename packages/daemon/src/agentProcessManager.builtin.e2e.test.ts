@@ -3,15 +3,16 @@ import http from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import {
   RUNTIME_CONFIG_VERSION,
   type AgentConfig,
   type MachineToServerMessage,
 } from "@botiverse/raft-shared";
-import { AgentProcessManager } from "./agentProcessManager.js";
-import { installDaemonFetchMockForTests } from "./daemonFetch.js";
-import { BuiltInDriver } from "./drivers/pi.js";
+import { AgentProcessManager } from "./agentProcessManager";
+import { installDaemonFetchMockForTests } from "./daemonFetch";
+import { BuiltInDriver } from "./drivers/pi";
+import { traceRows } from "./testing/traceRows";
+import { releaseAgentManagerForTests } from "./testing/agentManagerTeardown";
 
 const BUILTIN_AUTH_ERROR_MESSAGE =
   "Built-in provider authentication failed. Check this agent's provider API key and region/provider selection, then retry starting this agent.";
@@ -75,7 +76,9 @@ function makeBuiltInGatewayConfig(baseUrl: string): AgentConfig {
     serverUrl: "https://daemon.example.com",
     authToken: "sk_machine_test",
     agentCredentialKey: "sk_agent_test",
-    agentCredentialId: "cred-test",
+    // No credential id by default: a stop would revoke it over the injected
+    // fetch, and tests that do not fake the server must not send anything.
+    agentCredentialId: null,
   };
 }
 
@@ -113,24 +116,14 @@ function installManagedRunnerMintFetch(): () => void {
     if (url.includes("/internal/computer/runners/") && method === "DELETE") {
       return new Response(null, { status: 204 });
     }
+    // Other calls to the fake Raft server (for example the managed MCP tool
+    // catalog) fail the way an unreachable server would instead of leaving the
+    // process; everything else, i.e. the local provider servers, goes through.
+    if (url.startsWith("https://daemon.example.com/")) {
+      throw new TypeError(`fetch failed: ${method} ${url} is not served by this test`);
+    }
     return originalFetch(input, init);
   }) as typeof fetch);
-}
-
-function cleanupTestManager(manager: AgentProcessManager): void {
-  if ((manager as any).agentStartPumpTimer) clearTimeout((manager as any).agentStartPumpTimer);
-  for (const ap of (manager as any).agents?.values?.() ?? []) {
-    ap.notifications.clearTimer();
-    if (ap.pendingTrajectory?.timer) clearTimeout(ap.pendingTrajectory.timer);
-    if (ap.activityHeartbeat?.kind === "active") clearInterval(ap.activityHeartbeat.timer);
-    if (ap.startup?.kind === "waiting" && ap.startup.timer) clearTimeout(ap.startup.timer);
-    if (ap.exit?.kind === "live" && ap.exit.stalledRecoverySigtermTimer) clearTimeout(ap.exit.stalledRecoverySigtermTimer);
-    if (ap.compaction?.kind === "active" && ap.compaction.watchdog) clearTimeout(ap.compaction.watchdog);
-    if (ap.runtimeErrorDeliveryBackoff?.kind === "backing_off" && ap.runtimeErrorDeliveryBackoff.timer) {
-      clearTimeout(ap.runtimeErrorDeliveryBackoff.timer);
-    }
-  }
-  (manager as any).agents?.clear?.();
 }
 
 test("Built-in native SDK provider 401 is surfaced as action-required runtime error activity", { timeout: 45_000 }, async () => {
@@ -164,6 +157,17 @@ test("Built-in native SDK provider 401 is surfaced as action-required runtime er
       const errorEvent = await waitForActivity(sent, "runtime_error");
       assert.equal(errorEvent.launchId, "launch-native-provider-401");
       assert.equal(errorEvent.detail, BUILTIN_AUTH_ERROR_MESSAGE);
+      assert.ok(sent.some((message) => message.type === "agent:activity" && message.providerRequest?.phase === "failed" && message.providerRequest.httpStatus === 401));
+      // The routine `waiting` phase posts no activity row of its own (@artin,
+      // 1.0.36): a row per provider call said nothing the surrounding tool and
+      // thinking rows did not, and it crowded them out of the log. The failure
+      // row above is what a 401 still owes the reader.
+      assert.deepEqual(
+        sent.filter((message) =>
+          message.type === "agent:activity" && message.detail?.startsWith("Requesting model service")),
+        [],
+        "a `waiting` phase must not post an activity row",
+      );
       assert.equal(
         errorEvent.entries?.some((entry) =>
           entry.kind === "text" && entry.text.includes("Built-in provider authentication failed")
@@ -176,7 +180,7 @@ test("Built-in native SDK provider 401 is surfaced as action-required runtime er
       );
     } finally {
       await manager.stopAgent("agent-1").catch(() => {});
-      cleanupTestManager(manager);
+      await releaseAgentManagerForTests(manager);
       restoreFetch();
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -246,7 +250,7 @@ test("every daemon agent:activity send declares an explicit isHeartbeat bit (thr
       );
     } finally {
       await manager.stopAgent("agent-1").catch(() => {});
-      cleanupTestManager(manager);
+      await releaseAgentManagerForTests(manager);
       restoreFetch();
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -255,7 +259,7 @@ test("every daemon agent:activity send declares an explicit isHeartbeat bit (thr
 
 test("handoff marker persists launchId and processInstanceId for the L1<->L2 join (#460 V3)", async () => {
   const { readFile } = await import("node:fs/promises");
-  const { resolveRuntimeSessionRef } = await import("./agentProcessManager.js");
+  const { resolveRuntimeSessionRef } = await import("./agentProcessManager");
   const fallbackDir = await mkdtemp(path.join(os.tmpdir(), "slock-v3-marker-"));
   try {
     // Unknown session in an empty home -> native lookup misses -> the daemon
@@ -350,7 +354,7 @@ test("idle restart snapshot produces a handoff marker carrying the cached launch
     assert.equal(marker.processInstanceId, "pi-idle-v3",
       "idle-snapshot marker must carry the cached processInstanceId when available");
   } finally {
-    cleanupTestManager(manager);
+    await releaseAgentManagerForTests(manager);
     await rm(dataDir, { recursive: true, force: true });
   }
 });
@@ -391,7 +395,7 @@ test("real live->idle snapshot paths cache processInstanceId (startup-timeout re
     assert.equal(snap!.processInstanceId, "pi-real-v3",
       "real live->idle path must cache processInstanceId (Leiysky remaining blocker: sites cached launchId only)");
   } finally {
-    cleanupTestManager(manager);
+    await releaseAgentManagerForTests(manager);
     await rm(dataDir, { recursive: true, force: true });
   }
 });
@@ -399,7 +403,7 @@ test("real live->idle snapshot paths cache processInstanceId (startup-timeout re
 test("daemon activity trace rows carry the isHeartbeat provenance bit matching the wire (#460 V1)", { timeout: 45_000 }, async () => {
   await withOpenAiCompatible401Provider(async (baseUrl) => {
     const { BasicTracer, MemoryTraceSink, createSpanAttrContractTracer } = await import("@botiverse/raft-shared");
-    const { DAEMON_CORE_TRACE_ATTR_CONTRACTS } = await import("./core.js");
+    const { DAEMON_CORE_TRACE_ATTR_CONTRACTS } = await import("./core");
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "slock-v1-tracebit-e2e-"));
     const sent: MachineToServerMessage[] = [];
     const sink = new MemoryTraceSink();
@@ -438,7 +442,7 @@ test("daemon activity trace rows carry the isHeartbeat provenance bit matching t
       // independently verifiable (pilot violation V1: wire had the bit,
       // daemon-side trace did not -> grep=0 was the standing red). Oracle =
       // the manager's own tracer sink (stored-const read, labeled asserts).
-      const producedSpans = sink.getAllSpans().filter((span) => span.name === "daemon.agent.activity.produced");
+      const producedSpans = traceRows(sink).filter((span) => span.name === "daemon.agent.activity.produced");
       assert.ok(producedSpans.length > 0, "expected at least one activity.produced trace span");
       for (const span of producedSpans) {
         const attrs = (span.attrs ?? {}) as Record<string, unknown>;
@@ -469,7 +473,7 @@ test("daemon activity trace rows carry the isHeartbeat provenance bit matching t
       }
     } finally {
       await manager.stopAgent("agent-1").catch(() => {});
-      cleanupTestManager(manager);
+      await releaseAgentManagerForTests(manager);
       restoreFetch();
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -478,12 +482,12 @@ test("daemon activity trace rows carry the isHeartbeat provenance bit matching t
 
 test("produced-span contract completeness: every emitted attr is either allowlisted or an explicit scrub decision (task #460 V4)", async () => {
   // "Silent scrub must be a loud red" (gamma-2 witness obligation): the
-  // difference between what recordActivityProducedTrace emits and what the
+  // difference between what the activity sink's produced trace emits and what the
   // runtime attr contract admits must be an EXPLICITLY decided set. A new
   // emission-site key that is neither allowlisted nor decided fails here,
   // instead of dying silently at the contract layer like V4 did.
   const { BasicTracer, MemoryTraceSink } = await import("@botiverse/raft-shared");
-  const { DAEMON_CORE_TRACE_ATTR_CONTRACTS } = await import("./core.js");
+  const { DAEMON_CORE_TRACE_ATTR_CONTRACTS } = await import("./core");
 
   // Decided scrubs, each with an owner ruling — NOT drive-by candidates:
   // - producerFactId/producer_fact_id: banned join key (#460 classification
@@ -496,28 +500,30 @@ test("produced-span contract completeness: every emitted attr is either allowlis
   const tracer = new BasicTracer({ sink });
   const probe = {
     tracer,
-    recordDaemonTrace(name: string, attrs?: Record<string, unknown>) {
+    recordDaemonEvent(name: string, attrs?: Record<string, unknown>) {
       const span = tracer.startSpan(name, { surface: "daemon", kind: "internal", attrs });
       span.end("ok");
     },
   };
   // Drive the real emission function against a bare (pre-scrub) tracer so
   // the emitted key set is observed, not hand-maintained.
-  (AgentProcessManager.prototype as any).recordActivityProducedTrace.call(
-    probe,
-    "agent-1",
-    "working",
-    "Running command…",
-    "running_command",
-    [{ kind: "status", activity: "working", detail: "", detailKind: "running_command" }],
-    undefined,
-    "L-1",
-    1,
-    "daemon_activity:agent-1:L-1:1",
-    false,
-  );
+  const { LegacyActivitySink } = await import("./activity/activitySink");
+  new LegacyActivitySink({
+    sendToServer: () => {},
+    nextClientSeq: () => 1,
+    daemonInstanceId: () => null,
+    recordEvent: (name, attrs) => probe.recordDaemonEvent(name, attrs),
+    now: () => 0,
+  }).publishFact({
+    agentId: "agent-1",
+    activityKind: "working",
+    detail: "Running command…",
+    detailKind: "running_command",
+    entries: [{ kind: "status", activity: "working", detail: "", detailKind: "running_command" }],
+    launchId: "L-1",
+  }, { present: false, sessionIdPresent: false });
 
-  const spans = sink.getAllSpans().filter((span) => span.name === "daemon.agent.activity.produced");
+  const spans = traceRows(sink).filter((span) => span.name === "daemon.agent.activity.produced");
   assert.equal(spans.length, 1, "probe emission must produce exactly one span");
   const emittedKeys = Object.entries(spans[0].attrs ?? {})
     .filter(([, value]) => value !== undefined)

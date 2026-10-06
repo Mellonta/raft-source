@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { createElement } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { TOPBAR_OVERFLOW_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 import api from "../src/api/client";
 import ChannelMembers from "../src/components/agent/ChannelMembers";
 import type { Agent } from "../src/store/agentStore";
@@ -15,7 +13,6 @@ import type { Server, ServerMember } from "../src/store/serverStore";
 import { useServerStore } from "../src/store/serverStore";
 import {
   resetServerFeatureFlagsForTests,
-  setServerFeatureFlagForTests,
 } from "../src/store/serverFeatureFlags";
 import { TestIntlProvider } from "./helpers/intl";
 
@@ -163,7 +160,7 @@ async function openAddMemberModal(channelId: string) {
     ),
   );
 
-  fireEvent.click(screen.getByTitle("View participants"));
+  fireEvent.click(screen.getByRole("button", { name: "View participants" }));
   fireEvent.click(await screen.findByRole("button", { name: "Add Member" }));
 }
 
@@ -196,32 +193,34 @@ test("channel add-member candidates render descriptions as behavior, not source 
 
   const agentRow = getCandidateRow("Runtime Scout");
   assert.match(agentRow.className, /items-center/);
-  const agentAvatar = agentRow.firstElementChild;
+  const agentAvatar = agentRow.querySelector(".self-center");
   assert.ok(agentAvatar);
   assert.match(agentAvatar.className, /self-center/);
   assert.doesNotMatch(agentAvatar.className, /mt-0\.5/);
   assert.doesNotMatch(agentAvatar.className, /self-start/);
   const agentDescription = within(agentRow).getByText("Investigates runtime regressions.");
-  assert.equal(agentDescription.getAttribute("title"), "Investigates runtime regressions.");
+  assert.equal(agentDescription.getAttribute("title"), null);
+  assert.ok(agentDescription.hasAttribute("data-base-ui-tooltip-trigger"));
   assert.match(agentDescription.className, /truncate/);
   assert.match(agentDescription.className, /text-xs/);
 
   const humanRow = getCandidateRow("Design Partner");
   assert.match(humanRow.className, /items-center/);
-  const humanAvatar = humanRow.firstElementChild;
+  const humanAvatar = humanRow.querySelector(".self-center");
   assert.ok(humanAvatar);
   assert.match(humanAvatar.className, /self-center/);
   assert.doesNotMatch(humanAvatar.className, /mt-0\.5/);
   assert.doesNotMatch(humanAvatar.className, /self-start/);
   const humanDescription = within(humanRow).getByText("Reviews visual hierarchy before release.");
-  assert.equal(humanDescription.getAttribute("title"), "Reviews visual hierarchy before release.");
+  assert.equal(humanDescription.getAttribute("title"), null);
+  assert.ok(humanDescription.hasAttribute("data-base-ui-tooltip-trigger"));
   assert.match(humanDescription.className, /truncate/);
   assert.match(humanDescription.className, /text-xs/);
 
   const blankAgentRow = getCandidateRow("Blank Agent");
   assert.match(blankAgentRow.className, /items-center/);
   assert.doesNotMatch(blankAgentRow.className, /items-start/);
-  const blankAgentAvatar = blankAgentRow.firstElementChild;
+  const blankAgentAvatar = blankAgentRow.querySelector(".self-center");
   assert.ok(blankAgentAvatar);
   assert.match(blankAgentAvatar.className, /self-center/);
   assert.doesNotMatch(blankAgentAvatar.className, /mt-0\.5/);
@@ -231,7 +230,7 @@ test("channel add-member candidates render descriptions as behavior, not source 
   const blankHumanRow = getCandidateRow("No Description Human");
   assert.match(blankHumanRow.className, /items-center/);
   assert.doesNotMatch(blankHumanRow.className, /items-start/);
-  const blankHumanAvatar = blankHumanRow.firstElementChild;
+  const blankHumanAvatar = blankHumanRow.querySelector(".self-center");
   assert.ok(blankHumanAvatar);
   assert.match(blankHumanAvatar.className, /self-center/);
   assert.doesNotMatch(blankHumanAvatar.className, /mt-0\.5/);
@@ -241,10 +240,9 @@ test("channel add-member candidates render descriptions as behavior, not source 
 
 test("channel members panel submits a mixed selection in one batch request", async () => {
   const channel = seedAddMemberCandidates();
-  setServerFeatureFlagForTests("server-1", TOPBAR_OVERFLOW_FEATURE_FLAG_KEY, true);
   const posts: Array<{ url: string; body: unknown }> = [];
   api.post = (async (url: string, body: unknown) => {
-    posts.push({ url, body });
+    if (url === `/channels/${channel.id}/members/batch`) posts.push({ url, body });
     return {
       data: {
         ok: true,
@@ -314,14 +312,13 @@ test("channel participants distinguish Slack projections from Raft members", asy
     channelActivity: { [channel.id]: null },
   });
   useAgentStore.setState({ agents: [], agentActivities: {} });
-  setServerFeatureFlagForTests("server-1", TOPBAR_OVERFLOW_FEATURE_FLAG_KEY, true);
 
   render(
     createElement(TestIntlProvider, null,
       createElement(ChannelMembers, { channelId: channel.id }),
     ),
   );
-  fireEvent.click(await screen.findByTitle("View participants"));
+  fireEvent.click(await screen.findByRole("button", { name: "View participants" }));
 
   await screen.findByText("Taylor from Slack");
   assert.ok(screen.getByText("Slack participants"));

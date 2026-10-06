@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import test from "node:test";
 import {
-  CHINESE_COMMUNITY_QR_CONFIG_PATH,
+  CHINESE_COMMUNITY_QR_CONFIG_URL,
   getChineseCommunityQrConfigUrl,
   isChineseCommunityQrExpired,
   normalizeChineseCommunityQrConfig,
+  resolveChineseCommunityQrConfig,
 } from "../src/utils/chineseCommunityQr";
 
 test("Chinese community QR public config placeholder exists at the fetched path", () => {
@@ -38,6 +38,44 @@ test("Chinese community QR config normalizes only valid image URLs", () => {
   assert.equal(normalizeChineseCommunityQrConfig(null), null);
 });
 
+test("Chinese community QR config resolves only same-origin community images", () => {
+  assert.equal(
+    resolveChineseCommunityQrConfig(
+      { imageUrl: "/community/qr.png" },
+      "https://static.raft.build/community/chinese-qr.json",
+    )?.imageUrl,
+    "https://static.raft.build/community/qr.png",
+  );
+  assert.equal(
+    resolveChineseCommunityQrConfig(
+      { imageUrl: "https://example.com/community/qr.png" },
+      "https://static.raft.build/community/chinese-qr.json",
+    ),
+    null,
+  );
+  assert.equal(
+    resolveChineseCommunityQrConfig(
+      { imageUrl: "/other/qr.png" },
+      "https://static.raft.build/community/chinese-qr.json",
+    ),
+    null,
+  );
+  assert.equal(
+    resolveChineseCommunityQrConfig(
+      { imageUrl: "/community/qr.png?version=1" },
+      "https://static.raft.build/community/chinese-qr.json",
+    ),
+    null,
+  );
+  assert.equal(
+    resolveChineseCommunityQrConfig(
+      { imageUrl: "/community/qr.png" },
+      "http://static.raft.build/community/chinese-qr.json",
+    ),
+    null,
+  );
+});
+
 test("Chinese community QR expiry ignores invalid dates and flags past dates", () => {
   assert.equal(isChineseCommunityQrExpired(undefined, new Date("2026-09-08T00:00:00.000Z")), false);
   assert.equal(isChineseCommunityQrExpired("not-a-date", new Date("2026-09-08T00:00:00.000Z")), false);
@@ -45,6 +83,6 @@ test("Chinese community QR expiry ignores invalid dates and flags past dates", (
   assert.equal(isChineseCommunityQrExpired("2026-09-08T00:00:00.000Z", new Date("2026-09-08T00:00:00.000Z")), false);
 });
 
-test("Chinese community QR config URL defaults to the public config path", () => {
-  assert.equal(getChineseCommunityQrConfigUrl(), CHINESE_COMMUNITY_QR_CONFIG_PATH);
+test("Chinese community QR config URL defaults to the static assets site", () => {
+  assert.equal(getChineseCommunityQrConfigUrl(), CHINESE_COMMUNITY_QR_CONFIG_URL);
 });

@@ -1,0 +1,256 @@
+{
+  "provenance": {
+    "source": "botiverse/mobile tag v1.12.0 (2637cf9c170e7fb7a6bbb233488f1d41daf62ac7)",
+    "producedBy": "released encoders: buildSharedCreateAgentDialogSubmit -> SharedCreateAgentCoordinator -> buildCreateAgentBody (create); buildSharedAgentProfileUpdateBody (edit, PATCH /api/agents/:id)",
+    "ciRun": "https://github.com/botiverse/mobile/actions/runs/36525259790",
+    "branch": "cc-cata/task1217-v1120-samples (not for merge)"
+  },
+  "samples": {
+    "create.builtin.preset": {
+      "name": "sample-agent",
+      "model": "deepseek/deepseek-v4-pro",
+      "runtime": "builtin",
+      "machineId": "machine-1",
+      "avatarUrl": "pixel:mug",
+      "runtimeConfig": {
+        "version": 1,
+        "runtime": "builtin",
+        "provider": {
+          "kind": "preset",
+          "providerId": "deepseek",
+          "apiKey": "sk-example"
+        },
+        "model": {
+          "kind": "preset",
+          "id": "deepseek/deepseek-v4-pro"
+        },
+        "mode": {
+          "kind": "default"
+        },
+        "loadLocalPlugins": false,
+        "hostUserState": "forbidden"
+      },
+      "formDefinitionRef": {
+        "protocolVersion": 1,
+        "runtimeId": "builtin",
+        "schemaVersion": "builtin-pi.create.v3"
+      }
+    },
+    "create.builtin.gateway": {
+      "name": "sample-agent",
+      "model": "example-model",
+      "runtime": "builtin",
+      "machineId": "machine-1",
+      "envVars": {
+        "EXAMPLE_FLAG": "1"
+      },
+      "avatarUrl": "pixel:mug",
+      "runtimeConfig": {
+        "version": 1,
+        "runtime": "builtin",
+        "provider": {
+          "kind": "gateway",
+          "providerId": "openai-compatible",
+          "baseUrl": "https://gateway.example.test/v1",
+          "apiKey": "sk-example",
+          "supportsImageInput": true
+        },
+        "model": {
+          "kind": "custom",
+          "name": "example-model"
+        },
+        "mode": {
+          "kind": "default"
+        },
+        "envVars": {
+          "EXAMPLE_FLAG": "1"
+        },
+        "loadLocalPlugins": true,
+        "hostUserState": "forbidden"
+      },
+      "formDefinitionRef": {
+        "protocolVersion": 1,
+        "runtimeId": "builtin",
+        "schemaVersion": "builtin-pi.create.v3"
+      }
+    },
+    "create.kimi-sdk.explicit-effort": {
+      "name": "sample-agent",
+      "model": "k2",
+      "runtime": "kimi-sdk",
+      "reasoningEffort": "high",
+      "machineId": "machine-1",
+      "avatarUrl": "pixel:mug",
+      "runtimeConfig": {
+        "version": 1,
+        "runtime": "kimi-sdk",
+        "model": {
+          "kind": "preset",
+          "id": "k2"
+        },
+        "mode": {
+          "kind": "default"
+        },
+        "reasoningEffort": "high"
+      },
+      "formDefinitionRef": {
+        "protocolVersion": 1,
+        "runtimeId": "kimi-sdk",
+        "schemaVersion": "kimi-sdk.create.v1"
+      }
+    },
+    "create.kimi-sdk.default-effort": {
+      "name": "sample-agent",
+      "model": "k2",
+      "runtime": "kimi-sdk",
+      "machineId": "machine-1",
+      "avatarUrl": "pixel:mug",
+      "runtimeConfig": {
+        "version": 1,
+        "runtime": "kimi-sdk",
+        "model": {
+          "kind": "preset",
+          "id": "k2"
+        },
+        "mode": {
+          "kind": "default"
+        }
+      },
+      "formDefinitionRef": {
+        "protocolVersion": 1,
+        "runtimeId": "kimi-sdk",
+        "schemaVersion": "kimi-sdk.create.v1"
+      }
+    },
+    "edit.builtin.keep-secret": {
+      "name": "sample-agent",
+      "displayName": "sample-agent",
+      "description": null,
+      "runtimeConfig": {
+        "version": 1,
+        "runtime": "builtin",
+        "provider": {
+          "kind": "gateway",
+          "providerId": "openai-compatible",
+          "baseUrl": "https://gateway.example.test/v1",
+          "supportsImageInput": true
+        },
+        "model": {
+          "kind": "custom",
+          "name": "example-model"
+        },
+        "mode": {
+          "kind": "default"
+        },
+        "reasoningEffort": null,
+        "envVars": {
+          "EXAMPLE_FLAG": "1"
+        },
+        "command": null,
+        "loadLocalPlugins": false,
+        "hostUserState": "forbidden"
+      },
+      "runtime": "builtin",
+      "model": "example-model",
+      "reasoningEffort": null,
+      "envVars": {
+        "EXAMPLE_FLAG": "1"
+      },
+      "restartMode": "restart"
+    },
+    "edit.builtin.replace-secret": {
+      "name": "sample-agent",
+      "displayName": "sample-agent",
+      "description": null,
+      "runtimeConfig": {
+        "version": 1,
+        "runtime": "builtin",
+        "provider": {
+          "kind": "gateway",
+          "providerId": "openai-compatible",
+          "baseUrl": "https://gateway.example.test/v1",
+          "apiKey": "sk-new-example",
+          "supportsImageInput": true
+        },
+        "model": {
+          "kind": "custom",
+          "name": "example-model"
+        },
+        "mode": {
+          "kind": "default"
+        },
+        "reasoningEffort": null,
+        "envVars": {
+          "EXAMPLE_FLAG": "1"
+        },
+        "command": null,
+        "loadLocalPlugins": false,
+        "hostUserState": "forbidden"
+      },
+      "runtime": "builtin",
+      "model": "example-model",
+      "reasoningEffort": null,
+      "envVars": {
+        "EXAMPLE_FLAG": "1"
+      },
+      "restartMode": "restart"
+    },
+    "edit.kimi-sdk.effort-picked": {
+      "name": "sample-agent",
+      "displayName": "sample-agent",
+      "description": null,
+      "runtimeConfig": {
+        "version": 1,
+        "runtime": "kimi-sdk",
+        "provider": null,
+        "model": {
+          "kind": "preset",
+          "id": "k2"
+        },
+        "mode": {
+          "kind": "default"
+        },
+        "reasoningEffort": "high",
+        "envVars": null,
+        "command": null,
+        "loadLocalPlugins": null,
+        "hostUserState": null
+      },
+      "runtime": "kimi-sdk",
+      "model": "k2",
+      "reasoningEffort": "high",
+      "envVars": null,
+      "formDefinitionRef": {
+        "protocolVersion": 1,
+        "runtimeId": "kimi-sdk",
+        "schemaVersion": "kimi-sdk.create.v1"
+      }
+    },
+    "edit.kimi-sdk.untouched": {
+      "name": "sample-agent",
+      "displayName": "sample-agent",
+      "description": null,
+      "runtimeConfig": {
+        "version": 1,
+        "runtime": "kimi-sdk",
+        "provider": null,
+        "model": {
+          "kind": "preset",
+          "id": "k2"
+        },
+        "mode": {
+          "kind": "default"
+        },
+        "reasoningEffort": null,
+        "envVars": null,
+        "command": null,
+        "loadLocalPlugins": null,
+        "hostUserState": null
+      },
+      "runtime": "kimi-sdk",
+      "model": "k2",
+      "reasoningEffort": null,
+      "envVars": null
+    }
+  }
+}

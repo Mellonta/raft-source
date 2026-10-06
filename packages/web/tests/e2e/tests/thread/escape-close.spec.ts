@@ -61,7 +61,7 @@ test.describe("thread panel Escape close", () => {
     await page.keyboard.press("Escape");
     await expect(threadScroller).toBeVisible();
 
-    await page.getByRole("button", { name: "View in channel" }).focus();
+    await page.getByTestId("thread-overflow-trigger").focus();
     await page.keyboard.press("Escape");
     await expect(threadScroller).toHaveCount(0);
     await expect(threadComposer).toHaveCount(0);
@@ -140,8 +140,13 @@ test.describe("thread panel Escape close", () => {
 
     // Keep focus in the parent document before pressing Escape. If Chromium
     // leaves focus inside the sandboxed iframe, the parent preview shell cannot
-    // receive the key event.
-    await page.getByRole("button", { name: "Close", exact: true }).focus();
+    // receive the key event. The thread panel now also has a button named
+    // "Close" (RUI CloseButton), so scope to the preview overlay — the
+    // Lightbox portal is a direct child of body holding the preview iframe.
+    const previewOverlay = page
+      .locator("body > div")
+      .filter({ has: page.locator('iframe[title^="HTML preview"]') });
+    await previewOverlay.getByRole("button", { name: "Close", exact: true }).focus();
     await page.keyboard.press("Escape");
     await expect(page.locator('iframe[title^="HTML preview"]')).toHaveCount(0);
     await expect(threadScroller).toBeVisible();

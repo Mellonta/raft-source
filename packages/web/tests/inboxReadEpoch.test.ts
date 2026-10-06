@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import type { InboxItem } from "../src/store/inboxStore.js";
+import type { InboxItem } from "../src/store/inboxStore";
 
 class MemoryStorage {
   private readonly map = new Map<string, string>();
@@ -27,11 +26,11 @@ Object.defineProperty(globalThis, "sessionStorage", {
   configurable: true,
 });
 
-const { default: api } = await import("../src/api/client.js");
-const { triggerServerReset } = await import("../src/store/serverResetRegistry.js");
-const { useInboxStore } = await import("../src/store/inboxStore.js");
-const { useMessageStore } = await import("../src/store/messageStore.js");
-const { useServerStore } = await import("../src/store/serverStore.js");
+const { default: api } = await import("../src/api/client");
+const { triggerServerReset } = await import("../src/store/serverResetRegistry");
+const { useInboxStore } = await import("../src/store/inboxStore");
+const { useMessageStore } = await import("../src/store/messageStore");
+const { useServerStore } = await import("../src/store/serverStore");
 
 const originalGet = api.get.bind(api);
 const originalPost = api.post.bind(api);

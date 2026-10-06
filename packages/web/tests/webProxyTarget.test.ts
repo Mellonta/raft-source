@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   resolveWebProxyTarget,
   WEB_PROXY_TARGET_ORIGINS,
-} from "../scripts/webProxyTarget.ts";
+} from "../scripts/webProxyTarget";
 
 test("defaults to the local server port", () => {
   assert.deepEqual(resolveWebProxyTarget({}), {

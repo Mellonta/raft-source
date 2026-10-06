@@ -12,7 +12,6 @@ import {
   CircleHelp,
   MessageSquare,
   Monitor,
-  Network,
   Search,
   Settings,
   SquareSplitHorizontal,
@@ -20,6 +19,7 @@ import {
   UsersRound,
   Smartphone,
 } from "lucide-react";
+import { useFeedbackUnread } from "../../feedback/useFeedbackUnread";
 import { useAuthStore } from "../../store/authStore";
 import { useServerStore } from "../../store/serverStore";
 import type { Server } from "../../store/serverStore";
@@ -28,20 +28,33 @@ import { useInboxStore } from "../../store/inboxStore";
 import { useChannelStore } from "../../store/channelStore";
 import { useMachineStore } from "../../store/machineStore";
 import { SERVER_NOTIFICATION_PREFS_UPDATED_EVENT } from "../../store/events/notificationPrefsEvents";
-import api from "../../api/client";
 import { useRailMode } from "../../hooks/useSidebarTab";
 import { trackActivityOpen } from "../../analytics/activity";
-import { hasOtherServerActivityUnread, parseServerUnreadSummaryRows } from "../../utils/serverUnreadSummary";
-import type { ServerUnreadSummary } from "../../utils/serverUnreadSummary";
+import {
+  hasCurrentServerActivityUnread,
+  hasOtherServerActivityUnread,
+} from "../../utils/serverUnreadSummary";
 import { countMachinesNeedingAttention } from "../../utils/computerUpgradeIndicator";
 import AttentionDot from "../ui/AttentionDot";
-import { AvatarImageWithFallback } from "../ui/AvatarSlot";
+import AvatarSlot, { AvatarImageWithFallback } from "../ui/AvatarSlot";
 import MenuItem from "../ui/MenuItem";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import ServerSwitcherMenu from "../ui/ServerSwitcherMenu";
-import Spinner from "../ui/Spinner";
+import {
+  AppRailFooter,
+  AppRailHeader,
+  AppRailItem,
+  AppRailItemAttention,
+  AppRailItemIcon,
+  AppRailItemLabel,
+  AppRailNav,
+  AppRailRoot,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+  Spinner,
+} from "raft-ui";
 import Tooltip from "../ui/Tooltip";
-import { Popover, PopoverContent, PopoverTrigger } from "raft-ui";
 import NotificationTrigger from "./NotificationTrigger";
 import {
   useWorkspaceGridNavigationStore,
@@ -58,8 +71,6 @@ import {
 import { SEARCH_FOCUS_REQUEST_EVENT } from "../../utils/searchFocusRequest";
 import { hasChatAttentionUnread, selectChatAttentionChannelIds } from "../../utils/chatAttentionUnread";
 import { useShallow } from "zustand/react/shallow";
-import { WIKI_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
-import { useServerFeatureFlag } from "../../store/serverFeatureFlags";
 import { useJoinCommunityFlow } from "../../hooks/useJoinCommunityFlow";
 import { markMobileAppSeen, shouldShowMobileAppBadge } from "./mobileAppBadge";
 import {
@@ -87,13 +98,26 @@ interface LeftRailProps {
   hidden?: boolean;
   workspaceModeAvailable?: boolean;
   side?: WorkspaceGridRailSide;
+  thinDivider?: boolean;
+  publicProjection?: PublicLeftRailProjection;
 }
 
-export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left" }: LeftRailProps) {
+export interface PublicLeftRailProjection {
+  server: Pick<Server, "id" | "name" | "slug" | "avatarUrl">;
+  authenticated: boolean;
+  showHelp: boolean;
+  activeMode: "chat" | "settings";
+  onSelectMode: (mode: "chat" | "settings") => void;
+  onSelectSettingsTab: (tab: "about" | "feedback") => void;
+  onAnonymousServerSelection: () => void;
+}
+
+export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left", thinDivider = false, publicProjection }: LeftRailProps) {
   // Display-language (react-intl) — layout namespace. Rail tab labels feed both
   // raft-ui Tooltip content and `aria-label`, so they must come from the catalog,
   // not literals.
   const { formatMessage } = useIntl();
+  const feedbackUnread = useFeedbackUnread(!hidden && !publicProjection);
   const currentUserId = useAuthStore((s) => s.user?.id ?? null);
   const server = useServerStore((s) => s.current);
   const isGuest = server?.role === "guest";
@@ -108,11 +132,17 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
   const hasLocalChatUnread = useMessageStore((s) =>
     hasChatAttentionUnread(chatAttentionChannelIds, s.unreadCounts),
   );
-  // Current-server Activity still needs the local boolean projection for the
-  // immediate inbox transition before the cross-server summary poll lands.
-  const hasActiveInboxUnread = useInboxStore((s) => s.activeUnreadCount > 0);
+  // Keep this subscription on 0↔nonzero / accepted-window edges rather than
+  // every count. Once Activity accepts a fresh server window, totalUnreadCount
+  // owns the current-server dot; the cached cross-server summary remains only
+  // a pre-load hint and cannot resurrect a read dot.
+  const [hasAcceptedActivityWindow, hasActivityTotalUnread, hasPreloadActivityUnread] = useInboxStore(useShallow((s) => [
+    s.hasAcceptedWindow,
+    s.totalUnreadCount > 0,
+    s.activeUnreadCount > 0,
+  ] as const));
   const [computerAttentionCount, machineCount] = useMachineStore(useShallow((s) => [
-    countMachinesNeedingAttention(s.machines, s.latestDaemonVersion),
+    countMachinesNeedingAttention(s.machines),
     s.machines.length,
   ] as const));
   const computerAttentionTooltip = computerAttentionCount > 0
@@ -138,7 +168,9 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
 
   const [showServerMenu, setShowServerMenu] = useState(false);
   const [showHelpMenu, setShowHelpMenu] = useState(false);
-  const [serverUnreadCounts, setServerUnreadCounts] = useState<Record<string, ServerUnreadSummary>>({});
+  // Single source of truth: the store owns the cross-server unread summary.
+  const serverUnreadCounts = useServerStore((s) => s.serverUnreadCounts);
+  const loadServerUnreadSummary = useServerStore((s) => s.loadServerUnreadSummary);
   const suppressRailClickRef = useRef(false);
 
   // One-shot "there is a mobile app now" dot. Read from storage rather than
@@ -173,31 +205,21 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
   const _pathBase = useMemo(() => (server ? `/s/${server.slug}` : ""), [server]);
 
   useEffect(() => {
+    if (publicProjection) return;
     if (side !== "left") return;
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const { data } = await api.get("/servers/unread-summary");
-        if (cancelled) return;
-        setServerUnreadCounts(parseServerUnreadSummaryRows(data));
-      } catch {
-        // best-effort badge; ignore failures
-      }
-    };
+    // No mount fetch here: App owns the single boot entry for the summary;
+    // this effect keeps only the event triggers (prefs change, local-unread
+    // edge via the dep below).
     const handleNotificationPrefsUpdated = () => {
-      void load();
+      void loadServerUnreadSummary();
     };
-    void load();
     window.addEventListener(SERVER_NOTIFICATION_PREFS_UPDATED_EVENT, handleNotificationPrefsUpdated);
     return () => {
-      cancelled = true;
       window.removeEventListener(SERVER_NOTIFICATION_PREFS_UPDATED_EVENT, handleNotificationPrefsUpdated);
     };
-    // Refresh the cross-server unread summary when local unread *appears or
-    // clears* (flip), not on every inbound message. Local per-message churn was
-    // never a precise signal for other servers' badges anyway — this is the same
-    // best-effort trigger, minus the redundant per-message refetches.
-  }, [hasLocalChatUnread, side]);
+    // The store coalesces concurrent calls, so this is a cheap trigger rather
+    // than a second fetch. Refresh when local unread appears/clears (flip).
+  }, [hasLocalChatUnread, publicProjection, side, loadServerUnreadSummary]);
 
   const hasOtherServerUnread = useMemo(
     () => hasOtherServerActivityUnread(servers, server, serverUnreadCounts),
@@ -206,7 +228,12 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
   const currentServerActivityCount = server?.id
     ? serverUnreadCounts[server.id]?.activityUnreadCount
     : undefined;
-  const hasActivityUnread = hasActiveInboxUnread || (currentServerActivityCount !== undefined && currentServerActivityCount > 0);
+  const hasActivityUnread = hasCurrentServerActivityUnread({
+    hasAcceptedWindow: hasAcceptedActivityWindow,
+    hasTotalUnread: hasActivityTotalUnread,
+    hasPreloadActiveUnread: hasPreloadActivityUnread,
+    summaryUnreadCount: currentServerActivityCount,
+  });
   // Chat dot tracks unread in joined channels and DMs; Activity dot tracks
   // the server-authoritative Activity count independently of the selected
   // Activity filter.
@@ -215,12 +242,9 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
   // signals so the user wouldn't miss inbox-only items; with Activity now
   // visible on the rail, the Chat dot returns to its narrower meaning.
   const hasChatUnread = hasLocalChatUnread;
-  const wikiEnabled = useServerFeatureFlag(WIKI_FEATURE_FLAG_KEY).enabled;
 
   const selectWorkspaceView = (mode: NonNullable<WorkspaceGridRailMode>) => {
-    const leavingWiki = railMode === "wiki";
-    if (leavingWiki) selectRailMode("chat");
-    if (!leavingWiki && workspaceSidebar.activeItem === mode && !workspaceSidebar.collapsed) {
+    if (workspaceSidebar.activeItem === mode && !workspaceSidebar.collapsed) {
       setWorkspaceSidebarCollapsed(true, currentUserId, side);
       return;
     }
@@ -233,8 +257,7 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
 
   const rawWorkspaceItems = workspaceRailLayout[side];
   const workspaceItems = rawWorkspaceItems.filter((item) => (
-    (item !== "wiki" || wikiEnabled)
-    && (!isGuest || (item !== "members" && item !== "humans" && item !== "computers"))
+    (!isGuest || (item !== "members" && item !== "humans" && item !== "computers"))
   ));
   const workspaceDropIndex = workspaceRailDrag?.targetSide === side
     ? workspaceRailDrag.targetIndex
@@ -244,8 +267,7 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
     : rawWorkspaceItems
         .slice(0, workspaceDropIndex)
         .filter((item) => (
-          (item !== "wiki" || wikiEnabled)
-          && (!isGuest || (item !== "members" && item !== "humans" && item !== "computers"))
+          (!isGuest || (item !== "members" && item !== "humans" && item !== "computers"))
         ))
         .length;
 
@@ -387,18 +409,7 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
     if (item === "tasks") {
       return <RailTabButton {...common} icon={<CheckSquare size={18} />} label={formatMessage({ id: "layout.leftRail.tabTasks" })} onClick={() => selectWorkspaceView("tasks")} />;
     }
-    if (item === "wiki") {
-      return (
-        <RailTabButton
-          {...common}
-          active={railMode === "wiki"}
-          onPointerDown={undefined}
-          icon={<Network size={18} />}
-          label={formatMessage({ id: "layout.leftRail.tabWiki" })}
-          onClick={() => selectRailMode("wiki")}
-        />
-      );
-    }
+
     if (item === "saved") {
       return <RailTabButton {...common} icon={<Bookmark size={18} />} label={formatMessage({ id: "layout.leftRail.tabSaved" })} onClick={() => selectWorkspaceView("saved")} />;
     }
@@ -429,6 +440,102 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
   const serverInitial = (server?.name || "S").trim().charAt(0).toUpperCase() || "S";
 
   if (hidden) return null;
+  if (publicProjection) {
+    const projectedInitial = publicProjection.server.name.trim().charAt(0).toUpperCase() || "S";
+    // Brand signature surface: unconditional soft-signal rail strip intentional across all themes (Grace ruling #proj-frontend:52311f41 msg=bcaa8cce)
+    return (
+      <div
+        className="relative hidden h-full w-[64px] shrink-0 flex-col items-center border-r-2 border-black bg-soft-signal pb-2 select-none md:flex"
+        data-testid="workspace-left-rail"
+        data-public-server-rail="true"
+      >
+        <div className="relative flex h-panel-header w-full items-center justify-center border-b-2 border-black">
+          <Tooltip content={publicProjection.server.name} contentProps={{ side: "right" }}>
+            {/* Brand signature: black logo block with soft-signal glyph intentional across all themes (Grace ruling #proj-frontend:52311f41 msg=bcaa8cce) */}
+            <button
+              type="button"
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={() => {
+                if (!publicProjection.authenticated) {
+                  publicProjection.onAnonymousServerSelection();
+                  return;
+                }
+                setShowServerMenu((open) => !open);
+              }}
+              aria-label={formatMessage(
+                { id: "layout.leftRail.switchServerAria" },
+                { serverName: publicProjection.server.name },
+              )}
+              className="relative inline-flex size-10 items-center justify-center border-2 border-black bg-black font-display text-base font-bold text-soft-signal shadow-brutal-sm transition-all duration-100 hover:shadow-brutal"
+              data-testid="public-server-switcher-trigger"
+            >
+              <AvatarImageWithFallback src={publicProjection.server.avatarUrl} fallback={projectedInitial} />
+            </button>
+          </Tooltip>
+          {publicProjection.authenticated ? (
+            <ServerSwitcherMenu
+              open={showServerMenu}
+              onClose={() => setShowServerMenu(false)}
+              serverUnreadCounts={{}}
+              testId="desktop-server-switcher-menu"
+              className="absolute left-full top-1 ml-2 max-h-[calc(100dvh-16px)] w-64"
+            />
+          ) : null}
+        </div>
+        <div className="relative flex w-full flex-1 flex-col items-center gap-1.5 py-2">
+          <RailTabButton
+            icon={<MessageSquare size={18} />}
+            label={formatMessage({ id: "layout.leftRail.tabChat" })}
+            active={publicProjection.activeMode === "chat"}
+            onClick={() => publicProjection.onSelectMode("chat")}
+            testId="left-rail-tab-chat"
+          />
+        </div>
+        {publicProjection.showHelp ? (
+          <Popover open={showHelpMenu} onOpenChange={setShowHelpMenu}>
+            <div className="relative flex h-11 w-full items-center justify-center">
+              <PopoverTrigger
+                openOnHover
+                delay={0}
+                closeDelay={120}
+                render={(
+                  <RailTabButton
+                    icon={<CircleHelp size={18} />}
+                    label={formatMessage({ id: "layout.leftRail.tabHelp" })}
+                    active={showHelpMenu}
+                    onClick={() => setShowServerMenu(false)}
+                    testId="left-rail-help"
+                    ariaHasPopup="menu"
+                    ariaExpanded={showHelpMenu}
+                    showTooltip={false}
+                    showDot={showMobileAppBadge}
+                  />
+                )}
+              />
+              <HelpMenu
+                servers={servers}
+                serverSlugOverride={publicProjection.server.slug}
+                onClose={() => setShowHelpMenu(false)}
+                showMobileAppBadge={showMobileAppBadge}
+                onMobileAppOpened={dismissMobileAppBadge}
+                onOpenFeedback={() => publicProjection.onSelectSettingsTab("feedback")}
+                onOpenMobileApp={() => publicProjection.onSelectSettingsTab("about")}
+              />
+            </div>
+          </Popover>
+        ) : null}
+        <div className="flex h-11 w-full items-center justify-center">
+          <RailTabButton
+            icon={<Settings size={18} />}
+            label={formatMessage({ id: "layout.leftRail.tabSettings" })}
+            active={publicProjection.activeMode === "settings"}
+            onClick={() => publicProjection.onSelectMode("settings")}
+            testId="left-rail-settings"
+          />
+        </div>
+      </div>
+    );
+  }
   if (side === "right" && !workspaceEnabled) return null;
   if (side === "right" && workspaceItems.length === 0 && workspaceRailDrag?.targetSide !== "right") {
     return (
@@ -453,21 +560,23 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
   // assertion can catch.
   if (isHostShell()) return null;
 
+  const brutalRailDividerClassName = thinDivider && side === "left" ? "theme-brutal:!border-r" : "";
+
   return (
     <>
-      <div
-        className={`relative hidden md:flex h-full shrink-0 flex-col items-center bg-soft-signal select-none pb-2 ${workspaceEnabled ? "w-12" : "w-[64px] [@media(max-height:600px)]:w-[50px]"} ${workspaceEnabled ? (side === "left" ? "border-r border-black/25" : "border-l border-black/25") : "border-r-2 border-black"} ${workspaceRailDrag?.targetSide === side ? "outline outline-1 outline-black/35 -outline-offset-1" : ""}`}
+      <AppRailRoot
+        className={`hidden md:flex pb-2 ${brutalRailDividerClassName} ${workspaceEnabled ? (side === "left" ? "border-r border-line-muted" : "border-l border-line-muted") : ""} ${workspaceRailDrag?.targetSide === side ? "outline outline-1 outline-line-strong -outline-offset-1" : ""}`}
         data-workspace-rail-side={side}
         data-testid={`workspace-${side}-rail`}
       >
       {/* Server switcher (top) */}
-      {side === "left" ? <div className={`relative flex w-full items-center justify-center ${workspaceEnabled ? "h-12 border-b border-black/25" : "h-panel-header border-b-2 border-black"}`}>
+      {side === "left" ? <AppRailHeader className={workspaceEnabled ? "h-12 border-b border-line-muted" : undefined}>
         <Tooltip
           content={server?.name || formatMessage({ id: "layout.leftRail.serverFallbackName" })}
-          contentProps={{ side: "right", className: "bg-white" }}
+          contentProps={{ side: "right" }}
         >
-          <button
-            type="button"
+          <AppRailItem
+            selected={showServerMenu}
             onMouseDown={(e) => e.stopPropagation()}
             onClick={() => {
               setShowHelpMenu(false);
@@ -483,20 +592,27 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
             // #proj-uiux:8e7df837 task #98 followup 54fbf722: "server name
             // 按钮怎么没修？" — keep server-initial in step with the rail
             // tabs, not pinned at size-icon-header (36 across all viewports).
-            className={`relative inline-flex items-center justify-center border-2 border-black bg-black font-display font-bold text-soft-signal transition-all duration-100 ${workspaceEnabled ? "size-9 text-sm shadow-brutal-active hover:shadow-brutal-sm" : "size-10 text-base shadow-brutal-sm hover:shadow-brutal [@media(max-height:600px)]:h-9 [@media(max-height:600px)]:w-9"}`}
+            // No overflow-hidden here: the avatar clips its own image, and the
+            // other-server unread dot sits on the button's corner (task #685).
+            className="size-10 p-0 md:[@media(max-height:600px)]:size-9"
           >
-            {hasOtherServerUnread && (
-              <AttentionDot
-                size="lg"
-                // Must outrank the avatar image (`AvatarImageWithFallback` gives
-                // its img `relative z-[1]`); without an explicit level the dot
-                // is a z-auto positioned element and paints UNDER the image.
-                className="absolute -right-1 -top-1 z-[2]"
-                aria-hidden="true"
+            <AppRailItemIcon className="[&_[data-slot=app-rail-item-attention-mask]]:z-[2] [&_[data-slot=app-rail-item-indicator]]:z-[2]">
+              <AvatarSlot
+                context="panel-header"
+                type="server"
+                serverAvatarUrl={server?.avatarUrl}
+                serverInitial={serverInitial}
+                className="md:[@media(max-height:600px)]:!size-8"
               />
-            )}
-            <AvatarImageWithFallback src={server?.avatarUrl} fallback={serverInitial} />
-          </button>
+              {hasOtherServerUnread ? (
+                <AppRailItemAttention title={formatMessage({ id: "layout.leftRail.serverFallbackName" })}>
+                  <span aria-hidden="true" className="hidden">
+                    <AttentionDot size="lg" aria-hidden="true" />
+                  </span>
+                </AppRailItemAttention>
+              ) : null}
+            </AppRailItemIcon>
+          </AppRailItem>
         </Tooltip>
 
         <ServerSwitcherMenu
@@ -506,12 +622,12 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
           testId="desktop-server-switcher-menu"
           className="absolute left-full top-1 ml-2 w-64 max-h-[calc(100dvh-16px)]"
         />
-      </div> : null}
+      </AppRailHeader> : null}
 
       {/* Rail buttons (middle). Mutually-exclusive — at most one is
           highlighted at a time. Workspace keeps the URL stable while its
           Tasks overlay temporarily owns the active rail highlight. */}
-      <div className="relative flex flex-1 flex-col items-center gap-1.5 py-2 w-full">
+      <AppRailNav className="relative w-full">
         {workspaceEnabled && visibleWorkspaceDropIndex !== null ? (
           <div
             className="pointer-events-none absolute left-0 right-0 top-2 z-10 h-0.5 bg-[rgb(0_150_190/0.55)] transition-transform duration-100 ease-out"
@@ -528,7 +644,7 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
           >
             {workspaceRailDrag?.item === item ? (
               <div
-                className="size-8 border border-dashed border-black/55 bg-black/[0.06] transition-[opacity,transform] duration-100 ease-out"
+                className="size-8 border border-dashed border-foreground/40 bg-foreground/5 transition-[opacity,transform] duration-100 ease-out theme-brutal:border-black/55 theme-brutal:bg-black/[0.06]"
                 data-testid="workspace-rail-drop-placeholder"
               />
             ) : renderWorkspaceRailButton(item)}
@@ -555,7 +671,6 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
               testId="left-rail-tab-activity"
             />
             <RailTabButton icon={<CheckSquare size={18} />} label={formatMessage({ id: "layout.leftRail.tabTasks" })} active={railMode === "tasks"} onClick={() => selectRailMode("tasks")} testId="left-rail-tab-tasks" />
-            {wikiEnabled && <RailTabButton icon={<Network size={18} />} label={formatMessage({ id: "layout.leftRail.tabWiki" })} active={railMode === "wiki"} onClick={() => selectRailMode("wiki")} testId="left-rail-tab-wiki" />}
             {!isGuest && <RailTabButton icon={<Users size={18} />} label={formatMessage({ id: "layout.leftRail.tabMembers" })} active={railMode === "members"} onClick={() => selectRailMode("members")} testId="left-rail-tab-members" />}
             {!isGuest && <RailTabButton
               icon={<Monitor size={18} />}
@@ -573,7 +688,7 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
           <div className="relative min-h-2 flex-1 w-full">
           </div>
         ) : null}
-      </div>
+      </AppRailNav>
 
       {/* Notification Center trigger — the permanent Bell sits above Help.
           Its pink dot is conditional, but the entry point and empty-state
@@ -581,6 +696,7 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
           stdrc 2026-05-02 #proj-uiux:f87f6eb9 (task #94 "the top warning bar
           covers itself; collect everything into a popup hung off Settings").
           The popup floats to the right of the rail. */}
+      <AppRailFooter>
       {side === "left" ? <NotificationTrigger flavor="rail-bottom" /> : null}
 
       {side === "left" ? (
@@ -634,18 +750,20 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
             label={formatMessage({ id: "layout.leftRail.tabSettings" })}
             active={workspaceSettingsModalOpen && workspaceSettingsModalSide === side}
             onClick={() => openWorkspaceSettingsModal(side)}
+            showDot={feedbackUnread > 0}
+            dotTooltip={formatMessage({ id: "layout.systemNotifications.feedbackRepliesTitle" })}
             testId="workspace-settings-trigger"
           />
         </div>
       ) : null : side === "left" ? (
         <div className="flex h-11 w-full items-center justify-center">
-          <RailTabButton icon={<Settings size={18} />} label={formatMessage({ id: "layout.leftRail.tabSettings" })} active={railMode === "settings"} onClick={() => selectRailMode("settings")} testId="left-rail-settings" />
+          <RailTabButton icon={<Settings size={18} />} label={formatMessage({ id: "layout.leftRail.tabSettings" })} active={railMode === "settings"} onClick={() => selectRailMode("settings")} showDot={feedbackUnread > 0} dotTooltip={formatMessage({ id: "layout.systemNotifications.feedbackRepliesTitle" })} testId="left-rail-settings" />
         </div>
       ) : null}
-      </div>
+      </AppRailFooter>
       {workspaceRailDrag?.sourceSide === side ? createPortal(
         <div
-          className="pointer-events-none fixed z-[200] flex size-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center border border-black/40 bg-white opacity-90"
+          className="pointer-events-none fixed z-[200] flex size-8 -translate-x-1/2 -translate-y-1/2 items-center justify-center border border-line-strong bg-layer-panel opacity-90 theme-brutal:border-black/40 theme-brutal:bg-white"
           style={{ left: "var(--workspace-rail-drag-x)", top: "var(--workspace-rail-drag-y)" }}
           data-testid="workspace-rail-drag-overlay"
         >
@@ -653,6 +771,7 @@ export function LeftRail({ hidden, workspaceModeAvailable = false, side = "left"
         </div>,
         document.body,
       ) : null}
+      </AppRailRoot>
     </>
   );
 }
@@ -662,7 +781,6 @@ function workspaceRailIcon(item: WorkspaceGridRailItem) {
   if (item === "chat") return <MessageSquare size={18} />;
   if (item === "activity") return <Activity size={18} />;
   if (item === "tasks") return <CheckSquare size={18} />;
-  if (item === "wiki") return <Network size={18} />;
   if (item === "saved") return <Bookmark size={18} />;
   if (item === "members" || item === "humans") return <Users size={18} />;
   return <Monitor size={18} />;
@@ -708,18 +826,25 @@ function AnimatedRailSlot({
 
 function HelpMenu({
   servers,
+  serverSlugOverride,
   onClose,
   showMobileAppBadge,
   onMobileAppOpened,
+  onOpenFeedback,
+  onOpenMobileApp,
 }: {
   servers: Server[];
+  serverSlugOverride?: string;
   onClose: () => void;
   showMobileAppBadge: boolean;
   onMobileAppOpened: () => void;
+  onOpenFeedback?: () => void;
+  onOpenMobileApp?: () => void;
 }) {
   const { formatMessage } = useIntl();
   const navigate = useNavigate();
-  const serverSlug = useServerStore((state) => state.current?.slug ?? null);
+  const storedServerSlug = useServerStore((state) => state.current?.slug ?? null);
+  const serverSlug = serverSlugOverride ?? storedServerSlug;
   const onCloseRef = useRef(onClose);
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -746,6 +871,10 @@ function HelpMenu({
   const openFeedback = () => {
     if (!serverSlug) return;
     onCloseRef.current();
+    if (onOpenFeedback) {
+      onOpenFeedback();
+      return;
+    }
     navigate(`/s/${serverSlug}/settings/feedback`);
   };
   const openMobileApp = () => {
@@ -754,6 +883,10 @@ function HelpMenu({
     // and someone who opened Help to reach Feedback has not been told about it.
     onMobileAppOpened();
     onCloseRef.current();
+    if (onOpenMobileApp) {
+      onOpenMobileApp();
+      return;
+    }
     navigate(`/s/${serverSlug}/settings/about`);
   };
 
@@ -785,7 +918,7 @@ function HelpMenu({
         data-testid="left-rail-help-menu"
         className="w-80 overflow-hidden p-0"
       >
-          <div className="flex items-center border-b-2 border-black bg-brutal-cream px-3 py-2">
+          <div className="flex items-center border-b border-line-muted bg-layer-panel px-3 py-2 text-foreground-strong theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-brutal-cream theme-brutal:text-black">
             <SectionEyebrow>
               {formatMessage({ id: "layout.leftRail.helpMenuTitle" })}
             </SectionEyebrow>
@@ -833,7 +966,7 @@ function HelpMenu({
           ) : null}
           <MenuItem
             icon={communityJoinFlow.joiningCommunitySlug
-              ? <Spinner size="sm" aria-hidden="true" />
+              ? <Spinner size="sm" aria-hidden="true"  aria-label={formatMessage({ id: "common.loadingLabel" })} />
               : <UsersRound size={14} className="shrink-0" />}
             onClick={() => void openCommunity()}
             disabled={communityJoinFlow.joiningCommunitySlug !== null}
@@ -901,19 +1034,18 @@ const RailTabButton = forwardRef<HTMLButtonElement, RailTabButtonProps>(function
 }, forwardedRef) {
   const dotVisible = Boolean(showDot && (!dotInactiveOnly || !active));
   const button = (
-    <button
+    <AppRailItem
       {...buttonProps}
       ref={(node) => {
         setReactRef(buttonRef, node);
         setReactRef(forwardedRef, node);
       }}
-      type="button"
+      selected={active}
       onClick={(event) => {
         if (!suppressClickRef?.current) onClick(event);
       }}
       onDoubleClick={onDoubleClick}
       aria-label={label}
-      aria-pressed={active}
       aria-haspopup={ariaHasPopup}
       aria-expanded={ariaExpanded}
       data-testid={testId}
@@ -925,32 +1057,27 @@ const RailTabButton = forwardRef<HTMLButtonElement, RailTabButtonProps>(function
       // header icons. stdrc 2026-05-02 #proj-uiux:8e7df837 task #98:
       // "正常桌面上还是原来的大小比较合适，只在缩窄 rail 和 header 的时候
       // 应该缩按钮".
-      className={`relative inline-flex ${compact ? "size-8" : "size-10 [@media(max-height:600px)]:h-9 [@media(max-height:600px)]:w-9"} items-center justify-center border-2 transition-colors ${
-        active
-          ? activeVariant === "depressed"
-            ? "border-black bg-workspace-mode-active shadow-workspace-mode-active"
-            : "border-black bg-white shadow-brutal-sm"
-          : "border-transparent hover:border-black hover:bg-white"
-      } ${className}`}
+      className={`${compact ? "size-8" : "size-10 [@media(max-height:600px)]:h-9 [@media(max-height:600px)]:w-9"} ${activeVariant === "depressed" && active ? "border-black bg-workspace-mode-active shadow-workspace-mode-active" : className}`}
     >
-      <span className="relative inline-flex items-center justify-center">
+      <AppRailItemIcon className="relative">
         {icon}
-        {dotVisible && (
-          <AttentionDot
-            size="lg"
-            className="pointer-events-none absolute -right-1 -top-1"
-            tone={dotTone}
-            aria-hidden="true"
-          />
-        )}
-      </span>
-    </button>
+        {dotVisible ? (
+          <AppRailItemAttention title={dotTooltip ?? label}>
+            {icon}
+            <span className="hidden">
+              <AttentionDot size="lg" tone={dotTone} aria-hidden="true" />
+            </span>
+          </AppRailItemAttention>
+        ) : null}
+      </AppRailItemIcon>
+      <AppRailItemLabel>{label}</AppRailItemLabel>
+    </AppRailItem>
   );
 
   return showTooltip ? (
     <Tooltip
       content={dotVisible && dotTooltip ? dotTooltip : label}
-      contentProps={{ side: tooltipSide, className: "bg-white" }}
+      contentProps={{ side: tooltipSide }}
     >
       {button}
     </Tooltip>

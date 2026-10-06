@@ -1,6 +1,13 @@
 import { gte, lt, type SQL } from "drizzle-orm";
-import { messages } from "../db/schema.js";
+import { messages } from "../db/schema";
 
+/**
+ * THE one UUID-shape check for the server (task #12). Shape-only: any version
+ * and variant nibble passes, because that is exactly what the Postgres uuid
+ * column accepts — a well-formed-but-unknown UUID is a not-found, not an
+ * invalid input. Do NOT copy stricter variants (e.g. v1-5-only) into route
+ * files; version-strictness rejections were incidental, not designed.
+ */
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const MESSAGE_SHORT_ID_RE = /^[0-9a-f]{8}$/i;
 const UUID_SUFFIX_ZERO = "-0000-0000-0000-000000000000";

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   appConfigTraceAttrs,
@@ -7,7 +6,7 @@ import {
   appSnapshotTraceAttrs,
   appSourceTraceAttrs,
   filterAppRuntimeTraceAttrs,
-} from "./appRuntimeTrace.js";
+} from "./appRuntimeTrace";
 
 test("built-in App trace identities join exact revisions without content fields", () => {
   assert.deepEqual(

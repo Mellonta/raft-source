@@ -1,8 +1,8 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { ServerId } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { attachmentObjects, attachments, channels, messages } from "../db/schema.js";
-import * as channelService from "./channelService.js";
+import { getDb } from "../db/index";
+import { attachmentObjects, attachments, channels, messages } from "../db/schema";
+import * as channelService from "./channelService";
 
 export type AttachmentAuthorityPrincipal =
   | { type: "user"; id: string }

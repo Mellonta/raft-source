@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import type { APIRequestContext, Locator, Page } from "@playwright/test";
+import { randomUUID } from "node:crypto";
 import { loginViaApi } from "../fixtures/auth";
 import { waitForSeedState } from "../fixtures/seedState";
 import type { PlaywrightSeedState } from "../fixtures/seedState";
@@ -27,15 +28,31 @@ const REPRESENTATIVE_SOURCES = [
 
 const mermaidBlock = (source: string) => ["```mermaid", source, "```"].join("\n");
 
+async function createChannel(
+  request: APIRequestContext,
+  seedState: PlaywrightSeedState,
+  accessToken: string,
+) {
+  // Shard neighbors also write to the shared seed channel. Own this timeline so
+  // their realtime inserts cannot re-anchor it while sticky geometry is sampled.
+  const response = await request.post(`${seedState.urls.api}/api/channels`, {
+    headers: { Authorization: `Bearer ${accessToken}`, "X-Server-Id": seedState.server.id },
+    data: { name: `mermaid-${randomUUID().slice(0, 8)}` },
+  });
+  expect(response.ok()).toBeTruthy();
+  return await response.json() as { id: string };
+}
+
 async function postMessage(
   request: APIRequestContext,
   seedState: PlaywrightSeedState,
   accessToken: string,
+  channelId: string,
   content: string,
 ) {
   const response = await request.post(`${seedState.urls.api}/api/messages`, {
     headers: { Authorization: `Bearer ${accessToken}`, "X-Server-Id": seedState.server.id },
-    data: { channelId: seedState.channel.id, content },
+    data: { channelId, content },
   });
   expect(response.ok()).toBeTruthy();
   return await response.json() as { id: string };
@@ -50,11 +67,12 @@ async function openMarkdownMessage(
   const seedState = await waitForSeedState();
   const login = await loginViaApi(request, seedState);
   await dismissOwnerOnboarding(request, seedState, login.accessToken);
-  const message = await postMessage(request, seedState, login.accessToken, content);
+  const channel = await createChannel(request, seedState, login.accessToken);
+  const message = await postMessage(request, seedState, login.accessToken, channel.id, content);
   if (withFollowUp) {
-    await postMessage(request, seedState, login.accessToken, "Follow-up\n\n".repeat(40));
+    await postMessage(request, seedState, login.accessToken, channel.id, "Follow-up\n\n".repeat(40));
   }
-  await page.goto(`/s/${seedState.server.slug}/channel/${seedState.channel.id}?msg=${message.id}`);
+  await page.goto(`/s/${seedState.server.slug}/channel/${channel.id}?msg=${message.id}`);
   const messageItem = page.locator(`[data-index][data-message-id="${message.id}"]`);
   await expect(messageItem).toBeVisible();
   return { messageItem, diagram: messageItem.locator("[data-mermaid-status=valid]") };
@@ -110,9 +128,11 @@ test("a Mermaid message reaches an isolated, usable browser surface", async ({ p
   const scrollerBox = await scroller.boundingBox();
   expect(toolbarBox && scrollerBox ? Math.abs(toolbarBox.y - scrollerBox.y) : Infinity).toBeLessThanOrEqual(1);
 
-  await toolbar.getByRole("button", { name: "Code", exact: true }).click();
+  // The view toggle is a RUI SegmentedControl; its items are radios, not
+  // plain buttons (Base UI Radio.Root with a button render).
+  await toolbar.getByRole("radio", { name: "Code", exact: true }).click();
   await expect(diagram.locator("pre")).toContainText("LLM 管线（本次新增）");
-  await toolbar.getByRole("button", { name: "Diagram", exact: true }).click();
+  await toolbar.getByRole("radio", { name: "Diagram", exact: true }).click();
   await diagram.scrollIntoViewIfNeeded();
 
   for (const [name, extension] of [
@@ -234,16 +254,11 @@ test("Share image materializes Mermaid ink without interactive chrome", async ({
 });
 
 test("invalid Mermaid exposes a generic error and the original source", async ({ page, request }) => {
-  const seedState = await waitForSeedState();
-  const login = await loginViaApi(request, seedState);
-  await dismissOwnerOnboarding(request, seedState, login.accessToken);
-  const message = await postMessage(request, seedState, login.accessToken, mermaidBlock("not a diagram"));
-  await page.goto(`/s/${seedState.server.slug}/channel/${seedState.channel.id}?msg=${message.id}`);
-
-  const diagram = page.locator(`[data-message-id="${message.id}"] [data-mermaid-status=error]`);
+  const { messageItem } = await openMarkdownMessage(page, request, mermaidBlock("not a diagram"));
+  const diagram = messageItem.locator("[data-mermaid-status=error]");
   await expect(diagram.getByRole("alert")).toContainText("Couldn't render this diagram");
   await expect(diagram).not.toContainText("No diagram type detected");
-  await diagram.getByRole("button", { name: "Code", exact: true }).click();
+  await diagram.getByRole("radio", { name: "Code", exact: true }).click();
   await expect(diagram.locator("pre")).toContainText("not a diagram");
   await expect(diagram.getByRole("alert")).toHaveCount(0);
 });

@@ -1,5 +1,14 @@
 import { Router, type Router as RouterType } from "express";
-import * as productEventsService from "../services/productEventsService.js";
+import { getDb } from "../db/index";
+import { legacyProductEventsAllowed, resolveProductAnalyticsGate } from "../services/productAnalyticsGate";
+import {
+  buildClientEventRows,
+  clientEventBatchSchema,
+  countIngest,
+  getProductEventSink,
+} from "../services/productEventIngest";
+import * as productEventsService from "../services/productEventsService";
+import { sendJsonServerError } from "./errorResponse";
 
 export const productEventsRouter: RouterType = Router();
 
@@ -83,6 +92,13 @@ productEventsRouter.post("/onboarding-wizard", async (req, res) => {
 
     const idempotencyKey = shortField(body.idempotencyKey, 128);
 
+    // RFC-067 controls: an explicit "no" (workspace switch off, or the user
+    // turned "Share usage data" off) means nothing is recorded.
+    if (!(await legacyProductEventsAllowed(getDb(), { userId: req.userId!, serverId: req.serverId! }))) {
+      res.status(204).end();
+      return;
+    }
+
     await productEventsService.recordOnboardingWizardEvent({
       serverId: req.serverId!,
       eventType: body.eventType as productEventsService.OnboardingWizardEventType,
@@ -94,7 +110,76 @@ productEventsRouter.post("/onboarding-wizard", async (req, res) => {
 
     res.status(204).end();
   } catch (err) {
-    console.error("[product-events] unexpected error:", err);
-    res.status(500).json({ error: "Failed to record product event" });
+    sendJsonServerError(req, res, {
+      error: "Failed to record product event",
+      logPrefix: "[product-events] unexpected error:",
+      err,
+    });
+  }
+});
+
+// RFC-067 client behavior events. Clients ask first and send only when this
+// says yes (the user's "share usage data" choice, their analytics id, the
+// workspace switch, and a configured store); the batch route enforces the same
+// gate again.
+//
+// GET /api/product-events/config
+productEventsRouter.get("/config", async (req, res) => {
+  try {
+    const gate = await resolveProductAnalyticsGate(getDb(), { userId: req.userId!, serverId: req.serverId! });
+    res.json({ clientEventsAllowed: gate.clientEventsAllowed && getProductEventSink(req.app) !== null });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to read product event config",
+      logPrefix: "[product-events] config error:",
+      err,
+    });
+  }
+});
+
+// POST /api/product-events/batch
+//
+// Always 202 once the body is well-formed: the client drops its batch either
+// way. `accepted` is how many rows were queued for the store; counts of what
+// was written, lost, gated or rejected live in metrics.
+productEventsRouter.post("/batch", async (req, res) => {
+  const parsed = clientEventBatchSchema.safeParse(req.body);
+  if (!parsed.success) {
+    countIngest("rejected_malformed", 1);
+    res.status(400).json({ error: "Invalid product event batch" });
+    return;
+  }
+  const batch = parsed.data;
+  try {
+    const sink = getProductEventSink(req.app);
+    if (sink === null) {
+      countIngest("unconfigured", batch.events.length);
+      res.status(202).json({ accepted: 0 });
+      return;
+    }
+    const gate = await resolveProductAnalyticsGate(getDb(), { userId: req.userId!, serverId: req.serverId! });
+    if (!gate.clientEventsAllowed || gate.analyticsId === null) {
+      countIngest("gated", batch.events.length);
+      res.status(202).json({ accepted: 0 });
+      return;
+    }
+    const { rows, rejected } = buildClientEventRows({
+      batch,
+      analyticsId: gate.analyticsId,
+      serverId: req.serverId!,
+      receivedAt: new Date(),
+    });
+    for (const [reason, count] of Object.entries(rejected)) {
+      countIngest(`rejected_${reason as keyof typeof rejected}`, count);
+    }
+    // Queued for the background writer, which counts written and lost rows.
+    sink.enqueue(rows);
+    res.status(202).json({ accepted: rows.length });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to record product events",
+      logPrefix: "[product-events] batch error:",
+      err,
+    });
   }
 });

@@ -1,4 +1,6 @@
 import api from "../api/client";
+import { resolveNotificationChannel } from "./notificationChannel";
+import { mayUseServiceWorker } from "./offlineBundleHost";
 
 const SERVICE_WORKER_PATH = "/sw.js";
 export type WebPushPromptEvent =
@@ -22,11 +24,12 @@ export async function recordWebPushPromptEvent(input: {
   }
 }
 
+// True only where Web Push can actually work (see notificationChannel.ts). In
+// the Raft Desktop shell this is false even though serviceWorker/PushManager/
+// Notification exist: its app:// origin cannot register a service worker and the
+// desktop delivers OS notifications natively instead (task #93).
 export function supportsPushNotifications(): boolean {
-  return typeof window !== "undefined" &&
-    "serviceWorker" in navigator &&
-    "PushManager" in window &&
-    typeof Notification !== "undefined";
+  return resolveNotificationChannel().kind === "web-push";
 }
 
 export function getPushPermissionState(): NotificationPermission | "unsupported" {
@@ -36,6 +39,8 @@ export function getPushPermissionState(): NotificationPermission | "unsupported"
 
 export async function registerPushServiceWorker(): Promise<ServiceWorkerRegistration | null> {
   if (!("serviceWorker" in navigator)) return null;
+  // A page loaded from an offline bundle has no worker: the host serves its files.
+  if (!mayUseServiceWorker()) return null;
   try {
     const registration = await navigator.serviceWorker.register(SERVICE_WORKER_PATH);
     void registration.update().catch(() => {});
@@ -46,6 +51,10 @@ export async function registerPushServiceWorker(): Promise<ServiceWorkerRegistra
   }
 }
 
+// Throws when the lookup itself fails (SecurityError on origins/schemes that
+// can't host a service worker, blocked site storage). Callers decide what a
+// failed lookup means: a read-only probe degrades to "not subscribed"; a
+// mutation (disable) must report failure, not "nothing to do" (task #93 review).
 async function getExistingRegistration(): Promise<ServiceWorkerRegistration | null> {
   if (!("serviceWorker" in navigator)) return null;
   const registration = (await navigator.serviceWorker.getRegistration("/")) || null;
@@ -56,7 +65,13 @@ async function getExistingRegistration(): Promise<ServiceWorkerRegistration | nu
 }
 
 async function ensureRegistration(): Promise<ServiceWorkerRegistration | null> {
-  return (await getExistingRegistration()) || registerPushServiceWorker();
+  let existing: ServiceWorkerRegistration | null = null;
+  try {
+    existing = await getExistingRegistration();
+  } catch (err) {
+    console.warn("[Push] Service worker registration lookup failed:", err);
+  }
+  return existing || registerPushServiceWorker();
 }
 
 async function fetchVapidPublicKey(): Promise<string | null> {
@@ -85,10 +100,17 @@ function urlBase64ToUint8Array(value: string): Uint8Array {
 
 export async function isPushSubscribed(): Promise<boolean> {
   if (!supportsPushNotifications()) return false;
-  const registration = await getExistingRegistration();
-  if (!registration) return false;
-  const subscription = await registration.pushManager.getSubscription();
-  return !!subscription;
+  try {
+    const registration = await getExistingRegistration();
+    if (!registration) return false;
+    const subscription = await registration.pushManager.getSubscription();
+    return !!subscription;
+  } catch (err) {
+    // Never throw: callers (settings card, activation banner) await this inside
+    // state refreshes that must always settle (task #93).
+    console.warn("[Push] Subscription lookup failed:", err);
+    return false;
+  }
 }
 
 export async function enablePushNotifications(): Promise<NotificationPermission | "unsupported" | "unavailable" | "error"> {

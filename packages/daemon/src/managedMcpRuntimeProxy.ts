@@ -17,7 +17,7 @@ import {
   type ManagedMcpCallResult,
   type ManagedMcpRuntimeSnapshot,
 } from "@botiverse/raft-shared";
-import { applyLoopbackNoProxyEnv } from "./loopbackNoProxy.js";
+import { applyLoopbackNoProxyEnv } from "./loopbackNoProxy";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -25,7 +25,7 @@ import {
   ListToolsRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
-import { logger } from "./logger.js";
+import { logger } from "./logger";
 
 const HOST = "127.0.0.1";
 const MAX_REQUEST_BYTES = 1024 * 1024;

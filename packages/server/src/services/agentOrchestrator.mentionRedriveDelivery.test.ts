@@ -1,18 +1,17 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 
-import { getDb } from "../db/index.js";
-import { agents, channels, messageMentions, messages, servers, users } from "../db/schema.js";
-import { AgentOrchestrator } from "./agentOrchestrator.js";
+import { getDb } from "../db/index";
+import { agents, channels, messageMentions, messages, servers, users } from "../db/schema";
+import { AgentOrchestrator } from "./agentOrchestrator";
 import {
   ensureMentionDeliveryOccurrences,
   recordMentionDeliveryAck,
   recordMentionDeliveryDaemonTransition,
   recordMentionDeliveryServerDecision,
-} from "./mentionDeliveryOccurrenceService.js";
+} from "./mentionDeliveryOccurrenceService";
 
 
 /**
@@ -187,7 +186,7 @@ test("an already-ACKed occurrence answers ACKED and delivers NOTHING", async () 
   // FIXTURE ASSERTION FIRST. If the ack silently no-ops, the arm below fails for a reason that has
   // nothing to do with the code under test — and "it re-delivered an ACKed message" is far too
   // serious a claim to publish without first proving the message was actually ACKed.
-  const { getMentionDeliveryOccurrence } = await import("./mentionDeliveryOccurrenceService.js");
+  const { getMentionDeliveryOccurrence } = await import("./mentionDeliveryOccurrenceService");
   const row = await getMentionDeliveryOccurrence(message.id, agent.id);
   assert.equal(row?.state, "acked", `fixture must reach state=acked (ack returned ${JSON.stringify(ack)})`);
   const orch = new CountingOrchestrator(identity);

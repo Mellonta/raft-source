@@ -1,6 +1,6 @@
 import type { Server as SocketServer } from "socket.io";
-import type { messages } from "../db/schema.js";
-import { messageAudience, projectMessageSocketPayload, type MessageRealtimeTarget } from "./messageRealtimeEvents.js";
+import type { messages } from "../db/schema";
+import { messageAudience, projectMessageSocketPayload, type MessageRealtimeTarget } from "./messageRealtimeEvents";
 
 type MessageRow = typeof messages.$inferSelect;
 

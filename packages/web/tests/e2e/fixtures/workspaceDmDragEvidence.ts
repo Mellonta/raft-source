@@ -1,26 +1,48 @@
 import type { Page, Request, Response, TestInfo } from "@playwright/test";
 
+const RESPONSE_BODY_CAPTURE_TIMEOUT_MS = 250;
+const responseBodyCaptureTimeout = Symbol("responseBodyCaptureTimeout");
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | typeof responseBodyCaptureTimeout> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<typeof responseBodyCaptureTimeout>((resolve) => {
+        timeout = setTimeout(() => resolve(responseBodyCaptureTimeout), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 // Observe only this drag and this server's sidebar-order PATCH. Never capture
 // headers, auth, unrelated traffic, or DataTransfer contents.
-export async function withWorkspaceDmDragEvidence(
+export async function withWorkspaceDmDragEvidence<T>(
   page: Page,
   testInfo: TestInfo,
   serverId: string,
   dmIds: string[],
-  action: () => Promise<void>,
+  action: () => Promise<T>,
+  attachmentName = "workspace-dm-drag-evidence",
 ) {
   const browser = await page.evaluateHandle((ids) => {
     const events: Array<Record<string, unknown>> = [];
-    const types = ["dragstart", "dragenter", "dragover", "drop", "dragend"];
+    const types = [
+      "dragstart", "dragenter", "dragover", "drop", "dragend",
+      "pointerdown", "pointermove", "pointerup",
+      "mousedown", "mousemove", "mouseup",
+    ];
     const listener = (event: Event) => {
-      const drag = event as DragEvent;
+      const pointer = event as MouseEvent | DragEvent;
       const row = event.target instanceof Element
         ? event.target.closest<HTMLElement>("[data-sidebar-channel-id]") : null;
       const id = row?.dataset.sidebarChannelId;
       if (!id || !ids.includes(id) || events.length >= 200) return;
       const rect = row!.getBoundingClientRect();
       events.push({ type: event.type, at: performance.now(), id,
-        x: drag.clientX, y: drag.clientY, top: rect.top, left: rect.left,
+        x: pointer.clientX, y: pointer.clientY, top: rect.top, left: rect.left,
         width: rect.width, height: rect.height, viewportWidth: innerWidth,
         viewportHeight: innerHeight, defaultPrevented: event.defaultPrevented });
     };
@@ -42,7 +64,15 @@ export async function withWorkspaceDmDragEvidence(
     const entry = requests.get(response.request());
     if (!entry) return;
     entry.status = response.status();
-    pending.push(response.json().then(body => { entry.response = body; }, () => { entry.responseUnavailable = true; }));
+    pending.push((async () => {
+      const body = await withTimeout(response.json(), RESPONSE_BODY_CAPTURE_TIMEOUT_MS)
+        .catch(() => responseBodyCaptureTimeout);
+      if (body === responseBodyCaptureTimeout) {
+        entry.responseUnavailable = true;
+        return;
+      }
+      entry.response = body;
+    })());
   };
   const onFailed = (request: Request) => {
     const entry = requests.get(request);
@@ -51,18 +81,29 @@ export async function withWorkspaceDmDragEvidence(
   page.on("request", onRequest);
   page.on("response", onResponse);
   page.on("requestfailed", onFailed);
+  let result: T | undefined;
+  let actionError: unknown;
+  let actionSucceeded = false;
   try {
-    await action();
-  } finally {
+    result = await action();
+    actionSucceeded = true;
+  } catch (error) {
+    actionError = error;
+  }
+  try {
     page.off("request", onRequest);
     page.off("response", onResponse);
     page.off("requestfailed", onFailed);
-    await Promise.all(pending);
-    const events = await browser.evaluate(state => { state.stop(); return state.events; }).catch(() => null);
-    await browser.dispose();
-    await testInfo.attach("workspace-dm-drag-evidence", {
-      body: Buffer.from(JSON.stringify({ retry: testInfo.retry, dmIds, events, patches }, null, 2)),
-      contentType: "application/json",
-    });
+  } catch {
+    // Diagnostic cleanup should not replace the drag/PATCH action result.
   }
+  const events = await browser.evaluate(state => { state.stop(); return state.events; }).catch(() => null);
+  await browser.dispose().catch(() => undefined);
+  await Promise.allSettled(pending);
+  await testInfo.attach(attachmentName, {
+    body: Buffer.from(JSON.stringify({ retry: testInfo.retry, dmIds, events, patches }, null, 2)),
+    contentType: "application/json",
+  }).catch(() => undefined);
+  if (!actionSucceeded) throw actionError;
+  return result as T;
 }

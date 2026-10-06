@@ -17,10 +17,11 @@ import { createHash, randomBytes } from "node:crypto";
 import argon2 from "argon2";
 import { and, eq, isNull, isNotNull } from "drizzle-orm";
 import { asMachineId } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { computers, machines, serverMembers, servers, users } from "../db/schema.js";
-import { registerMachine, getMachine } from "./machineService.js";
-import { actorHasServerCapabilityInServer, getActorServerRoleInServer } from "../lib/actorPermissions.js";
+import { getDb } from "../db/index";
+import { computers, machines, serverMembers, servers, users } from "../db/schema";
+import { registerMachine, getMachine, generateMachineKeyMaterial, acquireMachineCreateLock } from "./machineService";
+import { lockActorMembershipRow, ServerMembershipRevokedError } from "../lib/actorMembershipFence";
+import { actorHasServerCapabilityInServer, getActorServerRoleInServer, actorRoleHasServerCapability } from "../lib/actorPermissions";
 
 const COMPUTER_API_KEY_PREFIX_LENGTH = 16;
 const COMPUTER_RAW_KEY_BYTES = 32;
@@ -308,28 +309,6 @@ export type AttachComputerResult =
  * orchestrator change, no agent-table change: agents bind to a Computer
  * via the normal `agents.machineId = <this machine id>`.
  */
-async function ensureComputerMachine(
-  computerId: string,
-  serverId: string,
-  userId: string,
-  name: string,
-): Promise<string> {
-  const db = getDb();
-  const [c] = await db
-    .select({ machineId: computers.machineId })
-    .from(computers)
-    .where(eq(computers.id, computerId));
-  if (c?.machineId) {
-    const existingMachine = await getMachine(asMachineId(c.machineId));
-    if (existingMachine) return c.machineId;
-  }
-  const { machine } = await registerMachine(serverId, userId, name);
-  await db
-    .update(computers)
-    .set({ machineId: machine.id })
-    .where(eq(computers.id, computerId));
-  return machine.id;
-}
 
 export async function attachComputer(input: {
   userId: string;
@@ -355,45 +334,68 @@ export async function attachComputer(input: {
     return { ok: false, error: "requires_admin" };
   }
 
-  // Name is display-only. A duplicate live display name from the same
-  // attaching user is ambiguous, so fail closed instead of treating the name
-  // as identity proof and rotating the existing credential.
-  const [existing] = await db
-    .select({ id: computers.id })
-    .from(computers)
-    .where(
-      and(
-        eq(computers.serverId, server.id),
-        eq(computers.attachedByUserId, input.userId),
-        eq(computers.name, input.name),
-        isNull(computers.revokedAt),
-      ),
-    );
-
-  if (existing) return { ok: false, error: "computer_name_collision" };
-
+  // Task #93 line G: both keys are generated before any lock (argon2 is slow). The attach then runs as ONE transaction:
+  // machines advisory lock → the attaching human's own `server_members` row (share) → capability re-check → name
+  // collision check → Computer insert → Machine register → link. A removal or demotion that commits first is observed
+  // under the lock and leaves zero Computers and zero Machines; before this, the two inserts ran without a transaction.
   const material = await generateComputerApiKeyMaterial();
+  const machineMaterial = await generateMachineKeyMaterial();
 
-  const [row] = await db
-    .insert(computers)
-    .values({
-      serverId: server.id,
-      name: input.name,
-      apiKeyHash: material.apiKeyHash,
-      apiKeyPrefix: material.apiKeyPrefix,
-      attachedByUserId: input.userId,
-    })
-    .returning({ id: computers.id });
+  try {
+    return await db.transaction(async (tx): Promise<AttachComputerResult> => {
+      const machineCreateLock = await acquireMachineCreateLock(tx, server.id);
+      const lockedRole = await lockActorMembershipRow(tx, server.id, input.userId, "share");
+      if (!actorRoleHasServerCapability(lockedRole, "registerMachines")) {
+        return { ok: false, error: "requires_admin" };
+      }
 
-  const machineId = await ensureComputerMachine(row.id, server.id, input.userId, input.name);
+      // Name is display-only. A duplicate live display name from the same
+      // attaching user is ambiguous, so fail closed instead of treating the name
+      // as identity proof and rotating the existing credential.
+      const [existing] = await tx
+        .select({ id: computers.id })
+        .from(computers)
+        .where(
+          and(
+            eq(computers.serverId, server.id),
+            eq(computers.attachedByUserId, input.userId),
+            eq(computers.name, input.name),
+            isNull(computers.revokedAt),
+          ),
+        );
 
-  return {
-    ok: true,
-    apiKey: material.apiKey,
-    serverMachineId: row.id,
-    machineId,
-    serverId: server.id,
-    serverSlug: server.slug,
-    resumed: false,
-  };
+      if (existing) return { ok: false, error: "computer_name_collision" };
+
+      const [row] = await tx
+        .insert(computers)
+        .values({
+          serverId: server.id,
+          name: input.name,
+          apiKeyHash: material.apiKeyHash,
+          apiKeyPrefix: material.apiKeyPrefix,
+          attachedByUserId: input.userId,
+        })
+        .returning({ id: computers.id });
+
+      const { machine } = await registerMachine(server.id, input.userId, input.name, {
+        machineCreateLock,
+        material: machineMaterial,
+      });
+      await tx.update(computers).set({ machineId: machine.id }).where(eq(computers.id, row.id));
+
+      return {
+        ok: true,
+        apiKey: material.apiKey,
+        serverMachineId: row.id,
+        machineId: machine.id,
+        serverId: server.id,
+        serverSlug: server.slug,
+        resumed: false,
+      };
+    });
+  } catch (error) {
+    // Removal committed first: identical to "not a member" before the transaction existed.
+    if (error instanceof ServerMembershipRevokedError) return { ok: false, error: "not_authorized" };
+    throw error;
+  }
 }

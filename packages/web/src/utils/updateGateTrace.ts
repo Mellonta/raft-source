@@ -1,14 +1,14 @@
-import { emitWebTrace, emitWebTraceAndFlushBeforeUnload } from "./webAuthTrace";
+import { emitWebEvent, emitWebEventAndFlushBeforeUnload } from "./webAuthTrace";
 
-let emit = emitWebTrace;
-let emitBeforeUnload = emitWebTraceAndFlushBeforeUnload;
+let emit = emitWebEvent;
+let emitBeforeUnload = emitWebEventAndFlushBeforeUnload;
 
 export function __setUpdateGateTraceEmittersForTest(input: {
-  emit?: typeof emitWebTrace;
-  emitBeforeUnload?: typeof emitWebTraceAndFlushBeforeUnload;
+  emit?: typeof emitWebEvent;
+  emitBeforeUnload?: typeof emitWebEventAndFlushBeforeUnload;
 } | null): void {
-  emit = input?.emit ?? emitWebTrace;
-  emitBeforeUnload = input?.emitBeforeUnload ?? emitWebTraceAndFlushBeforeUnload;
+  emit = input?.emit ?? emitWebEvent;
+  emitBeforeUnload = input?.emitBeforeUnload ?? emitWebEventAndFlushBeforeUnload;
 }
 
 export type UpdateGateAction =

@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   __resetFailpointsForTests,
   __setFailpointsForTests,
   failpoints,
   InMemoryFailpointRegistry,
   noopFailpointRegistry,
-} from "./failpoints.js";
+} from "./failpoints";
 
 test("noop registry has zero configured cost and falls through to fallback", () => {
   let called = 0;

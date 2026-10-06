@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { Command } from "commander";
 
-import { defineCommand, registerCliCommand } from "./command.js";
-import { CliError, CliExit } from "./errors.js";
-import type { CliIo } from "./io.js";
+import { defineCommand, registerCliCommand } from "./command";
+import { CliError, CliExit } from "./errors";
+import type { CliIo } from "./io";
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];

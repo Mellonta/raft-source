@@ -1,4 +1,4 @@
-import type { OsSupervisorKind } from "./osSupervisor.js";
+import type { OsSupervisorKind } from "./osSupervisor";
 
 export const OS_SUPERVISOR_KIND_ENV_VAR = "RAFT_COMPUTER_OS_SUPERVISOR_KIND";
 

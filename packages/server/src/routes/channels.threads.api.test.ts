@@ -1,5 +1,6 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
+import { openTestApp } from "../test/integration/app";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
@@ -7,35 +8,62 @@ import pg from "pg";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   BasicTracer,
-  MemoryTraceSink, THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY
+  MemoryTraceSink
 } from "@botiverse/raft-shared";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { closeRisingWavePool } from "../db/risingwave.js";
+import { getDb } from "../db/index";
+import { closeRisingWavePool } from "../db/risingwave";
+import { installRisingWaveReadReferences, uninstallRisingWaveReadReferences } from "../test/risingWaveReadReference";
 import {
-  users,
+  users, servers,
   agents, serverMembers,
   channels,
   channelHumans,
   channelAgents,
-  messages, threadFollows, userChannelReadCursors, inboxServingRows, inboxNotificationFacts,
+  messages, threadFollows, userChannelReadCursors, inboxNotificationFacts,
   inboxSuppressionStates, tasks, featureFlags, agentActivityEvents
-} from "../db/schema.js";
-import { addMember, removeMember } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { createChannel, getOrCreateThread, addHuman, addAgent, removeHuman, removeAgent, findOrCreateDM, canAgentReceiveChannelDelivery, deleteChannel, markReadLatest } from "../services/channelService.js";
+} from "../db/schema";
+import { addMember, removeMember } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { __testRisingWaveInbox, createChannel, getOrCreateThread, addHuman, addAgent, removeHuman, removeAgent, findOrCreateDM, canAgentReceiveChannelDelivery, deleteChannel, markReadLatest, retireDeletedThreadDoneResidue } from "../services/channelService";
 import {
   createMessage
-} from "../services/messageService.js";
-import * as taskService from "../services/taskService.js";
-import { registerMachine } from "../services/machineService.js";
-import { assignMachine } from "../services/agentService.js";
-import { createServer, installFakeIo, enableThreadAgentFollowerManagementForServer, recordTestInboxFact, seedThreadFixture, headers, channelDoneBody, threadDoneBody, legacyDoneFallbackCount, seedUser, fetchInboxAll } from "./channels.api.fixtures.js";
+} from "../services/messageService";
+import * as taskService from "../services/taskService";
+import { registerMachine } from "../services/machineService";
+import { assignMachine } from "../services/agentService";
+import { createServer, installFakeIo, recordTestInboxFact, seedThreadFixture, headers, channelDoneBody, threadDoneBody, legacyDoneFallbackCount, seedUser, fetchInboxAll } from "./channels.api.fixtures";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
+/**
+ * The v3 stats tests below mock the pool's query (the v3 read). The active list
+ * reads rw_followed_threads_v5 first (through queryRisingWave's pool.connect);
+ * stub that read with NO rows, so every followed thread is "missing in v4"
+ * (CDC lag) and takes the legacy regular query plus the v3 stats read under test.
+ */
+// The v4 row read fails, so the request takes the whole legacy path, whose
+// stats read is the RisingWave stats backend these tests exercise. (A thread
+// merely missing from v4 is left out, not served by the legacy read.)
+function stubFollowedThreadsV5Unavailable(): void {
+  __testRisingWaveInbox.set({
+    query: (async (_pool: unknown, queryText: string) => {
+      assert.match(queryText, /FROM rw_followed_threads_v5 v/, "only the v5 read goes through queryRisingWave here");
+      throw new Error('relation "rw_followed_threads_v5" does not exist');
+    }) as never,
+  });
+}
 
-test("thread Agent follower management is gated, authorized, Activity-recorded, reversible, and preserves personal attention", async ({ app }) => {
+function stubFollowedThreadsV5WithNoRows(): void {
+  __testRisingWaveInbox.set({
+    query: (async (_pool: unknown, queryText: string) => {
+      assert.match(queryText, /FROM rw_followed_threads_v5 v/, "only the v5 read goes through queryRisingWave here");
+      return { result: { rows: [] }, acquireWaitMs: 0, poolState: { rw_pool_total: 0, rw_pool_idle: 0, rw_pool_waiting: 0 } };
+    }) as never,
+  });
+}
+
+
+test("thread Agent follower management is authorized, Activity-recorded, reversible, and preserves personal attention", async ({ app }) => {
   const emittedEvents = installFakeIo(app.app);
   const db = getDb();
   const f = await seedThreadFixture(app.baseUrl);
@@ -48,12 +76,7 @@ test("thread Agent follower management is gated, authorized, Activity-recorded, 
   const removeUrl = `${app.baseUrl}/api/channels/threads/${f.threadId}/followers/agents/${f.agentBId}`;
   const restoreUrl = `${removeUrl}/restore`;
 
-  let response = await fetch(rosterUrl, { headers: headers(f.ownerToken, f.serverId) });
-  assert.equal(response.status, 404, "disabled servers must not discover the management surface");
-
-  await enableThreadAgentFollowerManagementForServer(f.serverId);
-
-  response = await fetch(rosterUrl, { headers: headers(f.followerToken, f.serverId) });
+  let response = await fetch(rosterUrl, { headers: headers(f.followerToken, f.serverId) });
   assert.equal(response.status, 200);
   let roster = await response.json() as {
     threads: Array<{
@@ -220,58 +243,6 @@ test("thread Agent follower management is gated, authorized, Activity-recorded, 
 });
 
 
-test("thread Agent follower management defaults on only for the initial server allowlist", async () => {
-  for (const serverSlug of ["botiverse", "slock-android"]) {
-    const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
-    try {
-      const f = await seedThreadFixture(app.baseUrl, serverSlug);
-      const response = await fetch(
-        `${app.baseUrl}/api/channels/threads/followers?threadChannelIds=${f.threadId}`,
-        { headers: headers(f.ownerToken, f.serverId) },
-      );
-      assert.equal(
-        response.status,
-        200,
-        `${serverSlug} is enabled before an operator creates the flag row`,
-      );
-      const flagResponse = await fetch(`${app.baseUrl}/api/feature-flags/evaluate`, {
-        method: "POST",
-        headers: headers(f.ownerToken, f.serverId),
-        body: JSON.stringify({
-          serverId: f.serverId,
-          platform: "web",
-          keys: [THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY],
-        }),
-      });
-      assert.equal(flagResponse.status, 200);
-      assert.deepEqual(await flagResponse.json(), {
-        evaluations: [{
-          key: THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY,
-          enabled: true,
-          reason: "initial_allowlist",
-        }],
-      });
-      await getDb().insert(featureFlags).values({
-        key: THREAD_AGENT_FOLLOWER_MANAGEMENT_FEATURE_FLAG_KEY,
-        description: "test kill switch for initial allowlist",
-        enabled: true,
-        killSwitch: true,
-        randomizationUnit: "server",
-        defaultEnabled: false,
-        salt: `thread-follower-${serverSlug}`,
-      });
-      const blockedResponse = await fetch(
-        `${app.baseUrl}/api/channels/threads/followers?threadChannelIds=${f.threadId}`,
-        { headers: headers(f.ownerToken, f.serverId) },
-      );
-      assert.equal(blockedResponse.status, 404, "an explicit kill switch overrides the initial allowlist");
-    } finally {
-      await app.close();
-    }
-  }
-});
-
-
 test("GET /api/channels/unread excludes followed threads whose parent channel was deleted", async ({ app }) => {
   const f = await seedThreadFixture(app.baseUrl);
   const db = getDb();
@@ -379,32 +350,38 @@ test("GET /api/channels/threads/followed records followed-thread phases and quer
   assert.deepEqual(processEventNames, [
     "followed_threads.load.started",
     "history.policy.checked",
+    "followed_threads.source_selected",
     "followed_threads.loaded",
     "response.ready",
     "http.response.finished",
   ]);
+  const sourceSelected = span.events.find((event) => event.name === "followed_threads.source_selected");
+  assert.equal(sourceSelected?.attrs?.followed_threads_source, "rw_v5");
+  assert.equal(sourceSelected?.attrs?.rw_regular_threads, 1);
+  assert.equal(sourceSelected?.attrs?.rw_missing_threads, 0);
 
+  // Active follows of a member: the rw_followed_threads_v5 path. Its query set
+  // is constant in the number of threads (primary-key / distinct-parent reads).
   const dbEvents = span.events.filter((event) => event.name === "db.query.finished");
   assert.deepEqual(
     dbEvents.map((event) => event.attrs?.query_name).sort(),
     [
-      "channels.followed_joint_threads_by_user",
+      "channels.followed_thread_ids_by_user",
+      "channels.followed_threads.parent_channels",
+      "channels.followed_threads.read_cursors",
       "channels.followed_threads.user_claimants",
-      "channels.followed_threads_by_user",
-      "channels.followed_threads_stats_by_threads",
+      "channels.followed_threads_rw_rows",
     ],
   );
-  assert.equal(dbEvents.length, 4);
-  assert.ok(dbEvents.length <= 4, "followed threads query count should stay constant for task-claimant enrichment");
+  assert.equal(dbEvents.length, 5, "followed threads query count should stay constant for task-claimant enrichment");
 
   const dbEventByQuery = new Map(dbEvents.map((event) => [event.attrs?.query_name, event]));
-  assert.equal(dbEventByQuery.get("channels.followed_threads_by_user")?.attrs?.phase, "followed_threads.loaded");
-  assert.equal(dbEventByQuery.get("channels.followed_threads_by_user")?.attrs?.row_count, 1);
-  assert.equal(dbEventByQuery.get("channels.followed_threads_stats_by_threads")?.attrs?.followed_threads_count, 1);
-  assert.equal(dbEventByQuery.get("channels.followed_threads_stats_by_threads")?.attrs?.stats_rows_count, 1);
-  assert.equal(dbEventByQuery.get("channels.followed_threads_stats_by_threads")?.attrs?.stats_source, "pg_legacy");
-  assert.equal(dbEventByQuery.get("channels.followed_threads_stats_by_threads")?.attrs?.fallback_reason, "feature_disabled");
-  assert.equal(dbEventByQuery.get("channels.followed_threads_stats_by_threads")?.attrs?.contract_version, 1);
+  assert.equal(dbEventByQuery.get("channels.followed_thread_ids_by_user")?.attrs?.phase, "followed_threads.loaded");
+  assert.equal(dbEventByQuery.get("channels.followed_thread_ids_by_user")?.attrs?.followed_threads_count, 1);
+  // No RisingWave in CI: the installed test reference serves the v5 rows from Postgres.
+  assert.equal(dbEventByQuery.get("channels.followed_threads_rw_rows")?.attrs?.rows_count, 1);
+  assert.equal(dbEventByQuery.get("channels.followed_threads.parent_channels")?.attrs?.parent_channels_count, 1);
+  assert.equal(dbEventByQuery.get("channels.followed_threads.read_cursors")?.attrs?.read_cursor_rows_count, 1);
   assert.equal(dbEventByQuery.get("channels.followed_threads.user_claimants")?.attrs?.input_count, 1);
   assert.equal(dbEventByQuery.get("channels.followed_threads.user_claimants")?.attrs?.claimants_count, 1);
 
@@ -426,7 +403,6 @@ test("GET /api/channels/threads/followed records followed-thread phases and quer
 test("GET /api/channels/threads/followed uses RW stats by default when configured and traces success", async ({ app }) => {
 
   const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
-  const previousRisingWaveFollowedThreadStatsVersion = process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
   const originalPoolQuery = pg.Pool.prototype.query;
   try {
     const sink = new MemoryTraceSink();
@@ -441,7 +417,9 @@ test("GET /api/channels/threads/followed uses RW stats by default when configure
     app.app.set("serverTracer", tracer);
 
     process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_default_on_test";
-    delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
+    // Exercise the RisingWave read itself: take the test reference away.
+    uninstallRisingWaveReadReferences();
+    stubFollowedThreadsV5Unavailable();
     const rwQueries: unknown[][] = [];
     let rwRows: unknown[] = [];
     (pg.Pool.prototype as unknown as { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> }).query = async (...args: unknown[]) => {
@@ -513,7 +491,7 @@ test("GET /api/channels/threads/followed uses RW stats by default when configure
     assert.equal(successEvent.attrs?.stats_source, "rw_mv");
     assert.equal(successEvent.attrs?.fallback_reason, "none");
     assert.equal(successEvent.attrs?.backend, "risingwave");
-    assert.equal(successEvent.attrs?.rw_followed_thread_stats_view, "rw_followed_thread_stats_v1");
+    assert.equal(successEvent.attrs?.rw_followed_thread_stats_view, "rw_followed_threads_v5");
     assert.equal(successEvent.attrs?.followed_threads_count, 1);
     assert.equal(successEvent.attrs?.stats_rows_count, 1);
 
@@ -526,21 +504,210 @@ test("GET /api/channels/threads/followed uses RW stats by default when configure
     } else {
       process.env.RISINGWAVE_DATABASE_URL = previousRisingWaveDatabaseUrl;
     }
-    if (previousRisingWaveFollowedThreadStatsVersion === undefined) {
-      delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
-    } else {
-      process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION = previousRisingWaveFollowedThreadStatsVersion;
-    }
+    installRisingWaveReadReferences();
+    __testRisingWaveInbox.reset();
     await closeRisingWavePool();
     await app.close();
   }
 });
 
 
+
+test("GET /api/channels/threads/followed reads v4 stats while rw_followed_threads_v5 is not built (074 transition)", async ({ app }) => {
+
+  const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
+  const originalPoolQuery = pg.Pool.prototype.query;
+  try {
+    const sink = new MemoryTraceSink();
+    const tracer = new BasicTracer({
+      sink,
+      traceIdGenerator: () => "7".repeat(32),
+      spanIdGenerator: (() => {
+        let next = 1;
+        return () => String(next++).padStart(16, "0");
+      })(),
+    });
+    app.app.set("serverTracer", tracer);
+
+    process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_default_on_test";
+    // Exercise the RisingWave read itself: take the test reference away.
+    uninstallRisingWaveReadReferences();
+    stubFollowedThreadsV5Unavailable();
+    const rwQueries: unknown[][] = [];
+    let rwRows: unknown[] = [];
+    const missingV5Queries: unknown[][] = [];
+    (pg.Pool.prototype as unknown as { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> }).query = async (...args: unknown[]) => {
+      if (/JOIN rw_followed_threads_v5 s/.test(String(args[0]))) {
+        missingV5Queries.push(args);
+        throw Object.assign(new Error('relation "rw_followed_threads_v5" does not exist'), { code: "42P01" });
+      }
+      rwQueries.push(args);
+      return { rows: rwRows };
+    };
+
+    const db = getDb();
+    const owner = await seedUser("followed-rw-default-owner@slock.test", "followed-rw-default-owner");
+    const replier = await seedUser("followed-rw-default-replier@slock.test", "followed-rw-default-replier");
+    const server = await createServer("Followed RW Default Server", "followed-rw-default-server", owner.id);
+    await addMember(server.id, replier.id);
+    const channel = await createChannel(server.id, "followed-rw-default-channel");
+    await addHuman(channel.id, owner.id);
+    const parentMessage = await createMessage(channel.id, "user", owner.id, "parent task");
+    const thread = await getOrCreateThread(parentMessage.id, owner.id, "user");
+    const unreadReply = await createMessage(thread.id, "user", replier.id, "pg reply that RW replaces");
+    await db.insert(threadFollows).values({
+      threadChannelId: thread.id,
+      followerType: "user",
+      followerId: owner.id,
+      parentMessageId: parentMessage.id,
+      reason: "manual",
+    });
+    rwRows = [{
+      threadChannelId: thread.id,
+      replyCount: 1,
+      lastReplyAt: "2026-06-18 09:00:00.000000+00",
+      lastReplyMessageId: unreadReply.id,
+      lastReplyContent: "rw supplied latest reply",
+      lastReplySenderType: "user",
+      lastReplySenderId: replier.id,
+      firstUnreadMessageId: unreadReply.id,
+      unreadCount: 1,
+    }];
+
+    const ownerToken = await tokenForHuman(owner.email);
+    sink.clear();
+
+    const res = await fetch(`${app.baseUrl}/api/channels/threads/followed`, {
+      headers: headers(ownerToken, server.id),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as { threads: Array<{ threadChannelId: string; unreadCount: number; latestActivityPreview: string | null }> };
+    assert.equal(body.threads.length, 1);
+    assert.equal(body.threads[0]?.threadChannelId, thread.id);
+    assert.equal(body.threads[0]?.unreadCount, 1);
+    assert.equal(body.threads[0]?.latestActivityPreview, "rw supplied latest reply");
+    assert.equal(missingV5Queries.length, 1, "the v5 stats read is tried first");
+    assert.equal(rwQueries.length, 1, "then the same read against v4");
+    assert.match(String(rwQueries[0]?.[0]), /JOIN rw_followed_threads_v4 s/);
+
+    const span = sink.getAllSpans().find((candidate) =>
+      candidate.name === "server.http.request"
+      && candidate.attrs?.route_pattern === "/api/channels/threads/followed",
+    );
+    assert.ok(span, "expected GET /api/channels/threads/followed root span");
+    const fallbackEvent = span.events.find((event) => event.name === "followed_threads.stats_backend.view_fallback");
+    assert.ok(fallbackEvent, "the transition fallback is traced");
+    assert.equal(fallbackEvent.attrs?.missing_view, "rw_followed_threads_v5");
+    assert.equal(fallbackEvent.attrs?.rw_followed_thread_stats_view, "rw_followed_threads_v4");
+  } finally {
+    (pg.Pool.prototype as unknown as { query: typeof originalPoolQuery }).query = originalPoolQuery;
+    if (previousRisingWaveDatabaseUrl === undefined) {
+      delete process.env.RISINGWAVE_DATABASE_URL;
+    } else {
+      process.env.RISINGWAVE_DATABASE_URL = previousRisingWaveDatabaseUrl;
+    }
+    installRisingWaveReadReferences();
+    __testRisingWaveInbox.reset();
+    await closeRisingWavePool();
+    await app.close();
+  }
+});
+
+
+test("GET /api/channels/threads/followed answers 503 + Retry-After when the RisingWave pool is saturated", async ({ app }) => {
+
+  const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
+  const originalPoolQuery = pg.Pool.prototype.query;
+  try {
+    const sink = new MemoryTraceSink();
+    const tracer = new BasicTracer({
+      sink,
+      traceIdGenerator: () => "7".repeat(32),
+      spanIdGenerator: (() => {
+        let next = 1;
+        return () => String(next++).padStart(16, "0");
+      })(),
+    });
+    app.app.set("serverTracer", tracer);
+
+    process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_default_on_test";
+    // Exercise the RisingWave read itself: take the test reference away.
+    uninstallRisingWaveReadReferences();
+    stubFollowedThreadsV5Unavailable();
+    const rwQueries: unknown[][] = [];
+    let rwRows: unknown[] = [];
+    const missingV5Queries: unknown[][] = [];
+    (pg.Pool.prototype as unknown as { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> }).query = async (...args: unknown[]) => {
+      if (/JOIN rw_followed_threads_v5 s/.test(String(args[0]))) {
+        missingV5Queries.push(args);
+        // pg-pool's error when no RW connection frees up within connectionTimeoutMillis.
+        throw new Error("timeout exceeded when trying to connect");
+      }
+      rwQueries.push(args);
+      return { rows: rwRows };
+    };
+
+    const db = getDb();
+    const owner = await seedUser("followed-rw-default-owner@slock.test", "followed-rw-default-owner");
+    const replier = await seedUser("followed-rw-default-replier@slock.test", "followed-rw-default-replier");
+    const server = await createServer("Followed RW Default Server", "followed-rw-default-server", owner.id);
+    await addMember(server.id, replier.id);
+    const channel = await createChannel(server.id, "followed-rw-default-channel");
+    await addHuman(channel.id, owner.id);
+    const parentMessage = await createMessage(channel.id, "user", owner.id, "parent task");
+    const thread = await getOrCreateThread(parentMessage.id, owner.id, "user");
+    const unreadReply = await createMessage(thread.id, "user", replier.id, "pg reply that RW replaces");
+    await db.insert(threadFollows).values({
+      threadChannelId: thread.id,
+      followerType: "user",
+      followerId: owner.id,
+      parentMessageId: parentMessage.id,
+      reason: "manual",
+    });
+    rwRows = [{
+      threadChannelId: thread.id,
+      replyCount: 1,
+      lastReplyAt: "2026-06-18 09:00:00.000000+00",
+      lastReplyMessageId: unreadReply.id,
+      lastReplyContent: "rw supplied latest reply",
+      lastReplySenderType: "user",
+      lastReplySenderId: replier.id,
+      firstUnreadMessageId: unreadReply.id,
+      unreadCount: 1,
+    }];
+
+    const ownerToken = await tokenForHuman(owner.email);
+    sink.clear();
+
+    const res = await fetch(`${app.baseUrl}/api/channels/threads/followed`, {
+      headers: headers(ownerToken, server.id),
+    });
+    assert.equal(res.status, 503, "a saturated RW pool is a retryable overload, not a 500");
+    assert.equal(res.headers.get("retry-after"), "2");
+    assert.deepEqual(await res.json(), {
+      error: "Temporarily overloaded, retry shortly",
+      code: "rw_overloaded",
+      retryable: true,
+    });
+    assert.equal(missingV5Queries.length, 1);
+    assert.equal(rwQueries.length, 0, "an overload is not retried against v4");
+  } finally {
+    (pg.Pool.prototype as unknown as { query: typeof originalPoolQuery }).query = originalPoolQuery;
+    if (previousRisingWaveDatabaseUrl === undefined) {
+      delete process.env.RISINGWAVE_DATABASE_URL;
+    } else {
+      process.env.RISINGWAVE_DATABASE_URL = previousRisingWaveDatabaseUrl;
+    }
+    installRisingWaveReadReferences();
+    __testRisingWaveInbox.reset();
+    await closeRisingWavePool();
+    await app.close();
+  }
+});
+
 test("GET /api/channels/threads/followed records replay SQL only for slow RW stats queries", async ({ app }) => {
 
   const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
-  const previousRisingWaveFollowedThreadStatsVersion = process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
   const previousSlowReplayMs = process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_SLOW_REPLAY_TRACE_MS;
   const previousReplayThreadCap = process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_REPLAY_THREAD_CAP;
   const originalPoolQuery = pg.Pool.prototype.query;
@@ -557,7 +724,9 @@ test("GET /api/channels/threads/followed records replay SQL only for slow RW sta
     app.app.set("serverTracer", tracer);
 
     process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_slow_replay_test";
-    delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
+    // Exercise the RisingWave read itself: take the test reference away.
+    uninstallRisingWaveReadReferences();
+    stubFollowedThreadsV5Unavailable();
     process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_SLOW_REPLAY_TRACE_MS = "1";
     process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_REPLAY_THREAD_CAP = "100";
     const rwQueries: unknown[][] = [];
@@ -618,7 +787,7 @@ test("GET /api/channels/threads/followed records replay SQL only for slow RW sta
     assert.equal(slowReplayEvent.attrs?.fallback_reason, "none");
     assert.equal(slowReplayEvent.attrs?.backend, "risingwave");
     assert.equal(slowReplayEvent.attrs?.query_name, "channels.followed_threads_stats_by_threads");
-    assert.equal(slowReplayEvent.attrs?.rw_followed_thread_stats_view, "rw_followed_thread_stats_v1");
+    assert.equal(slowReplayEvent.attrs?.rw_followed_thread_stats_view, "rw_followed_threads_v5");
     assert.equal(slowReplayEvent.attrs?.followed_threads_count, 1);
     assert.equal(slowReplayEvent.attrs?.stats_rows_count, 1);
     assert.equal(slowReplayEvent.attrs?.slow_threshold_ms, 1);
@@ -642,7 +811,7 @@ test("GET /api/channels/threads/followed records replay SQL only for slow RW sta
     assert.deepEqual(JSON.parse(replayParamsJson), [server.id, owner.id, thread.id]);
     assert.match(replaySql, /WITH input_threads\(thread_channel_id\)/);
     assert.match(replaySql, /VALUES \(\$3::varchar\)/);
-    assert.match(replaySql, /JOIN rw_followed_thread_stats_v1 s/);
+    assert.match(replaySql, /JOIN rw_followed_threads_v5 s/);
     assert.equal(replaySql.includes("postgres://127.0.0.1:4566"), false);
     assert.equal(replayParamsJson.includes("postgres://127.0.0.1:4566"), false);
     assert.equal(replaySql.includes("rw supplied latest reply"), false);
@@ -654,11 +823,8 @@ test("GET /api/channels/threads/followed records replay SQL only for slow RW sta
     } else {
       process.env.RISINGWAVE_DATABASE_URL = previousRisingWaveDatabaseUrl;
     }
-    if (previousRisingWaveFollowedThreadStatsVersion === undefined) {
-      delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
-    } else {
-      process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION = previousRisingWaveFollowedThreadStatsVersion;
-    }
+    installRisingWaveReadReferences();
+    __testRisingWaveInbox.reset();
     if (previousSlowReplayMs === undefined) {
       delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_SLOW_REPLAY_TRACE_MS;
     } else {
@@ -678,7 +844,6 @@ test("GET /api/channels/threads/followed records replay SQL only for slow RW sta
 test("GET /api/channels/threads/followed truncates over-cap slow RW replay payloads", async ({ app }) => {
 
   const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
-  const previousRisingWaveFollowedThreadStatsVersion = process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
   const previousSlowReplayMs = process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_SLOW_REPLAY_TRACE_MS;
   const previousReplayThreadCap = process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_REPLAY_THREAD_CAP;
   const originalPoolQuery = pg.Pool.prototype.query;
@@ -695,7 +860,9 @@ test("GET /api/channels/threads/followed truncates over-cap slow RW replay paylo
     app.app.set("serverTracer", tracer);
 
     process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_slow_replay_cap_test";
-    delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
+    // Exercise the RisingWave read itself: take the test reference away.
+    uninstallRisingWaveReadReferences();
+    stubFollowedThreadsV5Unavailable();
     process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_SLOW_REPLAY_TRACE_MS = "1";
     process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_REPLAY_THREAD_CAP = "0";
     const rwQueries: unknown[][] = [];
@@ -770,11 +937,8 @@ test("GET /api/channels/threads/followed truncates over-cap slow RW replay paylo
     } else {
       process.env.RISINGWAVE_DATABASE_URL = previousRisingWaveDatabaseUrl;
     }
-    if (previousRisingWaveFollowedThreadStatsVersion === undefined) {
-      delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
-    } else {
-      process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION = previousRisingWaveFollowedThreadStatsVersion;
-    }
+    installRisingWaveReadReferences();
+    __testRisingWaveInbox.reset();
     if (previousSlowReplayMs === undefined) {
       delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_SLOW_REPLAY_TRACE_MS;
     } else {
@@ -791,10 +955,9 @@ test("GET /api/channels/threads/followed truncates over-cap slow RW replay paylo
 });
 
 
-test("GET /api/channels/threads/followed falls back to Postgres when RW stats rows are incomplete", async ({ app }) => {
+test("GET /api/channels/threads/followed leaves out a thread RW has not caught up with (no error, no Postgres fill-in)", async ({ app }) => {
 
   const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
-  const previousRisingWaveFollowedThreadStatsVersion = process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
   const originalPoolQuery = pg.Pool.prototype.query;
   try {
     const sink = new MemoryTraceSink();
@@ -809,7 +972,9 @@ test("GET /api/channels/threads/followed falls back to Postgres when RW stats ro
     app.app.set("serverTracer", tracer);
 
     process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_missing_rows_test";
-    delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
+    // Exercise the RisingWave read itself: take the test reference away.
+    uninstallRisingWaveReadReferences();
+    stubFollowedThreadsV5WithNoRows();
     const rwQueries: unknown[][] = [];
     (pg.Pool.prototype as unknown as { query: (...args: unknown[]) => Promise<{ rows: unknown[] }> }).query = async (...args: unknown[]) => {
       rwQueries.push(args);
@@ -847,13 +1012,14 @@ test("GET /api/channels/threads/followed falls back to Postgres when RW stats ro
     const res = await fetch(`${app.baseUrl}/api/channels/threads/followed`, {
       headers: headers(ownerToken, server.id),
     });
-    assert.equal(res.status, 200);
-    const body = await res.json() as { threads: Array<{ threadChannelId: string; unreadCount: number; latestActivityPreview: string | null }> };
-    assert.equal(body.threads.length, 1);
-    assert.equal(body.threads[0]?.threadChannelId, thread.id);
-    assert.equal(body.threads[0]?.unreadCount, 1);
-    assert.equal(body.threads[0]?.latestActivityPreview, "unread reply");
-    assert.equal(rwQueries.length, 1, "RW stats backend should be attempted before the fallback");
+    assert.equal(res.status, 200, "a lagging RW read is served as-is, never an error or a Postgres reroute");
+    assert.equal(rwQueries.length, 0, "nothing listed, so no stats read");
+    const body = await res.json() as { threads: Array<Record<string, unknown>> };
+    assert.equal(
+      body.threads.find((candidate) => candidate.threadChannelId === thread.id),
+      undefined,
+      "a followed thread not in rw_followed_threads_v5 yet (CDC lag) is left out until RW catches up",
+    );
 
     const span = sink.getAllSpans().find((candidate) =>
       candidate.name === "server.http.request"
@@ -861,26 +1027,15 @@ test("GET /api/channels/threads/followed falls back to Postgres when RW stats ro
     );
     assert.ok(span, "expected GET /api/channels/threads/followed root span");
 
-    const rowMismatchEvent = span.events.find((event) => event.name === "followed_threads.stats_backend.row_mismatch");
-    assert.ok(rowMismatchEvent, "expected RW row mismatch trace event");
-    assert.equal(rowMismatchEvent.attrs?.stats_source, "rw_mv");
-    assert.equal(rowMismatchEvent.attrs?.fallback_reason, "rw_row_mismatch");
-    assert.equal(rowMismatchEvent.attrs?.followed_threads_count, 1);
-    assert.equal(rowMismatchEvent.attrs?.stats_rows_count, 0);
-
-    const statsEvents = span.events.filter((event) =>
-      event.name === "db.query.finished"
-      && event.attrs?.query_name === "channels.followed_threads_stats_by_threads"
-    );
-    assert.equal(statsEvents.length, 2, "expected RW stats query and PG fallback stats query");
-    assert.equal(statsEvents[0].attrs?.stats_source, "rw_mv");
-    assert.equal(statsEvents[0].attrs?.fallback_reason, "none");
-    assert.equal(statsEvents[0].attrs?.followed_threads_count, 1);
-    assert.equal(statsEvents[0].attrs?.stats_rows_count, 0);
-    assert.equal(statsEvents[1].attrs?.stats_source, "pg_legacy");
-    assert.equal(statsEvents[1].attrs?.fallback_reason, "rw_row_mismatch");
-    assert.equal(statsEvents[1].attrs?.followed_threads_count, 1);
-    assert.equal(statsEvents[1].attrs?.stats_rows_count, 1);
+    // Counted in the trace, not filled in from Postgres.
+    const sourceSelected = span.events.find((event) => event.name === "followed_threads.source_selected");
+    assert.equal(sourceSelected?.attrs?.followed_threads_source, "rw_v5");
+    assert.equal(sourceSelected?.attrs?.rw_missing_threads, 1);
+    const queryNames = span.events
+      .filter((event) => event.name === "db.query.finished")
+      .map((event) => event.attrs?.query_name);
+    assert.ok(!queryNames.includes("channels.followed_threads_by_user"), "no Postgres regular-thread list for the missing thread");
+    assert.ok(!queryNames.includes("channels.followed_threads_stats_by_threads"), "no stats read for threads that are not listed");
   } finally {
     (pg.Pool.prototype as unknown as { query: typeof originalPoolQuery }).query = originalPoolQuery;
     if (previousRisingWaveDatabaseUrl === undefined) {
@@ -888,11 +1043,8 @@ test("GET /api/channels/threads/followed falls back to Postgres when RW stats ro
     } else {
       process.env.RISINGWAVE_DATABASE_URL = previousRisingWaveDatabaseUrl;
     }
-    if (previousRisingWaveFollowedThreadStatsVersion === undefined) {
-      delete process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION;
-    } else {
-      process.env.RISINGWAVE_FOLLOWED_THREAD_STATS_VERSION = previousRisingWaveFollowedThreadStatsVersion;
-    }
+    installRisingWaveReadReferences();
+    __testRisingWaveInbox.reset();
     await closeRisingWavePool();
     await app.close();
   }
@@ -1263,6 +1415,153 @@ test("GET /api/channels/:id/threads/:messageId cloaks parent messages outside th
   const ownerBody = await ownerPrivate.json() as { threadChannelId: string; replyCount: number };
   assert.equal(ownerBody.threadChannelId, privateThread.id);
   assert.equal(ownerBody.replyCount, 1);
+});
+
+
+test("GET /api/channels/:id/threads/:messageId records the reject reason on every 404 branch and history-limit facts on success", async ({ app }) => {
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({
+    sink,
+    traceIdGenerator: () => "c".repeat(32),
+    spanIdGenerator: (() => {
+      let next = 1;
+      return () => String(next++).padStart(16, "0");
+    })(),
+  });
+  app.app.set("serverTracer", tracer);
+
+  const owner = await seedUser("thread-reject-owner@slock.test", "thread-reject-owner");
+  const outsider = await seedUser("thread-reject-outsider@slock.test", "thread-reject-outsider");
+  const server = await createServer("Thread Reject Server", "thread-reject-server", owner.id);
+  const otherServer = await createServer("Thread Reject Other", "thread-reject-other", owner.id);
+  await getDb().update(servers).set({ plan: "free" }).where(eq(servers.id, server.id));
+  await addMember(server.id, outsider.id, "member");
+  const channel = await createChannel(server.id, "thread-reject-public");
+  await addHuman(channel.id, owner.id);
+  const privateChannel = await createChannel(server.id, "thread-reject-private", "private", "private");
+  await addHuman(privateChannel.id, owner.id);
+
+  const threadedParent = await createMessage(channel.id, "user", owner.id, "threaded parent");
+  const thread = await getOrCreateThread(threadedParent.id, owner.id, "user");
+  await createMessage(thread.id, "user", owner.id, "reply");
+  const bareParent = await createMessage(channel.id, "user", owner.id, "no thread yet");
+  const privateParent = await createMessage(privateChannel.id, "user", owner.id, "private parent");
+
+  const ownerToken = await tokenForHuman(owner.email);
+  const outsiderToken = await tokenForHuman(outsider.email);
+
+  async function lookup(channelId: string, messageId: string, token: string, serverId: string) {
+    sink.clear();
+    const res = await fetch(`${app.baseUrl}/api/channels/${channelId}/threads/${messageId}`, {
+      headers: headers(token, serverId),
+    });
+    const body = await res.json() as Record<string, unknown>;
+    const span = sink.getAllSpans().find((candidate) =>
+      candidate.name === "server.http.request"
+      && candidate.attrs?.route_pattern === "/api/channels/:id/threads/:messageId",
+    );
+    assert.ok(span, "expected GET /api/channels/:id/threads/:messageId root span");
+    const rejected = span.events.filter((event) => event.name === "threads.lookup.rejected");
+    const history = span.events.filter((event) => event.name === "history.policy.checked" || event.name === "history.limit.checked");
+    return { status: res.status, body, rejected, history };
+  }
+
+  const found = await lookup(channel.id, threadedParent.id, ownerToken, server.id);
+  assert.equal(found.status, 200);
+  assert.deepEqual(found.rejected, [], "a resolved lookup records no rejection");
+  assert.deepEqual(found.history.map((event) => event.name), ["history.policy.checked", "history.limit.checked"]);
+  assert.equal(found.history[0]?.attrs?.plan, "free");
+  assert.equal(found.history[1]?.attrs?.history_cutoff_present, true);
+  assert.equal(found.history[1]?.attrs?.history_limited, false, "a fresh reply is inside the plan history");
+
+  const notFound = await lookup(channel.id, bareParent.id, ownerToken, server.id);
+  assert.equal(notFound.status, 404);
+  assert.deepEqual(notFound.body, { code: "THREAD_NOT_FOUND", error: "No thread found for this message" }, "additive code; error text unchanged");
+  assert.deepEqual(notFound.rejected.map((event) => event.attrs), [
+    { "threads.lookup.reject_reason": "not_found" },
+  ]);
+
+  const mismatch = await lookup(channel.id, threadedParent.id, ownerToken, otherServer.id);
+  assert.equal(mismatch.status, 404);
+  assert.deepEqual(mismatch.body, { error: "Channel not found or not visible" }, "response body unchanged");
+  assert.deepEqual(mismatch.rejected.map((event) => event.attrs), [{
+    "threads.lookup.reject_reason": "server_mismatch",
+    request_server_id: otherServer.id,
+    channel_server_id: server.id,
+  }]);
+
+  const denied = await lookup(privateChannel.id, privateParent.id, outsiderToken, server.id);
+  assert.equal(denied.status, 404);
+  assert.deepEqual(denied.body, { error: "Channel not found or not visible" }, "response body unchanged");
+  assert.deepEqual(denied.rejected.map((event) => event.attrs), [
+    { "threads.lookup.reject_reason": "access_denied" },
+  ]);
+
+  const missing = await lookup(randomUUID(), threadedParent.id, ownerToken, server.id);
+  assert.equal(missing.status, 404);
+  assert.deepEqual(missing.rejected.map((event) => event.attrs), [
+    { "threads.lookup.reject_reason": "channel_not_found" },
+  ]);
+
+  // Task #14: a thread whose replies all sit behind the Free-plan cutoff is
+  // found (200) but its reply fetch is empty — the span must say so.
+  const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+  await getDb().update(messages).set({ createdAt: old }).where(eq(messages.channelId, thread.id));
+  const cutOff = await lookup(channel.id, threadedParent.id, ownerToken, server.id);
+  assert.equal(cutOff.status, 200);
+  assert.equal(cutOff.history.find((event) => event.name === "history.limit.checked")?.attrs?.history_limited, true);
+});
+
+
+test("GET /api/messages/context/:id records plan history facts, including a target hidden by the cutoff", async ({ app }) => {
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({
+    sink,
+    traceIdGenerator: () => "d".repeat(32),
+    spanIdGenerator: (() => {
+      let next = 1;
+      return () => String(next++).padStart(16, "0");
+    })(),
+  });
+  app.app.set("serverTracer", tracer);
+
+  const owner = await seedUser("context-history-owner@slock.test", "context-history-owner");
+  const server = await createServer("Context History Server", "context-history-server", owner.id);
+  await getDb().update(servers).set({ plan: "free" }).where(eq(servers.id, server.id));
+  const channel = await createChannel(server.id, "context-history-channel");
+  await addHuman(channel.id, owner.id);
+  const oldMessage = await createMessage(channel.id, "user", owner.id, "older than the cutoff");
+  await getDb().update(messages)
+    .set({ createdAt: new Date(Date.now() - 40 * 24 * 60 * 60 * 1000) })
+    .where(eq(messages.id, oldMessage.id));
+  const recent = await createMessage(channel.id, "user", owner.id, "recent");
+  const token = await tokenForHuman(owner.email);
+
+  async function context(messageId: string) {
+    sink.clear();
+    const res = await fetch(`${app.baseUrl}/api/messages/context/${messageId}?channelId=${channel.id}`, {
+      headers: headers(token, server.id),
+    });
+    await res.json();
+    const span = sink.getAllSpans().find((candidate) =>
+      candidate.name === "server.http.request"
+      && candidate.attrs?.route_pattern === "/api/messages/context/:messageId",
+    );
+    assert.ok(span, "expected GET /api/messages/context/:messageId root span");
+    return { status: res.status, events: span.events };
+  }
+
+  const visible = await context(recent.id);
+  assert.equal(visible.status, 200);
+  assert.equal(visible.events.find((event) => event.name === "history.policy.checked")?.attrs?.plan, "free");
+  const limit = visible.events.find((event) => event.name === "history.limit.checked");
+  assert.equal(limit?.attrs?.history_cutoff_present, true);
+  assert.equal(limit?.attrs?.history_limited, true, "an older message exists behind the cutoff");
+
+  const hidden = await context(oldMessage.id);
+  assert.equal(hidden.status, 404);
+  const notFound = hidden.events.find((event) => event.name === "message_context.not_found");
+  assert.deepEqual(notFound?.attrs, { plan: "free", history_cutoff_present: true });
 });
 
 
@@ -1915,6 +2214,7 @@ test("agent post authority: /internal/agent/:id/send to thread requires parent-c
     "message_pipeline.db_phase.finished",
     "message_pipeline.db_phase.finished",
     "push.mobile.delivery.enqueued",
+    "send.facts_fanout.finished",
     "message_pipeline.inbox_notification_facts.recorded",
     "message_pipeline.db_phase.finished",
   ]);
@@ -1937,48 +2237,22 @@ test("agent post authority: /internal/agent/:id/send to thread requires parent-c
   assert.ok(deliveryEvent, "expected agent delivery to remain scheduled");
   assert.equal(deliveryEvent.attrs?.thread_agent_audience_source, "inbox_facts_precomputed");
 
+  // 2026-09-21 teardown: serving-row increment/rebuild projections are
+  // retired; the notification fact decision events remain the recorded
+  // write-time verdicts and keep their join-key contract.
   const decisionEvents = transactionEvents
     .map((event, index) => ({ event, index }))
     .filter(({ event }) => event.name === "inbox.notification_fact.decision");
-  const preRecordedRebuilds = transactionEvents
-    .map((event, index) => ({ event, index }))
-    .filter(({ event }) => event.name === "inbox.serving_row.rebuild");
-  const senderReadRebuilds = processEvents
-    .map((event, index) => ({ event, index }))
-    .filter(({ event, index }) => event.name === "inbox.serving_row.rebuild" && index > senderReadIndex);
 
-  assert.equal(decisionEvents.length, preRecordedRebuilds.length, "one projected serving-row rebuild should be emitted per notification fact decision");
   assert.ok(decisionEvents.length > 0, "thread send should record notification fact decisions");
-  assert.equal(senderReadRebuilds.length, 1, "sender read scheduling should project exactly one read-cursor mutation");
 
   const decisionJoinKeys = decisionEvents.map(({ event }) => event.attrs?.["inbox.trace_join_key"]);
-  const preRecordedJoinKeys = preRecordedRebuilds.map(({ event }) => event.attrs?.["inbox.trace_join_key"]);
   const targetKeyFromAttrs = (attrs: Record<string, unknown> | undefined) =>
     `${attrs?.receiver_type}:${attrs?.receiver_id}:${attrs?.source_channel_id}`;
-  const decisionTargetKeys = decisionEvents.map(({ event }) => targetKeyFromAttrs(event.attrs));
   assert.ok(decisionJoinKeys.every((key) => typeof key === "string"));
-  assert.ok(preRecordedJoinKeys.every((key) => typeof key === "string"));
-  assert.equal(new Set(preRecordedJoinKeys).size, preRecordedJoinKeys.length, "notification projections must not double-fire the same serving-row key");
   assert.ok(decisionEvents.every(({ event }) =>
     event.attrs?.["inbox.trace_join_key"] === `${targetKeyFromAttrs(event.attrs)}:${event.attrs?.message_id}`,
   ));
-  assert.deepEqual(
-    [...preRecordedJoinKeys].sort(),
-    [...decisionTargetKeys].sort(),
-    "notification fact decisions and pre-recorded serving-row rebuilds should project the same receiver/source target keys",
-  );
-  assert.ok(preRecordedRebuilds.every(({ event }) => event.attrs?.state === "row_upserted"));
-  assert.ok(preRecordedRebuilds.every(({ event }) => event.attrs?.reason === "projected"));
-
-  const senderReadRebuild = senderReadRebuilds[0]?.event;
-  assert.ok(senderReadRebuild);
-  const senderReadJoinKey = senderReadRebuild.attrs?.["inbox.trace_join_key"];
-  assert.ok(typeof senderReadJoinKey === "string");
-  assert.ok(preRecordedJoinKeys.includes(senderReadJoinKey));
-  assert.equal(senderReadRebuild.attrs?.state, "row_upserted");
-  assert.equal(senderReadRebuild.attrs?.reason, "projected");
-  assert.equal(senderReadRebuild.attrs?.last_read_seq, senderReadRebuild.attrs?.latest_notified_seq);
-  assert.equal(senderReadRebuild.attrs?.unread_count, 0);
 
   const targetEvent = span.events.find((event) => event.name === "target.resolved");
   assert.ok(targetEvent);
@@ -2304,6 +2578,65 @@ test("first reply in a thread writes sender='replied' and parent author='authore
     !events.some((event) => event.event === "message:new" && event.room === `user:${author.id}`),
     "public thread replies should use the access-checked thread room instead of follower-only direct emits",
   );
+});
+
+
+test("POST /api/channels/:id/threads applies the message posting gate to the first reply", async ({ app }) => {
+  const db = getDb();
+  const events = installFakeIo(app.app);
+  const f = await seedThreadFixture(app.baseUrl);
+  // A parent message with no thread yet: a refused first reply must leave no
+  // thread channel behind, not just no message.
+  const parentMessage = await createMessage(f.parentChannelId, "user", f.ownerId, "gated parent");
+  const url = `${app.baseUrl}/api/channels/${f.parentChannelId}/threads`;
+  const threadRows = () => db.select({ id: channels.id }).from(channels).where(eq(channels.parentMessageId, parentMessage.id));
+
+  // follower is a server member who has not joined the public parent channel:
+  // reading is allowed, posting is refused exactly like POST /api/messages.
+  let res = await fetch(url, {
+    method: "POST",
+    headers: headers(f.followerToken, f.serverId),
+    body: JSON.stringify({ parentMessageId: parentMessage.id, content: "reply from a non-member" }),
+  });
+  assert.equal(res.status, 403);
+  assert.deepEqual(await res.json(), { error: "You must join this channel to send messages" });
+  assert.equal((await threadRows()).length, 0, "a refused first reply must not materialize the thread");
+  assert.equal(events.some((event) => event.event === "message:new"), false, "a refused first reply must not broadcast");
+
+  res = await fetch(url, {
+    method: "POST",
+    headers: headers(f.memberBToken, f.serverId),
+    body: JSON.stringify({ parentMessageId: parentMessage.id, content: "x".repeat(32_001) }),
+  });
+  assert.equal(res.status, 400);
+  assert.deepEqual(await res.json(), { error: "Message content exceeds maximum length of 32000 characters" });
+  assert.equal((await threadRows()).length, 0, "over-length content is refused before the thread exists");
+
+  res = await fetch(url, {
+    method: "POST",
+    headers: headers(f.memberBToken, f.serverId),
+    body: JSON.stringify({ parentMessageId: parentMessage.id, content: "reply from a joined member" }),
+  });
+  assert.equal(res.status, 200, "a joined member still posts the first reply");
+  const created = await res.json() as { threadChannelId: string; replyCount: number };
+  assert.equal(created.replyCount, 1);
+  const replies = await db.select({ content: messages.content }).from(messages).where(eq(messages.channelId, created.threadChannelId));
+  assert.deepEqual(replies.map((row) => row.content), ["reply from a joined member"]);
+  assert.ok(
+    events.some((event) => event.event === "message:new" && event.room === `channel:${created.threadChannelId}`),
+    "the accepted first reply is still broadcast to the thread room",
+  );
+
+  // Without content the route only opens the thread, which stays available to
+  // anyone who can read the channel.
+  const openOnlyParent = await createMessage(f.parentChannelId, "user", f.ownerId, "open-only parent");
+  res = await fetch(url, {
+    method: "POST",
+    headers: headers(f.followerToken, f.serverId),
+    body: JSON.stringify({ parentMessageId: openOnlyParent.id }),
+  });
+  assert.equal(res.status, 200, "a non-member reader may still open a thread without posting");
+  assert.equal((await res.json() as { replyCount: number }).replyCount, 0);
 });
 
 
@@ -2979,13 +3312,13 @@ test("Thread Done retires only caller-owned Activity residue after the thread so
   );
   assert.ok(laterSourceMessage.seq > receiverMessage.seq);
   assert.equal(
-    (await db.select().from(inboxServingRows).where(and(
-      eq(inboxServingRows.receiverType, "user"),
-      eq(inboxServingRows.receiverId, f.ownerId),
-      eq(inboxServingRows.sourceChannelId, f.threadId),
+    (await db.select().from(inboxNotificationFacts).where(and(
+      eq(inboxNotificationFacts.receiverType, "user"),
+      eq(inboxNotificationFacts.receiverId, f.ownerId),
+      eq(inboxNotificationFacts.sourceChannelId, f.threadId),
     ))).length,
     1,
-    "fixture must expose one receiver-owned stale Activity row",
+    "fixture must expose one receiver-owned notification fact as Activity residue",
   );
 
   await deleteChannel(f.threadId);
@@ -3024,14 +3357,12 @@ test("Thread Done retires only caller-owned Activity residue after the thread so
     body: JSON.stringify({ threadChannelId: f.threadId, frontierSpace: "storage" }),
   });
   assert.equal(done.status, 200, await done.clone().text());
-  assert.deepEqual(await done.json(), {
-    ok: true,
-    terminalReason: "legacy_done_target_unavailable",
-    legacyNoop: true,
-    retiredThroughActivitySeq: receiverMessage.seq,
-    readStateVersion: 1,
-    changed: true,
-  });
+  // Task #67: activity-v1 declares this 200 as `{ ok: true }` and forbids extra
+  // properties, so the response is asserted EXACTLY -- a regression that puts the
+  // compatibility receipt back on the wire fails here. The retirement boundary it
+  // used to carry is asserted below on the caller's cursor row, and against
+  // channelService directly where the cursor cannot distinguish the cases.
+  assert.deepEqual(await done.json(), { ok: true });
   assert.equal(
     await legacyDoneFallbackCount("thread"),
     legacyFallbackBefore + 2,
@@ -3047,15 +3378,9 @@ test("Thread Done retires only caller-owned Activity residue after the thread so
     receiverMessage.seq,
     "deleted-thread Done must stop at caller-owned evidence rather than the deleted source max",
   );
-  assert.equal(
-    (await db.select().from(inboxServingRows).where(and(
-      eq(inboxServingRows.receiverType, "user"),
-      eq(inboxServingRows.receiverId, f.ownerId),
-      eq(inboxServingRows.sourceChannelId, f.threadId),
-    ))).length,
-    0,
-    "successful compatibility Done must retire the stale row so refresh cannot resurrect it",
-  );
+  // Task #67: readStateVersion used to ride on the response body; it is persisted
+  // here, so the durable surface keeps it under assertion.
+  assert.equal(cursor?.readStateVersion, 1, "the retirement must bump the caller's read-state version exactly once");
   assert.equal(
     (await db.select().from(inboxSuppressionStates).where(and(
       eq(inboxSuppressionStates.receiverType, "user"),
@@ -3076,14 +3401,21 @@ test("Thread Done retires only caller-owned Activity residue after the thread so
     }),
   });
   assert.equal(explicitReplay.status, 200, await explicitReplay.clone().text());
-  assert.deepEqual(await explicitReplay.json(), {
-    ok: true,
-    terminalReason: "legacy_done_target_unavailable",
-    legacyNoop: true,
-    retiredThroughActivitySeq: receiverMessage.seq,
-    readStateVersion: 1,
-    changed: false,
-  }, "the receipt must expose the actual retired caller boundary, not echo an untrusted frontier");
+  assert.deepEqual(await explicitReplay.json(), { ok: true });
+  // Task #67: the wire no longer carries the boundary, so the invariant it used to
+  // guard is asserted where it still lives. This call is idempotent (changed:false),
+  // so re-running it here observes without mutating.
+  assert.deepEqual(
+    await retireDeletedThreadDoneResidue(f.ownerId, f.threadId, laterSourceMessage.seq.toString()),
+    {
+      terminalReason: "legacy_done_target_unavailable",
+      legacyNoop: true,
+      retiredThroughActivitySeq: receiverMessage.seq,
+      readStateVersion: 1,
+      changed: false,
+    },
+    "the retirement boundary must stay at the caller's own evidence, not echo an untrusted frontier",
+  );
   assert.equal(
     await legacyDoneFallbackCount("thread"),
     legacyFallbackBefore + 2,
@@ -3111,15 +3443,6 @@ test("Thread Done retires only caller-owned Activity residue after the thread so
   assert.equal(cursorOnlyRead.maxReadSeq, cursorOnlyMessage.seq);
   assert.equal(cursorOnlyRead.changed, true);
   assert.equal(
-    (await db.select().from(inboxServingRows).where(and(
-      eq(inboxServingRows.receiverType, "user"),
-      eq(inboxServingRows.receiverId, f.ownerId),
-      eq(inboxServingRows.sourceChannelId, cursorOnlyThread.id),
-    ))).length,
-    0,
-    "cursor-only fixture must never have had an Activity serving row to retire",
-  );
-  assert.equal(
     (await db.select().from(inboxNotificationFacts).where(and(
       eq(inboxNotificationFacts.receiverType, "user"),
       eq(inboxNotificationFacts.receiverId, f.ownerId),
@@ -3140,14 +3463,27 @@ test("Thread Done retires only caller-owned Activity residue after the thread so
     }),
   });
   assert.equal(cursorOnlyDone.status, 200, await cursorOnlyDone.clone().text());
-  assert.deepEqual(await cursorOnlyDone.json(), {
-    ok: true,
-    terminalReason: "legacy_done_target_unavailable",
-    legacyNoop: true,
-    retiredThroughActivitySeq: cursorOnlyMessage.seq,
-    readStateVersion: 1,
-    changed: false,
-  });
+  // Task #64: a residue boundary never reads the caller's cursor, because the
+  // pre-fix defect could have written a live frontier into it and the schema
+  // cannot tell that apart from an honest read. With no notification rows or
+  // facts, the receiver-owned boundary is 0, so the receipt reports 0 rather
+  // than echoing the cursor. The retry stays an idempotent 200 with no change.
+  assert.deepEqual(await cursorOnlyDone.json(), { ok: true });
+  // Task #67: this is the one case the cursor row cannot witness -- the cursor
+  // already sits at cursorOnlyMessage.seq, so "reported 0" and "echoed the cursor"
+  // leave identical rows. Asserting it against the service keeps the #64 invariant
+  // observable; deleting it would trade a contract breach for a coverage hole.
+  assert.deepEqual(
+    await retireDeletedThreadDoneResidue(f.ownerId, cursorOnlyThread.id, cursorOnlyMessage.seq.toString()),
+    {
+      terminalReason: "legacy_done_target_unavailable",
+      legacyNoop: true,
+      retiredThroughActivitySeq: 0,
+      readStateVersion: 1,
+      changed: false,
+    },
+    "a residue boundary must never read the caller's cursor",
+  );
 
   const nonexistent = await fetch(`${app.baseUrl}/api/channels/threads/done`, {
     method: "POST",

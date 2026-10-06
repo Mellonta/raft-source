@@ -1,4 +1,4 @@
-import { axSurface } from "../../core/renderer.js";
+import { axSurface } from "../../core/renderer";
 import {
   AGENT_LOGIN_INTEGRATION_INVENTORY_PROJECTION,
   type AgentLoginIntegrationInventoryProjection,
@@ -17,6 +17,10 @@ export interface RegisteredIntegrationService {
   allowedScopes?: string[];
   createdAt: string;
   updatedAt: string;
+  /** Set by the platform's official-app judgment (contract rev3.1), never by the app. Absent/false = ordinary service. */
+  official?: boolean;
+  /** One-line purpose the platform records for an official app; empty for ordinary services. */
+  purpose?: string;
 }
 
 export interface ActiveAgentLogin {
@@ -39,6 +43,17 @@ export interface IntegrationListResponse {
   activeLogins: ActiveAgentLogin[];
 }
 
+export function projectCurrentIntegrationList(data: IntegrationListResponse): IntegrationListResponse {
+  const services = data.services.filter((service) => service.appType !== "slock_builtin");
+  const serviceIds = new Set(services.map((service) => service.id));
+  return {
+    services,
+    activeLogins: data.activeLogins.filter((login) => (
+      login.appType !== "slock_builtin" && serviceIds.has(login.serviceId)
+    )),
+  };
+}
+
 export interface IntegrationLoginResponse {
   status: "logged_in" | "already_logged_in" | "approval_required" | "install_required";
   nextAction?: "install_from_marketplace";
@@ -47,6 +62,7 @@ export interface IntegrationLoginResponse {
   requestId?: string;
   session?: {
     status: "stored";
+    authentication?: "unverified";
     source: "cache" | "fresh";
     path: string | null;
   };
@@ -63,6 +79,12 @@ export interface IntegrationLoginResponse {
     actionCardMessageId: string | null;
   };
 }
+
+// The platform response describes the Raft grant. The CLI cannot infer an
+// authenticated application session from arbitrary Set-Cookie headers.
+export type IntegrationLoginOutput = Omit<IntegrationLoginResponse, "status"> & {
+  status: IntegrationLoginResponse["status"] | "grant_active";
+};
 
 function formatMaybe(value: string | null | undefined): string {
   return value?.trim() || "-";
@@ -87,7 +109,6 @@ function pushServiceBlock(
   lines.push(`- ${service.name}`);
   lines.push(`  service: ${service.clientId}`);
   lines.push(`  id: ${service.id}`);
-  if (service.appType === "slock_builtin") lines.push("  type: built-in Raft app");
   lines.push(`  session: ${active ? "active login" : "not logged in"}`);
   lines.push(`  return URL: ${formatMaybe(service.returnUrl)}`);
   if (service.agentManifestUrl) {
@@ -97,6 +118,10 @@ function pushServiceBlock(
   }
   if (service.homepageUrl) lines.push(`  homepage: ${service.homepageUrl}`);
   if (service.description) lines.push(`  description: ${service.description}`);
+  // Contract rev3.1 §4b: the `official` mark is platform-set, never app-supplied, and
+  // the list shows installed services only. Ordinary services print neither line.
+  if (service.official === true) lines.push("  official: yes (set by the platform, never by the app)");
+  if (service.official === true && service.purpose && service.purpose.trim()) lines.push(`  purpose: ${service.purpose.trim()}`);
   if (!active) lines.push(`  next: raft integration login --service ${JSON.stringify(service.clientId)}`);
 }
 
@@ -108,9 +133,10 @@ export const formatIntegrationList = axSurface(
     AGENT_LOGIN_INTEGRATION_INVENTORY_PROJECTION,
 ): string => {
   const inventoryCopy = inventoryProjection.copy;
-  const activeByServiceId = new Map(data.activeLogins.map((login) => [login.serviceId, login]));
-  const builtInServices = data.services.filter((service) => service.appType === "slock_builtin");
-  const registeredServices = data.services.filter((service) => service.appType !== "slock_builtin");
+  // Older Servers may still return historical tombstone rows. Never project
+  // them as an available service or active Agent Login.
+  const { services: visibleServices, activeLogins: visibleActiveLogins } = projectCurrentIntegrationList(data);
+  const activeByServiceId = new Map(visibleActiveLogins.map((login) => [login.serviceId, login]));
   const lines: string[] = [
     inventoryCopy.heading,
     inventoryCopy.scope,
@@ -120,29 +146,21 @@ export const formatIntegrationList = axSurface(
     "",
   ];
 
-  if (builtInServices.length > 0) {
-    lines.push("Built-in Raft apps:");
-    for (const service of builtInServices) {
-      pushServiceBlock(lines, service, activeByServiceId.get(service.id));
-    }
-    lines.push("");
-  }
-
   lines.push("Registered services:");
-  if (registeredServices.length === 0) {
+  if (visibleServices.length === 0) {
     lines.push("- none");
   } else {
-    for (const service of registeredServices) {
+    for (const service of visibleServices) {
       pushServiceBlock(lines, service, activeByServiceId.get(service.id));
     }
   }
 
   lines.push("");
   lines.push("Active agent logins:");
-  if (data.activeLogins.length === 0) {
+  if (visibleActiveLogins.length === 0) {
     lines.push("- none");
   } else {
-    for (const login of data.activeLogins) {
+    for (const login of visibleActiveLogins) {
       lines.push(`- ${login.name}`);
       lines.push(`  service: ${login.clientId}`);
       lines.push(`  grant id: ${login.id}`);
@@ -161,13 +179,13 @@ export const formatIntegrationList = axSurface(
   return (lines.join("\n"));
 },
   {
-    examples: [{ args: [{ services: [{ id: "svc-1", clientId: "example-app", name: "example-app", appType: "slock_builtin", description: "built-in app", returnUrl: null, homepageUrl: null, agentManifestUrl: null }, { id: "svc-2", clientId: "lens", name: "lens", appType: "third_party_global", description: "trajectory viewer", returnUrl: "https://lens.example/callback", homepageUrl: "https://lens.example", agentManifestUrl: null }], activeLogins: [{ id: "grant-00000001", serviceId: "svc-2", clientId: "lens", name: "lens", description: "trajectory viewer", homepageUrl: "https://lens.example", returnUrl: "https://lens.example/callback", agentManifestUrl: null, scopes: ["identity", "openid"], createdAt: "2026-08-31T08:00:00.000Z" }] } as never] }],
+    examples: [{ args: [{ services: [{ id: "svc-2", clientId: "lens", name: "lens", appType: "third_party_global", description: "trajectory viewer", returnUrl: "https://lens.example/callback", homepageUrl: "https://lens.example", agentManifestUrl: null }], activeLogins: [{ id: "grant-00000001", serviceId: "svc-2", clientId: "lens", name: "lens", description: "trajectory viewer", homepageUrl: "https://lens.example", returnUrl: "https://lens.example/callback", agentManifestUrl: null, scopes: ["identity", "openid"], createdAt: "2026-08-31T08:00:00.000Z" }] } as never] }],
   },
 );
 
 export const formatIntegrationLogin = axSurface(
   "Login outcome incl. approval/installation requirement shapes.",
-  (data: IntegrationLoginResponse): string => {
+  (data: IntegrationLoginOutput): string => {
   if (data.status === "install_required") {
     const lines = [
       `Marketplace install required: ${data.service.name}`,
@@ -208,7 +226,7 @@ export const formatIntegrationLogin = axSurface(
     return (lines.join("\n"));
   }
 
-  const verb = data.status === "already_logged_in" ? "Already logged in" : "Agent login ready";
+  const verb = "Raft grant active";
   const lines = [
     `${verb}: ${data.service.name}`,
     `service: ${data.service.clientId}`,
@@ -221,15 +239,15 @@ export const formatIntegrationLogin = axSurface(
     lines.push(`local CLI env: raft integration env --service ${JSON.stringify(data.service.clientId)}`);
     lines.push(`for login_with_raft HTTP API action manifests: raft integration invoke --service ${JSON.stringify(data.service.clientId)} --list-actions`);
   }
-  lines.push("complete: this agent login is configured in Raft; no human OAuth is required");
+  lines.push("grant: this agent is authorized in Raft; application authentication has not been verified");
   lines.push("identity: run `raft profile show` if the service or human asks for your Raft Agent identity card");
   if (data.session) {
-    lines.push(`session: service session ${data.session.source === "fresh" ? "created" : "reused"} and stored for this agent`);
+    lines.push("session: callback cookies stored for this agent; application authentication unverified");
     if (data.session.path) lines.push(`session store: ${data.session.path}`);
-    lines.push(`next: use \`raft integration invoke --service ${JSON.stringify(data.service.clientId)} --list-actions\` only for login_with_raft HTTP API action manifests; for session-cookie services, use the established service session per service docs`);
+    lines.push(`next: use \`raft integration invoke --service ${JSON.stringify(data.service.clientId)} --list-actions\` only for login_with_raft HTTP API action manifests; for session-cookie services, verify authentication with a documented read-only service check before use`);
   } else {
     lines.push("session: no service callback session was established; Raft grant is active");
-    lines.push("next: use the service, or run `raft integration list` to confirm active login");
+    lines.push("next: follow the service documentation to establish and verify application authentication");
   }
   return (lines.join("\n"));
 },
@@ -239,7 +257,7 @@ export const formatIntegrationLogin = axSurface(
 );
 
 // --- v1 invoke error/receipt surfaces (moved from invokeV1.ts, error-face AX coverage) ---
-import type { IntegrationActionReceiptV1, IntegrationErrorV1 } from "./invokeV1.js";
+import type { IntegrationActionReceiptV1, IntegrationErrorV1 } from "./invokeV1";
 
 export const formatIntegrationReceiptV1 = axSurface(
   "v1 action receipt block: operation/authority/transport/schema/readback/rollback statuses and next action.",
@@ -337,4 +355,17 @@ export const formatIntegrationErrorV1 = axSurface(
       } as never],
     }],
   },
+);
+
+export const formatIntegrationTokenReceiverOutput = axSurface(
+  "JWT-redacted output forwarded from the caller-selected receiving process.",
+  (redactedOutput: string) => redactedOutput,
+  { examples: [{ args: ["receiver result: <redacted>"] }] },
+);
+
+export const formatIntegrationTokenReceipt = axSurface(
+  "Audience JWT private process delivery receipt; does not assert service authentication.",
+  (result: { audience: string; expiresAt: string }) =>
+    `Agent JWT delivered for ${result.audience}; expires ${result.expiresAt}. Service authentication is determined by the receiver.`,
+  { examples: [{ args: [{ audience: "example-service", expiresAt: "2026-10-05T00:05:00Z" }] }] },
 );

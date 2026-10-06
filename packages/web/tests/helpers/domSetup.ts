@@ -1,6 +1,22 @@
 // DOM test setup for jsdom/RTL behavioral component tests.
 // Vitest loads this before every `*.test.tsx` file through vitest.config.ts.
 import "global-jsdom/register";
+
+// jsdom performs no layout and ships no `scrollIntoView`; component code is
+// allowed to call it unguarded (every real browser has it), so the shared DOM
+// harness provides a no-op. Suites asserting scroll behavior override this
+// per file (e.g. agentRouteLocatesSidebarRow, attachmentCommentsPanelAnchor).
+Element.prototype.scrollIntoView = function scrollIntoView() {};
+
+// jsdom ships no `CSS.escape` either (browsers do). Minimal spec-shaped
+// polyfill: escape everything outside the identifier-safe set, so escaped
+// selectors built from URL-decoded ids stay valid and match nothing on a
+// crafted input (task #702).
+if (typeof CSS === "undefined" || typeof CSS.escape !== "function") {
+  const cssShim = (typeof CSS === "undefined" ? {} : CSS) as { escape?: (value: string) => string };
+  cssShim.escape = (value: string) => String(value).replace(/[^a-zA-Z0-9_\u00a0-\uffff-]/g, "\\$&");
+  (globalThis as typeof globalThis & { CSS?: typeof cssShim }).CSS = cssShim;
+}
 // oxlint-disable-next-line no-restricted-imports -- Whole-module React shim for classic-runtime test dependencies.
 import * as React from "react";
 

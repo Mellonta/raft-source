@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { asc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
-import type { Database } from "../db/index.js";
-import { migratePglite } from "../db/pgliteMigrations.js";
-import * as schema from "../db/schema.js";
+import type { Database } from "../db/index";
+import { migratePglite } from "../db/pgliteMigrations";
+import * as schema from "../db/schema";
 import {
   computerLifecycleOperations,
   computerOutageOccurrences,
@@ -19,20 +18,20 @@ import {
   oauthClients,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   drainAppNotificationDeliveries,
   emitAppFacingNotificationEvent,
-} from "./appNotificationDeliveryService.js";
+} from "./appNotificationDeliveryService";
 import {
   __setAppWebhookEncryptionKeyForTests,
   configureAppWebhook,
-} from "./appWebhookConfigService.js";
+} from "./appWebhookConfigService";
 import {
   drainDueComputerOutageNotifications,
   recordComputerOfflineTransition,
   recordComputerOnlineTransition,
-} from "./computerOutageNotificationService.js";
+} from "./computerOutageNotificationService";
 
 async function createFixture() {
   const client = new PGlite();

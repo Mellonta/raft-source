@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   classifyBackfillRunOutcome,
   evaluateAttachmentObjectCompletionGate,
   evaluateAttachmentObjectPreflight,
-} from "./attachmentObjectBackfillService.js";
-import type { AttachmentObjectParityReport } from "./attachmentObjectBackfillService.js";
+} from "./attachmentObjectBackfillService";
+import type { AttachmentObjectParityReport } from "./attachmentObjectBackfillService";
 
 // task #79. The gate decides whether a run may claim completion, and the
 // preflight decides whether it may write at all. Both are pure so each can be

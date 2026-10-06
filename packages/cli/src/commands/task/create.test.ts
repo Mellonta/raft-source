@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import type { CliIo } from "../../core/io.js";
-import { taskCreateCommand } from "./create.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import { CliError } from "../../core/errors";
+import type { CliIo } from "../../core/io";
+import { taskCreateCommand } from "./create";
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -167,15 +166,18 @@ test("task create sends one atomic create-and-assign request", async () => {
 });
 
 test("task create help advertises atomic assignee semantics", () => {
+  // Command guidance (RFC 072 §7): delivered before the first run in a context.
   const option = taskCreateCommand.spec.options?.find((candidate) => candidate.flags === "--assignee <handle>");
   assert.deepEqual(option, {
     flags: "--assignee <handle>",
     description: "Assign every created task atomically to an eligible '@handle'",
   });
-  assert.match(taskCreateCommand.spec.helpAfter ?? "", /Self-assignment starts work/);
-  assert.match(taskCreateCommand.spec.helpAfter ?? "", /owner\/admin assignment/);
-  assert.match(taskCreateCommand.spec.helpAfter ?? "", /no task-message is created/);
-  assert.match(taskCreateCommand.spec.helpAfter ?? "", /cannot move to done/);
+  assert.match(taskCreateCommand.spec.guidance ?? "", /Self-assignment starts work/);
+  assert.match(taskCreateCommand.spec.guidance ?? "", /task update --target <channel> --number <N> --status todo/);
+  assert.match(taskCreateCommand.spec.guidance ?? "", /task stays assigned to you/);
+  assert.match(taskCreateCommand.spec.guidance ?? "", /owner\/admin assignment/);
+  assert.match(taskCreateCommand.spec.guidance ?? "", /no task-message is created/);
+  assert.match(taskCreateCommand.spec.guidance ?? "", /cannot move to done/);
 });
 
 test("task create marks every batch item as resource-creating", async () => {

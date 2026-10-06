@@ -5,11 +5,10 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { test } from "vitest";
 import { MockAgent, setGlobalDispatcher, getGlobalDispatcher } from "undici";
 
-import { AuthClient, ServersClient } from "./apiClient.js";
-import { ComputerLifecycleClient } from "./localLifecycleIntents.js";
+import { AuthClient, ServersClient } from "./apiClient";
+import { ComputerLifecycleClient } from "./localLifecycleIntents";
 
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
 const MACHINE_ID = "22222222-2222-4222-8222-222222222222";
@@ -77,7 +76,6 @@ test("ComputerLifecycleClient.create binds server identity and legacy completion
       parentOperationId: PARENT_OPERATION_ID,
       action: "upgrade",
       targetVersion: "1.0.18",
-      completionMode: "legacy_k_promoted",
     });
     routeReached = true;
     res.writeHead(201, { "Content-Type": "application/json" });
@@ -97,7 +95,6 @@ test("ComputerLifecycleClient.create binds server identity and legacy completion
       parentOperationId: PARENT_OPERATION_ID,
       action: "upgrade",
       targetVersion: "1.0.18",
-      completionMode: "legacy_k_promoted",
     });
 
     assert.deepEqual(result, { status: "accepted", operationId: OPERATION_ID });

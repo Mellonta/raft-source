@@ -12,6 +12,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "send",
     "description": "Validate and atomically index one locator-only feedback artifact.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -33,6 +37,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Query the locator-only feedback index without returning session or feedback content.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
@@ -54,6 +62,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Drain pending events for the bound agent credential.",
+    "sideEffect": "destructive_read",
+    "idempotency": "none",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
@@ -75,6 +87,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Read visible history for a channel, DM, or thread target.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
@@ -96,6 +112,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "knowledge",
     "description": "Fetch a Slock Manual for Agents topic from the current server.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
@@ -117,73 +137,14 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "knowledge",
     "description": "Search Slock Manual for Agents topics from the current server.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
       "body": false
-    },
-    "response": {
-      "kind": "json",
-      "body": true
-    }
-  },
-  {
-    "key": "wikiManifestGet",
-    "method": "GET",
-    "path": "/wiki/manifest",
-    "fullPath": "/internal/agent-api/wiki/manifest",
-    "client": {
-      "resource": "wiki",
-      "method": "manifest"
-    },
-    "capability": "knowledge",
-    "description": "Read the canonical S3-backed Wiki manifest for the configured Wiki Agent.",
-    "request": {
-      "params": false,
-      "query": false,
-      "body": false
-    },
-    "response": {
-      "kind": "json",
-      "body": true
-    }
-  },
-  {
-    "key": "wikiArtifactRead",
-    "method": "GET",
-    "path": "/wiki/artifacts/:artifactId",
-    "fullPath": "/internal/agent-api/wiki/artifacts/:artifactId",
-    "client": {
-      "resource": "wiki",
-      "method": "read"
-    },
-    "capability": "knowledge",
-    "description": "Read the current manifest-reachable Wiki artifact Markdown for the configured Wiki Agent.",
-    "request": {
-      "params": true,
-      "query": false,
-      "body": false
-    },
-    "response": {
-      "kind": "json",
-      "body": true
-    }
-  },
-  {
-    "key": "wikiManifestPublish",
-    "method": "POST",
-    "path": "/wiki/publish",
-    "fullPath": "/internal/agent-api/wiki/publish",
-    "client": {
-      "resource": "wiki",
-      "method": "publish"
-    },
-    "capability": "knowledge",
-    "description": "Publish immutable Wiki revisions and atomically advance the canonical manifest.",
-    "request": {
-      "params": false,
-      "query": false,
-      "body": true
     },
     "response": {
       "kind": "json",
@@ -201,6 +162,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "mcp",
     "description": "Fetch the current Server-authorized managed MCP tool catalog for this Agent.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -222,6 +187,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "mcp",
     "description": "Call an allowlisted managed MCP tool through the Server gateway.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -243,6 +212,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "send",
     "description": "Send a message as the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "key",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -264,6 +237,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "send",
     "description": "Send a message through the versioned typed-mention contract.",
+    "sideEffect": "write",
+    "idempotency": "key",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -285,6 +262,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Resolve a message id exactly and return the canonical visible message.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -306,6 +287,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Search messages visible to the bound agent credential.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
@@ -327,6 +312,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "reactions",
     "description": "Add a reaction to a visible message as the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -348,6 +337,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "reactions",
     "description": "Remove a reaction from a visible message as the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -369,6 +362,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "channels",
     "description": "Join a visible public channel as the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -390,6 +387,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "channels",
     "description": "Leave a joined regular channel as the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -411,6 +412,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "channels",
     "description": "Mute ordinary activity delivery for a visible regular channel as the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -432,6 +437,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "channels",
     "description": "Unmute ordinary activity delivery for a visible regular channel as the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -453,6 +462,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "channels",
     "description": "Archive a regular channel when the bound agent has server channel-management authority.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -474,6 +487,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "channels",
     "description": "Unarchive a regular channel when the bound agent has server channel-management authority.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -495,6 +512,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "channels",
     "description": "List agents and humans in a visible channel, DM, or thread.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
@@ -516,6 +537,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "send",
     "description": "Resolve a writable channel, DM, or thread target for the bound agent credential.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -537,10 +562,89 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "channels",
     "description": "Stop ordinary delivery for a followed thread as the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
       "body": true
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "threadList",
+    "method": "GET",
+    "path": "/threads",
+    "fullPath": "/internal/agent-api/threads",
+    "client": {
+      "resource": "threads",
+      "method": "list"
+    },
+    "capability": "channels",
+    "description": "List active threads the bound agent is following.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": false,
+      "query": false,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "inboxList",
+    "method": "GET",
+    "path": "/inbox/conversations",
+    "fullPath": "/internal/agent-api/inbox/conversations",
+    "client": {
+      "resource": "inbox",
+      "method": "list"
+    },
+    "capability": "read",
+    "description": "List the bound agent's durable unread conversations, newest activity first.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": false,
+      "query": true,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "agentContext",
+    "method": "GET",
+    "path": "/context",
+    "fullPath": "/internal/agent-api/context",
+    "client": {
+      "resource": "agent",
+      "method": "context"
+    },
+    "capability": "read",
+    "description": "Identity bootstrap: the bound agent's identity, server, credential capabilities, and (external agents) the rendered operating guide.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": false,
+      "query": false,
+      "body": false
     },
     "response": {
       "kind": "json",
@@ -556,11 +660,40 @@ export const AGENT_API_ROUTE_MANIFEST = [
       "resource": "server",
       "method": "info"
     },
-    "capability": "server",
+    "capability": "read",
     "description": "List channels, agents, humans, and runtime context visible to the bound agent.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "userChannels",
+    "method": "GET",
+    "path": "/users/:name/channels",
+    "fullPath": "/internal/agent-api/users/:name/channels",
+    "client": {
+      "resource": "users",
+      "method": "channels"
+    },
+    "capability": "channels",
+    "description": "One visible agent or human (exact name, agents first; the serverInfo entry) and which of one window of your visible channels (serverInfo order, offset/limit, limit at most 200) list them as a member, in one request. Needs the read capability as well. 404 user_not_found when no visible user has that name.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": true,
+      "query": true,
       "body": false
     },
     "response": {
@@ -579,6 +712,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "server",
     "description": "Update the bound agent's server profile name or member-visibility setting.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -600,9 +737,38 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "mentions",
     "description": "List sender-side pending mention actions for unresolved outsider mentions.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "senderMentionDeliveries",
+    "method": "GET",
+    "path": "/messages/:messageId/mention-deliveries",
+    "fullPath": "/internal/agent-api/messages/:messageId/mention-deliveries",
+    "client": {
+      "resource": "mentions",
+      "method": "senderDeliveries"
+    },
+    "capability": "mentions",
+    "description": "Per-target delivery outcome for a message the bound agent sent.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": true,
+      "query": false,
       "body": false
     },
     "response": {
@@ -621,6 +787,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "mentions",
     "description": "Execute sender-side mention resolution actions.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -642,6 +812,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Claim one or more tasks by task number or message id.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -663,6 +837,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "List tasks in a channel.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
@@ -684,6 +862,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Create one or more tasks in a channel.",
+    "sideEffect": "write",
+    "idempotency": "key",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -705,6 +887,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Release a previously claimed task.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -726,6 +912,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Set or clear a task's assignee (pass null to unassign).",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -747,6 +937,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Update a task status.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -768,6 +962,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Record the structured receipt and expiry follow-up for a resource-creating task.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -789,6 +987,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Delete a task (creator or server admin).",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -810,6 +1012,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Convert a message into a task without claiming it.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -831,6 +1037,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Amend a task card with an append-only audit event.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -852,94 +1062,14 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Read a task's append-only lifecycle and amendment history.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
       "body": false
-    },
-    "response": {
-      "kind": "json",
-      "body": true
-    }
-  },
-  {
-    "key": "migrationBegin",
-    "method": "POST",
-    "path": "/migrations",
-    "fullPath": "/internal/agent-api/migrations",
-    "client": {
-      "resource": "migrations",
-      "method": "begin"
-    },
-    "capability": "server",
-    "description": "Begin a migration for the bound agent credential.",
-    "request": {
-      "params": false,
-      "query": false,
-      "body": true
-    },
-    "response": {
-      "kind": "json",
-      "body": true
-    }
-  },
-  {
-    "key": "migrationStatus",
-    "method": "GET",
-    "path": "/migrations/current",
-    "fullPath": "/internal/agent-api/migrations/current",
-    "client": {
-      "resource": "migrations",
-      "method": "status"
-    },
-    "capability": "read",
-    "description": "Read the active migration for the bound agent credential, if any.",
-    "request": {
-      "params": false,
-      "query": false,
-      "body": false
-    },
-    "response": {
-      "kind": "json",
-      "body": true
-    }
-  },
-  {
-    "key": "migrationReady",
-    "method": "POST",
-    "path": "/migrations/ready",
-    "fullPath": "/internal/agent-api/migrations/ready",
-    "client": {
-      "resource": "migrations",
-      "method": "ready"
-    },
-    "capability": "read",
-    "description": "Mark the bound agent's active migration prep phase ready.",
-    "request": {
-      "params": false,
-      "query": false,
-      "body": true
-    },
-    "response": {
-      "kind": "json",
-      "body": true
-    }
-  },
-  {
-    "key": "migrationArrived",
-    "method": "POST",
-    "path": "/migrations/arrived",
-    "fullPath": "/internal/agent-api/migrations/arrived",
-    "client": {
-      "resource": "migrations",
-      "method": "arrived"
-    },
-    "capability": "read",
-    "description": "Mark the bound agent's active migration arrival phase complete.",
-    "request": {
-      "params": false,
-      "query": false,
-      "body": true
     },
     "response": {
       "kind": "json",
@@ -957,6 +1087,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "List reminders owned by the bound agent credential.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
@@ -978,6 +1112,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Create a reminder owned by the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": false,
+    "audience": "managed",
     "request": {
       "params": false,
       "query": false,
@@ -999,6 +1137,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Cancel a scheduled or fired reminder owned by the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -1020,6 +1162,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Snooze a scheduled or fired reminder owned by the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "managed",
     "request": {
       "params": true,
       "query": false,
@@ -1041,6 +1187,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Update a scheduled reminder owned by the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "managed",
     "request": {
       "params": true,
       "query": false,
@@ -1062,6 +1212,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Authorize and acknowledge one exact app-source Inbox item revision.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1083,6 +1237,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Read lifecycle events for a reminder owned by the bound agent credential.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -1104,6 +1262,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Read effective durable configuration for a built-in RAP App owned by the bound agent.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -1125,6 +1287,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Atomically update durable configuration for a built-in RAP App owned by the bound agent.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -1146,6 +1312,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Show the bound agent profile, or another visible profile when target is provided.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
@@ -1165,8 +1335,12 @@ export const AGENT_API_ROUTE_MANIFEST = [
       "resource": "profile",
       "method": "update"
     },
-    "capability": "server",
+    "capability": "send",
     "description": "Update the bound agent profile metadata.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1186,8 +1360,12 @@ export const AGENT_API_ROUTE_MANIFEST = [
       "resource": "profile",
       "method": "updateAvatar"
     },
-    "capability": "server",
+    "capability": "send",
     "description": "Update the bound agent profile avatar using multipart form data.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1209,6 +1387,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "List available integration services and active agent logins.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1230,10 +1412,39 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Search or list public Marketplace apps without changing the installed integration inventory.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
       "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "integrationToken",
+    "method": "POST",
+    "path": "/integrations/token",
+    "fullPath": "/internal/agent-api/integrations/token",
+    "client": {
+      "resource": "integrations",
+      "method": "token"
+    },
+    "capability": "read",
+    "description": "Issue a short-lived Agent JWT for an operator-enabled Server-local audience.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": false,
+      "query": false,
+      "body": true
     },
     "response": {
       "kind": "json",
@@ -1251,6 +1462,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Provision or reuse this agent's login for a registered integration service.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1272,6 +1487,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Prepare a third-party integration registration/update action card.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1293,6 +1512,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Regenerate the one-time client secret for a source-owned integration app as its owner, delegated rotate maintainer, or a current server admin; invalidates the previous secret.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1314,6 +1537,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Transfer a source-owned integration app to another same-server agent as its owner or a current server admin.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1335,6 +1562,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Update a source-owned integration app. The current app owner or a current server admin may update it.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1356,6 +1587,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Manage source-owned app distribution, logo reset, Marketplace requests, or deletion as the app owner or a current server admin.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1377,6 +1612,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Upload a source-owned app logo as the app owner or a current server admin using multipart form data.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1398,6 +1637,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "List pending app registration cards requested by this agent and manageable source-owned apps; current server admins see every source-owned app in the server.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1419,6 +1662,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Get one requester-visible registration card or manageable source-owned app without disclosing unauthorized app existence.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": true,
@@ -1440,6 +1687,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "tasks",
     "description": "Prepare an action card for a human to commit.",
+    "sideEffect": "write",
+    "idempotency": "key",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1461,6 +1712,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "send",
     "description": "Upload a multipart attachment as the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1482,6 +1737,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "send",
     "description": "Read the server-authoritative direct-upload threshold and plan file limit.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1503,6 +1762,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "send",
     "description": "Create a direct attachment upload session as the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "none",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": false,
       "query": false,
@@ -1524,6 +1787,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "send",
     "description": "Verify and complete a direct attachment upload owned by the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -1545,6 +1812,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "send",
     "description": "Cancel a direct attachment upload owned by the bound agent credential.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -1566,6 +1837,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "send",
     "description": "Read a direct attachment upload session owned by the bound agent credential.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -1587,6 +1862,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "Download attachment bytes visible to the bound agent credential.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": false,
@@ -1595,6 +1874,31 @@ export const AGENT_API_ROUTE_MANIFEST = [
     "response": {
       "kind": "binary",
       "body": false
+    }
+  },
+  {
+    "key": "attachmentDownloadUrl",
+    "method": "GET",
+    "path": "/attachments/:attachmentId/url",
+    "fullPath": "/internal/agent-api/attachments/:attachmentId/url",
+    "client": {
+      "resource": "attachments",
+      "method": "downloadUrl"
+    },
+    "capability": "read",
+    "description": "Mint a short-lived (5 minute) download URL for an attachment visible to the bound agent credential, with its filename and MIME type. 409 download_url_unavailable when this Server's storage cannot presign; use the binary download instead.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": true,
+      "query": false,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
     }
   },
   {
@@ -1608,6 +1912,10 @@ export const AGENT_API_ROUTE_MANIFEST = [
     },
     "capability": "read",
     "description": "List comments scoped to an attachment visible to the bound agent credential.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
     "request": {
       "params": true,
       "query": true,
@@ -1617,5 +1925,108 @@ export const AGENT_API_ROUTE_MANIFEST = [
       "kind": "json",
       "body": true
     }
+  },
+  {
+    "key": "pushWebhookStatus",
+    "method": "GET",
+    "path": "/push-webhook",
+    "fullPath": "/internal/agent-api/push-webhook",
+    "client": {
+      "resource": "pushWebhook",
+      "method": "status"
+    },
+    "capability": "read",
+    "description": "Read the bound External Agent's inbox push registration and delivery status.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "external",
+    "request": {
+      "params": false,
+      "query": false,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "pushWebhookRegister",
+    "method": "PUT",
+    "path": "/push-webhook",
+    "fullPath": "/internal/agent-api/push-webhook",
+    "client": {
+      "resource": "pushWebhook",
+      "method": "register"
+    },
+    "capability": "read",
+    "description": "Register or replace the bound External Agent's inbox push webhook (raft-agent-inbox-notice.v1); a new registration replaces the secret and re-enables delivery.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "external",
+    "request": {
+      "params": false,
+      "query": false,
+      "body": true
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "pushWebhookDelete",
+    "method": "DELETE",
+    "path": "/push-webhook",
+    "fullPath": "/internal/agent-api/push-webhook",
+    "client": {
+      "resource": "pushWebhook",
+      "method": "unregister"
+    },
+    "capability": "read",
+    "description": "Remove the bound External Agent's inbox push registration.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": true,
+    "audience": "external",
+    "request": {
+      "params": false,
+      "query": false,
+      "body": false
+    },
+    "response": {
+      "kind": "empty",
+      "body": false
+    }
+  },
+  {
+    "key": "mentionsList",
+    "method": "GET",
+    "path": "/mentions",
+    "fullPath": "/internal/agent-api/mentions",
+    "client": {
+      "resource": "mentions",
+      "method": "list"
+    },
+    "capability": "mentions",
+    "description": "List notifiable @mentions of the bound agent, newest first.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "both",
+    "request": {
+      "params": false,
+      "query": true,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
   }
 ] as const;
+
+/** Content hash of AGENT_API_ROUTE_MANIFEST; see computeAgentApiManifestVersion. */
+export const AGENT_API_MANIFEST_VERSION = "1d0fc2a4c66a25e1";

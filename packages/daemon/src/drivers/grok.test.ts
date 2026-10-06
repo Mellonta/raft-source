@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import type { ChildProcess } from "node:child_process";
 import type { AgentConfig } from "@botiverse/raft-shared";
 import {
@@ -14,9 +13,9 @@ import {
   resolveGrokCommand,
   resolveGrokHomeFromEnv,
   resolveGrokSpawn,
-} from "./grok.js";
-import type { ParsedEvent, SpawnContext } from "./types.js";
-import { createChildProcessEventProbe, type EventProbe } from "../testing/drydock.js";
+} from "./grok";
+import type { ParsedEvent, SpawnContext } from "./types";
+import { createChildProcessEventProbe, type EventProbe } from "../testing/drydock";
 
 const grokConfig: AgentConfig = {
   name: "grok-agent",
@@ -76,6 +75,10 @@ function log(message) {
   if (logPath) fs.appendFileSync(logPath, JSON.stringify(message) + "\\n");
 }
 function send(message) {
+  if (scenario === "detect_slow" && message.id === 1) {
+    setTimeout(() => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n"), 5500);
+    return;
+  }
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
 }
 
@@ -114,6 +117,23 @@ rl.on("line", (line) => {
   const message = JSON.parse(line);
   log(message);
   if (message.method === "initialize") {
+    if (scenario === "detect_auth") {
+      send({ id: message.id, error: { code: -32000, message: "arbitrary localized text" } });
+      return;
+    }
+    if (scenario === "detect_unknown") {
+      send({ id: message.id, error: { code: -32603, message: "You are not authenticated." } });
+      return;
+    }
+    if (scenario === "detect_timeout") return;
+    if (scenario === "detect_no_models") {
+      send({ id: message.id, result: { protocolVersion: 1, agentCapabilities: { loadSession: true }, authMethods: [{ id: "grok.com" }], _meta: {} } });
+      return;
+    }
+    if (scenario === "detect_unsupported") {
+      send({ id: message.id, error: { code: -32601, message: "arbitrary text" } });
+      return;
+    }
     if (scenario === "permission_pre_session") {
       send({
         id: "permission-1",
@@ -802,7 +822,60 @@ test("grok model discovery reads the live initialize modelState shape", async ()
       env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}` },
       cwd: root,
     });
-    assert.deepEqual(detected, grokModelSetFromInitializeResult(initializeResult));
+    assert.deepEqual(detected, { kind: "live", value: grokModelSetFromInitializeResult(initializeResult) });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("grok detection preserves auth, unknown and timeout reasons without matching error prose", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-detect-failure-"));
+  try {
+    const { binDir } = installScriptedGrok(root);
+    for (const [scenario, code] of [
+      ["detect_auth", "runtime_not_authenticated"],
+      ["detect_unknown", "detect_failed"],
+      ["detect_timeout", "detect_timeout"],
+      ["detect_unsupported", "protocol_unsupported"],
+    ]) {
+      const outcome = await detectGrokModelsFromAcp({
+        env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`, SCRIPTED_GROK_SCENARIO: scenario },
+        cwd: root,
+        timeoutMs: scenario === "detect_timeout" ? 500 : 5000,
+      });
+      assert.deepEqual(outcome, { kind: "error", retryable: true, code }, scenario);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Grok auth capabilities without a catalog are not proof of missing authentication", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-detect-empty-"));
+  try {
+    const { binDir } = installScriptedGrok(root);
+    assert.deepEqual(await detectGrokModelsFromAcp({
+      env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`, SCRIPTED_GROK_SCENARIO: "detect_no_models" },
+      cwd: root,
+    }), { kind: "no_models" });
+    assert.deepEqual(await detectGrokModelsFromAcp({
+      env: { PATH: path.join(root, "missing-bin") }, cwd: root,
+    }), { kind: "error", retryable: true, code: "runtime_not_found" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("grok model discovery tolerates initialize arriving after the old five second deadline", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-detect-slow-"));
+  try {
+    const { binDir } = installScriptedGrok(root);
+    const outcome = await detectGrokModelsFromAcp({
+      env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`, SCRIPTED_GROK_SCENARIO: "detect_slow" },
+      cwd: root,
+    });
+    assert.equal(outcome.kind, "live");
+    if (outcome.kind === "live") assert.ok(outcome.value.models.some((m) => m.id === "grok-4.5"));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

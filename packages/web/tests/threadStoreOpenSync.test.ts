@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { useThreadStore } from "../src/store/threadStore.js";
-import type { ThreadSummary } from "../src/store/threadStore.js";
-import { hydrateThreadRepliesScope } from "../src/store/threadRepliesReadModel.js";
-import api from "../src/api/client.js";
-import { useServerStore } from "../src/store/serverStore.js";
-import type { Server } from "../src/store/serverStore.js";
+import { useThreadStore } from "../src/store/threadStore";
+import type { ThreadSummary } from "../src/store/threadStore";
+import { hydrateThreadRepliesScope } from "../src/store/threadRepliesReadModel";
+import api from "../src/api/client";
+import { useServerStore } from "../src/store/serverStore";
+import type { Server } from "../src/store/serverStore";
 
 const originalPost = api.post.bind(api);
 const originalGet = api.get.bind(api);
@@ -229,7 +228,7 @@ test("ensureOpenThreadChannel is the explicit first-durable-action writer", asyn
   resetStore();
   const postCalls: Array<{ url: string; body: unknown }> = [];
   api.get = (async () => {
-    throw { response: { status: 404 } };
+    throw { response: { status: 404, data: { code: "THREAD_NOT_FOUND", error: "No thread found for this message" } } };
   }) as typeof api.get;
   api.post = (async (url: string, body?: unknown) => {
     postCalls.push({ url, body });

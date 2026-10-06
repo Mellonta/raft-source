@@ -113,7 +113,13 @@ export interface ApmTraceTransitionRow {
 }
 
 export type ApmGatedFlushReason = "compaction_finished" | "review_finished" | "turn_end";
-export type ApmExpectedTerminationReason = "turn_end" | "stalled_recovery" | "startup_timeout" | "startup_request_error" | null;
+export type ApmExpectedTerminationReason =
+  | "turn_end"
+  | "stalled_recovery"
+  | "startup_timeout"
+  | "startup_request_error"
+  | "cold_idle_recycle"
+  | null;
 
 export interface ApmGatedSteeringDecisionState {
   isIdle: boolean;
@@ -586,6 +592,19 @@ export function reduceApmGatedAssistantContinuation(
       outstandingToolUses: state.outstandingToolUses,
       compacting: state.compacting,
       ...reviewStatePatch(state),
+    },
+  };
+}
+
+/** RFC 070 cold-idle sweep: the daemon is about to SIGTERM an idle runtime on
+ * purpose, so its exit is an expected termination, not a crash. */
+export function reduceApmColdIdleRecycleTermination(
+  state: ApmGatedSteeringDecisionState,
+): { nextState: ApmGatedSteeringDecisionState } {
+  return {
+    nextState: {
+      ...state,
+      expectedTerminationReason: "cold_idle_recycle",
     },
   };
 }

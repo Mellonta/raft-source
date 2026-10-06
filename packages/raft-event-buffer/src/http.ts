@@ -3,8 +3,8 @@ import {
   isTraceEventRowV2CompatibleSchemaFingerprint,
   TRACE_EVENT_ROW_V2_TABLE,
 } from "@botiverse/raft-shared";
-import { EventBuffer, type EventBufferEnvelope, type EventBufferRow } from "./core.js";
-import type { EventBufferRejectReason } from "./metrics.js";
+import { EventBuffer, type EventBufferEnvelope, type EventBufferRow } from "./core";
+import type { EventBufferRejectReason } from "./metrics";
 
 export interface EventBufferHttpOptions {
   buffer: EventBuffer;

@@ -1,15 +1,18 @@
-import { revokeSocketAccess } from "../socket/accessRevocation.js";
+import { revokeSocketAccess } from "../socket/accessRevocation";
 import { createHash } from "crypto";
 import { eq, and, asc, isNull, inArray, sql, count, ne } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { CURRENT_CONTRACT_VERSION } from "./serverSetupStateService.js";
-import { servers, serverMembers, serverMembershipDepartures, serverMemberRoleAuditEvents, serverAgentMembers, users, channels, channelHumans, messages, agents, subscriptions, threadFollows } from "../db/schema.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { CURRENT_CONTRACT_VERSION } from "./serverSetupStateService";
+import { servers, serverMembers, serverMembershipDepartures, serverMemberRoleAuditEvents, serverAgentMembers, users, channels, channelHumans, messages, agents, subscriptions, threadFollows, oauthAccessTokens } from "../db/schema";
+import { emitAppFacingMemberEvents, kickAppNotificationDelivery } from "./appNotificationDeliveryService";
 import { ALL_CHANNEL_TEAM_THRESHOLD, canTransitionServerRole, currentDate, hasServerCapability, isAdminOrOwner, isOwnerRole, type ServerRole } from "@botiverse/raft-shared";
-import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace.js";
-import * as serverAgreementService from "./serverAgreementService.js";
-import { refreshSubscriptionForServerIfStale } from "./billingService.js";
-import { assertHumanCapacityAvailable, getServerBillingEntitlement, getServerBillingUsage } from "./planService.js";
-import { evaluateFeatureFlag, ONBOARDING_OWNER_WIZARD_FEATURE_FLAG_KEY } from "./featureFlagService.js";
+import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace";
+import * as serverAgreementService from "./serverAgreementService";
+import { refreshSubscriptionForServerIfStale } from "./billingService";
+import { assertHumanCapacityAvailable, getServerBillingEntitlement, getServerBillingUsage } from "./planService";
+import { evaluateFeatureFlag, ONBOARDING_OWNER_WIZARD_FEATURE_FLAG_KEY } from "./featureFlagService";
+import { autoInstallOfficialAppsForProvisionedServer } from "./officialAppAutoInstallService";
+import { hasServerCompletedSetupForProjection } from "./serverSetupCompletionService";
 
 export interface SidebarOrderPreferences {
   channelOrder: string[];
@@ -213,11 +216,17 @@ export async function createServer(name: string, slug: string, ownerId: string) 
         description: "Your private onboarding space",
         type: "private",
       }).returning();
+      // read-position: new conversation, no history before this join (no row = position 0)
       await tx.insert(channelHumans).values({
         channelId: ownerChannel.id,
         userId: ownerId,
       });
     }
+
+    // Platform defaults are a Server-level provisioning fact. The protected
+    // policy defaults empty, so deploying this source does not itself change
+    // the live default set.
+    await autoInstallOfficialAppsForProvisionedServer(server.id, tx as ReturnType<typeof getDb>);
 
     return server;
   });
@@ -455,6 +464,27 @@ export async function getServerOnboardingSettings(serverId: string): Promise<Ser
     agentAllChannelGreetingEnabled: server.agentAllChannelGreetingEnabled !== false,
     onboardingWizardEnabled: await isOnboardingWizardEnabledForServer(serverId, db),
   };
+}
+
+/**
+ * RFC-067 workspace switch: when false, nothing about anyone's activity in
+ * this server is recorded as product analytics (productAnalyticsGate).
+ */
+export async function getServerProductAnalyticsEnabled(serverId: string): Promise<boolean | null> {
+  const [server] = await getDb()
+    .select({ enabled: servers.productAnalyticsEnabled })
+    .from(servers)
+    .where(and(eq(servers.id, serverId), isNull(servers.deletedAt)));
+  return server ? server.enabled : null;
+}
+
+export async function updateServerProductAnalyticsEnabled(serverId: string, enabled: boolean): Promise<boolean | null> {
+  const [updated] = await getDb()
+    .update(servers)
+    .set({ productAnalyticsEnabled: enabled, updatedAt: new Date() })
+    .where(and(eq(servers.id, serverId), isNull(servers.deletedAt)))
+    .returning({ enabled: servers.productAnalyticsEnabled });
+  return updated ? updated.enabled : null;
 }
 
 export async function getServerTranslationSettings(serverId: string): Promise<ServerTranslationSettings | null> {
@@ -828,9 +858,11 @@ export async function addMember(
       .where(and(eq(serverMembers.serverId, serverId), eq(serverMembers.userId, userId)));
     if (existing) return false;
 
-    const entitlement = await getServerBillingEntitlement(db, serverId);
-    const usage = await getServerBillingUsage(db, serverId);
-    assertHumanCapacityAvailable(entitlement, usage);
+    if (role !== "guest") {
+      const entitlement = await getServerBillingEntitlement(db, serverId);
+      const usage = await getServerBillingUsage(db, serverId);
+      assertHumanCapacityAvailable(entitlement, usage);
+    }
 
     const [inserted] = await db.insert(serverMembers).values({
       serverId,
@@ -843,6 +875,13 @@ export async function addMember(
         eq(serverMembershipDepartures.serverId, serverId),
         eq(serverMembershipDepartures.userId, userId),
       ));
+      // Same commit as the insert: the event row is the outbox.
+      await emitAppFacingMemberEvents({
+        serverId,
+        eventType: "server.member_added",
+        members: [{ principalType: "human", principalId: userId, role }],
+        provenance: { source: "server_service", actor_type: "human", reason: options.agreementAudit?.source ?? "added" },
+      }, db);
     }
 
     // Adding someone straight in as owner is the second way into the (owner × checkpoint) set
@@ -915,16 +954,40 @@ export async function addMember(
     return !!inserted;
   };
 
+  // With a caller's executor the caller commits, and kicks app delivery after.
   if (options.executor) {
     return run(options.executor);
   }
 
-  return getDb().transaction(run);
+  const added = await getDb().transaction(run);
+  if (added) kickAppNotificationDelivery();
+  return added;
 }
 
 export async function removeMember(serverId: string, userId: string, options: RemoveMemberOptions = {}) {
   const db = getDb();
-  await db.transaction(async (tx) => {
+  const announced = await db.transaction(async (tx) => {
+    // Task #101: keep the global order servers -> member rows -> resource rows. The `servers` row is locked FOR SHARE
+    // first because the departure insert below takes a key-share lock on it through its foreign key, while
+    // transitionMemberRole holds `servers` FOR UPDATE and then waits on member rows. The target's member row is locked
+    // FOR UPDATE before any channel_humans / thread_follows delete, so a fenced writer holding that member row and then
+    // waiting on channel_humans (the read-state sequencer for private, DM and joint scopes) makes this removal wait
+    // instead of deadlocking. A missing member row is not an error here: the deletes below are no-ops, as before.
+    await tx.execute(sql`
+      SELECT id
+      FROM servers
+      WHERE id = ${serverId}
+      FOR SHARE
+    `);
+    const memberRows = await tx.execute<{ role: string }>(sql`
+      SELECT role
+      FROM server_members
+      WHERE server_id = ${serverId}
+        AND user_id = ${userId}
+      FOR UPDATE
+    `);
+    const removedRole = memberRows.rows[0]?.role;
+
     const serverChannelIds = await tx
       .select({ id: channels.id })
       .from(channels)
@@ -976,22 +1039,42 @@ export async function removeMember(serverId: string, userId: string, options: Re
       eq(serverMembers.serverId, serverId),
       eq(serverMembers.userId, userId),
     ));
+    if (removedRole === undefined) return false;
+
+    // Sign-in with Raft tokens die with the membership. Without this they only
+    // fail while the user is absent and come back to life on rejoin; a member
+    // who returns signs in to their apps again.
+    await tx.update(oauthAccessTokens).set({ revokedAt: departedAt }).where(and(
+      eq(oauthAccessTokens.serverId, serverId),
+      eq(oauthAccessTokens.principalType, "human"),
+      eq(oauthAccessTokens.userId, userId),
+      isNull(oauthAccessTokens.revokedAt),
+    ));
+    // Same commit as the delete: the event row is the outbox.
+    const { recipientCount } = await emitAppFacingMemberEvents({
+      serverId,
+      eventType: "server.member_removed",
+      members: [{ principalType: "human", principalId: userId, role: removedRole }],
+      occurredAt: departedAt,
+      provenance: { source: "server_service", actor_type: "human", reason: options.reason ?? "removed" },
+    }, tx);
+    return recipientCount > 0;
   });
-  await revokeSocketAccess({ userId });
+  if (announced) kickAppNotificationDelivery();
+  await revokeSocketAccess({ userId, removedFromServerId: serverId });
 }
 
 /**
- * The onboarding invariant, enforced in one place (#4883): on a server that has crossed the
- * Cindy checkpoint (`onboarding_agent_id` set — the same fact the projection reads as
- * `everHadAgent`), every `role='owner'` member row must be `complete`. Setup is owner-only, so a
- * non-complete owner row is exactly what the projection turns into a stuck, undismissable
- * "Meet Cindy" for an agent that already exists.
+ * Keep a newly-created owner row aligned with the server-wide setup state (#4883, task #240).
+ * Once any owner completed setup (or the Cindy compatibility checkpoint is set), later owners
+ * inherit `complete`; setup is not owed independently by every owner.
  *
- * The `(owner × checkpoint-crossed)` set changes through four write paths, and all four call
- * this: a member BECOMES owner (`updateMemberRole` promote, `addMember` direct add) — pass their
- * `onlyUserId`; and the checkpoint is FIRST crossed (`updateServerOnboardingAgent` and
- * `updateServerOnboardingSettings`) — omit `onlyUserId` to sweep every existing owner. Rows
- * already `complete` are never touched, so the
+ * A member BECOMES owner through `updateMemberRole` or `addMember`; pass their `onlyUserId`.
+ * The Cindy compatibility checkpoint is set through `updateServerOnboardingAgent` or
+ * `updateServerOnboardingSettings`; omit `onlyUserId` to sweep every existing owner. The
+ * projection independently derives server completion from any completed owner, so historical
+ * incomplete co-owner rows fail open without a data backfill. Rows already `complete` are never
+ * touched, so the
  * original owner's `normal` (stamped by `markServerSetupCompleteOnFirstAgent` when they created
  * Cindy) is preserved; newly-reconciled owners are `grandfathered` — they never onboarded, so
  * they are not owed the post-setup survey/handoff either.
@@ -1023,11 +1106,7 @@ export async function reconcileOwnersToSetupCheckpoint(
   serverId: string,
   opts: { onlyUserId?: string } = {},
 ): Promise<void> {
-  const [server] = await db
-    .select({ onboardingAgentId: servers.onboardingAgentId })
-    .from(servers)
-    .where(and(eq(servers.id, serverId), isNull(servers.deletedAt)));
-  if (!server?.onboardingAgentId) return;
+  if (!(await hasServerCompletedSetupForProjection(db, serverId))) return;
 
   const conditions = [
     eq(serverMembers.serverId, serverId),
@@ -1130,6 +1209,11 @@ export async function transitionMemberRole(input: {
     }
 
     const removedAllChannelIds: string[] = [];
+    if (target.role === "guest" && input.nextRole !== "guest") {
+      const entitlement = await getServerBillingEntitlement(tx, input.serverId);
+      const usage = await getServerBillingUsage(tx, input.serverId);
+      assertHumanCapacityAvailable(entitlement, usage);
+    }
     if (input.nextRole === "guest") {
       const serverChannelRows = await tx
         .select({ id: channels.id, name: channels.name })
@@ -1185,6 +1269,12 @@ export async function transitionMemberRole(input: {
     if (isOwnerRole(input.nextRole)) {
       await reconcileOwnersToSetupCheckpoint(tx, input.serverId, { onlyUserId: input.targetUserId });
     }
+    await emitAppFacingMemberEvents({
+      serverId: input.serverId,
+      eventType: "server.member_role_changed",
+      members: [{ principalType: "human", principalId: input.targetUserId, role: input.nextRole }],
+      provenance: { source: "server_service", actor_type: "human", previous_role: target.role },
+    }, tx);
     return {
       changed: true,
       previousRole: target.role,
@@ -1192,19 +1282,44 @@ export async function transitionMemberRole(input: {
       removedAllChannelIds,
     };
   });
+  if (result.changed) kickAppNotificationDelivery();
   // Authorized idempotent retries must repair a failed post-commit fanout too.
   await revokeSocketAccess({ userId: input.targetUserId });
   return result;
 }
 
-export async function updateAgentMemberRole(serverId: string, agentId: string, role: Extract<ServerRole, "admin" | "member">) {
-  const db = getDb();
-  const [updated] = await db
-    .update(serverAgentMembers)
-    .set({ role })
-    .where(and(eq(serverAgentMembers.serverId, serverId), eq(serverAgentMembers.agentId, agentId)))
-    .returning();
-  return updated || null;
+export async function updateAgentMemberRole(
+  serverId: string,
+  agentId: string,
+  role: Extract<ServerRole, "admin" | "member">,
+  options: { executor?: DatabaseExecutor } = {},
+) {
+  const change = async (db: DatabaseExecutor) => {
+    const [previous] = await db
+      .select({ role: serverAgentMembers.role })
+      .from(serverAgentMembers)
+      .where(and(eq(serverAgentMembers.serverId, serverId), eq(serverAgentMembers.agentId, agentId)))
+      .for("update");
+    const [updated] = await db
+      .update(serverAgentMembers)
+      .set({ role })
+      .where(and(eq(serverAgentMembers.serverId, serverId), eq(serverAgentMembers.agentId, agentId)))
+      .returning();
+    if (updated && previous && previous.role !== role) {
+      await emitAppFacingMemberEvents({
+        serverId,
+        eventType: "server.member_role_changed",
+        members: [{ principalType: "agent", principalId: agentId, role }],
+        provenance: { source: "server_service", actor_type: "human", previous_role: previous.role },
+      }, db);
+    }
+    return updated || null;
+  };
+  // With a caller's executor the caller commits, and kicks app delivery after.
+  if (options.executor) return change(options.executor);
+  const updated = await getDb().transaction(change);
+  if (updated) kickAppNotificationDelivery();
+  return updated;
 }
 
 export async function countOwners(serverId: string) {
@@ -2021,7 +2136,7 @@ export async function deleteServer(serverId: string) {
   // module load fails, the server is still visible and the same DELETE can be
   // retried. Stripe failures themselves are best-effort inside the helper,
   // matching the existing deletion contract.
-  const { cancelSubscriptionForDeletedServer } = await import("./billingService.js");
+  const { cancelSubscriptionForDeletedServer } = await import("./billingService");
   await cancelSubscriptionForDeletedServer(serverId);
 
   return db.transaction(async (tx) => {
@@ -2030,6 +2145,11 @@ export async function deleteServer(serverId: string) {
       .from(servers)
       .where(and(eq(servers.id, serverId), ne(servers.kind, "joint_storage")));
     if (!existing) return null;
+
+    // Announce every member's removal before the tombstone, in the same commit.
+    const announced = existing.deletedAt == null
+      ? await announceServerDeletionToApps(tx, serverId)
+      : false;
 
     const [updated] = existing.deletedAt == null
       ? await tx
@@ -2046,6 +2166,29 @@ export async function deleteServer(serverId: string) {
     return {
       server: updated ?? existing,
       newlyDeleted: Boolean(updated),
+      announced,
     };
+  }).then((result) => {
+    if (result?.announced) kickAppNotificationDelivery();
+    return result && { server: result.server, newlyDeleted: result.newlyDeleted };
   });
+}
+
+async function announceServerDeletionToApps(tx: DatabaseExecutor, serverId: string): Promise<boolean> {
+  const [humans, agentMembers] = await Promise.all([
+    tx.select({ principalId: serverMembers.userId, role: serverMembers.role })
+      .from(serverMembers).where(eq(serverMembers.serverId, serverId)),
+    tx.select({ principalId: serverAgentMembers.agentId, role: serverAgentMembers.role })
+      .from(serverAgentMembers).where(eq(serverAgentMembers.serverId, serverId)),
+  ]);
+  const { recipientCount } = await emitAppFacingMemberEvents({
+    serverId,
+    eventType: "server.member_removed",
+    members: [
+      ...humans.map((member) => ({ principalType: "human" as const, ...member })),
+      ...agentMembers.map((member) => ({ principalType: "agent" as const, ...member })),
+    ],
+    provenance: { source: "server_service", actor_type: "human", reason: "server_deleted" },
+  }, tx);
+  return recipientCount > 0;
 }

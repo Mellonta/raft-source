@@ -3,7 +3,10 @@ import {
   FORBIDDEN_FEATURE_FLAG_ADMIN_PRIVILEGES as SHARED_FORBIDDEN_FEATURE_FLAG_ADMIN_PRIVILEGES,
   REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES as SHARED_REQUIRED_FEATURE_FLAG_ADMIN_PRIVILEGES,
   FeatureFlagAdminPrivilegeError,
+  featureFlagAdminPrivilegeLabel,
+  readFeatureFlagAdminPrivilegeMatrix,
   verifyFeatureFlagAdminPrivileges as verifySharedFeatureFlagAdminPrivileges,
+  type FeatureFlagAdminPrivilegeCheck,
   type FeatureFlagAdminPrivilegeQuery,
 } from "@botiverse/raft-shared";
 
@@ -52,29 +55,26 @@ export async function verifyFeatureFlagAdminPrivileges(
   options: { requireAuthenticatedUser?: boolean } = {},
 ): Promise<void> {
   await verifySharedFeatureFlagAdminPrivileges(query, options);
-  for (const expected of DELETE_ROUTE_REQUIRED_PRIVILEGES) {
-    const result = await query(
-      "SELECT has_table_privilege($1, $2, $3) AS allowed",
-      [FEATURE_FLAG_ADMIN_OPERATOR_ROLE, expected.object, expected.privilege],
-    );
-    if (result.rows[0]?.allowed !== true) {
-      throw new FeatureFlagAdminPrivilegeError(`missing:${expected.object}:${expected.privilege}`);
+  // Same oracle per check as before (has_table_privilege with the same
+  // arguments); the delete-route matrix now costs one round trip instead of 22.
+  const required: readonly FeatureFlagAdminPrivilegeCheck[] = DELETE_ROUTE_REQUIRED_PRIVILEGES;
+  const forbidden: readonly FeatureFlagAdminPrivilegeCheck[] = DELETE_ROUTE_FORBIDDEN_PRIVILEGES;
+  const allowed = await readFeatureFlagAdminPrivilegeMatrix(query, [...required, ...forbidden]);
+  required.forEach((expected, index) => {
+    if (allowed[index] !== true) {
+      throw new FeatureFlagAdminPrivilegeError(`missing:${featureFlagAdminPrivilegeLabel(expected)}`);
     }
-  }
-  for (const forbidden of DELETE_ROUTE_FORBIDDEN_PRIVILEGES) {
-    const result = await query(
-      "SELECT has_table_privilege($1, $2, $3) AS allowed",
-      [FEATURE_FLAG_ADMIN_OPERATOR_ROLE, forbidden.object, forbidden.privilege],
-    );
-    if (result.rows[0]?.allowed !== false) {
-      throw new FeatureFlagAdminPrivilegeError(`unexpected:${forbidden.object}:${forbidden.privilege}`);
+  });
+  forbidden.forEach((check, index) => {
+    if (allowed[required.length + index] !== false) {
+      throw new FeatureFlagAdminPrivilegeError(`unexpected:${featureFlagAdminPrivilegeLabel(check)}`);
     }
-  }
+  });
 }
 
 export const FEATURE_FLAG_ADMIN_PRIVILEGE_CONTRACT_KEY = "operator-surfaces-v2";
 export const FEATURE_FLAG_ADMIN_PRIVILEGE_MIGRATION_TAG =
-  "0260_feature_flag_admin_delete_privileges";
+  "0312_feature_flag_admin_trace_identity_privileges";
 
 export async function verifyFeatureFlagAdminPrivilegeReceipt(
   query: FeatureFlagAdminPrivilegeQuery,

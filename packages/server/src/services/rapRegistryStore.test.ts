@@ -1,16 +1,17 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { afterEach } from "vitest";
 import ts from "typescript";
 import { fileURLToPath } from "node:url";
-import { getDb } from "../db/index.js";
-import { agents, servers, users } from "../db/schema.js";
-import { BUILT_IN_RAP_APPS } from "./rapBuiltinAppManifests.js";
-import { parseManifest, type AppId, type AppManifest } from "./rapRegistry.js";
-import * as registryStoreModule from "./rapRegistryStore.js";
+import { getDb } from "../db/index";
+import { agentChannelReadCursors, agents, channelAgents, channels, servers, users } from "../db/schema";
+import { and, eq } from "drizzle-orm";
+import { createMessage } from "./messageService";
+import { BUILT_IN_RAP_APPS } from "./rapBuiltinAppManifests";
+import { parseManifest, type AppId, type AppManifest } from "./rapRegistry";
+import * as registryStoreModule from "./rapRegistryStore";
 import {
   clearHookHandlers,
   createRapRegistryForTests,
@@ -25,7 +26,7 @@ import {
   resolveConversation,
   type AppHookHandlers,
   type RapCatalogEntry,
-} from "./rapRegistryStore.js";
+} from "./rapRegistryStore";
 
 
 const STORE_SOURCE = path.join(path.dirname(fileURLToPath(import.meta.url)), "rapRegistryStore.ts");
@@ -114,7 +115,7 @@ test("the production catalog is exactly the three closed built-in manifests", as
         // below is class identity only; the classes are minted Computer-local
         // and transient by #203.
         syscalls: [],
-        notifications: ["memory_size_hint"],
+        notifications: ["memory_size_hint", "disk_space_hint"],
         config: {
           enabled: { type: "boolean", default: true },
           threshold_bytes: {
@@ -311,6 +312,28 @@ test("conversation identity is stable across calls and registry reconstruction",
   assert.equal(first.kind, "resolved");
   assert.deepEqual(again, first);
   assert.deepEqual(reconstructed, first);
+});
+
+test("a restored conversation with history starts the re-added agent's read position at its latest message", async () => {
+  const { serverId, agentId } = await seed("16");
+  const registry = createRapRegistryForTests([explicitEntry(ALPHA, [agentId])]);
+  const first = await registry.resolveConversation(serverId, ALPHA, agentId);
+  assert.equal(first.kind, "resolved");
+  if (first.kind !== "resolved") return;
+  const cursorOf = async () => (await getDb().select().from(agentChannelReadCursors).where(and(
+    eq(agentChannelReadCursors.agentId, agentId),
+    eq(agentChannelReadCursors.channelId, first.conversationId),
+  )))[0]?.lastReadSeq;
+  assert.equal(await cursorOf(), undefined, "a new, empty conversation needs no row: no row is position 0");
+
+  await createMessage(first.conversationId, "agent", agentId, "history one");
+  const latest = await createMessage(first.conversationId, "agent", agentId, "history two");
+  await getDb().delete(channelAgents).where(eq(channelAgents.channelId, first.conversationId));
+  await getDb().update(channels).set({ deletedAt: new Date() }).where(eq(channels.id, first.conversationId));
+
+  const restored = await registry.resolveConversation(serverId, ALPHA, agentId);
+  assert.deepEqual(restored, first);
+  assert.equal(await cursorOf(), latest.seq, "history from before the re-join is read (#8292's rule)");
 });
 
 test("unknown apps are refused rather than receiving ambient identity", async () => {

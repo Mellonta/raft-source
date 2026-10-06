@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, test } from "vitest";
 import {
   decryptManagedMcpHeaders,
   encryptManagedMcpHeaders,
   ManagedMcpCredentialError,
   normalizeManagedMcpHeaders,
-} from "./managedMcpCredentialService.js";
+} from "./managedMcpCredentialService";
 
 const ORIGINAL_KEY = process.env.SLOCK_MCP_CREDENTIAL_KEY;
 

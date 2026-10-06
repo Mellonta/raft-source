@@ -1,24 +1,23 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { openTestDatabase, closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { openTestDatabase, closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { afterAll, beforeAll } from "vitest";
 
 import { eq } from "drizzle-orm";
 import { WebSocket } from "ws";
 
-import { getDb } from "../db/index.js";
-import { computers, machines, servers, users } from "../db/schema.js";
-import { setupMachineWebSocket } from "./daemon.js";
-import { createServer as createRaftServer, addMember } from "../services/serverService.js";
-import { registerMachine } from "../services/machineService.js";
+import { getDb } from "../db/index";
+import { computers, machines, servers, users } from "../db/schema";
+import { setupMachineWebSocket } from "./daemon";
+import { createServer as createRaftServer, addMember } from "../services/serverService";
+import { registerMachine } from "../services/machineService";
 import {
   generateComputerApiKeyMaterial,
   extractComputerApiKeyPrefix,
-} from "../services/computerCredentialService.js";
+} from "../services/computerCredentialService";
 import argon2 from "argon2";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
 
 
 // task #88 (#wg-raft-computer 2026-06-05): pins the /daemon/connect auth
@@ -151,7 +150,8 @@ function attemptConnect(
 }
 
 function lastSpan(): CapturedSpan {
-  return spans[spans.length - 1];
+  const authSpans = spans.filter((span) => span.name === "server.daemon.connect.auth");
+  return authSpans[authSpans.length - 1];
 }
 
 // Every reject must end the span with the closed-set outcome/reason/auth_stage

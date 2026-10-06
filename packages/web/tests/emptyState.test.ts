@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Paperclip } from "lucide-react";
@@ -49,7 +48,8 @@ test("EmptyState renders sentence-case title and frameless icon (B + C contract)
   // Title is rendered as-passed (sentence case from the callsite). No
   // `uppercase` / `tracking-tight` CSS override.
   assert.match(html, /No files yet/);
-  assert.match(html, /text-lg font-display font-semibold text-black\/60/);
+  assert.match(html, /data-slot="empty-state-title"/);
+  assert.match(html, /text-foreground-strong\/60/);
   assert.doesNotMatch(html, /text-lg font-display font-semibold text-black"/);
   assert.doesNotMatch(html, /uppercase/);
   assert.doesNotMatch(html, /tracking-tight/);
@@ -57,13 +57,15 @@ test("EmptyState renders sentence-case title and frameless icon (B + C contract)
   // Icon wrapper is the new frameless, muted container — no border, no
   // bg-black/5, no 30%-opacity black border. Just `text-black/40` to
   // propagate to currentColor-aware lucide icons.
-  assert.match(html, /mb-4 inline-flex items-center justify-center text-black\/40/);
+  assert.match(html, /data-slot="empty-state-icon"/);
+  assert.match(html, /text-foreground-muted/);
   assert.doesNotMatch(html, /border-black\/30/);
   assert.doesNotMatch(html, /bg-black\/5/);
   assert.doesNotMatch(html, /text-black\/45/);
 
   // Description + action slots still work.
-  assert.match(html, /mx-auto max-w-\[32ch\] text-sm leading-relaxed text-black\/60/);
+  assert.match(html, /data-slot="empty-state-description"/);
+  assert.match(html, /text-foreground-strong\/60/);
   assert.match(html, /Attach files in Chat\./);
   assert.match(html, /Add file/);
 });
@@ -71,7 +73,6 @@ test("EmptyState renders sentence-case title and frameless icon (B + C contract)
 test("full-panel empty states reuse the shared EmptyState primitive", () => {
   const files = [
     "src/components/message/ChannelFilesPanel.tsx",
-    "src/components/ui/NotificationCenter.tsx",
     "src/components/saved/SavedPanel.tsx",
     "src/components/thread/ThreadsInbox.tsx",
     "src/components/task/TasksPanel.tsx",

@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 
@@ -63,10 +62,12 @@ test("mounted compact and document MarkdownContent share tokens while keeping th
   assert.match(documentHeading.className, /text-3xl/);
   assert.match(documentParagraph.className, /mb-3/);
   assert.equal(documentCode.className, sharedInlineCodeClass);
+  // Inline code uses raft-ui's in-message treatment (InlineCode
+  // appearance="message", raft-ui 0.5.16): borderless, 0.875em, and long
+  // unbroken tokens may break so they never overflow the message.
   assert.match(documentCode.className, /border-0/);
-  assert.match(documentCode.className, /bg-black\/\[0\.05\]/);
-  assert.match(documentCode.className, /\[overflow-wrap:break-word\]/);
-  assert.doesNotMatch(documentCode.className, /\[overflow-wrap:anywhere\]/);
+  assert.match(documentCode.className, /\[font-size:0\.875em\]/);
+  assert.match(documentCode.className, /wrap-anywhere|\[overflow-wrap:anywhere\]/);
   assert.ok(document.getByRole("link", { name: "Raft" }));
 });
 
@@ -84,12 +85,13 @@ test("real markdown attachment preview delegates its document body to MarkdownCo
   const paragraph = container.querySelector("p");
   assert.ok(shell);
   assert.ok(sharedBody, "preview must mount the shared MarkdownContent body");
-  assert.match(shell.className, /card-brutal/);
+  assert.equal(shell.getAttribute("data-slot"), "card");
+  assert.match(shell.className, /overflow-visible/);
   assert.match(shell.className, /font-display/);
   assert.match(heading.className, /text-3xl/);
   assert.ok(paragraph);
   assert.match(paragraph.className, /mb-3/);
   assert.ok(code);
-  assert.match(code.className, /bg-black\/\[0\.05\]/);
+  assert.match(code.className, /\[font-size:0\.875em\]/);
   assert.equal(container.querySelector("[data-testid='markdown-preview-truncated']"), null);
 });

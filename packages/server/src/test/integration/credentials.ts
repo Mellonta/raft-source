@@ -1,8 +1,8 @@
 import argon2 from "argon2";
 import { eq } from "drizzle-orm";
-import { getDb } from "../../db/index.js";
-import { users } from "../../db/schema.js";
-import { signAccessToken } from "../../middleware/auth.js";
+import { getDb } from "../../db/index";
+import { users } from "../../db/schema";
+import { signAccessToken } from "../../middleware/auth";
 
 const passwordHashes = new Map<string, Promise<string>>();
 

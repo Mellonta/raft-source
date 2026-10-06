@@ -45,6 +45,65 @@
         }
       }
     },
+    "/api/attachments/upload-sessions/{channelId}/active": {
+      "get": {
+        "operationId": "listAttachmentUploadSessions",
+        "summary": "List active attachment uploads for a channel",
+        "tags": [
+          "Attachment uploads"
+        ],
+        "security": [
+          {
+            "bearerAuth": [],
+            "serverScope": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "channelId",
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "required": true
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active uploads owned by the current member",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentUploadRecoveryList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid channel id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidUploadRequestError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Upload is forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentUploadForbiddenError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/attachments/upload-sessions": {
       "post": {
         "operationId": "createAttachmentUploadSession",
@@ -431,6 +490,112 @@
         ],
         "additionalProperties": false
       },
+      "AttachmentUploadRecoveryList": {
+        "type": "object",
+        "properties": {
+          "uploads": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttachmentUploadRecoveryView"
+            }
+          }
+        },
+        "required": [
+          "uploads"
+        ],
+        "additionalProperties": false
+      },
+      "AttachmentUploadRecoveryView": {
+        "type": "object",
+        "properties": {
+          "uploadId": {
+            "$ref": "#/components/schemas/AttachmentUploadId"
+          },
+          "filename": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "mimeType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 209715200
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "verifying"
+            ]
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+          }
+        },
+        "required": [
+          "uploadId",
+          "filename",
+          "mimeType",
+          "sizeBytes",
+          "state",
+          "expiresAt"
+        ],
+        "additionalProperties": false
+      },
+      "InvalidUploadRequestError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "const": "UPLOAD_INVALID_REQUEST"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "retryable": {
+            "type": "boolean",
+            "const": false
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "additionalProperties": false
+      },
+      "AttachmentUploadForbiddenError": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "const": "UPLOAD_FORBIDDEN"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1
+          },
+          "retryable": {
+            "type": "boolean",
+            "const": false
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "retryable"
+        ],
+        "additionalProperties": false
+      },
       "CreateAttachmentUploadSessionResponse": {
         "type": "object",
         "properties": {
@@ -503,52 +668,6 @@
         "type": "string",
         "format": "uuid",
         "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
-      },
-      "InvalidUploadRequestError": {
-        "type": "object",
-        "properties": {
-          "code": {
-            "type": "string",
-            "const": "UPLOAD_INVALID_REQUEST"
-          },
-          "message": {
-            "type": "string",
-            "minLength": 1
-          },
-          "retryable": {
-            "type": "boolean",
-            "const": false
-          }
-        },
-        "required": [
-          "code",
-          "message",
-          "retryable"
-        ],
-        "additionalProperties": false
-      },
-      "AttachmentUploadForbiddenError": {
-        "type": "object",
-        "properties": {
-          "code": {
-            "type": "string",
-            "const": "UPLOAD_FORBIDDEN"
-          },
-          "message": {
-            "type": "string",
-            "minLength": 1
-          },
-          "retryable": {
-            "type": "boolean",
-            "const": false
-          }
-        },
-        "required": [
-          "code",
-          "message",
-          "retryable"
-        ],
-        "additionalProperties": false
       },
       "AttachmentUploadIdempotencyConflictError": {
         "type": "object",

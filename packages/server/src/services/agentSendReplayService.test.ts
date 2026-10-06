@@ -1,15 +1,15 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import {
   __resetAgentSendReplayDbForTests,
   __setAgentSendReplayDbForTests,
   createOrReplayAgentSend,
-} from "./agentSendReplayService.js";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { agents, attachments, channels, messages, servers, users } from "../db/schema.js";
+} from "./agentSendReplayService";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { agents, attachments, channels, messages, servers, users } from "../db/schema";
+import { __setChannelWriterFenceTransactionTestAdapterForTests } from "./channelConversionFenceService";
 
 
 type InsertCapture = {
@@ -135,8 +135,16 @@ function makeDb(options: {
 }
 
 afterEach(async () => {
+  __setChannelWriterFenceTransactionTestAdapterForTests(null);
   __resetAgentSendReplayDbForTests();
   await closeTestDatabase();
+});
+
+beforeEach(() => {
+  // The in-memory replay adapter intentionally has no SQL executor. Install
+  // the explicit test transaction contract rather than making production
+  // fence code branch on the runtime shape of a fake.
+  __setChannelWriterFenceTransactionTestAdapterForTests(async () => undefined);
 });
 
 test("createOrReplayAgentSend persists a new agent message on first send", async () => {

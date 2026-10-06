@@ -23,12 +23,16 @@
 import type {
   AppConfigBoundsMap,
   AppConfigValue,
-} from "../../appConfigTransport.js";
+} from "../../appConfigTransport";
 
 /** Closed product app id for the Cleaner built-in. */
 export const CLEANER_APP_ID = "system.cleaner" as const;
 /** Closed notification-class identity for the Computer-local hint. */
 export const CLEANER_NOTIFICATION_CLASS = "memory_size_hint" as const;
+export const CLEANER_DISK_NOTIFICATION_CLASS = "disk_space_hint" as const;
+
+/** Local disk policy; kept off the closed config wire understood by older Computers. */
+export const CLEANER_DISK_FREE_PERCENT_THRESHOLD = 10;
 
 export const SECONDS_TO_MS = 1000;
 

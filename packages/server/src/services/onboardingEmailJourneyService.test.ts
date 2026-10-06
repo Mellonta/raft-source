@@ -1,17 +1,16 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { newsletterAudienceContacts, onboardingEmailJourneys, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { newsletterAudienceContacts, onboardingEmailJourneys, users } from "../db/schema";
 import {
   enqueueOnboardingEmailJourneyForUser,
   isOnboardingEmailJourneyEnabled,
   resetOnboardingEmailJourneyTestOverrides,
   setOnboardingEmailJourneyConfigForTest,
-} from "./onboardingEmailJourneyService.js";
+} from "./onboardingEmailJourneyService";
 
 
 async function seedVerifiedUser(email: string, name: string) {

@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import CreateAgentDialog from "../src/components/agent/CreateAgentDialog";

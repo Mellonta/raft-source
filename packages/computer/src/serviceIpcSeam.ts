@@ -2,10 +2,10 @@ import {
   createIpcServer,
   type IpcServer,
   type RequestHandlerMap,
-} from "./internal/ipc-server.js";
-import { createMachineAttestationHandler } from "./machineServiceAttestation.js";
-import { resetRunner, resetService } from "./reset.js";
-import { listRunners, readRunnerStatus, readServiceStatus } from "./lib/readers.js";
+} from "./internal/ipc-server";
+import { createMachineAttestationHandler } from "./machineServiceAttestation";
+import { resetRunner, resetService } from "./reset";
+import { listRunners, readRunnerStatus, readServiceStatus } from "./lib/readers";
 import {
   ServiceClientError,
   StateReaderError,
@@ -15,7 +15,7 @@ import {
   type RestartServiceResult,
   type UpgradeStartParams,
   type UpgradeStartResult,
-} from "./lib/types.js";
+} from "./lib/types";
 
 /**
  * Mutation surface the running service injects into its IPC seam so the

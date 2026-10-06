@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   AppWebhookConfigError,
   isPublicWebhookAddress,
   normalizeAppWebhookEndpoint,
-} from "./appWebhookConfigService.js";
+} from "./appWebhookConfigService";
 
 test("webhook endpoints require credential-free public HTTPS", () => {
   assert.equal(

@@ -8,11 +8,10 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { ComputerServiceError } from "./errors.js";
-import { login } from "./login.js";
-import type { ComputerApiEvent } from "../lib/events.js";
+import { ComputerServiceError } from "./errors";
+import { login } from "./login";
+import type { ComputerApiEvent } from "../lib/events";
 
 async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   const home = await mkdtemp(join(tmpdir(), "raft-computer-login-svc-"));

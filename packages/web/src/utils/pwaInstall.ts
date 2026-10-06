@@ -1,3 +1,5 @@
+import { trackEvent } from "../analytics/track";
+
 export type PwaInstallPlatform =
   | "ios_safari"
   | "ios_other"
@@ -130,10 +132,18 @@ export function readNumberStorage(storage: Storage, key: string): number | null 
 }
 
 export function recordPwaInstallEvent(event: PwaInstallTelemetryEvent): void {
-  // Analytics client is not wired in the web app yet. Keep the event shape
-  // centralized so a future tracking adapter can consume this function without
-  // touching install-prompt UI code.
   if (import.meta.env.DEV) {
     console.info("[pwa-install]", event.event, event);
   }
+  // Registered product events (RFC-067); trackEvent sends nothing until
+  // ingestion exists.
+  trackEvent(event.event, {
+    platform: event.platform,
+    surface: event.surface,
+    trigger: event.trigger,
+    display_mode: event.displayMode,
+    session_count_bucket: event.sessionCountBucket,
+    cooldown_state: event.cooldownState,
+    outcome: event.outcome,
+  });
 }

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { getDefaultAvatarDataUrl, resolveAvatarImageFetchTargetUrl } from "../src/utils/selectScreenshot";
 
 test("share screenshot routes CDN avatar URLs through the API avatar endpoint", () => {

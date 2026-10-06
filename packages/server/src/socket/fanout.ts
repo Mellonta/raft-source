@@ -1,5 +1,5 @@
 import type { Server } from "socket.io";
-import { getRedisPub, isRedisAvailable } from "../redis.js";
+import { getRedisPub, isRedisAvailable } from "../redis";
 
 /** Upper bound on one cross-replica acknowledged emit. The adapter's own
  * request timeout only starts after its `serverCount()` round trip, which

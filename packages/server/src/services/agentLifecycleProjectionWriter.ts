@@ -20,7 +20,7 @@ import {
   type AgentLifecycleEventType,
   type AgentLifecycleTraceAttrs,
   type CreateAgentLifecycleProjectionInput,
-} from "./agentLifecycleEvents.js";
+} from "./agentLifecycleEvents";
 import {
   lifecyclePlanShadowDecision,
   shouldEmitLiveActivity,
@@ -28,7 +28,7 @@ import {
   type LifecycleObservationClass,
   type LifecycleRuntimeState,
   type LifecycleShadowSignalSite,
-} from "./agentLifecycleReducer.js";
+} from "./agentLifecycleReducer";
 
 export type ActivityPersistenceOutcome = "applied" | "deduped" | "error";
 

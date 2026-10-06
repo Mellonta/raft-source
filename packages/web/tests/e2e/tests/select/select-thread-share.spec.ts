@@ -95,12 +95,25 @@ test("ThreadPanel select mode mounts toolbar in the thread, not in the channel",
     );
   }
 
+  // Keep a neighboring timeline row mounted so the thread opener must stay
+  // anchored to the requested parent instead of relying on a row position.
+  const neighbor = await request.post(`${seedState.urls.api}/api/messages`, {
+    headers: {
+      Authorization: `Bearer ${login.accessToken}`,
+      "X-Server-Id": seedState.server.id,
+    },
+    data: { channelId: seedState.channel.id, content: `${tag} neighbor` },
+  });
+  expect(neighbor.ok()).toBeTruthy();
+
   const parentCard = page.locator(`#message-${parentMsg.id}`).first();
   await parentCard.scrollIntoViewIfNeeded();
   await parentCard.hover();
-  // The hover-only affordance is incidental here; this test is about thread
-  // select-mode routing after the panel opens.
-  await parentCard.getByLabel("Reply in thread").click({ force: true });
+  // Use Playwright's normal actionability checks so a live timeline reflow
+  // cannot turn the resolved parent action into a stale coordinate click.
+  await parentCard.getByLabel("Reply in thread").click();
+  const threadParent = page.getByTestId("thread-panel-parent");
+  await expect(threadParent).toContainText(`${tag} parent`);
   const threadScroller = page.getByTestId("thread-message-scroller");
   await expect(threadScroller.getByText(`${tag} reply 1`)).toBeVisible();
 

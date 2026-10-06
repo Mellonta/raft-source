@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   openAttachmentPreviewExternalLink,
   validateAttachmentPreviewExternalLink,
-} from "../src/components/message/attachmentPreviewExternalLink.js";
+} from "../src/components/message/attachmentPreviewExternalLink";
 import type {
   AttachmentPreviewExternalLink,
-} from "../src/components/message/attachmentPreviewExternalLink.js";
-import { parseExternalLinkHotspots } from "../src/components/message/attachmentPreviewBridge.js";
+} from "../src/components/message/attachmentPreviewExternalLink";
+import { parseExternalLinkHotspots } from "../src/components/message/attachmentPreviewBridge";
 
 const appOrigin = "https://app.raft.build";
 

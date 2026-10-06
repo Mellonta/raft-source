@@ -1,4 +1,4 @@
-import type { CompletedTraceSpan, TraceAttributes, TraceSink, TraceSpanKind, TraceStatus } from "@botiverse/raft-shared";
+import type { CompletedTraceSpan, TraceAttributes, TraceLogEvent, TraceSink, TraceSpanKind, TraceStatus } from "@botiverse/raft-shared";
 
 export type OtlpHttpTraceSinkFetch = (
   input: string | URL,
@@ -68,13 +68,30 @@ type OtlpSpan = {
   };
 };
 
+type OtlpLogRecord = {
+  timeUnixNano: string;
+  observedTimeUnixNano: string;
+  severityNumber: number;
+  severityText: string;
+  eventName: string;
+  body: { stringValue: string };
+  traceId: string;
+  spanId: string;
+  attributes: OtlpAttribute[];
+};
+
+// Version of the standalone event record shape sent as an OTLP log.
+export const TRACE_EVENT_SCHEMA_VERSION = 1;
+
 /**
  * Best-effort bridge from Slock's lightweight tracing contract to OTLP/HTTP JSON.
- * It never blocks the span producer path: spans enter a bounded queue and are
- * dropped oldest-first if the exporter cannot keep up.
+ * It never blocks the span producer path: spans and standalone events enter
+ * bounded queues and are dropped oldest first if the exporter cannot keep up.
+ * Spans go to `/v1/traces`; standalone events go to `/v1/logs`.
  */
 export class OtlpHttpTraceSink implements TraceSink {
-  private readonly endpoint: string;
+  private readonly tracesEndpoint: string;
+  private readonly logsEndpoint: string;
   private readonly serviceName: string;
   private readonly deploymentEnvironment?: string;
   private readonly serviceVersion?: string;
@@ -92,19 +109,14 @@ export class OtlpHttpTraceSink implements TraceSink {
   private readonly flyAllocId?: string;
   private readonly flyRegion?: string;
   private readonly headers: Record<string, string>;
-  private readonly batchSize: number;
-  private readonly flushIntervalMs: number;
-  private readonly maxQueueSize: number;
   private readonly timeoutMs: number;
   private readonly fetchImpl: OtlpHttpTraceSinkFetch;
-  private readonly onError: (err: Error) => void;
-  private readonly queue: CompletedTraceSpan[] = [];
-  private flushTimer: ReturnType<typeof setTimeout> | null = null;
-  private flushing = false;
-  private droppedCount = 0;
+  private readonly spanQueue: ExportQueue<CompletedTraceSpan>;
+  private readonly eventQueue: ExportQueue<TraceLogEvent>;
 
   constructor(options: OtlpHttpTraceSinkOptions) {
-    this.endpoint = normalizeOtlpTracesEndpoint(options.endpoint);
+    this.tracesEndpoint = normalizeOtlpTracesEndpoint(options.endpoint);
+    this.logsEndpoint = otlpLogsEndpointFor(this.tracesEndpoint);
     this.serviceName = options.serviceName;
     this.deploymentEnvironment = options.deploymentEnvironment;
     this.serviceVersion = options.serviceVersion;
@@ -125,31 +137,154 @@ export class OtlpHttpTraceSink implements TraceSink {
       "content-type": "application/json",
       ...options.headers,
     };
-    this.batchSize = Math.max(1, options.batchSize ?? 64);
-    this.flushIntervalMs = Math.max(1, options.flushIntervalMs ?? 1000);
-    this.maxQueueSize = Math.max(this.batchSize, options.maxQueueSize ?? 4096);
+    const batchSize = Math.max(1, options.batchSize ?? 64);
+    const queueOptions = {
+      batchSize,
+      flushIntervalMs: Math.max(1, options.flushIntervalMs ?? 1000),
+      maxQueueSize: Math.max(batchSize, options.maxQueueSize ?? 4096),
+      onError: options.onError ?? ((err: Error) => console.warn("[TraceExporter] OTLP export failed:", err.message)),
+    };
     this.timeoutMs = Math.max(1, options.timeoutMs ?? 3000);
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
-    this.onError = options.onError ?? ((err) => console.warn("[TraceExporter] OTLP export failed:", err.message));
+    this.spanQueue = new ExportQueue({
+      ...queueOptions,
+      exportBatch: (spans) => this.post(this.tracesEndpoint, this.toOtlpPayload(spans)),
+    });
+    this.eventQueue = new ExportQueue({
+      ...queueOptions,
+      exportBatch: (events) => this.post(this.logsEndpoint, this.toOtlpLogsPayload(events)),
+    });
   }
 
   record(span: CompletedTraceSpan): void {
-    if (this.queue.length >= this.maxQueueSize) {
-      this.queue.shift();
+    this.spanQueue.add(span);
+  }
+
+  recordLogEvent(event: TraceLogEvent): void {
+    this.eventQueue.add(event);
+  }
+
+  getDroppedCount(): number {
+    return this.spanQueue.droppedCount + this.eventQueue.droppedCount;
+  }
+
+  async shutdown(): Promise<void> {
+    await Promise.all([this.spanQueue.shutdown(), this.eventQueue.shutdown()]);
+  }
+
+  async flush(): Promise<void> {
+    await Promise.all([this.spanQueue.flush(), this.eventQueue.flush()]);
+  }
+
+  private async post(endpoint: string, payload: unknown): Promise<void> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    timeout.unref?.();
+
+    try {
+      const response = await this.fetchImpl(endpoint, {
+        method: "POST",
+        headers: this.headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`OTLP HTTP ${response.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private toOtlpPayload(spans: readonly CompletedTraceSpan[]) {
+    return {
+      resourceSpans: [
+        {
+          resource: { attributes: this.resourceAttributes() },
+          scopeSpans: [
+            {
+              scope: {
+                name: "@botiverse/raft-server",
+              },
+              spans: spans.map((span) => toOtlpSpan(span)),
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  private toOtlpLogsPayload(events: readonly TraceLogEvent[]) {
+    return {
+      resourceLogs: [
+        {
+          resource: { attributes: this.resourceAttributes() },
+          scopeLogs: [
+            {
+              scope: {
+                name: "@botiverse/raft-server",
+              },
+              logRecords: events.map((event) => toOtlpLogRecord(event)),
+            },
+          ],
+        },
+      ],
+    };
+  }
+
+  private resourceAttributes(): OtlpAttribute[] {
+    return compactAttributes({
+      "service.name": this.serviceName,
+      "service.version": this.serviceVersion,
+      "service.revision": this.serviceRevision,
+      "service.instance.id": this.serviceInstanceId,
+      "slock.deployment_instance_source": this.deploymentInstanceSource,
+      "slock.deployment_identity_state": this.deploymentIdentityState,
+      "slock.ecs_task_id": this.ecsTaskId,
+      "aws.ecs.task.family": this.ecsTaskFamily,
+      "aws.ecs.task.revision": this.ecsTaskRevision,
+      "slock.fly_app_name": this.flyAppName,
+      "slock.fly_image_ref": this.flyImageRef,
+      "slock.fly_machine_id": this.flyMachineId,
+      "slock.fly_instance_id": this.flyInstanceId,
+      "slock.fly_alloc_id": this.flyAllocId,
+      "slock.fly_region": this.flyRegion,
+      "deployment.environment": this.deploymentEnvironment,
+      "telemetry.sdk.name": "slock-basic-tracer",
+    });
+  }
+}
+
+interface ExportQueueOptions<T> {
+  batchSize: number;
+  flushIntervalMs: number;
+  maxQueueSize: number;
+  onError: (err: Error) => void;
+  exportBatch: (items: readonly T[]) => Promise<void>;
+}
+
+class ExportQueue<T> {
+  private readonly items: T[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private flushing = false;
+  droppedCount = 0;
+
+  constructor(private readonly options: ExportQueueOptions<T>) {}
+
+  add(item: T): void {
+    if (this.items.length >= this.options.maxQueueSize) {
+      this.items.shift();
       this.droppedCount += 1;
     }
-    this.queue.push(span);
+    this.items.push(item);
 
-    if (this.queue.length >= this.batchSize) {
+    if (this.items.length >= this.options.batchSize) {
       void this.flush();
       return;
     }
 
     this.scheduleFlush();
-  }
-
-  getDroppedCount(): number {
-    return this.droppedCount;
   }
 
   async shutdown(): Promise<void> {
@@ -166,19 +301,19 @@ export class OtlpHttpTraceSink implements TraceSink {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
-    if (this.queue.length === 0) return;
+    if (this.items.length === 0) return;
 
     this.flushing = true;
-    const spans = this.queue.splice(0, this.batchSize);
+    const batch = this.items.splice(0, this.options.batchSize);
 
     try {
-      await this.exportBatch(spans);
+      await this.options.exportBatch(batch);
     } catch (err) {
-      this.droppedCount += spans.length;
-      this.onError(err instanceof Error ? err : new Error(String(err)));
+      this.droppedCount += batch.length;
+      this.options.onError(err instanceof Error ? err : new Error(String(err)));
     } finally {
       this.flushing = false;
-      if (this.queue.length > 0) {
+      if (this.items.length > 0) {
         this.scheduleFlush();
       }
     }
@@ -189,67 +324,8 @@ export class OtlpHttpTraceSink implements TraceSink {
     this.flushTimer = setTimeout(() => {
       this.flushTimer = null;
       void this.flush();
-    }, this.flushIntervalMs);
+    }, this.options.flushIntervalMs);
     this.flushTimer.unref?.();
-  }
-
-  private async exportBatch(spans: readonly CompletedTraceSpan[]): Promise<void> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-    timeout.unref?.();
-
-    try {
-      const response = await this.fetchImpl(this.endpoint, {
-        method: "POST",
-        headers: this.headers,
-        body: JSON.stringify(this.toOtlpPayload(spans)),
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        throw new Error(`OTLP HTTP ${response.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-      }
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  private toOtlpPayload(spans: readonly CompletedTraceSpan[]) {
-    return {
-      resourceSpans: [
-        {
-          resource: {
-            attributes: compactAttributes({
-              "service.name": this.serviceName,
-              "service.version": this.serviceVersion,
-              "service.revision": this.serviceRevision,
-              "service.instance.id": this.serviceInstanceId,
-              "slock.deployment_instance_source": this.deploymentInstanceSource,
-              "slock.deployment_identity_state": this.deploymentIdentityState,
-              "slock.ecs_task_id": this.ecsTaskId,
-              "aws.ecs.task.family": this.ecsTaskFamily,
-              "aws.ecs.task.revision": this.ecsTaskRevision,
-              "slock.fly_app_name": this.flyAppName,
-              "slock.fly_image_ref": this.flyImageRef,
-              "slock.fly_machine_id": this.flyMachineId,
-              "slock.fly_instance_id": this.flyInstanceId,
-              "slock.fly_alloc_id": this.flyAllocId,
-              "slock.fly_region": this.flyRegion,
-              "deployment.environment": this.deploymentEnvironment,
-              "telemetry.sdk.name": "slock-basic-tracer",
-            }),
-          },
-          scopeSpans: [
-            {
-              scope: {
-                name: "@botiverse/raft-server",
-              },
-              spans: spans.map((span) => toOtlpSpan(span)),
-            },
-          ],
-        },
-      ],
-    };
   }
 }
 
@@ -261,6 +337,31 @@ export function normalizeOtlpTracesEndpoint(endpoint: string): string {
     return withoutTrailingSlash;
   }
   return `${withoutTrailingSlash}/v1/traces`;
+}
+
+export function otlpLogsEndpointFor(tracesEndpoint: string): string {
+  return tracesEndpoint.replace(/\/v1\/traces$/, "/v1/logs");
+}
+
+// Telescope keeps the log body but drops `eventName`, so the event name is
+// also written as the body string.
+export function toOtlpLogRecord(event: TraceLogEvent): OtlpLogRecord {
+  const timeUnixNano = msToUnixNano(event.timeMs);
+  return {
+    timeUnixNano,
+    observedTimeUnixNano: timeUnixNano,
+    severityNumber: 9,
+    severityText: "INFO",
+    eventName: event.name,
+    body: { stringValue: event.name },
+    traceId: event.context?.traceId ?? "",
+    spanId: event.context?.spanId ?? "",
+    attributes: compactAttributes({
+      ...event.attrs,
+      "slock.surface": event.surface,
+      "slock.schema_version": TRACE_EVENT_SCHEMA_VERSION,
+    }),
+  };
 }
 
 export function toOtlpSpan(span: CompletedTraceSpan): OtlpSpan {

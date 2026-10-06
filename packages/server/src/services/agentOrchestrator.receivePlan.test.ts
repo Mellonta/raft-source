@@ -1,7 +1,6 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
-import { planReceiveAction } from "./agentOrchestrator.js";
+import { planReceiveAction } from "./agentOrchestrator";
 
 test("planReceiveAction returns buffered when messages are already queued", () => {
   assert.equal(

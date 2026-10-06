@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { devOverlayPlacementToPosition, parseDevOverlayPlacement, snapDevOverlayToEdge } from "../src/components/dev/devOverlayPosition";
 
 const viewport = { width: 390, height: 844 };

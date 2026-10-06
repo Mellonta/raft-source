@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { getAuthVerdict } from "../src/utils/authVerdict.js";
+import { getAuthVerdict } from "../src/utils/authVerdict";
 
 test("auth verdict treats refresh auth failures as terminal during restore", () => {
   const common = {

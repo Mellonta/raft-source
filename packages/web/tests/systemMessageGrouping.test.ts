@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createIntl } from "react-intl";
 import {
   buildSystemMessageRenderStates,
@@ -74,7 +73,7 @@ test("collapses non-ASCII task actors and recurring reminder notices", () => {
     [
       system('📌 哭哭 claimed #334 "agent dm 的view还是有问题"'),
       system('👀 哭哭 moved #334 "agent dm 的view还是有问题" to In Review'),
-      system("Reminder (recurring): #users:a545a4d3 — Check tong07@163.com reply re: outbound DM test result, relay to Kai"),
+      system("Reminder (recurring): #users:a545a4d3 — Check ops-contact@example.com reply re: outbound DM test result, relay to Kai"),
     ],
     enIntl.formatMessage,
   );

@@ -1,7 +1,7 @@
 import type { ReminderStatus, ReminderSummary } from "@botiverse/raft-shared";
-import type { ApiClient } from "../../client.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { cliError } from "../../core/errors.js";
+import type { ApiClient } from "../../client";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { cliError } from "../../core/errors";
 
 export async function resolveReminderId(
   client: ApiClient,

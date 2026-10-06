@@ -5,6 +5,7 @@
     "moduleResolution": "bundler",
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    "types": ["node", "vitest/globals"],
     "declaration": true,
     "outDir": "./dist",
     "rootDir": "./src"

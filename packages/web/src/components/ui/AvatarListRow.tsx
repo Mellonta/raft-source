@@ -1,5 +1,6 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 import SurfaceListItem from "./SurfaceListItem";
+import Tooltip from "./Tooltip";
 
 /**
  * Canonical "card-style row with an avatar on the left" primitive — the
@@ -119,18 +120,18 @@ export default function AvatarListRow({
     <div className="min-w-0 flex-1">
       {align === "start" ? (
         <div className="flex min-w-0 flex-col gap-1">
-          <span className="truncate text-sm font-bold text-black">{name}</span>
+          <span className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{name}</span>
           {subtitle != null && subtitle !== false && (
-            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs font-mono text-black/50">
+            <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs font-mono text-foreground-muted theme-brutal:text-black/50">
               {subtitle}
             </span>
           )}
         </div>
       ) : (
         <div className="flex min-w-0 flex-wrap items-baseline gap-x-2">
-          <span className="truncate text-sm font-bold text-black">{name}</span>
+          <span className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{name}</span>
           {subtitle != null && subtitle !== false && (
-            <span className="text-xs font-mono text-black/50">{subtitle}</span>
+            <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/50">{subtitle}</span>
           )}
         </div>
       )}
@@ -153,6 +154,19 @@ export default function AvatarListRow({
     </>
   );
   const hasAction = actionContent != null && actionContent !== false;
+  // Route buttonProps.title through the RUI Tooltip instead of the native
+  // attribute (title= migration); all other buttonProps pass through.
+  const { title: buttonTitle, ...restButtonProps } = buttonProps ?? {};
+  const rowButton = (
+    <button
+      {...restButtonProps}
+      type="button"
+      onClick={onClick}
+      className={`flex min-w-0 flex-1 gap-3 text-left ${itemsAlignClass}`}
+    >
+      {body}
+    </button>
+  );
   return (
     <SurfaceListItem
       selected={selected}
@@ -161,14 +175,7 @@ export default function AvatarListRow({
     >
       <div className={`flex w-full min-w-0 gap-3 ${itemsAlignClass}`}>
         {interactive ? (
-          <button
-            {...buttonProps}
-            type="button"
-            onClick={onClick}
-            className={`flex min-w-0 flex-1 gap-3 text-left ${itemsAlignClass}`}
-          >
-            {body}
-          </button>
+          buttonTitle ? <Tooltip content={buttonTitle}>{rowButton}</Tooltip> : rowButton
         ) : (
           <div className={`flex min-w-0 flex-1 gap-3 ${itemsAlignClass}`}>{body}</div>
         )}

@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   AUTOCOMPLETE_TRIGGER_QUERY,
   CHANNEL_TRIGGER,
   MENTION_TRIGGER,
-} from "../src/components/message/autocompleteTriggers.js";
+} from "../src/components/message/autocompleteTriggers";
 import {
   buildMentionCandidateGroups,
   buildMentionCandidateGroupsFromRankedCandidates,
@@ -12,11 +11,11 @@ import {
   getMentionCandidateDescription,
   getMentionCandidateServerLabel,
   isMemberScopedMentionChannel,
-} from "../src/components/message/mentionCandidates.js";
+} from "../src/components/message/mentionCandidates";
 import type {
   MentionCandidate,
-} from "../src/components/message/mentionCandidates.js";
-import type { Message } from "../src/store/messageStore.js";
+} from "../src/components/message/mentionCandidates";
+import type { Message } from "../src/store/messageStore";
 
 const candidates: MentionCandidate[] = [
   { id: "member-idle", name: "alice", displayName: "Alice", type: "user", avatarUrl: null },

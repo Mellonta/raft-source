@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +37,93 @@ type VisualCase = {
 
 const testDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(testDir, "..");
+const GOOGLE_FONT_CSS_URL =
+  "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap";
+// raft-ui's own fonts.css (imported by packages/web/src/index.css as
+// `@import "raft-ui/fonts.css"`) opens with this exact Google Fonts import.
+// It is a legitimate request from the app, not a leak: it gets the same
+// treatment as the app's own imports above — fulfilled with the bundled local
+// font CSS, so the run stays offline and deterministic. Copy the URL verbatim
+// from packages/web/node_modules/raft-ui/dist/fonts.css when raft-ui changes it.
+const RAFT_UI_FONT_CSS_URL =
+  "https://fonts.googleapis.com/css2?family=Geist:wght@400..700&family=Geist+Mono:wght@300..700&family=Hanken+Grotesk:wght@300..700&family=Inter:wght@400;500;600;700&display=swap";
+const GOOGLE_FONT_CSS_URLS = new Set([
+  GOOGLE_FONT_CSS_URL,
+  "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap",
+  RAFT_UI_FONT_CSS_URL,
+]);
+const webFontRoot = resolve(packageRoot, "../web/src/assets/fonts");
+const visualFontCssSource = readFileSync(resolve(webFontRoot, "fonts.css"), "utf8");
+if (createHash("sha256").update(visualFontCssSource).digest("hex")
+  !== "062661ae65973cc7bd9fcc3d82309060b4360581ee7ed72dd45138402e580344") {
+  throw new Error("visual font CSS digest mismatch: packages/web/src/assets/fonts/fonts.css");
+}
+const VISUAL_FONT_CSS = visualFontCssSource
+  .replace(/url\(\.\/([^)]+)\)/g, "url('/src/assets/fonts/$1')");
+const VISUAL_FONT_ASSETS = new Map([
+  [
+    "/src/assets/fonts/space-grotesk-0.ttf",
+    {
+      path: resolve(packageRoot, "../web/src/assets/fonts/space-grotesk-0.ttf"),
+      sha256: "ec926d5065eaca49a48f96e312bbae0bbc5733c24215cf5dfabbdccee926fef7",
+    },
+  ],
+  [
+    "/src/assets/fonts/space-grotesk-1.ttf",
+    {
+      path: resolve(packageRoot, "../web/src/assets/fonts/space-grotesk-1.ttf"),
+      sha256: "3e699ead1876244fa392243054ddefe7cf631b488438828a8a100731a22ab995",
+    },
+  ],
+  [
+    "/src/assets/fonts/space-grotesk-2.ttf",
+    {
+      path: resolve(packageRoot, "../web/src/assets/fonts/space-grotesk-2.ttf"),
+      sha256: "6c0346b8d297ebdc225832833e03e884a26ad99d265ecd3924d46e1ba285ea87",
+    },
+  ],
+  [
+    "/src/assets/fonts/space-grotesk-3.ttf",
+    {
+      path: resolve(packageRoot, "../web/src/assets/fonts/space-grotesk-3.ttf"),
+      sha256: "3e756954468ff1cb302dae0414262e72f76a67d87bef3fa1f3226cd0fb9b2d85",
+    },
+  ],
+  [
+    "/src/assets/fonts/space-mono-4.ttf",
+    {
+      path: resolve(packageRoot, "../web/src/assets/fonts/space-mono-4.ttf"),
+      sha256: "829aad32ab9525358de2a7ebc718d05a6b335e67421aad5e1e09cd1fa796af4e",
+    },
+  ],
+  [
+    "/src/assets/fonts/space-mono-5.ttf",
+    {
+      path: resolve(packageRoot, "../web/src/assets/fonts/space-mono-5.ttf"),
+      sha256: "5be2b984cdb8befc8ad1871d10f1aa8337f7d2bae3c6bf0ce720d0745ac1a8ec",
+    },
+  ],
+  [
+    "https://fonts.gstatic.com/s/hankengrotesk/v12/ieVn2YZDLWuGJpnzaiwFXS9tYtpd59CxCis4.woff2",
+    {
+      path: resolve(webFontRoot, "hanken-grotesk-quotes.woff2"),
+      sha256: "1f21c6eaa0000f3329cfcfac966b43d5bebf5aa610303e33294ac31bc6f4bb59",
+    },
+  ],
+]);
+
+for (const asset of VISUAL_FONT_ASSETS.values()) {
+  let contents: Buffer;
+  try {
+    contents = readFileSync(asset.path);
+  } catch (error) {
+    throw new Error(`visual font asset missing: ${asset.path}`, { cause: error });
+  }
+  const actual = createHash("sha256").update(contents).digest("hex");
+  if (actual !== asset.sha256) {
+    throw new Error(`visual font asset digest mismatch: ${asset.path}`);
+  }
+}
 const reactRepoRoot = process.env.SLOCK_REACT_REPO_DIR
   ? resolve(process.env.SLOCK_REACT_REPO_DIR)
   : resolve(testDir, "../../..");
@@ -212,9 +300,45 @@ function visualBillingInfo(caseId: string) {
   };
 }
 
-async function quietApi(page: any, caseId: string) {
+type VisualFontRouteState = {
+  served: Set<string>;
+  unexpectedExternalUrls: string[];
+};
+
+async function quietApi(page: any, caseId: string): Promise<VisualFontRouteState> {
+  const visualFonts: VisualFontRouteState = {
+    served: new Set(),
+    unexpectedExternalUrls: [],
+  };
   await page.route("**/*", (route: any) => {
-    const pathname = new URL(route.request().url()).pathname;
+    const requestUrl = route.request().url();
+    const parsedUrl = new URL(requestUrl);
+    if (GOOGLE_FONT_CSS_URLS.has(requestUrl)) {
+      visualFonts.served.add(requestUrl);
+      route.fulfill({
+        status: 200,
+        contentType: "text/css; charset=utf-8",
+        body: VISUAL_FONT_CSS,
+      });
+      return;
+    }
+    const fontAsset = VISUAL_FONT_ASSETS.get(parsedUrl.pathname)
+      ?? VISUAL_FONT_ASSETS.get(requestUrl);
+    if (fontAsset) {
+      visualFonts.served.add(requestUrl);
+      route.fulfill({
+        status: 200,
+        contentType: parsedUrl.pathname.endsWith(".woff2") ? "font/woff2" : "font/ttf",
+        path: fontAsset.path,
+      });
+      return;
+    }
+    if (parsedUrl.hostname === "fonts.googleapis.com" || parsedUrl.hostname === "fonts.gstatic.com") {
+      visualFonts.unexpectedExternalUrls.push(requestUrl);
+      route.fulfill({ status: 502, body: "unexpected external visual font request" });
+      return;
+    }
+    const pathname = parsedUrl.pathname;
     if (!pathname.startsWith("/api/")) {
       route.continue();
       return;
@@ -282,6 +406,30 @@ async function quietApi(page: any, caseId: string) {
             },
           ],
         }),
+      });
+      return;
+    }
+    // components.channel.members.add-panel clicks the add-member entry, but that
+    // entry is gated on `showAddEntry = !membersLoading && canAddChannelMembers`
+    // and the roster comes from this endpoint (useChannelMembers -> api.get).
+    // With no backend the request never settles, `membersLoading` stays true
+    // forever, and NEITHER add-member button renders — so the case's second
+    // interaction times out. Same shape as the create-agent catalog above.
+    //
+    // The payload deliberately returns fewer members than the seeded server
+    // roster: `hasAvailable` is what un-disables the button, and it is true only
+    // when somebody on the server is not yet in the channel.
+    //
+    // Scoped to this one case: serving a roster to every channel case would
+    // change unrelated visual baselines.
+    if (
+      caseId === "components.channel.members.add-panel"
+      && /\/channels\/[^/]+\/members$/.test(pathname)
+    ) {
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ agents: [], humans: [], externalMembers: [] }),
       });
       return;
     }
@@ -430,21 +578,6 @@ async function quietApi(page: any, caseId: string) {
             allowedScopes: [], logoUrl: null, humanMarketplaceVisible: true,
             createdByUserId: fxOwner.id, createdAt: fxTimes.entityCreatedAtIso, updatedAt: fxTimes.entityCreatedAtIso,
             installedAt: fxTimes.entityCreatedAtIso, publisherName: "Raft Labs", privateShared: false,
-          },
-        ]),
-      });
-      return;
-    }
-    if (pathname.endsWith("/integrations/built-in")) {
-      route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify([
-          {
-            id: "builtin_github", clientId: "github", appType: "slock_builtin",
-            name: "GitHub", description: "Built-in source control integration.",
-            homepageUrl: "https://github.com", agentManifestUrl: null, allowedScopes: [],
-            humanMarketplaceVisible: true, createdAt: fxTimes.entityCreatedAtIso, updatedAt: fxTimes.entityCreatedAtIso,
           },
         ]),
       });
@@ -757,6 +890,24 @@ async function quietApi(page: any, caseId: string) {
       });
       return;
     }
+    // Usage reads are unconditional after rollout retirement. Keep these
+    // fixtures explicitly without a snapshot, including the follow-up refresh.
+    if (/^\/api\/servers\/[^/]+\/machines\/[^/]+\/runtime-account-usage\/[^/]+$/.test(pathname)) {
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ state: "missing", snapshot: null }),
+      });
+      return;
+    }
+    if (/^\/api\/servers\/[^/]+\/machines\/[^/]+\/runtime-account-usage\/[^/]+\/refresh$/.test(pathname)) {
+      route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({ accepted: true, state: "requested" }),
+      });
+      return;
+    }
     if (isAgentDetailSubRoute(pathname, "activity-log")) {
       route.fulfill({
         status: 200,
@@ -879,8 +1030,10 @@ async function quietApi(page: any, caseId: string) {
     }
     if (pathname === "/api/tasks/server") {
       // Must mirror the render host's primed useTaskStore.serverTasks (shared
-      // tasksFixture.json) — TasksPanel's mount-time loadServerTasks() would
-      // otherwise replace the primed cards (task #353).
+      // tasksFixture.json) — TasksPanel's mount-time summary-lane loads (task
+      // #8: ?detail=summary&status=..., matched here on pathname) would
+      // otherwise replace the primed cards (task #353). No next_cursor key:
+      // each lane reports no further pages.
       route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -1307,6 +1460,15 @@ async function quietApi(page: any, caseId: string) {
       });
       return;
     }
+    // Events are paginated; the integrations list below still returns an array.
+    if (/^\/api\/integrations\/agents\/[^/]+\/events$/.test(pathname)) {
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ events: [], nextCursor: null }),
+      });
+      return;
+    }
     if (pathname.startsWith("/api/integrations/agents/")) {
       route.fulfill({
         status: 200,
@@ -1321,6 +1483,7 @@ async function quietApi(page: any, caseId: string) {
       body: JSON.stringify({ agents: [], humans: [], results: [] }),
     });
   });
+  return visualFonts;
 }
 
 async function seedVisualCase(page: Page, visualCase: VisualCase) {
@@ -1423,12 +1586,61 @@ async function applyCaseFixtureState(page: Page, visualCase: VisualCase) {
   await page.getByRole("option", { name: "Custom", exact: true }).click();
   await page.getByPlaceholder("https://gateway.example.com").fill("https://gateway.example.com");
   await page.getByPlaceholder("sk-ant-...").fill("visual-test-key");
+  // #7207 removed the nested Advanced disclosure: MORE now reveals Reasoning /
+  // MODE / Claude Command / env vars directly, so the Claude Command input is
+  // reachable straight after MORE. The extra Advanced click this used to need
+  // now waits forever on a button that no longer exists.
   await page.getByRole("button", { name: "More", exact: true }).click();
-  await page.getByRole("button", { name: "Advanced", exact: true }).click();
   await page.getByPlaceholder("claude").fill("claude");
   await page.locator(".fixed.inset-0").evaluate((element) => {
     element.scrollTop = 0;
   });
+}
+
+async function assertVisualFontsReady(page: Page, visualFonts: VisualFontRouteState) {
+  const faces = await page.evaluate(async () => {
+    const probes = [
+      { family: "Space Grotesk", descriptor: "400 16px 'Space Grotesk'", text: "Raft" },
+      { family: "Space Grotesk", descriptor: "700 16px 'Space Grotesk'", text: "Raft" },
+      { family: "Space Mono", descriptor: "400 16px 'Space Mono'", text: "Raft" },
+      { family: "Space Mono", descriptor: "700 16px 'Space Mono'", text: "Raft" },
+      { family: "Raft Quote Glyphs", descriptor: "400 16px 'Raft Quote Glyphs'", text: "\"" },
+    ];
+    const results = await Promise.all(probes.map(async (probe) => {
+      const matchingFaces = [...document.fonts].filter((face) => face.family === probe.family);
+      await Promise.all(matchingFaces.map((face) => face.load()));
+      await document.fonts.load(probe.descriptor, probe.text);
+      const marker = document.createElement("span");
+      marker.style.font = probe.descriptor;
+      marker.textContent = probe.text;
+      document.body.append(marker);
+      const computedFamily = getComputedStyle(marker).fontFamily;
+      marker.remove();
+      return {
+        ...probe,
+        computedFamily,
+        loadedStatuses: matchingFaces.map((face) => face.status),
+      };
+    }));
+    await document.fonts.ready;
+    return results;
+  });
+
+  expect(visualFonts.unexpectedExternalUrls).toEqual([]);
+  // The app's font CSS import is raft-ui's (index.css `@import "raft-ui/fonts.css"`);
+  // the legacy Space Grotesk URL stays in GOOGLE_FONT_CSS_URLS for other surfaces.
+  expect(visualFonts.served.has(RAFT_UI_FONT_CSS_URL)).toBe(true);
+  for (const assetUrl of VISUAL_FONT_ASSETS.keys()) {
+    const served = assetUrl.startsWith("/")
+      ? [...visualFonts.served].some((url) => new URL(url).pathname === assetUrl)
+      : visualFonts.served.has(assetUrl);
+    expect(served).toBe(true);
+  }
+  for (const face of faces) {
+    expect(face.computedFamily).toContain(face.family);
+    expect(face.loadedStatuses.length).toBeGreaterThan(0);
+    expect(face.loadedStatuses).toEqual(face.loadedStatuses.map(() => "loaded"));
+  }
 }
 
 for (const visualCase of cases) {
@@ -1441,7 +1653,7 @@ for (const visualCase of cases) {
     page.on("pageerror", (error: Error) => {
       console.log(`browser pageerror: ${error.message}`);
     });
-    await quietApi(page, visualCase.id);
+    const visualFonts = await quietApi(page, visualCase.id);
     // Every case renders against the fixture's declared instant, like the Android
     // visual host does (VisualFixtureData.Locale.NOW_EPOCH_MILLIS). Without this,
     // relative labels ("75 days ago" on screens.members.agent-detail.reminders)
@@ -1477,7 +1689,7 @@ for (const visualCase of cases) {
     const viewport = visualCase.viewport || { width: 390, height: 844, density: 1 };
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto(caseUrl(visualCase));
-    await page.evaluate(() => document.fonts.ready);
+    await assertVisualFontsReady(page, visualFonts);
     // The render host shows an explicit panel for unregistered case ids.
     // Fail here so body/viewport-selector cases cannot screenshot it as a
     // plausible-looking baseline.

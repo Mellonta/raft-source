@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { test } from "vitest";
 
 const correctionMigrationSql = readFileSync(
   resolve(import.meta.dirname, "../../drizzle/0138_eager_star_brand.sql"),

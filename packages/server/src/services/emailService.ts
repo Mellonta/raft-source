@@ -4,7 +4,7 @@ import {
   normalizeDisplayLocale,
   type DisplayLocale,
 } from "@botiverse/raft-shared";
-import { getAppUrl } from "../config/appUrl.js";
+import { getAppUrl } from "../config/appUrl";
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const BRAND_NAME = "Raft";
@@ -94,6 +94,7 @@ type SendEmailOptions = {
   from?: string;
   scheduledAt?: Date;
   idempotencyKey?: string;
+  headers?: Record<string, string>;
 };
 
 export type EmailDelivery = {
@@ -103,6 +104,7 @@ export type EmailDelivery = {
   html: string;
   replyTo?: string;
   scheduledAt?: string;
+  headers?: Record<string, string>;
 };
 
 let emailDeliveryObserverForTests: ((delivery: EmailDelivery) => void) | null = null;
@@ -127,6 +129,7 @@ async function sendEmail(
     html,
     ...(options.replyTo ? { replyTo: options.replyTo } : {}),
     scheduledAt: options.scheduledAt?.toISOString(),
+    ...(options.headers ? { headers: options.headers } : {}),
   };
   emailDeliveryObserverForTests?.(delivery);
   const client = getResend();
@@ -258,53 +261,6 @@ function emailButton(
 </div>`;
 }
 
-function feedbackCommunityUrl(): string {
-  return process.env.FEEDBACK_RECEIPT_COMMUNITY_URL || "https://app.raft.build/join/2ygbinDD9pvXuySuJrSEjg";
-}
-
-function feedbackReceiptFromEmail(): string {
-  return process.env.FEEDBACK_RECEIPT_FROM_EMAIL || `Cindy at ${BRAND_NAME} <cindy@raft.build>`;
-}
-
-export function isFeedbackReportReceiptEmailEnabled(): boolean {
-  return process.env.FEEDBACK_RECEIPT_EMAIL_ENABLED === "true";
-}
-
-export function renderFeedbackReportReceiptEmailHtml(input: {
-  recipientName?: string | null;
-  locale?: string | null;
-} = {}): string {
-  const communityUrl = feedbackCommunityUrl();
-  const recipientName = input.recipientName?.trim() ? escapeHtmlText(input.recipientName.trim()) : null;
-  const greeting = recipientName
-    ? `<p style="margin: 0 0 8px 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Hi ${recipientName},</p>`
-    : "";
-
-  return renderEmailLayout(`
-    <h1 style="margin: 0 0 16px 0; color: ${SLOCK_INK}; font-size: 22px; font-weight: bold;">We got your feedback 🙏</h1>
-    ${greeting}
-    <p style="margin: 0 0 8px 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Thanks for sending this our way — your report came through and it's with our team. We'll follow up.</p>
-    <p style="margin: 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Have a question or want to reach us? Come say hi in our community.</p>
-    ${emailButton(communityUrl, "Join the Raft community")}
-    <p class="slock-muted" style="margin: 0 0 16px 0; color: ${SLOCK_MUTED}; font-size: 13px; line-height: 1.5;">Or copy this link: <a class="slock-link" href="${communityUrl}" style="color: ${SLOCK_LINK}; word-break: break-all;">${communityUrl}</a></p>
-    <p style="margin: 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Thanks for helping make ${BRAND_NAME} better.</p>
-    <p style="margin: 24px 0 0 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">— Cindy &amp; the ${BRAND_NAME} team</p>
-  `);
-}
-
-export async function sendFeedbackReportReceiptEmail(
-  to: string,
-  input: {
-    recipientName?: string | null;
-    locale?: string | null;
-  } = {},
-): Promise<void> {
-  const html = renderFeedbackReportReceiptEmailHtml(input);
-  await sendEmail(to, "We got your feedback 🙏", html, {
-    from: feedbackReceiptFromEmail(),
-  });
-}
-
 export type AppReviewRequestEmailInput = {
   requestKind: "publish" | "offline";
   appName: string;
@@ -388,7 +344,7 @@ function onboardingReplyToEmail(): string {
 }
 
 function onboardingEmailFromEmail(): string {
-  return process.env.ONBOARDING_EMAIL_FROM_EMAIL || `RC from ${BRAND_NAME} <rc@raft.build>`;
+  return process.env.ONBOARDING_EMAIL_FROM_EMAIL || `Richard from ${BRAND_NAME} <richard@raft.build>`;
 }
 
 function onboardingBookingUrl(): string | null {
@@ -402,7 +358,7 @@ function onboardingGreeting(recipientName?: string | null): string {
 }
 
 function onboardingBookingLink(): string {
-  const bookingUrl = onboardingBookingUrl() || "https://cal.com/stdrc/quick-chat";
+  const bookingUrl = onboardingBookingUrl() || "https://cal.com/raft-build/quick-chat-about-raft";
   return `<a class="slock-link" href="${escapeHtmlText(bookingUrl)}" style="color: ${SLOCK_LINK}; text-decoration: underline;">here</a>`;
 }
 
@@ -471,7 +427,7 @@ export function renderOnboardingWelcomeEmailHtml(input: {
     <p style="margin: 0 0 12px 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Best way to feel it: spin up your first agent and hand it something real &mdash; ${onboardingAgentDocsLink()}.</p>
     <p style="margin: 0 0 12px 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Have any thoughts or feedback about the product? Grab 30 minutes with me ${bookingLink}.</p>
     <p style="margin: 0 0 24px 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Or just reply to this. I read every one.</p>
-    <p style="margin: 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">RC<br>Founder of ${BRAND_NAME}</p>
+    <p style="margin: 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Richard<br>Founder of ${BRAND_NAME}</p>
   `);
 }
 
@@ -501,7 +457,7 @@ export function renderOnboardingDayOneCheckInEmailHtml(input: {
     <p style="margin: 0 0 12px 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Hope you're settling in. How's it going with ${BRAND_NAME} so far?</p>
     <p style="margin: 0 0 12px 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Getting your agent team set up the way you want can take some figuring out, and I'd rather help early than leave you stuck.</p>
     <p style="margin: 0 0 24px 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">If anything's been confusing or hasn't worked how you expected, just reply and tell us. Or grab 30 minutes ${bookingLink}.</p>
-    <p style="margin: 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">RC<br>Founder of ${BRAND_NAME}</p>
+    <p style="margin: 0; color: ${SLOCK_INK}; font-size: 15px; line-height: 1.5;">Richard<br>Founder of ${BRAND_NAME}</p>
   `);
 }
 
@@ -537,6 +493,23 @@ type MobileAppEmailCopy = {
   cta: string;
   platformNote: string;
   accountFooter: string;
+  unsubscribe: string;
+  unsubscribePage: {
+    htmlLang: string;
+    confirmationTitle: string;
+    confirmationHeading: string;
+    confirmationBody: string;
+    submit: string;
+    successTitle: string;
+    successHeading: string;
+    successBody: string;
+    invalidTitle: string;
+    invalidHeading: string;
+    invalidBody: string;
+    failureTitle: string;
+    failureHeading: string;
+    failureBody: string;
+  };
 };
 
 export const MOBILE_APP_EMAIL_COPY = {
@@ -548,6 +521,23 @@ export const MOBILE_APP_EMAIL_COPY = {
     cta: "Get the mobile app",
     platformNote: "Android download, or join the iOS beta.",
     accountFooter: "You're receiving this because this email is tied to your Raft account.",
+    unsubscribe: "Unsubscribe from mobile-app emails",
+    unsubscribePage: {
+      htmlLang: "en",
+      confirmationTitle: "Unsubscribe from Raft mobile-app emails",
+      confirmationHeading: "Unsubscribe from mobile-app emails?",
+      confirmationBody: "Raft will stop sending you emails about the mobile app.",
+      submit: "Unsubscribe",
+      successTitle: "Unsubscribed",
+      successHeading: "You are unsubscribed.",
+      successBody: "Raft will no longer send you mobile-app emails.",
+      invalidTitle: "Invalid unsubscribe link",
+      invalidHeading: "This unsubscribe link is invalid.",
+      invalidBody: "Please use the link from the original Raft email.",
+      failureTitle: "Unsubscribe temporarily unavailable",
+      failureHeading: "We couldn't finish your unsubscribe this time.",
+      failureBody: "Please try again in a moment — the link still works.",
+    },
   },
   "zh-cn": {
     subject: "带上 Raft，随时查看",
@@ -557,17 +547,38 @@ export const MOBILE_APP_EMAIL_COPY = {
     cta: "获取移动端应用",
     platformNote: "下载 Android 版，或加入 iOS 测试版。",
     accountFooter: "你会收到这封邮件，是因为它与你的 Raft 账户相关。",
+    unsubscribe: "退订移动端应用邮件",
+    unsubscribePage: {
+      htmlLang: "zh-CN",
+      confirmationTitle: "退订 Raft 移动端应用邮件",
+      confirmationHeading: "要退订移动端应用邮件吗？",
+      confirmationBody: "Raft 将不再向你发送关于移动端应用的邮件。",
+      submit: "退订",
+      successTitle: "已退订",
+      successHeading: "你已退订。",
+      successBody: "Raft 不会再向你发送移动端应用邮件。",
+      invalidTitle: "退订链接无效",
+      invalidHeading: "这个退订链接无效。",
+      invalidBody: "请使用 Raft 原始邮件中的链接。",
+      failureTitle: "暂时无法退订",
+      failureHeading: "这次没能完成退订。",
+      failureBody: "请稍后再试，链接仍然有效。",
+    },
   },
 } satisfies Record<DisplayLocale, MobileAppEmailCopy>;
 
 export const MOBILE_APP_EMAIL_LOCALES = DISPLAY_LOCALES;
 
-function mobileAppEmailCopy(locale?: string | null): MobileAppEmailCopy {
+export function mobileAppEmailCopy(locale?: string | null): MobileAppEmailCopy {
   return MOBILE_APP_EMAIL_COPY[normalizeDisplayLocale(locale) ?? "en"];
 }
 
-export function renderMobileAppDownloadEmailHtml(locale?: string | null): string {
+export function renderMobileAppDownloadEmailHtml(
+  locale: string | null | undefined,
+  unsubscribeUrl: string,
+): string {
   const copy = mobileAppEmailCopy(locale);
+  const safeUnsubscribeUrl = escapeHtmlText(unsubscribeUrl);
   return renderEmailLayout(`
     <h1 style="margin: 0 0 16px 0; color: ${SLOCK_INK}; font-family: ${RAFT_DISPLAY_FONT_FAMILY}; font-size: 20px; line-height: 1.25; font-weight: 700;">${copy.headline}</h1>
     <p style="margin: 0; color: ${SLOCK_INK}; font-family: ${RAFT_DISPLAY_FONT_FAMILY}; font-size: 16px; line-height: 1.5;">${copy.body}</p>
@@ -586,7 +597,7 @@ export function renderMobileAppDownloadEmailHtml(locale?: string | null): string
     footerHtml: `
       <tr>
         <td style="padding-top: 24px; text-align: center;">
-          <p class="slock-muted" style="margin: 0; color: ${SLOCK_MUTED}; font-size: 12px; line-height: 1.5;">${copy.accountFooter}</p>
+          <p class="slock-muted" style="margin: 0; color: ${SLOCK_MUTED}; font-size: 12px; line-height: 1.5;">${copy.accountFooter}<br><a href="${safeUnsubscribeUrl}" style="color:${SLOCK_MUTED};text-decoration:underline;">${copy.unsubscribe}</a></p>
         </td>
       </tr>`,
   });
@@ -596,14 +607,19 @@ export async function sendMobileAppDownloadEmail(
   to: string,
   options: Pick<SendEmailOptions, "idempotencyKey" | "scheduledAt"> & {
     locale?: string | null;
-  } = {},
+    unsubscribeUrl: string;
+  },
 ): Promise<string | null> {
   const copy = mobileAppEmailCopy(options.locale);
-  return sendEmail(to, copy.subject, renderMobileAppDownloadEmailHtml(options.locale), {
+  return sendEmail(to, copy.subject, renderMobileAppDownloadEmailHtml(options.locale, options.unsubscribeUrl), {
     from: mobileAppEmailFromEmail(),
     replyTo: mobileAppEmailReplyToEmail(),
     idempotencyKey: options.idempotencyKey,
     scheduledAt: options.scheduledAt,
+    headers: {
+      "List-Unsubscribe": `<${options.unsubscribeUrl}>`,
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    },
   });
 }
 

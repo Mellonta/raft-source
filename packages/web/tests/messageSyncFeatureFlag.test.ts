@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import api from "../src/api/client";
 import {
   isSyncCoreMessagesFlagEnabled,
   refreshSyncCoreMessagesFlagForCurrentServer,
   resetSyncCoreMessagesFlagForTests,
 } from "../src/store/messageSyncFeatureFlag";
+import { registerNormalizedMessageV2Activation } from "../src/store/normalizedMessageV2FeatureFlag";
 import { SYNC_CORE_MESSAGES_FLAG_KEY } from "../src/store/messageSyncDomain";
-import { REGISTERED_SERVER_FEATURE_FLAG_KEYS } from "../src/store/serverFeatureFlags";
+import {
+  REGISTERED_SERVER_FEATURE_FLAG_KEYS,
+  publishServerFeatureFlagValuesFromLabsReadback,
+} from "../src/store/serverFeatureFlags";
 import { useServerStore } from "../src/store/serverStore";
 
 const originalPost = api.post.bind(api);
@@ -106,7 +109,33 @@ test("sync-core message flag returns false while an uncached evaluation is pendi
   assert.equal(isSyncCoreMessagesFlagEnabled(), true);
 });
 
+test("a determinate Lab value activates normalized messages while batch evaluation is loading", () => {
+  setCurrentServer("server-a");
+  const activations: string[] = [];
+  const unregister = registerNormalizedMessageV2Activation((serverId) => {
+    activations.push(serverId);
+  });
+
+  publishServerFeatureFlagValuesFromLabsReadback({
+    serverId: "server-a",
+    serverLabVersion: 1,
+    masterEnabled: true,
+    labs: [{
+      key: SYNC_CORE_MESSAGES_FLAG_KEY,
+      name: "Sync core messages",
+      description: "Sync core messages.",
+      state: "open",
+      enrolled: true,
+      effective: true,
+    }],
+  });
+
+  assert.deepEqual(activations, ["server-a"]);
+  unregister();
+});
+
 test("sync-core message flag treats missing evaluations and request failures as disabled", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
   setCurrentServer("server-a");
   stubEvaluation(async () => ({
     evaluations: [{ key: "other_flag_v0", enabled: true }],

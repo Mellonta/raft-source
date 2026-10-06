@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test, { after } from "node:test";
 import {
   MESSAGE_REPLIES_SYNC_WINDOW_PRODUCER,
   messageRef,
   messageRepliesDiscussion,
   syncScopeWindow,
-} from "../../shared/src/discussionGraph.js";
+} from "../../shared/src/discussionGraph";
 import {
   consumeThreadUpdatedWithSyncCore,
   hydrateThreadRepliesSnapshotWithSyncCore,
@@ -184,7 +183,7 @@ test("same-watermark authoritative snapshot wins every bounded live interleaving
   assert.equal(cases, 22461, "bounded enumeration cardinality must stay explicit");
 });
 
-after(() => {
+afterAll(() => {
   resetThreadRepliesSyncCoreForTests();
   useMessageStore.getState().setCurrentUserId(null);
   useServerStore.setState({ current: null });

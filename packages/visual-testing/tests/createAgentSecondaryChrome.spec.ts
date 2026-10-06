@@ -15,9 +15,8 @@ import { expect, test } from "@playwright/test";
  * background. @Dozy's CHANGES on #7056 flagged this rule as unprotected; this is
  * the strongest form available, and its limitation is stated below.
  *
- * Hosted: NOT COVERED — the browser suite is local-only. A CI-covered version
- * would need rui to expose the variant as a data attribute rather than only
- * through resolved classes.
+ * Visual browser CI measures this on selected staging pushes and daily runs.
+ * Ordinary PR checks do not run these browser assertions.
  */
 /**
  * BOTH shells that render a secondary control.

@@ -3,7 +3,7 @@ import type { ServerCapability } from "@botiverse/raft-shared";
 import {
   actorHasServerCapabilityInServer,
   type ActorContextType,
-} from "../lib/actorPermissions.js";
+} from "../lib/actorPermissions";
 
 export interface ActorCapabilityMatrixCase {
   label: string;

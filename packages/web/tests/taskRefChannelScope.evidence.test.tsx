@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, render as rtlRender, screen } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });

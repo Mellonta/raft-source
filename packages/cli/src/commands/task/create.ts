@@ -4,13 +4,13 @@
 import type { Command } from "commander";
 import { type AgentApiTaskCreateBody } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { requireTargetAlias, type TargetAliasOpts } from "../_target.js";
-import { formatTasksCreated } from "./_format.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { PEER_KIND_OPTION, requireTargetAlias, type TargetAliasOpts } from "../_target";
+import { formatTasksCreated } from "./_format";
 
 interface CreateOpts extends TargetAliasOpts {
   title?: string[];
@@ -25,6 +25,7 @@ export const taskCreateCommand = defineCommand(
     options: [
       { flags: "--target <target>", description: "Channel target: '#channel'" },
       { flags: "--channel <target>", description: "Legacy alias for --target (accepted during transition)" },
+      PEER_KIND_OPTION,
       {
         flags: "--title <title>",
         description: "Task title (repeatable for batch create)",
@@ -39,9 +40,10 @@ export const taskCreateCommand = defineCommand(
         description: "Require a structured resource receipt and expiry follow-up before completion",
       },
     ],
-    helpAfter: [
+    guidance: [
       "Atomic assignment:",
       "  --assignee applies to every --title. Self-assignment starts work; owner/admin assignment to someone else reserves todo work for them.",
+      "  To undo an accidental self-start, run `raft task update --target <channel> --number <N> --status todo`; the task stays assigned to you.",
       "  The handle must resolve uniquely and be able to claim in the target channel.",
       "  If handle resolution or channel authorization fails, no task-message is created.",
       "Resource receipt gate:",

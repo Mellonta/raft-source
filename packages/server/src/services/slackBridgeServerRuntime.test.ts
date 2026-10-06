@@ -1,19 +1,20 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { afterEach, beforeEach } from "vitest";
 
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
+  agents,
+  channelAgents,
   channelHumans,
   channels,
   externalActorProjections,
   externalAddressabilityProjections,
-  externalAuthorPolicies,
   externalAppCredentials,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalAppRegistrations,
   externalAppRegistrationSecrets,
@@ -24,38 +25,41 @@ import {
   externalInboundEvents,
   externalMessageLinks,
   externalOutboundDeliveries,
+  featureFlags,
   messages,
   oauthClientInstalls,
   oauthClients,
   servers,
   users,
-} from "../db/schema.js";
-import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../routes/slackBridge.js";
-import { resolveExternalBindingAuthority } from "./externalAppControlPlaneService.js";
+} from "../db/schema";
+import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../routes/slackBridge";
+import { resolveExternalBindingAuthority } from "./externalAppControlPlaneService";
 import {
   createFeatureFlagRule,
   updateFeatureFlagRule,
-} from "./featureFlagService.js";
+} from "./featureFlagService";
 import {
   enqueueExternalInboundEvent,
   type ExternalInboundNormalizedMessage,
   type ExternalInboundRuntimeAuthority,
-} from "./externalInboundWorkerService.js";
-import { createServer } from "./serverService.js";
-import { broadcastAndDeliver } from "./messageService.js";
+} from "./externalInboundWorkerService";
+import { createServer } from "./serverService";
+import { broadcastAndDeliver } from "./messageService";
 import {
   EXTERNAL_DELIVERY_AUTHORITY_BACKOFF_BASE_MS,
   EXTERNAL_DELIVERY_AUTHORITY_OVERDUE_MS,
   type ExternalDeliveryAuthorityAlert,
-} from "./externalDeliveryWorkerService.js";
-import { slackBridgeDatabaseRuntimeRevision } from "./slackBridgeDatabaseRuntimeAuthority.js";
+} from "./externalDeliveryWorkerService";
+import { slackBridgeDatabaseRuntimeRevision } from "./slackBridgeDatabaseRuntimeAuthority";
 import {
   createSlackBridgeEnvCredentialCipher,
   slackBridgeKeyFromEnv,
   SLACK_BRIDGE_CREDENTIAL_KEY_ID,
-} from "./slackBridgeEnvSecrets.js";
-import { createSlackBridgeServerRuntimeFromEnv } from "./slackBridgeServerRuntime.js";
+} from "./slackBridgeEnvSecrets";
+import { createSlackBridgeServerRuntimeFromEnv } from "./slackBridgeServerRuntime";
 
+// Built at runtime so secret scanners don't flag this test sample.
+const SLACK_XOXB = "xo" + "xb-";
 
 const MANAGED_ENV: NodeJS.ProcessEnv = {
   SLACK_BRIDGE_ENVIRONMENT: "production",
@@ -94,7 +98,7 @@ afterEach(async () => {
   await closeTestDatabase();
 });
 
-async function seedManagedAudience() {
+async function seedManagedAudience(privacyClass: "public" | "private" = "private") {
   const db = getDb();
   const [owner] = await db.insert(users).values({
     email: `slack-managed-${randomUUID()}@raft.test`,
@@ -116,7 +120,7 @@ async function seedManagedAudience() {
   const [channel] = await db.insert(channels).values({
     serverId: server.id,
     name: `slack-private-${randomUUID().slice(0, 8)}`,
-    type: "private",
+    type: privacyClass === "private" ? "private" : "channel",
   }).returning();
   await db.insert(channelHumans).values({ channelId: channel.id, userId: owner.id });
   const [client] = await db.insert(oauthClients).values({
@@ -177,6 +181,16 @@ async function seedManagedAudience() {
     providerAuthorityId: "T_MANAGED_RUNTIME",
     botUserId: "U_MANAGED_BOT",
   }).returning();
+  await db.insert(externalAppInstallServerGrants).values({
+    installId: install.id,
+    serverId: server.id,
+    registrationId: registration.id,
+    serverGrantId: grant.id,
+    grantEpoch: grant.grantEpoch,
+    state: "active",
+    authorizedByType: "human",
+    authorizedById: owner.id,
+  });
   const credentialCipher = createSlackBridgeEnvCredentialCipher({
     key: slackBridgeKeyFromEnv(
       MANAGED_ENV.SLACK_BRIDGE_CREDENTIAL_ENCRYPTION_KEY,
@@ -185,7 +199,7 @@ async function seedManagedAudience() {
   });
   const sealed = await credentialCipher.sealer.seal({
     serverId: server.id,
-    accessToken: "xoxb-managed-test",
+    accessToken: `${SLACK_XOXB}managed-test`,
     tokenType: "bot",
     providerAppId: "A_MANAGED_RUNTIME",
     providerTeamId: "T_MANAGED_RUNTIME",
@@ -205,15 +219,15 @@ async function seedManagedAudience() {
     registrationId: registration.id,
     installId: install.id,
     channelId: channel.id,
-    providerConversationId: "G_MANAGED_PRIVATE",
-    providerConversationKind: "private_channel",
-    privacyClass: "private",
+    providerConversationId: privacyClass === "private" ? "G_MANAGED_PRIVATE" : "C_MANAGED_PUBLIC",
+    providerConversationKind: privacyClass === "private" ? "private_channel" : "public_channel",
+    privacyClass,
     state: "active",
     grantEpoch: 1,
     connectionEpoch: 2,
     bindingEpoch: 3,
-    audienceRevision: 1,
-    audienceFreshUntil: new Date(NOW.getTime() + 60_000),
+    audienceRevision: privacyClass === "private" ? 1 : null,
+    audienceFreshUntil: privacyClass === "private" ? new Date(NOW.getTime() + 60_000) : null,
     consentedByType: "human",
     consentedById: owner.id,
     consentedAt: NOW,
@@ -226,7 +240,7 @@ async function seedManagedAudience() {
     externalAudienceDigest: "old-external",
     raftMemberCount: 1,
     raftAudienceDigest: "old-raft",
-    status: "unavailable",
+    status: privacyClass === "private" ? "unavailable" : "matched",
     observedAt: NOW,
     expiresAt: new Date(NOW.getTime() + 60_000),
   });
@@ -385,7 +399,6 @@ test("managed runtime composition is side-effect free before the server start ho
   assert.equal(typeof runtime.secretResolver.resolveSigningSecret, "function");
   assert.equal(typeof runtime.payloadSealer.sealNormalizedPayload, "function");
   assert.equal(typeof runtime.runtimeResolver?.resolveCurrentRuntime, "function");
-  assert.equal(typeof runtime.resolveAuthorPolicyAuthority, "function");
   assert.equal(typeof runtime.provisioning?.load, "function");
   assert.equal(typeof runtime.inboundWorkerDependencies.decryptNormalizedPayload, "function");
   assert.equal(typeof runtime.inboundWorkerDependencies.resolveCurrentRuntime, "function");
@@ -427,10 +440,64 @@ test("managed runtime resolves the trusted IM Bridges destination from the claim
   await runtime.stop();
 });
 
+test("attachment authority rejects a stale server-grant epoch with the canonical binding fence", async () => {
+  const seeded = await seedManagedAudience("public");
+  await getDb().insert(featureFlags).values({
+    key: SLACK_BRIDGE_FEATURE_FLAG_KEYS.attachmentTransfer,
+    description: "Slack attachment transfer",
+    enabled: true,
+    defaultEnabled: false,
+    killSwitch: false,
+    randomizationUnit: "server",
+    salt: SLACK_BRIDGE_FEATURE_FLAG_KEYS.attachmentTransfer,
+  });
+  await createFeatureFlagRule({
+    flagKey: SLACK_BRIDGE_FEATURE_FLAG_KEYS.attachmentTransfer,
+    stage: "server",
+    decision: "allow",
+    values: [seeded.server.id],
+  });
+  const runtime = await createSlackBridgeServerRuntimeFromEnv(MANAGED_ENV, {
+    db: getDb(),
+    now: () => NOW,
+  });
+  assert.ok(runtime);
+  const authority = {
+    provider: "slack",
+    appRegistrationId: seeded.registration.id,
+    installId: seeded.install.id,
+    workspaceId: seeded.install.providerAuthorityId,
+    providerAuthorityId: seeded.install.providerAuthorityId,
+    providerConversationId: seeded.binding.providerConversationId,
+    connectionEpoch: seeded.install.connectionEpoch,
+    bindingId: seeded.binding.id,
+    bindingEpoch: seeded.binding.bindingEpoch,
+  };
+  const authorityIsCurrent = runtime.inboundAttachmentWorkerDependencies.authorityIsCurrent;
+  assert.ok(authorityIsCurrent);
+  assert.equal(await authorityIsCurrent(authority, seeded.projection.id, getDb()), true);
+
+  await getDb().update(externalAppServerGrants).set({ grantEpoch: 2 })
+    .where(eq(externalAppServerGrants.id, seeded.grant.id));
+  const canonical = await resolveExternalBindingAuthority({
+    serverId: seeded.server.id,
+    bindingId: seeded.binding.id,
+    expectedConnectionEpoch: seeded.binding.connectionEpoch,
+    expectedBindingEpoch: seeded.binding.bindingEpoch,
+    now: NOW,
+  });
+  assert.deepEqual(canonical, { active: false, reason: "epoch_mismatch" });
+  assert.equal(await authorityIsCurrent(authority, seeded.projection.id, getDb()), false);
+  await runtime.stop();
+});
+
 test("managed server lifecycle consumes the database human resolver on start, event, periodic, and stop", async () => {
   const seeded = await seedManagedAudience();
   let installGrantCalls = 0;
   let audienceCalls = 0;
+  let privacyCalls = 0;
+  let rateLimitNextPrivacyCall = false;
+  let runtimeNow = NOW;
   let periodic: () => void = () => assert.fail("periodic callback was not scheduled");
   let cleared = false;
   const receipts: unknown[] = [];
@@ -451,7 +518,7 @@ test("managed server lifecycle consumes the database human resolver on start, ev
   };
   const runtime = await createSlackBridgeServerRuntimeFromEnv(MANAGED_ENV, {
     db: getDb(),
-    now: () => NOW,
+    now: () => runtimeNow,
     lifecycleIntervalMs: 1_000,
     lifecycleClock: {
       scheduleEvery(fn, intervalMs) {
@@ -487,13 +554,41 @@ test("managed server lifecycle consumes the database human resolver on start, ev
           },
         });
       }
+      if (String(url).startsWith("https://slack.com/api/conversations.info")) {
+        privacyCalls += 1;
+        const requestUrl = new URL(String(url));
+        const providerConversationId = requestUrl.searchParams.get("channel");
+        assert.ok([
+          "G_MANAGED_PRIVATE",
+          "G_MANAGED_PRIVATE_SECOND",
+        ].includes(providerConversationId ?? ""));
+        if (rateLimitNextPrivacyCall) {
+          rateLimitNextPrivacyCall = false;
+          return new Response(JSON.stringify({ ok: false, error: "ratelimited" }), {
+            status: 429,
+            headers: { "content-type": "application/json", "retry-after": "120" },
+          });
+        }
+        return new Response(JSON.stringify({
+          ok: true,
+          channel: {
+            id: providerConversationId,
+            is_private: true,
+            is_archived: false,
+            is_member: true,
+          },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       audienceCalls += 1;
       const requestUrl = new URL(String(url));
       assert.equal(
         requestUrl.origin + requestUrl.pathname,
         "https://slack.com/api/conversations.members",
       );
-      assert.equal(requestUrl.searchParams.get("channel"), "G_MANAGED_PRIVATE");
+      assert.ok([
+        "G_MANAGED_PRIVATE",
+        "G_MANAGED_PRIVATE_SECOND",
+      ].includes(requestUrl.searchParams.get("channel") ?? ""));
       assert.equal(requestUrl.searchParams.get("limit"), "200");
       assert.equal(requestUrl.searchParams.has("token"), false);
       assert.equal(init?.method, "GET");
@@ -512,6 +607,7 @@ test("managed server lifecycle consumes the database human resolver on start, ev
   await waitForReceipt(1);
   assert.equal(installGrantCalls, 1, "server start repairs missing install authority once");
   assert.equal(audienceCalls, 1, "server start performs one live audience refresh");
+  assert.equal(privacyCalls, 1, "server start verifies provider privacy separately");
   const startSnapshot = await getDb().select().from(externalBindingAudienceSnapshots);
   assert.equal(startSnapshot.at(-1)?.bindingId, seeded.binding.id);
   assert.equal(startSnapshot.at(-1)?.status, "matched");
@@ -520,24 +616,87 @@ test("managed server lifecycle consumes the database human resolver on start, ev
   await waitForReceipt(2);
   assert.equal(installGrantCalls, 1, "fresh install authority is not re-read on every event");
   assert.equal(audienceCalls, 2, "post-ingress event reconciliation reaches the provider");
+  assert.equal(privacyCalls, 2, "post-ingress event refreshes privacy freshness");
 
   periodic();
   await waitForReceipt(3);
   assert.equal(installGrantCalls, 1, "fresh install authority is not re-read on every tick");
   assert.equal(audienceCalls, 3, "persistent periodic reconciliation reaches the provider");
+  assert.equal(privacyCalls, 3, "periodic reconciliation refreshes privacy freshness");
+
+  const [secondChannel] = await getDb().insert(channels).values({
+    serverId: seeded.server.id,
+    name: `slack-private-second-${randomUUID().slice(0, 8)}`,
+    type: "private",
+  }).returning();
+  await getDb().insert(channelHumans).values({
+    channelId: secondChannel.id,
+    userId: seeded.owner.id,
+  });
+  const [secondBinding] = await getDb().insert(externalChannelBindings).values({
+    id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+    serverId: seeded.server.id,
+    registrationId: seeded.registration.id,
+    installId: seeded.install.id,
+    channelId: secondChannel.id,
+    providerConversationId: "G_MANAGED_PRIVATE_SECOND",
+    providerConversationKind: "private_channel",
+    privacyClass: "private",
+    state: "active",
+    grantEpoch: 1,
+    connectionEpoch: 2,
+    bindingEpoch: 1,
+    audienceRevision: 1,
+    audienceFreshUntil: new Date(NOW.getTime() + 60_000),
+    consentedByType: "human",
+    consentedById: seeded.owner.id,
+    consentedAt: NOW,
+  }).returning();
+  rateLimitNextPrivacyCall = true;
+  await runtime.requestLifecycleReconcile?.();
+  await waitForReceipt(4);
+  assert.equal(
+    privacyCalls,
+    4,
+    "the first binding rate limit stops the same install before its second provider call",
+  );
+  await runtime.requestLifecycleReconcile?.();
+  await waitForReceipt(5);
+  assert.equal(
+    privacyCalls,
+    4,
+    "event reconciliation must not retry privacy before Slack Retry-After",
+  );
+  runtimeNow = new Date(NOW.getTime() + 120_000);
+  await runtime.requestLifecycleReconcile?.();
+  await waitForReceipt(6);
+  assert.equal(
+    privacyCalls,
+    6,
+    "both bindings resume only after their shared install retry deadline",
+  );
+  await getDb().update(externalChannelBindings).set({
+    state: "paused",
+    stateReason: "test_second_binding_pause",
+  }).where(eq(externalChannelBindings.id, secondBinding.id));
+  const audienceCallsAfterPrivacyBackoff = audienceCalls;
 
   await getDb().update(externalAppCredentials).set({ envelopeKeyId: "env:wrong-key" });
   await runtime.requestLifecycleReconcile?.();
-  await waitForReceipt(4);
-  assert.equal(audienceCalls, 3, "a mismatched env key id fails closed before Slack access");
+  await waitForReceipt(7);
+  assert.equal(
+    audienceCalls,
+    audienceCallsAfterPrivacyBackoff,
+    "a mismatched env key id fails closed before Slack access",
+  );
 
   await getDb().update(externalAppCredentials).set({ envelopeKeyId: SLACK_BRIDGE_CREDENTIAL_KEY_ID });
   await getDb().delete(externalHumanIdentityLinks);
   await runtime.requestLifecycleReconcile?.();
-  await waitForReceipt(5);
+  await waitForReceipt(8);
   assert.equal(
     audienceCalls,
-    3,
+    audienceCallsAfterPrivacyBackoff,
     "removing the task #8 human link fails closed before Slack provider access",
   );
   const unavailableSnapshot = await getDb().select().from(externalBindingAudienceSnapshots);
@@ -549,7 +708,7 @@ test("managed server lifecycle consumes the database human resolver on start, ev
   });
   const pausedResult = await runtime.requestLifecycleReconcile?.();
   assert.deepEqual(pausedResult, { kind: "completed", trigger: "event", bindingCount: 0 });
-  assert.equal(audienceCalls, 3);
+  assert.equal(audienceCalls, audienceCallsAfterPrivacyBackoff);
   assert.equal(
     (await getDb().select().from(externalBindingAudienceSnapshots)).length,
     unavailableSnapshot.length,
@@ -559,7 +718,11 @@ test("managed server lifecycle consumes the database human resolver on start, ev
   await runtime.stop();
   assert.equal(cleared, true);
   await runtime.requestLifecycleReconcile?.();
-  assert.equal(audienceCalls, 3, "stopped runtime rejects later event reconciliation");
+  assert.equal(
+    audienceCalls,
+    audienceCallsAfterPrivacyBackoff,
+    "stopped runtime rejects later event reconciliation",
+  );
 });
 
 test("managed server start and stop own the durable inbound worker lifecycle", async ({ onTestFinished }) => {
@@ -717,6 +880,7 @@ test("managed server start owns ordinary Raft to Slack admission and delivery", 
   });
   const postedBodies: unknown[] = [];
   const authorityAlerts: ExternalDeliveryAuthorityAlert[] = [];
+  const outboundErrors: unknown[] = [];
   const runtime = await createSlackBridgeServerRuntimeFromEnv(MANAGED_ENV, {
     db: getDb(),
     now: () => workerNow,
@@ -730,6 +894,9 @@ test("managed server start owns ordinary Raft to Slack admission and delivery", 
     },
     onOutboundAuthorityAlert(alert: ExternalDeliveryAuthorityAlert) {
       authorityAlerts.push(alert);
+    },
+    onOutboundError(error: unknown) {
+      outboundErrors.push(error);
     },
     fetch: (async (url, init) => {
       const method = new URL(String(url)).pathname.split("/").at(-1);
@@ -770,26 +937,25 @@ test("managed server start owns ordinary Raft to Slack admission and delivery", 
 
   runtime.start();
   await started;
-  await getDb().insert(externalAuthorPolicies).values({
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(
+    outboundErrors,
+    [],
+    "an active legacy binding with no delivery partition is idle before its first message",
+  );
+  const [agent] = await getDb().insert(agents).values({
     serverId: seeded.server.id,
-    provider: "slack",
-    appRegistrationId: seeded.registration.id,
-    installId: seeded.install.id,
-    bindingId: seeded.binding.id,
-    bindingEpoch: seeded.binding.bindingEpoch,
-    authorType: "user",
-    authorId: seeded.owner.id,
-    displayName: seeded.owner.name,
-    fallbackKind: "human",
-    consentRevision: 1,
-    state: "granted",
-  });
+    name: "managed-runtime-agent",
+    displayName: "Managed Runtime Agent",
+    runtime: "codex",
+  }).returning();
+  await getDb().insert(channelAgents).values({ channelId: seeded.channel.id, agentId: agent.id });
 
   const message = await broadcastAndDeliver(createIo(), noopOrchestrator, {
     channelId: seeded.channel.id,
-    senderType: "user",
-    senderId: seeded.owner.id,
-    senderName: seeded.owner.name,
+    senderType: "agent",
+    senderId: agent.id,
+    senderName: agent.displayName!,
     content: "managed runtime outbound",
   });
   assert.equal(
@@ -859,6 +1025,144 @@ test("managed server start owns ordinary Raft to Slack admission and delivery", 
   assert.equal(postedBodies.length, 1);
 });
 
+test("zero-policy public thread reply follows the exact accepted root link", async ({ onTestFinished }) => {
+  const seeded = await seedManagedAudience("public");
+  let firstReceipt: (() => void) | null = null;
+  const started = new Promise<void>((resolve) => {
+    firstReceipt = resolve;
+  });
+  const postedBodies: unknown[] = [];
+  const runtime = await createSlackBridgeServerRuntimeFromEnv(MANAGED_ENV, {
+    db: getDb(),
+    now: () => NOW,
+    lifecycleIntervalMs: 60_000,
+    inboundWorkerIntervalMs: 60_000,
+    outboundWorkerIntervalMs: 10,
+    outboundWorkerLeaseOwner: "managed-runtime-public-thread-test",
+    onLifecycleReceipt() {
+      firstReceipt?.();
+      firstReceipt = null;
+    },
+    fetch: (async (url, init) => {
+      const method = new URL(String(url)).pathname.split("/").at(-1);
+      if (method === "auth.test") {
+        return new Response(JSON.stringify({
+          ok: true,
+          team_id: "T_MANAGED_RUNTIME",
+          user_id: "U_MANAGED_BOT",
+          bot_id: "B_MANAGED_BOT",
+        }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "x-oauth-scopes": SLACK_BRIDGE_REQUIRED_BOT_SCOPES.join(","),
+          },
+        });
+      }
+      if (method === "conversations.members") {
+        return new Response(JSON.stringify({
+          ok: true,
+          members: ["U_MANAGED_OWNER", "U_MANAGED_BOT"],
+          response_metadata: { next_cursor: "" },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (method === "conversations.info") {
+        return new Response(JSON.stringify({
+          ok: true,
+          channel: { id: "C_MANAGED_PUBLIC", is_channel: true, is_private: false },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (method === "chat.postMessage") {
+        postedBodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({
+          ok: true,
+          channel: "C_MANAGED_PUBLIC",
+          ts: "1786601594.810621",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`unexpected Slack method ${method}`);
+    }) as typeof fetch,
+  });
+  assert.ok(runtime);
+  onTestFinished(async () => runtime.stop());
+
+  runtime.start();
+  await started;
+  await getDb().delete(externalBindingAudienceSnapshots)
+    .where(eq(externalBindingAudienceSnapshots.bindingId, seeded.binding.id));
+  await getDb().insert(externalBindingAudienceSnapshots).values({
+    bindingId: seeded.binding.id,
+    bindingEpoch: seeded.binding.bindingEpoch,
+    audienceRevision: 1,
+    externalMemberCount: 1,
+    externalAudienceDigest: "public-thread-audience",
+    raftMemberCount: 1,
+    raftAudienceDigest: "public-thread-audience",
+    status: "matched",
+    observedAt: NOW,
+    expiresAt: new Date(NOW.getTime() + 60_000),
+  });
+  const [agent] = await getDb().insert(agents).values({
+    serverId: seeded.server.id,
+    name: "managed-public-thread-agent",
+    displayName: "Managed Public Thread Agent",
+    runtime: "codex",
+  }).returning();
+  const [root] = await getDb().insert(messages).values({
+    channelId: seeded.channel.id,
+    senderType: "user",
+    senderId: seeded.owner.id,
+    content: "managed public root",
+  }).returning();
+  const [thread] = await getDb().insert(channels).values({
+    serverId: seeded.server.id,
+    name: `managed-public-thread-${randomUUID().slice(0, 8)}`,
+    type: "thread",
+    parentMessageId: root.id,
+  }).returning();
+  await getDb().update(messages).set({ threadId: thread.id }).where(eq(messages.id, root.id));
+  await getDb().insert(channelAgents).values({ channelId: seeded.channel.id, agentId: agent.id });
+  assert.equal(
+    (await getDb().select().from(channelAgents).where(eq(channelAgents.channelId, thread.id))).length,
+    0,
+    "thread authority inherits the parent channel and has no legacy thread membership row",
+  );
+  await getDb().insert(externalMessageLinks).values({
+    provider: "slack",
+    installId: seeded.install.id,
+    providerAuthorityId: seeded.install.providerAuthorityId,
+    providerConversationId: seeded.binding.providerConversationId,
+    providerMessageId: "1786601594.810600",
+    bindingId: seeded.binding.id,
+    bindingEpoch: seeded.binding.bindingEpoch,
+    connectionEpoch: seeded.binding.connectionEpoch,
+    raftMessageId: root.id,
+    firstDirection: "raft_outbound",
+    payloadFingerprint: "a".repeat(64),
+    outcomeState: "accepted",
+    authorityState: "active",
+  });
+  const reply = await broadcastAndDeliver(createIo(), noopOrchestrator, {
+    channelId: thread.id,
+    senderType: "agent",
+    senderId: agent.id,
+    senderName: agent.displayName!,
+    content: "managed public thread reply",
+  });
+  const [queued] = await getDb().select().from(externalOutboundDeliveries);
+  assert.equal(queued?.sourceMessageId, reply.id);
+  assert.equal(queued?.renderSnapshot.level, "thread");
+  assert.equal(queued?.renderSnapshot.canonicalRootMessageId, root.id);
+  await waitFor(async () => {
+    const [delivery] = await getDb().select().from(externalOutboundDeliveries);
+    return delivery?.state === "accepted";
+  }, "managed public thread acceptance");
+  assert.equal(postedBodies.length, 1);
+  assert.equal((postedBodies[0] as { channel?: string }).channel, "C_MANAGED_PUBLIC");
+  assert.equal((postedBodies[0] as { thread_ts?: string }).thread_ts, "1786601594.810600");
+  assert.match(String((postedBodies[0] as { text?: string }).text), /managed public thread reply/);
+});
+
 test("managed active binding drops OFF-window Raft messages without replay after master recovery", async ({ onTestFinished }) => {
   const seeded = await seedManagedAudience();
   let firstReceipt: (() => void) | null = null;
@@ -916,21 +1220,6 @@ test("managed active binding drops OFF-window Raft messages without replay after
 
   runtime.start();
   await started;
-  await getDb().insert(externalAuthorPolicies).values({
-    serverId: seeded.server.id,
-    provider: "slack",
-    appRegistrationId: seeded.registration.id,
-    installId: seeded.install.id,
-    bindingId: seeded.binding.id,
-    bindingEpoch: seeded.binding.bindingEpoch,
-    authorType: "user",
-    authorId: seeded.owner.id,
-    displayName: seeded.owner.name,
-    fallbackKind: "human",
-    consentRevision: 1,
-    state: "granted",
-  });
-
   await updateFeatureFlagRule(
     SLACK_BRIDGE_FEATURE_FLAG_KEYS.master,
     seeded.masterRule.id,

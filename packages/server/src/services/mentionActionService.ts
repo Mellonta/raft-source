@@ -1,7 +1,7 @@
 import { and, desc, eq, gt, gte, inArray, isNull, lt, or } from "drizzle-orm";
 import { asServerId } from "@botiverse/raft-shared";
 
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   agents as agentsTable,
   channelAgents,
@@ -11,15 +11,15 @@ import {
   messages,
   serverMembers,
   threadFollows,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   actorHasChannelCapability,
   channelActorHasCapability,
   resolveChannelActorContext,
-} from "../lib/channelActorPermissions.js";
-import { uuidShortIdRange } from "../lib/messageId.js";
-import * as channelService from "./channelService.js";
-import { recordInboxNotificationFacts, type InboxNotificationFactInput } from "./inboxNotificationService.js";
+} from "../lib/channelActorPermissions";
+import { uuidShortIdRange } from "../lib/messageId";
+import * as channelService from "./channelService";
+import { recordInboxNotificationFacts, type InboxNotificationFactInput } from "./inboxNotificationService";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHORT_ID_RE = /^[0-9a-f]{8}$/i;
@@ -469,18 +469,31 @@ async function executeMentionActionForRow(
       ) {
         return null;
       }
-      if (row.targetType === "agent") {
-        await tx
+      const joinedChannel = row.targetType === "agent"
+        ? await tx
           .insert(channelAgents)
           .values({ channelId: membershipChannelId, agentId: row.targetId })
-          .onConflictDoNothing();
-      } else {
-        await tx
+          .onConflictDoNothing()
+          .returning({ channelId: channelAgents.channelId })
+        : await tx
           .insert(channelHumans)
           .values({ channelId: membershipChannelId, userId: row.targetId })
-          .onConflictDoNothing();
+          .onConflictDoNothing()
+          .returning({ channelId: channelHumans.channelId });
+      const principalKind = row.targetType === "agent" ? "agent" : "human";
+      if (joinedChannel.length > 0) {
+        // The mention that brought them in stays unread; a thread mention joins the parent
+        // channel at its latest message and the thread itself just before the mention.
+        await channelService.startReadPositionAtJoin(
+          tx,
+          principalKind,
+          row.targetId,
+          membershipChannelId,
+          row.channelType === "thread" ? undefined : row.messageSeq - 1,
+        );
       }
       if (row.channelType === "thread") {
+        await channelService.startReadPositionAtJoin(tx, principalKind, row.targetId, row.channelId, row.messageSeq - 1);
         await tx
           .insert(threadFollows)
           .values({

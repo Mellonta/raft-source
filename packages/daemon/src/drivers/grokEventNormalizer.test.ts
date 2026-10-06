@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { GrokEventNormalizer, type GrokJsonRpcMessage } from "./grokEventNormalizer.js";
+import { GrokEventNormalizer, type GrokJsonRpcMessage } from "./grokEventNormalizer";
 
 function notification(sessionId: string, update: Record<string, unknown>): GrokJsonRpcMessage {
   return {

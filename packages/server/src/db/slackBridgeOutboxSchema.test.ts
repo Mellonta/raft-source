@@ -1,9 +1,8 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
+import { dbTest as test } from "../test/integration/dbTest";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
-import { getDb } from "./index.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { getDb } from "./index";
+import { closeTestDatabase } from "../test/integration/database";
 import {
   channels,
   externalDeliveryAttempts,
@@ -14,7 +13,7 @@ import {
   messages,
   servers,
   users,
-} from "./schema.js";
+} from "./schema";
 
 
 afterEach(async () => {

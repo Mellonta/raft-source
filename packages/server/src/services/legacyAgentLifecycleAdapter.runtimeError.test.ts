@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   adaptDaemonActivityLifecycleEvent,
   normalizeRuntimeErrorActivityDiagnostic,
-} from "./legacyAgentLifecycleAdapter.js";
+} from "./legacyAgentLifecycleAdapter";
 
 const fingerprint = "a".repeat(16);
 

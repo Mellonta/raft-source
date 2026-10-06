@@ -230,3 +230,26 @@ export function buildSearchEntityResults(
   const entries = filterSearchEntityEntriesForQuery(params.query, buildSearchEntityEntries(params));
   return rankComposerSuggestions(params.query, entries);
 }
+
+/**
+ * Task #102 (desktop ⌘K overlay, Slack model): a destination counts as an EXACT
+ * match when the query names it outright — its title, or its handle for people /
+ * agents — ignoring a leading `#` / `@`, case and whitespace runs. Deliberately
+ * STRICTER than `rankComposerSuggestions`' exact score (which also drops
+ * punctuation and matches pinyin): Return entering the wrong channel is worse than
+ * Return opening the results page. And deliberately NOT "head of the ranked list
+ * only": with channels `design-system` and `designsystem`, query `designsystem`
+ * ranks `design-system` first under the looser score, so the strict match must be
+ * searched for in the whole ranked candidate list (before any display truncation)
+ * and hoisted. Returns the first strict match in ranking order.
+ */
+export function findExactDestination(query: string, entities: readonly SearchEntityResult[]): SearchEntityResult | null {
+  const normalize = (value: string) => value.trim().replace(/\s+/g, " ").toLowerCase();
+  const wanted = normalize(query.replace(/^\s*[#@]/, ""));
+  if (!wanted) return null;
+  for (const entity of entities) {
+    if (normalize(entity.title) === wanted) return entity;
+    if (entity.subtitle.kind === "text" && normalize(entity.subtitle.text.replace(/^\s*@/, "")) === wanted) return entity;
+  }
+  return null;
+}

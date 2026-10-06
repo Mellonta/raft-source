@@ -1,9 +1,9 @@
 import { and, eq, inArray } from "drizzle-orm";
 import type { Server as SocketServer } from "socket.io";
-import { getDb } from "../db/index.js";
-import { agentChannelReadCursors, userChannelReadCursors } from "../db/schema.js";
-import * as channelService from "./channelService.js";
-import { evaluateFeatureFlag, READ_RECEIPTS_FEATURE_FLAG_KEY } from "./featureFlagService.js";
+import { getDb } from "../db/index";
+import { agentChannelReadCursors, userChannelReadCursors } from "../db/schema";
+import * as channelService from "./channelService";
+import { evaluateFeatureFlag, READ_RECEIPTS_FEATURE_FLAG_KEY } from "./featureFlagService";
 
 export const READ_RECEIPT_PEER_STATE_LIMIT = 50;
 
@@ -172,6 +172,12 @@ export async function emitScopeReadUpdated(input: {
   maxReadSeq: number;
   changed: boolean;
 }): Promise<void> {
+  // Must stay the first check. Only agents' reads are broadcast (the exposed
+  // peers below are agents-only), so a human actor can never pass the member
+  // check. Deciding that after the flag/channel/member queries cost ~10
+  // queries per scope for nothing -- and read-all fans this out concurrently
+  // over every changed scope, enough to saturate the connection pool.
+  if (input.peerKind === "human") return;
   if (!input.changed || !input.io || !await readReceiptsEnabled(input.serverId)) return;
 
   const channel = await channelService.getChannel(input.scopeId);
@@ -182,7 +188,8 @@ export async function emitScopeReadUpdated(input: {
     || channelService.isAllSystemChannel(channel)
   ) return;
 
-  // Only agents' reads are broadcast; a human read never reaches other clients.
+  // Only agents' reads are broadcast; a human read never reaches other clients
+  // (human actors already returned at the top).
   const members = await listExposedReadPeers(input.scopeId);
   const actorIsMember = members.some((member) =>
     member.peerKind === input.peerKind && member.peerId === input.peerId

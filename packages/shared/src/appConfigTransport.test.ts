@@ -1,11 +1,10 @@
-import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
   isAppConfigValue,
   normalizeAppConfigWireSnapshot,
   validateAppConfigWithinBounds,
-} from "./appConfigTransport.js";
+} from "./appConfigTransport";
 
 /** Synthetic bounds: this file must stay free of any real app's values. */
 const TEST_BOUNDS = {

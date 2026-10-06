@@ -14,9 +14,8 @@
  */
 
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { describeListResult } from "./list.js";
+import { describeListResult } from "./list";
 
 const SERVER = "https://slock.example.com";
 

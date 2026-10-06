@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { createSyncCore } from "../core.js";
-import type { SyncDomainConfig } from "../types.js";
+import { createSyncCore } from "../core";
+import type { SyncDomainConfig } from "../types";
 import {
   ACTIVITY_DOMAIN,
   compareUInt64String,
@@ -11,7 +10,7 @@ import {
   foldActivityEvent,
   initialActivityState,
   type ActivityDomainState,
-} from "./activity.js";
+} from "./activity";
 
 const SCOPE = encodeActivityScopeId({
   serverId: "srv-1",

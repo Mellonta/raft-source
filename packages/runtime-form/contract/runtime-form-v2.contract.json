@@ -1,0 +1,336 @@
+{
+  "$comment": "Runtime form protocol v2: the single source for the TypeScript and Kotlin wire types. Edit this file, then run `pnpm --filter @botiverse/raft-runtime-form contract:generate`. Every type is open: receivers must ignore keys they do not know (README, Protocol v2).",
+  "name": "RuntimeFormV2",
+  "kotlinPackage": "build.raft.app.data.runtimeform.v2",
+  "types": {
+    "Definition": {
+      "doc": "Response of GET /api/servers/:id/machines/:machineId/runtime-forms/v2/:runtimeId (create), or of GET /api/agents/:id/runtime-form (edit, with `values`: the agent's current field values; writeOnly fields are never included).",
+      "fields": {
+        "protocolVersion": {
+          "type": "int",
+          "const": 2
+        },
+        "runtimeId": {
+          "type": "string"
+        },
+        "schemaVersion": {
+          "type": "string"
+        },
+        "dataSchema": {
+          "type": "DataSchema"
+        },
+        "uiSchema": {
+          "type": "UiSchema",
+          "optional": true
+        },
+        "optionSources": {
+          "type": "map<OptionSourceRef>",
+          "optional": true
+        },
+        "requiredClientCapabilities": {
+          "type": "string[]",
+          "optional": true,
+          "doc": "Client capabilities this form needs beyond the base v2 renderer. Absent or null means []. A client that sees an entry it does not implement, a value that is not an array, or a non-string entry must treat the whole v2 form as unavailable and fall back to its v1/legacy form; it must never render a partial v2 form. Names (frozen): `select.custom_value` (OptionSource.customValueAllowed), `choice.labels` (FieldCopy.choices), `option_source.status` (OptionSource.status/reason/retryable). A form lists a name only when it uses that feature; the server never sends those fields to a form that does not list the name."
+        },
+        "values": {
+          "type": "map<json>",
+          "optional": true
+        }
+      }
+    },
+    "DataSchema": {
+      "fields": {
+        "type": {
+          "type": "string",
+          "const": "object"
+        },
+        "required": {
+          "type": "string[]",
+          "optional": true
+        },
+        "properties": {
+          "type": "map<FieldSchema>"
+        }
+      }
+    },
+    "FieldSchema": {
+      "doc": "Render by `type` (with x-optionSource or x-optionsFrom), never by field name. An unknown `type` is unsupported: skip it if optional, block saving if required.",
+      "fields": {
+        "type": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string",
+          "optional": true
+        },
+        "minLength": {
+          "type": "int",
+          "optional": true
+        },
+        "format": {
+          "type": "string",
+          "optional": true
+        },
+        "writeOnly": {
+          "type": "bool",
+          "optional": true
+        },
+        "x-optionSource": {
+          "type": "string",
+          "optional": true,
+          "kotlinName": "optionSource"
+        },
+        "x-optionsFrom": {
+          "type": "OptionsFrom",
+          "optional": true,
+          "kotlinName": "optionsFrom"
+        },
+        "additionalProperties": {
+          "type": "json",
+          "optional": true,
+          "doc": "JSON Schema allows a boolean (`false`) or a value schema (`{\"type\": \"string\"}` for a key-value map); clients must accept both."
+        }
+      }
+    },
+    "OptionsFrom": {
+      "doc": "Choices derived from the option currently selected in another field: that option's `attribute` (a string list) are the choices, and its `defaultAttribute` (if any) is the default. Example: Kimi reasoning effort follows the selected model.",
+      "fields": {
+        "field": {
+          "type": "string"
+        },
+        "attribute": {
+          "type": "string"
+        },
+        "defaultAttribute": {
+          "type": "string",
+          "optional": true
+        }
+      }
+    },
+    "UiSchema": {
+      "fields": {
+        "order": {
+          "type": "string[]",
+          "optional": true
+        },
+        "layout": {
+          "type": "Layout",
+          "optional": true
+        },
+        "visibility": {
+          "type": "VisibilityRule[]",
+          "optional": true
+        },
+        "localization": {
+          "type": "map<FieldCopy>",
+          "optional": true
+        }
+      }
+    },
+    "Layout": {
+      "fields": {
+        "advanced": {
+          "type": "string[]",
+          "optional": true
+        }
+      }
+    },
+    "VisibilityRule": {
+      "doc": "Show the field at `pointer` only when the field at when.pointer has one of when.in.",
+      "fields": {
+        "pointer": {
+          "type": "string"
+        },
+        "when": {
+          "type": "VisibilityCondition",
+          "kotlinName": "condition"
+        }
+      }
+    },
+    "VisibilityCondition": {
+      "fields": {
+        "pointer": {
+          "type": "string"
+        },
+        "in": {
+          "type": "string[]",
+          "kotlinName": "values"
+        }
+      }
+    },
+    "FieldCopy": {
+      "fields": {
+        "label": {
+          "type": "string",
+          "optional": true
+        },
+        "hint": {
+          "type": "string",
+          "optional": true
+        },
+        "placeholder": {
+          "type": "string",
+          "optional": true
+        },
+        "choices": {
+          "type": "map<ChoiceCopy>",
+          "optional": true,
+          "doc": "capability `choice.labels`. Display copy for the choices of a `select` or `derived_select` field, keyed by option value. Label priority: choices[value].label, else the option's own `label`, else the raw value; `description` comes only from here. Keys that match no option are ignored; an option without a key falls back per that priority."
+        }
+      }
+    },
+    "ChoiceCopy": {
+      "doc": "Copy for one choice (FieldCopy.choices, capability `choice.labels`).",
+      "fields": {
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string",
+          "optional": true
+        }
+      }
+    },
+    "OptionSourceRef": {
+      "doc": "Choices for the field at `pointer`, loaded from .../runtime-forms/v2/:runtimeId/option-sources/:sourceId.",
+      "fields": {
+        "sourceId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "select",
+            "dependent_select"
+          ]
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "dependsOn": {
+          "type": "string",
+          "optional": true
+        }
+      }
+    },
+    "OptionSource": {
+      "doc": "Response of the option-sources endpoint. select: options + defaultValue. dependent_select: per-value lists keyed by the value of dependsOn. `customValueAllowed`, `status`, `reason` and `retryable` are sent only on the v2 endpoint and only to forms that list the matching capability (`select.custom_value`, `option_source.status`); a form without the capability gets the source exactly as before.",
+      "fields": {
+        "sourceId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "select",
+            "dependent_select"
+          ]
+        },
+        "pointer": {
+          "type": "string"
+        },
+        "dependsOn": {
+          "type": "string",
+          "optional": true
+        },
+        "options": {
+          "type": "Option[]",
+          "optional": true
+        },
+        "defaultValue": {
+          "type": "string",
+          "optional": true
+        },
+        "optionsByValue": {
+          "type": "map<Option[]>",
+          "optional": true
+        },
+        "defaultValueByValue": {
+          "type": "map<string>",
+          "optional": true
+        },
+        "customValueAllowedByValue": {
+          "type": "map<bool>",
+          "optional": true
+        },
+        "customValueAllowed": {
+          "type": "bool",
+          "optional": true,
+          "doc": "capability `select.custom_value`; meaningful only for kind `select` (dependent_select keeps customValueAllowedByValue). true: render a combobox (pick a listed option or type a value). The server stores a listed value as a preset and an unlisted typed value as a custom value; a required field still needs a non-empty value. On edit, a stored value that is not in the list is shown and submitted as a typed value, never reported as not-a-choice."
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "live",
+            "fallback",
+            "unavailable"
+          ],
+          "optional": true,
+          "doc": "capability `option_source.status`. live: the list came from the Computer's probe. fallback: the probe was not live and the list is the bundled one (usable; show `reason`). unavailable: no list at all; `options` is []. One status per source, worst wins (unavailable > fallback > live), dependent_select included (there is no per-value status). A source-level failure is reported here, never as a form-level error, and never makes a client fall back to v1 (v1 fallback is only for a form-level 404 or protocol error). Client obligations: unavailable + required field: show the status and (when retryable) a retry, and block submit; unavailable + optional field: hide the field. Retry = request the same source again with `?refresh=1`; the server then bypasses any cache (the Computer's probe gate already single-flights concurrent probes)."
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "probe_timeout",
+            "probe_failed",
+            "missing_config",
+            "no_models",
+            "unsupported",
+            "machine_offline"
+          ],
+          "optional": true,
+          "doc": "capability `option_source.status`. Why the status is not live; absent when status is live. probe_timeout and probe_failed stay distinct. Server mapping from the Computer's probe outcome: missing_config -> missing_config; no_models (or a live list with no models) -> no_models; unsupported -> unsupported; probe error with code detect_timeout, or the server's own wait timing out -> probe_timeout; probe error with code computer_offline, or the Computer offline/unrouted -> machine_offline; any other probe error or failure -> probe_failed. Clients must accept an unknown reason (show a generic message)."
+        },
+        "retryable": {
+          "type": "bool",
+          "optional": true,
+          "doc": "capability `option_source.status`. Whether retrying may change the answer: true for probe_timeout, probe_failed, machine_offline and no_models (the user may add models); false for missing_config and unsupported. Absent or false when status is live."
+        }
+      }
+    },
+    "Option": {
+      "fields": {
+        "value": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "providerKind": {
+          "type": "string",
+          "optional": true
+        },
+        "supportedReasoningEfforts": {
+          "type": "string[]",
+          "optional": true
+        },
+        "defaultReasoningEffort": {
+          "type": "string",
+          "optional": true
+        }
+      }
+    },
+    "SubmitRef": {
+      "fields": {
+        "protocolVersion": {
+          "type": "int",
+          "const": 2
+        },
+        "runtimeId": {
+          "type": "string"
+        }
+      }
+    },
+    "Submission": {
+      "doc": "The runtime-form part of POST /api/agents: field values keyed by dataSchema property name. The server assembles the runtimeConfig.",
+      "fields": {
+        "formDefinitionRef": {
+          "type": "SubmitRef"
+        },
+        "formValues": {
+          "type": "map<json>"
+        }
+      }
+    }
+  }
+}

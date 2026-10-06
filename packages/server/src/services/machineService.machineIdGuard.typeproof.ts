@@ -1,5 +1,5 @@
 import { asMachineId, asServerId } from "@botiverse/raft-shared";
-import { getMachine } from "./machineService.js";
+import { getMachine } from "./machineService";
 
 // Compile-time guard for the serverId→machine confusion class. All ids are
 // UUID strings, so before branding `getMachine(machineId: string)` happily

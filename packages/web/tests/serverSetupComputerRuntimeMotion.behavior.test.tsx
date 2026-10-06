@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, render as rtlRender } from "@testing-library/react";
 import ServerSetupComputerRuntimeStep, {
@@ -32,34 +31,34 @@ function collect(reducedMotion: boolean) {
   const seen: { type: string; at: number }[] = [];
   let now = 0;
   const dispatch = (action: Action) => seen.push({ type: action.type, at: now });
-  const advance = (t: { mock: { timers: { tick: (ms: number) => void } } }, ms: number) => {
+  const advance = (ms: number) => {
     now += ms;
-    t.mock.timers.tick(ms);
+    vi.advanceTimersByTime(ms);
   };
   return { seen, dispatch, advance, start: () => startConnectionMotion(dispatch, reducedMotion) };
 }
 
-test("settle arrives 2040ms after start, and handoff at 1400ms", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("settle arrives 2040ms after start, and handoff at 1400ms", () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const { seen, advance, start } = collect(false);
   const stop = start();
 
   assert.deepEqual(seen.map((s) => s.type), ["start"], "start dispatches immediately");
 
-  advance(t, 1_399);
+  advance(1_399);
   assert.deepEqual(seen.map((s) => s.type), ["start"], "nothing lands before 1400ms");
 
-  advance(t, 1);
+  advance(1);
   assert.deepEqual(
     seen.map((s) => ({ type: s.type, at: s.at })).filter((s) => s.type === "handoff"),
     [{ type: "handoff", at: 1_400 }],
     "handoff lands exactly at 1400ms",
   );
 
-  advance(t, 639);
+  advance(639);
   assert.equal(seen.some((s) => s.type === "settle"), false, "settle has not landed before 2040ms");
 
-  advance(t, 1);
+  advance(1);
   assert.deepEqual(
     seen.filter((s) => s.type === "settle"),
     [{ type: "settle", at: 2_040 }],
@@ -73,14 +72,14 @@ test("settle arrives 2040ms after start, and handoff at 1400ms", (t) => {
   stop();
 });
 
-test("reduced motion skips straight to settled and schedules no timers", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("reduced motion skips straight to settled and schedules no timers", () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const { seen, advance, start } = collect(true);
   const stop = start();
 
   assert.deepEqual(seen.map((s) => s.type), ["skip"], "reduced motion resolves immediately");
 
-  advance(t, 5_000);
+  advance(5_000);
   assert.deepEqual(
     seen.map((s) => s.type),
     ["skip"],
@@ -97,8 +96,8 @@ test("reduced motion skips straight to settled and schedules no timers", (t) => 
  * effect wiring could break while the schedule stayed green (@Bugen's point: the
  * primitive's green and the page's green are two different greens).
  */
-test("the step reaches data-motion-state=settled once the schedule completes", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("the step reaches data-motion-state=settled once the schedule completes", () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 
   const props = {
     runtimeStatus: "checking" as const,
@@ -127,19 +126,19 @@ test("the step reaches data-motion-state=settled once the schedule completes", (
   assert.notEqual(motionState(), "settled", "still animating before the schedule completes");
 
   act(() => {
-    t.mock.timers.tick(2_040);
+    vi.advanceTimersByTime(2_040);
   });
 
   assert.equal(motionState(), "settled", "the step is settled once settle lands at 2040ms");
 });
 
-test("cleanup cancels pending phases", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("cleanup cancels pending phases", () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const { seen, advance, start } = collect(false);
   const stop = start();
 
   stop();
-  advance(t, 5_000);
+  advance(5_000);
 
   assert.deepEqual(
     seen.map((s) => s.type),

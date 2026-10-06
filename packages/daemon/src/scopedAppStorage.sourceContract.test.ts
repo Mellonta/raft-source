@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { test } from "vitest";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -129,7 +128,7 @@ test("Agent Inbox production API cannot regain filesystem path authority", () =>
   const forbiddenImports = inbox.statements
     .filter(ts.isImportDeclaration)
     .map((statement) => (statement.moduleSpecifier as ts.StringLiteral).text)
-    .filter((specifier) => specifier === "node:fs" || specifier === "node:path" || specifier.endsWith("/raftHome.js"));
+    .filter((specifier) => specifier === "node:fs" || specifier === "node:path" || /\/raftHome(?:\.js)?$/.test(specifier));
   assert.deepEqual(
     forbiddenImports,
     [],
@@ -311,8 +310,8 @@ test("daemon production source has exactly one platform scoped-storage root cons
   const program = ts.createProgram({
     rootNames: productionSourcePaths,
     options: {
-      module: ts.ModuleKind.NodeNext,
-      moduleResolution: ts.ModuleResolutionKind.NodeNext,
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
       target: ts.ScriptTarget.ESNext,
       skipLibCheck: true,
     },

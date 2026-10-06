@@ -1,10 +1,10 @@
 import type { RequestHandler, Response } from "express";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
+import { addTraceEvent } from "../tracing/semanticTrace";
 import {
   InboxBackpressureRejectedError,
   type InboxRouteBackpressure,
   createDefaultInboxRouteBackpressure,
-} from "../services/inboxRouteBackpressure.js";
+} from "../services/inboxRouteBackpressure";
 
 const defaultInboxRouteBackpressure = createDefaultInboxRouteBackpressure();
 const INBOX_BACKPRESSURE_ADMISSION = Symbol("inboxBackpressureAdmission");

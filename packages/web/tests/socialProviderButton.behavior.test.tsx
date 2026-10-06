@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, render as rtlRender, screen } from "@testing-library/react";
 import SocialProviderButton from "../src/components/auth/SocialProviderButton";
@@ -23,9 +22,14 @@ test("social provider buttons center their icon and label together", () => {
 
   for (const label of ["Google", "GitHub", "Apple"]) {
     const button = screen.getByRole("button", { name: `Continue with ${label}` });
-    assert.ok(button.classList.contains("justify-center"));
-    assert.equal(button.children.length, 2);
-    assert.ok(button.firstElementChild instanceof HTMLImageElement);
-    assert.equal(button.lastElementChild?.textContent, `Continue with ${label}`);
+    // The RUI Button owns the chrome; its content slot is what carries the
+    // icon+label pair and the centering contract.
+    assert.equal(button.getAttribute("data-slot"), "button");
+    const content = button.querySelector('[data-slot="button-content"]');
+    assert.ok(content, "social buttons must render the RUI button content slot");
+    assert.ok(content.classList.contains("justify-center"));
+    assert.equal(content.children.length, 2);
+    assert.ok(content.firstElementChild instanceof HTMLImageElement);
+    assert.equal(content.lastElementChild?.textContent, `Continue with ${label}`);
   }
 });

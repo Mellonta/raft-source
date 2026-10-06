@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act } from "react";
 import { cleanup, render } from "@testing-library/react";
 import { createRenderCounter } from "./helpers/renderCount";
@@ -61,7 +60,7 @@ function seedAgents() {
 }
 
 function captureWebTraceBatches() {
-  const batches: Array<{ records?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
+  const batches: Array<{ events?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
   __resetAuthTraceForTest({ traceUrl: "https://trace.example.test" });
   setAuthTraceServerIdGetter(() => "server-1");
   setAuthTracePrincipalIdGetter(() => "user-1");
@@ -136,7 +135,7 @@ test("updating one agent's trace join re-renders and re-emits only that agent's 
 
   assert.ok(rc.get("a") > a0, "agent A's dot must observe its trace join update");
   assert.equal(rc.get("b"), b0, "agent B's dot must not re-render for agent A's trace join update");
-  const records = batches.flatMap((batch) => batch.records ?? []);
+  const records = batches.flatMap((batch) => batch.events ?? []);
   assert.deepEqual(
     records.map((record) => [record.name, record.attrs?.join]),
     [["slock.agent_activity.status_dot_applied", { clientEventId: "client-event-a" }]],

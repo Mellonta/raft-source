@@ -50,6 +50,25 @@ export function filterSidebarChannelsByMembership(
   return joinedOnly ? channels.filter((channel) => channel.joined === true) : channels;
 }
 
+/**
+ * A conversion receipt is authoritative until finalize commits the Joint
+ * projection. The API may briefly expose `type=joint` ahead of that receipt;
+ * sidebar sections must keep such a channel in the ordinary list so the
+ * visible classification matches the Settings state machine.
+ */
+export function hasActiveChannelConversion(
+  channel: Pick<Channel, "conversionJob">,
+): boolean {
+  const status = channel.conversionJob?.status;
+  return status === "pending" || status === "running" || status === "failed";
+}
+
+export function isSidebarJointChannel(
+  channel: Pick<Channel, "type" | "conversionJob">,
+): boolean {
+  return channel.type === "joint" && !hasActiveChannelConversion(channel);
+}
+
 export function shouldShowSidebarChannelEmptyState(channels: Channel[]): boolean {
   return channels.length === 0;
 }

@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
-import type { AgentContext } from "../../auth/env.js";
+import { setCanonicalFetchImplForTests } from "../../proxy";
+
+import type { AgentContext } from "../../auth/env";
 import {
   AgentManifestFetchError,
   buildLocalCliProfileEnv,
@@ -12,7 +13,7 @@ import {
   fetchAgentManifestWithWellKnownAliases,
   formatShellExports,
   validateAgentManifestV0,
-} from "./manifest.js";
+} from "./manifest";
 
 const agentContext: AgentContext = {
   agentId: "agent-123",
@@ -277,9 +278,8 @@ test("fetchAgentManifestWithWellKnownAliases falls back from Raft to legacy Sloc
 });
 
 test("fetchAgentManifest attaches the canonical dispatcher for an HTTPS proxy route", async () => {
-  const previousFetch = globalThis.fetch;
   let dispatcherObserved = false;
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+  const previousFetch = setCanonicalFetchImplForTests((async (input: string | URL | Request, init?: RequestInit) => {
     dispatcherObserved = Boolean((init as RequestInit & { dispatcher?: unknown } | undefined)?.dispatcher);
     const url = typeof input === "string" || input instanceof URL ? input.toString() : input.url;
     return responseWithUrl(JSON.stringify({
@@ -289,7 +289,7 @@ test("fetchAgentManifest attaches the canonical dispatcher for an HTTPS proxy ro
       status: 200,
       headers: { "content-type": "application/json" },
     }, url);
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     const result = await fetchAgentManifest(
       "https://proxy-only.example/.well-known/raft-agent-manifest.json",
@@ -298,13 +298,12 @@ test("fetchAgentManifest attaches the canonical dispatcher for an HTTPS proxy ro
     assert.equal(result.execution.mode, "http_api");
     assert.equal(dispatcherObserved, true);
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 });
 
 test("fetchAgentManifest preserves the actual credential-free URL and bounded HTTP cause", async () => {
-  const previousFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: string | URL | Request) => {
+  const previousFetch = setCanonicalFetchImplForTests((async (input: string | URL | Request) => {
     const url = typeof input === "string" || input instanceof URL ? input.toString() : input.url;
     return responseWithUrl("temporarily unavailable", {
       status: 503,
@@ -313,7 +312,7 @@ test("fetchAgentManifest preserves the actual credential-free URL and bounded HT
         "retry-after": "30",
       },
     }, url);
-  }) as typeof fetch;
+  }) as typeof fetch);
   try {
     await assert.rejects(
       () => fetchAgentManifest("https://manifest.example/.well-known/raft-agent-manifest.json", {}),
@@ -331,7 +330,7 @@ test("fetchAgentManifest preserves the actual credential-free URL and bounded HT
       },
     );
   } finally {
-    globalThis.fetch = previousFetch;
+    setCanonicalFetchImplForTests(previousFetch);
   }
 });
 

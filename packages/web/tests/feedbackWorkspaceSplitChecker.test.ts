@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { validateFeedbackWorkspaceSplit } from "../scripts/check-feedback-workspace-split.mjs";
 
 const manifest = {
@@ -9,7 +8,7 @@ const manifest = {
     file: "assets/feedback.js",
     isDynamicEntry: true,
   },
-  "node_modules/.pnpm/@botiverse+hands-feedback-react/source/styles.css": {
+  "node_modules/.pnpm/@botiverse+hands-feedback-react@0.4.1/node_modules/@botiverse/hands-feedback-react/dist/styles.css": {
     file: "assets/feedback.css",
     isDynamicEntry: true,
   },

@@ -3,7 +3,6 @@
 // workflow input is explicitly enabled. One-command SOP (replace <ref>):
 //   gh workflow run test.yml --ref <ref> -f unit_daemon_failure_probe=true
 // Expected: unit-daemon reports raw outcome=failure and unit-daemon-gate is RED.
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
 test(

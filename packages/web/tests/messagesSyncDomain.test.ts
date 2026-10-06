@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { createSyncCore, createSyncViolationBuffer } from "@botiverse/raft-shared";
 import type {
   SyncCore,
@@ -18,16 +17,16 @@ import {
   createMessagesSyncDomain,
   MESSAGES_SYNC_DOMAIN,
   resetMessagesSyncCoreForTests,
-} from "../src/store/messageSyncDomain.js";
+} from "../src/store/messageSyncDomain";
 import type {
   MessageDomainEvent,
-} from "../src/store/messageSyncDomain.js";
-import type { Message, MessageReaction } from "../src/store/messageStore.js";
-import { __setStateTransitionEmitterForTest } from "../src/utils/stateTransitionTrace.js";
+} from "../src/store/messageSyncDomain";
+import type { Message, MessageReaction } from "../src/store/messageStore";
+import { __setStateTransitionEmitterForTest } from "../src/utils/stateTransitionTrace";
 import {
   __resetStateViolationCoalescerForTest,
   __setStateViolationEmitterForTest,
-} from "../src/utils/stateViolationTrace.js";
+} from "../src/utils/stateViolationTrace";
 
 const channelId = "channel-messages-domain";
 const messageId = "message-1";

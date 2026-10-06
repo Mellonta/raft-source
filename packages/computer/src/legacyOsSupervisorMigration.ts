@@ -1,8 +1,8 @@
-import { withComputerMutationLock } from "./concurrency.js";
-import { retireLegacyOsSupervisor } from "./osSupervisorRuntime.js";
-import { listAttachedServerIds } from "./serverState.js";
-import { start } from "./services/start.js";
-import { stop } from "./services/stop.js";
+import { withComputerMutationLock } from "./concurrency";
+import { retireLegacyOsSupervisor } from "./osSupervisorRuntime";
+import { listAttachedServerIds } from "./serverState";
+import { start } from "./services/start";
+import { stop } from "./services/stop";
 
 export interface LegacyOsSupervisorMigrationDeps {
   retire?: typeof retireLegacyOsSupervisor;

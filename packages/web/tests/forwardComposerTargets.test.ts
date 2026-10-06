@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import type { Channel } from "../src/store/channelStore.js";
+import type { Channel } from "../src/store/channelStore";
 
 const mem = new Map<string, string>();
 Object.defineProperty(globalThis, "localStorage", {
@@ -15,8 +14,8 @@ Object.defineProperty(globalThis, "localStorage", {
   configurable: true,
 });
 
-const { canForwardToTarget, getForwardTargets } = await import("../src/components/message/ForwardComposerDialog.js");
-const { forwardRequestFailureMessage } = await import("../src/components/message/forwardComposerModel.js");
+const { canForwardToTarget, getForwardTargets } = await import("../src/components/message/ForwardComposerDialog");
+const { forwardRequestFailureMessage } = await import("../src/components/message/forwardComposerModel");
 
 function channel(overrides: Partial<Channel> & { id: string; name: string }): Channel {
   return {

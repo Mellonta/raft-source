@@ -1,7 +1,7 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
+import { dbTest as test } from "../test/integration/dbTest";
 import assert from "node:assert/strict";
 
-import { withAgentCreateLock, withServerLock, withServerResourceLock } from "./planService.js";
+import { withAgentCreateLock, withServerLock, withServerResourceLock } from "./planService";
 
 
 test("withServerLock serializes concurrent work on pglite", async ({ db }) => {

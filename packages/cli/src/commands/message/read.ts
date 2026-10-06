@@ -1,27 +1,29 @@
-// `raft message read --target <t> [--before <id|seq>] [--after <id|seq>] [--around <id|seq>] [--limit N]`
+// `raft message read --target <t> [--unread | --before <id|seq> | --after <id|seq> | --around <id|seq>] [--limit N]`
 // → GET /internal/agent-api/history
 //
 // The history anchors accept either a message id (full or short) or a
 // numeric seq. `--before` / `--after` exclude the anchor; `--around` includes it.
+// `--unread` starts right after the agent's read position instead of an anchor.
 
 import type { Command } from "commander";
 
-import type { ApiProxyDiagnostics } from "../../client.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { apiFailureError } from "../_apiFailure.js";
-import { requireTargetAlias, type TargetAliasOpts } from "../_target.js";
-import { formatHistory } from "./_format.js";
-import { recordConsumedRead } from "./_consumedSeqState.js";
+import type { ApiProxyDiagnostics } from "../../client";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { apiFailureError } from "../_apiFailure";
+import { PEER_KIND_OPTION, requireTargetAlias, type TargetAliasOpts } from "../_target";
+import { formatHistory } from "./_format";
+import { getConsumedExactSeqs, getConsumedSeq, recordHistoryReadWindow } from "./_consumedSeqState";
 
 interface ReadOpts extends TargetAliasOpts {
   before?: string;
   after?: string;
   around?: string;
   limit?: string;
+  unread?: boolean;
 }
 
 function parsePositiveInt(name: string, raw: string | undefined): number | undefined {
@@ -72,13 +74,22 @@ function validateReadOpts(opts: Partial<ReadOpts>): {
   after?: string;
   around?: string;
   limit?: number;
+  unread?: true;
 } {
   const channel = requireTargetAlias(opts);
   const limit = parsePositiveInt("limit", opts.limit);
   const before = opts.before?.trim();
   const after = opts.after?.trim();
+  if (opts.unread && (before || after || opts.around !== undefined)) {
+    throw new CliError({
+      code: "INVALID_ARG",
+      message: "--unread cannot be combined with --before, --after, or --around: it always starts right after your read position.",
+      suggestedNextAction: `raft message read --target "${channel}" --unread`,
+    });
+  }
   return {
     channel,
+    ...(opts.unread ? { unread: true as const } : {}),
     ...(before ? { before } : {}),
     ...(after ? { after } : {}),
     ...(opts.around !== undefined ? { around: opts.around } : {}),
@@ -86,16 +97,28 @@ function validateReadOpts(opts: Partial<ReadOpts>): {
   };
 }
 
+function alreadyShownIn(agentId: string, target: string, messages: ReadonlyArray<{ seq?: unknown }>): Set<number> {
+  const upTo = getConsumedSeq(agentId, target) ?? 0;
+  const exact = new Set(getConsumedExactSeqs(agentId, target));
+  const shown = new Set<number>();
+  for (const message of messages) {
+    if (typeof message.seq === "number" && (message.seq <= upTo || exact.has(message.seq))) shown.add(message.seq);
+  }
+  return shown;
+}
+
 export const messageReadCommand = defineCommand(
   {
     name: "read",
     description: "Read message history for a channel, DM, or thread",
     options: [
-      { flags: "--target <target>", description: "Target: '#channel', 'dm:@peer', '#channel:threadId', 'dm:@peer:threadId'" },
+      { flags: "--target <target>", description: "Target: '#channel', 'dm:@peer', '#channel:threadId', 'dm:@peer:threadId', 'agent-event:eventId'" },
       { flags: "--channel <target>", description: "Legacy alias for --target (accepted during transition)" },
+      PEER_KIND_OPTION,
       { flags: "--before <idOrSeq>", description: "Return messages strictly before this anchor (pure-decimal values are seqs)" },
       { flags: "--after <idOrSeq>", description: "Return messages strictly after this anchor (pure-decimal values are seqs)" },
       { flags: "--around <idOrSeq>", description: "Center the window on this anchor (8-character values are short ids)" },
+      { flags: "--unread", description: "Read this target's unread messages: start right after your read position and move it forward" },
       { flags: "--limit <n>", description: "Max messages to return (server default applies if omitted)" },
     ],
   },
@@ -110,6 +133,7 @@ export const messageReadCommand = defineCommand(
       ...(readOpts.after !== undefined ? { after: readOpts.after } : {}),
       ...(readOpts.around !== undefined ? { around: readOpts.around } : {}),
       ...(readOpts.limit !== undefined ? { limit: String(readOpts.limit) } : {}),
+      ...(readOpts.unread ? { unread: "true" as const } : {}),
     });
     if (!res.ok) {
       throw mapReadFailure(res);
@@ -120,39 +144,41 @@ export const messageReadCommand = defineCommand(
         message: "Agent API historyRead returned an empty response body",
       });
     }
+    // A Server that does not know `unread` ignores it and returns the latest
+    // page; printing that as "unread" would be wrong without anyone noticing.
+    if (readOpts.unread && typeof res.data.unread_after_seq !== "number") {
+      throw new CliError({
+        code: "UNSUPPORTED_BY_SERVER",
+        message: "This Server does not support --unread yet, so the page it returned was discarded instead of being shown as unread.",
+        suggestedNextAction: "raft inbox check (each row prints the read command for that conversation)",
+      });
+    }
+    // `--unread` folds messages this agent was already shown (recorded locally,
+    // per model context) so a message that came back unsettled is not read as new.
+    const alreadyShownSeqs = readOpts.unread
+      ? alreadyShownIn(agentContext.agentId, typeof res.data.target === "string" && res.data.target ? res.data.target : readOpts.channel, res.data.messages ?? [])
+      : undefined;
     writeText(
       ctx.io, adoptCliReplyText(
       `${formatHistory(readOpts.channel, res.data, {
         around: readOpts.around,
         after: readOpts.after,
         before: readOpts.before,
+        unread: readOpts.unread === true,
+        ...(alreadyShownSeqs ? { alreadyShownSeqs } : {}),
       })}\n`,
     ));
-    // FH-001 full-body advance contract (A), contiguous history-read slice:
-    // 1. A command that returns full message bodies to the current agent can
-    //    advance client_seen. This history-read path returns a bounded ordered
-    //    window, so it advances the per-target consumed cursor to max(returned
-    //    seq). Target-scoped: DM/channel/thread each own a cursor; thread read
-    //    advances the thread, not its parent.
-    // 2. Empty read ("No messages") does not advance or fabricate a boundary.
-    // 3. Monotonic forward only: browsing older seq < cursor never lowers it.
-    // 4. Passive receipt/wake hint/inbox preflight/thread-follow notices never
-    //    advance (FH-EXT-001). Only active body-returning reads advance.
-    // 5. Preview/snippet search is non-consuming. Full-body resolve is a
-    //    follow-up: a single high seq cannot safely become a max boundary
-    //    without contiguity or seen-set semantics.
-    //
-    // `--around` is an anchored context lookup, not a read-through boundary.
-    // It can expose a high seq while leaving surrounding unread context outside
-    // the returned window, so it must not update the local freshness cursor.
-    if (readOpts.around === undefined) {
-      const rows = res.data.messages ?? [];
-      let maxSeq = 0;
-      for (const row of rows) {
-        if (typeof row.seq === "number" && Number.isFinite(row.seq) && row.seq > maxSeq) maxSeq = row.seq;
-      }
-      recordConsumedRead(agentContext.agentId, readOpts.channel, maxSeq > 0 ? maxSeq : undefined);
-    }
+    // What the window consumed (the FH-001 full-body advance contract: target
+    // identity from the resolver, `--around` and gapped windows record exact
+    // seqs only, old-server boundary inference) is the shared seen policy
+    // (shared/src/agentOps/seenPolicy/historyRead.ts).
+    recordHistoryReadWindow(agentContext.agentId, {
+      requestedTarget: readOpts.channel,
+      ...(readOpts.around !== undefined ? { around: readOpts.around } : {}),
+      ...(readOpts.after !== undefined ? { after: readOpts.after } : {}),
+      ...(readOpts.unread && typeof res.data.unread_after_seq === "number" ? { after: String(res.data.unread_after_seq) } : {}),
+      data: res.data,
+    });
   },
 );
 

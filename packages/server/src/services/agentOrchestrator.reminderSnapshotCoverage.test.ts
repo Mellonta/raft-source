@@ -1,16 +1,15 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 
-import { getDb } from "../db/index.js";
-import { reminders, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { reminders, users } from "../db/schema";
 import { eq } from "drizzle-orm";
-import { AgentOrchestrator } from "./agentOrchestrator.js";
-import { createAgent } from "./agentService.js";
-import { registerMachine } from "./machineService.js";
-import { createServer } from "./serverService.js";
-import { createReminder } from "../apps/reminder/service.js";
+import { AgentOrchestrator } from "./agentOrchestrator";
+import { createAgent } from "./agentService";
+import { registerMachine } from "./machineService";
+import { createServer } from "./serverService";
+import { createReminder } from "../apps/reminder/service";
 
 afterEach(async () => {
   await closeTestDatabase();

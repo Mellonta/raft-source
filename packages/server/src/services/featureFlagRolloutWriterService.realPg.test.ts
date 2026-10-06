@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
-import { runNamedCase } from "../test/runNamedCase.js";
+import { runNamedCase } from "../test/runNamedCase";
 import { asc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
@@ -13,20 +12,20 @@ import {
   FEATURE_FLAG_ROLLOUT_GUARDRAIL_SCHEMA,
   type FeatureFlagRolloutGuardrailReceiptV1,
 } from "@botiverse/raft-shared";
-import type { Database } from "../db/index.js";
-import * as schema from "../db/schema.js";
+import type { Database } from "../db/index";
+import * as schema from "../db/schema";
 import {
   featureFlagConfigVersions,
   featureFlagRolloutAuditEvents,
   featureFlagRules,
   featureFlags,
-} from "../db/schema.js";
-import { acquireFeatureFlagLock } from "./featureFlagService.js";
+} from "../db/schema";
+import { acquireFeatureFlagLock } from "./featureFlagService";
 import {
   createFeatureFlagRolloutWriterService,
   FeatureFlagRolloutWriteConflictError,
   type FeatureFlagRolloutWriteInput,
-} from "./featureFlagRolloutWriterService.js";
+} from "./featureFlagRolloutWriterService";
 
 const REAL_PG_URL_ENV = "FEATURE_FLAG_ROLLOUT_REAL_PG_URL";
 const REAL_PG_URL = process.env[REAL_PG_URL_ENV];

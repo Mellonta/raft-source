@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
-import { FeedbackTransportError } from "@botiverse/hands-feedback-react/source";
+import { FeedbackTransportError } from "@botiverse/hands-feedback-react";
 import api from "../src/api/client";
 import {
   feedbackTransportError,

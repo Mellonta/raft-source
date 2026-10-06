@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   AttachmentCommentRefChip,
@@ -44,7 +43,7 @@ test("AttachmentCommentRefChip renders when the message has a comment ref and th
 
   assert.match(html, /data-message-affordance="attachment-comment-ref-chip"/);
   assert.match(html, /bg-brutal-stone\/25/);
-  assert.match(html, /title="Comment on flagged\.txt"/);
+  assert.match(html, /data-base-ui-tooltip-trigger/);
   assert.match(html, /re: flagged\.txt/);
   assert.doesNotMatch(html, /Stryker was here!/);
 });
@@ -60,7 +59,7 @@ test("AttachmentCommentRefChip suppresses the ref when the message has no commen
 test("AttachmentCommentRefChip includes anchor labels in visible text and titles", () => {
   const html = renderChip(makeCommentRef({ anchorLabel: "line 7" }), true);
 
-  assert.match(html, /title="Comment on flagged\.txt · line 7"/);
+  assert.match(html, /data-base-ui-tooltip-trigger/);
   assert.match(html, /re: flagged\.txt · line 7/);
 });
 
@@ -80,7 +79,8 @@ test("AttachmentCommentRefChip host links include jump copy and call the jump ha
       />
     </TestIntlProvider>,
   );
-  const link = screen.getByTitle("Jump to the message with flagged.txt · cell A1");
+  const link = document.querySelector('[data-message-affordance="attachment-comment-ref-chip"]');
+  assert.ok(link.hasAttribute("data-base-ui-tooltip-trigger"), "jump hint now rides the RUI tooltip trigger");
   assert.match(link.className, /bg-brutal-stone\/25/);
   fireEvent.click(link);
   assert.equal(jumpCount, 1);
@@ -96,6 +96,7 @@ test("AttachmentCommentRefChip host links omit anchor-label fallback copy when n
       />
     </TestIntlProvider>,
   );
-  const link = screen.getByTitle("Jump to the message with flagged.txt");
+  const link = document.querySelector('[data-message-affordance="attachment-comment-ref-chip"]');
+  assert.ok(link.hasAttribute("data-base-ui-tooltip-trigger"), "jump hint now rides the RUI tooltip trigger");
   assert.doesNotMatch(link.outerHTML, /Stryker was here!/);
 });

@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
 import {
   type WindowBindServerOk,
   type WindowOpenServerOk,
@@ -11,7 +10,7 @@ import {
   SERVER_TITLE_FALLBACK,
   SERVER_TITLE_MAX_UTF8_BYTES,
   SERVER_TITLE_SUFFIX,
-} from "../ipc.js";
+} from "../ipc";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends
   (<T>() => T extends B ? 1 : 2) ? true : false;

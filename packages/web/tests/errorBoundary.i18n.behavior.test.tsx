@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, render, screen } from "@testing-library/react";
 
@@ -15,6 +14,7 @@ const zh = zhMessages as Record<string, string>;
 
 const IDS = [
   "errorBoundary.title",
+  "errorBoundary.stack",
   "errorBoundary.componentStack",
   "errorBoundary.reloadApp",
 ] as const;
@@ -25,6 +25,7 @@ afterEach(() => {
 
 test("catalog pins error-boundary MessageIds with preserved English meaning", () => {
   assert.equal(en["errorBoundary.title"], "Something went wrong");
+  assert.equal(en["errorBoundary.stack"], "Stack trace");
   assert.equal(en["errorBoundary.componentStack"], "Component stack");
   assert.equal(en["errorBoundary.reloadApp"], "Reload app");
   for (const id of IDS) {

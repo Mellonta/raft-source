@@ -1,10 +1,11 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { playwrightScenarios } from "./playwrightScenarios.js";
-import { openTestApp } from "./integration/app.js";
-import { seedPlaywrightScenario } from "./seedPlaywrightScenario.js";
-import { evidenceConfig, observeApiProcess } from "../../../../scripts/e2e/transportEvidence.js";
+import { playwrightScenarios } from "./playwrightScenarios";
+import { openTestApp } from "./integration/app";
+import { seedPlaywrightScenario } from "./seedPlaywrightScenario";
+import { installRisingWaveReadReferences } from "./risingWaveReadReference";
+import { evidenceConfig, observeApiProcess } from "../../../../scripts/e2e/transportEvidence";
 
 const observeHttpServer = observeApiProcess(evidenceConfig());
 
@@ -19,6 +20,10 @@ async function main() {
   // /health can become ready before seeding finishes. Never let globalSetup
   // consume IDs or a capability left over from the previous server process.
   await rm(statePath, { force: true });
+
+  // The e2e server runs on PGlite without RisingWave (a hard dependency of the
+  // product): serve the RisingWave reads from their test-only Postgres references.
+  installRisingWaveReadReferences();
 
   const scenarioCapability = randomUUID();
   const testApp = await openTestApp(process.env.DATABASE_URL || "pglite://", port, {

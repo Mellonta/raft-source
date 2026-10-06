@@ -1,0 +1,34 @@
+-- Followed-thread stats on the unified chain's unread rule.
+--
+-- v2 (069) counted unread with the pre-RFC-063 rule: it excluded only the
+-- user's own sent messages and read rw_user_channel_read_cursors. The unified
+-- chain (rw_inbox_normal_v4 in 063-unified-inbox-chain.sql, which feeds the
+-- sidebar, Activity and the agent inbox) additionally excludes system messages
+-- whose causal actor is the receiver and the two noise system subtypes, and
+-- reads rw_receiver_cursors_v1. With two rules the same thread showed different
+-- unread counts in Threads, the Activity thread row and the sidebar.
+--
+-- v3 keeps v2's columns, keys and lookup index (the reader changes only the
+-- view name) and v2's joint storage mapping (a projected local thread reads
+-- the canonical thread's messages). Only unread_count / first_unread_seq (and
+-- so first_unread_message_id) change, to EXACTLY the chain predicate:
+--   seq > COALESCE(cursor from rw_receiver_cursors_v1, 0)
+--   AND NOT own-sent
+--   AND NOT COALESCE(system message caused by the receiver, FALSE)   -- NULL = no exclusion
+--   AND system_subtype NOT IN ('channel.self_unfollow_thread', 'task.deleted_summary')
+-- reply_count, latest_seq, latest_message_id, last_reply_at and the preview
+-- stay unfiltered: every message in the thread, as in v2.
+--
+-- The send-verdict columns are read from rw_messages directly (they were added
+-- in place, see 063), not from rw_message_target_v3: that relation drops
+-- archived channels and carries no id/content, and v2 serves both.
+--
+-- No eligibility gate is added (rw_target_eligible_v1 is not joined), as in v2.
+-- last_read_seq is BIGINT (the rw_receiver_cursors_v1 type); v2's was INT. The
+-- server does not read it.
+--
+-- Known gap: the Postgres history_cutoff read (getFollowedThreadStatsFromPostgres)
+-- stays a Postgres read; it applies the same predicate.
+CREATE MATERIALIZED VIEW rw_followed_thread_stats_v3 AS WITH followed_threads AS (SELECT t.server_id, tf.follower_id AS user_id, t.id AS thread_channel_id, COALESCE(canonical_thread.id, t.id) AS storage_thread_channel_id FROM rw_thread_follows AS tf JOIN rw_channels AS t ON t.id = tf.thread_channel_id AND t.type = 'thread' AND t.deleted_at IS NULL LEFT JOIN rw_joint_channel_servers AS thread_projection ON thread_projection.local_channel_id = t.id AND thread_projection.server_id = t.server_id AND thread_projection.status = 'active' LEFT JOIN rw_joint_channels AS thread_joint ON thread_joint.id = thread_projection.joint_channel_id AND thread_joint.status = 'active' LEFT JOIN rw_channels AS canonical_thread ON canonical_thread.id = thread_joint.canonical_channel_id AND canonical_thread.type = 'thread' AND canonical_thread.deleted_at IS NULL WHERE tf.follower_type = 'user'), stats AS (SELECT ft.server_id, ft.user_id, ft.thread_channel_id, ft.storage_thread_channel_id, COALESCE(rc.last_read_seq, 0) AS last_read_seq, CAST(count(m.id) AS INT) AS reply_count, CAST(count(m.id) FILTER (WHERE m.seq > COALESCE(rc.last_read_seq, 0) AND NOT (m.sender_type = 'user' AND m.sender_id = ft.user_id) AND NOT COALESCE(m.message_type = 'system' AND m.causal_actor_type = 'user' AND m.causal_actor_id = ft.user_id, FALSE) AND (m.system_subtype IS NULL OR m.system_subtype NOT IN ('channel.self_unfollow_thread', 'task.deleted_summary'))) AS INT) AS unread_count, max(m.seq) AS latest_seq, min(m.seq) FILTER (WHERE m.seq > COALESCE(rc.last_read_seq, 0) AND NOT (m.sender_type = 'user' AND m.sender_id = ft.user_id) AND NOT COALESCE(m.message_type = 'system' AND m.causal_actor_type = 'user' AND m.causal_actor_id = ft.user_id, FALSE) AND (m.system_subtype IS NULL OR m.system_subtype NOT IN ('channel.self_unfollow_thread', 'task.deleted_summary'))) AS first_unread_seq FROM followed_threads AS ft LEFT JOIN rw_receiver_cursors_v1 AS rc ON rc.receiver_type = 'user' AND rc.receiver_id = ft.user_id AND rc.channel_id = ft.thread_channel_id LEFT JOIN rw_messages AS m ON m.channel_id = ft.storage_thread_channel_id GROUP BY ft.server_id, ft.user_id, ft.thread_channel_id, ft.storage_thread_channel_id, COALESCE(rc.last_read_seq, 0)) SELECT stats.server_id, stats.user_id, stats.thread_channel_id, stats.storage_thread_channel_id, stats.last_read_seq, stats.reply_count, stats.unread_count, stats.latest_seq, stats.first_unread_seq, latest.id AS latest_message_id, latest.created_at AS last_reply_at, latest.content AS latest_preview, latest.sender_type AS latest_sender_type, latest.sender_id AS latest_sender_id, first_unread.id AS first_unread_message_id FROM stats LEFT JOIN rw_messages AS latest ON latest.channel_id = stats.storage_thread_channel_id AND latest.seq = stats.latest_seq LEFT JOIN rw_messages AS first_unread ON first_unread.channel_id = stats.storage_thread_channel_id AND first_unread.seq = stats.first_unread_seq;
+
+CREATE INDEX idx_rw_followed_thread_stats_v3_lookup ON rw_followed_thread_stats_v3(server_id, user_id, thread_channel_id);

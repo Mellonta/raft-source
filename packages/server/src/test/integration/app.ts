@@ -3,17 +3,17 @@ import express from "express";
 import type { RequestHandler } from "express";
 import type { AddressInfo } from "node:net";
 import { eq } from "drizzle-orm";
-import { createApp } from "../../app.js";
-import { getDb } from "../../db/index.js";
-import { closeTestDatabase, openTestDatabase } from "./database.js";
-import { measureIntegrationPhase, ownIntegrationResource, poisonIntegrationEnvironment } from "./lifecycle.js";
-import { featureFlags } from "../../db/schema.js";
-import { setupSocket } from "../../socket/index.js";
-import * as agentActivityLogService from "../../services/agentActivityLogService.js";
-import { HUMAN_ACTIVITY_MUTE_FEATURE_FLAG_KEY, ONBOARDING_OPENER_V2_FEATURE_FLAG_KEY } from "../../services/featureFlagService.js";
-import type { AgentStartDispatchResult } from "../../services/agentOrchestrator.js";
-import type { AttachmentUploadSessionService } from "../../routes/attachmentUploadSessions.js";
-import type { SlackBridgeRouteDependencies } from "../../routes/slackBridge.js";
+import { createApp } from "../../app";
+import { getDb } from "../../db/index";
+import { closeTestDatabase, openTestDatabase } from "./database";
+import { measureIntegrationPhase, ownIntegrationResource, poisonIntegrationEnvironment } from "./lifecycle";
+import { featureFlags } from "../../db/schema";
+import { setupSocket } from "../../socket/index";
+import * as agentActivityLogService from "../../services/agentActivityLogService";
+import { CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY, ONBOARDING_OPENER_V2_FEATURE_FLAG_KEY } from "../../services/featureFlagService";
+import type { AgentStartDispatchResult } from "../../services/agentOrchestrator";
+import type { AttachmentUploadSessionService } from "../../routes/attachmentUploadSessions";
+import type { SlackBridgeRouteDependencies } from "../../routes/slackBridge";
 
 type StubAgentOrchestrator = {
   deliverMessage: () => Promise<void>;
@@ -33,13 +33,15 @@ type StubAgentOrchestrator = {
   ) => Promise<{ acceptedCount: number; rejectedCount: number; droppedCount: number }>;
   getActivity: (agentId: string) => Promise<{ activity: string; activityDetail: string }>;
   listRecentActivityLog: (agentId: string, limit?: number) => Promise<never[]>;
+  getLiveActivityObservedAtMs: (agentId: string) => Promise<number | null>;
   getMachineStatus: (machineId: string) => Promise<"online" | "offline">;
   getMachineStatusVersion: (machineId: string) => Promise<number>;
   getMachineDaemonVersion: (machineId: string) => string | null;
   startAgent: (agentId: string) => Promise<AgentStartDispatchResult>;
-  stopAgent: (agentId: string, reason?: string) => Promise<void>;
+  stopAgent: (agentId: string, reason?: string) => Promise<{ delivered: boolean }>;
   resetAgent: (agentId: string, mode: "restart" | "session" | "full", options?: { restartIfStopped?: boolean }) => Promise<void>;
   evictCache: (agentId: string) => void;
+  liftWakeBlockForConfigChange: (agentId: string, options?: { runtimeValuesChanged?: boolean }) => Promise<void>;
   shutdown: () => void;
   setIO: () => void;
   hasMachineLocally: (machineId: string) => boolean;
@@ -99,13 +101,15 @@ function createAgentOrchestratorStub(): StubAgentOrchestrator {
     }),
     getActivity: async () => ({ activity: "offline", activityDetail: "" }),
     listRecentActivityLog: async () => [],
+    getLiveActivityObservedAtMs: async () => null,
     getMachineStatus: async () => "offline",
     getMachineStatusVersion: async () => 0,
     getMachineDaemonVersion: () => null,
     startAgent: async () => ({ outcome: "dispatched" }),
-    stopAgent: async () => { },
+    stopAgent: async () => ({ delivered: true }),
     resetAgent: async () => { },
     evictCache: () => { },
+    liftWakeBlockForConfigChange: async () => { },
     shutdown: () => { },
     setIO: () => { },
     hasMachineLocally: () => true,
@@ -119,6 +123,7 @@ export type TestAppOptions = {
   /** Standalone harness routes only; never mounted by the production app. */
   beforeApp?: RequestHandler;
   observeHttpServer?: (server: ReturnType<typeof createServer>) => void;
+  channelToJointConversionFlagDefaultEnabled?: boolean;
   clock?: { now(): Date };
   humanActivityMuteFlagDefaultEnabled?: boolean;
   onboardingOpenerFlagDefaultEnabled?: boolean;
@@ -136,7 +141,12 @@ export async function createTestApp(port = 0, opts: TestAppOptions = {}) {
     await getDb()
       .update(featureFlags)
       .set({ defaultEnabled: opts.humanActivityMuteFlagDefaultEnabled })
-      .where(eq(featureFlags.key, HUMAN_ACTIVITY_MUTE_FEATURE_FLAG_KEY));
+      .where(eq(featureFlags.key, "human_activity_mute_v0"));
+  }
+  if (opts.channelToJointConversionFlagDefaultEnabled !== undefined) {
+    await getDb().update(featureFlags)
+      .set({ defaultEnabled: opts.channelToJointConversionFlagDefaultEnabled })
+      .where(eq(featureFlags.key, CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY));
   }
   if (opts.onboardingOpenerFlagDefaultEnabled !== undefined) {
     await getDb().update(featureFlags)

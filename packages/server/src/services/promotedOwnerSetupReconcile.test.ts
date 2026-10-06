@@ -1,11 +1,12 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, serverMembers, servers, users } from "../db/schema.js";
-import { addMember, createServer, transitionMemberRole, updateServerOnboardingAgent, updateServerOnboardingSettings } from "./serverService.js";
+import { getDb } from "../db/index";
+import { agents, serverMembers, servers, users } from "../db/schema";
+import { createAgent } from "./agentService";
+import { addMember, createServer, transitionMemberRole, updateServerOnboardingAgent, updateServerOnboardingSettings } from "./serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -106,6 +107,84 @@ test("promotion on a server WITHOUT Cindy does not fabricate completion", async 
   );
 });
 
+test("promotion inherits server completion from an ordinary Agent without a Cindy pointer", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("ordinary-agent-owner");
+  const joiner = await seedUser("ordinary-agent-joiner");
+  const server = await createServer("Ordinary Agent", `ordinary-agent-${randomUUID()}`, owner.id);
+
+  const ordinaryAgent = await createAgent(server.id, "ordinary-agent", { runtime: "claude" });
+  assert.equal((await db.select({ onboardingAgentId: servers.onboardingAgentId })
+    .from(servers).where(eq(servers.id, server.id)))[0]?.onboardingAgentId, null);
+  assert.deepEqual(
+    await readSetup(server.id, owner.id),
+    { role: "owner", status: "complete", reason: "normal" },
+    "ordinary Agent creation already completed setup for the server's first owner",
+  );
+
+  // Completion is monotonic. Deleting the Agent must not make setup reappear for a later owner.
+  await db.update(agents).set({ deletedAt: new Date() }).where(eq(agents.id, ordinaryAgent.id));
+  await joinAsMember(server.id, joiner.id);
+  await promoteToOwner(server.id, owner.id, joiner.id);
+
+  assert.deepEqual(
+    await readSetup(server.id, joiner.id),
+    { role: "owner", status: "complete", reason: "grandfathered" },
+  );
+});
+
+test("direct-added owner inherits a server completion even without a Cindy pointer", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("completed-owner");
+  const joiner = await seedUser("completed-direct-owner");
+  const server = await createServer("Completed", `completed-${randomUUID()}`, owner.id);
+  await db.update(serverMembers)
+    .set({ setupStatus: "complete", setupCompletionReason: "admin_override" })
+    .where(and(eq(serverMembers.serverId, server.id), eq(serverMembers.userId, owner.id)));
+
+  await addMember(server.id, joiner.id, "owner");
+
+  assert.deepEqual(
+    await readSetup(server.id, joiner.id),
+    { role: "owner", status: "complete", reason: "grandfathered" },
+  );
+});
+
+test("server completion stays monotonic after the owner who completed setup is demoted", async ({ app }) => {
+  const db = getDb();
+  const completingOwner = await seedUser("demoted-completer");
+  const remainingOwner = await seedUser("remaining-owner");
+  const newOwner = await seedUser("post-demotion-owner");
+  const server = await createServer("Demoted completer", `demoted-completer-${randomUUID()}`, completingOwner.id);
+
+  // Establish a second owner before setup completes, so their row remains not_started.
+  await addMember(server.id, remainingOwner.id, "owner");
+  assert.equal((await readSetup(server.id, remainingOwner.id)).status, "not_started");
+
+  await db.update(serverMembers)
+    .set({ setupStatus: "complete", setupCompletionReason: "normal" })
+    .where(and(eq(serverMembers.serverId, server.id), eq(serverMembers.userId, completingOwner.id)));
+  await transitionMemberRole({
+    serverId: server.id,
+    actorUserId: remainingOwner.id,
+    targetUserId: completingOwner.id,
+    nextRole: "member",
+    guestTransitionsEnabled: true,
+  });
+
+  await addMember(server.id, newOwner.id, "owner");
+
+  assert.deepEqual(
+    await readSetup(server.id, completingOwner.id),
+    { role: "member", status: "complete", reason: "normal" },
+    "demotion changes authority, not the server's historical completion fact",
+  );
+  assert.deepEqual(
+    await readSetup(server.id, newOwner.id),
+    { role: "owner", status: "complete", reason: "grandfathered" },
+  );
+});
+
 test("promotion never clobbers an already-complete row's reason", async ({ app }) => {
   const owner = await seedUser("clobber-owner");
   const joiner = await seedUser("clobber-joiner");
@@ -142,7 +221,7 @@ test("adding a member straight in as owner on a server with Cindy reconciles the
   );
 });
 
-test("crossing the checkpoint sweeps a co-owner who existed before Cindy; original owner keeps normal", async ({ app }) => {
+test("one owner's completion immediately reconciles a co-owner; Cindy checkpoint preserves both reasons", async ({ app }) => {
   const db = getDb();
   const owner = await seedUser("precheckpoint-owner");
   const coOwner = await seedUser("precheckpoint-coowner");
@@ -152,10 +231,14 @@ test("crossing the checkpoint sweeps a co-owner who existed before Cindy; origin
   await db.update(serverMembers).set({ setupStatus: "complete", setupCompletionReason: "normal" })
     .where(and(eq(serverMembers.serverId, server.id), eq(serverMembers.userId, owner.id)));
 
-  // A co-owner exists BEFORE the checkpoint — no Cindy yet, so promotion leaves them pending.
+  // A co-owner exists BEFORE the Cindy pointer. Server setup is already complete because one
+  // owner completed it, so promotion must inherit that server-wide terminal state immediately.
   await joinAsMember(server.id, coOwner.id);
   await promoteToOwner(server.id, owner.id, coOwner.id);
-  assert.equal((await readSetup(server.id, coOwner.id)).status, "not_started", "no Cindy yet ⇒ still pending");
+  assert.deepEqual(
+    await readSetup(server.id, coOwner.id),
+    { role: "owner", status: "complete", reason: "grandfathered" },
+  );
 
   // Now Cindy is created and the checkpoint is crossed through the real setter.
   const [agent] = await db.insert(agents).values({
@@ -164,7 +247,7 @@ test("crossing the checkpoint sweeps a co-owner who existed before Cindy; origin
   }).returning();
   await updateServerOnboardingAgent(server.id, agent.id);
 
-  assert.deepEqual(await readSetup(server.id, coOwner.id), { role: "owner", status: "complete", reason: "grandfathered" }, "the pre-existing co-owner is swept on checkpoint crossing");
+  assert.deepEqual(await readSetup(server.id, coOwner.id), { role: "owner", status: "complete", reason: "grandfathered" }, "the inherited reason is preserved on checkpoint crossing");
   assert.deepEqual(await readSetup(server.id, owner.id), { role: "owner", status: "complete", reason: "normal" }, "the original owner's normal completion is preserved");
 });
 

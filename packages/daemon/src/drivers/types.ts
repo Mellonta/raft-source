@@ -1,7 +1,8 @@
 import type { ChildProcess } from "node:child_process";
+import type { RuntimeCompactionInterruption } from "@botiverse/raft-shared";
 import type { ActiveSpan, AgentConfig, AgentMessage, RuntimeModelSourceOutcome, SubagentLineage, Tracer, AxSurfaceText } from "@botiverse/raft-shared";
-import type { AgentProxyInboxCoordinator } from "../agentCredentialProxy.js";
-import type { AgentAppInboxStore } from "../agentAppInbox.js";
+import type { AgentProxyInboxCoordinator } from "../agentCredentialProxy";
+import type { AgentAppInboxStore } from "../agentAppInbox";
 
 // ── Runtime Contracts ──
 // Behavior-level contracts that describe how the daemon should interact with a
@@ -91,7 +92,10 @@ export interface RuntimeModelContract {
 // Runtime recovery notices are visible recovery facts: they explain daemon-side
 // fallback without refreshing progress or satisfying initial-turn readiness.
 
+export type RuntimeTokenUsageKind = "cumulative_session" | "per_turn" | "per_generation" | "unknown";
+
 export type ParsedEvent =
+  | { kind: "provider_request"; activity: import("@botiverse/raft-shared").ProviderRequestActivity }
   | { kind: "session_init"; sessionId: string }
   | ({ kind: "thinking"; text: string; runtimeTurn?: RuntimeTurnAttribution } & SubagentLineage)
   | ({ kind: "text"; text: string; runtimeTurn?: RuntimeTurnAttribution } & SubagentLineage)
@@ -103,7 +107,8 @@ export type ParsedEvent =
       kind: "compaction_interrupted";
       outcome: "compaction_failed_or_exhausted" | "aborted";
       reason: "manual" | "threshold" | "overflow" | "unknown";
-      failureReason?: "recovery_exhausted" | "compaction_failed";
+      failureReason?: "recovery_exhausted" | "input_too_large" | "compaction_failed";
+      willRetry?: boolean;
     }
   | { kind: "review_started" }
   | { kind: "review_finished" }
@@ -118,6 +123,7 @@ export type ParsedEvent =
       nativeReasonPresent?: boolean;
       reasonProvenance?: "runtime_error_event" | "codex_native_reason" | "daemon_fallback";
       terminalReason?: "compaction_failed_or_exhausted";
+      compaction?: RuntimeCompactionInterruption;
       startupRequestMethod?:
         | "initialize"
         | "thread/start"
@@ -206,9 +212,9 @@ export type ParsedEvent =
     }
   | {
       kind: "telemetry";
-      name: "token_usage" | "rate_limits" | "recovery";
+      name: "token_usage" | "usage_omission" | "rate_limits" | "recovery" | "request_diagnostic";
       source?: string;
-      usageKind?: "cumulative_session" | "per_turn" | "unknown";
+      usageKind?: RuntimeTokenUsageKind;
       sessionId?: string;
       turnId?: string;
       runtimeResultId?: string;

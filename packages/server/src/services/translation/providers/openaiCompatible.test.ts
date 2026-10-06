@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { OpenAICompatibleTranslationProvider, type OpenAICompatibleFetch } from "./openaiCompatible.js";
-import { TranslationPlaceholderValidationError, TranslationProviderError } from "../errors.js";
-import { createRegexPlaceholderPolicy } from "../placeholderPolicy.js";
+import { OpenAICompatibleTranslationProvider, type OpenAICompatibleFetch } from "./openaiCompatible";
+import { TranslationPlaceholderValidationError, TranslationProviderError } from "../errors";
+import { createRegexPlaceholderPolicy } from "../placeholderPolicy";
 
 const placeholderPolicy = createRegexPlaceholderPolicy({
   name: "brace-placeholder-v1",

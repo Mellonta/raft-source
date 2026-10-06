@@ -1,4 +1,3 @@
-import { describe, expect, it, vi } from "vitest";
 import { settlePageRoutes, withPageRoutes } from "./e2e/fixtures/routeLifecycle";
 
 describe("e2e route lifecycle", () => {

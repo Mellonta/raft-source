@@ -1,12 +1,12 @@
-import { ApiClient } from "../client.js";
+import { ApiClient } from "../client";
 import {
   AgentBootstrapError,
   loadAgentContext,
   type AgentContext,
-} from "../auth/env.js";
-import type { CliIo } from "./io.js";
-import { defaultCliIo } from "./io.js";
-import { CliError, type CliErrorCode } from "./errors.js";
+} from "../auth/env";
+import type { CliIo } from "./io";
+import { defaultCliIo } from "./io";
+import { CliError, type CliErrorCode } from "./errors";
 
 export interface CommandContext {
   io: CliIo;

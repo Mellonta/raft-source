@@ -3,13 +3,13 @@
 import type { Command } from "commander";
 import { type AgentApiTaskListQuery } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { requireTargetAlias, resolveTargetAlias, type TargetAliasOpts } from "../_target.js";
-import { formatMyTaskList, formatTaskList } from "./_format.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { PEER_KIND_OPTION, requireTargetAlias, resolveTargetAlias, type TargetAliasOpts } from "../_target";
+import { formatMyTaskList, formatTaskList } from "./_format";
 
 interface ListOpts extends TargetAliasOpts {
   mine?: boolean;
@@ -58,6 +58,7 @@ export const taskListCommand = defineCommand(
     options: [
       { flags: "--target <target>", description: "Channel target: '#channel'" },
       { flags: "--channel <target>", description: "Legacy alias for --target (accepted during transition)" },
+      PEER_KIND_OPTION,
       { flags: "--mine", description: "List tasks assigned to this agent across its visible task scope" },
       { flags: "--status <s>", description: "Filter: all|todo|in_progress|in_review|done|closed (--mine defaults to unfinished)" },
     ],

@@ -3,6 +3,7 @@ import {
   getModelLabel,
   getStaticRuntimeModelSourceSet,
   hasStaticRuntimeModelSource,
+  isRuntimeModelDetectionErrorCode,
   RUNTIME_MODELS,
   runtimeModelSourceOutcomeFromSet,
 } from "@botiverse/raft-shared";
@@ -14,6 +15,7 @@ import type {
 } from "@botiverse/raft-shared";
 import api from "../api/client";
 import { useServerStore } from "../store/serverStore";
+import { catalogModelLabel, useModelLabelCatalogStore } from "../store/modelLabelCatalogStore";
 import { canonicalizeCodexPresentation } from "../utils/codexModelOrder";
 
 export type RuntimeModelSourceState =
@@ -25,7 +27,7 @@ export interface RuntimeModelsResult {
   source: RuntimeModelSourceState;
   models: RuntimeModelInfo[];
   default?: string;
-  /** Bundled explanatory metadata. Never feed this into selectable options. */
+  /** Bundled metadata; terminal discovery failures may offer it as unverified. */
   suggestions: RuntimeModelInfo[];
   loading: boolean;
   fromMachine: boolean;
@@ -63,36 +65,22 @@ export function builtInCatalogCapabilityIsLive(
 }
 
 /**
- * Intersect the Server's provider presentation metadata with the exact target
- * Computer catalog. A persisted value remains visible when unavailable, but is
- * disabled so an unavailable legacy selection cannot become a new write.
+ * Built-in detection is advisory. Keep the static provider list editable and
+ * preserve the current identity; the runtime validates compatibility at start.
  */
 export function projectBuiltInPresetModelOptions(input: {
-  source: RuntimeModelSourceState;
   providerModels: readonly RuntimeModelInfo[];
   persistedModel?: string;
-}): Array<RuntimeModelInfo & { disabled?: boolean }> {
-  const supported = builtInCatalogCapabilityIsLive(input.source)
-    ? new Set(
-        input.source.kind === "live"
-          ? input.source.value.models.map((model) => model.id)
-          : [],
-      )
-    : new Set<string>();
-  const options: Array<RuntimeModelInfo & { disabled?: boolean }> =
-    input.providerModels.filter((model) => supported.has(model.id));
+}): RuntimeModelInfo[] {
+  const options = [...input.providerModels];
   const persistedModel = input.persistedModel?.trim();
   if (
     persistedModel &&
     !options.some((option) => option.id === persistedModel)
   ) {
-    const metadata = input.providerModels.find(
-      (model) => model.id === persistedModel,
-    );
     options.push({
       id: persistedModel,
-      label: metadata?.label ?? getModelLabel("builtin", persistedModel),
-      disabled: true,
+      label: getModelLabel("builtin", persistedModel),
     });
   }
   return options;
@@ -108,7 +96,17 @@ export function projectRuntimeModelLabelPresentation(
   runtime: string,
   model: string,
   catalog: Pick<RuntimeModelsResult, "models" | "source">,
+  machineId?: string | null,
 ): RuntimeModelLabelPresentation {
+  // The machine-reported catalog is the shared display source (task #700):
+  // the dropdown, the badge and every other surface show the same name.
+  const sharedLabel = catalogModelLabel(
+    useServerStore.getState().current?.id,
+    machineId,
+    runtime,
+    model,
+  );
+  if (sharedLabel) return { kind: "resolved", label: sharedLabel };
   const configuredLabel = catalog.models.find((candidate) => candidate.id === model)?.label;
   if (configuredLabel) return { kind: "resolved", label: configuredLabel };
 
@@ -128,11 +126,19 @@ export function projectBundledRuntimeModelSuggestions(runtime: string): RuntimeM
 
   return (RUNTIME_MODELS[runtime] ?? []).map((model) => ({
     ...model,
-    // A bundled entry for a dynamic source is explanation, never proof that
-    // the current Computer/config can launch it. Downgrade even legacy catalog
-    // entries that were annotated for the old selectable-fallback behavior.
+    // A bundled entry never proves that the current Computer/config can launch
+    // it, including when it is offered as a selectable fallback.
     verified: "suggestion_only",
   }));
+}
+
+/** Editing a known model is allowed without claiming that it can launch.
+ * Provider-scoped Built-in/Pi forms continue to own their own catalogs.
+ */
+export function runtimeModelFallbackOptions(runtime: string | undefined, source: RuntimeModelSourceState): RuntimeModelInfo[] {
+  if (!runtime || runtime === "builtin" || runtime === "pi"
+    || source.kind === "live" || source.kind === "loading" || source.kind === "idle") return [];
+  return (RUNTIME_MODELS[runtime] ?? []).map((model) => ({ ...model, verified: "suggestion_only" }));
 }
 
 /** Project both new typed API payloads and old `{models, default}` payloads. */
@@ -144,6 +150,7 @@ export function parseRuntimeModelSourcePayload(payload: unknown): RuntimeModelSo
     kind?: unknown;
     value?: unknown;
     retryable?: unknown;
+    code?: unknown;
     recovery?: unknown;
     catalog?: unknown;
     models?: unknown;
@@ -169,7 +176,10 @@ export function parseRuntimeModelSourcePayload(payload: unknown): RuntimeModelSo
   }
   if (candidate.kind === "unsupported") return { kind: "unsupported" };
   if (candidate.kind === "error") {
-    return { kind: "error", retryable: candidate.retryable !== false };
+    return {
+      kind: "error", retryable: candidate.retryable !== false,
+      ...(isRuntimeModelDetectionErrorCode(candidate.code) ? { code: candidate.code } : {}),
+    };
   }
   if (Array.isArray(candidate.models)) {
     const catalog = parseBuiltInCatalogCapability(candidate.catalog);
@@ -182,7 +192,9 @@ export function parseRuntimeModelSourcePayload(payload: unknown): RuntimeModelSo
   return { kind: "error", retryable: true };
 }
 
+/** Form submission eligibility only; the daemon still validates every launch. */
 export function runtimeModelSelectionIsRunnable(input: {
+  runtime?: string;
   source: RuntimeModelSourceState;
   model: string;
   modelIgnored?: boolean;
@@ -190,24 +202,19 @@ export function runtimeModelSelectionIsRunnable(input: {
   customAllowed: boolean;
   providerCatalog?: boolean;
   persistedModel?: string;
-  requireBuiltInCatalog?: boolean;
+  builtInPreset?: boolean;
 }): boolean {
   if (input.modelIgnored) return true;
   const model = input.model.trim();
   if (!model) return false;
   if (input.providerCatalog) return true;
-  if (input.requireBuiltInCatalog && input.persistedModel?.trim() === model)
-    return true;
   if (input.customMode) return input.customAllowed;
+  if (input.builtInPreset) return true;
   if (input.source.kind === "live") {
-    if (input.requireBuiltInCatalog &&
-      !builtInCatalogCapabilityIsLive(input.source)
-    )
-      return false;
     if (input.source.value.models.some((candidate) => candidate.id === model)) return true;
     return input.customAllowed && input.persistedModel === model;
   }
-  return false;
+  return runtimeModelFallbackOptions(input.runtime, input.source).some((candidate) => candidate.id === model);
 }
 
 export function projectRuntimeModelSourcePresentation(runtime: string, source: RuntimeModelSourceState): Omit<RuntimeModelsResult, "suggestions" | "rescan"> {
@@ -219,7 +226,7 @@ export function projectRuntimeModelSourcePresentation(runtime: string, source: R
   if (!value) {
     return {
       source,
-      models: [],
+      models: runtimeModelFallbackOptions(runtime, source),
       loading: source.kind === "loading",
       fromMachine: false,
     };
@@ -238,7 +245,61 @@ export function projectRuntimeModelSourcePresentation(runtime: string, source: R
   };
 }
 
-export function useRuntimeModels(machineId: string | null | undefined, runtime: string): RuntimeModelsResult {
+/**
+ * Opt-in sharing for passive surfaces (the hover profile card). Every mount used
+ * to ask the Computer to run the runtime's model probe; hovering over a few
+ * agents in a row stacked several `cursor-agent models` on one Mac until each
+ * hit the 15s deadline (2026-09-28). Passive readers share an in-flight request
+ * and reuse a recent live catalog; the Create Agent dialog and agent details
+ * stay fresh on every open, and a rescan always asks again.
+ */
+type SharedRuntimeModelRequest = { promise: Promise<RuntimeModelSourceState>; settledAt?: number; source?: RuntimeModelSourceState };
+const sharedRuntimeModelRequests = new Map<string, SharedRuntimeModelRequest>();
+
+export function resetSharedRuntimeModelRequestsForTests(): void {
+  sharedRuntimeModelRequests.clear();
+}
+
+function loadRuntimeModelSource(serverId: string, machineId: string, runtime: string): Promise<RuntimeModelSourceState> {
+  return api
+    .get(`/servers/${serverId}/machines/${machineId}/runtime-models/${runtime}`)
+    .then((res) => {
+      const source = parseRuntimeModelSourcePayload(res.data);
+      // A successful live detect was upserted into the shared catalog server
+      // side; refresh our copy so the dropdown never shows the older cached
+      // name (Kai's review of #8639). Only when the app already uses the
+      // catalog: nothing to align otherwise (and no stray request).
+      if (source.kind === "live" && useModelLabelCatalogStore.getState().byServer[serverId]) {
+        useModelLabelCatalogStore.getState().load(serverId, { force: true });
+      }
+      return source;
+    })
+    .catch((): RuntimeModelSourceState => ({ kind: "error", retryable: true }));
+}
+
+function sharedRuntimeModelSource(serverId: string, machineId: string, runtime: string, reuseRecentMs: number): Promise<RuntimeModelSourceState> {
+  const key = JSON.stringify([serverId, machineId, runtime]);
+  const existing = sharedRuntimeModelRequests.get(key);
+  if (existing && (existing.settledAt === undefined || (existing.source?.kind === "live" && Date.now() - existing.settledAt < reuseRecentMs))) {
+    return existing.promise;
+  }
+  const entry: SharedRuntimeModelRequest = {
+    promise: loadRuntimeModelSource(serverId, machineId, runtime).then((source) => {
+      entry.settledAt = Date.now();
+      entry.source = source;
+      return source;
+    }),
+  };
+  sharedRuntimeModelRequests.set(key, entry);
+  return entry.promise;
+}
+
+export function useRuntimeModels(
+  machineId: string | null | undefined,
+  runtime: string,
+  options: { reuseRecentMs?: number } = {},
+): RuntimeModelsResult {
+  const reuseRecentMs = options.reuseRecentMs ?? 0;
   const serverId = useServerStore((s) => s.current?.id);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const requestKey = serverId && machineId && runtime
@@ -289,20 +350,18 @@ export function useRuntimeModels(machineId: string | null | undefined, runtime: 
         previous: getStaticRuntimeModelSourceSet(runtime),
       },
     });
-    void api
-      .get(`/servers/${serverId}/machines/${machineId}/runtime-models/${runtime}`)
-      .then((res) => {
-        if (cancelled) return;
-        setSourceSnapshot({ requestKey, source: parseRuntimeModelSourcePayload(res.data) });
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setSourceSnapshot({ requestKey, source: { kind: "error", retryable: true } });
-      });
+    // A rescan (refreshNonce > 0) always asks the Computer again.
+    const pending = reuseRecentMs > 0 && refreshNonce === 0
+      ? sharedRuntimeModelSource(serverId, machineId, runtime, reuseRecentMs)
+      : loadRuntimeModelSource(serverId, machineId, runtime);
+    void pending.then((nextSource) => {
+      if (cancelled) return;
+      setSourceSnapshot({ requestKey, source: nextSource });
+    });
     return () => {
       cancelled = true;
     };
-  }, [machineId, requestKey, runtime, serverId]);
+  }, [machineId, requestKey, runtime, serverId, reuseRecentMs, refreshNonce]);
 
   const presentation = useMemo(
     () => projectRuntimeModelSourcePresentation(runtime, source),

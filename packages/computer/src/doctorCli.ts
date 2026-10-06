@@ -7,23 +7,30 @@ import {
   LegacyMachinesClient,
   ServerMachinesClient,
   ServersClient,
+  UnreadActivityDiagnosticClient,
   type ServerMachineEntry,
   type UserServerEntry,
-} from "./apiClient.js";
-import { adjudicate, collectDetectionEvidence } from "./lib/migration.js";
-import type { LocalCandidateEvidence } from "./lib/types.js";
-import { readUserSessionAuth } from "./lib/userSession.js";
-import { formatServerSlugDisplay, listServerAttachments } from "./serverState.js";
-import { formatRaftHomeForDisplay, resolveRaftHome } from "./paths.js";
-import { info, present } from "./output.js";
-import { createComputerApi } from "./lib/api.js";
-import { resolveServerUrl, resolveServerUrlEnv } from "./serverUrl.js";
-import { redactSecrets } from "./doctor.js";
+} from "./apiClient";
+import { adjudicate, collectDetectionEvidence } from "./lib/migration";
+import type { LocalCandidateEvidence } from "./lib/types";
+import { ensureUsableUserSession, readUserSessionAuth } from "./lib/userSession";
+import { formatServerSlugDisplay, listServerAttachments } from "./serverState";
+import { formatRaftHomeForDisplay, resolveRaftHome } from "./paths";
+import { info, present } from "./output";
+import { createComputerApi } from "./lib/api";
+import { resolveServerUrl, resolveServerUrlEnv } from "./serverUrl";
+import { redactSecrets } from "./doctor";
+import { ComputerError } from "./lib/errors";
+import {
+  exportUnreadActivityDiagnosticSnapshot,
+  UnreadActivityDiagnosticExportError,
+} from "./unreadActivityDiagnosticExport";
 
 export async function runDoctor(opts: {
   cleanup?: boolean;
   serverId?: string;
   serverLabel?: string;
+  unreadActivityDump?: string;
 }): Promise<void> {
   // CLI presenter over `api.doctor`. The api builds the diagnostic report
   // (running the residue cleanup pass when `--fix`/`cleanup` is set — a
@@ -94,6 +101,40 @@ export async function runDoctor(opts: {
         }
       } else {
         info("  No residue found — clean baseline.");
+      }
+    }
+
+    if (opts.unreadActivityDump) {
+      const session = await ensureUsableUserSession(slockHome);
+      if (session.status !== "usable") {
+        throw new ComputerError(
+          "DIAGNOSTIC_SNAPSHOT_AUTH_REQUIRED",
+          "Unread/Activity diagnostic export requires a current login. Run `raft-computer login`, then retry the same doctor command.",
+        );
+      }
+      const baseUrl = resolveServerUrl(
+        undefined,
+        session.serverUrl,
+        resolveServerUrlEnv(),
+      );
+      try {
+        const receipt = await exportUnreadActivityDiagnosticSnapshot({
+          client: new UnreadActivityDiagnosticClient(baseUrl, session.accessToken),
+          outputPath: opts.unreadActivityDump,
+          ...(opts.serverId ? { serverId: opts.serverId } : {}),
+        });
+        info("");
+        info(
+          redactSecrets(
+            `Unread/Activity diagnostic saved to ${receipt.outputPath} (${receipt.bytes} bytes; ${receipt.servers} server total${receipt.servers === 1 ? "" : "s"}; ${receipt.views} view${receipt.views === 1 ? "" : "s"}).`,
+          ),
+        );
+        info("This private local file was not uploaded.");
+      } catch (error) {
+        if (error instanceof UnreadActivityDiagnosticExportError) {
+          throw new ComputerError(error.code, error.message);
+        }
+        throw error;
       }
     }
 

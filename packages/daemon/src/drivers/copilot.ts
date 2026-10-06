@@ -1,12 +1,13 @@
 import { spawn } from "node:child_process";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig , type AxSurfaceText } from "@botiverse/raft-shared";
-import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./types.js";
-import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport.js";
+import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./types";
+import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
 import {
   prepareManagedMcpRuntimeProxy,
   writeManagedMcpRuntimeConfigFile,
-} from "../managedMcpRuntimeProxy.js";
-import { resolveRaftHome } from "../raftHome.js";
+} from "../managedMcpRuntimeProxy";
+import { resolveRaftHome } from "../raftHome";
+import { resolveRuntimeLaunch } from "./windowsLaunch";
 
 export async function buildCopilotSpawnEnv(ctx: SpawnContext): Promise<NodeJS.ProcessEnv> {
   return (await prepareCliTransport(ctx, { NO_COLOR: "1" })).spawnEnv;
@@ -113,11 +114,12 @@ export class CopilotDriver implements RuntimeDriver {
 
     const spawnEnv = await buildCopilotSpawnEnv(ctx);
 
-    const proc = spawn("copilot", args, {
+    const launch = resolveRuntimeLaunch("copilot", "copilot", args, { env: spawnEnv });
+    const proc = spawn(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
-      env: spawnEnv,
-      shell: process.platform === "win32",
+      env: launch.env ?? spawnEnv,
+      shell: false,
     });
 
     return { process: proc };

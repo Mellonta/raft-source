@@ -1,11 +1,11 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { getDaemonMachineLockId } from "./machineLock.js";
+import { getDaemonMachineLockId } from "./machineLock";
 import {
   detectLegacyDaemonSupervisor,
   legacyDaemonSupervisorFallbackCommands,
   type LegacyDaemonSupervisorGuidance,
-} from "./legacySupervisor.js";
+} from "./legacySupervisor";
 
 interface AdoptedComputerMatch {
   attachmentPath: string;

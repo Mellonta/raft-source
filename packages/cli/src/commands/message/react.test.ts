@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { normalizeReactionEmoji } from "./react.js";
+import { normalizeReactionEmoji } from "./react";
 
 test("normalizeReactionEmoji trims a single reaction token", () => {
   assert.equal(normalizeReactionEmoji(" 👀 "), "👀");

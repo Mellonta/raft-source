@@ -1,0 +1,46 @@
+-- Followed threads as one endpoint-shaped row: v3's stats plus the parent
+-- message and its task.
+--
+-- GET /api/channels/threads/followed (active follows) took many seconds for a
+-- user with thousands of followed threads: the Postgres regular-thread list
+-- and the read-state authority read each do a random `messages` read per
+-- followed thread (the parent message, and a LATERAL top-1 for the latest
+-- message). The v3 stats read for the same user was fast. The web client uses
+-- the response as a complete lookup table, so it cannot be paginated.
+--
+-- v4 = EXACTLY v3's stats (070): the same followed_threads CTE including the
+-- joint storage mapping (a projected local thread reads the canonical thread's
+-- messages), the same unread predicate (the unified chain's rule) and the same
+-- reply_count / latest / first_unread. It holds a row for every follow state
+-- (active, done, unfollowed), like v3; the server takes the follow set from
+-- Postgres (authoritative, so a just-followed thread appears immediately) and
+-- serves a followed thread that has no row here yet (CDC lag) from Postgres.
+--
+-- Added, joined in the final SELECT (not inside the aggregation):
+--   parent    rw_messages on the thread's parent_message_id
+--   parent_ch rw_channels of the parent message (parent_server_id)
+--   task      rw_tasks on task.message_id = parent.id
+-- The server keeps a thread as a regular thread only when parent_message_id is
+-- set and parent_server_id is the requested server, then re-checks the parent
+-- channel's visibility (archived / deleted / private membership) and reads its
+-- name and type in Postgres, by distinct parent channel. A NULL parent is a
+-- joint projection; those keep the Postgres joint-thread read.
+--
+-- latest_preview and parent_preview are 141-character prefixes, not the full
+-- content (v3 stored latest.content in full): the server renders
+-- parentMessagePreview as content > 100 ? slice(0, 100) + "…" and
+-- latestActivityPreview as content > 140 ? slice(0, 140) + "…", so a 141-char
+-- prefix produces byte-identical output for both, and the view does not carry
+-- every thread's full latest message.
+--
+-- History cutoff (free plan): there is no cutoff here, by product decision. The
+-- numbers (unread_count, reply_count, last_reply_at) are served as-is for every
+-- plan; the server only blanks the latest reply's preview when last_reply_at is
+-- before the plan's cutoff. This retires v3's "Known gap" (the Postgres
+-- history_cutoff stats read): no read is rerouted to Postgres for a cutoff.
+--
+-- rw_tasks is the CDC copy of public.tasks (deployed as `(*)`, see
+-- 024-risingwave-unread-inbox-full-materialized.sql's required CDC tables).
+CREATE MATERIALIZED VIEW rw_followed_threads_v4 AS WITH followed_threads AS (SELECT t.server_id, tf.follower_id AS user_id, t.id AS thread_channel_id, COALESCE(canonical_thread.id, t.id) AS storage_thread_channel_id, t.parent_message_id FROM rw_thread_follows AS tf JOIN rw_channels AS t ON t.id = tf.thread_channel_id AND t.type = 'thread' AND t.deleted_at IS NULL LEFT JOIN rw_joint_channel_servers AS thread_projection ON thread_projection.local_channel_id = t.id AND thread_projection.server_id = t.server_id AND thread_projection.status = 'active' LEFT JOIN rw_joint_channels AS thread_joint ON thread_joint.id = thread_projection.joint_channel_id AND thread_joint.status = 'active' LEFT JOIN rw_channels AS canonical_thread ON canonical_thread.id = thread_joint.canonical_channel_id AND canonical_thread.type = 'thread' AND canonical_thread.deleted_at IS NULL WHERE tf.follower_type = 'user'), stats AS (SELECT ft.server_id, ft.user_id, ft.thread_channel_id, ft.storage_thread_channel_id, ft.parent_message_id, COALESCE(rc.last_read_seq, 0) AS last_read_seq, CAST(count(m.id) AS INT) AS reply_count, CAST(count(m.id) FILTER (WHERE m.seq > COALESCE(rc.last_read_seq, 0) AND NOT (m.sender_type = 'user' AND m.sender_id = ft.user_id) AND NOT COALESCE(m.message_type = 'system' AND m.causal_actor_type = 'user' AND m.causal_actor_id = ft.user_id, FALSE) AND (m.system_subtype IS NULL OR m.system_subtype NOT IN ('channel.self_unfollow_thread', 'task.deleted_summary'))) AS INT) AS unread_count, max(m.seq) AS latest_seq, min(m.seq) FILTER (WHERE m.seq > COALESCE(rc.last_read_seq, 0) AND NOT (m.sender_type = 'user' AND m.sender_id = ft.user_id) AND NOT COALESCE(m.message_type = 'system' AND m.causal_actor_type = 'user' AND m.causal_actor_id = ft.user_id, FALSE) AND (m.system_subtype IS NULL OR m.system_subtype NOT IN ('channel.self_unfollow_thread', 'task.deleted_summary'))) AS first_unread_seq FROM followed_threads AS ft LEFT JOIN rw_receiver_cursors_v1 AS rc ON rc.receiver_type = 'user' AND rc.receiver_id = ft.user_id AND rc.channel_id = ft.thread_channel_id LEFT JOIN rw_messages AS m ON m.channel_id = ft.storage_thread_channel_id GROUP BY ft.server_id, ft.user_id, ft.thread_channel_id, ft.storage_thread_channel_id, ft.parent_message_id, COALESCE(rc.last_read_seq, 0)) SELECT stats.server_id, stats.user_id, stats.thread_channel_id, stats.storage_thread_channel_id, stats.last_read_seq, stats.reply_count, stats.unread_count, stats.latest_seq, stats.first_unread_seq, latest.id AS latest_message_id, latest.created_at AS last_reply_at, SUBSTR(latest.content, 1, 141) AS latest_preview, latest.sender_type AS latest_sender_type, latest.sender_id AS latest_sender_id, first_unread.id AS first_unread_message_id, stats.parent_message_id, parent.channel_id AS parent_channel_id, parent_ch.server_id AS parent_server_id, SUBSTR(parent.content, 1, 141) AS parent_preview, parent.sender_type AS parent_sender_type, parent.sender_id AS parent_sender_id, parent.seq AS parent_seq, parent.created_at AS parent_created_at, task.id AS task_id, task.task_number, task.status AS task_status, task.claimed_by_type AS task_claimed_by_type, task.claimed_by_id AS task_claimed_by_id FROM stats LEFT JOIN rw_messages AS latest ON latest.channel_id = stats.storage_thread_channel_id AND latest.seq = stats.latest_seq LEFT JOIN rw_messages AS first_unread ON first_unread.channel_id = stats.storage_thread_channel_id AND first_unread.seq = stats.first_unread_seq LEFT JOIN rw_messages AS parent ON parent.id = stats.parent_message_id LEFT JOIN rw_channels AS parent_ch ON parent_ch.id = parent.channel_id LEFT JOIN rw_tasks AS task ON task.message_id = parent.id;
+
+CREATE INDEX idx_rw_followed_threads_v4_lookup ON rw_followed_threads_v4(server_id, user_id, thread_channel_id);

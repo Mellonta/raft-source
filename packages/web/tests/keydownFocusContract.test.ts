@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { resolve, relative } from "node:path";
-import test from "node:test";
 
 /**
  * Fail-closed focus contract for global key listeners (focus-trap sweep, task #21).

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 import {
   buildMessageContextRequest,
   buildMessageContextRequestConfig,
@@ -15,11 +14,11 @@ test("thread panel message-context requests include the message URL and local ch
   });
 });
 
-test("thread parent hydration uses the typed parent-channel projection scope", () => {
+test("thread parent hydration uses the typed parent-channel projection scope and no surrounding window", () => {
   assert.deepEqual(buildThreadParentContextRequest("parent-message", "participant-parent-projection"), {
     url: "/messages/context/parent-message",
     config: {
-      params: { channelId: "participant-parent-projection" },
+      params: { channelId: "participant-parent-projection", before: 0, after: 0 },
     },
   });
 });

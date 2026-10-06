@@ -26,6 +26,10 @@ export type PlaywrightSeedState = {
     id: string;
     name: string;
   };
+  externalAgent: {
+    id: string;
+    name: string;
+  };
   machine: {
     id: string;
     name: string;

@@ -55,8 +55,7 @@ export default function CodeBlock({
   // Hover-revealed minimal copy affordance (no card / no border / no
   // shadow). Mirrors the bookmark button at the top-right of every
   // message row — both are "appear on hover, no chrome of their own"
-  // affordances. Code blocks live on a dark surface, so the icon uses light
-  // tones; touch devices keep the icon softly visible via CopyIconButton.
+  // affordances. The icon follows the code palette in either theme.
   return (
     <div className={wrapperClassName}>
       {showCopyButton ? (
@@ -69,7 +68,7 @@ export default function CodeBlock({
               copied={copied}
               copiedLabel={formatMessage({ id: "ui.copy.codeCopied" })}
               copyLabel={formatMessage({ id: "ui.copy.code" })}
-              surface="dark"
+              surface="code"
               className="absolute right-2 top-2 z-10"
             />
           )}

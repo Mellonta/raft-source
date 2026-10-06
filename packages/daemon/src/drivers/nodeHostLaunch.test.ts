@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { detectNodeHostKind, NodeHostUnavailableError, resolveNodeHostLaunch, seaDetected } from "./nodeHostLaunch.js";
+import { detectNodeHostKind, NodeHostUnavailableError, resolveNodeHostLaunch, seaDetected } from "./nodeHostLaunch";
 
 /**
  * The defect this pins: `exec_path_is_node: !versions.electron` inferred "is

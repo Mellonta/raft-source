@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import path from "node:path";
-import { test } from "vitest";
 
-import { resolveRaftHome } from "./paths.js";
+import { resolveRaftHome } from "./paths";
 
 test("resolveRaftHome: keeps ~/.slock as the default home", () => {
   assert.equal(resolveRaftHome({}, "/Users/alice"), path.resolve("/Users/alice/.slock"));

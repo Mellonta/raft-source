@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   __setAppMemberRefKeyForTests,
   deriveAppMemberRef,
-} from "./appOutboundProjectionService.js";
+} from "./appOutboundProjectionService";
 
 test("member refs are stable only inside the app and installation boundary", () => {
   __setAppMemberRefKeyForTests(Buffer.alloc(32, 7));

@@ -1,55 +1,66 @@
-import { revokeSocketAccess } from "../socket/accessRevocation.js";
+import { revokeSocketAccess } from "../socket/accessRevocation";
 import { createHash, randomInt, randomUUID } from "crypto";
 import { performance } from "node:perf_hooks";
 import type { QueryResultRow } from "pg";
 import { eq, and, isNull, isNotNull, sql, inArray, asc, desc, ne, or, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { getDb, getPool, getSqlTraceHash, withDbTraceAttributes, type DatabaseExecutor } from "../db/index.js";
+import { getDb, getSqlTraceHash, withDbTraceAttributes, type DatabaseExecutor } from "../db/index";
 import {
   getRisingWaveConnectionTimeoutMillis,
-  getRisingWaveInboxRfc056ServingMode,
   getRisingWaveInboxItemsServingVersion,
   getRisingWavePool,
   getRisingWavePoolState,
-  isRisingWaveFollowedThreadStatsEnabled,
+  RisingWaveNotConfiguredError,
   queryRisingWave,
   RISINGWAVE_UNREAD_INBOX_CONTRACT_VERSION,
-  type RisingWaveInboxRfc056ServingMode,
+  UNIFIED_CHAIN_VIEWS,
+  CONVERSATION_UNREAD_VIEW,
+  type RisingWavePoolState,
   type RisingWaveInboxItemsServingVersion,
-} from "../db/risingwave.js";
-import { channels, channelAgents, channelHumans, channelMembershipRoleEvents, dmChannelIdentities, agents, users, serverMembers, serverAgentMembers, messages, userChannelReadCursors, userChannelInboxStates, userChannelDisplayPrefs, inboxTargetMuteStates, inboxSuppressionStates, agentChannelReadCursors, servers, threadFollows, agentActivityEvents, tasks, taskEvents, jointChannels, jointChannelServers, jointChannelInvites, readMutationAuthorities, externalMessageAuthorFacts, externalProjectionAvatarArtifacts, externalActorProjections, externalAddressabilityProjections, externalAppRegistrations, externalChannelBindings } from "../db/schema.js";
-import { gt, gte } from "drizzle-orm";
-import { assertJointChannelCreationCapacity, getJointChannelCreationEntitlement, isChannelReadOnlyByBillingFeature, withServerLock, withServerResourceLock } from "./planService.js";
-import { CHANNEL_MANAGEMENT_CAPABILITIES, MAX_JOINT_CHANNEL_SERVERS, PLAN_CONFIG, canAddChannelMembers, canGuestJoinChannel, canGuestPostToChannel, canGuestReadChannel, channelTypeSupportsActivityMute, currentDate, formatInboxScopeCorruptionLine, getChannelAdminBasis, getEffectiveLimits, hasEffectiveChannelCapability, makeInboxScopeReadFrontier, type AgentActivity, type ChannelRole, type InboxScopeCursorCorruption, type InboxScopeReadFrontier, type ServerId, type ServerPlan, type ServerRole, type TraceAttributes, type TrajectoryEntry } from "@botiverse/raft-shared";
-import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace.js";
-import { MESSAGE_SHORT_ID_RE } from "../lib/messageId.js";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
-import { queryFailureReason, queryFailureTraceAttrs } from "../tracing/queryTrace.js";
+  asRisingWaveOverload,
+} from "../db/risingwave";
 import {
-  isRisingWaveInboxFailSoftError,
-  recordRisingWaveInboxBackendFailed,
-  recordRisingWaveInboxFallbackCompleted,
+  getConversationUnreadSourceOverride,
+  type ConversationUnreadRow,
+  type ConversationUnreadSummaryQuery,
+  type SidebarUnreadTotalsQuery,
+} from "./conversationUnreadSource";
+import { getActivityReadSourceOverride } from "./activityReadSource";
+import { agentPrivateSurfaces, channels, channelAgents, channelHumans, dmChannelIdentities, agents, users, serverMembers, messages, userChannelReadCursors, userChannelInboxStates, userChannelDisplayPrefs, inboxTargetMuteStates, inboxSuppressionStates, agentChannelReadCursors, servers, threadFollows, agentActivityEvents, tasks, taskEvents, jointChannels, jointChannelServers, jointChannelInvites, readMutationAuthorities, channelMembershipRoleEvents, serverAgentMembers, externalMessageAuthorFacts, externalProjectionAvatarArtifacts, externalActorProjections, externalAddressabilityProjections, externalAppRegistrations, externalChannelBindings } from "../db/schema";
+import { gt, gte, lt } from "drizzle-orm";
+import { acquireServerLock, assertGuestJoinableChannelCapacityAvailable, GUEST_JOINABLE_CHANNEL_LOCK_NAMESPACE, GuestJoinableChannelLimitError, isChannelReadOnlyByBillingFeature, withServerLock, withServerResourceLock } from "./planService";
+import { assertJointAdmission, freeServerIds, reconcileJointOverLimit, reconcileJointOverLimitFor, refreshJointEntitlementsBeforeAdmission } from "./jointChannelLimitService";
+import { getJointLimitStatesForJoints, resolveParentJointId } from "./jointChannelLimitState";
+export { GuestJoinableChannelLimitError } from "./planService";
+import { MAX_JOINT_CHANNEL_SERVERS, PLAN_CONFIG, channelTypeSupportsActivityMute, currentDate, currentTimeMs, formatInboxScopeCorruptionLine, getEffectiveLimits, makeInboxScopeReadFrontier, type AgentActivity, type InboxScopeCursorCorruption, type InboxScopeReadFrontier, type ServerId, type ServerPlan, type TraceAttributes, type TrajectoryEntry, CHANNEL_MANAGEMENT_CAPABILITIES, canAddChannelMembers, canGuestJoinChannel, canGuestPostToChannel, canGuestReadChannel, getChannelAdminBasis, hasEffectiveChannelCapability, type ChannelRole, type ServerRole } from "@botiverse/raft-shared";
+import { formatDmPeerRef, parseDmPeerRef, type DmPeerKind } from "@botiverse/raft-shared";
+import { DmTargetResolutionError } from "./dmTargetResolutionError";
+import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace";
+import { MESSAGE_SHORT_ID_RE, uuidShortIdRange } from "../lib/messageId";
+import { addTraceEvent, errorClassOf } from "../tracing/semanticTrace";
+import { queryFailureReason, queryFailureTraceAttrs } from "../tracing/queryTrace";
+import {
   risingWaveInboxFailureAttrs,
-  type RisingWaveBreakerState,
   type RisingWaveInboxTraceRoute,
-} from "../tracing/risingWaveInboxTrace.js";
-import { sendJointChannelInviteEmail } from "./emailService.js";
-import { normalizeEmail } from "./emailNormalization.js";
+} from "../tracing/risingWaveInboxTrace";
+import { sendJointChannelInviteEmail } from "./emailService";
+import { normalizeEmail } from "./emailNormalization";
 import {
   mapInboxPolicyRowsToItems,
   selectInboxPolicyActiveUnreadCount,
   selectInboxPolicyPageRows,
   type InboxPolicySqlRow,
-} from "./inboxPolicyModel.js";
-import { rebuildInboxServingRowsForReceiverTargets } from "./inboxNotificationService.js";
-import { legacyDoneFrontierFallbacksTotal } from "../metrics.js";
+} from "./inboxPolicyModel";
+import { legacyDoneFrontierFallbacksTotal } from "../metrics";
 import {
   executeCompatibilityReadMutation,
+  isReadMutationFenceRefusal,
+  raiseReadPositionForJoin,
   resolveReadMutationUnreadBoundary,
   type ReadMutationAck,
-} from "./readMutationSequencer.js";
-import { activityPromotionAllowedByMuteSql, isActivityPromotionSuppressedByMute } from "./inboxMutePolicy.js";
-import { evaluateFeatureFlag, INBOX_VISIBILITY_V3_FEATURE_FLAG_KEY, SERVER_GUEST_FEATURE_FLAG_KEY } from "./featureFlagService.js";
+} from "./readMutationSequencer";
+import { activityPromotionAllowedByMuteSql, isActivityPromotionSuppressedByMute } from "./inboxMutePolicy";
+import { evaluateFeatureFlag, SERVER_GUEST_FEATURE_FLAG_KEY } from "./featureFlagService";
 import {
   clearChannelDoneSuppression,
   clearFollowedThreadSuppressionForAll,
@@ -64,16 +75,53 @@ import {
   resolveChannelSuppressionTarget,
   resolveThreadSuppressionTarget,
   writeThreadDoneSuppression,
-} from "./inboxSuppressionWriters.js";
-import { emitAppFacingNotificationEvent } from "./appNotificationDeliveryService.js";
-import { isAppId } from "./rapRegistry.js";
+} from "./inboxSuppressionWriters";
+import { emitAppFacingNotificationEvent } from "./appNotificationDeliveryService";
+import { isAppId } from "./rapRegistry";
+import {
+  AGENT_REMINDERS_DM_PEER,
+  getAgentPrivateSurfaceChannelId,
+  getAgentPrivateSurfaceKind,
+  isAgentPrivateSurfaceChannel,
+} from "./agentPrivateSurfaces";
 import {
   getBuiltInConversationChannel,
   listInstalledApps as listInstalledRapApps,
-} from "./rapRegistryStore.js";
+} from "./rapRegistryStore";
+import { withChannelWriterFence, assertChannelWritableInTransaction } from "./channelConversionFenceService";
+import { assertActionCardWritableInTransaction } from "./actionCardConversionService";
 
 interface ChannelServiceOptions {
   executor?: DatabaseExecutor;
+  actionCardMessageId?: string;
+  actionCardConfirmationVersion?: number;
+}
+
+export type JointChannelInviteValidationCode =
+  | "joint_target_server_invalid"
+  | "joint_invitee_not_found"
+  | "joint_invitee_not_admin"
+  | "joint_invite_required"
+  | "joint_invite_limit_exceeded";
+
+export class JointChannelInviteValidationError extends Error {
+  readonly code: JointChannelInviteValidationCode;
+  readonly targetServerSlug?: string;
+  readonly invitee?: string;
+  readonly inviteeIndex?: number;
+
+  constructor(
+    message: string,
+    code: JointChannelInviteValidationCode,
+    details: { targetServerSlug?: string; invitee?: string; inviteeIndex?: number } = {},
+  ) {
+    super(message);
+    this.name = "JointChannelInviteValidationError";
+    this.code = code;
+    this.targetServerSlug = details.targetServerSlug;
+    this.invitee = details.invitee;
+    this.inviteeIndex = details.inviteeIndex;
+  }
 }
 
 export type RegularChannelType = "channel" | "private";
@@ -90,6 +138,12 @@ export type JointChannelMetadata = {
   jointServers?: JointServerMetadata[];
   jointPendingInvites?: JointPendingInviteMetadata[];
   jointBillingLocked?: boolean | null;
+  /**
+   * Contract v0.3 §18.8: set while the parent joint is over its free-server
+   * cap. Before this time the joint is in its grace period; at or after it the
+   * joint is read-only (`jointBillingLocked`). Null when within the cap.
+   */
+  jointOverLimitGraceEndsAt?: string | null;
 };
 
 export type ExternalBridgeMetadata = {
@@ -116,6 +170,8 @@ export type JointServerMetadata = {
   role: "host" | "participant" | null;
   status: "active" | "pending";
   isCurrentServer?: boolean;
+  /** Whether the joint's free-server cap counts this server as free. */
+  plan: "free" | "paid";
 };
 
 export type JointPendingInviteMetadata = {
@@ -185,7 +241,11 @@ function requiresExplicitMembership(type: string): boolean {
   return type === "private" || type === "joint";
 }
 
-async function resolveHumanServerRole(serverId: string, userId: string, executor: DatabaseExecutor = getDb()): Promise<ServerRole | null> {
+async function resolveHumanServerRole(
+  serverId: string,
+  userId: string,
+  executor: DatabaseExecutor = getDb(),
+): Promise<ServerRole | null> {
   const [membership] = await executor
     .select({ role: serverMembers.role })
     .from(serverMembers)
@@ -211,24 +271,24 @@ export async function createChannel(
   name: string,
   description?: string,
   type: ListableChannelType = "channel",
-  creator?: {
-    type: "user" | "agent";
-    id: string;
-    initialUserIds?: readonly string[];
-    initialAgentIds?: readonly string[];
-  },
+  options: ChannelServiceOptions & { type?: "user" | "agent"; id?: string; initialUserIds?: readonly string[]; initialAgentIds?: readonly string[] } = {},
 ) {
-  // Atomic quota check + insert under advisory lock (namespace 3 = channels)
-  return withServerLock(serverId, 3, async (tx) => {
+  const creator = options.type && options.id ? { ...options, type: options.type, id: options.id } : undefined;
+  const apply = async (tx: DatabaseExecutor) => {
+    if (options.actionCardMessageId) {
+      await assertActionCardWritableInTransaction(tx, options.actionCardMessageId, options.actionCardConfirmationVersion);
+    }
     const channel = await createChannelWithExecutor(tx, serverId, name, description, type);
     if (creator && type !== "joint") {
       if (creator.type === "user") {
+        // read-position: new conversation, no history before this join (no row = position 0)
         await tx.insert(channelHumans).values({
           channelId: channel.id,
           userId: creator.id,
           role: "admin",
         });
       } else {
+        // read-position: new conversation, no history before this join (no row = position 0)
         await tx.insert(channelAgents).values({
           channelId: channel.id,
           agentId: creator.id,
@@ -250,6 +310,7 @@ export async function createChannel(
         if (validUsers.length !== initialUserIds.length) {
           throw new Error("One or more initial users are not members of this server");
         }
+        // read-position: new conversation, no history before this join (no row = position 0)
         await tx.insert(channelHumans).values(initialUserIds.map((userId) => ({
           channelId: channel.id,
           userId,
@@ -268,6 +329,7 @@ export async function createChannel(
         if (validAgents.length !== initialAgentIds.length) {
           throw new Error("One or more initial agents are not active in this server");
         }
+        // read-position: new conversation, no history before this join (no row = position 0)
         await tx.insert(channelAgents).values(initialAgentIds.map((agentId) => ({
           channelId: channel.id,
           agentId,
@@ -276,7 +338,9 @@ export async function createChannel(
       }
     }
     return channel;
-  });
+  };
+  if (options.executor) return apply(options.executor);
+  return withServerLock(serverId, 3, apply);
 }
 
 async function createChannelWithExecutor(
@@ -435,58 +499,35 @@ type JointInvitee = {
   role: "owner" | "admin";
 };
 
-function assertJointChannelServerLimit(serverIds: Iterable<string>) {
-  if (new Set(serverIds).size > MAX_JOINT_CHANNEL_SERVERS) {
-    throw new Error(`Joint channels support a maximum of ${MAX_JOINT_CHANNEL_SERVERS} servers`);
-  }
-}
-
-async function getJointChannelServerIdsIncludingPending(executor: DatabaseExecutor, jointChannelId: string): Promise<string[]> {
-  const activeRows = await executor
-    .select({ serverId: jointChannelServers.serverId })
-    .from(jointChannelServers)
-    .where(and(
-      eq(jointChannelServers.jointChannelId, jointChannelId),
-      eq(jointChannelServers.status, "active"),
-    ));
-  const pendingRows = await executor
-    .select({ serverId: jointChannelInvites.toServerId })
-    .from(jointChannelInvites)
-    .where(and(
-      eq(jointChannelInvites.jointChannelId, jointChannelId),
-      eq(jointChannelInvites.status, "pending"),
-    ));
-  return [
-    ...activeRows.map((row) => row.serverId),
-    ...pendingRows.map((row) => row.serverId),
-  ];
-}
-
 export async function createJointChannel(input: CreateJointChannelInput) {
   const inviteRequests = normalizeJointInviteRequests(input);
   const db = getDb();
-  const entitlement = await getJointChannelCreationEntitlement(
-    db,
-    input.hostServerId,
-    input.now ?? new Date(),
-  );
+  const now = input.now ?? currentDate();
+  // §18.11 item 5: refresh entitlements before taking any lock.
+  const preResolvedTargets = [];
+  for (const inviteRequest of inviteRequests) {
+    preResolvedTargets.push((await getJointInviteTargetServer(db, inviteRequest.targetServerSlug, input.hostServerId)).id);
+  }
+  await refreshJointEntitlementsBeforeAdmission(null, [input.hostServerId, ...preResolvedTargets], now);
 
   const result = await withServerLock(input.hostServerId, 3, async (tx) => {
-    await assertJointChannelCreationCapacity(tx, input.hostServerId, entitlement);
     const resolvedInviteRequests = [];
     for (const inviteRequest of inviteRequests) {
       const targetServer = await getJointInviteTargetServer(tx, inviteRequest.targetServerSlug, input.hostServerId);
-      const invitees = await resolveJointInvitees(tx, targetServer.id, inviteRequest.invitedPeople);
+      const invitees = await resolveJointInvitees(tx, targetServer.id, inviteRequest.invitedPeople, inviteRequest.targetServerSlug);
       resolvedInviteRequests.push({ targetServer, invitees });
     }
-    assertJointChannelServerLimit([
-      input.hostServerId,
-      ...resolvedInviteRequests.map((request) => request.targetServer.id),
-    ]);
+    // Contract v0.3 §18.6/§18.7: no per-host joint count; the new joint must
+    // fit the server and free-server caps with every invited target counted.
+    await assertJointAdmission(tx, null, {
+      kind: "invite",
+      targetServerIds: [input.hostServerId, ...resolvedInviteRequests.map((request) => request.targetServer.id)],
+    }, now);
 
     const storageNamespaceId = await ensureJointStorageNamespace(tx, input.createdByUserId);
     const storageChannel = await createJointStorageChannelWithExecutor(tx, storageNamespaceId);
     const channel = await createChannelWithExecutor(tx, input.hostServerId, input.name, input.description, "joint");
+    // read-position: new conversation, no history before this join (no row = position 0)
     await tx.insert(channelHumans)
       .values([
         { channelId: channel.id, userId: input.createdByUserId },
@@ -494,6 +535,7 @@ export async function createJointChannel(input: CreateJointChannelInput) {
       ])
       .onConflictDoNothing();
     if (input.agentIds?.length) {
+      // read-position: new conversation, no history before this join (no row = position 0)
       await tx.insert(channelAgents)
         .values(input.agentIds.map((agentId) => ({ channelId: channel.id, agentId })))
         .onConflictDoNothing();
@@ -542,18 +584,21 @@ function normalizeJointInviteRequests(input: Pick<CreateJointChannelInput, "targ
         invitedPeople: input.invitedPeople ?? [],
       }];
   if (rawRequests.length > MAX_JOINT_CHANNEL_INVITE_TARGETS) {
-    throw new Error(`Joint channels support a maximum of ${MAX_JOINT_CHANNEL_SERVERS} servers`);
+    throw new JointChannelInviteValidationError(
+      `Joint channels support a maximum of ${MAX_JOINT_CHANNEL_SERVERS} servers`,
+      "joint_invite_limit_exceeded",
+    );
   }
   const byTargetSlug = new Map<string, JointInviteRequest>();
 
   for (const rawRequest of rawRequests) {
     const targetServerSlug = rawRequest.targetServerSlug.trim();
     if (!targetServerSlug) {
-      throw new Error("Invite server slug is required");
+      throw new JointChannelInviteValidationError("Invite server slug is required", "joint_invite_required");
     }
     const invitedPeople = normalizeJointInvitePeople(rawRequest.invitedPeople);
     if (invitedPeople.length === 0) {
-      throw new Error("At least one invited person is required");
+      throw new JointChannelInviteValidationError("At least one invited person is required", "joint_invite_required", { targetServerSlug });
     }
     const key = targetServerSlug.toLowerCase();
     const existing = byTargetSlug.get(key);
@@ -565,7 +610,7 @@ function normalizeJointInviteRequests(input: Pick<CreateJointChannelInput, "targ
   }
 
   if (byTargetSlug.size === 0) {
-    throw new Error("Invite server slug is required");
+    throw new JointChannelInviteValidationError("Invite server slug is required", "joint_invite_required");
   }
   return [...byTargetSlug.values()];
 }
@@ -579,11 +624,30 @@ export async function inviteServerToJointChannel(input: {
 }) {
   const targetSlug = input.targetServerSlug.trim();
   if (!targetSlug) {
-    throw new Error("Invite server slug is required");
+    throw new JointChannelInviteValidationError("Invite server slug is required", "joint_invite_required");
   }
   const invitedPeople = normalizeJointInvitePeople(input.invitedPeople);
   if (invitedPeople.length === 0) {
-    throw new Error("At least one invited person is required");
+    throw new JointChannelInviteValidationError("At least one invited person is required", "joint_invite_required", { targetServerSlug: targetSlug });
+  }
+
+  const now = currentDate();
+  const db = getDb();
+  const [preProjection] = await db
+    .select({ jointChannelId: jointChannelServers.jointChannelId })
+    .from(jointChannelServers)
+    .where(and(
+      eq(jointChannelServers.localChannelId, input.localChannelId),
+      eq(jointChannelServers.serverId, input.fromServerId),
+      eq(jointChannelServers.status, "active"),
+    ));
+  if (preProjection) {
+    const preTarget = await getJointInviteTargetServer(db, targetSlug, input.fromServerId);
+    await refreshJointEntitlementsBeforeAdmission(
+      await resolveParentJointId(db, preProjection.jointChannelId),
+      [preTarget.id],
+      now,
+    );
   }
 
   const result = await withServerResourceLock(input.fromServerId, 3, input.localChannelId, async (tx) => {
@@ -602,9 +666,13 @@ export async function inviteServerToJointChannel(input: {
     }
 
     const targetServer = await getJointInviteTargetServer(tx, targetSlug, input.fromServerId);
-    const existingServerIds = await getJointChannelServerIdsIncludingPending(tx, projection.jointChannelId);
-    assertJointChannelServerLimit([...existingServerIds, targetServer.id]);
-    const invitees = await resolveJointInvitees(tx, targetServer.id, invitedPeople);
+    // One lock on the parent joint row serializes invites from every
+    // participant server, not just this server's projection (§18.7).
+    await assertJointAdmission(tx, await resolveParentJointId(tx, projection.jointChannelId), {
+      kind: "invite",
+      targetServerIds: [targetServer.id],
+    }, now);
+    const invitees = await resolveJointInvitees(tx, targetServer.id, invitedPeople, targetSlug);
     const invites = [];
     for (const invitee of invitees) {
       const invite = await createJointChannelInvite({
@@ -626,7 +694,10 @@ export async function inviteServerToJointChannel(input: {
 
 function normalizeJointInvitePeople(invitedPeople: string[] | undefined): string[] {
   if ((invitedPeople?.length ?? 0) > MAX_JOINT_CHANNEL_INVITED_PEOPLE_PER_TARGET) {
-    throw new Error(`A joint channel invite can include a maximum of ${MAX_JOINT_CHANNEL_INVITED_PEOPLE_PER_TARGET} invited people per target server`);
+    throw new JointChannelInviteValidationError(
+      `A joint channel invite can include a maximum of ${MAX_JOINT_CHANNEL_INVITED_PEOPLE_PER_TARGET} invited people per target server`,
+      "joint_invite_limit_exceeded",
+    );
   }
   const seen = new Set<string>();
   const normalized: string[] = [];
@@ -649,18 +720,31 @@ async function getJointInviteTargetServer(executor: DatabaseExecutor, targetServ
     .from(servers)
     .where(eq(servers.slug, targetServerSlug));
   if (!targetServer || targetServer.deletedAt || targetServer.kind === "joint_storage") {
-    throw new Error("Target server not found");
+    throw new JointChannelInviteValidationError(
+      "Target server not found",
+      "joint_target_server_invalid",
+      { targetServerSlug },
+    );
   }
   if (targetServer.id === fromServerId) {
-    throw new Error("Cannot invite the current server");
+    throw new JointChannelInviteValidationError(
+      "Cannot invite the current server",
+      "joint_target_server_invalid",
+      { targetServerSlug },
+    );
   }
   return targetServer;
 }
 
-async function resolveJointInvitees(executor: DatabaseExecutor, targetServerId: string, invitedPeople: string[]): Promise<JointInvitee[]> {
+async function resolveJointInvitees(
+  executor: DatabaseExecutor,
+  targetServerId: string,
+  invitedPeople: string[],
+  targetServerSlug: string,
+): Promise<JointInvitee[]> {
   const invitees: JointInvitee[] = [];
   const seenUserIds = new Set<string>();
-  for (const invitedPerson of invitedPeople) {
+  for (const [inviteeIndex, invitedPerson] of invitedPeople.entries()) {
     const token = invitedPerson.trim();
     const isEmail = token.includes("@") && !token.startsWith("@");
     const lookup = isEmail ? normalizeEmail(token) : token.replace(/^@/, "");
@@ -680,17 +764,29 @@ async function resolveJointInvitees(executor: DatabaseExecutor, targetServerId: 
         isEmail ? eq(users.email, lookup) : eq(users.name, lookup),
       ));
     if (!invitee) {
-      throw new Error(`Invited person not found in target server: ${invitedPerson}`);
+      throw new JointChannelInviteValidationError(
+        `Invited person not found in target server: ${invitedPerson}`,
+        "joint_invitee_not_found",
+        { targetServerSlug, invitee: invitedPerson, inviteeIndex },
+      );
     }
     if (invitee.role !== "owner" && invitee.role !== "admin") {
-      throw new Error(`invited person must be a target server admin: ${invitedPerson}`);
+      throw new JointChannelInviteValidationError(
+        `Invited person must be a target server admin: ${invitedPerson}`,
+        "joint_invitee_not_admin",
+        { targetServerSlug, invitee: invitedPerson, inviteeIndex },
+      );
     }
     if (seenUserIds.has(invitee.userId)) continue;
     seenUserIds.add(invitee.userId);
     invitees.push({ ...invitee, role: invitee.role });
   }
   if (invitees.length === 0) {
-    throw new Error("At least one invited person is required");
+    throw new JointChannelInviteValidationError(
+      "At least one invited person is required",
+      "joint_invite_required",
+      { targetServerSlug },
+    );
   }
   return invitees;
 }
@@ -759,7 +855,10 @@ export async function createJointChannelInvite(input: {
       eq(jointChannelServers.status, "active"),
     ));
   if (existing) {
-    throw new Error("Target server is already in this joint channel");
+    throw new JointChannelInviteValidationError(
+      "Target server is already in this joint channel",
+      "joint_target_server_invalid",
+    );
   }
 
   const [invite] = await db.insert(jointChannelInvites).values({
@@ -768,14 +867,14 @@ export async function createJointChannelInvite(input: {
     toServerId: input.targetServerId,
     invitedUserId: input.invitedUserId,
     invitedByUserId: input.invitedByUserId,
-    expiresAt: new Date(Date.now() + JOINT_CHANNEL_INVITE_TTL_MS),
+    expiresAt: new Date(currentTimeMs() + JOINT_CHANNEL_INVITE_TTL_MS),
   }).onConflictDoUpdate({
     target: [jointChannelInvites.jointChannelId, jointChannelInvites.toServerId, jointChannelInvites.invitedUserId],
     targetWhere: sql`status = 'pending'`,
     set: {
       invitedByUserId: input.invitedByUserId,
-      expiresAt: new Date(Date.now() + JOINT_CHANNEL_INVITE_TTL_MS),
-      createdAt: new Date(),
+      expiresAt: new Date(currentTimeMs() + JOINT_CHANNEL_INVITE_TTL_MS),
+      createdAt: currentDate(),
     },
   }).returning();
   return invite;
@@ -817,8 +916,8 @@ export async function resendPendingJointChannelInvites(input: {
   await db.update(jointChannelInvites)
     .set({
       invitedByUserId: input.requestedByUserId,
-      expiresAt: new Date(Date.now() + JOINT_CHANNEL_INVITE_TTL_MS),
-      createdAt: new Date(),
+      expiresAt: new Date(currentTimeMs() + JOINT_CHANNEL_INVITE_TTL_MS),
+      createdAt: currentDate(),
     })
     .where(inArray(jointChannelInvites.id, inviteIds));
 
@@ -862,7 +961,7 @@ export async function listPendingJointChannelInvites(serverId: string, userId: s
       isNull(displayChannel.deletedAt),
     ))
     .orderBy(desc(jointChannelInvites.createdAt));
-  const now = Date.now();
+  const now = currentTimeMs();
   return rows.filter((row) => row.expiresAt.getTime() > now);
 }
 
@@ -872,6 +971,18 @@ export async function acceptJointChannelInvite(input: {
   acceptedByUserId: string;
 }) {
   assertJointChannelInviteId(input.inviteId);
+  const now = currentDate();
+  const [preInvite] = await getDb()
+    .select({ jointChannelId: jointChannelInvites.jointChannelId })
+    .from(jointChannelInvites)
+    .where(eq(jointChannelInvites.id, input.inviteId));
+  if (preInvite) {
+    await refreshJointEntitlementsBeforeAdmission(
+      await resolveParentJointId(getDb(), preInvite.jointChannelId),
+      [input.targetServerId],
+      now,
+    );
+  }
   return withServerLock(input.targetServerId, 3, async (tx) => {
     const fromProjection = alias(jointChannelServers, "joint_accept_from_projection");
     const displayChannel = alias(channels, "joint_accept_display_channel");
@@ -907,7 +1018,7 @@ export async function acceptJointChannelInvite(input: {
     if (!invite) {
       throw new Error("Joint channel invite not found");
     }
-    if (invite.expiresAt.getTime() <= Date.now()) {
+    if (invite.expiresAt.getTime() <= currentTimeMs()) {
       await tx.update(jointChannelInvites)
         .set({ status: "expired" })
         .where(eq(jointChannelInvites.id, input.inviteId));
@@ -933,14 +1044,18 @@ export async function acceptJointChannelInvite(input: {
         eq(jointChannelServers.status, "active"),
       ));
     if (existingProjection) {
-      await tx.insert(channelHumans)
+      const joined = await tx.insert(channelHumans)
         .values({ channelId: existingProjection.localChannelId, userId: input.acceptedByUserId })
-        .onConflictDoNothing();
+        .onConflictDoNothing()
+        .returning({ userId: channelHumans.userId });
+      if (joined.length > 0) {
+        await startReadPositionAtJoin(tx, "human", input.acceptedByUserId, existingProjection.localChannelId);
+      }
       await tx.update(jointChannelInvites)
         .set({
           status: "accepted",
           acceptedByUserId: input.acceptedByUserId,
-          acceptedAt: new Date(),
+          acceptedAt: currentDate(),
         })
         .where(eq(jointChannelInvites.id, input.inviteId));
       const [existingChannel] = await tx
@@ -953,6 +1068,11 @@ export async function acceptJointChannelInvite(input: {
       if (!existingChannel) throw new Error("Joint channel projection not found");
       return existingChannel;
     }
+
+    // Accepting counts active participants plus this server, so an old free
+    // invite cannot push a joint that is already over past the cap (§18.8).
+    const parentJointId = await resolveParentJointId(tx, invite.jointChannelId);
+    await assertJointAdmission(tx, parentJointId, { kind: "accept", serverId: input.targetServerId }, now);
 
     const projection = await createChannelWithExecutor(
       tx,
@@ -981,13 +1101,20 @@ export async function acceptJointChannelInvite(input: {
       },
       joinedByUserId: input.acceptedByUserId,
     });
+    // The projection is not committed yet, so name the canonical storage explicitly.
+    const [canonicalLatest] = await tx
+      .select({ seq: sql<number>`COALESCE(MAX(${messages.seq}), 0)::int` })
+      .from(messages)
+      .where(eq(messages.channelId, invite.canonicalChannelId));
+    await startReadPositionAtJoin(tx, "human", input.acceptedByUserId, projection.id, canonicalLatest?.seq ?? 0);
     await tx.update(jointChannelInvites)
       .set({
         status: "accepted",
         acceptedByUserId: input.acceptedByUserId,
-        acceptedAt: new Date(),
+        acceptedAt: currentDate(),
       })
       .where(eq(jointChannelInvites.id, input.inviteId));
+    if (parentJointId) await reconcileJointOverLimit(tx, parentJointId, now);
     return projection;
   });
 }
@@ -1122,32 +1249,42 @@ function readFrontierFromAuthorityRow(row: UnreadSummaryReadStateRow): InboxScop
   });
 }
 
+/**
+ * The list/DM/followed-thread read-state snapshot of one authority row (absent
+ * row = no channel row). Shared by attachReadState and the followed-threads
+ * RisingWave path, which builds the authority row from the cursor table plus
+ * the RW latest message, so both produce the same snapshot for the same facts.
+ */
+function readStateSnapshotFromAuthorityRow(state: UnreadSummaryReadStateRow | undefined): ReadStateSnapshot {
+  return {
+    // Legacy fields keep their historical coalesce-to-0 shape for existing
+    // consumers; the NEW readState union is the authoritative carrier
+    // (#632) — absence/corruption stay visible there.
+    maxReadSeq: state?.readCursorPresent ? Number(state.maxReadSeq) : 0,
+    readStateVersion: state?.readCursorPresent ? (state.readStateVersion as number) : 0,
+    readState: state ? readFrontierFromAuthorityRow(state) : makeInboxScopeReadFrontier(null),
+  };
+}
+
 async function attachReadState<T extends { id: string }>(
   rows: T[],
   userId: string,
   executor: DatabaseExecutor = getDb(),
+  traceQuery: DbQueryTracer = untracedDbQuery,
 ): Promise<Array<T & ReadStateSnapshot>> {
   if (rows.length === 0) return [];
   const authorityRows = await fetchReadStateAuthorityRows(
     rows.map((row) => row.id),
     userId,
-    untracedDbQuery,
+    traceQuery,
     "channels.read_state_by_channels",
     executor,
   );
   const stateByChannel = new Map(authorityRows.map((row) => [row.channelId, row]));
-  return rows.map((row) => {
-    const state = stateByChannel.get(row.id);
-    return {
-      ...row,
-      // Legacy fields keep their historical coalesce-to-0 shape for existing
-      // consumers; the NEW readState union is the authoritative carrier
-      // (#632) — absence/corruption stay visible there.
-      maxReadSeq: state?.readCursorPresent ? Number(state.maxReadSeq) : 0,
-      readStateVersion: state?.readCursorPresent ? (state.readStateVersion as number) : 0,
-      readState: state ? readFrontierFromAuthorityRow(state) : makeInboxScopeReadFrontier(null),
-    };
-  });
+  return rows.map((row) => ({
+    ...row,
+    ...readStateSnapshotFromAuthorityRow(stateByChannel.get(row.id)),
+  }));
 }
 
 // `type` is required, not optional: this row set decides whether the API
@@ -1222,20 +1359,6 @@ async function attachUserChannelDisplayPrefs<T extends { id: string }>(
   });
 }
 
-export async function isHumanActivityMuteEnabled(
-  _serverId: string,
-  _userId?: string | null,
-): Promise<boolean> {
-  // Human activity-mute launched via normal release (2026-06-30, tygg decision):
-  // the `human_activity_mute_v0` flag-gating was dropped in favor of a code-level
-  // enable, so the feature is unconditionally on for all servers/users. The
-  // historyCutoff -> legacy-PG routing (free-plan/historyCutoff cohort) is
-  // unaffected — it is handled separately in getInboxItemsFromRisingWave and is
-  // out of scope here (long-standing perf tracked in #91). Removing the residual
-  // flag infra is the deferred contract cleanup (#78).
-  return true;
-}
-
 type DmIdentityKind = "human_self" | "human_human" | "human_agent" | "agent_agent";
 
 function dmIdentityKey(participantIds: string[]): string {
@@ -1260,20 +1383,21 @@ export type ChannelUnreadSummaryEntry = {
    * derives read/unread from THIS, not from its own arithmetic.
    */
   readState: InboxScopeReadFrontier;
+  /**
+   * Non-joined public channel only: its latest message is past the user's read
+   * cursor. Such a channel has no exact count (unreadCount is 0); the sidebar
+   * shows a quiet indicator instead.
+   */
+  hasNew?: boolean;
 };
 
 interface SidebarUnreadSummaryOptions {
   traceQuery?: DbQueryTracer;
 }
 
-type SidebarUnreadSummaryInput = {
-  serverId: string;
-  historyCutoff?: Date;
-};
 
-const RW_INBOX_ITEMS_V1_SERVING_VIEW = "rw_inbox_items_v1";
-const RW_INBOX_ITEMS_V2_SERVING_VIEW = "rw_inbox_items_v2_suppressed_v3_4";
-const RW_INBOX_ITEMS_V3_SERVING_VIEW = "rw_inbox_items_v3_2";
+/** Every unified-chain serving view is receiver-keyed: reads must filter on `receiver_type`. */
+const RECEIVER_KEYED_SERVING_VIEWS: ReadonlySet<string> = new Set([UNIFIED_CHAIN_VIEWS.serving]);
 
 async function attachLastMessageAt<T extends { id: string }>(
   rows: T[],
@@ -1320,6 +1444,95 @@ async function attachLastMessageAt<T extends { id: string }>(
   return rows.map((row) => ({
     ...row,
     lastMessageAt: lastMessageMap.get(row.id) ?? null,
+  }));
+}
+
+type DMChannelLastMessageSummary = {
+  lastMessageAt: Date | null;
+  lastMessagePreview: string | null;
+  lastMessageSenderName: string | null;
+};
+
+async function attachLastMessageSummary<T extends { id: string }>(
+  rows: T[],
+  traceQuery: DbQueryTracer,
+  queryName: string,
+  countAttrName: string,
+): Promise<Array<T & DMChannelLastMessageSummary>> {
+  if (rows.length === 0) return [];
+
+  const channelIds = rows.map((row) => row.id);
+  const lastMessages = await traceQuery(
+    queryName,
+    () => getDb().execute(sql`
+      WITH input_channels(channel_id) AS (
+        VALUES ${sql.join(channelIds.map((id) => sql`(${id}::uuid)`), sql`, `)}
+      )
+      SELECT
+        input_channels.channel_id::text AS "channelId",
+        latest.created_at AS "lastMessageAt",
+        CASE
+          WHEN length(latest.normalized_content) = 0 THEN NULL
+          WHEN length(latest.normalized_content) > 140 THEN left(latest.normalized_content, 139) || '…'
+          ELSE latest.normalized_content
+        END AS "lastMessagePreview",
+        COALESCE(
+          NULLIF(sender_user.display_name, ''),
+          sender_user.name,
+          NULLIF(sender_agent.display_name, ''),
+          sender_agent.name,
+          external_author.display_name
+        ) AS "lastMessageSenderName"
+      FROM input_channels
+      JOIN LATERAL (
+        SELECT
+          m.id,
+          m.sender_type,
+          m.sender_id,
+          m.created_at,
+          btrim(regexp_replace(m.content, '\\s+', ' ', 'g')) AS normalized_content
+        FROM messages m
+        WHERE m.channel_id = input_channels.channel_id
+        ORDER BY m.created_at DESC, m.seq DESC
+        LIMIT 1
+      ) latest ON TRUE
+      LEFT JOIN users sender_user
+        ON latest.sender_type = 'user'
+       AND sender_user.id::text = latest.sender_id
+      LEFT JOIN agents sender_agent
+        ON latest.sender_type = 'agent'
+       AND sender_agent.id::text = latest.sender_id
+      LEFT JOIN external_message_author_facts external_author
+        ON latest.sender_type = 'external_projection'
+       AND external_author.message_id = latest.id
+    `).then((result) =>
+      (result.rows as Array<{
+        channelId: string;
+        lastMessageAt: Date | string | null;
+        lastMessagePreview: string | null;
+        lastMessageSenderName: string | null;
+      }>).map((row) => ({
+        channelId: row.channelId,
+        lastMessageAt: row.lastMessageAt instanceof Date
+          ? row.lastMessageAt
+          : row.lastMessageAt
+            ? new Date(row.lastMessageAt)
+            : null,
+        lastMessagePreview: row.lastMessagePreview,
+        lastMessageSenderName: row.lastMessageSenderName,
+      }))
+    ),
+    (latestRows) => ({
+      [countAttrName]: channelIds.length,
+      channels_with_messages_count: latestRows.length,
+    }),
+  );
+  const lastMessageMap = new Map(lastMessages.map((row) => [row.channelId, row]));
+  return rows.map((row) => ({
+    ...row,
+    lastMessageAt: lastMessageMap.get(row.id)?.lastMessageAt ?? null,
+    lastMessagePreview: lastMessageMap.get(row.id)?.lastMessagePreview ?? null,
+    lastMessageSenderName: lastMessageMap.get(row.id)?.lastMessageSenderName ?? null,
   }));
 }
 
@@ -1409,14 +1622,19 @@ export async function attachJointChannelMetadata<T extends { id: string; type: s
     ));
 
   const billingLockedByLocalId = new Map<string, boolean>();
-  await Promise.all(
-    projections.map(async (projection) => {
-      billingLockedByLocalId.set(
-        projection.localChannelId,
-        await isChannelReadOnlyByBillingFeature(projection.localChannelId, projection.serverId),
-      );
-    }),
-  );
+  const graceEndsAtByLocalId = new Map<string, string | null>();
+  const limitNow = currentDate();
+  const limitStates = await getJointLimitStatesForJoints(db, jointIds, limitNow);
+  for (const projection of projections) {
+    const state = limitStates.get(projection.jointChannelId) ?? null;
+    billingLockedByLocalId.set(projection.localChannelId, state?.readOnly ?? false);
+    graceEndsAtByLocalId.set(projection.localChannelId, state?.graceEndsAt?.toISOString() ?? null);
+  }
+  const freeServers = await freeServerIds(db, [...new Set([
+    ...activeServers.map((server) => server.serverId),
+    ...pendingInvites.map((invite) => invite.toServerId),
+  ])], limitNow);
+  const planOf = (serverId: string) => (freeServers.has(serverId) ? "free" as const : "paid" as const);
 
   return rows.map((row) => {
     if (row.type !== "joint") {
@@ -1467,6 +1685,7 @@ export async function attachJointChannelMetadata<T extends { id: string; type: s
         serverSlug: invite.serverSlug,
         role: null,
         status: "pending",
+        plan: planOf(invite.toServerId),
       });
     }
     const jointServers: JointServerMetadata[] = [
@@ -1477,6 +1696,7 @@ export async function attachJointChannelMetadata<T extends { id: string; type: s
         role: server.role as "host" | "participant",
         status: "active" as const,
         isCurrentServer: server.serverId === row.serverId,
+        plan: planOf(server.serverId),
       })),
       ...pendingServerRows.values(),
     ];
@@ -1492,6 +1712,7 @@ export async function attachJointChannelMetadata<T extends { id: string; type: s
       jointServers,
       jointPendingInvites,
       jointBillingLocked: projection ? billingLockedByLocalId.get(projection.localChannelId) ?? false : null,
+      jointOverLimitGraceEndsAt: projection ? graceEndsAtByLocalId.get(projection.localChannelId) ?? null : null,
     };
   });
 }
@@ -1504,6 +1725,12 @@ interface FollowedThreadsOptions {
   channelId?: string;
   q?: string;
   sort?: "asc" | "desc";
+  /**
+   * Internal: run the legacy all-Postgres list even when the active-follows
+   * RisingWave path (rw_followed_threads_v5) applies. For the path diff script
+   * (scripts/followed-threads-path-diff.ts) and tests; no route sets it.
+   */
+  forceLegacyPath?: boolean;
 }
 
 interface ThreadSummaryOptions {
@@ -1618,7 +1845,7 @@ export async function listChannels(
           ...ch,
           joined: serverRole === "guest" && isAllSystemChannel(ch) ? false : joinedSet.has(ch.id),
         }));
-      const humanActivityMuteEnabled = opts?.humanActivityMuteEnabled ?? await isHumanActivityMuteEnabled(serverId, userId);
+      const humanActivityMuteEnabled = opts?.humanActivityMuteEnabled ?? true;
       return attachJointChannelMetadata(
         await attachLastMessageAt(
           await attachReadState(
@@ -1707,7 +1934,7 @@ export async function listChannels(
           ? !isAllSystemChannel(ch) && joinedSet.has(ch.id)
           : isEnabledAllChannel(ch) || joinedSet.has(ch.id),
       }));
-    const humanActivityMuteEnabled = opts?.humanActivityMuteEnabled ?? await isHumanActivityMuteEnabled(serverId, userId);
+    const humanActivityMuteEnabled = opts?.humanActivityMuteEnabled ?? true;
     return attachJointChannelMetadata(
       await attachLastMessageAt(
         await attachReadState(
@@ -1754,7 +1981,15 @@ export async function updateChannel(
     guestJoinable?: boolean;
   },
   executor?: DatabaseExecutor,
-) {
+): Promise<typeof channels.$inferSelect> {
+  if (!executor) {
+    const updated = await withChannelWriterFence(channelId, tx => updateChannel(channelId, updates, tx));
+    // Post-commit: callers that own the transaction (routes) revoke themselves
+    // after their commit; the fenced path revokes here, after the fence.
+    await revokeChannelAccessAfterUpdate(updates, updated);
+    return updated;
+  }
+  await assertChannelWritableInTransaction(executor, channelId);
   const db = executor ?? getDb();
   const channel = await getChannel(channelId, { executor: db });
   if (!channel) throw new Error("Channel not found");
@@ -1829,6 +2064,10 @@ export async function updateChannel(
   if (nextGuestJoinable && !nextGuestVisible) {
     throw new Error("Guest-joinable channels must also be guest-visible");
   }
+  if (!channel.guestJoinable && nextGuestJoinable && channel.archivedAt === null) {
+    await acquireServerLock(db, channel.serverId, GUEST_JOINABLE_CHANNEL_LOCK_NAMESPACE);
+    await assertGuestJoinableChannelCapacityAvailable(db, channel.serverId);
+  }
   if (updates.guestVisible !== undefined || (nextType === "private" && !isAllSystemChannel(channel))) {
     setValues.guestVisible = nextGuestVisible;
   }
@@ -1837,7 +2076,6 @@ export async function updateChannel(
   }
 
   if (Object.keys(setValues).length === 0) {
-    if (!executor) await revokeChannelAccessAfterUpdate(updates, channel);
     return channel;
   }
 
@@ -1865,9 +2103,7 @@ export async function updateChannel(
 
     return updated;
   };
-  const updated = await (executor ? applyUpdate(executor) : getDb().transaction(applyUpdate));
-  if (!executor) await revokeChannelAccessAfterUpdate(updates, updated);
-  return updated;
+  return applyUpdate(executor);
 }
 
 /** Transaction callers invoke this only after commit, before publishing new
@@ -2033,7 +2269,12 @@ async function backfillJointThreadProjectionsForLocalParent(
 }
 
 async function listActiveJointThreadProjectionRows(
-  input: { localThreadChannelId?: string; canonicalThreadChannelId?: string; serverId?: string },
+  input: {
+    localThreadChannelId?: string;
+    canonicalThreadChannelId?: string;
+    canonicalThreadChannelIds?: string[];
+    serverId?: string;
+  },
   executor: DatabaseExecutor = getDb(),
 ): Promise<JointThreadProjection[]> {
   const db = executor;
@@ -2050,11 +2291,17 @@ async function listActiveJointThreadProjectionRows(
     eq(parentProjection.status, "active"),
     eq(localThread.type, "thread"),
     eq(canonicalThread.type, "thread"),
+    // The parent message is the durable local↔canonical Thread identity
+    // anchor. A swapped projection row must not silently redirect reads or
+    // writes to another canonical Thread that happens to share the parent
+    // channel; fail closed until the mapping is repaired.
+    sql`${parentMessage.threadId} = ${canonicalThread.id}::text`,
     isNull(localThread.deletedAt),
     isNull(canonicalThread.deletedAt),
   ];
   if (input.localThreadChannelId) filters.push(eq(jointChannelServers.localChannelId, input.localThreadChannelId));
   if (input.canonicalThreadChannelId) filters.push(eq(jointChannels.canonicalChannelId, input.canonicalThreadChannelId));
+  if (input.canonicalThreadChannelIds) filters.push(inArray(jointChannels.canonicalChannelId, input.canonicalThreadChannelIds));
   if (input.serverId) filters.push(eq(jointChannelServers.serverId, input.serverId));
 
   const rows = await db
@@ -2101,6 +2348,19 @@ export async function getActiveJointThreadProjectionsByCanonicalThread(
   executor: DatabaseExecutor = getDb(),
 ): Promise<JointThreadProjection[]> {
   return listActiveJointThreadProjectionRows({ canonicalThreadChannelId }, executor);
+}
+
+// One round trip for a whole page of canonical Threads, scoped to the local
+// Server. Same rows (and joined_at order) as calling
+// getActiveJointThreadProjectionsByCanonicalThread per id and keeping the
+// candidates whose localServerId is serverId.
+export async function getActiveJointThreadProjectionsByCanonicalThreadsForServer(
+  canonicalThreadChannelIds: string[],
+  serverId: string,
+  executor: DatabaseExecutor = getDb(),
+): Promise<JointThreadProjection[]> {
+  if (canonicalThreadChannelIds.length === 0) return [];
+  return listActiveJointThreadProjectionRows({ canonicalThreadChannelIds, serverId }, executor);
 }
 
 export async function getJointThreadProjectionForMember(
@@ -2387,7 +2647,7 @@ async function pruneThreadFollowsOutsideParentMembership(
   parentChannelId: string,
   executor: DatabaseExecutor,
 ) {
-  const start = Date.now();
+  const start = currentTimeMs();
   const userResult = await executor.execute(sql`
     DELETE FROM ${threadFollows}
     WHERE ${threadFollows.followerType} = 'user'
@@ -2436,7 +2696,7 @@ async function pruneThreadFollowsOutsideParentMembership(
     user_row_count: userResult.rows.length,
     agent_row_count: agentResult.rows.length,
     row_count: userResult.rows.length + agentResult.rows.length,
-    duration_ms: Date.now() - start,
+    duration_ms: currentTimeMs() - start,
   });
 }
 
@@ -2482,13 +2742,6 @@ export async function hasUserThreadResidue(userId: string, serverId: string, thr
         AND cursor_row.channel_id = ${threadChannelId}::uuid
     )
     OR EXISTS (
-      SELECT 1 FROM inbox_serving_rows serving_row
-      WHERE serving_row.receiver_type = 'user'
-        AND serving_row.receiver_id = ${userId}::uuid
-        AND serving_row.server_id = ${serverId}::uuid
-        AND serving_row.source_channel_id = ${threadChannelId}::uuid
-    )
-    OR EXISTS (
       SELECT 1 FROM inbox_notification_facts fact_row
       WHERE fact_row.receiver_type = 'user'
         AND fact_row.receiver_id = ${userId}::uuid
@@ -2529,23 +2782,42 @@ export async function resolveChannelAccess(input: {
   serverId: string;
   channelId: string;
   includeDeleted?: boolean;
+  executor?: DatabaseExecutor;
 }): Promise<ChannelAccessResolution | null> {
-  const channel = await getChannel(input.channelId, { includeDeleted: input.includeDeleted });
-  if (!channel) return null;
-  if (channel.serverId !== input.serverId) return null;
+  const resolved = await resolveChannelAccessMany({
+    serverId: input.serverId,
+    channelIds: [input.channelId],
+    includeDeleted: input.includeDeleted,
+    executor: input.executor,
+  });
+  return resolved.get(input.channelId) ?? null;
+}
 
-  if (channel.type !== "joint") {
-    return {
-      kind: "local",
-      localChannelId: channel.id,
-      canonicalChannelId: channel.id,
-      serverId: channel.serverId,
-      channel,
-    };
-  }
+/**
+ * resolveChannelAccess for many channel ids of one server in at most two
+ * queries (the channels, then the active projections of the joint ones). The
+ * single entry point of the local/joint access rule: a channel resolves when it
+ * exists (not deleted unless includeDeleted), belongs to `serverId`, and, for a
+ * joint channel, has an active projection in that server under an active joint.
+ * Ids that do not resolve are absent from the map.
+ */
+export async function resolveChannelAccessMany(input: {
+  serverId: string;
+  channelIds: readonly string[];
+  includeDeleted?: boolean;
+  executor?: DatabaseExecutor;
+}): Promise<Map<string, ChannelAccessResolution>> {
+  const resolved = new Map<string, ChannelAccessResolution>();
+  const channelIds = [...new Set(input.channelIds)];
+  if (channelIds.length === 0) return resolved;
+  const db = input.executor ?? getDb();
+  const conditions = [inArray(channels.id, channelIds)];
+  if (!input.includeDeleted) conditions.push(isNull(channels.deletedAt));
+  const channelRows = (await db.select().from(channels).where(and(...conditions)))
+    .filter((channel) => channel.serverId === input.serverId);
 
-  const db = getDb();
-  const [projection] = await db
+  const jointIds = channelRows.filter((channel) => channel.type === "joint").map((channel) => channel.id);
+  const projections = jointIds.length === 0 ? [] : await db
     .select({
       jointChannelId: jointChannelServers.jointChannelId,
       localChannelId: jointChannelServers.localChannelId,
@@ -2558,23 +2830,40 @@ export async function resolveChannelAccess(input: {
     .from(jointChannelServers)
     .innerJoin(jointChannels, eq(jointChannels.id, jointChannelServers.jointChannelId))
     .where(and(
-      eq(jointChannelServers.localChannelId, channel.id),
+      inArray(jointChannelServers.localChannelId, jointIds),
       eq(jointChannelServers.serverId, input.serverId),
       eq(jointChannelServers.status, "active"),
       eq(jointChannels.status, "active"),
     ));
+  const projectionByLocal = new Map<string, (typeof projections)[number]>();
+  for (const projection of projections) {
+    if (!projectionByLocal.has(projection.localChannelId)) projectionByLocal.set(projection.localChannelId, projection);
+  }
 
-  if (!projection) return null;
-
-  return {
-    kind: "joint",
-    localChannelId: projection.localChannelId,
-    canonicalChannelId: projection.canonicalChannelId,
-    jointChannelId: projection.jointChannelId,
-    localServerId: projection.localServerId,
-    role: projection.role,
-    channel,
-  };
+  for (const channel of channelRows) {
+    if (channel.type !== "joint") {
+      resolved.set(channel.id, {
+        kind: "local",
+        localChannelId: channel.id,
+        canonicalChannelId: channel.id,
+        serverId: channel.serverId,
+        channel,
+      });
+      continue;
+    }
+    const projection = projectionByLocal.get(channel.id);
+    if (!projection) continue;
+    resolved.set(channel.id, {
+      kind: "joint",
+      localChannelId: projection.localChannelId,
+      canonicalChannelId: projection.canonicalChannelId,
+      jointChannelId: projection.jointChannelId,
+      localServerId: projection.localServerId,
+      role: projection.role,
+      channel,
+    });
+  }
+  return resolved;
 }
 
 /**
@@ -2678,7 +2967,9 @@ export async function archiveChannel(
   channelId: string,
   archivedByUserId: string,
   executor?: DatabaseExecutor,
-) {
+): Promise<typeof channels.$inferSelect> {
+  if (!executor) return withChannelWriterFence(channelId, tx => archiveChannel(channelId, archivedByUserId, tx));
+  await assertChannelWritableInTransaction(executor, channelId);
   const db = executor ?? getDb();
   const channel = await getChannel(channelId, { executor: db });
   if (!channel) throw new Error("Channel not found");
@@ -2687,12 +2978,12 @@ export async function archiveChannel(
   if (channel.archivedAt) return channel;
 
   if (channel.type === "joint") {
-    const projections = await getActiveJointChannelProjectionsByLocalChannel(channelId);
+    const projections = await getActiveJointChannelProjectionsByLocalChannel(channelId, db);
     const projectionIds = projections.length > 0
       ? projections.map((projection) => projection.localChannelId)
       : [channelId];
     const [updated] = await db.update(channels)
-      .set({ archivedAt: new Date(), archivedByUserId, archivedByAgentId: null })
+      .set({ archivedAt: currentDate(), archivedByUserId, archivedByAgentId: null })
       .where(inArray(channels.id, projectionIds))
       .returning();
     return updated ?? channel;
@@ -2754,13 +3045,38 @@ export async function setLocalChannelArchivedByAgent(
   archived: boolean,
   executor?: DatabaseExecutor,
 ): Promise<{ channel: typeof channels.$inferSelect; changed: boolean }> {
+  if (!executor) return withChannelWriterFence(channelId, tx => setLocalChannelArchivedByAgent(channelId, archivedByAgentId, archived, tx));
+  await assertChannelWritableInTransaction(executor, channelId);
   const db = executor ?? getDb();
   const current = await getChannel(channelId, { executor: db });
   if (!current) throw new Error("Channel not found");
-  if (!REGULAR_CHANNEL_TYPES.includes(current.type as RegularChannelType)) {
+  if (!REGULAR_CHANNEL_TYPES.includes(current.type as RegularChannelType) && current.type !== "joint") {
     throw new Error("Only regular channels can be archived");
   }
   if (isAllSystemChannel(current)) throw new Error("The #all channel cannot be archived");
+
+  if (current.type === "joint") {
+    // Same shape as the human joint archive: the archive is shared, so every
+    // active projection flips together.
+    const projections = await getActiveJointChannelProjectionsByLocalChannel(channelId, db);
+    const projectionIds = projections.length > 0
+      ? projections.map((projection) => projection.localChannelId)
+      : [channelId];
+    const changedRows = await db.update(channels)
+      .set(archived
+        ? { archivedAt: currentDate(), archivedByUserId: null, archivedByAgentId }
+        : { archivedAt: null, archivedByUserId: null, archivedByAgentId: null })
+      .where(and(
+        inArray(channels.id, projectionIds),
+        archived ? isNull(channels.archivedAt) : isNotNull(channels.archivedAt),
+      ))
+      .returning();
+    const updatedLocal = changedRows.find((row) => row.id === channelId);
+    if (updatedLocal) return { channel: updatedLocal, changed: true };
+    const [unchanged] = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1);
+    if (!unchanged) throw new Error("Channel not found");
+    return { channel: unchanged, changed: changedRows.length > 0 };
+  }
 
   const applyArchive = async (tx: DatabaseExecutor) => {
     const [updated] = await tx.update(channels)
@@ -2795,15 +3111,28 @@ export async function setLocalChannelArchivedByAgent(
 /**
  * Unarchive a channel. Idempotent on already-active channels.
  */
-export async function unarchiveChannel(channelId: string, executor?: DatabaseExecutor) {
+export async function unarchiveChannel(channelId: string, executor?: DatabaseExecutor): Promise<typeof channels.$inferSelect> {
+  if (!executor) return withChannelWriterFence(channelId, tx => unarchiveChannel(channelId, tx));
+  await assertChannelWritableInTransaction(executor, channelId);
   const db = executor ?? getDb();
   const channel = await getChannel(channelId, { executor: db });
   if (!channel) throw new Error("Channel not found");
   if (!REGULAR_CHANNEL_TYPES.includes(channel.type as RegularChannelType) && channel.type !== "joint") throw new Error("Only regular channels can be unarchived");
   if (!channel.archivedAt) return channel;
 
+  let guestJoinable = channel.guestJoinable;
+  if (guestJoinable) {
+    await acquireServerLock(db, channel.serverId, GUEST_JOINABLE_CHANNEL_LOCK_NAMESPACE);
+    try {
+      await assertGuestJoinableChannelCapacityAvailable(db, channel.serverId);
+    } catch (error) {
+      if (!(error instanceof GuestJoinableChannelLimitError)) throw error;
+      guestJoinable = false;
+    }
+  }
+
   if (channel.type === "joint") {
-    const projections = await getActiveJointChannelProjectionsByLocalChannel(channelId);
+    const projections = await getActiveJointChannelProjectionsByLocalChannel(channelId, db);
     const projectionIds = projections.length > 0
       ? projections.map((projection) => projection.localChannelId)
       : [channelId];
@@ -2815,7 +3144,7 @@ export async function unarchiveChannel(channelId: string, executor?: DatabaseExe
   }
 
   const [updated] = await db.update(channels)
-    .set({ archivedAt: null, archivedByUserId: null, archivedByAgentId: null })
+    .set({ archivedAt: null, archivedByUserId: null, archivedByAgentId: null, guestJoinable })
     .where(eq(channels.id, channelId))
     .returning();
   return updated;
@@ -2902,7 +3231,7 @@ export async function deleteChannel(channelId: string) {
   // window — legacy `messages.task_*` or the canonical `tasks` table — so both
   // are closed here. Closing only one side would leave the other stuck open in
   // exactly the state this hook exists to prevent.
-  await db.transaction(async (tx) => {
+  await withChannelWriterFence(channelId, async (tx) => {
     await tx.update(messages)
       .set({
         taskStatus: "closed",
@@ -3078,7 +3407,7 @@ export async function disconnectJointChannel(channelId: string, disconnectedByUs
   if (!channel) throw new Error("Channel not found");
   if (channel.type !== "joint") throw new Error("Only joint channels can be disconnected");
 
-  const now = new Date();
+  const now = currentDate();
   await db.transaction(async (tx) => {
     const [projection] = await tx
       .select({ jointChannelId: jointChannelServers.jointChannelId })
@@ -3111,6 +3440,8 @@ export async function disconnectJointChannel(channelId: string, disconnectedByUs
     // soft-deleted. Eager, not lazy-at-read — a stale assignee must never be
     // observable, and read-time settlement would need every reader to remember.
     await unassignUnreachableJointTasks(tx, projection.jointChannelId, disconnectedByUserId, now);
+    // A free participant leaving can bring the joint back within the cap.
+    await reconcileJointOverLimitFor(tx, projection.jointChannelId, now);
   });
 }
 
@@ -3132,17 +3463,85 @@ async function deletePrivateChannelIfEmpty(channelId: string, db: DatabaseExecut
   if (humanCount + agentCount > 0) return;
 
   await db.update(channels)
-    .set({ deletedAt: new Date() })
+    .set({ deletedAt: currentDate() })
     .where(and(eq(channels.id, channelId), eq(channels.type, "private"), isNull(channels.deletedAt)));
 }
 
-export async function addAgent(
+/**
+ * Where a conversation's messages are stored, resolved on the caller's executor: a join
+ * runs inside the membership transaction, which must see its own uncommitted rows and
+ * must not wait on a second connection.
+ */
+export async function getMessageStorageChannelIdWithExecutor(executor: DatabaseExecutor, channelId: string): Promise<string> {
+  const [channel] = await executor
+    .select({ type: channels.type, serverId: channels.serverId })
+    .from(channels)
+    .where(eq(channels.id, channelId))
+    .limit(1);
+  if (!channel) return channelId;
+  if (channel.type === "thread") {
+    const jointThread = await getJointThreadProjectionByLocalThread(channelId, channel.serverId, executor);
+    return jointThread?.canonicalThreadChannelId ?? channelId;
+  }
+  if (channel.type !== "joint") return channelId;
+  const [projection] = await executor
+    .select({ canonicalChannelId: jointChannels.canonicalChannelId })
+    .from(jointChannelServers)
+    .innerJoin(jointChannels, eq(jointChannels.id, jointChannelServers.jointChannelId))
+    .where(and(
+      eq(jointChannelServers.localChannelId, channelId),
+      eq(jointChannelServers.serverId, channel.serverId),
+      eq(jointChannelServers.status, "active"),
+      eq(jointChannels.status, "active"),
+    ))
+    .limit(1);
+  return projection?.canonicalChannelId ?? channelId;
+}
+
+/**
+ * A member's read position starts where they joined: everything already in the
+ * conversation is read, for humans and agents alike, so "unread" is only ever
+ * `seq > cursor`. Runs in the membership write's transaction. `throughSeq` defaults
+ * to the conversation's latest message; a join caused by a message that must itself
+ * stay unread (a mention or reply that auto-follows) passes the seq before it.
+ */
+export async function startReadPositionAtJoin(
+  executor: DatabaseExecutor,
+  principalKind: "human" | "agent",
+  principalId: string,
   channelId: string,
-  agentId: string,
-  options: { role?: "member" | "admin"; executor?: DatabaseExecutor } = {},
-) {
+  throughSeq?: number,
+): Promise<void> {
+  let seq = throughSeq;
+  if (seq === undefined) {
+    const storageChannelId = await getMessageStorageChannelIdWithExecutor(executor, channelId);
+    const [latest] = await executor
+      .select({ seq: sql<number>`COALESCE(MAX(${messages.seq}), 0)::int` })
+      .from(messages)
+      .where(eq(messages.channelId, storageChannelId));
+    seq = latest?.seq ?? 0;
+  }
+  await raiseReadPositionForJoin(executor, principalKind, principalId, channelId, seq);
+}
+
+export async function addAgent(channelId: string, agentId: string, options: ChannelServiceOptions & { role?: "member" | "admin" } = {}): Promise<boolean> {
+  if (!options.executor) {
+    return withChannelWriterFence(channelId, async (tx) => {
+      if (options.actionCardMessageId) {
+        await assertActionCardWritableInTransaction(tx, options.actionCardMessageId, options.actionCardConfirmationVersion);
+      }
+      return addAgent(channelId, agentId, { ...options, executor: tx });
+    });
+  }
   const db = options.executor ?? getDb();
-  const channel = await getChannel(channelId, { executor: db });
+  await assertChannelWritableInTransaction(db, channelId);
+  if (options.actionCardMessageId) {
+    await assertActionCardWritableInTransaction(db, options.actionCardMessageId, options.actionCardConfirmationVersion);
+  }
+  const [channel] = await db
+    .select()
+    .from(channels)
+    .where(and(eq(channels.id, channelId), isNull(channels.deletedAt)));
   if (!channel) {
     throw new Error("Channel not found");
   }
@@ -3164,10 +3563,13 @@ export async function addAgent(
     .values({ channelId, agentId, role: options.role ?? "member" })
     .onConflictDoNothing()
     .returning({ agentId: channelAgents.agentId });
+  if (inserted.length > 0) await startReadPositionAtJoin(db, "agent", agentId, channelId);
   return inserted.length > 0;
 }
 
-export async function removeAgent(channelId: string, agentId: string, executor?: DatabaseExecutor) {
+export async function removeAgent(channelId: string, agentId: string, executor?: DatabaseExecutor): Promise<void> {
+  if (!executor) return withChannelWriterFence(channelId, tx => removeAgent(channelId, agentId, tx));
+  await assertChannelWritableInTransaction(executor, channelId);
   const db = executor ?? getDb();
   const channel = await getChannel(channelId, { executor: db });
   if (channel?.type === "thread") {
@@ -3184,9 +3586,16 @@ export async function removeAgent(channelId: string, agentId: string, executor?:
 }
 
 async function getChannelAgentsRaw(channelId: string) {
+  return (await getChannelAgentsRawForChannels([channelId])).map(({ channelId: _channelId, ...agent }) => agent);
+}
+
+/** getChannelAgentsRaw for several channels in one query; rows carry their channelId. */
+async function getChannelAgentsRawForChannels(channelIds: readonly string[], options: { name?: string; id?: string } = {}) {
+  if (channelIds.length === 0) return [];
   const db = getDb();
   return db
     .select({
+      channelId: channelAgents.channelId,
       id: agents.id,
       serverId: agents.serverId,
       serverName: servers.name,
@@ -3209,7 +3618,12 @@ async function getChannelAgentsRaw(channelId: string) {
       eq(serverAgentMembers.serverId, agents.serverId),
       eq(serverAgentMembers.agentId, agents.id),
     ))
-    .where(and(eq(channelAgents.channelId, channelId), isNull(agents.deletedAt)))
+    .where(and(
+      inArray(channelAgents.channelId, [...channelIds]),
+      isNull(agents.deletedAt),
+      options.name === undefined ? undefined : eq(agents.name, options.name),
+      options.id === undefined ? undefined : eq(agents.id, options.id),
+    ))
     .orderBy(asc(channelAgents.addedAt));
 }
 
@@ -3219,7 +3633,7 @@ async function getChannelAgentsRaw(channelId: string) {
  * active agent had a real `channel_agents` row in `#all`, so the audience is
  * every active (non-deleted) agent on the server.
  */
-async function getServerAudienceAgents(serverId: string) {
+async function getServerAudienceAgents(serverId: string, options: { name?: string } = {}) {
   const db = getDb();
   return db
     .select({
@@ -3234,7 +3648,11 @@ async function getServerAudienceAgents(serverId: string) {
     })
     .from(agents)
     .innerJoin(servers, eq(servers.id, agents.serverId))
-    .where(and(eq(agents.serverId, serverId), isNull(agents.deletedAt)))
+    .where(and(
+      eq(agents.serverId, serverId),
+      isNull(agents.deletedAt),
+      options.name === undefined ? undefined : eq(agents.name, options.name),
+    ))
     .orderBy(asc(agents.createdAt));
 }
 
@@ -3396,6 +3814,8 @@ export type DMChannel = {
   description: string | null;
   createdAt: Date;
   lastMessageAt?: Date | null;
+  lastMessagePreview?: string | null;
+  lastMessageSenderName?: string | null;
   activityMuted?: boolean;
   muteFromSeq?: number | null;
   prefsVersion?: number;
@@ -3657,6 +4077,7 @@ export async function findOrCreateDM(serverId: string, userId: string, agentId: 
         kind: identityKind,
         peerKey: identityKey,
       });
+      // read-position: new conversation, no history before this join (no row = position 0)
       await tx.insert(channelAgents).values({ channelId: dmChannel.id, agentId });
       await tx.insert(channelHumans).values({ channelId: dmChannel.id, userId });
       return dmChannel.id;
@@ -3722,6 +4143,7 @@ export async function findOrCreateUserDM(
           kind: identityKind,
           peerKey: identityKey,
         });
+        // read-position: new conversation, no history before this join (no row = position 0)
         await tx.insert(channelHumans).values({ channelId: dmChannel.id, userId: userId1 });
         return dmChannel.id;
       },
@@ -3802,6 +4224,7 @@ export async function findOrCreateUserDM(
         kind: identityKind,
         peerKey: identityKey,
       });
+      // read-position: new conversation, no history before this join (no row = position 0)
       await tx.insert(channelHumans).values([
         { channelId: dmChannel.id, userId: userId1 },
         { channelId: dmChannel.id, userId: userId2 },
@@ -3913,6 +4336,7 @@ export async function findOrCreateAgentDM(serverId: string, agentId1: string, ag
         kind: identityKind,
         peerKey: identityKey,
       });
+      // read-position: new conversation, no history before this join (no row = position 0)
       await tx.insert(channelAgents).values([
         { channelId: dmChannel.id, agentId: agentId1 },
         { channelId: dmChannel.id, agentId: agentId2 },
@@ -4057,17 +4481,17 @@ export async function listDMChannels(
   // Sort by most recent message first, then by createdAt for DMs with no messages
   if (allDMs.length === 0) return allDMs;
 
-  const humanActivityMuteEnabled = opts?.humanActivityMuteEnabled ?? await isHumanActivityMuteEnabled(serverId, userId);
+  const humanActivityMuteEnabled = opts?.humanActivityMuteEnabled ?? true;
   const allDmsWithMuteState = await attachActivityMuteState(allDMs, "user", userId, humanActivityMuteEnabled);
   const allDmsWithDisplayPrefs = await attachUserChannelDisplayPrefs(allDmsWithMuteState, userId);
-  const allDmsWithLastMessageAt = await attachLastMessageAt(
+  const allDmsWithLastMessageSummary = await attachLastMessageSummary(
     await attachReadState(allDmsWithDisplayPrefs, userId),
     traceQuery,
     "dm_channels.last_messages_by_channels",
     "dm_channels_count",
   );
 
-  return allDmsWithLastMessageAt.sort((a, b) => {
+  return allDmsWithLastMessageSummary.sort((a, b) => {
     const aLast = a.lastMessageAt;
     const bLast = b.lastMessageAt;
     // DMs with messages come first, sorted by most recent
@@ -4274,29 +4698,30 @@ export async function canUserAccessChannel(
   channelId: string,
   userId: string,
   serverId: ServerId,
-  opts?: { includeDeleted?: boolean },
+  opts?: { includeDeleted?: boolean; executor?: DatabaseExecutor },
 ): Promise<boolean> {
-  const channel = await getChannel(channelId, opts);
+  const db = opts?.executor ?? getDb();
+  const channel = await getChannel(channelId, { ...opts, executor: db });
   if (!channel) return false;
 
   // Cross-server guard: the channel must live in the caller's active server.
   if (channel.serverId !== serverId) return false;
 
-  const serverRole = await resolveHumanServerRole(serverId, userId);
+  const serverRole = await resolveHumanServerRole(serverId, userId, db);
   if (serverRole === "guest") {
     if (channel.type === "thread") {
-      const jointThread = await getJointThreadProjectionByLocalThread(channelId, serverId);
+      const jointThread = await getJointThreadProjectionByLocalThread(channelId, serverId, db);
       if (jointThread) return false;
       if (!channel.parentMessageId) return false;
-      const [parentMsg] = await getDb()
+      const [parentMsg] = await db
         .select({ channelId: messages.channelId })
         .from(messages)
         .where(eq(messages.id, channel.parentMessageId));
       return parentMsg ? canUserAccessChannel(parentMsg.channelId, userId, serverId, opts) : false;
     }
-    const isChannelMember = await isChannelHuman(channelId, userId);
+    const isChannelMember = await isChannelHuman(channelId, userId, db);
     return canGuestReadChannel({
-      gateEnabled: await isGuestFeatureEnabled(serverId, userId),
+      gateEnabled: await isGuestFeatureEnabled(serverId, userId, db),
       serverRole,
       channelType: channel.type,
       channelName: channel.name,
@@ -4314,20 +4739,37 @@ export async function canUserAccessChannel(
   // Public channels are viewable by all server humans.
   if (channel.type === "channel") return true;
 
-  if (channel.type === "joint" && !await resolveChannelAccess({ serverId, channelId, includeDeleted: opts?.includeDeleted })) {
-    return false;
+  if (channel.type === "joint") {
+    const resolvedJoint = await resolveChannelAccess({
+      serverId,
+      channelId,
+      includeDeleted: opts?.includeDeleted,
+      executor: db,
+    });
+    if (!resolvedJoint || resolvedJoint.kind !== "joint") return false;
+    const [membership] = await db
+      .select({ userId: channelHumans.userId })
+      .from(jointChannelServers)
+      .innerJoin(channelHumans, eq(channelHumans.channelId, jointChannelServers.localChannelId))
+      .where(and(
+        eq(jointChannelServers.jointChannelId, resolvedJoint.jointChannelId),
+        eq(jointChannelServers.serverId, serverId),
+        eq(jointChannelServers.status, "active"),
+        eq(channelHumans.userId, userId),
+      ))
+      .limit(1);
+    return Boolean(membership);
   }
 
   if (channel.type === "thread") {
-    const jointThread = await getJointThreadProjectionByLocalThread(channelId, serverId);
+    const jointThread = await getJointThreadProjectionByLocalThread(channelId, serverId, db);
     if (jointThread) {
       return canUserAccessChannel(jointThread.localParentChannelId, userId, serverId, opts);
     }
   }
 
   if (channel.type === "thread" && channel.parentMessageId) {
-    const db2 = getDb();
-    const [parentMsg] = await db2
+    const [parentMsg] = await db
       .select({ channelId: messages.channelId })
       .from(messages)
       .where(eq(messages.id, channel.parentMessageId));
@@ -4339,7 +4781,6 @@ export async function canUserAccessChannel(
   // human participant rows, so they are intentionally not readable through the
   // ordinary human channel/message/attachment routes; privileged human surfaces
   // expose them only as activity summaries through the agent detail API.
-  const db = getDb();
   if (channel.type === "dm") {
     const humanParticipants = await db
       .select({ userId: channelHumans.userId })
@@ -4356,6 +4797,110 @@ export async function canUserAccessChannel(
   if (row) return true;
 
   return false;
+}
+
+/**
+ * Batched `canUserAccessChannel` over many candidate channels of ONE server:
+ * returns the subset of `channelIds` the human may view, with a constant
+ * number of queries independent of `channelIds.length`.
+ *
+ * Mirrors `canUserAccessChannel` rule for rule for the `channel`, `private`
+ * and `joint` types (the only ones server-wide list surfaces enumerate).
+ * `thread` and `dm` ids, whose rules recurse through parents, fall back to the
+ * single-channel check so there is still exactly one source of truth for them.
+ */
+export async function filterUserAccessibleChannelIds(
+  channelIds: readonly string[],
+  userId: string,
+  serverId: ServerId,
+  opts?: { executor?: DatabaseExecutor },
+): Promise<Set<string>> {
+  const db = opts?.executor ?? getDb();
+  const accessible = new Set<string>();
+  if (channelIds.length === 0) return accessible;
+
+  // Same row filter as getChannel (not deleted) plus the cross-server guard.
+  const candidates = (await db
+    .select()
+    .from(channels)
+    .where(and(inArray(channels.id, [...channelIds]), isNull(channels.deletedAt))))
+    .filter((channel) => channel.serverId === serverId);
+  if (candidates.length === 0) return accessible;
+
+  const serverRole = await resolveHumanServerRole(serverId, userId, db);
+  const batchable = candidates.filter((channel) => channel.type === "channel" || channel.type === "private" || channel.type === "joint");
+  const fallback = candidates.filter((channel) => !batchable.includes(channel));
+
+  const needsMembership = batchable.filter((channel) => serverRole === "guest" || channel.type === "private");
+  const memberChannelIds = new Set<string>();
+  if (needsMembership.length > 0) {
+    const rows = await db
+      .select({ channelId: channelHumans.channelId })
+      .from(channelHumans)
+      .where(and(
+        eq(channelHumans.userId, userId),
+        inArray(channelHumans.channelId, needsMembership.map((channel) => channel.id)),
+      ));
+    for (const row of rows) memberChannelIds.add(row.channelId);
+  }
+
+  if (serverRole === "guest") {
+    const gateEnabled = batchable.length > 0 && await isGuestFeatureEnabled(serverId, userId, db);
+    for (const channel of batchable) {
+      if (canGuestReadChannel({
+        gateEnabled,
+        serverRole,
+        channelType: channel.type,
+        channelName: channel.name,
+        allChannelHidden: isAllSystemChannel(channel) && !isEnabledAllChannel(channel),
+        guestVisible: channel.guestVisible,
+        guestJoinable: channel.guestJoinable,
+        isChannelMember: memberChannelIds.has(channel.id),
+        archived: channel.archivedAt !== null,
+        deleted: channel.deletedAt !== null,
+      })) accessible.add(channel.id);
+    }
+  } else {
+    const visible = batchable.filter((channel) => !(isAllSystemChannel(channel) && !isEnabledAllChannel(channel)));
+    const jointIds = visible.filter((channel) => channel.type === "joint").map((channel) => channel.id);
+    // Joint: an active projection of the channel on this server (the
+    // resolveChannelAccess condition) AND the human is a member of some active
+    // local projection of that joint on this server.
+    const jointMembers = new Set<string>();
+    if (jointIds.length > 0) {
+      const memberProjection = alias(jointChannelServers, "member_projection");
+      const rows = await db
+        .selectDistinct({ localChannelId: jointChannelServers.localChannelId })
+        .from(jointChannelServers)
+        .innerJoin(jointChannels, eq(jointChannels.id, jointChannelServers.jointChannelId))
+        .innerJoin(memberProjection, and(
+          eq(memberProjection.jointChannelId, jointChannelServers.jointChannelId),
+          eq(memberProjection.serverId, serverId),
+          eq(memberProjection.status, "active"),
+        ))
+        .innerJoin(channelHumans, and(
+          eq(channelHumans.channelId, memberProjection.localChannelId),
+          eq(channelHumans.userId, userId),
+        ))
+        .where(and(
+          inArray(jointChannelServers.localChannelId, jointIds),
+          eq(jointChannelServers.serverId, serverId),
+          eq(jointChannelServers.status, "active"),
+          eq(jointChannels.status, "active"),
+        ));
+      for (const row of rows) jointMembers.add(row.localChannelId);
+    }
+    for (const channel of visible) {
+      if (channel.type === "channel") accessible.add(channel.id);
+      else if (channel.type === "joint") { if (jointMembers.has(channel.id)) accessible.add(channel.id); }
+      else if (memberChannelIds.has(channel.id)) accessible.add(channel.id);
+    }
+  }
+
+  for (const channel of fallback) {
+    if (await canUserAccessChannel(channel.id, userId, serverId, { executor: db })) accessible.add(channel.id);
+  }
+  return accessible;
 }
 
 /**
@@ -4424,6 +4969,15 @@ export function buildResidueOnlyReadAllReceipt(
  * A current member has access and never reaches this call; an ex-member's row is
  * gone. Membership answers "can you", residue answers "did you ever" -- and only
  * the second is the question here.
+ *
+ * Joining writes the first witness. Since #8292 a member's read position starts at
+ * the join, so EVERY join (channel, joint invite, thread follow) leaves a read-cursor
+ * row, and anyone removed afterwards gets the 403. The same holds for Guests: a
+ * revoked Guest could read the channel, so a 404 would hide nothing from them and
+ * would only stop them clearing its stale Activity entry. The one population still
+ * answered 404 is ex-members from before #8292 who never read, followed, marked
+ * done or were suppressed -- they left no residue and there is no membership
+ * history table to consult. That is the fail-closed direction.
  *
  * Fail-closed: any error answers "no prior relationship", i.e. falls to the 404
  * that discloses nothing. Per ruling ①, uncertainty tips toward non-disclosure.
@@ -4512,12 +5066,20 @@ export async function hasPriorChannelRelationship(
 /**
  * Add a human user to a channel (inserts into channelHumans).
  */
-export async function addHuman(
-  channelId: string,
-  userId: string,
-  options: ChannelServiceOptions & { role?: "member" | "admin" } = {},
-) {
+export async function addHuman(channelId: string, userId: string, options: ChannelServiceOptions & { role?: "member" | "admin" } = {}): Promise<boolean> {
+  if (!options.executor) {
+    return withChannelWriterFence(channelId, async (tx) => {
+      if (options.actionCardMessageId) {
+        await assertActionCardWritableInTransaction(tx, options.actionCardMessageId, options.actionCardConfirmationVersion);
+      }
+      return addHuman(channelId, userId, { ...options, executor: tx });
+    });
+  }
   const db = options.executor ?? getDb();
+  await assertChannelWritableInTransaction(db, channelId);
+  if (options.actionCardMessageId) {
+    await assertActionCardWritableInTransaction(db, options.actionCardMessageId, options.actionCardConfirmationVersion);
+  }
   const [channel] = await db
     .select({ id: channels.id, serverId: channels.serverId, name: channels.name, type: channels.type })
     .from(channels)
@@ -4549,6 +5111,7 @@ export async function addHuman(
     .values({ channelId, userId, role: options.role ?? "member" })
     .onConflictDoNothing()
     .returning({ userId: channelHumans.userId });
+  if (inserted.length > 0) await startReadPositionAtJoin(db, "human", userId, channelId);
   return inserted.length > 0;
 }
 
@@ -4802,7 +5365,15 @@ export async function markChannelMembershipRoleEventDelivered(eventId: string) {
 }
 
 /** Remove a human from a channel. #all never has explicit human membership. */
-export async function removeHuman(channelId: string, userId: string, executor?: DatabaseExecutor) {
+export async function removeHuman(channelId: string, userId: string, executor?: DatabaseExecutor): Promise<void> {
+  if (!executor) {
+    await withChannelWriterFence(channelId, tx => removeHuman(channelId, userId, tx));
+    // Executor callers own the surrounding transaction and invalidate after its
+    // commit. A reconnect before commit could otherwise recover the old rooms.
+    await revokeSocketAccess({ userId });
+    return;
+  }
+  await assertChannelWritableInTransaction(executor, channelId);
   const db = executor ?? getDb();
   const channel = await getChannel(channelId, { executor: db });
   if (channel?.type === "thread") {
@@ -4815,18 +5386,22 @@ export async function removeHuman(channelId: string, userId: string, executor?: 
     and(eq(channelHumans.channelId, channelId), eq(channelHumans.userId, userId))
   );
   await deletePrivateChannelIfEmpty(channelId, db);
-  // Executor callers own the surrounding transaction and invalidate after its
-  // commit. A reconnect before commit could otherwise recover the old rooms.
-  if (!executor) await revokeSocketAccess({ userId });
 }
 
 /**
  * Get humans in a channel.
  */
 async function getChannelHumansRaw(channelId: string) {
+  return (await getChannelHumansRawForChannels([channelId])).map(({ channelId: _channelId, ...human }) => human);
+}
+
+/** getChannelHumansRaw for several channels in one query; rows carry their channelId. */
+async function getChannelHumansRawForChannels(channelIds: readonly string[], options: { name?: string; id?: string } = {}) {
+  if (channelIds.length === 0) return [];
   const db = getDb();
   const rows = await db
     .select({
+      channelId: channelHumans.channelId,
       id: users.id,
       serverId: channels.serverId,
       serverName: servers.name,
@@ -4848,7 +5423,11 @@ async function getChannelHumansRaw(channelId: string) {
       eq(serverMembers.serverId, channels.serverId),
       eq(serverMembers.userId, users.id),
     ))
-    .where(eq(channelHumans.channelId, channelId))
+    .where(and(
+      inArray(channelHumans.channelId, [...channelIds]),
+      options.name === undefined ? undefined : eq(users.name, options.name),
+      options.id === undefined ? undefined : eq(users.id, options.id),
+    ))
     .orderBy(asc(channelHumans.joinedAt));
 
   return rows.map(({ email, ...rest }) => ({
@@ -4858,11 +5437,25 @@ async function getChannelHumansRaw(channelId: string) {
 }
 
 /**
+ * The one definition of who is in a server's `#all` audience.
+ *
+ * Guest visibility is a separate read-only policy: a Guest may be allowed to
+ * *read* a channel, but that never grants roster or delivery membership in
+ * `#all`. Every query that resolves the `#all` audience must use this condition
+ * rather than restating it — the Guest delivery defect this replaces existed
+ * because a second copy of the predicate in `messageService` silently lost the
+ * role filter, and the copies were held together only by a comment.
+ */
+export function serverAudienceMemberCondition(serverId: string) {
+  return and(eq(serverMembers.serverId, serverId), ne(serverMembers.role, "guest"));
+}
+
+/**
  * The non-Guest human audience of a server. This is the effective human
  * membership of an enabled virtual `#all` channel. Guest visibility is a
  * separate read-only policy and never grants roster or delivery membership.
  */
-async function getServerAudienceHumans(serverId: string) {
+async function getServerAudienceHumans(serverId: string, options: { name?: string } = {}) {
   const db = getDb();
   const rows = await db
     .select({
@@ -4880,7 +5473,10 @@ async function getServerAudienceHumans(serverId: string) {
     .from(serverMembers)
     .innerJoin(servers, eq(servers.id, serverMembers.serverId))
     .innerJoin(users, eq(serverMembers.userId, users.id))
-    .where(and(eq(serverMembers.serverId, serverId), ne(serverMembers.role, "guest")))
+    .where(and(
+      serverAudienceMemberCondition(serverId),
+      options.name === undefined ? undefined : eq(users.name, options.name),
+    ))
     .orderBy(asc(serverMembers.joinedAt));
 
   return rows.map(({ email, ...rest }) => ({
@@ -5039,12 +5635,19 @@ export async function getChannelMembers(channelId: string) {
       ];
       const agentsById = new Map<string, Awaited<ReturnType<typeof getChannelAgentsRaw>>[number]>();
       const humansById = new Map<string, Awaited<ReturnType<typeof getChannelHumansRaw>>[number]>();
+      // Two queries for all projections instead of two per projection, so
+      // mention scope does not grow with the number of servers (§18.10.1).
+      const localIds = orderedProjections.map((row) => row.localChannelId);
+      const [agentRows, humanRows] = await Promise.all([
+        getChannelAgentsRawForChannels(localIds),
+        getChannelHumansRawForChannels(localIds),
+      ]);
       for (const row of orderedProjections) {
-        for (const agent of await getChannelAgentsRaw(row.localChannelId)) {
-          agentsById.set(agent.id, agent);
+        for (const { channelId: agentChannelId, ...agent } of agentRows) {
+          if (agentChannelId === row.localChannelId) agentsById.set(agent.id, agent);
         }
-        for (const human of await getChannelHumansRaw(row.localChannelId)) {
-          humansById.set(human.id, human);
+        for (const { channelId: humanChannelId, ...human } of humanRows) {
+          if (humanChannelId === row.localChannelId) humansById.set(human.id, human);
         }
       }
       return { agents: [...agentsById.values()], humans: [...humansById.values()] };
@@ -5055,6 +5658,242 @@ export async function getChannelMembers(channelId: string) {
   const humanList = await getChannelHumansRaw(channelId);
 
   return { agents: agentList, humans: humanList };
+}
+
+export interface ChannelRosterNameMatches {
+  agents: Array<{ id: string; name: string; channelRole?: ChannelMembershipRole }>;
+  humans: Array<{ id: string; name: string; serverSlug: string | null; role: string | null; channelRole?: ChannelMembershipRole }>;
+}
+
+type ChannelMembershipRole = (typeof channelAgents.$inferSelect)["role"];
+
+/**
+ * A `GET /users/:name/channels` membership row: the channel's own facts and
+ * the subject's membership of it, nothing of the caller's. A
+ * `listChannelsForAgent` row also carries the caller's membership (`joined`,
+ * `channelRole`, `channelAuthorityRevision`), the caller's authority
+ * (`channelAdminBasis`, `channelCapabilities`), and the caller's attention
+ * state (`activityMuted`, `muteFromSeq`, `prefsVersion`,
+ * `activityMuteSupported`); none of them is copied. `joined` is the
+ * subject's: a membership row is a channel whose roster lists them.
+ * `channelRole` is the subject's stored role, present only where channel roles
+ * exist (a public or private channel other than `#all`).
+ */
+export function userChannelMembershipRow<Id extends string>(
+  channel: Omit<typeof channels.$inferSelect, "id"> & { id: Id },
+  channelRole: ChannelMembershipRole | undefined,
+) {
+  return {
+    id: channel.id,
+    serverId: channel.serverId,
+    name: channel.name,
+    description: channel.description,
+    type: channel.type,
+    guestVisible: channel.guestVisible,
+    guestJoinable: channel.guestJoinable,
+    parentMessageId: channel.parentMessageId,
+    parentChannelId: channel.parentChannelId,
+    createdAt: channel.createdAt,
+    archivedAt: channel.archivedAt,
+    archivedByUserId: channel.archivedByUserId,
+    archivedByAgentId: channel.archivedByAgentId,
+    deletedAt: channel.deletedAt,
+    joined: true,
+    ...(channelRole ? { channelRole } : {}),
+  };
+}
+
+/**
+ * Roster rows of `subject` for each channel of a `listChannelsForAgent` window,
+ * as the agent's roster route (`GET /channel-members?channel=#<name>`) would
+ * list them: `resolveChannelByName(serverId, agentId, "#<name>")`, then
+ * `getChannelMembers`. `null` where that reference does not resolve (the
+ * roster route's 404).
+ *
+ * A non-joint roster is matched by name (`subject.name`, of `subject.kind`; the
+ * other list is empty), the predicate the caller would apply to the full
+ * roster, so only matching rows are read. A joint roster spans every server's
+ * projection, where a same-named agent of another server is someone else, so
+ * it is matched by identity instead: the rows of the agent or user
+ * `subject.id` (see getJointChannelRosterRowsForSubject). User names are
+ * unique, so for humans the two agree.
+ *
+ * Public and private channels are batched: one `channel_agents` or
+ * `channel_humans` query for the whole window, one caller-membership query for
+ * the private ones, and one audience query when an enabled `#all` is in the
+ * window. Their resolution is the row itself: names are unique per server among
+ * live listable channels, archived included. Everything else (joint channels,
+ * whose roster spans server projections; a name that does not read back as a
+ * plain `#name` reference) is resolved through the roster route's own
+ * per-channel path; the joint rosters it resolves are then read together.
+ *
+ * Built-in app conversations (type `dm`, named by app id, the caller's own)
+ * are not rosters anyone is a member of in this sense: they are inspected and
+ * list no one (their `#<appId>` reference would resolve a regular channel of
+ * that name, if one exists, or nothing).
+ *
+ * A matched row carries the subject's `channelRole` only where channel roles
+ * exist: a public or private channel other than `#all`, read from that
+ * channel's own membership row (not a joint projection, not the `#all`
+ * audience).
+ */
+export async function getChannelRosterNameMatchesForAgentWindow(
+  serverId: string,
+  agentId: string,
+  window: ReadonlyArray<Pick<typeof channels.$inferSelect, "id" | "name" | "type">>,
+  subject: { kind: "agent" | "human"; name: string; id: string },
+): Promise<Array<ChannelRosterNameMatches | null>> {
+  // `withChannelRole`: the rows are the channel's own `channel_agents` /
+  // `channel_humans` rows and the channel supports channel roles.
+  const matches = (rows: readonly ChannelRosterRow[], withChannelRole = false): ChannelRosterNameMatches => {
+    const named = rows.filter((row) => row.name === subject.name);
+    const roleOf = (row: ChannelRosterRow) => (withChannelRole && row.channelRole ? { channelRole: row.channelRole } : {});
+    return subject.kind === "agent"
+      ? { agents: named.map((row) => ({ id: row.id, name: row.name, ...roleOf(row) })), humans: [] }
+      : { agents: [], humans: named.map((row) => ({ id: row.id, name: row.name, serverSlug: row.serverSlug, role: row.role ?? null, ...roleOf(row) })) };
+  };
+  // The roster route's query schema trims the reference before resolving it.
+  const refFor = (name: string) => `#${name}`.trim();
+  const batched = window.filter((channel) => (
+    (channel.type === "channel" || channel.type === "private")
+    && refFor(channel.name) === `#${channel.name}`
+    && parseChannelRef(`#${channel.name}`).threadShortId === null
+  ));
+  const batchedIds = new Set(batched.map((channel) => channel.id));
+  // A hidden #all (private "all") never resolves; an enabled one is the server audience.
+  const hiddenAll = batched.filter((channel) => isAllSystemChannel(channel) && !isEnabledAllChannel(channel));
+  const enabledAll = batched.filter((channel) => isEnabledAllChannel(channel));
+  const explicit = batched.filter((channel) => !isAllSystemChannel(channel));
+  const privateIds = explicit.filter((channel) => requiresExplicitMembership(channel.type)).map((channel) => channel.id);
+  const explicitIds = explicit.map((channel) => channel.id);
+
+  const db = getDb();
+  const [callerPrivateRows, explicitRows, audienceRows] = await Promise.all([
+    privateIds.length === 0
+      ? []
+      : db.select({ channelId: channelAgents.channelId })
+        .from(channelAgents)
+        .where(and(inArray(channelAgents.channelId, privateIds), eq(channelAgents.agentId, agentId))),
+    subject.kind === "agent"
+      ? getChannelAgentsRawForChannels(explicitIds, { name: subject.name })
+      : getChannelHumansRawForChannels(explicitIds, { name: subject.name }),
+    enabledAll.length === 0
+      ? []
+      : subject.kind === "agent"
+        ? getServerAudienceAgents(serverId, { name: subject.name })
+        : getServerAudienceHumans(serverId, { name: subject.name }),
+  ]);
+  const callerPrivate = new Set(callerPrivateRows.map((row) => row.channelId));
+  const rowsByChannel = new Map<string, ChannelRosterRow[]>();
+  for (const { channelId, ...row } of explicitRows) {
+    rowsByChannel.set(channelId, [...(rowsByChannel.get(channelId) ?? []), row]);
+  }
+
+  const result: Array<ChannelRosterNameMatches | null> = [];
+  // Window index -> resolved joint channel, read together after the loop.
+  const jointSlots = new Map<number, string>();
+  for (const channel of window) {
+    if (batchedIds.has(channel.id)) {
+      if (hiddenAll.includes(channel)) result.push(null);
+      else if (enabledAll.includes(channel)) result.push(matches(audienceRows));
+      else if (requiresExplicitMembership(channel.type) && !callerPrivate.has(channel.id)) result.push(null);
+      else result.push(matches(rowsByChannel.get(channel.id) ?? [], true));
+      continue;
+    }
+    if (channel.type === "dm") {
+      result.push(matches([]));
+      continue;
+    }
+    const resolved = await resolveChannelByName(serverId, agentId, refFor(channel.name));
+    if (!resolved) {
+      result.push(null);
+      continue;
+    }
+    if (resolved.type === "joint") {
+      jointSlots.set(result.length, resolved.channelId);
+      result.push(null);
+      continue;
+    }
+    const members = await getChannelMembers(resolved.channelId);
+    const ownRoleRows = resolved.channelId === channel.id
+      && (channel.type === "channel" || channel.type === "private")
+      && !isAllSystemChannel(channel);
+    result.push(matches(subject.kind === "agent" ? members.agents.map((agent) => ({ ...agent, serverSlug: agent.serverSlug ?? null })) : members.humans, ownRoleRows));
+  }
+  if (jointSlots.size > 0) {
+    const subjectRows = await getJointChannelRosterRowsForSubject([...new Set(jointSlots.values())], subject);
+    for (const [index, channelId] of jointSlots) {
+      const row = subjectRows.get(channelId);
+      result[index] = matches(row ? [row] : []);
+    }
+  }
+  return result;
+}
+
+type ChannelRosterRow = { id: string; name: string; serverSlug: string | null; role?: string | null; channelRole?: ChannelMembershipRole | null };
+
+/**
+ * `subject`'s row, if any, in the roster `getChannelMembers` returns for each
+ * of these joint channel projections, read by identity (agent or user id) in
+ * two queries for any number of channels.
+ *
+ * Membership lives on the projections: each server's members are
+ * `channel_agents`/`channel_humans` rows of that server's local `joint`
+ * channel (agents only ever on their own server's; a person can belong to
+ * several servers and so to several projections). While a projection and its
+ * joint channel are active, its roster merges every active, live projection,
+ * and the projection being viewed wins for a person on more than one;
+ * otherwise (disconnected or closed) it is that projection's own rows alone.
+ */
+async function getJointChannelRosterRowsForSubject(
+  channelIds: readonly string[],
+  subject: { kind: "agent" | "human"; id: string },
+): Promise<Map<string, ChannelRosterRow>> {
+  const db = getDb();
+  const peerProjection = alias(jointChannelServers, "subject_roster_peer_projection");
+  const peerChannel = alias(channels, "subject_roster_peer_channel");
+  const projectionRows = await db
+    .select({ channelId: jointChannelServers.localChannelId, peerChannelId: peerChannel.id })
+    .from(jointChannelServers)
+    .innerJoin(jointChannels, eq(jointChannels.id, jointChannelServers.jointChannelId))
+    .leftJoin(peerProjection, and(
+      eq(peerProjection.jointChannelId, jointChannelServers.jointChannelId),
+      eq(peerProjection.status, "active"),
+    ))
+    .leftJoin(peerChannel, and(eq(peerChannel.id, peerProjection.localChannelId), isNull(peerChannel.deletedAt)))
+    .where(and(
+      inArray(jointChannelServers.localChannelId, [...channelIds]),
+      eq(jointChannelServers.status, "active"),
+      eq(jointChannels.status, "active"),
+    ));
+  const projectionsByChannel = new Map<string, string[]>();
+  for (const row of projectionRows) {
+    const projections = projectionsByChannel.get(row.channelId) ?? [];
+    if (row.peerChannelId) projections.push(row.peerChannelId);
+    projectionsByChannel.set(row.channelId, projections);
+  }
+  const rosterChannelsFor = (channelId: string) => {
+    const projections = projectionsByChannel.get(channelId);
+    if (!projections) return [channelId];
+    return [
+      ...projections.filter((projection) => projection !== channelId),
+      ...projections.filter((projection) => projection === channelId),
+    ];
+  };
+  const readIds = [...new Set(channelIds.flatMap(rosterChannelsFor))];
+  const rows: Array<ChannelRosterRow & { channelId: string }> = subject.kind === "agent"
+    ? await getChannelAgentsRawForChannels(readIds, { id: subject.id })
+    : await getChannelHumansRawForChannels(readIds, { id: subject.id });
+
+  const result = new Map<string, ChannelRosterRow>();
+  for (const channelId of channelIds) {
+    for (const projection of rosterChannelsFor(channelId)) {
+      for (const { channelId: rowChannelId, ...row } of rows) {
+        if (rowChannelId === projection) result.set(channelId, row);
+      }
+    }
+  }
+  return result;
 }
 
 /**
@@ -5470,6 +6309,7 @@ async function isServerAgent(serverId: string, agentId: string): Promise<boolean
  * Private, joint channels, and DMs: only participating agents can view.
  */
 export async function canAgentAccessChannel(channelId: string, agentId: string): Promise<boolean> {
+  const db = getDb();
   const channel = await getChannel(channelId);
   if (!channel) return false;
 
@@ -5477,8 +6317,21 @@ export async function canAgentAccessChannel(channelId: string, agentId: string):
 
   if (channel.type === "channel") return true;
 
-  if (channel.type === "joint" && !await resolveChannelAccess({ serverId: channel.serverId, channelId })) {
-    return false;
+  if (channel.type === "joint") {
+    const resolvedJoint = await resolveChannelAccess({ serverId: channel.serverId, channelId });
+    if (!resolvedJoint || resolvedJoint.kind !== "joint") return false;
+    const [membership] = await db
+      .select({ agentId: channelAgents.agentId })
+      .from(jointChannelServers)
+      .innerJoin(channelAgents, eq(channelAgents.channelId, jointChannelServers.localChannelId))
+      .where(and(
+        eq(jointChannelServers.jointChannelId, resolvedJoint.jointChannelId),
+        eq(jointChannelServers.serverId, channel.serverId),
+        eq(jointChannelServers.status, "active"),
+        eq(channelAgents.agentId, agentId),
+      ))
+      .limit(1);
+    return Boolean(membership);
   }
 
   if (channel.type === "thread") {
@@ -5512,6 +6365,35 @@ export async function canAgentAccessChannel(channelId: string, agentId: string):
  * happened to be the creation target. Prefer durable DM provenance and only
  * use current membership as a legacy fallback.
  */
+/**
+ * Names in this server held by BOTH a human member and a (non-deleted) agent.
+ * For those names a bare `dm:@name` is ambiguous, so agent-facing DM targets
+ * carry the peer's kind (`dm:@name~agent`, see dmPeerRef.ts); every other name
+ * keeps the bare form it always had.
+ */
+export async function findCrossKindTwinPeerNames(serverId: string, names: readonly string[]): Promise<Set<string>> {
+  const unique = [...new Set(names)].filter((name) => name.length > 0);
+  const twins = new Set<string>();
+  if (unique.length === 0) return twins;
+  const db = getDb();
+  for (let i = 0; i < unique.length; i += 500) {
+    const chunk = unique.slice(i, i + 500);
+    const rows = await db
+      .selectDistinct({ name: users.name })
+      .from(users)
+      .innerJoin(serverMembers, and(eq(serverMembers.userId, users.id), eq(serverMembers.serverId, serverId)))
+      .innerJoin(agents, and(eq(agents.name, users.name), eq(agents.serverId, serverId), isNull(agents.deletedAt)))
+      .where(inArray(users.name, chunk));
+    for (const row of rows) if (row.name) twins.add(row.name);
+  }
+  return twins;
+}
+
+async function agentFacingDmRef(serverId: string, peerName: string, peerKind: DmPeerKind): Promise<string> {
+  const twins = await findCrossKindTwinPeerNames(serverId, [peerName]);
+  return `dm:@${formatDmPeerRef(peerName, twins.has(peerName) ? peerKind : null)}`;
+}
+
 export async function resolveAgentFacingChannelRef(
   serverId: string,
   agentId: string,
@@ -5524,6 +6406,8 @@ export async function resolveAgentFacingChannelRef(
   // for an invalid historical row; that string is not part of the target DSL.
   if (channel.type === "thread") return null;
   if (channel.type !== "dm") return `#${channel.name}`;
+  // The agent's own private reminder conversation (no peer, no identity row).
+  if (await getAgentPrivateSurfaceKind(agentId, channelId) === "reminders") return `dm:@${AGENT_REMINDERS_DM_PEER}`;
 
   const db = getDb();
   const [identity] = await db
@@ -5541,14 +6425,14 @@ export async function resolveAgentFacingChannelRef(
     const peerId = participants.find((id) => id !== agentId);
     if (peerId && identity.kind === "human_agent") {
       const [peer] = await db.select({ name: users.name }).from(users).where(eq(users.id, peerId)).limit(1);
-      return peer?.name ? `dm:@${peer.name}` : null;
+      return peer?.name ? agentFacingDmRef(serverId, peer.name, "human") : null;
     }
     if (peerId && identity.kind === "agent_agent") {
       const [peer] = await db.select({ name: agents.name }).from(agents).where(and(
         eq(agents.id, peerId),
         eq(agents.serverId, serverId),
       )).limit(1);
-      return peer?.name ? `dm:@${peer.name}` : null;
+      return peer?.name ? agentFacingDmRef(serverId, peer.name, "agent") : null;
     }
     return null;
   }
@@ -5560,7 +6444,7 @@ export async function resolveAgentFacingChannelRef(
     .innerJoin(users, eq(channelHumans.userId, users.id))
     .where(eq(channelHumans.channelId, channelId))
     .limit(1);
-  if (humanPeer?.name) return `dm:@${humanPeer.name}`;
+  if (humanPeer?.name) return agentFacingDmRef(serverId, humanPeer.name, "human");
 
   // Legacy agent-agent DMs likewise derive the peer from the other member.
   const [agentPeer] = await db
@@ -5572,7 +6456,7 @@ export async function resolveAgentFacingChannelRef(
       sql`${channelAgents.agentId} <> ${agentId}`,
     ))
     .limit(1);
-  if (agentPeer?.name) return `dm:@${agentPeer.name}`;
+  if (agentPeer?.name) return agentFacingDmRef(serverId, agentPeer.name, "agent");
 
   // Built-in app conversations intentionally have one agent member and no DM
   // identity row. Their registry app id is the documented dm:@ target.
@@ -5784,6 +6668,8 @@ export async function canAgentPostToChannel(channelId: string, agentId: string):
 
   if (isAllSystemChannel(channel) && !isEnabledAllChannel(channel)) return false;
   if (isEnabledAllChannel(channel)) return isServerAgent(channel.serverId, agentId);
+  // Private agent surfaces (dm:@reminders) are written by the server only.
+  if (channel.type === "dm" && await isAgentPrivateSurfaceChannel(channelId)) return false;
 
   if (channel.type === "thread") {
     const jointThread = await getJointThreadProjectionByLocalThread(channelId, channel.serverId);
@@ -5865,7 +6751,21 @@ export async function resolveChannelByName(
   // DM or DM thread: dm:@peer or dm:@peer:shortid (also legacy DM:@)
   if (channelRef.startsWith("DM:@") || channelRef.startsWith("dm:@")) {
     if (threadShortId) {
-      return resolveThreadByShortId(serverId, agentId, threadShortId);
+      // The thread is located by its short id; still refuse a malformed peer
+      // kind rather than silently ignoring it.
+      const rawPeer = baseRef.slice(4);
+      const parsedPeer = parseDmPeerRef(rawPeer);
+      if (!parsedPeer.ok && parsedPeer.reason === "unknown_peer_kind") {
+        throw DmTargetResolutionError.invalidPeerKind(rawPeer, parsedPeer.suffix);
+      }
+      const thread = await resolveThreadByShortId(serverId, agentId, threadShortId);
+      // An explicit kind is a claim about which DM the thread lives in: a
+      // thread under the agent Twin's DM is not `dm:@Twin~human:<id>`.
+      if (thread && parsedPeer.ok && parsedPeer.peerKind) {
+        const namedDm = await resolveDMByPeerName(serverId, agentId, rawPeer);
+        if (!namedDm || await getThreadParentChannelId(thread.channelId) !== namedDm.channelId) return null;
+      }
+      return thread;
     }
     return resolveDMByPeerName(serverId, agentId, baseRef.slice(4));
   }
@@ -5908,7 +6808,26 @@ export async function resolveChannelByName(
   return null;
 }
 
-/** Resolve a thread channel by its short ID (first 8 chars of parent message UUID). */
+/**
+ * Resolve a thread channel by an 8-hex suffix.
+ *
+ * The suffix is tried in order:
+ *   1. as a parent-message short id (`thread-<shortId>` channel name) — the
+ *      form `replyTarget` prints and the only form older docs described;
+ *   2. as a thread-channel id short form — the `threadId=` header field is the
+ *      first 8 chars of the thread channel's UUID, and agents habitually paste
+ *      it into the same `#channel:<id>` slot. Before this fallback that always
+ *      answered "Message or thread not found" for a thread that plainly exists.
+ *
+ * Both lookups are server-scoped (a `#channel:<id>` suffix never claimed to be
+ * scoped to the named channel — thread resolution has always been server-wide)
+ * and the same `canAgentAccessChannel` gate runs after each, so the fallback
+ * grants nothing the message-id path did not. An id matching a message in one
+ * place and a thread UUID in another resolves to the message first; a prefix
+ * matching more than one thread resolves to nothing (same neutral answer as a
+ * miss — UUID-prefix collisions are vanishingly rare and none of the callers
+ * can distinguish the two cases anyway).
+ */
 async function resolveThreadByShortId(
   serverId: string,
   agentId: string,
@@ -5927,9 +6846,40 @@ async function resolveThreadByShortId(
         isNull(channels.deletedAt)
       )
     );
-  if (!channel) return null;
-  if (!await canAgentAccessChannel(channel.id, agentId)) return null;
-  return { channelId: channel.id, type: "thread" };
+  if (channel) {
+    if (!await canAgentAccessChannel(channel.id, agentId)) return null;
+    return { channelId: channel.id, type: "thread" };
+  }
+
+  // Fallback: the suffix may be the thread channel's own id short form
+  // (`threadId=` in the message header), not its parent's message short id.
+  const bounds = uuidShortIdRange(shortId);
+  const candidates = await db
+    .select({ id: channels.id })
+    .from(channels)
+    .where(
+      and(
+        eq(channels.serverId, serverId),
+        eq(channels.type, "thread"),
+        gte(channels.id, bounds.lower),
+        ...(bounds.upper ? [lt(channels.id, bounds.upper)] : []),
+        isNull(channels.deletedAt)
+      )
+    )
+    .limit(2);
+  if (candidates.length !== 1) return null;
+  if (!await canAgentAccessChannel(candidates[0].id, agentId)) return null;
+  return { channelId: candidates[0].id, type: "thread" };
+}
+
+async function getThreadParentChannelId(threadChannelId: string): Promise<string | null> {
+  const [row] = await getDb()
+    .select({ channelId: messages.channelId })
+    .from(channels)
+    .innerJoin(messages, eq(messages.id, channels.parentMessageId))
+    .where(eq(channels.id, threadChannelId))
+    .limit(1);
+  return row?.channelId ?? null;
 }
 
 /**
@@ -5939,20 +6889,59 @@ async function resolveThreadByShortId(
 async function resolveDMByPeerName(
   serverId: string,
   agentId: string,
-  peerName: string
+  rawPeer: string
 ): Promise<{ channelId: string; type: "dm" } | null> {
   const db = getDb();
+
+  // `dm:@reminders` is the authenticated agent's own private reminder
+  // conversation. The handle is reserved, so it takes precedence over (and
+  // can never collide with) a human or agent peer named `reminders`.
+  if (rawPeer.toLowerCase() === AGENT_REMINDERS_DM_PEER) {
+    const channelId = await getAgentPrivateSurfaceChannelId(agentId, "reminders");
+    return channelId ? { channelId, type: "dm" } : null;
+  }
 
   // Built-in app DMs are resolved for the authenticated owner only. The
   // owner is never accepted from the ref string: Agent A therefore cannot
   // resolve Agent B's derived conversation even though both refs render as
   // `dm:@<appId>`.
-  if (isAppId(peerName)) {
-    const appDm = await getBuiltInConversationChannel(serverId, peerName, agentId);
+  if (isAppId(rawPeer)) {
+    const appDm = await getBuiltInConversationChannel(serverId, rawPeer, agentId);
     if (appDm) return { channelId: appDm.id, type: "dm" };
   }
 
-  // Try user peer first: find user with matching name in this server
+  // `dm:@name~agent` / `dm:@name~human` names the kind of peer explicitly.
+  // An unknown suffix is refused, never read as a bare name.
+  const parsed = parseDmPeerRef(rawPeer);
+  if (!parsed.ok) {
+    if (parsed.reason === "unknown_peer_kind") throw DmTargetResolutionError.invalidPeerKind(rawPeer, parsed.suffix);
+    return null;
+  }
+  const { peerName, peerKind } = parsed;
+
+  const humanDm = peerKind === "agent" ? null : await findHumanPeerDm(db, serverId, agentId, peerName);
+  if (peerKind === "human") return humanDm;
+  const agentDm = await findAgentPeerDm(db, serverId, agentId, peerName);
+  if (peerKind === "agent") return agentDm;
+
+  // A bare name held by BOTH a human member and a non-deleted agent in this
+  // server is ambiguous REGARDLESS of whether the two DMs both exist yet. The
+  // meaning of `dm:@name` must be stable over time: resolving it to the human's
+  // DM today and turning into an error once the agent's DM appears would let
+  // the same target silently change which conversation it names (a
+  // send-to-the-wrong-person hazard). `findCrossKindTwinPeerNames` is the one
+  // stability rule shared with the agent-facing label path.
+  const twins = await findCrossKindTwinPeerNames(serverId, [peerName]);
+  if (twins.has(peerName)) throw DmTargetResolutionError.ambiguous(peerName);
+  return humanDm ?? agentDm;
+}
+
+async function findHumanPeerDm(
+  db: ReturnType<typeof getDb>,
+  serverId: string,
+  agentId: string,
+  peerName: string,
+): Promise<{ channelId: string; type: "dm" } | null> {
   const userResults = await db
     .select({ id: users.id })
     .from(users)
@@ -5977,7 +6966,15 @@ async function resolveDMByPeerName(
       );
     if (dm) return { channelId: dm.id, type: "dm" };
   }
+  return null;
+}
 
+async function findAgentPeerDm(
+  db: ReturnType<typeof getDb>,
+  serverId: string,
+  agentId: string,
+  peerName: string,
+): Promise<{ channelId: string; type: "dm" } | null> {
   const agentResults = await db
     .select({ id: agents.id })
     .from(agents)
@@ -6000,7 +6997,6 @@ async function resolveDMByPeerName(
       ));
     if (dm) return { channelId: dm.id, type: "dm" };
   }
-
   return null;
 }
 
@@ -6442,11 +7438,39 @@ async function listThreadRowsForChannelView(
 // `thread_id` reference once its thread channel is resolved. Reply messages
 // *inside* a thread keep `thread_id = null` and live in the thread channel
 // itself (see `schema.ts` `messages.threadId` comment for the contract).
-async function syncParentMessageThreadId(parentMessageId: string, threadChannelId: string) {
-  const db = getDb();
-  await db.update(messages)
+//
+// getOrCreateThread calls this on every resolution, and the value is almost
+// always already set. Skip the no-op: an UPDATE writes a new row version even
+// when nothing changes, and when that version is not HOT it re-inserts the row
+// into every messages index, including the full-text GIN pending list.
+async function syncParentMessageThreadId(
+  parentMessageId: string,
+  threadChannelId: string,
+  executor: DatabaseExecutor = getDb(),
+) {
+  await executor.update(messages)
     .set({ threadId: threadChannelId })
-    .where(eq(messages.id, parentMessageId));
+    .where(and(
+      eq(messages.id, parentMessageId),
+      sql`${messages.threadId} IS DISTINCT FROM ${threadChannelId}`,
+    ));
+}
+
+/**
+ * Every creator of a root's canonical thread queues on the root message row
+ * before inserting the thread. Slack inbound locks the root FOR UPDATE and
+ * then inserts the thread ON CONFLICT; if this path inserted first, its
+ * uncommitted idx_channels_active_thread_parent entry made inbound wait on it
+ * while its parent_message_id FK share (and the thread_id stamp) waited on
+ * inbound's root lock: a 40P01 cycle. FOR NO KEY UPDATE is enough to queue
+ * behind that FOR UPDATE and matches the thread_id stamp this transaction
+ * writes anyway; it does not block readers' FOR KEY SHARE.
+ */
+async function lockThreadRootMessageForCreate(executor: DatabaseExecutor, parentMessageId: string) {
+  await executor.select({ id: messages.id })
+    .from(messages)
+    .where(eq(messages.id, parentMessageId))
+    .for("no key update");
 }
 
 /**
@@ -6470,13 +7494,20 @@ export async function getOrCreateThread(
 
   const existing = await getCanonicalThreadForParentMessage(parentMessageId);
   if (existing) {
-    await syncParentMessageThreadId(parentMessageId, existing.threadChannelId);
     const [parentThread] = await db
-      .select({ serverId: channels.serverId })
+      .select({
+        serverId: channels.serverId,
+        parentThreadId: sql<string | null>`(SELECT ${messages.threadId} FROM ${messages} WHERE ${messages.id} = ${parentMessageId})`,
+      })
       .from(channels)
       .where(eq(channels.id, existing.threadChannelId))
       .limit(1);
     if (!parentThread) throw new Error("Canonical thread channel not found");
+    // Usually already stamped. Still re-stamp when it is missing or when the
+    // canonical thread among duplicates has changed.
+    if (parentThread.parentThreadId !== existing.threadChannelId) {
+      await syncParentMessageThreadId(parentMessageId, existing.threadChannelId);
+    }
     return {
       id: existing.threadChannelId,
       serverId: parentThread.serverId,
@@ -6499,17 +7530,24 @@ export async function getOrCreateThread(
     .where(eq(channels.id, parentMsg.channelId));
   if (!parentChannel) throw new Error("Parent channel not found");
 
-  // Create thread channel
+  // Create the thread channel and stamp the parent's thread_id in one
+  // transaction. As two autocommit statements, a failed or timed-out stamp
+  // left a committed thread whose parent carried no thread_id; search relies
+  // on "a thread's parent always carries its thread_id".
   const threadName = `thread-${parentMessageId.slice(0, 8)}`;
-  const [threadChannel] = await db.insert(channels).values({
-    serverId: parentChannel.serverId,
-    name: threadName,
-    type: "thread",
-    parentMessageId,
-  }).onConflictDoNothing().returning();
+  const threadChannel = await db.transaction(async (tx) => {
+    await lockThreadRootMessageForCreate(tx, parentMessageId);
+    const [inserted] = await tx.insert(channels).values({
+      serverId: parentChannel.serverId,
+      name: threadName,
+      type: "thread",
+      parentMessageId,
+    }).onConflictDoNothing().returning();
+    if (inserted) await syncParentMessageThreadId(parentMessageId, inserted.id, tx);
+    return inserted;
+  });
 
   if (threadChannel) {
-    await syncParentMessageThreadId(parentMessageId, threadChannel.id);
     return { id: threadChannel.id, serverId: parentChannel.serverId, parentMessageId, created: true };
   }
 
@@ -6969,13 +8007,13 @@ export async function getThreadInfoForChannel(channelId: string, parentMessageId
 
 // ── Followed threads ─────────────────────────────────────
 
-type FollowedThreadMetadataRow = {
+export type FollowedThreadMetadataRow = {
   threadChannelId: string;
   storageThreadChannelId: string;
   activityUpperBoundSeq?: number | string | null;
 };
 
-type FollowedThreadStatsRow = {
+export type FollowedThreadStatsRow = {
   threadChannelId: string;
   replyCount: number;
   lastReplyAt: string | null;
@@ -6990,10 +8028,28 @@ type FollowedThreadStatsRow = {
 };
 
 type FollowedThreadStatsSource = "rw_mv" | "pg_legacy";
-type FollowedThreadStatsFallbackReason = "none" | "feature_disabled" | "history_cutoff" | "activity_upper_bound" | "rw_error" | "rw_row_mismatch";
+/**
+ * Why a followed-thread stats read ran on Postgres. None of these is a fallback
+ * for an absent or failing RisingWave (that is an error): they are the reads the
+ * RW view cannot answer (a per-thread activity upper bound) and consistency
+ * reads inside an authority transaction ("history_cutoff" is now only the label
+ * of an authority-transaction read that carries a cutoff; a cutoff alone no
+ * longer reroutes a read to Postgres).
+ */
+type FollowedThreadStatsPostgresReason = "history_cutoff" | "activity_upper_bound" | "authority_transaction";
+type FollowedThreadStatsFallbackReason = "none" | FollowedThreadStatsPostgresReason;
 
 const RISINGWAVE_FOLLOWED_THREAD_STATS_CONTRACT_VERSION = 1;
-const RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW = "rw_followed_thread_stats_v1";
+// The stats read is served by rw_followed_threads_v5 (074; v4's stats columns): v3's exact stats
+// columns (070: the unified chain's unread rule, a row for every follow state)
+// plus the parent/task columns the active path reads. One view serves both, so
+// v3 is no longer read and can be dropped once no running version reads it.
+// latest_preview is a 141-char prefix, enough for the 140-char preview.
+const RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW = "rw_followed_threads_v5";
+// TRANSITION (074): an environment whose RW has not built v5 yet still has v4,
+// with identical stats columns. A stats read that finds v5 missing reads v4
+// instead of failing the endpoint. Remove with v4 (DROP after v5 is everywhere).
+const RISINGWAVE_FOLLOWED_THREAD_STATS_TRANSITION_VIEW = "rw_followed_threads_v4";
 // This query is normally sub-100ms; 2s catches RW serving stalls without making
 // the trace stream noisy during ordinary latency variance.
 const RISINGWAVE_FOLLOWED_THREAD_STATS_SLOW_REPLAY_TRACE_MS = 2_000;
@@ -7021,16 +8077,23 @@ function followedThreadStatsTraceAttrs(
 
 function recordFollowedThreadStatsBackendFailed(error: unknown) {
   addTraceEvent("followed_threads.stats_backend.failed", {
-    ...followedThreadStatsTraceAttrs("rw_mv", "rw_error"),
-    error_class: error instanceof Error ? error.name : typeof error,
+    ...followedThreadStatsTraceAttrs("rw_mv", "none"),
+    error_class: errorClassOf(error),
   });
 }
 
+/**
+ * RW served fewer stats rows than the followed threads asked for: CDC lag (a
+ * thread followed seconds ago that the view has not caught up with yet). Not an
+ * error and not a Postgres reroute; the missing threads render without stats.
+ */
 function recordFollowedThreadStatsRowMismatch(expectedRows: number, actualRows: number) {
   addTraceEvent("followed_threads.stats_backend.row_mismatch", {
-    ...followedThreadStatsTraceAttrs("rw_mv", "rw_row_mismatch"),
+    ...followedThreadStatsTraceAttrs("rw_mv", "none"),
     followed_threads_count: expectedRows,
     stats_rows_count: actualRows,
+    missing_stats_rows_count: Math.max(0, expectedRows - actualRows),
+    likely_cause: "cdc_lag",
   });
 }
 
@@ -7064,6 +8127,7 @@ function buildRisingWaveFollowedThreadStatsReplayQuery(
   serverId: string,
   userId: string,
   threadChannelIds: string[],
+  view: string = RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW,
 ): RisingWaveFollowedThreadStatsReplayQuery {
   const values = threadChannelIds.map((_, index) => `($${index + 3}::varchar)`).join(", ");
   return {
@@ -7079,7 +8143,7 @@ function buildRisingWaveFollowedThreadStatsReplayQuery(
           ELSE to_char(s.last_reply_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00'
         END AS "lastReplyAt",
         s.latest_message_id::text AS "lastReplyMessageId",
-        -- Same tuple as lastReplyMessageId: rw_followed_thread_stats_v1 joins
+        -- Same tuple as lastReplyMessageId: the view joins
         -- latest.seq = stats.latest_seq, so id and seq cannot describe
         -- different messages. Never splice these from separate sources.
         s.latest_seq::text AS "lastReplySeqExact",
@@ -7089,7 +8153,7 @@ function buildRisingWaveFollowedThreadStatsReplayQuery(
         s.first_unread_message_id::text AS "firstUnreadMessageId",
         COALESCE(s.unread_count, 0)::int AS "unreadCount"
       FROM input_threads i
-      JOIN ${RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW} s
+      JOIN ${view} s
         ON s.server_id = $1
        AND s.user_id = $2
        AND s.thread_channel_id = i.thread_channel_id
@@ -7145,46 +8209,88 @@ async function getFollowedThreadStatsFromRisingWave(
   serverId: string,
   userId: string,
   threads: FollowedThreadMetadataRow[],
-  historyCutoff: Date | undefined,
   traceQuery: DbQueryTracer,
-): Promise<FollowedThreadStatsRow[] | null> {
-  // CONTRACT: rw_followed_thread_stats_v1 is an endpoint-shaped serving read
-  // model for GET /api/channels/threads/followed. It must return all stats
+  historyCutoffPresent: boolean,
+): Promise<FollowedThreadStatsRow[]> {
+  // CONTRACT: rw_followed_threads_v5 is an endpoint-shaped serving read
+  // model for GET /api/channels/threads/followed and the Done / Activity
+  // followed-thread lists, for every follow state. It must return all stats
   // fields in one lookup keyed by (server_id, user_id, thread_channel_id). Do
   // not replace this with request-time joins across generic RW MVs; that shape
   // was benchmarked slower than Postgres.
-  if (historyCutoff || !isRisingWaveFollowedThreadStatsEnabled()) return null;
+  if (threads.length === 0) return [];
   const client = getRisingWavePool();
-  if (!client || threads.length === 0) return null;
+  if (!client) throw new RisingWaveNotConfiguredError("followed-thread stats");
 
   const threadIds = threads.map((thread) => thread.threadChannelId);
-  const replayQuery = buildRisingWaveFollowedThreadStatsReplayQuery(serverId, userId, threadIds);
-  const queryStart = performance.now();
-  const result = await traceQuery(
-    RISINGWAVE_FOLLOWED_THREAD_STATS_QUERY_NAME,
-    () => client.query(replayQuery.sql, replayQuery.params),
-    (queryResult) => ({
-      ...followedThreadStatsTraceAttrs("rw_mv", "none"),
+  let view = RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW;
+  const readStats = async () => {
+    const replayQuery = buildRisingWaveFollowedThreadStatsReplayQuery(serverId, userId, threadIds, view);
+    const queryStart = performance.now();
+    const result = await traceQuery(
+      RISINGWAVE_FOLLOWED_THREAD_STATS_QUERY_NAME,
+      () => client.query(replayQuery.sql, replayQuery.params).catch((error: unknown) => {
+        throw asRisingWaveOverload(error);
+      }),
+      (queryResult) => ({
+        ...followedThreadStatsTraceAttrs("rw_mv", "none"),
+        backend: "risingwave",
+        rw_followed_thread_stats_view: view,
+        followed_threads_count: threads.length,
+        stats_rows_count: queryResult.rows.length,
+        // A cutoff no longer reroutes to Postgres; it only withholds old previews.
+        history_cutoff_present: historyCutoffPresent,
+      }),
+    );
+    recordSlowRisingWaveFollowedThreadStatsReplayQuery(performance.now() - queryStart, replayQuery, result.rows.length);
+    return result.rows as FollowedThreadStatsRow[];
+  };
+  try {
+    return await readStats();
+  } catch (error) {
+    // TRANSITION (074): v5 not built in this RW yet -> v4 (same stats columns).
+    if (!isMissingRelationError(error, RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW)) throw error;
+    addTraceEvent("followed_threads.stats_backend.view_fallback", {
       backend: "risingwave",
-      rw_followed_thread_stats_view: RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW,
-      followed_threads_count: threads.length,
-      stats_rows_count: queryResult.rows.length,
-      history_cutoff_present: false,
-    }),
-  );
-  recordSlowRisingWaveFollowedThreadStatsReplayQuery(performance.now() - queryStart, replayQuery, result.rows.length);
-  return result.rows as FollowedThreadStatsRow[];
+      missing_view: RISINGWAVE_FOLLOWED_THREAD_STATS_VIEW,
+      rw_followed_thread_stats_view: RISINGWAVE_FOLLOWED_THREAD_STATS_TRANSITION_VIEW,
+    });
+    view = RISINGWAVE_FOLLOWED_THREAD_STATS_TRANSITION_VIEW;
+    return readStats();
+  }
 }
 
-async function getFollowedThreadStatsFromPostgres(
+/** A "relation <name> does not exist" error (Postgres / RisingWave pgwire, SQLSTATE 42P01 when present). */
+function isMissingRelationError(error: unknown, relation: string): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const code = (error as { code?: unknown } | null)?.code;
+  return message.includes(relation) && (code === "42P01" || /does not exist|not found/i.test(message));
+}
+
+/**
+ * Followed-thread stats from Postgres, for the reads the RW view cannot answer
+ * (activity upper bound) and for authority transactions. Never
+ * a substitute for an absent or failing RisingWave. Exported for the test
+ * reference of the RW read (src/test/risingWaveReadReference.ts).
+ */
+export async function getFollowedThreadStatsFromPostgres(
   userId: string,
   threads: FollowedThreadMetadataRow[],
   historyCutoff: Date | undefined,
   traceQuery: DbQueryTracer,
-  fallbackReason: FollowedThreadStatsFallbackReason,
+  postgresReason: FollowedThreadStatsPostgresReason | "none",
   executor: DatabaseExecutor = getDb(),
 ): Promise<FollowedThreadStatsRow[]> {
   const cutoffCondition = historyCutoff ? sql` AND m.created_at > ${historyCutoff}` : sql``;
+  // The unified chain's unread rule (rw_inbox_normal_v4, 063-unified-inbox-chain.sql),
+  // identical to rw_followed_threads_v5 (v3's rule): after the cursor, not own-sent, not
+  // a system message the user caused (NULL causal actor = no exclusion), not a
+  // noise subtype. These reads serve the documented RW gaps, so they must not
+  // reintroduce the pre-063 rule.
+  const unreadPredicate = sql`m.seq > COALESCE(rc.last_read_seq, 0)
+              AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
+              AND NOT COALESCE(m.message_type = 'system' AND m.causal_actor_type = 'user' AND m.causal_actor_id = ${userId}::text, FALSE)
+              AND (m.system_subtype IS NULL OR m.system_subtype NOT IN ('channel.self_unfollow_thread', 'task.deleted_summary'))`;
 
   const statsRows = await traceQuery(
     "channels.followed_threads_stats_by_threads",
@@ -7201,15 +8307,9 @@ async function getFollowedThreadStatsFromPostgres(
           input_threads.thread_id,
           input_threads.storage_thread_id,
           count(m.id)::int AS reply_count,
-          count(m.id) FILTER (
-            WHERE m.seq > COALESCE(rc.last_read_seq, 0)
-              AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          )::int AS unread_count,
+          count(m.id) FILTER (WHERE ${unreadPredicate})::int AS unread_count,
           max(m.seq) AS latest_seq,
-          min(m.seq) FILTER (
-            WHERE m.seq > COALESCE(rc.last_read_seq, 0)
-              AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          ) AS first_unread_seq
+          min(m.seq) FILTER (WHERE ${unreadPredicate}) AS first_unread_seq
         FROM input_threads
         LEFT JOIN user_channel_read_cursors rc
           ON rc.channel_id = input_threads.thread_id AND rc.user_id = ${userId}
@@ -7242,7 +8342,7 @@ async function getFollowedThreadStatsFromPostgres(
        AND first_unread.seq = stats.first_unread_seq
     `),
     (result) => ({
-      ...followedThreadStatsTraceAttrs("pg_legacy", fallbackReason),
+      ...followedThreadStatsTraceAttrs("pg_legacy", postgresReason),
       followed_threads_count: threads.length,
       stats_rows_count: result.rows.length,
       history_cutoff_present: Boolean(historyCutoff),
@@ -7260,6 +8360,7 @@ async function getFollowedThreadStatsRows(
   executor?: DatabaseExecutor,
 ): Promise<FollowedThreadStatsRow[]> {
   if (executor) {
+    // Authority transaction: a consistency read on the caller's executor.
     return getFollowedThreadStatsFromPostgres(
       userId,
       threads,
@@ -7269,35 +8370,42 @@ async function getFollowedThreadStatsRows(
         ? "activity_upper_bound"
         : historyCutoff
           ? "history_cutoff"
-          : "feature_disabled",
+          : "authority_transaction",
       executor,
     );
   }
+  // The RW view carries no per-thread activity upper bound (unfollowed threads
+  // are clipped at done_through_seq), so those reads stay on Postgres.
+  //
+  // A plan history cutoff does NOT reroute (product decision): the numbers
+  // (unreadCount, replyCount, lastReplyAt) come from RW as-is for every plan.
+  // The only cutoff rule is that a free plan never sees content older than its
+  // cutoff; getFollowedThreads enforces it by blanking the latest reply's
+  // preview when that reply is before the cutoff.
   if (threads.some((thread) => thread.activityUpperBoundSeq != null)) {
     return getFollowedThreadStatsFromPostgres(userId, threads, historyCutoff, traceQuery, "activity_upper_bound");
   }
-  if (historyCutoff) {
-    return getFollowedThreadStatsFromPostgres(userId, threads, historyCutoff, traceQuery, "history_cutoff");
-  }
 
-  if (isRisingWaveFollowedThreadStatsEnabled()) {
-    try {
-      const risingWaveRows = await getFollowedThreadStatsFromRisingWave(serverId, userId, threads, historyCutoff, traceQuery);
-      if (risingWaveRows) {
-        if (risingWaveRows.length === threads.length) {
-          recordFollowedThreadStatsBackendSucceeded(risingWaveRows.length);
-          return risingWaveRows;
-        }
-        recordFollowedThreadStatsRowMismatch(threads.length, risingWaveRows.length);
-        return getFollowedThreadStatsFromPostgres(userId, threads, historyCutoff, traceQuery, "rw_row_mismatch");
-      }
-    } catch (error) {
-      recordFollowedThreadStatsBackendFailed(error);
-      return getFollowedThreadStatsFromPostgres(userId, threads, historyCutoff, traceQuery, "rw_error");
-    }
-  }
+  const override = getActivityReadSourceOverride();
+  if (override) return override.followedThreadStats({ serverId, userId, threads, traceQuery });
 
-  return getFollowedThreadStatsFromPostgres(userId, threads, historyCutoff, traceQuery, "feature_disabled");
+  // RisingWave only, for every follow state: unconfigured or a failed read errors.
+  let risingWaveRows: FollowedThreadStatsRow[];
+  try {
+    risingWaveRows = await getFollowedThreadStatsFromRisingWave(serverId, userId, threads, traceQuery, Boolean(historyCutoff));
+  } catch (error) {
+    recordFollowedThreadStatsBackendFailed(error);
+    throw error;
+  }
+  if (risingWaveRows.length !== threads.length) {
+    // CDC lag: a just-followed thread the view has not caught up with yet. Serve
+    // what RW has; getFollowedThreads renders a thread without a stats row from
+    // its parent message (zero replies, zero unread) until the view catches up.
+    recordFollowedThreadStatsRowMismatch(threads.length, risingWaveRows.length);
+    return risingWaveRows;
+  }
+  recordFollowedThreadStatsBackendSucceeded(risingWaveRows.length);
+  return risingWaveRows;
 }
 
 /** Test-only surface for the same-source frontier rule. */
@@ -7370,13 +8478,8 @@ function guestInboxAccessSql(ids: string[] | null, channelId: SQL): SQL {
     : sql`${channelId} IN (${sql.join(ids.map(id => sql`${id}::uuid`), sql`, `)})`;
 }
 
-/** Get all threads a user participates in, with unread counts and parent message info. */
-export async function getFollowedThreads(
-  serverId: string,
-  userId: string,
-  historyCutoff?: Date,
-  opts?: FollowedThreadsOptions,
-): Promise<Array<{
+/** One followed thread as GET /api/channels/threads/followed returns it. */
+export type FollowedThread = {
   threadChannelId: string;
   parentMessageId: string;
   parentChannelId: string;
@@ -7408,11 +8511,157 @@ export async function getFollowedThreads(
   doneAt: string | null;
   isFollowing: boolean;
   unfollowedAt: string | null;
-}>> {
-  const db = opts?.executor ?? getDb();
-  const traceQuery = opts?.traceQuery ?? untracedDbQuery;
-  const guestAccess = await guestInboxChannelIds(serverId, userId, db);
-  const state = opts?.state ?? "active";
+};
+
+/** One followed thread before stats and read state: its parent message, parent channel and task. */
+type FollowedThreadSourceRow = {
+  threadChannelId: string;
+  storageThreadChannelId: string;
+  parentMessageId: string | null;
+  parentChannelId: string;
+  parentChannelName: string;
+  parentChannelType: string;
+  parentMessageContent: string;
+  parentMessageCreatedAt: Date;
+  parentMessageSenderType: string;
+  parentMessageSenderId: string;
+  parentMessageSeq: string | null;
+  taskId: string | null;
+  taskNumber: number | null;
+  taskStatus: string | null;
+  taskClaimedByType: "agent" | "user" | null;
+  taskClaimedById: string | null;
+  doneAt: Date | string | null;
+  unfollowedAt: Date | string | null;
+  activityUpperBoundSeq: number | null;
+};
+
+/**
+ * One rw_followed_threads_v5 row (infra/risingwave/sql/074-followed-threads-v5.sql)
+ * as the server reads it: v3's stats columns (FollowedThreadStatsRow) plus the
+ * parent message and its task. lastReplyContent and parentMessageContent are
+ * 141-character prefixes (enough for the 140/100-character previews). The
+ * timestamps are `YYYY-MM-DD HH24:MI:SS.US+00` text, the format the v3 stats read
+ * returns for lastReplyAt.
+ */
+export type FollowedThreadRwRow = FollowedThreadStatsRow & {
+  storageThreadChannelId: string;
+  parentMessageId: string | null;
+  parentChannelId: string | null;
+  /** Server of the parent message's channel (rw_channels), NULL when RW lacks it. */
+  parentServerId: string | null;
+  parentMessageContent: string | null;
+  parentMessageSenderType: string | null;
+  parentMessageSenderId: string | null;
+  parentMessageSeq: string | null;
+  parentMessageCreatedAt: string | null;
+  taskId: string | null;
+  taskNumber: number | null;
+  taskStatus: string | null;
+  taskClaimedByType: "agent" | "user" | null;
+  taskClaimedById: string | null;
+  /** v5: the followed thread is a local projection of a joint thread. */
+  jointProjection: boolean;
+  /** v5: this server's local joint channel of the canonical parent channel (joint projections). */
+  jointParentChannelId: string | null;
+};
+
+type FollowedThreadsState = NonNullable<FollowedThreadsOptions["state"]>;
+
+/** Why a getFollowedThreads call ran the legacy (all-Postgres list) path. */
+type FollowedThreadsLegacyReason =
+  | "guest"
+  | "state"
+  | "executor"
+  | "search"
+  | "channel_filter"
+  | "max_rows"
+  | "forced"
+  | "rw_failed";
+
+type FollowedThreadsQueryContext = {
+  serverId: string;
+  userId: string;
+  db: DatabaseExecutor;
+  traceQuery: DbQueryTracer;
+  guestAccess: string[] | null;
+  state: FollowedThreadsState;
+  opts: FollowedThreadsOptions | undefined;
+};
+
+type LoadedFollowedThreads = {
+  threads: FollowedThreadSourceRow[];
+  statsRows: FollowedThreadStatsRow[];
+  readStateByThread: Map<string, ReadStateSnapshot>;
+};
+
+const RISINGWAVE_FOLLOWED_THREADS_VIEW = "rw_followed_threads_v5";
+const RISINGWAVE_FOLLOWED_THREADS_QUERY_NAME = "channels.followed_threads_rw_rows";
+
+/**
+ * The single lookup of the RW followed-threads path: every rw_followed_threads_v5
+ * row of (server, user), on the lookup index prefix. The view holds every follow
+ * state; the caller keeps only the Postgres follow set.
+ */
+export const RISINGWAVE_FOLLOWED_THREADS_ROWS_SQL = `
+      SELECT
+        v.thread_channel_id::text AS "threadChannelId",
+        v.storage_thread_channel_id::text AS "storageThreadChannelId",
+        COALESCE(v.reply_count, 0)::int AS "replyCount",
+        CASE
+          WHEN v.last_reply_at IS NULL THEN NULL::text
+          ELSE to_char(v.last_reply_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00'
+        END AS "lastReplyAt",
+        -- Same tuple: the view joins latest.seq = stats.latest_seq.
+        v.latest_message_id::text AS "lastReplyMessageId",
+        v.latest_seq::text AS "lastReplySeqExact",
+        v.latest_preview AS "lastReplyContent",
+        v.latest_sender_type AS "lastReplySenderType",
+        v.latest_sender_id AS "lastReplySenderId",
+        v.first_unread_message_id::text AS "firstUnreadMessageId",
+        COALESCE(v.unread_count, 0)::int AS "unreadCount",
+        v.parent_message_id::text AS "parentMessageId",
+        v.parent_channel_id::text AS "parentChannelId",
+        v.parent_server_id::text AS "parentServerId",
+        v.parent_preview AS "parentMessageContent",
+        v.parent_sender_type AS "parentMessageSenderType",
+        v.parent_sender_id AS "parentMessageSenderId",
+        v.parent_seq::text AS "parentMessageSeq",
+        CASE
+          WHEN v.parent_created_at IS NULL THEN NULL::text
+          ELSE to_char(v.parent_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00'
+        END AS "parentMessageCreatedAt",
+        v.task_id::text AS "taskId",
+        v.task_number::int AS "taskNumber",
+        v.task_status AS "taskStatus",
+        v.task_claimed_by_type AS "taskClaimedByType",
+        v.task_claimed_by_id AS "taskClaimedById",
+        COALESCE(v.joint_projection, FALSE) AS "jointProjection",
+        v.joint_parent_channel_id::text AS "jointParentChannelId"
+      FROM ${RISINGWAVE_FOLLOWED_THREADS_VIEW} v
+      WHERE v.server_id = $1
+        AND v.user_id = $2
+    `;
+
+function followedThreadsLegacyReason(ctx: FollowedThreadsQueryContext): FollowedThreadsLegacyReason | null {
+  if (ctx.opts?.forceLegacyPath) return "forced";
+  if (ctx.guestAccess !== null) return "guest";
+  if (ctx.state !== "active") return "state";
+  if (ctx.opts?.executor) return "executor";
+  if (ctx.opts?.q) return "search";
+  if (ctx.opts?.channelId) return "channel_filter";
+  if (ctx.opts?.maxRows != null) return "max_rows";
+  return null;
+}
+
+/**
+ * The Postgres regular-thread list (threads whose parent message is in this
+ * server).
+ */
+async function queryFollowedRegularThreads(
+  ctx: FollowedThreadsQueryContext,
+): Promise<FollowedThreadSourceRow[]> {
+  const { serverId, userId, db, traceQuery, guestAccess, state, opts } = ctx;
   const searchPattern = opts?.q ? `%${opts.q}%` : null;
   const doneCondition = state === "done"
     ? isNotNull(threadFollows.doneAt)
@@ -7482,6 +8731,7 @@ export async function getFollowedThreads(
         eq(parentChannels.serverId, serverId),
         guestInboxAccessSql(guestAccess, sql`${parentChannels.id}`),
         isNull(parentChannels.archivedAt),
+        isNull(parentChannels.deletedAt),
         sql`(${parentChannels.type} = 'channel' OR ${parentChannelHumans.userId} IS NOT NULL)`,
         opts?.channelId ? eq(parentMessages.channelId, opts.channelId) : undefined,
         searchPattern
@@ -7509,7 +8759,7 @@ export async function getFollowedThreads(
             )`
           : undefined,
       ));
-  const regularThreads = await traceQuery(
+  return traceQuery(
     "channels.followed_threads_by_user",
     () => state === "done" || state === "unfollowed"
       ? regularThreadsQuery
@@ -7522,6 +8772,12 @@ export async function getFollowedThreads(
           .limit(opts?.maxRows ?? 101)
       : regularThreadsQuery,
   );
+}
+
+/** The Postgres joint-thread list (local projections of joint threads). */
+async function queryFollowedJointThreads(ctx: FollowedThreadsQueryContext): Promise<FollowedThreadSourceRow[]> {
+  const { serverId, userId, db, traceQuery, guestAccess, state, opts } = ctx;
+  const searchPattern = opts?.q ? `%${opts.q}%` : null;
   const jointThreadRows = await traceQuery(
     "channels.followed_joint_threads_by_user",
     () => db.execute(sql`
@@ -7633,17 +8889,35 @@ export async function getFollowedThreads(
         : sql``}
     `),
   );
-  const threads = [
-    ...regularThreads,
-    ...(jointThreadRows.rows as any[]).map((row) => ({
-      ...row,
-      parentMessageCreatedAt: new Date(row.parentMessageCreatedAt),
-      unfollowedAt: row.unfollowedAt ? new Date(row.unfollowedAt) : null,
-      activityUpperBoundSeq: row.activityUpperBoundSeq == null ? null : Number(row.activityUpperBoundSeq),
-    })),
-  ];
+  return (jointThreadRows.rows as any[]).map((row) => ({
+    ...row,
+    parentMessageCreatedAt: new Date(row.parentMessageCreatedAt),
+    unfollowedAt: row.unfollowedAt ? new Date(row.unfollowedAt) : null,
+    activityUpperBoundSeq: row.activityUpperBoundSeq == null ? null : Number(row.activityUpperBoundSeq),
+  }));
+}
 
-  if (threads.length === 0) return [];
+/** Every follow state, any caller: the Postgres list, v3 stats, the read-state authority read. */
+async function loadFollowedThreadsLegacy(
+  ctx: FollowedThreadsQueryContext,
+  historyCutoff: Date | undefined,
+): Promise<LoadedFollowedThreads> {
+  const { serverId, userId, db, traceQuery, state, opts } = ctx;
+  const regularThreads = await queryFollowedRegularThreads(ctx);
+  const jointThreads = await queryFollowedJointThreads(ctx);
+  let threads = [...regularThreads, ...jointThreads];
+
+  if (await resolveHumanServerRole(serverId, userId, db) === "guest") {
+    const visibility = await Promise.all(threads.map(async (thread) => ({
+      thread,
+      visible: await canUserAccessChannel(thread.parentChannelId, userId, serverId as ServerId, {
+        executor: db,
+      }),
+    })));
+    threads = visibility.filter(({ visible }) => visible).map(({ thread }) => thread);
+  }
+
+  if (threads.length === 0) return { threads: [], statsRows: [], readStateByThread: new Map() };
 
   const statsRows = await getFollowedThreadStatsRows(
     serverId,
@@ -7656,6 +8930,300 @@ export async function getFollowedThreads(
     traceQuery,
     opts?.executor,
   );
+  const readStates = await attachReadState(
+    threads.map((thread) => ({ id: thread.threadChannelId })),
+    userId,
+    db,
+    traceQuery,
+  );
+  return {
+    threads,
+    statsRows,
+    readStateByThread: new Map(readStates.map((readState) => [readState.id, readState])),
+  };
+}
+
+async function readFollowedThreadRwRows(
+  serverId: string,
+  userId: string,
+  traceQuery: DbQueryTracer,
+): Promise<FollowedThreadRwRow[]> {
+  const override = getActivityReadSourceOverride();
+  if (override) return override.followedThreadRows({ serverId, userId, traceQuery });
+  const pool = getRisingWaveInboxPool();
+  if (!pool) throw new RisingWaveNotConfiguredError("followed threads");
+  const read = await traceQuery(
+    RISINGWAVE_FOLLOWED_THREADS_QUERY_NAME,
+    () => queryRisingWaveInbox<FollowedThreadRwRow>(pool, RISINGWAVE_FOLLOWED_THREADS_ROWS_SQL, [serverId, userId]),
+    (queryRead) => ({
+      backend: "risingwave",
+      db_system: "risingwave",
+      rw_followed_threads_view: RISINGWAVE_FOLLOWED_THREADS_VIEW,
+      rows_count: queryRead.result.rows.length,
+      "rw.acquire_wait_ms": Math.round(queryRead.acquireWaitMs),
+      "rw.pool.total_count": queryRead.poolState.rw_pool_total,
+      "rw.pool.idle_count": queryRead.poolState.rw_pool_idle,
+      "rw.pool.waiting_count": queryRead.poolState.rw_pool_waiting,
+    }),
+  );
+  return read.result.rows;
+}
+
+/**
+ * Active follows of a non-guest without search / channel filter / row cap /
+ * executor, from rw_followed_threads_v4 plus three primary-key Postgres reads.
+ *
+ * Authority stays in Postgres: the follow set (a just-followed thread appears
+ * immediately), the parent channel's visibility and name (by distinct parent
+ * channel), and the read cursor. RisingWave supplies what used to cost a random
+ * `messages` read per thread: the parent message, its task and the stats.
+ *
+ * Followed threads RW has no row for yet (CDC lag) take the legacy regular-thread
+ * query restricted to them; joint projections keep the legacy joint query. Both
+ * get v3 stats and the read-state authority read, as before.
+ *
+ * Returns null when the RW read fails (e.g. the view is not deployed yet); the
+ * caller then runs the whole legacy path. That error is never surfaced.
+ */
+async function loadActiveFollowedThreadsFromRisingWave(
+  ctx: FollowedThreadsQueryContext,
+  historyCutoff: Date | undefined,
+): Promise<LoadedFollowedThreads | null> {
+  const { serverId, userId, db, traceQuery } = ctx;
+  // Independent reads: RW in flight while Postgres resolves the follow set. The
+  // settled wrapper keeps an RW rejection from going unhandled if Postgres throws.
+  const rwRead = readFollowedThreadRwRows(serverId, userId, traceQuery).then(
+    (rows) => ({ ok: true as const, rows }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+  const followSet = await traceQuery(
+    "channels.followed_thread_ids_by_user",
+    () => db.execute(sql`
+      SELECT tf.thread_channel_id::text AS "threadChannelId"
+      FROM thread_follows tf
+      JOIN channels c
+        ON c.id = tf.thread_channel_id
+       AND c.type = 'thread'
+       AND c.deleted_at IS NULL
+       AND c.server_id = ${serverId}
+      WHERE tf.follower_type = 'user'
+        AND tf.follower_id = ${userId}
+        AND tf.done_at IS NULL
+        AND tf.unfollowed_at IS NULL
+    `),
+    (result) => ({ followed_threads_count: result.rows.length }),
+  );
+  const rw = await rwRead;
+  if (!rw.ok) {
+    addTraceEvent("followed_threads.rw_rows.failed", {
+      backend: "risingwave",
+      rw_followed_threads_view: RISINGWAVE_FOLLOWED_THREADS_VIEW,
+      error_class: errorClassOf(rw.error),
+    });
+    return null;
+  }
+  const followedIds = (followSet.rows as Array<{ threadChannelId: string }>).map((row) => row.threadChannelId);
+
+  // Partition the follow set by what RW knows about each thread.
+  const rwByThread = new Map(rw.rows.map((row) => [row.threadChannelId, row]));
+  // Joint projections are served like regular threads, with this server's local
+  // joint channel as the parent channel (v5's joint_parent_channel_id).
+  const rwRegular: FollowedThreadRwRow[] = [];
+  const jointThreadIds = new Set<string>();
+  const missingIds: string[] = [];
+  let nonRegularCount = 0;
+  for (const threadChannelId of followedIds) {
+    const row = rwByThread.get(threadChannelId);
+    if (!row) {
+      // CDC lag: followed in Postgres, not in the view yet.
+      missingIds.push(threadChannelId);
+    } else if (row.jointProjection) {
+      if (row.parentMessageId == null || row.parentMessageCreatedAt == null) {
+        // The canonical parent message has not reached RW yet: CDC lag.
+        missingIds.push(threadChannelId);
+      } else if (row.jointParentChannelId == null) {
+        // No active projection of the canonical parent channel in this server:
+        // not visible here (the Postgres joint query's parent_projection join).
+        nonRegularCount += 1;
+      } else {
+        jointThreadIds.add(threadChannelId);
+        rwRegular.push({ ...row, parentChannelId: row.jointParentChannelId });
+      }
+    } else if (row.parentMessageId == null || (row.parentServerId != null && row.parentServerId !== serverId)) {
+      // No parent message, or a parent in another server: never a thread of
+      // this server's channels.
+      nonRegularCount += 1;
+    } else if (row.parentServerId == null || row.parentChannelId == null || row.parentMessageCreatedAt == null) {
+      // The parent message (or its channel) has not reached RW yet: CDC lag.
+      missingIds.push(threadChannelId);
+    } else {
+      rwRegular.push(row);
+    }
+  }
+
+  // Visibility and names for the RW regular threads, authoritative in Postgres
+  // and per distinct parent channel. Same rule as the legacy regular query's
+  // WHERE: this server, not archived, not deleted, public or a member.
+  const parentChannelIds = [...new Set(rwRegular.map((row) => row.parentChannelId!))];
+  const parentChannelRows = parentChannelIds.length === 0 ? [] : (await traceQuery(
+    "channels.followed_threads.parent_channels",
+    () => db.execute(sql`
+      SELECT
+        c.id::text AS "id",
+        c.name AS "name",
+        c.type AS "type",
+        c.server_id::text AS "serverId",
+        c.archived_at AS "archivedAt",
+        c.deleted_at AS "deletedAt",
+        (ch.user_id IS NOT NULL) AS "member"
+      FROM channels c
+      LEFT JOIN channel_humans ch
+        ON ch.channel_id = c.id
+       AND ch.user_id = ${userId}
+      WHERE c.id IN (${sql.join(parentChannelIds.map((id) => sql`${id}::uuid`), sql`, `)})
+    `),
+    (result) => ({ parent_channels_count: parentChannelIds.length, rows_count: result.rows.length }),
+  )).rows as Array<{
+    id: string;
+    name: string;
+    type: string;
+    serverId: string;
+    archivedAt: unknown;
+    deletedAt: unknown;
+    member: boolean;
+  }>;
+  const visibleParentById = new Map(
+    parentChannelRows
+      .filter((channel) => channel.serverId === serverId
+        && channel.archivedAt == null
+        && channel.deletedAt == null
+        && (channel.type === "channel" || channel.member))
+      .map((channel) => [channel.id, channel]),
+  );
+  // A joint thread's parent must be the local joint channel, and (joint channels
+  // are not public) the user a member of it: the joint query's local_parent /
+  // parent_member rule.
+  const rwVisible = rwRegular.filter((row) => {
+    const parentChannel = visibleParentById.get(row.parentChannelId!);
+    if (!parentChannel) return false;
+    return !jointThreadIds.has(row.threadChannelId) || parentChannel.type === "joint";
+  });
+  const rwThreads: FollowedThreadSourceRow[] = rwVisible.map((row) => {
+    const parentChannel = visibleParentById.get(row.parentChannelId!)!;
+    return {
+      threadChannelId: row.threadChannelId,
+      storageThreadChannelId: row.storageThreadChannelId,
+      parentMessageId: row.parentMessageId,
+      parentChannelId: row.parentChannelId!,
+      parentChannelName: parentChannel.name,
+      parentChannelType: parentChannel.type,
+      parentMessageContent: row.parentMessageContent ?? "",
+      parentMessageCreatedAt: new Date(row.parentMessageCreatedAt!),
+      parentMessageSenderType: row.parentMessageSenderType ?? "",
+      parentMessageSenderId: row.parentMessageSenderId ?? "",
+      parentMessageSeq: row.parentMessageSeq,
+      taskId: row.taskId,
+      taskNumber: row.taskNumber == null ? null : Number(row.taskNumber),
+      taskStatus: row.taskStatus,
+      taskClaimedByType: row.taskClaimedByType,
+      taskClaimedById: row.taskClaimedById,
+      doneAt: null,
+      unfollowedAt: null,
+      activityUpperBoundSeq: null,
+    };
+  });
+
+  // Threads RW has not caught up with yet (CDC lag, seconds) are left out, not
+  // filled from Postgres: they show up on the next read. rw_missing_threads
+  // below keeps them visible in traces.
+  addTraceEvent("followed_threads.source_selected", {
+    followed_threads_source: "rw_v5",
+    rw_followed_threads_view: RISINGWAVE_FOLLOWED_THREADS_VIEW,
+    followed_threads_count: followedIds.length,
+    rw_rows_count: rw.rows.length,
+    rw_regular_threads: rwRegular.length,
+    rw_hidden_threads: rwRegular.length - rwVisible.length,
+    rw_non_regular_threads: nonRegularCount,
+    rw_missing_threads: missingIds.length,
+    joint_threads: rwVisible.filter((row) => jointThreadIds.has(row.threadChannelId)).length,
+  });
+
+  // Stats: the RW row itself (no second RW read).
+  const rwStatsRows: FollowedThreadStatsRow[] = rwVisible.map((row) => ({
+    threadChannelId: row.threadChannelId,
+    replyCount: row.replyCount,
+    lastReplyAt: row.lastReplyAt,
+    lastReplyMessageId: row.lastReplyMessageId,
+    lastReplySeqExact: row.lastReplySeqExact,
+    lastReplyContent: row.lastReplyContent,
+    lastReplySenderType: row.lastReplySenderType,
+    lastReplySenderId: row.lastReplySenderId,
+    firstUnreadMessageId: row.firstUnreadMessageId,
+    unreadCount: row.unreadCount,
+  }));
+  // Read state: the cursor by primary key, plus the RW latest message as the
+  // content frontier, through the same snapshot mapping as the authority read
+  // (fetchReadStateAuthorityRows).
+  const rwThreadIds = rwVisible.map((row) => row.threadChannelId);
+  const cursorRows = rwThreadIds.length === 0 ? [] : (await traceQuery(
+    "channels.followed_threads.read_cursors",
+    () => db.execute(sql`
+      SELECT
+        channel_id::text AS "channelId",
+        read_state_version::int AS "readStateVersion",
+        last_read_seq::text AS "maxReadSeq"
+      FROM user_channel_read_cursors
+      WHERE user_id = ${userId}
+        AND channel_id IN (${sql.join(rwThreadIds.map((id) => sql`${id}::uuid`), sql`, `)})
+    `),
+    (result) => ({ input_count: rwThreadIds.length, read_cursor_rows_count: result.rows.length }),
+  )).rows as Array<{ channelId: string; readStateVersion: number; maxReadSeq: string }>;
+  const cursorByThread = new Map(cursorRows.map((row) => [row.channelId, row]));
+  const readStateByThread = new Map<string, ReadStateSnapshot>();
+  for (const row of rwVisible) {
+    const cursor = cursorByThread.get(row.threadChannelId);
+    readStateByThread.set(row.threadChannelId, readStateSnapshotFromAuthorityRow({
+      channelId: row.threadChannelId,
+      readCursorPresent: cursor !== undefined,
+      readStateVersion: cursor?.readStateVersion ?? null,
+      maxReadSeq: cursor?.maxReadSeq ?? null,
+      latestActivityMessageId: row.lastReplyMessageId,
+      latestActivitySeq: row.lastReplySeqExact,
+      doneFrontierSeq: row.lastReplySeqExact ?? row.parentMessageSeq,
+    }));
+  }
+
+  return {
+    threads: rwThreads,
+    statsRows: rwStatsRows,
+    readStateByThread,
+  };
+}
+
+/** Get all threads a user participates in, with unread counts and parent message info. */
+export async function getFollowedThreads(
+  serverId: string,
+  userId: string,
+  historyCutoff?: Date,
+  opts?: FollowedThreadsOptions,
+): Promise<FollowedThread[]> {
+  const db = opts?.executor ?? getDb();
+  const traceQuery = opts?.traceQuery ?? untracedDbQuery;
+  const guestAccess = await guestInboxChannelIds(serverId, userId, db);
+  const state = opts?.state ?? "active";
+  const ctx: FollowedThreadsQueryContext = { serverId, userId, db, traceQuery, guestAccess, state, opts };
+
+  const legacyReason = followedThreadsLegacyReason(ctx);
+  let loaded = legacyReason === null ? await loadActiveFollowedThreadsFromRisingWave(ctx, historyCutoff) : null;
+  if (!loaded) {
+    addTraceEvent("followed_threads.source_selected", {
+      followed_threads_source: "legacy",
+      legacy_reason: legacyReason ?? "rw_failed",
+    });
+    loaded = await loadFollowedThreadsLegacy(ctx, historyCutoff);
+  }
+  const { threads, statsRows, readStateByThread } = loaded;
+  if (threads.length === 0) return [];
 
   const statsMap = new Map<string, {
     replyCount: number;
@@ -7709,13 +9277,6 @@ export async function getFollowedThreads(
     for (const u of userRows) claimantNameMap.set(u.id, u.displayName || u.name);
   }
 
-  const readStates = await attachReadState(
-    threads.map((thread) => ({ id: thread.threadChannelId })),
-    userId,
-    db,
-  );
-  const readStateByThread = new Map(readStates.map((state) => [state.id, state]));
-
   const externalLatestMessageIds = threads.flatMap((thread) => {
     const stats = statsMap.get(thread.threadChannelId);
     const senderType = stats?.lastReplySenderType ?? thread.parentMessageSenderType;
@@ -7738,10 +9299,17 @@ export async function getFollowedThreads(
     }
   }
 
+  const historyCutoffMs = historyCutoff?.getTime();
   const result = threads.map(t => {
     const stats = statsMap.get(t.threadChannelId);
     const readState = readStateByThread.get(t.threadChannelId);
-    const latestActivityContent = stats?.lastReplyContent ?? t.parentMessageContent;
+    // Free-plan history cutoff: the counts and lastReplyAt are served as-is (a
+    // product decision); only the content of a latest reply older than the
+    // cutoff is withheld. The parent preview is not cut (it never was).
+    const latestReplyBeforeCutoff = historyCutoffMs !== undefined
+      && stats?.lastReplyAt != null
+      && new Date(stats.lastReplyAt).getTime() < historyCutoffMs;
+    const latestActivityContent = latestReplyBeforeCutoff ? "" : stats?.lastReplyContent ?? t.parentMessageContent;
     return {
       threadChannelId: t.threadChannelId,
       parentMessageId: t.parentMessageId!,
@@ -8447,21 +10015,13 @@ export const __testInboxPgFallbackTimeout = {
 };
 
 const UUID_TEXT_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const RISINGWAVE_LEGACY_UNREAD_CONTRACT_VERSION = 1;
-const RISINGWAVE_CHANNEL_UNREAD_CONTRACT_VERSION = 2;
-const RISINGWAVE_CHANNEL_UNREAD_COUNTS_VIEW = "rw_channel_unread_counts_v2";
 
-type InboxTraceBackend = "rw_mv" | "pg_legacy" | "pg_serving_rows";
+/** pg_legacy: the canonical inline Postgres read (search, guest, authority transactions). */
+type InboxTraceBackend = "rw_mv" | "pg_legacy";
 type InboxTraceRoute = RisingWaveInboxTraceRoute;
-type InboxFallbackReason =
-  | "none"
-  | "no_rw_env"
-  | "history_cutoff"
-  | "joint_storage"
-  | "rw_error"
-  | "read_frontier_mismatch"
-  | "breaker_open"
-  | "pglite_dev";
+// RisingWave is a hard dependency, so no inbox read is ever a fallback. The
+// trace key stays for the consumed trace contract.
+type InboxFallbackReason = "none";
 type InboxTraceNegativeEvidenceBucket =
   | "does_not_prove_fact_recorded_or_ui_rendered"
   | "does_not_prove_fact_absent_or_message_ineligible"
@@ -8472,57 +10032,33 @@ type InboxBackendSelection = {
   fallbackReason: InboxFallbackReason;
   contractVersion?: number;
 };
-type InboxPostgresSelectionReason =
-  | "risingwave_result"
-  | "rfc056_guard_off_uses_canonical_pg"
-  | "rfc056_shadow_uses_canonical_pg"
-  | "read_frontier_mismatch_uses_canonical_pg"
-  | "history_cutoff_uses_serving_rows"
-  | "human_activity_mute_uses_serving_rows"
-  | "legacy_inline_policy_pending_serving_rows_migration";
+// Test seam: pool/query injection ONLY. It carries no routing or fallback
+// semantics — those died with the fail-soft teardown (2026-09-21) and must
+// not grow back here.
+let risingWaveInboxTestOverrides: {
+  getPool?: typeof getRisingWavePool;
+  query?: typeof queryRisingWave;
+} = {};
 
-type RisingWaveInboxFailSoftReason = "connection_acquire_error" | "query_error" | "breaker_open";
-
-type RisingWaveInboxAttempt<T> = {
-  result: T | null;
-  fallbackReason?: InboxFallbackReason;
-  failSoftReason?: RisingWaveInboxFailSoftReason;
-  contractVersion?: number;
-  error?: unknown;
+export const __testRisingWaveInbox = {
+  set(overrides: typeof risingWaveInboxTestOverrides) {
+    risingWaveInboxTestOverrides = { ...risingWaveInboxTestOverrides, ...overrides };
+  },
+  reset() {
+    risingWaveInboxTestOverrides = {};
+  },
 };
-
-type RisingWaveInboxFailSoftDeps = {
-  getPool: typeof getRisingWavePool;
-  query: typeof queryRisingWave;
-  getRfc056ServingMode: typeof getRisingWaveInboxRfc056ServingMode;
-  getInboxItemsServingVersion: typeof getRisingWaveInboxItemsServingVersionForRequest;
-  getJointStorageServerIds: typeof getJointStorageServerIdsForUser;
-  nowMs: () => number;
-  random: () => number;
-};
-
-const defaultRisingWaveInboxFailSoftDeps: RisingWaveInboxFailSoftDeps = {
-  getPool: getRisingWavePool,
-  query: queryRisingWave,
-  getRfc056ServingMode: getRisingWaveInboxRfc056ServingMode,
-  getInboxItemsServingVersion: getRisingWaveInboxItemsServingVersionForRequest,
-  getJointStorageServerIds: getJointStorageServerIdsForUser,
-  nowMs: () => performance.now(),
-  random: () => randomInt(0, 1_000_000) / 1_000_000,
-};
-
-let risingWaveInboxFailSoftDeps = defaultRisingWaveInboxFailSoftDeps;
 
 function getRisingWaveInboxPool() {
-  return risingWaveInboxFailSoftDeps.getPool();
+  return (risingWaveInboxTestOverrides.getPool ?? getRisingWavePool)();
 }
 
 function queryRisingWaveInbox<T extends QueryResultRow = QueryResultRow>(
-  pool: Parameters<typeof queryRisingWave>[0],
+  pool: NonNullable<ReturnType<typeof getRisingWavePool>>,
   queryText: string,
   values?: unknown[],
 ) {
-  return risingWaveInboxFailSoftDeps.query<T>(pool, queryText, values);
+  return (risingWaveInboxTestOverrides.query ?? queryRisingWave)<T>(pool, queryText, values);
 }
 
 type RisingWaveInboxThreadReplyCountContractRow = {
@@ -8545,6 +10081,15 @@ function inboxTraceAttrs(
     inbox_route: route,
     inbox_fallback_reason: fallbackReason,
     inbox_contract_version: contractVersion,
+    // db_system follows the backend. Without this, successful RW reads land as
+    // db_system=postgresql (the shared route tracer's default — one tracer
+    // instance serves both PG and RW queries in a request, so the per-call
+    // attrs are the only place the backend is known). Failures already set
+    // db_system=risingwave via risingWaveInboxFailureAttrs; during the
+    // 2026-09-19 incident this asymmetry made "successes counted by
+    // db_system=risingwave" structurally zero regardless of path health.
+    "db.system": backend === "rw_mv" ? "risingwave" : "postgresql",
+    db_system: backend === "rw_mv" ? "risingwave" : "postgresql",
   };
 }
 
@@ -8561,55 +10106,6 @@ function recordInboxBackendSelected(
   });
 }
 
-function inboxPostgresSelectionTraceAttrs(reason: InboxPostgresSelectionReason): TraceAttributes {
-  return {
-    "inbox.postgres_selection_reason": reason,
-    inbox_postgres_selection_reason: reason,
-    ...(reason === "legacy_inline_policy_pending_serving_rows_migration"
-      ? {
-        "inbox.legacy_retire_gate": "pending_serving_rows_parity",
-        inbox_legacy_retire_gate: "pending_serving_rows_parity",
-      }
-      : {}),
-  };
-}
-
-function recordInboxBackendFailed(
-  backend: InboxTraceBackend,
-  route: InboxTraceRoute,
-  error: unknown,
-  contractVersion?: number,
-  terminalStatus?: 500,
-) {
-  if (backend === "rw_mv") {
-    recordRisingWaveInboxBackendFailed({
-      route,
-      error,
-      contractVersion,
-      terminalStatus,
-      breakerState: getRisingWaveInboxBreakerTraceState(),
-      queryName: getRisingWaveInboxQueryName(route),
-    });
-    return;
-  }
-  addTraceEvent("inbox.backend.failed", {
-    ...inboxTraceAttrs(backend, route, "rw_error", contractVersion),
-    error_class: error instanceof Error ? error.name : typeof error,
-  });
-}
-
-const RISINGWAVE_INBOX_BREAKER_MIN_MS = 5_000;
-const RISINGWAVE_INBOX_BREAKER_MAX_MS = 15_000;
-
-const risingWaveInboxBreaker = {
-  openedAtMs: 0,
-  openUntilMs: 0,
-  openedCount: 0,
-  halfOpenProbeInFlight: false,
-  lastRoute: null as InboxTraceRoute | null,
-  lastReason: null as RisingWaveInboxFailSoftReason | null,
-};
-
 function getRisingWavePoolTraceAttrs(): TraceAttributes {
   const state = getRisingWavePoolState(getRisingWaveInboxPool());
   const timeoutMs = getRisingWaveConnectionTimeoutMillis();
@@ -8622,454 +10118,6 @@ function getRisingWavePoolTraceAttrs(): TraceAttributes {
     timeout_ms: timeoutMs,
     ...state,
   };
-}
-
-function getRisingWaveInboxQueryName(route: InboxTraceRoute): string {
-  if (route === "channel_unread") return "channels.unread_counts_by_user";
-  if (route === "sidebar_summary") return "servers.sidebar_unread_counts_by_user";
-  return "channels.inbox_items_by_user";
-}
-
-function getRisingWaveInboxBreakerState(nowMs = risingWaveInboxFailSoftDeps.nowMs()): "closed" | "open" | "half_open" {
-  if (risingWaveInboxBreaker.openUntilMs > nowMs) return "open";
-  if (risingWaveInboxBreaker.openUntilMs > 0) return "half_open";
-  return "closed";
-}
-
-function getRisingWaveInboxBreakerTraceState(nowMs = risingWaveInboxFailSoftDeps.nowMs()): RisingWaveBreakerState {
-  return getRisingWaveInboxBreakerState(nowMs);
-}
-
-function getRisingWaveInboxBreakerTraceAttrs(nowMs = risingWaveInboxFailSoftDeps.nowMs()): TraceAttributes {
-  return {
-    "rw.breaker.state": getRisingWaveInboxBreakerState(nowMs),
-    "rw.breaker.opened_count": risingWaveInboxBreaker.openedCount,
-    "rw.breaker.half_open_probe_in_flight": risingWaveInboxBreaker.halfOpenProbeInFlight,
-    "rw.breaker.open_remaining_ms": Math.max(Math.ceil(risingWaveInboxBreaker.openUntilMs - nowMs), 0),
-    "rw.breaker.last_route": risingWaveInboxBreaker.lastRoute,
-    "rw.breaker.last_reason": risingWaveInboxBreaker.lastReason,
-  };
-}
-
-function openRisingWaveInboxBreaker(
-  route: InboxTraceRoute,
-  reason: Exclude<RisingWaveInboxFailSoftReason, "breaker_open">,
-  contractVersion?: number,
-  error?: unknown,
-) {
-  const nowMs = risingWaveInboxFailSoftDeps.nowMs();
-  const openForMs = RISINGWAVE_INBOX_BREAKER_MIN_MS
-    + Math.floor(risingWaveInboxFailSoftDeps.random() * (RISINGWAVE_INBOX_BREAKER_MAX_MS - RISINGWAVE_INBOX_BREAKER_MIN_MS + 1));
-  risingWaveInboxBreaker.openedAtMs = nowMs;
-  risingWaveInboxBreaker.openUntilMs = nowMs + openForMs;
-  risingWaveInboxBreaker.openedCount += 1;
-  risingWaveInboxBreaker.halfOpenProbeInFlight = false;
-  risingWaveInboxBreaker.lastRoute = route;
-  risingWaveInboxBreaker.lastReason = reason;
-  addTraceEvent("inbox.rw.breaker.opened", {
-    ...inboxTraceAttrs("rw_mv", route, "rw_error", contractVersion),
-    ...(error ? risingWaveInboxFailureAttrs({
-      route,
-      error,
-      contractVersion,
-      queryName: getRisingWaveInboxQueryName(route),
-      breakerState: getRisingWaveInboxBreakerTraceState(nowMs),
-    }) : {}),
-    "rw.failsoft_reason": reason,
-    "rw.breaker.open_for_ms": openForMs,
-    "rw.query_name": getRisingWaveInboxQueryName(route),
-    "rw.fallback_outcome": "pg_selected",
-    ...getRisingWavePoolTraceAttrs(),
-    ...getRisingWaveInboxBreakerTraceAttrs(nowMs),
-  });
-}
-
-function closeRisingWaveInboxBreaker(route: InboxTraceRoute, contractVersion?: number) {
-  if (risingWaveInboxBreaker.openUntilMs === 0) return;
-  const previousState = getRisingWaveInboxBreakerState();
-  risingWaveInboxBreaker.openUntilMs = 0;
-  risingWaveInboxBreaker.halfOpenProbeInFlight = false;
-  addTraceEvent("inbox.rw.breaker.closed", {
-    ...inboxTraceAttrs("rw_mv", route, "none", contractVersion),
-    "rw.breaker.previous_state": previousState,
-    ...getRisingWavePoolTraceAttrs(),
-    ...getRisingWaveInboxBreakerTraceAttrs(),
-  });
-}
-
-function shouldBypassRisingWaveInboxRead(route: InboxTraceRoute, contractVersion?: number): boolean {
-  const nowMs = risingWaveInboxFailSoftDeps.nowMs();
-  const breakerState = getRisingWaveInboxBreakerState(nowMs);
-  if (breakerState === "closed") return false;
-  if (breakerState === "half_open" && !risingWaveInboxBreaker.halfOpenProbeInFlight) {
-    risingWaveInboxBreaker.halfOpenProbeInFlight = true;
-    addTraceEvent("inbox.rw.breaker.half_open_probe_started", {
-      ...inboxTraceAttrs("rw_mv", route, "none", contractVersion),
-      "rw.query_name": getRisingWaveInboxQueryName(route),
-      ...getRisingWavePoolTraceAttrs(),
-      ...getRisingWaveInboxBreakerTraceAttrs(nowMs),
-    });
-    return false;
-  }
-  addTraceEvent("inbox.rw.failsoft.fallback", {
-    ...inboxTraceAttrs("pg_legacy", route, "breaker_open", contractVersion),
-    reason: "breaker_open",
-    "rw.failsoft_reason": "breaker_open" satisfies RisingWaveInboxFailSoftReason,
-    "rw.query_name": getRisingWaveInboxQueryName(route),
-    "rw.fallback_outcome": "pg_selected",
-    ...getRisingWavePoolTraceAttrs(),
-    ...getRisingWaveInboxBreakerTraceAttrs(nowMs),
-  });
-  return true;
-}
-
-function getRisingWaveFallbackReasonForTrace(
-  attempt: RisingWaveInboxAttempt<unknown>,
-): "rw_error" | "breaker_open" | null {
-  if (attempt.failSoftReason === "breaker_open") return "breaker_open";
-  if (attempt.fallbackReason === "rw_error") return "rw_error";
-  return null;
-}
-
-async function withRisingWaveInboxFallbackTrace<T>(
-  route: InboxTraceRoute,
-  queryName: string,
-  attempt: RisingWaveInboxAttempt<unknown>,
-  readPostgres: () => Promise<T>,
-): Promise<T> {
-  const fallbackReason = getRisingWaveFallbackReasonForTrace(attempt);
-  if (!fallbackReason) return readPostgres();
-
-  const startedAtMs = risingWaveInboxFailSoftDeps.nowMs();
-  try {
-    const result = await readPostgres();
-    recordRisingWaveInboxFallbackCompleted({
-      route,
-      error: attempt.error,
-      contractVersion: attempt.contractVersion,
-      queryName,
-      breakerState: getRisingWaveInboxBreakerTraceState(),
-      fallbackReason,
-      fallbackOutcome: "success",
-      fallbackLatencyMs: Math.round(risingWaveInboxFailSoftDeps.nowMs() - startedAtMs),
-    });
-    return result;
-  } catch (error) {
-    recordRisingWaveInboxFallbackCompleted({
-      route,
-      error: attempt.error,
-      contractVersion: attempt.contractVersion,
-      queryName,
-      breakerState: getRisingWaveInboxBreakerTraceState(),
-      fallbackReason,
-      fallbackOutcome: "error",
-      fallbackLatencyMs: Math.round(risingWaveInboxFailSoftDeps.nowMs() - startedAtMs),
-    });
-    throw error;
-  }
-}
-
-async function tryReadRisingWaveInboxWithFailSoft<T>(
-  route: InboxTraceRoute,
-  contractVersion: number | undefined,
-  readRisingWave: () => Promise<T | null>,
-): Promise<RisingWaveInboxAttempt<T>> {
-  if (shouldBypassRisingWaveInboxRead(route, contractVersion)) {
-    return {
-      result: null,
-      fallbackReason: "breaker_open",
-      failSoftReason: "breaker_open",
-      contractVersion,
-    };
-  }
-  try {
-    const result = await readRisingWave();
-    closeRisingWaveInboxBreaker(route, contractVersion);
-    return { result, contractVersion };
-  } catch (error) {
-    const connectionFailure = isRisingWaveInboxFailSoftError(error);
-    // Inbox-item serving depends on additive versioned read-frontier relations.
-    // During DDL-first rollout/rollback, schema absence and other RW query
-    // failures must select the canonical PG response rather than return a 500
-    // or mix old/new schema state. The legacy unread/sidebar routes retain
-    // their stricter query-error behavior.
-    const canFailSoft = connectionFailure
-      || route === "all"
-      || route === "unread"
-      || route === "mentions"
-      || route === "unread_mentions";
-    const failSoftReason: Exclude<RisingWaveInboxFailSoftReason, "breaker_open"> = connectionFailure
-      ? "connection_acquire_error"
-      : "query_error";
-    recordInboxBackendFailed("rw_mv", route, error, contractVersion, canFailSoft ? undefined : 500);
-    if (!canFailSoft) {
-      risingWaveInboxBreaker.halfOpenProbeInFlight = false;
-      throw error;
-    }
-    openRisingWaveInboxBreaker(route, failSoftReason, contractVersion, error);
-    recordRisingWaveInboxFailSoftFallback(route, failSoftReason, contractVersion, error);
-    return {
-      result: null,
-      fallbackReason: "rw_error",
-      failSoftReason,
-      contractVersion,
-      error,
-    };
-  }
-}
-
-export const __testRisingWaveInboxFailSoft = {
-  reset() {
-    risingWaveInboxFailSoftDeps = defaultRisingWaveInboxFailSoftDeps;
-    risingWaveInboxBreaker.openedAtMs = 0;
-    risingWaveInboxBreaker.openUntilMs = 0;
-    risingWaveInboxBreaker.openedCount = 0;
-    risingWaveInboxBreaker.halfOpenProbeInFlight = false;
-    risingWaveInboxBreaker.lastRoute = null;
-    risingWaveInboxBreaker.lastReason = null;
-  },
-  setDeps(deps: Partial<RisingWaveInboxFailSoftDeps>) {
-    risingWaveInboxFailSoftDeps = { ...risingWaveInboxFailSoftDeps, ...deps };
-  },
-  getBreakerState(nowMs?: number) {
-    return getRisingWaveInboxBreakerState(nowMs);
-  },
-  validateReadFrontier(
-    rows: readonly InboxPolicySqlRow[],
-    primary: InboxReadAuthority,
-  ) {
-    return validateRisingWaveInboxReadFrontier(rows, primary);
-  },
-  read<T>(
-    route: InboxTraceRoute,
-    contractVersion: number | undefined,
-    readRisingWave: () => Promise<T | null>,
-  ) {
-    return tryReadRisingWaveInboxWithFailSoft(route, contractVersion, readRisingWave);
-  },
-  async readWithPostgresFallback<T>(
-    route: InboxTraceRoute,
-    contractVersion: number | undefined,
-    readRisingWave: () => Promise<T | null>,
-    readPostgres: (attempt: RisingWaveInboxAttempt<T>) => Promise<T>,
-  ) {
-    const attempt = await tryReadRisingWaveInboxWithFailSoft(route, contractVersion, readRisingWave);
-    if (attempt.result !== null) return { backend: "rw_mv" as const, result: attempt.result, attempt };
-    return {
-      backend: "pg_legacy" as const,
-      result: await withRisingWaveInboxFallbackTrace(
-        route,
-        getRisingWaveInboxQueryName(route),
-        attempt,
-        () => readPostgres(attempt),
-      ),
-      attempt,
-    };
-  },
-  async callInboxItemsWrapper(
-    serverId: string,
-    userId: string,
-    opts?: Parameters<typeof getInboxItems>[2],
-  ) {
-    return getInboxItems(serverId, userId, opts);
-  },
-  async callUnreadCountsWrapper(
-    serverId: string,
-    userId: string,
-    historyCutoff: Date | undefined,
-    opts?: UnreadCountOptions,
-  ) {
-    return getUnreadCounts(serverId, userId, historyCutoff, opts);
-  },
-  async callSidebarUnreadSummaryCountsWrapper(
-    servers: SidebarUnreadSummaryInput[],
-    userId: string,
-    opts?: SidebarUnreadSummaryOptions,
-  ) {
-    return getSidebarUnreadSummaryCounts(servers, userId, opts);
-  },
-};
-
-function recordRisingWaveInboxFailSoftFallback(
-  route: InboxTraceRoute,
-  reason: RisingWaveInboxFailSoftReason,
-  contractVersion?: number,
-  error?: unknown,
-) {
-  addTraceEvent("inbox.rw.failsoft.fallback", {
-    ...inboxTraceAttrs("pg_legacy", route, reason === "breaker_open" ? "breaker_open" : "rw_error", contractVersion),
-    reason: reason === "breaker_open" ? "breaker_open" : "rw_error",
-    ...(error ? risingWaveInboxFailureAttrs({
-      route,
-      error,
-      contractVersion,
-      queryName: getRisingWaveInboxQueryName(route),
-      breakerState: getRisingWaveInboxBreakerTraceState(),
-    }) : {}),
-    "rw.failsoft_reason": reason,
-    "rw.query_name": getRisingWaveInboxQueryName(route),
-    "rw.fallback_outcome": "pg_selected",
-    ...getRisingWavePoolTraceAttrs(),
-    ...getRisingWaveInboxBreakerTraceAttrs(),
-  });
-}
-
-function recordRisingWaveInboxThreadReplyCountNullContractViolation(
-  rows: readonly RisingWaveInboxThreadReplyCountContractRow[],
-  opts: {
-    filter: InboxFilter;
-    servedVersion: RisingWaveInboxItemsServingVersion;
-    requestedVersion: RisingWaveInboxItemsServingVersion;
-    forcedV2ForHistoryCutoff: boolean;
-    historyCutoff: boolean;
-  },
-) {
-  const nullThreadReplyCountRows = rows.filter((row) =>
-    row.kind === "thread" && row.replyCount == null
-  ).length;
-  if (nullThreadReplyCountRows === 0) return;
-
-  addTraceEvent("inbox.rw.thread_reply_count_null_contract_violation", {
-    ...inboxTraceAttrs("rw_mv", opts.filter, "none", opts.servedVersion),
-    state: "contract_violation",
-    contract: "thread_reply_count_non_null",
-    violated_field: "reply_count",
-    target_kind: "thread",
-    rw_inbox_items_version: opts.servedVersion,
-    rw_inbox_items_requested_version: opts.requestedVersion,
-    rw_inbox_items_version_forced: opts.forcedV2ForHistoryCutoff,
-    rw_inbox_items_version_force_reason: opts.forcedV2ForHistoryCutoff ? "history_cutoff" : "none",
-    rw_inbox_items_serving_view: getRisingWaveInboxItemsServingView(opts.servedVersion),
-    history_cutoff_present: opts.historyCutoff,
-    rows_count: rows.length,
-    null_thread_reply_count_rows: nullThreadReplyCountRows,
-  });
-}
-
-function inboxTargetTraceJoinKey(receiverType: "user" | "agent", receiverId: string, sourceChannelId: string) {
-  return `${receiverType}:${receiverId}:${sourceChannelId}`;
-}
-
-function recordInboxServingRowsRead(
-  rows: readonly InboxPolicySqlRow[],
-  opts: { receiverType: "user"; receiverId: string; filter: InboxFilter; limit: number; offset: number },
-) {
-  addTraceEvent("inbox.serving_row.read.page", {
-    "inbox.trace_contract_version": 1,
-    filter: opts.filter,
-    limit: opts.limit,
-    offset: opts.offset,
-    rows_count: rows.length,
-    negative_evidence_bucket: "does_not_prove_fact_recorded_or_ui_rendered" satisfies InboxTraceNegativeEvidenceBucket,
-  });
-  for (const row of rows) {
-    const sourceChannelId = typeof row.sourceChannelId === "string"
-      ? row.sourceChannelId
-      : typeof row.channelId === "string"
-        ? row.channelId
-        : typeof row.threadChannelId === "string"
-          ? row.threadChannelId
-          : "";
-    addTraceEvent("inbox.serving_row.read", {
-      "inbox.trace_contract_version": 1,
-      "inbox.trace_join_key": sourceChannelId
-        ? inboxTargetTraceJoinKey(opts.receiverType, opts.receiverId, sourceChannelId)
-        : `${opts.receiverType}:${opts.receiverId}:unknown`,
-      receiver_type: opts.receiverType,
-      receiver_id: opts.receiverId,
-      source_channel_id: sourceChannelId,
-      target_kind: row.kind ?? "unknown",
-      latest_notified_seq: row.latestNotifiedSeq ?? null,
-      first_unread_seq: row.firstUnreadSeq ?? null,
-      unread_count: row.unreadCount ?? 0,
-      has_any_mention: row.hasAnyMention === true || row.hasMention === true,
-      state: "row_returned",
-      negative_evidence_bucket: "does_not_prove_fact_recorded_or_ui_rendered" satisfies InboxTraceNegativeEvidenceBucket,
-    });
-  }
-}
-
-function recordInboxReadRebuildRequested(
-  userId: string,
-  rows: readonly { channelId: string }[],
-) {
-  addTraceEvent("inbox.serving_row.rebuild.requested", {
-    "inbox.trace_contract_version": 1,
-    receiver_type: "user",
-    receiver_id: userId,
-    targets_count: rows.length,
-    state: rows.length > 0 ? "read_cursor_advanced" : "no_active_inbox_rows",
-    negative_evidence_bucket: "does_not_prove_fact_absent_or_message_ineligible" satisfies InboxTraceNegativeEvidenceBucket,
-  });
-  for (const row of rows) {
-    addTraceEvent("inbox.serving_row.rebuild.target", {
-      "inbox.trace_contract_version": 1,
-      "inbox.trace_join_key": inboxTargetTraceJoinKey("user", userId, row.channelId),
-      receiver_type: "user",
-      receiver_id: userId,
-      source_channel_id: row.channelId,
-      state: "read_cursor_advanced",
-      negative_evidence_bucket: "does_not_prove_fact_absent_or_message_ineligible" satisfies InboxTraceNegativeEvidenceBucket,
-    });
-  }
-}
-
-function recordInboxMuteStateTrace(
-  eventName: "inbox.mute_state.read" | "inbox.mute_state.write",
-  opts: {
-    receiverType: "user" | "agent";
-    receiverId: string;
-    sourceChannelId: string;
-    state: "muted" | "unmuted";
-    muteFromSeq: number | null;
-    reason: "current_state" | "muted_from_next_seq" | "unmuted";
-  },
-) {
-  addTraceEvent(eventName, {
-    "inbox.trace_contract_version": 1,
-    "inbox.trace_join_key": inboxTargetTraceJoinKey(opts.receiverType, opts.receiverId, opts.sourceChannelId),
-    receiver_type: opts.receiverType,
-    receiver_id: opts.receiverId,
-    source_channel_id: opts.sourceChannelId,
-    state: opts.state,
-    reason: opts.reason,
-    activity_muted: opts.state === "muted",
-    mute_from_seq_present: opts.muteFromSeq != null,
-    ...(opts.muteFromSeq != null ? { mute_from_seq: opts.muteFromSeq } : {}),
-    negative_evidence_bucket: "does_not_prove_future_message_suppression" satisfies InboxTraceNegativeEvidenceBucket,
-  });
-}
-
-function getLegacyInboxFallbackReason(historyCutoff?: Date): InboxFallbackReason {
-  if (historyCutoff) return "history_cutoff";
-  try {
-    getPool();
-    return "no_rw_env";
-  } catch {
-    return "pglite_dev";
-  }
-}
-
-async function getRisingWaveInboxItemsServingVersionForRequest(
-  serverId: string,
-  userId: string,
-): Promise<RisingWaveInboxItemsServingVersion> {
-  const evaluation = await evaluateFeatureFlag({
-    key: INBOX_VISIBILITY_V3_FEATURE_FLAG_KEY,
-    serverId,
-    userId,
-  });
-  return evaluation.enabled ? 3 : getRisingWaveInboxItemsServingVersion();
-}
-
-function selectRisingWaveInboxItemsServingVersionForRequest(
-  requestedVersion: RisingWaveInboxItemsServingVersion,
-  opts: { historyCutoff?: Date },
-): RisingWaveInboxItemsServingVersion {
-  // v3 does not own the historyCutoff predicate yet. Keep cutoff traffic on RW
-  // v2 at request selection time so a v3 flag rollout cannot fall through to PG.
-  if (opts.historyCutoff && requestedVersion === 3) return 2;
-  return requestedVersion;
 }
 
 function userPersonalMentionExistsForMessageAliasSql(userId: string): SQL {
@@ -9092,42 +10140,6 @@ function legacyChatActivityPromotionAllowedSql(userId: string, muteFromSeq: SQL)
   });
 }
 
-async function getJointStorageServerIdsForUser(serverIds: string[], userId: string): Promise<Set<string>> {
-  const uniqueServerIds = [...new Set(serverIds.filter(Boolean))];
-  if (uniqueServerIds.length === 0) return new Set();
-
-  const db = getDb();
-  const result = await db.execute(sql`
-    SELECT DISTINCT c.server_id::text AS "serverId"
-    FROM joint_channel_servers jcs
-    INNER JOIN joint_channels jc
-      ON jc.id = jcs.joint_channel_id
-     AND jc.status = 'active'
-    INNER JOIN channels c
-      ON c.id = jcs.local_channel_id
-     AND c.server_id IN (${sql.join(uniqueServerIds.map((id) => sql`${id}`), sql`, `)})
-     AND c.deleted_at IS NULL
-     AND c.archived_at IS NULL
-    LEFT JOIN channel_humans ch
-      ON ch.channel_id = c.id
-     AND ch.user_id = ${userId}
-    LEFT JOIN thread_follows tf
-      ON tf.thread_channel_id = c.id
-     AND tf.follower_type = 'user'
-     AND tf.follower_id = ${userId}
-     AND tf.done_at IS NULL
-     AND tf.unfollowed_at IS NULL
-    WHERE jcs.status = 'active'
-      AND jcs.server_id = c.server_id
-      AND (
-        (c.type = 'joint' AND ch.user_id IS NOT NULL)
-        OR (c.type = 'thread' AND tf.thread_channel_id IS NOT NULL)
-      )
-  `);
-
-  return new Set((result.rows as Array<{ serverId: string }>).map((row) => row.serverId));
-}
-
 function buildRisingWaveInboxItemsServingQuery(
   limit: number,
   offset: number,
@@ -9135,17 +10147,32 @@ function buildRisingWaveInboxItemsServingQuery(
   opts: {
     includeMentionOnlyInAllAndUnread?: boolean;
     sort?: "asc" | "desc";
+    servingViewOverride?: string;
   } = {},
 ) {
   const sortDirection = opts.sort === "asc" ? "ASC" : "DESC";
-  // v1/v2 stays a code-level default. v3 is selected only by the reviewed
-  // Feature Flag v0 gate after matching production RW object evidence. The v2
-  // and v3 serving views point at the versioned v0.3 suppression graph; the
-  // graph must exist before this serving switch is merged/released.
-  const inboxItems = getRisingWaveInboxItemsServingView(version);
-  const mentionOnlyExpr = version === 1 ? "false" : "i.mention_only";
-  const visibilityContractPredicate =
-    version === 3 ? "AND i.visibility_contract_version = 3" : "";
+  // Defaults to the unified chain now that Stage 3 is complete. The override
+  // exists for parity scripts that still want to name a view explicitly.
+  const inboxItems = opts.servingViewOverride ?? UNIFIED_CHAIN_VIEWS.serving;
+  // 063 Stage 3: v4 is receiver-keyed. Derive the key expression from the view
+  // actually being queried rather than from the flag, so the predicate can
+  // never disagree with the FROM clause.
+  const receiverKeyed = RECEIVER_KEYED_SERVING_VIEWS.has(inboxItems);
+  const inboxReceiverExpr = receiverKeyed ? "i.receiver_id" : "i.user_id";
+  // Non-empty ONLY in the receiver-keyed shape: v3 has no receiver_type column,
+  // so emitting this against v3 would be a hard SQL error rather than a wrong
+  // answer -- which is the failure mode we want if these two ever drift apart.
+  const receiverTypePredicate = receiverKeyed ? "AND i.receiver_type = 'user'" : "";
+  const mentionOnlyExpr = "i.mention_only";
+  // v5 and later serving views carry the latest activity seq as a column. Earlier views need it looked
+  // up in rw_messages by id -- a random point read that, cold in the block cache,
+  // cost seconds per page (the Activity tail of 2026-09-25).
+  const carriesActivitySeq = inboxItems === UNIFIED_CHAIN_VIEWS.serving;
+  const latestActivitySeqExpr = carriesActivitySeq ? "i.latest_activity_seq" : "latest_activity.seq";
+  const latestActivityJoin = carriesActivitySeq
+    ? ""
+    : `LEFT JOIN rw_messages latest_activity
+        ON latest_activity.id = i.latest_activity_message_id`;
   const filterMentionOnlyPredicate = opts.includeMentionOnlyInAllAndUnread
     ? ""
     : `AND (
@@ -9167,23 +10194,7 @@ function buildRisingWaveInboxItemsServingQuery(
     `to_char((${expr}) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00'`;
 
   return `
-    WITH read_authority AS (
-      SELECT
-        true AS "readAuthorityPresent",
-        authority.last_terminal_authority_seq AS "readAuthoritySeq"
-      FROM rw_inbox_read_authorities_v1 authority
-      WHERE authority.server_id = $1
-        AND authority.principal_id = $2
-      UNION ALL
-      SELECT false, 0::bigint
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM rw_inbox_read_authorities_v1 authority
-        WHERE authority.server_id = $1
-          AND authority.principal_id = $2
-      )
-    ),
-    filtered AS (
+    WITH filtered AS (
       SELECT
         i.kind AS "kind",
         i.channel_id AS "channelId",
@@ -9209,7 +10220,7 @@ function buildRisingWaveInboxItemsServingQuery(
         i.latest_activity_sender_type AS "latestActivitySenderType",
         i.latest_activity_sender_id AS "latestActivitySenderId",
         i.latest_activity_message_id AS "latestActivityMessageId",
-        latest_activity.seq::text AS "latestActivitySeq",
+        ${latestActivitySeqExpr}::text AS "latestActivitySeq",
         i.last_activity_at AS "lastActivityAtRaw",
         i.last_reply_at AS "lastReplyAtRaw",
         i.reply_count::int AS "replyCount",
@@ -9232,13 +10243,12 @@ function buildRisingWaveInboxItemsServingQuery(
         i.has_any_mention AS "hasAnyMention"
       FROM ${inboxItems} i
       LEFT JOIN rw_user_channel_read_cursors_v2 cursor_v2
-        ON cursor_v2.user_id = i.user_id
+        ON cursor_v2.user_id = ${inboxReceiverExpr}
        AND cursor_v2.channel_id = COALESCE(i.channel_id, i.thread_channel_id)
-      LEFT JOIN rw_messages latest_activity
-        ON latest_activity.id = i.latest_activity_message_id
+      ${latestActivityJoin}
       WHERE i.server_id = $1
-        AND i.user_id = $2
-        ${visibilityContractPredicate}
+        AND ${inboxReceiverExpr} = $2
+        ${receiverTypePredicate}
         AND ($3::text <> 'all' OR i.kind = 'thread' OR i.channel_type IN ('channel', 'private', 'joint', 'dm'))
         AND (
           ($3::text = 'all')
@@ -9299,8 +10309,8 @@ function buildRisingWaveInboxItemsServingQuery(
         COALESCE(sum(CASE WHEN ${mentionOnlyExpr} THEN 0 ELSE i.unread_count END), 0)::int AS "activeUnreadCount"
       FROM ${inboxItems} i
       WHERE i.server_id = $1
-        AND i.user_id = $2
-        ${visibilityContractPredicate}
+        AND ${inboxReceiverExpr} = $2
+        ${receiverTypePredicate}
         AND (i.kind = 'thread' OR i.channel_type IN ('channel', 'private', 'joint', 'dm'))
         AND ($4::timestamptz IS NULL OR i.activity_at > $4::timestamptz)
         ${activeMentionOnlyPredicate}
@@ -9376,26 +10386,15 @@ function buildRisingWaveInboxItemsServingQuery(
       group_totals."groupChannelNames",
       group_totals."groupChannelTypes",
       group_totals."groupCounts",
-      group_totals."groupLastActivityAts",
-      read_authority."readAuthorityPresent",
-      read_authority."readAuthoritySeq"
+      group_totals."groupLastActivityAts"
     FROM totals
     CROSS JOIN active_totals
     CROSS JOIN group_totals
-    CROSS JOIN read_authority
     LEFT JOIN page_enriched ON true
     ORDER BY page_enriched."activityAt" ${sortDirection} NULLS LAST,
       page_enriched."kind" ${sortDirection},
       COALESCE(page_enriched."threadChannelId", page_enriched."channelId") ${sortDirection}
   `;
-}
-
-function getRisingWaveInboxItemsServingView(version: RisingWaveInboxItemsServingVersion): string {
-  return version === 3
-    ? RW_INBOX_ITEMS_V3_SERVING_VIEW
-    : version === 2
-      ? RW_INBOX_ITEMS_V2_SERVING_VIEW
-      : RW_INBOX_ITEMS_V1_SERVING_VIEW;
 }
 
 async function getInboxItemsFromRisingWave(
@@ -9414,31 +10413,46 @@ async function getInboxItemsFromRisingWave(
     requestedServingVersion?: RisingWaveInboxItemsServingVersion;
     traceQuery: DbQueryTracer;
   },
-): Promise<InboxQueryResult | null> {
+): Promise<InboxQueryResult> {
   const client = getRisingWaveInboxPool();
-  // CONTRACT: This is the only env-gated RW Inbox backend. No-env and
-  // v1 history_cutoff traffic intentionally use the Postgres serving-row SQL in
-  // getInboxItems. SYNC REQUIRED: fallback/error behavior changes here must be
-  // reflected in tracing expectations and parity verification.
-  if (!client) return null;
+  // CONTRACT: RisingWave is required. Unconfigured or a failed read throws;
+  // there is no Postgres fallback. SYNC REQUIRED: error behavior changes here
+  // must be reflected in tracing expectations and parity verification.
+  if (!client) throw new RisingWaveNotConfiguredError("Activity items");
 
   const pageLimit = Math.trunc(opts.limit + 1);
   const pageOffset = Math.trunc(opts.offset);
   const inboxItemsVersion = opts.servingVersion ?? getRisingWaveInboxItemsServingVersion();
   const requestedInboxItemsVersion = opts.requestedServingVersion ?? inboxItemsVersion;
-  const forcedV2ForHistoryCutoff = Boolean(opts.historyCutoff
-    && requestedInboxItemsVersion === 3
-    && inboxItemsVersion === 2);
-  if (opts.historyCutoff && inboxItemsVersion !== 2) return null;
+  const versionForceReason = requestedInboxItemsVersion === 3 && inboxItemsVersion === 2
+    ? "history_cutoff"
+    : "none";
+  if (opts.historyCutoff && inboxItemsVersion !== 2) {
+    throw new Error(`RisingWave inbox serving version ${inboxItemsVersion} does not support a history cutoff`);
+  }
+  // 063 Stage 3 is complete: Activity serves only from the receiver-keyed
+  // unified chain. The per-server Feature Flag that ramped it is gone, so the
+  // rollback for this read is a deploy revert, not a flag flip -- the v3 objects
+  // outlive this commit by design and are dropped in a later, separate batch.
+  const servingView = UNIFIED_CHAIN_VIEWS.serving;
   // Limit/offset are clamped by getInboxItems before this point and truncated
   // again here. Keep them as SQL literals because RisingWave does not accept
   // bound parameters in LIMIT/OFFSET in this shared serving query shape.
   const queryParams: unknown[] = [serverId, userId, opts.filter, opts.historyCutoff ?? null, opts.channelId ?? null, opts.q ?? null];
+  // The serving-view attributes below only become queryable once ScopeDB has
+  // matching typed columns (its row builder promotes an allowlist and silently
+  // drops everything else). The query name IS already a typed column, so during
+  // the ramp we also distinguish the chain there: that makes liveness queryable
+  // on the day of the hotfix rather than after a schema change. It deliberately
+  // splits the metric series while the flag is ramping - that separation is the
+  // point, and it disappears when the flag reaches 100% and the branch is
+  // deleted.
   const read = await opts.traceQuery(
     "channels.inbox_items_by_user",
     () => queryRisingWaveInbox(client, buildRisingWaveInboxItemsServingQuery(pageLimit, pageOffset, inboxItemsVersion, {
       includeMentionOnlyInAllAndUnread: opts.includeMentionOnlyInAllAndUnread,
       sort: opts.sort,
+      servingViewOverride: servingView,
     }), queryParams),
     (queryRead) => ({
       ...inboxTraceAttrs("rw_mv", opts.filter, "none", inboxItemsVersion),
@@ -9453,9 +10467,23 @@ async function getInboxItemsFromRisingWave(
       ...queryRead.poolState,
       rw_inbox_items_version: inboxItemsVersion,
       rw_inbox_items_requested_version: requestedInboxItemsVersion,
-      rw_inbox_items_version_forced: forcedV2ForHistoryCutoff,
-      rw_inbox_items_version_force_reason: forcedV2ForHistoryCutoff ? "history_cutoff" : "none",
+      rw_inbox_items_version_forced: versionForceReason !== "none",
+      rw_inbox_items_version_force_reason: versionForceReason,
       rw_inbox_visibility_v3_flag_enabled: requestedInboxItemsVersion === 3,
+      // 061 Stage 2: the serving view is no longer implied by the version -
+      // Still reported explicitly rather than hardcoded at the call site: the
+      // value a trace carries should be the view that was queried, so a future
+      // swap shows up here instead of hiding behind a literal.
+      rw_inbox_items_serving_view: servingView,
+      rw_inbox_items_derivation_chain: false,
+      // The flag is evaluated per server, so a server-gated rollout can only be
+      // compared against its control group if the serving event carries the
+      // dimension it was gated on. Nothing else on this event family does.
+      // The key must be exactly `server_id`: the ScopeDB row builder promotes
+      // only allowlisted attribute names into typed columns
+      // (PROMOTED_IDENTITY_ATTRS in shared/tracing/eventRows.ts), and anything
+      // else is dropped on that sink - a dotted key would be silently lost.
+      server_id: serverId,
       filter: opts.filter,
       limit: opts.limit,
       offset: opts.offset,
@@ -9474,8 +10502,9 @@ async function getInboxItemsFromRisingWave(
   recordRisingWaveInboxThreadReplyCountNullContractViolation(read.result.rows, {
     filter: opts.filter,
     servedVersion: inboxItemsVersion,
+    servingView,
     requestedVersion: requestedInboxItemsVersion,
-    forcedV2ForHistoryCutoff,
+    forcedV2ForHistoryCutoff: versionForceReason === "history_cutoff",
     historyCutoff: Boolean(opts.historyCutoff),
   });
   return { rows: read.result.rows, contractVersion: inboxItemsVersion };
@@ -9577,2148 +10606,69 @@ async function enrichInboxRowsWithProfileNames(
   }
 }
 
-async function getSidebarUnreadSummaryCountsFromRisingWave(
-  servers: SidebarUnreadSummaryInput[],
-  userId: string,
-  traceQuery: DbQueryTracer,
-): Promise<Record<string, number> | null> {
-  const client = getRisingWaveInboxPool();
-  // CONTRACT: rw_sidebar_unread_summary_v1 must match the inline Postgres SQL
-  // in getSidebarUnreadSummaryCounts below. SYNC REQUIRED: membership,
-  // channel-type, archived/deleted, history-cutoff, or count semantic changes
-  // must be mirrored in infra/risingwave/sql/024-risingwave-unread-inbox-full-materialized.sql
-  // and verified with risingwave:verify-inbox-parity.
-  if (!client) return null;
-
-  const counts: Record<string, number> = {};
-  for (const server of servers) counts[server.serverId] = 0;
-
-  const serverIds = servers.map((server) => server.serverId);
-  const rows = await traceQuery(
-    "servers.sidebar_unread_counts_by_user",
-    () => queryRisingWaveInbox(client, `
-      SELECT server_id::text AS "serverId", unread_count::int AS "count"
-      FROM rw_sidebar_unread_summary_v1
-      WHERE user_id = $1
-        AND server_id = ANY($2::varchar[])
-    `, [userId, serverIds]),
-    (result) => ({
-      ...inboxTraceAttrs("rw_mv", "sidebar_summary", "none", RISINGWAVE_LEGACY_UNREAD_CONTRACT_VERSION),
-      backend: "risingwave",
-      contract_version: RISINGWAVE_LEGACY_UNREAD_CONTRACT_VERSION,
-      "rw.acquire_wait_ms": Math.round(result.acquireWaitMs),
-      "rw.pool.total_count": result.poolState.rw_pool_total,
-      "rw.pool.idle_count": result.poolState.rw_pool_idle,
-      "rw.pool.waiting_count": result.poolState.rw_pool_waiting,
-      "rw.timeout_ms": getRisingWaveConnectionTimeoutMillis(),
-      "rw.pool.connection_timeout_ms": getRisingWaveConnectionTimeoutMillis(),
-      ...result.poolState,
-      servers_count: servers.length,
-      servers_with_unread_count: result.result.rows.length,
-      history_cutoff_present_count: 0,
-    }),
-    (error) => risingWaveInboxFailureAttrs({
-      route: "sidebar_summary",
-      error,
-      contractVersion: RISINGWAVE_LEGACY_UNREAD_CONTRACT_VERSION,
-      queryName: "servers.sidebar_unread_counts_by_user",
-    }),
-  );
-
-  for (const row of rows.result.rows as { serverId: string; count: number }[]) {
-    counts[row.serverId] = row.count;
-  }
-  return counts;
-}
-
-async function getUnreadCountsFromRisingWave(
-  serverId: string,
-  userId: string,
-  historyCutoff: Date | undefined,
-  traceQuery: DbQueryTracer,
-): Promise<Record<string, number> | null> {
-  // CONTRACT: RISINGWAVE_CHANNEL_UNREAD_COUNTS_VIEW materializes user-scoped
-  // private/DM/joint/thread unread rows for GET /api/channels/unread. Public
-  // non-thread channel unread is computed in the serving query because it is
-  // visible to any current user, but still needs the requested userId for read
-  // cursor and self-sent-message exclusion. SYNC REQUIRED: if the Postgres SQL
-  // in getUnreadCounts changes membership, thread parent access,
-  // archived/deleted, history-cutoff, or count semantics, update the RW query
-  // and MV in infra/risingwave/sql/024-risingwave-unread-inbox-full-materialized.sql and rerun
-  // risingwave:verify-inbox-parity.
-  //
-  // The RW MV covers full retained history. Per-plan history_cutoff requests use
-  // Postgres until a cutoff-aware RW contract is designed.
-  if (historyCutoff) return null;
-
-  const client = getRisingWaveInboxPool();
-  if (!client) return null;
-
-  const rows = await traceQuery(
-    "channels.unread_counts_by_user",
-    () => queryRisingWaveInbox(client, `
-      WITH public_unread AS (
-        SELECT
-          c.id AS channel_id,
-          count(m.id)::int AS unread_count
-        FROM rw_channels AS c
-        LEFT JOIN rw_user_channel_read_cursors AS rc
-          ON rc.channel_id = c.id
-         AND rc.user_id = $2
-        JOIN rw_messages AS m
-          ON m.channel_id = c.id
-         AND m.seq > COALESCE(rc.last_read_seq, 0)
-         AND NOT (m.sender_type = 'user' AND m.sender_id = $2)
-        WHERE c.server_id = $1
-          AND c.deleted_at IS NULL
-          AND c.archived_at IS NULL
-          AND c.type NOT IN ('dm', 'private', 'joint', 'thread')
-        GROUP BY c.id
-      ),
-      scoped_unread AS (
-        SELECT v.channel_id, v.unread_count::int AS unread_count
-        FROM ${RISINGWAVE_CHANNEL_UNREAD_COUNTS_VIEW} AS v
-        JOIN rw_channels AS c
-          ON c.id = v.channel_id
-        WHERE v.server_id = $1
-          AND v.user_id = $2
-          AND c.type IN ('dm', 'private', 'joint', 'thread')
-      )
-      SELECT channel_id AS "channelId", unread_count::int AS "count"
-      FROM public_unread
-      UNION ALL
-      SELECT channel_id AS "channelId", unread_count::int AS "count"
-      FROM scoped_unread
-      ORDER BY "channelId"
-    `, [serverId, userId]),
-    (result) => ({
-      ...inboxTraceAttrs("rw_mv", "channel_unread", "none", RISINGWAVE_CHANNEL_UNREAD_CONTRACT_VERSION),
-      backend: "risingwave",
-      contract_version: RISINGWAVE_CHANNEL_UNREAD_CONTRACT_VERSION,
-      "rw.acquire_wait_ms": Math.round(result.acquireWaitMs),
-      "rw.pool.total_count": result.poolState.rw_pool_total,
-      "rw.pool.idle_count": result.poolState.rw_pool_idle,
-      "rw.pool.waiting_count": result.poolState.rw_pool_waiting,
-      "rw.timeout_ms": getRisingWaveConnectionTimeoutMillis(),
-      "rw.pool.connection_timeout_ms": getRisingWaveConnectionTimeoutMillis(),
-      ...result.poolState,
-      rw_channel_unread_counts_view: RISINGWAVE_CHANNEL_UNREAD_COUNTS_VIEW,
-      unread_channels_count: result.result.rows.length,
-      history_cutoff_present: false,
-    }),
-    (error) => risingWaveInboxFailureAttrs({
-      route: "channel_unread",
-      error,
-      contractVersion: RISINGWAVE_CHANNEL_UNREAD_CONTRACT_VERSION,
-      queryName: "channels.unread_counts_by_user",
-    }),
-  );
-
-  const counts: Record<string, number> = {};
-  for (const row of rows.result.rows as { channelId: string; count: number }[]) {
-    counts[row.channelId] = row.count;
-  }
-  return counts;
-}
-
-async function tryGetInboxItemsFromRisingWave(
-  serverId: string,
+export async function getActivityUnreadTotalsBatch(
+  inputs: ActivityUnreadTotalsBatchInput[],
   userId: string,
   opts: {
-    filter: InboxFilter;
-    limit: number;
-    offset: number;
-    channelId?: string;
-    q?: string;
-    historyCutoff?: Date;
-    includeMentionOnlyInAllAndUnread?: boolean;
-    sort?: "asc" | "desc";
-    traceQuery: DbQueryTracer;
-  },
-): Promise<RisingWaveInboxAttempt<InboxQueryResult>> {
-  if (!getRisingWaveInboxPool()) return { result: null };
-
-  const requestedInboxItemsVersion = await risingWaveInboxFailSoftDeps.getInboxItemsServingVersion(serverId, userId);
-  const inboxItemsVersion = selectRisingWaveInboxItemsServingVersionForRequest(requestedInboxItemsVersion, opts);
-  return tryReadRisingWaveInboxWithFailSoft(
-    opts.filter,
-    inboxItemsVersion,
-    () => getInboxItemsFromRisingWave(serverId, userId, {
-      ...opts,
-      servingVersion: inboxItemsVersion,
-      requestedServingVersion: requestedInboxItemsVersion,
-    }),
+    traceQuery?: DbQueryTracer;
+  } = {},
+): Promise<Map<string, ActivityUnreadTotals>> {
+  const traceQuery = opts.traceQuery ?? untracedDbQuery;
+  const uniqueInputs = [...new Map(inputs.map((input) => [input.serverId, input])).values()];
+  if (uniqueInputs.length === 0) return new Map();
+  const override = getActivityReadSourceOverride();
+  if (override) return override.activityUnreadTotals(uniqueInputs, userId, { traceQuery });
+  // Totals come from the SAME materialized view family as the Activity list —
+  // one source, watermark included, so the historical cross-surface divergence
+  // (task #235) cannot exist. RisingWave is required: unconfigured or a failed
+  // read throws (no Postgres fallback, no fail-closed absence).
+  return getActivityUnreadTotalsBatchFromRisingWave(
+    uniqueInputs.map((input) => input.serverId),
+    userId,
+    traceQuery,
   );
 }
-
-async function tryGetUnreadCountsFromRisingWave(
-  serverId: string,
-  userId: string,
-  historyCutoff: Date | undefined,
-  traceQuery: DbQueryTracer,
-): Promise<RisingWaveInboxAttempt<Record<string, number>>> {
-  if (!getRisingWaveInboxPool()) return { result: null };
-  return tryReadRisingWaveInboxWithFailSoft(
-    "channel_unread",
-    RISINGWAVE_CHANNEL_UNREAD_CONTRACT_VERSION,
-    () => getUnreadCountsFromRisingWave(serverId, userId, historyCutoff, traceQuery),
-  );
-}
-
-async function getInboxItemsFromServingRows(
-  serverId: string,
-  userId: string,
-  opts: {
-    filter: InboxFilter;
-    limit: number;
-    offset: number;
-    channelId?: string;
-    q?: string;
-    sort?: "asc" | "desc";
-    historyCutoff?: Date;
-    fallbackReason?: InboxFallbackReason;
-    postgresSelectionReason?: InboxPostgresSelectionReason;
-    traceQuery: DbQueryTracer;
-    executor?: DatabaseExecutor;
-  },
-): Promise<InboxQueryResult> {
-  const db = opts.executor ?? getDb();
-  const guestAccess = await guestInboxChannelIds(serverId, userId, db);
-  const sortDirection = opts.sort === "asc" ? sql`ASC` : sql`DESC`;
-  const historyCutoffPredicate = opts.historyCutoff
-    ? sql`AND last_activity_at > ${opts.historyCutoff}`
-    : sql``;
-  const searchPattern = opts.q ? `%${opts.q}%` : null;
-  const searchPredicate = searchPattern
-    ? sql`AND (
-        COALESCE(channel_name, '') ILIKE ${searchPattern}
-        OR EXISTS (
-          SELECT 1
-          FROM messages search_message
-          LEFT JOIN users search_user
-            ON search_message.sender_type = 'user'
-           AND search_user.id::text = search_message.sender_id
-          LEFT JOIN agents search_agent
-            ON search_message.sender_type = 'agent'
-           AND search_agent.id::text = search_message.sender_id
-          WHERE search_message.channel_id = all_visible_rows.storage_channel_id
-            AND (
-              search_message.content ILIKE ${searchPattern}
-              OR COALESCE(search_user.display_name, search_user.name, search_agent.display_name, search_agent.name, '') ILIKE ${searchPattern}
-            )
-        )
-        OR (
-          kind = 'thread'
-          AND EXISTS (
-            SELECT 1
-            FROM channels search_thread
-            LEFT JOIN joint_channel_servers search_thread_projection
-              ON search_thread_projection.local_channel_id = search_thread.id
-             AND search_thread_projection.server_id = ${serverId}
-             AND search_thread_projection.status = 'active'
-            LEFT JOIN joint_channels search_thread_joint
-              ON search_thread_joint.id = search_thread_projection.joint_channel_id
-             AND search_thread_joint.status = 'active'
-            LEFT JOIN channels search_canonical_thread
-              ON search_canonical_thread.id = search_thread_joint.canonical_channel_id
-            INNER JOIN messages search_parent_message
-              ON search_parent_message.id = COALESCE(search_canonical_thread.parent_message_id, search_thread.parent_message_id)
-            INNER JOIN channels search_parent_channel
-              ON search_parent_channel.id = search_parent_message.channel_id
-            WHERE search_thread.id = all_visible_rows.source_channel_id
-              AND (
-                search_parent_channel.name ILIKE ${searchPattern}
-                OR search_parent_message.content ILIKE ${searchPattern}
-              )
-          )
-        )
-      )`
-    : sql``;
-  const splitAllPageEnrichment = opts.filter === "all";
-  const splitAllMetadata = splitAllPageEnrichment && opts.channelId == null;
-  type ServingRowsOutput = "combined" | "page" | "metadata";
-  const buildServingRowsQuery = (
-    output: ServingRowsOutput = splitAllMetadata ? "page" : "combined",
-  ) => {
-    const isAllFilter = opts.filter === "all";
-    const selectedSource = splitAllMetadata && output === "page"
-      ? sql`filtered`
-      : sql`faceted`;
-    const selectedGroupPredicate = splitAllMetadata && output === "page"
-      ? sql``
-      : sql`WHERE ${opts.channelId ?? null}::uuid IS NULL OR "groupChannelId" = ${opts.channelId ?? null}::uuid`;
-    const mentionAggregationCtes = isAllFilter
-      ? sql`
-    mention_presence AS MATERIALIZED (
-      SELECT DISTINCT mention.source_channel_id
-      FROM scoped_mentions mention
-    ),
-    live_mentions AS MATERIALIZED (
-      SELECT
-        NULL::uuid AS source_channel_id,
-        NULL::uuid AS latest_message_id,
-        NULL::bigint AS latest_message_seq,
-        0::int AS unread_mention_count,
-        NULL::uuid AS first_unread_message_id
-      WHERE false
-    ),`
-      : sql`
-    mention_presence AS MATERIALIZED (
-      SELECT NULL::uuid AS source_channel_id
-      WHERE false
-    ),
-    live_mentions AS MATERIALIZED (
-      SELECT
-        mention.source_channel_id,
-        (array_agg(mention.message_id ORDER BY mention.message_seq DESC, mention.message_id DESC))[1] AS latest_message_id,
-        max(mention.message_seq) AS latest_message_seq,
-        (count(*) FILTER (
-          WHERE mention.message_seq > mention.last_read_seq
-        ))::int AS unread_mention_count,
-        (array_agg(mention.message_id ORDER BY mention.message_seq ASC, mention.message_id ASC) FILTER (
-          WHERE mention.message_seq > mention.last_read_seq
-        ))[1] AS first_unread_message_id
-      FROM scoped_mentions mention
-      GROUP BY mention.source_channel_id, mention.last_read_seq
-    ),`;
-    const filterPredicate = opts.filter === "all"
-      ? sql`true`
-      : opts.filter === "unread"
-        ? sql`mention_only = false AND unread_count > 0`
-        : opts.filter === "mentions"
-          ? sql`has_any_mention = true`
-          : sql`mention_only = false AND unread_count > 0 AND unread_mention_count > 0`;
-    const pageMentionAggregationCte = isAllFilter
-      ? sql`
-    page_live_mentions AS MATERIALIZED (
-      SELECT
-        mention.source_channel_id,
-        (array_agg(mention.message_id ORDER BY mention.message_seq DESC, mention.message_id DESC))[1] AS latest_message_id,
-        max(mention.message_seq) AS latest_message_seq,
-        (count(*) FILTER (
-          WHERE mention.message_seq > mention.last_read_seq
-        ))::int AS unread_mention_count,
-        (array_agg(mention.message_id ORDER BY mention.message_seq ASC, mention.message_id ASC) FILTER (
-          WHERE mention.message_seq > mention.last_read_seq
-        ))[1] AS first_unread_message_id
-      FROM scoped_mentions mention
-      INNER JOIN page selected_page
-        ON selected_page.source_channel_id = mention.source_channel_id
-      GROUP BY mention.source_channel_id, mention.last_read_seq
-    ),`
-      : sql`
-    page_live_mentions AS MATERIALIZED (
-      SELECT
-        NULL::uuid AS source_channel_id,
-        NULL::uuid AS latest_message_id,
-        NULL::bigint AS latest_message_seq,
-        0::int AS unread_mention_count,
-        NULL::uuid AS first_unread_message_id
-      WHERE false
-    ),`;
-    const pageEnrichmentFields = splitAllPageEnrichment
-      ? sql`
-        CASE
-          WHEN p.kind = 'thread' THEN NULL::text
-          ELSE (
-            CASE
-              WHEN p.mention_only THEN p.effective_latest_personal_mention_message_id
-              ELSE p.latest_notified_message_id
-            END
-          )::text
-        END AS "lastMessageId",
-        NULL::text AS "lastMessageAt",
-        NULL::text AS "lastMessagePreview",
-        NULL::text AS "lastMessageSenderType",
-        NULL::text AS "lastMessageSenderId",
-        NULL::text AS "parentMessageId",
-        NULL::text AS "parentChannelId",
-        NULL::text AS "parentChannelName",
-        NULL::text AS "parentChannelType",
-        NULL::text AS "parentMessagePreview",
-        NULL::text AS "parentMessageSenderType",
-        NULL::text AS "parentMessageSenderId",
-        NULL::text AS "latestActivityPreview",
-        NULL::text AS "latestActivitySenderType",
-        NULL::text AS "latestActivitySenderId",
-        NULL::text AS "latestActivityMessageId",
-        NULL::text AS "latestActivitySeq",
-        NULL::text AS "lastActivityAt",
-        NULL::text AS "lastReplyAt",
-        NULL::int AS "replyCount",
-        NULL::int AS "taskNumber",
-        NULL::text AS "taskStatus",
-        NULL::text AS "taskClaimedByType",
-        NULL::text AS "taskClaimedById",
-        p.storage_channel_id::text AS "_storageChannelId",
-        (
-          CASE
-            WHEN p.mention_only THEN p.effective_latest_personal_mention_message_id
-            ELSE p.latest_notified_message_id
-          END
-        )::text AS "_latestMessageLookupId",`
-      : sql`
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE latest_message.id::text END AS "lastMessageId",
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE to_char((latest_message.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00' END AS "lastMessageAt",
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE latest_message.content END AS "lastMessagePreview",
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE latest_message.sender_type END AS "lastMessageSenderType",
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE latest_message.sender_id END AS "lastMessageSenderId",
-        pm.id::text AS "parentMessageId",
-        COALESCE(local_parent.id, parent_ch.id)::text AS "parentChannelId",
-        COALESCE(local_parent.name, parent_ch.name) AS "parentChannelName",
-        COALESCE(local_parent.type::text, parent_ch.type::text) AS "parentChannelType",
-        pm.content AS "parentMessagePreview",
-        pm.sender_type AS "parentMessageSenderType",
-        pm.sender_id AS "parentMessageSenderId",
-        COALESCE(latest_message.content, pm.content) AS "latestActivityPreview",
-        COALESCE(latest_message.sender_type, pm.sender_type) AS "latestActivitySenderType",
-        COALESCE(latest_message.sender_id, pm.sender_id) AS "latestActivitySenderId",
-        COALESCE(latest_message.id, pm.id)::text AS "latestActivityMessageId",
-        COALESCE(latest_message.seq, pm.seq)::text AS "latestActivitySeq",
-        to_char((COALESCE(latest_message.created_at, pm.created_at)) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00' AS "lastActivityAt",
-        CASE WHEN p.kind = 'thread' AND latest_message.id IS NOT NULL THEN to_char((latest_message.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00' ELSE NULL::text END AS "lastReplyAt",
-        CASE WHEN p.kind = 'thread' THEN COALESCE(reply_count.reply_count, 0)::int ELSE NULL::int END AS "replyCount",
-        task.task_number AS "taskNumber",
-        task.status AS "taskStatus",
-        task.claimed_by_type AS "taskClaimedByType",
-        task.claimed_by_id AS "taskClaimedById",`;
-    const pageEnrichmentJoins = splitAllPageEnrichment
-      ? sql``
-      : sql`
-      LEFT JOIN messages latest_message
-        ON latest_message.id = CASE
-          WHEN p.mention_only THEN p.effective_latest_personal_mention_message_id
-          ELSE p.latest_notified_message_id
-        END
-      LEFT JOIN channels thread_channel
-        ON thread_channel.id = p.source_channel_id
-       AND p.kind = 'thread'
-      LEFT JOIN joint_channel_servers thread_projection
-        ON thread_projection.local_channel_id = thread_channel.id
-       AND thread_projection.server_id = ${serverId}
-       AND thread_projection.status = 'active'
-      LEFT JOIN joint_channels thread_joint
-        ON thread_joint.id = thread_projection.joint_channel_id
-       AND thread_joint.status = 'active'
-      LEFT JOIN channels canonical_thread
-        ON canonical_thread.id = thread_joint.canonical_channel_id
-       AND canonical_thread.type = 'thread'
-       AND canonical_thread.deleted_at IS NULL
-      LEFT JOIN messages pm
-        ON pm.id = COALESCE(canonical_thread.parent_message_id, thread_channel.parent_message_id)
-      LEFT JOIN channels parent_ch
-        ON parent_ch.id = pm.channel_id
-      LEFT JOIN joint_channels parent_joint
-        ON parent_joint.canonical_channel_id = pm.channel_id
-       AND parent_joint.status = 'active'
-      LEFT JOIN joint_channel_servers parent_projection
-        ON parent_projection.joint_channel_id = parent_joint.id
-       AND parent_projection.server_id = ${serverId}
-       AND parent_projection.status = 'active'
-      LEFT JOIN channels local_parent
-        ON local_parent.id = parent_projection.local_channel_id
-       AND local_parent.type = 'joint'
-       AND local_parent.archived_at IS NULL
-       AND local_parent.deleted_at IS NULL
-      LEFT JOIN LATERAL (
-        SELECT count(*)::int AS reply_count
-        FROM messages m
-        WHERE p.kind = 'thread'
-          AND m.channel_id = p.storage_channel_id
-      ) reply_count ON true
-      LEFT JOIN tasks task
-        ON task.message_id = pm.id`;
-    const commonCtes = sql`
-    receiver_scope_ids AS MATERIALIZED (
-      SELECT source_row.source_channel_id
-      FROM inbox_serving_rows source_row
-      INNER JOIN channels source_channel
-        ON source_channel.id = source_row.source_channel_id
-       AND source_channel.server_id = ${serverId}::uuid
-       AND source_channel.deleted_at IS NULL
-       AND source_channel.archived_at IS NULL
-      LEFT JOIN user_channel_inbox_states scope_inbox
-        ON scope_inbox.channel_id = source_channel.id
-       AND scope_inbox.user_id = ${userId}::uuid
-      WHERE source_row.receiver_type = 'user'
-        AND source_row.receiver_id = ${userId}::uuid
-        AND source_row.server_id = ${serverId}::uuid
-        AND scope_inbox.done_at IS NULL
-    ),
-    receiver_rows AS MATERIALIZED (
-      SELECT
-        r.receiver_type,
-        r.receiver_id,
-        r.server_id,
-        r.kind,
-        r.source_channel_id,
-        r.latest_notified_message_id,
-        r.latest_notified_seq,
-        r.latest_notified_at,
-        r.last_activity_at,
-        r.first_unread_message_id,
-        r.first_unread_seq,
-        r.unread_count::int AS unread_count,
-        r.latest_personal_mention_message_id,
-        r.latest_personal_mention_seq,
-        r.unread_mention_count,
-        r.has_any_mention,
-        c.name AS channel_name,
-        c.type AS channel_type,
-        COALESCE(joint_storage.canonical_channel_id, c.id) AS storage_channel_id,
-        joint_projection.joint_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        inbox.done_at AS channel_done_at,
-        chat_member.user_id AS chat_member_user_id,
-        tf.thread_channel_id AS followed_thread_channel_id
-      FROM receiver_scope_ids scope
-      INNER JOIN inbox_serving_rows r
-        ON r.source_channel_id = scope.source_channel_id
-      INNER JOIN channels c
-        ON c.id = r.source_channel_id
-       AND c.deleted_at IS NULL
-       AND c.archived_at IS NULL
-      LEFT JOIN joint_channel_servers joint_projection
-        ON joint_projection.local_channel_id = c.id
-       AND joint_projection.server_id = c.server_id
-       AND joint_projection.status = 'active'
-      LEFT JOIN joint_channels joint_storage
-        ON joint_storage.id = joint_projection.joint_channel_id
-       AND joint_storage.status = 'active'
-      LEFT JOIN user_channel_inbox_states inbox
-        ON inbox.channel_id = c.id
-       AND inbox.user_id = ${userId}
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = c.id
-       AND rc.user_id = ${userId}
-      LEFT JOIN channel_humans chat_member
-        ON chat_member.channel_id = c.id
-       AND chat_member.user_id = ${userId}
-      LEFT JOIN thread_follows tf
-        ON tf.thread_channel_id = c.id
-       AND tf.follower_type = 'user'
-       AND tf.follower_id = ${userId}
-       AND tf.done_at IS NULL
-       AND tf.unfollowed_at IS NULL
-      WHERE r.receiver_type = 'user'
-        AND r.receiver_id = ${userId}::uuid
-        AND r.server_id = ${serverId}
-        AND c.server_id = ${serverId}
-        AND inbox.done_at IS NULL
-    ),
-    receiver_scope_stats AS (
-      SELECT count(*)::int AS receiver_scope_row_count
-      FROM receiver_rows
-    ),
-    mention_scope AS MATERIALIZED (
-      SELECT
-        receiver.source_channel_id,
-        receiver.source_channel_id AS mention_channel_id,
-        receiver.last_read_seq
-      FROM receiver_rows receiver
-      UNION
-      SELECT
-        receiver.source_channel_id,
-        sibling_projection.local_channel_id AS mention_channel_id,
-        receiver.last_read_seq
-      FROM receiver_rows receiver
-      INNER JOIN joint_channel_servers sibling_projection
-        ON sibling_projection.joint_channel_id = receiver.joint_channel_id
-       AND sibling_projection.status = 'active'
-    ),
-    server_target_mentions AS MATERIALIZED (
-      SELECT
-        server_mention.channel_id,
-        server_mention.message_id,
-        server_mention.message_seq,
-        server_mention.notified_at
-      FROM message_mentions server_mention
-      WHERE server_mention.target_type = 'user'
-        AND server_mention.target_id = ${userId}::uuid
-        AND server_mention.server_id = ${serverId}::uuid
-        AND (server_mention.notifiable_at_send OR server_mention.notified_at IS NOT NULL)
-    ),
-    scoped_mentions AS MATERIALIZED (
-      SELECT
-        scope.source_channel_id,
-        scope.last_read_seq,
-        server_mention.message_id,
-        server_mention.message_seq
-      FROM mention_scope scope
-      INNER JOIN server_target_mentions server_mention
-        ON server_mention.channel_id = scope.mention_channel_id
-      UNION ALL
-      SELECT
-        scope.source_channel_id,
-        scope.last_read_seq,
-        sibling_mention.message_id,
-        sibling_mention.message_seq
-      FROM mention_scope scope
-      INNER JOIN message_mentions sibling_mention
-        ON sibling_mention.channel_id = scope.mention_channel_id
-       AND sibling_mention.target_type = 'user'
-       AND sibling_mention.target_id = ${userId}::uuid
-       AND sibling_mention.server_id <> ${serverId}::uuid
-       AND (sibling_mention.notifiable_at_send OR sibling_mention.notified_at IS NOT NULL)
-    ),
-    ${mentionAggregationCtes}
-    base_rows AS (
-      SELECT
-        r.receiver_type,
-        r.receiver_id,
-        r.server_id,
-        r.kind,
-        r.source_channel_id,
-        r.latest_notified_message_id,
-        r.latest_notified_seq,
-        r.latest_notified_at,
-        r.last_activity_at,
-        r.first_unread_message_id,
-        r.first_unread_seq,
-        r.unread_count,
-        CASE
-          WHEN live_mentions.latest_message_seq IS NOT NULL
-            AND (r.latest_personal_mention_seq IS NULL OR live_mentions.latest_message_seq >= r.latest_personal_mention_seq)
-          THEN live_mentions.latest_message_id
-          ELSE r.latest_personal_mention_message_id
-        END AS latest_personal_mention_message_id,
-        GREATEST(
-          COALESCE(r.latest_personal_mention_seq, 0),
-          COALESCE(live_mentions.latest_message_seq, 0)
-        ) AS latest_personal_mention_seq,
-        GREATEST(r.unread_mention_count, COALESCE(live_mentions.unread_mention_count, 0)) AS unread_mention_count,
-        live_mentions.first_unread_message_id AS first_unread_personal_mention_message_id,
-        (
-          r.has_any_mention
-          OR live_mentions.latest_message_id IS NOT NULL
-          OR mention_presence.source_channel_id IS NOT NULL
-        ) AS has_any_mention,
-        r.channel_name,
-        r.channel_type,
-        r.storage_channel_id,
-        r.joint_channel_id,
-        r.last_read_seq,
-        r.channel_done_at,
-        r.chat_member_user_id,
-        r.followed_thread_channel_id
-      FROM receiver_rows r
-      LEFT JOIN live_mentions
-        ON live_mentions.source_channel_id = r.source_channel_id
-      LEFT JOIN mention_presence
-        ON mention_presence.source_channel_id = r.source_channel_id
-    ),
-    visible_rows AS (
-      SELECT
-        b.*,
-        CASE
-          WHEN b.kind IN ('channel', 'dm') AND b.chat_member_user_id IS NOT NULL THEN false
-          WHEN b.kind = 'thread' AND b.followed_thread_channel_id IS NOT NULL THEN false
-          ELSE true
-        END AS mention_only
-      FROM base_rows b
-      WHERE (
-          b.kind IN ('channel', 'dm')
-          AND b.channel_type IN ('channel', 'private', 'joint', 'dm')
-          AND b.chat_member_user_id IS NOT NULL
-        )
-        OR (
-          b.kind = 'thread'
-          AND b.followed_thread_channel_id IS NOT NULL
-        )
-        OR b.has_any_mention
-    ),
-    mention_channel_rows AS (
-      SELECT
-        'user' AS receiver_type,
-        ${userId}::uuid AS receiver_id,
-        ${serverId}::uuid AS server_id,
-        CASE WHEN c.type = 'dm' THEN 'dm' ELSE 'channel' END AS kind,
-        c.id AS source_channel_id,
-        m.id AS latest_notified_message_id,
-        m.seq AS latest_notified_seq,
-        m.created_at AS latest_notified_at,
-        m.created_at AS last_activity_at,
-        CASE
-          WHEN chat_member.user_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN m.id
-          ELSE NULL
-        END AS first_unread_message_id,
-        CASE
-          WHEN chat_member.user_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN m.seq
-          ELSE NULL
-        END AS first_unread_seq,
-        CASE
-          WHEN chat_member.user_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN 1
-          ELSE 0
-        END::int AS unread_count,
-        m.id AS latest_personal_mention_message_id,
-        m.seq AS latest_personal_mention_seq,
-        CASE WHEN m.seq > COALESCE(rc.last_read_seq, 0) THEN 1 ELSE 0 END::int AS unread_mention_count,
-        -- Mention-only fallback rows: firstMentionMessageId is the notified mention
-        -- ANCHOR (always), not the read-gated first-unread used by member rows. These
-        -- rows exist only because of the @ (unreadCount=0), so they must always jump to
-        -- the mention; aligned with pg_legacy and the canonical rule (ApplePI A).
-        m.id AS first_unread_personal_mention_message_id,
-        true AS has_any_mention,
-        c.name AS channel_name,
-        c.type AS channel_type,
-        COALESCE(joint_storage.canonical_channel_id, c.id) AS storage_channel_id,
-        joint_projection.joint_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        inbox.done_at AS channel_done_at,
-        chat_member.user_id AS chat_member_user_id,
-        NULL::uuid AS followed_thread_channel_id,
-        CASE WHEN chat_member.user_id IS NOT NULL THEN false ELSE true END AS mention_only
-      FROM (
-        SELECT
-          mm.channel_id,
-          max(mm.message_seq) AS latest_mention_seq
-        FROM server_target_mentions mm
-        INNER JOIN channels mention_channel
-          ON mention_channel.id = mm.channel_id
-        LEFT JOIN channel_humans member_check
-          ON member_check.channel_id = mm.channel_id
-         AND member_check.user_id = ${userId}
-        LEFT JOIN user_channel_inbox_states inbox_check
-          ON inbox_check.channel_id = mm.channel_id
-         AND inbox_check.user_id = ${userId}
-        LEFT JOIN inbox_suppression_states mention_suppression
-          ON mention_suppression.receiver_type = 'user'
-         AND mention_suppression.receiver_id = ${userId}::uuid
-         AND mention_suppression.target_kind = 'public_channel_mention'
-         AND mention_suppression.target_channel_id = mm.channel_id
-        WHERE mention_channel.server_id = ${serverId}
-          AND mention_channel.type IN ('channel', 'private', 'joint', 'dm')
-          AND mention_channel.deleted_at IS NULL
-          AND mention_channel.archived_at IS NULL
-          AND inbox_check.done_at IS NULL
-          AND (
-            member_check.user_id IS NOT NULL
-            OR (mention_channel.type = 'channel' AND mm.notified_at IS NOT NULL)
-          )
-        GROUP BY mm.channel_id
-      ) latest_mention
-      INNER JOIN channels c
-        ON c.id = latest_mention.channel_id
-      INNER JOIN messages m
-        ON m.channel_id = latest_mention.channel_id
-       AND m.seq = latest_mention.latest_mention_seq
-      LEFT JOIN joint_channel_servers joint_projection
-        ON joint_projection.local_channel_id = c.id
-       AND joint_projection.server_id = c.server_id
-       AND joint_projection.status = 'active'
-      LEFT JOIN joint_channels joint_storage
-        ON joint_storage.id = joint_projection.joint_channel_id
-       AND joint_storage.status = 'active'
-      LEFT JOIN user_channel_inbox_states inbox
-        ON inbox.channel_id = c.id
-       AND inbox.user_id = ${userId}
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = c.id
-       AND rc.user_id = ${userId}
-      LEFT JOIN channel_humans chat_member
-        ON chat_member.channel_id = c.id
-       AND chat_member.user_id = ${userId}
-    ),
-    mention_thread_rows AS (
-      SELECT
-        'user' AS receiver_type,
-        ${userId}::uuid AS receiver_id,
-        ${serverId}::uuid AS server_id,
-        'thread' AS kind,
-        t.id AS source_channel_id,
-        m.id AS latest_notified_message_id,
-        m.seq AS latest_notified_seq,
-        m.created_at AS latest_notified_at,
-        m.created_at AS last_activity_at,
-        CASE
-          WHEN existing_follow.thread_channel_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN m.id
-          ELSE NULL
-        END AS first_unread_message_id,
-        CASE
-          WHEN existing_follow.thread_channel_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN m.seq
-          ELSE NULL
-        END AS first_unread_seq,
-        CASE
-          WHEN existing_follow.thread_channel_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN 1
-          ELSE 0
-        END::int AS unread_count,
-        m.id AS latest_personal_mention_message_id,
-        m.seq AS latest_personal_mention_seq,
-        CASE WHEN m.seq > COALESCE(rc.last_read_seq, 0) THEN 1 ELSE 0 END::int AS unread_mention_count,
-        -- Mention-only fallback rows: firstMentionMessageId is the notified mention
-        -- ANCHOR (always), not the read-gated first-unread used by member rows. These
-        -- rows exist only because of the @ (unreadCount=0), so they must always jump to
-        -- the mention; aligned with pg_legacy and the canonical rule (ApplePI A).
-        m.id AS first_unread_personal_mention_message_id,
-        true AS has_any_mention,
-        t.name AS channel_name,
-        t.type AS channel_type,
-        COALESCE(canonical_thread.id, t.id) AS storage_channel_id,
-        thread_projection.joint_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        NULL::timestamp AS channel_done_at,
-        NULL::uuid AS chat_member_user_id,
-        existing_follow.thread_channel_id AS followed_thread_channel_id,
-        CASE WHEN existing_follow.thread_channel_id IS NOT NULL THEN false ELSE true END AS mention_only
-      FROM (
-        SELECT
-          mm.channel_id,
-          max(mm.message_seq) AS latest_mention_seq
-        FROM server_target_mentions mm
-        INNER JOIN channels thread_channel
-          ON thread_channel.id = mm.channel_id
-        INNER JOIN messages parent_message
-          ON parent_message.id = thread_channel.parent_message_id
-        INNER JOIN channels parent_channel
-          ON parent_channel.id = parent_message.channel_id
-        LEFT JOIN thread_follows existing_follow
-          ON existing_follow.thread_channel_id = mm.channel_id
-         AND existing_follow.follower_type = 'user'
-         AND existing_follow.follower_id = ${userId}
-         AND existing_follow.done_at IS NULL
-         AND existing_follow.unfollowed_at IS NULL
-        LEFT JOIN channel_humans parent_member
-          ON parent_member.channel_id = parent_channel.id
-         AND parent_member.user_id = ${userId}
-        LEFT JOIN inbox_suppression_states mention_suppression
-          ON mention_suppression.receiver_type = 'user'
-         AND mention_suppression.receiver_id = ${userId}::uuid
-         AND mention_suppression.target_kind = 'public_thread_mention'
-         AND mention_suppression.target_channel_id = mm.channel_id
-        WHERE thread_channel.server_id = ${serverId}
-          AND thread_channel.type = 'thread'
-          AND thread_channel.deleted_at IS NULL
-          AND parent_channel.archived_at IS NULL
-          AND parent_channel.deleted_at IS NULL
-          AND (
-            existing_follow.thread_channel_id IS NOT NULL
-            OR (
-              mm.notified_at IS NOT NULL
-              AND (
-                parent_channel.type = 'channel'
-                OR parent_member.user_id IS NOT NULL
-              )
-            )
-          )
-        GROUP BY mm.channel_id
-      ) latest_mention
-      INNER JOIN channels t
-        ON t.id = latest_mention.channel_id
-      INNER JOIN messages m
-        ON m.channel_id = latest_mention.channel_id
-       AND m.seq = latest_mention.latest_mention_seq
-      LEFT JOIN joint_channel_servers thread_projection
-        ON thread_projection.local_channel_id = t.id
-       AND thread_projection.server_id = ${serverId}
-       AND thread_projection.status = 'active'
-      LEFT JOIN joint_channels thread_joint
-        ON thread_joint.id = thread_projection.joint_channel_id
-       AND thread_joint.status = 'active'
-      LEFT JOIN channels canonical_thread
-        ON canonical_thread.id = thread_joint.canonical_channel_id
-       AND canonical_thread.type = 'thread'
-       AND canonical_thread.deleted_at IS NULL
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = t.id
-       AND rc.user_id = ${userId}
-      LEFT JOIN thread_follows existing_follow
-        ON existing_follow.thread_channel_id = t.id
-       AND existing_follow.follower_type = 'user'
-       AND existing_follow.follower_id = ${userId}
-       AND existing_follow.done_at IS NULL
-       AND existing_follow.unfollowed_at IS NULL
-    ),
-    all_visible_rows AS (
-      SELECT * FROM visible_rows
-      UNION ALL
-      SELECT mc.*
-      FROM mention_channel_rows mc
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM visible_rows vr
-        WHERE vr.kind = mc.kind
-          AND vr.source_channel_id = mc.source_channel_id
-      )
-      UNION ALL
-      SELECT mt.*
-      FROM mention_thread_rows mt
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM visible_rows vr
-        WHERE vr.kind = mt.kind
-          AND vr.source_channel_id = mt.source_channel_id
-      )
-    ),
-    active_totals AS (
-      SELECT
-        COALESCE(sum(CASE WHEN mention_only THEN 0 ELSE unread_count END), 0)::int AS "activeUnreadCount"
-      FROM all_visible_rows
-      WHERE last_activity_at IS NOT NULL
-        ${guestAccess === null ? sql`` : sql`AND ${guestInboxAccessSql(guestAccess, sql`source_channel_id`)}`}
-        ${historyCutoffPredicate}
-    ),
-    filtered AS (
-      SELECT *
-      FROM all_visible_rows
-      WHERE last_activity_at IS NOT NULL
-        ${guestAccess === null ? sql`` : sql`AND ${guestInboxAccessSql(guestAccess, sql`source_channel_id`)}`}
-        ${historyCutoffPredicate}
-        ${searchPredicate}
-        AND ${filterPredicate}
-    )`;
-    if (splitAllMetadata && output === "page") {
-      return sql`
-        WITH ${commonCtes},
-        page AS MATERIALIZED (
-          SELECT *
-          FROM filtered
-          ORDER BY last_activity_at ${sortDirection}, kind ${sortDirection}, source_channel_id ${sortDirection}
-          LIMIT ${opts.limit + 1}
-          OFFSET ${opts.offset}
-        )
-        SELECT
-          row_number() OVER (
-            ORDER BY last_activity_at ${sortDirection}, kind ${sortDirection}, source_channel_id ${sortDirection}
-          )::int - 1 AS "_pageOrdinal",
-          kind AS "_kind",
-          source_channel_id::text AS "_sourceChannelId",
-          latest_notified_message_id::text AS "_latestNotifiedMessageId",
-          latest_notified_seq::text AS "_latestNotifiedSeq",
-          last_activity_at AS "_lastActivityAt",
-          first_unread_message_id::text AS "_firstUnreadMessageId",
-          unread_count::int AS "_unreadCount",
-          latest_personal_mention_message_id::text AS "_latestPersonalMentionMessageId",
-          latest_personal_mention_seq::text AS "_latestPersonalMentionSeq",
-          unread_mention_count::int AS "_unreadMentionCount",
-          first_unread_personal_mention_message_id::text AS "_firstUnreadPersonalMentionMessageId",
-          has_any_mention AS "_hasAnyMention",
-          channel_name AS "_channelName",
-          channel_type::text AS "_channelType",
-          storage_channel_id::text AS "_storageChannelId",
-          joint_channel_id::text AS "_jointChannelId",
-          last_read_seq::text AS "_lastReadSeq",
-          mention_only AS "_mentionOnly"
-        FROM page
-        ORDER BY last_activity_at ${sortDirection}, kind ${sortDirection}, source_channel_id ${sortDirection}
-      `;
-    }
-    return sql`
-    WITH ${commonCtes},
-    non_thread_facets AS (
-      SELECT
-        filtered.*,
-        filtered.source_channel_id AS "groupChannelId",
-        filtered.channel_name AS "groupChannelName",
-        filtered.channel_type::text AS "groupChannelType"
-      FROM filtered
-      WHERE filtered.kind <> 'thread'
-    ),
-    thread_facets AS (
-      SELECT
-        filtered.*,
-        COALESCE(local_parent.id, parent_ch.id) AS "groupChannelId",
-        COALESCE(local_parent.name, parent_ch.name) AS "groupChannelName",
-        COALESCE(local_parent.type::text, parent_ch.type::text) AS "groupChannelType"
-      FROM filtered
-      INNER JOIN channels thread_channel
-        ON thread_channel.id = filtered.source_channel_id
-      LEFT JOIN joint_channel_servers thread_projection
-        ON thread_projection.local_channel_id = thread_channel.id
-       AND thread_projection.server_id = ${serverId}
-       AND thread_projection.status = 'active'
-      LEFT JOIN joint_channels thread_joint
-        ON thread_joint.id = thread_projection.joint_channel_id
-       AND thread_joint.status = 'active'
-      LEFT JOIN channels canonical_thread
-        ON canonical_thread.id = thread_joint.canonical_channel_id
-       AND canonical_thread.type = 'thread'
-       AND canonical_thread.deleted_at IS NULL
-      LEFT JOIN messages parent_message
-        ON parent_message.id = COALESCE(canonical_thread.parent_message_id, thread_channel.parent_message_id)
-      LEFT JOIN channels parent_ch
-        ON parent_ch.id = parent_message.channel_id
-      LEFT JOIN joint_channels parent_joint
-        ON parent_joint.canonical_channel_id = parent_message.channel_id
-       AND parent_joint.status = 'active'
-      LEFT JOIN joint_channel_servers parent_projection
-        ON parent_projection.joint_channel_id = parent_joint.id
-       AND parent_projection.server_id = ${serverId}
-       AND parent_projection.status = 'active'
-      LEFT JOIN channels local_parent
-        ON local_parent.id = parent_projection.local_channel_id
-       AND local_parent.type = 'joint'
-       AND local_parent.archived_at IS NULL
-       AND local_parent.deleted_at IS NULL
-      WHERE filtered.kind = 'thread'
-    ),
-    faceted AS (
-      SELECT * FROM non_thread_facets
-      UNION ALL
-      SELECT * FROM thread_facets
-    ),
-    group_counts AS (
-      SELECT
-        "groupChannelId",
-        "groupChannelName",
-        "groupChannelType",
-        count(*)::int AS "groupCount",
-        MAX(last_activity_at) AS "groupLastActivityAt"
-      FROM faceted
-      WHERE "groupChannelId" IS NOT NULL
-      GROUP BY "groupChannelId", "groupChannelName", "groupChannelType"
-    ),
-    group_totals AS (
-      SELECT
-        array_agg("groupChannelId"::text ORDER BY CASE WHEN "groupChannelType" = 'dm' THEN 0 ELSE 1 END, "groupLastActivityAt" DESC NULLS LAST, lower("groupChannelName"), "groupChannelId") AS "groupChannelIds",
-        array_agg("groupChannelName" ORDER BY CASE WHEN "groupChannelType" = 'dm' THEN 0 ELSE 1 END, "groupLastActivityAt" DESC NULLS LAST, lower("groupChannelName"), "groupChannelId") AS "groupChannelNames",
-        array_agg("groupChannelType" ORDER BY CASE WHEN "groupChannelType" = 'dm' THEN 0 ELSE 1 END, "groupLastActivityAt" DESC NULLS LAST, lower("groupChannelName"), "groupChannelId") AS "groupChannelTypes",
-        array_agg("groupCount" ORDER BY CASE WHEN "groupChannelType" = 'dm' THEN 0 ELSE 1 END, "groupLastActivityAt" DESC NULLS LAST, lower("groupChannelName"), "groupChannelId") AS "groupCounts",
-        array_agg("groupLastActivityAt"::text ORDER BY CASE WHEN "groupChannelType" = 'dm' THEN 0 ELSE 1 END, "groupLastActivityAt" DESC NULLS LAST, lower("groupChannelName"), "groupChannelId") AS "groupLastActivityAts"
-      FROM group_counts
-    ),
-    selected AS (
-      SELECT *
-      FROM ${selectedSource}
-      ${selectedGroupPredicate}
-    ),
-    totals AS (
-      SELECT
-        count(*)::int AS "totalCount",
-        COALESCE(sum(CASE WHEN mention_only THEN 0 ELSE unread_count END), 0)::int AS "totalUnreadCount"
-      FROM selected
-    ),
-    page AS MATERIALIZED (
-      SELECT *
-      FROM selected
-      ORDER BY last_activity_at ${sortDirection}, kind ${sortDirection}, source_channel_id ${sortDirection}
-      LIMIT ${opts.limit + 1}
-      OFFSET ${opts.offset}
-    ),
-    ${pageMentionAggregationCte}
-    page_effective AS (
-      SELECT
-        page.*,
-        CASE
-          WHEN page_live_mentions.latest_message_seq IS NOT NULL
-            AND (
-              page.latest_personal_mention_seq IS NULL
-              OR page_live_mentions.latest_message_seq >= page.latest_personal_mention_seq
-            )
-          THEN page_live_mentions.latest_message_id
-          ELSE page.latest_personal_mention_message_id
-        END AS effective_latest_personal_mention_message_id,
-        GREATEST(
-          page.unread_mention_count,
-          COALESCE(page_live_mentions.unread_mention_count, 0)
-        ) AS effective_unread_mention_count,
-        COALESCE(
-          page_live_mentions.first_unread_message_id,
-          page.first_unread_personal_mention_message_id
-        ) AS effective_first_unread_personal_mention_message_id,
-        (
-          page.has_any_mention
-          OR page_live_mentions.latest_message_id IS NOT NULL
-        ) AS effective_has_any_mention
-      FROM page
-      LEFT JOIN page_live_mentions
-        ON page_live_mentions.source_channel_id = page.source_channel_id
-    ),
-    page_enriched AS (
-      SELECT
-        p.kind AS "kind",
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE p.source_channel_id::text END AS "channelId",
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE p.channel_name END AS "channelName",
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE p.channel_type::text END AS "channelType",
-        ${pageEnrichmentFields}
-        CASE WHEN p.mention_only THEN p.effective_latest_personal_mention_message_id::text ELSE p.first_unread_message_id::text END AS "firstUnreadMessageId",
-        p.effective_first_unread_personal_mention_message_id::text AS "firstMentionMessageId",
-        NULL::text AS "lastMessageSenderName",
-        CASE WHEN p.mention_only THEN 0 ELSE p.unread_count END::int AS "unreadCount",
-        CASE WHEN p.kind = 'thread' THEN p.source_channel_id::text ELSE NULL::text END AS "threadChannelId",
-        NULL::text AS "taskClaimedByName",
-        (CASE WHEN p.mention_only THEN p.effective_has_any_mention ELSE p.effective_unread_mention_count > 0 END) AS "hasMention",
-        p.effective_has_any_mention AS "hasAnyMention",
-        p.mention_only AS "mentionOnly",
-        p.source_channel_id::text AS "mentionSourceChannelId",
-        p.last_activity_at AS "activityAt"
-      FROM page_effective p
-      ${pageEnrichmentJoins}
-    )
-    ${output === "metadata"
-      ? sql`
-        SELECT
-          receiver_scope_stats.receiver_scope_row_count AS "__receiverScopeRowCount",
-          totals."totalCount",
-          totals."totalUnreadCount",
-          active_totals."activeUnreadCount",
-          group_totals."groupChannelIds",
-          group_totals."groupChannelNames",
-          group_totals."groupChannelTypes",
-          group_totals."groupCounts",
-          group_totals."groupLastActivityAts"
-        FROM totals
-        CROSS JOIN active_totals
-        CROSS JOIN group_totals
-        CROSS JOIN receiver_scope_stats
-      `
-      : output === "page"
-        ? sql`
-          SELECT
-            page_enriched.*,
-            NULL::int AS "__receiverScopeRowCount",
-            NULL::int AS "totalCount",
-            NULL::int AS "totalUnreadCount",
-            NULL::int AS "activeUnreadCount",
-            NULL::text[] AS "groupChannelIds",
-            NULL::text[] AS "groupChannelNames",
-            NULL::text[] AS "groupChannelTypes",
-            NULL::int[] AS "groupCounts",
-            NULL::text[] AS "groupLastActivityAts"
-          FROM (SELECT 1) page_sentinel
-          LEFT JOIN page_enriched ON true
-          ORDER BY "activityAt" ${sortDirection} NULLS LAST,
-            "kind" ${sortDirection},
-            COALESCE("threadChannelId", "channelId") ${sortDirection}
-        `
-        : sql`
-          SELECT
-            page_enriched.*,
-            receiver_scope_stats.receiver_scope_row_count AS "__receiverScopeRowCount",
-            totals."totalCount",
-            totals."totalUnreadCount",
-            active_totals."activeUnreadCount",
-            group_totals."groupChannelIds",
-            group_totals."groupChannelNames",
-            group_totals."groupChannelTypes",
-            group_totals."groupCounts",
-            group_totals."groupLastActivityAts"
-          FROM totals
-          CROSS JOIN active_totals
-          CROSS JOIN group_totals
-          CROSS JOIN receiver_scope_stats
-          LEFT JOIN page_enriched ON true
-          ORDER BY "activityAt" ${sortDirection} NULLS LAST,
-            "kind" ${sortDirection},
-            COALESCE("threadChannelId", "channelId") ${sortDirection}
-        `}
-    `;
-  };
-  const allPagePrefixLimit = opts.offset + opts.limit + 1;
-  const boundedKeyPrefixLimit = searchPattern
-    ? sql``
-    : sql`LIMIT ${allPagePrefixLimit}`;
-  const messagePrefixHistoryCutoffPredicate = opts.historyCutoff
-    ? sql`AND prefix_message.created_at > ${opts.historyCutoff}`
-    : sql``;
-  const allPageKeyProjection = sql`
-    SELECT
-      kind AS "_kind",
-      source_channel_id::text AS "_sourceChannelId",
-      latest_notified_message_id::text AS "_latestNotifiedMessageId",
-      latest_notified_seq::text AS "_latestNotifiedSeq",
-      last_activity_at AS "_lastActivityAt",
-      first_unread_message_id::text AS "_firstUnreadMessageId",
-      unread_count::int AS "_unreadCount",
-      latest_personal_mention_message_id::text AS "_latestPersonalMentionMessageId",
-      latest_personal_mention_seq::text AS "_latestPersonalMentionSeq",
-      unread_mention_count::int AS "_unreadMentionCount",
-      first_unread_personal_mention_message_id::text AS "_firstUnreadPersonalMentionMessageId",
-      has_any_mention AS "_hasAnyMention",
-      channel_name AS "_channelName",
-      channel_type::text AS "_channelType",
-      storage_channel_id::text AS "_storageChannelId",
-      joint_channel_id::text AS "_jointChannelId",
-      last_read_seq::text AS "_lastReadSeq",
-      mention_only AS "_mentionOnly"
-    FROM page
-    ORDER BY last_activity_at ${sortDirection}, kind ${sortDirection}, source_channel_id ${sortDirection}
-  `;
-  const buildAllPageServingKeysQuery = () => sql`
-    WITH serving_prefix AS MATERIALIZED (
-      SELECT
-        r.kind,
-        r.source_channel_id,
-        r.latest_notified_message_id,
-        r.latest_notified_seq,
-        r.last_activity_at,
-        r.first_unread_message_id,
-        r.unread_count::int AS unread_count,
-        r.latest_personal_mention_message_id,
-        r.latest_personal_mention_seq,
-        r.unread_mention_count::int AS unread_mention_count,
-        NULL::uuid AS first_unread_personal_mention_message_id,
-        r.has_any_mention,
-        c.name AS channel_name,
-        c.type AS channel_type,
-        CASE
-          WHEN r.kind IN ('channel', 'dm') AND chat_member.user_id IS NOT NULL THEN false
-          WHEN r.kind = 'thread' AND followed_thread.thread_channel_id IS NOT NULL THEN false
-          ELSE true
-        END AS mention_only
-      FROM inbox_serving_rows r
-      INNER JOIN channels c
-       ON c.id = r.source_channel_id
-       AND c.deleted_at IS NULL
-       AND c.archived_at IS NULL
-      LEFT JOIN user_channel_inbox_states inbox
-        ON inbox.channel_id = c.id
-       AND inbox.user_id = ${userId}
-      LEFT JOIN channel_humans chat_member
-        ON chat_member.channel_id = c.id
-       AND chat_member.user_id = ${userId}
-      LEFT JOIN thread_follows followed_thread
-        ON followed_thread.thread_channel_id = c.id
-       AND followed_thread.follower_type = 'user'
-       AND followed_thread.follower_id = ${userId}
-       AND followed_thread.done_at IS NULL
-       AND followed_thread.unfollowed_at IS NULL
-      WHERE r.receiver_type = 'user'
-        AND r.receiver_id = ${userId}::uuid
-        AND r.server_id = ${serverId}::uuid
-        AND c.server_id = ${serverId}::uuid
-        AND inbox.done_at IS NULL
-        AND (
-          (
-            r.kind IN ('channel', 'dm')
-            AND c.type IN ('channel', 'private', 'joint', 'dm')
-            AND chat_member.user_id IS NOT NULL
-          )
-          OR (
-            r.kind = 'thread'
-            AND followed_thread.thread_channel_id IS NOT NULL
-          )
-          OR r.has_any_mention
-        )
-        AND r.last_activity_at IS NOT NULL
-        ${guestAccess === null ? sql`` : sql`AND ${guestInboxAccessSql(guestAccess, sql`r.source_channel_id`)}`}
-        ${historyCutoffPredicate}
-      ORDER BY r.last_activity_at ${sortDirection}, r.kind ${sortDirection}, r.source_channel_id ${sortDirection}
-      ${boundedKeyPrefixLimit}
-    ),
-    serving_page_rows AS MATERIALIZED (
-      SELECT
-        prefix.kind,
-        prefix.source_channel_id,
-        prefix.latest_notified_message_id,
-        prefix.latest_notified_seq,
-        prefix.last_activity_at,
-        prefix.first_unread_message_id,
-        prefix.unread_count,
-        prefix.latest_personal_mention_message_id,
-        prefix.latest_personal_mention_seq,
-        prefix.unread_mention_count,
-        prefix.first_unread_personal_mention_message_id,
-        prefix.has_any_mention,
-        prefix.channel_name,
-        prefix.channel_type,
-        COALESCE(joint_storage.canonical_channel_id, prefix.source_channel_id) AS storage_channel_id,
-        joint_projection.joint_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        prefix.mention_only
-      FROM serving_prefix prefix
-      LEFT JOIN joint_channel_servers joint_projection
-        ON joint_projection.local_channel_id = prefix.source_channel_id
-       AND joint_projection.server_id = ${serverId}::uuid
-       AND joint_projection.status = 'active'
-      LEFT JOIN joint_channels joint_storage
-        ON joint_storage.id = joint_projection.joint_channel_id
-       AND joint_storage.status = 'active'
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = prefix.source_channel_id
-       AND rc.user_id = ${userId}
-    ),
-    all_visible_rows AS (
-      SELECT * FROM serving_page_rows
-    ),
-    filtered AS (
-      SELECT *
-      FROM all_visible_rows
-      WHERE last_activity_at IS NOT NULL
-        ${guestAccess === null ? sql`` : sql`AND ${guestInboxAccessSql(guestAccess, sql`source_channel_id`)}`}
-        ${historyCutoffPredicate}
-        ${searchPredicate}
-    ),
-    page AS MATERIALIZED (
-      SELECT *
-      FROM filtered
-      ORDER BY last_activity_at ${sortDirection}, kind ${sortDirection}, source_channel_id ${sortDirection}
-      LIMIT ${allPagePrefixLimit}
-    )
-    ${allPageKeyProjection}
-  `;
-  const buildAllPageMentionKeysQuery = () => sql`
-    WITH server_target_mentions AS MATERIALIZED (
-      SELECT
-        server_mention.channel_id,
-        server_mention.message_id,
-        server_mention.message_seq,
-        server_mention.notified_at
-      FROM message_mentions server_mention
-      WHERE server_mention.target_type = 'user'
-        AND server_mention.target_id = ${userId}::uuid
-        AND server_mention.server_id = ${serverId}::uuid
-        AND (server_mention.notifiable_at_send OR server_mention.notified_at IS NOT NULL)
-    ),
-    receiver_mention_source_ids AS MATERIALIZED (
-      SELECT DISTINCT r.source_channel_id
-      FROM server_target_mentions mention
-      INNER JOIN inbox_serving_rows r
-        ON r.source_channel_id = mention.channel_id
-       AND r.receiver_type = 'user'
-       AND r.receiver_id = ${userId}::uuid
-       AND r.server_id = ${serverId}::uuid
-      UNION
-      SELECT DISTINCT r.source_channel_id
-      FROM message_mentions sibling_mention
-      INNER JOIN joint_channel_servers sibling_projection
-        ON sibling_projection.local_channel_id = sibling_mention.channel_id
-       AND sibling_projection.status = 'active'
-      INNER JOIN joint_channel_servers receiver_projection
-        ON receiver_projection.joint_channel_id = sibling_projection.joint_channel_id
-       AND receiver_projection.server_id = ${serverId}::uuid
-       AND receiver_projection.status = 'active'
-      INNER JOIN inbox_serving_rows r
-        ON r.source_channel_id = receiver_projection.local_channel_id
-       AND r.receiver_type = 'user'
-       AND r.receiver_id = ${userId}::uuid
-       AND r.server_id = ${serverId}::uuid
-      WHERE sibling_mention.target_type = 'user'
-        AND sibling_mention.target_id = ${userId}::uuid
-        AND sibling_mention.server_id <> ${serverId}::uuid
-        AND (sibling_mention.notifiable_at_send OR sibling_mention.notified_at IS NOT NULL)
-    ),
-    receiver_mention_prefix AS MATERIALIZED (
-      SELECT
-        r.kind,
-        r.source_channel_id,
-        r.latest_notified_message_id,
-        r.latest_notified_seq,
-        r.last_activity_at,
-        r.first_unread_message_id,
-        r.unread_count::int AS unread_count,
-        r.latest_personal_mention_message_id,
-        r.latest_personal_mention_seq,
-        r.unread_mention_count::int AS unread_mention_count,
-        NULL::uuid AS first_unread_personal_mention_message_id,
-        true AS has_any_mention,
-        c.name AS channel_name,
-        c.type AS channel_type,
-        CASE
-          WHEN r.kind IN ('channel', 'dm') AND chat_member.user_id IS NOT NULL THEN false
-          WHEN r.kind = 'thread' AND followed_thread.thread_channel_id IS NOT NULL THEN false
-          ELSE true
-        END AS mention_only
-      FROM receiver_mention_source_ids presence
-      INNER JOIN inbox_serving_rows r
-        ON r.source_channel_id = presence.source_channel_id
-       AND r.receiver_type = 'user'
-       AND r.receiver_id = ${userId}::uuid
-       AND r.server_id = ${serverId}::uuid
-      INNER JOIN channels c
-        ON c.id = r.source_channel_id
-       AND c.server_id = ${serverId}::uuid
-       AND c.deleted_at IS NULL
-       AND c.archived_at IS NULL
-      LEFT JOIN user_channel_inbox_states inbox
-        ON inbox.channel_id = c.id
-       AND inbox.user_id = ${userId}
-      LEFT JOIN channel_humans chat_member
-        ON chat_member.channel_id = c.id
-       AND chat_member.user_id = ${userId}
-      LEFT JOIN thread_follows followed_thread
-        ON followed_thread.thread_channel_id = c.id
-       AND followed_thread.follower_type = 'user'
-       AND followed_thread.follower_id = ${userId}
-       AND followed_thread.done_at IS NULL
-       AND followed_thread.unfollowed_at IS NULL
-      WHERE inbox.done_at IS NULL
-        AND r.last_activity_at IS NOT NULL
-        ${guestAccess === null ? sql`` : sql`AND ${guestInboxAccessSql(guestAccess, sql`r.source_channel_id`)}`}
-        ${historyCutoffPredicate}
-      ORDER BY r.last_activity_at ${sortDirection}, r.kind ${sortDirection}, r.source_channel_id ${sortDirection}
-      ${boundedKeyPrefixLimit}
-    ),
-    receiver_mention_rows AS (
-      SELECT
-        prefix.kind,
-        prefix.source_channel_id,
-        prefix.latest_notified_message_id,
-        prefix.latest_notified_seq,
-        prefix.last_activity_at,
-        prefix.first_unread_message_id,
-        prefix.unread_count,
-        prefix.latest_personal_mention_message_id,
-        prefix.latest_personal_mention_seq,
-        prefix.unread_mention_count,
-        prefix.first_unread_personal_mention_message_id,
-        prefix.has_any_mention,
-        prefix.channel_name,
-        prefix.channel_type,
-        COALESCE(joint_storage.canonical_channel_id, prefix.source_channel_id) AS storage_channel_id,
-        joint_projection.joint_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        prefix.mention_only
-      FROM receiver_mention_prefix prefix
-      LEFT JOIN joint_channel_servers joint_projection
-        ON joint_projection.local_channel_id = prefix.source_channel_id
-       AND joint_projection.server_id = ${serverId}::uuid
-       AND joint_projection.status = 'active'
-      LEFT JOIN joint_channels joint_storage
-        ON joint_storage.id = joint_projection.joint_channel_id
-       AND joint_storage.status = 'active'
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = prefix.source_channel_id
-       AND rc.user_id = ${userId}
-    ),
-    mention_channel_rows AS (
-      SELECT
-        CASE WHEN c.type = 'dm' THEN 'dm' ELSE 'channel' END AS kind,
-        c.id AS source_channel_id,
-        m.id AS latest_notified_message_id,
-        m.seq AS latest_notified_seq,
-        m.created_at AS last_activity_at,
-        CASE
-          WHEN chat_member.user_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN m.id
-          ELSE NULL
-        END AS first_unread_message_id,
-        CASE
-          WHEN chat_member.user_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN 1
-          ELSE 0
-        END::int AS unread_count,
-        m.id AS latest_personal_mention_message_id,
-        m.seq AS latest_personal_mention_seq,
-        CASE WHEN m.seq > COALESCE(rc.last_read_seq, 0) THEN 1 ELSE 0 END::int AS unread_mention_count,
-        m.id AS first_unread_personal_mention_message_id,
-        true AS has_any_mention,
-        c.name AS channel_name,
-        c.type AS channel_type,
-        COALESCE(joint_storage.canonical_channel_id, c.id) AS storage_channel_id,
-        joint_projection.joint_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        CASE WHEN chat_member.user_id IS NOT NULL THEN false ELSE true END AS mention_only
-      FROM (
-        SELECT
-          grouped_mention.channel_id,
-          grouped_mention.latest_mention_seq
-        FROM (
-          SELECT
-            mention.channel_id,
-            max(mention.message_seq) AS latest_mention_seq
-          FROM server_target_mentions mention
-          INNER JOIN channels mention_channel
-            ON mention_channel.id = mention.channel_id
-          LEFT JOIN channel_humans member_check
-            ON member_check.channel_id = mention.channel_id
-           AND member_check.user_id = ${userId}
-          LEFT JOIN user_channel_inbox_states inbox_check
-            ON inbox_check.channel_id = mention.channel_id
-           AND inbox_check.user_id = ${userId}
-          LEFT JOIN inbox_suppression_states mention_suppression
-            ON mention_suppression.receiver_type = 'user'
-           AND mention_suppression.receiver_id = ${userId}::uuid
-           AND mention_suppression.target_kind = 'public_channel_mention'
-           AND mention_suppression.target_channel_id = mention.channel_id
-          WHERE mention_channel.server_id = ${serverId}::uuid
-            AND mention_channel.type IN ('channel', 'private', 'joint', 'dm')
-            AND mention_channel.deleted_at IS NULL
-            AND mention_channel.archived_at IS NULL
-            AND inbox_check.done_at IS NULL
-            AND mention.message_seq > COALESCE(mention_suppression.done_through_seq, 0)
-            AND (
-              member_check.user_id IS NOT NULL
-              OR (mention_channel.type = 'channel' AND mention.notified_at IS NOT NULL)
-            )
-          GROUP BY mention.channel_id
-        ) grouped_mention
-        INNER JOIN messages prefix_message
-          ON prefix_message.channel_id = grouped_mention.channel_id
-         AND prefix_message.seq = grouped_mention.latest_mention_seq
-        WHERE prefix_message.created_at IS NOT NULL
-          ${messagePrefixHistoryCutoffPredicate}
-        ORDER BY prefix_message.created_at ${sortDirection}, grouped_mention.channel_id ${sortDirection}
-        ${boundedKeyPrefixLimit}
-      ) latest_mention
-      INNER JOIN channels c
-        ON c.id = latest_mention.channel_id
-      INNER JOIN messages m
-        ON m.channel_id = latest_mention.channel_id
-       AND m.seq = latest_mention.latest_mention_seq
-      LEFT JOIN joint_channel_servers joint_projection
-        ON joint_projection.local_channel_id = c.id
-       AND joint_projection.server_id = c.server_id
-       AND joint_projection.status = 'active'
-      LEFT JOIN joint_channels joint_storage
-        ON joint_storage.id = joint_projection.joint_channel_id
-       AND joint_storage.status = 'active'
-      LEFT JOIN user_channel_inbox_states inbox
-        ON inbox.channel_id = c.id
-       AND inbox.user_id = ${userId}
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = c.id
-       AND rc.user_id = ${userId}
-      LEFT JOIN channel_humans chat_member
-        ON chat_member.channel_id = c.id
-       AND chat_member.user_id = ${userId}
-    ),
-    mention_thread_rows AS (
-      SELECT
-        'thread' AS kind,
-        thread_channel.id AS source_channel_id,
-        m.id AS latest_notified_message_id,
-        m.seq AS latest_notified_seq,
-        m.created_at AS last_activity_at,
-        CASE
-          WHEN existing_follow.thread_channel_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN m.id
-          ELSE NULL
-        END AS first_unread_message_id,
-        CASE
-          WHEN existing_follow.thread_channel_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN 1
-          ELSE 0
-        END::int AS unread_count,
-        m.id AS latest_personal_mention_message_id,
-        m.seq AS latest_personal_mention_seq,
-        CASE WHEN m.seq > COALESCE(rc.last_read_seq, 0) THEN 1 ELSE 0 END::int AS unread_mention_count,
-        m.id AS first_unread_personal_mention_message_id,
-        true AS has_any_mention,
-        thread_channel.name AS channel_name,
-        thread_channel.type AS channel_type,
-        COALESCE(canonical_thread.id, thread_channel.id) AS storage_channel_id,
-        thread_projection.joint_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        CASE WHEN existing_follow.thread_channel_id IS NOT NULL THEN false ELSE true END AS mention_only
-      FROM (
-        SELECT
-          grouped_mention.channel_id,
-          grouped_mention.latest_mention_seq
-        FROM (
-          SELECT
-            mention.channel_id,
-            max(mention.message_seq) AS latest_mention_seq
-          FROM server_target_mentions mention
-          INNER JOIN channels candidate_thread
-            ON candidate_thread.id = mention.channel_id
-          INNER JOIN messages parent_message
-            ON parent_message.id = candidate_thread.parent_message_id
-          INNER JOIN channels parent_channel
-            ON parent_channel.id = parent_message.channel_id
-          LEFT JOIN thread_follows existing_follow
-            ON existing_follow.thread_channel_id = mention.channel_id
-           AND existing_follow.follower_type = 'user'
-           AND existing_follow.follower_id = ${userId}
-           AND existing_follow.done_at IS NULL
-           AND existing_follow.unfollowed_at IS NULL
-          LEFT JOIN channel_humans parent_member
-            ON parent_member.channel_id = parent_channel.id
-           AND parent_member.user_id = ${userId}
-          LEFT JOIN user_channel_inbox_states inbox_check
-            ON inbox_check.channel_id = mention.channel_id
-           AND inbox_check.user_id = ${userId}
-          LEFT JOIN inbox_suppression_states mention_suppression
-            ON mention_suppression.receiver_type = 'user'
-           AND mention_suppression.receiver_id = ${userId}::uuid
-           AND mention_suppression.target_kind = 'public_thread_mention'
-           AND mention_suppression.target_channel_id = mention.channel_id
-          WHERE candidate_thread.server_id = ${serverId}::uuid
-            AND candidate_thread.type = 'thread'
-            AND candidate_thread.deleted_at IS NULL
-            AND parent_channel.archived_at IS NULL
-            AND parent_channel.deleted_at IS NULL
-            AND inbox_check.done_at IS NULL
-            AND mention.message_seq > COALESCE(mention_suppression.done_through_seq, 0)
-            AND (
-              existing_follow.thread_channel_id IS NOT NULL
-              OR (
-                mention.notified_at IS NOT NULL
-                AND (
-                  parent_channel.type = 'channel'
-                  OR parent_member.user_id IS NOT NULL
-                )
-              )
-            )
-          GROUP BY mention.channel_id
-        ) grouped_mention
-        INNER JOIN messages prefix_message
-          ON prefix_message.channel_id = grouped_mention.channel_id
-         AND prefix_message.seq = grouped_mention.latest_mention_seq
-        WHERE prefix_message.created_at IS NOT NULL
-          ${messagePrefixHistoryCutoffPredicate}
-        ORDER BY prefix_message.created_at ${sortDirection}, grouped_mention.channel_id ${sortDirection}
-        ${boundedKeyPrefixLimit}
-      ) latest_mention
-      INNER JOIN channels thread_channel
-        ON thread_channel.id = latest_mention.channel_id
-      INNER JOIN messages m
-        ON m.channel_id = latest_mention.channel_id
-       AND m.seq = latest_mention.latest_mention_seq
-      LEFT JOIN joint_channel_servers thread_projection
-        ON thread_projection.local_channel_id = thread_channel.id
-       AND thread_projection.server_id = ${serverId}::uuid
-       AND thread_projection.status = 'active'
-      LEFT JOIN joint_channels thread_joint
-        ON thread_joint.id = thread_projection.joint_channel_id
-       AND thread_joint.status = 'active'
-      LEFT JOIN channels canonical_thread
-        ON canonical_thread.id = thread_joint.canonical_channel_id
-       AND canonical_thread.type = 'thread'
-       AND canonical_thread.deleted_at IS NULL
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = thread_channel.id
-       AND rc.user_id = ${userId}
-      LEFT JOIN thread_follows existing_follow
-        ON existing_follow.thread_channel_id = thread_channel.id
-       AND existing_follow.follower_type = 'user'
-       AND existing_follow.follower_id = ${userId}
-       AND existing_follow.done_at IS NULL
-       AND existing_follow.unfollowed_at IS NULL
-    ),
-    all_visible_rows AS (
-      SELECT * FROM receiver_mention_rows
-      UNION ALL
-      SELECT channel_row.*
-      FROM mention_channel_rows channel_row
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM receiver_mention_rows receiver_row
-        WHERE receiver_row.kind = channel_row.kind
-          AND receiver_row.source_channel_id = channel_row.source_channel_id
-      )
-      UNION ALL
-      SELECT thread_row.*
-      FROM mention_thread_rows thread_row
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM receiver_mention_rows receiver_row
-        WHERE receiver_row.kind = thread_row.kind
-          AND receiver_row.source_channel_id = thread_row.source_channel_id
-      )
-    ),
-    filtered AS (
-      SELECT *
-      FROM all_visible_rows
-      WHERE last_activity_at IS NOT NULL
-        ${guestAccess === null ? sql`` : sql`AND ${guestInboxAccessSql(guestAccess, sql`source_channel_id`)}`}
-        ${historyCutoffPredicate}
-        ${searchPredicate}
-    ),
-    page AS MATERIALIZED (
-      SELECT *
-      FROM filtered
-      ORDER BY last_activity_at ${sortDirection}, kind ${sortDirection}, source_channel_id ${sortDirection}
-      LIMIT ${allPagePrefixLimit}
-    )
-    ${allPageKeyProjection}
-  `;
-  const mergeAllPageKeyRows = (
-    servingRows: readonly QueryResultRow[],
-    mentionRows: readonly QueryResultRow[],
-  ): QueryResultRow[] =>
-    mergeInboxAllPageKeyRows(
-      servingRows,
-      mentionRows,
-      opts.sort,
-      opts.offset,
-      opts.limit,
-    );
-  const buildAllPageHydrationQuery = (pageKeyRows: readonly QueryResultRow[]) => {
-    const nullableText = (value: unknown) => value == null ? null : String(value);
-    const pageInput = pageKeyRows.map((row) => ({
-      row_ordinal: Number(row._pageOrdinal),
-      kind: String(row._kind),
-      source_channel_id: String(row._sourceChannelId),
-      latest_notified_message_id: nullableText(row._latestNotifiedMessageId),
-      latest_notified_seq: nullableText(row._latestNotifiedSeq),
-      last_activity_at: row._lastActivityAt instanceof Date
-        ? row._lastActivityAt.toISOString()
-        : String(row._lastActivityAt),
-      first_unread_message_id: nullableText(row._firstUnreadMessageId),
-      unread_count: Number(row._unreadCount),
-      latest_personal_mention_message_id: nullableText(row._latestPersonalMentionMessageId),
-      latest_personal_mention_seq: nullableText(row._latestPersonalMentionSeq),
-      unread_mention_count: Number(row._unreadMentionCount),
-      first_unread_personal_mention_message_id: nullableText(row._firstUnreadPersonalMentionMessageId),
-      has_any_mention: row._hasAnyMention === true,
-      channel_name: nullableText(row._channelName),
-      channel_type: nullableText(row._channelType),
-      storage_channel_id: String(row._storageChannelId),
-      joint_channel_id: nullableText(row._jointChannelId),
-      last_read_seq: nullableText(row._lastReadSeq),
-      mention_only: row._mentionOnly === true,
-    }));
-    return sql`
-      WITH page_input AS MATERIALIZED (
-        SELECT input.*
-        FROM jsonb_to_recordset(${JSON.stringify(pageInput)}::jsonb) AS input(
-          row_ordinal int,
-          kind text,
-          source_channel_id uuid,
-          latest_notified_message_id uuid,
-          latest_notified_seq bigint,
-          last_activity_at timestamptz,
-          first_unread_message_id uuid,
-          unread_count int,
-          latest_personal_mention_message_id uuid,
-          latest_personal_mention_seq bigint,
-          unread_mention_count int,
-          first_unread_personal_mention_message_id uuid,
-          has_any_mention boolean,
-          channel_name text,
-          channel_type text,
-          storage_channel_id uuid,
-          joint_channel_id uuid,
-          last_read_seq bigint,
-          mention_only boolean
-        )
-      ),
-      page_mention_scope AS MATERIALIZED (
-        SELECT
-          input.row_ordinal,
-          input.source_channel_id,
-          input.source_channel_id AS mention_channel_id,
-          input.last_read_seq
-        FROM page_input input
-        UNION
-        SELECT
-          input.row_ordinal,
-          input.source_channel_id,
-          sibling_projection.local_channel_id AS mention_channel_id,
-          input.last_read_seq
-        FROM page_input input
-        INNER JOIN joint_channel_servers sibling_projection
-          ON sibling_projection.joint_channel_id = input.joint_channel_id
-         AND sibling_projection.status = 'active'
-      ),
-      page_scoped_mentions AS MATERIALIZED (
-        SELECT
-          scope.row_ordinal,
-          scope.source_channel_id,
-          scope.last_read_seq,
-          server_mention.message_id,
-          server_mention.message_seq
-        FROM page_mention_scope scope
-        INNER JOIN message_mentions server_mention
-          ON server_mention.channel_id = scope.mention_channel_id
-         AND server_mention.target_type = 'user'
-         AND server_mention.target_id = ${userId}::uuid
-         AND server_mention.server_id = ${serverId}::uuid
-         AND (server_mention.notifiable_at_send OR server_mention.notified_at IS NOT NULL)
-        UNION ALL
-        SELECT
-          scope.row_ordinal,
-          scope.source_channel_id,
-          scope.last_read_seq,
-          sibling_mention.message_id,
-          sibling_mention.message_seq
-        FROM page_mention_scope scope
-        INNER JOIN message_mentions sibling_mention
-          ON sibling_mention.channel_id = scope.mention_channel_id
-         AND sibling_mention.target_type = 'user'
-         AND sibling_mention.target_id = ${userId}::uuid
-         AND sibling_mention.server_id <> ${serverId}::uuid
-         AND (sibling_mention.notifiable_at_send OR sibling_mention.notified_at IS NOT NULL)
-      ),
-      page_live_mentions AS MATERIALIZED (
-        SELECT
-          mention.row_ordinal,
-          mention.source_channel_id,
-          (array_agg(mention.message_id ORDER BY mention.message_seq DESC, mention.message_id DESC))[1] AS latest_message_id,
-          max(mention.message_seq) AS latest_message_seq,
-          (count(*) FILTER (
-            WHERE mention.message_seq > mention.last_read_seq
-          ))::int AS unread_mention_count,
-          (array_agg(mention.message_id ORDER BY mention.message_seq ASC, mention.message_id ASC) FILTER (
-            WHERE mention.message_seq > mention.last_read_seq
-          ))[1] AS first_unread_message_id
-        FROM page_scoped_mentions mention
-        GROUP BY mention.row_ordinal, mention.source_channel_id, mention.last_read_seq
-      ),
-      page_effective AS (
-        SELECT
-          input.*,
-          CASE
-            WHEN live.latest_message_seq IS NOT NULL
-              AND (
-                input.latest_personal_mention_seq IS NULL
-                OR live.latest_message_seq >= input.latest_personal_mention_seq
-              )
-            THEN live.latest_message_id
-            ELSE input.latest_personal_mention_message_id
-          END AS effective_latest_personal_mention_message_id,
-          GREATEST(
-            input.unread_mention_count,
-            COALESCE(live.unread_mention_count, 0)
-          ) AS effective_unread_mention_count,
-          COALESCE(
-            live.first_unread_message_id,
-            input.first_unread_personal_mention_message_id
-          ) AS effective_first_unread_personal_mention_message_id,
-          (
-            input.has_any_mention
-            OR live.latest_message_id IS NOT NULL
-          ) AS effective_has_any_mention
-        FROM page_input input
-        LEFT JOIN page_live_mentions live
-          ON live.row_ordinal = input.row_ordinal
-      )
-      SELECT
-        p.row_ordinal AS "_pageOrdinal",
-        p.kind AS "kind",
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE p.source_channel_id::text END AS "channelId",
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE p.channel_name END AS "channelName",
-        CASE WHEN p.kind = 'thread' THEN NULL::text ELSE p.channel_type END AS "channelType",
-        CASE
-          WHEN p.kind = 'thread' THEN NULL::text
-          ELSE (
-            CASE
-              WHEN p.mention_only THEN p.effective_latest_personal_mention_message_id
-              ELSE p.latest_notified_message_id
-            END
-          )::text
-        END AS "lastMessageId",
-        NULL::text AS "lastMessageAt",
-        NULL::text AS "lastMessagePreview",
-        NULL::text AS "lastMessageSenderType",
-        NULL::text AS "lastMessageSenderId",
-        NULL::text AS "parentMessageId",
-        NULL::text AS "parentChannelId",
-        NULL::text AS "parentChannelName",
-        NULL::text AS "parentChannelType",
-        NULL::text AS "parentMessagePreview",
-        NULL::text AS "parentMessageSenderType",
-        NULL::text AS "parentMessageSenderId",
-        NULL::text AS "latestActivityPreview",
-        NULL::text AS "latestActivitySenderType",
-        NULL::text AS "latestActivitySenderId",
-        NULL::text AS "latestActivityMessageId",
-        NULL::text AS "latestActivitySeq",
-        NULL::text AS "lastActivityAt",
-        NULL::text AS "lastReplyAt",
-        NULL::int AS "replyCount",
-        NULL::int AS "taskNumber",
-        NULL::text AS "taskStatus",
-        NULL::text AS "taskClaimedByType",
-        NULL::text AS "taskClaimedById",
-        p.storage_channel_id::text AS "_storageChannelId",
-        (
-          CASE
-            WHEN p.mention_only THEN p.effective_latest_personal_mention_message_id
-            ELSE p.latest_notified_message_id
-          END
-        )::text AS "_latestMessageLookupId",
-        CASE WHEN p.mention_only THEN p.effective_latest_personal_mention_message_id::text ELSE p.first_unread_message_id::text END AS "firstUnreadMessageId",
-        p.effective_first_unread_personal_mention_message_id::text AS "firstMentionMessageId",
-        NULL::text AS "lastMessageSenderName",
-        CASE WHEN p.mention_only THEN 0 ELSE p.unread_count END::int AS "unreadCount",
-        CASE WHEN p.kind = 'thread' THEN p.source_channel_id::text ELSE NULL::text END AS "threadChannelId",
-        NULL::text AS "taskClaimedByName",
-        (CASE WHEN p.mention_only THEN p.effective_has_any_mention ELSE p.effective_unread_mention_count > 0 END) AS "hasMention",
-        p.effective_has_any_mention AS "hasAnyMention",
-        p.mention_only AS "mentionOnly",
-        p.source_channel_id::text AS "mentionSourceChannelId",
-        p.last_activity_at AS "activityAt"
-      FROM page_effective p
-      ORDER BY p.row_ordinal
-    `;
-  };
-  const buildAllPageEnrichmentQuery = (pageRows: readonly QueryResultRow[]) => {
-    const pageInput = pageRows.map((row, rowOrdinal) => ({
-      row_ordinal: rowOrdinal,
-      kind: String(row.kind),
-      source_channel_id: String(row.mentionSourceChannelId),
-      storage_channel_id: String(row._storageChannelId),
-      latest_message_lookup_id: row._latestMessageLookupId == null
-        ? null
-        : String(row._latestMessageLookupId),
-    }));
-    return sql`
-      WITH page_input AS MATERIALIZED (
-        SELECT *
-        FROM jsonb_to_recordset(${JSON.stringify(pageInput)}::jsonb) AS input(
-          row_ordinal int,
-          kind text,
-          source_channel_id uuid,
-          storage_channel_id uuid,
-          latest_message_lookup_id uuid
-        )
-      )
-      SELECT
-        input.row_ordinal AS "_pageOrdinal",
-        CASE WHEN input.kind = 'thread' THEN NULL::text ELSE latest_message.id::text END AS "lastMessageId",
-        CASE WHEN input.kind = 'thread' THEN NULL::text ELSE to_char((latest_message.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00' END AS "lastMessageAt",
-        CASE WHEN input.kind = 'thread' THEN NULL::text ELSE latest_message.content END AS "lastMessagePreview",
-        CASE WHEN input.kind = 'thread' THEN NULL::text ELSE latest_message.sender_type END AS "lastMessageSenderType",
-        CASE WHEN input.kind = 'thread' THEN NULL::text ELSE latest_message.sender_id END AS "lastMessageSenderId",
-        pm.id::text AS "parentMessageId",
-        COALESCE(local_parent.id, parent_ch.id)::text AS "parentChannelId",
-        COALESCE(local_parent.name, parent_ch.name) AS "parentChannelName",
-        COALESCE(local_parent.type::text, parent_ch.type::text) AS "parentChannelType",
-        pm.content AS "parentMessagePreview",
-        pm.sender_type AS "parentMessageSenderType",
-        pm.sender_id AS "parentMessageSenderId",
-        COALESCE(latest_message.content, pm.content) AS "latestActivityPreview",
-        COALESCE(latest_message.sender_type, pm.sender_type) AS "latestActivitySenderType",
-        COALESCE(latest_message.sender_id, pm.sender_id) AS "latestActivitySenderId",
-        COALESCE(latest_message.id, pm.id)::text AS "latestActivityMessageId",
-        COALESCE(latest_message.seq, pm.seq)::text AS "latestActivitySeq",
-        to_char((COALESCE(latest_message.created_at, pm.created_at)) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00' AS "lastActivityAt",
-        CASE WHEN input.kind = 'thread' AND latest_message.id IS NOT NULL THEN to_char((latest_message.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00' ELSE NULL::text END AS "lastReplyAt",
-        CASE WHEN input.kind = 'thread' THEN COALESCE(reply_count.reply_count, 0)::int ELSE NULL::int END AS "replyCount",
-        task.task_number AS "taskNumber",
-        task.status AS "taskStatus",
-        task.claimed_by_type AS "taskClaimedByType",
-        task.claimed_by_id AS "taskClaimedById"
-      FROM page_input input
-      LEFT JOIN messages latest_message
-        ON latest_message.id = input.latest_message_lookup_id
-      LEFT JOIN channels thread_channel
-        ON thread_channel.id = input.source_channel_id
-       AND input.kind = 'thread'
-      LEFT JOIN joint_channel_servers thread_projection
-        ON thread_projection.local_channel_id = thread_channel.id
-       AND thread_projection.server_id = ${serverId}
-       AND thread_projection.status = 'active'
-      LEFT JOIN joint_channels thread_joint
-        ON thread_joint.id = thread_projection.joint_channel_id
-       AND thread_joint.status = 'active'
-      LEFT JOIN channels canonical_thread
-        ON canonical_thread.id = thread_joint.canonical_channel_id
-       AND canonical_thread.type = 'thread'
-       AND canonical_thread.deleted_at IS NULL
-      LEFT JOIN messages pm
-        ON pm.id = COALESCE(canonical_thread.parent_message_id, thread_channel.parent_message_id)
-      LEFT JOIN channels parent_ch
-        ON parent_ch.id = pm.channel_id
-      LEFT JOIN joint_channels parent_joint
-        ON parent_joint.canonical_channel_id = pm.channel_id
-       AND parent_joint.status = 'active'
-      LEFT JOIN joint_channel_servers parent_projection
-        ON parent_projection.joint_channel_id = parent_joint.id
-       AND parent_projection.server_id = ${serverId}
-       AND parent_projection.status = 'active'
-      LEFT JOIN channels local_parent
-        ON local_parent.id = parent_projection.local_channel_id
-       AND local_parent.type = 'joint'
-       AND local_parent.archived_at IS NULL
-       AND local_parent.deleted_at IS NULL
-      LEFT JOIN LATERAL (
-        SELECT count(*)::int AS reply_count
-        FROM messages m
-        WHERE input.kind = 'thread'
-          AND m.channel_id = input.storage_channel_id
-      ) reply_count ON true
-      LEFT JOIN tasks task
-        ON task.message_id = pm.id
-      ORDER BY input.row_ordinal
-    `;
-  };
-  const queryHash = getSqlTraceHash(
-    splitAllMetadata ? buildAllPageServingKeysQuery() : buildServingRowsQuery(),
-  );
-  const scopeTraceAttrs = inboxPgFallbackQueryScopeTraceAttrs(queryHash);
-  let timeoutPlan: InboxPgFallbackTimeoutPlan | undefined;
-  let receiverScopeRowCount: number | undefined;
-  const receiverScopeRowCountTraceAttrs = () =>
-    receiverScopeRowCount === undefined
-      ? { receiver_scope_row_count_state: "unavailable_query_failed" as const }
-      : {
-          receiver_scope_row_count: receiverScopeRowCount,
-          receiver_scope_row_count_state: "measured" as const,
-        };
-  const executeScopedServingRowsQuery = async (executor: DatabaseExecutor) => {
-    // Keep the serving-key prefix, mention-fallback prefix, metadata,
-    // bounded page hydration, and page enrichment as independent timeout
-    // observations. Each key producer returns the first offset+limit+1 rows; their
-    // stable in-memory union therefore contains every row that can enter the final
-    // page. Hydration carries at most one requested page through JSON. Each statement
-    // is independently subject to the same transaction-local 3s cap. Ordinary paging
-    // already tolerates a newly created row committed between statements appearing on
-    // the next request.
-    const servingPageResult = splitAllMetadata
-      ? await executor.execute(buildAllPageServingKeysQuery())
-      : null;
-    const mentionPageResult = splitAllMetadata
-      ? await executor.execute(buildAllPageMentionKeysQuery())
-      : null;
-    const mainResult = servingPageResult && mentionPageResult
-      ? {
-        ...servingPageResult,
-        rows: mergeAllPageKeyRows(servingPageResult.rows, mentionPageResult.rows),
-      }
-      : await executor.execute(buildServingRowsQuery());
-    const metadataResult = splitAllMetadata
-      ? await executor.execute(buildServingRowsQuery("metadata"))
-      : null;
-    const metadataRow = metadataResult?.rows[0];
-    if (splitAllMetadata && !metadataRow) {
-      throw new Error("Inbox serving-row metadata query returned no sentinel row");
-    }
-    const receiverScopeCount = metadataRow?.__receiverScopeRowCount
-      ?? mainResult.rows[0]?.__receiverScopeRowCount;
-    if (receiverScopeCount != null) {
-      receiverScopeRowCount = Number(receiverScopeCount);
-    }
-    const pageHydrationResult = splitAllMetadata && mainResult.rows.length > 0
-      ? await executor.execute(buildAllPageHydrationQuery(mainResult.rows))
-      : null;
-    if (
-      splitAllMetadata
-      && pageHydrationResult
-      && pageHydrationResult.rows.length !== mainResult.rows.length
-    ) {
-      throw new Error("Inbox serving-row page hydration returned an incomplete page");
-    }
-    const mainRows = metadataRow
-      ? pageHydrationResult?.rows.length
-        ? pageHydrationResult.rows.map((row) => ({ ...row, ...metadataRow }))
-        : [{ kind: null, ...metadataRow }]
-      : mainResult.rows;
-    if (!splitAllPageEnrichment) return mainResult;
-
-    const pageRows = mainRows.filter((row) => row.kind != null);
-    const pageEnrichmentResult = pageRows.length > 0
-      ? await executor.execute(buildAllPageEnrichmentQuery(pageRows))
-      : { rows: [] as QueryResultRow[] };
-    const pageEnrichmentByOrdinal = new Map<number, QueryResultRow>();
-    for (const row of pageEnrichmentResult.rows) {
-      pageEnrichmentByOrdinal.set(Number(row._pageOrdinal), row);
-    }
-    let pageOrdinal = 0;
-    const rows = mainRows.map((row) => {
-      const {
-        _pageOrdinal: _discardCorePageOrdinal,
-        _storageChannelId: _discardStorageChannelId,
-        _latestMessageLookupId: _discardLatestMessageLookupId,
-        ...coreRow
-      } = row;
-      if (row.kind == null) return coreRow;
-      const enrichment = pageEnrichmentByOrdinal.get(pageOrdinal);
-      pageOrdinal += 1;
-      if (!enrichment) return coreRow;
-      const { _pageOrdinal: _discardPageOrdinal, ...enrichmentFields } = enrichment;
-      return { ...coreRow, ...enrichmentFields };
+function recordInboxServingRowsRead(
+  rows: readonly InboxPolicySqlRow[],
+  opts: { receiverType: "user"; receiverId: string; filter: InboxFilter; limit: number; offset: number },
+) {
+  addTraceEvent("inbox.serving_row.read.page", {
+    "inbox.trace_contract_version": 1,
+    filter: opts.filter,
+    limit: opts.limit,
+    offset: opts.offset,
+    rows_count: rows.length,
+    negative_evidence_bucket: "does_not_prove_fact_recorded_or_ui_rendered" satisfies InboxTraceNegativeEvidenceBucket,
+  });
+  for (const row of rows) {
+    const sourceChannelId = typeof row.sourceChannelId === "string"
+      ? row.sourceChannelId
+      : typeof row.channelId === "string"
+        ? row.channelId
+        : typeof row.threadChannelId === "string"
+          ? row.threadChannelId
+          : "";
+    addTraceEvent("inbox.serving_row.read", {
+      "inbox.trace_contract_version": 1,
+      "inbox.trace_join_key": sourceChannelId
+        ? inboxTargetTraceJoinKey(opts.receiverType, opts.receiverId, sourceChannelId)
+        : `${opts.receiverType}:${opts.receiverId}:unknown`,
+      receiver_type: opts.receiverType,
+      receiver_id: opts.receiverId,
+      source_channel_id: sourceChannelId,
+      target_kind: row.kind ?? "unknown",
+      latest_notified_seq: row.latestNotifiedSeq ?? null,
+      first_unread_seq: row.firstUnreadSeq ?? null,
+      unread_count: row.unreadCount ?? 0,
+      has_any_mention: row.hasAnyMention === true || row.hasMention === true,
+      state: "row_returned",
+      negative_evidence_bucket: "does_not_prove_fact_recorded_or_ui_rendered" satisfies InboxTraceNegativeEvidenceBucket,
     });
-    return { ...mainResult, rows };
-  };
-  const executeServingRowsQuery = opts.executor
-    ? () => withDbTraceAttributes(scopeTraceAttrs, () => executeScopedServingRowsQuery(opts.executor!))
-    : () => withDbTraceAttributes(scopeTraceAttrs, () => db.transaction(async (tx) => {
-      const inheritedTimeoutResult = await tx.execute(sql`
-        SELECT setting::bigint AS "inheritedTimeoutMs", unit
-        FROM pg_settings
-        WHERE name = 'statement_timeout'
-      `);
-      const inheritedTimeoutRow = inheritedTimeoutResult.rows[0];
-      if (inheritedTimeoutRow?.unit !== "ms") {
-        throw new Error(
-          "Unexpected statement_timeout unit for inbox PG fallback",
-        );
-      }
-      const inheritedTimeoutMs = Number(
-        inheritedTimeoutRow.inheritedTimeoutMs,
-      );
-      const currentTimeoutPlan: InboxPgFallbackTimeoutPlan = {
-        inheritedTimeoutMs,
-        effectiveTimeoutMs:
-          inboxPgFallbackEffectiveTimeoutMs(inheritedTimeoutMs),
-      };
-      timeoutPlan = currentTimeoutPlan;
-      const executionTraceAttrs = {
-        ...scopeTraceAttrs,
-        ...inboxPgFallbackTimeoutPlanTraceAttrs(currentTimeoutPlan),
-      };
-      return withDbTraceAttributes(executionTraceAttrs, async () => {
-        // `is_local=true` keeps this cap transaction-local. It can only tighten
-        // the inherited role/session policy: unlimited becomes 3s, 15s becomes
-        // 3s, and a future stricter 2s policy remains 2s. The setting resets
-        // before the checked-out client returns to the shared pool.
-        await tx.execute(sql`SELECT set_config(
-          'statement_timeout',
-          ${`${currentTimeoutPlan.effectiveTimeoutMs}ms`},
-          true
-        )`);
-        return executeScopedServingRowsQuery(tx);
-      });
-    }));
-  const result = await opts.traceQuery(
-    INBOX_PG_FALLBACK_QUERY_NAME,
-    executeServingRowsQuery,
-    (queryResult) => ({
-      ...inboxTraceAttrs(
-        "pg_serving_rows",
-        opts.filter,
-        opts.fallbackReason ?? "none",
-      ),
-      ...inboxPostgresSelectionTraceAttrs(
-        opts.postgresSelectionReason ?? "human_activity_mute_uses_serving_rows",
-      ),
-      ...inboxPgFallbackQueryTraceAttrs(
-        queryHash,
-        "query_completed",
-        timeoutPlan,
-      ),
-      filter: opts.filter,
-      limit: opts.limit,
-      offset: opts.offset,
-      history_cutoff_present: Boolean(opts.historyCutoff),
-      channel_id_present: Boolean(opts.channelId),
-      query_present: Boolean(opts.q),
-      ...receiverScopeRowCountTraceAttrs(),
-      row_count: queryResult.rows.length,
-    }),
-    (error) => ({
-      ...inboxTraceAttrs(
-        "pg_serving_rows",
-        opts.filter,
-        opts.fallbackReason ?? "none",
-      ),
-      ...inboxPostgresSelectionTraceAttrs(
-        opts.postgresSelectionReason ?? "human_activity_mute_uses_serving_rows",
-      ),
-      ...inboxPgFallbackQueryErrorTraceAttrs(queryHash, error, timeoutPlan),
-      filter: opts.filter,
-      limit: opts.limit,
-      offset: opts.offset,
-      history_cutoff_present: Boolean(opts.historyCutoff),
-      channel_id_present: Boolean(opts.channelId),
-      query_present: Boolean(opts.q),
-      ...receiverScopeRowCountTraceAttrs(),
-    }),
-  );
-  return { rows: result.rows };
+  }
 }
 
-export interface ActivityUnreadTotalsBatchInput {
-  serverId: string;
-  historyCutoff?: Date;
+function inboxTargetTraceJoinKey(receiverType: "user" | "agent", receiverId: string, sourceChannelId: string) {
+  return `${receiverType}:${receiverId}:${sourceChannelId}`;
 }
 
 export type ActivityUnreadTotals = {
@@ -11726,713 +10676,152 @@ export type ActivityUnreadTotals = {
   activeUnreadCount: number;
 };
 
-/**
- * task #235: per-server Activity unread totals for ALL of a user's servers in
- * ONE set-based statement (plus the same batched receiver-scope cardinality
- * pre-read the per-server serving path already uses).
- *
- * The CTE chain below is the totals-only extraction of
- * `getInboxItemsFromServingRows` (`filter=all`, no search, no channel facet),
- * keyed by the input VALUES table `v(server_id, history_cutoff)` instead of a
- * single `${serverId}` — every `server_id = $X` site becomes a join against
- * `v`/row server keys, the history-cutoff predicate becomes row-wise against
- * `v.history_cutoff`, and the final aggregates GROUP BY server with a LEFT
- * JOIN from `v` so an empty member server yields present-0, never a dropped
- * row (contract v2.3.1 §5/9c). Membership is revalidated IN the statement
- * (`server_members` join on the anchor): a membership revoked between the
- * route's listing and this computation drops the group entirely → the
- * service reports it unknown/absent, never a count or a fake 0 (§5
- * unauthorized fail-closed). The two texts must evolve in lockstep: the
- * per-server path stays alive as the test oracle
- * (activityUnreadTotalsBatch.oracle.test.ts) and any predicate drift between
- * them is a red test, per DoD 9d.
- *
- * Backend note (v2.3.1 §2): this batch computes the PG serving-rows (Sink B)
- * aggregates. `isHumanActivityMuteEnabled` is unconditionally true, so the
- * per-server authority path takes the same serving-rows branch for every
- * route-reachable configuration of this computation (the legacy inline branch
- * needs `forceCanonicalPostgres`, which the unread-summary loader never
- * sets). RisingWave row parity is owned by the rfcs/024 contract.
- */
-export async function getActivityUnreadTotalsBatch(
-  inputs: ActivityUnreadTotalsBatchInput[],
-  userId: string,
+export type ActivityUnreadTotalsBatchInput = {
+  serverId: string;
+  historyCutoff?: Date;
+};
+
+function recordInboxMuteStateTrace(
+  eventName: "inbox.mute_state.read" | "inbox.mute_state.write",
   opts: {
-    traceQuery?: DbQueryTracer;
-    executor?: DatabaseExecutor;
-  } = {},
-): Promise<Map<string, ActivityUnreadTotals>> {
-  const db = opts.executor ?? getDb();
-  const traceQuery = opts.traceQuery ?? untracedDbQuery;
-  const uniqueInputs = [...new Map(inputs.map((input) => [input.serverId, input])).values()];
-  if (uniqueInputs.length === 0) return new Map();
-  // Backend-consistency guard: when RFC056 serving mode is "on" and an RW
-  // pool is configured, Home's inbox authority can serve RW-computed totals.
-  // This batch computes the PG serving-rows aggregates, so asserting a number
-  // here could disagree with what Home shows — the exact cross-surface
-  // divergence task #235 exists to eliminate. Fail closed: the whole batch is
-  // unknown (absent on the wire) until an RW batch with audited equivalence
-  // exists. "shadow" keeps Postgres authoritative and stays computable.
-  const rfc056ServingMode = risingWaveInboxFailSoftDeps.getRfc056ServingMode();
-  if (rfc056ServingMode === "on" && getRisingWaveInboxPool()) {
-    addTraceEvent("activity_unread_batch.rw_live_fail_closed", {
-      rw_rfc056_serving_mode: rfc056ServingMode,
-      server_count: uniqueInputs.length,
-    });
-    return new Map();
-  }
-  const serverIdArray = `{${uniqueInputs.map((input) => input.serverId).join(",")}}`;
-  const inputValuesSql = sql.join(
-    uniqueInputs.map((input) =>
-      sql`(${input.serverId}::uuid, ${input.historyCutoff ?? null}::timestamptz)`),
-    sql`, `,
-  );
-  // Same rationale as the per-server serving path: the primary-key prefix
-  // badly underestimates heavy receivers, so read the exact (server, source)
-  // pairs first and feed them to the main statement as a VALUES table with
-  // known cardinality.
-  const receiverScopeQuery = sql`
-    SELECT
-      r.server_id::text AS "serverId",
-      r.source_channel_id::text AS "sourceChannelId"
-    FROM inbox_serving_rows r
-    INNER JOIN channels source_channel
-      ON source_channel.id = r.source_channel_id
-     AND source_channel.server_id = r.server_id
-     AND source_channel.deleted_at IS NULL
-     AND source_channel.archived_at IS NULL
-    LEFT JOIN user_channel_inbox_states inbox
-      ON inbox.channel_id = source_channel.id
-     AND inbox.user_id = ${userId}::uuid
-    WHERE r.receiver_type = 'user'
-      AND r.receiver_id = ${userId}::uuid
-      AND r.server_id = ANY(${serverIdArray}::uuid[])
-      AND inbox.done_at IS NULL
-  `;
-  const buildBatchTotalsQuery = (scopePairs: Array<{ serverId: string; sourceChannelId: string }>) => {
-    const scopeValuesSql = scopePairs.length > 0
-      ? sql`(VALUES ${sql.join(
-          scopePairs.map((pair) => sql`(${pair.serverId}::uuid, ${pair.sourceChannelId}::uuid)`),
-          sql`, `,
-        )})`
-      : sql`(SELECT NULL::uuid, NULL::uuid WHERE false)`;
-    return sql`
-    WITH v(server_id, history_cutoff) AS (
-      VALUES ${inputValuesSql}
-    ),
-    scope(server_id, source_channel_id) AS (
-      ${scopeValuesSql}
-    ),
-    receiver_rows AS MATERIALIZED (
-      SELECT
-        r.receiver_type,
-        r.receiver_id,
-        r.server_id,
-        r.kind,
-        r.source_channel_id,
-        r.latest_notified_message_id,
-        r.latest_notified_seq,
-        r.latest_notified_at,
-        r.last_activity_at,
-        r.first_unread_message_id,
-        r.first_unread_seq,
-        r.unread_count::int AS unread_count,
-        r.latest_personal_mention_message_id,
-        r.latest_personal_mention_seq,
-        r.unread_mention_count,
-        r.has_any_mention,
-        c.name AS channel_name,
-        c.type AS channel_type,
-        COALESCE(joint_storage.canonical_channel_id, c.id) AS storage_channel_id,
-        joint_projection.joint_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        inbox.done_at AS channel_done_at,
-        chat_member.user_id AS chat_member_user_id,
-        tf.thread_channel_id AS followed_thread_channel_id
-      FROM inbox_serving_rows r
-      INNER JOIN scope
-        ON scope.server_id = r.server_id
-       AND scope.source_channel_id = r.source_channel_id
-      INNER JOIN channels c
-        ON c.id = r.source_channel_id
-       AND c.deleted_at IS NULL
-       AND c.archived_at IS NULL
-      LEFT JOIN joint_channel_servers joint_projection
-        ON joint_projection.local_channel_id = c.id
-       AND joint_projection.server_id = c.server_id
-       AND joint_projection.status = 'active'
-      LEFT JOIN joint_channels joint_storage
-        ON joint_storage.id = joint_projection.joint_channel_id
-       AND joint_storage.status = 'active'
-      LEFT JOIN user_channel_inbox_states inbox
-        ON inbox.channel_id = c.id
-       AND inbox.user_id = ${userId}
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = c.id
-       AND rc.user_id = ${userId}
-      LEFT JOIN channel_humans chat_member
-        ON chat_member.channel_id = c.id
-       AND chat_member.user_id = ${userId}
-      LEFT JOIN thread_follows tf
-        ON tf.thread_channel_id = c.id
-       AND tf.follower_type = 'user'
-       AND tf.follower_id = ${userId}
-       AND tf.done_at IS NULL
-       AND tf.unfollowed_at IS NULL
-      WHERE r.receiver_type = 'user'
-        AND r.receiver_id = ${userId}::uuid
-        AND c.server_id = r.server_id
-        AND inbox.done_at IS NULL
-    ),
-    mention_scope AS MATERIALIZED (
-      SELECT
-        receiver.server_id,
-        receiver.source_channel_id,
-        receiver.source_channel_id AS mention_channel_id,
-        receiver.last_read_seq
-      FROM receiver_rows receiver
-      UNION
-      SELECT
-        receiver.server_id,
-        receiver.source_channel_id,
-        sibling_projection.local_channel_id AS mention_channel_id,
-        receiver.last_read_seq
-      FROM receiver_rows receiver
-      INNER JOIN joint_channel_servers sibling_projection
-        ON sibling_projection.joint_channel_id = receiver.joint_channel_id
-       AND sibling_projection.status = 'active'
-    ),
-    live_mentions AS MATERIALIZED (
-      SELECT
-        scope_rows.server_id,
-        scope_rows.source_channel_id,
-        (array_agg(mention.message_id ORDER BY mention.message_seq DESC, mention.message_id DESC))[1] AS latest_message_id,
-        max(mention.message_seq) AS latest_message_seq,
-        (count(*) FILTER (
-          WHERE mention.message_seq > scope_rows.last_read_seq
-        ))::int AS unread_mention_count,
-        (array_agg(mention.message_id ORDER BY mention.message_seq ASC, mention.message_id ASC) FILTER (
-          WHERE mention.message_seq > scope_rows.last_read_seq
-        ))[1] AS first_unread_message_id
-      FROM mention_scope scope_rows
-      INNER JOIN message_mentions mention
-        ON mention.channel_id = scope_rows.mention_channel_id
-       AND mention.target_type = 'user'
-       AND mention.target_id = ${userId}::uuid
-       AND (mention.notifiable_at_send OR mention.notified_at IS NOT NULL)
-      GROUP BY scope_rows.server_id, scope_rows.source_channel_id, scope_rows.last_read_seq
-    ),
-    base_rows AS (
-      SELECT
-        r.receiver_type,
-        r.receiver_id,
-        r.server_id,
-        r.kind,
-        r.source_channel_id,
-        r.latest_notified_message_id,
-        r.latest_notified_seq,
-        r.latest_notified_at,
-        r.last_activity_at,
-        r.first_unread_message_id,
-        r.first_unread_seq,
-        r.unread_count,
-        CASE
-          WHEN live_mentions.latest_message_seq IS NOT NULL
-            AND (r.latest_personal_mention_seq IS NULL OR live_mentions.latest_message_seq >= r.latest_personal_mention_seq)
-          THEN live_mentions.latest_message_id
-          ELSE r.latest_personal_mention_message_id
-        END AS latest_personal_mention_message_id,
-        GREATEST(
-          COALESCE(r.latest_personal_mention_seq, 0),
-          COALESCE(live_mentions.latest_message_seq, 0)
-        ) AS latest_personal_mention_seq,
-        GREATEST(r.unread_mention_count, COALESCE(live_mentions.unread_mention_count, 0)) AS unread_mention_count,
-        live_mentions.first_unread_message_id AS first_unread_personal_mention_message_id,
-        (r.has_any_mention OR live_mentions.latest_message_id IS NOT NULL) AS has_any_mention,
-        r.channel_name,
-        r.channel_type,
-        r.storage_channel_id,
-        r.last_read_seq,
-        r.channel_done_at,
-        r.chat_member_user_id,
-        r.followed_thread_channel_id
-      FROM receiver_rows r
-      LEFT JOIN live_mentions
-        ON live_mentions.source_channel_id = r.source_channel_id
-    ),
-    visible_rows AS (
-      SELECT
-        b.*,
-        CASE
-          WHEN b.kind IN ('channel', 'dm') AND b.chat_member_user_id IS NOT NULL THEN false
-          WHEN b.kind = 'thread' AND b.followed_thread_channel_id IS NOT NULL THEN false
-          ELSE true
-        END AS mention_only
-      FROM base_rows b
-      WHERE (
-          b.kind IN ('channel', 'dm')
-          AND b.channel_type IN ('channel', 'private', 'joint', 'dm')
-          AND b.chat_member_user_id IS NOT NULL
-        )
-        OR (
-          b.kind = 'thread'
-          AND b.followed_thread_channel_id IS NOT NULL
-        )
-        OR b.has_any_mention
-    ),
-    mention_channel_rows AS (
-      SELECT
-        'user' AS receiver_type,
-        ${userId}::uuid AS receiver_id,
-        latest_mention.server_id AS server_id,
-        CASE WHEN c.type = 'dm' THEN 'dm' ELSE 'channel' END AS kind,
-        c.id AS source_channel_id,
-        m.id AS latest_notified_message_id,
-        m.seq AS latest_notified_seq,
-        m.created_at AS latest_notified_at,
-        m.created_at AS last_activity_at,
-        CASE
-          WHEN chat_member.user_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN m.id
-          ELSE NULL
-        END AS first_unread_message_id,
-        CASE
-          WHEN chat_member.user_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN m.seq
-          ELSE NULL
-        END AS first_unread_seq,
-        CASE
-          WHEN chat_member.user_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN 1
-          ELSE 0
-        END::int AS unread_count,
-        m.id AS latest_personal_mention_message_id,
-        m.seq AS latest_personal_mention_seq,
-        CASE WHEN m.seq > COALESCE(rc.last_read_seq, 0) THEN 1 ELSE 0 END::int AS unread_mention_count,
-        m.id AS first_unread_personal_mention_message_id,
-        true AS has_any_mention,
-        c.name AS channel_name,
-        c.type AS channel_type,
-        COALESCE(joint_storage.canonical_channel_id, c.id) AS storage_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        inbox.done_at AS channel_done_at,
-        chat_member.user_id AS chat_member_user_id,
-        NULL::uuid AS followed_thread_channel_id,
-        CASE WHEN chat_member.user_id IS NOT NULL THEN false ELSE true END AS mention_only
-      FROM (
-        SELECT
-          mm.channel_id,
-          mention_channel.server_id,
-          max(mm.message_seq) AS latest_mention_seq
-        FROM message_mentions mm
-        INNER JOIN channels mention_channel
-          ON mention_channel.id = mm.channel_id
-        INNER JOIN v
-          ON v.server_id = mention_channel.server_id
-        LEFT JOIN channel_humans member_check
-          ON member_check.channel_id = mm.channel_id
-         AND member_check.user_id = ${userId}
-        LEFT JOIN user_channel_inbox_states inbox_check
-          ON inbox_check.channel_id = mm.channel_id
-         AND inbox_check.user_id = ${userId}
-        LEFT JOIN inbox_suppression_states mention_suppression
-          ON mention_suppression.receiver_type = 'user'
-         AND mention_suppression.receiver_id = ${userId}::uuid
-         AND mention_suppression.target_kind = 'public_channel_mention'
-         AND mention_suppression.target_channel_id = mm.channel_id
-        WHERE mm.target_type = 'user'
-          AND mm.target_id = ${userId}::uuid
-          AND mm.server_id = v.server_id
-          AND (mm.notifiable_at_send OR mm.notified_at IS NOT NULL)
-          AND mm.message_seq > COALESCE(mention_suppression.done_through_seq, 0)
-          AND mention_channel.type IN ('channel', 'private', 'joint', 'dm')
-          AND mention_channel.deleted_at IS NULL
-          AND mention_channel.archived_at IS NULL
-          AND inbox_check.done_at IS NULL
-          AND (
-            member_check.user_id IS NOT NULL
-            OR (mention_channel.type = 'channel' AND mm.notified_at IS NOT NULL)
-          )
-        GROUP BY mm.channel_id, mention_channel.server_id
-      ) latest_mention
-      INNER JOIN channels c
-        ON c.id = latest_mention.channel_id
-      INNER JOIN messages m
-        ON m.channel_id = latest_mention.channel_id
-       AND m.seq = latest_mention.latest_mention_seq
-      LEFT JOIN joint_channel_servers joint_projection
-        ON joint_projection.local_channel_id = c.id
-       AND joint_projection.server_id = c.server_id
-       AND joint_projection.status = 'active'
-      LEFT JOIN joint_channels joint_storage
-        ON joint_storage.id = joint_projection.joint_channel_id
-       AND joint_storage.status = 'active'
-      LEFT JOIN user_channel_inbox_states inbox
-        ON inbox.channel_id = c.id
-       AND inbox.user_id = ${userId}
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = c.id
-       AND rc.user_id = ${userId}
-      LEFT JOIN channel_humans chat_member
-        ON chat_member.channel_id = c.id
-       AND chat_member.user_id = ${userId}
-    ),
-    mention_thread_rows AS (
-      SELECT
-        'user' AS receiver_type,
-        ${userId}::uuid AS receiver_id,
-        latest_mention.server_id AS server_id,
-        'thread' AS kind,
-        t.id AS source_channel_id,
-        m.id AS latest_notified_message_id,
-        m.seq AS latest_notified_seq,
-        m.created_at AS latest_notified_at,
-        m.created_at AS last_activity_at,
-        CASE
-          WHEN existing_follow.thread_channel_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN m.id
-          ELSE NULL
-        END AS first_unread_message_id,
-        CASE
-          WHEN existing_follow.thread_channel_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN m.seq
-          ELSE NULL
-        END AS first_unread_seq,
-        CASE
-          WHEN existing_follow.thread_channel_id IS NOT NULL
-           AND m.seq > COALESCE(rc.last_read_seq, 0)
-           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-          THEN 1
-          ELSE 0
-        END::int AS unread_count,
-        m.id AS latest_personal_mention_message_id,
-        m.seq AS latest_personal_mention_seq,
-        CASE WHEN m.seq > COALESCE(rc.last_read_seq, 0) THEN 1 ELSE 0 END::int AS unread_mention_count,
-        m.id AS first_unread_personal_mention_message_id,
-        true AS has_any_mention,
-        t.name AS channel_name,
-        t.type AS channel_type,
-        COALESCE(canonical_thread.id, t.id) AS storage_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        NULL::timestamp AS channel_done_at,
-        NULL::uuid AS chat_member_user_id,
-        existing_follow.thread_channel_id AS followed_thread_channel_id,
-        CASE WHEN existing_follow.thread_channel_id IS NOT NULL THEN false ELSE true END AS mention_only
-      FROM (
-        SELECT
-          mm.channel_id,
-          thread_channel.server_id,
-          max(mm.message_seq) AS latest_mention_seq
-        FROM message_mentions mm
-        INNER JOIN channels thread_channel
-          ON thread_channel.id = mm.channel_id
-        INNER JOIN v
-          ON v.server_id = thread_channel.server_id
-        INNER JOIN messages parent_message
-          ON parent_message.id = thread_channel.parent_message_id
-        INNER JOIN channels parent_channel
-          ON parent_channel.id = parent_message.channel_id
-        LEFT JOIN thread_follows existing_follow
-          ON existing_follow.thread_channel_id = mm.channel_id
-         AND existing_follow.follower_type = 'user'
-         AND existing_follow.follower_id = ${userId}
-         AND existing_follow.done_at IS NULL
-         AND existing_follow.unfollowed_at IS NULL
-        LEFT JOIN channel_humans parent_member
-          ON parent_member.channel_id = parent_channel.id
-         AND parent_member.user_id = ${userId}
-        LEFT JOIN inbox_suppression_states mention_suppression
-          ON mention_suppression.receiver_type = 'user'
-         AND mention_suppression.receiver_id = ${userId}::uuid
-         AND mention_suppression.target_kind = 'public_thread_mention'
-         AND mention_suppression.target_channel_id = mm.channel_id
-        WHERE mm.target_type = 'user'
-          AND mm.target_id = ${userId}::uuid
-          AND mm.server_id = v.server_id
-          AND (mm.notifiable_at_send OR mm.notified_at IS NOT NULL)
-          AND mm.message_seq > COALESCE(mention_suppression.done_through_seq, 0)
-          AND thread_channel.type = 'thread'
-          AND thread_channel.deleted_at IS NULL
-          AND parent_channel.archived_at IS NULL
-          AND parent_channel.deleted_at IS NULL
-          AND (
-            existing_follow.thread_channel_id IS NOT NULL
-            OR (
-              mm.notified_at IS NOT NULL
-              AND (
-                parent_channel.type = 'channel'
-                OR parent_member.user_id IS NOT NULL
-              )
-            )
-          )
-        GROUP BY mm.channel_id, thread_channel.server_id
-      ) latest_mention
-      INNER JOIN channels t
-        ON t.id = latest_mention.channel_id
-      INNER JOIN messages m
-        ON m.channel_id = latest_mention.channel_id
-       AND m.seq = latest_mention.latest_mention_seq
-      LEFT JOIN joint_channel_servers thread_projection
-        ON thread_projection.local_channel_id = t.id
-       AND thread_projection.server_id = latest_mention.server_id
-       AND thread_projection.status = 'active'
-      LEFT JOIN joint_channels thread_joint
-        ON thread_joint.id = thread_projection.joint_channel_id
-       AND thread_joint.status = 'active'
-      LEFT JOIN channels canonical_thread
-        ON canonical_thread.id = thread_joint.canonical_channel_id
-       AND canonical_thread.type = 'thread'
-       AND canonical_thread.deleted_at IS NULL
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = t.id
-       AND rc.user_id = ${userId}
-      LEFT JOIN thread_follows existing_follow
-        ON existing_follow.thread_channel_id = t.id
-       AND existing_follow.follower_type = 'user'
-       AND existing_follow.follower_id = ${userId}
-       AND existing_follow.done_at IS NULL
-       AND existing_follow.unfollowed_at IS NULL
-    ),
-    all_visible_rows AS (
-      SELECT * FROM visible_rows
-      UNION ALL
-      SELECT mc.*
-      FROM mention_channel_rows mc
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM visible_rows vr
-        WHERE vr.server_id = mc.server_id
-          AND vr.kind = mc.kind
-          AND vr.source_channel_id = mc.source_channel_id
-      )
-      UNION ALL
-      SELECT mt.*
-      FROM mention_thread_rows mt
-      WHERE NOT EXISTS (
-        SELECT 1
-        FROM visible_rows vr
-        WHERE vr.server_id = mt.server_id
-          AND vr.kind = mt.kind
-          AND vr.source_channel_id = mt.source_channel_id
-      )
-    ),
-    active_totals AS (
-      SELECT
-        avr.server_id,
-        COALESCE(sum(CASE WHEN avr.mention_only THEN 0 ELSE avr.unread_count END), 0)::int AS active_unread_count
-      FROM all_visible_rows avr
-      INNER JOIN v
-        ON v.server_id = avr.server_id
-      WHERE avr.last_activity_at IS NOT NULL
-        AND (v.history_cutoff IS NULL OR avr.last_activity_at > v.history_cutoff)
-      GROUP BY avr.server_id
-    ),
-    filtered AS (
-      SELECT avr.*
-      FROM all_visible_rows avr
-      INNER JOIN v
-        ON v.server_id = avr.server_id
-      WHERE avr.last_activity_at IS NOT NULL
-        AND (v.history_cutoff IS NULL OR avr.last_activity_at > v.history_cutoff)
-    ),
-    faceted AS (
-      SELECT
-        filtered.*,
-        CASE WHEN filtered.kind = 'thread' THEN COALESCE(local_parent.id, parent_ch.id) ELSE filtered.source_channel_id END AS "groupChannelId"
-      FROM filtered
-      LEFT JOIN channels thread_channel
-        ON thread_channel.id = filtered.source_channel_id
-       AND filtered.kind = 'thread'
-      LEFT JOIN joint_channel_servers thread_projection
-        ON thread_projection.local_channel_id = thread_channel.id
-       AND thread_projection.server_id = filtered.server_id
-       AND thread_projection.status = 'active'
-      LEFT JOIN joint_channels thread_joint
-        ON thread_joint.id = thread_projection.joint_channel_id
-       AND thread_joint.status = 'active'
-      LEFT JOIN channels canonical_thread
-        ON canonical_thread.id = thread_joint.canonical_channel_id
-       AND canonical_thread.type = 'thread'
-       AND canonical_thread.deleted_at IS NULL
-      LEFT JOIN messages parent_message
-        ON parent_message.id = COALESCE(canonical_thread.parent_message_id, thread_channel.parent_message_id)
-      LEFT JOIN channels parent_ch
-        ON parent_ch.id = parent_message.channel_id
-      LEFT JOIN joint_channels parent_joint
-        ON parent_joint.canonical_channel_id = parent_message.channel_id
-       AND parent_joint.status = 'active'
-      LEFT JOIN joint_channel_servers parent_projection
-        ON parent_projection.joint_channel_id = parent_joint.id
-       AND parent_projection.server_id = filtered.server_id
-       AND parent_projection.status = 'active'
-      LEFT JOIN channels local_parent
-        ON local_parent.id = parent_projection.local_channel_id
-       AND local_parent.type = 'joint'
-       AND local_parent.archived_at IS NULL
-       AND local_parent.deleted_at IS NULL
-    ),
-    totals AS (
-      SELECT
-        faceted.server_id,
-        COALESCE(sum(CASE WHEN faceted.mention_only THEN 0 ELSE faceted.unread_count END), 0)::int AS total_unread_count
-      FROM faceted
-      GROUP BY faceted.server_id
-    )
-    SELECT
-      v.server_id::text AS "serverId",
-      COALESCE(totals.total_unread_count, 0)::int AS "totalUnreadCount",
-      COALESCE(active_totals.active_unread_count, 0)::int AS "activeUnreadCount"
-    FROM v
-    INNER JOIN server_members sm
-      ON sm.server_id = v.server_id
-     AND sm.user_id = ${userId}::uuid
-    LEFT JOIN totals
-      ON totals.server_id = v.server_id
-    LEFT JOIN active_totals
-      ON active_totals.server_id = v.server_id
-    `;
-  };
-  const executeBatch = async (executor: DatabaseExecutor) => {
-    const scopeResult = await executor.execute(receiverScopeQuery);
-    const scopePairs = scopeResult.rows.map((row) => ({
-      serverId: String(row.serverId),
-      sourceChannelId: String(row.sourceChannelId),
-    }));
-    return executor.execute(buildBatchTotalsQuery(scopePairs));
-  };
-  const executeWithTimeoutCap = opts.executor
-    ? () => executeBatch(opts.executor!)
-    : () => db.transaction(async (tx) => {
-      const inheritedTimeoutResult = await tx.execute(sql`
-        SELECT setting::bigint AS "inheritedTimeoutMs", unit
-        FROM pg_settings
-        WHERE name = 'statement_timeout'
-      `);
-      const inheritedTimeoutRow = inheritedTimeoutResult.rows[0];
-      if (inheritedTimeoutRow?.unit !== "ms") {
-        throw new Error(
-          "Unexpected statement_timeout unit for activity unread totals batch",
-        );
-      }
-      const effectiveTimeoutMs = inboxPgFallbackEffectiveTimeoutMs(
-        Number(inheritedTimeoutRow.inheritedTimeoutMs),
-      );
-      await tx.execute(sql`SELECT set_config(
-        'statement_timeout',
-        ${`${effectiveTimeoutMs}ms`},
-        true
-      )`);
-      return executeBatch(tx);
-    });
-  const result = await traceQuery(
-    "channels.activity_unread_totals_batch_by_user",
-    executeWithTimeoutCap,
-    (queryResult) => ({
-      server_count: uniqueInputs.length,
-      row_count: queryResult.rows.length,
-    }),
-  );
-  const totalsByServer = new Map<string, ActivityUnreadTotals>();
-  for (const row of result.rows) {
-    totalsByServer.set(String(row.serverId), {
-      totalUnreadCount: Number(row.totalUnreadCount),
-      activeUnreadCount: Number(row.activeUnreadCount),
-    });
-  }
-  return totalsByServer;
+    receiverType: "user" | "agent";
+    receiverId: string;
+    sourceChannelId: string;
+    state: "muted" | "unmuted";
+    muteFromSeq: number | null;
+    reason: "current_state" | "muted_from_next_seq" | "unmuted";
+  },
+) {
+  addTraceEvent(eventName, {
+    "inbox.trace_contract_version": 1,
+    "inbox.trace_join_key": inboxTargetTraceJoinKey(opts.receiverType, opts.receiverId, opts.sourceChannelId),
+    receiver_type: opts.receiverType,
+    receiver_id: opts.receiverId,
+    source_channel_id: opts.sourceChannelId,
+    state: opts.state,
+    reason: opts.reason,
+    activity_muted: opts.state === "muted",
+    mute_from_seq_present: opts.muteFromSeq != null,
+    ...(opts.muteFromSeq != null ? { mute_from_seq: opts.muteFromSeq } : {}),
+    negative_evidence_bucket: "does_not_prove_future_message_suppression" satisfies InboxTraceNegativeEvidenceBucket,
+  });
 }
 
-async function tryGetSidebarUnreadSummaryCountsFromRisingWave(
-  servers: SidebarUnreadSummaryInput[],
+function recordInboxReadRebuildRequested(
+  userId: string,
+  rows: readonly { channelId: string }[],
+) {
+  addTraceEvent("inbox.serving_row.rebuild.requested", {
+    "inbox.trace_contract_version": 1,
+    receiver_type: "user",
+    receiver_id: userId,
+    targets_count: rows.length,
+    state: rows.length > 0 ? "read_cursor_advanced" : "no_active_inbox_rows",
+    negative_evidence_bucket: "does_not_prove_fact_absent_or_message_ineligible" satisfies InboxTraceNegativeEvidenceBucket,
+  });
+  for (const row of rows) {
+    addTraceEvent("inbox.serving_row.rebuild.target", {
+      "inbox.trace_contract_version": 1,
+      "inbox.trace_join_key": inboxTargetTraceJoinKey("user", userId, row.channelId),
+      receiver_type: "user",
+      receiver_id: userId,
+      source_channel_id: row.channelId,
+      state: "read_cursor_advanced",
+      negative_evidence_bucket: "does_not_prove_fact_absent_or_message_ineligible" satisfies InboxTraceNegativeEvidenceBucket,
+    });
+  }
+}
+
+function recordRisingWaveInboxThreadReplyCountNullContractViolation(
+  rows: readonly RisingWaveInboxThreadReplyCountContractRow[],
+  opts: {
+    filter: InboxFilter;
+    servedVersion: RisingWaveInboxItemsServingVersion;
+    requestedVersion: RisingWaveInboxItemsServingVersion;
+    forcedV2ForHistoryCutoff: boolean;
+    historyCutoff: boolean;
+    servingView?: string;
+  },
+) {
+  const nullThreadReplyCountRows = rows.filter((row) =>
+    row.kind === "thread" && row.replyCount == null
+  ).length;
+  if (nullThreadReplyCountRows === 0) return;
+
+  addTraceEvent("inbox.rw.thread_reply_count_null_contract_violation", {
+    ...inboxTraceAttrs("rw_mv", opts.filter, "none", opts.servedVersion),
+    state: "contract_violation",
+    contract: "thread_reply_count_non_null",
+    violated_field: "reply_count",
+    target_kind: "thread",
+    rw_inbox_items_version: opts.servedVersion,
+    rw_inbox_items_requested_version: opts.requestedVersion,
+    rw_inbox_items_version_forced: opts.forcedV2ForHistoryCutoff,
+    rw_inbox_items_version_force_reason: opts.forcedV2ForHistoryCutoff ? "history_cutoff" : "none",
+    rw_inbox_items_serving_view: opts.servingView ?? UNIFIED_CHAIN_VIEWS.serving,
+    history_cutoff_present: opts.historyCutoff,
+    rows_count: rows.length,
+    null_thread_reply_count_rows: nullThreadReplyCountRows,
+  });
+}
+
+async function getActivityUnreadTotalsBatchFromRisingWave(
+  serverIds: string[],
   userId: string,
   traceQuery: DbQueryTracer,
-): Promise<RisingWaveInboxAttempt<Record<string, number>>> {
-  if (!getRisingWaveInboxPool()) return { result: null };
-  return tryReadRisingWaveInboxWithFailSoft(
-    "sidebar_summary",
-    RISINGWAVE_LEGACY_UNREAD_CONTRACT_VERSION,
-    () => getSidebarUnreadSummaryCountsFromRisingWave(servers, userId, traceQuery),
+): Promise<Map<string, ActivityUnreadTotals>> {
+  const client = getRisingWaveInboxPool();
+  if (!client) throw new RisingWaveNotConfiguredError("Activity unread totals");
+  // Point lookup on the totals MV stacked on the serving view: every serving
+  // predicate (mention-only zeroing, target kinds, watermark, free-tier
+  // cutoff) is inherited by construction, so the count is definitionally the
+  // sum of what the list shows. Rebuild scripts must carry this dependent
+  // when swapping the serving view.
+  const totals = new Map<string, ActivityUnreadTotals>();
+  for (const serverId of serverIds) {
+    totals.set(serverId, { totalUnreadCount: 0, activeUnreadCount: 0 });
+  }
+  const totalsView = UNIFIED_CHAIN_VIEWS.totals;
+  const read = await traceQuery(
+    "channels.activity_unread_totals_batch_by_user.derivation",
+    () => queryRisingWaveInbox<{ serverId: string; totalUnreadCount: number }>(
+      client,
+      `SELECT
+         t.server_id AS "serverId",
+         t.total_unread_count AS "totalUnreadCount"
+       FROM ${totalsView} t
+       WHERE t.receiver_id = $1
+         AND t.receiver_type = 'user'
+         AND t.server_id = ANY($2)`,
+      [userId, serverIds],
+    ),
+    (queryRead) => ({
+      ...inboxTraceAttrs("rw_mv", "activity_totals", "none"),
+      server_count: serverIds.length,
+      row_count: queryRead.result.rows.length,
+      // Every (user, server) membership has a totals row, so a missing row is not
+      // an ordinary zero: the membership has not reached RisingWave. Counted, not
+      // hidden; the badge still reads 0 for it.
+      missing_row_count: serverIds.length - queryRead.result.rows.length,
+      rw_inbox_items_serving_view: totalsView,
+      rw_inbox_items_derivation_chain: true,
+      rw_inbox_unified_chain: true,
+    }),
   );
+  for (const row of read.result.rows) {
+    const count = Number(row.totalUnreadCount);
+    totals.set(String(row.serverId), { totalUnreadCount: count, activeUnreadCount: count });
+  }
+  return totals;
 }
 
-type InboxReadAuthority = { present: boolean; seq: number };
 
 function safeReadFrontierNumber(value: unknown): number | null {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
-async function getPrimaryInboxReadAuthority(
-  serverId: string,
-  userId: string,
-  traceQuery: DbQueryTracer,
-): Promise<InboxReadAuthority> {
-  const rows = await traceQuery(
-    "channels.inbox_read_authority_by_user",
-    () => getDb()
-      .select({ seq: readMutationAuthorities.lastTerminalAuthoritySeq })
-      .from(readMutationAuthorities)
-      .where(and(
-        eq(readMutationAuthorities.serverId, serverId),
-        eq(readMutationAuthorities.principalId, userId),
-      ))
-      .limit(1),
-    (result) => ({ row_count: result.length }),
-  );
-  return rows[0] ? { present: true, seq: rows[0].seq } : { present: false, seq: 0 };
-}
 
-function validateRisingWaveInboxReadFrontier(
-  rows: readonly InboxPolicySqlRow[],
-  primary: InboxReadAuthority,
-): { ok: true } | { ok: false; reason: string; rwAuthoritySeq: number | null; rwAuthorityPresent: boolean | null } {
-  const sentinel = rows[0];
-  const rwAuthoritySeq = safeReadFrontierNumber(sentinel?.readAuthoritySeq);
-  const rwAuthorityPresent = typeof sentinel?.readAuthorityPresent === "boolean"
-    ? sentinel.readAuthorityPresent
-    : null;
-  if (
-    !sentinel
-    || rwAuthoritySeq === null
-    || rwAuthorityPresent === null
-    || rwAuthorityPresent !== primary.present
-    || rwAuthoritySeq !== primary.seq
-  ) {
-    return { ok: false, reason: "authority_mismatch", rwAuthoritySeq, rwAuthorityPresent };
-  }
-
-  for (const row of rows) {
-    if (row.kind == null) continue;
-    const maxReadSeq = safeReadFrontierNumber(row.maxReadSeq);
-    const readStateVersion = safeReadFrontierNumber(row.readStateVersion);
-    if (maxReadSeq === null || readStateVersion === null) {
-      return { ok: false, reason: "row_read_state_missing", rwAuthoritySeq, rwAuthorityPresent };
-    }
-    if (row.mentionOnly !== true) {
-      const materializedLastReadSeq = safeReadFrontierNumber(row.materializedLastReadSeq);
-      if (materializedLastReadSeq === null || materializedLastReadSeq !== maxReadSeq) {
-        return { ok: false, reason: "cursor_projection_mismatch", rwAuthoritySeq, rwAuthorityPresent };
-      }
-      if (
-        (materializedLastReadSeq > 0 || readStateVersion > 0)
-        && row.readCursorPresent !== true
-      ) {
-        return { ok: false, reason: "cursor_projection_missing", rwAuthoritySeq, rwAuthorityPresent };
-      }
-    }
-  }
-  return { ok: true };
-}
 
 function attachRisingWaveReadStateToInboxItems(
   items: InboxItem[],
@@ -12445,7 +10834,7 @@ function attachRisingWaveReadStateToInboxItems(
   } as InboxItem));
 }
 
-type InboxItemsResult = {
+export type InboxItemsResult = {
   items: InboxItem[];
   groups: InboxGroupCount[];
   hasMore: boolean;
@@ -12517,7 +10906,7 @@ function mergeActivityGroups(
 async function getUnifiedActivityAllInboxItems(
   serverId: string,
   userId: string,
-  opts: NonNullable<Parameters<typeof getInboxItems>[2]>,
+  opts: InboxItemsQuery,
   limit: number,
   offset: number,
 ): Promise<InboxItemsResult> {
@@ -12560,29 +10949,6 @@ async function getUnifiedActivityAllInboxItems(
   };
 }
 
-function recordRfc056ServingGuardDecision(
-  mode: RisingWaveInboxRfc056ServingMode,
-  route: InboxFilter,
-  queryAllowed: boolean,
-) {
-  const servingAuthority = mode === "on" && queryAllowed
-    ? "risingwave_candidate_with_postgres_fallback"
-    : "postgres_only";
-  addTraceEvent("inbox.rw.rfc056_serving_guard.decision", {
-    ...inboxTraceAttrs(
-      servingAuthority === "postgres_only" ? "pg_legacy" : "rw_mv",
-      route,
-      "none",
-    ),
-    "rw.rfc056.serving_mode": mode,
-    "rw.rfc056.query_allowed": queryAllowed,
-    "rw.rfc056.serving_authority": servingAuthority,
-    rw_rfc056_serving_mode: mode,
-    rw_rfc056_query_allowed: queryAllowed,
-    rw_rfc056_serving_authority: servingAuthority,
-  });
-}
-
 async function buildRisingWaveInboxItemsResult(
   result: InboxQueryResult,
   limit: number,
@@ -12604,63 +10970,7 @@ async function buildRisingWaveInboxItemsResult(
   };
 }
 
-function recordRfc056ShadowComparison(
-  route: InboxFilter,
-  candidate: InboxItemsResult | null,
-  authoritative: InboxItemsResult,
-) {
-  const matched = candidate !== null
-    ? JSON.stringify(candidate) === JSON.stringify(authoritative)
-    : null;
-  addTraceEvent("inbox.rw.rfc056_serving_guard.shadow_comparison", {
-    ...inboxTraceAttrs("pg_legacy", route, "none"),
-    "rw.rfc056.serving_mode": "shadow",
-    "rw.rfc056.authoritative_backend": "pg_legacy",
-    "rw.rfc056.comparison": matched === null
-      ? "candidate_unavailable"
-      : matched
-        ? "match"
-        : "mismatch",
-    "rw.rfc056.candidate_items_count": candidate?.items.length ?? 0,
-    "rw.rfc056.authoritative_items_count": authoritative.items.length,
-    "rw.rfc056.candidate_total_count": candidate?.totalCount ?? 0,
-    "rw.rfc056.authoritative_total_count": authoritative.totalCount,
-    rw_rfc056_serving_mode: "shadow",
-    rw_rfc056_authoritative_backend: "pg_legacy",
-    rw_rfc056_comparison: matched === null
-      ? "candidate_unavailable"
-      : matched
-        ? "match"
-        : "mismatch",
-  });
-}
-
-async function observeRfc056ShadowComparison(
-  route: InboxFilter,
-  candidate: InboxQueryResult | null,
-  authoritative: InboxItemsResult,
-  limit: number,
-  traceQuery: DbQueryTracer,
-  db: DatabaseExecutor,
-) {
-  if (!candidate) {
-    recordRfc056ShadowComparison(route, null, authoritative);
-    return;
-  }
-  try {
-    const candidateResult = await buildRisingWaveInboxItemsResult(
-      candidate,
-      limit,
-      traceQuery,
-      db,
-    );
-    recordRfc056ShadowComparison(route, candidateResult, authoritative);
-  } catch {
-    // Shadow observations are diagnostic only. Candidate comparison failures
-    // can never fail or replace the authoritative Postgres response.
-    recordRfc056ShadowComparison(route, null, authoritative);
-  }
-}
+export type InboxItemsQuery = NonNullable<Parameters<typeof getInboxItems>[2]>;
 
 export async function getInboxItems(
   serverId: string,
@@ -12699,10 +11009,7 @@ export async function getInboxItems(
   if (filter === "all" && opts.includeUnfollowedThreads) {
     return getUnifiedActivityAllInboxItems(serverId, userId, { ...opts, q }, limit, offset);
   }
-  const legacyFallbackReason = getLegacyInboxFallbackReason(historyCutoff);
-  const humanActivityMuteEnabled =
-    opts.humanActivityMuteEnabled ??
-    (await isHumanActivityMuteEnabled(serverId, userId));
+  const humanActivityMuteEnabled = opts.humanActivityMuteEnabled ?? true;
   const humanMuteFromSeqSelect = humanActivityMuteEnabled
     ? sql`mute.mute_from_seq`
     : sql`NULL::bigint`;
@@ -12716,186 +11023,42 @@ export async function getInboxItems(
     `
     : sql``;
 
-  // The current RW inbox projection intentionally does not materialize sender
-  // display names. Search must include the visible sender label, so query
-  // requests use the canonical Postgres paths until that field joins the
-  // versioned RW contract; non-search traffic keeps the existing RW fast path.
-  // Guest policy is not yet represented in materialized projections. Use
-  // the canonical query until those projections carry this access axis.
-  const rfc056ServingMode = guestAccess !== null ? "off" : risingWaveInboxFailSoftDeps.getRfc056ServingMode();
-  const rfc056QueryAllowed = !q
-    && !opts.forcePostgres
-    && rfc056ServingMode !== "off";
-  recordRfc056ServingGuardDecision(
-    rfc056ServingMode,
-    filter,
-    rfc056QueryAllowed,
-  );
-  let risingWaveAttempt: RisingWaveInboxAttempt<InboxQueryResult> = !rfc056QueryAllowed
-    ? { result: null }
-    : await tryGetInboxItemsFromRisingWave(serverId, userId, {
-        filter,
-        limit,
-        offset,
-        channelId,
-        sort: opts.sort,
-        historyCutoff,
-        includeMentionOnlyInAllAndUnread: humanActivityMuteEnabled,
-        traceQuery,
-      });
-  let risingWaveResult = risingWaveAttempt.result;
-  if (risingWaveResult) {
-    const primaryAuthority = await getPrimaryInboxReadAuthority(
-      serverId,
-      userId,
-      traceQuery,
-    );
-    const validation = validateRisingWaveInboxReadFrontier(
-      risingWaveResult.rows as InboxPolicySqlRow[],
-      primaryAuthority,
-    );
-    if (!validation.ok) {
-      addTraceEvent("inbox.rw.read_frontier_mismatch", {
-        ...inboxTraceAttrs(
-          "rw_mv",
-          filter,
-          "read_frontier_mismatch",
-          risingWaveResult.contractVersion,
-        ),
-        reason: validation.reason,
-        pg_authority_present: primaryAuthority.present,
-        pg_authority_seq: primaryAuthority.seq,
-        rw_authority_present: validation.rwAuthorityPresent,
-        rw_authority_seq: validation.rwAuthoritySeq,
-        fallback_target: "pg_fallback",
-        fallback_outcome: "pg_selected",
-      });
-      risingWaveResult = null;
-      risingWaveAttempt = {
-        ...risingWaveAttempt,
-        result: null,
-        fallbackReason: "read_frontier_mismatch",
-      };
-    }
-  }
-  const risingWaveShadowResult = rfc056ServingMode === "shadow"
-    ? risingWaveResult
-    : null;
-  if (rfc056ServingMode === "shadow") {
-    // Shadow may read and compare RFC056, but Postgres remains authoritative.
-    risingWaveResult = null;
-  }
-  const pgCanonicalFallbackReason: InboxFallbackReason =
-    risingWaveAttempt.fallbackReason ?? legacyFallbackReason;
-  const servingRowsFallbackReason: InboxFallbackReason = historyCutoff
-    ? pgCanonicalFallbackReason
-    : (risingWaveAttempt.fallbackReason ?? "none");
-  const pgCanonicalContractVersion = risingWaveAttempt.contractVersion;
-  const postgresSelectionReason: InboxPostgresSelectionReason = risingWaveResult
-    ? "risingwave_result"
-    : rfc056ServingMode === "off"
-      ? "rfc056_guard_off_uses_canonical_pg"
-      : rfc056ServingMode === "shadow"
-        ? "rfc056_shadow_uses_canonical_pg"
-        : risingWaveAttempt.fallbackReason === "read_frontier_mismatch"
-          ? "read_frontier_mismatch_uses_canonical_pg"
-          : historyCutoff
-            ? "history_cutoff_uses_serving_rows"
-            : humanActivityMuteEnabled
-              ? "human_activity_mute_uses_serving_rows"
-              : "legacy_inline_policy_pending_serving_rows_migration";
-  const postgresSelectionAttrs = inboxPostgresSelectionTraceAttrs(
-    postgresSelectionReason,
-  );
-  const selection: InboxBackendSelection = risingWaveResult
-    ? {
-        backend: "rw_mv",
-        fallbackReason: "none",
-        contractVersion: risingWaveResult.contractVersion,
-      }
-    : {
-        backend: "pg_legacy",
-        fallbackReason: pgCanonicalFallbackReason,
-        contractVersion: pgCanonicalContractVersion,
-      };
-
-  if (
-    (humanActivityMuteEnabled || historyCutoff)
-    && !risingWaveResult
-    && !opts.forceCanonicalPostgres
-  ) {
-    const servingResult = await withRisingWaveInboxFallbackTrace(
-      filter,
-      "channels.inbox_items_serving_rows_by_user",
-      risingWaveAttempt,
-      () => getInboxItemsFromServingRows(serverId, userId, {
-        filter,
-        limit,
-        offset,
-        channelId,
-        q,
-        sort: opts.sort,
-        historyCutoff,
-        fallbackReason: servingRowsFallbackReason,
-        postgresSelectionReason,
-        traceQuery,
-        executor: opts.executor,
-      }),
-    );
-    const page = selectInboxPolicyPageRows(
-      servingResult.rows as InboxPolicySqlRow[],
-      limit,
-    );
-    const pageRows = page.rows as any[];
-    await enrichInboxRowsWithProfileNames(pageRows, traceQuery, db);
-    recordInboxBackendSelected(
-      "pg_serving_rows",
-      filter,
-      servingRowsFallbackReason,
-      pgCanonicalContractVersion,
-      postgresSelectionAttrs,
-    );
-    recordInboxServingRowsRead(pageRows, {
-      receiverType: "user",
-      receiverId: userId,
+  // The derivation view is THE serving source, and RisingWave is a hard
+  // dependency: unconfigured or a failed read is an error, never a reroute (no
+  // PG fail-soft; a future RW->PG sink may add storage-level redundancy, not a
+  // read branch). The canonical inline Postgres read below serves only what the
+  // projections do not carry yet -- search (sender display names are not
+  // materialized) and guest access (guest policy is not represented) -- plus the
+  // explicit force escapes for authority transactions.
+  const useCanonicalPostgres = Boolean(q)
+    || guestAccess !== null
+    || opts.forcePostgres === true
+    || opts.forceCanonicalPostgres === true;
+  const canonicalSelectionReason = q
+    ? "search_not_projected"
+    : guestAccess !== null
+      ? "guest_policy_not_projected"
+      : "forced_canonical";
+  if (!useCanonicalPostgres) {
+    const override = getActivityReadSourceOverride();
+    if (override) return override.inboxItems(serverId, userId, { ...opts, q });
+    const risingWaveResult = await getInboxItemsFromRisingWave(serverId, userId, {
       filter,
       limit,
       offset,
+      channelId,
+      sort: opts.sort,
+      historyCutoff,
+      includeMentionOnlyInAllAndUnread: humanActivityMuteEnabled,
+      traceQuery,
     });
-    // PG serving-rows path: the read-cursor triple AND the union frontier
-    // pair come from the SINGLE authority read (identical union to the
-    // list/unread exits); the serving query's own activity pair stays as the
-    // display pair only. The authority read runs on the SAME executor as the
-    // serving query — a global-getDb() read would miss the caller's
-    // transaction snapshot and deadlock single-connection drivers.
-    await enrichInboxRowsWithReadCursorAuthority(pageRows, userId, traceQuery, db);
-    const items = await attachReadStateToInboxItems(
-      mapInboxPolicyRowsToItems(pageRows, logInboxScopeCorruption, "authority") as InboxItem[],
-      userId,
-      db,
+    recordInboxBackendSelected(
+      "rw_mv",
+      filter,
+      "none",
+      risingWaveResult.contractVersion,
     );
-    const authoritativeResult: InboxItemsResult = {
-      items,
-      groups: readInboxGroupCounts(servingResult.rows),
-      hasMore: page.hasMore,
-      totalCount: page.totalCount,
-      totalUnreadCount: page.totalUnreadCount,
-      activeUnreadCount: selectInboxPolicyActiveUnreadCount(
-        servingResult.rows as InboxPolicySqlRow[],
-        page.totalUnreadCount,
-      ),
-    };
-    if (rfc056ServingMode === "shadow") {
-      await observeRfc056ShadowComparison(
-        filter,
-        risingWaveShadowResult,
-        authoritativeResult,
-        limit,
-        traceQuery,
-        db,
-      );
-    }
-    return authoritativeResult;
+    return buildRisingWaveInboxItemsResult(risingWaveResult, limit, traceQuery, db);
   }
 
   const legacyActivityChannelFilterPredicate = channelId
@@ -12945,13 +11108,20 @@ export async function getInboxItems(
       )`
     : sql``;
 
+  // Free-tier history cutoff on the canonical path. In the projected world
+  // this predicate lives INSIDE the serving view (plan-derived); the inline
+  // SQL carries it per request so the canonical reads keep the same product
+  // behavior. Empty fragments when no cutoff: zero plan-shape change.
+  const legacyCutoffAndM = historyCutoff ? sql` AND m.created_at > ${historyCutoff}` : sql``;
+  const legacyCutoffAndMm = historyCutoff ? sql` AND mm.created_at > ${historyCutoff}` : sql``;
+
   const readLegacyInboxItemsFromPostgres = () =>
     filter === "all"
       ? traceQuery(
           "channels.inbox_items_by_user",
           () =>
             db.execute(sql`
-    -- Canonical no-env Inbox behavior lives in this inline Postgres SQL.
+    -- Canonical Postgres Inbox read (search, guest access, authority transactions).
     -- If you change selected fields, filters, unread/mention semantics,
     -- ordering, pagination, or totals here, update rw_inbox_items_v2 in
     -- infra/risingwave/sql/024-risingwave-unread-inbox-full-materialized.sql and rerun
@@ -13025,6 +11195,7 @@ export async function getInboxItems(
       INNER JOIN channels parent_ch
         ON parent_ch.id = pm.channel_id
        AND parent_ch.archived_at IS NULL
+       AND parent_ch.deleted_at IS NULL
       LEFT JOIN joint_channels parent_joint
         ON parent_joint.canonical_channel_id = pm.channel_id
        AND parent_joint.status = 'active'
@@ -13068,7 +11239,8 @@ export async function getInboxItems(
         NULL::bigint AS "parentMessageSeq",
         c.last_read_seq AS "lastReadSeq",
         c.mute_from_seq AS "muteFromSeq",
-        lm.created_at AS "activityAt"
+        lm.created_at AS "activityAt",
+        false AS "isOutsiderMention"
       FROM eligible_chats c
       INNER JOIN LATERAL (
         SELECT m.created_at
@@ -13096,7 +11268,8 @@ export async function getInboxItems(
         t.parent_message_seq AS "parentMessageSeq",
         t.last_read_seq AS "lastReadSeq",
         NULL::bigint AS "muteFromSeq",
-        COALESCE(latest_reply.created_at, t.parent_message_created_at) AS "activityAt"
+        COALESCE(latest_reply.created_at, t.parent_message_created_at) AS "activityAt",
+        false AS "isOutsiderMention"
       FROM followed_threads t
       LEFT JOIN LATERAL (
         SELECT m.created_at
@@ -13105,6 +11278,124 @@ export async function getInboxItems(
         ORDER BY m.seq DESC
         LIMIT 1
       ) latest_reply ON true
+      UNION ALL
+      -- Notified outsider public-channel mentions: a user @-mentioned in a
+      -- public channel they are NOT a member of gets a mention-only Activity
+      -- row. notified_at is the notify pipeline's recorded policy verdict —
+      -- Activity trusts it rather than re-deriving visibility. This behavior
+      -- lived exclusively in write-time fan-out (serving_rows) until the
+      -- 2026-09-21 teardown surfaced the gap (live regression, three prod
+      -- cases verified against the old chain).
+      SELECT
+        'channel' AS "kind",
+        oc.id AS "sourceChannelId",
+        oc.id AS "storageChannelId",
+        oc.name AS "channelName",
+        oc.type::text AS "channelType",
+        NULL::uuid AS "parentMessageId",
+        NULL::uuid AS "parentChannelId",
+        NULL::text AS "parentChannelName",
+        NULL::text AS "parentChannelType",
+        NULL::text AS "parentMessagePreview",
+        NULL::text AS "parentMessageSenderType",
+        NULL::text AS "parentMessageSenderId",
+        NULL::timestamptz AS "parentMessageCreatedAt",
+        NULL::bigint AS "parentMessageSeq",
+        COALESCE(outsider_rc.last_read_seq, 0) AS "lastReadSeq",
+        NULL::bigint AS "muteFromSeq",
+        outsider_latest.created_at AS "activityAt",
+        true AS "isOutsiderMention"
+      FROM channels oc
+      INNER JOIN LATERAL (
+        SELECT m.created_at
+        FROM message_mentions mm
+        INNER JOIN messages m ON m.id = mm.message_id
+        LEFT JOIN inbox_suppression_states mention_suppression
+          ON mention_suppression.receiver_type = 'user'
+         AND mention_suppression.receiver_id = ${userId}::uuid
+         AND mention_suppression.target_kind = 'public_channel_mention'
+         AND mention_suppression.target_channel_id = mm.channel_id
+        WHERE mm.channel_id = oc.id
+          AND mm.target_type = 'user'
+          AND mm.target_id = ${userId}::uuid
+          AND mm.notified_at IS NOT NULL
+          AND mm.message_seq > COALESCE(mention_suppression.done_through_seq, 0)${legacyCutoffAndMm}
+        ORDER BY mm.message_seq DESC
+        LIMIT 1
+      ) outsider_latest ON true
+      LEFT JOIN channel_humans outsider_member
+        ON outsider_member.channel_id = oc.id
+       AND outsider_member.user_id = ${userId}
+      LEFT JOIN user_channel_read_cursors outsider_rc
+        ON outsider_rc.channel_id = oc.id
+       AND outsider_rc.user_id = ${userId}
+      WHERE oc.server_id = ${serverId}
+        AND ${guestInboxAccessSql(guestAccess, sql`oc.id`)}
+        AND oc.type = 'channel'
+        AND oc.deleted_at IS NULL
+        AND oc.archived_at IS NULL
+        AND outsider_member.user_id IS NULL
+      UNION ALL
+      -- Notified outsider public-thread mentions: same admission verdict
+      -- (notified_at) for threads the user does not follow, in public parent
+      -- channels. Mirrors notified_public_thread_mentions in the filtered
+      -- branch.
+      SELECT
+        'thread' AS "kind",
+        ot.id AS "sourceChannelId",
+        ot.id AS "storageChannelId",
+        NULL::text AS "channelName",
+        NULL::text AS "channelType",
+        ot.parent_message_id AS "parentMessageId",
+        outsider_parent_ch.id AS "parentChannelId",
+        outsider_parent_ch.name AS "parentChannelName",
+        outsider_parent_ch.type::text AS "parentChannelType",
+        outsider_pm.content AS "parentMessagePreview",
+        outsider_pm.sender_type AS "parentMessageSenderType",
+        outsider_pm.sender_id AS "parentMessageSenderId",
+        outsider_pm.created_at AS "parentMessageCreatedAt",
+        outsider_pm.seq AS "parentMessageSeq",
+        COALESCE(outsider_trc.last_read_seq, 0) AS "lastReadSeq",
+        NULL::bigint AS "muteFromSeq",
+        outsider_tm.created_at AS "activityAt",
+        true AS "isOutsiderMention"
+      FROM channels ot
+      INNER JOIN messages outsider_pm ON outsider_pm.id = ot.parent_message_id
+      INNER JOIN channels outsider_parent_ch ON outsider_parent_ch.id = outsider_pm.channel_id
+      INNER JOIN LATERAL (
+        SELECT m.created_at
+        FROM message_mentions mm
+        INNER JOIN messages m ON m.id = mm.message_id
+        LEFT JOIN inbox_suppression_states mention_suppression
+          ON mention_suppression.receiver_type = 'user'
+         AND mention_suppression.receiver_id = ${userId}::uuid
+         AND mention_suppression.target_kind = 'public_thread_mention'
+         AND mention_suppression.target_channel_id = mm.channel_id
+        WHERE mm.channel_id = ot.id
+          AND mm.target_type = 'user'
+          AND mm.target_id = ${userId}::uuid
+          AND mm.notified_at IS NOT NULL
+          AND mm.message_seq > COALESCE(mention_suppression.done_through_seq, 0)${legacyCutoffAndMm}
+        ORDER BY mm.message_seq DESC
+        LIMIT 1
+      ) outsider_tm ON true
+      LEFT JOIN thread_follows outsider_follow
+        ON outsider_follow.thread_channel_id = ot.id
+       AND outsider_follow.follower_type = 'user'
+       AND outsider_follow.follower_id = ${userId}
+       AND outsider_follow.done_at IS NULL
+       AND outsider_follow.unfollowed_at IS NULL
+      LEFT JOIN user_channel_read_cursors outsider_trc
+        ON outsider_trc.channel_id = ot.id
+       AND outsider_trc.user_id = ${userId}
+      WHERE ot.server_id = ${serverId}
+        AND ot.type = 'thread'
+        AND ot.deleted_at IS NULL
+        AND outsider_parent_ch.type = 'channel'
+        AND ${guestInboxAccessSql(guestAccess, sql`outsider_parent_ch.id`)}
+        AND outsider_parent_ch.archived_at IS NULL
+        AND outsider_parent_ch.deleted_at IS NULL
+        AND outsider_follow.thread_channel_id IS NULL
     ),
     filtered_activity AS (
       SELECT *
@@ -13149,8 +11440,10 @@ export async function getInboxItems(
       FROM selected_activity a
       INNER JOIN messages m
         ON m.channel_id = a."storageChannelId"
-       AND m.seq > a."lastReadSeq"
+       AND m.seq > a."lastReadSeq"${legacyCutoffAndM}
        AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
+       AND ${legacyChatActivityPromotionAllowedSql(userId, sql`a."muteFromSeq"`)}
+      WHERE NOT a."isOutsiderMention"
     ),
     page AS (
       SELECT *
@@ -13166,13 +11459,13 @@ export async function getInboxItems(
         p."channelName",
         p."channelType",
         latest_message.id::text AS "lastMessageId",
-        first_unread.id::text AS "firstUnreadMessageId",
+        CASE WHEN p."isOutsiderMention" THEN has_mention.first_mention_message_id::text ELSE first_unread.id::text END AS "firstUnreadMessageId",
         to_char((latest_message.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS.US') || '+00' AS "lastMessageAt",
         latest_message.content AS "lastMessagePreview",
         latest_message.sender_type AS "lastMessageSenderType",
         latest_message.sender_id AS "lastMessageSenderId",
         COALESCE(su.display_name, su.name, sa.display_name, sa.name) AS "lastMessageSenderName",
-        COALESCE(unread.unread_count, 0)::int AS "unreadCount",
+        CASE WHEN p."isOutsiderMention" THEN 0 ELSE COALESCE(unread.unread_count, 0) END::int AS "unreadCount",
         CASE WHEN p."kind" = 'thread' THEN p."sourceChannelId"::text ELSE NULL::text END AS "threadChannelId",
         p."parentMessageId"::text AS "parentMessageId",
         p."parentChannelId"::text AS "parentChannelId",
@@ -13192,8 +11485,10 @@ export async function getInboxItems(
         legacy_task.task_number AS "taskNumber",
         legacy_task.status AS "taskStatus",
         COALESCE(claimant_user.display_name, claimant_user.name, claimant_agent.display_name, claimant_agent.name) AS "taskClaimedByName",
-        COALESCE(has_mention.found, false) AS "hasMention",
+        CASE WHEN p."isOutsiderMention" THEN true ELSE COALESCE(has_mention.found, false) END AS "hasMention",
         has_mention.first_mention_message_id::text AS "firstMentionMessageId",
+        CASE WHEN p."isOutsiderMention" THEN true ELSE COALESCE(has_mention.found, false) END AS "hasAnyMention",
+        p."isOutsiderMention" AS "mentionOnly",
         p."activityAt"
       FROM page p
       LEFT JOIN LATERAL (
@@ -13208,8 +11503,9 @@ export async function getInboxItems(
         SELECT m.id
         FROM messages m
         WHERE m.channel_id = p."storageChannelId"
-          AND m.seq > p."lastReadSeq"
+          AND m.seq > p."lastReadSeq"${legacyCutoffAndM}
           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
+          AND ${legacyChatActivityPromotionAllowedSql(userId, sql`p."muteFromSeq"`)}
         ORDER BY m.seq ASC
         LIMIT 1
       ) first_unread ON true
@@ -13217,8 +11513,9 @@ export async function getInboxItems(
         SELECT count(*)::int AS unread_count
         FROM messages m
         WHERE m.channel_id = p."storageChannelId"
-          AND m.seq > p."lastReadSeq"
+          AND m.seq > p."lastReadSeq"${legacyCutoffAndM}
           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
+          AND ${legacyChatActivityPromotionAllowedSql(userId, sql`p."muteFromSeq"`)}
       ) unread ON true
       LEFT JOIN LATERAL (
         SELECT count(*)::int AS reply_count
@@ -13245,7 +11542,21 @@ export async function getInboxItems(
                 AND sibling_projection.local_channel_id = mm.channel_id
             )
           )
-          AND mm.message_seq > p."lastReadSeq"
+          -- Outsider rows: the anchor ignores the READ cursor (a mention-only
+          -- row must open the @ even when read) but respects DONE
+          -- (suppression): after done, only a newer mention reopens and the
+          -- anchor moves to it. Member rows keep cursor gating.
+          AND (
+            (NOT p."isOutsiderMention" AND mm.message_seq > p."lastReadSeq")
+            OR (p."isOutsiderMention" AND mm.message_seq > COALESCE((
+              SELECT s.done_through_seq
+              FROM inbox_suppression_states s
+              WHERE s.receiver_type = 'user'
+                AND s.receiver_id = ${userId}::uuid
+                AND s.target_kind = CASE p."kind" WHEN 'thread' THEN 'public_thread_mention' ELSE 'public_channel_mention' END
+                AND s.target_channel_id = p."sourceChannelId"
+            ), 0))
+          )${legacyCutoffAndMm}
         ORDER BY mm.message_seq ASC
         LIMIT 1
       ) has_mention ON true
@@ -13283,13 +11594,8 @@ export async function getInboxItems(
       COALESCE(page_enriched."threadChannelId", page_enriched."channelId") ${sortDirection}
   `),
           (queryResult) => ({
-            ...inboxTraceAttrs(
-              "pg_legacy",
-              filter,
-              pgCanonicalFallbackReason,
-              pgCanonicalContractVersion,
-            ),
-            ...postgresSelectionAttrs,
+            ...inboxTraceAttrs("pg_legacy", filter, "none"),
+            inbox_pg_selection_reason: canonicalSelectionReason,
             filter,
             limit,
             offset,
@@ -13305,7 +11611,7 @@ export async function getInboxItems(
           "channels.inbox_items_by_user",
           () =>
             db.execute(sql`
-    -- Canonical no-env Inbox behavior lives in this inline Postgres SQL.
+    -- Canonical Postgres Inbox read (search, guest access, authority transactions).
     -- If you change selected fields, filters, unread/mention semantics,
     -- ordering, pagination, or totals here, update rw_inbox_items_v2 in
     -- infra/risingwave/sql/024-risingwave-unread-inbox-full-materialized.sql and rerun
@@ -13377,7 +11683,7 @@ export async function getInboxItems(
         WHERE mm.target_type = 'user'
           AND mm.target_id = ${userId}::uuid
           AND mm.notified_at IS NOT NULL
-          AND mm.message_seq > COALESCE(mention_suppression.done_through_seq, 0)
+          AND mm.message_seq > COALESCE(mention_suppression.done_through_seq, 0)${legacyCutoffAndMm}
           AND mention_channel.server_id = ${serverId}
           AND ${guestInboxAccessSql(guestAccess, sql`mention_channel.id`)}
           AND mention_channel.type = 'channel'
@@ -13440,7 +11746,7 @@ export async function getInboxItems(
         WHERE mm.target_type = 'user'
           AND mm.target_id = ${userId}::uuid
           AND mm.notified_at IS NOT NULL
-          AND mm.message_seq > COALESCE(mention_suppression.done_through_seq, 0)
+          AND mm.message_seq > COALESCE(mention_suppression.done_through_seq, 0)${legacyCutoffAndMm}
           AND thread_channel.server_id = ${serverId}
           AND thread_channel.type = 'thread'
           AND thread_channel.deleted_at IS NULL
@@ -13503,6 +11809,7 @@ export async function getInboxItems(
       INNER JOIN channels parent_ch
         ON parent_ch.id = pm.channel_id
        AND parent_ch.archived_at IS NULL
+       AND parent_ch.deleted_at IS NULL
       LEFT JOIN joint_channels parent_joint
         ON parent_joint.canonical_channel_id = pm.channel_id
        AND parent_joint.status = 'active'
@@ -13579,8 +11886,9 @@ export async function getInboxItems(
         SELECT m.id
         FROM messages m
         WHERE m.channel_id = c.storage_channel_id
-          AND m.seq > c.last_read_seq
+          AND m.seq > c.last_read_seq${legacyCutoffAndM}
           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
+          AND ${legacyChatActivityPromotionAllowedSql(userId, sql`c.mute_from_seq`)}
         ORDER BY m.seq ASC
         LIMIT 1
       ) first_unread ON true
@@ -13588,8 +11896,9 @@ export async function getInboxItems(
         SELECT count(*)::int AS unread_count
         FROM messages m
         WHERE m.channel_id = c.storage_channel_id
-          AND m.seq > c.last_read_seq
+          AND m.seq > c.last_read_seq${legacyCutoffAndM}
           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
+          AND ${legacyChatActivityPromotionAllowedSql(userId, sql`c.mute_from_seq`)}
       ) unread ON true
       LEFT JOIN LATERAL (
         SELECT true AS found, mm.message_id AS first_mention_message_id
@@ -13610,7 +11919,7 @@ export async function getInboxItems(
                 AND sibling_projection.local_channel_id = mm.channel_id
             )
           )
-          AND mm.message_seq > c.last_read_seq
+          AND mm.message_seq > c.last_read_seq${legacyCutoffAndMm}
         ORDER BY mm.message_seq ASC
         LIMIT 1
       ) has_mention ON true
@@ -13775,7 +12084,7 @@ export async function getInboxItems(
         SELECT m.id
         FROM messages m
         WHERE m.channel_id = t.storage_channel_id
-          AND m.seq > COALESCE(rc.last_read_seq, 0)
+          AND m.seq > COALESCE(rc.last_read_seq, 0)${legacyCutoffAndM}
           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
         ORDER BY m.seq ASC
         LIMIT 1
@@ -13784,7 +12093,7 @@ export async function getInboxItems(
         SELECT count(*)::int AS unread_count
         FROM messages m
         WHERE m.channel_id = t.storage_channel_id
-          AND m.seq > COALESCE(rc.last_read_seq, 0)
+          AND m.seq > COALESCE(rc.last_read_seq, 0)${legacyCutoffAndM}
           AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
       ) unread ON true
       LEFT JOIN LATERAL (
@@ -13806,7 +12115,7 @@ export async function getInboxItems(
                 AND sibling_projection.local_channel_id = mm.channel_id
             )
           )
-          AND mm.message_seq > COALESCE(rc.last_read_seq, 0)
+          AND mm.message_seq > COALESCE(rc.last_read_seq, 0)${legacyCutoffAndMm}
         ORDER BY mm.message_seq ASC
         LIMIT 1
       ) has_mention ON true
@@ -13939,13 +12248,8 @@ export async function getInboxItems(
       COALESCE(page."threadChannelId", page."channelId") ${sortDirection}
   `),
           (queryResult) => ({
-            ...inboxTraceAttrs(
-              "pg_legacy",
-              filter,
-              pgCanonicalFallbackReason,
-              pgCanonicalContractVersion,
-            ),
-            ...postgresSelectionAttrs,
+            ...inboxTraceAttrs("pg_legacy", filter, "none"),
+            inbox_pg_selection_reason: canonicalSelectionReason,
             filter,
             limit,
             offset,
@@ -13957,44 +12261,38 @@ export async function getInboxItems(
             mute_state_join_present: humanActivityMuteEnabled,
           }),
         );
-  const result =
-    risingWaveResult ??
-    (await withRisingWaveInboxFallbackTrace(
-      filter,
-      "channels.inbox_items_by_user",
-      risingWaveAttempt,
-      readLegacyInboxItemsFromPostgres,
-    ));
+  const result = await readLegacyInboxItemsFromPostgres();
 
   const rawRows = result.rows as InboxPolicySqlRow[];
   const page = selectInboxPolicyPageRows(rawRows, limit);
   const pageRows = page.rows as any[];
 
   await enrichInboxRowsWithProfileNames(pageRows, traceQuery, db);
-  recordInboxBackendSelected(
-    selection.backend,
+  recordInboxBackendSelected("pg_legacy", filter, "none", undefined, {
+    inbox_pg_selection_reason: canonicalSelectionReason,
+  });
+  // Row-read trace events (page + one per returned item). Event names keep
+  // the historical inbox.serving_row.* family: they are a consumed trace
+  // contract (join-key correlation), and renaming them is a trace-contract
+  // change, not a teardown concern.
+  recordInboxServingRowsRead(pageRows, {
+    receiverType: "user",
+    receiverId: userId,
     filter,
-    selection.fallbackReason,
-    selection.contractVersion,
-    selection.backend === "pg_legacy" ? postgresSelectionAttrs : {},
-  );
-  if (selection.backend !== "rw_mv") {
-    // PG canonical path: the read-cursor triple AND the union frontier pair
-    // come from the SINGLE authority read (identical union to the list/unread
-    // exits); RW rows carry their own cursor_v2 fields and skip this to
-    // preserve the offload. The authority read runs on the SAME executor as
-    // the rest of the flow — required when the caller is inside a
-    // transaction (activity-sync authority tx), both for snapshot
-    // consistency and to avoid single-connection (pglite) deadlock.
-    await enrichInboxRowsWithReadCursorAuthority(pageRows, userId, traceQuery, db);
-  }
-  const frontierSource = selection.backend === "rw_mv" ? "servingPair" : "authority";
-  const mappedItems = mapInboxPolicyRowsToItems(pageRows, logInboxScopeCorruption, frontierSource) as InboxItem[];
-  const items = selection.backend === "rw_mv"
-    ? attachRisingWaveReadStateToInboxItems(mappedItems, pageRows)
-    : await attachReadStateToInboxItems(mappedItems, userId, db);
+    limit,
+    offset,
+  });
+  // PG canonical path: the read-cursor triple AND the union frontier pair
+  // come from the SINGLE authority read (identical union to the list/unread
+  // exits). The authority read runs on the SAME executor as the rest of the
+  // flow — required when the caller is inside a transaction (activity-sync
+  // authority tx), both for snapshot consistency and to avoid
+  // single-connection (pglite) deadlock.
+  await enrichInboxRowsWithReadCursorAuthority(pageRows, userId, traceQuery, db);
+  const mappedItems = mapInboxPolicyRowsToItems(pageRows, logInboxScopeCorruption, "authority") as InboxItem[];
+  const items = await attachReadStateToInboxItems(mappedItems, userId, db);
 
-  const authoritativeResult: InboxItemsResult = {
+  return {
     items,
     groups: readInboxGroupCounts(result.rows),
     hasMore: page.hasMore,
@@ -14005,17 +12303,6 @@ export async function getInboxItems(
       page.totalUnreadCount,
     ),
   };
-  if (rfc056ServingMode === "shadow") {
-    await observeRfc056ShadowComparison(
-      filter,
-      risingWaveShadowResult,
-      authoritativeResult,
-      limit,
-      traceQuery,
-      db,
-    );
-  }
-  return authoritativeResult;
 }
 
 export async function markChannelInboxDone(
@@ -14068,11 +12355,6 @@ export async function markChannelInboxActive(userId: string, channelId: string) 
     await clearChannelDoneSuppression({ userId, channelId, executor: tx });
   });
   const sourceChannelId = await getMessageStorageChannelId(channelId);
-  await rebuildInboxServingRowsForReceiverTargets([{
-    receiverType: "user",
-    receiverId: userId,
-    sourceChannelId,
-  }]);
 }
 
 export type ReadStateMutationResult = {
@@ -14124,12 +12406,25 @@ export async function recordThreadFollow(
   opts: {
     reactivateUnfollowed?: boolean;
     preserveExistingReason?: boolean;
+    /**
+     * Where the follower's read position starts when this call STARTS a follow (no row,
+     * or a previously unfollowed one): "latest", or the seq before the message that
+     * caused the follow so that message stays unread. An already-active follow keeps
+     * its position. Omit only when the caller moves the position itself.
+     */
+    joinedThroughSeq?: number | "latest";
   } = {},
 ) {
   const db = getDb();
   const reactivateUnfollowed = opts.reactivateUnfollowed ?? false;
   const preserveExistingReason = opts.preserveExistingReason ?? false;
   const result = await db.execute(sql`
+    WITH prev AS (
+      SELECT unfollowed_at FROM thread_follows
+      WHERE thread_channel_id = ${threadChannelId}::uuid
+        AND follower_type = ${followerType}
+        AND follower_id = ${followerId}::uuid
+    )
     INSERT INTO thread_follows (
       thread_channel_id,
       follower_type,
@@ -14160,7 +12455,8 @@ export async function recordThreadFollow(
       unfollowed_at = NULL
     WHERE ${reactivateUnfollowed}
        OR thread_follows.unfollowed_at IS NULL
-    RETURNING thread_channel_id
+    RETURNING thread_channel_id,
+      NOT EXISTS (SELECT 1 FROM prev WHERE prev.unfollowed_at IS NULL) AS started
   `);
 
   if (result.rows.length > 0) {
@@ -14170,13 +12466,26 @@ export async function recordThreadFollow(
       threadChannelId,
     });
   }
+  const started = (result.rows[0] as { started?: boolean } | undefined)?.started === true;
+  if (started && opts.joinedThroughSeq !== undefined) {
+    await startReadPositionAtJoin(
+      db,
+      followerType === "user" ? "human" : "agent",
+      followerId,
+      threadChannelId,
+      opts.joinedThroughSeq === "latest" ? undefined : opts.joinedThroughSeq,
+    );
+  }
 }
 
 /** Follow a thread manually (user). */
 export async function followThread(userId: string, threadChannelId: string, parentMessageId: string) {
   await recordThreadFollow("user", userId, threadChannelId, parentMessageId, "manual", { reactivateUnfollowed: true });
-  // Mark thread as read so existing messages don't appear as unread
-  await markReadLatest(userId, threadChannelId);
+  // Mark thread as read so existing messages don't appear as unread. A read-state fence refusal (the follower left the
+  // Server meanwhile) must not fail the follow; any other error still surfaces.
+  await markReadLatest(userId, threadChannelId).catch((error: unknown) => {
+    if (!isReadMutationFenceRefusal(error)) throw error;
+  });
 }
 
 /** Unfollow a thread for any supported follower type. */
@@ -14196,7 +12505,7 @@ export async function unfollowThreadForFollower(
   if (!parentMessageId) return;
 
   await db.transaction(async (tx) => {
-    const now = new Date();
+    const now = currentDate();
     await tx.insert(threadFollows).values({
       threadChannelId,
       followerType,
@@ -14221,7 +12530,10 @@ export async function unfollowThreadForFollower(
   });
 
   if (followerType === "user") {
-    await markReadLatest(followerId, threadChannelId);
+    // A read-state fence refusal must not fail the unfollow; any other error still surfaces.
+    await markReadLatest(followerId, threadChannelId).catch((error: unknown) => {
+      if (!isReadMutationFenceRefusal(error)) throw error;
+    });
   }
 }
 
@@ -14324,11 +12636,6 @@ export async function undoneThread(userId: string, threadChannelId: string) {
     }
   });
   const sourceChannelId = await getMessageStorageChannelId(threadChannelId);
-  await rebuildInboxServingRowsForReceiverTargets([{
-    receiverType: "user",
-    receiverId: userId,
-    sourceChannelId,
-  }]);
 }
 
 /** Clear doneAt for all followers of a thread (called when new message arrives). */
@@ -14447,7 +12754,7 @@ export async function setInboxTargetActivityMuteState(opts: {
   activityMuted: boolean;
 }): Promise<InboxTargetActivityMuteState> {
   const db = getDb();
-  const now = new Date();
+  const now = currentDate();
   const current = await getInboxTargetActivityMuteState(opts.receiverType, opts.receiverId, opts.sourceChannelId);
   if (current.activityMuted === opts.activityMuted) {
     return { ...current, changed: false };
@@ -14574,7 +12881,7 @@ export async function setUserChannelMessageDisplayPrefs(opts: {
   collapseLongMessages: boolean;
 }): Promise<UserChannelMessageDisplayPrefs> {
   const db = getDb();
-  const now = new Date();
+  const now = currentDate();
   const current = await getUserChannelMessageDisplayPrefs(opts.userId, opts.channelId);
   if (current.collapseLongMessages === opts.collapseLongMessages) {
     return { ...current, changed: false };
@@ -14618,7 +12925,6 @@ export async function getActivityMutedUserIdsForMessage(opts: {
 }): Promise<Set<string>> {
   const db = getDb();
   if (opts.userIds.length === 0) return new Set();
-  if (!await isHumanActivityMuteEnabled(opts.serverId)) return new Set();
   const rows = await db
     .select({
       receiverId: inboxTargetMuteStates.receiverId,
@@ -14697,6 +13003,7 @@ async function getLatestUnreadMessageSeqForUser(userId: string, channelId: strin
 export async function markReadLatest(
   principal: string | { kind: "human" | "agent"; id: string },
   channelId: string,
+  options: { actingUserId?: string } = {},
 ): Promise<ReadStateMutationResult> {
   const channel = await getChannel(channelId, { includeDeleted: true });
   if (!channel) throw new Error("Channel not found");
@@ -14708,6 +13015,8 @@ export async function markReadLatest(
     principalKind: resolved.kind,
     principalId: resolved.id,
     mutation: { kind: "channel_read_all", scopeId: channelId },
+    // Task #93 line B: a human writing an agent receiver's read state is fenced as the delegating actor.
+    actor: resolved.kind === "agent" && options.actingUserId ? { kind: "human", userId: options.actingUserId } : undefined,
   });
   const scope = ack.scopes.find((candidate) => candidate.scopeId === channelId);
   if (!scope) return { channelId, maxReadSeq: 0, readStateVersion: 0, changed: false };
@@ -14739,257 +13048,233 @@ export async function markUnread(userId: string, channelId: string): Promise<Rea
   };
 }
 
-/** Get unread message counts for all channels in a server for a user.
- *  Two-step approach: first identify channels with any unread via EXISTS (short-circuits),
- *  then count only in those channels. Avoids scanning messages in fully-read channels. */
+/**
+ * Sidebar unread comes from ONE RisingWave view, rw_conversation_unread_v2
+ * (infra/risingwave/sql/068-chain-mention-v6-consumers.sql), a projection of the
+ * unified chain: rw_inbox_normal_v4 + muted subscriptions (full count,
+ * rw_inbox_muted_full_v1) + rw_inbox_mention_v6. Every rule -- membership, muted, joint storage mapping,
+ * followed-thread visibility, free-plan eligibility (rw_target_eligible_v1), the
+ * unread predicate (own sends, self-caused system messages and noise subtypes
+ * excluded) and mention admission -- lives in the chain, so these readers only
+ * select. There is no Postgres fallback: with no RisingWave, or a failed read,
+ * the request fails.
+ *
+ * Non-joined public channels carry no count. The summary asks, in the same round
+ * trip, whether each one has anything past the user's cursor (`hasNew`): a
+ * per-request lookup over the server's public channels, never a users x public
+ * channels expansion.
+ */
+const CONVERSATION_UNREAD_CONTRACT_VERSION = 3;
+
+function conversationUnreadRwTraceAttrs(read: { acquireWaitMs: number; poolState: RisingWavePoolState }): TraceAttributes {
+  return {
+    backend: "risingwave",
+    "rw.acquire_wait_ms": Math.round(read.acquireWaitMs),
+    "rw.pool.total_count": read.poolState.rw_pool_total,
+    "rw.pool.idle_count": read.poolState.rw_pool_idle,
+    "rw.pool.waiting_count": read.poolState.rw_pool_waiting,
+    "rw.timeout_ms": getRisingWaveConnectionTimeoutMillis(),
+    "rw.pool.connection_timeout_ms": getRisingWaveConnectionTimeoutMillis(),
+    ...read.poolState,
+  };
+}
+
+type ConversationUnreadRead<T> = { rows: T; rwAttrs: TraceAttributes };
+
+
+function nullableText(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+async function readConversationUnreadSummaryRows(
+  query: ConversationUnreadSummaryQuery,
+): Promise<ConversationUnreadRead<ConversationUnreadRow[]>> {
+  const override = getConversationUnreadSourceOverride();
+  if (override) return { rows: await override.summaryRows(query), rwAttrs: {} };
+  const pool = getRisingWaveInboxPool();
+  if (!pool) throw new RisingWaveNotConfiguredError("sidebar unread");
+  // Public arm: the server's live public channels the user has NOT joined (a
+  // joined one is a subscribed row of the view, muted included), still eligible
+  // under the plan (the chain's rule), whose latest seq is past the user's
+  // cursor. rw_channels is read by its server_id index; the other joins are
+  // point lookups by target / (user, channel).
+  const publicArm = query.includePublicNew
+    ? `
+      UNION ALL
+      SELECT c.server_id AS server_id, c.id AS target_id, 'channel' AS kind, FALSE AS subscribed,
+             CAST(0 AS BIGINT) AS unread_count, CAST(0 AS BIGINT) AS mention_unread,
+             CAST(0 AS BIGINT) AS total_mentions, TRUE AS has_new,
+             tl.latest_seq AS latest_seq, CAST(NULL AS VARCHAR) AS latest_message_id,
+             (uc.user_id IS NOT NULL) AS cursor_present,
+             CAST(uc.last_read_seq AS BIGINT) AS last_read_seq,
+             uc.read_state_version AS read_state_version
+      FROM rw_channels AS c
+      JOIN rw_target_latest_v4 AS tl ON tl.target_id = c.id
+      JOIN rw_target_eligible_v1 AS g ON g.target_id = c.id
+      LEFT JOIN rw_channel_humans AS ch ON ch.channel_id = c.id AND ch.user_id = $1
+      LEFT JOIN rw_user_channel_read_cursors_v2 AS uc ON uc.channel_id = c.id AND uc.user_id = $1
+      WHERE c.server_id = $2
+        AND c.type = 'channel'
+        AND c.deleted_at IS NULL
+        AND c.archived_at IS NULL
+        AND ch.user_id IS NULL
+        AND tl.latest_seq > COALESCE(CAST(uc.last_read_seq AS BIGINT), 0)`
+    : "";
+  const read = await queryRisingWaveInbox(pool, `
+      SELECT server_id, target_id, kind, subscribed,
+             unread_count, mention_unread, total_mentions, FALSE AS has_new,
+             latest_seq, latest_message_id, cursor_present, last_read_seq, read_state_version
+      FROM ${CONVERSATION_UNREAD_VIEW}
+      WHERE receiver_type = 'user'
+        AND receiver_id = $1
+        AND server_id = $2
+        AND (unread_count > 0 OR total_mentions > 0)${publicArm}`, [query.userId, query.serverId]);
+  const rows = read.result.rows.map((row): ConversationUnreadRow => ({
+    serverId: String(row.server_id),
+    targetId: String(row.target_id),
+    kind: row.kind as ConversationUnreadRow["kind"],
+    subscribed: row.subscribed === true,
+    unreadCount: Number(row.unread_count ?? 0),
+    mentionUnread: Number(row.mention_unread ?? 0),
+    totalMentions: Number(row.total_mentions ?? 0),
+    hasNew: row.has_new === true,
+    latestSeq: nullableText(row.latest_seq),
+    latestMessageId: nullableText(row.latest_message_id),
+    cursorPresent: row.cursor_present === true,
+    lastReadSeq: nullableText(row.last_read_seq),
+    readStateVersion: row.read_state_version === null || row.read_state_version === undefined
+      ? null
+      : Number(row.read_state_version),
+  }));
+  return { rows, rwAttrs: conversationUnreadRwTraceAttrs(read) };
+}
+
+async function readSidebarUnreadTotals(
+  query: SidebarUnreadTotalsQuery,
+): Promise<ConversationUnreadRead<Array<{ serverId: string; unreadCount: number }>>> {
+  const override = getConversationUnreadSourceOverride();
+  if (override) return { rows: await override.sidebarTotals(query), rwAttrs: {} };
+  const pool = getRisingWaveInboxPool();
+  if (!pool) throw new RisingWaveNotConfiguredError("sidebar unread totals");
+  const read = await queryRisingWaveInbox(pool, `
+      SELECT server_id, CAST(SUM(unread_count) AS BIGINT) AS unread_count
+      FROM ${CONVERSATION_UNREAD_VIEW}
+      WHERE receiver_type = 'user'
+        AND receiver_id = $1
+        AND server_id = ANY($2::varchar[])
+        AND subscribed
+        AND kind <> 'thread'
+        AND unread_count > 0
+      GROUP BY server_id`, [query.userId, query.serverIds]);
+  const rows = read.result.rows.map((row) => ({
+    serverId: String(row.server_id),
+    unreadCount: Number(row.unread_count ?? 0),
+  }));
+  return { rows, rwAttrs: conversationUnreadRwTraceAttrs(read) };
+}
+
+async function loadConversationUnreadSummaryRows(
+  serverId: string,
+  userId: string,
+  includePublicNew: boolean,
+  traceQuery: DbQueryTracer,
+): Promise<ConversationUnreadRow[]> {
+  const queryName = includePublicNew ? "channels.unread_summary_by_user" : "channels.unread_counts_by_user";
+  const read = await traceQuery(
+    queryName,
+    () => readConversationUnreadSummaryRows({ serverId, userId, includePublicNew }),
+    (result) => ({
+      ...inboxTraceAttrs("rw_mv", "channel_unread", "none", CONVERSATION_UNREAD_CONTRACT_VERSION),
+      ...result.rwAttrs,
+      rw_conversation_unread_view: CONVERSATION_UNREAD_VIEW,
+      unread_channels_count: result.rows.filter((row) => row.unreadCount > 0).length,
+      has_new_channels_count: result.rows.filter((row) => row.hasNew).length,
+      rows_count: result.rows.length,
+    }),
+    (error) => risingWaveInboxFailureAttrs({
+      route: "channel_unread",
+      error,
+      contractVersion: CONVERSATION_UNREAD_CONTRACT_VERSION,
+      queryName,
+    }),
+  );
+  recordInboxBackendSelected("rw_mv", "channel_unread", "none", CONVERSATION_UNREAD_CONTRACT_VERSION);
+  return read.rows;
+}
+
+/**
+ * Exact unread counts for the user's subscribed conversations of a server
+ * (joined channels incl. muted/private/joint, DMs, followed threads), keyed by
+ * LOCAL channel id; only counts > 0. Non-joined public channels are not counted.
+ */
 export async function getUnreadCounts(
   serverId: string,
   userId: string,
-  historyCutoff?: Date,
   opts?: UnreadCountOptions,
 ): Promise<Record<string, number>> {
   const traceQuery = opts?.traceQuery ?? untracedDbQuery;
-  const jointStorageServerIds = historyCutoff
-    ? new Set<string>()
-    : await risingWaveInboxFailSoftDeps.getJointStorageServerIds([serverId], userId);
-  let risingWaveAttempt: RisingWaveInboxAttempt<Record<string, number>> = { result: null };
-  if (!historyCutoff && jointStorageServerIds.size === 0) {
-    risingWaveAttempt = await tryGetUnreadCountsFromRisingWave(serverId, userId, historyCutoff, traceQuery);
-    if (risingWaveAttempt.result) {
-      recordInboxBackendSelected("rw_mv", "channel_unread", "none", RISINGWAVE_CHANNEL_UNREAD_CONTRACT_VERSION);
-      return risingWaveAttempt.result;
-    }
-  }
-
-  const db = getDb();
-  const cutoffCondition = historyCutoff ? sql` AND m.created_at > ${historyCutoff}` : sql``;
-  const legacyFallbackReason = getLegacyInboxFallbackReason(historyCutoff);
-  const pgFallbackReason = risingWaveAttempt.fallbackReason
-    ?? (jointStorageServerIds.size > 0 ? "joint_storage" : legacyFallbackReason);
-
-  const rows = await withRisingWaveInboxFallbackTrace(
-    "channel_unread",
-    "channels.unread_counts_by_user",
-    risingWaveAttempt,
-    () => traceQuery(
-      "channels.unread_counts_by_user",
-      () => db.execute(sql`
-      -- Canonical no-env channel unread behavior lives in this inline Postgres SQL.
-      -- If you change membership, thread parent access, archived/deleted,
-      -- history-cutoff, or count semantics here, update RISINGWAVE_CHANNEL_UNREAD_COUNTS_VIEW
-      -- in infra/risingwave/sql/024-risingwave-unread-inbox-full-materialized.sql and rerun
-      -- pnpm --filter @botiverse/raft-server risingwave:verify-inbox-parity.
-      WITH candidate_channels AS (
-        SELECT
-          c.id AS source_channel_id,
-          COALESCE(joint_storage.canonical_channel_id, c.id) AS storage_channel_id,
-          COALESCE(rc.last_read_seq, 0) AS last_read_seq
-        FROM channels c
-        LEFT JOIN channel_humans ch
-          ON ch.channel_id = c.id AND ch.user_id = ${userId}
-        LEFT JOIN joint_channel_servers joint_projection
-          ON joint_projection.local_channel_id = c.id
-         AND joint_projection.server_id = c.server_id
-         AND joint_projection.status = 'active'
-        LEFT JOIN joint_channels joint_storage
-          ON joint_storage.id = joint_projection.joint_channel_id
-         AND joint_storage.status = 'active'
-        LEFT JOIN user_channel_read_cursors rc
-          ON rc.channel_id = c.id AND rc.user_id = ${userId}
-        WHERE c.server_id = ${serverId}
-          AND c.deleted_at IS NULL
-          AND c.archived_at IS NULL
-          AND c.type != 'thread'
-          -- DM/private/joint channels must be visible to the current user.
-          AND (c.type NOT IN ('dm', 'private', 'joint') OR ch.user_id IS NOT NULL)
-        UNION ALL
-        SELECT
-          c.id AS source_channel_id,
-          c.id AS storage_channel_id,
-          COALESCE(rc.last_read_seq, 0) AS last_read_seq
-        FROM thread_follows tf
-        INNER JOIN channels c
-          ON c.id = tf.thread_channel_id
-         AND c.type = 'thread'
-         AND c.server_id = ${serverId}
-         AND c.deleted_at IS NULL
-        INNER JOIN messages pm
-          ON pm.id = c.parent_message_id
-        INNER JOIN channels pc
-          ON pc.id = pm.channel_id
-         AND pc.archived_at IS NULL
-         AND pc.deleted_at IS NULL
-        LEFT JOIN channel_humans pch
-          ON pch.channel_id = pc.id AND pch.user_id = ${userId}
-        LEFT JOIN user_channel_read_cursors rc
-          ON rc.channel_id = c.id AND rc.user_id = ${userId}
-        WHERE tf.follower_type = 'user'
-          AND tf.follower_id = ${userId}
-          AND tf.done_at IS NULL
-          AND tf.unfollowed_at IS NULL
-          AND (pc.type NOT IN ('dm', 'private', 'joint') OR pch.user_id IS NOT NULL)
-        UNION ALL
-        SELECT
-          local_thread.id AS source_channel_id,
-          canonical_thread.id AS storage_channel_id,
-          COALESCE(rc.last_read_seq, 0) AS last_read_seq
-        FROM thread_follows tf
-        INNER JOIN channels local_thread
-          ON local_thread.id = tf.thread_channel_id
-         AND local_thread.type = 'thread'
-         AND local_thread.server_id = ${serverId}
-         AND local_thread.deleted_at IS NULL
-        INNER JOIN joint_channel_servers thread_projection
-          ON thread_projection.local_channel_id = local_thread.id
-         AND thread_projection.server_id = ${serverId}
-         AND thread_projection.status = 'active'
-        INNER JOIN joint_channels thread_joint
-          ON thread_joint.id = thread_projection.joint_channel_id
-         AND thread_joint.status = 'active'
-        INNER JOIN channels canonical_thread
-          ON canonical_thread.id = thread_joint.canonical_channel_id
-         AND canonical_thread.type = 'thread'
-         AND canonical_thread.deleted_at IS NULL
-        INNER JOIN messages parent_msg
-          ON parent_msg.id = canonical_thread.parent_message_id
-        INNER JOIN joint_channels parent_joint
-          ON parent_joint.canonical_channel_id = parent_msg.channel_id
-         AND parent_joint.status = 'active'
-        INNER JOIN joint_channel_servers parent_projection
-          ON parent_projection.joint_channel_id = parent_joint.id
-         AND parent_projection.server_id = ${serverId}
-         AND parent_projection.status = 'active'
-        INNER JOIN channels local_parent
-          ON local_parent.id = parent_projection.local_channel_id
-         AND local_parent.type = 'joint'
-         AND local_parent.archived_at IS NULL
-         AND local_parent.deleted_at IS NULL
-        INNER JOIN channel_humans parent_member
-          ON parent_member.channel_id = local_parent.id
-         AND parent_member.user_id = ${userId}
-        LEFT JOIN user_channel_read_cursors rc
-          ON rc.channel_id = local_thread.id AND rc.user_id = ${userId}
-        WHERE tf.follower_type = 'user'
-          AND tf.follower_id = ${userId}
-          AND tf.done_at IS NULL
-          AND tf.unfollowed_at IS NULL
-      ),
-      unread_channels AS (
-        SELECT cc.source_channel_id, cc.storage_channel_id, cc.last_read_seq
-        FROM candidate_channels cc
-        WHERE EXISTS (
-            SELECT 1 FROM messages m
-            WHERE m.channel_id = cc.storage_channel_id
-              AND m.seq > cc.last_read_seq
-              AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-              ${cutoffCondition}
-          )
-      )
-      SELECT uc.source_channel_id AS "channelId", count(*)::int AS "count"
-      FROM unread_channels uc
-      JOIN messages m ON m.channel_id = uc.storage_channel_id
-        AND m.seq > uc.last_read_seq
-        AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-        ${cutoffCondition}
-      GROUP BY uc.source_channel_id
-      `),
-      (result) => ({
-        ...inboxTraceAttrs("pg_legacy", "channel_unread", pgFallbackReason, RISINGWAVE_CHANNEL_UNREAD_CONTRACT_VERSION),
-        unread_channels_count: result.rows.length,
-        history_cutoff_present: Boolean(historyCutoff),
-      }),
-    ),
-  );
-
+  const rows = await loadConversationUnreadSummaryRows(serverId, userId, false, traceQuery);
   const counts: Record<string, number> = {};
-  for (const row of rows.rows as { channelId: string; count: number }[]) {
-    counts[row.channelId] = row.count;
+  for (const row of rows) {
+    if (row.subscribed && row.unreadCount > 0) counts[row.targetId] = row.unreadCount;
   }
-  recordInboxBackendSelected(
-    "pg_legacy",
-    "channel_unread",
-    pgFallbackReason,
-    RISINGWAVE_CHANNEL_UNREAD_CONTRACT_VERSION,
-  );
   return counts;
 }
 
+function readStateRowFromConversationUnreadRow(row: ConversationUnreadRow): UnreadSummaryReadStateRow {
+  return {
+    channelId: row.targetId,
+    readCursorPresent: row.cursorPresent,
+    readStateVersion: row.readStateVersion,
+    maxReadSeq: row.lastReadSeq,
+    latestActivityMessageId: row.latestMessageId,
+    latestActivitySeq: row.latestSeq,
+  };
+}
+
+/**
+ * The sidebar summary of one server: subscribed conversations with their exact
+ * count and mention flags, mention-only rows (count 0 + flags), and non-joined
+ * public channels with `hasNew` (count 0). Read state rides on the same row.
+ */
 export async function getUnreadSummary(
   serverId: string,
   userId: string,
-  historyCutoff?: Date,
   opts?: UnreadCountOptions,
 ): Promise<Record<string, ChannelUnreadSummaryEntry>> {
   const traceQuery = opts?.traceQuery ?? untracedDbQuery;
-  const counts = await getUnreadCounts(serverId, userId, historyCutoff, { traceQuery });
-  const db = getDb();
-  const mentionRows = await traceQuery(
-    "channels.unread_summary_mentions_by_user",
-    () => db.execute(sql`
-      SELECT
-        serving_row.source_channel_id::text AS "channelId",
-        serving_row.unread_mention_count::int AS "unreadMentionCount",
-        serving_row.has_any_mention AS "hasAnyMention"
-      FROM inbox_serving_rows serving_row
-      INNER JOIN channels source_channel
-        ON source_channel.id = serving_row.source_channel_id
-       AND source_channel.server_id = serving_row.server_id
-       AND source_channel.deleted_at IS NULL
-       AND source_channel.archived_at IS NULL
-      WHERE serving_row.receiver_type = 'user'
-        AND serving_row.receiver_id = ${userId}::uuid
-        AND serving_row.server_id = ${serverId}
-    `),
-    (result) => ({
-      unread_summary_mention_rows_count: result.rows.length,
-      history_cutoff_present: Boolean(historyCutoff),
-    }),
-  );
+  const rows = await loadConversationUnreadSummaryRows(serverId, userId, true, traceQuery);
 
   const summary: Record<string, ChannelUnreadSummaryEntry> = {};
+  const readStateRows = new Map<string, UnreadSummaryReadStateRow>();
   const absentReadState = makeInboxScopeReadFrontier(null);
-  for (const [channelId, unreadCount] of Object.entries(counts)) {
-    summary[channelId] = {
-      unreadCount,
-      hasMention: false,
-      hasAnyMention: false,
+  for (const row of rows) {
+    const existing = summary[row.targetId];
+    if (row.hasNew) {
+      // A public channel the user has not joined; a mention-only row for the
+      // same channel keeps its flags (and its fuller read-state row).
+      summary[row.targetId] = existing
+        ? { ...existing, hasNew: true }
+        : { unreadCount: 0, hasMention: false, hasAnyMention: false, hasNew: true, readState: absentReadState };
+      if (!readStateRows.has(row.targetId)) readStateRows.set(row.targetId, readStateRowFromConversationUnreadRow(row));
+      continue;
+    }
+    summary[row.targetId] = {
+      unreadCount: row.subscribed ? row.unreadCount : 0,
+      hasMention: row.mentionUnread > 0,
+      hasAnyMention: row.totalMentions > 0,
+      ...(existing?.hasNew ? { hasNew: true } : {}),
       readState: absentReadState,
     };
+    readStateRows.set(row.targetId, readStateRowFromConversationUnreadRow(row));
   }
-  for (const row of mentionRows.rows as Array<{ channelId: string; unreadMentionCount: number; hasAnyMention: boolean }>) {
-    if (row.unreadMentionCount <= 0 && row.hasAnyMention !== true) continue;
-    const channelId = row.channelId;
-    const existing = summary[channelId];
-    summary[channelId] = {
-      unreadCount: existing?.unreadCount ?? 0,
-      hasMention: row.unreadMentionCount > 0,
-      hasAnyMention: row.hasAnyMention === true,
-      readState: existing?.readState ?? absentReadState,
-    };
-  }
-
-  const scopeIds = Object.keys(summary);
-  if (scopeIds.length > 0) {
-    // #632 SSOT: read the AUTHORITY table directly (the cursor table is what
-    // both the RW materialization and the PG count arms derive from), with
-    // presence preserved as a STRUCTURAL JOIN fact — no COALESCE-to-0 before
-    // the shared constructor decides absent/present/corrupt. The frontier
-    // pair comes from ONE row (lateral over the storage channel), so id/seq
-    // cannot be cross-source.
-    const readStateRows = await fetchReadStateAuthorityRows(
-      scopeIds,
-      userId,
-      traceQuery,
-      "channels.unread_summary_read_state_by_user",
-    );
-    applyUnreadSummaryReadStates(
-      summary,
-      readStateRows,
-      (channelId, corruption) => {
-        console.error(formatInboxScopeCorruptionLine(channelId, corruption));
-      },
-    );
-  }
+  applyUnreadSummaryReadStates(
+    summary,
+    [...readStateRows.values()],
+    (channelId, corruption) => {
+      console.error(formatInboxScopeCorruptionLine(channelId, corruption));
+    },
+  );
   return summary;
 }
 
@@ -15038,136 +13323,44 @@ export function applyUnreadSummaryReadStates(
 }
 
 /**
- * Count unread messages that would surface as pink unread indicators in the sidebar.
- * This includes:
- * - regular channels the user has joined
- * - DM channels the user participates in
- *
- * It excludes:
- * - non-joined regular channels (which render with the dim/grey unread treatment)
- * - thread channels (not part of the sidebar's pink unread server summary)
+ * Per-server count behind the pink "other servers have unread" badge: the SUM of
+ * exact unread over the user's subscribed channels and DMs (muted included, as
+ * before), from the same view as the sidebar summary. Excludes followed threads,
+ * mention-only rows and non-joined public channels.
  */
 export async function getSidebarUnreadSummaryCounts(
-  servers: SidebarUnreadSummaryInput[],
+  serverIds: string[],
   userId: string,
   opts: SidebarUnreadSummaryOptions = {},
 ): Promise<Record<string, number>> {
-  if (servers.length === 0) return {};
+  const uniqueServerIds = [...new Set(serverIds)];
+  if (uniqueServerIds.length === 0) return {};
   const traceQuery = opts.traceQuery ?? untracedDbQuery;
-
-  const hasHistoryCutoff = servers.some((server) => Boolean(server.historyCutoff));
-  const jointStorageServerIds = hasHistoryCutoff
-    ? new Set<string>()
-    : await risingWaveInboxFailSoftDeps.getJointStorageServerIds(servers.map((server) => server.serverId), userId);
-  let risingWaveAttempt: RisingWaveInboxAttempt<Record<string, number>> = { result: null };
-  if (!hasHistoryCutoff && jointStorageServerIds.size === 0) {
-    risingWaveAttempt = await tryGetSidebarUnreadSummaryCountsFromRisingWave(
-      servers,
-      userId,
-      traceQuery,
-    );
-    if (risingWaveAttempt.result) {
-      recordInboxBackendSelected("rw_mv", "sidebar_summary", "none", RISINGWAVE_LEGACY_UNREAD_CONTRACT_VERSION);
-      return risingWaveAttempt.result;
-    }
-  }
-
-  const db = getDb();
-  const legacyFallbackReason = getLegacyInboxFallbackReason(servers.find((server) => server.historyCutoff)?.historyCutoff);
-  const pgFallbackReason = risingWaveAttempt.fallbackReason
-    ?? (jointStorageServerIds.size > 0 ? "joint_storage" : legacyFallbackReason);
-
-  const serverRows = servers.map(({ serverId, historyCutoff }) =>
-    sql`(${serverId}::uuid, ${historyCutoff ?? null}::timestamp)`,
+  const queryName = "servers.sidebar_unread_counts_by_user";
+  const read = await traceQuery(
+    queryName,
+    () => readSidebarUnreadTotals({ serverIds: uniqueServerIds, userId }),
+    (result) => ({
+      ...inboxTraceAttrs("rw_mv", "sidebar_summary", "none", CONVERSATION_UNREAD_CONTRACT_VERSION),
+      ...result.rwAttrs,
+      rw_conversation_unread_view: CONVERSATION_UNREAD_VIEW,
+      servers_count: uniqueServerIds.length,
+      servers_with_unread_count: result.rows.filter((row) => row.unreadCount > 0).length,
+    }),
+    (error) => risingWaveInboxFailureAttrs({
+      route: "sidebar_summary",
+      error,
+      contractVersion: CONVERSATION_UNREAD_CONTRACT_VERSION,
+      queryName,
+    }),
   );
-
-  const rows = await withRisingWaveInboxFallbackTrace(
-    "sidebar_summary",
-    "servers.sidebar_unread_counts_by_user",
-    risingWaveAttempt,
-    () => traceQuery(
-      "servers.sidebar_unread_counts_by_user",
-      () => db.execute(sql`
-    -- Canonical no-env sidebar unread behavior lives in this inline Postgres SQL.
-    -- If you change membership, channel-type, archived/deleted, history-cutoff,
-    -- or count semantics here, update rw_sidebar_unread_summary_v1 in
-    -- infra/risingwave/sql/024-risingwave-unread-inbox-full-materialized.sql and rerun
-    -- pnpm --filter @botiverse/raft-server risingwave:verify-inbox-parity.
-    WITH selected_servers(server_id, history_cutoff) AS (
-      VALUES ${sql.join(serverRows, sql`, `)}
-    ),
-    sidebar_unread_channels AS (
-      SELECT
-        c.server_id,
-        c.id,
-        COALESCE(joint_storage.canonical_channel_id, c.id) AS storage_channel_id,
-        COALESCE(rc.last_read_seq, 0) AS last_read_seq,
-        s.history_cutoff
-      FROM selected_servers s
-      INNER JOIN channels c ON c.server_id = s.server_id
-      LEFT JOIN joint_channel_servers joint_projection
-        ON joint_projection.local_channel_id = c.id
-       AND joint_projection.server_id = c.server_id
-       AND joint_projection.status = 'active'
-      LEFT JOIN joint_channels joint_storage
-        ON joint_storage.id = joint_projection.joint_channel_id
-       AND joint_storage.status = 'active'
-      LEFT JOIN user_channel_read_cursors rc
-        ON rc.channel_id = c.id AND rc.user_id = ${userId}
-      WHERE c.deleted_at IS NULL
-        AND c.archived_at IS NULL
-        AND c.type != 'thread'
-        AND EXISTS (
-          SELECT 1 FROM channel_humans ch
-          WHERE ch.channel_id = c.id AND ch.user_id = ${userId}
-        )
-        AND EXISTS (
-          SELECT 1 FROM messages m
-          WHERE m.channel_id = COALESCE(joint_storage.canonical_channel_id, c.id)
-            AND m.seq > COALESCE(rc.last_read_seq, 0)
-            AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-            AND (s.history_cutoff IS NULL OR m.created_at > s.history_cutoff)
-        )
-    )
-    SELECT uc.server_id::text AS "serverId", count(*)::int AS "count"
-    FROM sidebar_unread_channels uc
-    JOIN messages m ON m.channel_id = uc.storage_channel_id
-      AND m.seq > uc.last_read_seq
-      AND NOT (m.sender_type = 'user' AND m.sender_id = ${userId})
-      AND (uc.history_cutoff IS NULL OR m.created_at > uc.history_cutoff)
-    GROUP BY uc.server_id
-      `),
-      (result) => ({
-        ...inboxTraceAttrs("pg_legacy", "sidebar_summary", pgFallbackReason, RISINGWAVE_LEGACY_UNREAD_CONTRACT_VERSION),
-        servers_count: servers.length,
-        servers_with_unread_count: result.rows.length,
-        history_cutoff_present_count: servers.filter((server) => Boolean(server.historyCutoff)).length,
-      }),
-    ),
-  );
-
   const counts: Record<string, number> = {};
-  for (const server of servers) counts[server.serverId] = 0;
-  for (const row of rows.rows as { serverId: string; count: number }[]) {
-    counts[row.serverId] = row.count;
+  for (const serverId of uniqueServerIds) counts[serverId] = 0;
+  for (const row of read.rows) {
+    if (row.serverId in counts) counts[row.serverId] = row.unreadCount;
   }
-  recordInboxBackendSelected(
-    "pg_legacy",
-    "sidebar_summary",
-    pgFallbackReason,
-    RISINGWAVE_LEGACY_UNREAD_CONTRACT_VERSION,
-  );
+  recordInboxBackendSelected("rw_mv", "sidebar_summary", "none", CONVERSATION_UNREAD_CONTRACT_VERSION);
   return counts;
-}
-
-export async function getSidebarUnreadSummaryCount(
-  serverId: string,
-  userId: string,
-  historyCutoff?: Date,
-  opts: SidebarUnreadSummaryOptions = {},
-): Promise<number> {
-  const counts = await getSidebarUnreadSummaryCounts([{ serverId, historyCutoff }], userId, opts);
-  return counts[serverId] ?? 0;
 }
 
 // ── Agent legacy read / compatibility tracking ───────────
@@ -15222,6 +13415,56 @@ export async function getAgentLegacyReadCursors(
  * horizon. Faithfulness-sensitive decisions must use explicit model-seen
  * provenance instead.
  */
+/**
+ * An agent's own send: advance its read cursor to the sent message only when
+ * that reads through nothing it has not been handed. If the conversation holds
+ * unread from others between the cursor and the new message (the inbox's own
+ * unread rule: not the agent's sends, not system rows it caused, not noise
+ * subtypes), the cursor stays where it is, and those messages are still
+ * delivered. The agent's own message never counts as unread for it (the inbox
+ * chain and the pull exclude it), so leaving the cursor below it is safe.
+ * Check and write are one statement.
+ *
+ * `channelId` keys the cursor (the agent-facing, local conversation id);
+ * `storageChannelId` is where the rows live. They differ for a joint channel
+ * or joint thread, whose rows are stored under the canonical id: checking the
+ * local id there would find nothing and read through every unread row.
+ */
+export async function markAgentOwnSendRead(agentId: string, channelId: string, seq: number, storageChannelId: string = channelId) {
+  const db = getDb();
+  const result = await db.execute(sql`
+    WITH cursor_now AS (
+      SELECT COALESCE(
+        (SELECT COALESCE(last_read_seq8, CAST(last_read_seq AS BIGINT))
+         FROM agent_channel_read_cursors
+         WHERE agent_id = ${agentId} AND channel_id = ${channelId}),
+        0
+      ) AS seq
+    )
+    INSERT INTO agent_channel_read_cursors (agent_id, channel_id, last_read_seq, updated_at)
+    SELECT ${agentId}, ${channelId}, ${seq}, now()
+    WHERE NOT EXISTS (
+      SELECT 1 FROM messages m, cursor_now
+      WHERE m.channel_id = ${storageChannelId}
+        AND m.seq > cursor_now.seq
+        AND m.seq < ${seq}
+        AND NOT (m.sender_type = 'agent' AND m.sender_id = ${agentId}::text)
+        AND NOT COALESCE(m.message_type = 'system' AND m.causal_actor_type = 'agent' AND m.causal_actor_id = ${agentId}::text, FALSE)
+        AND (m.system_subtype IS NULL OR m.system_subtype NOT IN ('channel.self_unfollow_thread', 'task.deleted_summary'))
+    )
+    ON CONFLICT (agent_id, channel_id) DO UPDATE SET
+      last_read_seq = EXCLUDED.last_read_seq,
+      updated_at = now()
+    WHERE agent_channel_read_cursors.last_read_seq < EXCLUDED.last_read_seq
+    RETURNING
+      channel_id::text AS "channelId",
+      last_read_seq::int AS "maxReadSeq"
+  `);
+  const [advanced] = result.rows as Array<{ channelId: string; maxReadSeq: number }>;
+  if (advanced) return { ...advanced, changed: true };
+  return { channelId, maxReadSeq: await getAgentLegacyReadCursor(agentId, channelId), changed: false };
+}
+
 export async function markAgentLegacyRead(agentId: string, channelId: string, seq: number) {
   const db = getDb();
   const result = await db.execute(sql`
@@ -15236,16 +13479,11 @@ export async function markAgentLegacyRead(agentId: string, channelId: string, se
       last_read_seq::int AS "maxReadSeq"
   `);
   const [advanced] = result.rows as Array<{ channelId: string; maxReadSeq: number }>;
-  await rebuildInboxServingRowsForReceiverTargets([{
-    receiverType: "agent",
-    receiverId: agentId,
-    sourceChannelId: channelId,
-  }]);
   if (advanced) return { ...advanced, changed: true };
 
   await db
     .update(agentChannelReadCursors)
-    .set({ updatedAt: new Date() })
+    .set({ updatedAt: currentDate() })
     .where(and(
       eq(agentChannelReadCursors.agentId, agentId),
       eq(agentChannelReadCursors.channelId, channelId),
@@ -15277,183 +13515,600 @@ export async function markAgentLegacyAckCheckpoint(agentId: string, seqs: number
     .filter((seq) => Number.isInteger(seq) && seq > 0))];
   if (normalizedSeqs.length === 0) return;
 
-  const db = getDb();
-  const ackChannels = alias(channels, "legacy_ack_channels");
-  const ackParentMessages = alias(messages, "legacy_ack_parent_messages");
-  const rows = await db
-    .select({
-      channelId: messages.channelId,
-      maxSeq: sql<number>`max(${messages.seq})::int`,
-    })
-    .from(messages)
-    .innerJoin(ackChannels, eq(ackChannels.id, messages.channelId))
-    .leftJoin(ackParentMessages, eq(ackParentMessages.id, ackChannels.parentMessageId))
-    .innerJoin(channelAgents, and(
-      eq(channelAgents.channelId, sql<string>`COALESCE(${ackParentMessages.channelId}, ${messages.channelId})`),
-      eq(channelAgents.agentId, agentId),
-    ))
-    .where(inArray(messages.seq, normalizedSeqs))
-    .groupBy(messages.channelId);
+  // The cursor belongs to the conversation the agent was delivered: a message stored
+  // under a joint channel's canonical channel (or thread) is acked on the agent's
+  // server's local projection of it, the id live delivery and recovery hand the
+  // agent. Only conversations the agent belongs to are written: a member of the
+  // channel (for a thread, of its parent channel), or a follower of the thread.
+  const result = await getDb().execute(sql`
+    WITH acked AS (
+      SELECT ${messages.channelId} AS storage_id, max(${messages.seq})::int AS max_seq
+      FROM ${messages}
+      WHERE ${inArray(messages.seq, normalizedSeqs)}
+      GROUP BY ${messages.channelId}
+    ), targets AS (
+      SELECT COALESCE(${jointChannelServers.localChannelId}, acked.storage_id) AS target_id, acked.max_seq
+      FROM acked
+      INNER JOIN ${agents} ON ${agents.id} = ${agentId}
+      LEFT JOIN ${jointChannels}
+        ON ${jointChannels.canonicalChannelId} = acked.storage_id AND ${jointChannels.status} = 'active'
+      LEFT JOIN ${jointChannelServers}
+        ON ${jointChannelServers.jointChannelId} = ${jointChannels.id}
+        AND ${jointChannelServers.serverId} = ${agents.serverId}
+        AND ${jointChannelServers.status} = 'active'
+    )
+    SELECT targets.target_id AS "channelId", targets.max_seq AS "maxSeq"
+    FROM targets
+    INNER JOIN ${channels} ON ${channels.id} = targets.target_id
+    LEFT JOIN ${messages} AS parent ON parent.id = ${channels.parentMessageId}
+    WHERE EXISTS (
+        SELECT 1 FROM ${channelAgents}
+        WHERE ${channelAgents.channelId} = COALESCE(parent.channel_id, targets.target_id)
+          AND ${channelAgents.agentId} = ${agentId}
+      )
+      OR EXISTS (
+        SELECT 1 FROM ${threadFollows}
+        WHERE ${threadFollows.threadChannelId} = targets.target_id
+          AND ${threadFollows.followerType} = 'agent'
+          AND ${threadFollows.followerId} = ${agentId}
+          AND ${threadFollows.unfollowedAt} IS NULL
+      )
+  `);
+  const rows = (result.rows as Array<{ channelId: string; maxSeq: number | string }>)
+    .map((row) => ({ channelId: String(row.channelId), maxSeq: Number(row.maxSeq) }));
 
   await Promise.all(rows.map((row) => markAgentLegacyRead(agentId, row.channelId, row.maxSeq)));
 }
 
-/** Get unread message counts for all channels an agent belongs to. Returns channelLabel → count. */
-export async function getAgentUnreadCounts(agentId: string, historyCutoff?: Date): Promise<Record<string, number>> {
+export type AgentFollowedThreadListItem = {
+  target: string;
+  threadChannelId: string;
+  parentChannelRef: string;
+  parentMessageId: string;
+  parentMessageShortId: string;
+  followedAt: string;
+  reason: string;
+  doneAt: string | null;
+};
+
+export async function listAgentFollowedThreads(
+  serverId: string,
+  agentId: string,
+): Promise<AgentFollowedThreadListItem[]> {
   const db = getDb();
+  const parentMessages = alias(messages, "agent_followed_thread_parent_messages");
+  const parentChannels = alias(channels, "agent_followed_thread_parent_channels");
 
-  const baseConditions = [
-    isNull(channels.deletedAt),
-    gt(messages.seq, sql`COALESCE(${agentChannelReadCursors.lastReadSeq}, 0)`),
-  ];
-  if (historyCutoff) {
-    baseConditions.push(gt(messages.createdAt, historyCutoff));
-  }
-
-  const nonThreadRows = await db
+  const rows = await db
     .select({
-      channelId: messages.channelId,
-      channelName: channels.name,
-      channelType: channels.type,
-      count: sql<number>`count(*)::int`,
+      threadChannelId: channels.id,
+      parentChannelId: parentChannels.id,
+      parentMessageId: threadFollows.parentMessageId,
+      followedAt: threadFollows.createdAt,
+      reason: threadFollows.reason,
+      doneAt: threadFollows.doneAt,
     })
-    .from(messages)
-    .innerJoin(channels, eq(messages.channelId, channels.id))
-    .innerJoin(channelAgents, and(
-      eq(channelAgents.channelId, messages.channelId),
-      eq(channelAgents.agentId, agentId),
+    .from(threadFollows)
+    .innerJoin(channels, and(
+      eq(channels.id, threadFollows.threadChannelId),
+      eq(channels.type, "thread"),
+      eq(channels.serverId, serverId),
+      isNull(channels.deletedAt),
     ))
-    .leftJoin(
-      agentChannelReadCursors,
-      and(
-        eq(agentChannelReadCursors.channelId, messages.channelId),
-        eq(agentChannelReadCursors.agentId, agentId),
-      ),
-    )
+    .innerJoin(parentMessages, eq(parentMessages.id, threadFollows.parentMessageId))
+    .innerJoin(parentChannels, and(
+      eq(parentChannels.id, parentMessages.channelId),
+      eq(parentChannels.serverId, serverId),
+      isNull(parentChannels.deletedAt),
+    ))
     .where(and(
-      ...baseConditions,
-      sql`${channels.type} <> 'thread'`,
-    ))
-    .groupBy(messages.channelId, channels.name, channels.type);
-
-  const unreadParentMessages = alias(messages, "agent_unread_thread_parent_messages");
-  const unreadParentChannels = alias(channels, "agent_unread_thread_parent_channels");
-  const unreadParentChannelAgents = alias(channelAgents, "agent_unread_thread_parent_channel_agents");
-  const threadRows = await db
-    .select({
-      channelId: messages.channelId,
-      channelName: channels.name,
-      channelType: channels.type,
-      parentChannelId: unreadParentChannels.id,
-      parentChannelName: unreadParentChannels.name,
-      parentChannelType: unreadParentChannels.type,
-      parentMessageId: unreadParentMessages.id,
-      count: sql<number>`count(*)::int`,
-    })
-    .from(messages)
-    .innerJoin(channels, eq(messages.channelId, channels.id))
-    .innerJoin(threadFollows, and(
-      eq(threadFollows.threadChannelId, channels.id),
       eq(threadFollows.followerType, "agent"),
       eq(threadFollows.followerId, agentId),
       isNull(threadFollows.unfollowedAt),
     ))
-    .innerJoin(agents, and(
-      eq(agents.id, threadFollows.followerId),
-      isNull(agents.deletedAt),
-    ))
-    .innerJoin(unreadParentMessages, eq(unreadParentMessages.id, channels.parentMessageId))
-    .innerJoin(unreadParentChannels, and(
-      eq(unreadParentChannels.id, unreadParentMessages.channelId),
-      isNull(unreadParentChannels.deletedAt),
-    ))
-    .leftJoin(unreadParentChannelAgents, and(
-      eq(unreadParentChannelAgents.channelId, unreadParentMessages.channelId),
-      eq(unreadParentChannelAgents.agentId, agents.id),
-    ))
-    .leftJoin(
-      agentChannelReadCursors,
-      and(
-        eq(agentChannelReadCursors.channelId, messages.channelId),
-        eq(agentChannelReadCursors.agentId, agentId),
-      ),
-    )
-    .where(and(
-      ...baseConditions,
-      eq(channels.type, "thread"),
-      gte(messages.createdAt, threadFollows.createdAt),
-      sql`(
-        (${unreadParentChannels.type} = 'channel' AND ${agents.serverId} = ${unreadParentChannels.serverId})
-        OR ${unreadParentChannelAgents.agentId} IS NOT NULL
-      )`,
-    ))
-    .groupBy(
-      messages.channelId,
-      channels.name,
-      channels.type,
-      unreadParentChannels.id,
-      unreadParentChannels.name,
-      unreadParentChannels.type,
-      unreadParentMessages.id,
-    );
+    .orderBy(desc(threadFollows.createdAt), desc(threadFollows.threadChannelId));
 
-  const deliverableThreadRows = [];
-  for (const row of threadRows) {
-    if (await canAgentReceiveChannelDelivery(row.channelId, agentId)) {
-      deliverableThreadRows.push(row);
-    }
-  }
-
-  const rows = [
-    ...nonThreadRows.map((row) => ({
-      ...row,
-      parentChannelId: null as string | null,
-      parentChannelName: null as string | null,
-      parentChannelType: null as string | null,
-      parentMessageId: null as string | null,
-    })),
-    ...deliverableThreadRows,
-  ];
-
-  // Resolve human peer names for DM channels
-  const dmChannelIds = rows.flatMap((row) => {
-    if (row.channelType === "dm") return [row.channelId];
-    if (row.channelType === "thread" && row.parentChannelType === "dm" && row.parentChannelId) return [row.parentChannelId];
-    return [];
-  });
-  const dmPeerNames = new Map<string, string>();
-  if (dmChannelIds.length > 0) {
-    const peers = await db
-      .select({
-        channelId: channelHumans.channelId,
-        peerName: users.name,
-      })
-      .from(channelHumans)
-      .innerJoin(users, eq(channelHumans.userId, users.id))
-      .where(inArray(channelHumans.channelId, dmChannelIds));
-    for (const p of peers) {
-      dmPeerNames.set(p.channelId, p.peerName);
-    }
-  }
-
-  const counts: Record<string, number> = {};
+  const items: AgentFollowedThreadListItem[] = [];
   for (const row of rows) {
-    let key: string;
-    if (row.channelType === "dm") {
-      const peerName = dmPeerNames.get(row.channelId) || row.channelName;
-      key = `DM:@${peerName}`;
-    } else if (row.channelType === "thread" && row.parentChannelName && row.parentMessageId) {
-      const shortParentMessageId = row.parentMessageId.slice(0, 8);
-      if (row.parentChannelType === "dm") {
-        const peerName = row.parentChannelId ? dmPeerNames.get(row.parentChannelId) : undefined;
-        key = `DM:@${peerName || row.parentChannelName}:${shortParentMessageId}`;
-      } else {
-        key = `#${row.parentChannelName}:${shortParentMessageId}`;
+    if (!await canAgentAccessChannel(row.threadChannelId, agentId)) continue;
+    const parentChannelRef = await resolveAgentFacingChannelRef(serverId, agentId, row.parentChannelId);
+    if (!parentChannelRef) continue;
+    const parentMessageShortId = row.parentMessageId.slice(0, 8);
+    items.push({
+      target: `${parentChannelRef}:${parentMessageShortId}`,
+      threadChannelId: row.threadChannelId,
+      parentChannelRef,
+      parentMessageId: row.parentMessageId,
+      parentMessageShortId,
+      followedAt: row.followedAt.toISOString(),
+      reason: row.reason,
+      doneAt: row.doneAt ? row.doneAt.toISOString() : null,
+    });
+  }
+  return items;
+}
+
+/**
+ * One (agent, target) row of the agent inbox view (UNIFIED_CHAIN_VIEWS.agentInbox,
+ * rw_agent_inbox_v5 in infra/risingwave/sql/068-chain-mention-v6-consumers.sql). The view owns
+ * every offer rule: it holds ONLY the conversations the agent is offered (joined
+ * through a membership or an active follow; admitted-stream unread, or a mention
+ * unread beyond the admitted stream -- a mention after a mute pierces it),
+ * and thread rows only when the agent can receive the thread (parent access, thread
+ * and parent not deleted). The app reads these rows; it does not re-filter them.
+ * `target_id` is the agent-facing channel (a joint channel's LOCAL projection);
+ * `storage_channel_id` is where its messages live.
+ */
+export interface AgentInboxChainRow {
+  targetId: string;
+  storageChannelId: string;
+  kind: "channel" | "dm" | "thread";
+  serverId: string;
+  channelName: string;
+  channelType: typeof channels.$inferSelect["type"];
+  /** A thread's parent message; for a joint thread's local projection, the canonical parent. */
+  parentMessageId: string | null;
+  /** The LOCAL parent channel (rw_thread_parent_v3). */
+  parentChannelId: string | null;
+  parentChannelName: string | null;
+  parentChannelType: string | null;
+  lastReadSeq: number;
+  unreadCount: number;
+  firstUnreadSeq: number | null;
+  latestSeq: number | null;
+  mentionUnread: number;
+  maxMentionSeq: number | null;
+  /** False when the row exists only through the mention arm (e.g. a muted channel). */
+  subscribed: boolean;
+  /** The unread the agent is offered: subscribed ? unread_count : mention_unread. */
+  offeredUnread: number;
+  /** GREATEST(latest_seq, max_mention_seq): the newest activity, the inbox page key. */
+  activitySeq: number;
+  /** channel_agents.added_at, or the active thread follow's created_at. */
+  joinedAt: Date;
+}
+
+export type AgentInboxChainSelection =
+  | { source: "chain"; rows: AgentInboxChainRow[] }
+  | { source: "unavailable"; reason: "rw_unconfigured" | "rw_error" };
+
+function toNullableNumber(value: unknown): number | null {
+  return value === null || value === undefined ? null : Number(value);
+}
+
+/**
+ * Read, once per resume, the agent's rows from the unified chain -- the only
+ * source of agent recovery. Both consumers (unread summary and catch-up
+ * candidates) take the SAME rows. When the chain is unconfigured or its read
+ * fails the selection is `unavailable` and the caller skips recovery; there is
+ * no second source to fall back to.
+ */
+export async function selectAgentInboxChainRows(agentId: string): Promise<AgentInboxChainSelection> {
+  const pool = getRisingWaveInboxPool();
+  if (!pool) return { source: "unavailable", reason: "rw_unconfigured" };
+  try {
+    return { source: "chain", rows: await readAgentInboxChainRows(pool, agentId) };
+  } catch (error) {
+    console.error(`[ChannelService] agent inbox chain read failed for agent ${agentId}; skipping resume recovery:`, error);
+    return { source: "unavailable", reason: "rw_error" };
+  }
+}
+
+/**
+ * Narrows a chain read. With `limit`, the rows come newest activity first
+ * (`ORDER BY activity_seq DESC LIMIT`), one range scan of the view's
+ * (agent_id, activity_seq DESC) index.
+ */
+export type AgentInboxChainReadOptions = {
+  kind?: AgentInboxChainRow["kind"];
+  beforeSeq?: number;
+  mentionsOnly?: boolean;
+  limit?: number;
+};
+
+/** Read one agent's rows from the agent inbox view. Throws on query failure. */
+export async function readAgentInboxChainRows(
+  pool: NonNullable<ReturnType<typeof getRisingWavePool>>,
+  agentId: string,
+  opts: AgentInboxChainReadOptions = {},
+): Promise<AgentInboxChainRow[]> {
+  const values: unknown[] = [agentId];
+  const where = ["agent_id = $1"];
+  if (opts.kind !== undefined) {
+    values.push(opts.kind);
+    where.push(`kind = $${values.length}`);
+  }
+  if (opts.beforeSeq !== undefined) {
+    values.push(opts.beforeSeq);
+    where.push(`activity_seq < $${values.length}`);
+  }
+  if (opts.mentionsOnly) where.push("mention_unread > 0");
+  let page = "";
+  if (opts.limit !== undefined) {
+    // RisingWave only accepts a constant after LIMIT (a bind parameter fails to
+    // prepare: "expects an integer ... after LIMIT, but found non-const
+    // expression"), so the validated integer is inlined.
+    const limit = Math.trunc(opts.limit);
+    if (!Number.isSafeInteger(limit) || limit < 0) throw new Error(`invalid agent inbox page limit: ${opts.limit}`);
+    page = `
+    ORDER BY activity_seq DESC
+    LIMIT ${limit}`;
+  }
+  const read = await queryRisingWaveInbox(pool, `SELECT
+      target_id, storage_channel_id, kind, server_id, channel_name, channel_type, parent_message_id,
+      parent_channel_id, parent_channel_name, parent_channel_type, last_read_seq, unread_count,
+      first_unread_seq, latest_seq, mention_unread, max_mention_seq, subscribed, offered_unread,
+      activity_seq, joined_at
+    FROM ${UNIFIED_CHAIN_VIEWS.agentInbox}
+    WHERE ${where.join(" AND ")}${page}`, values);
+  return read.result.rows.map((row) => ({
+    targetId: String(row.target_id),
+    storageChannelId: String(row.storage_channel_id),
+    kind: row.kind as AgentInboxChainRow["kind"],
+    serverId: String(row.server_id),
+    channelName: String(row.channel_name),
+    channelType: row.channel_type as AgentInboxChainRow["channelType"],
+    parentMessageId: row.parent_message_id == null ? null : String(row.parent_message_id),
+    parentChannelId: row.parent_channel_id == null ? null : String(row.parent_channel_id),
+    parentChannelName: row.parent_channel_name == null ? null : String(row.parent_channel_name),
+    parentChannelType: row.parent_channel_type == null ? null : String(row.parent_channel_type),
+    lastReadSeq: Number(row.last_read_seq),
+    unreadCount: Number(row.unread_count),
+    firstUnreadSeq: toNullableNumber(row.first_unread_seq),
+    latestSeq: toNullableNumber(row.latest_seq),
+    mentionUnread: Number(row.mention_unread),
+    maxMentionSeq: toNullableNumber(row.max_mention_seq),
+    subscribed: row.subscribed === true,
+    offeredUnread: Number(row.offered_unread),
+    activitySeq: Number(row.activity_seq),
+    joinedAt: new Date(row.joined_at as string | Date),
+  }));
+}
+
+export type AgentInboxTotals = { conversations: number; dms: number; mentions: number };
+
+/** The agent's inbox totals, counted in the view. Throws on query failure. */
+export async function readAgentInboxChainTotals(
+  pool: NonNullable<ReturnType<typeof getRisingWavePool>>,
+  agentId: string,
+): Promise<AgentInboxTotals> {
+  const read = await queryRisingWaveInbox(pool, `SELECT
+      count(*) AS conversations,
+      count(*) FILTER (WHERE kind = 'dm') AS dms,
+      count(*) FILTER (WHERE mention_unread > 0) AS mentions
+    FROM ${UNIFIED_CHAIN_VIEWS.agentInbox}
+    WHERE agent_id = $1`, [agentId]);
+  const row = read.result.rows[0] ?? {};
+  return {
+    conversations: Number(row.conversations ?? 0),
+    dms: Number(row.dms ?? 0),
+    mentions: Number(row.mentions ?? 0),
+  };
+}
+
+const AGENT_UNREAD_SUMMARY_MAX_TARGETS = 20;
+
+/**
+ * The resume prompt lists unread targets one line each; an agent following
+ * thousands of threads (prod max 13,906) would get a prompt of thousands of lines.
+ * Keep DMs (and DM threads) first, then the targets with the most unread, and
+ * fold the rest into one line that says how many were left out. The daemon
+ * renders every entry as "- <label>: <n> unread", so the folded line reads
+ * naturally without a daemon change.
+ */
+export function capAgentUnreadSummary(
+  counts: Record<string, number>,
+  max = AGENT_UNREAD_SUMMARY_MAX_TARGETS,
+): Record<string, number> {
+  const entries = Object.entries(counts);
+  if (entries.length <= max) return counts;
+  entries.sort(([a, na], [b, nb]) => {
+    const dmA = a.startsWith("dm:") ? 0 : 1;
+    const dmB = b.startsWith("dm:") ? 0 : 1;
+    return dmA - dmB || nb - na || a.localeCompare(b);
+  });
+  const kept = entries.slice(0, max);
+  const rest = entries.slice(max);
+  const folded = rest.reduce((sum, [, n]) => sum + n, 0);
+  return {
+    ...Object.fromEntries(kept),
+    [`(${rest.length} more conversations — run \`raft inbox check\` to list them)`]: folded,
+  };
+}
+
+/**
+ * The agent-facing `dm:@peer` ref of every DM the rows name (DM rows, and the
+ * parent DM of DM threads). A DM with no addressable peer (e.g. the single-member
+ * migration receipt DM) has no entry.
+ */
+export async function resolveAgentInboxDmRefs(
+  agentId: string,
+  rows: readonly AgentInboxChainRow[],
+): Promise<Map<string, string>> {
+  const byServer = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const channelId = row.kind === "dm"
+      ? row.targetId
+      : row.kind === "thread" && row.parentChannelType === "dm" ? row.parentChannelId : null;
+    if (!channelId) continue;
+    const ids = byServer.get(row.serverId) ?? new Set<string>();
+    ids.add(channelId);
+    byServer.set(row.serverId, ids);
+  }
+  const refs = new Map<string, string>();
+  for (const [serverId, ids] of byServer) {
+    for (const [channelId, ref] of await resolveAgentFacingDmRefs(serverId, agentId, [...ids])) refs.set(channelId, ref);
+  }
+  return refs;
+}
+
+/**
+ * The batched form of resolveAgentFacingChannelRef for DM channels: `dm:@peer`
+ * for each DM the agent belongs to, by the same rules (DM identity row first;
+ * legacy DMs by their other human, then other agent member; built-in app
+ * conversations by their app id). One query per 500 channels instead of several
+ * per channel — an agent can have hundreds of unread DM threads.
+ */
+export async function resolveAgentFacingDmRefs(
+  serverId: string,
+  agentId: string,
+  dmChannelIds: readonly string[],
+): Promise<Map<string, string>> {
+  const refs = new Map<string, string>();
+  const ids = [...new Set(dmChannelIds)];
+  for (let i = 0; i < ids.length; i += 500) {
+    const chunk = ids.slice(i, i + 500);
+    const result = await getDb().execute(sql`
+      SELECT c.id::text AS channel_id, c.name AS channel_name,
+        i.kind AS identity_kind, i.peer_key AS peer_key,
+        (SELECT u.name FROM ${users} AS u
+          WHERE i.kind = 'human_agent' AND u.id::text = (
+            SELECT p FROM unnest(string_to_array(i.peer_key, ':')) AS p WHERE p <> ${agentId} LIMIT 1)) AS identity_human,
+        (SELECT a.name FROM ${agents} AS a
+          WHERE i.kind = 'agent_agent' AND a.server_id = c.server_id AND a.id::text = (
+            SELECT p FROM unnest(string_to_array(i.peer_key, ':')) AS p WHERE p <> ${agentId} LIMIT 1)) AS identity_agent,
+        (SELECT u.name FROM ${channelHumans} AS h INNER JOIN ${users} AS u ON u.id = h.user_id
+          WHERE h.channel_id = c.id LIMIT 1) AS legacy_human,
+        (SELECT a.name FROM ${channelAgents} AS ca INNER JOIN ${agents} AS a ON a.id = ca.agent_id
+          WHERE ca.channel_id = c.id AND ca.agent_id <> ${agentId} LIMIT 1) AS legacy_agent,
+        (SELECT s.kind FROM ${agentPrivateSurfaces} AS s
+          WHERE s.channel_id = c.id AND s.agent_id = ${agentId} LIMIT 1) AS private_surface_kind
+      FROM ${channels} AS c
+      INNER JOIN ${channelAgents} AS me ON me.channel_id = c.id AND me.agent_id = ${agentId}
+      LEFT JOIN ${dmChannelIdentities} AS i ON i.channel_id = c.id AND i.server_id = c.server_id
+      WHERE c.id IN (${sql.join(chunk.map((id) => sql`${id}::uuid`), sql`, `)})
+        AND c.type = 'dm' AND c.server_id = ${serverId}
+    `);
+    const peers: Array<{ channelId: string; name: string; kind: DmPeerKind | null }> = [];
+    for (const row of result.rows as Array<Record<string, string | null>>) {
+      let peer: { name: string; kind: DmPeerKind | null } | null = null;
+      if (row.private_surface_kind === "reminders") {
+        peer = { name: AGENT_REMINDERS_DM_PEER, kind: null };
+      } else if (row.identity_kind) {
+        // Mirrors resolveAgentFacingChannelRef: an identity row is authoritative;
+        // the agent must be one of its participants.
+        const participants = String(row.peer_key ?? "").split(":");
+        if (participants.includes(agentId)) {
+          if (row.identity_kind === "human_agent" && row.identity_human) peer = { name: row.identity_human, kind: "human" };
+          if (row.identity_kind === "agent_agent" && row.identity_agent) peer = { name: row.identity_agent, kind: "agent" };
+        }
+      } else if (row.legacy_human) {
+        peer = { name: row.legacy_human, kind: "human" };
+      } else if (row.legacy_agent) {
+        peer = { name: row.legacy_agent, kind: "agent" };
+      } else if (isAppId(String(row.channel_name))) {
+        peer = { name: String(row.channel_name), kind: null };
       }
-    } else {
-      key = `#${row.channelName}`;
+      if (peer) peers.push({ channelId: String(row.channel_id), ...peer });
     }
-    counts[key] = row.count;
+    const twins = await findCrossKindTwinPeerNames(serverId, peers.filter((p) => p.kind).map((p) => p.name));
+    for (const peer of peers) {
+      refs.set(peer.channelId, `dm:@${formatDmPeerRef(peer.name, twins.has(peer.name) ? peer.kind : null)}`);
+    }
+  }
+  return refs;
+}
+
+/**
+ * The bare peer face of one DM, as the agent-facing payload prints it: `name`
+ * or `name~kind` (the `dm:@...` target with the prefix stripped). Reuses the
+ * batched resolveAgentFacingDmRefs — identity-row-first resolution plus the
+ * twin suffix — so the rendered label always matches the target DSL exactly.
+ */
+export async function resolveAgentFacingDmPeerFace(
+  serverId: string,
+  agentId: string,
+  channelId: string,
+): Promise<string | null> {
+  const refs = await resolveAgentFacingDmRefs(serverId, agentId, [channelId]);
+  const ref = refs.get(channelId);
+  if (!ref) return null;
+  return ref.slice("dm:@".length);
+}
+
+/**
+ * THE target of an agent inbox row, in the delivery target DSL (what
+ * `raft message send/read --target` takes and live delivery prints):
+ * `#chan`, `#chan:<parent short id>`, `dm:@peer`, `dm:@peer:<parent short id>`.
+ * The resume summary and `raft inbox check` both label rows with it.
+ */
+export function formatAgentInboxTarget(row: AgentInboxChainRow, dmRefs: ReadonlyMap<string, string>): string {
+  if (row.kind === "dm") return dmRefs.get(row.targetId) ?? `dm:@${row.channelName}`;
+  if (row.kind === "thread" && row.parentMessageId && row.parentChannelName) {
+    const shortId = row.parentMessageId.slice(0, 8);
+    if (row.parentChannelType === "dm") {
+      const parentRef = (row.parentChannelId ? dmRefs.get(row.parentChannelId) : undefined) ?? `dm:@${row.parentChannelName}`;
+      return `${parentRef}:${shortId}`;
+    }
+    return `#${row.parentChannelName}:${shortId}`;
+  }
+  return `#${row.channelName}`;
+}
+
+/**
+ * Unread counts for the conversations an agent will be offered on resume, from
+ * the unified chain's rows (read once for this resume by
+ * selectAgentInboxChainRows). Returns target -> offered unread. The chain gates
+ * the free-plan history window per target (rw_target_eligible_v1), not per message.
+ */
+export async function getAgentUnreadCounts(
+  agentId: string,
+  chain: AgentInboxChainRow[],
+): Promise<Record<string, number>> {
+  const dmRefs = await resolveAgentInboxDmRefs(agentId, chain);
+  const counts: Record<string, number> = {};
+  for (const row of chain) {
+    if (row.offeredUnread <= 0) continue;
+    const target = formatAgentInboxTarget(row, dmRefs);
+    counts[target] = (counts[target] ?? 0) + row.offeredUnread;
   }
   return counts;
+}
+
+/**
+ * `raft inbox check` cannot answer: the durable unread source (the unified
+ * chain in RisingWave) is unconfigured or its read failed. The route turns this
+ * into 503 INBOX_UNAVAILABLE -- never a silently partial list.
+ */
+export class AgentInboxUnavailableError extends Error {
+  readonly code = "INBOX_UNAVAILABLE" as const;
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "AgentInboxUnavailableError";
+  }
+}
+
+export type AgentInboxView = "unread" | "mentions";
+
+export type AgentInboxConversation = {
+  target: string;
+  kind: AgentInboxChainRow["kind"];
+  unread: number;
+  mentions: number;
+  lastReadSeq: number;
+  activitySeq: number;
+  latestSenderName: string | null;
+  latestAt: string | null;
+};
+
+export type AgentInboxList = {
+  view: AgentInboxView;
+  items: AgentInboxConversation[];
+  hasMore: boolean;
+  nextBeforeSeq: number | null;
+  totals: AgentInboxTotals;
+};
+
+/**
+ * The agent's Activity panel: the conversations the view offers, newest activity
+ * first, keyset-paged by activity seq in the view. A message belongs to exactly
+ * one conversation and seq is global, so activity seqs are unique across rows and
+ * `activity_seq < beforeSeq` pages exactly. Only the page (and the agent's DM
+ * rows, to drop DMs no target can open) is read, never the whole inbox.
+ */
+export async function listAgentInbox(
+  agentId: string,
+  serverId: string,
+  opts: { view: AgentInboxView; beforeSeq?: number; limit: number },
+): Promise<AgentInboxList> {
+  const pool = getRisingWaveInboxPool();
+  if (!pool) throw new AgentInboxUnavailableError("Agent inbox source is not configured");
+  let totals: AgentInboxTotals;
+  let dmRows: AgentInboxChainRow[];
+  try {
+    [totals, dmRows] = await Promise.all([
+      readAgentInboxChainTotals(pool, agentId),
+      readAgentInboxChainRows(pool, agentId, { kind: "dm" }),
+    ]);
+  } catch (error) {
+    throw new AgentInboxUnavailableError("Agent inbox source read failed", { cause: error });
+  }
+
+  // A DM with no addressable peer (e.g. the single-member migration receipt DM)
+  // cannot be opened with any target, so it would sit in the list forever: it is
+  // neither listed nor counted.
+  const dmRefs = await resolveAgentInboxDmRefs(agentId, dmRows);
+  const unaddressable = dmRows.filter((row) => !dmRefs.has(row.targetId));
+  const hidden = new Set(unaddressable.map((row) => row.targetId));
+  totals = {
+    conversations: totals.conversations - unaddressable.length,
+    dms: totals.dms - unaddressable.length,
+    mentions: totals.mentions - unaddressable.filter((row) => row.mentionUnread > 0).length,
+  };
+
+  let rows: AgentInboxChainRow[];
+  try {
+    rows = await readAgentInboxChainRows(pool, agentId, {
+      beforeSeq: opts.beforeSeq,
+      mentionsOnly: opts.view === "mentions",
+      // One past the page says whether there is more; the hidden DMs may take slots.
+      limit: opts.limit + 1 + hidden.size,
+    });
+  } catch (error) {
+    throw new AgentInboxUnavailableError("Agent inbox source read failed", { cause: error });
+  }
+  const candidates = rows.filter((row) => !hidden.has(row.targetId));
+  const page = candidates.slice(0, opts.limit);
+  const hasMore = candidates.length > page.length;
+
+  for (const [channelId, ref] of await resolveAgentInboxDmRefs(agentId, page.filter((row) => row.kind === "thread"))) {
+    dmRefs.set(channelId, ref);
+  }
+  const latestBySeq = await getAgentInboxLatestMessages(page.map((row) => row.activitySeq).filter((seq) => seq > 0));
+  const items: AgentInboxConversation[] = page.map((row) => {
+    const latest = latestBySeq.get(row.activitySeq);
+    return {
+      target: formatAgentInboxTarget(row, dmRefs),
+      kind: row.kind,
+      unread: row.offeredUnread,
+      mentions: row.mentionUnread,
+      lastReadSeq: row.lastReadSeq,
+      activitySeq: row.activitySeq,
+      latestSenderName: latest?.senderName ?? null,
+      latestAt: latest?.createdAt ?? null,
+    };
+  });
+  const last = page.at(-1);
+  return {
+    view: opts.view,
+    items,
+    hasMore,
+    nextBeforeSeq: hasMore && last ? last.activitySeq : null,
+    totals,
+  };
+}
+
+/** Sender name and time of the given messages (seq is global), for one inbox page. */
+async function getAgentInboxLatestMessages(
+  seqs: number[],
+): Promise<Map<number, { senderName: string | null; createdAt: string }>> {
+  const out = new Map<number, { senderName: string | null; createdAt: string }>();
+  if (seqs.length === 0) return out;
+  const rows = await getDb()
+    .select({
+      seq: messages.seq,
+      createdAt: messages.createdAt,
+      messageType: messages.messageType,
+      senderType: messages.senderType,
+      userName: users.name,
+      agentName: agents.name,
+    })
+    .from(messages)
+    .leftJoin(users, and(eq(messages.senderType, "user"), sql`${users.id}::text = ${messages.senderId}`))
+    .leftJoin(agents, and(eq(messages.senderType, "agent"), sql`${agents.id}::text = ${messages.senderId}`))
+    .where(inArray(messages.seq, seqs));
+  for (const row of rows) {
+    const senderName = row.messageType === "system"
+      ? null
+      : row.senderType === "user"
+        ? row.userName
+        : row.senderType === "agent"
+          ? row.agentName
+          : null;
+    out.set(Number(row.seq), {
+      senderName: senderName ?? null,
+      createdAt: (row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt)).toISOString(),
+    });
+  }
+  return out;
 }

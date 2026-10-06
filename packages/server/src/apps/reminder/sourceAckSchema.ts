@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { check, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { agents, reminders, servers } from "../../db/schema.js";
+import { agents, reminders, servers } from "../../db/schema";
 
 export const reminderSourceAckEvents = pgTable("reminder_events", {
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),

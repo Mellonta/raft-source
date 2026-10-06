@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { shutdownServerRuntime } from "./serverShutdown.js";
+import { shutdownServerRuntime } from "./serverShutdown";
 
 test("HTTP acceptance stops before machine ownership is released", async () => {
   const events: string[] = [];

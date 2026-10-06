@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { TestIntlProvider } from "./helpers/intl";
-import type { Message } from "../src/store/messageStore.js";
-import type { User } from "../src/store/authStore.js";
-import type { Server, ServerMember } from "../src/store/serverStore.js";
-import type { Agent } from "../src/store/agentStore.js";
-import type { Channel } from "../src/store/channelStore.js";
+import type { Message } from "../src/store/messageStore";
+import type { User } from "../src/store/authStore";
+import type { Server, ServerMember } from "../src/store/serverStore";
+import type { Agent } from "../src/store/agentStore";
+import type { Channel } from "../src/store/channelStore";
 
 class MemoryStorage {
   private readonly map = new Map<string, string>();
@@ -420,7 +419,8 @@ test("MessageItem renders current server role when current-user member cache is 
 
   // The role badge renders through the catalog now (member.role.*) — the raw
   // enum badge was English in zh UI (DOM sweep 2026-08-04). en locale → "Admin".
-  assert.match(html, /title="Admin"/);
+  // The hover hint moved from native title= to the RUI tooltip trigger.
+  assert.match(html, /data-base-ui-tooltip-trigger/);
   assert.match(html, />Admin<\/span>/);
   assert.doesNotMatch(html, /title="member"/);
 });

@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 import {
   getCooldownState,
   getPwaInstallPlatform,
   getSessionCountBucket,
   hasPwaInstallPath,
   shouldShowPwaInstallPrompt,
-} from "../src/utils/pwaInstall.ts";
+} from "../src/utils/pwaInstall";
 
 const repoRoot = resolve(new URL("..", import.meta.url).pathname);
 
@@ -75,7 +74,6 @@ test("PWA install UI is wired into mobile layout and Browser settings only", () 
   const settings = readFileSync(resolve(repoRoot, "src/components/settings/SettingsPanel.tsx"), "utf8");
   const prompt = readFileSync(resolve(repoRoot, "src/components/pwa/PwaInstallPrompt.tsx"), "utf8");
   const notifications = readFileSync(resolve(repoRoot, "src/components/layout/useSystemNotifications.tsx"), "utf8");
-  const notificationCenter = readFileSync(resolve(repoRoot, "src/components/ui/NotificationCenter.tsx"), "utf8");
   const illustration = readFileSync(resolve(repoRoot, "public/pwa/ios-add-to-home-screen-3step.svg"), "utf8");
 
   assert.match(mainLayout, /import PwaInstallPrompt from "\.\.\/pwa\/PwaInstallPrompt"/);
@@ -87,7 +85,6 @@ test("PWA install UI is wired into mobile layout and Browser settings only", () 
   assert.match(notifications, /kind: "info"/);
   assert.match(notifications, /id: pwaInstallBusy \? "layout\.systemNotifications\.opening" : "layout\.systemNotifications\.install"/);
   assert.match(notifications, /variant: "primary"/);
-  assert.match(notificationCenter, /isPrimary \? "bg-brutal-pink" : "bg-white"/);
   assert.match(prompt, /if \(standalone\) return null/);
   assert.doesNotMatch(prompt, /NativeInstallBanner[\s\S]*bg-soft-signal/);
   assert.match(prompt, /data-pwa-install-settings-card[\s\S]*md:hidden/);

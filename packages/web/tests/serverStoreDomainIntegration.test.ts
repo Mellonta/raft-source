@@ -1,5 +1,4 @@
 import { strict as assert } from "node:assert";
-import test from "node:test";
 import api from "../src/api/client";
 import { DEFAULT_SIDEBAR_ORDER } from "../src/store/events/serverEvents";
 import {
@@ -139,9 +138,9 @@ async function flushAsyncWork() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-test("[RED T5-server] setCurrent uses the server persistence registry and domain fold", async (t) => {
+test("[RED T5-server] setCurrent uses the server persistence registry and domain fold", async () => {
   resetStore();
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     if (url.endsWith("/members")) return { data: [] };
     if (url.endsWith("/sidebar-order")) return { data: {} };
     if (url.endsWith("/settings")) {
@@ -182,10 +181,10 @@ test("[RED T5-server] setCurrent uses the server persistence registry and domain
   assert.deepEqual(useServerStore.getState().sidebarOrder.channelOrder, []);
 });
 
-test("server settings fail closed when feedback settings are absent", async (t) => {
+test("server settings fail closed when feedback settings are absent", async () => {
   resetStore();
   useServerStore.setState({ current: server(), serverEpoch: 1 });
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     assert.equal(url, "/servers/server-1/settings");
     return { data: { settings: { onboardSettings: {} } } };
   });
@@ -196,7 +195,7 @@ test("server settings fail closed when feedback settings are absent", async (t) 
   assert.equal(useServerStore.getState().settings?.feedbackSettings.enabled, false);
 });
 
-test("[RED T5-server] loadServers clears legacy id, refreshes current facts, and starts server loaders", async (t) => {
+test("[RED T5-server] loadServers clears legacy id, refreshes current facts, and starts server loaders", async () => {
   resetStore();
   const refreshed = server({ name: "Core Team", plan: "team" });
   globalThis.localStorage.setItem(LEGACY_SERVER_ID_STORAGE_KEY, "legacy-server");
@@ -207,7 +206,7 @@ test("[RED T5-server] loadServers clears legacy id, refreshes current facts, and
   });
 
   const getUrls: string[] = [];
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     getUrls.push(url);
     if (url === "/servers") return { data: [refreshed] };
     if (url === "/servers/server-1/members") return { data: [member()] };
@@ -235,14 +234,14 @@ test("[RED T5-server] loadServers clears legacy id, refreshes current facts, and
   ]);
 });
 
-test("[RED T5-server] updateServerOrder de-dupes requested ids and applies saved order from source of truth", async (t) => {
+test("[RED T5-server] updateServerOrder de-dupes requested ids and applies saved order from source of truth", async () => {
   resetStore();
   const first = server({ id: "a", slug: "a", name: "A" });
   const second = server({ id: "b", slug: "b", name: "B" });
   const third = server({ id: "c", slug: "c", name: "C" });
   useServerStore.setState({ servers: [first, second, third] });
 
-  t.mock.method(api, "patch", async (url: string, body: { serverOrder: string[] }) => {
+  vi.spyOn(api, "patch").mockImplementation(async (url: string, body: { serverOrder: string[] }) => {
     assert.equal(url, "/servers/order");
     assert.deepEqual(body.serverOrder, ["b", "a", "c"]);
     return { data: { serverOrder: ["c", "a", "c", 17, "missing"] } };
@@ -253,14 +252,14 @@ test("[RED T5-server] updateServerOrder de-dupes requested ids and applies saved
   assert.deepEqual(useServerStore.getState().servers.map((item) => item.id), ["c", "a", "b"]);
 });
 
-test("[RED T5-server] updateServerOrder rolls back to the prior list when persistence fails", async (t) => {
+test("[RED T5-server] updateServerOrder rolls back to the prior list when persistence fails", async () => {
   resetStore();
   const first = server({ id: "a", slug: "a", name: "A" });
   const second = server({ id: "b", slug: "b", name: "B" });
   const third = server({ id: "c", slug: "c", name: "C" });
   useServerStore.setState({ servers: [first, second, third] });
 
-  t.mock.method(api, "patch", async () => {
+  vi.spyOn(api, "patch").mockImplementation(async () => {
     throw new Error("order save failed");
   });
 
@@ -269,14 +268,14 @@ test("[RED T5-server] updateServerOrder rolls back to the prior list when persis
   assert.deepEqual(useServerStore.getState().servers.map((item) => item.id), ["a", "b", "c"]);
 });
 
-test("[RED T5-server] updateServerOrder treats a null save body as accepting the optimistic order", async (t) => {
+test("[RED T5-server] updateServerOrder treats a null save body as accepting the optimistic order", async () => {
   resetStore();
   const first = server({ id: "a", slug: "a", name: "A" });
   const second = server({ id: "b", slug: "b", name: "B" });
   const third = server({ id: "c", slug: "c", name: "C" });
   useServerStore.setState({ servers: [first, second, third] });
 
-  t.mock.method(api, "patch", async () => ({ data: null }));
+  vi.spyOn(api, "patch").mockImplementation(async () => ({ data: null }));
 
   await useServerStore.getState().updateServerOrder(["c", "b"]);
 
@@ -317,17 +316,17 @@ test("[RED T5-server] clearCurrent resets request-shaped slices and is idempoten
   assert.equal(resetCount, 1);
 });
 
-test("[RED T5-server] createServer adds owner role and enters the same switch path as setCurrent", async (t) => {
+test("[RED T5-server] createServer adds owner role and enters the same switch path as setCurrent", async () => {
   resetStore();
   const created = server({ id: "created", slug: "created", name: "Created", role: "member" });
   const getUrls: string[] = [];
 
-  t.mock.method(api, "post", async (url: string, body: { name: string; slug: string }) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body: { name: string; slug: string }) => {
     assert.equal(url, "/servers");
     assert.deepEqual(body, { name: "Created", slug: "created" });
     return { data: created };
   });
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     getUrls.push(url);
     if (url.endsWith("/members")) return { data: [] };
     if (url.endsWith("/sidebar-order")) return { data: {} };
@@ -355,17 +354,17 @@ test("[RED T5-server] createServer adds owner role and enters the same switch pa
   ]);
 });
 
-test("[RED T5-server] joinCommunityServer reloads full server truth and throws if the joined slug is missing", async (t) => {
+test("[RED T5-server] joinCommunityServer reloads full server truth and throws if the joined slug is missing", async () => {
   resetStore();
   const community = server({ id: "community-id", slug: "community-cn", name: "Community CN", role: "member" });
   let includeJoined = true;
 
-  t.mock.method(api, "post", async (url: string, body: { agreementId?: string | null; slug: string }) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body: { agreementId?: string | null; slug: string }) => {
     assert.equal(url, "/servers/join-community");
     assert.deepEqual(body, { agreementId: "agreement-1", slug: "community-cn" });
     return { data: { id: "ignored" } };
   });
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     if (url === "/servers") return { data: includeJoined ? [community] : [] };
     if (url.endsWith("/members")) return { data: [] };
     if (url.endsWith("/sidebar-order")) return { data: {} };
@@ -390,18 +389,18 @@ test("[RED T5-server] joinCommunityServer reloads full server truth and throws i
   );
 });
 
-test("[RED T5-server] profile, avatar, and push patches update known servers without creating unknown entries", async (t) => {
+test("[RED T5-server] profile, avatar, and push patches update known servers without creating unknown entries", async () => {
   resetStore();
   const current = server({ id: "current", slug: "current", name: "Old", avatarUrl: "/old.png" });
   const other = server({ id: "other", slug: "other", name: "Other" });
   useServerStore.setState({ servers: [current, other], current, serverEpoch: 2 });
 
-  t.mock.method(api, "patch", async (url: string, body: unknown) => {
+  vi.spyOn(api, "patch").mockImplementation(async (url: string, body: unknown) => {
     assert.equal(url, "/servers/current");
     assert.deepEqual(body, { name: "New", hideHumansFromMembers: true });
     return { data: { name: "New", avatarUrl: "/profile.png", hideHumansFromMembers: true } };
   });
-  t.mock.method(api, "post", async (url: string, body: FormData) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body: FormData) => {
     assert.equal(url, "/servers/current/avatar");
     assert.equal(typeof body.get, "function");
     return { data: { avatarUrl: "/avatar.png" } };
@@ -452,7 +451,7 @@ test("[RED T5-server] unknown server patches are silent no-ops at the store boun
   assert.equal(useServerStore.getState().serverEpoch, 5);
 });
 
-test("[RED T5-server] leaveServer removes current membership, clears matching slug, and resets server slices", async (t) => {
+test("[RED T5-server] leaveServer removes current membership, clears matching slug, and resets server slices", async () => {
   resetStore();
   const current = server({ id: "current", slug: "current", name: "Current" });
   const other = server({ id: "other", slug: "other", name: "Other" });
@@ -469,7 +468,7 @@ test("[RED T5-server] leaveServer removes current membership, clears matching sl
   });
   serverPersistence.writeLastServerSlug("current");
 
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     assert.equal(url, "/servers/current/leave");
     return { data: {} };
   });
@@ -488,7 +487,7 @@ test("[RED T5-server] leaveServer removes current membership, clears matching sl
   assert.equal(useServerStore.getState().serverEpoch, 4);
 });
 
-test("[RED T5-server] deleteServer mirrors leave semantics through the delete endpoint", async (t) => {
+test("[RED T5-server] deleteServer mirrors leave semantics through the delete endpoint", async () => {
   resetStore();
   const current = server({ id: "current", slug: "current", name: "Current" });
   useServerStore.setState({
@@ -504,7 +503,7 @@ test("[RED T5-server] deleteServer mirrors leave semantics through the delete en
   });
   serverPersistence.writeLastServerSlug("current");
 
-  t.mock.method(api, "delete", async (url: string) => {
+  vi.spyOn(api, "delete").mockImplementation(async (url: string) => {
     assert.equal(url, "/servers/current");
     return { data: {} };
   });
@@ -523,7 +522,7 @@ test("[RED T5-server] deleteServer mirrors leave semantics through the delete en
   assert.equal(useServerStore.getState().serverEpoch, 7);
 });
 
-test("[RED T5-server] handleMembershipRemoved reconciles servers, clears current, and forgets stale slug", async (t) => {
+test("[RED T5-server] handleMembershipRemoved reconciles servers, clears current, and forgets stale slug", async () => {
   resetStore();
   let resetCount = 0;
   registerServerReset(() => {
@@ -544,7 +543,7 @@ test("[RED T5-server] handleMembershipRemoved reconciles servers, clears current
   });
   serverPersistence.writeLastServerSlug("removed");
 
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     if (url === "/servers") return { data: [kept] };
     throw new Error(`unexpected GET ${url}`);
   });
@@ -565,7 +564,7 @@ test("[RED T5-server] handleMembershipRemoved reconciles servers, clears current
   assert.equal(resetCount, 1);
 });
 
-test("[RED T5-server] handleMembershipRemoved preserves current state for non-current and still-member cases", async (t) => {
+test("[RED T5-server] handleMembershipRemoved preserves current state for non-current and still-member cases", async () => {
   resetStore();
   const current = server({ id: "current", slug: "current", name: "Current" });
   const other = server({ id: "other", slug: "other", name: "Other" });
@@ -584,7 +583,7 @@ test("[RED T5-server] handleMembershipRemoved preserves current state for non-cu
   serverPersistence.writeLastServerSlug("current");
 
   let serverLoads = 0;
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     if (url === "/servers") {
       serverLoads += 1;
       return { data: serverLoads === 1 ? [current] : [current, other] };
@@ -614,12 +613,12 @@ test("[RED T5-server] handleMembershipRemoved preserves current state for non-cu
   assert.equal(serverPersistence.readLastServerSlug(), "current");
 });
 
-test("[RED T5-server] handleMembershipRemoved reloads and returns false when no current server is selected", async (t) => {
+test("[RED T5-server] handleMembershipRemoved reloads and returns false when no current server is selected", async () => {
   resetStore();
   const kept = server({ id: "kept", slug: "kept", name: "Kept" });
   useServerStore.setState({ servers: [], current: null, loading: true, serverEpoch: 12 });
 
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     if (url === "/servers") return { data: [kept] };
     throw new Error(`unexpected GET ${url}`);
   });
@@ -633,7 +632,7 @@ test("[RED T5-server] handleMembershipRemoved reloads and returns false when no 
   assert.equal(useServerStore.getState().loading, false);
 });
 
-test("[RED T5-server] loadSidebarOrder normalizes payloads and falls back only for the active epoch", async (t) => {
+test("[RED T5-server] loadSidebarOrder normalizes payloads and falls back only for the active epoch", async () => {
   resetStore();
   const current = server({ id: "current", slug: "current", name: "Current" });
   useServerStore.setState({
@@ -643,7 +642,7 @@ test("[RED T5-server] loadSidebarOrder normalizes payloads and falls back only f
     sidebarOrder: sidebar({ channelOrder: ["dirty"] }),
   });
 
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     assert.equal(url, "/servers/current/sidebar-order");
     return {
       data: {
@@ -680,7 +679,7 @@ test("[RED T5-server] loadSidebarOrder normalizes payloads and falls back only f
   assert.deepEqual(useServerStore.getState().sidebarOrder.agentPanelTabOrder, ["agents"]);
 });
 
-test("[RED T5-server] loadSidebarOrder discards stale success and stale failure responses", async (t) => {
+test("[RED T5-server] loadSidebarOrder discards stale success and stale failure responses", async () => {
   resetStore();
   const current = server({ id: "current", slug: "current", name: "Current" });
   const pending = defer<{ data: SidebarOrderPreferences }>();
@@ -692,7 +691,7 @@ test("[RED T5-server] loadSidebarOrder discards stale success and stale failure 
     sidebarOrder: retained,
   });
 
-  t.mock.method(api, "get", async () => pending.promise);
+  vi.spyOn(api, "get").mockImplementation(async () => pending.promise);
 
   const load = useServerStore.getState().loadSidebarOrder();
   useServerStore.setState({ serverEpoch: 5, sidebarOrder: retained });
@@ -702,8 +701,8 @@ test("[RED T5-server] loadSidebarOrder discards stale success and stale failure 
   assert.equal(useServerStore.getState().sidebarOrder, retained);
 
   const failed = defer<{ data: SidebarOrderPreferences }>();
-  t.mock.reset();
-  t.mock.method(api, "get", async () => failed.promise);
+  vi.restoreAllMocks();
+  vi.spyOn(api, "get").mockImplementation(async () => failed.promise);
   const failureLoad = useServerStore.getState().loadSidebarOrder();
   useServerStore.setState({ serverEpoch: 6, sidebarOrder: retained });
   failed.reject(new Error("late failure"));
@@ -712,7 +711,7 @@ test("[RED T5-server] loadSidebarOrder discards stale success and stale failure 
   assert.equal(useServerStore.getState().sidebarOrder, retained);
 });
 
-test("[RED T5-server] loadSidebarOrder failure restores the default order for the still-active epoch", async (t) => {
+test("[RED T5-server] loadSidebarOrder failure restores the default order for the still-active epoch", async () => {
   resetStore();
   const current = server({ id: "current", slug: "current", name: "Current" });
   useServerStore.setState({
@@ -722,7 +721,7 @@ test("[RED T5-server] loadSidebarOrder failure restores the default order for th
     sidebarOrder: sidebar({ channelOrder: ["dirty"] }),
   });
 
-  t.mock.method(api, "get", async () => {
+  vi.spyOn(api, "get").mockImplementation(async () => {
     throw new Error("sidebar failed");
   });
 
@@ -731,7 +730,7 @@ test("[RED T5-server] loadSidebarOrder failure restores the default order for th
   assert.deepEqual(useServerStore.getState().sidebarOrder, DEFAULT_SIDEBAR_ORDER);
 });
 
-test("[RED T5-server] updateSidebarOrder rolls back failed writes only while still on the same server", async (t) => {
+test("[RED T5-server] updateSidebarOrder rolls back failed writes only while still on the same server", async () => {
   resetStore();
   const current = server({ id: "current", slug: "current", name: "Current" });
   const original = sidebar({ channelOrder: ["original"] });
@@ -743,7 +742,7 @@ test("[RED T5-server] updateSidebarOrder rolls back failed writes only while sti
     sidebarOrder: original,
   });
 
-  t.mock.method(api, "patch", async (url: string, body: Partial<SidebarOrderPreferences>) => {
+  vi.spyOn(api, "patch").mockImplementation(async (url: string, body: Partial<SidebarOrderPreferences>) => {
     assert.equal(url, "/servers/current/sidebar-order");
     assert.deepEqual(body, { channelOrder: ["optimistic"] });
     return pending.promise;
@@ -757,7 +756,7 @@ test("[RED T5-server] updateSidebarOrder rolls back failed writes only while sti
   assert.equal(useServerStore.getState().sidebarOrder, original);
 });
 
-test("updateSidebarOrder preserves typed pinned refs through unrelated sparse writes", async (t) => {
+test("updateSidebarOrder preserves typed pinned refs through unrelated sparse writes", async () => {
   resetStore();
   const current = server({ id: "current", slug: "current", name: "Current" });
   const originalPinned: SidebarOrderPreferences["pinned"] = [
@@ -772,7 +771,7 @@ test("updateSidebarOrder preserves typed pinned refs through unrelated sparse wr
     sidebarOrder: original,
   });
 
-  t.mock.method(api, "patch", async (url: string, body: Partial<SidebarOrderPreferences>) => {
+  vi.spyOn(api, "patch").mockImplementation(async (url: string, body: Partial<SidebarOrderPreferences>) => {
     assert.equal(url, "/servers/current/sidebar-order");
     assert.deepEqual(body, { channelOrder: ["optimistic"] });
     return { data: { channelOrder: ["server-confirmed"] } };
@@ -784,7 +783,7 @@ test("updateSidebarOrder preserves typed pinned refs through unrelated sparse wr
   assert.deepEqual(useServerStore.getState().sidebarOrder.pinned, originalPinned);
 });
 
-test("updateSidebarOrder serializes section writes with the latest confirmed version", async (t) => {
+test("updateSidebarOrder serializes section writes with the latest confirmed version", async () => {
   resetStore();
   const current = server({ id: "current", slug: "current", name: "Current" });
   const original = sidebar({
@@ -816,7 +815,7 @@ test("updateSidebarOrder serializes section writes with the latest confirmed ver
     sidebarOrder: original,
   });
 
-  t.mock.method(api, "patch", async (url: string, body: Partial<SidebarOrderPreferences>) => {
+  vi.spyOn(api, "patch").mockImplementation(async (url: string, body: Partial<SidebarOrderPreferences>) => {
     assert.equal(url, "/servers/current/sidebar-order");
     requests.push(body);
     if (requests.length === 1) return createPending.promise;
@@ -871,7 +870,7 @@ test("updateSidebarOrder serializes section writes with the latest confirmed ver
   assert.equal(useServerStore.getState().sidebarOrder.sectionsVersion, 2);
 });
 
-test("[RED T5-server] updateSidebarOrder keeps a newer server's sidebar when an old write fails", async (t) => {
+test("[RED T5-server] updateSidebarOrder keeps a newer server's sidebar when an old write fails", async () => {
   resetStore();
   const first = server({ id: "first", slug: "first", name: "First" });
   const second = server({ id: "second", slug: "second", name: "Second" });
@@ -885,7 +884,7 @@ test("[RED T5-server] updateSidebarOrder keeps a newer server's sidebar when an 
     sidebarOrder: firstSidebar,
   });
 
-  t.mock.method(api, "patch", async () => pending.promise);
+  vi.spyOn(api, "patch").mockImplementation(async () => pending.promise);
 
   const update = useServerStore.getState().updateSidebarOrder({ channelOrder: ["first-optimistic"] });
   assert.deepEqual(useServerStore.getState().sidebarOrder.channelOrder, ["first-optimistic"]);

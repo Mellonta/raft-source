@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   assertSurfaceProducerFactLineage,
   collectSurfaceProducerFactIds,
   formatProducerFactLineageBracket,
   formatProducerFactLineageNote,
   stripSurfaceProducerFactLineage,
-} from "./producerFactLineage.js";
+} from "./producerFactLineage";
 
 test("surface producer-fact lineage assertion covers object attrs and canonical text", () => {
   const surface = {

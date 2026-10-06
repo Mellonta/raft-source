@@ -1,4 +1,4 @@
-import type { CompletedTraceSpan, TraceAttributes, TraceEvent, TraceEventRecord, TraceSpanKind, TraceStatus, TraceSurface } from "./index.js";
+import type { CompletedTraceSpan, TraceAttributes, TraceEvent, TraceEventRecord, TraceSpanKind, TraceStatus, TraceSurface } from "./index";
 
 export interface TraceEventRowResource {
   serviceName: string;
@@ -74,6 +74,9 @@ export interface TraceEventRow {
   repair_kind: string | null;
   action: string | null;
   error_class: string | null;
+  /** Full driver/exception message. HIGH CARDINALITY by design: a closed enum
+   * cannot carry a failure reason nobody predicted. See PROMOTED_DETAIL_ATTRS. */
+  error_message: string | null;
   error_kind: string | null;
   error_subkind: string | null;
   rw_failure_stage: string | null;
@@ -196,6 +199,12 @@ export const TRACE_EVENT_ROW_V2_PROJECTION_COLUMNS = [
   ["query_fingerprint", "string"],
   ["timeout_bucket", "string"],
   ["retryable", "string"],
+  // 67th column — additive rollout step 2026-09-20 (precedent: the 59->66
+  // seven-column rollout). ORDERING CONTRACT: raft.trace_events_v2 must gain
+  // this column BEFORE this code deploys; the sink asserts required columns at
+  // startup and the ingest statement names columns explicitly, so the old
+  // 66-column insert stays valid against the widened table.
+  ["error_message", "string"],
 ] as const satisfies readonly TraceEventRowProjectionColumn[];
 
 /**
@@ -210,7 +219,7 @@ export const TRACE_EVENT_ROW_V2_TABLE = "raft.trace_events_v2";
 
 /** SHA-256 of JSON.stringify(TRACE_EVENT_ROW_V2_PROJECTION_COLUMNS). */
 export const TRACE_EVENT_ROW_V2_SCHEMA_FINGERPRINT =
-  "sha256:bc054cd6b79fe489eac8252fd91e8dcb4663ddc4b8d249395f5317a0c6bb5f46";
+  "sha256:ac8d905d788da3021e79af74d1b46b0373cc79ec876b03f8531ac28c69db5a69";
 
 export const TRACE_EVENT_ROW_V2_LEGACY_SCHEMA_FINGERPRINT =
   "sha256:d8cbabe44110bb2bc108a48021dbee4e37af732d6cc52c97fdcf06cb44b5e1ce";
@@ -234,13 +243,31 @@ export const TRACE_EVENT_ROW_V2_INGEST_STATEMENT =
 export const TRACE_EVENT_ROW_V2_LEGACY_INGEST_STATEMENT =
   buildTraceEventRowV2IngestStatement(TRACE_EVENT_ROW_V2_LEGACY_PROJECTION_COLUMNS);
 
+/** The 66-column statement that preceded the error_message rollout. The env
+ * override (SCOPEDB_TRACE_EVENTS_INGEST_STATEMENT) is validation-only — the
+ * sink always writes with the current code-owned statement — so an env value
+ * pinned before this rollout must stay recognized or the sink disables itself
+ * on the first post-rollout deploy. Retire together with the previous schema
+ * fingerprint. */
+export const TRACE_EVENT_ROW_V2_PREVIOUS_INGEST_STATEMENT =
+  buildTraceEventRowV2IngestStatement(TRACE_EVENT_ROW_V2_PROJECTION_COLUMNS.slice(0, 66));
+
 export function isTraceEventRowV2CompatibleIngestStatement(value: string): boolean {
   return value === TRACE_EVENT_ROW_V2_INGEST_STATEMENT
+    || value === TRACE_EVENT_ROW_V2_PREVIOUS_INGEST_STATEMENT
     || value === TRACE_EVENT_ROW_V2_LEGACY_INGEST_STATEMENT;
 }
 
+/** The 66-column projection that preceded the error_message rollout. Old
+ * workers keep sending this fingerprint until the fleet fully replaces;
+ * retire it (and the 59-column one, if it is finally dead) in a follow-up
+ * once the mixed-fleet window closes. */
+export const TRACE_EVENT_ROW_V2_PREVIOUS_SCHEMA_FINGERPRINT =
+  "sha256:bc054cd6b79fe489eac8252fd91e8dcb4663ddc4b8d249395f5317a0c6bb5f46";
+
 export function isTraceEventRowV2CompatibleSchemaFingerprint(value: string): boolean {
   return value === TRACE_EVENT_ROW_V2_SCHEMA_FINGERPRINT
+    || value === TRACE_EVENT_ROW_V2_PREVIOUS_SCHEMA_FINGERPRINT
     || value === TRACE_EVENT_ROW_V2_LEGACY_SCHEMA_FINGERPRINT;
 }
 
@@ -348,9 +375,29 @@ const PROMOTED_CLOSED_ATTRS = [
   "machine_affinity_route",
 ] as const satisfies readonly TraceEventRowStringKey[];
 
+/**
+ * High-cardinality detail strings.
+ *
+ * Kept separate from PROMOTED_CLOSED_ATTRS on purpose: those are closed enums,
+ * and the whole point of this list is the opposite — a value that could not be
+ * enumerated ahead of time. The 2026-09-19 RisingWave serving incident is the
+ * worked example: `error_class` collapsed to a single useless token, the raw
+ * driver message was consumed by the classifier and then discarded, and the
+ * result was ~17h in which the failing path recorded THAT it failed without
+ * WHY. Low cardinality is a storage property, not a correctness requirement.
+ *
+ * Retention/scrub: `fields.ts` declares error_message as detail with
+ * `scrub_and_short_retention`; treat these columns as short-retention and
+ * never assume they are safe to aggregate on.
+ */
+const PROMOTED_DETAIL_ATTRS = [
+  "error_message",
+] as const satisfies readonly TraceEventRowStringKey[];
+
 export const TRACE_EVENT_ROW_PROMOTED_ATTRS = [
   ...PROMOTED_IDENTITY_ATTRS,
   ...PROMOTED_CLOSED_ATTRS,
+  ...PROMOTED_DETAIL_ATTRS,
 ] as const satisfies readonly TraceEventRowStringKey[];
 
 const PROMOTED_NUMERIC_ATTRS = [
@@ -488,6 +535,7 @@ function traceEventRowForEvent(
     repair_kind: null,
     action: null,
     error_class: null,
+    error_message: null,
     error_kind: null,
     error_subkind: null,
     rw_failure_stage: null,

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { en as enMessages } from "../src/i18n/messages/en";
 import { zhCn as zhMessages } from "../src/i18n/messages/zh-cn";
@@ -76,14 +75,6 @@ const KNOWN_DRIFT: ReadonlyArray<readonly [string, readonly string[]]> = [
   // translation (低/中/...). "Medium" now diverges: effort value -> Medium
   // (English, by reversal ruling) vs font-size option -> 中 (translated).
   ["Medium", ["Medium", "中"]],
-  // @AngLee batch F (wiki, reviewed in-PR): wiki "Setup" button -> 设置 vs app
-  // status "Setup" -> 待配置; wiki "Started" timestamp prefix -> 开始于 vs
-  // activity-log status "Started" -> 已启动. Ruled-permanent divergences.
-  ["Setup", ["待配置", "设置"]],
-  ["Started", ["已启动", "开始于"]],
-  // @AngLee 2026-08-04 (batch F): wiki status "Active" -> 已启用, vs agent
-  // status "Active" -> 活跃 (agent.detail.active). Ruled-permanent divergence.
-  ["Active", ["已启用", "活跃"]],
   // @AngLee 2026-08-04 (batch F): the agent reset DIALOG actions diverge from the
   // machine BULK actions by ruling — 重新启动/完全重置并重启 (agent dialog) vs
   // 重启/完整重置并重启 (machine list bulk actions). Ruled-permanent.
@@ -92,6 +83,11 @@ const KNOWN_DRIFT: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["Clear All", ["清空选择", "清除筛选"]],
   ["Complete", ["已完善", "已完成"]],
   ["From", ["发送者", "来自"]],
+  // @Cat 2026-09-24, #proj-uiux:9c7fb599 bfe8f8b0: externalIdentity.kind.human
+  // is a participant TYPE (人类), not a server member. composer.actorType.human
+  // and search.badgeHuman refer to MEMBERS (人类成员). Keep English Human in
+  // both contexts; adding "member" would break the sibling Agent/Computer labels.
+  ["Human", ["人类", "人类成员"]],
   ["Open", ["开放", "打开"]],
   ["Private", ["私密", "私有"]],
   ["Read", ["已读", "读取"]],

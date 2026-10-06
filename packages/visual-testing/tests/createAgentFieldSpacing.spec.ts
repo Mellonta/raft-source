@@ -20,8 +20,8 @@ import { expect, test } from "@playwright/test";
  * misleading: 12px was rendered first and looked barely changed, and 8px was
  * chosen from that comparison rather than from the number.
  *
- * LOCAL-ONLY suite: no CI job runs this, so Hosted is NOT COVERED for these
- * assertions.
+ * Visual browser CI runs these assertions on selected staging pushes and
+ * daily runs; they are not part of ordinary PR checks.
  */
 
 type Theme = "brutal" | "elegant";

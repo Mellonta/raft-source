@@ -1,5 +1,5 @@
-import { unregisterAgentCredentialProxiesForAgent } from "./agentCredentialProxy.js";
-import { unregisterManagedMcpRuntimeProxiesForAgent } from "./managedMcpRuntimeProxy.js";
+import { unregisterAgentCredentialProxiesForAgent } from "./agentCredentialProxy";
+import { unregisterManagedMcpRuntimeProxiesForAgent } from "./managedMcpRuntimeProxy";
 
 export function cleanupLaunchProxies(agentId: string): void {
   unregisterAgentCredentialProxiesForAgent(agentId);

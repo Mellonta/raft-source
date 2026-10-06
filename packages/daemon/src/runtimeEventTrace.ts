@@ -1,4 +1,4 @@
-import type { ParsedEvent } from "./drivers/index.js";
+import type { ParsedEvent } from "./drivers/index";
 
 export type RuntimeDiagnosticEvent =
   Extract<ParsedEvent, { kind: "runtime_diagnostic" }>;

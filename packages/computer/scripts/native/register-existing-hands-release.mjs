@@ -15,6 +15,22 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{40}$/;
 const VERSION = /^\d+\.\d+\.\d+$/;
 const CHANNELS = new Set(["main", "alpha"]);
+// task #816 — named feature-branch channels. Same slug grammar and reserved
+// words as the Computer CLI (packages/computer/src/lib/channelState.ts):
+// lowercase letters/digits/hyphens, 3-64 chars, never a cohort word.
+const NAMED_CHANNEL = /^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/;
+const RESERVED_CHANNEL_WORDS = new Set([
+  "main", "alpha", "latest", "stable", "rc", "release", "staging", "production", "prod", "nightly", "preview", "pinned", "default",
+]);
+function isNamedChannel(value) {
+  return NAMED_CHANNEL.test(value) && !RESERVED_CHANNEL_WORDS.has(value);
+}
+// A feature-channel version is the package triplet plus `-<channel>.<n>`; the
+// suffix must name the very channel it is registered to, so a build can never
+// be registered under a channel it was not stamped for.
+function featureVersionPattern(channel) {
+  return new RegExp(`^\\d+\\.\\d+\\.\\d+-${channel.replace(/[-]/g, "\\-")}\\.[1-9]\\d*$`);
+}
 const REQUIRED_TARGETS = [
   "darwin-arm64",
   "darwin-x64",
@@ -42,8 +58,20 @@ function exactInteger(value, name) {
 
 function exactChannel(value) {
   const channel = required(value, "--channel");
-  if (!CHANNELS.has(channel)) throw new Error("--channel must be exactly main or alpha");
-  return channel;
+  if (CHANNELS.has(channel) || isNamedChannel(channel)) return channel;
+  throw new Error("--channel must be exactly main, alpha, or a named feature channel (lowercase letters, digits, hyphens)");
+}
+
+// The receipt binds the candidate to its source identity. RC candidates carry
+// `rcTag` (computer-v<version>-rc.<n>); feature-channel candidates carry
+// `featureChannel` naming the exact channel and no rcTag, so a feature build
+// can never be registered to main/alpha nor an RC to a feature channel.
+function receiptSourceIdentityMatches(receipt, exactVersion, channel) {
+  if (CHANNELS.has(channel)) {
+    return receipt.featureChannel === undefined
+      && new RegExp(`^computer-v${exactVersion.replaceAll(".", "\\.")}-rc\\.[1-9][0-9]*$`).test(receipt.rcTag);
+  }
+  return receipt.rcTag === undefined && receipt.featureChannel === channel;
 }
 
 function expectedConfirmation(channel) {
@@ -248,8 +276,12 @@ export async function prepareVerifiedCandidate({
   const source = required(sourceCommit, "--source-commit").toLowerCase();
   if (!COMMIT.test(source)) throw new Error("--source-commit must be a full lowercase Git commit");
   const exactVersion = required(version, "--version");
-  if (!VERSION.test(exactVersion)) throw new Error("--version must be an exact stable semver");
   const exactTargetChannel = exactChannel(channel);
+  if (CHANNELS.has(exactTargetChannel)) {
+    if (!VERSION.test(exactVersion)) throw new Error("--version must be an exact stable semver");
+  } else if (!featureVersionPattern(exactTargetChannel).test(exactVersion)) {
+    throw new Error(`--version for channel ${exactTargetChannel} must be <major>.<minor>.<patch>-${exactTargetChannel}.<n>`);
+  }
   if (confirmation !== expectedConfirmation(exactTargetChannel)) {
     throw new Error("--confirmation did not match the required channel-bound exact phrase");
   }
@@ -276,7 +308,7 @@ export async function prepareVerifiedCandidate({
     receipt.manifestSha256 !== expectedManifestSha ||
     receipt.inventorySha256 !== expectedInventorySha ||
     typeof receipt.nodeVersion !== "string" ||
-    !new RegExp(`^computer-v${exactVersion.replaceAll(".", "\\.")}-rc\\.[1-9][0-9]*$`).test(receipt.rcTag)
+    !receiptSourceIdentityMatches(receipt, exactVersion, exactTargetChannel)
   ) {
     throw new Error("candidate receipt identity mismatch");
   }

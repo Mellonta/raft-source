@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, fireEvent, render as rtlRender, screen } from "@testing-library/react";
 import SetupSessionFooter from "../src/components/onboarding/SetupSessionFooter";
 import { useServerStore } from "../src/store/serverStore";

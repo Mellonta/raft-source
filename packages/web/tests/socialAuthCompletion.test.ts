@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { completeSocialAuthWithOneLinkRefresh } from "../src/utils/socialAuthCompletion";
 
 function httpError(status: number, code: string): Error & {

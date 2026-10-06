@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { isMemberScopedMentionChannel } from "../src/components/message/mentionCandidates";
 
 test("member-scoped mention autocomplete is limited to private and joint channels", () => {

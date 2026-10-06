@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { isExternalAgentCursorAdvancingProofLevel } from "@botiverse/raft-shared";
 import {
@@ -7,7 +6,7 @@ import {
   buildRaftChannelWakeInjectedEvent,
   raftChannelWakeManifest,
   createRaftChannelWakeAdapter,
-} from "./raftChannelWakeAdapter.js";
+} from "./raftChannelWakeAdapter";
 
 const baseInput = {
   eventId: "event-1",

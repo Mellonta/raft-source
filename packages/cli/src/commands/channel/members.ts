@@ -2,14 +2,15 @@
 //
 // Returns the current join/post members for a channel, DM, or thread.
 
+import type { AgentChannelMembersData } from "@botiverse/raft-shared";
 import type { Command } from "commander";
 
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText } from "../../core/renderer.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { formatChannelMembers } from "../server/_format.js";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText } from "../../core/renderer";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { formatChannelMembers } from "../server/_format";
 
 export const channelMembersCommand = defineCommand(
   {
@@ -36,7 +37,7 @@ export const channelMembersCommand = defineCommand(
         message: res.error ?? `HTTP ${res.status}`,
       });
     }
-    writeText(ctx.io, formatChannelMembers(res.data as any));
+    writeText(ctx.io, formatChannelMembers(res.data as AgentChannelMembersData));
   },
 );
 

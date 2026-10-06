@@ -11,7 +11,7 @@ import {
   type EventBufferDropReason,
   type EventBufferQueueMetricState,
   type EventBufferRejectReason,
-} from "./metrics.js";
+} from "./metrics";
 
 export type EventBufferRow = Record<string, unknown>;
 

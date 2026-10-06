@@ -1,6 +1,8 @@
 import type { KeyboardEvent, ReactNode } from "react";
 import { Check } from "lucide-react";
 import { useIntl } from "react-intl";
+import { Card, Input } from "raft-ui";
+import { dismissLayerProps } from "./dismissLayer";
 
 export interface SelectionPopoverOption {
   key: string;
@@ -68,7 +70,7 @@ function SelectionPopoverOptionRow({
 }: SelectionPopoverOption) {
   const leadingContent = leading ?? avatar;
   const labelClassName = italic
-    ? "-mx-1 px-1 whitespace-nowrap leading-6 italic text-black/70"
+    ? "-mx-1 px-1 whitespace-nowrap leading-6 italic text-foreground-muted theme-brutal:text-black/70"
     : "truncate leading-6";
   // Selection family contract (stdrc #proj-theme:ac79cf20 msg=32e323aa
   // + msg=832c2c02 + msg=b0b92c1c 2026-05-25): hover = bg-soft-signal/30
@@ -79,15 +81,15 @@ function SelectionPopoverOptionRow({
   // sidebar action menus + right-click context menus all share one
   // hover token.
   const rowTone = disabled
-    ? "cursor-not-allowed bg-white text-black/30"
-    : "bg-white text-black hover:bg-soft-signal/30";
+    ? "cursor-not-allowed bg-layer-panel text-foreground-muted theme-brutal:bg-white theme-brutal:text-black/30"
+    : "bg-layer-panel text-foreground-strong hover:bg-fill-muted theme-brutal:bg-white theme-brutal:text-black theme-brutal:hover:bg-soft-signal/30";
 
   return (
     <button
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className={`flex h-9 w-full items-center justify-between gap-2 overflow-hidden border-b border-black/10 px-3 text-left text-xs font-bold last:border-b-0 ${rowTone}`}
+      className={`flex h-9 w-full items-center justify-between gap-2 overflow-hidden border-b border-line-muted px-3 text-left text-xs font-bold last:border-b-0 theme-brutal:border-black/10 ${rowTone}`}
     >
       <span className="flex min-w-0 items-center gap-2">
         {(reserveLeadingSlot || leadingContent) && (
@@ -114,22 +116,22 @@ export default function SelectionPopover(props: SelectionPopoverProps) {
     showHeader = true,
     emptyLabel,
     width = "content",
-    className = `absolute left-0 top-[calc(100%+8px)] z-20 ${width === "trigger" ? "w-full" : "min-w-[220px]"} border-2 border-black bg-white shadow-brutal`,
+    className = `absolute left-0 top-[calc(100%+8px)] z-20 ${width === "trigger" ? "w-full" : "min-w-[220px]"} border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal`,
   } = props;
   const emptyLabelText = emptyLabel ?? formatMessage({ id: "ui.selectionPopover.emptyLabel" });
 
   return (
-    <div className={className}>
+    <Card className={className} {...dismissLayerProps}>
       {showHeader && (
-        <div className="flex items-center justify-between border-b border-black px-3 py-2">
-          <span className="text-[10px] font-bold uppercase tracking-wide text-black/60">
+        <div className="flex items-center justify-between border-b border-line-muted px-3 py-2 theme-brutal:border-black">
+          <span className="text-[10px] font-bold uppercase tracking-wide text-foreground-muted">
             {title}
           </span>
           {showClear && onClear && (
             <button
               type="button"
               onClick={onClear}
-              className="text-[10px] font-bold tracking-wide text-black/50 hover:text-black"
+              className="text-[10px] font-bold tracking-wide text-foreground-muted hover:text-foreground-strong"
             >
               {formatMessage({ id: "ui.selectionPopover.clear" })}
             </button>
@@ -137,8 +139,8 @@ export default function SelectionPopover(props: SelectionPopoverProps) {
         </div>
       )}
       {props.searchable && (
-        <div className="border-b border-black px-2 py-2">
-          <input
+        <div className="border-b border-line-muted px-2 py-2 theme-brutal:border-black">
+          <Input
             type="text"
             autoFocus
             value={props.search}
@@ -148,13 +150,13 @@ export default function SelectionPopover(props: SelectionPopoverProps) {
               props.onInputKeyDown?.(event, options);
             }}
             placeholder={props.searchPlaceholder ?? formatMessage({ id: "ui.selectionPopover.searchPlaceholder" })}
-            className="input-brutal w-full px-2 py-1 text-xs font-mono"
+            className="w-full px-2 py-1 text-xs font-mono"
           />
         </div>
       )}
       <div className="max-h-64 overflow-y-auto">
         {options.length === 0 ? (
-          <div className="px-3 py-3 text-center text-[11px] font-mono text-black/40">
+          <div className="px-3 py-3 text-center text-[11px] font-mono text-foreground-muted">
             {emptyLabelText}
           </div>
         ) : (
@@ -163,6 +165,6 @@ export default function SelectionPopover(props: SelectionPopoverProps) {
           ))
         )}
       </div>
-    </div>
+    </Card>
   );
 }

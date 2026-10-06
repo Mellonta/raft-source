@@ -1,4 +1,4 @@
 export {
   registerReminderLogCommand,
   reminderLogCommand,
-} from "../../apps/reminder/log.js";
+} from "../../apps/reminder/log";

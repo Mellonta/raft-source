@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { describe, it } from "node:test";
 
 const readSource = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), "utf8");
 
@@ -27,6 +26,7 @@ describe("openThread payload contract", () => {
     assertSourceIncludes("components/layout/rightPanelUrlSync.ts", [
       `parentChannelId: channelId,
         parentMessageId: messageId,
+        threadChannelId: knownThreadChannelId,
         focusedMessageId: threadFocusedMessageId`,
     ]);
 
@@ -58,6 +58,7 @@ describe("openThread payload contract", () => {
     assertSourceOccurrenceCount("components/search/MessageSearchPage.tsx",
       `parentChannelId: result.parentChannelId,
         parentMessageId: result.parentMessageId,
+        threadChannelId: result.channelId,
         focusedMessageId: result.id`,
       1,
     );

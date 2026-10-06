@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import {
   classifyCandidate,
   parseArgs,
   type EmptyThreadCandidate,
-} from "../../scripts/cleanup-empty-thread-channels.js";
+} from "../../scripts/cleanup-empty-thread-channels";
 
 const cleanupSource = readFileSync(
   fileURLToPath(new URL("../../scripts/cleanup-empty-thread-channels.ts", import.meta.url)),

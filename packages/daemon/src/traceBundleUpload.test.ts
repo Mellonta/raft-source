@@ -12,8 +12,7 @@ import { gunzipSync } from "node:zlib";
 import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, test } from "vitest";
-import { DaemonTraceBundleUploader } from "./traceBundleUpload.js";
+import { DaemonTraceBundleUploader } from "./traceBundleUpload";
 import { computeTraceJitter, NO_JITTER } from "@botiverse/raft-trace-client";
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -28,8 +27,9 @@ function sha256Hex(body: Buffer): string {
 }
 
 // The mock-timer tests use fire-and-forget `void this.uploadOnce()` chains, so
-// keep this suite explicitly sequential if Vitest's defaults change later.
-describe.sequential("DaemonTraceBundleUploader", () => {
+// this suite must stay sequential. Tests in a file run sequentially unless marked
+// `concurrent` (Vitest 5 removed `describe.sequential`, which only restated that default).
+describe("DaemonTraceBundleUploader", () => {
   let originalMinFileAgeMs: string | undefined;
   let originalUploadIntervalMs: string | undefined;
 

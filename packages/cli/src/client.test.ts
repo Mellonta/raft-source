@@ -1,17 +1,16 @@
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
-import type { AgentContext } from "./auth/env.js";
+import type { AgentContext } from "./auth/env";
 import { MANUAL_CONTEXT_CAPABILITY, RAFT_CLIENT_CAPABILITIES_HEADER } from "@botiverse/raft-shared";
-import { ApiClient } from "./client.js";
-import { CliError } from "./core/errors.js";
+import { ApiClient } from "./client";
+import { CliError } from "./core/errors";
 import {
   __setCliTransportTraceSinkForTest,
   routeFamilyForPath,
   upstreamLayerForFetchError,
   type CliTransportNormalizedErrorAttrs,
-} from "./transportTrace.js";
+} from "./transportTrace";
 
 const ctx: AgentContext = {
   agentId: "agent-1",
@@ -801,6 +800,19 @@ test("ApiClient classifies api.raft.build as the Raft API host", async () => {
 
 test("transport route family classifier returns only closed route families", () => {
   assert.equal(routeFamilyForPath("/internal/agent-api/tasks/claim?message_id=msg-private"), "tasks/claim");
+  assert.equal(routeFamilyForPath("/internal/agent-api/threads"), "threads");
   assert.equal(routeFamilyForPath("/api/attachments/attachment-secret"), "attachments/download");
   assert.equal(routeFamilyForPath("/internal/agent-api/unclassified/sk_agent_secret?target=dm:@alice"), "unknown");
+});
+
+test("ApiClient forwards the caller abort signal to canonical JSON transport", async () => {
+  const original = globalThis.fetch;
+  const controller = new AbortController();
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal(init?.signal, controller.signal);
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+  }) as typeof fetch;
+  try {
+    await new ApiClient(ctx).request("POST", "/internal/agent-api/integrations/token", { service: "test-rp" }, { signal: controller.signal });
+  } finally { globalThis.fetch = original; }
 });

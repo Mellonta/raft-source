@@ -5,20 +5,19 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 
 import { BasicTracer, MemoryTraceSink, type CompletedTraceSpan } from "@botiverse/raft-shared";
 
-import { CliExit, inferNextCommands } from "./output.js";
-import { ComputerError } from "./lib/errors.js";
-import type { LegacyMachineCandidate } from "./lib/types.js";
-import { migrationDismissalsPath, serverAttachmentPath, userSessionPath } from "./paths.js";
-import { ComputerServiceError } from "./services/errors.js";
+import { CliExit, inferNextCommands } from "./output";
+import { ComputerError } from "./lib/errors";
+import type { LegacyMachineCandidate } from "./lib/types";
+import { migrationDismissalsPath, serverAttachmentPath, userSessionPath } from "./paths";
+import { ComputerServiceError } from "./services/errors";
 import {
   ACCOUNT_UNAVAILABLE_MESSAGES,
   accountUnavailableMessage,
   resolveAccountUnavailableLocale,
-} from "./accountUnavailable.js";
+} from "./accountUnavailable";
 import {
   MIGRATION_FRESH_TRIGGERS,
   pickZeroMatchMigrationFromInput,
@@ -27,8 +26,8 @@ import {
   setupCore,
   type SetupDeps,
   type SetupOptions,
-} from "./setup.js";
-import { DEFAULT_SLOCK_SERVER_URL, LEGACY_PRODUCTION_SERVER_URL } from "./serverUrl.js";
+} from "./setup";
+import { DEFAULT_SLOCK_SERVER_URL, LEGACY_PRODUCTION_SERVER_URL } from "./serverUrl";
 
 const SERVER_A = "11111111-1111-4111-8111-111111111111";
 const SERVER_B = "22222222-2222-4222-8222-222222222222";
@@ -1923,8 +1922,12 @@ test("setup: roster-unavailable non-TTY --yes continues fresh with visible warni
 
     assert.deepEqual(events.filter((event) => event === "attach" || event.startsWith("start:")), ["attach", `start:${SERVER_A}`]);
     assert.ok(events.some((event) => event.includes("WARNING: Migration: legacy machine roster unavailable")));
-    const decision = findSpan(sink.getAllSpans(), "computer.migration.decision");
+    const decision = sink.getAllLogEvents().find((event) => event.name === "computer.migration.decision");
+    assert.ok(decision, "expected a computer.migration.decision event");
     assert.equal(decision.attrs?.reason, "server-unavailable");
+    assert.equal(decision.attrs?.status, "ok");
+    const migration = findSpan(sink.getAllSpans(), "computer.migration");
+    assert.equal(decision.context?.spanId, migration.context.spanId);
     const discovery = findSpan(sink.getAllSpans(), "computer.migration.discovery");
     assert.equal(discovery.attrs?.local_candidate_count, 2);
   });

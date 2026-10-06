@@ -5,7 +5,7 @@ import {
   reduceMachineConvergence,
   type MachineConvergenceEvent,
   type MachineReducerResult,
-} from "./machineConvergenceReducer.js";
+} from "./machineConvergenceReducer";
 import {
   FileDurableTextCell,
   SerializedMachineOperationStore,
@@ -13,7 +13,7 @@ import {
   type MachineDispatchIdentity,
   type MachineOperationRecord,
   type MachineProcessIdentity,
-} from "./machineOperationStore.js";
+} from "./machineOperationStore";
 
 function recordPath(slockHome: string, operationId: string): string {
   return join(slockHome, "machine-operations", `${operationId}.json`);

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { INVALID_EMAIL_MESSAGE, isValidEmailAddress, validateEmailAddress } from "./emailValidation.js";
+import { INVALID_EMAIL_MESSAGE, isValidEmailAddress, validateEmailAddress } from "./emailValidation";
 
 test("email validation accepts ordinary addresses after trimming", () => {
   assert.equal(isValidEmailAddress("dev@slock.ai"), true);

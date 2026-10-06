@@ -1,7 +1,7 @@
 import { createTraceClient, LocalRotatingTraceSink } from "@botiverse/raft-trace-client";
 import { noopTracer } from "@botiverse/raft-shared";
-import { computerDir } from "../paths.js";
-import type { ComputerTraceClientSource, ComputerTracer } from "./traceTypes.js";
+import { computerDir } from "../paths";
+import type { ComputerTraceClientSource, ComputerTracer } from "./traceTypes";
 
 /**
  * Build the env-gated Computer trace client for a given emitting `source`

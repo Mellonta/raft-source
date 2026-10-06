@@ -1,17 +1,17 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 
 import argon2 from "argon2";
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { users, machines } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { createServer, addMember, transitionMemberRole } from "../services/serverService.js";
-import { extractApiKeyFingerprint, extractApiKeyPrefix, registerMachine } from "../services/machineService.js";
-import { __setMachinePrincipalFenceHandlerForTests } from "../replicaRouter.js";
+import { getDb } from "../db/index";
+import { users, machines } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { signAccessToken } from "../middleware/auth";
+import { createServer, addMember, transitionMemberRole } from "../services/serverService";
+import { extractApiKeyFingerprint, extractApiKeyPrefix, registerMachine } from "../services/machineService";
+import { __setMachinePrincipalFenceHandlerForTests } from "../replicaRouter";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act, cleanup, render } from "@testing-library/react";
-import type { InboxItem } from "../src/store/inboxStore.js";
+import type { InboxItem } from "../src/store/inboxStore";
 
-const { isInboxItemActive, useIsItemActive } = await import("../src/components/thread/useIsItemActive.js");
-const { default: ConversationPreviewCard } = await import("../src/components/ui/cards/ConversationPreviewCard.js");
-const { useThreadStore } = await import("../src/store/threadStore.js");
+const { isInboxItemActive, useIsItemActive } = await import("../src/components/thread/useIsItemActive");
+const { default: ConversationPreviewCard } = await import("../src/components/ui/cards/ConversationPreviewCard");
+const { useThreadStore } = await import("../src/store/threadStore");
 
 const inactiveThread = { openParentChannelId: null, openParentMessageId: null, openThreadChannelId: null };
 

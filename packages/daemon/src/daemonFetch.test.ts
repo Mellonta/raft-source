@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { test } from "vitest";
 import { ProxyAgent } from "undici";
-import { createProviderHttpClient, daemonFetch, withDaemonFetchProxy } from "./daemonFetch.js";
+import { createProviderHttpClient, daemonFetch, withDaemonFetchProxy } from "./daemonFetch";
 import {
   buildIsolatedFetchDispatcher,
   evictIsolatedFetchDispatcher,
-} from "./proxy.js";
+} from "./proxy";
 
 test("daemonFetch accepts a native Request without passing the Request object to undici", async () => {
   const seen: { method?: string; testHeader?: string; body: string } = { body: "" };

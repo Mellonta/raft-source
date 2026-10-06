@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { test } from "vitest";
 import {
   emitTaskCreated,
   emitTaskDeleted,
@@ -8,7 +7,7 @@ import {
   emitTaskMessageUpdated,
   emitTaskUpdated,
   projectTaskMessageUpdated,
-} from "./taskRealtimeEvents.js";
+} from "./taskRealtimeEvents";
 
 function createIoRecorder() {
   const emissions: Array<{ rooms: string[]; event: string; payload: unknown }> = [];

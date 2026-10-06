@@ -20,7 +20,7 @@ import type { ReactNode } from "react";
 import { Badge } from "raft-ui";
 import type { BadgeProps } from "raft-ui";
 import type { TaskStatus } from "../../store/taskStore";
-import { getTaskStatusBackgroundStyle, STATUS_BADGE_CONFIG } from "./taskStatusUi";
+import { getTaskStatusBadgeClassName, STATUS_BADGE_CONFIG } from "./taskStatusUi";
 
 interface StatusBadgeProps extends Omit<BadgeProps, "appearance" | "className" | "children" | "uppercase" | "variant"> {
   status: TaskStatus;
@@ -52,8 +52,8 @@ export function StatusBadge({
       variant={cfg.variant}
       // Stryker disable next-line BooleanLiteral: task status badges intentionally keep source-cased labels; source contract pins uppercase=false.
       uppercase={false}
-      className={`${cfg.bg} ${className}`.trim()}
-      style={{ ...style, ...getTaskStatusBackgroundStyle(status) }}
+      className={`${getTaskStatusBadgeClassName(status)} ${className}`.trim()}
+      style={style}
       data-status={status}
       {...rest}
     >

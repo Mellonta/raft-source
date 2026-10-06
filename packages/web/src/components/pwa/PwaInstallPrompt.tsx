@@ -1,6 +1,8 @@
+import CloseButton from "../ui/CloseButton";
 import { useCallback, useEffect, useState } from "react";
 import { useIntl } from "react-intl";
 import { Smartphone, X } from "lucide-react";
+import { Button } from "raft-ui";
 import BottomSheet from "../ui/BottomSheet";
 import {
   PWA_INSTALL_OPEN_EVENT,
@@ -48,27 +50,27 @@ function IosInstructionSheet({
     >
       <div className="mb-3 flex items-start justify-between gap-3">
         <div>
-          <div className="text-lg font-black leading-tight text-black">
+          <div className="text-lg font-black leading-tight text-foreground-strong">
             {formatMessage({ id: "pwa.install.addToYourHomeScreen" })}
           </div>
-          <div className="mt-1 text-sm text-black/60">
+          <div className="mt-1 text-sm text-foreground-muted">
             {isSafari
               ? formatMessage({ id: "pwa.install.safariSubtitle" })
               : formatMessage({ id: "pwa.install.openInSafariSettingsHint" })}
           </div>
         </div>
-        <button
+        <CloseButton
           type="button"
           onClick={onClose}
-          className="btn-brutal-sm bg-white p-1"
+          className=" "
           aria-label={formatMessage({ id: "pwa.install.closeInstructionsAria" })}
         >
           <X size={16} />
-        </button>
+        </CloseButton>
       </div>
 
       {isSafari ? (
-        <div className="border-2 border-black bg-brutal-cream p-2">
+        <div className="rounded-md border border-line-muted bg-layer-inset p-2 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream">
           <img
             src="/pwa/ios-add-to-home-screen-3step.svg"
             alt={formatMessage({ id: "pwa.install.threeStepsAlt" })}
@@ -76,22 +78,22 @@ function IosInstructionSheet({
           />
         </div>
       ) : (
-        <div className="border-2 border-black bg-brutal-cream p-3 text-sm text-black">
+        <div className="rounded-md border border-line-muted bg-layer-inset p-3 text-sm text-foreground-strong theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream theme-brutal:text-black">
           {formatMessage({ id: "pwa.install.iosSafariOnly" })}
         </div>
       )}
 
       <div className="mt-4 flex gap-2">
         {!isSafari && (
-          <button type="button" onClick={onCopyLink} className="btn-brutal bg-brutal-pink px-3 py-2 text-xs">
+          <Button type="button" onClick={onCopyLink} size="sm" variant="accent">
             {formatMessage({ id: "pwa.install.copyLink" })}
-          </button>
+          </Button>
         )}
-        <button type="button" onClick={onClose} className="btn-brutal bg-white px-3 py-2 text-xs">
+        <Button type="button" onClick={onClose} size="sm" variant="outline">
           {isSafari
             ? formatMessage({ id: "pwa.install.gotIt" })
             : formatMessage({ id: "common.close" })}
-        </button>
+        </Button>
       </div>
     </BottomSheet>
   );
@@ -144,18 +146,19 @@ export function PwaInstallSettingsCard() {
 
   return (
     <div data-pwa-install-settings-card className="mb-6 md:hidden">
-      <div className="border-2 border-black bg-white p-4 shadow-brutal-sm">
+      <div className="rounded-lg border border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-bold text-black">
+            <div className="flex items-center gap-2 text-sm font-bold text-foreground-strong">
               <Smartphone size={16} />
               {formatMessage({ id: "pwa.install.addToHomeScreen" })}
             </div>
-            <div className="mt-1 text-xs text-black/60">{helpText}</div>
+            <div className="mt-1 text-xs text-foreground-muted">{helpText}</div>
           </div>
-          <button
+          <Button
             type="button"
-            className="btn-brutal bg-brutal-pink px-3 py-1.5 text-xs"
+            size="sm"
+            variant="accent"
             onClick={() => {
               recordPwaInstallEvent({
                 event: "pwa_install_cta_clicked",
@@ -170,7 +173,7 @@ export function PwaInstallSettingsCard() {
             }}
           >
             {formatMessage({ id: "pwa.install.add" })}
-          </button>
+          </Button>
         </div>
       </div>
     </div>

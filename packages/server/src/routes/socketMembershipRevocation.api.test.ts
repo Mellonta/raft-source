@@ -1,13 +1,13 @@
-import { emitTaskCreated, emitTaskUpdated, emitTaskDeleted } from "../services/taskRealtimeEvents.js";
+import { emitTaskCreated, emitTaskUpdated, emitTaskDeleted } from "../services/taskRealtimeEvents";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import WebSocket from "ws";
 import { and, eq } from "drizzle-orm";
 import { SERVER_GUEST_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
-import { channels, featureFlagRules, serverMembers, threadFollows } from "../db/schema.js";
-import { createApiTest } from "../test/integration/apiTest.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { getOrCreateThread } from "../services/channelService.js";
+import { channels, featureFlagRules, serverMembers, threadFollows } from "../db/schema";
+import { createApiTest } from "../test/integration/apiTest";
+import { signAccessToken } from "../middleware/auth";
+import { getOrCreateThread } from "../services/channelService";
 
 const test = createApiTest({ onboardingOpenerFlagDefaultEnabled: false });
 

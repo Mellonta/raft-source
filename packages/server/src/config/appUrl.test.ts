@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "vitest";
 import {
   DEFAULT_APP_URL,
   getAppPermalinkHostnames,
@@ -9,7 +8,7 @@ import {
   getWebCorsOrigins,
   getWebFrameAncestorOrigins,
   normalizeAppUrl,
-} from "./appUrl.js";
+} from "./appUrl";
 
 const ORIGINAL_ENV = {
   APP_URL: process.env.APP_URL,

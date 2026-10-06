@@ -5,6 +5,7 @@ import api from "../../api/client";
 import type { Channel } from "../../store/channelStore";
 import type { Message } from "../../store/messageStore";
 import AvatarSlot from "../ui/AvatarSlot";
+import { isJointChannelReadOnly } from "../../utils/jointChannelLimit";
 
 export const MAX_FORWARD_DESTINATIONS = 10;
 export type MobileForwardStep = "targets" | "preview" | "detail";
@@ -42,7 +43,7 @@ export function targetIcon(channel: Channel) {
 export function canForwardToTarget(channel: Channel): boolean {
   if (channel.archivedAt || channel.type === "thread") return false;
   if (channel.type === "dm") return true;
-  if (channel.type === "joint" && channel.jointBillingLocked === true) return false;
+  if (isJointChannelReadOnly(channel)) return false;
   return channel.joined === true;
 }
 

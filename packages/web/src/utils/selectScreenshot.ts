@@ -1,6 +1,6 @@
 import { toPng } from "html-to-image";
-import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
-import pixelAvatars from "../../assets/avatars/pixelAvatars.json";
+import { clearClockTimeout, errorClassOf, setClockTimeout } from "@botiverse/raft-shared";
+import { DEFAULT_AVATAR_KEY, pixelAvatarDataUrl } from "../components/agent/PixelAvatar";
 import { useServerStore } from "../store/serverStore";
 import { assertValidDesktopRuntimeEnvironment, RUNTIME_API_BASE } from "../desktopRuntimeEnvironment";
 import { materializeDomCaptureSnapshots } from "./domCaptureSnapshot";
@@ -108,6 +108,21 @@ export async function waitForDocumentFontsForScreenshot(
  *
  * Returns a `data:image/png;base64,...` URL.
  */
+export function resolveScreenshotSurface(source: HTMLElement): { backgroundColor: string; color: string } {
+  const color = getComputedStyle(source).color;
+  for (let element: HTMLElement | null = source.parentElement; element; element = element.parentElement) {
+    const backgroundColor = getComputedStyle(element).backgroundColor;
+    // Selection/hover washes are stripped from the clone. Use its solid
+    // underlying surface, not a translucent row highlight or a white default.
+    const alpha = backgroundColor.match(/(?:rgba\([^)]*,|\/)\s*([\d.]+)(%)?\s*\)$/);
+    const opacity = alpha ? Number(alpha[1]) / (alpha[2] ? 100 : 1) : 1;
+    if (backgroundColor && backgroundColor !== "transparent" && opacity >= 1) {
+      return { backgroundColor, color };
+    }
+  }
+  return { backgroundColor: "#FFFFFF", color };
+}
+
 export interface CaptureOptions {
   backgroundColor?: string;
   pixelRatio?: number;
@@ -440,11 +455,6 @@ async function decodeImage(img: HTMLImageElement): Promise<void> {
   }
 }
 
-function isTransparentColor(value: string): boolean {
-  const color = value.trim().toLowerCase();
-  return color === "" || color === "transparent" || color === "rgba(0, 0, 0, 0)" || color === "rgba(0,0,0,0)";
-}
-
 function svgDataUrl(svg: string): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
@@ -452,22 +462,10 @@ function svgDataUrl(svg: string): string {
 const DEFAULT_HUMAN_AVATAR_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" fill="#BBAFE6"/><path d="M20 21a8 8 0 0 0-16 0" fill="none" stroke="#141111" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/><circle cx="12" cy="7" r="4" fill="none" stroke="#141111" stroke-width="2"/></svg>';
 
-// The agent default is the same robot sprite used by AgentAvatar when a
-// custom image is unavailable. Keep this capture-only copy inline so a failed
-// image cannot make the rasterizer depend on React/CSS-grid state.
-const DEFAULT_AGENT_AVATAR_DATA_URL = (() => {
-  const avatars = pixelAvatars.avatars as Record<string, { bg: string; grid: string[] }>;
-  const avatar = avatars[pixelAvatars.defaultKey];
-  const palette = pixelAvatars.palette as Record<string, string>;
-  const bg = avatar.bg.startsWith("#") ? avatar.bg : palette[avatar.bg];
-  const cells = avatar.grid.flatMap((row, y) => row.split("").flatMap((color, x) => {
-    const fill = color === "_" ? "transparent" : color.startsWith("#") ? color : palette[color];
-    return fill === "transparent"
-      ? []
-      : [`<rect x="${x}" y="${y}" width="1" height="1" fill="${fill}"/>`];
-  }));
-  return svgDataUrl(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" shape-rendering="crispEdges"><rect width="8" height="8" fill="${bg}"/>${cells.join("")}</svg>`);
-})();
+// The agent default is the same robot sprite AgentAvatar renders when a custom
+// image is unavailable — built by the single pixel-avatar SVG builder, so a
+// failed image never depends on React state.
+const DEFAULT_AGENT_AVATAR_DATA_URL = pixelAvatarDataUrl(DEFAULT_AVATAR_KEY) ?? "";
 
 /**
  * Return the same visible default-avatar treatment used by AvatarSlot when a
@@ -501,46 +499,6 @@ function canRasterizeOriginalImage(src: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * html-to-image serializes CSS grid children inconsistently inside SVG
- * foreignObject. Pixel avatars are intentionally CSS-only in the live UI, so
- * materialize each 8x8 grid into one inline SVG before rasterization. This is
- * capture-only; the live avatar remains the canonical CSS grid.
- */
-function inlinePixelAvatarsForScreenshot(root: HTMLElement): void {
-  const avatars = root.querySelectorAll<HTMLElement>("[data-agent-pixel-avatar]");
-  avatars.forEach((avatar) => {
-    const cells = Array.from(avatar.children).slice(0, 64) as HTMLElement[];
-    if (cells.length !== 64) return;
-
-    const avatarStyle = window.getComputedStyle(avatar);
-    const bg = avatarStyle.backgroundColor;
-    if (isTransparentColor(bg)) return;
-
-    const rects = cells.flatMap((cell, index) => {
-      const fill = window.getComputedStyle(cell).backgroundColor;
-      if (isTransparentColor(fill)) return [];
-      const x = index % 8;
-      const y = Math.floor(index / 8);
-      return [`<rect x="${x}" y="${y}" width="1" height="1" fill="${fill}"/>`];
-    });
-
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" shape-rendering="crispEdges"><rect width="8" height="8" fill="${bg}"/>${rects.join("")}</svg>`;
-    const img = document.createElement("img");
-    img.src = svgDataUrl(svg);
-    img.alt = "";
-    img.style.display = "block";
-    img.style.width = "100%";
-    img.style.height = "100%";
-    img.style.objectFit = "cover";
-    img.style.imageRendering = "pixelated";
-
-    avatar.replaceChildren(img);
-    avatar.style.display = "block";
-    avatar.style.backgroundColor = bg;
-  });
 }
 
 async function inlineImageForScreenshot(img: HTMLImageElement): Promise<void> {
@@ -577,7 +535,7 @@ async function inlineImageForScreenshot(img: HTMLImageElement): Promise<void> {
         fetchUrl: target.url,
         error: err,
         errMessage: err instanceof Error ? err.message : String(err),
-        errName: err instanceof Error ? err.name : typeof err,
+        errName: errorClassOf(err),
       },
     );
     if (target.avatarFallbackKind) {
@@ -619,15 +577,16 @@ async function captureSelectedMessagesUnsafe(
     return 0;
   });
 
-  // Default falls through to white per the layout color contract (post-#1272
-  // main panel = white). Callers should still pass an explicit value.
-  const bg = options.backgroundColor ?? "#FFFFFF";
+  // Match the live surface so cloned dark-theme text keeps its original contrast.
+  const surface = resolveScreenshotSurface(nodes[0]);
+  const bg = options.backgroundColor ?? surface.backgroundColor;
 
   // Track the LIVE MESSAGE ROW's own rendered width — not the chat column /
   // parent's. Measuring the parent (chat column) lets the off-screen container
   // become wider than where the row was actually laid out (parent padding,
-  // flex-1 sibling siblings, max-w constraints), which causes inline-block
-  // children like `<MSG_REF_CHIP>` (`#proj-growth` etc.) to re-layout inside
+  // flex-1 sibling siblings, max-w constraints), which causes inline
+  // children like the message reference chips (`#proj-growth` etc.) to
+  // re-layout inside
   // an SVG `<foreignObject>` and overflow because the chip itself has no
   // max-width / truncate. Optionally cap the export to a channel-specific
   // reading width so a single message does not become an overly wide, flat
@@ -669,7 +628,7 @@ async function captureSelectedMessagesUnsafe(
   container.style.padding = "0";
   container.style.background = bg;
   container.style.fontFamily = getComputedStyle(document.body).fontFamily;
-  container.style.color = "#141111";
+  container.style.color = surface.color;
   container.style.boxSizing = "border-box";
   container.setAttribute("data-select-screenshot-root", "true");
 
@@ -771,7 +730,8 @@ async function captureSelectedMessagesUnsafe(
     // We also freeze each image's rendered box before replacing src. If a single
     // image still fails, the export keeps the live message layout instead of
     // collapsing that media slot to a 1x1 broken-image placeholder.
-    inlinePixelAvatarsForScreenshot(container);
+    // Pixel avatars are already <img> data URLs (PixelAvatar), so they go
+    // through the same image inlining as everything else.
     const imgs = Array.from(container.querySelectorAll("img")) as HTMLImageElement[];
     await Promise.all(imgs.map((img) => inlineImageForScreenshot(img)));
 

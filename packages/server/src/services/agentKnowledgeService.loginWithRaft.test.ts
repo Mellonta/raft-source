@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService.js";
+import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService";
 
 // Gogo's 7/23 byte audit found this seeded card served a correctness bug for
 // weeks: it told agents that workspace membership decides who may use a tool,

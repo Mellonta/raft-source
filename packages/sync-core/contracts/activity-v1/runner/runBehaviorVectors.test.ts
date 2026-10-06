@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 import {
   BEHAVIOR_VECTORS_PATH,
   canonicalJson,
   runBehaviorVectors,
   runCase,
-} from "./runBehaviorVectors.js";
+} from "./runBehaviorVectors";
 
 const envelopes = readFileSync(BEHAVIOR_VECTORS_PATH, "utf8")
   .trim()

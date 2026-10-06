@@ -19,7 +19,7 @@ function assert(condition, message) {
 assert(pkg.name === "@botiverse/raft", "package name must be the canonical @botiverse/raft");
 assert(pkg.private !== true, "package must not be private");
 assert(pkg.publishConfig?.access === "public", "publishConfig.access must be public");
-assert(pkg.engines?.node === ">=20", "package engines.node must declare the supported Node floor");
+assert(pkg.engines?.node === ">=24", "package engines.node must declare the supported Node floor");
 assert(pkg.bin?.raft === "dist/raft.js", "raft bin must point at dist/raft.js");
 assert(pkg.bin?.slock === "dist/slock.js", "slock alias bin must point at dist/slock.js");
 assert(Array.isArray(pkg.files) && pkg.files.includes("dist"), "published package must include dist/");

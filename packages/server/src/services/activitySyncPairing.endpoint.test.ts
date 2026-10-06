@@ -1,4 +1,4 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 /**
  * task #364 — endpoint-level proof that `latestActivityMessageId` and
  * `latestActivitySeq` are SAME-SOURCE on the real Activity snapshot path.
@@ -42,7 +42,7 @@ import { randomUUID } from "node:crypto";
 
 import argon2 from "argon2";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channelHumans,
   channels,
@@ -54,9 +54,9 @@ import {
   threadFollows,
   users,
   userChannelReadCursors,
-} from "../db/schema.js";
-import { getActivitySnapshot } from "./activitySyncService.js";
-import { openTestApp } from "../test/integration/app.js";
+} from "../db/schema";
+import { getActivitySnapshot } from "./activitySyncService";
+import { openTestApp } from "../test/integration/app";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

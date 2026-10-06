@@ -19,12 +19,13 @@ import {
   currentTimeMs,
   sourceRefIdentityKey,
   type AgentInboxAppItem,
+  type AgentInboxSourceSeal,
   type AgentInboxPrimaryAction,
   type AgentInboxRetention,
   type AgentInboxSourceRef,
 } from "@botiverse/raft-shared";
-import { appInboxItemTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace.js";
-import type { ScopedAppStorage } from "./scopedAppStorage.js";
+import { appInboxItemTraceAttrs } from "@botiverse/raft-shared/src/appRuntimeTrace";
+import type { ScopedAppStorage } from "./scopedAppStorage";
 
 export type AgentAppInboxMintInput = {
   appId: string;
@@ -81,6 +82,8 @@ export type AgentAppInboxAckIntent = {
   createdAtMs: number;
   ownerAgentId?: string;
 };
+
+export type AgentAppInboxSeal = AgentInboxSourceSeal;
 
 /**
  * One notification class under an app. App-owned packages inject these;
@@ -142,6 +145,11 @@ export const AGENT_APP_INBOX_PERSISTED_REJECTION_CODES = [
   "ack_intent_source_ref_invalid",
   "ack_intent_item_id_invalid",
   "ack_intent_item_binding_invalid",
+  "seals_invalid",
+  "seal_invalid",
+  "seal_shape_invalid",
+  "seal_registry_binding_invalid",
+  "seal_source_ref_invalid",
 ] as const;
 
 type AgentAppInboxPersistedRejectionCode =
@@ -163,9 +171,33 @@ function rejectPersistedPayload(code: AgentAppInboxPersistedRejectionCode): neve
   throw new AgentAppInboxPersistedRejection(code);
 }
 
+/** How an App asks for its Inbox item to be noticed by the owner agent. */
+export interface AgentAppInboxNoticeOptions {
+  /**
+   * false: only a running agent session is notified. A stopped agent is
+   * neither restarted locally nor woken through the Server; it sees the item
+   * when it next wakes for another reason. Default true.
+   */
+  startStoppedAgent?: boolean;
+}
+
 export type AgentAppInboxStore = {
   list(): readonly AgentInboxAppItem[];
   listAcknowledgedSources(): readonly AgentAppInboxAcknowledgedSource[];
+  listSeals(): readonly AgentAppInboxSeal[];
+  findProtectingSeal(input: {
+    appId: string;
+    notificationClass: string;
+    sourceRef: AgentInboxSourceRef;
+  }): AgentAppInboxSeal | null;
+  sealSources(input: {
+    sources: readonly Pick<AgentAppInboxSeal, "appId" | "notificationClass" | "sourceRef">[];
+    owner: string;
+    until: string;
+  }): AgentAppInboxSeal[] | null;
+  unsealSources(input: {
+    sources: readonly Pick<AgentAppInboxSeal, "appId" | "notificationClass" | "sourceRef">[];
+  }): AgentAppInboxSeal[] | null;
   isSourceAcknowledged(input: {
     appId: string;
     notificationClass: string;
@@ -230,6 +262,8 @@ export function createAgentAppInboxStore(options?: {
   const acknowledgedSources = new Map<string, AgentAppInboxAcknowledgedSource>();
   /** itemId → daemon-owned outbound exact ACK intent. */
   const ackIntents = new Map<string, AgentAppInboxAckIntent>();
+  /** Exact source identity -> local per-Agent hold, independent of source record lifetime. */
+  const seals = new Map<string, AgentAppInboxSeal>();
   const assertStorageActive = () => options?.storage?.assertActive();
 
   const persist = () => {
@@ -237,10 +271,11 @@ export function createAgentAppInboxStore(options?: {
     const durable = [...items.values()].filter((item) => isDurableRetention(item.retention));
     options.storage.writeTextAtomic(
       `${JSON.stringify({
-        version: 3,
+        version: 4,
         items: durable,
         acknowledgedSources: [...acknowledgedSources.values()],
         ackIntents: [...ackIntents.values()],
+        seals: [...seals.values()],
       })}\n`,
     );
   };
@@ -256,7 +291,7 @@ export function createAgentAppInboxStore(options?: {
       } catch {
         rejectPersistedPayload("invalid_json");
       }
-      if (!parsed || typeof parsed !== "object" || ![1, 2, 3].includes((parsed as { version?: number }).version ?? 0)) {
+      if (!parsed || typeof parsed !== "object" || ![1, 2, 3, 4].includes((parsed as { version?: number }).version ?? 0)) {
         rejectPersistedPayload("envelope_invalid");
       }
       const rawItems = (parsed as { items?: unknown }).items;
@@ -278,7 +313,7 @@ export function createAgentAppInboxStore(options?: {
         }
       }
       const restoredAckIntents: AgentAppInboxAckIntent[] = [];
-      if ((parsed as { version?: number }).version === 3) {
+      if (((parsed as { version?: number }).version ?? 0) >= 3) {
         const rawAckIntents = (parsed as { ackIntents?: unknown }).ackIntents;
         if (rawAckIntents !== undefined && !Array.isArray(rawAckIntents)) {
           rejectPersistedPayload("ack_intents_invalid");
@@ -290,6 +325,16 @@ export function createAgentAppInboxStore(options?: {
             rejectPersistedPayload("ack_intent_item_binding_invalid");
           }
           restoredAckIntents.push(intent);
+        }
+      }
+      const restoredSeals: AgentAppInboxSeal[] = [];
+      if ((parsed as { version?: number }).version === 4) {
+        const rawSeals = (parsed as { seals?: unknown }).seals;
+        if (rawSeals !== undefined && !Array.isArray(rawSeals)) {
+          rejectPersistedPayload("seals_invalid");
+        }
+        for (const rawSeal of rawSeals ?? []) {
+          restoredSeals.push(restoreSeal(rawSeal, registry));
         }
       }
 
@@ -314,6 +359,9 @@ export function createAgentAppInboxStore(options?: {
       for (const intent of restoredAckIntents) {
         ackIntents.set(intent.itemId, intent);
       }
+      for (const seal of restoredSeals) {
+        seals.set(makeIdentityKey(seal.appId, seal.notificationClass, seal.sourceRef), seal);
+      }
     } catch (error) {
       options.storage.reportDataFailure(
         error instanceof AgentAppInboxPersistedRejection
@@ -331,13 +379,66 @@ export function createAgentAppInboxStore(options?: {
       assertStorageActive();
       return [...items.values()].sort(
         (a, b) => (b.createdAtMs ?? 0) - (a.createdAtMs ?? 0) || a.itemId.localeCompare(b.itemId),
-      );
+      ).map((item) => {
+        const seal = seals.get(makeIdentityKey(item.appId, item.notificationClass, item.sourceRef));
+        return seal
+          ? { ...item, sourceRef: { ...item.sourceRef }, seal: { owner: seal.owner, until: seal.until, sealedAtMs: seal.sealedAtMs } }
+          : item;
+      });
     },
     listAcknowledgedSources() {
       assertStorageActive();
       return [...acknowledgedSources.values()].sort(
         (a, b) => b.acknowledgedAtMs - a.acknowledgedAtMs || a.itemId.localeCompare(b.itemId),
       );
+    },
+    listSeals() {
+      assertStorageActive();
+      return [...seals.values()]
+        .sort((a, b) => makeIdentityKey(a.appId, a.notificationClass, a.sourceRef)
+          .localeCompare(makeIdentityKey(b.appId, b.notificationClass, b.sourceRef)))
+        .map((seal) => ({ ...seal, sourceRef: { ...seal.sourceRef } }));
+    },
+    findProtectingSeal(input) {
+      assertStorageActive();
+      const found = findSealForSourceId(seals, input);
+      return found ? { ...found, sourceRef: { ...found.sourceRef } } : null;
+    },
+    sealSources(input) {
+      assertStorageActive();
+      if (
+        input.sources.length === 0
+        || !isValidSealLabel(input.owner, AGENT_INBOX_PREVIEW_MAX_CHARS)
+        || !isValidSealLabel(input.until, 500)
+      ) return null;
+      const normalized = input.sources.map((source) => normalizeSealSource(source, registry));
+      if (normalized.some((source) => source === null)) return null;
+      const keys = normalized.map((source) => makeIdentityKey(source!.appId, source!.notificationClass, source!.sourceRef));
+      if (new Set(keys).size !== keys.length) return null;
+      const created = normalized.map((source) => ({
+        ...source!,
+        owner: input.owner,
+        until: input.until,
+        sealedAtMs: nowMs(),
+      }));
+      for (const seal of created) {
+        seals.set(makeIdentityKey(seal.appId, seal.notificationClass, seal.sourceRef), seal);
+      }
+      persist();
+      return created;
+    },
+    unsealSources(input) {
+      assertStorageActive();
+      if (input.sources.length === 0) return null;
+      const normalized = input.sources.map((source) => normalizeSealSource(source, registry));
+      if (normalized.some((source) => source === null)) return null;
+      const keys = normalized.map((source) => makeIdentityKey(source!.appId, source!.notificationClass, source!.sourceRef));
+      if (new Set(keys).size !== keys.length) return null;
+      if (keys.some((key) => !seals.has(key))) return null;
+      const removed = keys.map((key) => seals.get(key)!);
+      for (const key of keys) seals.delete(key);
+      persist();
+      return removed;
     },
     isSourceAcknowledged(input) {
       assertStorageActive();
@@ -462,6 +563,7 @@ export function createAgentAppInboxStore(options?: {
       assertStorageActive();
       const item = items.get(itemId);
       if (!item) return false;
+      if (findSealForSourceId(seals, item)) return false;
       const sourceAcked = options?.beforeAck?.(item);
       if (sourceAcked === false) {
         if (options?.ownerAgentId) {
@@ -503,6 +605,7 @@ export function createAgentAppInboxStore(options?: {
       assertStorageActive();
       const item = items.get(input.itemId);
       if (!item) return null;
+      if (findSealForSourceId(seals, item)) return null;
       const existing = ackIntents.get(input.itemId);
       if (existing) return { ...existing, sourceRef: { ...existing.sourceRef } };
       const intent: AgentAppInboxAckIntent = {
@@ -523,6 +626,7 @@ export function createAgentAppInboxStore(options?: {
       const item = items.get(input.itemId);
       const intent = ackIntents.get(input.itemId);
       if (!item || !intent || intent.ackAttemptId !== input.ackAttemptId) return false;
+      if (findSealForSourceId(seals, item)) return false;
       if (makeIdentityKey(item.appId, item.notificationClass, item.sourceRef) !== makeIdentityKey(intent.appId, intent.notificationClass, intent.sourceRef)) {
         return false;
       }
@@ -592,9 +696,101 @@ export function createAgentAppInboxStore(options?: {
       identityIndex.clear();
       acknowledgedSources.clear();
       ackIntents.clear();
+      seals.clear();
       persist();
     },
   };
+}
+
+function restoreSeal(raw: unknown, registry: AgentAppInboxRegistry): AgentAppInboxSeal {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    rejectPersistedPayload("seal_invalid");
+  }
+  const saved = raw as Partial<AgentAppInboxSeal>;
+  if (
+    typeof saved.appId !== "string"
+    || typeof saved.notificationClass !== "string"
+    || !saved.sourceRef
+    || typeof saved.owner !== "string"
+    || !saved.owner
+    || saved.owner.length > AGENT_INBOX_PREVIEW_MAX_CHARS
+    || PREVIEW_FORBIDDEN_CHARS.test(saved.owner)
+    || typeof saved.until !== "string"
+    || !saved.until
+    || saved.until.length > 500
+    || PREVIEW_FORBIDDEN_CHARS.test(saved.until)
+    || typeof saved.sealedAtMs !== "number"
+    || !Number.isFinite(saved.sealedAtMs)
+  ) {
+    rejectPersistedPayload("seal_shape_invalid");
+  }
+  const classSpec = registry[saved.appId]?.[saved.notificationClass];
+  if (!classSpec || !isDurableRetention(classSpec.retention)) {
+    rejectPersistedPayload("seal_registry_binding_invalid");
+  }
+  if (saved.sourceRef.revision === undefined && isClosedSourceRefShape(saved.sourceRef)) {
+    return {
+      appId: saved.appId,
+      notificationClass: saved.notificationClass,
+      sourceRef: { ...saved.sourceRef },
+      owner: saved.owner,
+      until: saved.until,
+      sealedAtMs: saved.sealedAtMs,
+    };
+  }
+  const normalized = classSpec.normalizeSourceRef(saved.sourceRef);
+  if (!normalized.ok || !isClosedSourceRefShape(normalized.ref)) {
+    rejectPersistedPayload("seal_source_ref_invalid");
+  }
+  return {
+    appId: saved.appId,
+    notificationClass: saved.notificationClass,
+    sourceRef: normalized.ref,
+    owner: saved.owner,
+    until: saved.until,
+    sealedAtMs: saved.sealedAtMs,
+  };
+}
+
+function normalizeSealSource(
+  source: Pick<AgentAppInboxSeal, "appId" | "notificationClass" | "sourceRef">,
+  registry: AgentAppInboxRegistry,
+): Pick<AgentAppInboxSeal, "appId" | "notificationClass" | "sourceRef"> | null {
+  const classSpec = registry[source.appId]?.[source.notificationClass];
+  if (!classSpec || !isDurableRetention(classSpec.retention)) return null;
+  if (source.sourceRef.revision === undefined && isClosedSourceRefShape(source.sourceRef)) {
+    return {
+      appId: source.appId,
+      notificationClass: source.notificationClass,
+      sourceRef: { ...source.sourceRef },
+    };
+  }
+  const normalized = classSpec.normalizeSourceRef(source.sourceRef);
+  if (!normalized.ok || !isClosedSourceRefShape(normalized.ref)) return null;
+  return {
+    appId: source.appId,
+    notificationClass: source.notificationClass,
+    sourceRef: normalized.ref,
+  };
+}
+
+function isValidSealLabel(value: string, maxLength: number): boolean {
+  return value === value.trim()
+    && value.length > 0
+    && value.length <= maxLength
+    && !PREVIEW_FORBIDDEN_CHARS.test(value);
+}
+
+function findSealForSourceId(
+  seals: ReadonlyMap<string, AgentAppInboxSeal>,
+  input: Pick<AgentAppInboxSeal, "appId" | "notificationClass" | "sourceRef">,
+): AgentAppInboxSeal | undefined {
+  return [...seals.values()].find((seal) =>
+    seal.appId === input.appId
+    && seal.notificationClass === input.notificationClass
+    && seal.sourceRef.kind === input.sourceRef.kind
+    && seal.sourceRef.id === input.sourceRef.id,
+  );
 }
 
 function restorePersistedItem(raw: unknown, registry: AgentAppInboxRegistry): AgentInboxAppItem {

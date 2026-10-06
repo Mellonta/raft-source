@@ -1,3 +1,4 @@
+import { withChannelWriterFence } from "../services/channelConversionFenceService";
 import {
   canAddChannelMembers,
   getChannelAdminBasis,
@@ -9,9 +10,9 @@ import {
   type ServerRole,
 } from "@botiverse/raft-shared";
 import { and, eq } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { channelAgents, channelHumans, channels } from "../db/schema.js";
-import { resolveActorContext, type ActorContextType } from "./actorPermissions.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { channelAgents, channelHumans, channels } from "../db/schema";
+import { resolveActorContext, type ActorContextType } from "./actorPermissions";
 
 export interface ChannelActorContext {
   actorType: ActorContextType;
@@ -164,7 +165,7 @@ export async function withLockedChannelActorCapabilities<T>(
   },
   callback: (executor: DatabaseExecutor, context: ChannelActorContext) => Promise<T>,
 ): Promise<T> {
-  return getDb().transaction(async (tx) => {
+  return withChannelWriterFence(input.channelId, async (tx) => {
     const [lockedChannel] = await tx.select({ id: channels.id })
       .from(channels)
       .where(and(eq(channels.id, input.channelId), eq(channels.serverId, input.serverId)))

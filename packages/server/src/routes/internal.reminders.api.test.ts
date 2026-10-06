@@ -1,23 +1,24 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import { eq } from "drizzle-orm";
-import { jointChannels, jointChannelServers, reminders, threadFollows, users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
-import { registerMachine } from "../services/machineService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { createMessage } from "../services/messageService.js";
-import * as channelService from "../services/channelService.js";
+import { agents, jointChannels, jointChannelServers, reminders, serverMembers, threadFollows, users } from "../db/schema";
+import { addMember, createServer } from "../services/serverService";
+import { createAgent, assignMachine } from "../services/agentService";
+import { registerMachine } from "../services/machineService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { createMessage } from "../services/messageService";
+import { createAppReminder } from "../apps/reminder/crud";
+import * as channelService from "../services/channelService";
 import {
   fireReminder,
   getReminderById,
   replaceReminder,
   type ReminderRow,
-} from "../apps/reminder/service.js";
+} from "../apps/reminder/service";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -119,9 +120,59 @@ function installFakeIo(app: { set: (k: string, v: unknown) => void }): EmittedEv
         },
       };
     },
+    // Reminder events are published per socket. Model one connected socket per
+    // server member, carrying the handshake role exactly like production
+    // sockets; a delivery is recorded against that member's user room.
+    local: {
+      in(rooms: string | string[]) {
+        const serverId = String(Array.isArray(rooms) ? rooms[0] : rooms).slice("server:".length);
+        return {
+          async fetchSockets() {
+            const members = await getDb()
+              .select({ userId: serverMembers.userId, serverRole: serverMembers.role })
+              .from(serverMembers)
+              .where(eq(serverMembers.serverId, serverId));
+            return members.map(({ userId, serverRole }) => ({
+              data: { userId, serverRole },
+              emit(event: string, payload: unknown) {
+                events.push({ room: `user:${userId}`, event, payload });
+              },
+            }));
+          },
+        };
+      },
+    },
   };
   app.set("io", fakeIo);
   return events;
+}
+
+/**
+ * Three more connected humans around the seeded owner: an admin (holds
+ * `editAgents`), the agent's human creator (plain member), and a plain member
+ * with no relation to the agent. Only the first two may inspect the agent.
+ */
+async function seedReminderViewers(serverId: string, agentId: string) {
+  const db = getDb();
+  const [admin, creator, bystander] = await db
+    .insert(users)
+    .values(["admin", "creator", "bystander"].map((name) => ({
+      email: `internal-reminders-${name}@slock.test`,
+      name: `internal-reminders-${name}`,
+      displayName: name,
+      passwordHash: "unused",
+      emailVerified: true,
+    })))
+    .returning();
+  await addMember(serverId, admin.id, "admin");
+  await addMember(serverId, creator.id);
+  await addMember(serverId, bystander.id);
+  await db.update(agents).set({ creatorType: "user", creatorId: creator.id }).where(eq(agents.id, agentId));
+  return { admin, creator, bystander };
+}
+
+function deliveredTo(events: EmittedEvent[], event: string): string[] {
+  return events.filter((e) => e.event === event).map((e) => e.room).sort();
 }
 
 function installReminderOrchestratorStub(app: {
@@ -241,8 +292,9 @@ function agentHeaders(apiKey: string): Record<string, string> {
   };
 }
 
-test("POST /internal/agent/:id/reminders emits reminder:scheduled on the server room", async ({ app }) => {
-  const { server, agent, apiKey, anchorId } = await seed();
+test("POST /internal/agent/:id/reminders delivers reminder:scheduled only to users who may inspect the owner agent", async ({ app }) => {
+  const { owner, server, agent, apiKey, anchorId } = await seed();
+  const { admin, creator } = await seedReminderViewers(server.id, agent.id);
   const sync = installReminderOrchestratorStub(app.app);
   const events = installFakeIo(app.app);
 
@@ -259,22 +311,93 @@ test("POST /internal/agent/:id/reminders emits reminder:scheduled on the server 
   const body = (await res.json()) as { reminder: { reminderId: string; ownerAgentId: string } };
   assert.equal(body.reminder.ownerAgentId, agent.id);
 
-  const scheduledEvents = events.filter((e) => e.event === "reminder:scheduled");
-  assert.equal(scheduledEvents.length, 1, "expected exactly one reminder:scheduled event");
-  const [evt] = scheduledEvents;
-  assert.equal(evt.room, `server:${server.id}`);
-  const payload = evt.payload as { reminder: { reminderId: string; ownerAgentId: string; title: string } };
-  assert.equal(payload.reminder.reminderId, body.reminder.reminderId);
-  assert.equal(payload.reminder.ownerAgentId, agent.id);
-  assert.equal(payload.reminder.title, "standup");
+  // The summary carries the title and anchor permalink, so the bystander's
+  // socket in the same server room must not receive it.
+  assert.deepEqual(
+    deliveredTo(events, "reminder:scheduled"),
+    [owner, admin, creator].map((user) => `user:${user.id}`).sort(),
+  );
+  for (const evt of events.filter((e) => e.event === "reminder:scheduled")) {
+    const payload = evt.payload as { reminder: { reminderId: string; ownerAgentId: string; title: string } };
+    assert.equal(payload.reminder.reminderId, body.reminder.reminderId);
+    assert.equal(payload.reminder.ownerAgentId, agent.id);
+    assert.equal(payload.reminder.title, "standup");
+  }
   assert.deepEqual(sync.upserts.map(({ agentId, row }) => [agentId, row.id, row.version]), [
     [agent.id, body.reminder.reminderId, 1],
   ]);
   assert.deepEqual(sync.cancels, []);
 });
 
+test("agent-api refuses reminder mutations for external agents with an explicit 409 and schedules nothing", async ({ app }) => {
+  const { server, anchorId } = await seed();
+  const sync = installReminderOrchestratorStub(app.app);
+  const events = installFakeIo(app.app);
+  const external = await createAgent(server.id, "r-external", { runtime: "external", model: "external" });
+  const [channel] = await channelService.listChannels(server.id);
+  await channelService.addAgent(channel.id, external.id);
+  const headers = agentHeaders(await agentApiKey(external.id));
+  // A reminder that predates the refusal (or was created by another path).
+  const legacy = await createAppReminder({
+    serverId: server.id,
+    ownerAgentId: external.id,
+    targetChannelId: null,
+    msgId: anchorId,
+    title: "pre-existing",
+    fireAt: new Date(Date.now() + 60_000),
+    payload: null,
+    recurrence: null,
+    createdBy: { type: "agent", id: external.id },
+  });
+
+  const refused = [
+    await fetch(`${app.baseUrl}/internal/agent-api/reminders`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "never fires", delaySeconds: 60, msgId: anchorId }),
+    }),
+    // Refused before request validation: an invalid body still gets the 409.
+    await fetch(`${app.baseUrl}/internal/agent-api/reminders`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({}),
+    }),
+    await fetch(`${app.baseUrl}/internal/agent-api/reminders/${legacy.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ title: "changed" }),
+    }),
+    await fetch(`${app.baseUrl}/internal/agent-api/reminders/${legacy.id}/snooze`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ delaySeconds: 300 }),
+    }),
+  ];
+  for (const res of refused) {
+    assert.equal(res.status, 409);
+    const body = await res.json() as { code?: string; error?: string };
+    assert.equal(body.code, "reminders_unsupported_for_external_agents");
+    assert.match(body.error ?? "", /not yet supported for external agents/);
+  }
+  const rows = await getDb().select().from(reminders).where(eq(reminders.ownerAgentId, external.id));
+  assert.deepEqual(rows.map((row) => [row.title, row.version]), [["pre-existing", legacy.version]]);
+  assert.deepEqual(sync.upserts, []);
+  assert.equal(events.filter((e) => e.event === "reminder:scheduled").length, 0);
+
+  // Reads and cancel stay truthful for an external agent.
+  const listRes = await fetch(`${app.baseUrl}/internal/agent-api/reminders?status=scheduled,fired`, { headers });
+  assert.equal(listRes.status, 200);
+  const listBody = await listRes.json() as { reminders: Array<{ reminderId: string }> };
+  assert.deepEqual(listBody.reminders.map((r) => r.reminderId), [legacy.id]);
+  const logRes = await fetch(`${app.baseUrl}/internal/agent-api/reminders/${legacy.id}/log`, { headers });
+  assert.equal(logRes.status, 200);
+  const cancelRes = await fetch(`${app.baseUrl}/internal/agent-api/reminders/${legacy.id}`, { method: "DELETE", headers });
+  assert.equal(cancelRes.status, 200);
+  assert.equal((await cancelRes.json() as { reminder: { status: string } }).reminder.status, "canceled");
+});
+
 test("agent-api reminder routes use bound credential identity without legacy agent id", async ({ app }) => {
-  const { server, agent, anchorId } = await seed();
+  const { owner, agent, anchorId } = await seed();
   const sync = installReminderOrchestratorStub(app.app);
   const events = installFakeIo(app.app);
   const apiKey = await agentApiKey(agent.id);
@@ -290,7 +413,7 @@ test("agent-api reminder routes use bound credential identity without legacy age
   assert.equal(createBody.reminder.ownerAgentId, agent.id);
   assert.equal(createBody.reminder.title, "agent-api");
   assert.equal(events.filter((e) => e.event === "reminder:scheduled").length, 1);
-  assert.equal(events[0].room, `server:${server.id}`);
+  assert.equal(events[0].room, `user:${owner.id}`);
 
   const listRes = await fetch(`${app.baseUrl}/internal/agent-api/reminders?status=scheduled,fired`, { headers });
   assert.equal(listRes.status, 200);
@@ -591,8 +714,9 @@ test("GET /internal/agent-api/reminders validates the ?status filter", async ({ 
   assert.equal(body.error, "Invalid status value");
 });
 
-test("DELETE /internal/agent/:id/reminders/:reminderId emits reminder:canceled on the server room", async ({ app }) => {
-  const { server, agent, apiKey, anchorId } = await seed();
+test("DELETE /internal/agent/:id/reminders/:reminderId delivers reminder:canceled only to users who may inspect the owner agent", async ({ app }) => {
+  const { owner, server, agent, apiKey, anchorId } = await seed();
+  const { admin, creator } = await seedReminderViewers(server.id, agent.id);
   installReminderOrchestratorStub(app.app);
 
   // Create the reminder first via the same route so we exercise the real path.
@@ -618,14 +742,16 @@ test("DELETE /internal/agent/:id/reminders/:reminderId emits reminder:canceled o
   );
   assert.equal(delRes.status, 200, `expected 200, got ${delRes.status}`);
 
-  const canceledEvents = events.filter((e) => e.event === "reminder:canceled");
-  assert.equal(canceledEvents.length, 1, "expected exactly one reminder:canceled event");
-  const [evt] = canceledEvents;
-  assert.equal(evt.room, `server:${server.id}`);
-  assert.deepEqual(evt.payload, {
-    reminderId,
-    ownerAgentId: agent.id,
-  });
+  assert.deepEqual(
+    deliveredTo(events, "reminder:canceled"),
+    [owner, admin, creator].map((user) => `user:${user.id}`).sort(),
+  );
+  for (const evt of events.filter((e) => e.event === "reminder:canceled")) {
+    assert.deepEqual(evt.payload, {
+      reminderId,
+      ownerAgentId: agent.id,
+    });
+  }
 });
 
 test("POST /internal/agent/:id/reminders rejects missing msgId", async ({ app }) => {

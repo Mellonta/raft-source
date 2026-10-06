@@ -1,11 +1,10 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { serverMembers, servers, users } from "../db/schema.js";
-import { markSetupHandoffAcknowledged } from "./serverService.js";
+import { getDb } from "../db/index";
+import { serverMembers, servers, users } from "../db/schema";
+import { markSetupHandoffAcknowledged } from "./serverService";
 
 
 afterEach(async () => {

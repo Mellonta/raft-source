@@ -14,7 +14,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
-import test from "node:test";
 import { en as enMessages } from "../src/i18n/messages/en";
 
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -99,18 +98,19 @@ test("raw Modal usage is pinned so new hand-rolled confirmations cannot slip in"
   const expectedRawModalCounts: Record<string, number> = {
     // 2026-08-09, task #31: seven files LEFT this map by adopting DialogCard
     // (InviteHumanDialog, ReportIssueDialog, MachineDetailPanel, AddMembersDialog,
-    // CreateChannelDialog, CreateTaskDialog, WikiPanel, SOSDialog,
+    // CreateChannelDialog, CreateTaskDialog, SOSDialog,
     // CreateJointChannelDialog, RolePermissionHelpDialog — ten in total). Entries are deleted rather
     // than zeroed: this is a deepEqual against the real reading, so a stale entry
     // would quietly re-permit the count it used to allow. Lowering a ratchet is as
     // deliberate an act as raising one.
     "src/components/AnnouncementModal.tsx": 1,
-    "src/components/ConfirmDialog.tsx": 1,
-    "src/components/agent/AgentDetailPanel.tsx": 2,
-    "src/components/agent/ChannelMembers.tsx": 2,
+    // task #677: ConfirmDialog left this map by migrating its frame to the rui
+    // Dialog family — confirmations are now design-system-owned end to end.
+    "src/components/agent/AgentDetailPanel.tsx": 1,
+    "src/components/agentMigration/AgentMigrationDialog.tsx": 1,
+    "src/components/agent/ChannelMembers.tsx": 1,
     // Flag-off compatibility keeps the pre-overflow member modal isolated so
     // disabling the rollout really returns to the old surface.
-    "src/components/agent/LegacyChannelMembers.tsx": 2,
     "src/components/agent/CreateAgentDialog.tsx": 3,
     // task #187 overflow drawer: the unsaved name/description draft prompt needs
     // three actions (keep editing / discard / save and close); ordinary
@@ -138,12 +138,16 @@ test("raw Modal usage is pinned so new hand-rolled confirmations cannot slip in"
     // create_agent, survey, handoff) render as gate-owned Modals; the client
     // standalone page renders the same steps as page content instead.
     "src/components/onboarding/ServerSetupProjectionGate.tsx": 4,
+    // Desktop ⌘K search overlay: the real /search floated over the current channel
+    // in a Modal (backdrop primitive). Not a confirmation — a search surface.
+    "src/components/search/SearchOverlay.tsx": 1,
     "src/components/server/CommunityAgreementDialog.tsx": 1,
     // Product feedback is a routed Settings subpage. Its workspace and lazy
     // loading state intentionally use panel chrome rather than raw Modal.
-    // Connected Apps adds one installed-app detail Modal. It contains read-only
-    // state and ordinary commands; destructive uninstall remains ConfirmDialog-owned.
-    "src/components/settings/SettingsPanel.tsx": 4,
+    // Connected Apps keeps three non-destructive shells: app detail,
+    // registration, and offline-request handling. The retired built-in detail
+    // modal is gone; destructive uninstall remains ConfirmDialog-owned.
+    "src/components/settings/SettingsPanel.tsx": 3,
     // Ordinary Create Agent and Add/Edit MCP forms share this product dialog shell.
     "src/components/ui/DialogCard.tsx": 1,
     "src/components/task/LegacyTaskPanel.tsx": 1,

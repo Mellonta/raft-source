@@ -1,0 +1,16 @@
+-- Track ~10,000 common search_vector lexemes instead of ~1,000.
+--
+-- Why: with the default statistics target (100), ANALYZE keeps 1,000
+-- most_common_elems for messages.search_vector; on prod (2026-10-01) the least
+-- frequent of them is at 1.4% of messages. The planner estimates every other
+-- term at a fixed min(0.5%, that frequency / 2) of the table (≈82k rows at
+-- 16.4M), so the search admission probes (the corpus-wide text-match cap and
+-- recent sort's text-first vs walk choice) cannot tell a term with 100 matches
+-- from one with 200k. A 0.3% prod sample has 8,393 lexemes at >= 0.1% and
+-- 13,122 at >= 0.05%; at target 1000 the list covers lexemes down to ~0.07%,
+-- so terms above ~11k matches get real estimates and the fallback drops to ~6k.
+--
+-- Cost: SET STATISTICS takes SHARE UPDATE EXCLUSIVE (does not block reads or
+-- writes) and does not run ANALYZE; ANALYZE then samples 300 x 1000 rows
+-- (about every 4 days per 0302). Run one manual ANALYZE messages after deploy.
+ALTER TABLE "messages" ALTER COLUMN "search_vector" SET STATISTICS 1000;

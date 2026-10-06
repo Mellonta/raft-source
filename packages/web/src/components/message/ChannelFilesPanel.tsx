@@ -1,12 +1,16 @@
-import { TOPBAR_OVERFLOW_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 import { Archive, Clock3, Download, EllipsisVertical, File, FileText, Image, MapPin, Paperclip, Video } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import {
+  Button,
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
+  FileRow,
+  FilesList,
+  FilesPanel,
+  FilesViewport,
 } from "raft-ui";
 import api from "../../api/client";
 import type { Channel } from "../../store/channelStore";
@@ -14,10 +18,8 @@ import type { MessageAttachment } from "../../store/messageStore";
 import { useAppNavigate } from "../../hooks/useAppNavigate";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import { useImageLightboxStore } from "../../store/imageLightboxStore";
-import { useServerFeatureFlag } from "../../store/serverFeatureFlags";
 import { imageGalleryBackgroundClass } from "../../utils/imagePreviewStyles";
 import AvatarListRow from "../ui/AvatarListRow";
-import Button from "../ui/Button";
 import EmptyState from "../ui/EmptyState";
 import AttachmentTooltip from "./attachmentTooltip";
 import {
@@ -35,6 +37,7 @@ import {
 } from "./attachmentPreview";
 import { openDocumentPreview } from "./openDocumentPreview";
 import { openMediaPreview } from "./openMediaPreview";
+import { AttachmentTypeBadge } from "./AttachmentTypeBadge";
 
 export interface ChannelFileEntry {
   id: string;
@@ -134,7 +137,7 @@ function ChannelFileVisual({
   }, [canPreview, file.id, file.thumbnailUrl]);
 
   return (
-    <span className="flex size-14 shrink-0 items-center justify-center overflow-hidden border-2 border-black bg-white">
+    <span className="relative flex size-14 shrink-0 items-center justify-center overflow-hidden border border-line-muted bg-layer-card theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white">
       {canPreview && src ? (
         <img
           src={src}
@@ -145,6 +148,11 @@ function ChannelFileVisual({
       ) : (
         <Icon size={18} />
       )}
+      <AttachmentTypeBadge
+        filename={file.filename}
+        data-message-affordance="channel-file-type-badge"
+        className="!absolute bottom-0 left-0"
+      />
     </span>
   );
 }
@@ -194,7 +202,7 @@ function ChannelFileOverflowMenu({
         <DropdownMenuTrigger
           render={(
             <Button
-              shape="icon"
+              size="icon-sm"
               aria-label={menuLabel}
               data-testid="channel-file-overflow-trigger"
               data-file-id={file.id}
@@ -234,9 +242,6 @@ export default function ChannelFilesPanel({ channel }: { channel: Channel }) {
   const { formatMessage } = useIntl();
   const nav = useAppNavigate();
   const { formatShortDateTime } = useTimeFormatter();
-  const topbarOverflowEnabled = useServerFeatureFlag(
-    TOPBAR_OVERFLOW_FEATURE_FLAG_KEY,
-  ).enabled;
   const loadingMoreRef = useRef(false);
   const [files, setFiles] = useState<ChannelFileEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -363,12 +368,12 @@ export default function ChannelFilesPanel({ channel }: { channel: Channel }) {
   }, []);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-white">
-      <div className="min-h-0 flex-1 overflow-y-auto" onScroll={(event) => handleScroll(event.currentTarget)}>
+    <FilesPanel>
+      <FilesViewport onScroll={(event) => handleScroll(event.currentTarget)}>
         {loading ? (
-          <div className="flex h-full items-center justify-center text-sm font-mono text-black/40">{formatMessage({ id: "message.channelFilesPanel.loading" })}</div>
+          <div className="flex h-full items-center justify-center text-sm font-mono text-foreground-muted">{formatMessage({ id: "message.channelFilesPanel.loading" })}</div>
         ) : error ? (
-          <div className="flex h-full items-center justify-center text-sm font-bold text-brutal-red">{error}</div>
+          <div className="flex h-full items-center justify-center text-sm font-bold text-danger">{error}</div>
         ) : files.length === 0 ? (
           <EmptyState
             className="h-full"
@@ -378,17 +383,18 @@ export default function ChannelFilesPanel({ channel }: { channel: Channel }) {
           />
         ) : (
           <>
-            <div className="flex flex-col gap-2 p-3">
+            <FilesList className="flex flex-col gap-2 p-3">
               {files.map((file) => {
                 const type = getChannelFileType(file);
                 const Icon = fileTypeIcon(type);
                 const canPreview = isPreviewableImage(file);
                 return (
+                  <FileRow key={file.id} className="contents">
                   <AvatarListRow
                     key={file.id}
                     align="start"
                     avatar={<ChannelFileVisual file={file} canPreview={canPreview} icon={Icon} />}
-                    name={file.filename}
+                    name={<AttachmentTooltip content={file.filename}><span>{file.filename}</span></AttachmentTooltip>}
                     subtitle={
                       <>
                         <span>{formatChannelFileSize(file.sizeBytes, formatMessage)}</span>
@@ -401,82 +407,67 @@ export default function ChannelFilesPanel({ channel }: { channel: Channel }) {
                     onClick={() => void openPreview(file)}
                     buttonProps={{ "aria-label": formatMessage({ id: "message.channelFilesPanel.previewFile" }) }}
                     actionContent={
-                      topbarOverflowEnabled ? (
-                        <div className="channel-file-responsive-actions" data-testid="channel-file-responsive-actions">
-                          <div className="channel-file-inline-actions" data-testid="channel-file-inline-actions">
-                            <AttachmentTooltip content={formatMessage({ id: "message.channelFilesPanel.jumpToMessage" })}>
-                              <button
-                                onClick={() => openSource(file)}
-                                className="btn-brutal-sm flex size-7 items-center justify-center p-0"
-                                aria-label={formatMessage({ id: "message.channelFilesPanel.jumpToMessage" })}
-                                data-testid="channel-file-inline-jump"
-                              >
-                                <MapPin size={14} />
-                              </button>
-                            </AttachmentTooltip>
-                            <AttachmentTooltip content={formatMessage({ id: "message.channelFilesPanel.downloadFile" })}>
-                              <button
-                                onClick={() => void downloadAttachment(file)}
-                                className="btn-brutal-sm flex size-7 items-center justify-center p-0"
-                                aria-label={formatMessage({ id: "message.channelFilesPanel.downloadFile" })}
-                                data-testid="channel-file-inline-download"
-                              >
-                                <Download size={14} />
-                              </button>
-                            </AttachmentTooltip>
-                          </div>
-                          <div className="channel-file-overflow-actions">
-                            <ChannelFileOverflowMenu
-                              file={file}
-                              onOpenSource={() => openSource(file)}
-                              onDownload={() => void downloadAttachment(file)}
-                            />
-                          </div>
+                      <div className="channel-file-responsive-actions" data-testid="channel-file-responsive-actions">
+                        <div className="channel-file-inline-actions" data-testid="channel-file-inline-actions">
+                          <AttachmentTooltip content={formatMessage({ id: "message.channelFilesPanel.jumpToMessage" })}>
+                            <Button
+                              onClick={() => openSource(file)}
+                              size="icon-sm"
+                              variant="ghost"
+                              className="size-7 p-0"
+                              aria-label={formatMessage({ id: "message.channelFilesPanel.jumpToMessage" })}
+                              data-testid="channel-file-inline-jump"
+                            >
+                              <MapPin size={14} />
+                            </Button>
+                          </AttachmentTooltip>
+                          <AttachmentTooltip content={formatMessage({ id: "message.channelFilesPanel.downloadFile" })}>
+                            <Button
+                              onClick={() => void downloadAttachment(file)}
+                              size="icon-sm"
+                              variant="ghost"
+                              className="size-7 p-0"
+                              aria-label={formatMessage({ id: "message.channelFilesPanel.downloadFile" })}
+                              data-testid="channel-file-inline-download"
+                            >
+                              <Download size={14} />
+                            </Button>
+                          </AttachmentTooltip>
                         </div>
-                      ) : (
-                        <>
-                          <button
-                            onClick={() => openSource(file)}
-                            className="btn-brutal-sm flex size-7 items-center justify-center p-0"
-                            title={formatMessage({ id: "message.channelFilesPanel.jumpToMessage" })}
-                            aria-label={formatMessage({ id: "message.channelFilesPanel.jumpToMessage" })}
-                          >
-                            <MapPin size={14} />
-                          </button>
-                          <button
-                            onClick={() => downloadAttachment(file)}
-                            className="btn-brutal-sm flex size-7 items-center justify-center p-0"
-                            title={formatMessage({ id: "message.channelFilesPanel.downloadFile" })}
-                            aria-label={formatMessage({ id: "message.channelFilesPanel.downloadFile" })}
-                          >
-                            <Download size={14} />
-                          </button>
-                        </>
-                      )
+                        <div className="channel-file-overflow-actions">
+                          <ChannelFileOverflowMenu
+                            file={file}
+                            onOpenSource={() => openSource(file)}
+                            onDownload={() => void downloadAttachment(file)}
+                          />
+                        </div>
+                      </div>
                     }
-                    className={topbarOverflowEnabled ? "channel-file-row" : ""}
+                    className="channel-file-row"
                   />
+                  </FileRow>
                 );
               })}
-            </div>
+            </FilesList>
             {(loadingMore || nextCursor) && (
               <div className="flex justify-center p-4">
                 {loadingMore ? (
-                  <div className="font-mono text-xs text-black/45">{formatMessage({ id: "message.channelFilesPanel.loadingMore" })}</div>
+                  <div className="font-mono text-xs text-foreground-muted">{formatMessage({ id: "message.channelFilesPanel.loadingMore" })}</div>
                 ) : (
-                  <button
+                  <Button
                     type="button"
                     onClick={() => void loadFilesPage(nextCursor, "append")}
-                    className="btn-brutal-sm bg-white px-4 py-1.5 text-xs"
+                    size="sm"
+                    variant="outline"
                   >
                     {formatMessage({ id: "message.channelFilesPanel.loadMore" })}
-                  </button>
+                  </Button>
                 )}
               </div>
             )}
           </>
         )}
-      </div>
-    </div>
+      </FilesViewport>
+    </FilesPanel>
   );
 }

@@ -1,22 +1,22 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 
+import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
 import type { MachineToServerMessage, ServerToMachineMessage } from "@botiverse/raft-shared";
 import {
   REMINDER_FIRE_RECEIPT_CAPABILITY,
   REMINDER_FIRE_REQUEST_CAPABILITY,
-} from "@botiverse/raft-shared/src/apps/reminder/protocol.js";
+} from "@botiverse/raft-shared/src/apps/reminder/protocol";
 
-import { getDb } from "../db/index.js";
-import { agents, channels, servers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agents, channels, servers, users } from "../db/schema";
 import {
   createReminder,
   getReminderById,
   type ReminderRow,
-} from "../apps/reminder/service.js";
-import { AgentOrchestrator } from "./agentOrchestrator.js";
+} from "../apps/reminder/service";
+import { AgentOrchestrator } from "./agentOrchestrator";
 
 
 afterEach(async () => {
@@ -122,7 +122,7 @@ function observeLegacyAdapter(
   const deliveries: Array<{ agentId: string; content: string }> = [];
   const upserts: ReminderRow[] = [];
   const cancels: Array<{ agentId: string; reminderId: string; version: number }> = [];
-  const receiptOutcomes: string[] = [];
+  const sink = new MemoryTraceSink();
   const results: ServerToMachineMessage[] = [];
   (orchestrator as any).validateMachineAgentMessage = async () => agent;
   (orchestrator as any).deliverMessage = async (
@@ -144,15 +144,19 @@ function observeLegacyAdapter(
     results.push(message);
     return true;
   };
-  (orchestrator as any).recordBuiltInAppTrace = (
-    name: string,
-    attrs: Record<string, unknown>,
-  ) => {
-    if (name === "server.app_source.receipt" && typeof attrs.outcome === "string") {
-      receiptOutcomes.push(attrs.outcome);
-    }
+  (orchestrator as any).tracer = new BasicTracer({ sink });
+  return {
+    deliveries,
+    upserts,
+    cancels,
+    results,
+    get receiptOutcomes() {
+      return sink.getAllSpans()
+        .filter((span) => span.name === "server.app_source.receipt")
+        .map((span) => span.attrs?.outcome)
+        .filter((outcome): outcome is string => typeof outcome === "string");
+    },
   };
-  return { deliveries, upserts, cancels, receiptOutcomes, results };
 }
 
 test("daemon 1.0.15 legacy frame wakes exactly once and re-pushes the recurring revision", async ({ db }) => {

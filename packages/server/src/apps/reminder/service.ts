@@ -8,19 +8,19 @@ import type {
   ReminderStatus,
   RaftTargetString,
 } from "@botiverse/raft-shared";
-import { getDb, type DatabaseExecutor } from "../../db/index.js";
-import { agents, reminders, reminderEvents, servers, messages, channels } from "../../db/schema.js";
-import { reminderSourceAcknowledgements } from "./sourceAckSchema.js";
-import * as channelService from "../../services/channelService.js";
-import * as messageService from "../../services/messageService.js";
-import type { AgentOrchestrator } from "../../services/agentOrchestrator.js";
-import { getConfiguredAppUrl } from "../../config/appUrl.js";
+import { getDb, type DatabaseExecutor } from "../../db/index";
+import { agents, reminders, reminderEvents, servers, messages, channels } from "../../db/schema";
+import { reminderSourceAcknowledgements } from "./sourceAckSchema";
+import * as channelService from "../../services/channelService";
+import * as messageService from "../../services/messageService";
+import type { AgentOrchestrator } from "../../services/agentOrchestrator";
+import { getConfiguredAppUrl } from "../../config/appUrl";
 import {
   computeNextFire,
   formatRecurrence,
   isSupportedRecurrence,
   type Recurrence,
-} from "../../services/recurrence.js";
+} from "../../services/recurrence";
 
 const ONBOARDING_OWNER_CHANNEL_NAME = "onboarding-owner";
 
@@ -93,8 +93,6 @@ export interface ReminderEventRow {
 export interface ReminderServiceOptions {
   executor?: DatabaseExecutor;
   clock?: TimeProvider;
-  /** Internal reconciliation may mutate system-owned reminders; generic APIs may not. */
-  allowSystemManaged?: boolean;
   /** Failure injection after row CAS but before source-log event insert. */
   afterFireTransitionForTesting?: () => void;
   /**
@@ -117,15 +115,6 @@ export type ReminderMutationOptions = ReminderServiceOptions & {
   /** Row version observed by the caller; every mutation is compare-and-swap. */
   expectedVersion: number;
 };
-
-function isSystemManagedReminderPayload(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  const payload = value as { kind?: unknown; version?: unknown };
-  return (
-    (payload.kind === "wiki.incremental_discovery" || payload.kind === "wiki.lint")
-    && payload.version === 1
-  );
-}
 
 function isOnboardingDay2Reminder(row: Pick<ReminderRow, "payload">): boolean {
   if (!row.payload || typeof row.payload !== "object") return false;
@@ -166,6 +155,60 @@ async function resolveReminderTargetChannel(
   };
 }
 
+type ReminderTargetChannel = { id: string; name: string | null; type: string };
+
+/**
+ * resolveReminderTargetChannel for a whole list: the distinct target channels
+ * of each server through channelService.resolveChannelAccessMany (the single
+ * entry point of the local/joint access rule), so at most two queries per
+ * server instead of one resolveChannelAccess per reminder. Listing an agent's
+ * reminders used to resolve each one under Promise.all, so ~170 reminders
+ * borrowed ~170 pool connections at once (prod 2026-10-06 02:36Z).
+ */
+async function resolveReminderTargetChannels(
+  rows: Array<Pick<ReminderRow, "id" | "serverId" | "targetChannelId" | "payload">>,
+  opts: ReminderServiceOptions,
+): Promise<Map<string, ReminderTargetChannel | null>> {
+  const result = new Map<string, ReminderTargetChannel | null>();
+  const channelIdByRow = new Map<string, string>();
+  // The onboarding day-2 fallback (no explicit target) is rare; resolve it once
+  // per server.
+  const onboardingChannelByServer = new Map<string, Promise<string | null>>();
+  for (const row of rows) {
+    if (row.targetChannelId) {
+      channelIdByRow.set(row.id, row.targetChannelId);
+    } else if (isOnboardingDay2Reminder(row)) {
+      if (!onboardingChannelByServer.has(row.serverId)) {
+        onboardingChannelByServer.set(row.serverId, resolveOnboardingOwnerChannelId(row, opts));
+      }
+      const channelId = await onboardingChannelByServer.get(row.serverId)!;
+      if (channelId) channelIdByRow.set(row.id, channelId);
+      else result.set(row.id, null);
+    }
+  }
+
+  const channelIdsByServer = new Map<string, string[]>();
+  for (const row of rows) {
+    const channelId = channelIdByRow.get(row.id);
+    if (!channelId) continue;
+    const ids = channelIdsByServer.get(row.serverId) ?? [];
+    ids.push(channelId);
+    channelIdsByServer.set(row.serverId, ids);
+  }
+  const accessByServer = new Map<string, Map<string, channelService.ChannelAccessResolution>>();
+  for (const [serverId, channelIds] of channelIdsByServer) {
+    accessByServer.set(serverId, await channelService.resolveChannelAccessMany({ serverId, channelIds }));
+  }
+
+  for (const row of rows) {
+    const channelId = channelIdByRow.get(row.id);
+    if (!channelId) continue;
+    const access = accessByServer.get(row.serverId)?.get(channelId);
+    result.set(row.id, access ? { id: access.channel.id, name: access.channel.name, type: access.channel.type } : null);
+  }
+  return result;
+}
+
 function formatTopLevelChannelRef(
   channel: { name: string | null; type: string } | null,
 ): string | null {
@@ -173,10 +216,6 @@ function formatTopLevelChannelRef(
   return channel.type === "channel" || channel.type === "private"
     ? `#${channel.name}`
     : null;
-}
-
-function isProtectedSystemManagedReminder(row: ReminderRow, opts: ReminderServiceOptions): boolean {
-  return isSystemManagedReminderPayload(row.payload) && opts.allowSystemManaged !== true;
 }
 
 function getExecutor(opts: ReminderServiceOptions): DatabaseExecutor {
@@ -236,8 +275,7 @@ export async function createReminder(
 /**
  * Replaces a stable reminder identity without resetting its revision.
  *
- * Wiki uses a stable daily-reminder id while allowing its owning Agent to be
- * rebound. Keeping one monotonically increasing revision lets the old
+ * Keeping one monotonically increasing revision lets the old
  * Computer consume a cancel for the replacement revision while the new
  * Computer receives the same revision as an upsert.
  */
@@ -332,7 +370,7 @@ export async function cancelReminder(
   const db = getExecutor(opts);
   const now = getClock(opts).now();
   const [current] = await db.select().from(reminders).where(eq(reminders.id, reminderId));
-  if (!current || isProtectedSystemManagedReminder(current as ReminderRow, opts)) return null;
+  if (!current) return null;
   const conditions = [
     eq(reminders.id, reminderId),
     inArray(reminders.status, ["scheduled", "fired"]),
@@ -373,7 +411,6 @@ export async function snoozeReminder(
   const [current] = await db.select().from(reminders).where(eq(reminders.id, reminderId));
   if (!current || !["scheduled", "fired"].includes((current as ReminderRow).status)) return null;
   const currentRow = current as ReminderRow;
-  if (isProtectedSystemManagedReminder(currentRow, opts)) return null;
   const conditions = [
     eq(reminders.id, reminderId),
     inArray(reminders.status, ["scheduled", "fired"]),
@@ -418,7 +455,6 @@ export async function updateReminder(
   const [current] = await db.select().from(reminders).where(eq(reminders.id, reminderId));
   if (!current || (current as ReminderRow).status !== "scheduled") return null;
   const currentRow = current as ReminderRow;
-  if (isProtectedSystemManagedReminder(currentRow, opts)) return null;
 
   const set: Record<string, unknown> = {
     updatedAt: now,
@@ -929,8 +965,7 @@ export type ReminderSourceAckResult =
       ok: false;
       reason:
         | "reminder_not_found"
-        | "target_not_fired"
-        | "stale_source_revision";
+        | "target_not_fired";
       latestFiredSourceVersion?: number;
     };
 
@@ -950,9 +985,10 @@ function firedSourceVersion(event: ReminderEventRow): number | null {
  * Server-authoritative exact acknowledgement for one fired Reminder source.
  *
  * The local daemon cannot use App Inbox item persistence as current-world
- * authority. This helper linearizes against the Reminder row, binds the exact
- * fired event, and only lets a same-attempt replay bypass a newer fired event
- * after the Server already accepted that exact operation.
+ * authority. This helper linearizes against the Reminder row and binds the
+ * exact fired event. A newer recurring occurrence does not invalidate an older
+ * pending fired item: each occurrence has its own source version, event row,
+ * and acknowledgement tombstone.
  */
 export async function ackAuthorizedReminderFire(input: {
   serverId: string;
@@ -1018,14 +1054,7 @@ export async function ackAuthorizedReminderFire(input: {
       if (sourceVersion === input.sourceVersion) targetEvent = event;
     }
 
-    if (latestFiredSourceVersion > input.sourceVersion) {
-      return {
-        ok: false,
-        reason: "stale_source_revision",
-        latestFiredSourceVersion,
-      };
-    }
-    if (!targetEvent || latestFiredSourceVersion !== input.sourceVersion) {
+    if (!targetEvent) {
       return {
         ok: false,
         reason: "target_not_fired",
@@ -1410,11 +1439,7 @@ export async function toReminderSummaries(
     appUrl: getConfiguredAppUrl(),
   };
   const anchors = await resolveAnchors(rows, ctx, opts);
-  const targetChannels = new Map<string, { id: string; name: string | null; type: string } | null>();
-  await Promise.all(rows.map(async (row) => {
-    if (!row.targetChannelId && !isOnboardingDay2Reminder(row)) return;
-    targetChannels.set(row.id, await resolveReminderTargetChannel(row, opts));
-  }));
+  const targetChannels = await resolveReminderTargetChannels(rows, opts);
   return rows.map((r) => {
     const a = anchors.get(r.id) ?? { msgRef: null, msgPermalink: null };
     const targetChannel = targetChannels.get(r.id);

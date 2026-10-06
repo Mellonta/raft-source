@@ -2,15 +2,12 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { buildStatusReport, runStatus } from "./status.js";
-import { servicePidPath, serverConnectedMarkerPath } from "./paths.js";
-import { markFatalConfig, markTerminalUnlinked } from "./health.js";
-import { DEFAULT_SLOCK_SERVER_URL, LEGACY_PRODUCTION_SERVER_URL } from "./serverUrl.js";
-import { COMPUTER_VERSION } from "./version.js";
-import { persistOperation } from "@botiverse/k-carrier";
-import { kStateDir } from "./kPaths.js";
+import { buildStatusReport, runStatus } from "./status";
+import { servicePidPath, serverConnectedMarkerPath } from "./paths";
+import { markFatalConfig, markTerminalUnlinked } from "./health";
+import { DEFAULT_SLOCK_SERVER_URL, LEGACY_PRODUCTION_SERVER_URL } from "./serverUrl";
+import { COMPUTER_VERSION } from "./version";
 
 // task #30 PR-G regression guard — Computer-level aggregate `status`.
 // Pins: fresh state, per-server aggregation, daemon liveness from
@@ -67,7 +64,6 @@ test("status: fresh home → not logged in, service stopped, no attachments", as
     assert.equal(r.service.running, false);
     assert.equal(r.service.version.version, null);
     assert.equal(r.service.logPath, join(home, "computer", "run", "service.log"));
-    assert.equal(r.upgrade, null);
     assert.deepEqual(r.servers, []);
   });
 });
@@ -307,140 +303,6 @@ test("status: stale version evidence is not reported as live", async () => {
     assert.equal(r.service.version.version, null);
     const sa = r.servers.find((s) => s.serverId === SERVER_A);
     assert.equal(sa?.runnerVersion.version, null);
-  });
-});
-
-test("status: K's active operation is the only upgrade state projection", async () => {
-  await withHome(async (home) => {
-    await persistOperation(kStateDir(home), {
-      formatVersion: 1,
-      id: "upgrade-k-123",
-      startedAtMs: Date.parse("2026-07-06T00:00:00.000Z"),
-      updatedAtMs: Date.parse("2026-07-06T00:00:03.000Z"),
-      fromVersion: "0.0.73",
-      targetVersion: "0.0.74",
-      previousStableVersion: "0.0.73",
-      phase: "downloading",
-      outcome: null,
-      reason: "downloading 0.0.74",
-      provenance: { who: "local", carrier: "cli" },
-      metadata: {
-        trigger: "cli",
-        upgradeScopeVersion: "1",
-        upgradeScope: "local",
-      },
-      acknowledgedAtMs: null,
-    });
-
-    const report = await buildStatusReport(home);
-    assert.deepEqual(report.upgrade, {
-      requestId: "upgrade-k-123",
-      fromVersion: "0.0.73",
-      targetVersion: "0.0.74",
-      phase: "downloading",
-      outcome: null,
-      startedAt: "2026-07-06T00:00:00.000Z",
-      updatedAt: "2026-07-06T00:00:03.000Z",
-      source: "k",
-      scope: "local",
-      message: "downloading 0.0.74",
-      percent: null,
-    });
-  });
-});
-
-test("status: promoted, rolled-back, and failed receipts survive a fresh service reader", async () => {
-  await withHome(async (home) => {
-    for (const outcome of ["promoted", "rolled-back", "failed"] as const) {
-      await persistOperation(kStateDir(home), {
-        formatVersion: 1,
-        id: `durable-${outcome}`,
-        startedAtMs: 1,
-        updatedAtMs: 2,
-        fromVersion: "1.0.24",
-        targetVersion: "1.0.25",
-        previousStableVersion: "1.0.24",
-        phase: outcome,
-        outcome,
-        reason: null,
-        provenance: { who: "local", carrier: "cli" },
-        metadata: {
-          trigger: "cli",
-          upgradeScopeVersion: "1",
-          upgradeScope: "local",
-        },
-        acknowledgedAtMs: null,
-      });
-
-      const firstReader = await buildStatusReport(home);
-      const freshReader = await buildStatusReport(home);
-      assert.equal(firstReader.upgrade?.requestId, `durable-${outcome}`);
-      assert.equal(freshReader.upgrade?.outcome, outcome);
-      assert.equal(freshReader.upgrade?.scope, "local");
-    }
-  });
-});
-
-test("status: unacknowledged terminal K receipt keeps its exact phase and outcome", async () => {
-  await withHome(async (home) => {
-    await persistOperation(kStateDir(home), {
-      formatVersion: 1,
-      id: "rolled-back-k-123",
-      startedAtMs: Date.parse("2026-07-06T00:00:00.000Z"),
-      updatedAtMs: Date.parse("2026-07-06T00:00:03.000Z"),
-      fromVersion: "0.0.73",
-      targetVersion: "0.0.74",
-      previousStableVersion: "0.0.73",
-      phase: "rolled-back",
-      outcome: "rolled-back",
-      reason: "stable version restored",
-      provenance: { who: "local", carrier: "cli" },
-      metadata: { trigger: "cli" },
-      acknowledgedAtMs: null,
-    });
-
-    const report = await buildStatusReport(home);
-    assert.equal(report.upgrade?.phase, "rolled-back");
-    assert.equal(report.upgrade?.outcome, "rolled-back");
-
-    const lines: string[] = [];
-    const oldWrite = process.stdout.write;
-    process.stdout.write = ((chunk: string | Uint8Array) => {
-      lines.push(String(chunk));
-      return true;
-    }) as typeof process.stdout.write;
-    try {
-      await runStatus();
-    } finally {
-      process.stdout.write = oldWrite;
-    }
-    const out = lines.join("");
-    assert.match(out, /terminal receipt, unacknowledged/);
-    assert.match(out, /Phase:\s+rolled-back/);
-    assert.match(out, /Outcome: rolled-back/);
-    assert.match(out, /raft-computer operation acknowledge rolled-back-k-123/);
-    assert.doesNotMatch(out, /Phase:\s+failed/);
-  });
-});
-
-test("status: acknowledged terminal K receipt is audit state, not an in-flight operation", async () => {
-  await withHome(async (home) => {
-    await persistOperation(kStateDir(home), {
-      formatVersion: 1,
-      id: "acknowledged-k-123",
-      startedAtMs: 1,
-      updatedAtMs: 3,
-      fromVersion: "0.0.73",
-      targetVersion: "0.0.74",
-      previousStableVersion: "0.0.73",
-      phase: "up-to-date",
-      outcome: "up-to-date",
-      reason: null,
-      provenance: { who: "local", carrier: "cli" },
-      metadata: { trigger: "cli" },
-      acknowledgedAtMs: 3,
-    });
-    assert.equal((await buildStatusReport(home)).upgrade, null);
   });
 });
 

@@ -1,4 +1,4 @@
-import type { components, operations } from "./generated/openapi.js";
+import type { components, operations } from "./generated/openapi";
 
 type Equal<Left, Right> =
   (<Value>() => Value extends Left ? 1 : 2) extends
@@ -13,7 +13,8 @@ type ExpectedOperations =
   | "completeAttachmentUploadSession"
   | "createAttachmentUploadSession"
   | "getAttachmentUploadCapabilities"
-  | "getAttachmentUploadSession";
+  | "getAttachmentUploadSession"
+  | "listAttachmentUploadSessions";
 
 type CapabilitiesBody = operations["getAttachmentUploadCapabilities"]["responses"][200]["content"]["application/json"];
 type StatusBody = operations["getAttachmentUploadSession"]["responses"][200]["content"]["application/json"];
@@ -21,6 +22,7 @@ type CreateBody = operations["createAttachmentUploadSession"]["responses"][201][
 type CompleteBody = operations["completeAttachmentUploadSession"]["responses"][200]["content"]["application/json"];
 type RateLimitedBody = operations["createAttachmentUploadSession"]["responses"][429]["content"]["application/json"];
 type ObjectNotFoundBody = operations["completeAttachmentUploadSession"]["responses"][404]["content"]["application/json"];
+type RecoveryListBody = operations["listAttachmentUploadSessions"]["responses"][200]["content"]["application/json"];
 
 export type AttachmentUploadConsumerAssertions = [
   Assert<Equal<keyof operations, ExpectedOperations>>,
@@ -36,4 +38,5 @@ export type AttachmentUploadConsumerAssertions = [
   Assert<Equal<RateLimitedBody["retryAfterMs"], number>>,
   Assert<Equal<ObjectNotFoundBody["code"], "UPLOAD_OBJECT_NOT_FOUND">>,
   Assert<Equal<ObjectNotFoundBody["retryable"], true>>,
+  Assert<Equal<RecoveryListBody["uploads"][number]["state"], "pending" | "verifying">>,
 ];

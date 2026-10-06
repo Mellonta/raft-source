@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import type { ReactElement } from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { TestIntlProvider } from "./helpers/intl";
@@ -148,6 +147,47 @@ test("mounted language-region save surfaces Chinese fallback when the mode patch
 
   assert.ok(await screen.findByText(zh["settings.language.updateFailed"]));
   assert.doesNotMatch(document.body.textContent ?? "", /Failed to update language preferences/);
+});
+
+test("language-region names why message translation cannot run", async () => {
+  seedLanguageSettings();
+  renderZh(<SettingsPanel tab="language-region" />);
+  const notice = await screen.findByTestId("translation-unavailable-notice");
+  assert.ok(
+    notice.textContent?.includes(zhMessages["settings.language.translationServerOff"]),
+    "server gate off is the named reason",
+  );
+
+  await act(async () => {
+    useTranslationStore.setState({
+      settings: {
+        ...useTranslationStore.getState().settings,
+        serverTranslationEnabled: true,
+        providerAvailable: false,
+        available: false,
+      },
+    } as never);
+  });
+  await waitFor(() =>
+    assert.ok(
+      screen.getByTestId("translation-unavailable-notice").textContent?.includes(
+        zhMessages["settings.language.translationProviderMissing"],
+      ),
+    ),
+  );
+
+  // Available: the notice disappears so it cannot read as a permanent warning.
+  await act(async () => {
+    useTranslationStore.setState({
+      settings: {
+        ...useTranslationStore.getState().settings,
+        serverTranslationEnabled: true,
+        providerAvailable: true,
+        available: true,
+      },
+    } as never);
+  });
+  await waitFor(() => assert.ok(screen.queryByTestId("translation-unavailable-notice") === null));
 });
 
 test("new strings reuse this screen's established terminology", () => {

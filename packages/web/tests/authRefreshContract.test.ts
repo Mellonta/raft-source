@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   shouldKeepSessionAfterLoadUserFailure,
   shouldLogoutAfterPostRefreshLoadUserFailure,
   shouldLogoutAfterRefreshFailure,
   shouldRetryLoadUserAfterError,
-} from "../src/utils/authSessionPolicy.js";
+} from "../src/utils/authSessionPolicy";
 
 type RequestOutcome =
   | { kind: "success" }

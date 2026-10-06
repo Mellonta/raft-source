@@ -13,6 +13,7 @@ import {
   rankFinderResults,
 } from "./conversationFinderModel";
 import type { FinderResult } from "./conversationFinderModel";
+import { dismissLayerProps } from "../ui/dismissLayer";
 
 // "Find a conversation…" — a name-based jump box pinned above the sidebar
 // scroll surface (Slack parity, #kabi-desktop). Fuzzy-matches channels, DMs,
@@ -143,8 +144,8 @@ export function SidebarConversationFinder({
 
   return (
     <div ref={rootRef} className="relative shrink-0 px-2 pt-2.5 pb-2">
-      <div className="flex min-w-0 items-center gap-2 border-2 border-black bg-white px-2.5 py-1.5 shadow-brutal-sm focus-within:shadow-brutal">
-        <Search size={15} className="shrink-0 text-black/50" />
+      <div className="flex min-w-0 items-center gap-2 rounded-md border border-line-field bg-layer-panel px-2.5 py-1.5 shadow-raft-xs focus-within:border-line-field-hover theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm theme-brutal:focus-within:shadow-brutal">
+        <Search size={15} className="shrink-0 text-foreground-hint" />
         <input
           ref={inputRef}
           value={query}
@@ -159,17 +160,18 @@ export function SidebarConversationFinder({
           placeholder={formatMessage({ id: "sidebar.findConversationPlaceholder" })}
           aria-label={formatMessage({ id: "sidebar.findConversationPlaceholder" })}
           data-testid="sidebar-conversation-finder-input"
-          className="min-w-0 flex-1 bg-transparent text-sm font-display font-medium outline-none placeholder:text-black/40"
+          className="min-w-0 flex-1 bg-transparent text-sm font-display font-medium text-foreground-strong outline-none placeholder:text-foreground-placeholder"
         />
       </div>
 
       {showDropdown && (
         <div
+          {...dismissLayerProps}
           className="absolute inset-x-2 top-full z-30 mt-1 max-h-[min(60vh,22rem)] overflow-y-auto card-brutal"
           data-testid="sidebar-conversation-finder-results"
         >
           {ranked.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-black/50">
+            <div className="px-3 py-2 text-xs text-foreground-hint">
               {formatMessage({ id: "sidebar.findConversationEmpty" })}
             </div>
           ) : (
@@ -185,18 +187,26 @@ export function SidebarConversationFinder({
                 }}
                 onMouseEnter={() => setActiveIndex(index)}
                 className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium transition-colors ${
-                  index === activeRow ? "bg-soft-signal font-bold" : "hover:bg-soft-signal/50"
+                  index === activeRow ? "bg-primary-soft text-foreground-strong font-bold theme-brutal:bg-soft-signal theme-brutal:text-black" : "hover:bg-fill-muted theme-brutal:hover:bg-soft-signal/50"
                 }`}
               >
                 <FinderResultIcon result={result} />
-                <span className="min-w-0 flex-1 truncate font-medium text-black">
-                  {result.label}
-                </span>
-                {result.sublabel && (
-                  <span className="max-w-[45%] shrink-0 truncate text-[11px] text-black/40">
-                    {result.sublabel}
+                {/* Constrained text group (task #100): shrinks to the space left
+                    after the icon; inside, the grid gives the LABEL priority (it
+                    grows to its natural width but never past the group) and the
+                    sublabel (description) takes the remainder and yields first —
+                    a shrink-0 45% sublabel had squeezed "proj-frontend" and
+                    "proj-frontend-perf" both down to "proj-fr…". */}
+                <span className="grid min-w-0 flex-1 grid-cols-[minmax(0,auto)_minmax(0,1fr)] items-baseline gap-2">
+                  <span className="min-w-0 truncate font-medium text-foreground-strong">
+                    {result.label}
                   </span>
-                )}
+                  {result.sublabel && (
+                    <span className="min-w-0 truncate text-[11px] text-foreground-hint theme-brutal:text-black/40">
+                      {result.sublabel}
+                    </span>
+                  )}
+                </span>
               </button>
             ))
           )}
@@ -209,9 +219,9 @@ export function SidebarConversationFinder({
 function FinderResultIcon({ result }: { result: FinderResult }) {
   if (result.kind === "channel") {
     return result.private ? (
-      <Lock size={14} className="shrink-0 text-black/50" />
+      <Lock size={14} className="shrink-0 text-foreground-hint" />
     ) : (
-      <Hash size={14} className="shrink-0 text-black/50" />
+      <Hash size={14} className="shrink-0 text-foreground-hint" />
     );
   }
   // DMs / agents / people reuse the app's avatar primitive at the same size

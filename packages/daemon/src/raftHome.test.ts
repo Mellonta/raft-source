@@ -2,8 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
-import { listLegacyRaftStatePaths, resolveDefaultRaftHome, resolveRaftHome, resolveRaftHomePath } from "./raftHome.js";
+import { listLegacyRaftStatePaths, resolveDefaultRaftHome, resolveRaftHome, resolveRaftHomePath } from "./raftHome";
 
 test("resolveRaftHome defaults to ~/.slock", () => {
   assert.equal(resolveRaftHome({}, "/Users/alice"), path.resolve("/Users/alice/.slock"));

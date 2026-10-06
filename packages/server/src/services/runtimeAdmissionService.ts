@@ -6,11 +6,9 @@ import {
   type RuntimeInfo,
   type RuntimeSelectionOption,
 } from "@botiverse/raft-shared";
-import { evaluateFeatureFlag, GROK_RUNTIME_FEATURE_FLAG_KEY } from "./featureFlagService.js";
-import {
-  BUILTIN_PI_FORM_DEFINITION_REF,
-  KIMI_SDK_FORM_DEFINITION_REF,
-} from "./runtimeFormDefinitionService.js";
+import { evaluateFeatureFlag, GROK_RUNTIME_FEATURE_FLAG_KEY } from "./featureFlagService";
+import { runtimeFormV1Entry } from "./runtimeFormDefinitionService";
+import { RUNTIME_FORM_V2_MARKER, runtimeFormV2Entry } from "./runtimeFormV2Registry";
 
 export interface RuntimeAdmissionPolicy {
   grokRuntimeEnabled: boolean;
@@ -40,6 +38,7 @@ function projectRuntimeOption(input: {
   const manageableForCurrentAgent = current && capabilityAvailable;
   const canSelectInThisContext = capabilityAvailable
     && (availableForNew || (current && admissionStatus === "grandfathered_current"));
+  const v1Form = runtimeFormV1Entry(input.runtime.id);
 
   return {
     runtimeId: input.runtime.id,
@@ -50,13 +49,11 @@ function projectRuntimeOption(input: {
     availableForNew,
     manageableForCurrentAgent,
     canSelectInThisContext,
-    ...((input.runtime.id === "builtin" || input.runtime.id === "kimi-sdk") && (availableForNew || current)
-      ? {
-          formDefinitionRef: input.runtime.id === "builtin"
-            ? BUILTIN_PI_FORM_DEFINITION_REF
-            : KIMI_SDK_FORM_DEFINITION_REF,
-        }
-      : {}),
+    // Two independent opt-ins: `formDefinitionRef` for the frozen v1 form (web
+    // schema path, installed v1 apps), `runtimeFormV2` for the v2 form. A
+    // runtime that only has a v2 form carries no v1 ref.
+    ...(v1Form && (availableForNew || current) ? { formDefinitionRef: v1Form.ref } : {}),
+    ...(runtimeFormV2Entry(input.runtime.id) && (availableForNew || current) ? { runtimeFormV2: RUNTIME_FORM_V2_MARKER } : {}),
   };
 }
 

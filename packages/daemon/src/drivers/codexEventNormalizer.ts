@@ -1,6 +1,6 @@
-import type { ParsedEvent } from "./types.js";
-import { RuntimeTurnState } from "../runtimeTurnState.js";
-import { parseCodexTelemetryEvent } from "./codexTelemetrySidecar.js";
+import type { ParsedEvent } from "./types";
+import { RuntimeTurnState } from "../runtimeTurnState";
+import { parseCodexTelemetryEvent } from "./codexTelemetrySidecar";
 
 export type JsonRpcId = number | string;
 

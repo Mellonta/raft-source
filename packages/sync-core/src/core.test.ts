@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { createSyncCore } from "./core.js";
-import type { SyncDomainConfig, SyncFrame, SyncSnapshot } from "./types.js";
+import { createSyncCore } from "./core";
+import type { SyncDomainConfig, SyncFrame, SyncSnapshot } from "./types";
 
 /** Toy log domain: state = ordered list of applied event tags. */
 type LogState = { entries: ReadonlyArray<string> };

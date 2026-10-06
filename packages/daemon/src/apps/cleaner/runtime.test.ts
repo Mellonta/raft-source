@@ -1,21 +1,31 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 
+import { readdirSync, readFileSync } from "node:fs";
 import {
   AGENT_INBOX_PREVIEW_MAX_CHARS,
+  BasicTracer,
 } from "@botiverse/raft-shared";
+import { LocalRotatingTraceSink } from "@botiverse/raft-trace-client";
 import {
   CLEANER_APP_ID,
   CLEANER_CONFIG_BOUNDS,
   CLEANER_CONFIG_DEFAULTS,
-} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol.js";
+} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol";
 import {
+  CLEANER_MEMORY_HINT_REWAKE_COOLDOWN_MS,
+  CLEANER_MEMORY_HINT_REWAKE_GROWTH_RATIO,
+  CLEANER_WORKSPACE_CLEANUP_TIP,
+  CLEANER_WORKSPACE_CLEANUP_TIP_MIN_INTERVAL_MS,
   SystemCleanerRuntime,
+  memoryHintTitle,
   type CleanerClock,
   type CleanerConfigEnvelope,
   type CleanerMeasurement,
-} from "./runtime.js";
+  type CleanerDiskMeasurement,
+} from "./runtime";
 
 interface FakeTimer {
   id: number;
@@ -89,7 +99,10 @@ function config(overrides?: Partial<CleanerConfigEnvelope>): CleanerConfigEnvelo
 
 function runtimeFixture(input?: {
   measurement?: CleanerMeasurement | ((ownerAgentId: string) => CleanerMeasurement | Promise<CleanerMeasurement>);
+  diskMeasurement?: () => Promise<CleanerDiskMeasurement>;
+  onWake?: () => void;
   measurementTimeoutMs?: number;
+  trace?: (name: string, attrs: Readonly<Record<string, unknown>>) => void;
 }) {
   const clock = new FakeClock();
   const measurements: Array<{ ownerAgentId: string; literalFileName: string; absolutePath: string }> = [];
@@ -107,10 +120,15 @@ function runtimeFixture(input?: {
       };
       return typeof result === "function" ? result(measurementInput.ownerAgentId) : result;
     },
+    measureDiskSpace: input?.diskMeasurement ?? (async () => ({ kind: "measured", availableBytes: 50, totalBytes: 100 })),
     wake: async (ownerAgentId, item) => {
       wakes.push({ ownerAgentId, itemId: item.itemId });
+      input?.onWake?.();
     },
-    trace: (name, attrs) => traces.push({ name, attrs }),
+    trace: (name, attrs) => {
+      traces.push({ name, attrs });
+      input?.trace?.(name, attrs);
+    },
   });
   return { runtime, clock, measurements, wakes, traces };
 }
@@ -185,12 +203,96 @@ test("periodic check measures only the literal owner's MEMORY.md and mints+wakes
     `raft app config --app system.cleaner --set threshold_bytes=${CLEANER_CONFIG_DEFAULTS.thresholdBytes * 2}`,
   );
   assert.match(items[0]!.title ?? "", /64\.0 KiB.*64\.0 KiB/);
-  assert.match(items[0]!.summary ?? "", /Loaded each session.*recheck in 1h/i);
   assert.ok((items[0]!.title?.length ?? 0) <= AGENT_INBOX_PREVIEW_MAX_CHARS);
   assert.ok((items[0]!.summary?.length ?? 0) <= AGENT_INBOX_PREVIEW_MAX_CHARS);
   assert.deepEqual(fixture.wakes.map((wake) => wake.ownerAgentId), ["owner-a"]);
   assert.equal(fixture.runtime.activeScheduleCount("owner-a"), 1);
   assert.equal(fixture.runtime.activeScheduleCount("owner-b"), 1);
+});
+
+test("memory hint suggests clearing unused workspace files at most once a week per agent", async () => {
+  const fixture = runtimeFixture();
+  fixture.runtime.applyConfig(config());
+  const memoryTitle = () => fixture.runtime.inbox.list()
+    .find((item) => item.sourceRef.kind === "memory_hint")?.title ?? "";
+  const presents = () => fixture.traces
+    .filter((trace) => trace.name === "daemon.cleaner.present" && trace.attrs.workspace_cleanup_tip !== undefined)
+    .map((trace) => trace.attrs.workspace_cleanup_tip);
+  const skipped = () => fixture.traces
+    .filter((trace) => trace.name === "daemon.cleaner.present" && trace.attrs.workspace_cleanup_tip !== undefined)
+    .map((trace) => trace.attrs.workspace_cleanup_tip_skipped);
+  const drops = () => fixture.traces.filter((trace) => trace.name === "daemon.cleaner.drop");
+
+  await firePeriodic(fixture);
+  const firstTipAtMs = fixture.clock.now();
+  assert.ok(memoryTitle().includes(CLEANER_WORKSPACE_CLEANUP_TIP), "first hint carries the tip");
+  assert.deepEqual(presents(), [true]);
+  assert.deepEqual(skipped(), [undefined]);
+
+  // The hint itself re-presents at most daily (see the rewake cooldown test).
+  fixture.clock.nowMs = firstTipAtMs + CLEANER_MEMORY_HINT_REWAKE_COOLDOWN_MS;
+  await firePeriodic(fixture);
+  assert.ok(fixture.clock.now() - firstTipAtMs < CLEANER_WORKSPACE_CLEANUP_TIP_MIN_INTERVAL_MS);
+  assert.ok(!memoryTitle().includes(CLEANER_WORKSPACE_CLEANUP_TIP), "a repeat within the week omits it");
+  assert.deepEqual(presents(), [true, false]);
+  assert.deepEqual(skipped(), [undefined, "weekly_cap"]);
+  assert.equal(drops().length, 0, "holding back the tip is not a drop; the hint still presented");
+  assert.equal(fixture.wakes.length, 2, "the weekly cap holds back only the tip, not the daily hint");
+
+  fixture.clock.nowMs = firstTipAtMs + CLEANER_WORKSPACE_CLEANUP_TIP_MIN_INTERVAL_MS;
+  await firePeriodic(fixture);
+  assert.ok(memoryTitle().includes(CLEANER_WORKSPACE_CLEANUP_TIP), "a week later it returns");
+  assert.deepEqual(presents(), [true, false, true]);
+  assert.deepEqual(skipped(), [undefined, "weekly_cap", undefined]);
+});
+
+test("memory hint titles with the cleanup tip stay under the inbox cap", () => {
+  for (const intervalMs of [MIN_INTERVAL_MS, MAX_INTERVAL_MS, MIN_INTERVAL_MS + 1_001]) {
+    for (const thresholdBytes of [MIN_THRESHOLD_BYTES, MAX_THRESHOLD_BYTES]) {
+      const title = memoryHintTitle(MAX_THRESHOLD_BYTES * 1024 - 1, thresholdBytes, intervalMs, true);
+      assert.ok(title.length <= AGENT_INBOX_PREVIEW_MAX_CHARS, `${title.length}: ${title}`);
+    }
+  }
+});
+
+test("cleaner events keep their owner agent through the local trace sink's id allowlist", async () => {
+  // The sink drops id-shaped keys it does not allowlist; it allows owner_agent_id
+  // and item_id, not ownerAgentId/itemId. Without this, prod could count cleaner
+  // hints and drops but not say whose they were.
+  const machineDir = await mkdtemp(path.join(os.tmpdir(), "cleaner-trace-owner-"));
+  try {
+    const tracer = new BasicTracer({
+      sink: new LocalRotatingTraceSink({ machineDir, maxFileBytes: 1024 * 1024, maxFiles: 4 }),
+    });
+    const outcomes: CleanerMeasurement[] = [
+      { kind: "measured", bytes: CLEANER_CONFIG_DEFAULTS.thresholdBytes + 1 },
+      { kind: "measured", bytes: 1 },
+    ];
+    const fixture = runtimeFixture({
+      measurement: () => outcomes.shift()!,
+      trace: (name, attrs) => tracer.emitEvent(name, { surface: "daemon", attrs: attrs as never }),
+    });
+    fixture.runtime.applyConfig(config());
+    await firePeriodic(fixture);
+    await firePeriodic(fixture);
+
+    const dir = path.join(machineDir, "traces");
+    const written = readdirSync(dir).flatMap((name) => readFileSync(path.join(dir, name), "utf8")
+      .split("\n").filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { name: string; attrs?: Record<string, unknown> }));
+    const present = written.find((record) => record.name === "daemon.cleaner.present");
+    const drop = written.find((record) => record.name === "daemon.cleaner.drop" && record.attrs?.reason === "superseded");
+    assert.ok(present && drop, "one hint was presented, then dropped once under threshold");
+    for (const record of [present, drop]) {
+      assert.equal(record.attrs?.owner_agent_id, "owner-a", record.name);
+      assert.equal(record.attrs?.app_id, CLEANER_APP_ID, record.name);
+      assert.equal(record.attrs?.ownerAgentId, undefined, record.name);
+    }
+    assert.equal(present.attrs?.item_id, fixture.wakes[0]!.itemId);
+    assert.equal(present.attrs?.workspace_cleanup_tip, true, "#8833's tip flag survives the sink too");
+  } finally {
+    await rm(machineDir, { recursive: true, force: true });
+  }
 });
 
 test("under-threshold and not-established measurements produce zero current item while rearming", async () => {
@@ -375,4 +477,146 @@ test("all four canonical schema bounds fail closed before scheduling", () => {
   }
   assert.equal(fixture.clock.activeCount(), 0);
   assert.equal(fixture.runtime.inbox.list().length, 0);
+});
+
+
+test("low disk space never reaches or wakes the agent and retracts a hint left by an older runtime", async () => {
+  let availableBytes = 9;
+  const fixture = runtimeFixture({
+    diskMeasurement: async () => ({ kind: "measured", availableBytes, totalBytes: 100 }),
+  });
+  fixture.runtime.applyConfig(config());
+  const legacy = fixture.runtime.inbox.mint({
+    appId: CLEANER_APP_ID,
+    notificationClass: "disk_space_hint",
+    sourceRef: { kind: "disk_hint", agentId: "owner-a" },
+    title: "Agent data disk: 9 B free, below 10%; recheck in 1h",
+    summary: "Clean only inside your own workspace.",
+  });
+  assert.ok(legacy.ok);
+  const diskDecisions = () => fixture.traces
+    .filter(({ name, attrs }) => name === "daemon.cleaner.decision" && attrs.notificationClass === "disk_space_hint")
+    .map(({ attrs }) => attrs.decision);
+
+  await firePeriodic(fixture);
+  assert.deepEqual(fixture.runtime.inbox.list().map((item) => item.notificationClass), ["memory_size_hint"]);
+  assert.ok(fixture.wakes.every((wake) => wake.itemId !== legacy.item.itemId));
+  assert.deepEqual(diskDecisions(), ["disk_low"]);
+  assert.equal(fixture.traces.filter(({ name, attrs }) =>
+    name === "daemon.cleaner.present" && attrs.notificationClass === "disk_space_hint").length, 0);
+
+  availableBytes = 0;
+  await firePeriodic(fixture);
+  assert.deepEqual(diskDecisions(), ["disk_low", "disk_low"]);
+  assert.deepEqual(fixture.runtime.inbox.list().map((item) => item.notificationClass), ["memory_size_hint"]);
+  availableBytes = 10;
+  await firePeriodic(fixture);
+  assert.deepEqual(diskDecisions(), ["disk_low", "disk_low"], "10% free is not low");
+  assert.equal(fixture.wakes.length, 1, "only the memory hint ever woke");
+});
+
+test("missing memory and an unreadable disk produce no item and no wake", async () => {
+  let disk: CleanerDiskMeasurement = { kind: "measured", availableBytes: 1, totalBytes: 100 };
+  const fixture = runtimeFixture({
+    measurement: { kind: "not_established", reason: "missing" },
+    diskMeasurement: async () => disk,
+  });
+  fixture.runtime.applyConfig(config());
+  await firePeriodic(fixture);
+  assert.ok(fixture.traces.some(({ name, attrs }) => name === "daemon.cleaner.decision" && attrs.decision === "disk_low"));
+  disk = { kind: "not_established", reason: "read_failed" };
+  await firePeriodic(fixture);
+  assert.ok(fixture.traces.some(({ name, attrs }) =>
+    name === "daemon.cleaner.measurement" && attrs.notificationClass === "disk_space_hint" && attrs.established === false));
+  assert.equal(fixture.runtime.inbox.list().length, 0);
+  assert.equal(fixture.wakes.length, 0);
+  assert.equal(fixture.runtime.activeScheduleCount("owner-a"), 1);
+});
+
+test("an unchanged memory hint wakes once per day; marked growth or clearing the threshold resets that", async () => {
+  const threshold = CLEANER_CONFIG_DEFAULTS.thresholdBytes;
+  let bytes = threshold * 2;
+  const fixture = runtimeFixture({ measurement: () => ({ kind: "measured", bytes }) });
+  fixture.runtime.applyConfig(config());
+  const wakeReasons = () => fixture.traces
+    .filter(({ name, attrs }) => name === "daemon.cleaner.present" && attrs.notificationClass !== "disk_space_hint")
+    .map(({ attrs }) => attrs.wake_reason);
+  const cooldownDrops = () => fixture.traces
+    .filter(({ name, attrs }) => name === "daemon.cleaner.drop" && attrs.reason === "rewake_cooldown").length;
+
+  await firePeriodic(fixture);
+  const firstAtMs = fixture.clock.now();
+  assert.deepEqual(wakeReasons(), ["first"]);
+  const itemId = fixture.runtime.inbox.list()[0]!.itemId;
+
+  // The agent reads the hint (ack) but MEMORY.md stays the same size.
+  assert.ok(fixture.runtime.inbox.ack(itemId));
+  await firePeriodic(fixture);
+  await firePeriodic(fixture);
+  assert.deepEqual(wakeReasons(), ["first"], "hourly checks within a day neither re-present nor wake");
+  assert.equal(cooldownDrops(), 2);
+  assert.equal(fixture.runtime.inbox.list().length, 0, "an acknowledged hint is not re-minted during the cooldown");
+  assert.equal(fixture.wakes.length, 1);
+
+  bytes = Math.ceil(threshold * 2 * CLEANER_MEMORY_HINT_REWAKE_GROWTH_RATIO);
+  await firePeriodic(fixture);
+  assert.deepEqual(wakeReasons(), ["first", "grew"]);
+  assert.equal(fixture.wakes.length, 2);
+
+  fixture.clock.nowMs = firstAtMs + 2 * CLEANER_MEMORY_HINT_REWAKE_COOLDOWN_MS;
+  await firePeriodic(fixture);
+  assert.deepEqual(wakeReasons(), ["first", "grew", "cooldown_elapsed"]);
+
+  bytes = 1;
+  await firePeriodic(fixture);
+  bytes = threshold * 2;
+  await firePeriodic(fixture);
+  assert.deepEqual(wakeReasons(), ["first", "grew", "cooldown_elapsed", "first"], "dropping under the threshold resets the cooldown");
+  assert.equal(fixture.wakes.length, 4);
+});
+
+test("disk measurement finishing after owner removal cannot publish into a replacement config", async () => {
+  let finish!: (measurement: CleanerDiskMeasurement) => void;
+  const fixture = runtimeFixture({
+    measurement: { kind: "measured", bytes: 1 },
+    diskMeasurement: () => new Promise((resolve) => { finish = resolve; }),
+  });
+  fixture.runtime.applyConfig(config());
+  fixture.clock.fire(fixture.clock.earliestActiveId());
+  await Promise.resolve();
+  fixture.runtime.replaceOwnerSnapshot("owner-a", null);
+  fixture.runtime.applyConfig(config());
+  finish({ kind: "measured", availableBytes: 0, totalBytes: 100 });
+  await fixture.runtime.waitForIdle();
+  assert.equal(fixture.runtime.inbox.list().length, 0);
+  assert.equal(fixture.wakes.length, 0);
+});
+
+test("disk timeout does not block a memory hint and checks retry next period", async () => {
+  let observedWake!: () => void;
+  const wakeObserved = new Promise<void>((resolve) => { observedWake = resolve; });
+  const fixture = runtimeFixture({
+    diskMeasurement: () => new Promise(() => {}),
+    measurementTimeoutMs: 50,
+    onWake: observedWake,
+  });
+  fixture.runtime.applyConfig(config());
+  fixture.clock.fire(fixture.clock.earliestActiveId());
+  await wakeObserved;
+  assert.deepEqual(fixture.runtime.inbox.list().map((item) => item.notificationClass), ["memory_size_hint"]);
+  fixture.clock.fire(fixture.clock.earliestActiveId());
+  await fixture.runtime.waitForIdle();
+  assert.equal(fixture.runtime.activeScheduleCount("owner-a"), 1);
+  assert.ok(fixture.traces.some(({ attrs }) => attrs.notificationClass === "disk_space_hint" && attrs.reason === "timeout"));
+});
+
+test("a large disk with 20 GiB or more free is not low even under 10%", async () => {
+  const GIB = 1024 ** 3;
+  const fixture = runtimeFixture({
+    measurement: { kind: "measured", bytes: 1 },
+    diskMeasurement: async () => ({ kind: "measured", availableBytes: 100 * GIB, totalBytes: 2048 * GIB }),
+  });
+  fixture.runtime.applyConfig(config());
+  await firePeriodic(fixture);
+  assert.ok(!fixture.traces.some(({ name, attrs }) => name === "daemon.cleaner.decision" && attrs.decision === "disk_low"));
 });

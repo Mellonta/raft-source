@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   hasManualContextCapability,
   MANUAL_CONTEXT_CAPABILITY,
   MANUAL_INDEX_COMMAND,
   validateKnowledgeContext,
-} from "./knowledgeContext.js";
+} from "./knowledgeContext";
 
 test("Manual context requires independent concise natural-language fields", () => {
   assert.deepEqual(validateKnowledgeContext(undefined, "intent"), {

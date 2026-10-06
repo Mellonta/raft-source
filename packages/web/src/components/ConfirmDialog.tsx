@@ -1,16 +1,22 @@
-import { useId, useState } from "react";
+import { useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { X } from "lucide-react";
-import { DEFAULT_LOCALE } from "../i18n/locale";
 import type { Locale } from "../i18n/locale";
 import { mergedMessages } from "../i18n/messages";
 import type { MessageId } from "../i18n/messages";
-import Modal from "./Modal";
 import Banner from "./ui/Banner";
-import Button from "./ui/Button";
-import type { ButtonTone } from "./ui/Button";
-import Spinner from "./ui/Spinner";
+import {
+  Dialog,
+  DialogBody,
+  DialogClose,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Spinner,
+  Button,
+} from "raft-ui";
+import type { ButtonProps } from "raft-ui";
 
 interface ConfirmDialogProps {
   title: string;
@@ -22,11 +28,13 @@ interface ConfirmDialogProps {
   onConfirm: () => Promise<void> | void;
   onClose: () => void;
   confirmDisabled?: boolean;
+  /** Semantic button variant for the confirm action (preferred over confirmColor) */
+  confirmVariant?: ButtonProps["variant"];
   /** Override the confirm button color (default: "bg-brutal-red" for destructive actions) */
   confirmColor?: string;
   /** Hide the secondary cancel action for informational acknowledgement dialogs. */
   hideCancel?: boolean;
-  /** Modal stacking layer (0 = default z-50, 1 = z-[60] for nested dialogs) */
+  /** Stacking layer (0 = default z-50, 1 = z-60 for nested dialogs) */
   layer?: number;
   /** Optional test id for the confirm button (e2e selection) */
   confirmTestId?: string;
@@ -38,26 +46,29 @@ interface ConfirmDialogProps {
   plainMessage?: boolean;
   /** Compact actions for confirmations embedded in already-dense surfaces. */
   actionSize?: "xs" | "sm";
+  /** Caller-owned semantic foreground override for the confirm action. */
+  confirmClassName?: string;
   /**
    * Locale for the dialog-owned chrome (Cancel, close labels, default loading
-   * and fallback error). Defaults to English so an unmigrated caller remains
-   * one complete English surface. Use `active` only when every caller-owned
-   * title/message/button string is migrated; pass an explicit locale for an
+   * and fallback error). Defaults to `active`: every caller's own copy is
+   * migrated, so the chrome follows the display locale. The old English
+   * default (#5117, partial rollout) left a Chinese dialog with an English
+   * "Cancel" whenever a caller forgot to opt in. Pass an explicit locale for an
    * independently localized surface such as the billing WebView.
    */
   chromeLocale?: Locale | "active";
 }
 
-const CONFIRM_TONES_BY_LEGACY_COLOR: Record<string, ButtonTone> = {
-  "bg-white": "white",
-  "bg-soft-signal": "yellow",
-  "bg-brutal-pink": "pink",
-  "bg-brutal-cyan": "cyan",
-  "bg-brutal-lavender": "lavender",
-  "bg-brutal-orange": "orange",
-  "bg-brutal-lime": "lime",
-  "bg-brutal-red": "red",
-  "bg-brutal-stone": "stone",
+const CONFIRM_TONES_BY_LEGACY_COLOR: Record<string, ButtonProps["variant"]> = {
+  "bg-white": "outline",
+  "bg-soft-signal": "primary",
+  "bg-brutal-pink": "accent",
+  "bg-brutal-cyan": "information",
+  "bg-brutal-lavender": "muted",
+  "bg-brutal-orange": "warning",
+  "bg-brutal-lime": "success",
+  "bg-brutal-red": "danger",
+  "bg-brutal-stone": "muted",
 };
 
 /**
@@ -74,6 +85,7 @@ export default function ConfirmDialog({
   onConfirm,
   onClose,
   confirmDisabled = false,
+  confirmVariant,
   confirmColor,
   hideCancel = false,
   layer,
@@ -82,12 +94,11 @@ export default function ConfirmDialog({
   maxWidthClass = "max-w-sm",
   plainMessage = false,
   actionSize = "sm",
-  chromeLocale = DEFAULT_LOCALE,
+  confirmClassName,  chromeLocale = "active",
 }: ConfirmDialogProps) {
   const { formatMessage } = useIntl();
   const fixedChromeMessages = chromeLocale === "active" ? null : mergedMessages(chromeLocale);
   const formatChromeMessage = (id: MessageId) => fixedChromeMessages?.[id] ?? formatMessage({ id });
-  const titleId = useId();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -96,7 +107,7 @@ export default function ConfirmDialog({
   const resolvedConfirmLabel = confirmLabel ?? formatChromeMessage("common.confirm.defaultConfirmLabel");
   const resolvedProcessing = loadingLabel ?? formatChromeMessage("common.confirm.processing");
   const resolvedProcessingEllipsis = loadingLabel ?? formatChromeMessage("common.confirm.processingEllipsis");
-  const confirmTone = CONFIRM_TONES_BY_LEGACY_COLOR[confirmColor ?? "bg-brutal-red"] ?? "red";
+  const confirmTone = confirmVariant ?? (confirmColor ? CONFIRM_TONES_BY_LEGACY_COLOR[confirmColor] : undefined) ?? "danger";
 
   const handleClose = () => {
     if (!loading) onClose();
@@ -123,56 +134,66 @@ export default function ConfirmDialog({
   };
 
   return (
-    <Modal onClose={handleClose} layer={layer}>
-      <div
-        className={`w-full ${maxWidthClass} card-brutal p-6`}
-        role="dialog"
+    <Dialog
+      open
+      // The old Modal frame never closed on a backdrop press for confirmations
+      // (closeOnBackdrop stayed false) — keep that: only Escape, the close
+      // button and Cancel dismiss, all gated on the in-flight confirm.
+      disablePointerDismissal
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) handleClose();
+      }}
+    >
+      <DialogContent
+        layer={(layer ?? 0) >= 1 ? 1 : 0}
+        className={maxWidthClass}
         aria-modal="true"
-        aria-labelledby={titleId}
         aria-busy={loading}
       >
-        {/* Header */}
-        <div className="mb-4 flex items-center justify-between">
-          <h2 id={titleId} className="text-lg font-bold uppercase">{title}</h2>
-          <button
-            onClick={handleClose}
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogClose
             disabled={loading}
-            className="btn-brutal-sm bg-white p-1 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-30"
             aria-label={formatChromeMessage(
               loading ? "common.confirm.actionInProgress" : "common.confirm.closeDialog",
             )}
+          />
+        </DialogHeader>
+
+        {/* font-normal matches the sibling JointConversionConfirmDialog: the
+            rui brutal body recipe is font-medium, but confirmation copy was
+            regular-weight under the old frame. */}
+        <DialogBody className="font-normal">
+          {/* The title establishes the action and this is its one explanation.
+              Repeating the same warning inside a second coloured panel made
+              confirmations read like two competing pieces of content. Rich
+              callers retain their own layout; ordinary copy gets the shared
+              compact text treatment. */}
+          {/* No bottom margin on the body wrapper: the rui Dialog recipe
+              already spaces body and footer; a leftover mb-* here doubled the
+              gap (Josh's review measurement on #8468). */}
+          <div
+            className={plainMessage ? undefined : "text-sm leading-relaxed text-foreground-muted"}
+            data-slot="confirm-dialog-content"
           >
-            <X size={20} />
-          </button>
-        </div>
+            {message}
+          </div>
 
-        {/* The title establishes the action and this is its one explanation.
-            Repeating the same warning inside a second coloured panel made
-            confirmations read like two competing pieces of content. Rich
-            callers retain their own layout; ordinary copy gets the shared
-            compact text treatment. */}
-        <div
-          className={plainMessage ? "mb-5" : "mb-5 text-sm leading-relaxed text-black/75"}
-          data-slot="confirm-dialog-content"
-        >
-          {message}
-        </div>
+          {/* Error */}
+          {error && (
+            <Banner intent="warning" className="mt-4">
+              {error}
+            </Banner>
+          )}
+        </DialogBody>
 
-        {/* Error */}
-        {error && (
-          <Banner intent="warning" className="mb-4">
-            {error}
-          </Banner>
-        )}
-
-        {/* Actions */}
-        <div className="flex flex-wrap justify-end gap-3">
+        <DialogFooter className="flex-wrap">
           {!hideCancel && (
             <Button
               onClick={handleClose}
               disabled={loading}
               size={actionSize}
-              tone="white"
+              variant="outline"
               className="whitespace-nowrap disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-30"
             >
               {cancelLabel ?? formatChromeMessage("common.confirm.cancel")}
@@ -183,18 +204,17 @@ export default function ConfirmDialog({
             onClick={handleConfirm}
             disabled={loading || confirmDisabled}
             size={actionSize}
-            shape={confirmIcon || loading ? "iconText" : "text"}
-            tone={confirmTone}
-            className="whitespace-nowrap disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-80"
+            variant={confirmTone}
+            className={`whitespace-nowrap disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-80 ${confirmClassName ?? ""}`.trim()}
             aria-busy={loading}
             aria-label={loading ? resolvedProcessingEllipsis : undefined}
           >
-            {loading && <Spinner size="xs" label={resolvedProcessing} />}
+            {loading && <Spinner size="xs" aria-label={resolvedProcessing} />}
             {!loading && confirmIcon}
             {loading ? resolvedProcessingEllipsis : resolvedConfirmLabel}
           </Button>
-        </div>
-      </div>
-    </Modal>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

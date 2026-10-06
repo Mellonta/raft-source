@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { runNamedCase } from "../src/test/runNamedCase.js";
+import { runNamedCase } from "../src/test/runNamedCase";
 import {
   INBOX_SERVING_ROWS_INDEX_CREATION_DEPENDENCIES,
   runInboxServingRowsIndexCreation,
   type InboxServingRowsIndexCreationDependencies,
-} from "./create-inbox-serving-rows-receiver-server-index.js";
+} from "./create-inbox-serving-rows-receiver-server-index";
 import {
   assertIndexCreationTimeouts,
   createIndexCreationPool,
   CREATE_INBOX_SERVING_ROWS_RECEIVER_SERVER_INDEX_SQL,
   type InboxServingRowsIndexStatus,
-} from "./inbox-serving-rows-receiver-server-index.js";
+} from "./inbox-serving-rows-receiver-server-index";
 
 type CreationPool = ReturnType<typeof createIndexCreationPool>;
 type CreationClient = Awaited<ReturnType<CreationPool["connect"]>>;

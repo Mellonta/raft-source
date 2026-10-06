@@ -8,7 +8,7 @@ import {
   type DaemonApiRequestQueryByRoute,
   type DaemonApiResponseByRoute,
   type DaemonApiRouteKey,
-} from "./daemonApiContract.js";
+} from "./daemonApiContract";
 import { z } from "zod";
 
 export type DaemonApiRawClientErrorReason =

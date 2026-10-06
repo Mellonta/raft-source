@@ -15,14 +15,13 @@
 // + write a migration to widen the whitelist. Don't ship one without the
 // other.
 //
-// **Failure mode:** event-write failures must never break the underlying
-// product flow. We log + swallow at the helper boundary so a stuck DB
-// doesn't take down the action-card execute path. Funnel data is
-// best-effort by design.
+// **Failure mode:** standalone event writes must never break the underlying
+// product flow. The canonical transaction-aware action-card path opts into
+// rollback-coupled audit writes; all other funnel data remains best-effort.
 
 import { sql } from "drizzle-orm";
-import { getDb, type DatabaseTransaction } from "../db/index.js";
-import { productEvents } from "../db/schema.js";
+import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
+import { productEvents } from "../db/schema";
 
 /**
  * Action-card-specific event type. Mirrors the day-1 whitelist enforced by
@@ -133,6 +132,12 @@ export interface RecordActionCardEventArgs {
   /** At-most-once write within (cardId, eventType) when set. */
   idempotencyKey?: string;
   metadata?: ActionCardEventMetadata;
+  /**
+   * Optional caller-owned transaction.  Conversion action-card execution
+   * supplies its canonical source-lock transaction here so the authoritative
+   * attempt/success audit cannot be written after that lock is released.
+   */
+  executor?: DatabaseExecutor;
 }
 
 export interface RecordOnboardingWizardEventArgs {
@@ -175,15 +180,17 @@ function cleanShortField(value: string | undefined): string | undefined {
 }
 
 /**
- * Record an action-card lifecycle event. Best-effort: failures are logged
- * and swallowed so a wobbly DB doesn't take down the underlying product
- * flow. Callers should NOT await the result for correctness.
+ * Record an action-card lifecycle event. Standalone writes are best-effort:
+ * failures are logged and swallowed so analytics cannot take down the
+ * underlying product flow. When the caller supplies its authoritative
+ * transaction, an insert failure is rethrown so the business transition and
+ * its audit boundary roll back together.
  */
 export async function recordActionCardEvent(
   args: RecordActionCardEventArgs,
 ): Promise<void> {
   try {
-    const db = getDb();
+    const db = args.executor ?? getDb();
     // Defensive cap on `error_code` length — should always be a short
     // categorical code, but bound it so a buggy caller can't dump arbitrary
     // text into the funnel.
@@ -214,6 +221,7 @@ export async function recordActionCardEvent(
       `[productEvents] failed to record ${args.eventType} for card ${args.cardId}:`,
       err,
     );
+    if (args.executor) throw err;
   }
 }
 

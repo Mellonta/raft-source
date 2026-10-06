@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   consumeReadStateUpdate,
   getAcceptedReadState,
@@ -7,10 +6,10 @@ import {
   normalizeReadStateUpdatedBulk,
   registerReadStateIngressCorruptListener,
   resetReadStateSyncForTests,
-} from "../src/store/readStateSync.js";
+} from "../src/store/readStateSync";
 import type {
   ReadStateIngressCorruption,
-} from "../src/store/readStateSync.js";
+} from "../src/store/readStateSync";
 
 // #632 C0 — read-state ingress failure observability.
 //

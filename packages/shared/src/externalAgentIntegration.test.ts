@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   EXTERNAL_AGENT_COMMS_PROTOCOL_VERSION,
@@ -9,7 +8,7 @@ import {
   validateExternalAgentWakeEventEnvelope,
   validateExternalRuntimeIntegrationManifest,
   type ExternalAgentProofLevel,
-} from "./externalAgentIntegration.js";
+} from "./externalAgentIntegration";
 
 const baseEvent = {
   schema: "slock-external-agent-wake-event.v1",

@@ -2,13 +2,13 @@
 
 import type { Command } from "commander";
 
-import type { AgentContext } from "../../auth/env.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeJson, writeText, NL, adoptCliReplyText } from "../../core/renderer.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import type { IntegrationListResponse, RegisteredIntegrationService } from "./_format.js";
+import type { AgentContext } from "../../auth/env";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeJson, writeText, NL, adoptCliReplyText } from "../../core/renderer";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import type { IntegrationListResponse, RegisteredIntegrationService } from "./_format";
 import {
   AgentManifestFetchError,
   AgentManifestResponseFormatError,
@@ -18,7 +18,7 @@ import {
   formatShellExports,
   type AgentManifest,
   type LocalCliProfileEnv,
-} from "./manifest.js";
+} from "./manifest";
 
 interface EnvOptions {
   service: string;

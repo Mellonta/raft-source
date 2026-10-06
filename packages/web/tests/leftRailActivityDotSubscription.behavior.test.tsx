@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { useEffect } from "react";
 import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
@@ -10,7 +9,7 @@ import { useWorkspaceGridNavigationStore } from "../src/components/workspace/wor
 import { TestIntlProvider } from "./helpers/intl";
 import { useAuthStore } from "../src/store/authStore";
 import { useInboxStore } from "../src/store/inboxStore";
-import { useServerStore } from "../src/store/serverStore";
+import { resetInFlightLoadersForTest, useServerStore } from "../src/store/serverStore";
 import { useThreadStore } from "../src/store/threadStore";
 
 const originalApiGet = api.get;
@@ -18,6 +17,9 @@ const originalServerState = useServerStore.getState();
 
 afterEach(() => {
   cleanup();
+  // Module-level single-flight windows survive setState resets; clear them so a
+  // case that stubbed api with a never-settling promise cannot strand the next.
+  resetInFlightLoadersForTest();
   api.get = originalApiGet;
   localStorage.clear();
   useAuthStore.setState(useAuthStore.getInitialState(), true);
@@ -119,6 +121,10 @@ test("the rail server avatar falls back to its initial after an image load error
   assert.ok(switcher);
   const avatar = switcher.querySelector<HTMLImageElement>('img[src="https://cdn.example.com/broken-server.png"]');
   assert.ok(avatar);
+  const frame = avatar.closest('[data-slot="avatar"]');
+  assert.ok(frame, "the rail image needs the RUI frame that supplies its size");
+  assert.equal(frame.getAttribute("data-size"), "md");
+  assert.equal(frame.getAttribute("data-avatar-context"), "panel-header");
   assert.equal(switcher.textContent?.trim(), "B");
 
   fireEvent.error(avatar);
@@ -138,21 +144,47 @@ test("the rail server avatar falls back to its initial after an image load error
   assert.equal(replacement.hidden, false);
 });
 
-test("the Activity dot follows the server-authoritative summary, not the local inbox aggregate", async () => {
+test("a fresh current-server Activity total outranks a stale summary while other-server attention remains", async () => {
   seedActivityRail([], []);
+  const currentServer = useServerStore.getState().current!;
+  useServerStore.setState({
+    servers: [
+      currentServer,
+      {
+        ...currentServer,
+        id: "server-other",
+        name: "Other Server",
+        slug: "other-server",
+      },
+    ],
+  });
   let summaryRequests = 0;
   api.get = (() => {
     summaryRequests += 1;
     return Promise.resolve({
-      data: [{
-        serverId: "server-activity-rail",
-        unreadCount: 1,
-        serverPushMuted: false,
-        activityUnreadCount: 1,
-      }],
+      data: [
+        {
+          serverId: "server-activity-rail",
+          unreadCount: 1,
+          serverPushMuted: false,
+          activityUnreadCount: 1,
+        },
+        {
+          serverId: "server-other",
+          unreadCount: 1,
+          serverPushMuted: false,
+          activityUnreadCount: 1,
+        },
+      ],
     });
   }) as typeof api.get;
-  useInboxStore.setState({ activeUnreadCount: 0 });
+  useInboxStore.setState({
+    acceptedWindowGeneration: "activity-window:fresh",
+    hasAcceptedWindow: true,
+    loaded: true,
+    totalUnreadCount: 0,
+    activeUnreadCount: 0,
+  });
   render(
     <MemoryRouter initialEntries={["/"]}>
       <TestIntlProvider>
@@ -160,21 +192,95 @@ test("the Activity dot follows the server-authoritative summary, not the local i
       </TestIntlProvider>
     </MemoryRouter>,
   );
+  // The boot summary fetch now lives in App's single boot entry (LeftRail's
+  // effect only keeps event triggers). Simulate that entry directly so this
+  // test's subject — the stale-vs-fresh dot logic — has a loaded summary.
+  void useServerStore.getState().loadServerUnreadSummary();
   const activityButton = document.querySelector<HTMLButtonElement>('[data-testid="left-rail-tab-activity"]');
   assert.ok(activityButton, "Activity rail button renders");
   const currentActivityButton = () => document.querySelector<HTMLButtonElement>('[data-testid="left-rail-tab-activity"]');
+  const serverSwitcherButton = () => document.querySelector<HTMLButtonElement>('button[aria-label*="Activity Rail Server"]');
   await waitFor(() => {
-    assert.equal(summaryRequests, 1, "left rail must load the server summary");
-    assert.notEqual(currentActivityButton()?.querySelector('span[aria-hidden="true"]'), null, "positive server-authoritative unread shows the dot");
+    // The rail must load the summary; not necessarily exactly once. The effect
+    // deliberately re-fetches when local unread appears or clears (the "flip"
+    // note in LeftRail), and the store coalesces only concurrent calls, so a
+    // second sequential fetch is expected behaviour rather than a regression.
+    assert.ok(summaryRequests >= 1, `left rail must load the server summary, saw ${summaryRequests}`);
+    assert.equal(
+      currentActivityButton()?.querySelector('span[aria-hidden="true"]'),
+      null,
+      "fresh Activity total=0 must suppress the stale current-server summary=1",
+    );
+    assert.notEqual(
+      serverSwitcherButton()?.querySelector('span[aria-hidden="true"]'),
+      null,
+      "the same cross-server summary still reports other-server Activity attention",
+    );
   });
 
   act(() => {
-    useInboxStore.setState({ activeUnreadCount: 2 });
+    useInboxStore.setState({ totalUnreadCount: 2, activeUnreadCount: 2 });
   });
-  // The rail may commit for unrelated async work already queued by the full
-  // suite; the contract is that this local aggregate cannot change the
-  // server-authoritative Activity presentation.
-  assert.notEqual(currentActivityButton()?.querySelector('span[aria-hidden="true"]'), null, "server-authoritative dot remains visible");
+  assert.notEqual(
+    currentActivityButton()?.querySelector('span[aria-hidden="true"]'),
+    null,
+    "new current-server Activity unread lights the dot immediately",
+  );
+
+  act(() => {
+    useInboxStore.setState({ totalUnreadCount: 1, activeUnreadCount: 1 });
+  });
+  assert.notEqual(
+    currentActivityButton()?.querySelector('span[aria-hidden="true"]'),
+    null,
+    "reading one of several Activity items keeps the dot while unread remains",
+  );
+
+  act(() => {
+    useInboxStore.setState({ totalUnreadCount: 0, activeUnreadCount: 0 });
+  });
+  assert.equal(
+    currentActivityButton()?.querySelector('span[aria-hidden="true"]'),
+    null,
+    "mark-read total=0 clears the dot without waiting for summary refresh",
+  );
+
+  act(() => {
+    useInboxStore.setState({ totalUnreadCount: 3, activeUnreadCount: 3 });
+  });
+  assert.notEqual(currentActivityButton()?.querySelector('span[aria-hidden="true"]'), null);
+  act(() => {
+    useInboxStore.setState({ totalUnreadCount: 0, activeUnreadCount: 0 });
+  });
+  assert.equal(
+    currentActivityButton()?.querySelector('span[aria-hidden="true"]'),
+    null,
+    "mark-all-read total=0 clears the dot without waiting for summary refresh",
+  );
+
+  act(() => {
+    useInboxStore.setState({
+      acceptedWindowGeneration: "",
+      hasAcceptedWindow: true,
+      loaded: true,
+      totalUnreadCount: 0,
+      activeUnreadCount: 0,
+    });
+  });
+  assert.equal(
+    currentActivityButton()?.querySelector('span[aria-hidden="true"]'),
+    null,
+    "a background refresh in flight must keep the accepted total authoritative",
+  );
+
+  const chatButton = document.querySelector<HTMLButtonElement>('[data-testid="left-rail-tab-chat"]');
+  assert.ok(chatButton);
+  fireEvent.click(chatButton);
+  assert.equal(
+    currentActivityButton()?.querySelector('span[aria-hidden="true"]'),
+    null,
+    "leaving Activity must not OR the stale current-server summary back into the rail",
+  );
 });
 
 test("classic Activity double-click navigates once and only adds first-unread focus", () => {

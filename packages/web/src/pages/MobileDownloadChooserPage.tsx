@@ -36,6 +36,16 @@ export function isTouchCapableMac(nav: { userAgent?: string; maxTouchPoints?: nu
   return /Macintosh|Mac OS X/i.test(ua) && (nav.maxTouchPoints ?? 0) > 1;
 }
 
+/**
+ * Public releases page for the desktop beta (task #714).
+ *
+ * The desktop beta ships through GitHub releases, not through our own endpoint
+ * — unlike the mobile links above, there is no signed URL to expire, so linking
+ * the vendor page directly is safe. Exported so tests pin this exact constant
+ * instead of a copy.
+ */
+export const DESKTOP_BETA_RELEASES_URL = "https://github.com/botiverse/desktop-beta/releases";
+
 export default function MobileDownloadChooserPage() {
   const { formatMessage } = useIntl();
   const likelyIPad = typeof navigator === "undefined" ? false : isTouchCapableMac(navigator);
@@ -75,6 +85,18 @@ export default function MobileDownloadChooserPage() {
             data-testid="mobile-download-chooser-android"
           >
             {formatMessage({ id: "settings.mobileApp.android" })}
+          </a>
+          {/* Desktop beta (task #714): the newsletter links here for BOTH mobile
+              and desktop readers, so the desktop entry lives on this page too.
+              External GitHub releases page → new tab, like the iOS one. */}
+          <a
+            className="btn-brutal-sm bg-white px-3 py-2 text-center text-sm font-bold"
+            href={DESKTOP_BETA_RELEASES_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            data-testid="mobile-download-chooser-desktop-beta"
+          >
+            {formatMessage({ id: "mobileDownload.chooser.desktopBeta" })}
           </a>
         </div>
       </div>

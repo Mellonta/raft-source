@@ -8,7 +8,7 @@ import type {
   SyncScopeId,
   SyncSeq,
   SyncSnapshot,
-} from "./types.js";
+} from "./types";
 
 export type SyncHarnessInput<E = unknown, S = unknown> =
   | { kind: "frame"; domain: SyncDomainName; frame: SyncFrame<E> }

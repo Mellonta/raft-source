@@ -45,13 +45,13 @@
  * `UPLOAD_OBJECT_PUT_UNCERTAIN` with the session preserved.
  */
 
-import { emitWebTrace } from "./webAuthTrace";
+import { emitWebEvent } from "./webAuthTrace";
 import type { UploadCapabilityFallbackTraceEventName } from "./webAuthTrace";
 
 /**
  * The event this module may emit. Typed against the central registry rather
  * than `string`, which is the tooth: if the name is ever dropped from
- * `WebTraceEventName`, assigning `emitWebTrace` to this seam stops compiling.
+ * `WebEventName`, assigning `emitWebEvent` to this seam stops compiling.
  * The previous `as unknown as` cast made the emitter accept any `string`, so
  * this family worked at runtime while sitting outside the registry's
  * compile-time contract entirely — a rename or a registry refactor would have
@@ -65,11 +65,11 @@ type FallbackEmitter = (
   attrs: Record<string, unknown>,
 ) => void;
 
-let emitter: FallbackEmitter = emitWebTrace;
+let emitter: FallbackEmitter = emitWebEvent;
 
 /** Test seam: observe emissions without coupling to the trace pipeline. */
 export function __setUploadFallbackEmitterForTest(next: FallbackEmitter | null): void {
-  emitter = next ?? emitWebTrace;
+  emitter = next ?? emitWebEvent;
 }
 
 /**

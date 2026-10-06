@@ -19,34 +19,31 @@ import { Router, type Response, type Router as RouterType } from "express";
 import type { Server as SocketServer } from "socket.io";
 import {
   AGENT_MIGRATION_TERMINAL_FAILURE_CODES,
-  agentMigrationTransferSummarySchema,
   currentDate,
   type AgentMigrationControlManifest,
   type AgentMigrationSourceQuiesceReceipt,
 } from "@botiverse/raft-shared";
 import { and, eq, inArray, isNull } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, computers, servers } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agents, computers, servers } from "../db/schema";
 import {
   ALLOWED_AGENT_CAPABILITIES,
   mintAgentCredential,
   normalizeAgentCapabilities,
   revokeAgentCredential,
   type AgentCapability,
-} from "../services/agentCredentialService.js";
+} from "../services/agentCredentialService";
+import { broadcastAgentCredentialRevocation } from "../replicaRouter";
 import {
   ProviderConnectionError,
   resolveProviderConnectionLaunch,
-} from "../services/providerConnectionService.js";
-import { isProviderConnectionsEnabled } from "../services/providerConnectionFeature.js";
+} from "../services/providerConnectionService";
+import { isProviderConnectionsEnabled, isProviderProbesEnabled } from "../services/providerConnectionFeature";
 import {
-  validateAgentO11yBatch,
-  type AgentO11yAcceptedEvent,
-} from "../services/agentO11yValidation.js";
-import {
-  AgentO11yWriterUnavailableError,
-  getAgentO11yScopeDbWriter,
-} from "../services/agentO11yScopeDbWriter.js";
+  materializeProviderProbe,
+  ProviderProbeError,
+} from "../services/providerProbeService";
+import { isProviderProbeId } from "@botiverse/raft-shared";
 // task #30 PR-A: preflight derives its principal/path view DIRECTLY from the
 // live auth registry — never a copied/static `EXPECTED_PRINCIPALS` list. A
 // registry gap therefore fails preflight and real auth identically (the
@@ -54,9 +51,10 @@ import {
 import {
   routeAuthPolicy,
   CLAIMED_AUTH_POLICY_PREFIXES,
-} from "../middleware/routeAuthPolicy.js";
-import { SERVER_VERSION } from "../version.js";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
+} from "../middleware/routeAuthPolicy";
+import { SERVER_VERSION } from "../version";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
+import { archiveMigrationSourceWorkspace } from "../services/agentMigrationSourceArchive";
 import {
   acknowledgeAgentMigrationCancellation,
   assertAgentMigrationTargetArrivalArchivable,
@@ -64,30 +62,34 @@ import {
   completeAgentMigrationResumableUpload,
   flipAgentMigrationTargetImport,
   getAgentMigrationTargetImport,
-  getAgentMigrationTargetImportById,
   getAgentMigrationResumableControl,
-  markAgentMigrationSourceReadyForComputer,
   markAgentMigrationTransportLostForComputer,
   markAgentMigrationTargetImportArrived,
   planAgentMigrationChunkTransfers,
+  prepareAgentMigrationStreamedChunk,
   recordAgentMigrationChunkReceipt,
+  recordAgentMigrationSourceArchiveAttemptFailed,
   recordAgentMigrationSourceWorkspaceArchived,
+  recordAgentMigrationSourceBuildProgress,
   recordAgentMigrationSourceQuiesced,
   registerAgentMigrationControlManifest,
   recordAgentMigrationAutoStartFailure,
   startAgentMigrationTargetImport,
   type AgentMigrationTransportFailureCode,
   type AgentMigrationTargetImportView,
-} from "../services/agentMigrationService.js";
+} from "../services/agentMigrationService";
 import {
   emitAgentMigrationUpdated,
   emitAgentMigrationUpdatedByRef,
-} from "../services/agentMigrationRealtime.js";
+} from "../services/agentMigrationRealtime";
+import { sendJsonServerError } from "./errorResponse";
 
 export const internalComputerRouter: RouterType = Router();
 
 const AGENT_MIGRATION_TRANSPORT_FAILURE_CODES: ReadonlySet<AgentMigrationTransportFailureCode> =
   new Set(AGENT_MIGRATION_TERMINAL_FAILURE_CODES);
+// Code-shaped only (no free text): stored verbatim in transport_error_code.
+const AGENT_MIGRATION_TRANSPORT_DETAIL_CODE_PATTERN = /^[A-Za-z0-9_:.-]{1,160}$/;
 
 function jsonBody(req: { body?: unknown }): Record<string, unknown> {
   return req.body && typeof req.body === "object" && !Array.isArray(req.body)
@@ -130,27 +132,6 @@ function sendMigrationTargetImport(res: Response, view: AgentMigrationTargetImpo
   res.status(200).json({ ok: true, migration: view });
 }
 
-async function archiveMigrationSourceWorkspace(
-  orchestrator: AgentOrchestrator | undefined,
-  migration: AgentMigrationTargetImportView,
-): Promise<void> {
-  if (
-    !orchestrator
-    || typeof orchestrator.archiveAgentMigrationSourceWorkspace !== "function"
-  ) {
-    throw new Error("MIGRATION_SOURCE_WORKSPACE_ARCHIVE_FAILED");
-  }
-  try {
-    await orchestrator.archiveAgentMigrationSourceWorkspace(migration.sourceMachineId, {
-      migrationId: migration.migrationId,
-      agentId: migration.agentId,
-    });
-  } catch (error) {
-    console.error("internal.computer.agent-migrations source archive error:", error);
-    throw new Error("MIGRATION_SOURCE_WORKSPACE_ARCHIVE_FAILED");
-  }
-}
-
 function sendMigrationError(res: Response, err: unknown): void {
   const message = err instanceof Error ? err.message : String(err);
   const byMessage: Record<string, { status: number; code: string; error: string }> = {
@@ -174,11 +155,13 @@ function sendMigrationError(res: Response, err: unknown): void {
     MIGRATION_CANCEL_OUTCOME_MISMATCH: { status: 409, code: "migration_cancel_outcome_mismatch", error: "Migration cancel outcome does not match the frozen disposition" },
     MIGRATION_SOURCE_NOT_QUIESCED: { status: 409, code: "migration_source_not_quiesced", error: "Source runtime is not quiesced" },
     MIGRATION_SOURCE_QUIESCE_RECEIPT_INVALID: { status: 400, code: "migration_source_quiesce_receipt_invalid", error: "Source quiesce receipt is invalid" },
+    MIGRATION_SOURCE_PROGRESS_INVALID: { status: 400, code: "migration_source_progress_invalid", error: "Source build progress is invalid" },
     MIGRATION_SOURCE_QUIESCE_RECEIPT_CONFLICT: { status: 409, code: "migration_source_quiesce_receipt_conflict", error: "Source quiesce receipt conflicts with the active generation" },
     MIGRATION_CONTROL_MANIFEST_INVALID: { status: 400, code: "migration_control_manifest_invalid", error: "Migration control manifest is invalid" },
     MIGRATION_CONTROL_MANIFEST_TOO_LARGE: { status: 413, code: "migration_control_manifest_too_large", error: "Migration control manifest exceeds its fixed budget" },
     MIGRATION_CONTROL_MANIFEST_CONFLICT: { status: 409, code: "migration_control_manifest_conflict", error: "Migration control manifest conflicts with the active generation" },
     MIGRATION_CONTROL_MANIFEST_MISSING: { status: 409, code: "migration_control_manifest_missing", error: "Migration control manifest is not registered" },
+    MIGRATION_STREAMED_CHUNK_INVALID: { status: 400, code: "migration_streamed_chunk_invalid", error: "Streamed chunk is invalid" },
     MIGRATION_CHUNK_RECEIPT_MISMATCH: { status: 409, code: "migration_chunk_receipt_mismatch", error: "Migration chunk receipt does not match the active control manifest" },
     MIGRATION_CHUNK_RECEIPT_SET_MISMATCH: { status: 409, code: "migration_chunk_receipt_set_mismatch", error: "Migration chunk receipt set does not match the active control manifest" },
     MIGRATION_CHUNKS_MISSING: { status: 409, code: "migration_chunks_missing", error: "Migration chunks are still missing" },
@@ -257,10 +240,8 @@ internalComputerRouter.post("/preflight", async (req, res) => {
 /**
  * GET /internal/computer/agent-migrations/by-id/:migrationId
  *
- * E2E/live driver and product-safe target handoff surface. Agent-facing
- * migration begin/status routes expose migration id, not the bearer-like
- * grant key. The authenticated target Computer can resolve that id to the
- * target import view once server ownership and target-machine binding match.
+ * Target import view. The authenticated target Computer can resolve the
+ * migration id once server ownership and target-machine binding match.
  */
 internalComputerRouter.get("/agent-migrations/by-id/:migrationId", async (req, res) => {
   try {
@@ -269,63 +250,12 @@ internalComputerRouter.get("/agent-migrations/by-id/:migrationId", async (req, r
       res.status(500).json({ error: "Computer machine binding missing", code: "machine_binding_missing" });
       return;
     }
-    const view = await getAgentMigrationTargetImportById({
+    const view = await getAgentMigrationTargetImport({
       migrationId: req.params.migrationId,
       serverId: ctx.serverId,
       targetMachineId: ctx.targetMachineId,
     });
     sendMigrationTargetImport(res, view);
-  } catch (err) {
-    sendMigrationError(res, err);
-  }
-});
-
-internalComputerRouter.post("/agent-migrations/by-id/:migrationId/source-ready", async (req, res) => {
-  try {
-    const ctx = await computerMigrationContext(req);
-    if (!ctx) {
-      res.status(500).json({ error: "Computer machine binding missing", code: "machine_binding_missing" });
-      return;
-    }
-    const body = jsonBody(req);
-    const manifestPath = requiredString(body, "manifestPath");
-    if (!manifestPath) {
-      res.status(400).json({ error: "manifestPath is required", code: "manifest_path_required" });
-      return;
-    }
-    const manifestSha256 = body.manifestSha256 === undefined || body.manifestSha256 === null
-      ? null
-      : requiredString(body, "manifestSha256");
-    if (body.manifestSha256 !== undefined && body.manifestSha256 !== null && !manifestSha256) {
-      res.status(400).json({ error: "manifestSha256 must be a non-empty string", code: "manifest_sha_invalid" });
-      return;
-    }
-    const transferSummary = agentMigrationTransferSummarySchema.safeParse(body.transferSummary);
-    if (!transferSummary.success) {
-      res.status(400).json({
-        error: "transferSummary must contain bounded pathless migration counts",
-        code: "migration_transfer_summary_invalid",
-      });
-      return;
-    }
-    const migration = await markAgentMigrationSourceReadyForComputer({
-      migrationId: req.params.migrationId,
-      serverId: ctx.serverId,
-      sourceMachineId: ctx.machineId,
-      manifestPath,
-      manifestSha256,
-      transferSummary: transferSummary.data,
-    });
-    await emitAgentMigrationUpdated(req.app.get("io") as SocketServer | undefined, migration);
-    res.status(200).json({
-      ok: true,
-      migration: {
-        id: migration.id,
-        state: migration.state,
-        manifestPath: migration.manifestPath,
-        manifestSha256: migration.manifestSha256,
-      },
-    });
   } catch (err) {
     sendMigrationError(res, err);
   }
@@ -346,11 +276,21 @@ internalComputerRouter.post("/agent-migrations/by-id/:migrationId/transport-lost
     const message = typeof body.message === "string" && body.message.length > 0
       ? body.message.slice(0, 500)
       : null;
+    // Newer daemons also send the unfiltered cause; older ones only send `code`.
+    const detailCode = typeof body.detailCode === "string"
+      && AGENT_MIGRATION_TRANSPORT_DETAIL_CODE_PATTERN.test(body.detailCode)
+      ? body.detailCode
+      : null;
+    const transportGeneration = typeof body.transportGeneration === "string" && body.transportGeneration.length <= 200
+      ? body.transportGeneration
+      : null;
     const migration = await markAgentMigrationTransportLostForComputer({
       migrationId: req.params.migrationId,
       serverId: ctx.serverId,
       machineId: ctx.machineId,
       code,
+      detailCode,
+      transportGeneration,
       message,
     });
     await emitAgentMigrationUpdated(req.app.get("io") as SocketServer | undefined, migration);
@@ -445,6 +385,31 @@ internalComputerRouter.post("/agent-migrations/by-id/:migrationId/resumable/sour
   }
 });
 
+internalComputerRouter.post("/agent-migrations/by-id/:migrationId/resumable/source-progress", async (req, res) => {
+  try {
+    const ctx = await computerMigrationContext(req);
+    const token = migrationTransportToken(req);
+    if (!ctx || !token) {
+      res.status(token ? 500 : 401).json({ error: token ? "Computer machine binding missing" : "Migration transport token missing", code: token ? "machine_binding_missing" : "migration_transport_token_missing" });
+      return;
+    }
+    const recorded = await recordAgentMigrationSourceBuildProgress({
+      migrationId: req.params.migrationId,
+      serverId: ctx.serverId,
+      sourceMachineId: ctx.machineId,
+      transportToken: token,
+      report: jsonBody(req),
+    });
+    res.status(200).json({
+      ok: true,
+      advanced: recorded.advanced,
+      prepDeadlineAt: recorded.migration.prepDeadlineAt.toISOString(),
+    });
+  } catch (err) {
+    sendMigrationError(res, err);
+  }
+});
+
 internalComputerRouter.post("/agent-migrations/by-id/:migrationId/resumable/control", async (req, res) => {
   try {
     const ctx = await computerMigrationContext(req);
@@ -525,6 +490,37 @@ internalComputerRouter.get("/agent-migrations/by-id/:migrationId/resumable/chunk
   }
 });
 
+// Streamed bundles: the source asks for an upload URL for each chunk as soon
+// as it is packed, before the control manifest exists.
+internalComputerRouter.post("/agent-migrations/by-id/:migrationId/resumable/stream-chunks/:chunkIndex", async (req, res) => {
+  try {
+    const ctx = await computerMigrationContext(req);
+    const token = migrationTransportToken(req);
+    const body = jsonBody(req);
+    const migrationGeneration = requiredString(body, "migrationGeneration");
+    const leaseId = requiredString(body, "leaseId");
+    const sha256 = requiredString(body, "sha256");
+    if (!ctx || !token || !migrationGeneration || !leaseId || !sha256) {
+      res.status(!token ? 401 : 400).json({ error: !token ? "Migration transport token missing" : "Streamed chunk is invalid", code: !token ? "migration_transport_token_missing" : "migration_streamed_chunk_invalid" });
+      return;
+    }
+    const result = await prepareAgentMigrationStreamedChunk({
+      migrationId: req.params.migrationId,
+      serverId: ctx.serverId,
+      sourceMachineId: ctx.machineId,
+      transportToken: token,
+      migrationGeneration,
+      leaseId,
+      chunkIndex: Number(req.params.chunkIndex),
+      sizeBytes: body.sizeBytes as number,
+      sha256,
+    });
+    res.status(200).json({ ok: true, ...result });
+  } catch (err) {
+    sendMigrationError(res, err);
+  }
+});
+
 internalComputerRouter.post("/agent-migrations/by-id/:migrationId/resumable/chunks/:chunkIndex/receipt", async (req, res) => {
   try {
     const ctx = await computerMigrationContext(req);
@@ -587,33 +583,10 @@ internalComputerRouter.post("/agent-migrations/by-id/:migrationId/resumable/uplo
   }
 });
 
-/**
- * GET /internal/computer/agent-migrations/:grantKey
- *
- * task #124 — target-side import/adopt read surface. Only the authenticated
- * target Computer may see or drive the grant. The response carries the
- * current server generation; every mutating callback must echo that exact
- * generation and receives the next one back.
- */
-internalComputerRouter.get("/agent-migrations/:grantKey", async (req, res) => {
-  try {
-    const ctx = await targetImportContext(req);
-    if (!ctx) {
-      res.status(500).json({ error: "Computer machine binding missing", code: "machine_binding_missing" });
-      return;
-    }
-    const view = await getAgentMigrationTargetImport({
-      grantKey: req.params.grantKey,
-      serverId: ctx.serverId,
-      targetMachineId: ctx.targetMachineId,
-    });
-    sendMigrationTargetImport(res, view);
-  } catch (err) {
-    sendMigrationError(res, err);
-  }
-});
-
-internalComputerRouter.post("/agent-migrations/:grantKey/start-transfer", async (req, res) => {
+// Target-side steps (start import, flip, arrived). Only the authenticated
+// target Computer may drive them; every call echoes the current
+// migrationGeneration and receives the next one back.
+internalComputerRouter.post("/agent-migrations/by-id/:migrationId/start-transfer", async (req, res) => {
   try {
     const ctx = await targetImportContext(req);
     if (!ctx) {
@@ -626,7 +599,7 @@ internalComputerRouter.post("/agent-migrations/:grantKey/start-transfer", async 
       return;
     }
     const view = await startAgentMigrationTargetImport({
-      grantKey: req.params.grantKey,
+      migrationId: req.params.migrationId,
       migrationGeneration,
       serverId: ctx.serverId,
       targetMachineId: ctx.targetMachineId,
@@ -638,7 +611,7 @@ internalComputerRouter.post("/agent-migrations/:grantKey/start-transfer", async 
   }
 });
 
-internalComputerRouter.post("/agent-migrations/:grantKey/flip-machine", async (req, res) => {
+internalComputerRouter.post("/agent-migrations/by-id/:migrationId/flip-machine", async (req, res) => {
   try {
     const ctx = await targetImportContext(req);
     if (!ctx) {
@@ -651,7 +624,7 @@ internalComputerRouter.post("/agent-migrations/:grantKey/flip-machine", async (r
       return;
     }
     const view = await flipAgentMigrationTargetImport({
-      grantKey: req.params.grantKey,
+      migrationId: req.params.migrationId,
       migrationGeneration,
       serverId: ctx.serverId,
       targetMachineId: ctx.targetMachineId,
@@ -663,7 +636,7 @@ internalComputerRouter.post("/agent-migrations/:grantKey/flip-machine", async (r
   }
 });
 
-internalComputerRouter.post("/agent-migrations/:grantKey/arrived", async (req, res) => {
+internalComputerRouter.post("/agent-migrations/by-id/:migrationId/arrived", async (req, res) => {
   try {
     const ctx = await targetImportContext(req);
     if (!ctx) {
@@ -689,24 +662,36 @@ internalComputerRouter.post("/agent-migrations/:grantKey/arrived", async (req, r
     const orchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
     const arrivalStartedAt = currentDate();
     const current = await assertAgentMigrationTargetArrivalArchivable({
-      grantKey: req.params.grantKey,
+      migrationId: req.params.migrationId,
       migrationGeneration,
       serverId: ctx.serverId,
       targetMachineId: ctx.targetMachineId,
       now: arrivalStartedAt,
     });
-    await archiveMigrationSourceWorkspace(orchestrator, current);
     const archiveConfirmedAt = currentDate();
-    const archived = await recordAgentMigrationSourceWorkspaceArchived({
-      grantKey: req.params.grantKey,
-      migrationGeneration: current.migrationGeneration,
-      serverId: ctx.serverId,
-      targetMachineId: ctx.targetMachineId,
-      now: archiveConfirmedAt,
-    });
+    let arrivalGeneration = current.migrationGeneration;
+    const archive = await archiveMigrationSourceWorkspace(orchestrator, current);
+    if (archive.ok) {
+      const archived = await recordAgentMigrationSourceWorkspaceArchived({
+        migrationId: req.params.migrationId,
+        migrationGeneration: current.migrationGeneration,
+        serverId: ctx.serverId,
+        targetMachineId: ctx.targetMachineId,
+        now: archiveConfirmedAt,
+      });
+      arrivalGeneration = archived.migrationGeneration;
+    } else {
+      // The flip already committed: the agent belongs to the target. Leave the
+      // source copy to the background retry instead of failing the migration.
+      await recordAgentMigrationSourceArchiveAttemptFailed({
+        migrationId: current.migrationId,
+        errorCode: archive.errorCode,
+        now: archiveConfirmedAt,
+      });
+    }
     const arrival = await markAgentMigrationTargetImportArrived({
-      grantKey: req.params.grantKey,
-      migrationGeneration: archived.migrationGeneration,
+      migrationId: req.params.migrationId,
+      migrationGeneration: arrivalGeneration,
       serverId: ctx.serverId,
       targetMachineId: ctx.targetMachineId,
       reportPath,
@@ -723,7 +708,7 @@ internalComputerRouter.post("/agent-migrations/:grantKey/arrived", async (req, r
 
     if (!orchestrator || typeof orchestrator.startAgent !== "function") {
       const failed = await recordAgentMigrationAutoStartFailure({
-        grantKey: arrived.grantKey,
+        migrationId: arrived.migrationId,
         agentId: arrived.agentId,
         targetMachineId: arrived.targetMachineId,
         stage: "orchestrator",
@@ -743,7 +728,7 @@ internalComputerRouter.post("/agent-migrations/:grantKey/arrived", async (req, r
       const startResult = await orchestrator.startAgent(arrived.agentId);
       if (startResult.outcome !== "dispatched") {
         const failed = await recordAgentMigrationAutoStartFailure({
-          grantKey: arrived.grantKey,
+          migrationId: arrived.migrationId,
           agentId: arrived.agentId,
           targetMachineId: arrived.targetMachineId,
           stage: "start_agent",
@@ -758,7 +743,7 @@ internalComputerRouter.post("/agent-migrations/:grantKey/arrived", async (req, r
         return;
       }
       const completed = await completeAgentMigrationAutoStart({
-        grantKey: arrived.grantKey,
+        migrationId: arrived.migrationId,
         agentId: arrived.agentId,
         targetMachineId: arrived.targetMachineId,
       });
@@ -771,7 +756,7 @@ internalComputerRouter.post("/agent-migrations/:grantKey/arrived", async (req, r
     } catch (err) {
       console.error("internal.computer.agent-migrations auto-start error:", err);
       const failed = await recordAgentMigrationAutoStartFailure({
-        grantKey: arrived.grantKey,
+        migrationId: arrived.migrationId,
         agentId: arrived.agentId,
         targetMachineId: arrived.targetMachineId,
         stage: "start_agent",
@@ -865,8 +850,11 @@ internalComputerRouter.get("/runners", async (req, res) => {
       runners: rows,
     });
   } catch (err) {
-    console.error("internal.computer.runners.list error:", err);
-    res.status(500).json({ error: "Failed to list runners" });
+    sendJsonServerError(req, res, {
+      error: "Failed to list runners",
+      logPrefix: "internal.computer.runners.list error:",
+      err,
+    });
   }
 });
 
@@ -912,97 +900,13 @@ internalComputerRouter.post("/runners/:agentId/stop", async (req, res) => {
     await orchestrator.stopAgent(targetAgentId, "manual");
     res.status(200).json({ ok: true, agentId: targetAgentId });
   } catch (err) {
-    console.error("internal.computer.runners.stop error:", err);
-    res.status(500).json({ error: "Failed to stop runner" });
-  }
-});
-
-/**
- * POST /internal/computer/agent-o11y/events
- *
- * Agent observability v0 rev 3.2 — daemon-mediated event ingest. The daemon
- * sends validated local events, but the server remains authoritative:
- * tenant identity is derived from the authenticated Computer principal and
- * PII/carrier invariants are rechecked before writing to ScopeDB.
- */
-internalComputerRouter.post("/agent-o11y/events", async (req, res) => {
-  try {
-    const serverId = req.serverId;
-    const computerId = req.computerId;
-    if (!serverId || !computerId) {
-      res.status(500).json({
-        ok: false,
-        code: "agent_o11y_auth_state_missing",
-        message: "Computer authentication state missing",
-      });
-      return;
-    }
-
-    const validation = validateAgentO11yBatch(req.body);
-    if (!validation.ok) {
-      res.status(validation.status).json({
-        ok: false,
-        code: validation.code,
-        message: validation.message,
-      });
-      return;
-    }
-
-    // Same boundary as runner mint/stop/revoke: a Computer may only report on
-    // agents bound to its own machine, not any agent on the server.
-    const ctx = await computerMigrationContext(req);
-    const membership = ctx
-      ? await verifyAgentO11yAgentsOnMachine(validation.events, ctx)
-      : { ok: false as const };
-    if (!membership.ok) {
-      res.status(403).json({
-        ok: false,
-        code: "agent_o11y_agent_not_in_server",
-        message: "event agent does not belong to the authenticated Computer's machine",
-      });
-      return;
-    }
-
-    const writer = getAgentO11yScopeDbWriter(req.app);
-    const result = await writer.writeEvents(validation.events, {
-      server_id: serverId,
-      computer_id: computerId,
-      machine_id: req.machineId ?? null,
-    });
-
-    res.status(202).json({ ok: true, accepted: result.accepted });
-  } catch (err) {
-    if (err instanceof AgentO11yWriterUnavailableError) {
-      res.status(503).json({ ok: false, code: err.code, message: err.message });
-      return;
-    }
-    console.error("internal.computer.agent-o11y.events error:", err);
-    res.status(500).json({
-      ok: false,
-      code: "agent_o11y_internal_error",
-      message: "Failed to ingest agent observability events",
+    sendJsonServerError(req, res, {
+      error: "Failed to stop runner",
+      logPrefix: "internal.computer.runners.stop error:",
+      err,
     });
   }
 });
-
-async function verifyAgentO11yAgentsOnMachine(
-  events: readonly AgentO11yAcceptedEvent[],
-  ctx: { serverId: string; machineId: string },
-): Promise<{ ok: true } | { ok: false }> {
-  const agentIds = [...new Set(events.map((event) => event.agent_id))];
-  if (agentIds.length === 0) return { ok: true };
-
-  const rows = await getDb()
-    .select({ id: agents.id })
-    .from(agents)
-    .where(and(
-      inArray(agents.id, agentIds),
-      eq(agents.serverId, ctx.serverId),
-      eq(agents.machineId, ctx.machineId),
-      isNull(agents.deletedAt),
-    ));
-  return rows.length === agentIds.length ? { ok: true } : { ok: false };
-}
 
 /**
  * POST /internal/computer/runners/:agentId/credentials
@@ -1128,8 +1032,7 @@ internalComputerRouter.post("/runners/:agentId/credentials", async (req, res) =>
       res.status(404).json({ error: "Agent not found", code: "agent_missing" });
       return;
     }
-    console.error("internal.computer.runners.credentials.mint error:", err);
-    res.status(500).json({ error: "Failed to mint runner credential" });
+    sendJsonServerError(req, res, { error: "Failed to mint runner credential", logPrefix: "internal.computer.runners.credentials.mint error:", err });
   }
 });
 
@@ -1182,14 +1085,72 @@ internalComputerRouter.post("/runners/:agentId/provider-connection", async (req,
     res.status(200).json(launch);
   } catch (error) {
     if (error instanceof ProviderConnectionError) {
-      res.status(error.code === "provider_connection_key_missing" ? 503 : 409).json({
-        error: "Provider connection is unavailable",
-        code: "provider_connection_unavailable",
+      // The try-block locals are not visible here, so derive the observability
+      // context straight from the request.
+      const failure = providerConnectionLaunchFailureResponse(error, {
+        serverId: req.serverId ?? "",
+        connectionId: typeof req.body?.connectionId === "string" ? req.body.connectionId : "",
+        agentId: req.params.agentId,
       });
+      res.status(failure.status).json(failure.body);
       return;
     }
-    console.error("internal.computer.runners.provider-connection error:", error);
-    res.status(500).json({ error: "Failed to materialize provider connection" });
+    sendJsonServerError(req, res, { error: "Failed to materialize provider connection", logPrefix: "internal.computer.runners.provider-connection error:", err: error });
+  }
+});
+
+/**
+ * POST /internal/computer/probes/:probeId/materialize
+ *
+ * One-time, machine-authenticated materialization for a probe claim. The
+ * machine command never carries credentials; this endpoint is the only place
+ * a probe sees them, and the intent's claim column group makes it exactly
+ * once per carrier (same claimant may retry inside the lease).
+ */
+internalComputerRouter.post("/probes/:probeId/materialize", async (req, res) => {
+  try {
+    const context = await computerMigrationContext(req);
+    if (!context) {
+      res.status(500).json({ error: "Computer authentication state missing" });
+      return;
+    }
+    if (!await isProviderProbesEnabled(context.serverId)) {
+      res.status(404).json({ error: "Provider probes are not enabled for this server", code: "probe_disabled" });
+      return;
+    }
+    const probeId = req.params.probeId;
+    if (!isProviderProbeId(probeId)) {
+      res.status(400).json({ error: "Provider probe id is invalid", code: "probe_invalid" });
+      return;
+    }
+    const body = jsonBody(req);
+    if (Object.keys(body).length !== 1 || typeof body.claimRequestId !== "string" || !body.claimRequestId) {
+      res.status(400).json({ error: "claimRequestId is required", code: "probe_invalid" });
+      return;
+    }
+    const orchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
+    const fact = await orchestrator?.readProbeCarrierFact(context.machineId) ?? null;
+    const payload = await materializeProviderProbe({
+      serverId: context.serverId,
+      probeId,
+      machineId: context.machineId,
+      claimRequestId: body.claimRequestId,
+      fact,
+    });
+    res.status(200).json(payload);
+  } catch (error) {
+    if (error instanceof ProviderProbeError) {
+      const status = error.code === "probe_not_found" || error.code === "probe_disabled"
+        ? 404
+        : error.code === "probe_invalid"
+          ? 400
+          : error.code === "probe_expired"
+            ? 410
+            : 409;
+      res.status(status).json({ error: error.message, code: error.code });
+      return;
+    }
+    sendJsonServerError(req, res, { error: "Failed to materialize probe", logPrefix: "internal.computer.probes.materialize error:", err: error });
   }
 });
 
@@ -1226,9 +1187,38 @@ internalComputerRouter.delete("/runners/:agentId/credentials/:credentialId", asy
       res.status(404).json({ error: "Credential not found", code: "credential_missing" });
       return;
     }
+    await broadcastAgentCredentialRevocation(req.params.agentId);
     res.status(204).end();
   } catch (err) {
-    console.error("internal.computer.runners.credentials.revoke error:", err);
-    res.status(500).json({ error: "Failed to revoke runner credential" });
+    sendJsonServerError(req, res, {
+      error: "Failed to revoke runner credential",
+      logPrefix: "internal.computer.runners.credentials.revoke error:",
+      err,
+    });
   }
 });
+
+/**
+ * Launch-failure mapping for the provider materialization exit. The
+ * enforcement-blocked case keeps its own response code AND a structured log
+ * line so the post-flip 24h monitor can count it separately from generic
+ * unavailability (Cardy P1 on the flip runbook).
+ */
+export function providerConnectionLaunchFailureResponse(
+  error: ProviderConnectionError,
+  context: { serverId: string; connectionId: string; agentId: string },
+): { status: number; body: { error: string; code: string } } {
+  if (error.code === "provider_connection_key_missing") {
+    return { status: 503, body: { error: "Provider connection is unavailable", code: "provider_connection_key_missing" } };
+  }
+  if (error.code === "provider_connection_unverified") {
+    console.warn("[provider-probe] launch blocked: no fresh Computer verification", {
+      serverId: context.serverId,
+      connectionId: context.connectionId,
+      agentId: context.agentId,
+      code: error.code,
+    });
+    return { status: 409, body: { error: "Provider connection lacks a fresh Computer verification", code: "provider_connection_unverified" } };
+  }
+  return { status: 409, body: { error: "Provider connection is unavailable", code: "provider_connection_unavailable" } };
+}

@@ -1,12 +1,12 @@
-import { afterEach, test } from "vitest";
 import assert from "node:assert/strict";
 import {
   integrationAuditEvents,
   oauthAccessRequests,
   oauthAccessTokens,
   oauthClients,
+  oauthAgentAutoGrantBlocks,
   oauthGrants,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   __resetOAuthServiceDbForTests,
   __setOAuthServiceDbForTests,
@@ -22,9 +22,10 @@ import {
   projectMarketplaceInstallBadge,
   requestOAuthClientPublish,
   requestOAuthClientUnpublish,
+  normalizeWhenToUse,
   revokeGrant,
   updateOAuthClient,
-} from "./oauthService.js";
+} from "./oauthService";
 
 test("marketplace install badge projection pins count and publication-age boundaries", () => {
   const now = new Date("2026-08-19T12:00:00.000Z");
@@ -105,6 +106,9 @@ function makeUpdateBuilder<T>(result: T, capture?: UpdateCapture) {
 function makeInsertBuilder<T>(result: T, capture?: InsertCapture) {
   const afterValues: any = {
     returning() {
+      return afterValues;
+    },
+    onConflictDoNothing() {
       return afterValues;
     },
     then(resolve: (value: T) => unknown, reject?: (reason: unknown) => unknown) {
@@ -804,17 +808,21 @@ test("exchangeAccessRequest tolerates modest future clock skew for human authori
   assert.equal(auditInsertCapture.table, integrationAuditEvents);
 });
 
-test("revokeGrant also revokes outstanding access tokens", async () => {
+test("revokeGrant also revokes outstanding access tokens and blocks automatic re-grants", async () => {
   const grantUpdateCapture: UpdateCapture = {};
   const tokenUpdateCapture: UpdateCapture = {};
+  const blockInsertCapture: InsertCapture = {};
   const tx = makeTx({
     selects: [{
       result: [{
         id: "grant-1",
         serverId: "server-1",
+        agentId: "agent-1",
+        clientId: "client-1",
         revokedAt: null,
       }],
     }],
+    inserts: [{ result: undefined, capture: blockInsertCapture }],
     updates: [
       { result: [{ id: "grant-1", revokedAt: new Date() }], capture: grantUpdateCapture },
       { result: undefined, capture: tokenUpdateCapture },
@@ -830,6 +838,13 @@ test("revokeGrant also revokes outstanding access tokens", async () => {
   assert.equal(grantUpdateCapture.table, oauthGrants);
   assert.equal(tokenUpdateCapture.table, oauthAccessTokens);
   assert.ok(tokenUpdateCapture.values?.revokedAt instanceof Date);
+  assert.equal(blockInsertCapture.table, oauthAgentAutoGrantBlocks);
+  assert.deepEqual(blockInsertCapture.values, {
+    agentId: "agent-1",
+    clientId: "client-1",
+    serverId: "server-1",
+    blockedByUserId: "user-1",
+  });
 });
 
 test("revokeGrant ignores grants outside the caller server", async () => {
@@ -1149,4 +1164,105 @@ test("denyAccessRequest ignores requests outside the caller server", async () =>
     resolvedByUserId: "user-1",
   });
   assert.equal(result, null);
+});
+
+// ---------------------------------------------------------------------------
+// whenToUse (task #319). One shared validator behind both write paths (Web
+// PATCH and agent app update); these unit tests pin its contract so neither
+// route can quietly drift.
+
+test("normalizeWhenToUse clears empty and accepts a single short line", () => {
+  assert.equal(normalizeWhenToUse(undefined), null);
+  assert.equal(normalizeWhenToUse(null), null);
+  assert.equal(normalizeWhenToUse(""), null);
+  assert.equal(normalizeWhenToUse("   "), null);
+  assert.equal(normalizeWhenToUse("sync when channel state changes"), "sync when channel state changes");
+  // Exactly at the cap, counted in code points (not UTF-16 units): an astral
+  // emoji must not tip the value over the edge.
+  const maxed = "a".repeat(159) + "🙂";
+  assert.equal([...maxed].length, 160);
+  assert.equal(normalizeWhenToUse(maxed), maxed);
+  // Bare channel refs stay legal — they are neutralized on read.
+  assert.equal(normalizeWhenToUse("use in #general when the queue backs up"), "use in #general when the queue backs up");
+});
+
+test("normalizeWhenToUse rejects the write-side injection shapes", () => {
+  assert.throws(() => normalizeWhenToUse("a".repeat(161)), /whenToUse must be at most 160 characters/);
+  assert.throws(() => normalizeWhenToUse("first line\nsecond line"), /single line/);
+  assert.throws(() => normalizeWhenToUse("carriage\rreturn"), /single line/);
+  assert.throws(() => normalizeWhenToUse("embeddednull"), /single line/);
+  assert.throws(() => normalizeWhenToUse("install @acme/metrics for usage stats"), /bare scoped package/);
+  assert.throws(() => normalizeWhenToUse("(@acme/metrics) after setup"), /bare scoped package/);
+  // Backticked occurrences are presentation, not references — allowed.
+  assert.equal(normalizeWhenToUse("install `@acme/metrics` for usage stats"), "install `@acme/metrics` for usage stats");
+  assert.equal(normalizeWhenToUse("run ```@acme/metrics sync```"), "run ```@acme/metrics sync```");
+});
+
+test("updateOAuthClient applies the shared whenToUse validator", async () => {
+  const updateCapture: UpdateCapture = {};
+  const before = {
+    id: "client-1",
+    serverId: "server-1",
+    clientId: "demo-app",
+    appType: "server_local",
+    publishStatus: "private",
+    category: "productivity",
+    dataAccessSummary: null,
+    publishRejectionReason: null,
+    name: "Demo App",
+    description: null,
+    whenToUse: null,
+    homepageUrl: "https://demo.example",
+    returnUrl: "https://demo.example/callback",
+    agentManifestUrl: null,
+    logoUrl: null,
+    humanMarketplaceVisible: true,
+    createdByUserId: "user-1",
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  const tx = makeTx({
+    selects: [{ result: [before] }, { result: [before] }, { result: [before] }],
+    updates: [
+      { result: [{ ...before, whenToUse: "when the queue backs up" }], capture: updateCapture },
+      { result: [{ ...before, whenToUse: null }] },
+    ],
+    inserts: [
+      { result: [{ id: "audit-1" }] },
+      { result: [{ id: "audit-2" }] },
+    ],
+  });
+
+  __setOAuthServiceDbForTests(() => ({
+    transaction: async (fn: (arg: typeof tx) => Promise<unknown>) => fn(tx),
+  }) as any);
+
+  const updated = await updateOAuthClient({
+    serverId: "server-1",
+    clientId: "demo-app",
+    actorUserId: "user-1",
+    whenToUse: "when the queue backs up",
+  });
+  assert.equal((updateCapture.values as Record<string, unknown>).whenToUse, "when the queue backs up");
+  assert.equal(updated?.whenToUse, "when the queue backs up");
+
+  // Clearing the field must round to null.
+  const cleared = await updateOAuthClient({
+    serverId: "server-1",
+    clientId: "demo-app",
+    actorUserId: "user-1",
+    whenToUse: "  ",
+  });
+  assert.equal(cleared?.whenToUse, null);
+
+  // Rejection never reaches the transaction.
+  await assert.rejects(
+    () => updateOAuthClient({
+      serverId: "server-1",
+      clientId: "demo-app",
+      actorUserId: "user-1",
+      whenToUse: "install @acme/metrics for usage stats",
+    }),
+    /bare scoped package/,
+  );
 });

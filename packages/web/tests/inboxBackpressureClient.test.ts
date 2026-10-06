@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { AxiosError } from "axios";
 import type { InternalAxiosRequestConfig } from "axios";
-import api from "../src/api/client.js";
+import api from "../src/api/client";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>([["slock_access_token", "inbox-pressure-token"]]);

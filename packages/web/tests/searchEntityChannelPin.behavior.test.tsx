@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor, within } from "@testing-library/react";
 import api from "../src/api/client";
 import {
-  ARCHIVED_CHANNEL_BADGE_CLASS,
   ARCHIVED_CHANNEL_ICON_CLASS,
   ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
   ARCHIVED_CHANNEL_TEXT_CLASS,
-} from "../src/components/channel/channelArchiveVisual.js";
+} from "../src/components/channel/channelArchiveVisual";
 import type { Agent } from "../src/store/agentStore";
 import type { User } from "../src/store/authStore";
 import type { Channel } from "../src/store/channelStore";
@@ -292,13 +290,17 @@ test("archived channel search results render with the shared muted visual treatm
     /bg-black\/5/,
     "active channel search result icon should keep the yellow hash treatment",
   );
-  assertElementHasClasses(within(archivedResult).getByText("Archived"), ARCHIVED_CHANNEL_BADGE_CLASS);
+  // Both tags on the archived row are the same rui Badge the active row uses,
+  // not a hand-written span. How they look is measured in a real browser.
+  const activeTypeBadge = activeResult.querySelector('[data-slot="badge"]');
+  const archivedBadges = [...archivedResult.querySelectorAll('[data-slot="badge"]')];
+  assert.ok(activeTypeBadge, "active channel result renders its type tag as a rui Badge");
+  assert.deepEqual(archivedBadges.map((badge) => badge.textContent), ["Channel", "Archived"]);
+  for (const badge of archivedBadges) {
+    assert.equal(badge.className, activeTypeBadge.className, `${badge.textContent} tag matches the active row's Badge`);
+  }
   assertElementHasClasses(
-    within(archivedResult).getAllByText("Channel").find((element) => element.className.includes("uppercase")),
-    ARCHIVED_CHANNEL_BADGE_CLASS,
-  );
-  assertElementHasClasses(
-    within(archivedResult).getAllByText("Channel").find((element) => element.className.includes("text-xs")),
+    within(archivedResult).getAllByText("Channel").find((element) => element.getAttribute("data-slot") !== "badge" && element.className.includes("text-xs")),
     ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
   );
 });
@@ -365,20 +367,57 @@ test("global Search visually selects only the active entity result", async () =>
     agents: [makeAgent("agent-design", "design-agent")],
   });
 
-  const channelResult = screen.getByTestId("search-channel-result-channel-design");
-  const agentButton = screen.getByText("design-agent").closest("button");
-  const agentResult = agentButton?.parentElement;
+  // The card frame and its selected look come from rui's SearchEntityResult,
+  // which draws them from `data-selected` (task #694 removed slock's own
+  // square frame around it).
+  const channelCard = screen
+    .getByTestId("search-channel-result-channel-design")
+    .querySelector("[data-slot=search-entity-result]");
+  const agentCard = screen.getByText("design-agent").closest("[data-slot=search-entity-result]");
 
   await waitFor(() => {
-    assertElementHasClasses(channelResult, "border-black shadow-brutal-sm");
+    assert.equal(channelCard?.getAttribute("data-selected"), "true");
   });
-  assert.ok(agentResult, "agent result card");
-  assert.doesNotMatch(
-    agentResult.className,
-    /(?:^|\s)shadow-brutal-sm(?:\s|$)/,
+  assert.ok(agentCard, "agent result card");
+  assert.equal(
+    agentCard.getAttribute("data-selected"),
+    null,
     "a non-channel entity must not look selected merely because both channel ids are absent",
   );
-  assert.match(agentResult.className, /border-black\/30/);
+});
+
+test("global Search lists every entity match in a scrolling list and keeps the keyboard row in view", async () => {
+  api.get = (async () => ({ data: { hasMore: false, results: [] } })) as typeof api.get;
+  const scrolledRows: Element[] = [];
+  const originalScrollIntoView = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = function recordScrollIntoView(this: Element) {
+    scrolledRows.push(this);
+  };
+  try {
+    const channels = Array.from({ length: 8 }, (_, index) => makeChannel(`channel-design-${index}`, `design-${index}`, null));
+
+    await renderSearchPage({ query: "design", channels });
+
+    // Regression (bug-triage #4): the list used to stop at 5 matches with no way to see the rest.
+    const list = screen.getByTestId("search-entity-results");
+    for (const channel of channels) {
+      assert.ok(within(list).getByTestId(`search-channel-result-${channel.id}`), `${channel.name} must be listed`);
+    }
+    assert.match(list.className, /overflow-y-auto/, "the entity list scrolls instead of truncating");
+    assert.match(list.className, /max-h-/, "the entity list keeps a bounded height");
+
+    // Walk the keyboard selection to the last row; it must be scrolled into view.
+    const lastRow = within(list).getByTestId("search-channel-result-channel-design-7");
+    for (let step = 0; step < channels.length; step += 1) {
+      fireEvent.keyDown(list, { key: "ArrowDown" });
+    }
+    await waitFor(() => {
+      assert.equal(lastRow.getAttribute("data-active"), "true");
+      assert.equal(scrolledRows.at(-1), lastRow);
+    });
+  } finally {
+    Element.prototype.scrollIntoView = originalScrollIntoView;
+  }
 });
 
 test("active channel search results toggle pinned state from the shared right-click menu without opening the result", async () => {

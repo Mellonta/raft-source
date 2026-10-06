@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act } from "react";
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { BrowserRouter, MemoryRouter } from "react-router-dom";
 import { TestIntlProvider } from "./helpers/intl";
 import api from "../src/api/client";
 import ThreadPanel from "../src/components/message/ThreadPanel";
+import { isCurrentRightPanelSearchSnapshot } from "../src/components/layout/rightPanelUrlSync";
 import { useAuthStore } from "../src/store/authStore";
 import type { User } from "../src/store/authStore";
 import { useChannelStore } from "../src/store/channelStore";
@@ -31,6 +31,7 @@ window.matchMedia = window.matchMedia ?? (() => ({
   addListener: () => {}, removeListener: () => {},
   addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
 }));
+const defaultMatchMedia = window.matchMedia;
 globalThis.IntersectionObserver = globalThis.IntersectionObserver ?? class {
   observe() {} unobserve() {} disconnect() {} takeRecords() { return []; }
 } as typeof IntersectionObserver;
@@ -58,8 +59,22 @@ afterEach(() => {
   useMessageStore.setState(useMessageStore.getInitialState(), true);
   useThreadStore.setState(useThreadStore.getInitialState(), true);
   useTaskStore.setState(useTaskStore.getInitialState(), true);
+  window.matchMedia = defaultMatchMedia;
   window.history.pushState({}, "", "/");
 });
+
+function installMatchMedia(matches: boolean): void {
+  window.matchMedia = (() => ({
+    matches,
+    media: "(min-width: 1024px)",
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  })) as typeof window.matchMedia;
+}
 
 function makeUser(overrides: Partial<User> = {}): User {
   return {
@@ -142,22 +157,32 @@ test("empty ThreadPanel renders the zh-cn no-replies state + no English leak", a
   // renders its zh title.
   await waitFor(() => assert.ok(screen.getByText("暂无回复"), "empty state renders zh noReplies"));
   assert.doesNotMatch(document.body.textContent ?? "", /No replies yet/, "no English empty-state leak");
+
+  // The empty-state glyph is the raft-ui ThreadIcon (task #710): package geometry
+  // (18×18 box + leading path), not the lucide MessageSquare stand-in.
+  const emptySvg = document.querySelector(".empty-state svg, [data-slot] svg[viewBox='0 0 18 18']");
+  const threadSvg = emptySvg ?? document.querySelector("svg[viewBox='0 0 18 18']");
+  assert.ok(threadSvg, "empty state renders an 18×18 conversation icon");
+  assert.match(threadSvg.querySelector("path")?.getAttribute("d") ?? "", /^M16\.25 5V4\.25/);
 });
 
-test("ThreadPanel header chrome renders zh-cn titles", () => {
+test("ThreadPanel header and action menu render zh-cn titles", async () => {
   seedThreadPanel(true);
   renderZh(<MemoryRouter><ThreadPanel /></MemoryRouter>);
 
   // Search-in-thread opener + close-thread control resolve zh via the catalog.
-  assert.ok(screen.getByTitle("在消息列中搜索"), "search-in-thread title renders zh");
-  assert.ok(screen.getAllByTitle("关闭消息列").length >= 1, "close-thread title renders zh");
+  fireEvent.click(screen.getByTestId("thread-overflow-trigger"));
+  assert.ok(await screen.findByRole("menuitem", { name: "在消息列中搜索" }), "search command renders zh");
+  const closeThread = screen.getByTestId("thread-close");
+  assert.equal(closeThread.getAttribute("title"), null, "native close title is gone");
+  assert.ok(closeThread.hasAttribute("data-base-ui-tooltip-trigger"), "close-thread hint now rides the RUI tooltip trigger");
   assert.equal(screen.queryByTitle("Search in thread"), null, "no English search title");
   assert.equal(screen.queryByTitle("Close thread"), null, "no English close title");
 
   // The open-parent control is icon-only. Its accessible name and Tooltip
   // content resolve zh; native title is intentionally absent so there is one
   // tooltip system. onOpenParentChannel is undefined here → "在频道中查看".
-  const openParent = screen.getByRole("button", { name: "在频道中查看" });
+  const openParent = screen.getByRole("menuitem", { name: "在频道中查看" });
   assert.equal(openParent.getAttribute("title"), null);
   assert.match(openParent.querySelector("svg")?.getAttribute("class") ?? "", /lucide-map-pin/);
   assert.doesNotMatch(document.body.textContent ?? "", /View in channel|Open Channel/, "no English channel label leak");
@@ -187,6 +212,52 @@ test("ThreadPanel keeps chrome above its mobile scrolling history", () => {
     "content layer remains inside the isolated panel",
   );
   assert.ok(container.contains(panel));
+});
+
+test("mounted desktop ThreadPanel View in channel pushes and closes before the route commits", async () => {
+  installMatchMedia(true);
+  seedThreadPanel(true);
+  window.history.pushState(
+    { idx: 4, key: "origin-thread" },
+    "",
+    "/s/tp-i18n/channel/parent-channel?thread=parent-channel%3Aparent-message",
+  );
+  const historyLengthBefore = window.history.length;
+
+  renderEn(
+    <BrowserRouter>
+      <ThreadPanel composerAutoFocus={false} />
+    </BrowserRouter>,
+  );
+
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("thread-overflow-trigger"));
+    await Promise.resolve();
+  });
+  const viewInChannel = await screen.findByTestId("thread-overflow-view-in-channel");
+  await act(async () => {
+    fireEvent.click(viewInChannel);
+    await Promise.resolve();
+  });
+
+  assert.equal(window.location.pathname, "/s/tp-i18n/channel/parent-channel");
+  assert.equal(window.location.search, "?msg=parent-message");
+  assert.equal(
+    window.history.length,
+    historyLengthBefore + 1,
+    "desktop View in channel must PUSH so Back can return to the thread entry",
+  );
+  assert.equal(
+    useThreadStore.getState().openParentMessageId,
+    null,
+    "ThreadPanel's real click handler must close the thread synchronously",
+  );
+  assert.equal(
+    isCurrentRightPanelSearchSnapshot("?thread=parent-channel%3Aparent-message"),
+    false,
+    "the stale origin thread snapshot must not regain store ownership",
+  );
+  assert.equal(isCurrentRightPanelSearchSnapshot("?msg=parent-message"), true);
 });
 
 test("ThreadPanel reply rows use the current auth avatar when the member cache is stale", async () => {
@@ -380,7 +451,7 @@ test("ThreadPanel ignores Escape when focus is outside the panel", async () => {
 });
 
 test("loaded, loading, and empty thread parents keep balanced brutal spacing", async () => {
-  const expectedClasses = ["border-b-2", "border-black", "bg-white", "px-3", "py-3"];
+  const expectedClasses = ["border-b", "border-line-muted", "bg-layer-panel", "px-3", "py-3"];
   const assertParentRecipe = (branch: string) => {
     const parent = screen.getByTestId("thread-panel-parent");
     for (const className of expectedClasses) {
@@ -489,6 +560,37 @@ test("Guest thread hides the parent Join action when the visible parent is read-
 
   assert.equal(screen.queryByPlaceholderText("Message thread"), null);
   assert.equal(screen.queryByRole("button", { name: "Join channel to reply" }), null);
+  assert.ok(screen.getByTestId("guest-readonly-thread-banner"));
+});
+
+test("joined Guest thread stays read-only and cannot react", () => {
+  seedThreadPanel(true);
+  useServerStore.setState((state) => ({
+    current: state.current ? { ...state.current, role: "guest" } : null,
+  }));
+
+  renderEn(<MemoryRouter><ThreadPanel composerAutoFocus={false} /></MemoryRouter>);
+
+  assert.equal(screen.queryByPlaceholderText("Message thread"), null);
+  assert.ok(screen.getByTestId("guest-readonly-thread-banner"));
+  assert.equal(document.querySelector('[data-message-affordance="reaction"]'), null);
+});
+
+test("unjoined Guest thread explains that Join follows the parent without enabling replies", () => {
+  seedThreadPanel(true);
+  const threadChannel = makeChannel({ id: "thread-channel", type: "thread", name: "thread" });
+  useServerStore.setState((state) => ({
+    current: state.current ? { ...state.current, role: "guest" } : null,
+  }));
+  useChannelStore.setState({
+    channels: [makeChannel({ joined: false, guestVisible: true, guestJoinable: true }), threadChannel],
+  } as never);
+
+  renderEn(<MemoryRouter><ThreadPanel composerAutoFocus={false} /></MemoryRouter>);
+
+  assert.ok(screen.getByRole("button", { name: "Join channel" }));
+  assert.match(screen.getByTestId("guest-thread-join-explanation").textContent ?? "", /remains read-only/);
+  assert.equal(screen.queryByPlaceholderText("Message thread"), null);
 });
 
 test("DM threads keep their composer even when channel-style joined metadata is false", async () => {

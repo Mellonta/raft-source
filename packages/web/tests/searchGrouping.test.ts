@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   buildTimeRangeParams,
   getSearchRelativeTimeParts,
@@ -9,7 +8,7 @@ import {
   normalizeSearchScopes,
   normalizeSearchSort,
   normalizeSearchTimeRange,
-} from "../src/components/search/searchGrouping.js";
+} from "../src/components/search/searchGrouping";
 
 test("groups thread hits while keeping standalone messages flat", () => {
   const groups = groupMessageSearchResults([

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { MemoryTraceSink, type CompletedTraceSpan, type TraceSink } from "@botiverse/raft-shared";
-import { createTraceClient, MultiSink } from "./traceClient.js";
+import { createTraceClient, MultiSink } from "./traceClient";
 
 test("createTraceClient force-injects `source` attr onto every span", () => {
   const sink = new MemoryTraceSink();

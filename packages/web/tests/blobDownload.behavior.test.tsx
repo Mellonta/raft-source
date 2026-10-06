@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { useBlobDownload } from "../src/hooks/useBlobDownload";

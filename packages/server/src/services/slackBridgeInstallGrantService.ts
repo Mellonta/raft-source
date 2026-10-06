@@ -2,19 +2,19 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { and, desc, eq, gt, isNull, lte, or } from "drizzle-orm";
 
-import { getDb, type Database } from "../db/index.js";
+import { getDb, type Database } from "../db/index";
 import {
   externalAppCredentials,
   externalAppInstallGrantReceipts,
   externalAppInstalls,
   externalAppRegistrations,
-  externalAppServerGrants,
-} from "../db/schema.js";
-import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../routes/slackBridge.js";
+} from "../db/schema";
+import { SLACK_BRIDGE_REQUIRED_BOT_SCOPES } from "../routes/slackBridge";
 import type {
   SlackBridgeProvisioningInstallGrant,
   SlackBridgeProvisioningProvider,
-} from "./slackBridgeProvisioningControlPlane.js";
+} from "./slackBridgeProvisioningControlPlane";
+import { findAnyCurrentExternalInstallServerGrantAuthority } from "./externalInstallServerGrantAuthority";
 
 // A receipt bounds revocation exposure to 30 minutes. The production lifecycle
 // runs every five minutes and starts renewal ten minutes before expiry, leaving
@@ -126,7 +126,6 @@ export async function refreshSlackBridgeInstallGrantReceipts(input: {
   };
   const candidates = await db.select({
     registration: externalAppRegistrations,
-    grant: externalAppServerGrants,
     install: externalAppInstalls,
     credential: externalAppCredentials,
   }).from(externalAppInstalls)
@@ -134,11 +133,6 @@ export async function refreshSlackBridgeInstallGrantReceipts(input: {
       eq(externalAppRegistrations.id, externalAppInstalls.registrationId),
       eq(externalAppRegistrations.provider, "slack"),
       eq(externalAppRegistrations.state, "active"),
-    ))
-    .innerJoin(externalAppServerGrants, and(
-      eq(externalAppServerGrants.id, externalAppInstalls.serverGrantId),
-      eq(externalAppServerGrants.state, "active"),
-      eq(externalAppServerGrants.grantEpoch, externalAppInstalls.grantEpoch),
     ))
     .innerJoin(externalAppCredentials, and(
       eq(externalAppCredentials.installId, externalAppInstalls.id),
@@ -194,6 +188,13 @@ export async function refreshSlackBridgeInstallGrantReceipts(input: {
     }
 
     try {
+      if (!await findAnyCurrentExternalInstallServerGrantAuthority(db, {
+        installId: candidate.install.id,
+        registrationId: candidate.registration.id,
+      })) {
+        result.skipped += 1;
+        continue;
+      }
       const observation = await input.provider.readInstallGrant({
         installId: candidate.install.id,
         providerAppId: candidate.install.providerAppId,
@@ -236,22 +237,23 @@ export async function refreshSlackBridgeInstallGrantReceipts(input: {
           eq(externalAppRegistrations.id, candidate.registration.id),
           eq(externalAppRegistrations.state, "active"),
         )).for("update").limit(1);
-        const [grant] = await tx.select().from(externalAppServerGrants).where(and(
-          eq(externalAppServerGrants.id, candidate.grant.id),
-          eq(externalAppServerGrants.state, "active"),
-          eq(externalAppServerGrants.grantEpoch, candidate.install.grantEpoch),
-        )).for("update").limit(1);
         const [credential] = await tx.select().from(externalAppCredentials).where(and(
           eq(externalAppCredentials.id, candidate.credential.id),
           eq(externalAppCredentials.state, "active"),
           eq(externalAppCredentials.credentialRevision, candidate.install.credentialRevision),
           or(isNull(externalAppCredentials.expiresAt), gt(externalAppCredentials.expiresAt, input.now)),
         )).for("update").limit(1);
+        const currentServerAuthority = install && registration
+          ? await findAnyCurrentExternalInstallServerGrantAuthority(tx, {
+              installId: install.id,
+              registrationId: registration.id,
+            }, { lock: true })
+          : null;
         if (
           !install
           || !registration
-          || !grant
           || !credential
+          || !currentServerAuthority
           || !slackBridgeInstallGrantMatchesInstall(install, observation.fact)
         ) return false;
 

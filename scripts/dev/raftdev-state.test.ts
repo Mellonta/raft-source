@@ -3,13 +3,12 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
 
-import { markTraceReaderStateFileStoppedIfPresent } from "./raftdev.ts";
+import { markTraceReaderStateFileStoppedIfPresent } from "./raftdev";
 
 test("markTraceReaderStateFileStoppedIfPresent preserves run identity and stops valid state", (t) => {
   const root = mkdtempSync(join(tmpdir(), "raftdev-reader-state-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(root, { recursive: true, force: true }));
   const statePath = join(root, "demo", "traces", "reader-state.json");
   mkdirSync(join(root, "demo", "traces"), { recursive: true });
   writeFileSync(statePath, JSON.stringify({
@@ -30,7 +29,7 @@ test("markTraceReaderStateFileStoppedIfPresent preserves run identity and stops 
 
 test("markTraceReaderStateFileStoppedIfPresent leaves absent state absent", (t) => {
   const root = mkdtempSync(join(tmpdir(), "raftdev-reader-state-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(root, { recursive: true, force: true }));
   const statePath = join(root, "missing", "traces", "reader-state.json");
 
   assert.equal(markTraceReaderStateFileStoppedIfPresent(statePath), false);
@@ -38,7 +37,7 @@ test("markTraceReaderStateFileStoppedIfPresent leaves absent state absent", (t) 
 
 test("markTraceReaderStateFileStoppedIfPresent refuses malformed or oversized state", (t) => {
   const root = mkdtempSync(join(tmpdir(), "raftdev-reader-state-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(root, { recursive: true, force: true }));
   const statePath = join(root, "demo", "traces", "reader-state.json");
   mkdirSync(join(root, "demo", "traces"), { recursive: true });
   const malformed = JSON.stringify({

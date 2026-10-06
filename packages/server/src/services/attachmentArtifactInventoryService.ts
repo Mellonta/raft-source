@@ -10,7 +10,7 @@ import {
   or,
   sql,
 } from "drizzle-orm";
-import type { Database, DatabaseExecutor } from "../db/index.js";
+import type { Database, DatabaseExecutor } from "../db/index";
 import {
   attachmentArtifactInventoryObservations,
   attachmentArtifactInventoryRuns,
@@ -22,18 +22,18 @@ import {
   attachmentUploadSessions,
   channels,
   servers,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   attachmentArtifactIdentityKey,
   ensureAttachmentArtifactOwnershipWithExecutor,
   type AttachmentArtifactOwnership,
-} from "./attachmentArtifactOwnershipService.js";
+} from "./attachmentArtifactOwnershipService";
 import {
   buildAttachmentTransferArtifactPlan,
   type AttachmentTransferArtifactBackend,
   type AttachmentTransferArtifactPlan,
-} from "./attachmentTransferIntentService.js";
-import type { StorageBackend } from "./storageService.js";
+} from "./attachmentTransferIntentService";
+import type { StorageBackend } from "./storageService";
 
 export type AttachmentArtifactInventoryResult = "exists" | "missing" | "unverified";
 export type AttachmentObjectInventorySemanticClass =

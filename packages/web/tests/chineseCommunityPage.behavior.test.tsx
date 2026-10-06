@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import ChineseCommunityPage from "../src/pages/ChineseCommunityPage";
 import { TestIntlProvider } from "./helpers/intl";
 
@@ -52,7 +51,7 @@ test("Chinese community page loads a runtime QR config with no-store cache", asy
     return {
       ok: true,
       json: async () => ({
-        imageUrl: " /runtime/wechat-qr.png ",
+        imageUrl: " /community/wechat-qr.png ",
         updatedAt: "2026-09-08T00:00:00.000Z",
         expiresAt: "2099-01-01T00:00:00.000Z",
         fallbackContact: "@Raft",
@@ -66,7 +65,7 @@ test("Chinese community page loads a runtime QR config with no-store cache", asy
   assert.equal(requested.length, 1);
   assert.equal(requested[0]?.url, "/runtime/chinese-qr.json");
   assert.equal(requested[0]?.init?.cache, "no-store");
-  assert.equal(image.getAttribute("src"), "/runtime/wechat-qr.png");
+  assert.equal(image.getAttribute("src"), "http://localhost:3000/community/wechat-qr.png");
   assert.equal(image.getAttribute("alt"), "Raft 中文社群微信群二维码");
   assert.ok(screen.getByText("扫码加入中文社群"));
   assert.equal(screen.queryByText("扫码加入微信群，获取中文交流、使用问题和活动通知。"), null);
@@ -84,14 +83,42 @@ test("Chinese community page shows a missing state when QR config is unavailable
   assert.ok(screen.getByText("二维码暂未配置。请稍后刷新，或联系 Raft 团队。"));
 });
 
+test("Chinese community page falls back to the release config when the static site is unavailable", async () => {
+  const requested: string[] = [];
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    requested.push(String(url));
+    if (String(url) === "/community/chinese-qr.json") {
+      return {
+        ok: true,
+        json: async () => ({ imageUrl: "/community/release-qr.png" }),
+      } as Response;
+    }
+    return { ok: false, json: async () => ({}) } as Response;
+  }) as typeof fetch;
+
+  renderPage();
+
+  const image = await screen.findByTestId("chinese-community-qr-image");
+  assert.deepEqual(requested, [
+    "https://static.raft.build/community/chinese-qr.json",
+    "/community/chinese-qr.json",
+  ]);
+  assert.equal(image.getAttribute("src"), "http://localhost:3000/community/release-qr.png");
+});
+
 test("Chinese community page switches to fallback when the QR image fails to load", async () => {
-  globalThis.fetch = (async () => ({
-    ok: true,
-    json: async () => ({
-      imageUrl: "/missing/wechat-qr.png",
-      fallbackContact: "@Raft",
-    }),
-  } as Response)) as typeof fetch;
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    if (String(url) === "/community/chinese-qr.json") {
+      return { ok: false, json: async () => ({}) } as Response;
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        imageUrl: "/community/missing-wechat-qr.png",
+        fallbackContact: "@Raft",
+      }),
+    } as Response;
+  }) as typeof fetch;
 
   renderPage();
 
@@ -101,6 +128,28 @@ test("Chinese community page switches to fallback when the QR image fails to loa
   await screen.findByTestId("chinese-community-qr-missing");
   assert.equal(screen.queryByTestId("chinese-community-qr-image"), null);
   assert.ok(screen.getByText("二维码无法加载。请稍后刷新，或联系 Raft 团队。"));
+});
+
+test("Chinese community page uses the release image when the remote image fails to load", async () => {
+  globalThis.fetch = (async (url: string | URL | Request) => ({
+    ok: true,
+    json: async () => ({
+      imageUrl: String(url) === "/community/chinese-qr.json"
+        ? "/community/release-qr.png"
+        : "/community/remote-qr.png",
+    }),
+  } as Response)) as typeof fetch;
+
+  renderPage();
+
+  fireEvent.error(await screen.findByTestId("chinese-community-qr-image"));
+
+  await waitFor(() => {
+    assert.equal(
+      screen.getByTestId("chinese-community-qr-image").getAttribute("src"),
+      "http://localhost:3000/community/release-qr.png",
+    );
+  });
 });
 
 test("Chinese community page does not render an expired QR image as scannable", async () => {

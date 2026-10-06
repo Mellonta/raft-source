@@ -1,8 +1,9 @@
+import { Card, InlineCode, toast, Button } from "raft-ui";
+import CloseButton from "./ui/CloseButton";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
-import { InlineCode, toast } from "raft-ui";
 import type { Announcement } from "@botiverse/raft-shared";
 import { useIntl } from "react-intl";
 import Modal from "./Modal";
@@ -176,23 +177,23 @@ function AnnouncementModalContent({ current }: { current: Announcement }) {
 
   return (
     <Modal onClose={() => close(current.id)} layer={1} closeOnBackdrop>
-      <div className="card-brutal w-full max-w-xl flex flex-col" data-testid="announcement-modal" role="dialog" aria-modal="true" aria-label={current.title}>
-        <div className="flex items-center justify-between border-b-2 border-black px-5 py-3 bg-soft-signal">
+      <Card className="w-full max-w-xl flex flex-col" data-testid="announcement-modal" role="dialog" aria-modal="true" aria-label={current.title}>
+        <div className="flex items-center justify-between border-b border-line-muted px-5 py-3 bg-primary-soft text-foreground-strong theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
           <h2 className="text-lg font-bold uppercase truncate" data-testid="announcement-title">
             {current.title}
           </h2>
-          <button
+          <CloseButton
             type="button"
             onClick={() => close(current.id)}
-            className="btn-brutal-sm bg-white p-1"
+            className=""
             aria-label={formatMessage({ id: "common.announcement.dismiss" })}
           >
             <X size={20} />
-          </button>
+          </CloseButton>
         </div>
 
         <div
-          className="max-h-[60vh] overflow-y-auto px-6 py-5 text-sm leading-relaxed"
+          className="max-h-[60vh] overflow-y-auto px-6 py-5 text-sm leading-relaxed text-foreground-strong theme-brutal:text-black"
           data-testid="announcement-page-body"
         >
           {page.title && <h3 className="mt-0 mb-3 text-base font-bold uppercase">{page.title}</h3>}
@@ -209,7 +210,7 @@ function AnnouncementModalContent({ current }: { current: Announcement }) {
                 </a>
               ),
               code: ({ children }) => (
-                <InlineCode className="rounded-sm bg-white px-1 text-[0.85em]">
+                <InlineCode className="rounded-sm bg-layer-inset px-1 text-[0.85em] theme-brutal:bg-white">
                   {children}
                 </InlineCode>
               ),
@@ -222,31 +223,34 @@ function AnnouncementModalContent({ current }: { current: Announcement }) {
           </ReactMarkdown>
         </div>
 
-        <div className="flex items-center justify-between gap-3 border-t-2 border-black px-5 py-3 bg-white">
+        <div className="flex items-center justify-between gap-3 border-t border-line-muted px-5 py-3 bg-layer-panel theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white">
           <div>
             {totalPages > 1 && (
-              <span className="font-mono text-xs text-black/60" data-testid="announcement-page-indicator">
+              <span className="font-mono text-xs text-foreground-muted theme-brutal:text-black/60" data-testid="announcement-page-indicator">
                 {pageIndex + 1} / {totalPages}
               </span>
             )}
           </div>
           <div className="flex items-center gap-2">
             {totalPages > 1 && pageIndex > 0 && (
-              <button
+              <Button
+                size="md"
+                variant="outline"
                 type="button"
                 onClick={handleBack}
-                className="btn-brutal bg-white px-4 py-2 text-sm inline-flex items-center gap-1"
                 data-testid="announcement-back"
               >
                 <ChevronLeft size={14} />
                 {formatMessage({ id: "common.announcement.back" })}
-              </button>
+              </Button>
             )}
-            <button
+            <Button
+              size="md"
+              variant="accent"
               ref={okButtonRef}
               type="button"
               onClick={handleNext}
-              className="btn-brutal bg-brutal-pink px-4 py-2 text-sm font-bold inline-flex items-center gap-1"
+              className="font-bold"
               data-testid={isLast ? "announcement-ok" : "announcement-next"}
             >
               {isLast
@@ -257,10 +261,10 @@ function AnnouncementModalContent({ current }: { current: Announcement }) {
                     <ChevronRight size={14} />
                   </>
                 )}
-            </button>
+            </Button>
           </div>
         </div>
-      </div>
+      </Card>
     </Modal>
   );
 }

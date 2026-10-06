@@ -1,26 +1,27 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { createServer as createHttpServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { resetProductFeedbackRouteBindingCacheForTest } from "../services/productFeedbackRouteBindingService.js";
+import { eq } from "drizzle-orm";
+import { getDb } from "../db/index";
+import { serverMembers, servers, users } from "../db/schema";
+import { signAccessToken } from "../middleware/auth";
+import { resetProductFeedbackRouteBindingCacheForTest } from "../services/productFeedbackRouteBindingService";
 import {
   resetProductFeedbackBreakersForTest,
   resetProductFeedbackReporterSessionCacheForTest,
-} from "../services/productFeedbackConversationService.js";
-import { openTestApp } from "../test/integration/app.js";
-import { buildProductFeedbackContact } from "./productFeedback.js";
+} from "../services/productFeedbackConversationService";
+import { openTestApp } from "../test/integration/app";
+import { buildProductFeedbackContact } from "./productFeedback";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
-async function seedUser() {
+async function seedUser(suffix = "") {
   const [user] = await getDb().insert(users).values({
-    email: "feedback@slock.test",
-    name: "feedback-user",
+    email: `feedback${suffix}@slock.test`,
+    name: `feedback-user${suffix}`,
     displayName: "Feedback User",
     passwordHash: await fixturePasswordHash("password123"),
     emailVerified: true,
@@ -139,7 +140,7 @@ test("product feedback returns bounded Hands diagnostics beside the stable integ
     withFeedbackEnv(baseUrl, async () => {
       const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
       try {
-        const user = await seedUser();
+        const user = await seedUser("-noserver");
         const token = signAccessToken(user.id);
         const form = new FormData();
         form.set("type", "idea");
@@ -616,4 +617,393 @@ test("close entry logs only the sanitized upstream failure stage", async () => {
     status: 502,
     body: { error: "private upstream body must not be logged" },
   });
+});
+
+// --- reporter attribution (server-derived, optional, best-effort) ---
+
+test("reporter attribution forwards the validated server slug and handle to Hands", async () => {
+  await withHandsFeedbackUpstream(async (baseUrl, requests) => (
+    withFeedbackEnv(baseUrl, async () => {
+      const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+      try {
+        const db = getDb();
+        const user = await seedUser("-member");
+        const token = signAccessToken(user.id);
+        const [server] = await db.insert(servers).values({
+          name: "Attribution Server",
+          slug: "attribution-server",
+          ownerId: user.id,
+        }).returning();
+        await db.insert(serverMembers).values({ serverId: server.id, userId: user.id, role: "owner" });
+
+        const form = new FormData();
+        form.set("type", "problem");
+        form.set("message", "Attribution should travel to Hands.");
+        form.set("submission_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        form.set("may_contact", "false");
+        form.set("metadata", JSON.stringify({}));
+
+        const response = await fetch(`${app.baseUrl}/api/product-feedback`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "X-Server-Id": server.id },
+          body: form,
+        });
+        assert.equal(response.status, 201);
+
+        const feedbackRequest = requests.find((request) => (
+          request.method === "POST" && request.url === "/public/v2/apps/raft-web/feedback"
+        ));
+        assert.ok(feedbackRequest, "feedback POST should reach Hands");
+        const metadata = JSON.parse(multipartField(
+          feedbackRequest.body,
+          feedbackRequest.headers["content-type"],
+          "metadata",
+        )) as Record<string, unknown>;
+        const attribution = metadata.reporter_attribution as Record<string, unknown>;
+        assert.ok(attribution, "reporter_attribution must be present");
+        assert.equal(attribution.v, 1);
+        assert.equal(attribution.server_id, server.id);
+        assert.equal(attribution.server_slug, "attribution-server");
+        assert.equal(attribution.user_id, user.id);
+        assert.equal(attribution.handle, "feedback-user-member");
+      } finally {
+        await app.close();
+      }
+    })
+  ));
+});
+
+test("reporter attribution is omitted when the caller is not a member of the claimed server", async () => {
+  await withHandsFeedbackUpstream(async (baseUrl, requests) => (
+    withFeedbackEnv(baseUrl, async () => {
+      const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+      try {
+        const db = getDb();
+        const user = await seedUser("-member");
+        const token = signAccessToken(user.id);
+        const outsider = await seedUser("-outsider");
+        // The server exists, but the submitting user is NOT a member.
+        const [foreignServer] = await db.insert(servers).values({
+          name: "Foreign Server",
+          slug: "foreign-server",
+          ownerId: outsider.id,
+        }).returning();
+
+        const form = new FormData();
+        form.set("type", "problem");
+        form.set("message", "Attribution must fail closed for non-members.");
+        form.set("submission_id", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+        form.set("may_contact", "false");
+        form.set("metadata", JSON.stringify({}));
+
+        const response = await fetch(`${app.baseUrl}/api/product-feedback`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "X-Server-Id": foreignServer.id },
+          body: form,
+        });
+        // Attribution failure must NOT block submission.
+        assert.equal(response.status, 201);
+
+        const feedbackRequest = requests.find((request) => (
+          request.method === "POST" && request.url === "/public/v2/apps/raft-web/feedback"
+        ));
+        assert.ok(feedbackRequest);
+        const metadata = JSON.parse(multipartField(
+          feedbackRequest.body,
+          feedbackRequest.headers["content-type"],
+          "metadata",
+        )) as Record<string, unknown>;
+        assert.equal("reporter_attribution" in metadata, false, "no attribution for a non-member");
+      } finally {
+        await app.close();
+      }
+    })
+  ));
+});
+
+test("reporter attribution is omitted for clients that send no server context", async () => {
+  await withHandsFeedbackUpstream(async (baseUrl, requests) => (
+    withFeedbackEnv(baseUrl, async () => {
+      const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+      try {
+        const user = await seedUser();
+        const token = signAccessToken(user.id);
+        const form = new FormData();
+        form.set("type", "idea");
+        form.set("message", "Older clients send no X-Server-Id.");
+        form.set("submission_id", "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+        form.set("may_contact", "false");
+        form.set("metadata", JSON.stringify({}));
+
+        const response = await fetch(`${app.baseUrl}/api/product-feedback`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` }, // deliberately no X-Server-Id
+          body: form,
+        });
+        assert.equal(response.status, 201);
+
+        const feedbackRequest = requests.find((request) => (
+          request.method === "POST" && request.url === "/public/v2/apps/raft-web/feedback"
+        ));
+        assert.ok(feedbackRequest);
+        const metadata = JSON.parse(multipartField(
+          feedbackRequest.body,
+          feedbackRequest.headers["content-type"],
+          "metadata",
+        )) as Record<string, unknown>;
+        assert.equal("reporter_attribution" in metadata, false);
+      } finally {
+        await app.close();
+      }
+    })
+  ));
+});
+
+test("reporter attribution refuses a joint-storage pseudo-server", async () => {
+  await withHandsFeedbackUpstream(async (baseUrl, requests) => (
+    withFeedbackEnv(baseUrl, async () => {
+      const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+      try {
+        const db = getDb();
+        const user = await seedUser("-joint");
+        const token = signAccessToken(user.id);
+        // A joint-storage pseudo-server the user genuinely belongs to. The
+        // server-scoped middleware excludes these; attribution must too.
+        const [jointServer] = await db.insert(servers).values({
+          name: "Joint Storage",
+          slug: "joint-storage-server",
+          kind: "joint_storage",
+          ownerId: user.id,
+        }).returning();
+        await db.insert(serverMembers).values({ serverId: jointServer.id, userId: user.id, role: "owner" });
+
+        const form = new FormData();
+        form.set("type", "problem");
+        form.set("message", "A storage pseudo-server must not become attribution.");
+        form.set("submission_id", "dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+        form.set("may_contact", "false");
+        form.set("metadata", JSON.stringify({}));
+
+        const response = await fetch(`${app.baseUrl}/api/product-feedback`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "X-Server-Id": jointServer.id },
+          body: form,
+        });
+        assert.equal(response.status, 201, "submission still succeeds");
+
+        const feedbackRequest = requests.find((request) => (
+          request.method === "POST" && request.url === "/public/v2/apps/raft-web/feedback"
+        ));
+        assert.ok(feedbackRequest);
+        const metadata = JSON.parse(multipartField(
+          feedbackRequest.body,
+          feedbackRequest.headers["content-type"],
+          "metadata",
+        )) as Record<string, unknown>;
+        assert.equal(
+          "reporter_attribution" in metadata,
+          false,
+          "joint-storage servers must not produce reporter attribution",
+        );
+      } finally {
+        await app.close();
+      }
+    })
+  ));
+});
+
+test("reporter attribution never records a server the submitter is not in, even when they belong to several", async () => {
+  await withHandsFeedbackUpstream(async (baseUrl, requests) => (
+    withFeedbackEnv(baseUrl, async () => {
+      const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+      try {
+        const db = getDb();
+        const user = await seedUser("-multi");
+        const token = signAccessToken(user.id);
+        const other = await seedUser("-multiforeign");
+
+        // The submitter belongs to two servers; a third belongs to someone else.
+        const [mineA] = await db.insert(servers).values({
+          name: "Mine A", slug: "mine-a", ownerId: user.id,
+        }).returning();
+        const [mineB] = await db.insert(servers).values({
+          name: "Mine B", slug: "mine-b", ownerId: user.id,
+        }).returning();
+        const [theirs] = await db.insert(servers).values({
+          name: "Theirs", slug: "theirs", ownerId: other.id,
+        }).returning();
+        await db.insert(serverMembers).values({ serverId: mineA.id, userId: user.id, role: "owner" });
+        await db.insert(serverMembers).values({ serverId: mineB.id, userId: user.id, role: "member" });
+
+        // Claim somebody else's server while genuinely belonging to two others.
+        const form = new FormData();
+        form.set("type", "problem");
+        form.set("message", "Attribution must not be borrowed from a foreign server.");
+        form.set("submission_id", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+        form.set("may_contact", "false");
+        form.set("metadata", JSON.stringify({}));
+
+        const response = await fetch(`${app.baseUrl}/api/product-feedback`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "X-Server-Id": theirs.id },
+          body: form,
+        });
+        assert.equal(response.status, 201, "submission still succeeds");
+
+        const feedbackRequest = requests.find((request) => (
+          request.method === "POST" && request.url === "/public/v2/apps/raft-web/feedback"
+        ));
+        assert.ok(feedbackRequest);
+        const rawMetadata = multipartField(
+          feedbackRequest.body,
+          feedbackRequest.headers["content-type"],
+          "metadata",
+        );
+        // The foreign server must not appear anywhere in the payload.
+        assert.equal(rawMetadata.includes("theirs"), false, "foreign slug must not leak");
+        assert.equal(rawMetadata.includes(theirs.id), false, "foreign id must not leak");
+        const metadata = JSON.parse(rawMetadata) as Record<string, unknown>;
+        assert.equal(
+          "reporter_attribution" in metadata,
+          false,
+          "no attribution may be recorded for a server the submitter is not in",
+        );
+      } finally {
+        await app.close();
+      }
+    })
+  ));
+});
+
+test("attribution never blocks submission when X-Server-Id is malformed", async () => {
+  await withHandsFeedbackUpstream(async (baseUrl, requests) => (
+    withFeedbackEnv(baseUrl, async () => {
+      const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+      try {
+        const user = await seedUser("-malformed");
+        const token = signAccessToken(user.id);
+        const form = new FormData();
+        form.set("type", "problem");
+        form.set("message", "A malformed server header must not block feedback.");
+        form.set("submission_id", "ffffffff-ffff-4fff-8fff-ffffffffffff");
+        form.set("may_contact", "false");
+        form.set("metadata", JSON.stringify({}));
+
+        const response = await fetch(`${app.baseUrl}/api/product-feedback`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "X-Server-Id": "not-a-uuid" },
+          body: form,
+        });
+        // The submission must succeed and actually reach Hands; a non-uuid header
+        // must not turn optional context into a hard failure.
+        assert.equal(response.status, 201, "valid feedback must still submit");
+        assert.equal((await response.json() as { id: string }).id, "ticket-native");
+        const posts = requests.filter((request) => (
+          request.method === "POST" && request.url === "/public/v2/apps/raft-web/feedback"
+        ));
+        assert.equal(posts.length, 1, "Hands must still receive the submission");
+        const metadata = JSON.parse(multipartField(
+          posts[0].body,
+          posts[0].headers["content-type"],
+          "metadata",
+        )) as Record<string, unknown>;
+        assert.equal("reporter_attribution" in metadata, false, "no attribution for a malformed header");
+      } finally {
+        await app.close();
+      }
+    })
+  ));
+});
+
+test("attribution is skipped, not fatal, when the server row disappears mid-flight", async () => {
+  await withHandsFeedbackUpstream(async (baseUrl, requests) => (
+    withFeedbackEnv(baseUrl, async () => {
+      const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+      try {
+        const db = getDb();
+        const user = await seedUser("-vanished");
+        const token = signAccessToken(user.id);
+        // Soft-delete the server after the user joins it: the membership row
+        // remains but the server is gone, so resolution must degrade quietly
+        // rather than fail the submission.
+        const [server] = await db.insert(servers).values({
+          name: "Vanishing", slug: "vanishing", ownerId: user.id,
+        }).returning();
+        await db.insert(serverMembers).values({ serverId: server.id, userId: user.id, role: "owner" });
+        await db.update(servers).set({ deletedAt: new Date() }).where(eq(servers.id, server.id));
+
+        const form = new FormData();
+        form.set("type", "idea");
+        form.set("message", "A soft-deleted server must not block feedback.");
+        form.set("submission_id", "aaaaaaab-aaaa-4aaa-8aaa-aaaaaaaaaaab");
+        form.set("may_contact", "false");
+        form.set("metadata", JSON.stringify({}));
+
+        const response = await fetch(`${app.baseUrl}/api/product-feedback`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "X-Server-Id": server.id },
+          body: form,
+        });
+        assert.equal(response.status, 201);
+        const posts = requests.filter((request) => (
+          request.method === "POST" && request.url === "/public/v2/apps/raft-web/feedback"
+        ));
+        assert.equal(posts.length, 1);
+        const metadata = JSON.parse(multipartField(
+          posts[0].body,
+          posts[0].headers["content-type"],
+          "metadata",
+        )) as Record<string, unknown>;
+        assert.equal("reporter_attribution" in metadata, false);
+      } finally {
+        await app.close();
+      }
+    })
+  ));
+});
+
+test("an agent Report Issue ticket forwards a canonical feedback_report_id and rejects any other value before Hands traffic", async () => {
+  await withHandsFeedbackUpstream(async (baseUrl, requests) => (
+    withFeedbackEnv(baseUrl, async () => {
+      const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+      try {
+        const user = await seedUser();
+        const token = signAccessToken(user.id);
+        const submit = (submissionId: string, feedbackReportId: string) => {
+          const form = new FormData();
+          form.set("type", "problem");
+          form.set("message", "Issue report for Helper");
+          form.set("submission_id", submissionId);
+          form.set("may_contact", "false");
+          form.set("feedback_report_id", feedbackReportId);
+          return fetch(`${app.baseUrl}/api/product-feedback`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` },
+            body: form,
+          });
+        };
+
+        const rejected = await submit("dddddddd-dddd-4ddd-8ddd-dddddddddddd", "report-1");
+        assert.equal(rejected.status, 400);
+        assert.equal((await rejected.json() as { code: string }).code, "feedback_invalid");
+        assert.equal(requests.some((request) => request.url === "/public/v2/apps/raft-web/feedback"), false);
+
+        const accepted = await submit("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", "0d9b2c4e-6f1a-4b3c-9d8e-7f6a5b4c3d2e");
+        assert.equal(accepted.status, 201);
+        const feedbackRequest = requests.find((request) => (
+          request.method === "POST" && request.url === "/public/v2/apps/raft-web/feedback"
+        ));
+        assert.ok(feedbackRequest);
+        const metadata = JSON.parse(multipartField(
+          feedbackRequest.body,
+          feedbackRequest.headers["content-type"],
+          "metadata",
+        )) as Record<string, unknown>;
+        assert.equal(metadata.feedback_report_id, "0d9b2c4e-6f1a-4b3c-9d8e-7f6a5b4c3d2e");
+        assert.equal(metadata.surface, "agent.report_issue");
+      } finally {
+        await app.close();
+      }
+    })
+  ));
 });

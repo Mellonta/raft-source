@@ -1,10 +1,10 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 
-import { createSocialUser } from "./userService.js";
+import { createSocialUser } from "./userService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import test from "node:test";
 import { gzipSync } from "node:zlib";
-import { S3TraceStorage } from "./nodeStorage.js";
+import { S3TraceStorage } from "./nodeStorage";
 
 test("S3TraceStorage writes objects to R2 path-style endpoint with metadata", async () => {
   const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
@@ -98,4 +97,26 @@ test("S3TraceStorage returns null on missing objects", async () => {
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+test("S3TraceStorage refuses keys with dot path segments instead of sending them", async () => {
+  let calls = 0;
+  const storage = new S3TraceStorage({
+    endpoint: "https://account.r2.cloudflarestorage.com",
+    bucket: "trace-bucket",
+    accessKeyId: "access-key",
+    secretAccessKey: "secret-key",
+    fetch: async () => {
+      calls += 1;
+      return new Response("", { status: 200 });
+    },
+  });
+
+  for (const key of ["feedback-report-ledgers/server/../x.json", "../other-bucket/x", "a/./b", "a/.."]) {
+    await assert.rejects(storage.put(key, "x"), /dot path segment/, key);
+    await assert.rejects(storage.get(key), /dot path segment/, key);
+  }
+  assert.equal(calls, 0);
+  await storage.put("a/..b/c.json", "x");
+  assert.equal(calls, 1);
 });

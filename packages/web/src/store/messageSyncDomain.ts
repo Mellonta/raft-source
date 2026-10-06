@@ -1,5 +1,5 @@
 import { createSyncCore } from "@botiverse/raft-shared";
-import { CANONICAL_MESSAGE_FIELD_DESCRIPTORS } from "../../../shared/src/canonicalMessageManifest.js";
+import { CANONICAL_MESSAGE_FIELD_DESCRIPTORS } from "../../../shared/src/canonicalMessageManifest";
 import type {
   StateTransitionOutcome,
   StateViolationKind,

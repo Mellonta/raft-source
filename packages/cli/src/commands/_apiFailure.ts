@@ -1,1 +1,1 @@
-export { apiFailureError, proxyCliErrorOptions } from "../core/apiFailure.js";
+export { apiFailureError, proxyCliErrorOptions } from "../core/apiFailure";

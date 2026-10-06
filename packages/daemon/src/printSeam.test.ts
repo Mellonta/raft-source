@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
-import { test } from "vitest";
 
-import * as runtimeInput from "./agentRuntimeInput.js";
-import type { RuntimeDriver } from "./drivers/types.js";
+import * as runtimeInput from "./agentRuntimeInput";
+import type { RuntimeDriver } from "./drivers/types";
 
 // Structural seam checks. Runtime-input copy snapshots live in agentRuntimeInput.snapshot.test.ts.
 

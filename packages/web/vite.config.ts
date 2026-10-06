@@ -1,4 +1,4 @@
-import { defineConfig, type ViteDevServer } from "vite";
+import { defineConfig, type Rolldown, type ViteDevServer } from "vite";
 import react from "@vitejs/plugin-react";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -137,6 +137,120 @@ const pwaManifestNamePlugin = () => ({
   },
 });
 
+// Match a module id that belongs to one of the named npm packages (pnpm layout
+// nests them as .../node_modules/<name>/...).
+function vendorPackages(names: string[]): RegExp {
+  const escaped = names.map((name) => name.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&"));
+  return new RegExp(`[\\\\/]node_modules[\\\\/](?:${escaped.join("|")})[\\\\/]`);
+}
+
+// Modules the entry loads at startup, computed once per build. Rolldown 1.2
+// emits such a module as its own common chunk whenever a lazy route also
+// imports it, even though the entry has already loaded it
+// (rolldown/rolldown#10731), which turned the first paint into ~100 requests.
+// Grouping this closure restores what Rollup produced: the entry plus a few files.
+//
+// The import graph is not tree-shaken, so a plain walk would pass through
+// re-export barrels (e.g. @botiverse/raft-shared -> @botiverse/raft-sync-core)
+// and pull lazy-only modules such as the Activity runtime into startup. A
+// barrel's re-export edge is followed only when its target is itself a barrel
+// or declares (not merely re-exports) a name that some startup module imports.
+const webEntry = resolve(webRoot, "src/main.tsx");
+const REEXPORT_STATEMENT = /^export\s+(?:\*(?:\s+as\s+[\w$]+)?|\{[^}]*\})\s+from\s+["'][^"']+["'];?$/;
+const NAMED_IMPORT = /import\s*(?:[\w$]+\s*,\s*)?\{([^}]*)\}\s*from\s*["']/g;
+const NAMESPACE_IMPORT = /import\s*(?:[\w$]+\s*,\s*)?\*\s*as\s/;
+
+function isReexportBarrel(code: string | null): boolean {
+  if (!code) return false;
+  const statements = code
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "")
+    .split(/;\s*|\n/)
+    .map((statement) => statement.trim())
+    .filter(Boolean);
+  return statements.length > 0 && statements.every((statement) => REEXPORT_STATEMENT.test(statement));
+}
+
+const LOCAL_EXPORT_LIST = /export\s*\{([^}]*)\}\s*(?!\s*from)(?:;|$)/gm;
+
+// Names a module declares itself. `import { x } from "./y"; export { x };` is a
+// re-export in disguise, so exported bindings that were imported are skipped.
+function declaredExports(code: string): Set<string> {
+  const importedBindings = new Set<string>();
+  for (const [, list] of code.matchAll(NAMED_IMPORT)) {
+    for (const part of list.split(",")) {
+      const local = part.trim().split(/\s+as\s+/).pop();
+      if (local) importedBindings.add(local);
+    }
+  }
+  const names = new Set<string>();
+  for (const [, name] of code.matchAll(/export\s+(?:default\s+)?(?:async\s+)?(?:function\*?|const|let|var|class)\s+([\w$]+)/g)) {
+    names.add(name);
+  }
+  if (/export\s+default\b/.test(code)) names.add("default");
+  for (const [, list] of code.matchAll(LOCAL_EXPORT_LIST)) {
+    for (const part of list.split(",")) {
+      const [local, exported = local] = part.trim().split(/\s+as\s+/);
+      if (local && !importedBindings.has(local)) names.add(exported);
+    }
+  }
+  return names;
+}
+
+let entryStartupClosure: Set<string> | null = null;
+function computeStartupClosure(ctx: Rolldown.ChunkingContext): Set<string> {
+  const importedNames = new Set<string>(["default"]);
+  // Barrels imported by a module that uses `import * as`: every re-export counts.
+  const wholeBarrels = new Set<string>();
+  for (;;) {
+    const closure = new Set<string>();
+    const sizeBefore = importedNames.size + wholeBarrels.size;
+    const pending = [webEntry];
+    while (pending.length > 0) {
+      const id = pending.pop()!;
+      if (closure.has(id)) continue;
+      closure.add(id);
+      const info = ctx.getModuleInfo(id);
+      if (!info) continue;
+      if (!isReexportBarrel(info.code)) {
+        const code = info.code ?? "";
+        const namespaceImport = NAMESPACE_IMPORT.test(code);
+        for (const [, list] of code.matchAll(NAMED_IMPORT)) {
+          for (const part of list.split(",")) {
+            const name = part.trim().split(/\s+as\s+/)[0];
+            if (name) importedNames.add(name);
+          }
+        }
+        for (const target of info.importedIds) {
+          if (namespaceImport && isReexportBarrel(ctx.getModuleInfo(target)?.code ?? null)) wholeBarrels.add(target);
+          pending.push(target);
+        }
+        continue;
+      }
+      for (const target of info.importedIds) {
+        const code = ctx.getModuleInfo(target)?.code ?? null;
+        if (wholeBarrels.has(id) || code === null || isReexportBarrel(code)) {
+          if (wholeBarrels.has(id) && isReexportBarrel(code)) wholeBarrels.add(target);
+          pending.push(target);
+          continue;
+        }
+        for (const name of declaredExports(code)) {
+          if (importedNames.has(name)) {
+            pending.push(target);
+            break;
+          }
+        }
+      }
+    }
+    if (importedNames.size + wholeBarrels.size === sizeBefore) return closure;
+  }
+}
+
+function inEntryStartupClosure(moduleId: string, ctx: Rolldown.ChunkingContext): boolean {
+  entryStartupClosure ??= computeStartupClosure(ctx);
+  return moduleId !== webEntry && entryStartupClosure.has(moduleId);
+}
+
 export default defineConfig({
   ...(process.env.VITE_DEV_CACHE_DIR ? { cacheDir: process.env.VITE_DEV_CACHE_DIR } : {}),
   define: {
@@ -219,12 +333,22 @@ export default defineConfig({
   build: {
     outDir: "dist",
     manifest: true,
-    rollupOptions: {
+    // Vite 8 bundles with Rolldown: the object form of `manualChunks` is gone,
+    // `codeSplitting` groups replace it.
+    rolldownOptions: {
       output: {
-        manualChunks: {
-          "vendor-react": ["react", "react-dom", "react-router-dom"],
-          "vendor-markdown": ["react-markdown", "remark-breaks", "remark-gfm", "rehype-raw", "rehype-sanitize"],
-          "vendor-socketio": ["socket.io-client"],
+        codeSplitting: {
+          groups: [
+            // react-router-dom only re-exports react-router, so name the package that
+            // holds the code.
+            { name: "vendor-react", test: vendorPackages(["react", "react-dom", "react-router", "react-router-dom"]) },
+            {
+              name: "vendor-markdown",
+              test: vendorPackages(["react-markdown", "remark-breaks", "remark-gfm", "rehype-raw", "rehype-sanitize"]),
+            },
+            { name: "vendor-socketio", test: vendorPackages(["socket.io-client"]) },
+            { name: (moduleId, ctx) => (inEntryStartupClosure(moduleId, ctx) ? "app-shell" : null), debugName: "app-shell" },
+          ],
         },
       },
     },

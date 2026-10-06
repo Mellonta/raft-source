@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
 import {
   resolveServerPushSuppressionForPipeline,
   type ServerPushPipelineSurface,
-} from "./messageService.js";
-import { shouldSuppressServerPush } from "./serverService.js";
+} from "./messageService";
+import { shouldSuppressServerPush } from "./serverService";
 
 test("server push mode all delivers ordinary and mentioned messages", () => {
   assert.equal(shouldSuppressServerPush("all", false), false);

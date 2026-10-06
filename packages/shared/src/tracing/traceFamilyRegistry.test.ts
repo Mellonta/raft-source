@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import test from "node:test";
 import {
   STATE_TRANSITION_DOMAINS,
   STATE_TRANSITION_JOIN_FIELDS,
@@ -16,7 +15,7 @@ import {
   buildStateTransitionTraceAttrs,
   buildStateViolationTraceAttrs,
   traceFamilyRegistration,
-} from "../index.js";
+} from "../index";
 
 test("trace family registry has live consumers for every registered family", () => {
   assert.deepEqual(
@@ -135,6 +134,7 @@ test("state transition schema keeps stable keys closed and arrival fields in met
     "epoch",
     "seq",
     "timestamp",
+    "arrival_to_applied_ms",
   ]);
   assert.ok(STATE_TRANSITION_DOMAINS.includes("messages"));
 });

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { MachineCatalogAuthority } from "./machineCatalogAuthority.js";
+import { MachineCatalogAuthority } from "./machineCatalogAuthority";
 
 const generation = (connectionEpochId: string, replicaGeneration: string) => ({
   connectionEpochId,

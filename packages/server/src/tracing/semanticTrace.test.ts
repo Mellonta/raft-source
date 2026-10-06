@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
-import { test } from "vitest";
 import { BasicTracer, MemoryTraceSink, traceEventRowsForSpan } from "@botiverse/raft-shared";
-import { addTraceEvent, createTraceDbQueryTracer, getCurrentTraceContext, runWithTraceSpan, tracePhase, withTraceRoot } from "./semanticTrace.js";
+import { getActiveTraceContext, runWithActiveSpan } from "@botiverse/raft-trace-client";
+import { addTraceEvent, createTraceDbQueryTracer, getCurrentTraceContext, runWithTraceSpan, tracePhase, withTraceRoot } from "./semanticTrace";
 
 const TRACE_EVENT_ROW_TEST_RESOURCE = {
   serviceName: "slock-server",
@@ -94,15 +94,18 @@ test("semantic trace root exposes current context and closes on failure", async 
     () => withTraceRoot(tracer, "server.http.request", { surface: "server", kind: "server" }, async () => {
       assert.equal(getCurrentTraceContext()?.traceId, "e".repeat(32));
       throw new TypeError("boom");
-    }),
+    }, "server.http.request.error"),
     TypeError,
   );
 
   const [recorded] = sink.getAllSpans();
   assert.ok(recorded);
   assert.equal(recorded.status, "error");
-  assert.equal(recorded.events.at(-1)?.name, "error");
-  assert.equal(recorded.events.at(-1)?.attrs?.error_class, "TypeError");
+  assert.equal(recorded.attrs?.error_class, "TypeError");
+  const [errorEvent] = sink.getAllLogEvents();
+  assert.equal(errorEvent?.name, "server.http.request.error");
+  assert.equal(errorEvent?.context?.spanId, recorded.context.spanId);
+  assert.equal(errorEvent?.attrs?.error_class, "TypeError");
 });
 
 test("db query tracer labels success and failure events with db_system and duration bucket", async () => {
@@ -173,4 +176,21 @@ test("db query tracer honors an explicit non-default db_system", async () => {
   assert.equal(failed?.attrs?.db_system, "risingwave");
   assert.equal(failed?.attrs?.retryable, "false");
   assert.equal(failed?.attrs && "sqlstate" in failed.attrs, false);
+});
+
+test("server and daemon read one active-span store", () => {
+  // The server facade and the daemon-side trace-client must agree on the
+  // active span, otherwise in-process work that crosses the two (built-in app
+  // runtimes, tests that drive both) parents its spans to nothing.
+  const tracer = new BasicTracer({ sink: new MemoryTraceSink() });
+  const span = tracer.startSpan("server.http.request", { surface: "server", kind: "server" });
+  try {
+    assert.equal(getCurrentTraceContext(), null);
+    assert.equal(getActiveTraceContext(), null);
+    assert.deepEqual(runWithTraceSpan(span, () => getActiveTraceContext()), span.context);
+    assert.deepEqual(runWithActiveSpan(span, () => getCurrentTraceContext()), span.context);
+    assert.equal(getCurrentTraceContext(), null);
+  } finally {
+    span.end();
+  }
 });

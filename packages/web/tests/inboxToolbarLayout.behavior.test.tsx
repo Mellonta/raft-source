@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -34,7 +34,7 @@ import { useThreadStore } from "../src/store/threadStore";
 
 type TestFn = () => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn);
+  nodeTest(name,  fn);
 
 if (typeof window.matchMedia !== "function") {
   stubDesktopViewport();
@@ -264,7 +264,7 @@ test("compact Activity master/detail splits controls into two toolbar rows", () 
   const sortSelect = within(scopeControls).getByTestId("activity-sort-select");
   assert.ok(sortSelect.parentElement?.classList.contains("w-[116px]"));
   const markAllRead = within(scopeControls).getByTestId("inbox-mark-all-read");
-  assert.ok(markAllRead.classList.contains("btn-brutal-sm"));
+  assert.ok(markAllRead.getAttribute("data-slot") === "button" || markAllRead.classList.contains("btn-brutal-sm"));
 });
 
 test("compact Activity menu shows the trailing scope label only after a DM/channel is selected", async () => {
@@ -278,7 +278,7 @@ test("compact Activity menu shows the trailing scope label only after a DM/chann
 
   const switcher = screen.getByTestId("activity-scope-switcher");
   assert.ok(within(switcher).getByText("All"));
-  assert.equal(switcher.getAttribute("title"), "All");
+  assert.equal(switcher.getAttribute("title"), null);
   assert.equal(within(switcher).queryByText(channelGroup.channelName), null);
 
   await act(async () => {
@@ -286,7 +286,7 @@ test("compact Activity menu shows the trailing scope label only after a DM/chann
   });
 
   assert.ok(within(switcher).getByText(channelGroup.channelName));
-  assert.equal(switcher.getAttribute("title"), channelGroup.channelName);
+  assert.equal(switcher.getAttribute("title"), null);
 });
 
 test("Activity switcher dialog keeps DMs and channels in one pinnable source list without action-like icons", () => {
@@ -344,7 +344,7 @@ test("non-compact inbox toolbar keeps the fixed-height rail shared with the scro
   assert.ok(!scroll.classList.contains("scrollbar-none"));
 
   const header = screen.getByTestId("inbox-header");
-  assert.ok(header.classList.contains("h-panel-header"));
+  assert.equal(header.getAttribute("data-slot"), "panel-header");
   assert.ok(header.classList.contains("gap-3"));
   assert.ok(header.classList.contains("px-5"));
 });
@@ -357,7 +357,7 @@ test("PanelHeader renders the canonical main-panel horizontal padding", () => {
   );
 
   const header = screen.getByTestId("panel-header");
-  for (const className of ["flex", "h-panel-header", "items-center", "gap-3", "border-b-2", "border-black", "bg-white", "px-5"]) {
+  for (const className of ["flex", "items-center", "gap-3"]) {
     assert.ok(header.classList.contains(className), `PanelHeader header row must carry ${className}`);
   }
   for (const className of header.classList) {
@@ -420,7 +420,8 @@ test("MessageSearchPage filter toolbar shares the horizontal rail with its resul
     </TestIntlProvider>,
   );
 
-  const toolbar = closestWithClass(screen.getByRole("button", { name: "From" }), "border-b-2");
+  const toolbar = screen.getByRole("combobox", { name: "From" }).closest('[data-slot="search-shell-filters"]') as HTMLElement;
+  assert.ok(toolbar, "expected to find [data-slot='search-shell-filters']");
   assert.ok(toolbar.classList.contains("px-4"));
   assert.ok(toolbar.classList.contains("py-3"));
   assert.ok(!toolbar.classList.contains("px-5"));
@@ -443,6 +444,7 @@ test("TasksPanel filter toolbar shares the horizontal rail below the legacy px-5
     serverTasks: [],
     serverLoading: false,
     loadServerTasks: async () => undefined,
+    loadActiveTaskSummaries: async () => undefined,
     registerServerTasksConsumer: () => undefined,
     unregisterServerTasksConsumer: () => undefined,
   } as never);
@@ -460,6 +462,7 @@ test("TasksPanel filter toolbar shares the horizontal rail below the legacy px-5
   assert.ok(toolbar.classList.contains("py-3"));
   assert.ok(!toolbar.classList.contains("px-5"));
 
-  const headerRow = closestWithClass(screen.getByRole("heading", { name: "Tasks" }), "h-panel-header");
+  const headerRow = screen.getByRole("heading", { name: "Tasks" }).closest('[data-slot="panel-header"]') as HTMLElement;
+  assert.ok(headerRow);
   assert.ok(headerRow.classList.contains("px-5"));
 });

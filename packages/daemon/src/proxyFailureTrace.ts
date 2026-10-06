@@ -1,5 +1,5 @@
-import type { AgentProxyFailure, AgentProxyTransportNormalizedError } from "./agentCredentialProxy.js";
-import { routeFamilyForPath } from "./agentCredentialProxy.js";
+import type { AgentProxyFailure, AgentProxyTransportNormalizedError } from "./agentCredentialProxy";
+import { routeFamilyForPath } from "./agentCredentialProxy";
 
 export type DaemonProxyFailureReason =
   | "local_daemon_state_invalid"

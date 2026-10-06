@@ -1,17 +1,23 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
-import { drizzle as drizzleNodePg, type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { drizzle as drizzleNodePg } from "drizzle-orm/node-postgres";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { drizzle as drizzlePglite } from "drizzle-orm/pglite";
 import { PGlite } from "@electric-sql/pglite";
 import pg from "pg";
+import { attachPoolClientErrorHandler } from "./pgPoolErrorHandler";
 import { noopTracer, type TraceContext, type Tracer } from "@botiverse/raft-shared";
-import * as schema from "./schema.js";
-import { migratePglite } from "./pgliteMigrations.js";
-import { closeRisingWavePool } from "./risingwave.js";
-import { dbPoolConnections, dbPoolWaitingRequests, pgPoolReadOnlyClientRecycledTotal } from "../metrics.js";
-import { getCurrentTraceContext } from "../tracing/semanticTrace.js";
+import * as schema from "./schema";
+import { migratePglite } from "./pgliteMigrations";
+import { closeRisingWavePool } from "./risingwave";
+import {
+  recordSecondConnectionInsideTransaction,
+  scopeTransactions,
+  type Database,
+} from "./ambientTransaction";
+import { dbPoolConnections, dbPoolWaitingRequests, pgPoolReadOnlyClientRecycledTotal } from "../metrics";
+import { errorClassOf, getCurrentTraceContext } from "../tracing/semanticTrace";
 
 let _tracer: Tracer = noopTracer;
 const dbTraceAttributes = new AsyncLocalStorage<Record<string, string | number | boolean>>();
@@ -67,6 +73,17 @@ interface PoolCheckoutState {
   queueMs: number;
   startMs: number;
   queryIdentity: QueryIdentity;
+  // Set once a statement other than BEGIN/COMMIT/ROLLBACK/SAVEPOINT has run, so
+  // the span names the work the connection was held for, not the closing COMMIT.
+  hasWorkStatement?: boolean;
+  // False for the first checkout of a newly opened client: its queueMs then
+  // includes opening the connection (reported as connect_ms).
+  connectionReused: boolean;
+  // Round trip of the first statement run on this checkout, from send to
+  // result. Separates "the database/pooler answered slowly" from "the
+  // connection was held for other work" when hold_ms is high.
+  firstQueryStartMs?: number;
+  firstQueryMs?: number;
   traceParent: TraceContext | null;
   traceAttributes?: Record<string, string | number | boolean>;
 }
@@ -76,6 +93,19 @@ interface InstrumentedPoolClient extends pg.PoolClient {
     checkout?: PoolCheckoutState;
     readOnlyRecycleError?: Error;
   };
+}
+
+type InstrumentedRelease = pg.PoolClient["release"] & { __slockDbInstrumentedRelease?: true };
+
+// Clients this process has already checked out at least once. Shared by the
+// connect and pool.query paths, so a client first used by either counts as
+// reused afterwards (connection_reused on server.db.connection).
+const seenPoolClients = new WeakSet<object>();
+
+function markClientCheckedOut(client: object): boolean {
+  const reused = seenPoolClients.has(client);
+  seenPoolClients.add(client);
+  return reused;
 }
 
 interface InstrumentedPool extends pg.Pool {
@@ -125,12 +155,11 @@ function recordReadOnlyRecovery(label: string, err: unknown, state: ReadOnlyReco
   };
 
   pgPoolReadOnlyClientRecycledTotal.labels(label).inc();
-  if (_tracer !== noopTracer) {
-    _tracer.startSpan("server.db.pool.read_only_client_recycled", {
-      surface: "server",
-      attrs,
-    }).end("ok");
-  }
+  _tracer.emitEvent("server.db.pool.read_only_client_recycled", {
+    surface: "server",
+    parent: getCurrentTraceContext(),
+    attrs,
+  });
 
   const now = state.now();
   if (now - state.lastLoggedAtMs < state.logIntervalMs) {
@@ -231,12 +260,16 @@ function recordConnectionSpan(checkout: PoolCheckoutState, releaseArgs: unknown[
   _tracer.startSpan("server.db.connection", {
     parent: checkout.traceParent,
     surface: "server",
+    startTimeMs: checkout.startMs - checkout.queueMs,
     attrs: {
       event_kind: "db_connection",
       pool: checkout.label,
       queue_ms: checkout.queueMs,
       hold_ms: holdMs,
       pool_occupancy_ms: holdMs,
+      connection_reused: checkout.connectionReused,
+      ...(checkout.connectionReused ? {} : { connect_ms: checkout.queueMs }),
+      ...(checkout.firstQueryMs === undefined ? {} : { first_query_ms: checkout.firstQueryMs }),
       db_operation: "unknown",
       statement_kind: checkout.queryIdentity.statementKind,
       query: checkout.queryIdentity.rawSql,
@@ -255,7 +288,7 @@ function recordConnectionSpan(checkout: PoolCheckoutState, releaseArgs: unknown[
 }
 
 function checkoutErrorClass(err: unknown): string {
-  return err instanceof Error ? err.name : typeof err;
+  return errorClassOf(err);
 }
 
 function recordConnectionCheckoutFailure(
@@ -270,6 +303,7 @@ function recordConnectionCheckoutFailure(
   _tracer.startSpan("server.db.connection", {
     parent: traceParent,
     surface: "server",
+    startTimeMs: Date.now() - queueMs,
     attrs: {
       event_kind: "db_connection",
       outcome: "checkout_failed",
@@ -319,22 +353,35 @@ function preparePoolClient(
   readOnlyRecoveryState: ReadOnlyRecoveryState,
 ): pg.PoolClient {
   const instrumented = client as InstrumentedPoolClient;
+  const connectionReused = markClientCheckedOut(client);
   if (!instrumented.__slockDbInstrumentation) {
     const originalQuery = client.query.bind(client);
-    const originalRelease = client.release.bind(client);
     const state = {};
     instrumented.__slockDbInstrumentation = state;
 
     client.query = ((...args: unknown[]) => {
       const checkout = instrumented.__slockDbInstrumentation?.checkout;
+      const timesFirstQuery = Boolean(checkout && checkout.firstQueryStartMs === undefined);
+      if (checkout && timesFirstQuery) checkout.firstQueryStartMs = Date.now();
+      const finishFirstQuery = () => {
+        if (checkout && timesFirstQuery && checkout.firstQueryMs === undefined && checkout.firstQueryStartMs !== undefined) {
+          checkout.firstQueryMs = Date.now() - checkout.firstQueryStartMs;
+        }
+      };
       if (checkout) {
-        checkout.queryIdentity = queryIdentityFromInput(args[0]);
-        checkout.traceAttributes = dbTraceAttributes.getStore();
+        const queryIdentity = queryIdentityFromInput(args[0]);
+        const isWorkStatement = queryIdentity.statementKind !== "transaction";
+        if (isWorkStatement || !checkout.hasWorkStatement) {
+          checkout.queryIdentity = queryIdentity;
+          checkout.traceAttributes = dbTraceAttributes.getStore();
+          checkout.hasWorkStatement ||= isWorkStatement;
+        }
       }
       const callback = args[args.length - 1];
       if (typeof callback === "function") {
         const queryArgs = args.slice(0, -1);
         return originalQuery(...queryArgs as [never], (err: Error | undefined, ...rest: unknown[]) => {
+          finishFirstQuery();
           markReadOnlyRecycle(instrumented, checkout?.label ?? "unknown", err, readOnlyRecoveryState);
           callback(err, ...rest);
         });
@@ -343,19 +390,35 @@ function preparePoolClient(
       try {
         const result = originalQuery(...args as [never]);
         if (result && typeof (result as Promise<unknown>).then === "function") {
-          return (result as Promise<unknown>).catch((err) => {
-            markReadOnlyRecycle(instrumented, checkout?.label ?? "unknown", err, readOnlyRecoveryState);
-            throw err;
-          });
+          return (result as Promise<unknown>).then(
+            (value) => {
+              finishFirstQuery();
+              return value;
+            },
+            (err) => {
+              finishFirstQuery();
+              markReadOnlyRecycle(instrumented, checkout?.label ?? "unknown", err, readOnlyRecoveryState);
+              throw err;
+            },
+          );
         }
+        finishFirstQuery();
         return result;
       } catch (err) {
+        finishFirstQuery();
         markReadOnlyRecycle(instrumented, checkout?.label ?? "unknown", err, readOnlyRecoveryState);
         throw err;
       }
     }) as pg.PoolClient["query"];
 
-    client.release = ((...args: unknown[]) => {
+  }
+
+  // pg-pool assigns a fresh client.release on every checkout, so the release
+  // hook must be re-installed per checkout; installing it once per client
+  // dropped the connection span (and the read-only recycle) for every reuse.
+  if (!(client.release as InstrumentedRelease).__slockDbInstrumentedRelease) {
+    const originalRelease = client.release.bind(client);
+    const release = ((...args: unknown[]) => {
       const checkout = instrumented.__slockDbInstrumentation?.checkout;
       const readOnlyRecycleError = instrumented.__slockDbInstrumentation?.readOnlyRecycleError;
       const releaseArgs = readOnlyRecycleError ? [readOnlyRecycleError] : args;
@@ -367,12 +430,15 @@ function preparePoolClient(
         recordConnectionSpan(checkout, releaseArgs);
       }
       return originalRelease(...releaseArgs as [never]);
-    }) as pg.PoolClient["release"];
+    }) as InstrumentedRelease;
+    release.__slockDbInstrumentedRelease = true;
+    client.release = release;
   }
 
   instrumented.__slockDbInstrumentation.checkout = {
     label,
     queueMs,
+    connectionReused,
     startMs: Date.now(),
     queryIdentity: queryIdentityFromInput(undefined),
     traceParent: getCurrentTraceContext(),
@@ -435,6 +501,9 @@ export function instrumentPool(label: string, pool: pg.Pool) {
     const traceAttributes = dbTraceAttributes.getStore();
     const traceParent = getCurrentTraceContext();
     const finishQuery = (client: pg.PoolClient, checkout: PoolCheckoutState, releaseArgs: unknown[]) => {
+      // pool.query runs exactly one statement right after checkout, so its round
+      // trip is the whole hold.
+      checkout.firstQueryMs ??= Date.now() - checkout.startMs;
       const finalReleaseArgs = readOnlyRecoveryReleaseArgs(label, releaseArgs, readOnlyRecoveryState);
       if (finalReleaseArgs.length > 0) {
         client.release(finalReleaseArgs[0] as never);
@@ -447,9 +516,10 @@ export function instrumentPool(label: string, pool: pg.Pool) {
     if (typeof callback === "function") {
       const queryArgs = args.slice(0, -1);
       (originalConnect() as Promise<pg.PoolClient>).then((client) => {
-        const checkout = {
+        const checkout: PoolCheckoutState = {
           label,
           queueMs: Date.now() - queueStart,
+          connectionReused: markClientCheckedOut(client),
           startMs: Date.now(),
           queryIdentity,
           traceParent,
@@ -473,9 +543,10 @@ export function instrumentPool(label: string, pool: pg.Pool) {
     }
 
     return (originalConnect() as Promise<pg.PoolClient>).then((client) => {
-      const checkout = {
+      const checkout: PoolCheckoutState = {
         label,
         queueMs: Date.now() - queueStart,
+        connectionReused: markClientCheckedOut(client),
         startMs: Date.now(),
         queryIdentity,
         traceParent,
@@ -498,9 +569,7 @@ export function instrumentPool(label: string, pool: pg.Pool) {
   }) as pg.Pool["query"];
 }
 
-export type Database = NodePgDatabase<typeof schema>;
-export type DatabaseTransaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
-export type DatabaseExecutor = Database | DatabaseTransaction;
+export type { Database, DatabaseExecutor, DatabaseTransaction } from "./ambientTransaction";
 
 export class SearchQueryAbortedError extends Error {
   readonly code = "SEARCH_QUERY_ABORTED";
@@ -609,6 +678,12 @@ function cancelPgQuery(context: PgSearchCancelContext): void {
   if (client.processID == null || client.secretKey == null) return;
 
   const cancelClient = new pg.Client(context.pool.options);
+  // The Client instance itself must carry an 'error' listener: a dropped
+  // connection makes pg emit 'error' on the Client, and an unhandled 'error'
+  // event crashes the process (task #269).
+  cancelClient.on("error", (error) => {
+    console.warn("Failed to send pg cancel request for message search:", error);
+  });
   const cancelConnection = (cancelClient as unknown as {
     connection?: { once(event: "error", listener: (error: Error) => void): void };
   }).connection;
@@ -699,6 +774,10 @@ export async function executeSearchSql<T extends pg.QueryResultRow = pg.QueryRes
   if (!searchPool) {
     return getSearchDb().execute<T>(statement) as Promise<SearchQueryResult<T>>;
   }
+  // A separate replica pool is a second connection relative to the ambient
+  // transaction; surface it in the audit so search reads can't silently split
+  // off from an in-flight transaction.
+  recordSecondConnectionInsideTransaction("executeSearchSql");
   return executeCancellablePgPoolSql<T>(searchPool, statement, options);
 }
 
@@ -712,7 +791,10 @@ function getPgliteDataDir(connectionString: string): string | undefined {
   return raw;
 }
 
-function createPool(connectionString: string) {
+// Exported for the task #269 real-PG teeth: the child process in
+// pgPoolErrorHandler.realPg.child.ts must exercise this exact wiring (helper
+// + attach site), not a mirror of it.
+export function createPool(connectionString: string) {
   const isNeon = connectionString.includes("neon.tech");
   const pool = new pg.Pool({
     connectionString,
@@ -731,6 +813,9 @@ function createPool(connectionString: string) {
   pool.on("error", (err) => {
     console.error("Unexpected pg pool error (likely a disconnected idle client):", err.message);
   });
+  // Checked-out clients lose pg-pool's idle 'error' listener; without our own,
+  // a server-side connection drop between queries kills the process (task #269).
+  attachPoolClientErrorHandler(pool, "pg");
   return pool;
 }
 
@@ -745,7 +830,8 @@ export async function initDatabase(
 
   _pool = createPool(databaseUrl);
   instrumentPool("primary", _pool);
-  _db = drizzleNodePg(_pool, { schema });
+  _rootDb = drizzleNodePg(_pool, { schema });
+  _db = scopeTransactions(_rootDb);
   _pglite = null;
 
   const hasSearchReplica = !!searchDatabaseUrl && searchDatabaseUrl !== databaseUrl;
@@ -753,7 +839,7 @@ export async function initDatabase(
   if (hasSearchReplica) {
     _searchPool = createPool(searchDatabaseUrl);
     instrumentPool("search", _searchPool);
-    _searchDb = drizzleNodePg(_searchPool, { schema });
+    _searchDb = scopeTransactions(drizzleNodePg(_searchPool, { schema }));
     log("[db] search: using read replica");
   } else {
     _searchPool = _pool;
@@ -772,29 +858,78 @@ export async function initPgliteDatabase(client: PGlite): Promise<Database> {
     throw error;
   }
   _pglite = client;
-  _db = drizzlePglite(client, { schema }) as unknown as Database;
+  _rootDb = drizzlePglite(client, { schema }) as unknown as Database;
+  _db = scopeTransactions(_rootDb);
   _pool = null;
   _searchPool = null;
   _searchDb = _db;
   return _db;
 }
 
+/**
+ * The open transaction is the ambient connection.
+ *
+ * Functions take their executor as an optional argument that defaults to getDb(), and
+ * some capture `const db = getDb()` before opening a transaction. Either way a caller
+ * that forgets to pass its transaction down used to query the ROOT pool while its own
+ * transaction was open: a second connection that cannot see the transaction's
+ * uncommitted rows and can wait on a lock the transaction holds (on the
+ * single-connection test database, a hang). Nothing in the types catches that.
+ *
+ * So the root database is wrapped: while a transaction callback is running, every use
+ * of the root -- through getDb() or through a handle taken earlier -- goes to that
+ * transaction. A root `transaction(...)` inside one becomes a savepoint on it. After
+ * the callback settles the scope is closed, so a promise that outlives the commit is
+ * back on the pool.
+ *
+ * getRootDb() is the deliberate escape hatch: a separate connection even inside a
+ * transaction. An audit over the full server suite (2026-09-25) found no code that
+ * needs one; any future use should say why at the call site.
+ *
+ * RAFT_TX_POOL_AUDIT_FILE (tests/diagnostics): records every second-connection use
+ * made inside a transaction — the root escape hatch (getRootDb), a separate search
+ * replica (getSearchDb / executeSearchSql when a replica pool exists), or any other
+ * path that reaches a connection outside the ambient transaction. Each entry carries
+ * the source label and a stack.
+ */
+let _rootDb: Database | null = null;
+
 export function getDb() {
   if (!_db) throw new Error("Database not initialized. Call initDatabase() first.");
   return _db;
+}
+
+/**
+ * A connection OUTSIDE any open transaction -- only for work that must not join it.
+ * Say why at the call site.
+ */
+export function getRootDb(): Database {
+  if (!_rootDb) throw new Error("Database not initialized. Call initDatabase() first.");
+  recordSecondConnectionInsideTransaction("getRootDb");
+  return _rootDb;
 }
 
 export function isDatabaseInitialized() {
   return Boolean(_db);
 }
 
-export function getPool() {
-  if (!_pool) throw new Error("Database not initialized. Call initDatabase() first.");
-  return _pool;
+/**
+ * Pool gauges only — a read-only view of the primary pool's size, for tracing.
+ * The raw `pg.Pool` is not exposed: that would be a Proxy-bypassing escape hatch
+ * able to open a second connection inside a transaction (the exact hazard #8319
+ * closes).
+ */
+export function getPoolMetrics(): { waitingCount: number; totalCount: number; idleCount: number } | null {
+  if (!_pool) return null;
+  return { waitingCount: _pool.waitingCount, totalCount: _pool.totalCount, idleCount: _pool.idleCount };
 }
 
 export function getSearchDb() {
   if (!_searchDb) throw new Error("Database not initialized. Call initDatabase() first.");
+  // When a separate read replica is configured, getSearchDb() reaches a connection
+  // outside the ambient transaction — a second connection. The no-replica case is
+  // just _db (the wrapped primary), so only the replica case is a hazard to audit.
+  if (_searchDb !== _db) recordSecondConnectionInsideTransaction("getSearchDb");
   return _searchDb;
 }
 
@@ -805,35 +940,15 @@ export async function pingDatabase() {
 
 let _poolMetricsTimer: ReturnType<typeof setInterval> | null = null;
 
-function emitPoolMetricsSpan(tracer: Tracer, label: string, pool: pg.Pool): void {
-  const attrs: Record<string, unknown> = {
-    pool: label,
-    total: pool.totalCount,
-    idle: pool.idleCount,
-    waiting: pool.waitingCount,
-  };
-  const rejected = (pool as unknown as { rejectedCount?: number }).rejectedCount;
-  if (typeof rejected === "number") {
-    attrs.rejected = rejected;
-  }
-  tracer.startSpan("server.db.pool.stats", {
-    surface: "server",
-    attrs,
-  }).end("ok");
-}
-
-export function startPoolMetricsReporting(tracer?: Tracer): void {
+export function startPoolMetricsReporting(): void {
   if (_poolMetricsTimer) return;
-  const t = tracer ?? noopTracer;
   const report = () => {
     const primary = _pool;
     if (!primary) return;
     reportPoolMetrics("primary", primary);
-    emitPoolMetricsSpan(t, "primary", primary);
     const search = _searchPool;
     if (search && search !== primary) {
       reportPoolMetrics("search", search);
-      emitPoolMetricsSpan(t, "search", search);
     }
   };
   report();
@@ -874,6 +989,7 @@ export async function closeDatabase() {
     }
   } finally {
     _db = null;
+    _rootDb = null;
     _searchDb = null;
     _pool = null;
     _pglite = null;

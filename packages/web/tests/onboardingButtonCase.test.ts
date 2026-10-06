@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 
 /**
  * Casing rules (stdrc, 2026-07-12):

@@ -1,8 +1,7 @@
-import { expect, test } from "vitest";
 import { applyPatch, createTwoFilesPatch } from "diff";
-import { getDriver } from "./index.js";
-import { buildCliSystemPrompt } from "./systemPrompt.js";
-import { promptConfig } from "../testing/promptFixture.js";
+import { getDriver } from "./index";
+import { buildCliSystemPrompt } from "./systemPrompt";
+import { promptConfig } from "../testing/promptFixture";
 
 // Store shared copy once and lossless unified diffs for each real driver's output.
 // These detect copy changes, not whether a model follows the instructions.

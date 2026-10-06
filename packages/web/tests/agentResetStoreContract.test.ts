@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 
 import api from "../src/api/client";
 import { useAgentStore } from "../src/store/agentStore";

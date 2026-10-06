@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "vitest";
-import { createManagedMcpPiTools } from "./managedMcpTools.js";
+import { createManagedMcpPiTools } from "./managedMcpTools";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {

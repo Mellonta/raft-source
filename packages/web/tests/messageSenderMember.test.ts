@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { resolveMessageSenderMember, resolveMessageSenderMemberFromList } from "../src/utils/messageSenderMember.js";
-import type { User } from "../src/store/authStore.js";
-import type { Message } from "../src/store/messageStore.js";
-import type { ServerMember } from "../src/store/serverStore.js";
+import { resolveMessageSenderMember, resolveMessageSenderMemberFromList } from "../src/utils/messageSenderMember";
+import type { User } from "../src/store/authStore";
+import type { Message } from "../src/store/messageStore";
+import type { ServerMember } from "../src/store/serverStore";
 
 const currentUser: User = {
   id: "user-1",

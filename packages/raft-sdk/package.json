@@ -1,6 +1,6 @@
 {
   "name": "@botiverse/raft-sdk",
-  "version": "0.1.1",
+  "version": "0.12.1",
   "license": "FSL-1.1-ALv2",
   "description": "Typed Raft Agent API client for external agents and bots.",
   "type": "module",
@@ -13,10 +13,12 @@
       "import": "./dist/esm/index.js",
       "require": "./dist/cjs/index.cjs"
     },
+    "./operations.json": "./operations.json",
     "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "operations.json"
   ],
   "sideEffects": false,
   "dependencies": {
@@ -34,20 +36,20 @@
     "access": "public"
   },
   "scripts": {
-    "build": "rslib build",
-    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "build": "tsdown",
+    "test": "vitest run",
     "test:artifact": "pnpm run build && node scripts/check-packed-artifact.mjs",
     "prepack": "pnpm run build",
     "prepublishOnly": "pnpm run test && pnpm run test:artifact",
     "lint:publish-package": "node scripts/check-publish-package.mjs && node scripts/check-publish-workflow.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "generate:operations": "node --import @oxc-node/core/register scripts/generate-operations.ts"
   },
   "devDependencies": {
-    "@microsoft/api-extractor": "7.52.11",
-    "@rslib/core": "0.23.2",
     "@botiverse/raft-shared": "workspace:*",
     "@types/node": "^25.5.0",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3"
+    "tsdown": "^0.23.0",
+    "typescript": "^6.0.3",
+    "vitest": "^5.0.2"
   }
 }

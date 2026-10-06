@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
 import {
   recordCrash,
@@ -16,8 +15,8 @@ import {
   classifyTerminalHandshakeRejection,
   CRASH_WINDOW_MS,
   DEGRADED_THRESHOLD,
-} from "./health.js";
-import { serverAttachmentPath, serverHealthPath } from "./paths.js";
+} from "./health";
+import { serverAttachmentPath, serverHealthPath } from "./paths";
 
 // PR-H §3.3 regression guard — per-server crash history + degraded detection.
 

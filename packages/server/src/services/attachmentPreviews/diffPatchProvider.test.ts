@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { buildDiffPatchPreview, diffPatchPreviewProvider, isDiffPatchAttachment } from "./providers/diffPatch.js";
+import { buildDiffPatchPreview, diffPatchPreviewProvider, isDiffPatchAttachment } from "./providers/diffPatch";
 
 test("isDiffPatchAttachment detects diff and patch filenames", () => {
   assert.equal(isDiffPatchAttachment("changes.diff", "application/octet-stream"), true);

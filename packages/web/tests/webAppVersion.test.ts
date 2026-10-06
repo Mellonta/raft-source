@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { version as packageVersion } from "../package.json";
 import { resolveWebAppVersion } from "../src/utils/webAppVersion";
 

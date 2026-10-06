@@ -1,8 +1,8 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
-import { AGENT_BOOTSTRAP_SURFACE_ENABLED_ENV } from "../services/agentCredentialService.js";
-import { openTestApp } from "../test/integration/app.js";
+import { AGENT_BOOTSTRAP_SURFACE_ENABLED_ENV } from "../services/agentCredentialService";
+import { openTestApp } from "../test/integration/app";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

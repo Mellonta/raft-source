@@ -4,7 +4,6 @@
  * still suppress the redundant preview.
  */
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { InlineThreadReplies } from "../src/components/message/InlineThreadReplies";
@@ -332,7 +331,7 @@ test("thread panel parent (hideThreadActions) renders no inline previews", async
   assert.doesNotMatch(container.textContent ?? "", /inline reply/);
 });
 
-test("the count leads the gray preview surface and clicking any reply opens the thread", async () => {
+test("the count leads the neutral preview surface and clicking any reply opens the thread", async () => {
   seedStores();
   let openCount = 0;
 
@@ -349,17 +348,15 @@ test("the count leads the gray preview surface and clicking any reply opens the 
   const surface = container.querySelector<HTMLButtonElement>('[data-message-affordance="inline-thread-replies"]');
   assert.ok(surface, "the inline reply preview surface should render");
   assert.equal(surface.tagName, "BUTTON", "the whole preview surface is the thread-opening control");
-  assert.match(surface.className, /bg-black\/\[0\.03\]/, "the surface has the requested light gray background");
   assert.doesNotMatch(surface.className, /cursor-pointer/, "the intuitive row action keeps the default arrow cursor");
-  assert.match(surface.className, /hover:bg-black\/\[0\.08\]/, "hover darkens the whole gray surface one stronger step");
 
   const countLabel = surface.querySelector('[data-message-affordance="inline-thread-replies-count"]');
   assert.ok(countLabel, "the reply count should render");
   assert.match(countLabel.textContent ?? "", /2 replies/);
   assert.equal(surface.firstElementChild, countLabel, "the reply count sits above the three preview rows");
   assert.equal(countLabel.tagName, "SPAN", "the surface must not contain a nested button");
-  assert.match(countLabel.className, /text-black\/55/, "the secondary thread action uses a neutral gray instead of an attention color");
-  assert.match(countLabel.className, /group-hover:text-black/, "hover can strengthen the action to neutral black");
+  assert.match(countLabel.className, /text-foreground-muted/, "the secondary thread action uses a themed neutral instead of an attention color");
+  assert.match(countLabel.className, /group-hover:text-foreground-strong/, "hover strengthens the action within the active theme");
 
   const previewBody = Array.from(surface.querySelectorAll("span"))
     .find((element) => element.textContent === "inline reply 2");

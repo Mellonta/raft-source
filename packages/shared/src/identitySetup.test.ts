@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { accountNeedsIdentitySetup, hasPlaceholderHandle } from "./index.js";
+import { accountNeedsIdentitySetup, hasPlaceholderHandle } from "./index";
 
 /**
  * @Jianwei, 2026-07-13: migration 0170 stamps `profile_setup_completed_at` for everyone who

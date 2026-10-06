@@ -113,10 +113,17 @@ export interface PendingMentionAction {
   expiresAt?: string | null;
 }
 
+export interface MessageDeliveryWarning {
+  targetType: "agent";
+  targetId: string;
+  reason: "agent_stopped";
+}
+
 export interface SendMessageResult {
   messageId: string;
   pendingMentionActions: PendingMentionAction[];
   unresolvedMentionHandles: string[];
+  deliveryWarnings?: MessageDeliveryWarning[];
 }
 
 export interface ConversationContext {
@@ -356,6 +363,12 @@ export interface MessageState {
   contextLoadError: string | null;
   unreadCounts: Record<string, number>;
   mentionFlags: Record<string, boolean>;
+  /**
+   * Non-joined public channels whose latest message is past the user's cursor
+   * (`hasNew` in the unread summary). They carry no exact count; the sidebar
+   * shows a quiet indicator for them.
+   */
+  newFlags: Record<string, boolean>;
   currentUserId: string | null;
   drafts: Record<string, string>;
   historyLimited: boolean;
@@ -610,6 +623,9 @@ function getMaxDisplaySeq(messages: Message[]): number {
 }
 
 /** Default channel metadata. */
+/** `contextLoadError` value for a jump target hidden by the plan history cutoff. */
+export const CONTEXT_BEYOND_HISTORY_ERROR = "message.chatPanel.messageBeyondHistory";
+
 const DEFAULT_META: ChannelMeta = { hasMore: true, hasNewer: false, historyLimited: false };
 const DEFAULT_WINDOW_META: ChannelWindowMeta = {
   ...DEFAULT_META,
@@ -899,17 +915,29 @@ function clearLocalReadSuppressions() {
   localReadSuppressions.clear();
 }
 
+/** One entry of `GET /channels/unread?summary=1` (server ChannelUnreadSummaryEntry). */
+export type UnreadSummaryWireEntry = {
+  unreadCount: number;
+  hasMention: boolean;
+  hasAnyMention: boolean;
+  /** Non-joined public channel with messages past the cursor; unreadCount is 0. */
+  hasNew?: boolean;
+  readState?: import("@botiverse/raft-shared").InboxScopeReadFrontier;
+};
+
 export function parseUnreadSnapshot(data: unknown): {
   unreadCounts: Record<string, number>;
   mentionFlags: Record<string, boolean>;
+  newFlags: Record<string, boolean>;
 } {
   const source = typeof data === "object" && data !== null && "channels" in data
     ? (data as { channels?: unknown }).channels
     : data;
   const unreadCounts: Record<string, number> = {};
   const mentionFlags: Record<string, boolean> = {};
+  const newFlags: Record<string, boolean> = {};
   if (typeof source !== "object" || source === null) {
-    return { unreadCounts, mentionFlags };
+    return { unreadCounts, mentionFlags, newFlags };
   }
   for (const [channelId, value] of Object.entries(source)) {
     if (typeof value === "number") {
@@ -917,12 +945,13 @@ export function parseUnreadSnapshot(data: unknown): {
       continue;
     }
     if (typeof value !== "object" || value === null) continue;
-    const entry = value as { unreadCount?: unknown; hasMention?: unknown; hasAnyMention?: unknown };
+    const entry = value as { [K in keyof UnreadSummaryWireEntry]?: unknown };
     const unreadCount = typeof entry.unreadCount === "number" ? entry.unreadCount : 0;
     if (unreadCount > 0) unreadCounts[channelId] = unreadCount;
     if (entry.hasMention === true) mentionFlags[channelId] = true;
+    if (entry.hasNew === true) newFlags[channelId] = true;
   }
-  return { unreadCounts, mentionFlags };
+  return { unreadCounts, mentionFlags, newFlags };
 }
 
 function hasActiveLocalReadSuppression(
@@ -1090,12 +1119,18 @@ function applyAcceptedReadStateProjection(
         return rest;
       })()
       : state.mentionFlags;
+  const newFlags = projection.unreadCount === 0 && state.newFlags[channelId]
+    ? (() => {
+      const { [channelId]: _new, ...rest } = state.newFlags;
+      return rest;
+    })()
+    : state.newFlags;
   // Stryker disable all: this is a Zustand identity-preservation fast path; behavior tests assert resulting unread/mention state, not object reference churn.
-  if (unreadCounts === state.unreadCounts && mentionFlags === state.mentionFlags) {
+  if (unreadCounts === state.unreadCounts && mentionFlags === state.mentionFlags && newFlags === state.newFlags) {
     return { state, projection };
   }
   // Stryker restore all
-  return { state: { ...state, unreadCounts, mentionFlags }, projection };
+  return { state: { ...state, unreadCounts, mentionFlags, newFlags }, projection };
 }
 
 function applyAcceptedReadStateProjectionForChannels(state: MessageState, channelIds: Iterable<string>): MessageState {
@@ -1129,6 +1164,7 @@ function withAcceptedReadStateProjection(
     ...nextState,
     unreadCounts: projected.unreadCounts,
     mentionFlags: projected.mentionFlags,
+    newFlags: projected.newFlags,
   };
 }
 
@@ -1370,22 +1406,37 @@ export function normalizePendingMentionActions(raw: unknown): PendingMentionActi
     .filter((item) => item.resolutionId.length > 0);
 }
 
+export function normalizeDeliveryWarnings(raw: unknown): MessageDeliveryWarning[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+    .flatMap((item): MessageDeliveryWarning[] => {
+      if (item.targetType !== "agent" || item.reason !== "agent_stopped") return [];
+      const targetId = typeof item.targetId === "string" ? item.targetId : "";
+      if (!targetId) return [];
+      return [{ targetType: "agent", targetId, reason: "agent_stopped" }];
+    });
+}
+
 export function normalizeSendMessageResponse(data: unknown): {
   message: Message;
   pendingMentionActions: PendingMentionAction[];
   unresolvedMentionHandles: string[];
+  deliveryWarnings?: MessageDeliveryWarning[];
 } {
   if (isMessagePayload(data)) {
     return { message: data, pendingMentionActions: [], unresolvedMentionHandles: [] };
   }
-  const wrapped = data as { message?: unknown; pendingMentionActions?: unknown; unresolvedMentionHandles?: unknown } | null;
+  const wrapped = data as { message?: unknown; pendingMentionActions?: unknown; unresolvedMentionHandles?: unknown; deliveryWarnings?: unknown } | null;
   if (isMessagePayload(wrapped?.message)) {
+    const deliveryWarnings = normalizeDeliveryWarnings(wrapped?.deliveryWarnings);
     return {
       message: wrapped.message,
       pendingMentionActions: normalizePendingMentionActions(wrapped?.pendingMentionActions),
       unresolvedMentionHandles: Array.isArray(wrapped?.unresolvedMentionHandles)
         ? wrapped.unresolvedMentionHandles.filter((item): item is string => typeof item === "string")
         : [],
+      ...(deliveryWarnings.length > 0 ? { deliveryWarnings } : {}),
     };
   }
   throw new Error("Invalid message send response");
@@ -1481,6 +1532,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   // Stryker restore all
   unreadCounts: {},
   mentionFlags: {},
+  newFlags: {},
   currentUserId: null,
   drafts: loadDraftsFromStorage(),
 
@@ -1499,7 +1551,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       // be the bare map — mirror parseUnreadSnapshot's own source resolution
       // rather than assuming a shape.
       // Real wire row type rather than an inline assertion (#632 C1).
-      type UnreadWireRow = { readState?: import("@botiverse/raft-shared").InboxScopeReadFrontier } | number | null;
+      type UnreadWireRow = Partial<UnreadSummaryWireEntry> | number | null;
       const unreadSource: unknown = typeof data === "object" && data !== null && "channels" in data
         ? (data as { channels?: unknown }).channels
         : data;
@@ -1520,12 +1572,14 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           ...Object.keys(state.unreadCounts),
           ...Object.keys(snapshot.unreadCounts),
           ...Object.keys(snapshot.mentionFlags),
+          ...Object.keys(snapshot.newFlags),
         ]);
         // Stryker disable next-line ObjectLiteral: this merge seed is Zustand state plumbing; plain snapshot and stale-summary tests assert observable unread/mention results.
         let nextState: MessageState = {
           ...state,
           unreadCounts: filterUnreadCountsByLocalReadSuppressions(snapshot.unreadCounts, localReadSuppressions),
           mentionFlags: filterMentionFlagsByLocalReadSuppressions(snapshot.mentionFlags, localReadSuppressions),
+          newFlags: filterMentionFlagsByLocalReadSuppressions(snapshot.newFlags, localReadSuppressions),
         };
         for (const channelId of projectionChannelIds) {
           const readState = getAcceptedReadState(serverId, channelId);
@@ -1547,6 +1601,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         return {
           unreadCounts: nextState.unreadCounts,
           mentionFlags: nextState.mentionFlags,
+          newFlags: nextState.newFlags,
         };
       });
     } catch {
@@ -1560,10 +1615,12 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       // Stryker disable all: local clearUnread no-op/mention branches predate this read-state sync slice and are covered by local mark-read tests.
       const hasUnread = Boolean(state.unreadCounts[channelId]);
       const hasMentionFlag = state.mentionFlags[channelId] === true;
-      if (!hasUnread && !hasMentionFlag) return state;
+      const hasNewFlag = state.newFlags[channelId] === true;
+      if (!hasUnread && !hasMentionFlag && !hasNewFlag) return state;
       const { [channelId]: _unread, ...unreadCounts } = state.unreadCounts;
       const { [channelId]: _mention, ...mentionFlags } = state.mentionFlags;
-      return { unreadCounts, mentionFlags };
+      const { [channelId]: _new, ...newFlags } = state.newFlags;
+      return { unreadCounts, mentionFlags, newFlags };
       // Stryker restore all
     });
   },
@@ -2250,9 +2307,10 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         messageId: normalizedResponse.message.id,
         pendingMentionActions: [],
         unresolvedMentionHandles: normalizedResponse.unresolvedMentionHandles,
+        deliveryWarnings: normalizedResponse.deliveryWarnings ?? [],
       };
     }
-    const { pendingMentionActions, unresolvedMentionHandles } = normalizedResponse;
+    const { pendingMentionActions, unresolvedMentionHandles, deliveryWarnings = [] } = normalizedResponse;
     const { useChannelStore } = await import("./channelStore");
     useChannelStore.getState().touchChannelActivity(
       channelId,
@@ -2310,7 +2368,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         lastSeq: Math.max(state.lastSeq, persistedMessage.seq || 0),
       };
     });
-    return { messageId: message.id, pendingMentionActions, unresolvedMentionHandles };
+    return { messageId: message.id, pendingMentionActions, unresolvedMentionHandles, deliveryWarnings };
   },
 
   loadMessageContext: async (channelId, messageId) => {
@@ -2411,10 +2469,17 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         const fallbackGeneration = claimMessageWindowRequest();
         await get().loadMessages(channelId, fallbackGeneration);
         if (ownsMessageWindowRequest(fallbackGeneration, channelId, get().currentChannelId)) {
+          // The context route 404s for a target behind the plan history cutoff
+          // just as for a missing message. When the fallback page reports the
+          // channel is history-limited, say the target is beyond the plan's
+          // history range (with the billing CTA) instead of "not found" (task #14).
+          const contextLoadError = selectChannelWindowMeta(get(), channelId).historyLimited
+            ? CONTEXT_BEYOND_HISTORY_ERROR
+            : "message.chatPanel.messageNotFound";
           set((state) => ({
-            contextLoadError: "message.chatPanel.messageNotFound",
+            contextLoadError,
             channelWindowMeta: updateWindowMetaRecord(state.channelWindowMeta, channelId, {
-              contextLoadError: "message.chatPanel.messageNotFound",
+              contextLoadError,
             }),
           }));
         }
@@ -2744,6 +2809,7 @@ registerServerReset(() =>
       hasGap: false,
       unreadCounts: {},
       mentionFlags: {},
+      newFlags: {},
       historyLimited: false,
       isNearBottom: true,
     });

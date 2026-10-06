@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 // /events appends a camelCase `senderType` echo field to each (snake_case
 // AgentMessage) event. It used to read camelCase `m.senderType` — undefined on
 // buffer entries — so every event reported "agent" regardless of the real
@@ -9,15 +9,23 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { createChannel, addAgent, addHuman } from "../services/channelService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { AgentOrchestrator } from "../services/agentOrchestrator.js";
+import { getDb } from "../db/index";
+import { externalActorProjections, users } from "../db/schema";
+import { insertCanonicalExternalMessage } from "../services/externalProjectionService";
+import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { createChannel, addAgent, addHuman } from "../services/channelService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { AgentOrchestrator } from "../services/agentOrchestrator";
+import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
+import { createMessage, __setExternalAgentInboxChainSelectorForTests } from "../services/messageService";
+
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+
+// CI has no RisingWave: the external agent inbox pull reads the test-only
+// reference derivation of the agent inbox chain.
+__setExternalAgentInboxChainSelectorForTests(async (agentId: string) => ({ source: "chain", rows: await referenceAgentInboxChain(agentId) }));
 
 test("/events senderType echo mirrors the buffer's agent-facing sender_type", async ({ app }) => {
   const db = getDb();
@@ -49,14 +57,9 @@ test("/events senderType echo mirrors the buffer's agent-facing sender_type", as
     channel_type: "channel" as const,
     timestamp: new Date().toISOString(),
   };
-  await orchestrator.deliverMessage(agent.id, {
-    ...base, sender_id: owner!.id, sender_name: owner!.name, sender_type: "human",
-    content: "from a human", seq: 9101, message_id: randomUUID(),
-  });
-  await orchestrator.deliverMessage(agent.id, {
-    ...base, sender_id: "system", sender_name: "system", sender_type: "system",
-    content: "from the system", seq: 9102, message_id: randomUUID(),
-  });
+  // Persisted messages reach an external agent from its durable inbox.
+  const human = await createMessage(channel.id, "user", owner!.id, "from a human");
+  const system = await createMessage(channel.id, "user", "system", "from the system", "system");
   await orchestrator.deliverMessage(agent.id, {
     ...base,
     sender_id: randomUUID(),
@@ -82,27 +85,37 @@ test("/events senderType echo mirrors the buffer's agent-facing sender_type", as
       },
     },
   });
-  const externalProjectionMessageId = randomUUID();
-  await orchestrator.deliverMessage(agent.id, {
-    ...base,
-    sender_id: randomUUID(),
-    sender_name: "Alice External",
-    sender_type: "third_party_app",
+  // A provider message projected into the channel (e.g. from Slack): a real
+  // external-projection row, served from the durable inbox pull.
+  const [actor] = await db.insert(externalActorProjections).values({
+    provider: "slack",
+    appRegistrationId: `registration-${suffix}`,
+    installId: `install-${suffix}`,
+    workspaceId: "workspace-1",
+    externalActorId: "U-ALICE",
+    displayName: "Alice External",
+    handles: ["alice"],
+    actorKind: "human",
+    state: "active",
+    deactivated: false,
+    projectionRevision: 1,
+    observedAt: new Date(),
+  }).returning();
+  const projected = await db.transaction((executor) => insertCanonicalExternalMessage({
+    executor,
+    channelId: channel.id,
     content: "hello &lt;result&gt; user:owner",
-    seq: 9104,
-    message_id: externalProjectionMessageId,
-    mentioned: false,
-    external_message: {
-      schema: "external-message-provenance.v1",
-      provider: "slack",
-      workspace_id: "workspace-1",
-      conversation_id: "conversation-1",
-      message_id: "1722387723.000100",
-      actor_id: "U-ALICE",
-      actor_kind: "human",
-      projection_id: randomUUID(),
-    },
-  });
+    createdAt: new Date(),
+    projectionId: actor!.id,
+    provider: "slack",
+    appRegistrationId: `registration-${suffix}`,
+    installId: `install-${suffix}`,
+    workspaceId: "workspace-1",
+    externalActorId: "U-ALICE",
+    externalConversationId: "conversation-1",
+    externalMessageId: "1722387723.000100",
+    actorProjectionRevision: 1,
+  }));
 
   const res = await fetch(`${app.baseUrl}/internal/agent-api/events`, {
     headers: { Authorization: `Bearer ${minted.apiKey}` },
@@ -110,15 +123,16 @@ test("/events senderType echo mirrors the buffer's agent-facing sender_type", as
   assert.equal(res.status, 200);
   const body = await res.json() as { events: any[] };
   const bySeq = new Map(body.events.map((e) => [e.seq, e]));
-  assert.equal(bySeq.get(9101)?.sender_type, "human");
-  assert.equal(bySeq.get(9101)?.senderType, "human", "echo must not be stuck at 'agent'");
-  assert.equal(bySeq.get(9102)?.senderType, "system");
+  assert.equal(bySeq.get(human.seq)?.sender_type, "human");
+  assert.equal(bySeq.get(human.seq)?.senderType, "human", "echo must not be stuck at 'agent'");
+  assert.equal(bySeq.get(system.seq)?.senderType, "system");
   assert.equal(bySeq.get(9103)?.sender_type, "third_party_app");
   assert.equal(bySeq.get(9103)?.senderType, "third_party_app");
   assert.equal(bySeq.get(9103)?.third_party_event?.source?.client_id, "external-build-app");
-  assert.equal(bySeq.get(9104)?.sender_type, "third_party_app");
-  assert.equal(bySeq.get(9104)?.senderType, "third_party_app");
-  assert.equal(bySeq.get(9104)?.mentioned, false);
-  assert.equal(bySeq.get(9104)?.external_message?.message_id, "1722387723.000100");
-  assert.equal(bySeq.get(9104)?.content, "hello &lt;result&gt; user:owner", "inert content must not be escaped twice");
+  const external = bySeq.get(projected.message.seq);
+  assert.equal(external?.sender_type, "third_party_app");
+  assert.equal(external?.senderType, "third_party_app");
+  assert.equal(external?.mentioned, false);
+  assert.equal(external?.external_message?.message_id, "1722387723.000100");
+  assert.equal(external?.content, "hello &lt;result&gt; user:owner", "inert content must not be escaped twice");
 });

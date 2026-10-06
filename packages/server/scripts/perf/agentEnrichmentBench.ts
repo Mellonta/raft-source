@@ -1,20 +1,20 @@
 /**
  * Benchmark: batched vs per-agent enrichAgentWithCreatorProfile.
  *
- * Run: npx tsx packages/server/scripts/perf/agentEnrichmentBench.ts
+ * Run: node --import @oxc-node/core/register packages/server/scripts/perf/agentEnrichmentBench.ts
  *
  * Seeds an in-memory PGlite database with N agents (mixed creator types),
  * runs both code paths against the same dataset, and prints per-call latency.
  * This isolates the enrichment cost from network/Express/orchestrator/runtime
  * profile lookups so the delta is unambiguous.
  */
-import { initDatabase, getDb, closeDatabase } from "../../src/db/index.js";
-import { agents, servers, serverMembers, users } from "../../src/db/schema.js";
+import { initDatabase, getDb, closeDatabase } from "../../src/db/index";
+import { agents, servers, serverMembers, users } from "../../src/db/schema";
 import { eq } from "drizzle-orm";
 import {
   enrichAgentWithCreatorProfile,
   batchEnrichAgentsWithCreatorProfile,
-} from "../../src/services/agentService.js";
+} from "../../src/services/agentService";
 
 async function seed(agentCount: number) {
   const db = getDb();

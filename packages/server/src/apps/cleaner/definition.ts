@@ -22,12 +22,13 @@
 import {
   CLEANER_APP_ID,
   CLEANER_CONFIG_CANONICAL,
-} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol.js";
+  CLEANER_DISK_NOTIFICATION_CLASS,
+} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol";
 
-import type { AppId } from "../../services/rapRegistry.js";
-import type { BuiltInRapAppDefinition } from "../../services/rapBuiltinAppManifests.js";
+import type { AppId } from "../../services/rapRegistry";
+import type { BuiltInRapAppDefinition } from "../../services/rapBuiltinAppManifests";
 
-import { projectCleanerConfigToWire } from "./configProjector.js";
+import { projectCleanerConfigToWire } from "./configProjector";
 
 export const BUILT_IN_MEMORY_HINT_EVENT_KIND = "memory_size_hint" as const;
 
@@ -38,7 +39,7 @@ export const BUILT_IN_MEMORY_CLEANER_APP = {
     app_id: CLEANER_APP_ID as AppId,
     hooks: [],
     syscalls: [],
-    notifications: [BUILT_IN_MEMORY_HINT_EVENT_KIND],
+    notifications: [BUILT_IN_MEMORY_HINT_EVENT_KIND, CLEANER_DISK_NOTIFICATION_CLASS],
     config: {
       enabled: {
         type: "boolean",

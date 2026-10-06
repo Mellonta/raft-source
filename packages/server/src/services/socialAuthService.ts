@@ -2,10 +2,10 @@ import { createHash, createPublicKey, randomBytes } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { and, eq, isNotNull, isNull, lt } from "drizzle-orm";
 import { currentTimeMs, sanitizeAppLocalReturnPath } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { oauthTransactions, socialAuthCompletions, userAuthIdentities } from "../db/schema.js";
-import { getAppUrl as getConfiguredOrDefaultAppUrl } from "../config/appUrl.js";
-import { findExistingSocialLoginUser } from "./userService.js";
+import { getDb } from "../db/index";
+import { oauthTransactions, socialAuthCompletions, userAuthIdentities } from "../db/schema";
+import { getAppUrl as getConfiguredOrDefaultAppUrl } from "../config/appUrl";
+import { findExistingSocialLoginUser } from "./userService";
 
 export type SocialAuthProvider = "google" | "github" | "apple";
 export type SocialAuthMode = "login" | "link";

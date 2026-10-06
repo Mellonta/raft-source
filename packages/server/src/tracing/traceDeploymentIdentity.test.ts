@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { traceSpanFactRowForSpan, type CompletedTraceSpan } from "@botiverse/raft-shared";
 import {
   resolveTraceDeploymentIdentity,
   traceDeploymentResourceOptions,
-} from "./traceDeploymentIdentity.js";
+} from "./traceDeploymentIdentity";
 
 function metadataFetch(taskArn: string, family = "slock-prod", revision: string | number = "16"): typeof fetch {
   return (async () => new Response(JSON.stringify({

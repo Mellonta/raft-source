@@ -1,5 +1,5 @@
-import type { AgentManifestActionV1, AgentManifestV1 } from "./manifestV1.js";
-import type { ManifestObservation } from "./readiness.js";
+import type { AgentManifestActionV1, AgentManifestV1 } from "./manifestV1";
+import type { ManifestObservation } from "./readiness";
 
 export type IntegrationAuthStatusV1 =
   | "session_present"

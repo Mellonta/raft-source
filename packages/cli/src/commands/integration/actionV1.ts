@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type { RegisteredIntegrationService } from "./_format.js";
+import type { RegisteredIntegrationService } from "./_format";
 import {
   boundedSchemaErrorPath,
   compileAgentManifestSchemaV1,
@@ -8,7 +8,7 @@ import {
   type AgentManifestReadbackBindingV1,
   type AgentManifestV1,
   type JsonValue,
-} from "./manifestV1.js";
+} from "./manifestV1";
 
 export interface V1RequestPlan {
   method: AgentManifestActionV1["endpoint"]["method"];

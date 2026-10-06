@@ -35,8 +35,8 @@
 import { connect, type Socket } from "node:net";
 import { randomUUID } from "node:crypto";
 import { clearClockTimeout, currentTimeMs, setClockTimeout } from "@botiverse/raft-shared";
-import { serviceSocketPath, serviceWindowsPipeName } from "../paths.js";
-import { FrameDecoder, encodeFrame } from "../internal/ipc-codec.js";
+import { serviceSocketPath, serviceWindowsPipeName } from "../paths";
+import { FrameDecoder, encodeFrame } from "../internal/ipc-codec";
 import {
   ServiceClientError,
   type ConnectServiceOptions,
@@ -45,7 +45,7 @@ import {
   type RequestOptions,
   type ServiceClient,
   type ServiceEvent,
-} from "./types.js";
+} from "./types";
 
 const DEFAULT_PROTOCOL_VERSION = 1;
 const CLIENT_KIND = "lib";

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { createTraceContext, type CompletedTraceSpan } from "@botiverse/raft-shared";
-import { normalizeOtlpTracesEndpoint, OtlpHttpTraceSink, toOtlpSpan, type OtlpHttpTraceSinkFetch } from "./otlpHttpTraceSink.js";
+import { normalizeOtlpTracesEndpoint, OtlpHttpTraceSink, toOtlpSpan, type OtlpHttpTraceSinkFetch } from "./otlpHttpTraceSink";
 
 function makeSpan(overrides: Partial<CompletedTraceSpan> = {}): CompletedTraceSpan {
   const parent = createTraceContext({

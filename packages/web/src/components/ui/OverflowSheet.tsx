@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { ArrowLeft, MoreHorizontal, X } from "lucide-react";
+import type { ButtonProps } from "raft-ui";
 import {
-  Button as RaftButton,
+  Button,
   Drawer,
   DrawerClose,
   DrawerContent,
@@ -10,12 +11,11 @@ import {
   DrawerTitle,
   Switch,
 } from "raft-ui";
-import Button from "./Button";
+import Tooltip from "./Tooltip";
 import type { MessageId } from "../../i18n/messages";
 
 /**
- * Topbar overflow primitives (task #187, gated by
- * `topbar_overflow_v0`). Shared shell for the channel and thread
+ * Topbar overflow primitives. Shared shell for the channel and thread
  * overflow menus: one compact trigger + a right-side Drawer.
  * On phones `max-w-[min(100vw,34rem)]` resolves to full width, so the
  * sheet IS the mobile page; the mobile chevron in the header doubles as
@@ -28,24 +28,28 @@ export function OverflowMenuTrigger({
   onClick,
   icon,
   testId,
+  variant = "outline",
 }: {
   labelId: MessageId;
   onClick: () => void;
   /** Defaults to the generic overflow glyph; semantic surfaces may provide a more precise icon. */
   icon?: ReactNode;
   testId?: string;
+  variant?: ButtonProps["variant"];
 }) {
   const { formatMessage } = useIntl();
   return (
-    <Button
-      onClick={onClick}
-      shape="icon"
-      title={formatMessage({ id: labelId })}
-      aria-label={formatMessage({ id: labelId })}
-      data-testid={testId}
-    >
-      {icon ?? <MoreHorizontal size={14} />}
-    </Button>
+    <Tooltip content={formatMessage({ id: labelId })}>
+      <Button
+        size="icon-sm"
+        variant={variant}
+        onClick={onClick}
+        aria-label={formatMessage({ id: labelId })}
+        data-testid={testId}
+      >
+        {icon ?? <MoreHorizontal size={14} />}
+      </Button>
+    </Tooltip>
   );
 }
 
@@ -100,7 +104,7 @@ export function OverflowSheet({
   children: ReactNode;
 }) {
   const { formatMessage } = useIntl();
-  const headerClassName = "flex h-panel-header shrink-0 items-center border-b-2 border-black bg-soft-signal px-4";
+  const headerClassName = "flex h-panel-header shrink-0 items-center border-b border-line-muted bg-layer-panel px-4 text-foreground-strong theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black";
   return (
     <Drawer
       open={open}
@@ -117,7 +121,7 @@ export function OverflowSheet({
     >
       <DrawerContent
         data-testid={testId}
-        className="inset-y-0 right-0 h-dvh w-full max-w-[min(100vw,34rem)] [--drawer-content-height:100dvh] [--drawer-inset:0px] flex-col rounded-none border-y-0 border-r-0 border-l-2 bg-brutal-cream"
+        className="inset-y-0 right-0 h-dvh w-full max-w-[min(100vw,34rem)] [--drawer-content-height:100dvh] [--drawer-inset:0px] flex-col rounded-none border-0 theme-brutal:border-l-2 theme-brutal:border-line-strong bg-layer-panel text-foreground-strong theme-brutal:bg-brutal-cream"
       >
         {/* Bare mode HIDES the header instead of unmounting it and keeps
             the body wrapper as the same element at the same position —
@@ -129,6 +133,7 @@ export function OverflowSheet({
           className={bare ? "hidden" : headerClassName}
           data-testid={bare ? undefined : "overflow-sheet-header"}
         >
+
           {/* Mobile has Back / identity / actions columns; desktop removes
               Back from layout and resolves to identity / actions. The
               subtitle starts in the SAME identity column as the title, so a
@@ -138,7 +143,7 @@ export function OverflowSheet({
             <DrawerClose
               render={(
                 <Button
-                  shape="icon"
+                  size="icon-sm"
                   className="md:hidden"
                   aria-label={formatMessage({ id: closeLabelId })}
                 />
@@ -148,9 +153,10 @@ export function OverflowSheet({
             </DrawerClose>
             <div className="min-w-0">
               <DrawerTitle
-                className="truncate text-base font-bold leading-tight"
+                className="truncate text-base font-bold leading-tight text-inherit theme-brutal:text-black"
                 data-testid="overflow-sheet-title"
               >
+
                 {title}
               </DrawerTitle>
               <DrawerDescription className="sr-only">
@@ -168,7 +174,7 @@ export function OverflowSheet({
                 <DrawerClose
                   render={(
                     <Button
-                      shape="icon"
+                      size="icon-sm"
                       className="max-md:hidden"
                       aria-label={formatMessage({ id: closeLabelId })}
                     />
@@ -223,12 +229,12 @@ export function OverflowActionRow({
   className?: string;
 }) {
   return (
-    <RaftButton
-      variant={danger ? "danger" : "default"}
-      size="lg"
+    <Button
+      variant={danger ? "danger" : "outline"}
+      size="md"
       nativeButton
       type="button"
-      className={`h-auto w-full justify-start gap-3 px-4 py-3 text-left [&_[data-slot=button-content]]:w-full [&_[data-slot=button-content]]:justify-start ${className ?? ""}`}
+      className={`w-full justify-start text-left [&_[data-slot=button-content]]:w-full [&_[data-slot=button-content]]:justify-start ${className ?? ""}`}
       onClick={onClick}
       disabled={disabled}
       data-testid={testId}
@@ -237,11 +243,11 @@ export function OverflowActionRow({
       <span data-icon="inline-start" className="shrink-0">{icon}</span>
       <span className="truncate">{label}</span>
       {trailing && (
-        <span className="ml-auto shrink-0 font-mono text-xs font-normal text-black/55">
+        <span className="ml-auto shrink-0 font-mono text-xs font-normal text-foreground-muted">
           {trailing}
         </span>
       )}
-    </RaftButton>
+    </Button>
   );
 }
 
@@ -262,19 +268,19 @@ export function OverflowCommandRow({
   testId?: string;
 }) {
   return (
-    <RaftButton
+    <Button
       variant="ghost"
       size="md"
       nativeButton
       type="button"
-      className="h-11 w-full justify-start gap-3 border-0 px-4 py-0 text-left font-medium shadow-none hover:translate-y-0 hover:border-0 hover:bg-black/5 hover:shadow-none active:translate-x-0 active:translate-y-0 active:shadow-none [&_[data-slot=button-content]]:w-full [&_[data-slot=button-content]]:justify-start"
+      className="h-11 w-full justify-start gap-3 border-0 px-4 py-0 text-left font-medium shadow-none hover:translate-y-0 hover:border-0 hover:bg-fill-muted hover:shadow-none active:translate-x-0 active:translate-y-0 active:shadow-none theme-brutal:hover:bg-black/5 [&_[data-slot=button-content]]:w-full [&_[data-slot=button-content]]:justify-start"
       onClick={onClick}
       disabled={disabled}
       data-testid={testId}
     >
       <span data-icon="inline-start" className="shrink-0">{icon}</span>
       <span className="truncate">{label}</span>
-    </RaftButton>
+    </Button>
   );
 }
 
@@ -298,7 +304,7 @@ export function OverflowSwitchRow({
 }) {
   return (
     <div className="flex w-full items-center justify-between gap-3 px-4 py-3">
-      <span id={labelId} className="flex min-w-0 items-center gap-3 text-sm font-bold text-black">
+      <span id={labelId} className="flex min-w-0 items-center gap-3 text-sm font-bold text-foreground-strong">
         <span className="shrink-0">{icon}</span>
         <span className="truncate">{label}</span>
       </span>
@@ -325,9 +331,9 @@ export function OverflowDangerZone({
 }) {
   const { formatMessage } = useIntl();
   return (
-    <div className="mt-2 border-t-2 border-black pt-2">
+    <div className="mt-2 border-t border-line-muted pt-2 theme-brutal:border-t-2 theme-brutal:border-black">
       {labelId && (
-        <div className="px-4 pb-1 text-xs font-bold tracking-wide text-black/65">
+        <div className="px-4 pb-1 text-xs font-bold tracking-wide text-foreground-muted">
           {formatMessage({ id: labelId })}
         </div>
       )}

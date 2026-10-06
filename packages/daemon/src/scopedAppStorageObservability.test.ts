@@ -9,20 +9,19 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 
-import { FakeClock } from "./testing/fakeClock.js";
+import { FakeClock } from "./testing/fakeClock";
 import {
   createScopedAppStorageFactory,
   type ScopedAppStorageFailureEvent,
-} from "./scopedAppStorage.js";
+} from "./scopedAppStorage";
 import {
   createScopedAppStorageObserver,
   evaluateScopedAppStorageInstrumentation,
   renderScopedAppStorageCoverageMatrix,
   SCOPED_APP_STORAGE_OBSERVATION_FAMILIES,
-} from "./scopedAppStorageObservability.js";
+} from "./scopedAppStorageObservability";
 
 const BASE_EVENT = {
   store: "app_state",
@@ -383,7 +382,7 @@ test("a fatal Reminder write failure leaves an epoch-bound durable counter befor
   try {
     const child = spawnSync(process.execPath, [
       "--import",
-      "tsx",
+      "@oxc-node/core/register",
       "--input-type=module",
       "--eval",
       script,

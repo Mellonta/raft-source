@@ -3,6 +3,7 @@ import { createIntl, createIntlCache } from "react-intl";
 import type { IntlShape } from "react-intl";
 import type { MessageId } from "../i18n/messages";
 import { en } from "../i18n/messages/en";
+import { formatRelativeTime } from "./relativeTime";
 
 export type ActivityMessageValues = Record<string, string | number>;
 
@@ -29,10 +30,14 @@ export function getActivityDotClass(activity: AgentActivity): string {
       return "bg-brutal-lime";
     // Status lights are fixed semantic colors — bg-status-busy, not the
     // skinnable soft-signal accent (see index.css token comment).
+    // Static: an ambient state never loops (task #136). An infinite pulse kept
+    // the compositor producing frames at display refresh rate for as long as
+    // any agent worked — measured 144 fps / 80% GPU with a modal open vs 2 fps
+    // / 3% with the dots paused. Busy yellow alone distinguishes it.
     case "thinking":
-      return "bg-status-busy animate-pulse";
+      return "bg-status-busy";
     case "working":
-      return "bg-status-busy animate-pulse";
+      return "bg-status-busy";
     case "error":
       return "bg-brutal-orange";
     case "offline":
@@ -83,6 +88,23 @@ export function getActivityTextDescriptor(
   detail?: string,
   detailKind?: AgentActivityDetailKind,
 ): ActivityTextDescriptor {
+  // task #1116: the daemon observed deliveries it wrote that the runtime never
+  // consumed. Dedicated copy regardless of the carried activity kind, so the
+  // reader sees the observation rather than a misleading "Idle".
+  if (detailKind === "delivery_unconsumed") {
+    return { primary: { id: "activity.status.deliveryUnconsumed" } };
+  }
+  // task #1119: the server paused automatic wakes after consecutive early
+  // exits; only a manual start lifts it, so say that instead of "Offline".
+  if (detailKind === "wake_crash_loop_blocked") {
+    return { primary: { id: "activity.status.wakeCrashLoopBlocked" } };
+  }
+  // RFC 071 §9: the terminal-failure breaker stopped automatic wakes. The
+  // server's detail says until when (or that a manual start is needed) and
+  // why; without it, the generic copy.
+  if (detailKind === "terminal_failure_paused") {
+    return { primary: detail ? { raw: detail } : { id: "activity.status.terminalFailurePaused" } };
+  }
   switch (activity) {
     case "online":
       return { primary: { id: "activity.status.online" } };
@@ -105,6 +127,12 @@ export function getActivityTextDescriptor(
       };
     }
     case "offline":
+      // task #1123: a failed start is reported as offline + runtime_unavailable
+      // with a human detail chosen by the daemon's typed reason. The activity
+      // log must show that detail, not collapse it into a bare "Offline".
+      if (detailKind === "runtime_unavailable" && detail) {
+        return { primary: { raw: detail } };
+      }
       return {
         primary: {
           id: detailKind === "stopped"
@@ -136,6 +164,36 @@ export function formatActivityText(
     formatMessage,
     getActivityTextDescriptor(activity, detail, detailKind),
   );
+}
+
+/** The display-state fields `formatAgentDisplayStateText` reads. */
+export interface AgentDisplayTextInput {
+  activity: AgentActivity;
+  activityDetail: string;
+  activityDetailKind: AgentActivityDetailKind;
+  isOnline: boolean;
+  isExternal?: boolean;
+  lastSeenAt?: string | null;
+}
+
+/**
+ * Localized status text for an agent display state. Same as
+ * `formatActivityText`, except an external agent that is not online but was
+ * seen before reads "Last active <time ago>".
+ * `withDetail: false` withholds the activity detail (public projections).
+ */
+export function formatAgentDisplayStateText(
+  intl: Pick<IntlShape, "formatMessage" | "locale">,
+  state: AgentDisplayTextInput,
+  options: { withDetail?: boolean } = {},
+): string {
+  if (state.isExternal && !state.isOnline && state.lastSeenAt) {
+    const time = formatRelativeTime(state.lastSeenAt, intl.locale);
+    if (time) return String(intl.formatMessage({ id: "activity.status.lastActive" }, { time }));
+  }
+  return options.withDetail === false
+    ? formatActivityText(intl.formatMessage, state.activity, "")
+    : formatActivityText(intl.formatMessage, state.activity, state.activityDetail, state.activityDetailKind);
 }
 
 /**

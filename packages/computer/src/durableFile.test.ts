@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { writeDurableTextFile } from "./durableFile.js";
+import { writeDurableTextFile } from "./durableFile";
 
 test("durable writer isolates concurrent temporary files and leaves one complete generation", async () => {
   const home = await mkdtemp(join(tmpdir(), "raft-computer-durable-write-"));

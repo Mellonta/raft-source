@@ -3,11 +3,11 @@
 import type { Command } from "commander";
 import type { AgentApiIntegrationMarketplaceResponse } from "@botiverse/raft-shared";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeJson, writeText, adoptCliReplyText } from "../../core/renderer.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeJson, writeText, adoptCliReplyText } from "../../core/renderer";
 
 interface MarketplaceOptions {
   limit?: string;

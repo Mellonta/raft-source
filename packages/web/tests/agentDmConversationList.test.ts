@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AgentDMConversationList } from "../src/components/agent/AgentDMConversationList";
@@ -27,7 +26,8 @@ test("agent DM conversation rows render as activity-only cards without navigatio
   assert.match(html, /Helper/);
   assert.match(html, /Can you check this\?/);
   assert.match(html, /aria-label="Helper agent DM activity"/);
-  assert.match(html, /title="Agent DM activity"/);
+  assert.doesNotMatch(html, /title="Agent DM activity"/);
+  assert.match(html, /data-base-ui-tooltip-trigger/);
   assert.match(html, /Activity only/);
   assert.doesNotMatch(html, /<button/);
 });
@@ -53,7 +53,8 @@ test("agent DM conversation rows render zh chrome from FormatJS messages", () =>
   assert.match(html, /Agent 私信/);
   assert.match(html, /暂无消息/);
   assert.match(html, /aria-label="小帮手 的 Agent 私信动态"/);
-  assert.match(html, /title="Agent 私信动态"/);
+  assert.doesNotMatch(html, /title="Agent 私信动态"/);
+  assert.match(html, /data-base-ui-tooltip-trigger/);
   assert.match(html, /仅动态/);
   assert.doesNotMatch(html, /Activity only|Agent DM activity|No messages yet/);
 });

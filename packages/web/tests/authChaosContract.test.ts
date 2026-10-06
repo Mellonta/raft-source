@@ -1,17 +1,16 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   getAuthBootstrapView,
   nextAuthRestoreStateAfterExternalTokenSync,
   shouldRetryAuthRestore,
-} from "../src/utils/authRestoreMachine.js";
-import { getProtectedRequestAuthFailureAction } from "../src/utils/protectedRequestAuthPolicy.js";
-import { createRefreshCoordinator } from "../src/utils/refreshCoordinator.js";
-import { shouldLogoutAfterPostRefreshLoadUserFailure } from "../src/utils/authSessionPolicy.js";
+} from "../src/utils/authRestoreMachine";
+import { getProtectedRequestAuthFailureAction } from "../src/utils/protectedRequestAuthPolicy";
+import { createRefreshCoordinator } from "../src/utils/refreshCoordinator";
+import { shouldLogoutAfterPostRefreshLoadUserFailure } from "../src/utils/authSessionPolicy";
 import {
   resolveSocketRefreshOutcome,
   shouldAttemptSocketTokenRefresh,
-} from "../src/utils/socketSessionPolicy.js";
+} from "../src/utils/socketSessionPolicy";
 
 type RestoreSignal = {
   name: string;

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { parseAttachmentArtifactInventoryArgs } from "./inventory-attachment-artifacts.js";
+import { parseAttachmentArtifactInventoryArgs } from "./inventory-attachment-artifacts";
 
 test("inventory CLI is dry-run by default and production apply requires an explicit write acknowledgement", () => {
   assert.deepEqual(parseAttachmentArtifactInventoryArgs([], "production"), {

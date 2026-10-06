@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { cleanup, render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -30,7 +30,7 @@ import { TestIntlProvider } from "./helpers/intl";
  */
 
 const test = ((name: string, fn: Parameters<typeof nodeTest>[1]) =>
-  nodeTest(name, { concurrency: false }, fn)) as typeof nodeTest;
+  nodeTest(name,  fn)) as typeof nodeTest;
 
 async function renderMessage(opts: { saved: boolean; locale?: "en" | "zh-cn" }) {
   const { default: MessageItem } = await import("../src/components/message/MessageItem");

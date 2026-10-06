@@ -17,10 +17,9 @@
 // Owners: schema/contract co-owned by @Dozy + @meichen — please update
 // the test alongside any change to the bucket set.
 
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { classifyExecuteError } from "./productEventsService.js";
-import { ActionCardError } from "./actionCardsService.js";
+import { classifyExecuteError } from "./productEventsService";
+import { ActionCardError } from "./actionCardsService";
 
 test("classifyExecuteError: 400 / INVALID_PAYLOAD → validation + code/status, no message", () => {
   const meta = classifyExecuteError(new ActionCardError(400, "INVALID_PAYLOAD", "bad shape"));

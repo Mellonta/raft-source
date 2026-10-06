@@ -1,26 +1,32 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 
 const daemonRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(readFileSync(join(daemonRoot, "package.json"), "utf8"));
 const preflightSource = readFileSync(join(daemonRoot, "scripts/release-runtime-sdk-preflight.mjs"), "utf8");
 
-test("all daemon branch-cut release commands require the runtime SDK preflight", () => {
-  for (const name of ["release:patch", "release:minor", "release:major", "release:alpha"]) {
-    assert.match(
-      packageJson.scripts[name],
-      /^node scripts\/release-runtime-sdk-preflight\.mjs && /,
-      `${name} must fail closed on the SDK decision before versioning or tagging`,
-    );
-    assert.match(
-      packageJson.scripts[name],
-      /git add .*packages\/daemon\/runtime-sdk-release-preflight\.json/,
-      `${name} must commit the auditable SDK decision receipt`,
-    );
+test("the daemon has no release lane of its own: it ships only inside Computer", () => {
+  // docs/operations/computer-release-version.md: one release number, one
+  // publication (Computer SEA). A daemon-only version/tag/publish script would
+  // reopen the split this test closes.
+  assert.equal(packageJson.private, true, "the daemon must not be publishable to npm");
+  assert.equal(packageJson.publishConfig, undefined);
+  for (const name of Object.keys(packageJson.scripts)) {
+    assert.doesNotMatch(name, /^release:(patch|minor|major|alpha)$/, `${name} reintroduces a daemon release lane`);
+    assert.doesNotMatch(packageJson.scripts[name], /npm version|npm publish|git tag daemon-v/, `${name} versions, tags, or publishes the daemon on its own`);
   }
+  assert.equal(
+    packageJson.scripts["release:sdk-preflight"],
+    "node scripts/release-runtime-sdk-preflight.mjs",
+    "the runtime SDK preflight stays available for the Computer branch cut",
+  );
+});
+
+test("the daemon version is the Computer version", () => {
+  const computer = JSON.parse(readFileSync(join(daemonRoot, "../computer/package.json"), "utf8"));
+  assert.equal(packageJson.version, computer.version);
 });
 
 test("runtime SDK preflight covers both Pi packages and the Kimi botiverse dist-tag", () => {

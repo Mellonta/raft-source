@@ -1,27 +1,26 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 import {
   AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
   AGENT_MIGRATION_COMMIT_MARKER_PATH,
   AGENT_MIGRATION_CONTROL_SCHEMA_VERSION,
-  AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
+  AGENT_MIGRATION_CAPABILITY,
   AGENT_MIGRATION_RESUMABLE_PROTOCOL,
   type AgentMigrationControlManifest,
 } from "@botiverse/raft-shared";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
 import {
   agentMigrationChunkReceipts,
   agentMigrations,
   agents,
   servers,
   users,
-} from "../db/schema.js";
-import { completeAgentMigrationResumableUpload } from "./agentMigrationService.js";
+} from "../db/schema";
+import { completeAgentMigrationResumableUpload } from "./agentMigrationService";
 
 const REAL_PG_URL_ENV = "AGENT_MIGRATION_RECEIPT_ORDER_REAL_PG_URL";
 const REAL_PG_REQUIRED = process.env.AGENT_MIGRATION_RECEIPT_ORDER_REAL_PG_REQUIRED === "1";
@@ -85,7 +84,7 @@ function controlManifest(input: {
       sourceMachineId: input.sourceMachineId,
       targetMachineId: input.targetMachineId,
     },
-    capability: { required: [...AGENT_MIGRATION_RESUMABLE_CAPABILITIES] },
+    capability: { required: [AGENT_MIGRATION_CAPABILITY] },
     bundle: {
       contentType: AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
       totalBytes: input.chunkCount * 4,

@@ -1,4 +1,4 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 /**
  * Best-effort one-off backfill for daemons.computer_version.
  *

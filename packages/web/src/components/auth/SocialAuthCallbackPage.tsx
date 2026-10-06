@@ -8,7 +8,7 @@ import { getExternalBrowserLoginUrl, isEmbeddedUserAgentProviderError, PENDING_I
 import { completeSocialAuthWithOneLinkRefresh } from "../../utils/socialAuthCompletion";
 import { refreshTokensWithDedupe } from "../../utils/refreshCoordinator";
 import Banner from "../ui/Banner";
-import Button from "../ui/Button";
+import { Button } from "raft-ui";
 import type { SocialAuthProviderId } from "../../hooks/useAuthProviders";
 import CenteredCardFrame from "./CenteredCardFrame";
 import { AuthPageIntro } from "./AuthPageFrame";
@@ -185,7 +185,7 @@ export default function SocialAuthCallbackPage() {
               disabled={!acceptedLegal || finishing}
               onClick={() => void finishSignIn(true)}
               size="lg"
-              tone="pink"
+              variant="accent"
               className="w-full"
             >
               {finishing ? formatMessage({ id: "pages.socialCallback.finishing" }) : formatMessage({ id: "pages.socialCallback.continue" })}
@@ -196,16 +196,16 @@ export default function SocialAuthCallbackPage() {
             <Banner intent="warning" className="font-bold">
               {error}
             </Banner>
-            <button
+            <Button size="sm"
               type="button"
+              variant="outline"
               onClick={() => window.location.replace("/")}
-              className="btn-brutal bg-white px-4 py-2 text-sm"
             >
               {formatMessage({ id: "auth.backToSignIn.button" })}
-            </button>
+            </Button>
           </div>
         ) : (
-          <div className="text-sm font-bold text-black/70">{formatMessage({ id: "pages.socialCallback.finishingSignIn" })}</div>
+          <div className="text-sm font-bold text-foreground-muted">{formatMessage({ id: "pages.socialCallback.finishingSignIn" })}</div>
         )}
       </div>
     </CenteredCardFrame>

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   SERVER_CAPABILITY_KEYS,
   canChangeMemberRole,
@@ -7,10 +6,32 @@ import {
   canMutateBilling,
   canReadBillingSummary,
   getServerCapabilities,
+  getServerSurfaceCapabilities,
   hasServerCapability,
   type ServerCapability,
   type ServerRole,
-} from "./serverPermissions.js";
+} from "./serverPermissions";
+
+test("public server view modes never derive membership powers from authentication", () => {
+  const anonymous = getServerSurfaceCapabilities("public-anonymous");
+  const signedIn = getServerSurfaceCapabilities("public-authenticated-nonmember");
+
+  for (const projection of [anonymous, signedIn]) {
+    assert.equal(projection.readPublicChannels, true);
+    assert.equal(projection.writeMessages, false);
+    assert.equal(projection.reactToMessages, false);
+    assert.equal(projection.followThreads, false);
+    assert.deepEqual(
+      SERVER_CAPABILITY_KEYS.filter((key) => projection.server[key]),
+      [],
+      "a public viewer has no server membership capability",
+    );
+  }
+  assert.equal(anonymous.showHelp, false);
+  assert.equal(anonymous.settingsScope, "anonymous-resources");
+  assert.equal(signedIn.showHelp, true);
+  assert.equal(signedIn.settingsScope, "account-and-resources");
+});
 
 const MEMBER_CAPABILITIES = new Set<ServerCapability>([
   "viewChannel",
@@ -19,15 +40,16 @@ const MEMBER_CAPABILITIES = new Set<ServerCapability>([
   "joinPublicChannels",
   "addChannelMembers",
   "viewMembers",
+  "viewServerProfile",
   "viewAgents",
   "controlAgentRuntime",
   "viewMachines",
   "assignTasks",
 ]);
 
-test("server capability registry contains the complete 40-capability contract", () => {
-  assert.equal(SERVER_CAPABILITY_KEYS.length, 40);
-  assert.equal(new Set(SERVER_CAPABILITY_KEYS).size, 40);
+test("server capability registry contains the complete 41-capability contract", () => {
+  assert.equal(SERVER_CAPABILITY_KEYS.length, 41);
+  assert.equal(new Set(SERVER_CAPABILITY_KEYS).size, 41);
 });
 
 test("role bundles match every role x capability cell", () => {
@@ -51,7 +73,7 @@ test("guest has an explicit all-false server capability bundle", () => {
   );
 });
 
-test("member has exactly the ten explicitly approved capabilities", () => {
+test("member has exactly the eleven explicitly approved capabilities", () => {
   const granted = SERVER_CAPABILITY_KEYS.filter((capability) => hasServerCapability("member", capability));
   assert.deepEqual(granted, [...MEMBER_CAPABILITIES]);
 });

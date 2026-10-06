@@ -1,4 +1,5 @@
 import { createPortal } from "react-dom";
+import { dismissLayerProps } from "./dismissLayer";
 
 /**
  * Invisible click-outside catcher for context menus and drawer overlays.
@@ -30,6 +31,9 @@ export default function DismissBackdrop({
 }) {
   return createPortal(
     <div
+      // Same marker contract as Modal's root: full-window dismiss layer (task #121).
+      data-slot="dismiss-backdrop"
+      {...dismissLayerProps}
       className="fixed inset-0 touch-none"
       style={{ zIndex }}
       onClick={

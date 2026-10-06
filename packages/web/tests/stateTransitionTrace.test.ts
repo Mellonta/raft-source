@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -482,7 +481,7 @@ test("channel domain store actions emit state transition traces", () => {
   });
 });
 
-test("task domain store actions emit state transition traces", async (t) => {
+test("task domain store actions emit state transition traces", async () => {
   assert.deepEqual(useTaskStore.getState().tasks, []);
   assert.equal(useTaskStore.getState().loading, false);
   assert.deepEqual(useTaskStore.getState().serverTasks, []);
@@ -497,12 +496,12 @@ test("task domain store actions emit state transition traces", async (t) => {
     taskNumber: 2,
   });
 
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     if (url === "/tasks/channel/channel-1") return { data: { tasks: [taskOne] } };
     if (url === "/tasks/server") return { data: { tasks: [taskServer] } };
     throw new Error(`unexpected GET ${url}`);
   });
-  t.mock.method(api, "patch", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "patch").mockImplementation(async (url: string, body?: unknown) => {
     if (url === "/tasks/task-1/status") {
       assert.deepEqual(body, { status: "done" });
       return { data: { task: fullTask({ status: "done", completedAt: "2026-07-07T00:03:00.000Z" }) } };
@@ -515,11 +514,11 @@ test("task domain store actions emit state transition traces", async (t) => {
     }
     throw new Error(`unexpected PATCH ${url}`);
   });
-  t.mock.method(api, "delete", async (url: string) => {
+  vi.spyOn(api, "delete").mockImplementation(async (url: string) => {
     assert.equal(url, "/tasks/task-1");
     return { data: {} };
   });
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     if (url === "/tasks/convert-message") {
       assert.deepEqual(body, { messageId: "message-convert" });
       return { data: { task: fullTask({ id: "task-convert", messageId: "message-convert", taskNumber: 3 }) } };
@@ -585,9 +584,9 @@ test("task domain store actions emit state transition traces", async (t) => {
   ]);
 });
 
-test("task store non-trace loading and create paths stay pinned for mutation gate", async (t) => {
+test("task store non-trace loading and create paths stay pinned for mutation gate", async () => {
   const consoleErrors: unknown[][] = [];
-  t.mock.method(console, "error", (...args: unknown[]) => {
+  vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
     consoleErrors.push(args);
   });
 
@@ -626,7 +625,7 @@ test("task store non-trace loading and create paths stay pinned for mutation gat
   const staleLoadPromise = new Promise((resolve) => {
     releaseStaleLoad = resolve;
   });
-  t.mock.method(api, "get", async (url: string) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string) => {
     if (url === "/tasks/channel/channel-1") {
       await loadTasksPromise;
       return { data: { tasks: [fullTask()] } };
@@ -643,7 +642,7 @@ test("task store non-trace loading and create paths stay pinned for mutation gat
     }
     throw new Error(`unexpected GET ${url}`);
   });
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     assert.equal(url, "/tasks/channel/channel-1");
     assert.deepEqual(body, { tasks: [{ title: "first" }, { title: "second" }] });
     return {
@@ -695,7 +694,7 @@ test("task store non-trace loading and create paths stay pinned for mutation gat
   ]);
 });
 
-test("inbox transition traces expose closed detail and persist-failure conflict metadata", async (t) => {
+test("inbox transition traces expose closed detail and persist-failure conflict metadata", async () => {
   const records = captureStateTransitions();
   const domain = createInboxDomain();
 
@@ -720,7 +719,7 @@ test("inbox transition traces expose closed detail and persist-failure conflict 
     marker: "message-2",
   });
 
-  t.mock.method(api, "post", async () => {
+  vi.spyOn(api, "post").mockImplementation(async () => {
     throw new Error("persist failed");
   });
   inboxReadPatch("channel:channel-1", "channel-1");
@@ -782,7 +781,7 @@ test("state transition emission uses the shared helper instead of ad-hoc flat at
   ].join("\n");
 
   assert.match(sources, /emitStateTransitionTrace\(/, "stores must emit through the RFC 040 helper");
-  assert.doesNotMatch(sources, /emitWebTrace\(\"slock\.state\.transition\"/, "state transition attrs must not bypass key/meta schema");
+  assert.doesNotMatch(sources, /emitWebEvent\(\"slock\.state\.transition\"/, "state transition attrs must not bypass key/meta schema");
 });
 
 test("state transition source contract keeps low-cardinality event labels visible", () => {

@@ -1,22 +1,22 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import pg from "pg";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb, getPool } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { createServer } from "../services/serverService";
 import {
   buildMessageSearchStatement,
   buildUserVisibleChannelsSql,
-} from "./searchService.js";
+} from "./searchService";
 import {
   CREATE_SENDER_INDEX_SQL,
   SENDER_INDEX_NAME,
-} from "../../scripts/messages-sender-index.js";
+} from "../../scripts/messages-sender-index";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -58,7 +58,7 @@ function messagesScanReceipt(root: ExplainNode) {
 }
 
 async function seedSearchCorpus(serverId: string, fixtureId: string): Promise<void> {
-  const pool = getPool();
+  const pool = (getDb() as unknown as { $client: pg.Pool }).$client;
   const client = await pool.connect();
   try {
     await client.query("BEGIN");

@@ -40,6 +40,16 @@ export const agentMigrationTransferSummarySchema = z.object({
     memoryMdPresent: z.boolean(),
     notesPresent: z.boolean(),
   }).strict(),
+  // Paths the agent listed in `.raftmigrateignore` (absent when none were).
+  excludedIgnored: z.object({
+    count: boundedExcludedCountSchema,
+    fileCount: boundedExcludedCountSchema,
+    bytes: z.number().int().nonnegative(),
+    largest: z.array(z.object({
+      path: z.string().min(1).max(4096),
+      bytes: z.number().int().nonnegative(),
+    }).strict()).max(5),
+  }).strict().optional(),
 }).strict().superRefine((summary, ctx) => {
   const categorized = Object.values(summary.excludedRegenerableByCategory)
     .reduce((total, count) => total + count, 0);
@@ -53,6 +63,23 @@ export const agentMigrationTransferSummarySchema = z.object({
 });
 
 export type AgentMigrationTransferSummary = z.infer<typeof agentMigrationTransferSummarySchema>;
+
+export const AGENT_MIGRATION_SOURCE_BUILD_PHASES = ["scanning", "packing", "hashing"] as const;
+
+/** Bundle-build progress a source daemon reports between quiesce and control registration. */
+export const agentMigrationSourceBuildProgressReportSchema = z.object({
+  migrationGeneration: z.string().min(1).max(512),
+  phase: z.enum(AGENT_MIGRATION_SOURCE_BUILD_PHASES),
+  files: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+}).strict();
+
+export type AgentMigrationSourceBuildProgress = {
+  phase: (typeof AGENT_MIGRATION_SOURCE_BUILD_PHASES)[number];
+  files: number;
+  bytes: number;
+  reportedAt: string;
+};
 
 export const agentMigrationUpdatedPayloadSchema = z.object({
   agentId: z.string().uuid(),

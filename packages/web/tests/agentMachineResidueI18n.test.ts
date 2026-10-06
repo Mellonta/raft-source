@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -43,7 +42,7 @@ test("agent and machine residue slice adopts FormatJS ids without re-hardcoding 
   assertContainsIds(agentSkills, [
     "agent.skills.loadFailed",
     "agent.skills.loading",
-    "agent.skills.title",
+    "agent.skills.heading",
     "agent.skills.globalEmpty",
     "agent.skills.workspaceEmpty",
   ]);
@@ -68,8 +67,6 @@ test("agent and machine residue slice adopts FormatJS ids without re-hardcoding 
     "machine.commandGuide.choosePlatform",
     "machine.commandGuide.windowsX64",
     "machine.commandGuide.raftComputerWindowsX64",
-    "machine.commandGuide.daemonLegacy",
-    "machine.commandGuide.generateLegacyDaemonCommand",
   ]);
 
 

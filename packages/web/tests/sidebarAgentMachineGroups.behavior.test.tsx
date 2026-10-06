@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import api from "../src/api/client";
-import Sidebar from "../src/components/layout/Sidebar.js";
+import Sidebar from "../src/components/layout/Sidebar";
 import { sidebarAgentMachineGroupCollapsedStorageKey } from "../src/components/layout/sidebarCollapsedSections";
 import { TestIntlProvider } from "./helpers/intl";
 import type { Agent } from "../src/store/agentStore";

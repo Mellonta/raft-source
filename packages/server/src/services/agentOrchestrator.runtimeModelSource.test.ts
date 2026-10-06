@@ -1,11 +1,58 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
+import { EventEmitter } from "node:events";
 import {
   RUNTIME_MODELS,
   STATIC_RUNTIME_MODEL_SOURCE_IDS,
   STATIC_RUNTIME_MODEL_SOURCE_VERIFICATION,
 } from "@botiverse/raft-shared";
-import { projectRuntimeModelSourceResult } from "./agentOrchestrator.js";
+import { AgentOrchestrator, projectRuntimeModelSourceResult } from "./agentOrchestrator";
+
+test("local model request waits for slow Grok result and preserves the connection fence", async () => {
+  vi.useFakeTimers();
+  try {
+    let requestId = "";
+    const connection = { replicaGeneration: "generation-1", connectionEpochId: "epoch-1", ws: { readyState: 1 } };
+    const harness = Object.assign(new EventEmitter(), {
+      machineConnections: new Map([["machine", connection]]),
+      isMachineHeartbeatStale: () => false,
+      sendRequiredToMachine: async (_machine: string, message: { requestId: string }) => { requestId = message.requestId; },
+      removeListener: EventEmitter.prototype.removeListener,
+    });
+    const request = AgentOrchestrator.prototype.detectMachineRuntimeModelsWithAuthority.call(harness as never, "machine", "grok")
+      .then((result) => ({ result }), (error) => ({ error }));
+    await vi.advanceTimersByTimeAsync(5500);
+    const outcome = { kind: "error", retryable: true, code: "runtime_not_authenticated" } as const;
+    harness.emit("machine:response:machine", { type: "machine:runtime_models:result", requestId, outcome });
+    const settled = await request;
+    assert.ok("result" in settled, "server must not time out before a supported slow detector responds");
+    assert.deepEqual(settled.result.outcome, outcome);
+    assert.equal(harness.listenerCount("machine:response:machine"), 0);
+
+    const staleRequest = AgentOrchestrator.prototype.detectMachineRuntimeModelsWithAuthority.call(harness as never, "machine", "grok")
+      .then(() => null, (error: Error) => error);
+    connection.connectionEpochId = "epoch-2";
+    harness.emit("machine:response:machine", { type: "machine:runtime_models:result", requestId, outcome });
+    assert.ok(await staleRequest, "a late result from the old connection must still be refused");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("remote Grok detection gives the relay room for the daemon budget", async () => {
+  let budget = 0;
+  const outcome = { kind: "error", retryable: true, code: "detect_timeout" } as const;
+  const harness = {
+    machineConnections: new Map(),
+    getMachineResponseRelay: () => ({
+      request: async (_request: unknown, timeout: number) => {
+        budget = timeout;
+        return { type: "machine:runtime_models:result", outcome };
+      },
+    }),
+  };
+  assert.deepEqual(await AgentOrchestrator.prototype.detectMachineRuntimeModels.call(harness as never, "remote", "grok"), outcome);
+  assert.ok(budget > 15000, "cross-replica relay must not keep the old 5s budget");
+});
 
 test("new typed daemon outcome wins over rollout compatibility fields", () => {
   assert.deepEqual(projectRuntimeModelSourceResult({

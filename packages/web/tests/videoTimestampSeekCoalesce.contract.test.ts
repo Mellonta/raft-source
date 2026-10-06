@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { createElement } from "react";
 import { cleanup, render } from "@testing-library/react";
 import "./helpers/domSetup";
-import { jumpToAnchor } from "../src/components/message/attachmentCommentAnchors.ts";
-import { VideoAttachmentPreviewModal } from "../src/components/message/attachmentPreviewSurfaces.tsx";
-import { createVideoSeekCoalescer } from "../src/components/message/videoTimestampSeekCoalesce.ts";
-import { TestIntlProvider } from "./helpers/intl.tsx";
+import { jumpToAnchor } from "../src/components/message/attachmentCommentAnchors";
+import { VideoAttachmentPreviewModal } from "../src/components/message/attachmentPreviewSurfaces";
+import { createVideoSeekCoalescer } from "../src/components/message/videoTimestampSeekCoalesce";
+import { TestIntlProvider } from "./helpers/intl";
 
 afterEach(() => {
   cleanup();

@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
-import type { Database } from "../db/index.js";
-import { migratePglite } from "../db/pgliteMigrations.js";
-import * as schema from "../db/schema.js";
+import type { Database } from "../db/index";
+import { migratePglite } from "../db/pgliteMigrations";
+import * as schema from "../db/schema";
 import {
   attachmentArtifactInventoryObservations,
   attachmentArtifactInventoryRuns,
@@ -21,12 +20,12 @@ import {
   messages,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   inspectAttachmentArtifactInventory,
   inventoryAttachmentArtifacts,
-} from "./attachmentArtifactInventoryService.js";
-import type { StorageBackend } from "./storageService.js";
+} from "./attachmentArtifactInventoryService";
+import type { StorageBackend } from "./storageService";
 
 class InventoryStorage implements Pick<StorageBackend, "head"> {
   readonly heads: string[] = [];

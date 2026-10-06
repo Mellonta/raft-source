@@ -3,8 +3,8 @@
 // Errors are mapped to ACTIONABLE codes — the caller renders guidance,
 // never a raw server body (binding constraint).
 import { fetch } from "undici";
-import { computerFetch } from "./proxy.js";
-import { classifyAdoptLegacyAccessResponse, type AdoptLegacyAccessResult } from "./lib/adoptLegacyResponse.js";
+import { computerFetch } from "./proxy";
+import { classifyAdoptLegacyAccessResponse, type AdoptLegacyAccessResult } from "./lib/adoptLegacyResponse";
 
 export interface DeviceAuthorizeResult {
   deviceCode: string;
@@ -70,6 +70,51 @@ export class DeviceAuthClient {
     if (code === "access_denied") return { status: "denied" };
     if (code === "expired_token") return { status: "expired" };
     return { status: "error", code };
+  }
+}
+
+export type UnreadActivityDiagnosticResult =
+  | { status: "success"; snapshot: Record<string, unknown> }
+  | { status: "auth_required" }
+  | { status: "forbidden" }
+  | { status: "error"; code: "request_failed" | "unexpected_shape" | `http_${number}` };
+
+/**
+ * Fetch the current session receiver's Server-owned unread/Activity
+ * diagnostic snapshot. This transport deliberately performs no local unread
+ * query and does not accept any user/agent/session identity. The caller must
+ * run the one shared validator before serialization or disk side effects.
+ */
+export class UnreadActivityDiagnosticClient {
+  constructor(
+    private readonly baseUrl: string,
+    private readonly accessToken: string,
+  ) {}
+
+  async get(serverId?: string): Promise<UnreadActivityDiagnosticResult> {
+    const url = new URL("/api/diagnostics/unread-activity", this.baseUrl);
+    if (serverId) url.searchParams.set("serverId", serverId);
+    let response: Awaited<ReturnType<typeof fetch>>;
+    try {
+      response = await computerFetch(url.toString(), {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${this.accessToken}`,
+        },
+      });
+    } catch {
+      return { status: "error", code: "request_failed" };
+    }
+    if (response.status === 401) return { status: "auth_required" };
+    if (response.status === 403) return { status: "forbidden" };
+    if (response.status !== 200) return { status: "error", code: `http_${response.status}` };
+
+    const snapshot = await response.json().catch(() => null) as unknown;
+    if (snapshot === null || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+      return { status: "error", code: "unexpected_shape" };
+    }
+    return { status: "success", snapshot: snapshot as Record<string, unknown> };
   }
 }
 // --- Computer attach (RFC v0.8 contract v3 §6/§9) ---

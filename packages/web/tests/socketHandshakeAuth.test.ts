@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 
 class MemoryStorage {
   private readonly values = new Map<string, string>();
@@ -26,8 +25,8 @@ Object.defineProperty(globalThis, "localStorage", {
   value: new MemoryStorage(),
 });
 
-const { useServerStore } = await import("../src/store/serverStore.js");
-const { getSocket, updateSocketAuthFromStorage } = await import("../src/api/socket.js");
+const { useServerStore } = await import("../src/store/serverStore");
+const { getSocket, updateSocketAuthFromStorage } = await import("../src/api/socket");
 
 afterEach(() => {
   getSocket().close();

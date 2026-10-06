@@ -2,12 +2,13 @@
 
 import type { Command } from "commander";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError, type CliErrorCode } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { formatManualIndexCommand, requireKnowledgeContexts } from "./context.js";
+import { formatAgentKnowledgeSearchResults } from "@botiverse/raft-shared";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError, type CliErrorCode } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { formatManualIndexCommand, requireKnowledgeContexts } from "./context";
 
 export interface KnowledgeSearchOptions {
   scope?: string;
@@ -27,36 +28,8 @@ export interface KnowledgeSearchResultForFormat {
   expandedTerms?: Array<{ from: string; to: string }>;
 }
 
-/**
- * One compact line naming why a result matched, printed only when the server
- * supplied a reason worth stating: a typo correction or a concept expansion
- * changes what the agent should conclude from the hit, whereas a plain lexical
- * match is already obvious from the query.
- */
-function formatMatchReason(result: KnowledgeSearchResultForFormat): string {
-  const parts: string[] = [];
-  for (const { term, matched } of result.correctedTerms ?? []) {
-    parts.push(`${term} → ${matched} (typo)`);
-  }
-  for (const { from, to } of result.expandedTerms ?? []) {
-    parts.push(`${from} → ${to} (concept)`);
-  }
-  return parts.length > 0 ? `   matched: ${parts.join(", ")}` : "";
-}
-
 export function formatKnowledgeSearchResults(results: KnowledgeSearchResultForFormat[]): string {
-  return results
-    .map((result, index) => {
-      const firstScreen = result.firstScreen.trim();
-      const body = firstScreen
-        .split(/\r?\n/)
-        .filter(Boolean)
-        .map((line) => `   ${line}`)
-        .join("\n");
-      const reason = formatMatchReason(result);
-      return `${index + 1}. ${result.slug} — ${result.title}${reason ? `\n${reason}` : ""}${body ? `\n${body}` : ""}`;
-    })
-    .join("\n\n") + "\n";
+  return formatAgentKnowledgeSearchResults(results);
 }
 
 function toKnowledgeSearchErrorCode(errorCode: string | null | undefined, status: number): CliErrorCode {

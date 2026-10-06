@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const webRoot = resolve(import.meta.dirname, "..");
 const repoRoot = resolve(webRoot, "../..");
@@ -9,7 +8,7 @@ const repoRoot = resolve(webRoot, "../..");
 // carry; skipped when an exported snapshot's RELEASE_SOURCE marker is present.
 const inSourceSnapshot = existsSync(resolve(repoRoot, "RELEASE_SOURCE"));
 
-test("e2e CI build bakes direct API origin to avoid vite-preview websocket proxy churn", { skip: inSourceSnapshot && "source-available snapshot has no private CI/deploy files" }, () => {
+test("e2e CI build bakes direct API origin to avoid vite-preview websocket proxy churn", { skip: inSourceSnapshot }, () => {
   const workflow = readFileSync(resolve(repoRoot, ".github/workflows/test.yml"), "utf8");
   const playwrightConfig = readFileSync(resolve(webRoot, "playwright.config.ts"), "utf8");
 

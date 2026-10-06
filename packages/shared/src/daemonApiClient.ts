@@ -4,7 +4,7 @@ import {
   type DaemonApiRequestQueryByRoute,
   type DaemonApiResponseByRoute,
   type DaemonApiRouteKey,
-} from "./daemonApiContract.js";
+} from "./daemonApiContract";
 import {
   createDaemonApiRawClient,
   requestDaemonApiRawRoute,
@@ -18,7 +18,7 @@ import {
   type DaemonApiRawTransport,
   type DaemonApiRawTransportRequest,
   type DaemonApiRawTransportResponse,
-} from "./daemonApiRawClient.js";
+} from "./daemonApiRawClient";
 
 export type DaemonApiClientResponse<K extends DaemonApiRouteKey> = DaemonApiResponseByRoute[K];
 export type DaemonApiClientErrorKind = "transport" | "http" | "validation";

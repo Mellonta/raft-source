@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import axios from "axios";
-import { refreshTokensWithDedupe } from "../src/utils/refreshCoordinator.js";
+import { refreshTokensWithDedupe } from "../src/utils/refreshCoordinator";
 
 type StubStore = Record<string, string>;
 

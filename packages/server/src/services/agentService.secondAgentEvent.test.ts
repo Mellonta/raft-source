@@ -1,12 +1,12 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, productEvents, users } from "../db/schema.js";
-import { createAgent } from "./agentService.js";
-import { createServer } from "./serverService.js";
+import { getDb } from "../db/index";
+import { agents, productEvents, users } from "../db/schema";
+import { createAgent } from "./agentService";
+import { createServer } from "./serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

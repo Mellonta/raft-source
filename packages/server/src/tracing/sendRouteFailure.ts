@@ -30,8 +30,8 @@
 // returned as 500" bug VISIBLE) but does NOT change the HTTP status — the
 // 500→4xx behavior fix is a separate PR (risk-isolated per ratify decision).
 
-import { addTraceEvent } from "./semanticTrace.js";
-import { sanitizeRouteErrorMessage } from "./routeFailure.js";
+import { addTraceEvent, errorClassOf } from "./semanticTrace";
+import { sanitizeRouteErrorMessage } from "./routeFailure";
 
 /**
  * Closed-set classification of why an agent-api/send request failed AFTER
@@ -188,7 +188,7 @@ export function traceSendRouteFailure(subkind: TaggableSendRouteSubkind, httpSta
  */
 export function traceSendRouteCatch(err: unknown, httpStatus: number): void {
   addTraceEvent(SEND_ROUTE_FAILURE_EVENT, {
-    error_class: err instanceof Error ? err.name : typeof err,
+    error_class: errorClassOf(err),
     error_subkind: resolveSendRouteSubkind(err),
     error_message: sanitizeRouteErrorMessage(err instanceof Error ? err.message : String(err ?? "")),
     http_status: httpStatus,

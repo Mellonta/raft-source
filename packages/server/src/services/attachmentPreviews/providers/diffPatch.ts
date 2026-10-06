@@ -1,5 +1,5 @@
 import type { DiffAttachmentPreviewData } from "@botiverse/raft-shared";
-import type { AttachmentPreviewProvider } from "../types.js";
+import type { AttachmentPreviewProvider } from "../types";
 
 export const DIFF_PREVIEW_BYTE_LIMIT = 256 * 1024;
 export const DIFF_PREVIEW_PAYLOAD_BYTE_LIMIT = 8 * 1024;

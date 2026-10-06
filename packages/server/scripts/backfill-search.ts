@@ -1,9 +1,9 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import pg from "pg";
-import * as schema from "../src/db/schema.js";
-import { buildSearchText } from "../src/services/searchService.js";
+import * as schema from "../src/db/schema";
+import { buildSearchText } from "../src/services/searchService";
 
 type CliOptions = {
   batchSize: number;
@@ -47,7 +47,7 @@ function usage() {
   console.error(
     [
       "Usage:",
-      "  DATABASE_URL=... tsx scripts/backfill-search.ts [--batch-size 1000] [--limit 5000] [--server-id <uuid>] [--dry-run]",
+      "  DATABASE_URL=... node --import @oxc-node/core/register scripts/backfill-search.ts [--batch-size 1000] [--limit 5000] [--server-id <uuid>] [--dry-run]",
       "",
       "Options:",
       "  --batch-size <n>  Number of rows per batch (default: 1000)",

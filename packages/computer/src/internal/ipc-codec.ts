@@ -21,7 +21,7 @@
 // barrel re-exports the closed-set `IPC_ERROR_CODES` and the
 // `ServiceClientError` envelope; the codec itself is implementation
 // detail that both ends import directly within the package.
-import { ServiceClientError } from "../lib/types.js";
+import { ServiceClientError } from "../lib/types";
 
 export const MAX_FRAME_BYTES = 1024 * 1024;
 

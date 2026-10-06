@@ -5,10 +5,10 @@
 // the device-code/approved events to `info()` lines, and `present()` maps a
 // thrown `ComputerError` → the shared stderr error contract.
 // §6 closed-set error codes stay byte-identical.
-import { canInstallEnterToOpenUrl, installEnterToOpenUrl, openUrlInBrowser } from "./browserHandoff.js";
-import { info, present } from "./output.js";
-import { resolveRaftHome } from "./paths.js";
-import { createComputerApi } from "./lib/api.js";
+import { canInstallEnterToOpenUrl, installEnterToOpenUrl, openUrlInBrowser } from "./browserHandoff";
+import { info, present } from "./output";
+import { resolveRaftHome } from "./paths";
+import { createComputerApi } from "./lib/api";
 
 export type RunLoginOptions = {
   serverUrl?: string;

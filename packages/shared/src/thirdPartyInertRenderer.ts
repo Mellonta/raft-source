@@ -6,18 +6,21 @@
  *   description, and declared data-access wording.
  * - Output is canonical agent-facing text. It is safe to place in marketplace,
  *   install disclosure, app metadata, and tool-result readouts.
+ * - Markdown inline/fenced code is literal data; ref-shaped text inside it is
+ *   never parsed or rewritten.
  * - Structured values such as normalized domains, callback URLs, categories, and
  *   closed scope enums do not belong here; those should be rendered from
  *   server-normalized values at the call site.
  */
 
-import { extractRaftRefTargets, type RaftRefTarget } from "./raftRefs.js";
+import { extractRaftRefTargets, type RaftRefTarget } from "./raftRefs";
 
 export type ThirdPartyInertTextField =
   | "app_name"
   | "developer_name"
   | "publisher_name"
   | "description"
+  | "when_to_use"
   | "data_access"
   | "tool_result";
 
@@ -45,7 +48,7 @@ function escapeAgentMarkupLiterals(value: string): string {
 }
 
 export function neutralizeRaftRefLiterals(value: string): string {
-  const refs = extractRaftRefTargets(value, { dedupe: false, includeMarkdownCode: true })
+  const refs = extractRaftRefTargets(value, { dedupe: false, includeMarkdownCode: false })
     .filter((ref) => ref.start < ref.end)
     .sort((a, b) => a.start - b.start || b.end - a.end);
 

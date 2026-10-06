@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { afterEach, test, vi } from "vitest";
 import {
   createTraceContext,
   TRACE_EVENT_ROW_V2_INGEST_STATEMENT,
   TRACE_EVENT_ROW_V2_PROJECTION_COLUMNS,
   type TraceEventRecord,
 } from "@botiverse/raft-shared";
-import { jitteredFlushDelayMs, ScopeDbTraceEventSink } from "./scopeDbTraceEventSink.js";
+import { jitteredFlushDelayMs, ScopeDbTraceEventSink } from "./scopeDbTraceEventSink";
 
 function makeEventRecord(overrides: Partial<TraceEventRecord> = {}): TraceEventRecord {
   return {
@@ -287,6 +286,10 @@ test("ScopeDbTraceEventSink writes addEvent-time rows through SDK ingestStream w
     shadow_plan_kind: null,
     machine_affinity_route: "aws_replay",
     replay_status: 503,
+    // Appended last to match the projection: #8032 widened TraceEventRowProjection
+    // with error_message at the END so the pre-widening 66-column insert stays
+    // valid against the widened table. This fixture was missed by that rollout.
+    error_message: null,
   });
 });
 
@@ -417,6 +420,7 @@ test("ScopeDbTraceEventSink writes span fact rows at span end without OTLP event
     shadow_plan_kind: null,
     machine_affinity_route: null,
     replay_status: null,
+    error_message: null,
   });
 });
 

@@ -6,7 +6,7 @@
  * persistence, no ambient clock or randomness (RFC 043 §9.4). The same input
  * sequence, in any interleaving, yields the same terminal state.
  */
-import { createSyncViolationBuffer } from "./violations.js";
+import { createSyncViolationBuffer } from "./violations";
 import type {
   SyncCore,
   SyncCoreConfig,
@@ -23,7 +23,7 @@ import type {
   SyncSnapshot,
   SyncViolationBuffer,
   SyncViolationDrain,
-} from "./types.js";
+} from "./types";
 
 interface ScopeEntry<S = unknown> {
   /** null = no baseline yet (pre-first-snapshot for contiguous scopes). */

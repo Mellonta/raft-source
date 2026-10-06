@@ -1,26 +1,26 @@
-import { publishChannelUpdate } from "./channelRealtimeEvents.js";
-import { socketUserServerRoom } from "../socket/platformScope.js";
+import { publishChannelUpdate } from "./channelRealtimeEvents";
+import { socketUserServerRoom } from "../socket/platformScope";
 import { ALL_CHANNEL_TEAM_THRESHOLD, currentDate, referralSourceLabel, signupRoleLabel } from "@botiverse/raft-shared";
 import type { Server as SocketServer } from "socket.io";
 import { createHash } from "node:crypto";
-import type { AgentOrchestrator } from "./agentOrchestrator.js";
-import { getDb } from "../db/index.js";
-import * as agentService from "./agentService.js";
-import * as channelService from "./channelService.js";
-import * as featureFlagService from "./featureFlagService.js";
-import * as messageService from "./messageService.js";
-import * as serverService from "./serverService.js";
-import { getStorage } from "./storageService.js";
-import * as userService from "./userService.js";
-import { createAppReminder } from "../apps/reminder/crud.js";
-import { computeNextFire, type Recurrence } from "./recurrence.js";
-import { OWNER_OPENER_TEAM_MODE_HTML } from "./ownerOpenerArtifactHtml.js";
-import { createIdempotentPendingAttachmentProjectionWithExecutor } from "./attachmentProjectionWriterService.js";
+import type { AgentOrchestrator } from "./agentOrchestrator";
+import { getDb } from "../db/index";
+import * as agentService from "./agentService";
+import * as channelService from "./channelService";
+import * as featureFlagService from "./featureFlagService";
+import * as messageService from "./messageService";
+import * as serverService from "./serverService";
+import { getStorage } from "./storageService";
+import * as userService from "./userService";
+import { createAppReminder } from "../apps/reminder/crud";
+import { computeNextFire, type Recurrence } from "./recurrence";
+import { OWNER_OPENER_TEAM_MODE_HTML } from "./ownerOpenerArtifactHtml";
+import { createIdempotentPendingAttachmentProjectionWithExecutor } from "./attachmentProjectionWriterService";
 import {
   buildAttachmentTransferArtifactPlan,
   createAttachmentTransferIntent,
-} from "./attachmentTransferIntentService.js";
-import { ATTACHMENT_TRANSFER_INTENT_TTL_MS } from "./attachmentUploadWriterService.js";
+} from "./attachmentTransferIntentService";
+import { ATTACHMENT_TRANSFER_INTENT_TTL_MS } from "./attachmentUploadWriterService";
 
 type OnboardingKind = "owner" | "member";
 

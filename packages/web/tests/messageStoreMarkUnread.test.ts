@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import type { LocalReadSuppression } from "../src/store/messageStore.js";
+import type { LocalReadSuppression } from "../src/store/messageStore";
 
 class MemoryStorage {
   private readonly map = new Map<string, string>();
@@ -43,9 +42,9 @@ const {
   filterUnreadCountsByLocalReadSuppressions,
   markCurrentBrowserTabActiveForAutoRead,
   useMessageStore,
-} = await import("../src/store/messageStore.js");
-const { useServerStore } = await import("../src/store/serverStore.js");
-const { default: api } = await import("../src/api/client.js");
+} = await import("../src/store/messageStore");
+const { useServerStore } = await import("../src/store/serverStore");
+const { default: api } = await import("../src/api/client");
 
 const originalPost = api.post.bind(api);
 const originalGet = api.get.bind(api);

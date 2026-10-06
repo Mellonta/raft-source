@@ -3,13 +3,13 @@ import { constants } from "node:fs";
 import { chmod, link, lstat, mkdir, open, unlink } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 
-import { RaftSdkConfigurationError } from "./client.js";
+import { RaftSdkConfigurationError } from "./client";
 import {
   parseStoredRaftCredential,
   RaftCredentialError,
   type RaftCredentialStore,
   type StoredRaftCredential,
-} from "./credential.js";
+} from "./credential";
 
 const MAX_CREDENTIAL_FILE_BYTES = 64 * 1024;
 

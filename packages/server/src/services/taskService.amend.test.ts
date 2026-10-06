@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
@@ -10,7 +10,7 @@ import {
   InMemoryFailpointRegistry,
 } from "@botiverse/raft-shared";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channelHumans,
   jointChannels,
@@ -19,11 +19,11 @@ import {
   taskEvents,
   tasks,
   users,
-} from "../db/schema.js";
-import { addHuman, createChannel } from "./channelService.js";
-import { withProjectedTaskFacts } from "./messageTaskProjection.js";
-import { createServer } from "./serverService.js";
-import * as taskService from "./taskService.js";
+} from "../db/schema";
+import { addHuman, createChannel } from "./channelService";
+import { withProjectedTaskFacts } from "./messageTaskProjection";
+import { createServer } from "./serverService";
+import * as taskService from "./taskService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

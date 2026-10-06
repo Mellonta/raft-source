@@ -1,136 +1,155 @@
+export { verifyBundledPiOAuth } from "./bundledPiOAuth";
 import path from "node:path";
 import os from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import { accessSync, createReadStream, createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { accessSync } from "node:fs";
+import { mkdir, readFile, rename, rm, statfs, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import {
   DISTRIBUTION_POLICY,
   createTraceScopeTracer,
-  AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
-  AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-  AGENT_MIGRATION_SOURCE_WORKSPACE_ARCHIVE_CAPABILITY,
+  AGENT_MIGRATION_CAPABILITY,
   COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS,
   currentDate,
   currentTimeMs,
+  errorClassOf,
   formatTraceparent,
   getStaticRuntimeModelSourceSet,
   noopTracer,
   parseTraceparent,
   RUNTIMES,
-  WIKI_WORKSPACE_PACK_CAPABILITY,
+  type ActiveSpan,
   type AgentConfig,
+  type ComputerLastUpgradeReceipt,
   type ComputerLifecycleExecutionAck,
   type AgentMigrationTransportLeaseMessage,
-  type AgentMigrationTransferSummary,
   type AgentMigrationTransportReady,
   type MachineToServerMessage,
+  type MentionDeliveryTerminalErrorCode,
   type MachineShutdownReason,
   type RuntimeModelSourceOutcome,
   type RuntimeAccountUsageProvider,
   type RuntimeAccountUsageSnapshot,
   type ServerToMachineMessage,
+  type TraceContext,
   type TraceScope,
   type TraceSpanAttrContracts,
   type TraceStatus,
   type Tracer,
+  DAEMON_CAPABILITY_SEQUENCED_STATUS,
+  isValidMachineDiskStatus,
+  DAEMON_CAPABILITY_RUNTIME_OUTCOME_V1,
+  SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1,
+  type AgentStartNotSpawnedReason,
 } from "@botiverse/raft-shared";
+import {
+  RUNTIME_OUTCOME_OUTBOX_DIR_NAME,
+  RUNTIME_OUTCOME_STORAGE_BLOCKED_TEXT,
+  RuntimeOutcomeOutbox,
+  AUTOMATIC_START_REFUSAL_TEXT,
+  isOutboxFrame,
+  type OutboxFs,
+  type OutboxStartAdmission,
+  type RecoveryGrant,
+} from "./runtimeOutcomeOutbox";
 import {
   APP_CONFIG_TRACE_IDENTITY_KEYS,
   APP_SNAPSHOT_TRACE_IDENTITY_KEYS,
   APP_SOURCE_TRACE_IDENTITY_KEYS,
-} from "@botiverse/raft-shared/src/appRuntimeTrace.js";
-import { AgentProcessManager, classifySpawnFailure } from "./agentProcessManager.js";
-import { getDriver } from "./drivers/index.js";
-import { readCommandVersion, resolveCommandOnPath } from "./drivers/probe.js";
+} from "@botiverse/raft-shared/src/appRuntimeTrace";
+import { AgentProcessManager, classifySpawnFailure, type RuntimeProcessGate } from "./agentProcessManager";
+import { getDriver } from "./drivers/index";
+import { readCommandVersion, resolveCommandOnPath } from "./drivers/probe";
 import {
   DaemonConnection,
   systemClock,
   type ConnectionOptions,
   type Clock,
-} from "./connection.js";
-import { createAgentAppInboxStore, type AgentAppInboxStore } from "./agentAppInbox.js";
+} from "./connection";
+import { createAgentAppInboxStore, type AgentAppInboxStore } from "./agentAppInbox";
 import {
   createScopedAppStorageFactory,
   type ScopedAppStorageFactory,
-} from "./scopedAppStorage.js";
+} from "./scopedAppStorage";
 import {
   createScopedAppStorageObserver,
   type ScopedAppStorageObserver,
-} from "./scopedAppStorageObservability.js";
+} from "./scopedAppStorageObservability";
 import {
   BUILT_IN_READY_CAPABILITIES,
   createBuiltInLocalScheduleRuntime,
-} from "./registry.manifest.js";
-import { logger } from "./logger.js";
+} from "./registry.manifest";
+import { logger } from "./logger";
+import { runFeedbackTranscriptRequest } from "./feedbackTranscriptOutcomeUpload";
 import {
   acquireDaemonMachineLock,
   resolveDefaultMachineStateRoot,
   type DaemonMachineOwnerProvenance,
   type DaemonMachineLockHandle,
-} from "./machineLock.js";
+} from "./machineLock";
 import {
   LocalRotatingTraceSink,
   computeTraceJitter,
   createTraceClient,
+  getActiveTraceContext,
   NO_JITTER,
+  runWithActiveSpan,
   type TraceJitter,
 } from "@botiverse/raft-trace-client";
-import { DaemonTraceBundleUploader } from "./traceBundleUpload.js";
-import { SLOCK_HOME_ENV, listLegacyRaftStatePaths, resolveRaftHome, resolveRaftHomePath } from "./raftHome.js";
-import { regenerateExistingOpencliWrappers } from "./drivers/cliTransport.js";
-import { daemonFetch } from "./daemonFetch.js";
-import { assertLegacyDaemonKeyNotAdoptedByComputer } from "./computerMigrationGuard.js";
-import { ensureWikiAgentWorkspace } from "./wikiAgentWorkspace.js";
-import { buildRuntimeModelSourceResultMessage } from "./runtimeModelSourceProjection.js";
+import { DaemonTraceBundleUploader } from "./traceBundleUpload";
+import { ProbeGate } from "./probeGate";
+import { SLOCK_HOME_ENV, listLegacyRaftStatePaths, resolveRaftHome, resolveRaftHomePath } from "./raftHome";
+import { regenerateExistingOpencliWrappers } from "./drivers/cliTransport";
+import { daemonFetch } from "./daemonFetch";
 import {
-  AGENT_MIGRATION_TRANSPORT_HOST_ENV,
-  AGENT_MIGRATION_TRANSPORT_PORT_ENV,
-  AGENT_MIGRATION_TRANSPORT_PUBLIC_URL_ENV,
-  createAgentMigrationHttpTransport,
-  type AgentMigrationHttpTransport,
-} from "./agentMigrationHttpTransport.js";
-import { archiveCompletedAgentMigrationSourceWorkspace } from "./agentMigrationWorkspaceArchive.js";
+  buildProviderProbeResultMessage,
+  buildUnclaimedProviderProbeResult,
+  claimProbeMaterialization,
+  runProviderProbeCanary,
+  type ProbeMaterialization,
+} from "./providerProbe";
+import { isProviderProbeRuntime } from "@botiverse/raft-shared";
+import { VERSION as PI_SDK_VERSION } from "@earendil-works/pi-coding-agent";
+import { asProviderProbeId } from "@botiverse/raft-shared";
+import { assertLegacyDaemonKeyNotAdoptedByComputer } from "./computerMigrationGuard";
+import { buildRuntimeModelSourceResultMessage } from "./runtimeModelSourceProjection";
 import {
-  summarizeAgentMigrationExportManifest,
-} from "./agentMigrationExport.js";
+  archiveCompletedAgentMigrationSourceWorkspace,
+  quarantinePreexistingAgentWorkspace,
+  type AgentMigrationWorkspaceArchiveOutcome,
+} from "./agentMigrationWorkspaceArchive";
 import {
-  AGENT_MIGRATION_OBJECT_STORE_CONTENT_TYPE,
-  AgentMigrationObjectStoreBundleTooLargeError,
-  AgentMigrationObjectStoreInsufficientDiskError,
-  AgentMigrationObjectStoreManifestTooLargeError,
-  buildAgentMigrationObjectStoreBundle,
-  stageAgentMigrationObjectStoreBundle,
-} from "./agentMigrationObjectStoreBundle.js";
+  createRaftDiskWalkBudget,
+  measureRaftDiskFootprint,
+  removeMigrationGenerationBulk,
+  runRaftDiskJanitor,
+  scheduleRaftDiskJanitor,
+  type RaftDiskFootprint,
+} from "./raftDiskJanitor";
+import type { AgentMigrationExportProgress } from "./agentMigrationExport";
 import {
-  buildAgentMigrationResumableBundle,
   classifyAgentMigrationTargetResidue,
+  commitMarkerMatches,
+  readCommitMarker,
+  migrationStatePathSegment,
   missingAgentMigrationChunks,
   stageAndCommitAgentMigrationResumableBundle,
+  streamAgentMigrationResumableBundle,
   validateAgentMigrationControlManifest,
   verifyAndStoreAgentMigrationChunk,
+  type AgentMigrationControlChunk,
   type AgentMigrationControlManifest,
-} from "./agentMigrationResumableBundle.js";
-import {
-  buildAgentMigrationAdoptPlan,
-  executeAgentMigrationAdoptPlan,
-  type AgentMigrationRebindClient,
-} from "./agentMigrationImport.js";
+  type AgentMigrationPlacementStep,
+} from "./agentMigrationResumableBundle";
 
-export * from "./agentMigrationExport.js";
-export * from "./agentMigrationHttpTransport.js";
-export * from "./agentMigrationObjectStoreBundle.js";
-export * from "./agentMigrationResumableBundle.js";
-export * from "./agentMigrationImport.js";
-export * from "./legacySupervisor.js";
-import { readSecretFileSync } from "./secretFile.js";
+export * from "./legacySupervisor";
+import { readSecretFileSync } from "./secretFile";
 import {
   createRuntimeAccountUsageCollector,
   type RuntimeAccountUsageCollector,
-} from "./runtimeAccountUsage/collector.js";
+} from "./runtimeAccountUsage/collector";
 
 /**
  * Default endpoint for daemon trace bundle uploads. Always baked as the
@@ -150,29 +169,43 @@ const RUNNER_CREDENTIAL_MINT_MAX_ATTEMPTS = 3;
 const RUNNER_CREDENTIAL_MINT_RETRY_DELAY_MS = 250;
 const MIGRATION_OBJECT_STORE_DOWNLOAD_RETRY_INITIAL_MS = 25;
 const MIGRATION_OBJECT_STORE_DOWNLOAD_RETRY_MAX_MS = 250;
-
-function migrationStatePathSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "migration";
-}
+// Matches the source's upload concurrency.
+const MIGRATION_TARGET_CHUNK_DOWNLOAD_CONCURRENCY = 3;
+const DISK_STATUS_FIRST_REPORT_DELAY_MS = 60_000;
+const DISK_STATUS_REPORT_INTERVAL_MS = 60 * 60 * 1_000;
 const STUCK_TOOL_V0_IDENTITY_ATTRS = [
   "schema_version",
   "server_id",
   "machine_id",
   "agent_id",
   "launch_id",
-  "runtime_session_id",
+  // #424: the raw value is dropped by the sink and has no hash form; the fact
+  // it carried ("this tool had a session") survives on the flag below, which is
+  // #422 class B. Listing the bare key promised something the disk never gets.
   "runtime_session_id_present",
   "runtime_turn_id",
   "tool_execution_instance_id",
   "runtime_tool_call_id_present",
   "process_instance_id",
-  "producer_fact_id",
+  // #424: `producer_fact_id` removed — scrubbed by the #460 ruling and its emit
+  // deleted in #422, so the contract was naming a key nothing can supply.
   "runtime",
   "runtime_version",
   "tool_class",
 ] as const;
 
 export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
+  // task #1127. Registering this span is also how "never record argument
+  // values" stops being a promise: the contract filter drops anything not
+  // listed, so a later attempt to attach the stderr body cannot survive.
+  "daemon.agent.tool_argument_parse_failed": {
+    spanAttrs: [
+      "agentId",
+      "launchId",
+      "runtime",
+      "model",
+    ],
+  },
   "daemon.runtime_account_usage.refresh": {
     spanAttrs: [
       "outcome",
@@ -235,9 +268,21 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
       "wake_enqueued",
       "catchup",
     ],
+    endAttrs: [
+      "item_id",
+      "outcome",
+      "reason",
+      "wake_enqueued",
+      "catchup",
+      "error_class",
+    ],
   },
   "daemon.app_source.receipt": {
     spanAttrs: [...APP_SOURCE_TRACE_IDENTITY_KEYS, "outcome", "catchup"],
+  },
+  "daemon.app_source.fire_request": {
+    spanAttrs: [...APP_SOURCE_TRACE_IDENTITY_KEYS, "request_id", "catchup"],
+    endAttrs: ["outcome", "error_class"],
   },
   "daemon.app_storage.failure": {
     spanAttrs: [
@@ -329,6 +374,7 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
   },
   "daemon.lifecycle.start": {
     spanAttrs: ["machine_dir_present", "local_trace_enabled"],
+    endAttrs: ["error_class"],
     eventAttrs: {
       "daemon.machine_lock.acquired": ["machine_dir_present"],
     },
@@ -336,11 +382,15 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
   "daemon.lifecycle.stop": {
     spanAttrs: ["machine_lock_present"],
   },
+  "daemon.runner_credential_mint": {
+    spanAttrs: ["agentId", "runtime"],
+    endAttrs: ["error_class"],
+  },
   "daemon.runner_credential_mint.retry": {
-    spanAttrs: ["agentId", "runtime", "attempt", "max_attempts", "status", "code", "reason", "retryable"],
+    spanAttrs: ["agentId", "runtime", "attempt", "max_attempts", "http_status", "code", "reason", "retryable"],
   },
   "daemon.runner_credential_mint.failed": {
-    spanAttrs: ["agentId", "runtime", "status", "code", "reason", "retryable", "max_attempts"],
+    spanAttrs: ["agentId", "runtime", "http_status", "code", "reason", "retryable", "max_attempts"],
   },
   "daemon.agent.spawn.failed": {
     spanAttrs: [
@@ -396,6 +446,10 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
       "developer_instructions_match_standing",
     ],
   },
+  "daemon.agent.start": {
+    spanAttrs: ["agent_id", "launch_id", "start_dispatch_id", "runtime"],
+    endAttrs: ["outcome", "error_class"],
+  },
   "daemon.agent.start_dispatch.receipt": {
     spanAttrs: [
       "agent_id",
@@ -419,7 +473,6 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
       "driver",
       "launch_source",
       "state_instance_id",
-      "residency_state_instance_id",
       "transition_seq",
       "residency_transition_seq",
       "transition_kind",
@@ -481,7 +534,7 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
     spanAttrs: ["agentId", "launchId", "runtime", "outcome", "source", "itemType", "payloadBytes"],
   },
   "daemon.runtime_models.detect": {
-    spanAttrs: ["runtime", "requestId"],
+    spanAttrs: ["runtime", "request_id"],
     eventAttrs: {
       "daemon.pi.models.services_ready": ["available_models_count", "diagnostics_count", "diagnostic_info_count", "diagnostic_warning_count"],
       "daemon.pi.models.result": ["available_models_count", "returned_models_count", "diagnostics_count", "diagnostic_info_count", "diagnostic_warning_count", "outcome"],
@@ -502,8 +555,9 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
         "response_started",
         "reason",
         "http_status",
-        "session_id_present",
-        "runtime_session_id",
+        // #424: renamed from `session_id_present` and the bare
+        // `runtime_session_id` removed — same value, one family. See pi.ts.
+        "runtime_session_id_present",
         "launch_id_present",
         "launch_id",
       ],
@@ -601,17 +655,7 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
       "error_class",
       "error_code",
       "upstream_error_code",
-      "endpoint_class",
       "http_status",
-      "content_length_present",
-      "upload_body_mode",
-      "bundle_size_bucket",
-      "bundle_content_bytes",
-      "max_bytes",
-      "manifest_sha_present",
-      "attempt",
-      "status",
-      "retry_delay_ms",
     ],
   },
   "daemon.migration_transport.resumable": {
@@ -627,17 +671,20 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
       "upstream_error_code",
       "http_status",
       "attempt",
-      "status",
       "retry_delay_ms",
       "chunk_count",
       "bundle_size_bucket",
       "control_bytes",
       "commit_outcome",
       "residue_class",
+      "duration_ms",
+      "chunks_removed",
+      "chunks_freed_bytes",
     ],
   },
   "daemon.migration_transport.lease": {
-    spanAttrs: [
+    spanAttrs: [],
+    endAttrs: [
       "outcome",
       "role",
       "transfer_kind",
@@ -648,6 +695,14 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
       "migration_id_present",
       "session_id_present",
     ],
+  },
+  "daemon.migration_transport.transfer": {
+    spanAttrs: ["role", "transfer_kind", "migration_ref", "stage", "download_concurrency"],
+    endAttrs: ["outcome", "error_class"],
+  },
+  "daemon.migration_transport.placement": {
+    spanAttrs: ["role", "transfer_kind", "migration_ref", "stage", "chunk_count", "file_count", "expanded_bytes"],
+    endAttrs: ["outcome", "error_class"],
   },
   "daemon.agent.activity.produced": {
     // isHeartbeat/is_heartbeat (#460 V1) and process_instance_id (#460 V3)
@@ -666,7 +721,7 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
     spanAttrs: [
       "agentId",
       "agent_id",
-      "status",
+      "agent_status",
       "previous_status",
       "previous_status_present",
       "status_changed",
@@ -689,12 +744,12 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
     spanAttrs: ["agentId", "event_kind", "runtime"],
   },
 } satisfies TraceSpanAttrContracts;
-export { subscribeDaemonLogs, type DaemonLogEvent, type DaemonLogLevel } from "./logger.js";
+export { subscribeDaemonLogs, type DaemonLogEvent, type DaemonLogLevel } from "./logger";
 export {
   deleteWorkspaceDirectory,
   resolveWorkspaceDirectoryPath,
   scanWorkspaceDirectories,
-} from "./workspaces.js";
+} from "./workspaces";
 
 export const DAEMON_CLI_USAGE = "Usage: slock-daemon --server-url <url> --api-key-file <path>";
 
@@ -714,6 +769,8 @@ export type DefaultAgentEnvVarsProvider = (
 ) => Promise<Record<string, string> | null> | Record<string, string> | null;
 
 class RunnerCredentialMintError extends Error {
+  /** task #1120: stable launch-failure class; `code` below is the mint-specific code. */
+  readonly spawnFailureCode = "runner_credential_mint_failed" as const;
   readonly code: string;
   readonly retryable: boolean;
   readonly status?: number;
@@ -789,22 +846,120 @@ function isRetryableResumableMigrationStatus(status: number, retryNotFound: bool
     || status >= 500;
 }
 
+// Bundle-build progress is reported at most this often. The server slides the
+// prep deadline only when the reported counts grew, so a stuck build that keeps
+// reporting still times out.
+const MIGRATION_SOURCE_PROGRESS_INTERVAL_MS = 30_000;
+const MIGRATION_TARGET_STEP_RETRY_INITIAL_MS = 1_000;
+const MIGRATION_TARGET_STEP_RETRY_MAX_MS = 30_000;
+// Long enough to ride out a rolling server deploy; bounded well inside the
+// arrival deadline so a genuinely broken server still fails the run.
+const MIGRATION_TARGET_STEP_RETRY_BUDGET_MS = 5 * 60_000;
+
+/** States in which a target control step has already taken effect. */
+const MIGRATION_TARGET_STEP_APPLIED_STATES: Record<"start-transfer" | "flip-machine" | "arrived", readonly string[]> = {
+  "start-transfer": ["in_transit", "arriving", "starting", "completed"],
+  "flip-machine": ["arriving", "starting", "completed"],
+  "arrived": ["starting", "completed"],
+};
+
+/** Network failures and 408/425/429/5xx responses may succeed on retry; 4xx decisions do not. */
+export function isTransientMigrationStepFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const status = /^MIGRATION_TARGET_IMPORT_[A-Z_]+_FAILED:(\d{3})(?::|$)/.exec(error.message)?.[1]
+    ?? /^MIGRATION_TARGET_IMPORT_LOOKUP_FAILED:(\d{3})$/.exec(error.message)?.[1];
+  if (status) {
+    const code = Number(status);
+    return code === 408 || code === 425 || code === 429 || code >= 500;
+  }
+  // fetch() rejects with a TypeError ("fetch failed") on connection-level errors.
+  return error instanceof TypeError || systemErrorCode(error) !== null || systemErrorCode(error.cause) !== null;
+}
+
+/**
+ * Target control steps used to be sent once: a 5xx or dropped connection
+ * during a server deploy failed the whole migration, even after the flip.
+ * Retry transient failures with backoff, and before each retry read the
+ * current view: the lost attempt may have committed, in which case the step is
+ * done and must not be replayed. If it did not commit, the identical request
+ * is resent; a generation change aborts the run instead (the server rejects
+ * stale generations, and a retry must never borrow the new one).
+ */
+export async function retryMigrationTargetStep<B extends { migrationGeneration: string }>(input: {
+  step: keyof typeof MIGRATION_TARGET_STEP_APPLIED_STATES;
+  body: B;
+  post: (body: B) => Promise<MigrationTargetImportView>;
+  fetchView: () => Promise<MigrationTargetImportView>;
+  onRetry?: (error: unknown, delayMs: number) => void;
+  wait?: (delayMs: number) => Promise<void>;
+  nowMs?: () => number;
+}): Promise<MigrationTargetImportView> {
+  const nowMs = input.nowMs ?? currentTimeMs;
+  const wait = input.wait ?? ((delayMs: number) => waitForAmbientBackoff(delayMs));
+  const retryUntilMs = nowMs() + MIGRATION_TARGET_STEP_RETRY_BUDGET_MS;
+  let delayMs = MIGRATION_TARGET_STEP_RETRY_INITIAL_MS;
+  while (true) {
+    try {
+      return await input.post(input.body);
+    } catch (error) {
+      if (!isTransientMigrationStepFailure(error) || nowMs() + delayMs > retryUntilMs) throw error;
+      input.onRetry?.(error, delayMs);
+    }
+    await wait(delayMs);
+    delayMs = Math.min(delayMs * 2, MIGRATION_TARGET_STEP_RETRY_MAX_MS);
+    let current: MigrationTargetImportView;
+    try {
+      current = await input.fetchView();
+    } catch (error) {
+      if (!isTransientMigrationStepFailure(error) || nowMs() + delayMs > retryUntilMs) throw error;
+      continue;
+    }
+    if (MIGRATION_TARGET_STEP_APPLIED_STATES[input.step].includes(current.state)) return current;
+    // Never adopt a generation this run did not start with: a changed
+    // generation means the run was superseded (canceled, re-provisioned), and
+    // retrying under the new one would bypass the stale-generation guard.
+    if (current.migrationGeneration !== input.body.migrationGeneration) {
+      throw new Error("MIGRATION_TARGET_STEP_GENERATION_SUPERSEDED");
+    }
+  }
+}
+
 function migrationTransferFailureMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   return message.slice(0, 500);
 }
 
 export function migrationTransferFailureCode(err: unknown): string | undefined {
-  if (
-    err instanceof AgentMigrationObjectStoreBundleTooLargeError
-    || err instanceof AgentMigrationObjectStoreManifestTooLargeError
-    || err instanceof AgentMigrationObjectStoreInsufficientDiskError
-  ) {
-    return err.code;
-  }
   const message = err instanceof Error ? err.message : String(err);
   const code = /^(MIGRATION_[A-Z0-9_]+)/.exec(message)?.[1];
   return code && RESUMABLE_MIGRATION_SPECIFIC_ERROR_CODES.has(code) ? code : undefined;
+}
+
+/**
+ * Best-effort, non-secret classification of any transfer failure. `code` above
+ * stays limited to the codes older servers understand; this is sent alongside
+ * as `detailCode` so the server can keep the real cause instead of collapsing
+ * everything else into MIGRATION_TRANSPORT_LOST.
+ */
+export function migrationTransferFailureDetailCode(err: unknown): string | undefined {
+  const known = migrationTransferFailureCode(err);
+  if (known) return known;
+  if (err instanceof MigrationStepResponseError) {
+    return `${err.errorCode}:${err.httpStatus}:${err.upstreamErrorCode}`;
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  const prefixed = /^(MIGRATION_[A-Z0-9_]+(?::[0-9]{3}(?::[A-Za-z0-9_]+)?)?)/.exec(message)?.[1];
+  if (prefixed) return prefixed.slice(0, 160);
+  if (!(err instanceof Error)) return undefined;
+  const nodeCode = systemErrorCode(err) ?? systemErrorCode((err as { cause?: unknown }).cause);
+  if (nodeCode) return err.message === "fetch failed" ? `FETCH_${nodeCode}` : `NODE_${nodeCode}`;
+  if (err.message === "fetch failed") return "FETCH_FAILED";
+  return /^[A-Za-z]{1,40}$/.test(err.name) ? `JS_${err.name}` : undefined;
+}
+
+function systemErrorCode(value: unknown): string | null {
+  const code = value && typeof value === "object" ? (value as { code?: unknown }).code : undefined;
+  return typeof code === "string" && /^E[A-Z0-9_]{1,40}$/.test(code) ? code : null;
 }
 
 const RESUMABLE_MIGRATION_SPECIFIC_ERROR_CODES = new Set([
@@ -838,7 +993,9 @@ type MigrationTraceStage =
   | "arrival_report"
   | "cancel_cleanup"
   | "transport_lost_report"
-  | "source_ready_report"
+  | "verify"
+  | "unpack"
+  | "commit"
   | "transfer";
 
 class MigrationStepResponseError extends Error {
@@ -911,16 +1068,6 @@ async function migrationStepResponseError(
   );
 }
 
-class MigrationObjectStoreUploadHttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly archiveBytes: number,
-  ) {
-    super(`MIGRATION_OBJECT_STORE_UPLOAD_FAILED:${status}`);
-    this.name = "MigrationObjectStoreUploadHttpError";
-  }
-}
-
 function migrationObjectStoreFailureTraceAttrs(err: unknown): Record<string, unknown> {
   if (err instanceof MigrationStepResponseError) {
     return {
@@ -930,21 +1077,10 @@ function migrationObjectStoreFailureTraceAttrs(err: unknown): Record<string, unk
       http_status: err.httpStatus,
     };
   }
-  if (!(err instanceof MigrationObjectStoreUploadHttpError)) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      stage: "transfer",
-      error_code: /^(MIGRATION_[A-Z0-9_]+)/.exec(message)?.[1],
-    };
-  }
+  const message = err instanceof Error ? err.message : String(err);
   return {
     stage: "transfer",
-    error_code: "MIGRATION_OBJECT_STORE_UPLOAD_FAILED",
-    endpoint_class: "object_store",
-    http_status: err.status,
-    content_length_present: true,
-    upload_body_mode: "spooled_file",
-    bundle_size_bucket: migrationObjectStoreBundleSizeBucket(err.archiveBytes),
+    error_code: /^(MIGRATION_[A-Z0-9_]+)/.exec(message)?.[1],
   };
 }
 
@@ -958,6 +1094,32 @@ function migrationTraceIdentityAttrs(
     transfer_kind: lease.transferKind,
     stage,
   };
+}
+
+/**
+ * Runs `work` over `items` with at most `limit` in flight. After the first
+ * failure no new item starts; in-flight items settle, then that failure throws.
+ */
+async function forEachWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  // Cast so TypeScript does not narrow to null: workers assign it inside closures.
+  let failure = null as { error: unknown } | null;
+  const worker = async () => {
+    while (!failure && next < items.length) {
+      const item = items[next++]!;
+      try {
+        await work(item);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure) throw failure.error;
 }
 
 function migrationObjectStoreBundleSizeBucket(bytes: number): string {
@@ -976,6 +1138,40 @@ async function migrationStepErrorSuffix(response: Response): Promise<string> {
 
 declare const __RAFT_DAEMON_VERSION__: string | undefined;
 
+const MODEL_CATALOG_RECONNECT_MIN_INTERVAL_MS = 30 * 60_000;
+/**
+ * Floor between the STARTS of two connect-triggered rounds, complete or not. A
+ * connection that flaps faster than a round can finish (task #354: a reconnect
+ * every ~21 s for two hours) never completes one, so the completion-based
+ * throttle alone would re-spawn every runtime CLI on every reconnect.
+ */
+const MODEL_CATALOG_RECONNECT_MIN_START_INTERVAL_MS = 5 * 60_000;
+const MODEL_CATALOG_MAX_MODELS = 300;
+const MODEL_CATALOG_MAX_ID_LENGTH = 200;
+const MODEL_CATALOG_MAX_LABEL_LENGTH = 80;
+const CATALOG_CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
+
+/**
+ * Labels come straight from each runtime CLI's output, so bound what crosses the
+ * wire: at most MODEL_CATALOG_MAX_MODELS entries, control characters stripped,
+ * labels trimmed to MODEL_CATALOG_MAX_LABEL_LENGTH. An entry whose id is empty,
+ * too long or has control characters is dropped (an id is an identity, not
+ * display text, so it is never rewritten); an empty label falls back to the id.
+ */
+export function sanitizeCatalogModels(
+  models: ReadonlyArray<{ id: string; label: string }>,
+): Array<{ id: string; label: string }> {
+  const out: Array<{ id: string; label: string }> = [];
+  for (const model of models) {
+    if (out.length >= MODEL_CATALOG_MAX_MODELS) break;
+    const id = typeof model.id === "string" ? model.id.trim() : "";
+    if (!id || id.length > MODEL_CATALOG_MAX_ID_LENGTH || /[\u0000-\u001f\u007f]/.test(id)) continue;
+    const label = (typeof model.label === "string" ? model.label : "").replace(CATALOG_CONTROL_CHARS, "").trim();
+    out.push({ id, label: (label || id).slice(0, MODEL_CATALOG_MAX_LABEL_LENGTH) });
+  }
+  return out;
+}
+
 export interface DaemonCoreOptions {
   serverUrl: string;
   apiKey: string;
@@ -986,6 +1182,10 @@ export interface DaemonCoreOptions {
   /** Test/embedded override; production resolves the canonical Raft home. */
   slockHome?: string;
   machineStateDir?: string;
+  /** RFC 071 outbox directory (default: `<agents data dir>/.runtime-outcome-outbox`). */
+  runtimeOutcomeOutboxDir?: string;
+  /** Tests only: the durable-write steps of the outbox. */
+  runtimeOutcomeOutboxFs?: OutboxFs;
   machineOwnerProvenance?: DaemonMachineOwnerProvenance;
   hostname?: string;
   osDescription?: string;
@@ -995,7 +1195,7 @@ export interface DaemonCoreOptions {
   agentManagerFactory?: (
     sendToServer: (msg: MachineToServerMessage) => void,
     daemonApiKey: string,
-    options?: { dataDir?: string; serverUrl: string; defaultAgentEnvVarsProvider?: DefaultAgentEnvVarsProvider; slockCliPath?: string; slockHome?: string; tracer?: Tracer; daemonInstanceId?: string; appInboxForAgent?: (agentId: string) => AgentAppInboxStore },
+    options?: { dataDir?: string; serverUrl: string; defaultAgentEnvVarsProvider?: DefaultAgentEnvVarsProvider; slockCliPath?: string; slockHome?: string; tracer?: Tracer; daemonInstanceId?: string; appInboxForAgent?: (agentId: string) => AgentAppInboxStore; runtimeProcessGate?: RuntimeProcessGate },
   ) => AgentProcessManager;
   defaultAgentEnvVarsProvider?: DefaultAgentEnvVarsProvider;
   /** Seam for tests — injected into the ReminderCache so timers can be faked. */
@@ -1010,6 +1210,8 @@ export interface DaemonCoreOptions {
     onDisconnect?: () => void;
     onHandshakeRejected?: (event: { statusCode: number; reason: string | null }) => void;
   };
+  /** Remote upgrade v2: summary of the last installer receipt, carried on `ready`. */
+  getComputerLastUpgradeReceipt?: () => Promise<ComputerLastUpgradeReceipt | null>;
   /** Durable managed-Computer operation acknowledgements waiting for receipt. */
   getComputerLifecycleAcks?: () => ComputerLifecycleExecutionAck[];
   /** Fresh, async machine attestation used only for ready-phase evidence. */
@@ -1037,7 +1239,7 @@ export interface DaemonCoreOptions {
    * the triggering `requestId` and upstream emitters. The managed runner is a
    * transport relay only: its supervisor owns download/swap/restart and emits
    * progress back over local IPC for this live WS. On success the replacement
-   * runner reports `done` via `onComputerUpgradeReconcile`; on failure the
+   * runner used to report `done` here; v2 reads the reconnect version instead. On failure the
    * relay reports `done{ok:false}` in place.
    */
   onComputerControl?: (action: "restart" | "upgrade", ctx: ComputerControlContext) => void | Promise<void>;
@@ -1047,25 +1249,11 @@ export interface DaemonCoreOptions {
    * single runner and must not be mistaken for this stronger contract.
    */
   computerControlViaSupervisor?: boolean;
-  /**
-   * Called once after `ready` is sent on each (re)connect. A managed Computer
-   * uses this to detect that THIS process booted from a freshly swapped binary
-   * (a pending-upgrade marker is present) and report `computer:upgrade:done`,
-   * stitching the upgrade's connection blip via the marker's `requestId`. The
-   * hook owns reading + clearing its own marker; `emitDone` sends the upstream
-   * frame (core fills `type`). Absent for a raw daemon.
-   */
-  onComputerUpgradeReconcile?: (
-    emitDone: (done: { requestId: string; ok: boolean; newVersion?: string; rolledBack?: boolean; error?: string }) => void,
-    emitProgress: (progress: { requestId: string; phase: "restarting"; message: string }) => void,
-  ) => void | Promise<void>;
   /** Report a persisted restart request only after this new runner generation
    * has connected and sent ready. The hook owns marker read/clear. */
   onComputerRestartReconcile?: (
     emitDone: (done: { requestId: string; ok: boolean; error?: string }) => void,
   ) => void | Promise<void>;
-  /** Test seam; production creates the transport only when listen env is configured. */
-  migrationTransport?: AgentMigrationHttpTransport | null;
   /** Test seam; production collectors keep credentials and raw provider responses local. */
   runtimeAccountUsageCollector?: RuntimeAccountUsageCollector;
 }
@@ -1084,33 +1272,21 @@ const COMPUTER_LIFECYCLE_ORIGIN_RECONCILE_MAX_ATTEMPTS = 3;
 const COMPUTER_LIFECYCLE_ORIGIN_RECONCILE_RETRY_MS = 50;
 
 /**
- * Context handed to `onComputerControl` for the `upgrade` action so the
- * managed Computer can stream progress + terminal outcome over the runner's
- * live WS without owning the connection itself.
+ * Context handed to `onComputerControl`. For `upgrade` it carries the exact
+ * target; the Computer launches the installer and reports nothing (v2).
  */
 export interface ComputerControlContext {
   /** Canonical lifecycle operation identifier. */
   operationId?: string;
+  /** Remote upgrade v2: exact target the Server resolved; the installer runs against it. */
+  targetVersion?: string;
   /** Echoes the triggering `computer:upgrade{requestId}`; undefined if the
    *  command carried none. */
   requestId?: string;
-  /** Stream upgrade progress upstream. core fills `type` + `requestId`;
-   *  safe no-op if the connection has since dropped. */
-  emitUpgradeProgress: (ev: {
-    phase: "downloading" | "verifying" | "applying" | "restarting";
-    message?: string;
-    percent?: number;
-    fromVersion?: string;
-    targetVersion?: string;
-  }) => void;
-  /** Report a terminal upgrade outcome upstream. Used by the upgrading
-   *  process only on FAILURE (no restart happens) — on success the process
-   *  exits and the respawned binary reports `done` via the reconnect path. */
-  emitUpgradeDone: (ev: { ok: boolean; newVersion?: string; rolledBack?: boolean; error?: string }) => void;
 }
 
-interface MigrationTargetImportView {
-  grantKey: string;
+export interface MigrationTargetImportView {
+  migrationId: string;
   migrationRef: string;
   migrationGeneration: string;
   state: string;
@@ -1359,14 +1535,6 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   return Math.floor(parsed);
 }
 
-function hasAgentMigrationHttpTransportListenConfig(env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(
-    env[AGENT_MIGRATION_TRANSPORT_HOST_ENV]?.trim()
-    || env[AGENT_MIGRATION_TRANSPORT_PORT_ENV]?.trim()
-    || env[AGENT_MIGRATION_TRANSPORT_PUBLIC_URL_ENV]?.trim()
-  );
-}
-
 function formatChannelTarget(msg: ServerToMachineMessage & { type: "agent:deliver" }): string {
   return msg.message.channel_type === "dm"
     ? `dm:@${msg.message.channel_name}`
@@ -1383,6 +1551,8 @@ function summarizeIncomingMessage(msg: ServerToMachineMessage): string {
       return `(agent=${msg.agentId}, runtime=${msg.config.runtime}, model=${msg.config.model}, session=${msg.config.sessionId || "new"}, wikiPack=${msg.wikiWorkspacePack.packId.slice(0, 12)}${msg.wakeMessage ? ", wake=true" : ""})`;
     case "agent:stop":
       return `(agent=${msg.agentId})`;
+    case "agent:wake:outcome":
+      return `(agent=${msg.agentId}, wake=${msg.wakeRequestId.slice(0, 8)}, outcome=${msg.outcome}${msg.reason ? `, reason=${msg.reason}` : ""})`;
     case "agent:reset-workspace":
       return `(agent=${msg.agentId})`;
     case "agent:deliver":
@@ -1418,7 +1588,7 @@ function summarizeIncomingMessage(msg: ServerToMachineMessage): string {
     case "machine:migration:source_workspace_archive":
       return `(agent=${msg.agentId}, migration=${msg.migrationId})`;
     case "machine:migration_transport:lease":
-      return `(agent=${msg.agentId}, migration_ref=${msg.migrationRef}, session=${msg.sessionId}, provider=${msg.provider}, role=${msg.role}, kind=${msg.transferKind}, url=${msg.url ? "set" : "missing"})`;
+      return `(agent=${msg.agentId}, migration_ref=${msg.migrationRef}, session=${msg.sessionId}, provider=${msg.provider}, role=${msg.role}, kind=${msg.transferKind})`;
     case "machine:migration:cancel":
       return `(agent=${msg.agentId}, migration_ref=${msg.migrationRef}, role=${msg.role}, disposition=${msg.disposition})`;
     case "reminder.upsert":
@@ -1437,6 +1607,16 @@ type AgentStartMessage =
   | Extract<ServerToMachineMessage, { type: "agent:start:wiki" }>;
 type AgentDeliverMessage = Extract<ServerToMachineMessage, { type: "agent:deliver" }>;
 type AgentStartAckMessage = Extract<MachineToServerMessage, { type: "agent:start:ack" }>;
+
+/** RFC 071 outbox: the daemon refused this start locally; no process was created. */
+class LocalStartRefusedError extends Error {
+  constructor(readonly reason: AgentStartNotSpawnedReason) {
+    super(reason === "terminal_failure_outcome_storage_blocked"
+      ? RUNTIME_OUTCOME_STORAGE_BLOCKED_TEXT
+      : AUTOMATIC_START_REFUSAL_TEXT);
+    this.name = "LocalStartRefusedError";
+  }
+}
 
 /**
  * Which buffered delivery may be promoted to the START WAKE MESSAGE, or -1 for none.
@@ -1470,6 +1650,15 @@ export class DaemonCore {
   private readonly computerVersion: string | null;
   private readonly slockCliPath: string;
   private readonly slockHome: string;
+  /**
+   * Archive requests are retried by the server (and a cross-disk copy can
+   * outlive the server's 15s wait), so a retry for the same agent joins the
+   * in-flight run instead of starting a second copy beside it.
+   */
+  private readonly migrationSourceArchiveRuns = new Map<string, {
+    migrationId: string;
+    run: Promise<AgentMigrationWorkspaceArchiveOutcome>;
+  }>();
   private readonly agentsDataDir: string;
   // One-shot guard: rewrite stale per-agent opencli wrappers to the current
   // self-healing form on the first connect of this daemon process (a SEA
@@ -1478,16 +1667,25 @@ export class DaemonCore {
   private readonly runtimeDetector: () => RuntimeDetection;
   private readonly agentManager: AgentProcessManager;
   private readonly connection: DaemonConnection;
+  private readonly runtimeOutcomeOutbox: RuntimeOutcomeOutbox;
+  /** RFC 071 outbox: whether the current connection's server acknowledges outbox frames. */
+  private serverAcksRuntimeOutcomes = false;
+  /** RFC 071 outbox: `breakerGeneration` per accepted launch, echoed as `generation` (bounded per agent). */
+  private readonly launchGenerations = new Map<string, Map<string, number>>();
   private readonly appScheduleClock: Clock;
   private readonly lifecycleOriginClock: Clock;
   private lifecycleOriginConnectionGeneration = 0;
+  /** Runtimes from the last `ready`; the catalog push covers exactly these. */
+  private lastReadyRuntimes: readonly string[] = [];
+  /** Runtime ids + versions from the last `ready`; a change lifts the reconnect throttle. */
+  private lastReadyRuntimeSignature = "";
+  private catalogPublishInFlight = false;
+  private catalogPublishQueued: { force: boolean } | null = null;
+  private lastCatalogPublish: { atMs: number; runtimeSignature: string } | null = null;
+  private lastCatalogRoundStartMs: number | null = null;
   private lifecycleOriginRetryTimer: unknown = null;
   private readonly localScheduleRuntime: ReturnType<typeof createBuiltInLocalScheduleRuntime>;
   private readonly appInboxes = new Map<string, AgentAppInboxStore>();
-  private readonly migrationTransport: AgentMigrationHttpTransport | null;
-  private migrationTransportListenPromise: Promise<void> | null = null;
-  private migrationTransportListening = false;
-  private migrationTransportUrl: string | null = null;
   private migrationTransferLease: AgentMigrationTransportLeaseMessage | null = null;
   private readonly migrationTransferRuns = new Map<string, MigrationTransferRunState>();
   private tracer: Tracer;
@@ -1501,12 +1699,18 @@ export class DaemonCore {
   private machineContextConflict = false;
   private localTraceSink: LocalRotatingTraceSink | null = null;
   private traceBundleUploader: DaemonTraceBundleUploader | null = null;
+  private diskJanitor: { stop(): void } | null = null;
+  private raftDiskFootprint: { atMs: number; value: Promise<RaftDiskFootprint> } | null = null;
+  private diskStatusTimer: ReturnType<typeof setTimeout> | null = null;
+  private diskStatusReportsEnabled = true;
   private readonly coreStartingAgentIds = new Set<string>();
   private readonly coreStartPendingDeliveries = new Map<string, AgentDeliverMessage[]>();
   private readonly acceptedStartDispatches = new Map<string, AgentStartAckMessage>();
   private readonly acceptingStartDispatches = new Map<string, Promise<AgentStartAckMessage>>();
   private readonly handledComputerControlOperationIds = new Set<string>();
   private readonly runtimeAccountUsageCollector: RuntimeAccountUsageCollector;
+  /** Overlapping model / usage probes for the same key join one run instead of each spawning a CLI (probeGate.ts). Uncapped across keys so no probe waits past the server's request budget. */
+  private readonly probeGate = new ProbeGate();
   private static readonly START_DISPATCH_RECEIPT_CACHE_SIZE = 1_024;
 
   constructor(options: DaemonCoreOptions) {
@@ -1534,10 +1738,6 @@ export class DaemonCore {
     this.appScheduleClock = options.reminderClock ?? systemClock;
     this.lifecycleOriginClock = options.connectionOptions?.clock ?? systemClock;
 
-    this.migrationTransport = options.migrationTransport === undefined
-      ? (hasAgentMigrationHttpTransportListenConfig() ? createAgentMigrationHttpTransport() : null)
-      : options.migrationTransport;
-
     let connection!: DaemonConnection;
 
     this.agentsDataDir = options.dataDir ?? resolveRaftHomePath("agents", this.slockHome);
@@ -1556,21 +1756,50 @@ export class DaemonCore {
       workerUrl: traceUploadDisabled ? undefined : (process.env.SLOCK_DAEMON_TRACE_UPLOAD_URL || DEFAULT_TRACE_UPLOAD_URL),
       serverConnected: () => connection?.connected ?? false,
       appInboxForAgent: (agentId: string) => this.getAgentAppInbox(agentId),
+      // RFC 071 outbox: every spawn/rebind first durably records the process as open.
+      runtimeProcessGate: {
+        openProcess: (agentId: string, processInstanceId: string, spawnLaunchId: string | null) =>
+          this.runtimeOutcomeOutbox.openProcess(agentId, processInstanceId, spawnLaunchId),
+        processExitedLocally: (agentId: string, processInstanceId: string) =>
+          this.runtimeOutcomeOutbox.processExitedLocally(agentId, processInstanceId),
+        processNotStarted: (agentId: string, processInstanceId: string) =>
+          this.runtimeOutcomeOutbox.processNotStarted(agentId, processInstanceId),
+        startRefusal: (agentId: string, launchId: string | null, recoveryGrant: RecoveryGrant | null) =>
+          this.runtimeOutcomeOutbox.startDecision(agentId, launchId, recoveryGrant),
+        waitForCapability: () => this.runtimeOutcomeOutbox.waitForCapability(),
+      },
     };
 
+    this.runtimeOutcomeOutbox = new RuntimeOutcomeOutbox({
+      dir: options.runtimeOutcomeOutboxDir ?? path.join(this.agentsDataDir, RUNTIME_OUTCOME_OUTBOX_DIR_NAME),
+      daemonInstanceId: this.daemonInstanceId,
+      send: (msg) => connection.send(msg),
+      fs: options.runtimeOutcomeOutboxFs,
+      trace: (name, attrs, status) => this.recordDaemonEvent(name, attrs, status),
+    });
+    // RFC 071: the agent manager's evidence frames go through the durable
+    // outbox (write-ahead, stop-and-wait); everything else is sent directly.
+    const sendAgentFrame = (msg: MachineToServerMessage) => this.routeAgentManagerFrame(msg, connection);
     this.agentManager = options.agentManagerFactory
-      ? options.agentManagerFactory((msg) => connection.send(msg), options.apiKey, agentManagerOptions)
-      : new AgentProcessManager((msg) => connection.send(msg), options.apiKey, agentManagerOptions);
+      ? options.agentManagerFactory(sendAgentFrame, options.apiKey, agentManagerOptions)
+      : new AgentProcessManager(sendAgentFrame, options.apiKey, agentManagerOptions);
 
     this.localScheduleRuntime = createBuiltInLocalScheduleRuntime({
       agentsDataDir: this.agentsDataDir,
       clock: this.appScheduleClock,
       getInbox: (agentId) => this.getAgentAppInbox(agentId),
-      notifyInbox: (agentId, item) =>
-        this.agentManager.notifyAgentAppInbox(agentId, item),
+      notifyInbox: (agentId, item, notice) =>
+        this.agentManager.notifyAgentAppInbox(agentId, item, notice),
+      cleanerMeasureRaftDiskFootprint: () => this.measureRaftDiskFootprintCached(),
       send: (message) => connection.send(message),
       trace: (name, attrs, status) =>
-        this.recordDaemonTrace(name, { ...attrs }, status),
+        this.recordDaemonEvent(name, { ...attrs }, status),
+      // Lazy lookup: this.tracer is replaced once the local trace sink is
+      // installed, so the runtime must not capture the startup tracer.
+      tracer: {
+        startSpan: (name, spanOptions) => this.tracer.startSpan(name, spanOptions),
+        emitEvent: (name, eventOptions) => this.tracer.emitEvent(name, eventOptions),
+      },
     });
 
     const connectionFactory = options.connectionFactory ?? ((connOptions: ConnectionOptions) => new DaemonConnection(connOptions));
@@ -1583,7 +1812,12 @@ export class DaemonCore {
       onConnect: () => this.handleConnect(),
       onDisconnect: () => this.handleDisconnect(),
       onHandshakeRejected: (event) => this.handleHandshakeRejected(event),
-      onTraceEvent: (name, attrs, status) => this.recordDaemonTrace(name, attrs, status),
+      onTraceEvent: (name, attrs, status, parent) => this.recordDaemonEvent(name, attrs, status, parent),
+      // Lazy lookup for the same reason as the app runtime tracer above.
+      tracer: {
+        startSpan: (name, spanOptions) => this.tracer.startSpan(name, spanOptions),
+        emitEvent: (name, eventOptions) => this.tracer.emitEvent(name, eventOptions),
+      },
     });
 
     this.connection = connection;
@@ -1592,7 +1826,7 @@ export class DaemonCore {
 
   private getAgentAppInbox(agentId: string): AgentAppInboxStore {
     if (this.machineContextConflict) {
-      this.recordDaemonTrace("daemon.app_storage.access_denied", {
+      this.recordDaemonEvent("daemon.app_storage.access_denied", {
         app_id: "system.agent-inbox",
         outcome: "denied",
         reason: "machine_context_conflict",
@@ -1601,7 +1835,7 @@ export class DaemonCore {
     }
     const storageFactory = this.scopedAppStorageFactory;
     if (!storageFactory) {
-      this.recordDaemonTrace("daemon.app_storage.access_denied", {
+      this.recordDaemonEvent("daemon.app_storage.access_denied", {
         app_id: "system.agent-inbox",
         outcome: "denied",
         reason: "machine_context_missing",
@@ -1615,7 +1849,7 @@ export class DaemonCore {
         "system.agent-inbox",
       );
       if (legacyDisposition === "quarantined") {
-        this.recordDaemonTrace("daemon.app_storage.legacy_quarantined", {
+        this.recordDaemonEvent("daemon.app_storage.legacy_quarantined", {
           app_id: "system.agent-inbox",
           owner_agent_id_present: true,
           reason: "unscoped_owner_unknown",
@@ -1631,7 +1865,7 @@ export class DaemonCore {
         beforeServerAuthorizedAck: (item) => this.localScheduleRuntime.beforeServerAuthorizedAck(agentId, item),
         ownerAgentId: agentId,
         trace: (name, attrs, status) =>
-          this.recordDaemonTrace(name, attrs, status),
+          this.recordDaemonEvent(name, attrs, status),
       });
       this.appInboxes.set(agentId, store);
     }
@@ -1656,6 +1890,22 @@ export class DaemonCore {
     return lockId ? computeTraceJitter(lockId) : NO_JITTER;
   }
 
+  /**
+   * Where the Computer redirects this daemon's stdout/stderr
+   * (`<home>/computer/servers/<serverId>/runner.log`, legacy
+   * `server-runner.log`; see packages/computer/src/paths.ts). Mirrored here
+   * rather than imported: the daemon must not depend on the Computer package,
+   * and deployed Computers already write these paths, so tier 2 works without
+   * a Computer release. Empty until the server has told us which server we
+   * are attached to.
+   */
+  private runnerLogPathCandidates(): string[] {
+    const serverId = this.authenticatedMachineContext?.serverId ?? this.observedServerId;
+    if (!serverId || !/^[A-Za-z0-9_-]{1,128}$/.test(serverId)) return [];
+    const serverDir = path.join(this.slockHome, "computer", "servers", serverId);
+    return [path.join(serverDir, "runner.log"), path.join(serverDir, "server-runner.log")];
+  }
+
   private installLocalTraceSink(machineDir: string): void {
     if (!this.shouldEnableLocalTrace()) return;
     const jitter = this.resolveTraceJitter();
@@ -1672,6 +1922,7 @@ export class DaemonCore {
     }));
     this.agentManager.setTracer(this.tracer);
     this.agentManager.setCliTransportTraceDir(path.join(machineDir, "traces"));
+    this.agentManager.setMachineDir(machineDir);
   }
 
   private installTraceBundleUploader(machineDir: string): void {
@@ -1693,13 +1944,77 @@ export class DaemonCore {
       workerUrl,
       tracer: this.tracer,
       currentFileProvider: () => this.localTraceSink?.getCurrentFile() ?? null,
+      sinkReportProvider: {
+        drain: () => this.localTraceSink?.drainSinkReport() ?? null,
+        noteUndelivered: () => this.localTraceSink?.noteAttrDropReportUndelivered(),
+      },
       jitter: this.resolveTraceJitter(),
     });
     this.traceBundleUploader.start();
   }
 
+  /**
+   * Bounded daily cleanup of Raft Computer's own migration data under
+   * SLOCK_HOME (never agent workspaces). Several daemons may share one
+   * SLOCK_HOME; every removal is idempotent.
+   */
+  private installDiskJanitor(): void {
+    if (this.diskJanitor || process.env.SLOCK_DAEMON_DISK_JANITOR_DISABLED === "1") return;
+    this.diskJanitor = scheduleRaftDiskJanitor({ pass: () => this.runDiskJanitorPass() });
+  }
+
+  private async runDiskJanitorPass(): Promise<void> {
+    const startedAtMs = currentTimeMs();
+    try {
+      const result = await runRaftDiskJanitor({ slockHome: this.slockHome });
+      for (const removal of result.backupsRemoved) {
+        this.recordDaemonEvent("daemon.disk_janitor.backup_removed", {
+          owner_agent_id: removal.ownerAgentId,
+          backup_kind: removal.backupKind,
+          age_days: removal.ageDays,
+          freed_bytes: removal.freedBytes,
+        });
+      }
+      // A fresh measurement after the sweep, so reports compare before/after.
+      this.raftDiskFootprint = null;
+      const footprint = await this.measureRaftDiskFootprintCached();
+      this.recordDaemonEvent("daemon.disk_janitor.run", {
+        outcome: "ok",
+        migration_generations_cleaned: result.migrationGenerationsCleaned,
+        migration_freed_bytes: result.migrationFreedBytes,
+        backups_removed: result.backupsRemoved.length,
+        backups_freed_bytes: result.backupsFreedBytes,
+        sweep_outcome: result.sweepOutcome,
+        duration_ms: currentTimeMs() - startedAtMs,
+        ...footprint,
+      });
+    } catch (error) {
+      this.recordDaemonEvent("daemon.disk_janitor.run", {
+        outcome: "failed",
+        error_class: errorClassOf(error),
+        duration_ms: currentTimeMs() - startedAtMs,
+      }, "error");
+    }
+  }
+
+  /** One bounded walk per hour at most, shared by every caller. */
+  private measureRaftDiskFootprintCached(): Promise<RaftDiskFootprint> {
+    const nowMs = currentTimeMs();
+    if (this.raftDiskFootprint && nowMs - this.raftDiskFootprint.atMs < 60 * 60 * 1_000) {
+      return this.raftDiskFootprint.value;
+    }
+    const value = measureRaftDiskFootprint(this.slockHome);
+    this.raftDiskFootprint = { atMs: nowMs, value };
+    value.catch(() => {
+      if (this.raftDiskFootprint?.value === value) this.raftDiskFootprint = null;
+    });
+    return value;
+  }
+
   start() {
     logger.info("[Slock Daemon] Starting...");
+    // RFC 071: reload un-acked evidence; it is resent with its original identities.
+    this.runtimeOutcomeOutbox.load();
     logger.info(`[Slock Daemon] ${SLOCK_HOME_ENV}=${this.slockHome}`);
     for (const legacy of listLegacyRaftStatePaths(this.slockHome)) {
       logger.warn(
@@ -1711,7 +2026,11 @@ export class DaemonCore {
       slockHome: this.slockHome,
       apiKey: this.options.apiKey,
     });
+    let lifecycleSpan: ActiveSpan | null = null;
     if (!this.machineLock) {
+      // The trace sink only exists after the lock is taken, so the start time
+      // is captured first and given to the span once the sink is ready.
+      const startTimeMs = currentTimeMs();
       this.machineLock = acquireDaemonMachineLock({
         apiKey: this.options.apiKey,
         serverUrl: this.options.serverUrl,
@@ -1721,30 +2040,29 @@ export class DaemonCore {
       logger.info(`[Slock Daemon] Acquired machine lock: ${this.machineLock.lockDir}`);
       this.installLocalTraceSink(this.machineLock.machineDir);
       this.installTraceBundleUploader(this.machineLock.machineDir);
-      const span = this.tracer.startSpan("daemon.lifecycle.start", {
+      this.installDiskJanitor();
+      lifecycleSpan = this.tracer.startSpan("daemon.lifecycle.start", {
         surface: "daemon",
         kind: "internal",
+        startTimeMs,
         attrs: {
           machine_dir_present: true,
           local_trace_enabled: this.shouldEnableLocalTrace(),
         },
       });
-      span.addEvent("daemon.machine_lock.acquired", { machine_dir_present: true });
-      span.end("ok");
-    }
-    if (this.migrationTransport) {
-      this.startMigrationTransport();
+      lifecycleSpan.addEvent("daemon.machine_lock.acquired", { machine_dir_present: true });
     }
     try {
       this.connection.connect();
     } catch (err) {
-      void this.stopMigrationTransport();
+      lifecycleSpan?.end("error", { attrs: { error_class: errorClassOf(err) } });
       this.traceBundleUploader?.stop();
       this.traceBundleUploader = null;
       this.machineLock.release();
       this.machineLock = null;
       throw err;
     }
+    lifecycleSpan?.end("ok");
   }
 
   async stop() {
@@ -1764,10 +2082,17 @@ export class DaemonCore {
     this.scopedAppStorageObserver = null;
     this.traceBundleUploader?.stop();
     this.traceBundleUploader = null;
+    this.diskJanitor?.stop();
+    this.diskJanitor = null;
+    this.diskStatusReportsEnabled = false;
+    if (this.diskStatusTimer !== null) clearTimeout(this.diskStatusTimer);
+    this.diskStatusTimer = null;
     try {
+      // A graceful stop stores every exit (closing the open-launch records) before the outbox stops.
       await this.agentManager.stopAll();
       span.addEvent("daemon.agents.stopped");
     } finally {
+      this.runtimeOutcomeOutbox.stop();
       if (this.connection.connected) {
         const lifecycleAcks = this.options.getComputerLifecycleAcks?.()
           .filter((ack) => ack.phase === "shutdown");
@@ -1787,7 +2112,6 @@ export class DaemonCore {
           shutdown_reason: shutdownReason,
         });
       }
-      await this.stopMigrationTransport();
       this.connection.disconnect();
       span.addEvent("daemon.connection.disconnect_requested");
       this.machineLock?.release();
@@ -1809,98 +2133,125 @@ export class DaemonCore {
     return this.agentManager.getRunningAgentIds();
   }
 
-  private recordDaemonTrace(name: string, attrs?: Record<string, unknown>, status: TraceStatus = "ok"): void {
-    const span = this.tracer.startSpan(name, {
+  // Records a point in time fact as a trace event. The event attaches to the
+  // given parent, or to the span that is active right now.
+  private recordDaemonEvent(
+    name: string,
+    attrs?: Record<string, unknown>,
+    status: TraceStatus = "ok",
+    parent?: TraceContext | null,
+  ): void {
+    this.tracer.emitEvent(name, {
+      parent: parent ?? getActiveTraceContext(),
       surface: "daemon",
-      kind: "internal",
-      attrs,
+      attrs: { ...attrs, status },
     });
-    span.end(status);
+  }
+
+  // Error-system boundary: the handleConnect/emitReady lifecycle hooks are
+  // best-effort by design — a failed hook must never suppress the ready
+  // report — but the failure's bounded identity still exits through a span
+  // (closed site/reason + error_class), never only the logger.
+  private recordConnectLifecycleError(site: string, reason: string, error: unknown): void {
+    this.recordDaemonEvent("daemon.connect.lifecycle_error", {
+      site,
+      outcome: "error",
+      reason,
+      error_class: errorClassOf(error),
+    }, "error");
   }
 
   private getMigrationTransportReady(): AgentMigrationTransportReady {
+    return { ...this.getMigrationTransportReadyBase(), activeLeases: this.activeMigrationTransferLeases() };
+  }
+
+  /** Resumable transfer runs alive in this process; a restart empties this. */
+  private activeMigrationTransferLeases(): NonNullable<AgentMigrationTransportReady["activeLeases"]> {
+    const leases = new Map<string, NonNullable<AgentMigrationTransportReady["activeLeases"]>[number]>();
+    for (const run of this.migrationTransferRuns.values()) {
+      if (!run.lease.transportGeneration || run.controller.signal.aborted) continue;
+      const entry = {
+        migrationId: run.lease.migrationId,
+        transportGeneration: run.lease.transportGeneration,
+        role: run.lease.role,
+      };
+      leases.set(`${entry.migrationId}:${entry.transportGeneration}:${entry.role}`, entry);
+    }
+    return [...leases.values()];
+  }
+
+  private getMigrationTransportReadyBase(): AgentMigrationTransportReady {
     const transferLease = this.getActiveMigrationTransferLease();
+    const capabilities = [AGENT_MIGRATION_CAPABILITY];
     if (transferLease) {
       return {
         provisioned: true,
-        endpoint: transferLease.url,
+        endpoint: null,
         leaseSource: "server",
         provider: transferLease.provider,
         role: transferLease.role,
         transferKind: transferLease.transferKind,
-        url: transferLease.url,
         expiresAt: transferLease.expiresAt,
         maxBytes: transferLease.maxBytes,
-        protocol: AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-        capabilities: [
-          ...AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
-          AGENT_MIGRATION_SOURCE_WORKSPACE_ARCHIVE_CAPABILITY,
-        ],
+        capabilities,
         observedAt: currentDate().toISOString(),
       };
     }
 
-    const endpoint = this.migrationTransportListening ? this.migrationTransportUrl : null;
     return {
-      provisioned: Boolean(endpoint),
-      endpoint,
-      leaseSource: endpoint ? "env" : null,
-      protocol: AGENT_MIGRATION_RESUMABLE_PROTOCOL,
-      capabilities: [
-        ...AGENT_MIGRATION_RESUMABLE_CAPABILITIES,
-        AGENT_MIGRATION_SOURCE_WORKSPACE_ARCHIVE_CAPABILITY,
-      ],
+      provisioned: false,
+      endpoint: null,
+      leaseSource: null,
+      capabilities,
       observedAt: currentDate().toISOString(),
     };
   }
 
-  private startMigrationTransport(): void {
-    if (!this.migrationTransport || this.migrationTransportListenPromise) return;
-
-    this.migrationTransportListenPromise = this.migrationTransport.listen()
-      .then(({ url }) => {
-        this.migrationTransportListening = true;
-        this.migrationTransportUrl = url;
-        logger.info(`[Slock Daemon] Agent migration HTTP transport listening: ${url}`);
-        this.recordDaemonTrace("daemon.migration_transport.listen", {
-          outcome: "listening",
-          url_present: Boolean(url),
-        });
-      })
-      .catch((err: unknown) => {
-        this.migrationTransportListening = false;
-        this.migrationTransportUrl = null;
-        logger.error("[Slock Daemon] Agent migration HTTP transport failed to listen", err);
-        this.recordDaemonTrace("daemon.migration_transport.listen", {
-          outcome: "failed",
-          error_class: err instanceof Error ? err.name : typeof err,
-        }, "error");
-      });
-  }
-
-  private async stopMigrationTransport(): Promise<void> {
-    if (!this.migrationTransport) return;
-
-    const listenPromise = this.migrationTransportListenPromise;
-    this.migrationTransportListenPromise = null;
-    if (listenPromise) await listenPromise;
-    if (!this.migrationTransportListening) return;
-
-    try {
-      await this.migrationTransport.close();
-      this.migrationTransportUrl = null;
-      logger.info("[Slock Daemon] Agent migration HTTP transport stopped");
-      this.recordDaemonTrace("daemon.migration_transport.stop", { outcome: "stopped" });
-    } catch (err) {
-      logger.error("[Slock Daemon] Agent migration HTTP transport failed to stop", err);
-      this.recordDaemonTrace("daemon.migration_transport.stop", {
-        outcome: "failed",
-        error_class: err instanceof Error ? err.name : typeof err,
-      }, "error");
-    } finally {
-      this.migrationTransportListening = false;
-      this.migrationTransportUrl = null;
+  /**
+   * Computer-scoped provider probe. The command carries no credential: the
+   * daemon claims a one-time materialization with its own machine auth, runs
+   * the bounded canary through the real provider adapter, and returns a
+   * closed-category result. A claim failure still produces a failure result so
+   * the Server never waits out the budget for a decidable carrier error.
+   */
+  private async handleProviderProbe(
+    msg: Extract<ServerToMachineMessage, { type: "machine:provider_probe:request" }>,
+  ): Promise<void> {
+    const probeId = asProviderProbeId(msg.probeId);
+    // Wave 1 only knows the Built-in canary adapter; a different runtime label
+    // is a protocol violation and must never produce a Built-in receipt (F3).
+    if (!isProviderProbeRuntime(msg.runtime)) {
+      this.connection.send(await buildUnclaimedProviderProbeResult({
+        requestId: msg.requestId,
+        probeId,
+      }));
+      return;
     }
+    let materialization: ProbeMaterialization;
+    try {
+      materialization = await claimProbeMaterialization({
+        serverUrl: this.options.serverUrl,
+        daemonApiKey: this.options.apiKey,
+        probeId,
+        claimRequestId: msg.requestId,
+      });
+    } catch {
+      this.connection.send(await buildUnclaimedProviderProbeResult({
+        requestId: msg.requestId,
+        probeId,
+      }));
+      return;
+    }
+    const execution = await runProviderProbeCanary({ materialization, model: msg.model });
+    this.connection.send(await buildProviderProbeResultMessage({
+      requestId: msg.requestId,
+      probeId,
+      execution,
+      authority: materialization.authority,
+      daemonVersion: this.daemonVersion,
+      computerVersion: this.computerVersion,
+      runtimeVersion: PI_SDK_VERSION,
+    }));
   }
 
   private getActiveMigrationTransferLease(): AgentMigrationTransportLeaseMessage | null {
@@ -1923,7 +2274,6 @@ export class DaemonCore {
     if (lease.transferKind !== "upload" && lease.transferKind !== "download") {
       throw new Error(`unsupported migration transfer kind: ${lease.transferKind}`);
     }
-    if (!lease.url.trim()) throw new Error("migration transfer lease url is required");
     if (!lease.bearerToken.trim()) throw new Error("migration transfer lease bearer token is required");
     const expiresAtMs = Date.parse(lease.expiresAt);
     if (!lease.expiresAt.trim() || !Number.isFinite(expiresAtMs) || expiresAtMs <= currentTimeMs()) {
@@ -1932,40 +2282,43 @@ export class DaemonCore {
     if (!Number.isInteger(lease.maxBytes) || lease.maxBytes <= 0) {
       throw new Error("migration transfer lease maxBytes must be a positive integer");
     }
-    if (lease.protocol !== undefined) {
-      if (lease.protocol !== AGENT_MIGRATION_RESUMABLE_PROTOCOL) {
-        throw new Error("MIGRATION_RESUMABLE_PROTOCOL_UNSUPPORTED");
-      }
-      if (
-        !Array.isArray(lease.capabilities)
-        || !AGENT_MIGRATION_RESUMABLE_CAPABILITIES.every((capability) =>
-          lease.capabilities?.includes(capability))
-        || !lease.controlUrl?.trim()
-        || !lease.leaseId?.trim()
-        || !lease.transportGeneration?.trim()
-        || !lease.sourceMachineId?.trim()
-        || !lease.targetMachineId?.trim()
-        || !Number.isSafeInteger(lease.expectedMigrationRevision)
-      ) {
-        throw new Error("MIGRATION_RESUMABLE_CAPABILITY_REQUIRED");
-      }
+    if (
+      !lease.controlUrl.trim()
+      || !lease.leaseId.trim()
+      || !lease.transportGeneration.trim()
+      || !lease.sourceMachineId.trim()
+      || !lease.targetMachineId.trim()
+      || !Number.isSafeInteger(lease.expectedMigrationRevision)
+    ) {
+      throw new Error("MIGRATION_TRANSFER_LEASE_INVALID");
     }
   }
 
   private handleMigrationTransportLease(lease: AgentMigrationTransportLeaseMessage): void {
+    const span = this.tracer.startSpan("daemon.migration_transport.lease", {
+      surface: "daemon",
+      kind: "internal",
+    });
     try {
-      this.applyMigrationTransferLease(lease);
+      const outcomeAttrs = this.applyMigrationTransferLease(lease, span.context);
+      span.end("ok", { attrs: outcomeAttrs });
     } catch (err) {
       logger.error("[Slock Daemon] Failed to apply migration transport lease", err);
-      this.recordDaemonTrace("daemon.migration_transport.lease", {
-        outcome: "failed",
-        lease_present: true,
-        error_class: err instanceof Error ? err.name : typeof err,
-      }, "error");
+      span.end("error", {
+        attrs: {
+          outcome: "failed",
+          lease_present: true,
+          error_class: errorClassOf(err),
+        },
+      });
     }
   }
 
-  private applyMigrationTransferLease(lease: AgentMigrationTransportLeaseMessage): void {
+  // Applies the lease and returns the trace attrs that describe the outcome.
+  private applyMigrationTransferLease(
+    lease: AgentMigrationTransportLeaseMessage,
+    leaseSpan: TraceContext,
+  ): Record<string, unknown> {
     this.validateMigrationTransferLease(lease);
     if (
       this.migrationTransferLease?.agentId === lease.agentId
@@ -1976,7 +2329,8 @@ export class DaemonCore {
     ) {
       this.migrationTransferLease = lease;
       this.emitReadyIfConnected();
-      this.recordDaemonTrace("daemon.migration_transport.lease", {
+      this.startMigrationTransferRun(lease, leaseSpan);
+      return {
         ...migrationTraceIdentityAttrs(lease, "lease"),
         outcome: "unchanged",
         agent_id_present: true,
@@ -1986,14 +2340,13 @@ export class DaemonCore {
         provider: lease.provider,
         role: lease.role,
         transfer_kind: lease.transferKind,
-      });
-      this.startMigrationTransferRun(lease);
-      return;
+      };
     }
 
     this.migrationTransferLease = lease;
     this.emitReadyIfConnected();
-    this.recordDaemonTrace("daemon.migration_transport.lease", {
+    this.startMigrationTransferRun(lease, leaseSpan);
+    return {
       ...migrationTraceIdentityAttrs(lease, "lease"),
       outcome: "applied",
       agent_id_present: true,
@@ -2003,20 +2356,18 @@ export class DaemonCore {
       provider: lease.provider,
       role: lease.role,
       transfer_kind: lease.transferKind,
-      url_present: Boolean(lease.url),
       bearer_token_present: Boolean(lease.bearerToken),
-    });
-    this.startMigrationTransferRun(lease);
+    };
   }
 
-  private startMigrationTransferRun(lease: AgentMigrationTransportLeaseMessage): void {
+  private startMigrationTransferRun(lease: AgentMigrationTransportLeaseMessage, leaseSpan: TraceContext): void {
     const key = [
       lease.agentId,
       lease.migrationId,
       lease.migrationGeneration,
       lease.sessionId,
       lease.role,
-      lease.transportGeneration ?? "legacy",
+      lease.transportGeneration,
     ].join(":");
     if (this.migrationTransferRuns.has(key)) return;
     const controller = new AbortController();
@@ -2028,35 +2379,51 @@ export class DaemonCore {
       workspacePlaced: false,
       flipCommitted: false,
     };
-    const promise = this.runMigrationTransferLease(lease, run)
+    // The transfer runs longer than the lease message that started it, so it
+    // gets its own span. Stage events inside the transfer attach to it.
+    const span = this.tracer.startSpan("daemon.migration_transport.transfer", {
+      parent: leaseSpan,
+      surface: "daemon",
+      kind: "internal",
+      attrs: {
+        ...migrationTraceIdentityAttrs(lease, "transfer"),
+        ...(lease.role === "target" ? { download_concurrency: MIGRATION_TARGET_CHUNK_DOWNLOAD_CONCURRENCY } : {}),
+      },
+    });
+    const promise = runWithActiveSpan(span, () => this.runMigrationTransferLease(lease, run))
+      .then(() => {
+        span.end("ok");
+      })
       .catch(async (err: unknown) => {
         if (controller.signal.aborted) {
-          this.recordDaemonTrace("daemon.migration_transport.object_store", {
+          span.end("cancelled", { attrs: { outcome: "canceled" } });
+          this.recordDaemonEvent("daemon.migration_transport.object_store", {
             ...migrationTraceIdentityAttrs(lease, "transfer"),
             outcome: "canceled",
-          });
+          }, "ok", span.context);
           return;
         }
+        span.end("error", { attrs: { outcome: "failed", error_class: errorClassOf(err) } });
         logger.error("[Slock Daemon] Migration object-store transfer failed", err);
-        this.recordDaemonTrace("daemon.migration_transport.object_store", {
+        this.recordDaemonEvent("daemon.migration_transport.object_store", {
           ...migrationTraceIdentityAttrs(lease, "transfer"),
           outcome: "failed",
           agent_id_present: Boolean(lease.agentId),
           migration_id_present: Boolean(lease.migrationId),
           session_id_present: Boolean(lease.sessionId),
-          error_class: err instanceof Error ? err.name : typeof err,
+          error_class: errorClassOf(err),
           ...migrationObjectStoreFailureTraceAttrs(err),
-        }, "error");
+        }, "error", span.context);
         try {
           await this.reportMigrationTransportLost(lease, err);
         } catch (reportErr) {
           logger.error("[Slock Daemon] Failed to report migration transport loss", reportErr);
-          this.recordDaemonTrace("daemon.migration_transport.object_store", {
+          this.recordDaemonEvent("daemon.migration_transport.object_store", {
             ...migrationTraceIdentityAttrs(lease, "transport_lost_report"),
             outcome: "transport_lost_report_failed",
             migration_id_present: Boolean(lease.migrationId),
-            error_class: reportErr instanceof Error ? reportErr.name : typeof reportErr,
-          }, "error");
+            error_class: errorClassOf(reportErr),
+          }, "error", span.context);
         }
       })
       .finally(() => {
@@ -2071,34 +2438,17 @@ export class DaemonCore {
     lease: AgentMigrationTransportLeaseMessage,
     run: MigrationTransferRunState,
   ): Promise<void> {
-    if (lease.provider !== "object_store") return;
-    const signal = run.controller.signal;
-    if (lease.protocol === AGENT_MIGRATION_RESUMABLE_PROTOCOL) {
-      if (lease.role === "source") {
-        await this.uploadResumableMigrationBundle(lease, signal);
-        return;
-      }
-      await this.downloadAndCommitResumableMigrationBundle(lease, run);
-      return;
-    }
     if (lease.role === "source") {
-      await this.uploadMigrationObjectStoreBundle(lease, signal);
+      await this.uploadResumableMigrationBundle(lease, run.controller.signal);
       return;
     }
-    await this.downloadAndImportMigrationObjectStoreBundle(lease, run);
-  }
-
-  private migrationObjectStoreHeaders(lease: AgentMigrationTransportLeaseMessage): HeadersInit {
-    return {
-      "X-Raft-Migration-Token": lease.bearerToken,
-    };
+    await this.downloadAndCommitResumableMigrationBundle(lease, run);
   }
 
   private migrationResumableControlUrl(
     lease: AgentMigrationTransportLeaseMessage,
     suffix: string,
   ): URL {
-    if (!lease.controlUrl) throw new Error("MIGRATION_RESUMABLE_CONTROL_URL_MISSING");
     const base = new URL(lease.controlUrl, this.options.serverUrl).toString().replace(/\/$/, "");
     return new URL(`${base}${suffix}`, this.options.serverUrl);
   }
@@ -2110,20 +2460,70 @@ export class DaemonCore {
     };
   }
 
+  /**
+   * Throttled, fire-and-forget bundle-build progress for the server. Reports
+   * never overlap and never fail the migration; a server without the endpoint
+   * (404) disables reporting for this run. A report skipped by the throttle is
+   * sent once the interval ends, so the latest counts are not lost before a
+   * long quiet stretch.
+   */
+  private createMigrationSourceProgressReporter(
+    lease: AgentMigrationTransportLeaseMessage,
+    signal: AbortSignal,
+  ): (progress: AgentMigrationExportProgress) => void {
+    let lastSentAt = currentDate().getTime();
+    let inFlight = false;
+    let disabled = false;
+    let pending: AgentMigrationExportProgress | null = null;
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearFlush = () => {
+      if (flushTimer) clearTimeout(flushTimer);
+      flushTimer = null;
+    };
+    signal.addEventListener("abort", clearFlush, { once: true });
+    const send = (progress: AgentMigrationExportProgress) => {
+      lastSentAt = currentDate().getTime();
+      pending = null;
+      clearFlush();
+      inFlight = true;
+      void daemonFetch(this.migrationResumableControlUrl(lease, "/source-progress"), {
+        method: "POST",
+        headers: {
+          ...this.migrationResumableControlHeaders(lease),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ migrationGeneration: lease.transportGeneration, ...progress }),
+        signal,
+      }).then((response) => {
+        if (response.status === 404) disabled = true;
+      }, () => undefined).finally(() => {
+        inFlight = false;
+      });
+    };
+    const report = (progress: AgentMigrationExportProgress) => {
+      if (disabled || signal.aborted) return;
+      const waitMs = lastSentAt + MIGRATION_SOURCE_PROGRESS_INTERVAL_MS - currentDate().getTime();
+      if (inFlight || waitMs > 0) {
+        pending = progress;
+        if (!flushTimer) {
+          flushTimer = setTimeout(() => {
+            flushTimer = null;
+            if (pending) report(pending);
+          }, Math.max(waitMs, 1_000));
+          flushTimer.unref?.();
+        }
+        return;
+      }
+      send(progress);
+    };
+    return report;
+  }
+
   private async uploadResumableMigrationBundle(
     lease: AgentMigrationTransportLeaseMessage,
     signal: AbortSignal,
   ): Promise<void> {
-    if (
-      lease.transferKind !== "upload"
-      || !lease.transportGeneration
-      || !lease.leaseId
-      || !Number.isSafeInteger(lease.expectedMigrationRevision)
-      || !lease.sourceMachineId
-      || !lease.targetMachineId
-    ) {
-      throw new Error("MIGRATION_RESUMABLE_SOURCE_LEASE_INVALID");
-    }
+    if (lease.transferKind !== "upload") throw new Error("MIGRATION_RESUMABLE_SOURCE_LEASE_INVALID");
     signal.throwIfAborted();
     const launchId = this.agentManager.getAgentLaunchId(lease.agentId) ?? "none";
     const sessionId = this.agentManager.getAgentSessionId(lease.agentId) ?? "none";
@@ -2164,136 +2564,165 @@ export class DaemonCore {
       );
     }
 
-    const spoolParentPath = path.join(
-      this.slockHome,
-      "migrations",
-      migrationStatePathSegment(lease.migrationId),
-      migrationStatePathSegment(lease.transportGeneration),
-      "source-spool",
-    );
-    const built = await buildAgentMigrationResumableBundle({
+    const streamed = await streamAgentMigrationResumableBundle({
       agentId: lease.agentId,
       migrationId: lease.migrationId,
       migrationGeneration: lease.transportGeneration,
       leaseId: lease.leaseId,
       sourceMachineId: lease.sourceMachineId,
       targetMachineId: lease.targetMachineId,
-      slockHome: this.slockHome,
       workspacePath: path.join(this.agentsDataDir, lease.agentId),
       maxBytes: lease.maxBytes,
-      spoolParentPath,
+      signal,
+      onProgress: this.createMigrationSourceProgressReporter(lease, signal),
+      uploadChunk: (chunk, bytes) => this.uploadStreamedMigrationChunk(lease, chunk, bytes, signal),
     });
-    try {
-      signal.throwIfAborted();
-      const controlResponse = await daemonFetch(
-        this.migrationResumableControlUrl(lease, "/control"),
-        {
-          method: "POST",
-          headers: {
-            ...this.migrationResumableControlHeaders(lease),
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ control: built.control }),
-          signal,
-        },
+    if (streamed.resizedEntryCount > 0) {
+      logger.warn(
+        `[Daemon] Migration ${lease.migrationRef}: ${streamed.resizedEntryCount} file(s) changed size while packing `
+        + `and were cut or zero-padded to their listed size: ${streamed.resizedEntries.join(", ")}`,
       );
-      if (!controlResponse.ok) {
-        throw await migrationStepResponseError(
-          "MIGRATION_CONTROL_REGISTER_FAILED",
-          controlResponse,
-          "control_register",
-        );
-      }
-      const registered = await controlResponse.json() as { controlSha256?: string };
-      if (registered.controlSha256 !== built.controlSha256) {
-        throw new Error("MIGRATION_CONTROL_DIGEST_MISMATCH");
-      }
-
-      while (true) {
-        signal.throwIfAborted();
-        const plan = await this.fetchResumableChunkPlan(lease, "source", signal);
-        if (plan.complete) break;
-        if (plan.chunks.length === 0) throw new Error("MIGRATION_CHUNK_PLAN_EMPTY");
-        for (const chunk of plan.chunks) {
-          const expected = built.control.bundle.chunks[chunk.index];
-          if (
-            !expected
-            || chunk.method !== "PUT"
-            || chunk.sizeBytes !== expected.sizeBytes
-            || chunk.sha256 !== expected.sha256
-          ) {
-            throw new Error("MIGRATION_CHUNK_PLAN_MISMATCH");
-          }
-          const upload = await this.fetchResumableTransferWithRetry(
-            lease,
-            "chunk_upload",
-            false,
-            signal,
-            () => daemonFetch(chunk.url, {
-              method: "PUT",
-              headers: {
-                "Content-Type": "application/octet-stream",
-                "Content-Length": String(expected.sizeBytes),
-              },
-              body: Readable.toWeb(built.openChunk(chunk.index)) as BodyInit,
-              duplex: "half",
-              signal,
-            }),
-          );
-          if (!upload.ok) throw new Error(`MIGRATION_CHUNK_UPLOAD_FAILED:${upload.status}`);
-          await this.reportResumableChunkReceipt(lease, "source", expected, upload.headers.get("etag"), signal);
-        }
-      }
-      const completed = await daemonFetch(
-        this.migrationResumableControlUrl(lease, "/upload-complete"),
-        {
-          method: "POST",
-          headers: {
-            ...this.migrationResumableControlHeaders(lease),
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            migrationGeneration: lease.transportGeneration,
-            leaseId: lease.leaseId,
-            controlSha256: built.controlSha256,
-          }),
-          signal,
-        },
-      );
-      if (!completed.ok) {
-        throw await migrationStepResponseError(
-          "MIGRATION_UPLOAD_COMPLETE_FAILED",
-          completed,
-          "upload_complete",
-        );
-      }
-      this.recordDaemonTrace("daemon.migration_transport.resumable", {
-        ...migrationTraceIdentityAttrs(lease, "upload_complete"),
-        outcome: "uploaded",
-        chunk_count: built.control.bundle.chunks.length,
-        bundle_size_bucket: migrationObjectStoreBundleSizeBucket(built.control.bundle.totalBytes),
-        control_bytes: built.controlBytes,
-      });
-    } finally {
-      await rm(built.spoolDirectory, { recursive: true, force: true });
     }
+    await this.registerAndCompleteResumableUpload(lease, streamed, signal);
+  }
+
+  /** Streamed bundles: records the chunk with the server, then uploads it unless it is already there. */
+  private async uploadStreamedMigrationChunk(
+    lease: AgentMigrationTransportLeaseMessage,
+    chunk: AgentMigrationControlChunk,
+    bytes: Buffer,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const prepareResponse = await this.fetchResumableTransferWithRetry(
+      lease,
+      "chunk_plan",
+      false,
+      signal,
+      () => daemonFetch(this.migrationResumableControlUrl(lease, `/stream-chunks/${chunk.index}`), {
+        method: "POST",
+        headers: {
+          ...this.migrationResumableControlHeaders(lease),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          migrationGeneration: lease.transportGeneration,
+          leaseId: lease.leaseId,
+          sizeBytes: chunk.sizeBytes,
+          sha256: chunk.sha256,
+        }),
+        signal,
+      }),
+    );
+    if (!prepareResponse.ok) {
+      throw await migrationStepResponseError("MIGRATION_CHUNK_PLAN_FAILED", prepareResponse, "chunk_plan");
+    }
+    const prepared = await prepareResponse.json() as { uploaded?: boolean; url?: string | null };
+    if (prepared.uploaded === true) return;
+    if (typeof prepared.url !== "string" || !prepared.url) throw new Error("MIGRATION_CHUNK_PLAN_MISMATCH");
+    const uploadUrl = prepared.url;
+    const upload = await this.fetchResumableTransferWithRetry(
+      lease,
+      "chunk_upload",
+      false,
+      signal,
+      () => daemonFetch(uploadUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(chunk.sizeBytes),
+        },
+        body: bytes as Uint8Array<ArrayBuffer>,
+        signal,
+      }),
+    );
+    if (!upload.ok) throw new Error(`MIGRATION_CHUNK_UPLOAD_FAILED:${upload.status}`);
+    await this.reportResumableChunkReceipt(lease, "source", chunk, upload.headers.get("etag"), signal);
+  }
+
+  /** Registers the control and completes the upload; every chunk was already streamed up. */
+  private async registerAndCompleteResumableUpload(
+    lease: AgentMigrationTransportLeaseMessage,
+    built: { control: AgentMigrationControlManifest; controlSha256: string; controlBytes: number },
+    signal: AbortSignal,
+  ): Promise<void> {
+    signal.throwIfAborted();
+    const controlResponse = await daemonFetch(
+      this.migrationResumableControlUrl(lease, "/control"),
+      {
+        method: "POST",
+        headers: {
+          ...this.migrationResumableControlHeaders(lease),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ control: built.control }),
+        signal,
+      },
+    );
+    if (!controlResponse.ok) {
+      throw await migrationStepResponseError(
+        "MIGRATION_CONTROL_REGISTER_FAILED",
+        controlResponse,
+        "control_register",
+      );
+    }
+    const registered = await controlResponse.json() as { controlSha256?: string };
+    if (registered.controlSha256 !== built.controlSha256) {
+      throw new Error("MIGRATION_CONTROL_DIGEST_MISMATCH");
+    }
+
+    signal.throwIfAborted();
+    const plan = await this.fetchResumableChunkPlan(lease, "source", signal);
+    if (!plan.complete) throw new Error("MIGRATION_CHUNKS_MISSING");
+    const completed = await daemonFetch(
+      this.migrationResumableControlUrl(lease, "/upload-complete"),
+      {
+        method: "POST",
+        headers: {
+          ...this.migrationResumableControlHeaders(lease),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          migrationGeneration: lease.transportGeneration,
+          leaseId: lease.leaseId,
+          controlSha256: built.controlSha256,
+        }),
+        signal,
+      },
+    );
+    if (!completed.ok) {
+      throw await migrationStepResponseError(
+        "MIGRATION_UPLOAD_COMPLETE_FAILED",
+        completed,
+        "upload_complete",
+      );
+    }
+    this.recordDaemonEvent("daemon.migration_transport.resumable", {
+      ...migrationTraceIdentityAttrs(lease, "upload_complete"),
+      outcome: "uploaded",
+      chunk_count: built.control.bundle.chunks.length,
+      bundle_size_bucket: migrationObjectStoreBundleSizeBucket(built.control.bundle.totalBytes),
+      control_bytes: built.controlBytes,
+    });
   }
 
   private async downloadAndCommitResumableMigrationBundle(
     lease: AgentMigrationTransportLeaseMessage,
     run: MigrationTransferRunState,
   ): Promise<void> {
-    if (
-      lease.transferKind !== "download"
-      || !lease.transportGeneration
-      || !lease.leaseId
-      || !lease.targetMachineId
-    ) {
-      throw new Error("MIGRATION_RESUMABLE_TARGET_LEASE_INVALID");
-    }
+    if (lease.transferKind !== "download") throw new Error("MIGRATION_RESUMABLE_TARGET_LEASE_INVALID");
     const signal = run.controller.signal;
     signal.throwIfAborted();
+    // Both durations are measured on this machine's clock, so they can be
+    // read without subtracting timestamps taken on the source computer.
+    const waitStartedAtMs = currentTimeMs();
     const { control, controlSha256 } = await this.waitForResumableControl(lease, signal);
+    const controlReceivedAtMs = currentTimeMs();
+    this.recordDaemonEvent("daemon.migration_transport.resumable", {
+      ...migrationTraceIdentityAttrs(lease, "control_wait"),
+      outcome: "control_received",
+      chunk_count: control.bundle.chunks.length,
+      duration_ms: controlReceivedAtMs - waitStartedAtMs,
+    });
     if (
       control.identity.migrationId !== lease.migrationId
       || control.identity.migrationGeneration !== lease.transportGeneration
@@ -2304,14 +2733,41 @@ export class DaemonCore {
       throw new Error("MIGRATION_CONTROL_IDENTITY_MISMATCH");
     }
     const finalWorkspacePath = path.join(this.agentsDataDir, lease.agentId);
-    const residue = await classifyAgentMigrationTargetResidue({
+    let residue = await classifyAgentMigrationTargetResidue({
       control,
       controlSha256,
       slockHome: this.slockHome,
       finalWorkspacePath,
     });
-    if (residue.classification === "user-owned") {
-      throw new Error("MIGRATION_WORKSPACE_ALREADY_EXISTS");
+    const staleWorkspace = residue.classification === "user-owned"
+      || (residue.classification === "complete-old-copy"
+        && residue.committed
+        && !commitMarkerMatches(residue.committed, control, controlSha256));
+    if (staleWorkspace) {
+      // Until the flip the server keeps authority on the source, so this
+      // directory is not the agent's live workspace, unless the agent is
+      // somehow running here, in which case nothing is touched.
+      if (this.agentManager.getRunningAgentIds().includes(lease.agentId)) {
+        throw new Error("MIGRATION_WORKSPACE_ALREADY_EXISTS");
+      }
+      const { quarantinePath } = await quarantinePreexistingAgentWorkspace({
+        slockHome: this.slockHome,
+        dataDir: this.agentsDataDir,
+        agentId: lease.agentId,
+        migrationId: lease.migrationId,
+      });
+      this.recordDaemonEvent("daemon.migration_transport.resumable", {
+        ...migrationTraceIdentityAttrs(lease, "chunk_download"),
+        outcome: "preexisting_workspace_quarantined",
+        residue_class: residue.classification,
+        quarantine_path_present: Boolean(quarantinePath),
+      });
+      residue = await classifyAgentMigrationTargetResidue({
+        control,
+        controlSha256,
+        slockHome: this.slockHome,
+        finalWorkspacePath,
+      });
     }
     const chunksDirectory = path.join(residue.generationRootPath, "chunks");
     const missing = new Set(await missingAgentMigrationChunks({ control, chunksDirectory }));
@@ -2328,7 +2784,7 @@ export class DaemonCore {
         await waitForAmbientBackoff(MIGRATION_OBJECT_STORE_DOWNLOAD_RETRY_INITIAL_MS, signal);
         continue;
       }
-      for (const chunk of plan.chunks) {
+      const planned = plan.chunks.map((chunk) => {
         const expected = control.bundle.chunks[chunk.index];
         if (
           !expected
@@ -2338,6 +2794,9 @@ export class DaemonCore {
         ) {
           throw new Error("MIGRATION_CHUNK_PLAN_MISMATCH");
         }
+        return { chunk, expected };
+      });
+      await forEachWithConcurrency(planned, MIGRATION_TARGET_CHUNK_DOWNLOAD_CONCURRENCY, async ({ chunk, expected }) => {
         const response = await this.fetchResumableTransferWithRetry(
           lease,
           "chunk_download",
@@ -2355,8 +2814,14 @@ export class DaemonCore {
           chunksDirectory,
         });
         await this.reportResumableChunkReceipt(lease, "target", expected, null, signal);
-      }
+      });
     }
+    this.recordDaemonEvent("daemon.migration_transport.resumable", {
+      ...migrationTraceIdentityAttrs(lease, "chunk_download"),
+      outcome: "chunks_downloaded",
+      chunk_count: control.bundle.chunks.length,
+      duration_ms: currentTimeMs() - controlReceivedAtMs,
+    });
 
     const targetImport = await this.fetchMigrationTargetImportView(lease.migrationId);
     if (targetImport.migrationRef !== lease.migrationRef) {
@@ -2365,7 +2830,7 @@ export class DaemonCore {
     await this.writeMigrationCancellationMarker(lease, run, finalWorkspacePath);
     signal.throwIfAborted();
     const started = await this.postMigrationTargetImportStep(
-      targetImport.grantKey,
+      lease.migrationId,
       "start-transfer",
       { migrationGeneration: targetImport.migrationGeneration },
     );
@@ -2377,12 +2842,14 @@ export class DaemonCore {
       slockHome: this.slockHome,
       chunksDirectory,
       finalWorkspacePath,
+    }, {
+      traceStep: (step, work) => this.traceMigrationPlacementStep(lease, control, step, work),
     });
     run.workspacePlaced = true;
     await this.writeMigrationCancellationMarker(lease, run, finalWorkspacePath);
     signal.throwIfAborted();
     const flipped = await this.postMigrationTargetImportStep(
-      targetImport.grantKey,
+      lease.migrationId,
       "flip-machine",
       { migrationGeneration: started.migrationGeneration },
     );
@@ -2409,7 +2876,7 @@ export class DaemonCore {
     await writeFile(reportPath, reportPayload, { mode: 0o600 });
     const reportSha256 = createHash("sha256").update(reportPayload).digest("hex");
     await this.postMigrationTargetImportStep(
-      targetImport.grantKey,
+      lease.migrationId,
       "arrived",
       {
         migrationGeneration: flipped.migrationGeneration,
@@ -2418,13 +2885,47 @@ export class DaemonCore {
       },
     );
     await rm(this.migrationCancellationDirectory(lease.sessionId), { recursive: true, force: true });
-    this.recordDaemonTrace("daemon.migration_transport.resumable", {
+    // Arrived and flipped: the Server no longer asks this generation for its
+    // chunks, so the compressed workspace copy goes; the JSON report stays.
+    const chunksFreedBytes = await removeMigrationGenerationBulk(
+      residue.generationRootPath,
+      createRaftDiskWalkBudget(),
+    ).catch(() => null);
+    this.recordDaemonEvent("daemon.migration_transport.resumable", {
       ...migrationTraceIdentityAttrs(lease, "arrival_report"),
       outcome: "committed",
       chunk_count: control.bundle.chunks.length,
       commit_outcome: committed.outcome,
       residue_class: residue.classification,
+      ...(chunksFreedBytes === null ? { chunks_removed: false } : { chunks_removed: true, chunks_freed_bytes: chunksFreedBytes }),
     });
+  }
+
+  private async traceMigrationPlacementStep<T>(
+    lease: AgentMigrationTransportLeaseMessage,
+    control: AgentMigrationControlManifest,
+    step: AgentMigrationPlacementStep,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const span = this.tracer.startSpan("daemon.migration_transport.placement", {
+      parent: getActiveTraceContext(),
+      surface: "daemon",
+      kind: "internal",
+      attrs: {
+        ...migrationTraceIdentityAttrs(lease, step),
+        chunk_count: control.bundle.chunks.length,
+        file_count: control.archive.entryCount,
+        expanded_bytes: control.archive.expandedBytes,
+      },
+    });
+    try {
+      const result = await work();
+      span.end("ok", { attrs: { outcome: "ok" } });
+      return result;
+    } catch (err) {
+      span.end("error", { attrs: { outcome: "failed", error_class: errorClassOf(err) } });
+      throw err;
+    }
   }
 
   private async waitForResumableControl(
@@ -2526,9 +3027,6 @@ export class DaemonCore {
     etag: string | null,
     signal: AbortSignal,
   ): Promise<void> {
-    if (!lease.transportGeneration || !lease.leaseId) {
-      throw new Error("MIGRATION_RESUMABLE_LEASE_IDENTITY_MISSING");
-    }
     const response = await this.fetchResumableTransferWithRetry(
       lease,
       "chunk_receipt",
@@ -2590,13 +3088,13 @@ export class DaemonCore {
         await response.body?.cancel().catch(() => undefined);
       } catch (error) {
         lastStatus = null;
-        lastErrorClass = error instanceof Error ? error.name : typeof error;
+        lastErrorClass = errorClassOf(error);
       }
 
       const remainingMs = expiresAtMs - currentTimeMs();
       if (remainingMs <= 0) break;
       const sleepMs = Math.min(delayMs, remainingMs);
-      this.recordDaemonTrace("daemon.migration_transport.resumable", {
+      this.recordDaemonEvent("daemon.migration_transport.resumable", {
         ...migrationTraceIdentityAttrs(lease, operation === "chunk_upload"
           ? "chunk_upload"
           : operation === "chunk_download"
@@ -2607,7 +3105,7 @@ export class DaemonCore {
         outcome: "retry",
         operation,
         attempt,
-        status: lastStatus,
+        http_status: lastStatus,
         error_class: lastErrorClass,
         retry_delay_ms: sleepMs,
       });
@@ -2615,193 +3113,6 @@ export class DaemonCore {
       delayMs = Math.min(delayMs * 2, MIGRATION_OBJECT_STORE_DOWNLOAD_RETRY_MAX_MS);
     }
     throw new Error("MIGRATION_LEASE_EXPIRED");
-  }
-
-  private async uploadMigrationObjectStoreBundle(
-    lease: AgentMigrationTransportLeaseMessage,
-    signal: AbortSignal,
-  ): Promise<void> {
-    if (lease.transferKind !== "upload") {
-      throw new Error("MIGRATION_OBJECT_STORE_SOURCE_KIND_MISMATCH");
-    }
-    signal.throwIfAborted();
-    const built = await buildAgentMigrationObjectStoreBundle({
-      agentId: lease.agentId,
-      slockHome: this.slockHome,
-      workspacePath: path.join(this.agentsDataDir, lease.agentId),
-      maxBytes: lease.maxBytes,
-    });
-    const spoolDirectory = await mkdtemp(path.join(os.tmpdir(), "raft-agent-migration-upload-"));
-    const spoolPath = path.join(spoolDirectory, "bundle.tar.gz");
-    let archiveBytes = 0;
-    let uploadStatus = 0;
-    try {
-      await pipeline(
-        built.bundle,
-        createWriteStream(spoolPath, { flags: "wx", mode: 0o600 }),
-        { signal },
-      );
-      archiveBytes = (await stat(spoolPath)).size;
-      const response = await daemonFetch(lease.url, {
-        method: "PUT",
-        headers: {
-          ...this.migrationObjectStoreHeaders(lease),
-          "Content-Type": AGENT_MIGRATION_OBJECT_STORE_CONTENT_TYPE,
-          "Content-Length": String(archiveBytes),
-        },
-        body: Readable.toWeb(createReadStream(spoolPath)) as BodyInit,
-        duplex: "half",
-        signal,
-      });
-      if (!response.ok) {
-        throw new MigrationObjectStoreUploadHttpError(response.status, archiveBytes);
-      }
-      uploadStatus = response.status;
-    } finally {
-      await rm(spoolDirectory, { recursive: true, force: true });
-    }
-    await this.reportMigrationSourceReady(
-      lease,
-      built.manifestSha256,
-      summarizeAgentMigrationExportManifest(built.manifest),
-    );
-    this.recordDaemonTrace("daemon.migration_transport.object_store", {
-      ...migrationTraceIdentityAttrs(lease, "source_ready_report"),
-      outcome: "uploaded",
-      endpoint_class: "object_store",
-      http_status: uploadStatus,
-      content_length_present: true,
-      upload_body_mode: "spooled_file",
-      bundle_size_bucket: migrationObjectStoreBundleSizeBucket(archiveBytes),
-      bundle_content_bytes: built.contentBytes,
-      max_bytes: lease.maxBytes,
-    });
-  }
-
-  private async downloadAndImportMigrationObjectStoreBundle(
-    lease: AgentMigrationTransportLeaseMessage,
-    run: MigrationTransferRunState,
-  ): Promise<void> {
-    if (lease.transferKind !== "download") {
-      throw new Error("MIGRATION_OBJECT_STORE_TARGET_KIND_MISMATCH");
-    }
-    const signal = run.controller.signal;
-    const response = await this.downloadMigrationObjectStoreBundleWithRetry(lease, signal);
-    if (!response.body) throw new Error("MIGRATION_OBJECT_STORE_DOWNLOAD_BODY_MISSING");
-    const staged = await stageAgentMigrationObjectStoreBundle({
-      bundle: Readable.fromWeb(response.body as import("node:stream/web").ReadableStream),
-      slockHome: this.slockHome,
-      sessionId: lease.sessionId,
-      maxBytes: lease.maxBytes,
-      signal,
-    });
-    const targetImport = await this.fetchMigrationTargetImportView(lease.migrationId);
-    if (targetImport.agentId !== lease.agentId) {
-      throw new Error("MIGRATION_TARGET_IMPORT_AGENT_MISMATCH");
-    }
-    if (targetImport.migrationRef !== lease.migrationRef) {
-      throw new Error("MIGRATION_TARGET_IMPORT_REF_MISMATCH");
-    }
-    if (targetImport.manifestSha256 && targetImport.manifestSha256 !== staged.manifestSha256) {
-      throw new Error("MIGRATION_TARGET_IMPORT_MANIFEST_SHA_MISMATCH");
-    }
-
-    const plan = await buildAgentMigrationAdoptPlan({
-      sourceKind: "staged_bundle",
-      slockHome: this.slockHome,
-      stagingWorkspacePath: staged.stagingWorkspacePath,
-      finalWorkspacePath: path.join(this.agentsDataDir, lease.agentId),
-      manifest: staged.manifest,
-      manifestSha256: staged.manifestSha256,
-      generation: {
-        grantKey: targetImport.grantKey,
-        migrationGeneration: targetImport.migrationGeneration,
-        sourceMachineId: targetImport.sourceMachineId,
-        targetMachineId: targetImport.targetMachineId,
-        localMachineId: targetImport.targetMachineId,
-      },
-    });
-    await this.writeMigrationCancellationMarker(lease, run, plan.finalWorkspacePath);
-    await executeAgentMigrationAdoptPlan(
-      plan,
-      this.migrationRebindClient(targetImport.grantKey),
-      currentDate(),
-      {
-        signal,
-        onWorkspacePlacementStarting: async () => {
-          run.workspacePlacementStarted = true;
-          await this.writeMigrationCancellationMarker(lease, run, plan.finalWorkspacePath);
-        },
-        onWorkspacePlaced: async () => {
-          run.workspacePlaced = true;
-          await this.writeMigrationCancellationMarker(lease, run, plan.finalWorkspacePath);
-        },
-        onFlipCommitted: async () => {
-          run.flipCommitted = true;
-          await this.writeMigrationCancellationMarker(lease, run, plan.finalWorkspacePath);
-        },
-      },
-    );
-    await rm(this.migrationCancellationDirectory(lease.sessionId), { recursive: true, force: true });
-    this.recordDaemonTrace("daemon.migration_transport.object_store", {
-      ...migrationTraceIdentityAttrs(lease, "arrival_report"),
-      outcome: "imported",
-      bundle_content_bytes: staged.contentBytes,
-      manifest_sha_present: true,
-    });
-  }
-
-  private async downloadMigrationObjectStoreBundleWithRetry(
-    lease: AgentMigrationTransportLeaseMessage,
-    signal: AbortSignal,
-  ): Promise<Response> {
-    const expiresAtMs = Date.parse(lease.expiresAt);
-    let attempt = 0;
-    let delayMs = MIGRATION_OBJECT_STORE_DOWNLOAD_RETRY_INITIAL_MS;
-    let lastStatus: number | null = null;
-    let lastErrorClass: string | null = null;
-
-    while (currentTimeMs() < expiresAtMs) {
-      signal.throwIfAborted();
-      attempt += 1;
-      try {
-        const response = await daemonFetch(lease.url, {
-          method: "GET",
-          headers: this.migrationObjectStoreHeaders(lease),
-          signal,
-        });
-        if (response.ok) {
-          return response;
-        }
-        lastStatus = response.status;
-        lastErrorClass = null;
-        if (!isRetryableMigrationObjectStoreDownloadStatus(response.status)) {
-          throw new Error(`MIGRATION_OBJECT_STORE_DOWNLOAD_FAILED:${response.status}`);
-        }
-      } catch (err) {
-        if (err instanceof Error && err.message.startsWith("MIGRATION_OBJECT_STORE_DOWNLOAD_FAILED:")) {
-          throw err;
-        }
-        lastErrorClass = err instanceof Error ? err.name : typeof err;
-      }
-
-      const remainingMs = expiresAtMs - currentTimeMs();
-      if (remainingMs <= 0) break;
-      const sleepMs = Math.min(delayMs, remainingMs);
-      this.recordDaemonTrace("daemon.migration_transport.object_store", {
-        ...migrationTraceIdentityAttrs(lease, "chunk_download"),
-        outcome: "download_retry",
-        attempt,
-        status: lastStatus,
-        error_class: lastErrorClass,
-        retry_delay_ms: sleepMs,
-      });
-      await waitForAmbientBackoff(sleepMs, signal);
-      delayMs = Math.min(delayMs * 2, MIGRATION_OBJECT_STORE_DOWNLOAD_RETRY_MAX_MS);
-    }
-
-    const suffix = lastStatus !== null ? String(lastStatus) : (lastErrorClass ?? "unknown");
-    throw new Error(`MIGRATION_OBJECT_STORE_DOWNLOAD_RETRY_EXHAUSTED:${suffix}`);
   }
 
   private migrationCancellationDirectory(sessionId: string): string {
@@ -2833,7 +3144,7 @@ export class DaemonCore {
       agentId: lease.agentId,
       migrationId: lease.migrationId,
       migrationRef: lease.migrationRef,
-      transportGeneration: lease.transportGeneration ?? lease.migrationGeneration,
+      transportGeneration: lease.transportGeneration,
       sessionId: lease.sessionId,
       finalWorkspacePath: path.resolve(finalWorkspacePath),
       workspacePlacementStarted: run.workspacePlacementStarted,
@@ -2890,6 +3201,21 @@ export class DaemonCore {
   }
 
   private async handleMigrationCancellation(message: AgentMigrationCancelMessage): Promise<void> {
+    const span = this.tracer.startSpan("daemon.migration_transport.cancel_cleanup", {
+      surface: "daemon",
+      kind: "internal",
+      attrs: {
+        role: message.role,
+        migration_ref: message.migrationRef,
+      },
+    });
+    const cleaned = await runWithActiveSpan(span, () => this.cleanUpCancelledMigration(message));
+    span.end(cleaned ? "ok" : "error");
+  }
+
+  // Returns false when the cleanup failed. The failure is already reported
+  // to the server and recorded as a trace event.
+  private async cleanUpCancelledMigration(message: AgentMigrationCancelMessage): Promise<boolean> {
     try {
       if (!message.agentId.trim() || !message.migrationId.trim()) throw new Error("MIGRATION_CANCEL_IDENTITY_INVALID");
       if (!/^mig_[A-Za-z0-9_-]{22}$/.test(message.migrationRef)) throw new Error("MIGRATION_CANCEL_REF_INVALID");
@@ -2912,21 +3238,21 @@ export class DaemonCore {
           throw new Error("MIGRATION_CANCEL_GENERATION_STALE");
         }
         await this.reportMigrationCancellation(message, priorReceipt.outcome);
-        return;
+        return true;
       }
 
       const matchingRuns = [...this.migrationTransferRuns.values()].filter((run) =>
         run.lease.agentId === message.agentId
         && run.lease.migrationId === message.migrationId
         && run.lease.migrationRef === message.migrationRef
-        && (run.lease.transportGeneration ?? run.lease.migrationGeneration) === message.transportGeneration
+        && run.lease.transportGeneration === message.transportGeneration
         && run.lease.role === message.role
       );
       const activeLeaseMatches = Boolean(
         this.migrationTransferLease?.agentId === message.agentId
         && this.migrationTransferLease?.migrationId === message.migrationId
         && this.migrationTransferLease?.migrationRef === message.migrationRef
-        && (this.migrationTransferLease?.transportGeneration ?? this.migrationTransferLease?.migrationGeneration) === message.transportGeneration
+        && this.migrationTransferLease?.transportGeneration === message.transportGeneration
         && this.migrationTransferLease?.role === message.role
       );
       for (const run of matchingRuns) run.controller.abort(new Error("MIGRATION_CANCEL_REQUESTED"));
@@ -2997,20 +3323,21 @@ export class DaemonCore {
       };
       await this.writeJsonAtomically(this.migrationCancellationReceiptPath(sessionKey), receipt);
       await this.reportMigrationCancellation(message, outcome);
-      this.recordDaemonTrace("daemon.migration_transport.object_store", {
+      this.recordDaemonEvent("daemon.migration_transport.object_store", {
         stage: "cancel_cleanup",
         outcome: "cancel_acknowledged",
         role: message.role,
         migration_ref: message.migrationRef,
       });
+      return true;
     } catch (err) {
       logger.error("[Slock Daemon] Migration cancellation cleanup failed", err);
-      this.recordDaemonTrace("daemon.migration_transport.object_store", {
+      this.recordDaemonEvent("daemon.migration_transport.object_store", {
         stage: "cancel_cleanup",
         outcome: "cancel_cleanup_failed",
         role: message.role,
         migration_ref: message.migrationRef,
-        error_class: err instanceof Error ? err.name : typeof err,
+        error_class: errorClassOf(err),
         error_code: /^(MIGRATION_[A-Z0-9_]+)/.exec(
           err instanceof Error ? err.message : String(err),
         )?.[1],
@@ -3019,12 +3346,13 @@ export class DaemonCore {
         await this.reportMigrationCancellation(
           message,
           "needs_attention",
-          err instanceof Error ? err.name : typeof err,
+          errorClassOf(err),
           err instanceof Error ? err.message : String(err),
         );
       } catch (reportErr) {
         logger.error("[Slock Daemon] Failed to report migration cancellation attention state", reportErr);
       }
+      return false;
     }
   }
 
@@ -3068,45 +3396,64 @@ export class DaemonCore {
         role: lease.role,
         transferKind: lease.transferKind,
         code: migrationTransferFailureCode(err),
+        // Lets the server ignore a stale run after re-provisioning (additive).
+        ...(lease.transportGeneration ? { transportGeneration: lease.transportGeneration } : {}),
+        detailCode: migrationTransferFailureDetailCode(err),
         message: migrationTransferFailureMessage(err),
       }),
     });
     if (!response.ok) {
       throw new Error(`MIGRATION_TRANSPORT_LOST_REPORT_FAILED:${response.status}`);
     }
-    this.recordDaemonTrace("daemon.migration_transport.object_store", {
+    this.recordDaemonEvent("daemon.migration_transport.object_store", {
       ...migrationTraceIdentityAttrs(lease, "transport_lost_report"),
       outcome: "transport_lost_reported",
       migration_id_present: Boolean(lease.migrationId),
     });
   }
 
-  private async reportMigrationSourceReady(
-    lease: AgentMigrationTransportLeaseMessage,
-    manifestSha256: string,
-    transferSummary: AgentMigrationTransferSummary,
-  ): Promise<void> {
-    const url = new URL(`/internal/computer/agent-migrations/by-id/${encodeURIComponent(lease.migrationId)}/source-ready`, this.options.serverUrl);
-    const response = await daemonFetch(url, {
-      method: "POST",
-      headers: {
-        ...this.internalComputerHeaders(),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        manifestPath: `object-store:${lease.sessionId}/manifest.json`,
-        manifestSha256,
-        transferSummary,
-      }),
-    });
-    if (!response.ok) {
-      throw new Error(`MIGRATION_SOURCE_READY_REPORT_FAILED:${response.status}:${await migrationStepErrorSuffix(response)}`);
+  private archiveMigrationSourceWorkspaceSerialized(
+    agentId: string,
+    migrationId: string,
+    migrationCreatedAt?: string,
+  ): Promise<AgentMigrationWorkspaceArchiveOutcome> {
+    const inFlight = this.migrationSourceArchiveRuns.get(agentId);
+    if (inFlight?.migrationId === migrationId) return inFlight.run;
+    // A different migration of the same agent waits for the in-flight one:
+    // both touch the same source directory and backup root.
+    const run = (inFlight?.run.catch(() => undefined) ?? Promise.resolve())
+      .then(() => this.assertMigrationSourceWorkspaceArchivable(agentId, migrationCreatedAt))
+      .then(() => archiveCompletedAgentMigrationSourceWorkspace({
+        slockHome: this.slockHome,
+        dataDir: this.agentsDataDir,
+        agentId,
+        migrationId,
+      }))
+      .finally(() => {
+        if (this.migrationSourceArchiveRuns.get(agentId)?.run === run) {
+          this.migrationSourceArchiveRuns.delete(agentId);
+        }
+      });
+    this.migrationSourceArchiveRuns.set(agentId, { migrationId, run });
+    return run;
+  }
+
+  /**
+   * The server checks the holder before asking, but a background retry reaches
+   * the daemon after that check committed. The daemon is the last line: never
+   * archive a workspace whose agent runs here, or one that a later migration
+   * committed onto this computer (the agent moved back).
+   */
+  private async assertMigrationSourceWorkspaceArchivable(agentId: string, migrationCreatedAt?: string): Promise<void> {
+    if (this.agentManager.getRunningAgentIds().includes(agentId)) {
+      throw new Error("MIGRATION_WORKSPACE_ARCHIVE_AGENT_RUNNING");
     }
-    this.recordDaemonTrace("daemon.migration_transport.object_store", {
-      ...migrationTraceIdentityAttrs(lease, "source_ready_report"),
-      outcome: "source_ready_reported",
-      migration_id_present: Boolean(lease.migrationId),
-    });
+    const createdAtMs = migrationCreatedAt ? Date.parse(migrationCreatedAt) : Number.NaN;
+    if (!Number.isFinite(createdAtMs)) return;
+    const marker = await readCommitMarker(path.join(this.agentsDataDir, agentId));
+    if (marker && Date.parse(marker.committedAt) > createdAtMs) {
+      throw new Error("MIGRATION_WORKSPACE_ARCHIVE_NEWER_OWNER");
+    }
   }
 
   private async fetchMigrationTargetImportView(migrationId: string): Promise<MigrationTargetImportView> {
@@ -3123,30 +3470,8 @@ export class DaemonCore {
     return body.migration;
   }
 
-  private async fetchMigrationTargetImportViewByGrantKey(grantKey: string): Promise<MigrationTargetImportView> {
-    const url = new URL(`/internal/computer/agent-migrations/${encodeURIComponent(grantKey)}`, this.options.serverUrl);
-    const response = await daemonFetch(url, {
-      method: "GET",
-      headers: this.internalComputerHeaders(),
-    });
-    if (!response.ok) {
-      throw new Error(`MIGRATION_TARGET_IMPORT_LOOKUP_FAILED:${response.status}`);
-    }
-    const body = await response.json() as { migration?: MigrationTargetImportView };
-    if (!body.migration) throw new Error("MIGRATION_TARGET_IMPORT_VIEW_MISSING");
-    return body.migration;
-  }
-
-  private migrationRebindClient(grantKey: string): AgentMigrationRebindClient {
-    return {
-      startTransfer: (input) => this.postMigrationTargetImportStep(grantKey, "start-transfer", input),
-      flipMachine: (input) => this.postMigrationTargetImportStep(grantKey, "flip-machine", input),
-      markArrived: (input) => this.postMigrationTargetImportStep(grantKey, "arrived", input),
-    };
-  }
-
   private async postMigrationTargetImportStep(
-    grantKey: string,
+    migrationId: string,
     step: "start-transfer" | "flip-machine" | "arrived",
     body: {
       migrationGeneration: string;
@@ -3154,11 +3479,22 @@ export class DaemonCore {
       reportSha256?: string;
     },
   ): Promise<MigrationTargetImportView> {
-    return await this.postMigrationTargetImportStepOnce(grantKey, step, body, true);
+    return await retryMigrationTargetStep({
+      step,
+      body,
+      post: (attemptBody) => this.postMigrationTargetImportStepOnce(migrationId, step, attemptBody, true),
+      fetchView: () => this.fetchMigrationTargetImportView(migrationId),
+      onRetry: (error, delayMs) => this.recordDaemonEvent("daemon.migration_transport.target_step", {
+        step,
+        outcome: "retry",
+        error_class: errorClassOf(error),
+        delay_ms: delayMs,
+      }),
+    });
   }
 
   private async postMigrationTargetImportStepOnce(
-    grantKey: string,
+    migrationId: string,
     step: "start-transfer" | "flip-machine" | "arrived",
     body: {
       migrationGeneration: string;
@@ -3167,7 +3503,7 @@ export class DaemonCore {
     },
     allowStartGenerationRefresh: boolean,
   ): Promise<MigrationTargetImportView> {
-    const url = new URL(`/internal/computer/agent-migrations/${encodeURIComponent(grantKey)}/${step}`, this.options.serverUrl);
+    const url = new URL(`/internal/computer/agent-migrations/by-id/${encodeURIComponent(migrationId)}/${step}`, this.options.serverUrl);
     const response = await daemonFetch(url, {
       method: "POST",
       headers: {
@@ -3179,10 +3515,10 @@ export class DaemonCore {
     if (!response.ok) {
       const suffix = await migrationStepErrorSuffix(response);
       if (step === "start-transfer" && response.status === 409 && suffix === "migration_generation_stale" && allowStartGenerationRefresh) {
-        const current = await this.fetchMigrationTargetImportViewByGrantKey(grantKey);
+        const current = await this.fetchMigrationTargetImportView(migrationId);
         if (current.state === "in_transit") return current;
         if (current.state === "ready" && current.migrationGeneration !== body.migrationGeneration) {
-          return await this.postMigrationTargetImportStepOnce(grantKey, step, {
+          return await this.postMigrationTargetImportStepOnce(migrationId, step, {
             ...body,
             migrationGeneration: current.migrationGeneration,
           }, false);
@@ -3203,10 +3539,12 @@ export class DaemonCore {
   }
 
   private withDaemonTraceScope(tracer: Tracer): Tracer {
+    const scopedTracer = () => createTraceScopeTracer(tracer, this.daemonTraceScope(), {
+      spanAttrContracts: DAEMON_CORE_TRACE_ATTR_CONTRACTS,
+    });
     return {
-      startSpan: (name, options) => createTraceScopeTracer(tracer, this.daemonTraceScope(), {
-        spanAttrContracts: DAEMON_CORE_TRACE_ATTR_CONTRACTS,
-      }).startSpan(name, options),
+      startSpan: (name, options) => scopedTracer().startSpan(name, options),
+      emitEvent: (name, options) => scopedTracer().emitEvent(name, options),
     };
   }
 
@@ -3243,7 +3581,7 @@ export class DaemonCore {
       this.scopedAppStorageObserver?.stop();
       this.scopedAppStorageObserver = null;
       this.appInboxes.clear();
-      this.recordDaemonTrace("daemon.machine_context.conflict", {
+      this.recordDaemonEvent("daemon.machine_context.conflict", {
         machine_id_match: current.machineId === context.machineId,
         server_id_match: current.serverId === context.serverId,
       }, "error");
@@ -3259,7 +3597,7 @@ export class DaemonCore {
     this.observedServerId = context.serverId;
     this.scopedAppStorageObserver = createScopedAppStorageObserver({
       clock: this.appScheduleClock,
-      trace: (name, attrs, status) => this.recordDaemonTrace(name, attrs, status),
+      trace: (name, attrs, status) => this.recordDaemonEvent(name, attrs, status),
       serverId: context.serverId,
       writerEpoch: this.daemonInstanceId,
     });
@@ -3268,7 +3606,7 @@ export class DaemonCore {
       owner: this.authenticatedMachineContext,
       writerEpoch: this.daemonInstanceId,
       onFailure: (event) => {
-        this.recordDaemonTrace("daemon.app_storage.failure", {
+        this.recordDaemonEvent("daemon.app_storage.failure", {
           operation: event.operation,
           store: event.store,
           app: event.appId,
@@ -3287,7 +3625,7 @@ export class DaemonCore {
       },
     });
     this.localScheduleRuntime.bindScopedStorage(this.scopedAppStorageFactory);
-    this.recordDaemonTrace("daemon.machine_context.bound", {
+    this.recordDaemonEvent("daemon.machine_context.bound", {
       machine_id_present: true,
       server_id_present: true,
     });
@@ -3337,10 +3675,35 @@ export class DaemonCore {
     };
   }
 
-  private async mintRunnerCredential(agentId: string, config: AgentConfig): Promise<{ apiKey: string; credentialId: string | null }> {
+  private async mintRunnerCredential(
+    agentId: string,
+    config: AgentConfig,
+    parent: TraceContext | null,
+  ): Promise<{ apiKey: string; credentialId: string | null }> {
     if (config.agentCredentialKey) {
       return { apiKey: config.agentCredentialKey, credentialId: config.agentCredentialId ?? null };
     }
+    const span = this.tracer.startSpan("daemon.runner_credential_mint", {
+      parent,
+      surface: "daemon",
+      kind: "client",
+      attrs: { agentId, runtime: config.runtime },
+    });
+    try {
+      const credential = await this.mintRunnerCredentialWithRetry(agentId, config, span.context);
+      span.end("ok");
+      return credential;
+    } catch (err) {
+      span.end("error", { attrs: { error_class: errorClassOf(err) } });
+      throw err;
+    }
+  }
+
+  private async mintRunnerCredentialWithRetry(
+    agentId: string,
+    config: AgentConfig,
+    mintSpan: TraceContext,
+  ): Promise<{ apiKey: string; credentialId: string | null }> {
     if (process.env.SLOCK_AGENT_RUNNER_CREDENTIALS_DISABLED === "1") {
       throw new RunnerCredentialMintError("runner credential mint is disabled by SLOCK_AGENT_RUNNER_CREDENTIALS_DISABLED", {
         code: "runner_credentials_disabled",
@@ -3360,31 +3723,31 @@ export class DaemonCore {
       } catch (err) {
         lastError = err;
         const detail = runnerCredentialErrorDetail(err);
-        this.recordDaemonTrace("daemon.runner_credential_mint.retry", {
+        this.recordDaemonEvent("daemon.runner_credential_mint.retry", {
           agentId,
           runtime: config.runtime,
           attempt,
           max_attempts: RUNNER_CREDENTIAL_MINT_MAX_ATTEMPTS,
-          status: detail.status,
+          http_status: detail.status,
           code: detail.code,
           reason: detail.message,
           retryable: detail.retryable,
-        }, detail.retryable && attempt < RUNNER_CREDENTIAL_MINT_MAX_ATTEMPTS ? "ok" : "error");
+        }, detail.retryable && attempt < RUNNER_CREDENTIAL_MINT_MAX_ATTEMPTS ? "ok" : "error", mintSpan);
         if (!detail.retryable || attempt >= RUNNER_CREDENTIAL_MINT_MAX_ATTEMPTS) break;
         await waitForRunnerCredentialRetry();
       }
     }
 
     const detail = runnerCredentialErrorDetail(lastError);
-    this.recordDaemonTrace("daemon.runner_credential_mint.failed", {
+    this.recordDaemonEvent("daemon.runner_credential_mint.failed", {
       agentId,
       runtime: config.runtime,
-      status: detail.status,
+      http_status: detail.status,
       code: detail.code,
       reason: detail.message,
       retryable: detail.retryable,
       max_attempts: RUNNER_CREDENTIAL_MINT_MAX_ATTEMPTS,
-    }, "error");
+    }, "error", mintSpan);
     throw new RunnerCredentialMintError(
       `runner_credential_mint_failed: ${detail.message}. Managed runner startup requires /internal/computer credential mint; deploy server first or roll back the daemon binary.`,
       {
@@ -3425,9 +3788,24 @@ export class DaemonCore {
     });
   }
 
+  /** task #1113: no process and no snapshot — hand the wake back to the Server with the delivery key. */
+  private sendDeliveryRejectedNoProcess(msg: AgentDeliverMessage, traceparent?: string): void {
+    this.connection.send({
+      type: "agent:delivery:rejected",
+      agentId: msg.agentId,
+      seq: msg.seq > 0 ? msg.seq : msg.message.seq ?? 0,
+      ...(msg.deliveryId ? { deliveryId: msg.deliveryId } : {}),
+      reason: "no_process",
+      ...(msg.mentionDelivery ? { mentionDelivery: msg.mentionDelivery } : {}),
+      ...(traceparent ? { traceparent } : {}),
+    });
+  }
+
   private sendMentionDeliveryTerminalError(
     msg: AgentDeliverMessage,
-    code: "IDENTITY_UNKNOWN" | "IDENTITY_DRIFT" | "QUOTA_LIMITED" | "DELIVERY_REJECTED" | "UNSUPPORTED_DELIVERY_PATH" | "INSTRUMENT_FAILED",
+    // task #154: single authoritative union from @botiverse/raft-shared
+    // (previously a third inline copy that silently lacked REDELIVERY_EXHAUSTED).
+    code: MentionDeliveryTerminalErrorCode,
     traceparent?: string,
   ): void {
     if (!msg.mentionDelivery) return;
@@ -3455,34 +3833,88 @@ export class DaemonCore {
 
   private sendStartDispatchReceipt(
     receipt: AgentStartAckMessage,
-    msg: AgentStartMessage,
     outcome: "accepted" | "duplicate",
+    startSpan: TraceContext,
   ): void {
-    const span = this.tracer.startSpan("daemon.agent.start_dispatch.receipt", {
-      parent: parseTraceparent(msg.traceparent),
-      surface: "daemon",
-      kind: "consumer",
-      attrs: {
-        agent_id: receipt.agentId,
-        launch_id: receipt.launchId,
-        start_dispatch_id: receipt.startDispatchId,
-        queue_state: receipt.queueState,
-        queue_depth: receipt.queueDepth,
-        queue_age_ms: receipt.queueAgeMs,
-        outcome,
-      },
-    });
+    this.recordDaemonEvent("daemon.agent.start_dispatch.receipt", {
+      agent_id: receipt.agentId,
+      launch_id: receipt.launchId,
+      start_dispatch_id: receipt.startDispatchId,
+      queue_state: receipt.queueState,
+      queue_depth: receipt.queueDepth,
+      queue_age_ms: receipt.queueAgeMs,
+      outcome,
+    }, "ok", startSpan);
     this.connection.send({
       ...receipt,
-      traceparent: formatTraceparent(span.context),
+      traceparent: formatTraceparent(startSpan),
     });
-    span.end("ok");
   }
 
-  private reportAgentStartFailure(msg: AgentStartMessage, err: unknown): void {
+  /**
+   * RFC 071 outbox: route the agent manager's frames. Evidence frames get the
+   * launch's `generation` and go through the outbox. A refusal for blocked
+   * storage cannot be stored either, so it is sent best effort.
+   */
+  private routeAgentManagerFrame(msg: MachineToServerMessage, connection: DaemonConnection): void {
+    if (!isOutboxFrame(msg)) {
+      connection.send(msg);
+      return;
+    }
+    const generation = this.launchGenerations.get(msg.agentId)?.get(msg.launchId);
+    const frame = generation === undefined ? msg : { ...msg, generation };
+    // Only to a server that acks: an older one does not understand the reason
+    // (it gets no outbox frame; the refusal is queued like any other).
+    if (this.serverAcksRuntimeOutcomes && frame.type === "agent:start:outcome" && frame.result.kind === "not_spawned"
+      && frame.result.reason === "terminal_failure_outcome_storage_blocked") {
+      connection.send(frame);
+      return;
+    }
+    this.runtimeOutcomeOutbox.enqueue(frame);
+  }
+
+  private recordLaunchGeneration(msg: AgentStartMessage): void {
+    if (!msg.launchId || msg.breakerGeneration === undefined) return;
+    const byLaunch = this.launchGenerations.get(msg.agentId) ?? new Map<string, number>();
+    byLaunch.set(msg.launchId, msg.breakerGeneration);
+    while (byLaunch.size > 32) byLaunch.delete(byLaunch.keys().next().value!);
+    this.launchGenerations.set(msg.agentId, byLaunch);
+  }
+
+  /**
+   * RFC 071 outbox local refusal (see `RuntimeOutcomeOutbox.decideStart`).
+   * A known storage failure or lost critical evidence refuses whatever
+   * server is attached; only the ack-dependent parts (reserve, backlog-only
+   * markers) need an acking server:
+   *  - a start (human too) whose open request / epoch cannot be written, or
+   *    (acks) with no reserve: `terminal_failure_outcome_storage_blocked`;
+   *  - an AUTOMATIC start while the agent is unreliable, or has an un-acked
+   *    marker of lost critical evidence no human takeover covers (any
+   *    server), or (acks) a backlog-only marker: `terminal_failure_needs_manual`;
+   *  - an admitted human start durably clears the unreliable state (the only
+   *    way to clear it), records its takeover, and gets a recovery grant
+   *    bound to its launch: the only thing that lets it through the spawn /
+   *    rebind gate (passed explicitly to `startAgent`).
+   */
+  private localStartAdmission(msg: AgentStartMessage): OutboxStartAdmission {
+    return this.runtimeOutcomeOutbox.admitServerStart(msg.agentId, {
+      takeoverEpoch: msg.takeoverEpoch,
+      humanStart: msg.humanStart,
+      launchId: msg.launchId,
+    });
+  }
+
+  private reportAgentStartFailure(msg: AgentStartMessage, err: unknown, startSpan?: TraceContext): void {
+    // RFC 071: a launch the process manager did not settle (spawned, rebound,
+    // or its own not_spawned) failed here before any process existed.
+    this.agentManager.settleServerStartNotSpawned(
+      msg.agentId,
+      msg.launchId,
+      err instanceof LocalStartRefusedError ? err.reason : "start_rejected",
+    );
     const classification = classifySpawnFailure(err);
     logger.error(`[Agent ${msg.agentId}] Start failed (${classification.reason}): ${classification.detail}`);
-    this.recordDaemonTrace("daemon.agent.spawn.failed", {
+    this.recordDaemonEvent("daemon.agent.spawn.failed", {
       agentId: msg.agentId,
       launchId: msg.launchId,
       start_dispatch_id: msg.startDispatchId,
@@ -3493,8 +3925,10 @@ export class DaemonCore {
         ? "unclassified_fallback"
         : "classified",
       session_id_present: Boolean(msg.config.sessionId),
-    }, "error");
-    this.connection.send({ type: "agent:status", agentId: msg.agentId, status: "inactive", launchId: msg.launchId });
+      // The shown refusal text (with the way out) where this daemon refused the start itself.
+      ...(err instanceof LocalStartRefusedError ? { local_refusal_detail: err.message } : {}),
+    }, "error", startSpan);
+    this.agentManager.reportStartFailureStatus(msg.agentId, msg.launchId);
     // Accepted ambient clock: telemetry records the daemon's observed wall-clock time for this failure.
     this.connection.send({
       type: "agent:activity",
@@ -3504,27 +3938,59 @@ export class DaemonCore {
       launchId: msg.launchId,
       observedAtMs: Date.now(),
       isHeartbeat: false,
+      // task #1123: the typed reason travels beside the human text so the web
+      // picks copy by reason instead of parsing the detail string.
+      spawnFailure: {
+        reason: classification.reason,
+        ...(classification.reason === "model_not_found" && typeof msg.config.model === "string" && msg.config.model
+          ? { model: msg.config.model.slice(0, 128) }
+          : {}),
+      },
     });
   }
 
+  // One consumer span covers the whole start request, including duplicate
+  // deliveries. It is passed down by value and never made active, because
+  // the agent process started here outlives it.
   private handleAgentStartMessage(msg: AgentStartMessage): void {
+    const span = this.tracer.startSpan("daemon.agent.start", {
+      parent: parseTraceparent(msg.traceparent),
+      surface: "daemon",
+      kind: "consumer",
+      attrs: {
+        agent_id: msg.agentId,
+        launch_id: msg.launchId,
+        start_dispatch_id: msg.startDispatchId,
+        runtime: msg.config.runtime,
+      },
+    });
+    const endWithFailure = (err: unknown) => {
+      this.reportAgentStartFailure(msg, err, span.context);
+      span.end("error", { attrs: { outcome: "failed", error_class: errorClassOf(err) } });
+    };
+
     if (!msg.startDispatchId) {
-      this.startAgentFromMessage(msg).catch((err: unknown) => {
-        this.reportAgentStartFailure(msg, err);
-      });
+      this.startAgentFromMessage(msg, span.context).then(
+        () => span.end("ok", { attrs: { outcome: "started" } }),
+        endWithFailure,
+      );
       return;
     }
 
     const accepted = this.acceptedStartDispatches.get(msg.startDispatchId);
     if (accepted) {
-      this.sendStartDispatchReceipt(accepted, msg, "duplicate");
+      this.sendStartDispatchReceipt(accepted, "duplicate", span.context);
+      span.end("ok", { attrs: { outcome: "duplicate" } });
       return;
     }
     const accepting = this.acceptingStartDispatches.get(msg.startDispatchId);
     if (accepting) {
       void accepting.then((receipt) => {
-        this.sendStartDispatchReceipt(receipt, msg, "duplicate");
-      }).catch(() => {});
+        this.sendStartDispatchReceipt(receipt, "duplicate", span.context);
+        span.end("ok", { attrs: { outcome: "duplicate" } });
+      }).catch((err: unknown) => {
+        span.end("error", { attrs: { outcome: "duplicate_failed", error_class: errorClassOf(err) } });
+      });
       return;
     }
 
@@ -3538,13 +4004,15 @@ export class DaemonCore {
     // this promise exists only to fan acceptance out to duplicate deliveries.
     void acceptance.catch(() => {});
     this.acceptingStartDispatches.set(msg.startDispatchId, acceptance);
-    this.startAgentFromMessage(msg, (receipt) => {
+    this.startAgentFromMessage(msg, span.context, (receipt) => {
       this.rememberAcceptedStartDispatch(receipt);
       resolveAccepted(receipt);
-      this.sendStartDispatchReceipt(receipt, msg, "accepted");
-    }).catch((err: unknown) => {
+      this.sendStartDispatchReceipt(receipt, "accepted", span.context);
+    }).then(() => {
+      span.end("ok", { attrs: { outcome: "started" } });
+    }, (err: unknown) => {
       rejectAccepted(err);
-      this.reportAgentStartFailure(msg, err);
+      endWithFailure(err);
     }).finally(() => {
       this.acceptingStartDispatches.delete(msg.startDispatchId!);
     });
@@ -3552,25 +4020,33 @@ export class DaemonCore {
 
   private async startAgentFromMessage(
     msg: AgentStartMessage,
+    startSpan: TraceContext,
     onAccepted?: (receipt: AgentStartAckMessage) => void,
   ): Promise<void> {
+    // RFC 071: from here this launch owes one final result (spawned, rebound,
+    // or not_spawned); reportAgentStartFailure settles it if nothing else did.
+    this.recordLaunchGeneration(msg);
+    // A start refused at admission already has its result (`admission_full`).
+    if (!this.agentManager.noteServerStartAccepted(msg.agentId, msg.launchId)) {
+      this.reportAgentStartFailure(msg, new Error("Too many starts are still waiting for a result on this agent"), startSpan);
+      return;
+    }
+    // RFC 071 outbox local refusal: before the agent counts as starting, so a
+    // refused start leaves no starting state behind.
+    const admission = this.localStartAdmission(msg);
+    if (admission.refusal) throw new LocalStartRefusedError(admission.refusal);
+    const recoveryGrant = admission.recoveryGrant;
     this.coreStartingAgentIds.add(msg.agentId);
     // Reminder sync fallback: a starting agent may own reminders that no
     // connect-time snapshot covered (e.g. it arrived by migration after this
     // connection was established). Guarded no-op when already synchronized.
     this.localScheduleRuntime.requestReminderSnapshotIfUnsynchronized(msg.agentId);
+    this.localScheduleRuntime.requestAppConfigSnapshotIfMissing(msg.agentId);
     let wakeDeliveryAck: AgentDeliverMessage | null = null;
     let replayDeliveries: AgentDeliverMessage[] = [];
     try {
       this.observeRuntimeContext(msg.config);
-      if (msg.type === "agent:start:wiki") {
-        await ensureWikiAgentWorkspace(
-          msg.agentId,
-          path.join(this.agentsDataDir, msg.agentId),
-          msg.wikiWorkspacePack,
-        );
-      }
-      const agentCredential = await this.mintRunnerCredential(msg.agentId, msg.config);
+      const agentCredential = await this.mintRunnerCredential(msg.agentId, msg.config, startSpan);
       const config = { ...msg.config, agentCredentialKey: agentCredential.apiKey, agentCredentialId: agentCredential.credentialId };
 
       const pendingDeliveries = this.coreStartPendingDeliveries.get(msg.agentId) || [];
@@ -3600,9 +4076,18 @@ export class DaemonCore {
         wakeMessageTransient,
         msg.resumeMessages,
         msg.startDispatchId,
+        startSpan,
+        msg.catchupBatchId,
+        recoveryGrant,
       );
       if (msg.startDispatchId) {
         const acceptance = this.agentManager.getAgentStartAcceptance(msg.agentId);
+        // Machine-local evidence for the dispatch → ack → frame chain (#1129):
+        // the runner log must show which launch this daemon acknowledged.
+        logger.info(
+          `[Agent ${msg.agentId}] Start accepted ` +
+          `(launchId=${msg.launchId ?? "none"}, dispatchId=${msg.startDispatchId}, queue=${acceptance.queueState})`,
+        );
         onAccepted?.({
           type: "agent:start:ack",
           agentId: msg.agentId,
@@ -3611,6 +4096,7 @@ export class DaemonCore {
           queueState: acceptance.queueState,
           queueDepth: acceptance.queueDepth,
           queueAgeMs: acceptance.queueAgeMs,
+          ...(acceptance.processInstanceId ? { processInstanceId: acceptance.processInstanceId } : {}),
         });
       }
       await startPromise;
@@ -3624,6 +4110,8 @@ export class DaemonCore {
       }
     } catch (err) {
       this.coreStartPendingDeliveries.delete(msg.agentId);
+      // A start that failed before its gate cannot keep its grant.
+      this.runtimeOutcomeOutbox.releaseRecoveryGrant(recoveryGrant);
       throw err;
     } finally {
       this.coreStartingAgentIds.delete(msg.agentId);
@@ -3638,18 +4126,47 @@ export class DaemonCore {
     switch (msg.type) {
       case "machine:context":
         this.bindAuthenticatedMachineContext(msg);
+        // RFC 071 outbox: deliver only to a server that acknowledges; an older
+        // server (or a context conflict) pauses delivery and keeps the queue.
+        this.serverAcksRuntimeOutcomes = !this.machineContextConflict
+          && (msg.capabilities ?? []).includes(SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1);
+        this.runtimeOutcomeOutbox.onServerContext(this.serverAcksRuntimeOutcomes);
+        break;
+
+      case "agent:outcome:ack":
+        this.runtimeOutcomeOutbox.ack(msg);
         break;
 
       case "agent:start":
-      case "agent:start:wiki":
         this.observeRuntimeContext(msg.config);
         logger.info(`[Agent ${msg.agentId}] Start requested (runtime=${msg.config.runtime}, model=${msg.config.model}, session=${msg.config.sessionId || "new"}${msg.wakeMessage ? ", wake=true" : ""})`);
         this.handleAgentStartMessage(msg);
         break;
 
+      case "agent:start:wiki":
+        this.agentManager.noteServerStartAccepted(msg.agentId, msg.launchId);
+        this.reportAgentStartFailure(msg, new Error("Wiki has been retired"));
+        break;
+
+      case "agent:workspace:ensure-wiki":
+        this.connection.send({
+          type: "agent:workspace:wiki_ensured",
+          agentId: msg.agentId,
+          requestId: msg.requestId,
+          success: false,
+          packId: msg.pack.packId,
+          files: [],
+          error: "Wiki has been retired",
+        });
+        break;
+
       case "agent:stop":
         logger.info(`[Agent ${msg.agentId}] Stop requested`);
         this.agentManager.stopAgent(msg.agentId);
+        break;
+
+      case "agent:wake:outcome":
+        this.agentManager.handleServerWakeOutcome(msg);
         break;
 
       case "agent:reset-workspace":
@@ -3707,7 +4224,11 @@ export class DaemonCore {
             break;
           }
 
-          const acceptedOrPromise = this.agentManager.deliverMessage(msg.agentId, msg.message, {
+          // The routing facts the agent manager records for this delivery
+          // (`daemon.agent.delivery.routed`, consumption, stdin retries) belong
+          // under this span. Work that outlives the delivery, such as an idle
+          // auto-restart spawn, leaves the scope inside the agent manager.
+          const acceptedOrPromise = runWithActiveSpan(span, () => this.agentManager.deliverMessage(msg.agentId, msg.message, {
             deliveryId: msg.deliveryId,
             transient: msg.transient ?? false,
             mentionDelivery: msg.mentionDelivery,
@@ -3723,7 +4244,8 @@ export class DaemonCore {
               formatTraceparent(span.context),
             ),
             onMentionAck: () => this.sendDeliveryAck(msg, formatTraceparent(span.context)),
-          });
+            onRejectedNoProcess: () => this.sendDeliveryRejectedNoProcess(msg, formatTraceparent(span.context)),
+          }));
           Promise.resolve(acceptedOrPromise).then((accepted) => {
             span.addEvent("daemon.deliver_to_agent_manager", { accepted });
             if (!accepted) {
@@ -3740,10 +4262,10 @@ export class DaemonCore {
             span.end("ok", { attrs: { outcome: "ack-sent", ackSeq, deliveryId: msg.deliveryId } });
           }, (err: unknown) => {
             logger.error(`[Agent ${msg.agentId}] Delivery handling failed`, err);
-            span.end("error", { attrs: { error_class: err instanceof Error ? err.name : typeof err } });
+            span.end("error", { attrs: { error_class: errorClassOf(err) } });
           });
         } catch (err) {
-          span.end("error", { attrs: { error_class: err instanceof Error ? err.name : typeof err } });
+          span.end("error", { attrs: { error_class: errorClassOf(err) } });
           throw err;
         }
         break;
@@ -3768,7 +4290,7 @@ export class DaemonCore {
           span.end("ok", { attrs: { outcome: accepted ? "accepted" : "no_injection_path" } });
         }, (err: unknown) => {
           logger.error(`[Agent ${msg.agentId}] Runtime profile migration handling failed`, err);
-          span.end("error", { attrs: { error_class: err instanceof Error ? err.name : typeof err } });
+          span.end("error", { attrs: { error_class: errorClassOf(err) } });
         });
         break;
       }
@@ -3792,7 +4314,7 @@ export class DaemonCore {
           span.end("ok", { attrs: { outcome: accepted ? "accepted" : "no_injection_path" } });
         }, (err: unknown) => {
           logger.error(`[Agent ${msg.agentId}] Runtime profile daemon release notice handling failed`, err);
-          span.end("error", { attrs: { error_class: err instanceof Error ? err.name : typeof err } });
+          span.end("error", { attrs: { error_class: errorClassOf(err) } });
         });
         break;
       }
@@ -3827,30 +4349,6 @@ export class DaemonCore {
         });
         break;
 
-      case "agent:workspace:ensure-wiki":
-        ensureWikiAgentWorkspace(msg.agentId, path.join(this.agentsDataDir, msg.agentId), msg.pack).then((receipt) => {
-          this.connection.send({
-            type: "agent:workspace:wiki_ensured",
-            agentId: msg.agentId,
-            requestId: msg.requestId,
-            success: true,
-            packId: receipt.packId,
-            files: receipt.files,
-          });
-        }).catch((err: unknown) => {
-          logger.error(`[Daemon] Failed to ensure Wiki workspace for ${msg.agentId}`, err);
-          this.connection.send({
-            type: "agent:workspace:wiki_ensured",
-            agentId: msg.agentId,
-            requestId: msg.requestId,
-            success: false,
-            packId: msg.pack.packId,
-            files: [],
-            error: err instanceof Error ? err.message : "Unknown Wiki workspace error",
-          });
-        });
-        break;
-
       case "agent:skills:list":
       {
         const span = this.tracer.startSpan("daemon.agent.skills.list", {
@@ -3878,7 +4376,7 @@ export class DaemonCore {
           span.end("error", {
             attrs: {
               outcome: "skills_list_failed",
-              error_class: err instanceof Error ? err.name : typeof err,
+              error_class: errorClassOf(err),
             },
           });
         });
@@ -3908,30 +4406,42 @@ export class DaemonCore {
         });
         break;
 
-      case "agent:diagnostic:feedback_transcript":
-        this.agentManager.collectFeedbackTranscript(msg.agentId, msg.feedbackReportId, {
-          reportGeneratedAt: msg.feedbackReportGeneratedAt ?? currentDate().toISOString(),
-          reportTimeSource: msg.feedbackReportTimeSource ?? "server_request_received",
-        }).then((result) => {
-          this.connection.send({
-            type: "agent:diagnostic:feedback_transcript_result",
-            agentId: msg.agentId,
-            feedbackReportId: msg.feedbackReportId,
+      case "agent:diagnostic:feedback_transcript": {
+        // task #1228 ①: collect → send the result frame → only then upload the
+        // transcript_outcome object (best-effort, never retried, never able to
+        // delay or rewrite the result).
+        const daemonVersion = readBakedDaemonVersion();
+        void runFeedbackTranscriptRequest({
+          collect: () => this.agentManager.collectFeedbackTranscript(msg.agentId, msg.feedbackReportId, {
+            reportGeneratedAt: msg.feedbackReportGeneratedAt ?? currentDate().toISOString(),
+            reportTimeSource: msg.feedbackReportTimeSource ?? "server_request_received",
+          }, {
+            includeMachineLogTail: msg.includeMachineLogTail === true,
+            machineLogPaths: this.runnerLogPathCandidates(),
+            daemonVersion,
             requestId: msg.requestId,
-            ...result,
-          });
-        }).catch((err: unknown) => {
-          logger.error(`[Daemon] Failed to collect feedback transcript for ${msg.agentId}`, err);
-          this.connection.send({
-            type: "agent:diagnostic:feedback_transcript_result",
-            agentId: msg.agentId,
-            feedbackReportId: msg.feedbackReportId,
-            requestId: msg.requestId,
-            reachable: false,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          }),
+          send: (result) => {
+            this.connection.send({
+              type: "agent:diagnostic:feedback_transcript_result",
+              agentId: msg.agentId,
+              feedbackReportId: msg.feedbackReportId,
+              requestId: msg.requestId,
+              ...result,
+            });
+          },
+          uploadOutcome: (result) => this.agentManager.uploadFeedbackTranscriptOutcome(
+            msg.agentId,
+            msg.feedbackReportId,
+            msg.requestId,
+            result,
+            daemonVersion ?? null,
+          ),
+          workerConfigured: this.agentManager.feedbackUploadsConfigured,
+          tag: `report=${msg.feedbackReportId} agent=${msg.agentId} request=${msg.requestId}`,
         });
         break;
+      }
 
       case "agent:activity_probe":
         // Server is asking for ground-truth current activity. Echo
@@ -3962,16 +4472,15 @@ export class DaemonCore {
       // as `machine:capabilities` — so re-emitting IS the answer, no bespoke
       // result message needed.
       case "machine:runtimes:rescan":
-        this.emitReadyIfConnected();
+        if (this.connection.connected) {
+          void this.emitReady().then((readySent) => {
+            if (readySent) this.requestRuntimeModelCatalogPublish(true);
+          });
+        }
         break;
 
       case "machine:migration:source_workspace_archive": {
-        void archiveCompletedAgentMigrationSourceWorkspace({
-          slockHome: this.slockHome,
-          dataDir: this.agentsDataDir,
-          agentId: msg.agentId,
-          migrationId: msg.migrationId,
-        }).then(
+        void this.archiveMigrationSourceWorkspaceSerialized(msg.agentId, msg.migrationId, msg.migrationCreatedAt).then(
           (outcome) => {
             this.connection.send({
               type: "machine:migration:source_workspace_archive_result",
@@ -3983,23 +4492,27 @@ export class DaemonCore {
           },
           (error: unknown) => {
             logger.error(`[Daemon] Failed to archive migrated workspace for ${msg.agentId}`, error);
+            const errorCode = migrationTransferFailureDetailCode(error);
             this.connection.send({
               type: "machine:migration:source_workspace_archive_result",
               requestId: msg.requestId,
               migrationId: msg.migrationId,
               agentId: msg.agentId,
               outcome: "error",
+              ...(errorCode ? { errorCode } : {}),
             });
           },
         );
         break;
       }
 
+      case "machine:provider_probe:request": {
+        void this.handleProviderProbe(msg);
+        break;
+      }
+
       case "machine:runtime_models:detect": {
         const driver = getDriver(msg.runtime);
-        const staticSource = driver
-          ? getStaticRuntimeModelSourceSet(msg.runtime)
-          : undefined;
         const span = this.tracer.startSpan("daemon.runtime_models.detect", {
           surface: "daemon",
           kind: "internal",
@@ -4008,13 +4521,8 @@ export class DaemonCore {
             requestId: msg.requestId,
           },
         });
-        const detect: Promise<RuntimeModelSourceOutcome> = typeof driver?.detectModels === "function"
-          ? driver.detectModels({ tracer: this.tracer, span })
-          : Promise.resolve(
-              staticSource
-                ? { kind: "live", value: staticSource }
-                : { kind: "unsupported" },
-            );
+        const joinedInFlight = this.probeGate.activeKeys.includes(`runtime_models:${msg.runtime}`);
+        const detect = this.detectRuntimeModelOutcome(msg.runtime, span);
         void detect.then((detectedOutcome) => {
           const resultMessage = buildRuntimeModelSourceResultMessage(
             msg.requestId,
@@ -4028,6 +4536,7 @@ export class DaemonCore {
               attrs: {
                 outcome: "models_returned",
                 models_count: outcome.value.models.length,
+                joined_in_flight: joinedInFlight,
                 default_model_present: Boolean(outcome.value.default),
                 verified_as: driver?.model.detectedModelsVerifiedAs ?? "suggestion_only",
               },
@@ -4037,6 +4546,7 @@ export class DaemonCore {
               attrs: {
                 outcome: outcome.kind,
                 models_count: 0,
+                joined_in_flight: joinedInFlight,
               },
             });
           }
@@ -4051,7 +4561,7 @@ export class DaemonCore {
           span.end("error", {
             attrs: {
               outcome: "error",
-              error_class: err instanceof Error ? err.name : typeof err,
+              error_class: errorClassOf(err),
             },
           });
         });
@@ -4060,13 +4570,13 @@ export class DaemonCore {
 
       case "machine:runtime_account_usage:refresh": {
         const provider: RuntimeAccountUsageProvider = msg.provider;
-        void this.runtimeAccountUsageCollector(provider).then((snapshot: RuntimeAccountUsageSnapshot) => {
+        void this.probeGate.run(`runtime_account_usage:${provider}`, () => this.runtimeAccountUsageCollector(provider)).then((snapshot: RuntimeAccountUsageSnapshot) => {
           this.connection.send({
             type: "machine:runtime_account_usage:snapshot",
             requestId: msg.requestId,
             snapshot,
           });
-          this.recordDaemonTrace("daemon.runtime_account_usage.refresh", {
+          this.recordDaemonEvent("daemon.runtime_account_usage.refresh", {
             outcome: "snapshot_sent",
             provider,
             reason: msg.reason,
@@ -4080,11 +4590,11 @@ export class DaemonCore {
           });
         }).catch((err: unknown) => {
           logger.warn(`[Daemon] Runtime account usage refresh failed (${provider}): ${err instanceof Error ? err.message : String(err)}`);
-          this.recordDaemonTrace("daemon.runtime_account_usage.refresh", {
+          this.recordDaemonEvent("daemon.runtime_account_usage.refresh", {
             outcome: "collector_error",
             provider,
             reason: msg.reason,
-            error_class: err instanceof Error ? err.name : typeof err,
+            error_class: errorClassOf(err),
           });
         });
         break;
@@ -4116,7 +4626,7 @@ export class DaemonCore {
             ) ?? false
           : false;
         if (operationId && (alreadyDurable || this.handledComputerControlOperationIds.has(operationId))) {
-          this.recordDaemonTrace("daemon.computer_control.replayed", {
+          this.recordDaemonEvent("daemon.computer_control.replayed", {
             action,
             operation_id: operationId,
             outcome: "ignored",
@@ -4124,7 +4634,7 @@ export class DaemonCore {
           break;
         }
         if (operationId) this.handledComputerControlOperationIds.add(operationId);
-        this.recordDaemonTrace("daemon.computer_control.received", {
+        this.recordDaemonEvent("daemon.computer_control.received", {
           action,
           handled: Boolean(this.options.onComputerControl),
           ...(operationId ? { operation_id: operationId } : {}),
@@ -4134,14 +4644,7 @@ export class DaemonCore {
           const ctx: ComputerControlContext = {
             operationId,
             requestId,
-            emitUpgradeProgress: (ev) => {
-              if (!requestId) return;
-              this.connection.send({ type: "computer:upgrade:progress", requestId, ...ev });
-            },
-            emitUpgradeDone: (ev) => {
-              if (!requestId) return;
-              this.connection.send({ type: "computer:upgrade:done", requestId, ...ev });
-            },
+            ...(msg.type === "computer:upgrade" && typeof msg.targetVersion === "string" ? { targetVersion: msg.targetVersion } : {}),
           };
           // May be async while the runner relays supervisor progress; don't
           // block the message loop — surface failures via logs/trace.
@@ -4165,9 +4668,8 @@ export class DaemonCore {
                   ok: false,
                   error: failure,
                 });
-              } else {
-                ctx.emitUpgradeDone({ ok: false, error: failure });
               }
+              // upgrade: nothing to report; the machine's reconnect version is the readback.
             });
         } else {
           logger.info(`[Daemon] Ignoring computer:${action} — not launched by a Computer service.`);
@@ -4189,12 +4691,112 @@ export class DaemonCore {
     }
   }
 
+  /**
+   * One detection path for both the on-demand `runtime_models:detect` request and
+   * the unsolicited catalog push. Shares the probe gate key, so a push and a
+   * request for the same runtime join one detection instead of spawning twice.
+   */
+  private detectRuntimeModelOutcome(runtime: string, span: ActiveSpan): Promise<RuntimeModelSourceOutcome> {
+    const driver = getDriver(runtime);
+    const staticSource = driver ? getStaticRuntimeModelSourceSet(runtime) : undefined;
+    if (typeof driver?.detectModels === "function") {
+      return this.probeGate.run(`runtime_models:${runtime}`, () => driver.detectModels!({ tracer: this.tracer, span }));
+    }
+    return Promise.resolve(staticSource ? { kind: "live", value: staticSource } : { kind: "unsupported" });
+  }
+
+  /**
+   * Push each detected runtime's model list (id + the runtime's own label) so the
+   * server holds the single copy every model-name surface reads. Runtimes run one
+   * at a time to avoid spawning every CLI at once on connect. Only a live result
+   * is sent: an error, missing login or unsupported runtime leaves the server's
+   * previous copy in place rather than blanking it.
+   */
+  /**
+   * Single-flight entry for the catalog push. Detection spawns each runtime's CLI
+   * (some take seconds), so a flapping connection must not re-run it on every
+   * reconnect: a connect-triggered push is skipped when a complete round ran
+   * within MODEL_CATALOG_RECONNECT_MIN_INTERVAL_MS and the runtime ids/versions
+   * are unchanged, or when any round (complete or not) started within
+   * MODEL_CATALOG_RECONNECT_MIN_START_INTERVAL_MS. `rescan` forces a round. A trigger arriving mid-round is
+   * folded into one follow-up round after the current one.
+   */
+  private requestRuntimeModelCatalogPublish(force: boolean): void {
+    if (this.catalogPublishInFlight) {
+      this.catalogPublishQueued = { force: force || (this.catalogPublishQueued?.force ?? false) };
+      return;
+    }
+    const runtimeSignature = this.lastReadyRuntimeSignature;
+    const now = currentTimeMs();
+    if (!force) {
+      if (
+        this.lastCatalogPublish?.runtimeSignature === runtimeSignature
+        && now - this.lastCatalogPublish.atMs < MODEL_CATALOG_RECONNECT_MIN_INTERVAL_MS
+      ) {
+        return;
+      }
+      if (this.lastCatalogRoundStartMs !== null && now - this.lastCatalogRoundStartMs < MODEL_CATALOG_RECONNECT_MIN_START_INTERVAL_MS) {
+        return;
+      }
+    }
+    this.lastCatalogRoundStartMs = now;
+    this.catalogPublishInFlight = true;
+    void this.publishRuntimeModelCatalogs()
+      .then((completed) => {
+        // Only a round that reached every runtime while connected counts; a
+        // round cut short by a disconnect must not suppress the next connect.
+        if (completed) this.lastCatalogPublish = { atMs: currentTimeMs(), runtimeSignature };
+      })
+      .finally(() => {
+        this.catalogPublishInFlight = false;
+        const queued = this.catalogPublishQueued;
+        this.catalogPublishQueued = null;
+        if (queued && this.connection.connected) this.requestRuntimeModelCatalogPublish(queued.force);
+      });
+  }
+
+  /**
+   * Returns true only when every runtime's result reached the same connection the
+   * round started on. The connection generation moves on every disconnect and
+   * connect, so a flap between two runtimes (even one that reconnects before the
+   * next check) marks the round incomplete and the next connect pushes again.
+   */
+  private async publishRuntimeModelCatalogs(): Promise<boolean> {
+    const generation = this.lifecycleOriginConnectionGeneration;
+    const sameConnection = () => this.connection.connected && generation === this.lifecycleOriginConnectionGeneration;
+    for (const runtime of this.lastReadyRuntimes) {
+      if (!sameConnection()) return false;
+      const span = this.tracer.startSpan("daemon.runtime_models.catalog", {
+        surface: "daemon",
+        kind: "internal",
+        attrs: { runtime },
+      });
+      try {
+        const outcome = await this.detectRuntimeModelOutcome(runtime, span);
+        const models = outcome.kind === "live" ? sanitizeCatalogModels(outcome.value.models) : [];
+        if (models.length > 0) {
+          if (!sameConnection()) {
+            span.end("ok", { attrs: { outcome: "connection_changed", models_count: models.length } });
+            return false;
+          }
+          this.connection.send({ type: "machine:runtime_models:catalog", runtime, models });
+        }
+        span.end("ok", { attrs: { outcome: models.length > 0 ? "sent" : outcome.kind, models_count: models.length } });
+      } catch (err) {
+        span.end("error", { attrs: { outcome: "error", error_class: errorClassOf(err) } });
+      }
+    }
+    return sameConnection();
+  }
+
   private emitReadyIfConnected(): void {
     if (this.connection.connected) void this.emitReady();
   }
 
   private async emitReady(expectedLifecycleGeneration?: number): Promise<boolean> {
     const { ids: runtimes, versions: runtimeVersions, diagnostics: runtimeDiagnostics = {} } = this.runtimeDetector();
+    this.lastReadyRuntimes = runtimes;
+    this.lastReadyRuntimeSignature = JSON.stringify(runtimes.map((id) => [id, runtimeVersions[id] ?? null]));
     const runtimeInfo = runtimes.map((id) => runtimeVersions[id] ? `${id} (${runtimeVersions[id]})` : id);
     logger.info(`[Daemon] Detected runtimes: ${runtimeInfo.join(", ") || "none"}`);
     for (const [runtime, diagnostic] of Object.entries(runtimeDiagnostics)) {
@@ -4210,7 +4812,17 @@ export class DaemonCore {
         lifecycleAcks = await this.options.getComputerLifecycleReadyAcks();
       } catch (error) {
         logger.warn(`[Daemon] Computer lifecycle attestation skipped: ${error instanceof Error ? error.message : String(error)}`);
+        this.recordConnectLifecycleError("lifecycle_attestation", "attestation_threw", error);
         lifecycleAcks = [];
+      }
+    }
+    let lastUpgradeReceipt: ComputerLastUpgradeReceipt | null = null;
+    if (this.options.getComputerLastUpgradeReceipt) {
+      try {
+        lastUpgradeReceipt = await this.options.getComputerLastUpgradeReceipt();
+      } catch (error) {
+        this.recordConnectLifecycleError("last_upgrade_receipt", "receipt_read_threw", error);
+        lastUpgradeReceipt = null;
       }
     }
     if (expectedLifecycleGeneration !== undefined
@@ -4225,12 +4837,19 @@ export class DaemonCore {
         "agent:stop",
         "agent:deliver",
         "workspace:files",
-        WIKI_WORKSPACE_PACK_CAPABILITY,
+        DAEMON_CAPABILITY_SEQUENCED_STATUS,
+        // RFC 071: agent:runtime:outcome v1, process spawned/exited, rebind
+        // ack processInstanceId, catchupBatchId echo.
+        DAEMON_CAPABILITY_RUNTIME_OUTCOME_V1,
         ...BUILT_IN_READY_CAPABILITIES,
         ...(this.options.computerControlViaSupervisor
           ? [COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS]
           : []),
       ],
+      daemonInstanceId: this.daemonInstanceId,
+      ...(this.runtimeOutcomeOutbox.unreliableAgents().length > 0
+        ? { runtimeOutcomeUnreliableAgents: this.runtimeOutcomeOutbox.unreliableAgents() }
+        : {}),
       runtimes,
       runtimeVersions,
       runningAgents: runningAgentIds,
@@ -4242,14 +4861,36 @@ export class DaemonCore {
       ...((this.options.getComputerLifecycleAcks || this.options.getComputerLifecycleReadyAcks)
         ? { lifecycleAcks }
         : {}),
+      ...(lastUpgradeReceipt ? { lastUpgradeReceipt } : {}),
     });
-    this.recordDaemonTrace("daemon.ready.sent", {
+    // Fresh disk report shortly after every (re)connect, then hourly.
+    this.scheduleDiskStatusReport(DISK_STATUS_FIRST_REPORT_DELAY_MS);
+    this.recordDaemonEvent("daemon.ready.sent", {
       runtimes_count: runtimes.length,
       running_agents_count: runningAgentIds.length,
       idle_agents_count: idleAgentSessions.length,
       runtime_profile_reports_count: runtimeProfileReports.length,
     });
     return true;
+  }
+
+  private scheduleDiskStatusReport(delayMs: number): void {
+    if (this.diskStatusTimer !== null) clearTimeout(this.diskStatusTimer);
+    this.diskStatusTimer = setTimeout(() => {
+      this.diskStatusTimer = null;
+      void this.sendDiskStatus().finally(() => {
+        if (this.diskStatusReportsEnabled) this.scheduleDiskStatusReport(DISK_STATUS_REPORT_INTERVAL_MS);
+      });
+    }, delayMs);
+    this.diskStatusTimer.unref?.();
+  }
+
+  private async sendDiskStatus(): Promise<void> {
+    const info = await statfs(this.agentsDataDir).catch(() => null);
+    if (!info || !this.connection.connected) return;
+    const disk = { availableBytes: info.bavail * info.bsize, totalBytes: info.blocks * info.bsize };
+    if (!isValidMachineDiskStatus(disk)) return;
+    this.connection.send({ type: "machine:disk_status", ...disk });
   }
 
   private invalidateLifecycleOriginReconcile(): number {
@@ -4313,6 +4954,7 @@ export class DaemonCore {
       logger.warn(
         `[Daemon] Computer lifecycle origin reconcile skipped: ${err instanceof Error ? err.message : String(err)}`,
       );
+      this.recordConnectLifecycleError("lifecycle_origin_reconcile", "reconcile_threw", err);
     }
   }
 
@@ -4326,6 +4968,7 @@ export class DaemonCore {
       this.options.lifecycleHooks?.onConnect?.();
     } catch (err) {
       logger.warn(`[Daemon] Connection lifecycle hook failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.recordConnectLifecycleError("lifecycle_hook", "lifecycle_hook_threw", err);
     }
 
     // One-shot on first connect: bring existing per-agent opencli wrappers to
@@ -4342,9 +4985,13 @@ export class DaemonCore {
         }
       } catch (err) {
         logger.warn(`[Daemon] opencli wrapper refresh skipped: ${err instanceof Error ? err.message : String(err)}`);
+        this.recordConnectLifecycleError("opencli_wrapper_refresh", "wrapper_refresh_threw", err);
       }
     }
     const initialReady = this.emitReady(lifecycleOriginConnectionGeneration);
+    void initialReady.then((readySent) => {
+      if (readySent) this.requestRuntimeModelCatalogPublish(false);
+    });
     if (this.options.reconcileComputerLifecycleOrigin) {
       void initialReady
         .then((readySent) => readySent
@@ -4354,45 +5001,21 @@ export class DaemonCore {
           logger.warn(
             `[Daemon] Computer lifecycle origin reconcile skipped: ${err instanceof Error ? err.message : String(err)}`,
           );
+          this.recordConnectLifecycleError("lifecycle_origin_reconcile", "reconcile_threw", err);
         });
     }
+    // task #1103: wake requests parked while offline go out once per connect edge.
+    this.agentManager.resendPendingServerWakes();
     const runningAgentIds = this.agentManager.getRunningAgentIds();
     const idleAgentSessions = this.agentManager.getIdleAgentSessionIds();
     const runtimeProfileReports = this.agentManager.getAgentRuntimeProfileReports();
-
-    // Managed-Computer SEA upgrade blip-stitch: if THIS process booted from a
-    // freshly swapped binary, report `computer:upgrade:done` upstream now that
-    // the WS is back. The hook reads + clears its own pending-upgrade marker.
-    if (this.options.onComputerUpgradeReconcile) {
-      void Promise.resolve()
-        .then(() =>
-          this.options.onComputerUpgradeReconcile!(
-            (done) => {
-              this.connection.send({ type: "computer:upgrade:done", ...done });
-              this.recordDaemonTrace("daemon.computer_upgrade.reconciled", {
-                request_id: done.requestId,
-                ok: done.ok,
-                ...(done.newVersion ? { new_version: done.newVersion } : {}),
-              });
-            },
-            (progress) => {
-              this.connection.send({ type: "computer:upgrade:progress", ...progress });
-            },
-          ),
-        )
-        .catch((err) => {
-          logger.error(
-            `[Daemon] computer upgrade reconcile failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        });
-    }
 
     if (this.options.onComputerRestartReconcile) {
       void Promise.resolve()
         .then(() =>
           this.options.onComputerRestartReconcile!((done) => {
             this.connection.send({ type: "computer:restart:done", ...done });
-            this.recordDaemonTrace("daemon.computer_restart.reconciled", {
+            this.recordDaemonEvent("daemon.computer_restart.reconciled", {
               request_id: done.requestId,
               ok: done.ok,
             });
@@ -4402,6 +5025,7 @@ export class DaemonCore {
           logger.error(
             `[Daemon] computer restart reconcile failed: ${err instanceof Error ? err.message : String(err)}`,
           );
+          this.recordConnectLifecycleError("computer_restart_reconcile", "reconcile_threw", err);
         });
     }
 
@@ -4467,9 +5091,11 @@ export class DaemonCore {
   }
 
   private handleDisconnect() {
+    this.serverAcksRuntimeOutcomes = false;
+    this.runtimeOutcomeOutbox.onDisconnected();
     this.invalidateLifecycleOriginReconcile();
     logger.warn("[Daemon] Lost connection — agents continue running locally");
-    this.recordDaemonTrace("daemon.connection.local_disconnect_observed", {
+    this.recordDaemonEvent("daemon.connection.local_disconnect_observed", {
       running_agents_count: this.agentManager.getRunningAgentIds().length,
       idle_agents_count: this.agentManager.getIdleAgentSessionIds().length,
     }, "cancelled");

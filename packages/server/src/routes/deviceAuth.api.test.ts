@@ -1,13 +1,13 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import argon2 from "argon2";
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { signAccessToken } from "../middleware/auth.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { signAccessToken } from "../middleware/auth";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

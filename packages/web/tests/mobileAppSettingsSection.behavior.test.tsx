@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, render, screen } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -168,9 +167,10 @@ test("the two download buttons stay peers, neither styled as the recommended one
     const ios = screen.getByTestId("mobile-download-ios");
     for (const el of [android, ios]) {
       assert.ok(
-        el.className.includes("bg-white"),
+        el.className.includes("bg-layer-panel"),
         `both buttons must share the neutral surface: ${el.className}`,
       );
+      assert.equal(el.getAttribute("data-slot"), "button", "downloads use the shared theme-aware button primitive");
       assert.ok(
         !el.className.includes("bg-brutal-pink"),
         `neither button may take the CTA fill: ${el.className}`,

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { resetInlineAttachmentUrlCache } from "../src/components/message/inlineAttachmentUrlCache";
-import { afterEach, test } from "node:test";
 import { act } from "react";
 import { cleanup, render as rtlRender, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";

@@ -1,14 +1,14 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { managedMcpServers, users } from "../db/schema.js";
-import { createAgent } from "../services/agentService.js";
-import { addMember, createServer } from "../services/serverService.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { managedMcpServers, users } from "../db/schema";
+import { createAgent } from "../services/agentService";
+import { addMember, createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -251,6 +251,15 @@ test("managed MCP control plane is capability-gated and never returns credential
     });
     assert.equal(apply.status, 200, await apply.text());
     assert.deepEqual(resetCalls, [{ agentId: agent.id, mode: "restart", options: { restartIfStopped: false } }]);
+
+    // Task #91: the single-assignment route runs its whole write inside the membership fence; exercise its success path.
+    const single = await fetch(`${app.baseUrl}/api/mcp/agents/${agent.id}/assignments/${created.id}`, {
+      method: "PUT",
+      headers: headers(memberToken, server.id),
+      body: JSON.stringify({ enabled: false, allowedTools: null }),
+    });
+    assert.equal(single.status, 200, await single.clone().text());
+    assert.equal((await single.json() as { assignment: { enabled: boolean } | null }).assignment?.enabled, false);
 
     const unsafeDraftTest = await fetch(`${app.baseUrl}/api/mcp/servers/test-configuration`, {
       method: "POST",

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 // Render-perf contract (#proj-frontend:24c90895). 铁根's render-count found
 // /tasks re-rendered 24–46 TaskCards per task:new (whole-board churn) because

@@ -1,6 +1,24 @@
 {
   "fixtures": [
     {
+      "operation": "list",
+      "status": 400,
+      "body": {
+        "code": "UPLOAD_INVALID_REQUEST",
+        "message": "The channel id is invalid.",
+        "retryable": false
+      }
+    },
+    {
+      "operation": "list",
+      "status": 403,
+      "body": {
+        "code": "UPLOAD_FORBIDDEN",
+        "message": "The member cannot access uploads in this channel.",
+        "retryable": false
+      }
+    },
+    {
       "operation": "create",
       "status": 400,
       "body": {

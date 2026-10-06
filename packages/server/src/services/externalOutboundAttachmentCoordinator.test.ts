@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { afterEach, beforeEach, test } from "vitest";
 import { eq } from "drizzle-orm";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
 import {
   attachmentObjects,
   attachments,
@@ -18,15 +17,15 @@ import {
   messages,
   servers,
   users,
-} from "../db/schema.js";
-import type { ExternalOutboundAttachmentProviderAdapter } from "./externalAttachmentProviderAdapter.js";
-import { createOutboundExternalAttachmentTransferWithExecutor } from "./externalAttachmentTransferService.js";
-import type { SlackBridgeRenderSnapshot } from "./externalDeliveryOutboxService.js";
+} from "../db/schema";
+import type { ExternalOutboundAttachmentProviderAdapter } from "./externalAttachmentProviderAdapter";
+import { createOutboundExternalAttachmentTransferWithExecutor } from "./externalAttachmentTransferService";
+import type { SlackBridgeRenderSnapshot } from "./externalDeliveryOutboxService";
 import {
   dispatchExternalOutboundAttachments,
   finalizeAcceptedOutboundAttachmentFacts,
-} from "./externalOutboundAttachmentCoordinator.js";
-import type { StorageBackend } from "./storageService.js";
+} from "./externalOutboundAttachmentCoordinator";
+import type { StorageBackend } from "./storageService";
 
 const NOW = new Date("2026-09-05T02:00:00.000Z");
 
@@ -92,7 +91,7 @@ async function fixture() {
   const bindingId = randomUUID();
   const [partition] = await db.insert(externalDeliveryPartitions).values({ bindingId, bindingEpoch: 1 }).returning();
   const snapshot: SlackBridgeRenderSnapshot = {
-    schema: "slack-bridge-render-snapshot.v2",
+    schema: "slack-bridge-render-snapshot.v4",
     sourceMessageId: message.id,
     sourceMessageSeq: message.seq,
     canonicalConversationId: channel.id,
@@ -102,11 +101,7 @@ async function fixture() {
     senderType: "user",
     senderId: owner.id,
     authorName: owner.name,
-    authorAvatarDigest: null,
-    authorPolicy: {
-      policyId: randomUUID(),
-      serverId: server.id,
-      consentRevision: 1,
+    authorPresentation: {
       displayName: owner.name,
       fallbackKind: "human",
       avatar: null,
@@ -135,7 +130,6 @@ async function fixture() {
       bindingEpoch: 1,
       memberRevision: 1,
       contextRevision: 1,
-      consentRevision: 1,
       privacyClass: "public",
       raftChannelId: channel.id,
       providerAuthorityId: "workspace-1",

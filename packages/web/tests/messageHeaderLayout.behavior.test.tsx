@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, render as rtlRender } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -176,7 +175,7 @@ test("header prioritizes time, name, then subtitle truncation", async () => {
   assert.match(name.className, /(?:^| )shrink-0(?: |$)/);
   assert.match(name.className, /(?:^| )truncate(?: |$)/);
 
-  const subtitle = row.querySelector<HTMLElement>("span[title='Head of Ops']");
+  const subtitle = [...row.querySelectorAll<HTMLElement>("span")].find((el) => el.textContent === "Head of Ops");
   assert.ok(subtitle, "subtitle renders with a title tooltip");
   // Subtitle is the first to truncate: min-w-0 + truncate, but NOT shrink-0.
   assert.match(subtitle.className, /(?:^| )min-w-0(?: |$)/);

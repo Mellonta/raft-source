@@ -1,9 +1,8 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { request as httpRequest } from "node:http";
-import { onTestFinished, vi } from "vitest";
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import {
@@ -15,39 +14,40 @@ import {
   type AgentMessage,
   type FailpointRegistry,
 } from "@botiverse/raft-shared";
-import { executeSearchSql as executeSearchSqlFromDb, getDb, SearchQueryAbortedError } from "../db/index.js";
-import { agentActivityEvents, attachmentObjectCharges, attachmentObjects, attachments, channelAgents, channelHumans, channels, featureFlagRules, featureFlags, inboxNotificationFacts, inboxServingRows, jointChannels, jointChannelServers, messageMentions, messageReactions, messages, serverMembers, servers as serversTable, tasks, threadFollows, users } from "../db/schema.js";
-import { assignMachine, createAgent } from "../services/agentService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { AgentOrchestrator } from "../services/agentOrchestrator.js";
-import { addAgent, addHuman, archiveChannel, createChannel, findOrCreateDM, findOrCreateUserDM, getActiveJointThreadProjectionsByCanonicalThread, getOrCreateThread, getOrCreateThreadForChannel, removeHuman } from "../services/channelService.js";
-import { registerMachine } from "../services/machineService.js";
+import { executeSearchSql as executeSearchSqlFromDb, getDb, SearchQueryAbortedError } from "../db/index";
+import { agentActivityEvents, attachmentObjectCharges, attachmentObjects, attachments, channelAgents, channelHumans, channels, featureFlagRules, featureFlags, inboxNotificationFacts, jointChannels, jointChannelServers, messageMentions, messageReactions, messages, serverMembers, servers as serversTable, tasks, threadFollows, users } from "../db/schema";
+import { assignMachine, createAgent } from "../services/agentService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { AgentOrchestrator } from "../services/agentOrchestrator";
+import { addAgent, addHuman, archiveChannel, createChannel, findOrCreateDM, findOrCreateUserDM, getActiveJointThreadProjectionsByCanonicalThread, getActiveJointThreadProjectionsByCanonicalThreadsForServer, getOrCreateThread, getOrCreateThreadForChannel, removeHuman } from "../services/channelService";
+import { registerMachine } from "../services/machineService";
 import {
   __resetMessageServiceDepsForTests,
   __setMessageServiceDepsForTests,
   createMessage,
   listMessages,
-} from "../services/messageService.js";
+  projectJointMessagesToLocalChannel,
+} from "../services/messageService";
 import {
   __resetOrdinaryMessageOutboundAuthorizationResolverForTests,
   __setOrdinaryMessageOutboundAuthorizationResolverForTests,
   __setSlackBridgeReconciliationMarkerMinterForTests,
   mintSlackBridgeReconciliationMarker,
-} from "../services/externalDeliveryOutboxService.js";
-import { createServer } from "../services/serverService.js";
+} from "../services/externalDeliveryOutboxService";
+import { createServer } from "../services/serverService";
 import {
   __resetSearchServiceDepsForTests,
   __setSearchServiceDepsForTests,
   MESSAGE_SEARCH_RELEVANCE_ESTIMATED_CANDIDATE_LIMIT,
-} from "../services/searchService.js";
-import { openTestApp } from "../test/integration/app.js";
-import { setMessageForwardingEnabledForApp } from "../config/messageForwarding.js";
-import { COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY, MESSAGE_FORWARDING_FEATURE_FLAG_KEY } from "../services/featureFlagService.js";
-import { signAccessToken } from "../middleware/auth.js";
+  MESSAGE_SEARCH_RELEVANCE_ESTIMATED_TEXT_MATCH_LIMIT,
+} from "../services/searchService";
+import { openTestApp } from "../test/integration/app";
+import { COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY } from "../services/featureFlagService";
+import { signAccessToken } from "../middleware/auth";
 import {
   __setWebHttpClientTraceSinkForTest,
   startWebHttpClientSpan,
-} from "../../../web/src/utils/webHttpClientTrace.js";
+} from "../../../web/src/utils/webHttpClientTrace";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -119,14 +119,12 @@ async function readHumanMessageMutationCounts() {
   const [messageCount] = await db.select({ count: sql<number>`count(*)::int` }).from(messages);
   const [taskCount] = await db.select({ count: sql<number>`count(*)::int` }).from(tasks);
   const [freshnessFactCount] = await db.select({ count: sql<number>`count(*)::int` }).from(inboxNotificationFacts);
-  const [freshnessServingCount] = await db.select({ count: sql<number>`count(*)::int` }).from(inboxServingRows);
   const [activityCount] = await db.select({ count: sql<number>`count(*)::int` }).from(agentActivityEvents);
 
   return {
     messages: messageCount?.count ?? 0,
     tasks: taskCount?.count ?? 0,
     inboxNotificationFacts: freshnessFactCount?.count ?? 0,
-    inboxServingRows: freshnessServingCount?.count ?? 0,
     agentActivityEvents: activityCount?.count ?? 0,
   };
 }
@@ -1884,6 +1882,8 @@ test("POST /messages rolls back a keyless source, attachments, mentions, and inb
     payload: "fail after all derived facts before commit",
   });
   __setFailpointsForTests(registry);
+  // A side-effect replacement must retain the real atomic persistence/fence.
+  __setMessageServiceDepsForTests({ sendPushNotifications: async () => undefined });
 
   try {
     const db = getDb();
@@ -1964,6 +1964,7 @@ test("POST /messages rolls back a keyless source, attachments, mentions, and inb
     assert.ok(facts.length >= 2);
     assert.ok(facts.every((fact) => fact.messageId === message.id));
   } finally {
+    __resetMessageServiceDepsForTests();
     __resetFailpointsForTests();
     await app.close();
   }
@@ -2151,6 +2152,68 @@ test("joint channel thread permalink preview resolves replies through the caller
     ),
     "joint participant should resolve a focused reply when the client scopes context to the local thread projection",
   );
+});
+
+test("joint thread projection for a message page is one batched lookup scoped to the local server", async ({ app: _app }) => {
+  const db = getDb();
+  const hostOwner = await seedUser("joint-thread-batch-host@slock.test", "joint-thread-batch-host");
+  const guestOwner = await seedUser("joint-thread-batch-guest@slock.test", "joint-thread-batch-guest");
+  const hostServer = await createServer("Joint Thread Batch Host", "joint-thread-batch-host", hostOwner.id);
+  const guestServer = await createServer("Joint Thread Batch Guest", "joint-thread-batch-guest", guestOwner.id);
+  await db.insert(serverMembers).values([
+    { serverId: hostServer.id, userId: hostOwner.id, role: "owner" },
+    { serverId: guestServer.id, userId: guestOwner.id, role: "owner" },
+  ]).onConflictDoNothing();
+
+  const hostProjection = await createChannel(hostServer.id, "joint-thread-batch-room", undefined, "joint");
+  const guestProjection = await createChannel(guestServer.id, "joint-thread-batch-room", undefined, "joint");
+  await addHuman(hostProjection.id, hostOwner.id);
+  await addHuman(guestProjection.id, guestOwner.id);
+  const [joint] = await db.insert(jointChannels).values({
+    canonicalChannelId: hostProjection.id,
+    createdByServerId: hostServer.id,
+    createdByUserId: hostOwner.id,
+  }).returning();
+  await db.insert(jointChannelServers).values([
+    { jointChannelId: joint.id, serverId: hostServer.id, localChannelId: hostProjection.id, role: "host", joinedByUserId: hostOwner.id },
+    { jointChannelId: joint.id, serverId: guestServer.id, localChannelId: guestProjection.id, role: "participant", joinedByUserId: guestOwner.id },
+  ]);
+
+  const canonicalIds: string[] = [];
+  for (const content of ["batch parent a", "batch parent b"]) {
+    const parent = await createMessage(hostProjection.id, "user", hostOwner.id, content);
+    const thread = await getOrCreateThreadForChannel(hostProjection.id, parent.id, hostOwner.id, "user");
+    canonicalIds.push(thread.canonicalThreadChannelId);
+  }
+
+  // Reference: the per-thread lookup the page used to run once per thread id.
+  const expectedLocal = async (canonicalId: string, serverId: string) =>
+    (await getActiveJointThreadProjectionsByCanonicalThread(canonicalId))
+      .find((projection) => projection.localServerId === serverId)?.localThreadChannelId;
+
+  const guestRows = await getActiveJointThreadProjectionsByCanonicalThreadsForServer(canonicalIds, guestServer.id);
+  assert.deepEqual([...new Set(guestRows.map((row) => row.localServerId))], [guestServer.id]);
+  assert.deepEqual(new Set(guestRows.map((row) => row.canonicalThreadChannelId)), new Set(canonicalIds));
+  assert.deepEqual(await getActiveJointThreadProjectionsByCanonicalThreadsForServer([], guestServer.id), []);
+
+  const unrelatedThreadId = "00000000-0000-4000-8000-000000000001";
+  const page = [
+    { id: "m1", channelId: hostProjection.id, threadId: canonicalIds[0] },
+    { id: "m2", channelId: hostProjection.id, threadId: canonicalIds[1] },
+    { id: "m3", channelId: hostProjection.id, threadId: unrelatedThreadId },
+    { id: "m4", channelId: hostProjection.id, threadId: null },
+  ];
+  for (const [serverId, localChannelId] of [[guestServer.id, guestProjection.id], [hostServer.id, hostProjection.id]] as const) {
+    const projected = await projectJointMessagesToLocalChannel(page, localChannelId, serverId);
+    assert.deepEqual(projected.map((message) => message.channelId), page.map(() => localChannelId));
+    assert.equal(projected[0]!.threadId, await expectedLocal(canonicalIds[0]!, serverId));
+    assert.equal(projected[1]!.threadId, await expectedLocal(canonicalIds[1]!, serverId));
+    assert.equal(projected[2]!.threadId, unrelatedThreadId, "threads without a projection keep their id");
+    assert.equal(projected[3]!.threadId, null);
+  }
+  const guestPage = await projectJointMessagesToLocalChannel(page, guestProjection.id, guestServer.id);
+  assert.ok(guestPage[0]!.threadId, "guest page has a local thread id");
+  assert.notEqual(guestPage[0]!.threadId, canonicalIds[0], "guest page must see its own local thread, not the canonical one");
 });
 
 test("message reactions add idempotently, enrich messages, and remove cleanly", async ({ app }) => {
@@ -2535,6 +2598,113 @@ test("POST /messages allows inert outsider mentions in DMs without notify or inb
   assert.equal(agentMentionsRes.status, 200);
   const agentMentions = await agentMentionsRes.json() as { mentions: Array<{ messageId: string }> };
   assert.deepEqual(agentMentions.mentions.map((mention) => mention.messageId), []);
+});
+
+test("POST /v2/messages surfaces stopped-agent DM delivery warnings without failing the send", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("messages-stopped-agent-owner@slock.test", "messages-stopped-agent-owner");
+  const server = await createServer("Messages Stopped Agent", "messages-stopped-agent", owner.id);
+  await db.insert(serverMembers).values({ serverId: server.id, userId: owner.id, role: "owner" }).onConflictDoNothing();
+  const agent = await createAgent(server.id, "MessagesStoppedAgent", { runtime: "codex" });
+  const dm = await findOrCreateDM(server.id, owner.id, agent.id);
+  assert.ok(dm, "expected owner/agent DM");
+
+  const originalOrchestrator = app.app.get("agentOrchestrator") as AgentOrchestrator;
+  const delivered: Array<{ agentId: string; message: AgentMessage }> = [];
+  app.app.set("agentOrchestrator", {
+    ...originalOrchestrator,
+    deliverMessage: async (agentId: string, message: AgentMessage) => {
+      delivered.push({ agentId, message });
+      return { status: "dropped" as const, reason: "wake_suppressed" as const };
+    },
+  });
+  onTestFinished(() => {
+    app.app.set("agentOrchestrator", originalOrchestrator);
+  });
+
+  const ownerToken = await tokenForHuman(owner.email);
+  const sendRes = await fetch(`${app.baseUrl}/api/v2/messages`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(ownerToken, server.id),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      channelId: dm.id,
+      content: "hello stopped agent",
+    }),
+  });
+
+  assert.equal(sendRes.status, 200);
+  const sent = await sendRes.json() as {
+    message: { id: string; content: string };
+    deliveryWarnings?: Array<{ targetType: string; targetId: string; reason: string }>;
+  };
+  assert.equal(sent.message.content, "hello stopped agent");
+  assert.deepEqual(sent.deliveryWarnings, [{
+    targetType: "agent",
+    targetId: agent.id,
+    reason: "agent_stopped",
+  }]);
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0]?.agentId, agent.id);
+  assert.equal(delivered[0]?.message.channel_type, "dm");
+});
+
+test("POST /v2/messages keeps stopped-agent warning lookup bounded", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("messages-stopped-agent-timeout-owner@slock.test", "messages-stopped-agent-timeout-owner");
+  const server = await createServer("Messages Stopped Agent Timeout", "messages-stopped-agent-timeout", owner.id);
+  await db.insert(serverMembers).values({ serverId: server.id, userId: owner.id, role: "owner" }).onConflictDoNothing();
+  const agent = await createAgent(server.id, "MessagesStoppedAgentTimeout", { runtime: "codex" });
+  const dm = await findOrCreateDM(server.id, owner.id, agent.id);
+  assert.ok(dm, "expected owner/agent DM");
+
+  const originalOrchestrator = app.app.get("agentOrchestrator") as AgentOrchestrator;
+  const delivered: Array<{ agentId: string; message: AgentMessage }> = [];
+  let releaseDelivery!: () => void;
+  const slowDelivery = new Promise<{ status: "dropped"; reason: "wake_suppressed" }>((resolve) => {
+    releaseDelivery = () => resolve({ status: "dropped", reason: "wake_suppressed" });
+  });
+  app.app.set("agentOrchestrator", {
+    ...originalOrchestrator,
+    deliverMessage: async (agentId: string, message: AgentMessage) => {
+      delivered.push({ agentId, message });
+      return slowDelivery;
+    },
+  });
+  onTestFinished(() => {
+    releaseDelivery();
+    app.app.set("agentOrchestrator", originalOrchestrator);
+  });
+
+  const ownerToken = await tokenForHuman(owner.email);
+  const startedAt = Date.now();
+  const sendRes = await fetch(`${app.baseUrl}/api/v2/messages`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(ownerToken, server.id),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      channelId: dm.id,
+      content: "hello slow stopped agent",
+    }),
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(sendRes.status, 200);
+  assert.ok(elapsedMs < 5000, `send should stay bounded, took ${elapsedMs}ms`);
+  const sent = await sendRes.json() as {
+    message: { id: string; content: string };
+    deliveryWarnings?: Array<{ targetType: string; targetId: string; reason: string }>;
+  };
+  assert.equal(sent.message.content, "hello slow stopped agent");
+  assert.equal(sent.deliveryWarnings, undefined);
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0]?.agentId, agent.id);
+  assert.equal(delivered[0]?.message.channel_type, "dm");
+  releaseDelivery();
 });
 
 test("user mention-actions execute mirrors notify and add semantics", async ({ app }) => {
@@ -4260,8 +4430,16 @@ test("GET /messages/search records success and failure diagnostics", async ({  }
     );
     assert.ok(successQuerySpan, "expected request-linked search query child span");
     assert.equal(successQuerySpan.attrs?.phase, "visibility_candidates_enrich");
-    assert.equal(successQuerySpan.attrs?.query_plan_shape, "fts_recent_page_first");
+    // A term this rare is within the corpus-wide cap, so recent sort collects text matches first.
+    assert.equal(successQuerySpan.attrs?.query_plan_shape, "fts_recent_text_matches_first");
     assert.equal(successQuerySpan.attrs?.query_length_bucket, "short");
+    const recentProbeSpan = sink.getAllSpans().find((candidate) =>
+      candidate.name === "server.db.query"
+      && candidate.context.parentSpanId === successSpan.context.spanId
+      && candidate.attrs?.query_name === "messages.search.text_match_breadth"
+    );
+    assert.ok(recentProbeSpan, "recent sort with text runs the text-match estimate first");
+    assert.equal(typeof recentProbeSpan.attrs?.estimated_text_match_rows, "number");
     assert.equal(Object.values(successQuerySpan.attrs ?? {}).includes("needle"), false);
 
     await db.insert(messages).values({
@@ -4313,8 +4491,19 @@ test("GET /messages/search records success and failure diagnostics", async ({  }
     assert.equal(failedQuerySpan.status, "error");
     assert.equal(failedQuerySpan.attrs?.reason, "database_error");
     assert.equal(failedQuerySpan.attrs?.sqlstate, "22P02");
+    // The reason reaches this span as a CLASSIFICATION, not as prose: sqlstate
+    // 22P02 (invalid_text_representation) already names the cause, so the
+    // message stays the canned excerpt. The driver's own wording for this error
+    // inlines the offending value -- 'invalid input syntax for type uuid:
+    // "<value>"' -- so it is withheld rather than carried. Both facts are
+    // asserted: the classification is present, AND the parameter is absent.
+    // (Without the withholding, this span leaks the senderId value.)
     assert.equal(failedQuerySpan.attrs?.error_message, "Database statement failed");
-    assert.equal(JSON.stringify(failedQuerySpan.attrs).includes("broken-search-sender"), false);
+    assert.equal(
+      String(failedQuerySpan.attrs?.error_message).includes("not-a-uuid"),
+      false,
+      "the span must not carry the senderId parameter value",
+    );
   } finally {
     await app.close();
   }
@@ -4335,16 +4524,22 @@ test("message search returns typed QUERY_TOO_BROAD above the documented boundary
     });
     await createMessage(channel.id, "user", owner.id, "breadthboundary searchable row");
 
+    // Two probes: the viewer-scoped estimate (WITH visible_channels) and the
+    // corpus-wide text-match estimate (FROM messages m), sized against the
+    // corpus row count.
     let injectedEstimate = MESSAGE_SEARCH_RELEVANCE_ESTIMATED_CANDIDATE_LIMIT;
+    let injectedTextMatchEstimate = MESSAGE_SEARCH_RELEVANCE_ESTIMATED_TEXT_MATCH_LIMIT;
     const dialect = new PgDialect();
     __setSearchServiceDepsForTests({
       executeSearchSql: (async (statement: SQL, options?: { signal?: AbortSignal }) => {
-        const rendered = dialect.sqlToQuery(statement).sql.trimStart();
+        const rendered = dialect.sqlToQuery(statement).sql.replace(/\s+/g, " ").trim();
         if (rendered.startsWith("EXPLAIN (FORMAT JSON)")) {
+          const planRows = rendered.startsWith("EXPLAIN (FORMAT JSON) WITH visible_channels") ? injectedEstimate : injectedTextMatchEstimate;
           return {
-            rows: [{ "QUERY PLAN": [{ Plan: { "Node Type": "Nested Loop", "Plan Rows": injectedEstimate } }] }],
+            rows: [{ "QUERY PLAN": [{ Plan: { "Node Type": "Nested Loop", "Plan Rows": planRows } }] }],
           };
         }
+        if (rendered.includes("FROM pg_class")) return { rows: [{ corpus_rows: 1_000_000 }] };
         return executeSearchSqlFromDb(statement, options);
       }) as typeof executeSearchSqlFromDb,
     });
@@ -4357,6 +4552,16 @@ test("message search returns typed QUERY_TOO_BROAD above the documented boundary
     assert.equal(atLimit.status, 200, "the exact documented threshold remains searchable");
     const atLimitBody = await atLimit.json() as { results: unknown[]; hasMore: boolean };
     assert.equal(atLimitBody.results.length, 1);
+
+    // Rare in this server but common across all servers: the corpus-wide
+    // text-match set the relevance statement reads first is too large.
+    injectedTextMatchEstimate = MESSAGE_SEARCH_RELEVANCE_ESTIMATED_TEXT_MATCH_LIMIT + 1;
+    const corpusBroad = await fetch(`${app.baseUrl}/api/messages/search?q=breadthboundary&limit=1`, {
+      headers: userHeaders,
+    });
+    assert.equal(corpusBroad.status, 422);
+    assert.equal((await corpusBroad.json() as { code: string }).code, "QUERY_TOO_BROAD");
+    injectedTextMatchEstimate = MESSAGE_SEARCH_RELEVANCE_ESTIMATED_TEXT_MATCH_LIMIT;
 
     injectedEstimate = MESSAGE_SEARCH_RELEVANCE_ESTIMATED_CANDIDATE_LIMIT + 1;
 
@@ -4390,6 +4595,54 @@ test("message search returns typed QUERY_TOO_BROAD above the documented boundary
   }
 });
 
+test("recent search on a term above the corpus-wide cap walks the server timeline when the flag is on and no channel narrows it", async ({ app }) => {
+  try {
+    const owner = await seedUser("search-timeline-owner@slock.test", "search-timeline-owner");
+    const server = await createServer("Search Timeline Server", "search-timeline-server", owner.id);
+    const channel = await createChannel(server.id, "search-timeline-channel");
+    await createMessage(channel.id, "user", owner.id, "timelinewalk searchable row");
+
+    // The corpus-wide text-match estimate says the term is dense: recent sort
+    // never rejects, it walks newest first.
+    const dialect = new PgDialect();
+    const executed: string[] = [];
+    let timelineFlag = false;
+    __setSearchServiceDepsForTests({
+      isServerTimelineWalkEnabled: async () => timelineFlag,
+      executeSearchSql: (async (statement: SQL, options?: { signal?: AbortSignal }) => {
+        const rendered = dialect.sqlToQuery(statement).sql.replace(/\s+/g, " ").trim();
+        if (rendered.startsWith("EXPLAIN (FORMAT JSON)")) {
+          return { rows: [{ "QUERY PLAN": [{ Plan: { "Node Type": "Bitmap Heap Scan", "Plan Rows": MESSAGE_SEARCH_RELEVANCE_ESTIMATED_TEXT_MATCH_LIMIT + 1 } }] }] };
+        }
+        if (rendered.includes("FROM pg_class")) return { rows: [{ corpus_rows: 1_000_000 }] };
+        executed.push(rendered);
+        return executeSearchSqlFromDb(statement, options);
+      }) as typeof executeSearchSqlFromDb,
+    });
+    const headers = authHeaders(await tokenForHuman(owner.email), server.id);
+
+    // Flag off (absent in prod until the timeline verifies): the global walk.
+    const flagOff = await fetch(`${app.baseUrl}/api/messages/search?q=timelinewalk&sort=recent&limit=5`, { headers });
+    assert.equal(flagOff.status, 200);
+    assert.equal((await flagOff.json() as { results: unknown[] }).results.length, 1);
+    assert.doesNotMatch(executed.at(-1) ?? "", /\bmessage_server_timeline\b/, "the kill switch keeps the global walk");
+
+    timelineFlag = true;
+    const walk = await fetch(`${app.baseUrl}/api/messages/search?q=timelinewalk&sort=recent&limit=5`, { headers });
+    assert.equal(walk.status, 200);
+    assert.equal((await walk.json() as { results: unknown[] }).results.length, 1);
+    assert.match(executed.at(-1) ?? "", /\bFROM message_server_timeline t JOIN messages m ON m\.id = t\.message_id\b/);
+
+    const narrowed = await fetch(`${app.baseUrl}/api/messages/search?q=timelinewalk&sort=recent&limit=5&channelId=${channel.id}`, { headers });
+    assert.equal(narrowed.status, 200);
+    assert.equal((await narrowed.json() as { results: unknown[] }).results.length, 1);
+    assert.doesNotMatch(executed.at(-1) ?? "", /\bmessage_server_timeline\b/, "a channel filter already narrows the walk to that channel");
+  } finally {
+    __resetSearchServiceDepsForTests();
+    await app.close();
+  }
+});
+
 test("message search maps admitted PostgreSQL statement timeout to typed SEARCH_TIMEOUT instead of an empty set", async ({ app }) => {
 
   try {
@@ -4407,6 +4660,7 @@ test("message search maps admitted PostgreSQL statement timeout to typed SEARCH_
             rows: [{ "QUERY PLAN": [{ Plan: { "Node Type": "Nested Loop", "Plan Rows": 1 } }] }],
           };
         }
+        if (rendered.includes("FROM pg_class")) return { rows: [{ corpus_rows: 1_000_000 }] };
         throw Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" });
       }) as typeof executeSearchSqlFromDb,
     });
@@ -4673,36 +4927,97 @@ test("GET /messages/search cloaks explicit private channel filter from non-membe
   assert.equal(body.error, "Channel not found");
 });
 
-test("POST /messages/forward is fail-closed until the forwarding flag is enabled", async ({ app }) => {
-  const sink = new MemoryTraceSink();
-  app.app.set("serverTracer", new BasicTracer({ sink }));
+test("GET /messages/search and the agent search stop returning a soft-deleted channel and its threads while archived channels stay searchable", async ({ app }) => {
   const db = getDb();
-  const owner = await seedUser("forward-disabled-owner@slock.test", "forward-disabled-owner");
-  const server = await createServer("Forward Disabled Server", "forward-disabled-server", owner.id);
+  const owner = await seedUser("search-deleted-owner@slock.test", "search-deleted-owner");
+  const member = await seedUser("search-deleted-member@slock.test", "search-deleted-member");
+  const server = await createServer("Search Deleted Server", "search-deleted-server", owner.id);
+  await db.insert(serverMembers).values([
+    { serverId: server.id, userId: owner.id, role: "owner" },
+    { serverId: server.id, userId: member.id, role: "member" },
+  ]).onConflictDoNothing();
+  const agent = await createAgent(server.id, "search-deleted-agent", { runtime: "codex" });
+  const { machine, apiKey } = await registerMachine(server.id, owner.id, "search-deleted-machine");
+  await assignMachine(agent.id, machine.id);
+
+  const marker = "quartzlantern";
+  const doomed = await createChannel(server.id, "search-deleted-room");
+  const archived = await createChannel(server.id, "search-archived-room");
+  const doomedMessage = await createMessage(doomed.id, "user", owner.id, `${marker} in the room that will be deleted`);
+  const doomedThread = await getOrCreateThread(doomedMessage.id, owner.id, "user");
+  const doomedThreadReply = await createMessage(doomedThread.id, "user", owner.id, `${marker} reply under the room that will be deleted`);
+  const archivedMessage = await createMessage(archived.id, "user", owner.id, `${marker} in the archived room`);
+  await archiveChannel(archived.id, owner.id);
+
+  const memberToken = await tokenForHuman(member.email);
+  const ownerToken = await tokenForHuman(owner.email);
+  const searchIds = async (init: RequestInit, url: string): Promise<string[]> => {
+    const res = await fetch(url, init);
+    assert.equal(res.status, 200, await res.clone().text());
+    const body = await res.json() as { results: Array<{ id: string }> };
+    return body.results.map((result) => result.id).sort();
+  };
+  const humanSearch = () => searchIds(
+    { headers: authHeaders(memberToken, server.id) },
+    `${app.baseUrl}/api/messages/search?q=${marker}&limit=20`,
+  );
+  const agentSearch = () => searchIds(
+    { headers: machineHeaders(apiKey) },
+    `${app.baseUrl}/internal/agent/${agent.id}/search?q=${marker}&limit=20`,
+  );
+
+  const everything = [doomedMessage.id, doomedThreadReply.id, archivedMessage.id].sort();
+  assert.deepEqual(await humanSearch(), everything, "precondition: a member finds the live, thread and archived messages");
+  assert.deepEqual(await agentSearch(), everything, "precondition: an agent finds the live, thread and archived messages");
+
+  const deleteRes = await fetch(`${app.baseUrl}/api/channels/${doomed.id}`, {
+    method: "DELETE",
+    headers: authHeaders(ownerToken, server.id),
+  });
+  assert.equal(deleteRes.status, 200, await deleteRes.clone().text());
+
+  assert.deepEqual(
+    await humanSearch(),
+    [archivedMessage.id],
+    "a soft-deleted channel and the threads under it must vanish from human search; the archived channel stays searchable",
+  );
+  assert.deepEqual(
+    await agentSearch(),
+    [archivedMessage.id],
+    "a soft-deleted channel and the threads under it must vanish from agent search; the archived channel stays searchable",
+  );
+});
+
+test("POST /messages/forward stays available after the rollout flag is retired", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("forward-retired-owner@slock.test", "forward-retired-owner");
+  const server = await createServer("Forward Retired Server", "forward-retired-server", owner.id);
   await db.insert(serverMembers).values({ serverId: server.id, userId: owner.id, role: "owner" }).onConflictDoNothing();
-  const source = await createChannel(server.id, "forward-disabled-source");
-  const destination = await createChannel(server.id, "forward-disabled-destination");
+  const source = await createChannel(server.id, "forward-retired-source");
+  const destination = await createChannel(server.id, "forward-retired-destination");
   await db.insert(channelHumans).values([
     { channelId: source.id, userId: owner.id },
     { channelId: destination.id, userId: owner.id },
   ]).onConflictDoNothing();
-  const sourceMessage = await createMessage(source.id, "user", owner.id, "hidden forward source");
+  const sourceMessage = await createMessage(source.id, "user", owner.id, "forward source after retirement");
   const token = await tokenForHuman(owner.email);
+
+  await db
+    .update(featureFlags)
+    .set({ killSwitch: true })
+    .where(eq(featureFlags.key, "message_forwarding_v0"));
 
   const enabled = await fetch(`${app.baseUrl}/api/messages/forward/enabled`, {
     headers: authHeaders(token, server.id),
   });
   assert.equal(enabled.status, 200);
-  assert.deepEqual(await enabled.json(), { enabled: false });
+  assert.deepEqual(await enabled.json(), { enabled: true });
 
-  sink.clear();
-  const traceId = "7".repeat(32);
   const res = await fetch(`${app.baseUrl}/api/messages/forward`, {
     method: "POST",
     headers: {
       ...authHeaders(token, server.id),
       "Content-Type": "application/json",
-      traceparent: `00-${traceId}-${"f".repeat(16)}-01`,
     },
     body: JSON.stringify({
       destinationChannelId: destination.id,
@@ -4710,114 +5025,7 @@ test("POST /messages/forward is fail-closed until the forwarding flag is enabled
       note: "",
     }),
   });
-
-  assert.equal(res.status, 404);
-  assert.deepEqual(await res.json(), { error: "Forwarding is not available" });
-  const span = findForwardAttemptSpan(sink, traceId);
-  const terminal = span?.events.find((event) => event.name === "messages.forward.terminal");
-  assert.equal(terminal?.attrs?.phase, "gate");
-  assert.equal(terminal?.attrs?.stable_code, "feature_disabled");
-  assert.equal(terminal?.attrs?.error_class, "FeatureGateDenied");
-});
-
-test("POST /messages/forward uses message_forwarding_v0 server allowlist and kill switch", async ({ app }) => {
-  const db = getDb();
-  const owner = await seedUser("forward-flag-owner@slock.test", "forward-flag-owner");
-  const allowlistedServer = await createServer("Forward Flag Allowed", "botiverse", owner.id);
-  const blockedServer = await createServer("Forward Flag Blocked", "forward-flag-blocked", owner.id);
-  await db.insert(serverMembers).values([
-    { serverId: allowlistedServer.id, userId: owner.id, role: "owner" },
-    { serverId: blockedServer.id, userId: owner.id, role: "owner" },
-  ]).onConflictDoNothing();
-
-  const seedForwardablePair = async (serverId: string, prefix: string) => {
-    const source = await createChannel(serverId, `${prefix}-source`);
-    const destination = await createChannel(serverId, `${prefix}-destination`);
-    await db.insert(channelHumans).values([
-      { channelId: source.id, userId: owner.id },
-      { channelId: destination.id, userId: owner.id },
-    ]).onConflictDoNothing();
-    const sourceMessage = await createMessage(source.id, "user", owner.id, `${prefix} source`);
-    return { source, destination, sourceMessage };
-  };
-
-  const allowlisted = await seedForwardablePair(allowlistedServer.id, "forward-flag-allowlisted");
-  const blocked = await seedForwardablePair(blockedServer.id, "forward-flag-blocked");
-  const token = await tokenForHuman(owner.email);
-
-  await db.insert(featureFlagRules).values({
-    flagKey: MESSAGE_FORWARDING_FEATURE_FLAG_KEY,
-    stage: "server",
-    decision: "allow",
-    values: [allowlistedServer.id],
-  });
-
-  const allowlistedEnabled = await fetch(`${app.baseUrl}/api/messages/forward/enabled`, {
-    headers: authHeaders(token, allowlistedServer.id),
-  });
-  assert.equal(allowlistedEnabled.status, 200);
-  assert.deepEqual(await allowlistedEnabled.json(), { enabled: true });
-
-  const blockedEnabled = await fetch(`${app.baseUrl}/api/messages/forward/enabled`, {
-    headers: authHeaders(token, blockedServer.id),
-  });
-  assert.equal(blockedEnabled.status, 200);
-  assert.deepEqual(await blockedEnabled.json(), { enabled: false });
-
-  const blockedForward = await fetch(`${app.baseUrl}/api/messages/forward`, {
-    method: "POST",
-    headers: {
-      ...authHeaders(token, blockedServer.id),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      destinationChannelId: blocked.destination.id,
-      sourceMessageIds: [blocked.sourceMessage.id],
-      note: "",
-    }),
-  });
-  assert.equal(blockedForward.status, 404);
-  assert.deepEqual(await blockedForward.json(), { error: "Forwarding is not available" });
-
-  const allowlistedForward = await fetch(`${app.baseUrl}/api/messages/forward`, {
-    method: "POST",
-    headers: {
-      ...authHeaders(token, allowlistedServer.id),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      destinationChannelId: allowlisted.destination.id,
-      sourceMessageIds: [allowlisted.sourceMessage.id],
-      note: "",
-    }),
-  });
-  assert.equal(allowlistedForward.status, 200, await allowlistedForward.clone().text());
-
-  await db
-    .update(featureFlags)
-    .set({ killSwitch: true })
-    .where(eq(featureFlags.key, MESSAGE_FORWARDING_FEATURE_FLAG_KEY));
-
-  const killedEnabled = await fetch(`${app.baseUrl}/api/messages/forward/enabled`, {
-    headers: authHeaders(token, allowlistedServer.id),
-  });
-  assert.equal(killedEnabled.status, 200);
-  assert.deepEqual(await killedEnabled.json(), { enabled: false });
-
-  const killedForward = await fetch(`${app.baseUrl}/api/messages/forward`, {
-    method: "POST",
-    headers: {
-      ...authHeaders(token, allowlistedServer.id),
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      destinationChannelId: allowlisted.destination.id,
-      sourceMessageIds: [allowlisted.sourceMessage.id],
-      note: "",
-    }),
-  });
-  assert.equal(killedForward.status, 404);
-  assert.deepEqual(await killedForward.json(), { error: "Forwarding is not available" });
+  assert.equal(res.status, 200, await res.clone().text());
 });
 
 test("POST /messages/forward records pre-router auth, account, and server admission terminals", async ({ app }) => {
@@ -4891,7 +5099,7 @@ test("POST /messages/forward records a pre-router rate-limit terminal", async ()
     };
     const body = JSON.stringify({});
     const first = await fetch(`${app.baseUrl}/api/messages/forward`, { method: "POST", headers, body });
-    assert.equal(first.status, 404);
+    assert.equal(first.status, 400);
 
     sink.clear();
     const traceId = "5".repeat(32);
@@ -4921,7 +5129,6 @@ test("POST /messages/forward records a pre-router rate-limit terminal", async ()
 
 test("POST /messages/forward records validation rejection on the propagated trace", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   try {
     const sink = new MemoryTraceSink();
     app.app.set("serverTracer", new BasicTracer({ sink }));
@@ -4962,7 +5169,6 @@ test("POST /messages/forward records validation rejection on the propagated trac
 
 test("POST /messages/forward stores an ordered immutable forwarded bundle snapshot", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   try {
     const sink = new MemoryTraceSink();
     app.app.set("serverTracer", new BasicTracer({ sink }));
@@ -5147,7 +5353,6 @@ test("POST /messages/forward stores an ordered immutable forwarded bundle snapsh
 
 test("POST /messages/forward records an unexpected terminal phase without identifiers", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   const registry = new InMemoryFailpointRegistry();
   registry.configure("server.message.forward.beforeSourceSnapshot", {
     mode: "once",
@@ -5279,7 +5484,6 @@ test("POST /messages/forward records an unexpected terminal phase without identi
 
 test("POST /messages/forward keeps a pre-persist disconnect marker separate from the final error terminal", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   installFakeIo(app);
   const blocker = createBlockingThrowFailpoint(
     "server.message.forward.beforeSourceSnapshot",
@@ -5348,7 +5552,6 @@ test("POST /messages/forward keeps a pre-persist disconnect marker separate from
 
 test("POST /messages/forward keeps a post-persist disconnect marker separate from the final committed terminal", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   installFakeIo(app);
   const barrier = createFailpointBarrier();
   const registry = new InMemoryFailpointRegistry({ sleep: barrier.sleep });
@@ -5419,7 +5622,6 @@ test("POST /messages/forward keeps a post-persist disconnect marker separate fro
 
 test("POST /messages/forward batches canonical destinations with truthful partial and idempotent retry results", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   const emitted = installFakeIo(app);
   try {
     const sink = new MemoryTraceSink();
@@ -5589,7 +5791,6 @@ test("POST /messages/forward batches canonical destinations with truthful partia
 
 test("POST /messages/forward supports thread sources through parent-source-read authority", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   try {
     const db = getDb();
     const owner = await seedUser("forward-thread-owner@slock.test", "forward-thread-owner");
@@ -5861,7 +6062,6 @@ test("POST /messages/forward supports thread sources through parent-source-read 
 
 test("POST /messages/forward scrubs private thread provenance for parent-denied viewers", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   try {
     const db = getDb();
     const owner = await seedUser("forward-private-thread-owner@slock.test", "forward-private-thread-owner");
@@ -5952,7 +6152,6 @@ test("POST /messages/forward scrubs private thread provenance for parent-denied 
 
 test("POST /messages/forward requires source read authority and degrades private provenance", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   try {
     const db = getDb();
     const owner = await seedUser("forward-private-owner@slock.test", "forward-private-owner");
@@ -6072,7 +6271,6 @@ test("POST /messages/forward requires source read authority and degrades private
 
 test("POST /messages/forward rejects short source ids before server-wide message resolution", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   try {
     const db = getDb();
     const owner = await seedUser("forward-short-owner@slock.test", "forward-short-owner");
@@ -6131,7 +6329,6 @@ test("POST /messages/forward rejects short source ids before server-wide message
 
 test("POST /messages/forward supports joint destinations and restricted joint sources", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   try {
     const db = getDb();
     const owner = await seedUser("forward-joint-owner@slock.test", "forward-joint-owner");
@@ -6533,7 +6730,6 @@ test("POST /messages/forward supports joint destinations and restricted joint so
 
 test("POST /messages/forward rejects cross-source and non-ordinary source messages", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   const emitted = installFakeIo(app);
   try {
     const db = getDb();
@@ -6688,7 +6884,6 @@ test("POST /messages/forward rejects cross-source and non-ordinary source messag
 
 test("GET /messages/forward/targets/search returns channels, DMs, agents, and humans", async ({ app }) => {
 
-  setMessageForwardingEnabledForApp(app.app, true);
   try {
     const db = getDb();
     const owner = await seedUser("fwd-search-owner@slock.test", "fwd-search-owner");

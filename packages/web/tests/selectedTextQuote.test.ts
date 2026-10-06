@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   SELECTED_TEXT_QUOTE_EVENT,
   appendQuoteToComposer,

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { classifySlackOutboundReconciliation } from "./slackBridgeDatabaseOutboundRuntime.js";
+import { classifySlackOutboundReconciliation } from "./slackBridgeDatabaseOutboundRuntime";
 
 test("outbound caller aborts on every unsafe reconciliation result", () => {
   for (const reason of [

@@ -15,7 +15,7 @@
  *      not resurrect unread/mention state.
  */
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -38,7 +38,7 @@ import { useThreadStore } from "../src/store/threadStore";
 
 type TestFn = () => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn);
+  nodeTest(name,  fn);
 
 const originalGet = api.get;
 const originalPost = api.post;

@@ -5,13 +5,18 @@
 
 import type { Command } from "commander";
 
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError, type CliErrorCode } from "../../core/errors.js";
-import { writeText, NL } from "../../core/renderer.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { resolveTargetAlias, type TargetAliasOpts } from "../_target.js";
-import { formatSearchResults } from "./_format.js";
+import {
+  AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT,
+  AGENT_API_MESSAGE_SEARCH_MAX_LIMIT,
+} from "@botiverse/raft-shared";
+
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError, type CliErrorCode } from "../../core/errors";
+import { writeText, NL } from "../../core/renderer";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { PEER_KIND_OPTION, resolveTargetAlias, type TargetAliasOpts } from "../_target";
+import { formatSearchResults, type SearchData } from "./_format";
 
 interface SearchOpts extends TargetAliasOpts {
   query?: string;
@@ -188,6 +193,31 @@ function normalizeSearchOpts(opts: Partial<SearchOpts & { sort?: string }>): Omi
   };
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Two copy-pasteable retries of the caller's own search: recent sort (never
+ * rejected as too broad) and the same search narrowed to one channel.
+ */
+export function formatQueryTooBroadNextAction(opts: {
+  query?: string;
+  sender?: string;
+  before?: string;
+  after?: string;
+}): string {
+  const base = [
+    "raft message search",
+    ...(opts.query ? [`--query ${shellQuote(opts.query)}`] : []),
+    ...(opts.sender ? [`--sender ${shellQuote(opts.sender)}`] : []),
+    ...(opts.after ? [`--after ${shellQuote(opts.after)}`] : []),
+    ...(opts.before ? [`--before ${shellQuote(opts.before)}`] : []),
+  ].join(" ");
+  return `Newest first (never rejected as too broad): ${base} --sort recent\n`
+    + `Or narrow to one channel you are in: ${base} --target '#<channel>'`;
+}
+
 function toSearchErrorCode(errorCode: string | null | undefined, status: number): CliErrorCode {
   switch (errorCode) {
     case "SCOPE_DENIED":
@@ -209,12 +239,25 @@ export const messageSearchCommand = defineCommand(
       { flags: "--query <q>", description: "Search query string (optional when filters are provided)" },
       { flags: "--target <target>", description: "Restrict to a single channel/DM/thread" },
       { flags: "--channel <target>", description: "Legacy alias for --target (accepted during transition)" },
+      PEER_KIND_OPTION,
       { flags: "--sender <handle>", description: "Restrict to messages by sender handle, e.g. @alice" },
       { flags: "--sort <mode>", description: "Sort results by relevance or recent (default: relevance; filter-only searches use recent)" },
       { flags: "--before <iso>", description: "Only messages before this ISO datetime" },
       { flags: "--after <iso>", description: "Only messages after this ISO datetime" },
-      { flags: "--limit <n>", description: "Max results (server default applies if omitted)" },
-      { flags: "--offset <n>", description: "Skip this many results (server default applies if omitted)" },
+      {
+        flags: "--limit <n>",
+        description:
+          `Max results (default ${AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT}, capped at ${AGENT_API_MESSAGE_SEARCH_MAX_LIMIT}; `
+          + `a full page of ${AGENT_API_MESSAGE_SEARCH_MAX_LIMIT} does not mean there are no more)`,
+      },
+      {
+        flags: "--offset <n>",
+        description:
+          "Skip this many results (default 0). Not a stable cursor in either sort "
+          + "mode: under relevance the ordering re-ranks as the corpus changes; under "
+          + "recent (including filter-only searches) new messages shift every later "
+          + "row, so the same offset can repeat rows. For recent, page with --before",
+      },
     ],
   },
   async (ctx, opts: Partial<SearchOpts>) => {
@@ -233,12 +276,14 @@ export const messageSearchCommand = defineCommand(
       ...(searchOpts.offset !== undefined ? { offset: String(searchOpts.offset) } : {}),
     });
     if (!res.ok) {
+      const code = toSearchErrorCode(res.errorCode, res.status);
       throw new CliError({
-        code: toSearchErrorCode(res.errorCode, res.status),
+        code,
         message: res.error ?? `HTTP ${res.status}`,
+        ...(code === "QUERY_TOO_BROAD" ? { suggestedNextAction: formatQueryTooBroadNextAction(searchOpts) } : {}),
       });
     }
-    writeText(ctx.io, formatSearchResults(searchOpts.displayQuery, res.data as any), NL);
+    writeText(ctx.io, formatSearchResults(searchOpts.displayQuery, res.data as SearchData, searchOpts.offset, searchOpts.sort, searchOpts.limit), NL);
   },
 );
 

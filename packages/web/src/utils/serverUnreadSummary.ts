@@ -61,6 +61,27 @@ export function hasOtherServerActivityUnread(
   });
 }
 
+/**
+ * Resolve the current server's Activity dot without mixing two snapshots.
+ *
+ * Before Activity has accepted its first window, the cross-server summary and
+ * the optimistic active count are the only available hints. Once a window is
+ * accepted, its server-wide total is authoritative until the Activity identity
+ * is hard-reset. A background refresh may temporarily clear its generation
+ * receipt, but must not make an older summary authoritative again. In
+ * particular, an older summary must not resurrect a dot after mark-read /
+ * mark-all-read changed the accepted window total to zero.
+ */
+export function hasCurrentServerActivityUnread(input: {
+  hasAcceptedWindow: boolean;
+  hasTotalUnread: boolean;
+  hasPreloadActiveUnread: boolean;
+  summaryUnreadCount?: number;
+}): boolean {
+  if (input.hasAcceptedWindow) return input.hasTotalUnread;
+  return input.hasPreloadActiveUnread || (input.summaryUnreadCount ?? 0) > 0;
+}
+
 /** Preserve the caller's snapshot when a cross-server reconciliation is unchanged. */
 export function retainServerUnreadSummary(
   previous: Record<string, ServerUnreadSummary>,

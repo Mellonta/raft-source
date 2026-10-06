@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   getBillingPlanPresentation,
   getBillingControlsState,
@@ -131,7 +130,6 @@ test("billing plan presentation keeps Partner distinct from Founder, Pro, and Fr
     notIncludedFeatures: [
       "billing.higherFileUploadLimits",
       "billing.unlimitedMessageHistory",
-      "billing.unlimitedJointChannels",
       "billing.moreProfessionalFeaturesComingSoon",
     ],
     hasProFeatures: false,

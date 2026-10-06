@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { afterEach, test, vi } from "vitest";
 import * as XLSX from "xlsx";
-import { buildXlsxPreview } from "./providers/xlsx.js";
+import { buildXlsxPreview } from "./providers/xlsx";
 
 vi.mock("xlsx", async (importOriginal) => {
   const actual = await importOriginal<typeof import("xlsx")>();

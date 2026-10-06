@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
 
 const createAgentSource = readFileSync(
   new URL("../src/components/agent/CreateAgentDialog.tsx", import.meta.url),
@@ -61,7 +60,7 @@ test("runtime config fields keep the create-agent model rescan layout", () => {
   // `<Field>` is the local indirection that picks StableField (reserved message
   // row) or plain FormField, per the page's opt-in — see StableField.tsx.
   assert.match(runtimeConfigFieldsSource, /<Field\s+label=\{formatMessage\(\{ id: "agent\.runtimeConfig\.model" \}\)\}/);
-  assert.match(runtimeConfigFieldsSource, /className="ml-auto text-black\/40 hover:text-black transition-colors disabled:opacity-50 disabled:cursor-not-allowed"/);
+  assert.match(runtimeConfigFieldsSource, /className="ml-auto text-foreground-muted hover:text-foreground-strong transition-colors disabled:opacity-50 disabled:cursor-not-allowed"/);
   assert.doesNotMatch(runtimeConfigFieldsSource, /<FormField label="Model">/);
 });
 
@@ -74,7 +73,7 @@ test("Built-in gateway and schema-backed model fields do not inherit host model 
   // Button when the page opted in, and the original raw button otherwise —
   // so Agent Details keeps its appearance. The property this guard protects,
   // "the rescan control sits in the label row", is unchanged.
-  assert.match(runtimeConfigFieldsSource, /labelAccessory=\{showHeaderRescan \? \(\s*<FieldAction/);
+  assert.match(runtimeConfigFieldsSource, /labelAccessory=\{showHeaderRescan \? \(\s*<Tooltip[\s\S]{0,120}?<FieldAction/);
   assert.match(runtimeConfigFieldsSource, /\{builtInGatewayProvider \? null : \(\s*<RuntimeSelectControl/);
   assert.match(runtimeConfigFieldsSource, /id: builtInGatewayProvider[\s\S]*"agent\.runtimeConfig\.gatewayModelId"/);
   assert.match(createAgentSource, /if \(schemaBacked \|\| customModelMode \|\| builtInGatewayModelRequired\) return;/);
@@ -112,22 +111,19 @@ test("reasoning effort keeps omitted Claude Code effort as Default, not implicit
   assert.doesNotMatch(agentDetailSource, /\(draftReasoningEffort \?\? null\) !== \(agent\.reasoningEffort \?\? null\)/);
 });
 
-// task #22: selecting a saved Provider connection means the credential comes from
-// the connection reference, so the agent-local built-in provider block (provider
-// picker, API key, gateway base URL, image-input) must not render at all. The
-// sibling schema-driven section already guards every field with the same flag;
-// this block was the one that missed it, which is why picking `ds 官方 api` still
-// demanded a DeepSeek key. Behavior is covered by
-// agentRuntimeConnectionFields.behavior.test.tsx; this one only pins the source
-// form so the guard cannot be silently dropped.
-test("connection mode hides the agent-local built-in provider fields", () => {
+// task #41 supersedes task #22's separate-selector/hide-the-schema shape. Saved
+// connections now live inside the ordinary Provider field; connection-owned
+// fields remain in their schema positions but are inert and never receive a
+// credential value.
+test("connection mode reuses the Provider schema without a second selector or credential value", () => {
   assert.match(
     runtimeConfigFieldsSource,
-    /\{builtInProviderSupported && !managedConnectionActive && \(/,
+    /\{builtInProviderSupported && \(/,
   );
-  // The unguarded form is the regression: it renders a required API key field
-  // (and its red "needs an API key" hint) while a connection is selected.
-  assert.doesNotMatch(runtimeConfigFieldsSource, /\{builtInProviderSupported && \(/);
+  assert.match(runtimeConfigFieldsSource, /value=\{managedConnectionActive \? "" : builtInProviderApiKey\}/);
+  assert.match(runtimeConfigFieldsSource, /disabled=\{managedConnectionActive\}/);
+  assert.doesNotMatch(createAgentSource, /create-agent-provider-connection/);
+  assert.doesNotMatch(agentDetailSource, /edit-agent-provider-connection/);
 });
 
 // task #22 wiring tooth. The pure predicates are covered by their own tests and

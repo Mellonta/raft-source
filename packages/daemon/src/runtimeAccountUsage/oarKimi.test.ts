@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { test, vi } from "vitest";
 import { kimiRuntime, utcInstantFromDate, type AccountUsageSnapshot } from "@botiverse/oar";
 
 import { runtimeAccountUsageSnapshotSchema } from "@botiverse/raft-shared";
-import { createRuntimeAccountUsageCollector } from "./collector.js";
-import { projectOarAccountUsageSnapshot } from "./oarAdapter.js";
+import { createRuntimeAccountUsageCollector } from "./collector";
+import { projectOarAccountUsageSnapshot } from "./oarAdapter";
 
 const base = {
   provider: "kimi",
@@ -42,6 +41,31 @@ test("Kimi OAR windows preserve percentages, resets and masked account identity"
     ["5h limit", 0.48, resetsAt],
   ]);
   assert.ok(!JSON.stringify(account).includes("alpha@example.com"));
+});
+
+test("Kimi phone sign-ins without an email are identified by their profile nickname", () => {
+  const account = project({
+    kind: "available",
+    plan: "Max",
+    displayName: " 登月者8387 ",
+    rateLimited: true,
+    windows: [{ label: "5h limit", usedRatio: 1 }],
+  });
+  assert.equal(account.maskedLabel, undefined);
+  assert.equal(account.displayName, "登月者8387");
+  assert.equal(account.planLabel, "Max");
+});
+
+test("an account identified by a masked email never carries displayName", () => {
+  const account = project({
+    kind: "available",
+    email: "alpha@example.com",
+    displayName: "登月者8387",
+    rateLimited: false,
+    windows: [{ label: "Weekly limit", usedRatio: 0.4 }],
+  });
+  assert.equal(account.maskedLabel, "a****@example.com");
+  assert.equal("displayName" in account, false);
 });
 
 test("Kimi extra usage headroom keeps OAR account health even when a subscription window is full", () => {

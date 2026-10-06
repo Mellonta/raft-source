@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import type { RuntimeModelInfo } from "@botiverse/raft-shared";
-import { canonicalizeCodexPresentation } from "../src/utils/codexModelOrder.js";
+import { canonicalizeCodexPresentation } from "../src/utils/codexModelOrder";
 
 // Codex is a dynamic runtime source, but the web picker uses Raft's bundled
 // fallback order to keep host presets ahead of older live catalog entries and to

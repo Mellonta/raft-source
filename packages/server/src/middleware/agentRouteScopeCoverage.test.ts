@@ -23,11 +23,10 @@
 //   • Allowlist entry with empty reason → "reason must be non-empty"
 
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { internalRouter } from "../routes/internal.js";
-import { getStaticAgentScope } from "./agentScope.js";
-import { AGENT_ROUTE_SCOPE_COVERAGE } from "./agentRouteScopeCoverage.js";
+import { internalRouter } from "../routes/internal";
+import { getStaticAgentScope } from "./agentScope";
+import { AGENT_ROUTE_SCOPE_COVERAGE } from "./agentRouteScopeCoverage";
 
 interface RouteEntry {
   method: string;

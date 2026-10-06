@@ -1,5 +1,4 @@
-import { CSV_PREVIEW_MAX_FILE_SIZE_BYTES, isTextPreviewCandidate } from "@botiverse/raft-shared";
-import { XLSX_PREVIEW_MAX_FILE_SIZE_BYTES } from "@botiverse/raft-shared";
+import { CSV_PREVIEW_MAX_FILE_SIZE_BYTES, isTextPreviewCandidate, XLSX_PREVIEW_MAX_FILE_SIZE_BYTES } from "@botiverse/raft-shared";
 import type { AttachmentPreviewData, AttachmentPreviewResponse, CsvAttachmentPreviewData, DiffAttachmentPreviewData, XlsxAttachmentPreviewData } from "@botiverse/raft-shared";
 import type { IntlShape } from "react-intl";
 import type { MessageAttachment } from "../../store/messageStore";

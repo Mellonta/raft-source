@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   getCommittedSearchQuery,
   isSearchKeyboardComposing,
-} from "../src/components/search/searchComposition.js";
+} from "../src/components/search/searchComposition";
 
 test("defers committed search query while IME composition is active", () => {
   assert.equal(getCommittedSearchQuery("nihao", true), null);

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 
 // task #361 — Activity thread-latest monotonic seq fix (read-side).
 //
@@ -24,7 +23,7 @@ const {
   rememberLocalThreadActivity,
   clearInboxLocalThreadActivityHighWater,
   inboxItemLatestMarker,
-} = await import("../src/store/inboxStore.js");
+} = await import("../src/store/inboxStore");
 
 type ThreadItem = {
   kind: "thread";

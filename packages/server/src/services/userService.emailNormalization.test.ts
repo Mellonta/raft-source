@@ -1,10 +1,9 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { passwordResets, users } from "../db/schema.js";
-import { requestPasswordReset } from "./userService.js";
+import { getDb } from "../db/index";
+import { passwordResets, users } from "../db/schema";
+import { requestPasswordReset } from "./userService";
 
 
 afterEach(async () => {

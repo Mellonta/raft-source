@@ -12,7 +12,7 @@
  *       readable and the held publisher is still accepted).
  */
 import assert from "node:assert/strict";
-import { afterEach, test as nodeTest } from "node:test";
+import { test as nodeTest } from "vitest";
 
 import {
   captureActivityShadowGeneration,
@@ -35,7 +35,7 @@ import { triggerServerReset } from "../src/store/serverResetRegistry";
 
 type TestFn = (t: unknown) => void | Promise<void>;
 const test = (name: string, fn: TestFn) =>
-  nodeTest(name, { concurrency: false }, fn as never);
+  nodeTest(name,  fn as never);
 
 afterEach(() => {
   resetActivityBootstrapForTests();

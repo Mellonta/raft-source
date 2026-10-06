@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import type { ReactElement } from "react";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
@@ -226,7 +225,8 @@ test("Sidebar section headers and nav rows render the finalized Chinese under zh
   );
   assert.ok(sortButton, "channels sort control");
   assert.equal(sortButton.getAttribute("aria-label"), "对侧栏会话排序");
-  assert.equal(sortButton.getAttribute("title"), "对侧栏会话排序：手动");
+  assert.equal(sortButton.getAttribute("title"), null);
+  assert.ok(sortButton.hasAttribute("data-base-ui-tooltip-trigger"), "sort hint now rides the RUI tooltip trigger");
   // Same rail, Members tab: `layout.sidebar.agents` / `humans` / empty states.
   cleanup();
   seedServerChrome();
@@ -240,6 +240,45 @@ test("Sidebar section headers and nav rows render the finalized Chinese under zh
   // count to >= 1 instead would have let either one silently stop rendering.
   assert.ok(screen.getByText("成员"), "mobile rail header (layout.sidebar.headerMembers)");
   assert.ok(screen.getByText("人类"), "humans section header (layout.sidebar.humans)");
+  assertNoRawPlaceholders();
+});
+
+// Family 3c — Sidebar.tsx Humans rows / `layout.sidebar.guestLabel` (task #89).
+// Property: in the Members rail, a Guest is visibly marked as Guest and nobody else
+// is — Owner/Admin/Member rows carry no role label.
+test("the Sidebar Humans list labels only Guest members, in Chinese", () => {
+  seedServerChrome();
+  const human = (userId: string, displayName: string, role: "owner" | "admin" | "member" | "guest") => ({
+    userId,
+    email: `${userId}@example.com`,
+    gravatarHash: "",
+    name: userId,
+    displayName,
+    description: null,
+    avatarUrl: null,
+    role,
+    joinedAt: "2026-07-22T00:00:00.000Z",
+  });
+  useServerStore.setState({
+    members: [
+      human("user-1", "Owner Person", "owner"),
+      human("user-2", "Admin Person", "admin"),
+      human("user-3", "Member Person", "member"),
+      human("user-4", "Guest Person", "guest"),
+    ],
+  } as never);
+  renderZh(<Sidebar mobileInline />, "/s/server/members");
+
+  const rowFor = (displayName: string) => {
+    const row = screen.getByText(displayName).closest("button");
+    assert.ok(row, `${displayName} row`);
+    return row;
+  };
+  assert.equal(screen.getAllByText("访客").length, 1, "exactly one Guest label in the rail");
+  assert.ok(within(rowFor("Guest Person")).getByText("访客"), "the Guest row carries the label");
+  for (const name of ["Owner Person", "Admin Person", "Member Person"]) {
+    assert.equal(within(rowFor(name)).queryByText("访客"), null, `${name} has no role label`);
+  }
   assertNoRawPlaceholders();
 });
 
@@ -275,9 +314,10 @@ test("the Sidebar archive confirm dialog renders the finalized Chinese WITH its 
   renderZh(<Sidebar mobileInline />, "/s/server");
 
   fireEvent.contextMenu(screen.getByText(PROBE_CHANNEL_NAME));
-  // The row context menu is a portal-rendered plain div (no ARIA role), so it is
-  // located by its own class contract rather than by role.
-  const menu = document.querySelector<HTMLElement>("div.card-brutal.w-48");
+  // The row context menu is a portal-rendered RUI ContextMenuPopup, located by
+  // its data-slot contract or w-48 popup container.
+  const menu = document.querySelector<HTMLElement>('[data-slot="context-menu-content"].w-48')
+    ?? document.querySelector<HTMLElement>("div.card-brutal.w-48");
   assert.ok(menu, "channel context menu");
   // `layout.sidebar.markAsUnread` / `pin` / `archive` all live in this menu.
   assert.ok(within(menu).getByText("标为未读"), "mark as unread action");

@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import type { ExternalAttachmentAuthority } from "./externalAttachmentProviderAdapter.js";
+import type { ExternalAttachmentAuthority } from "./externalAttachmentProviderAdapter";
 import {
   createSlackInboundAttachmentAdapter,
   type SlackInboundAttachmentTransport,
-} from "./slackInboundAttachmentAdapter.js";
+} from "./slackInboundAttachmentAdapter";
 
 const AUTHORITY: ExternalAttachmentAuthority = {
   provider: "slack",

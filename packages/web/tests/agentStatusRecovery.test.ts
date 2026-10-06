@@ -1,28 +1,27 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import {
   assertSurfaceProducerFactLineage,
   stripSurfaceProducerFactLineage,
 } from "@botiverse/raft-shared";
-import api from "../src/api/client.js";
-import { selectAgentDisplayState, useAgentStore } from "../src/store/agentStore.js";
-import type { Agent, TrajectoryEntry } from "../src/store/agentStore.js";
-import { useServerStore } from "../src/store/serverStore.js";
-import type { Server } from "../src/store/serverStore.js";
+import api from "../src/api/client";
+import { selectAgentDisplayState, useAgentStore } from "../src/store/agentStore";
+import type { Agent, TrajectoryEntry } from "../src/store/agentStore";
+import { useServerStore } from "../src/store/serverStore";
+import type { Server } from "../src/store/serverStore";
 import {
   __resetStateViolationCoalescerForTest,
   __setStateViolationEmitterForTest,
-} from "../src/utils/stateViolationTrace.js";
+} from "../src/utils/stateViolationTrace";
 import {
   __setStateTransitionEmitterForTest,
-} from "../src/utils/stateTransitionTrace.js";
+} from "../src/utils/stateTransitionTrace";
 import {
   __resetAuthTraceForTest,
   flushAuthTraces,
   setAuthTraceFetchForTest,
   setAuthTracePrincipalIdGetter,
   setAuthTraceServerIdGetter,
-} from "../src/utils/webAuthTrace.js";
+} from "../src/utils/webAuthTrace";
 
 const originalGet = api.get.bind(api);
 const originalPost = api.post.bind(api);
@@ -106,7 +105,7 @@ function captureStateTransitions() {
 
 function captureWebTraceBatches() {
   const values = new Map<string, string>();
-  const batches: Array<{ records?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
+  const batches: Array<{ events?: Array<{ name?: string; attrs?: Record<string, unknown> }> }> = [];
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
     value: {
@@ -329,7 +328,7 @@ test("agent state transition trace classifies conflict, logged, stale, and inval
   ]);
   await flushAuthTraces();
   const storeDecisions = webTraceBatches
-    .flatMap((batch) => batch.records ?? [])
+    .flatMap((batch) => batch.events ?? [])
     .filter((record) => record.name === "slock.agent_activity.store_decision");
   assert.deepEqual(
     storeDecisions.map((record) => record.attrs?.outcome),

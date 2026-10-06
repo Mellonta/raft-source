@@ -4,19 +4,21 @@ import {
   noopTracer,
   type CompletedTraceSpan,
   type TraceEventRecord,
+  type TraceLogEvent,
   type TraceSink,
   type TraceSpanFactRecord,
   type Tracer,
 } from "@botiverse/raft-shared";
-import { OtlpHttpTraceSink } from "./otlpHttpTraceSink.js";
-import { ScopeDbTraceEventSink } from "./scopeDbTraceEventSink.js";
-import { SERVER_VERSION } from "../version.js";
+import { OtlpHttpTraceSink } from "./otlpHttpTraceSink";
+import { ScopeDbTraceEventSink } from "./scopeDbTraceEventSink";
+import { TraceUserIdTraceSink } from "./traceUserIdTraceSink";
+import { SERVER_VERSION } from "../version";
 import {
   createGeneratedTraceDeploymentIdentity,
   traceDeploymentResourceOptions,
   type TraceDeploymentIdentity,
   type TraceDeploymentResourceOptions,
-} from "./traceDeploymentIdentity.js";
+} from "./traceDeploymentIdentity";
 import {
   scopeDbTraceSinkEnabled,
   scopeDbTraceSinkFlushesTotal,
@@ -25,7 +27,7 @@ import {
   scopeDbTraceSinkQueueRows,
   scopeDbTraceSinkRowsDroppedTotal,
   scopeDbTraceSinkRowsExportedTotal,
-} from "../metrics.js";
+} from "../metrics";
 
 export interface ServerTracerRuntime {
   tracer: Tracer;
@@ -74,7 +76,7 @@ export function createServerTracerFromEnv(
   const sink = sinks.length === 1 ? sinks[0]! : new FanoutTraceSink(sinks);
 
   return {
-    tracer: new BasicTracer({ sink }),
+    tracer: new BasicTracer({ sink: new TraceUserIdTraceSink(sink) }),
     shutdown: async () => {
       for (const shutdownSink of sinks) {
         await shutdownSink.shutdown();
@@ -128,6 +130,17 @@ class FanoutTraceSink implements TraceSink {
         sink.recordSpanFact(record);
       } catch (err) {
         console.warn("[TraceExporter] trace span-fact sink failed:", err instanceof Error ? err.message : String(err));
+      }
+    }
+  }
+
+  recordLogEvent(event: TraceLogEvent): void {
+    for (const sink of this.sinks) {
+      if (!sink.recordLogEvent) continue;
+      try {
+        sink.recordLogEvent(event);
+      } catch (err) {
+        console.warn("[TraceExporter] trace log event sink failed:", err instanceof Error ? err.message : String(err));
       }
     }
   }

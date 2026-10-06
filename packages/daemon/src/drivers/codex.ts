@@ -1,30 +1,32 @@
+import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, runtimeModelSourceOutcomeFromSet, type AgentConfig, type RuntimeModelInfo, type RuntimeModelSet, type RuntimeModelSourceOutcome, type Tracer , type AxSurfaceText } from "@botiverse/raft-shared";
-import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProbeResult } from "./types.js";
-import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport.js";
-import { codexStateRootCandidates, resolveCodexHomeRootFromEnv } from "./codexHome.js";
-import { detectNodeHostKind, NodeHostUnavailableError, resolveNodeHostLaunch } from "./nodeHostLaunch.js";
-import { firstExistingPath, requiresWindowsShell, resolveCommandOnPath, withWindowsUserEnvironment, type ProbeDeps } from "./probe.js";
+import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProbeResult } from "./types";
+import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
+import { codexStateRootCandidates, resolveCodexHomeRootFromEnv } from "./codexHome";
+import { detectNodeHostKind, NodeHostUnavailableError, resolveNodeHostLaunch } from "./nodeHostLaunch";
+import { firstExistingPath, resolveCommandOnPath, withWindowsUserEnvironment, type ProbeDeps } from "./probe";
+import { resolveWindowsDirectLaunch } from "./windowsLaunch";
 import {
   CodexEventNormalizer,
   parseCodexJsonRpcLine,
   type JsonRpcMessage,
   type JsonRpcId,
-} from "./codexEventNormalizer.js";
-import { prepareManagedMcpRuntimeProxy } from "../managedMcpRuntimeProxy.js";
+} from "./codexEventNormalizer";
+import { prepareManagedMcpRuntimeProxy } from "../managedMcpRuntimeProxy";
 import {
   buildCodexInstructionShapeAttrs,
   buildCodexInstructionShapeStaticAttrs,
   type CodexInstructionObservationPhase,
   type CodexInstructionShapeStaticAttrs,
   type CodexThreadRequestMethod,
-} from "./codexInstructionShape.js";
+} from "./codexInstructionShape";
 
-export { parseCodexJsonRpcLine } from "./codexEventNormalizer.js";
+export { parseCodexJsonRpcLine } from "./codexEventNormalizer";
 
 /**
  * macOS desktop-bundled Codex CLI locations that are still real install surfaces.
@@ -69,7 +71,8 @@ interface CodexSpawnCandidate {
   source: "explicit_bin" | "npm_global" | "path" | "desktop_bundle" | "desktop_install";
   command: string;
   argsPrefix: string[];
-  shell: boolean;
+  /** Runtimes are never started through a shell; see windowsLaunch.ts. */
+  shell: false;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -178,12 +181,9 @@ function codexSpawnCandidates(deps: ProbeDeps = {}): CodexSpawnCandidateDiscover
 
     const command = resolveCommandOnPath("codex", deps);
     if (command && !isWindowsSandboxRunner(command)) {
-      candidates.push({
-        source: "path",
-        command,
-        argsPrefix: [],
-        shell: requiresWindowsShell(command, platform),
-      });
+      const direct = windowsDirectCodexCandidate("path", command, deps);
+      if (typeof direct === "string") rejected.push(direct);
+      else candidates.push(direct);
     }
 
     const desktopEntry = resolveWindowsCodexDesktopEntry(deps);
@@ -392,15 +392,46 @@ function resolveExplicitCodexBin(deps: ProbeDeps): ExplicitCodexBinResolution {
     };
   }
 
+  if (platform === "win32") {
+    const direct = windowsDirectCodexCandidate("explicit_bin", command, deps);
+    if (typeof direct === "string") return { status: "invalid", raw, reason: direct };
+    return { status: "resolved", candidate: direct };
+  }
+
   return {
     status: "resolved",
     candidate: {
       source: "explicit_bin",
       command,
       argsPrefix: [],
-      shell: requiresWindowsShell(command, platform),
+      shell: false,
     },
   };
+}
+
+/**
+ * A Windows command as a direct launch: a .cmd/.bat shim is resolved to the
+ * program it runs, never started through cmd.exe. Returns a path-free
+ * rejection reason when the shim cannot be resolved.
+ */
+function windowsDirectCodexCandidate(
+  source: CodexSpawnCandidate["source"],
+  command: string,
+  deps: ProbeDeps,
+): CodexSpawnCandidate | string {
+  try {
+    const launch = resolveWindowsDirectLaunch("codex", command, [], deps);
+    return {
+      source,
+      command: launch.command,
+      argsPrefix: launch.args,
+      shell: false,
+      ...(launch.env ? { env: launch.env } : {}),
+    };
+  } catch (error) {
+    if (!(error instanceof RuntimeExecutableNotFoundError)) throw error;
+    return `${source} batch wrapper rejected: ${error.reason ?? "unresolved"}`;
+  }
 }
 
 function describeCodexProbeFailure(error: unknown): string {
@@ -585,7 +616,7 @@ export function probeCodex(deps: ProbeDeps = {}): RuntimeProbeResult {
   };
 }
 
-export function resolveCodexSpawn(commandArgs: string[], deps: ProbeDeps = {}): { command: string; args: string[]; shell: boolean; source: CodexSpawnCandidate["source"]; env?: NodeJS.ProcessEnv } {
+export function resolveCodexSpawn(commandArgs: string[], deps: ProbeDeps = {}): { command: string; args: string[]; shell: false; source: CodexSpawnCandidate["source"]; env?: NodeJS.ProcessEnv } {
   const { candidate, rejected, explicitOverrideFailed } = resolveCompatibleCodexCandidate(deps);
   if (candidate) {
     return {
@@ -612,21 +643,21 @@ export function resolveCodexSpawn(commandArgs: string[], deps: ProbeDeps = {}): 
   }
 
   if ((deps.platform ?? process.platform) === "win32") {
-    throw new Error(
+    // Surface why a found .cmd wrapper was turned away (launch_unresolved event).
+    const wrapperReason = rejected.map((note) => /batch wrapper rejected: (\w+)/.exec(note)?.[1]).find(Boolean);
+    throw new RuntimeExecutableNotFoundError({ runtimeId: "codex", reason: wrapperReason, message:
       "Cannot resolve a compatible Codex CLI app-server entry point on Windows. " +
       "Install Codex Desktop or install @openai/codex globally via npm (npm i -g @openai/codex). " +
       "Ignoring .codex/.sandbox-bin/codex-command-runner because it is a sandbox helper, not the Codex CLI." +
       ` (${search}).` +
       rejectedNote +
-      restartNote,
-    );
+      restartNote });
   }
 
-  throw new Error(
+  throw new RuntimeExecutableNotFoundError({ runtimeId: "codex", message:
     `Cannot resolve a compatible Codex CLI app-server entry point (${search}).` +
     rejectedNote +
-    restartNote,
-  );
+    restartNote });
 }
 
 export function buildCodexAppServerArgs(managedMcp?: { name: string; url: string } | null): string[] {
@@ -1316,9 +1347,8 @@ export class CodexDriver implements RuntimeDriver {
     if (!this.instructionShapeRequestAttrs) return;
 
     const sessionId = this.normalizer.threadId || this.instructionShapeConfiguredSessionId;
-    const span = this.instructionShapeTracer.startSpan("daemon.codex.request_instruction_shape", {
+    this.instructionShapeTracer.emitEvent("daemon.codex.request_instruction_shape", {
       surface: "daemon",
-      kind: "internal",
       attrs: {
         ...this.instructionShapeIdentityAttrs,
         session_id: sessionId || undefined,
@@ -1328,9 +1358,9 @@ export class CodexDriver implements RuntimeDriver {
         session_request_method: requestMethod,
         compaction_starts_count: this.instructionShapeCompactionStarts,
         compaction_finishes_count: this.instructionShapeCompactionFinishes,
+        status: "ok",
       },
     });
-    span.end("ok");
   }
 
   private observeInstructionShapeCompactionEvents(events: ParsedEvent[]): void {

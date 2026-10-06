@@ -19,8 +19,8 @@ import type {
   ExternalInboundPayloadAad,
   ExternalIngressPayloadSealer,
   ExternalIngressSecretResolver,
-} from "./externalAppIngressService.js";
-import type { ExternalInboundWorkerDependencies } from "./externalInboundWorkerService.js";
+} from "./externalAppIngressService";
+import type { ExternalInboundWorkerDependencies } from "./externalInboundWorkerService";
 
 const SIGNING_SECRET_SCHEMA = "slack-signing-secret.v1" as const;
 const PAYLOAD_ENVELOPE_SCHEMA = "slack-inbound-payload-envelope.v1" as const;

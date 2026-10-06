@@ -1,22 +1,23 @@
-export default async function* testExecutionReporter(source) {
-  for await (const event of source) {
-    if ((event.type !== "test:pass" && event.type !== "test:fail") || event.data?.details?.type !== "test") {
-      continue;
-    }
+import { appendFileSync } from "node:fs";
 
-    const data = event.data;
-    yield `${JSON.stringify({
-      type: event.type,
-      file: data.file ?? data.entryFile ?? null,
-      entryFile: data.entryFile ?? null,
-      name: data.name,
-      line: data.line ?? null,
-      column: data.column ?? null,
-      nesting: data.nesting ?? null,
-      testId: data.testId ?? null,
-      parentId: data.parentId ?? null,
-      skip: data.skip ?? null,
-      todo: data.todo ?? null,
-    })}\n`;
+// Vitest reporter that records every test case that actually reached a result,
+// one JSON line per case, so run-tests-with-manifest.mjs can prove no test was
+// silently dropped. The event log path comes from the runner via env.
+export default class TestExecutionReporter {
+  constructor() {
+    this.eventLogPath = process.env.RAFT_CLI_TEST_EVENT_LOG;
+    if (!this.eventLogPath) {
+      throw new Error("RAFT_CLI_TEST_EVENT_LOG must name the event log file");
+    }
+  }
+
+  onTestCaseResult(testCase) {
+    const state = testCase.result().state;
+    appendFileSync(this.eventLogPath, `${JSON.stringify({
+      type: state === "failed" ? "test:fail" : "test:pass",
+      file: testCase.module.moduleId,
+      name: testCase.name,
+      skip: state === "skipped" ? true : null,
+    })}\n`);
   }
 }

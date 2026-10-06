@@ -1,15 +1,14 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 
 import {
   broadcastAndDeliver,
   __resetMessageServiceDepsForTests,
   __setMessageServiceDepsForTests,
-} from "./messageService.js";
-import { getDb } from "../db/index.js";
+} from "./messageService";
+import { getDb } from "../db/index";
 import {
   agents,
   channelAgents,
@@ -20,7 +19,7 @@ import {
   servers,
   threadFollows,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 
 
 // Delivery-decision teeth for thread_join_context. Persistence, follow rows,

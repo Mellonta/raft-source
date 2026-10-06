@@ -143,7 +143,12 @@ function getHighlightSnapshot(
 }
 
 function tokenStyle(token: CodeTokenLine[number]): CSSProperties | undefined {
-  return token.color ? { color: token.color } : undefined;
+  // Both palettes live in the same cached tokens; switching the root theme
+  // updates ink through CSS without asynchronous work or a plaintext flash.
+  return {
+    "--shiki-light-color": token.variants.light?.color,
+    "--shiki-dark-color": token.variants.dark?.color,
+  } as CSSProperties;
 }
 
 function PlainCode({ code }: { code: string }) {
@@ -181,7 +186,7 @@ function ShikiHighlightedCodeImpl({
       {highlight.lines.map((line, lineIndex) => (
         <span className="line" key={lineIndex}>
           {line.map((token, tokenIndex) => (
-            <span key={tokenIndex} style={tokenStyle(token)}>
+            <span className="r-code-token" key={tokenIndex} style={tokenStyle(token)}>
               {token.content}
             </span>
           ))}

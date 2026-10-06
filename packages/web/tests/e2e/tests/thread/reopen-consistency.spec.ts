@@ -69,7 +69,9 @@ test.describe("P0 thread reopen consistency", () => {
       await expect(threadScroller.getByText(firstReply)).toBeVisible();
       await expect(inlineReplies).toContainText(firstReply);
 
-      await threadPage.getByTitle("Close thread").click();
+      // The close affordance is a RUI CloseButton (aria-label from the Tooltip
+      // text, no title attribute); key on its stable testid.
+      await threadPage.getByTestId("thread-close").click();
       await expect(threadScroller).toHaveCount(0);
       await expect(threadComposer).toHaveCount(0);
 

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { createElement, Fragment } from "react";
-import { cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import api from "../src/api/client";
 import ChannelFilesPanel from "../src/components/message/ChannelFilesPanel";
@@ -144,6 +143,33 @@ function renderPanel(locale: "en" | "zh-cn" = "en") {
   );
 }
 
+async function getRegisteredOverflowTrigger(trigger: HTMLElement) {
+  const fileId = trigger.getAttribute("data-file-id");
+  assert.ok(fileId, "file-menu trigger must identify its file");
+  return waitFor(() => {
+    const matches = screen
+      .getAllByTestId("channel-file-overflow-trigger")
+      .filter((candidate) => candidate.getAttribute("data-file-id") === fileId);
+    assert.equal(matches.length, 1, "file must have one mounted overflow trigger");
+    const current = matches[0];
+    assert.equal(current.isConnected, true);
+    assert.equal(current.getAttribute("aria-expanded"), "false");
+    return current;
+  });
+}
+
+async function openOverflowMenu(trigger: HTMLElement) {
+  const activeTrigger = await getRegisteredOverflowTrigger(trigger);
+  // Focus can update the tooltip composed around this trigger. Flush the
+  // interaction through React before inspecting the resulting menu state.
+  await act(async () => {
+    activeTrigger.focus();
+    fireEvent.keyDown(activeTrigger, { key: "ArrowDown" });
+  });
+  assert.equal(activeTrigger.getAttribute("aria-expanded"), "true");
+  return screen.getByTestId("channel-file-overflow-menu");
+}
+
 afterEach(() => {
   cleanup();
   api.get = originalGet as typeof api.get;
@@ -159,7 +185,7 @@ afterEach(() => {
   useServerStore.setState({ current: null });
 });
 
-test("flag on keeps markdown row preview primary and moves file commands into a vertical-ellipsis menu", async () => {
+test("file list keeps markdown row preview primary and moves file commands into a vertical-ellipsis menu", async () => {
   seedServer();
   const attachmentRequests: string[] = [];
   mockApis(true, attachmentRequests);
@@ -190,8 +216,8 @@ test("flag on keeps markdown row preview primary and moves file commands into a 
   const inlineDownload = screen.getByTestId("channel-file-inline-download");
   assert.equal(inlineJump.getAttribute("title"), null);
   assert.equal(inlineDownload.getAttribute("title"), null);
-  assert.equal(inlineJump.getAttribute("data-slot"), "tooltip-trigger");
-  assert.equal(inlineDownload.getAttribute("data-slot"), "tooltip-trigger");
+  assert.equal(inlineJump.getAttribute("data-slot"), "button");
+  assert.equal(inlineDownload.getAttribute("data-slot"), "button");
 
   fireEvent.click(screen.getByRole("button", { name: "Preview file" }));
   await waitFor(() => {
@@ -203,8 +229,7 @@ test("flag on keeps markdown row preview primary and moves file commands into a 
   assert.deepEqual(downloadedUrls, []);
   assert.deepEqual(attachmentRequests, [`/attachments/${file.id}/preview`]);
 
-  fireEvent.click(trigger);
-  const menu = await screen.findByTestId("channel-file-overflow-menu");
+  const menu = await openOverflowMenu(trigger);
   assert.deepEqual(
     Array.from(menu.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent?.trim()),
     ["Jump to original message", "Download file"],
@@ -217,7 +242,7 @@ test("flag on keeps markdown row preview primary and moves file commands into a 
     `/s/design/channel/${channel.id}?msg=${file.messageId}`,
   ));
 
-  fireEvent.click(trigger);
+  await openOverflowMenu(trigger);
   fireEvent.click(screen.getByTestId("channel-file-overflow-download"));
   await waitFor(() => assert.deepEqual(downloadedUrls, ["https://cdn.example.test/file.md"]));
   assert.deepEqual(attachmentRequests, [
@@ -231,8 +256,8 @@ test("thread files jump to the exact source reply inside their parent thread", a
   mockApis(true, [], [threadFile]);
   renderPanel();
 
-  fireEvent.click(await screen.findByTestId("channel-file-overflow-trigger"));
-  fireEvent.click(await screen.findByTestId("channel-file-overflow-jump"));
+  await openOverflowMenu(await screen.findByTestId("channel-file-overflow-trigger"));
+  fireEvent.click(screen.getByTestId("channel-file-overflow-jump"));
 
   await waitFor(() => assert.equal(
     screen.getByTestId("location-probe").textContent,
@@ -327,17 +352,170 @@ test("file row previews route media through the shared preview surfaces before s
   ]);
 });
 
-test("flag off preserves the two legacy icon buttons while using the shared MapPin semantic", async () => {
+test("retired flag disabled keeps the file menu and desktop jump/download actions", async () => {
   seedServer();
   mockApis(false, []);
   renderPanel();
 
   await screen.findByText(file.filename);
   await waitFor(() => {
-    assert.ok(screen.getByTitle("Jump to original message").querySelector(".lucide-map-pin"));
-    assert.ok(screen.getByTitle("Download file"));
+    assert.ok(screen.getByTestId("channel-file-inline-jump").querySelector(".lucide-map-pin"));
+    assert.ok(screen.getByTestId("channel-file-inline-download"));
   });
-  assert.equal(screen.queryByTestId("channel-file-overflow-trigger"), null);
+  assert.ok(screen.getByTestId("channel-file-overflow-trigger"));
+});
+
+test("mouse activation opens the file menu on Base UI's scheduled browser frame", async () => {
+  seedServer();
+  mockApis(true, []);
+  renderPanel();
+
+  const trigger = await screen.findByTestId("channel-file-overflow-trigger");
+  await waitFor(() => assert.equal(trigger.getAttribute("aria-expanded"), "false"));
+
+  // Hold the mouse path at Base UI's registration boundary. The trigger is
+  // mounted, but its root-owned aria/event contract is not available yet.
+  // The helper must not dispatch mouse-down until this test publishes the
+  // contract; once released, the real Base UI handler must still defer open
+  // state to the captured browser frame.
+  trigger.removeAttribute("aria-expanded");
+  const originalGetAttribute = trigger.getAttribute;
+  let fileIdReads = 0;
+  let releaseFirstCandidateRead: (() => void) | undefined;
+  const firstCandidateRead = new Promise<void>((resolve) => {
+    releaseFirstCandidateRead = resolve;
+  });
+  trigger.getAttribute = function getAttribute(name: string) {
+    const value = originalGetAttribute.call(this, name);
+    if (name === "data-file-id" && value === file.id) {
+      fileIdReads += 1;
+      if (fileIdReads === 2) releaseFirstCandidateRead?.();
+    }
+    return value;
+  };
+
+  const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
+  const originalWindowRequestAnimationFrame = window.requestAnimationFrame;
+  let scheduledFrame: FrameRequestCallback | undefined;
+  const requestFrame = ((callback: FrameRequestCallback) => {
+    scheduledFrame = callback;
+    return 1;
+  }) as typeof requestAnimationFrame;
+  let activationAttempts = 0;
+  const holdUntilRegistered = (event: MouseEvent) => {
+    if (event.button !== 0) return;
+    activationAttempts += 1;
+    if (trigger.getAttribute("aria-expanded") !== "false") event.stopImmediatePropagation();
+  };
+  document.addEventListener("mousedown", holdUntilRegistered, true);
+
+  try {
+    globalThis.requestAnimationFrame = requestFrame;
+    window.requestAnimationFrame = requestFrame;
+
+    const activation = getRegisteredOverflowTrigger(trigger).then((activeTrigger) => {
+      fireEvent.mouseDown(activeTrigger, { button: 0 });
+      return activeTrigger;
+    });
+    await firstCandidateRead;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(activationAttempts, 0, "unregistered trigger must receive no mouse activation");
+    assert.equal(scheduledFrame, undefined);
+    assert.equal(screen.queryByTestId("channel-file-overflow-menu"), null);
+
+    trigger.setAttribute("aria-expanded", "false");
+    const activeTrigger = await activation;
+    assert.equal(activeTrigger, trigger);
+    assert.equal(activationAttempts, 1, "registered trigger must receive exactly one mouse activation");
+    assert.equal(activeTrigger.getAttribute("aria-expanded"), "false");
+    assert.equal(screen.queryByTestId("channel-file-overflow-menu"), null);
+    assert.ok(scheduledFrame, "mouse-down must schedule the menu-open frame");
+
+    await act(async () => scheduledFrame?.(performance.now()));
+    assert.equal(activeTrigger.getAttribute("aria-expanded"), "true");
+    assert.ok(screen.getByTestId("channel-file-overflow-menu"));
+  } finally {
+    trigger.getAttribute = originalGetAttribute;
+    document.removeEventListener("mousedown", holdUntilRegistered, true);
+    globalThis.requestAnimationFrame = originalRequestAnimationFrame;
+    window.requestAnimationFrame = originalWindowRequestAnimationFrame;
+  }
+});
+
+test("keyboard activation waits for Base UI to publish the trigger contract", async () => {
+  seedServer();
+  mockApis(true, []);
+  renderPanel();
+
+  const trigger = await screen.findByTestId("channel-file-overflow-trigger");
+  await waitFor(() => assert.equal(trigger.getAttribute("aria-expanded"), "false"));
+
+  // Hold keyboard delivery at the same structural boundary as Base UI's
+  // detached-trigger registration: the DOM button exists, but the root-owned
+  // aria/event contract has not been forwarded yet. The second file-id read
+  // proves the helper has inspected the mounted candidate before this test
+  // explicitly publishes aria-expanded=false and releases the boundary.
+  trigger.removeAttribute("aria-expanded");
+  const originalGetAttribute = trigger.getAttribute;
+  let fileIdReads = 0;
+  let releaseFirstCandidateRead: (() => void) | undefined;
+  const firstCandidateRead = new Promise<void>((resolve) => {
+    releaseFirstCandidateRead = resolve;
+  });
+  trigger.getAttribute = function getAttribute(name: string) {
+    const value = originalGetAttribute.call(this, name);
+    if (name === "data-file-id" && value === file.id) {
+      fileIdReads += 1;
+      if (fileIdReads === 2) releaseFirstCandidateRead?.();
+    }
+    return value;
+  };
+  let activationAttempts = 0;
+  const holdUntilRegistered = (event: KeyboardEvent) => {
+    if (event.key !== "ArrowDown") return;
+    activationAttempts += 1;
+    if (trigger.getAttribute("aria-expanded") !== "false") event.stopImmediatePropagation();
+  };
+  document.addEventListener("keydown", holdUntilRegistered, true);
+
+  try {
+    const opening = openOverflowMenu(trigger).then(
+      (menu) => ({ menu, error: null }),
+      (error: unknown) => ({ menu: null, error }),
+    );
+    await firstCandidateRead;
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    assert.equal(activationAttempts, 0, "unregistered trigger must receive no activation");
+
+    trigger.setAttribute("aria-expanded", "false");
+    const { menu, error } = await opening;
+    if (error) throw error;
+    assert.equal(activationAttempts, 1, "registered trigger must receive exactly one activation");
+    assert.ok(menu);
+    assert.ok(menu.querySelector('[role="menuitem"]'));
+  } finally {
+    trigger.getAttribute = originalGetAttribute;
+    document.removeEventListener("keydown", holdUntilRegistered, true);
+  }
+});
+
+test("keyboard activation reacquires the mounted trigger after replacement", async () => {
+  seedServer();
+  mockApis(true, []);
+  const first = renderPanel();
+
+  const staleTrigger = await screen.findByTestId("channel-file-overflow-trigger");
+  await waitFor(() => assert.equal(staleTrigger.getAttribute("aria-expanded"), "false"));
+  first.unmount();
+  assert.equal(staleTrigger.isConnected, false);
+  renderPanel();
+
+  const menu = await openOverflowMenu(staleTrigger);
+  const activeTrigger = screen.getByTestId("channel-file-overflow-trigger");
+  assert.notEqual(activeTrigger, staleTrigger);
+  assert.equal(activeTrigger.isConnected, true);
+  assert.equal(activeTrigger.getAttribute("aria-expanded"), "true");
+  assert.ok(menu.querySelector('[role="menuitem"]'));
 });
 
 test("the file menu follows the active Chinese locale", async () => {
@@ -347,8 +525,7 @@ test("the file menu follows the active Chinese locale", async () => {
 
   const trigger = await screen.findByTestId("channel-file-overflow-trigger");
   assert.equal(trigger.getAttribute("aria-label"), `${file.filename} 的操作`);
-  fireEvent.click(trigger);
-  const menu = await screen.findByTestId("channel-file-overflow-menu");
+  const menu = await openOverflowMenu(trigger);
   assert.deepEqual(
     Array.from(menu.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent?.trim()),
     ["跳转到原消息", "下载文件"],

@@ -1,12 +1,12 @@
 import {
   appSnapshotTraceAttrs,
   appSourceTraceAttrs,
-} from "@botiverse/raft-shared/src/appRuntimeTrace.js";
+} from "@botiverse/raft-shared/src/appRuntimeTrace";
 import type { ReminderJob } from "@botiverse/raft-shared";
 
-import { composeAppSnapshot } from "../../services/appSnapshotComposition.js";
-import { BUILT_IN_REMINDER_APP } from "./definition.js";
-import { getSnapshotForAgent, toReminderJob } from "./service.js";
+import { composeAppSnapshot } from "../../services/appSnapshotComposition";
+import { BUILT_IN_REMINDER_APP } from "./definition";
+import { getSnapshotForAgent, toReminderJob } from "./service";
 
 export function composeReminderSnapshot(ownerAgentId: string) {
   const snapshotTraceAttrs = appSnapshotTraceAttrs({

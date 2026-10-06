@@ -1,14 +1,15 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { agents, servers, users, serverMembers } from "../db/schema.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { createAgent } from "../services/agentService.js";
-import { createChannel, addHuman, findOrCreateDM, findOrCreateUserDM, listChannels } from "../services/channelService.js";
+import { getDb } from "../db/index";
+import { agents, servers, users, serverMembers } from "../db/schema";
+import { signAccessToken } from "../middleware/auth";
+import { createAgent } from "../services/agentService";
+import { createChannel, addHuman, findOrCreateDM, findOrCreateUserDM, getOrCreateThread, listChannels } from "../services/channelService";
+import { createMessage } from "../services/messageService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -99,6 +100,31 @@ test("GET /channels/:id returns joined:true for a private-channel member", async
   assert.equal(body.joined, true);
 });
 
+test("GET /channels/:id hides thread metadata when the requester cannot access its private parent", async ({ app }) => {
+  const { owner, other, server } = await seed();
+  const parentChannel = await createChannel(server.id, "private-parent", undefined, "private");
+  await addHuman(parentChannel.id, owner.id);
+  const parentMessage = await createMessage(parentChannel.id, "user", owner.id, "secret parent");
+  const thread = await getOrCreateThread(parentMessage.id, owner.id, "user");
+
+  const { status, body } = await fetchChannel(app.baseUrl, thread.id, other.id, server.id);
+  assert.equal(status, 404, "same-server membership must not reveal a private parent's thread metadata");
+  assert.deepEqual(body, { error: "Channel not found" });
+});
+
+test("GET /channels/:id returns thread metadata when a server member can access its regular parent", async ({ app }) => {
+  const { owner, other, server } = await seed();
+  const parentChannel = await createChannel(server.id, "regular-parent", undefined, "channel");
+  await addHuman(parentChannel.id, owner.id);
+  const parentMessage = await createMessage(parentChannel.id, "user", owner.id, "public parent");
+  const thread = await getOrCreateThread(parentMessage.id, owner.id, "user");
+
+  const { status, body } = await fetchChannel(app.baseUrl, thread.id, other.id, server.id);
+  assert.equal(status, 200, "parent access must keep child-thread detail hydration available");
+  assert.equal(body.id, thread.id);
+  assert.equal(body.type, "thread");
+});
+
 test("GET /channels/:id returns joined:false for a non-member on a regular channel", async ({ app }) => {
   const { owner, other, server } = await seed();
   const channel = await createChannel(server.id, "shared", undefined, "channel");
@@ -184,4 +210,11 @@ test("GET /channels/:id computes joined per-requester (owner true, other true af
   const otherView = await fetchChannel(app.baseUrl, channel.id, other.id, server.id);
   assert.equal(ownerView.body.joined, true);
   assert.equal(otherView.body.joined, true);
+});
+
+test("GET /channels/:id answers 404, not 500, for an id that is not a uuid", async ({ app }) => {
+  const { owner, server } = await seed();
+  const { status, body } = await fetchChannel(app.baseUrl, "threads", owner.id, server.id);
+  assert.equal(status, 404);
+  assert.deepEqual(body, { error: "Channel not found" });
 });

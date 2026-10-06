@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { getHumanDepartureLabel } from "../src/components/member/humanMembershipStatus";

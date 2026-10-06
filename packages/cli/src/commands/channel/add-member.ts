@@ -3,12 +3,12 @@
 
 import type { Command } from "commander";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { adoptCliReplyText, writeText, NL } from "../../core/renderer.js";
-import { parseRegularChannelTarget } from "./leave.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { adoptCliReplyText, writeText, NL } from "../../core/renderer";
+import { parseRegularChannelTarget } from "./leave";
 
 interface AddMemberOpts {
   target?: string;
@@ -39,11 +39,11 @@ export function formatAddMemberResult(target: string, memberType: "user" | "agen
 export const channelAddMemberCommand = defineCommand(
   {
     name: "add-member",
-    description: "Add a human or agent to a regular channel when this agent has server admin authority",
+    description: "Add a human or agent from this server to a public, private, or joint channel when this agent has server admin authority",
     options: [
       {
         flags: "--target <target>",
-        description: "Regular channel to add a member to, e.g. '#engineering'",
+        description: "Channel to add a member to, e.g. '#engineering'",
       },
       {
         flags: "--user <handle>",
@@ -61,7 +61,7 @@ export const channelAddMemberCommand = defineCommand(
     if (!channelName) {
       throw new CliError({
         code: "INVALID_TARGET",
-        message: "Target must be a regular channel in the form '#channel-name'. DMs and thread targets are not supported.",
+        message: "Target must be a channel in the form '#channel-name'. DMs and thread targets are not supported.",
       });
     }
 

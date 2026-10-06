@@ -1,21 +1,96 @@
+import Tooltip from "../ui/Tooltip";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, Children } from "react";
 import type { ChangeEvent, MouseEvent, PointerEvent as ReactPointerEvent, ReactNode, TouchEvent } from "react";
 import { createPortal } from "react-dom";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
-import { Copy, MessageSquare, MessageCirclePlus, MessageCircleOff, Download, ClipboardCheck, Play, Pause, Volume2, CheckCircle, RotateCcw, Link, Bookmark, BookmarkMinus, Languages, AlertTriangle, Plus, Eye, Music, ExternalLink } from "lucide-react";
-import { PreviewCard, PreviewCardContent, PreviewCardTrigger, Skeleton } from "raft-ui";
+import { Copy, MessageCirclePlus, MessageCircleOff, Download, ClipboardCheck, Play, Pause, Volume2, CheckCircle, RotateCcw, Link, Bookmark, BookmarkMinus, Languages, AlertTriangle, Plus, Eye, Music } from "lucide-react";
+import {
+  Badge,
+  ContextMenuPopup,
+  MessageAttachmentDiffAddition,
+  MessageAttachmentDiffDeletion,
+  MessageAttachmentDiffSummary,
+  MessageAttachmentGroup,
+  MessageAttachmentMetaStart,
+  MessageImageGallery,
+  MessageImageGalleryAction,
+  MessageImageGalleryItem,
+  MessageImageGalleryOverlay,
+  MessageImageGalleryPreview,
+  MessageImageGalleryRow,
+  MessageItem,
+  MessageItemAvatarSlot,
+  MessageItemBody,
+  MessageItemContent,
+  MessageItemContinuationTime,
+  MessageItemFooter,
+  MessageItemGutter,
+  MessageItemHeader,
+  MessageItemInlineStatus,
+  MessageItemMeta,
+  MessageItemSender,
+  MessageItemSenderButton,
+  MessageItemTime,
+  MessageItemSavedIndicator,
+  MessageItemTranslationAction,
+  MessageItemTranslationFailedStatus,
+  MessageItemTranslationOriginal,
+  MessageItemTranslationOriginalLabel,
+  MessageItemTranslationRetryAction,
+  MessageItemTranslationStatus,
+  MessageMultiSelectCheckbox,
+  MessageReferenceChip,
+  MessageReferenceText,
+  MessageVideoPreview,
+  MessageVideoPreviewAction,
+  MessageVideoPreviewFailureAction,
+  MessageVideoPreviewFailureContent,
+  MessageVideoPreviewFailureIcon,
+  MessageVideoPreviewFailureTitle,
+  MessageVideoPreviewFallback,
+  MessageVideoPreviewMedia,
+  PopoverPopup,
+  PreviewCard,
+  PreviewCardContent,
+  PreviewCardTrigger,
+  Skeleton,
+  Spinner,
+  SystemMessage,
+  SystemMessageContent,
+  SystemMessageTime,
+  TaskChip,
+  TaskStatusIcon,
+  ThreadIcon,
+  toast,
+  buildMessageImageGalleryRows,
+} from "raft-ui";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import { useStore } from "zustand";
 import {
+  createRaftBareTaskRefRegex,
+  createRaftChannelRefRegex,
+  createRaftChannelThreadRefRegex,
+  createRaftDmRefRegex,
+  createRaftDmThreadRefRegex,
+  createRaftMalformedDmKindRefRegex,
+  createRaftMessageRefRegex,
+  createRaftStructuredUserRefRegex,
+  createRaftUserRefRegex,
+  formatRaftRefTarget,
   messageReactionActorsDiscussion,
   messageRef as canonicalMessageRef,
-  TOPBAR_OVERFLOW_FEATURE_FLAG_KEY,
+  parseRaftPermalink,
+  parseRaftRefTarget,
+  replaceOutsideMarkdownCode,
 } from "@botiverse/raft-shared";
 import type {
   ActionCardMetadata,
+  ExternalActorKind,
+  RaftRefTarget,
   ReactionActorRef,
+  SyncScopeKey,
 } from "@botiverse/raft-shared";
 import { useMessageStore } from "../../store/messageStore";
 import type { Message, MessageAttachment, MessageMention } from "../../store/messageStore";
@@ -31,7 +106,6 @@ import { useMachineStore } from "../../store/machineStore";
 
 import { useTaskStore } from "../../store/taskStore";
 import type { Task } from "../../store/taskStore";
-import { StatusBadge } from "../task/StatusBadge";
 // Parked with its render site below — see the note there.
 // import TaskChipList from "../task/TaskChipList";
 import { useThreadStore } from "../../store/threadStore";
@@ -46,56 +120,41 @@ import { useServerStore } from "../../store/serverStore";
 import { useTranslationStore } from "../../store/translationStore";
 import type { PreferredTranslationDisplay, TranslationEntry } from "../../store/translationStore";
 import { useLegacyTaskPanelStore } from "../../store/legacyTaskPanelStore";
-import { getMessageBodyFontSizeClass, useAppearanceStore } from "../../store/appearanceStore";
+import {
+  getMessageBodyFontSizeClass,
+  getMessageBodyFontSizeStyle,
+  useAppearanceStore,
+} from "../../store/appearanceStore";
 import api from "../../api/client";
 import { useImageLightboxStore } from "../../store/imageLightboxStore";
 import type { LightboxCommentContext } from "../../store/imageLightboxStore";
-import {
-  createRaftBareTaskRefRegex,
-  createRaftChannelRefRegex,
-  createRaftChannelThreadRefRegex,
-  createRaftDmThreadRefRegex,
-  createRaftMessageRefRegex,
-  createRaftStructuredUserRefRegex,
-  createRaftUserRefRegex,
-  formatRaftRefTarget,
-  parseRaftRefTarget,
-  replaceOutsideMarkdownCode,
-  parseRaftPermalink,
-} from "@botiverse/raft-shared";
-import type {
-  RaftRefTarget,
-} from "@botiverse/raft-shared";
 import QuotedMessagePermalinkPreview from "./QuotedMessagePermalinkPreview";
 import {
   extractFirstQuotedMessagePermalink,
   matchesUnavailableQuotedPermalink,
 } from "./quotedMessagePermalink";
 import MentionLink from "./MentionLink";
-import { MSG_REF_CHIP } from "./messageRefChip";
 import { ReferenceChip } from "./ReferenceChip";
 import ProfilePreviewCardContent from "./ProfilePreviewCardContent";
+import ExternalIdentityPreviewCard from "./ExternalIdentityPreviewCard";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import { agentModelLabel, useShowAgentModelName } from "../../utils/agentModelName";
+import { useCatalogModelLabel } from "../../store/modelLabelCatalogStore";
 import StatusDot from "../ui/StatusDot";
 import type { StatusDotProps } from "../ui/StatusDot";
-import { formatActivityText } from "../../utils/activity";
+import { formatAgentDisplayStateText } from "../../utils/activity";
 import { formatFileSizeBytes } from "../../utils/fileSizePresentation";
 import AvatarSlot from "../ui/AvatarSlot";
 import ContextMenuDivider from "../ui/ContextMenuDivider";
 import MenuItem from "../ui/MenuItem";
 import DismissBackdrop from "../ui/DismissBackdrop";
-import CheckMarker from "../ui/CheckMarker";
-import Spinner from "../ui/Spinner";
 import { isAudioPreviewAttachment, isDiffPatchAttachment, isDocumentPreviewAttachment, isVideoPreviewAttachment } from "./attachmentPreview";
 import type { DiffAttachmentPreview, DocumentAttachmentPreview } from "./attachmentPreview";
-import MarkdownContent from "../markdown/MarkdownContent";
+import MarkdownContent, {MarkdownCode} from "../markdown/MarkdownContent";
 import { MessageReadReceiptScopeProvider } from "./messageReadReceiptScope";
 import type { MessageReadReceiptScope } from "./messageReadReceiptScope";
 import { projectReadReceipt } from "../../store/readReceiptDomain";
 import { useReadReceiptStore } from "../../store/readReceiptStore";
-import { buildLegacyTaskWindowUrl, buildThreadWindowUrl, openPanelInNewTab } from "../../utils/openPanelInNewTab";
-import { MarkdownCode } from "../markdown/MarkdownContent";
 import { fetchAttachmentPreviewSummary } from "./attachmentPreviewSummaryCache";
 import { fetchInlineAttachmentUrls } from "./inlineAttachmentUrlCache";
 import { openDocumentPreview } from "./openDocumentPreview";
@@ -117,7 +176,6 @@ import {
   applyMessageReactionsForV2Ingress,
   isMessageV2IngressSoleApplyEligible,
 } from "../../store/normalizedMessageReactions";
-import type { SyncScopeKey } from "@botiverse/raft-shared";
 import {
   reactionReadModelStore,
   selectReactionActors,
@@ -149,7 +207,6 @@ import { ThreadRepliesBadge } from "./ThreadRepliesBadge";
 import CollapsibleMessageContent from "./CollapsibleMessageContent";
 
 import { formatReminderReceiptContentTitle, formatReminderReceiptTime, formatReminderReceiptTooltip, splitReminderReceiptFireAtTokens } from "../../utils/reminderReceiptTime";
-import { imageGalleryBackgroundClass } from "../../utils/imagePreviewStyles";
 import { resolveMessageSenderMember } from "../../utils/messageSenderMember";
 import { isRaftUploadedHumanAvatarUrl } from "../../utils/humanAvatar";
 import type { TimeFormatOptions } from "../../utils/timeFormatting";
@@ -174,7 +231,13 @@ import type { ForwardedBundleAttachmentSnapshot, ForwardedBundleItem } from "./F
 import ForwardedBundleRouteCard from "./ForwardedBundleRouteCard";
 import { openConversationAgentActivity, openConversationAgentProfile } from "../../utils/profilePanelUrl";
 import { formatMemberRole } from "../../utils/memberRoleLabel";
+import { findDmByPeer } from "../../utils/refTarget";
 import { dispatchSenderMentionInsert } from "./senderMentionInsert";
+import { dismissLayerProps } from "../ui/dismissLayer";
+
+// raft-ui's task status ids are kebab-case; slock's are snake_case.
+const toRuiTaskStatus = (status: Task["status"]) =>
+  status === "in_progress" ? "in-progress" : status === "in_review" ? "in-review" : status;
 
 const REACTION_PICKER_EVENT = "raft:message-reaction-picker-open";
 const REACTION_PICKER_WIDTH = 224;
@@ -184,7 +247,7 @@ const QUICK_REACTION_GLYPH_SIZE = 18;
 const SENDER_AVATAR_LONG_PRESS_MS = 500;
 const SENDER_AVATAR_LONG_PRESS_MOVE_TOLERANCE_PX = 10;
 const THREAD_SEARCH_FRAGMENT_HIGHLIGHT_CLASS =
-  "bg-soft-signal/70 text-inherit [font:inherit]";
+  "bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal/70 theme-brutal:text-inherit [font:inherit]";
 
 function ThreadSearchFragmentHighlight({ children }: { children?: ReactNode }) {
   return (
@@ -381,80 +444,6 @@ function ReactionCount({ count }: { count: number }) {
   );
 }
 
-type MessageImageAttachment = NonNullable<Message["attachments"]>[number];
-type ImageAspectKind = "wide" | "tall" | "normal";
-const SINGLE_IMAGE_MAX_WIDTH = 416;
-const SINGLE_IMAGE_MAX_HEIGHT = 288;
-
-export interface ImageGalleryRow {
-  attachments: MessageImageAttachment[];
-  gridClass: string;
-  heightClass: string;
-}
-
-export function classifyImageAspect(att: Pick<MessageImageAttachment, "width" | "height">): ImageAspectKind {
-  if (!att.width || !att.height || att.width <= 0 || att.height <= 0) return "normal";
-  const ratio = att.width / att.height;
-  if (ratio >= 2.2) return "wide";
-  if (ratio <= 0.55) return "tall";
-  return "normal";
-}
-
-function getImageGalleryRowClasses(attachments: MessageImageAttachment[]): Omit<ImageGalleryRow, "attachments"> {
-  if (attachments.length <= 1) {
-    return { gridClass: "grid-cols-1", heightClass: "h-32 sm:h-36" };
-  }
-  if (attachments.length === 2) {
-    return { gridClass: "grid-cols-2", heightClass: "h-32 sm:h-36" };
-  }
-  return { gridClass: "grid-cols-2 md:grid-cols-3", heightClass: "h-28 sm:h-32" };
-}
-
-export function buildImageGalleryRows(attachments: MessageImageAttachment[]): ImageGalleryRow[] {
-  if (attachments.length <= 1) {
-    return attachments.length === 0 ? [] : [{ attachments, ...getImageGalleryRowClasses(attachments) }];
-  }
-
-  const rows: ImageGalleryRow[] = [];
-  let buffer: MessageImageAttachment[] = [];
-
-  const pushBufferedRows = () => {
-    if (buffer.length === 0) return;
-    const chunkSize = buffer.length === 4 ? 2 : 3;
-    for (let i = 0; i < buffer.length; i += chunkSize) {
-      const rowAttachments = buffer.slice(i, i + chunkSize);
-      rows.push({ attachments: rowAttachments, ...getImageGalleryRowClasses(rowAttachments) });
-    }
-    buffer = [];
-  };
-
-  for (const attachment of attachments) {
-    if (classifyImageAspect(attachment) === "wide") {
-      pushBufferedRows();
-      rows.push({ attachments: [attachment], ...getImageGalleryRowClasses([attachment]) });
-      continue;
-    }
-    buffer.push(attachment);
-  }
-
-  pushBufferedRows();
-  return rows;
-}
-
-function getImageGalleryFitClass(att: MessageImageAttachment): string {
-  return classifyImageAspect(att) === "normal" ? "object-cover" : "object-contain";
-}
-
-function getSingleImageReserveStyle(att: MessageImageAttachment) {
-  if (!att.width || !att.height || att.width <= 0 || att.height <= 0) {
-    return { width: "min(11rem, 100%)", aspectRatio: "4 / 3" };
-  }
-
-  const scale = Math.min(SINGLE_IMAGE_MAX_WIDTH / att.width, SINGLE_IMAGE_MAX_HEIGHT / att.height, 1);
-  const reservedWidth = Math.max(1, Math.round(att.width * scale));
-  return { width: `min(${reservedWidth}px, 100%)`, aspectRatio: `${att.width} / ${att.height}` };
-}
-
 export interface MentionEntry {
   displayName: string;
   type: "agent" | "user";
@@ -539,7 +528,10 @@ function escapeMessageHtmlText(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    // `~` would otherwise pair up as GFM strikethrough across two refs such as
+    // `dm:@Twin~agent` and `dm:@Twin~human` once placeholders are restored.
+    .replace(/~/g, "&#126;");
 }
 
 function makeRaftRefAnchor(target: RaftRefTarget, label: string): string {
@@ -643,6 +635,7 @@ function renderContent(
   refAuthorityServerSlug?: string,
   threadRefAuthorityUnavailable = false,
   knownTaskNumbers?: Set<number>,
+  taskByNumber?: ReadonlyMap<number, Task>,
   timeFormatOptions: TimeFormatOptions = {},
   threadSearchHighlightQuery?: string,
   formatMessage?: IntlShape["formatMessage"],
@@ -650,6 +643,48 @@ function renderContent(
   channelParticipantMembersById?: ReadonlyMap<string, ServerMember>,
   unavailableQuotedPermalinkUrl?: string | null,
 ) {
+  // Inline task refs render rui's inline TaskChip when the referenced task is
+  // loaded in the client store, so they follow the same body-size, body-
+  // baseline rule as every other chip in the sentence (#proj-rui task #84).
+  // Unknown tasks keep a neutral badge so the chip never claims a status it
+  // does not know.
+  //
+  // The inline badge shows the status icon + `#N` and deliberately NOT the
+  // assignee: the badge sits inside the sender's sentence, and an `@name`
+  // there reads as a mention the author never wrote (task #1252 — "等 #211
+  // @peng 做完", where @peng came from the badge). The footer badge is not
+  // inside a sentence and keeps the assignee; the task detail shows it too.
+  //
+  // No Tooltip wrapper here on purpose: the footer badge's tooltip mounts a
+  // base-ui trigger with an auto-generated id, and the evidence contract in
+  // tests/taskRefChannelScope.evidence.test.tsx requires the rendered ref
+  // markup to be byte-identical across renders of the same number.
+  const renderTaskBadge = (taskNumber: number) => {
+    const task = taskByNumber?.get(taskNumber);
+    if (!task) return null;
+    return (
+      <TaskChip
+        variant="inline"
+        status={toRuiTaskStatus(task.status)}
+        data-status={task.status}
+        data-testid="message-task-ref-badge"
+        render={
+          <a
+            href="#"
+            className="cursor-default"
+            data-message-affordance="open-linked-task"
+            onClick={(e) => {
+              e.preventDefault();
+              onOpenTaskRef?.(taskNumber);
+            }}
+          >
+            <TaskStatusIcon status={toRuiTaskStatus(task.status)} />
+            <span className="shrink-0">{taskNumberSigil(task.taskNumber)}</span>
+          </a>
+        }
+      />
+    );
+  };
   let mentionIdentityMap: Map<string, MentionEntry> | null = null;
   const resolveMentionByIdentity = (type: "agent" | "user", id: string) => {
     mentionIdentityMap ??= buildMentionIdentityMap(mentionMap);
@@ -695,6 +730,75 @@ function renderContent(
   processed = replaceRaftRefMarkdownWithPlaceholders(processed, raftRefPlaceholders);
   processed = escapeUserRawHtmlForMessageMarkdown(processed);
 
+  // Pre-process thread references: #channel:shortId or dm:@peer:shortId.
+  // These MUST run before the mention passes: `dm:@peer(:shortId)?` contains
+  // `@peer`, and letting mentions claim it first breaks the ref token into
+  // `dm:` + mention chip (+ `:shortId`), which is exactly the production
+  // regression where `dm:@artin:1f1def75` stopped being clickable.
+  // Placeholders also avoid double-processing by the channel regex.
+  const threadPlaceholders: string[] = [];
+  const channelNameSet = new Set(channels.map((c) => c.name.toLowerCase()));
+  processed = processed.replace(createRaftChannelThreadRefRegex(), (match, chanName: string, shortId: string) => {
+    if (threadRefAuthorityUnavailable) {
+      const idx = threadPlaceholders.length;
+      threadPlaceholders.push(`<span>${match}</span>`);
+      return `\x00THREAD${idx}\x00`;
+    }
+    const crossServerAuthority = !!refAuthorityServerSlug
+      && !!currentServerSlug
+      && refAuthorityServerSlug !== currentServerSlug;
+    if (!channelNameSet.has(chanName.toLowerCase()) && !crossServerAuthority) return match;
+    const chan = channels.find((c) => c.name.toLowerCase() === chanName.toLowerCase() && (c.type === "channel" || c.type === "private" || c.type === "joint"));
+    const html = `<a data-thread-ref="${shortId}" data-thread-parent="${crossServerAuthority ? "" : chan?.id || ""}" data-thread-parent-name="${chanName}">#${chanName}:${shortId}</a>`;
+    const idx = threadPlaceholders.length;
+    threadPlaceholders.push(html);
+    return `\x00THREAD${idx}\x00`;
+  });
+  processed = processed.replace(createRaftDmThreadRefRegex(), (_match, peerName: string, shortId: string) => {
+    if (threadRefAuthorityUnavailable) {
+      const idx = threadPlaceholders.length;
+      threadPlaceholders.push(`<span>${escapeMessageHtmlText(_match)}</span>`);
+      return `\x00THREAD${idx}\x00`;
+    }
+    const crossServerAuthority = !!refAuthorityServerSlug
+      && !!currentServerSlug
+      && refAuthorityServerSlug !== currentServerSlug;
+    const dm = findDmByPeer(channels, peerName);
+    if (!dm && !crossServerAuthority) {
+      // Unresolvable refs must read identically to the source — protect the
+      // whole token as plain text instead of letting the mention pass chip
+      // `@peer` out of it.
+      const idx = threadPlaceholders.length;
+      threadPlaceholders.push(`<span>${escapeMessageHtmlText(_match)}</span>`);
+      return `\x00THREAD${idx}\x00`;
+    }
+    const html = `<a data-thread-ref="${shortId}" data-thread-parent="${crossServerAuthority ? "" : dm?.id || ""}" data-thread-parent-name="${crossServerAuthority ? peerName : dm?.name || peerName}" data-thread-parent-type="dm">${escapeMessageHtmlText(`dm:@${peerName}:${shortId}`)}</a>`;
+    const idx = threadPlaceholders.length;
+    threadPlaceholders.push(html);
+    return `\x00THREAD${idx}\x00`;
+  });
+  // Bare `dm:@peer` refs: claim the whole token (same preemption rule) and
+  // render through the raft-ref anchor path, which navigates to the DM.
+  processed = processed.replace(createRaftDmRefRegex(), (_match, peerName: string) => {
+    const dm = findDmByPeer(channels, peerName);
+    if (!dm) {
+      const idx = threadPlaceholders.length;
+      threadPlaceholders.push(`<span>${escapeMessageHtmlText(_match)}</span>`);
+      return `\x00THREAD${idx}\x00`;
+    }
+    const index = raftRefPlaceholders.length;
+    raftRefPlaceholders.push(makeRaftRefAnchor({ kind: "dm", peerName }, _match));
+    return `\x00RAFTREF${index}\x00`;
+  });
+
+  // `dm:@name~bot` (unknown peer kind) is not a ref: keep it plain text so
+  // neither `dm:@name` nor the mention pass turns it into another target.
+  processed = processed.replace(createRaftMalformedDmKindRefRegex(), (match) => {
+    const idx = threadPlaceholders.length;
+    threadPlaceholders.push(`<span>${escapeMessageHtmlText(match)}</span>`);
+    return `\x00THREAD${idx}\x00`;
+  });
+
   const mentionPlaceholders: string[] = [];
   const storeMentionPlaceholder = (name: string, entry: MentionEntry) => {
     const safeName = name.replace(/"/g, "&quot;");
@@ -726,45 +830,6 @@ function renderContent(
     const entry = structuredMentionMap.get(name) ?? mentionMap.get(name);
     if (!entry) return match; // Not a known name — keep as plain text
     return `${prefix}${storeMentionPlaceholder(name, entry)}`;
-  });
-
-  // Pre-process thread references: #channel:shortId or dm:@peer:shortId
-  // Use placeholders to avoid double-processing by the channel regex
-  const threadPlaceholders: string[] = [];
-  const channelNameSet = new Set(channels.map((c) => c.name.toLowerCase()));
-  processed = processed.replace(createRaftChannelThreadRefRegex(), (match, chanName: string, shortId: string) => {
-    if (threadRefAuthorityUnavailable) {
-      const idx = threadPlaceholders.length;
-      threadPlaceholders.push(`<span>${match}</span>`);
-      return `\x00THREAD${idx}\x00`;
-    }
-    const crossServerAuthority = !!refAuthorityServerSlug
-      && !!currentServerSlug
-      && refAuthorityServerSlug !== currentServerSlug;
-    if (!channelNameSet.has(chanName.toLowerCase()) && !crossServerAuthority) return match;
-    const chan = channels.find((c) => c.name.toLowerCase() === chanName.toLowerCase() && (c.type === "channel" || c.type === "private" || c.type === "joint"));
-    const html = `<a data-thread-ref="${shortId}" data-thread-parent="${crossServerAuthority ? "" : chan?.id || ""}" data-thread-parent-name="${chanName}">#${chanName}:${shortId}</a>`;
-    const idx = threadPlaceholders.length;
-    threadPlaceholders.push(html);
-    return `\x00THREAD${idx}\x00`;
-  });
-  processed = processed.replace(createRaftDmThreadRefRegex(), (_match, peerName: string, shortId: string) => {
-    if (threadRefAuthorityUnavailable) {
-      const idx = threadPlaceholders.length;
-      threadPlaceholders.push(`<span>${_match}</span>`);
-      return `\x00THREAD${idx}\x00`;
-    }
-    const crossServerAuthority = !!refAuthorityServerSlug
-      && !!currentServerSlug
-      && refAuthorityServerSlug !== currentServerSlug;
-    const dm = channels.find(
-      (c) => c.type === "dm" && (c.peerName?.toLowerCase() === peerName.toLowerCase() || c.name.toLowerCase() === peerName.toLowerCase())
-    );
-    if (!dm && !crossServerAuthority) return _match;
-    const html = `<a data-thread-ref="${shortId}" data-thread-parent="${crossServerAuthority ? "" : dm?.id || ""}" data-thread-parent-name="${crossServerAuthority ? peerName : dm?.name || peerName}" data-thread-parent-type="dm">dm:@${peerName}:${shortId}</a>`;
-    const idx = threadPlaceholders.length;
-    threadPlaceholders.push(html);
-    return `\x00THREAD${idx}\x00`;
   });
 
   // Pre-process task references: "task #205" always links; bare "#205" only if it's a known task
@@ -844,29 +909,33 @@ function renderContent(
 
             if (target.kind === "computer") {
               return (
-                <a
-                  data-testid={`computer-reference-${target.machineId}`}
-                  href="#"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    onNavigateComputer(target.machineId);
-                  }}
-                  className={`${MSG_REF_CHIP} bg-brutal-cyan/30 text-black cursor-default hover:bg-brutal-cyan/60`}
-                >
-                  {children}
-                </a>
+                <MessageReferenceChip
+                  variant="link"
+                  className="cursor-default"
+                  render={
+                    <a data-testid={`computer-reference-${target.machineId}`}
+                      href="#"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        onNavigateComputer(target.machineId);
+                      }}>
+                      {children}
+                    </a>
+                  }
+                />
               );
             }
 
             if (target.kind === "app") {
               return (
-                <span
-                  data-testid={`app-reference-${target.appId}`}
-                  className={`${MSG_REF_CHIP} bg-soft-signal/40 text-black`}
-                  title={formatMessage?.({ id: "message.messageItem.appReferenceOnly" })}
-                >
+                <Tooltip content={formatMessage?.({ id: "message.messageItem.appReferenceOnly" })}>
+                <MessageReferenceText
+                  variant="primary"
+                                    render={
+                    <span data-testid={`app-reference-${target.appId}`} />}>
                   {children}
-                </span>
+                </MessageReferenceText>
+                </Tooltip>
               );
             }
 
@@ -886,16 +955,19 @@ function renderContent(
               if (target.kind === "channel") {
                 if (!channel) return <span>{children}</span>;
                 return (
-                  <a
-                    href="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      onNavigateChannel(channel);
-                    }}
-                    className={`${MSG_REF_CHIP} bg-brutal-pink/30 text-black cursor-default hover:bg-brutal-pink/60`}
-                  >
-                    {children}
-                  </a>
+                  <MessageReferenceChip
+                    variant="accent"
+                    className="cursor-default"
+                    render={
+                      <a href="#"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          onNavigateChannel(channel);
+                        }}>
+                        {children}
+                      </a>
+                    }
+                  />
                 );
               }
 
@@ -908,26 +980,29 @@ function renderContent(
                 const threadRefKey = `${routeServerSlug}:${target.channelName.toLowerCase()}:${target.threadShortId.toLowerCase()}`;
                 const isResolvingThreadRef = resolvingThreadRefKey === threadRefKey;
                 return (
-                  <a
-                    href="#"
-                    aria-busy={isResolvingThreadRef}
-                    onClick={(e) => {
-                      e.preventDefault();
-                      if (isResolvingThreadRef) return;
-                      void onOpenThread({
-                        serverSlug: routeServerSlug,
-                        parentChannelName: target.channelName,
-                        parentChannelId,
-                        shortId: target.threadShortId,
-                      });
-                    }}
-                    className={`${MSG_REF_CHIP} bg-brutal-cyan/30 text-black ${isResolvingThreadRef ? "cursor-wait opacity-80" : "cursor-default hover:bg-brutal-cyan/60"}`}
-                  >
-                    <span>{children}</span>
-                    {isResolvingThreadRef ? (
-                      <Spinner size="xs" className="ml-1 align-[-1px]" />
-                    ) : null}
-                  </a>
+                  <MessageReferenceChip
+                    variant="link"
+                    className={`${isResolvingThreadRef ? "cursor-wait opacity-80" : "cursor-default"}`}
+                    render={
+                      <a href="#"
+                        aria-busy={isResolvingThreadRef}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          if (isResolvingThreadRef) return;
+                          void onOpenThread({
+                            serverSlug: routeServerSlug,
+                            parentChannelName: target.channelName,
+                            parentChannelId,
+                            shortId: target.threadShortId,
+                          });
+                        }}>
+                        <span>{children}</span>
+                        {isResolvingThreadRef ? (
+                          <Spinner size="xs" className="ml-1 align-[-1px]" aria-label={formatMessage?.({ id: "common.loadingLabel" })} />
+                        ) : null}
+                      </a>
+                    }
+                  />
                 );
               }
 
@@ -936,38 +1011,44 @@ function renderContent(
                 const routeServerSlug = refAuthorityServerSlug ?? currentServerSlug;
                 if (!routeServerSlug) return <span>{children}</span>;
                 return (
-                  <a
-                    href="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      void onOpenThread({
-                        serverSlug: routeServerSlug,
-                        parentChannelName: target.channelName,
-                        parentChannelId: crossServerAuthority ? null : channel?.id ?? null,
-                        shortId: target.threadParentShortId!,
-                        focusedMessageId: target.messageId,
-                      });
-                    }}
-                    className={`${MSG_REF_CHIP} bg-soft-signal/40 text-black cursor-default hover:bg-soft-signal`}
-                  >
-                    {children}
-                  </a>
+                  <MessageReferenceText
+                    variant="primary"
+                    className="cursor-default"
+                    render={
+                      <a href="#"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void onOpenThread({
+                            serverSlug: routeServerSlug,
+                            parentChannelName: target.channelName,
+                            parentChannelId: crossServerAuthority ? null : channel?.id ?? null,
+                            shortId: target.threadParentShortId!,
+                            focusedMessageId: target.messageId,
+                          });
+                        }}>
+                        {children}
+                      </a>
+                    }
+                  />
                 );
               }
 
               if (!onOpenMessageRef) return <span>{children}</span>;
               if (!channel) return <span>{children}</span>;
               return (
-                <a
-                  href="#"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    void onOpenMessageRef?.(channel, target.messageId, target.threadParentShortId);
-                  }}
-                  className={`${MSG_REF_CHIP} bg-soft-signal/40 text-black cursor-default hover:bg-soft-signal`}
-                >
-                  {children}
-                </a>
+                <MessageReferenceText
+                  variant="primary"
+                  className="cursor-default"
+                  render={
+                    <a href="#"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        void onOpenMessageRef?.(channel, target.messageId, target.threadParentShortId);
+                      }}>
+                      {children}
+                    </a>
+                  }
+                />
               );
             }
 
@@ -975,26 +1056,24 @@ function renderContent(
               const crossServerAuthority = !!refAuthorityServerSlug
                 && !!currentServerSlug
                 && refAuthorityServerSlug !== currentServerSlug;
-              const dm = channels.find(
-                (entry) =>
-                  entry.type === "dm" &&
-                  (entry.peerName?.toLowerCase() === target.peerName.toLowerCase() ||
-                    entry.name.toLowerCase() === target.peerName.toLowerCase()),
-              );
+              const dm = findDmByPeer(channels, target.peerName);
               if (!dm && !(crossServerAuthority && target.kind === "dm-thread")) return <span>{children}</span>;
               if (target.kind === "dm") {
                 if (!dm) return <span>{children}</span>;
                 return (
-                  <a
-                    href="#"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      onNavigateDm(dm);
-                    }}
-                    className={`${MSG_REF_CHIP} bg-brutal-pink/30 text-black cursor-default hover:bg-brutal-pink/60`}
-                  >
-                    {children}
-                  </a>
+                  <MessageReferenceChip
+                    variant="accent"
+                    className="cursor-default"
+                    render={
+                      <a href="#"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          onNavigateDm(dm);
+                        }}>
+                        {children}
+                      </a>
+                    }
+                  />
                 );
               }
               if (!onOpenThread) return <span>{children}</span>;
@@ -1002,36 +1081,41 @@ function renderContent(
               const routeServerSlug = refAuthorityServerSlug ?? currentServerSlug;
               if (!routeServerSlug) return <span>{children}</span>;
               return (
-                <a
-                  href="#"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    void onOpenThread({
-                      serverSlug: routeServerSlug,
-                      parentChannelName: crossServerAuthority ? target.peerName : dm!.name,
-                      parentChannelType: "dm",
-                      parentChannelId: crossServerAuthority ? null : dm!.id,
-                      shortId: target.threadShortId,
-                    });
-                  }}
-                  className={`${MSG_REF_CHIP} bg-brutal-cyan/30 text-black cursor-default hover:bg-brutal-cyan/60`}
-                >
-                  {children}
-                </a>
+                <MessageReferenceChip
+                  variant="link"
+                  className="cursor-default"
+                  render={
+                    <a href="#"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        void onOpenThread({
+                          serverSlug: routeServerSlug,
+                          parentChannelName: crossServerAuthority ? target.peerName : dm!.name,
+                          parentChannelType: "dm",
+                          parentChannelId: crossServerAuthority ? null : dm!.id,
+                          shortId: target.threadShortId,
+                        });
+                      }}>
+                      {children}
+                    </a>
+                  }
+                />
               );
             }
 
             if (target.kind === "task" && onOpenTaskRef) {
+              const taskBadge = renderTaskBadge(target.taskNumber);
+              if (taskBadge) return taskBadge;
               return (
                 <a
                   href="#"
+                  className="cursor-default"
+                  data-message-affordance="open-linked-task"
                   onClick={(e) => {
                     e.preventDefault();
                     onOpenTaskRef(target.taskNumber);
-                  }}
-                  className={`${MSG_REF_CHIP} bg-soft-signal/40 text-black cursor-default hover:bg-soft-signal`}
-                >
-                  {children}
+                  }}>
+                  <Badge variant="muted" uppercase={false}>{children}</Badge>
                 </a>
               );
             }
@@ -1047,7 +1131,7 @@ function renderContent(
 
             if (!mentionId || (mentionType !== "agent" && mentionType !== "user")) {
               return (
-                <span className="font-bold text-black underline decoration-black/30 decoration-2 underline-offset-2 select-text">
+                <span className="font-bold text-foreground-strong underline decoration-line-muted decoration-2 underline-offset-2 select-text theme-brutal:text-black theme-brutal:decoration-black/30">
                   {children}
                 </span>
               );
@@ -1081,35 +1165,42 @@ function renderContent(
               && refAuthorityServerSlug !== currentServerSlug;
             if (!routeServerSlug || !parentName || (!parentId && !crossServerAuthority)) {
               return (
-                <span className={`${MSG_REF_CHIP} bg-brutal-cyan/30 text-black opacity-60`}>
+                <MessageReferenceChip
+                  variant="link"
+                  className="opacity-60"
+                  render={
+                    <span />}>
                   {children}
-                </span>
+                </MessageReferenceChip>
               );
             }
             const threadRefKey = `${routeServerSlug}:${parentName.toLowerCase()}:${threadRef.toLowerCase()}`;
             const isResolvingThreadRef = resolvingThreadRefKey === threadRefKey;
             return (
-              <a
-                href="#"
-                aria-busy={isResolvingThreadRef}
-                onClick={(e) => {
-                  e.preventDefault();
-                  if (isResolvingThreadRef) return;
-                  void onOpenThread({
-                    serverSlug: routeServerSlug,
-                    parentChannelName: parentName,
-                    parentChannelType: parentType,
-                    parentChannelId: crossServerAuthority ? null : parentId,
-                    shortId: threadRef,
-                  });
-                }}
-                className={`${MSG_REF_CHIP} bg-brutal-cyan/30 text-black ${isResolvingThreadRef ? "cursor-wait opacity-80" : "cursor-default hover:bg-brutal-cyan/60"}`}
-              >
-                <span>{children}</span>
-                {isResolvingThreadRef ? (
-                  <Spinner size="xs" className="ml-1 align-[-1px]" />
-                ) : null}
-              </a>
+              <MessageReferenceChip
+                variant="link"
+                className={`${isResolvingThreadRef ? "cursor-wait opacity-80" : "cursor-default"}`}
+                render={
+                  <a href="#"
+                    aria-busy={isResolvingThreadRef}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      if (isResolvingThreadRef) return;
+                      void onOpenThread({
+                        serverSlug: routeServerSlug,
+                        parentChannelName: parentName,
+                        parentChannelType: parentType,
+                        parentChannelId: crossServerAuthority ? null : parentId,
+                        shortId: threadRef,
+                      });
+                    }}>
+                    <span>{children}</span>
+                    {isResolvingThreadRef ? (
+                      <Spinner size="xs" className="ml-1 align-[-1px]" aria-label={formatMessage?.({ id: "common.loadingLabel" })} />
+                    ) : null}
+                  </a>
+                }
+              />
             );
           }
           // #channel → clickable, navigates to channel
@@ -1120,45 +1211,56 @@ function renderContent(
             );
             if (!channel) {
               return (
-                <span className={`${MSG_REF_CHIP} bg-brutal-pink/30 text-black opacity-60`}>
+                <MessageReferenceChip
+                  variant="accent"
+                  className="opacity-60"
+                  render={
+                    <span />}>
                   {children}
-                </span>
+                </MessageReferenceChip>
               );
             }
             return (
-              <a
-                href="#"
-                onClick={(e) => {
-                  e.preventDefault();
-                  onNavigateChannel(channel);
-                }}
-                className={`${MSG_REF_CHIP} bg-brutal-pink/30 text-black cursor-default hover:bg-brutal-pink/60`}
-              >
-                {children}
-              </a>
+              <MessageReferenceChip
+                variant="accent"
+                className="cursor-default"
+                render={
+                  <a href="#"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      onNavigateChannel(channel);
+                    }}>
+                    {children}
+                  </a>
+                }
+              />
             );
           }
-          // #205 → clickable, resolves a task in the current channel context
+          // #205 → clickable, resolves a task in the current channel context.
+          // Task refs reuse the message-side task badge (task #662); unknown
+          // tasks keep a neutral badge that claims no status color.
           const taskRef = node?.properties?.dataTaskRef as string | undefined;
           if (taskRef && onOpenTaskRef) {
             const taskNumber = Number(taskRef);
             if (!Number.isInteger(taskNumber) || taskNumber <= 0) {
               return (
-                <span className={`${MSG_REF_CHIP} bg-soft-signal/30 text-black opacity-60`}>
-                  {children}
+                <span className="opacity-60">
+                  <Badge variant="muted" uppercase={false}>{children}</Badge>
                 </span>
               );
             }
+            const taskBadge = renderTaskBadge(taskNumber);
+            if (taskBadge) return taskBadge;
             return (
               <a
                 href="#"
+                className="cursor-default"
+                data-message-affordance="open-linked-task"
                 onClick={(e) => {
                   e.preventDefault();
                   onOpenTaskRef(taskNumber);
-                }}
-                className={`${MSG_REF_CHIP} bg-soft-signal/40 text-black cursor-default hover:bg-soft-signal`}
-              >
-                {children}
+                }}>
+                <Badge variant="muted" uppercase={false}>{children}</Badge>
               </a>
             );
           }
@@ -1186,30 +1288,20 @@ function renderContent(
               : (formatMessage
                 ? formatMessage({ id: "message.messageItem.linkedMessageFallback" })
                 : "linked message");
-            const isCurrentServer = !currentServerSlug || raftPermalink.serverSlug === currentServerSlug;
-
             return (
               <ReferenceChip
                 as={quotedMessageUnavailable ? "span" : "a"}
                 href={quotedMessageUnavailable ? undefined : href}
                 onClick={quotedMessageUnavailable ? undefined : (e) => {
                   e.preventDefault();
-                  if (isCurrentServer) {
-                    onOpenPermalink?.(href);
-                    return;
-                  }
-                  window.open(href, "_blank", "noopener,noreferrer");
+                  onOpenPermalink?.(href);
                 }}
                 title={quotedMessageUnavailable ? undefined : href}
                 icon={Link}
-                colorClass={
-                  isCurrentServer
-                    ? "bg-soft-signal/40 text-black hover:bg-soft-signal"
-                    : "bg-white text-blue-700 hover:bg-black/5"
-                }
+                variant="link"
                 label={channelLabel}
                 trailing={quotedMessageUnavailable ? undefined : (
-                  <span className="text-[10px] font-normal leading-none text-black/50">msg</span>
+                  <span className="text-[10px] font-normal leading-none text-foreground-placeholder theme-brutal:text-black/50">msg</span>
                 )}
               />
             );
@@ -1219,7 +1311,7 @@ function renderContent(
               href={href}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-blue-700 underline decoration-2 underline-offset-2 hover:text-brutal-pink select-text"
+              className="text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2 hover:text-brutal-pink select-text"
             >
               {children}
             </a>
@@ -1234,14 +1326,15 @@ function renderContent(
             || node?.properties?.["data-reminder-fire-at"]) as string | undefined;
           if (reminderFireAt) {
             return (
+              <Tooltip content={formatReminderReceiptTooltip(reminderFireAt, timeFormatOptions)}>
               <span
                 {...props}
-                title={formatReminderReceiptTooltip(reminderFireAt, timeFormatOptions)}
               >
                 {formatMessage
                   ? formatReminderReceiptTime(reminderFireAt, formatMessage, new Date(), timeFormatOptions)
                   : reminderFireAt}
               </span>
+              </Tooltip>
             );
           }
           return <span {...props}>{children}</span>;
@@ -1343,60 +1436,60 @@ export function AttachmentMetaText({
 }) {
   const { formatMessage } = useIntl();
   return (
-    <span
+    <MessageAttachmentMetaStart
       data-message-affordance="attachment-meta"
-      className="inline-flex min-w-0 max-w-full flex-1 items-center gap-1.5"
+      className="inline-flex max-w-full items-center gap-1.5"
     >
       <span data-message-affordance="attachment-meta-label" className="min-w-0 flex-1 truncate">{label}</span>
       {sizeBytes && sizeBytes > 0 ? (
         <>
-          <span className="shrink-0 text-black/35">·</span>
+          <span className="shrink-0 text-foreground-placeholder theme-brutal:text-black/35">·</span>
           <span data-message-affordance="attachment-meta-size" className="shrink-0">{formatFileSizeBytes(sizeBytes, formatMessage)}</span>
         </>
       ) : null}
-    </span>
+    </MessageAttachmentMetaStart>
   );
 }
 
 function DiffPatchStatsLine({ preview }: { preview: DiffAttachmentPreview | null }) {
   const { formatMessage } = useIntl();
   if (!preview) {
-    return <span className="text-black/70">{formatMessage({ id: "message.messageItem.diffPreview" })}</span>;
+    return <span className="text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.diffPreview" })}</span>;
   }
 
   const { files, hunks, additions, deletions } = preview.stats;
 
   return (
-    <>
-      <span className="text-black/70">{formatMessage({ id: "message.messageItem.diffStats" }, { fileCount: files, hunkCount: hunks })}</span>
-      <span className="text-[#1f883d]">+{additions}</span>
-      <span className="text-[#cf222e]">-{deletions}</span>
-    </>
+    <MessageAttachmentDiffSummary className="inline-flex min-w-0 items-center">
+      <span className="text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.diffStats" }, { fileCount: files, hunkCount: hunks })}</span>
+      <MessageAttachmentDiffAddition>+{additions}</MessageAttachmentDiffAddition>
+      <MessageAttachmentDiffDeletion>-{deletions}</MessageAttachmentDiffDeletion>
+    </MessageAttachmentDiffSummary>
   );
 }
 
 function DocumentPreviewSummaryLine({ preview }: { preview: DocumentAttachmentPreviewState | null }) {
   const { formatMessage } = useIntl();
   if (!preview) {
-    return <span className="min-w-0 truncate text-black/70">{formatMessage({ id: "message.messageItem.documentPreview" })}</span>;
+    return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.documentPreview" })}</span>;
   }
 
   if (preview.preview.kind === "csv") {
     const id = preview.truncated
       ? "message.messageItem.documentSummaryFirst"
       : "message.messageItem.documentSummaryPreview";
-    return <span className="min-w-0 truncate text-black/70">{formatMessage({ id }, { rowCount: preview.preview.rows.length, columnCount: preview.preview.columnCount })}</span>;
+    return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id }, { rowCount: preview.preview.rows.length, columnCount: preview.preview.columnCount })}</span>;
   }
   if (preview.preview.kind === "markdown") {
-    return <span className="min-w-0 truncate text-black/70">{formatMessage({ id: "message.messageItem.markdownDocument" })}</span>;
+    return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.markdownDocument" })}</span>;
   }
   if (preview.preview.kind === "text") {
-    return <span className="min-w-0 truncate text-black/70">{formatMessage({ id: "message.messageItem.plainTextDocument" })}</span>;
+    return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.plainTextDocument" })}</span>;
   }
   if (preview.preview.kind === "xlsx") {
-    return <span className="min-w-0 truncate text-black/70">{formatMessage({ id: "message.messageItem.xlsxDocument" })}</span>;
+    return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.xlsxDocument" })}</span>;
   }
-  return <span className="min-w-0 truncate text-black/70">{formatMessage({ id: "message.messageItem.pdfDocument" })}</span>;
+  return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.pdfDocument" })}</span>;
 }
 
 // Locale-aware document-preview label for attachment card metadata. The modal
@@ -1521,7 +1614,7 @@ function AttachmentCard({
       onClick={primaryOnClick}
       affordance={primaryAffordance}
       affordanceName={primaryAffordanceName}
-      icon={isVideo ? <Play size={16} className="text-black/70" /> : isAudio ? <Music size={16} className="text-black/70" /> : undefined}
+      icon={isVideo ? <Play size={16} className="text-foreground-muted" /> : isAudio ? <Music size={16} className="text-foreground-muted" /> : undefined}
       meta={<AttachmentMetaText label={primaryMetaLabel} sizeBytes={attachment.sizeBytes} />}
       secondaryDownload={isAudio ? { onClick: onDownload, label: formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename }), affordanceName: "audio-download" } : undefined}
     />
@@ -1606,63 +1699,59 @@ function InlineVideoAttachmentCard({
   }, [attachment.id, isOptimistic, loadInlineVideoUrl]);
 
   return (
-    <div
+    <Tooltip content={attachment.filename}>
+    <MessageVideoPreview
       ref={containerRef}
       data-message-affordance="inline-video-preview"
-      className="group/video relative w-full max-w-[min(28rem,calc(100vw-7rem))] overflow-hidden border-2 border-black bg-black text-left"
-      title={attachment.filename}
     >
-      <div className="relative aspect-video w-full bg-black">
-        {inlineUrl && !loadFailed ? (
-          <>
-            <video
-              ref={videoRef}
-              title={formatMessage({ id: "message.messageItem.videoAttachmentTitle" }, { filename: attachment.filename })}
-              src={inlineUrl}
-              controls
-              playsInline
-              preload="metadata"
-              className="block h-full w-full bg-black object-contain"
-              onError={() => setLoadFailed(true)}
-            />
-          </>
-        ) : (
-          <button
-            type="button"
-            onClick={loadFailed ? onDownload : undefined}
-            className={`flex h-full w-full items-center justify-center bg-black text-white ${loadFailed ? "hover:bg-black/90" : "cursor-default"}`}
-            aria-label={loadFailed ? formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename }) : formatMessage({ id: "message.messageItem.loadingFile" }, { filename: attachment.filename })}
-          >
-            {isOptimistic || loadingUrl ? (
-              <Spinner size="md" variant="inverse" />
-            ) : loadFailed ? (
-              <div className="flex max-w-[16rem] flex-col items-center gap-2 px-4 text-center text-xs font-bold">
+      {inlineUrl && !loadFailed ? (
+        <MessageVideoPreviewMedia
+          render={<video
+            ref={videoRef}
+            title={formatMessage({ id: "message.messageItem.videoAttachmentTitle" }, { filename: attachment.filename })}
+            src={inlineUrl}
+            controls
+            playsInline
+            preload="metadata"
+            onError={() => setLoadFailed(true)}
+          />}
+        />
+      ) : (
+        <MessageVideoPreviewFallback>
+          {isOptimistic || loadingUrl ? (
+            <Spinner size="md" variant="inverse" aria-label={formatMessage({ id: "common.loadingLabel" })} />
+          ) : loadFailed ? (
+            <MessageVideoPreviewFailureContent>
+              <MessageVideoPreviewFailureIcon>
                 <AlertTriangle size={24} />
-                <span>{formatMessage({ id: "message.messageItem.codecWarning" })}</span>
-                <span className="inline-flex items-center gap-1 text-white/75">
-                  <Download size={13} />
-                  {formatMessage({ id: "message.messageItem.downloadToView" })}
-                </span>
-              </div>
-            ) : (
-              <Play size={32} className="text-white/80" />
-            )}
-          </button>
-        )}
-        {!isOptimistic && (
-          <button
-            type="button"
-            onClick={onOpenPreview}
-            title={formatMessage({ id: "message.messageItem.openInPreview" }, { filename: attachment.filename })}
-            className="absolute right-1.5 top-1.5 flex size-6 items-center justify-center border border-black bg-white/80 text-black/60 hover:bg-white hover:text-black"
-            aria-label={formatMessage({ id: "message.messageItem.openInPreview" }, { filename: attachment.filename })}
-            data-message-affordance="inline-video-expand"
-          >
-            <Eye size={12} />
-          </button>
-        )}
-      </div>
-    </div>
+              </MessageVideoPreviewFailureIcon>
+              <MessageVideoPreviewFailureTitle>{formatMessage({ id: "message.messageItem.codecWarning" })}</MessageVideoPreviewFailureTitle>
+              <MessageVideoPreviewFailureAction
+                onClick={onDownload}
+                aria-label={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename })}
+              >
+                <Download size={13} />
+                {formatMessage({ id: "message.messageItem.downloadToView" })}
+              </MessageVideoPreviewFailureAction>
+            </MessageVideoPreviewFailureContent>
+          ) : (
+            <Play size={32} className="text-white/80" />
+          )}
+        </MessageVideoPreviewFallback>
+      )}
+      {!isOptimistic && (
+        <Tooltip content={formatMessage({ id: "message.messageItem.openInPreview" }, { filename: attachment.filename })}>
+        <MessageVideoPreviewAction
+          onClick={onOpenPreview}
+          aria-label={formatMessage({ id: "message.messageItem.openInPreview" }, { filename: attachment.filename })}
+          data-message-affordance="inline-video-expand"
+        >
+          <Eye size={12} />
+        </MessageVideoPreviewAction>
+        </Tooltip>
+      )}
+    </MessageVideoPreview>
+    </Tooltip>
   );
 }
 
@@ -1741,13 +1830,13 @@ function InlineAudioPlayer({
   }, []);
 
   return (
-    <div data-message-affordance="inline-audio-player" className="w-full border border-black bg-brutal-cream p-2">
+    <div data-message-affordance="inline-audio-player" className="w-full border border-line-muted bg-layer-inset p-2 theme-brutal:border-black theme-brutal:bg-brutal-cream">
       <div className="flex min-w-0 items-center gap-2">
         <button
           type="button"
           data-message-affordance="audio-play-toggle"
           aria-label={formatMessage({ id: playing ? "message.messageItem.pauseAudio" : "message.messageItem.playAudio" }, { filename })}
-          className="flex size-7 shrink-0 items-center justify-center border border-black bg-white text-black transition-colors hover:bg-soft-signal focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
+          className="flex size-7 shrink-0 items-center justify-center border border-line-muted bg-layer-panel text-foreground-strong transition-colors hover:bg-primary-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-line-strong theme-brutal:hover:bg-soft-signal theme-brutal:focus-visible:outline-black"
           onClick={handleTogglePlayback}
         >
           {playing ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
@@ -1768,24 +1857,24 @@ function InlineAudioPlayer({
           />
           <div
             data-message-affordance="audio-seek-rail"
-            className="pointer-events-none absolute left-0 right-0 top-1/2 h-2 -translate-y-1/2 border border-black bg-white peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-black"
+            className="pointer-events-none absolute left-0 right-0 top-1/2 h-2 -translate-y-1/2 border border-line-muted bg-layer-panel peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-black"
             aria-hidden="true"
           >
-            <div className="h-full bg-brutal-cyan" style={{ width: `${progress}%` }} />
+            <div className="h-full bg-primary-strong theme-brutal:bg-brutal-cyan" style={{ width: `${progress}%` }} />
           </div>
           <span
             data-message-affordance="audio-seek-thumb"
-            className="pointer-events-none absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 border border-black bg-white peer-focus-visible:bg-soft-signal peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-black"
+            className="pointer-events-none absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 border border-line-muted bg-layer-panel peer-focus-visible:bg-primary-soft peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-line-strong theme-brutal:peer-focus-visible:bg-soft-signal theme-brutal:peer-focus-visible:outline-black"
             style={{ left: `${progress}%` }}
             aria-hidden="true"
           />
         </div>
-        <div data-message-affordance="audio-time" className="w-[4.75rem] shrink-0 text-right font-mono text-[11px] font-bold tabular-nums text-black/60">
+        <div data-message-affordance="audio-time" className="w-[4.75rem] shrink-0 text-right font-mono text-[11px] font-bold tabular-nums text-foreground-muted">
           {timeLabel}
         </div>
       </div>
       <div data-message-affordance="audio-volume-control" className="mt-1.5 flex items-center gap-2 pl-9">
-        <Volume2 size={13} className="shrink-0 text-black/60" aria-hidden="true" />
+        <Volume2 size={13} className="shrink-0 text-foreground-muted" aria-hidden="true" />
         <div className="relative h-6 min-w-0 flex-1">
           <input
             type="range"
@@ -1801,14 +1890,14 @@ function InlineAudioPlayer({
           />
           <div
             data-message-affordance="audio-volume-rail"
-            className="pointer-events-none absolute left-0 right-0 top-1/2 h-1.5 -translate-y-1/2 border border-black bg-white peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-black"
+            className="pointer-events-none absolute left-0 right-0 top-1/2 h-1.5 -translate-y-1/2 border border-line-muted bg-layer-panel peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-black"
             aria-hidden="true"
           >
-            <div className="h-full bg-soft-signal" style={{ width: `${volumeProgress}%` }} />
+            <div className="h-full bg-primary-strong theme-brutal:bg-soft-signal" style={{ width: `${volumeProgress}%` }} />
           </div>
           <span
             data-message-affordance="audio-volume-thumb"
-            className="pointer-events-none absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 border border-black bg-white peer-focus-visible:bg-soft-signal peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-black"
+            className="pointer-events-none absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 border border-line-muted bg-layer-panel peer-focus-visible:bg-primary-soft peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-line-strong theme-brutal:peer-focus-visible:bg-soft-signal theme-brutal:peer-focus-visible:outline-black"
             style={{ left: `${volumeProgress}%` }}
             aria-hidden="true"
           />
@@ -1905,12 +1994,12 @@ function InlineAudioAttachmentCard({
   }, [attachment.id, isOptimistic, loadInlineAudioUrl]);
 
   const downloadButton = (
+    <Tooltip content={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename })}>
     <button
       type="button"
       data-message-affordance="audio-download"
       aria-label={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename })}
-      title={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename })}
-      className="flex size-7 items-center justify-center border border-black bg-white text-black/60 hover:bg-soft-signal hover:text-black focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
+      className="flex size-7 items-center justify-center border border-line-muted bg-layer-panel text-foreground-muted hover:bg-primary-soft hover:text-foreground-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-line-strong theme-brutal:hover:bg-soft-signal theme-brutal:focus-visible:outline-black"
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -1919,6 +2008,7 @@ function InlineAudioAttachmentCard({
     >
       <Download size={14} />
     </button>
+    </Tooltip>
   );
 
   return (
@@ -1931,12 +2021,12 @@ function InlineAudioAttachmentCard({
         <div className={INLINE_AUDIO_PREVIEW_CARD_CLASS}>
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <div className="flex size-8 shrink-0 items-center justify-center border-2 border-black bg-soft-signal">
-                <Music size={16} className="text-black" />
+              <div className="flex size-8 shrink-0 items-center justify-center border border-line-muted bg-primary-soft text-foreground-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
+                <Music size={16} className="text-current" />
               </div>
               <div className="min-w-0">
-                <div className="truncate text-sm font-bold text-black" title={attachment.filename}>{attachment.filename}</div>
-                <div className="text-xs font-bold text-black/50">{formatMessage({ id: "message.messageItem.audioFile" })}</div>
+                <Tooltip content={attachment.filename}><div className="truncate text-sm font-bold text-foreground-strong">{attachment.filename}</div></Tooltip>
+                <div className="text-xs font-bold text-foreground-hint">{formatMessage({ id: "message.messageItem.audioFile" })}</div>
               </div>
             </div>
             {downloadButton}
@@ -1952,25 +2042,25 @@ function InlineAudioAttachmentCard({
         <div className={INLINE_AUDIO_PREVIEW_CARD_CLASS}>
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <div className="flex size-8 shrink-0 items-center justify-center border-2 border-black bg-soft-signal">
-                <Music size={16} className="text-black" />
+              <div className="flex size-8 shrink-0 items-center justify-center border border-line-muted bg-primary-soft text-foreground-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
+                <Music size={16} className="text-current" />
               </div>
               <div className="min-w-0">
-                <div className="truncate text-sm font-bold text-black" title={attachment.filename}>{attachment.filename}</div>
-                <div className="text-xs font-bold text-black/50">{formatMessage({ id: "message.messageItem.audioFile" })}</div>
+                <Tooltip content={attachment.filename}><div className="truncate text-sm font-bold text-foreground-strong">{attachment.filename}</div></Tooltip>
+                <div className="text-xs font-bold text-foreground-hint">{formatMessage({ id: "message.messageItem.audioFile" })}</div>
               </div>
             </div>
             {!isOptimistic && !loadFailed ? downloadButton : null}
           </div>
           <button
             type="button"
-            className={`flex h-10 w-full items-center justify-center border border-black bg-brutal-cream text-xs font-bold text-black/70 ${loadFailed ? "hover:bg-soft-signal" : "cursor-default"}`}
+            className={`flex h-10 w-full items-center justify-center border border-line-muted bg-layer-inset text-xs font-bold text-foreground-muted theme-brutal:border-black theme-brutal:bg-brutal-cream theme-brutal:text-black/70 ${loadFailed ? "hover:bg-primary-soft hover:text-foreground-strong theme-brutal:hover:bg-soft-signal theme-brutal:hover:text-black" : "cursor-default"}`}
             onClick={loadFailed ? onDownload : undefined}
             aria-label={loadFailed ? formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename }) : formatMessage({ id: "message.messageItem.loadingFile" }, { filename: attachment.filename })}
           >
             {isOptimistic || loadingUrl ? (
               <span className="inline-flex items-center gap-2">
-                <Spinner size="xs" />
+                <Spinner size="xs" aria-label={formatMessage({ id: "common.loadingLabel" })} />
                 {formatMessage({ id: "message.messageItem.loadingFile" }, { filename: attachment.filename })}
               </span>
             ) : loadFailed ? (
@@ -2025,6 +2115,12 @@ function buildLightboxCommentContexts(
   return contexts;
 }
 
+export interface ReadOnlySenderProjection {
+  displayName: string;
+  avatarUrl: string | null;
+  description: string | null;
+}
+
 interface MessageItemProps {
   message: Message;
   mentionMap: Map<string, MentionEntry>;
@@ -2051,6 +2147,12 @@ interface MessageItemProps {
   /** Mutation authority for this rendered channel/thread. Readable messages
    * may still be non-interactive when the viewer is not a member. */
   canReact?: boolean;
+  /** Render the canonical message row for a narrow, anonymous/read-only DTO. */
+  readOnlyProjection?: boolean;
+  /** Display-only identity from a narrow public DTO. It never grants profile
+   * navigation, mention authority, or access to a member/agent store row. */
+  readOnlySender?: ReadOnlySenderProjection;
+  onReadOnlyNavigateChannel?: (channel: Channel) => void;
   onBeforeOpenThread?: () => void;
   onOpenThread?: (request: OpenThreadRequest) => void;
   onOpenProfile?: (kind: "agent" | "human", id: string) => void;
@@ -2075,18 +2177,13 @@ function AgentStatusDot({
   agentId: string;
   fallbackAgent?: Pick<Agent, "status"> | null;
 } & Omit<StatusDotProps, "activity" | "external" | "tone">) {
-  const { formatMessage } = useIntl();
+  const intl = useIntl();
   const displayState = useAgentDisplayState(agentId, fallbackAgent);
-  const activityText = formatActivityText(
-    formatMessage,
-    displayState.activity,
-    displayState.activityDetail,
-    displayState.activityDetailKind,
-  );
+  const activityText = formatAgentDisplayStateText(intl, displayState);
   return (
     <StatusDot
       activity={displayState.activity}
-      external={displayState.isExternal}
+      external={displayState.isExternal && !displayState.isOnline}
       title={activityText}
       className={className}
       {...rest}
@@ -2108,11 +2205,15 @@ function MessageSenderAvatar({
   hoverAgent,
   hoverMember,
   externalAvatarUrl,
-  externalInitials,
+  externalDisplayName,
+  externalProvider,
+  externalWorkspaceName,
+  externalActorKind,
   testId,
   onNavigateAgent,
   onNavigateAgentActivity,
   onNavigateHuman,
+  onNavigateExternal,
   onContextMenu,
   onLongPressMention,
 }: {
@@ -2127,11 +2228,15 @@ function MessageSenderAvatar({
   hoverAgent?: Agent | null;
   hoverMember?: ServerMember | null;
   externalAvatarUrl?: string | null;
-  externalInitials?: string | null;
+  externalDisplayName: string;
+  externalProvider?: string | null;
+  externalWorkspaceName?: string | null;
+  externalActorKind?: ExternalActorKind | null;
   testId?: string;
   onNavigateAgent: (id: string) => void;
   onNavigateAgentActivity: (id: string) => void;
   onNavigateHuman: (id: string) => void;
+  onNavigateExternal: () => void;
   onContextMenu?: (event: MouseEvent<HTMLButtonElement>) => void;
   onLongPressMention?: () => void;
 }) {
@@ -2242,19 +2347,15 @@ function MessageSenderAvatar({
         : "placeholder";
   if (showExternal) {
     return (
-      <div
-        className="mt-0.5 shrink-0 self-start"
-        data-testid={testId}
-        data-avatar-kind="external"
-        data-avatar-source={externalAvatarUrl ? "external-avatar" : "placeholder"}
-      >
-        <AvatarSlot
-          context="panel-header"
-          type="app"
-          appAvatarUrl={externalAvatarUrl}
-          appInitials={externalInitials}
-        />
-      </div>
+      <ExternalIdentityPreviewCard
+        displayName={externalDisplayName}
+        provider={externalProvider}
+        workspaceName={externalWorkspaceName}
+        actorKind={externalActorKind}
+        avatarUrl={externalAvatarUrl}
+        testId={testId}
+        onNavigate={onNavigateExternal}
+      />
     );
   }
   // Unified wrapper structure for both agent + human paths so the avatar
@@ -2415,36 +2516,33 @@ function TranslationIndicator({
   // maps to an upgrade action (the former "Upgrade" label branch was dead).
   void onUpgrade;
   const handleAction = text.action === "retry" ? onRetry : onToggleOriginal;
+  const ActionComponent = text.action === "retry" ? MessageItemTranslationRetryAction : MessageItemTranslationAction;
   const action = text.label
     ? (
-      <button
-        type="button"
+      <Tooltip content={text.title}>
+      <ActionComponent
         onClick={handleAction}
-        className={`font-bold underline decoration-black/40 underline-offset-2 hover:decoration-black ${
-          text.tone === "failed" ? "text-brutal-orange" : ""
-        }`}
-        title={text.title}
         aria-label={text.label || text.title}
       >
         {text.label}
-      </button>
+      </ActionComponent>
+      </Tooltip>
     )
     : null;
 
-  return (
-    <div
-      className={`inline-flex items-center gap-1.5 text-[11px] font-mono ${
-        text.tone === "failed" ? "text-brutal-orange" : "text-black/45"
-      }`}
+  const StatusWrapper = text.tone === "failed" ? MessageItemTranslationFailedStatus : MessageItemTranslationStatus;
+  const indicator = (
+    <StatusWrapper
       data-testid={`message-translation-indicator-${entry.messageId}`}
-      title={action ? undefined : text.title}
     >
       <Icon size={12} className={text.tone === "pending" ? "animate-pulse" : ""} />
       {text.message && <span>{text.message}</span>}
       {text.message && action && <span aria-hidden>·</span>}
       {action}
-    </div>
+    </StatusWrapper>
   );
+
+  return action ? indicator : <Tooltip content={text.title}>{indicator}</Tooltip>;
 }
 
 interface MessageMarkdownBodyProps {
@@ -2466,6 +2564,10 @@ interface MessageMarkdownBodyProps {
   refAuthorityServerSlug?: string;
   threadRefAuthorityUnavailable?: boolean;
   knownTaskNumbers?: Set<number>;
+  /** Task payloads for inline task refs (task #662 research prototype: refs
+   *  reuse the message-side task badge). Referentially stable via useMemo in
+   *  the parent; an unstable map would defeat the memo above. */
+  taskByNumber?: ReadonlyMap<number, Task>;
   timeFormatOptions: TimeFormatOptions;
   threadSearchHighlightQuery?: string;
   /** #693 per-@mentioned-agent read badge. Primitives only, so the memo above
@@ -2511,6 +2613,7 @@ const MessageMarkdownBody = memo(function MessageMarkdownBody(props: MessageMark
     props.refAuthorityServerSlug,
     props.threadRefAuthorityUnavailable,
     props.knownTaskNumbers,
+    props.taskByNumber,
     props.timeFormatOptions,
     props.threadSearchHighlightQuery,
     formatMessage,
@@ -2537,10 +2640,21 @@ function taskNumberSigil(taskNumber: number): string {
   return `#${taskNumber}`;
 }
 
-const MessageItem = memo(function MessageItem({ message, mentionMap, channels, previewSenderAgent, previewSenderMember, channelParticipantAgentsById, channelParticipantMembersById, threadSummary, parentChannelId, parentMessageId, hideThreadActions, showThreadFollowAction, linkedTask, senderAvatarTestId, mentionComposerChannelId, reactionParentScopeKey, canReact = true, onBeforeOpenThread, onOpenThread, onOpenProfile, threadSearchHighlightQuery, threadSearchActive, groupState }: MessageItemProps) {
+/** Task-assignee handle inside the footer task badge. One shared JSX node
+ *  keeps the file's audited `@` literal count at one —
+ *  scripts/i18n-literal-baseline.json audits exactly one. Inline task refs
+ *  do NOT render the assignee (task #1252): the badge must not fabricate an
+ *  `@` into the sender's sentence. */
+function taskAssigneeHandle(claimedByName: string) {
+  return <span className="min-w-0 truncate">@{claimedByName}</span>;
+}
+
+const ignoreReadOnlyProjectionNavigation = () => undefined;
+
+const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, mentionMap, channels, previewSenderAgent, previewSenderMember, channelParticipantAgentsById, channelParticipantMembersById, threadSummary, parentChannelId, parentMessageId, hideThreadActions, showThreadFollowAction, linkedTask, senderAvatarTestId, mentionComposerChannelId, reactionParentScopeKey, canReact = true, readOnlyProjection = false, readOnlySender, onReadOnlyNavigateChannel, onBeforeOpenThread, onOpenThread, onOpenProfile, threadSearchHighlightQuery, threadSearchActive, groupState }: MessageItemProps) {
   // Feature flag gate: outside enabled scope, NO comment
   // affordance renders — preview comments context, re: chips, chip counts.
-  const commentsEnabled = useAttachmentCommentsEnabled();
+  const commentsEnabled = useAttachmentCommentsEnabled(!readOnlyProjection);
   const isHighlightedInChannel = useMessageStore((s) => s.highlightedMessageId === message.id);
   // A thread reply permalink owns highlight chrome only inside that thread.
   // The same store focus must never color a stale channel row when another
@@ -2593,7 +2707,18 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
   const senderAgent = storeSenderAgent ?? previewSenderAgent;
   // Desktop-only, opt-in: a model label next to an agent sender's name.
   const showAgentModelNameOption = useShowAgentModelName();
-  const agentModelLabelText = showAgentModelNameOption ? agentModelLabel(senderAgent) : null;
+  // Subscribe per row: this component is memoized, so a catalog that arrives
+  // after the first message render must still update the name (task #700).
+  // Subscribe per row: this component is memoized, so a catalog that arrives
+  // after the first message render must still update the name (task #700).
+  const catalogModelLabelText = useCatalogModelLabel(
+    senderAgent?.machineId,
+    senderAgent?.runtime,
+    senderAgent?.model,
+  );
+  const agentModelLabelText = showAgentModelNameOption
+    ? catalogModelLabelText ?? agentModelLabel(senderAgent)
+    : null;
   const senderMember = useMemo(() => {
     if (previewSenderMember) return previewSenderMember;
     const memberById = new Map<string, ServerMember>();
@@ -2665,20 +2790,17 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
 
   const serverSlug = useServerStore((s) => s.current?.slug);
   const referenceSurfaceChannelId = parentChannelId || message.channelId;
-  const topbarOverflowEnabled = useServerFeatureFlag(TOPBAR_OVERFLOW_FEATURE_FLAG_KEY).enabled;
   // task #187 collapse-long-messages: per-user, per-channel server-persisted
   // pref. OFF = long messages on this surface always render fully expanded
-  // (CollapsibleMessageContent behaves as if disabled). The feature flag is a
-  // rollback boundary, so persisted flag-on preferences are ignored while it
-  // is off and the legacy always-collapse behavior wins. Missing hydration
-  // likewise defaults to collapsing — the server default.
+  // (CollapsibleMessageContent behaves as if disabled). Missing hydration
+  // defaults to collapsing — the server default.
   const storedCollapseLongMessages = useChannelStore(
     (state) =>
       (state.channels.find((candidate) => candidate.id === referenceSurfaceChannelId)
         ?? state.dmChannels.find((candidate) => candidate.id === referenceSurfaceChannelId))
         ?.collapseLongMessages ?? true,
   );
-  const collapseLongMessages = topbarOverflowEnabled ? storedCollapseLongMessages : true;
+  const collapseLongMessages = storedCollapseLongMessages;
   const isJointReferenceSurface = channels.some(
     (channel) => channel.id === referenceSurfaceChannelId && channel.type === "joint",
   );
@@ -2825,6 +2947,15 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
     });
   }, [onOpenProfile, parentMessageId]);
 
+  const handleNavigateExternal = useCallback(() => {
+    const profile = message.externalAuthor;
+    if (!profile) return;
+    useProfileStore.getState().openExternalProfile(message.id, profile, {
+      channelId: message.channelId,
+      openSource: parentMessageId ? "thread" : "channel",
+    });
+  }, [message.channelId, message.externalAuthor, message.id, parentMessageId]);
+
   const handleNavigateComputer = useCallback((machineId: string) => {
     const computer = useMachineStore.getState().machines.find((machine) => machine.id === machineId && machine.isComputer);
     if (computer) nav.toComputer(machineId);
@@ -2839,9 +2970,15 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
   }, [nav]);
 
   // Look up agent's avatar
-  const agentAvatarUrl = senderAgent?.avatarUrl ?? null;
-  const humanAvatarUrl = senderMember?.avatarUrl ?? null;
-  const externalAvatarUrl = message.externalAuthor?.avatarUrl ?? null;
+  const agentAvatarUrl = readOnlyProjection
+    ? readOnlySender?.avatarUrl ?? null
+    : senderAgent?.avatarUrl ?? null;
+  const humanAvatarUrl = readOnlyProjection
+    ? readOnlySender?.avatarUrl ?? null
+    : senderMember?.avatarUrl ?? null;
+  const externalAvatarUrl = readOnlyProjection
+    ? null
+    : message.externalAuthor?.avatarUrl ?? null;
   const senderAgentDmChannel = isAgent
     ? dmChannels.find((channel) => channel.peerType === "agent" && channel.peerId === message.senderId)
     : null;
@@ -2851,16 +2988,20 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
       : null;
 
   // Sender subtitle: agent description or human description (fallback to role)
-  const senderDisplayName = isExternal
-    ? message.externalAuthor?.displayName || message.senderName || formatMessage({ id: "message.author.externalFallback" })
-    : isAgent
-      ? senderAgent?.displayName || senderAgentDmChannel?.peerDisplayName || senderAgent?.name || message.senderName || formatMessage({ id: "message.messageItem.senderAgentFallback" })
-      : message.senderName || formatMessage({ id: "message.messageItem.senderUserFallback" });
-  const senderSubtitle = isExternal
-    ? message.externalAuthor?.provider ?? null
-    : isAgent
-      ? senderAgent?.description || message.senderDescription || null
-      : senderMember?.description || message.senderDescription || formatMemberRole(senderMember?.role ?? "", formatMessage) || null;
+  const senderDisplayName = readOnlyProjection
+    ? readOnlySender?.displayName || message.senderName || formatMessage({ id: "message.messageItem.senderUserFallback" })
+    : isExternal
+      ? message.externalAuthor?.displayName || message.senderName || formatMessage({ id: "message.author.externalFallback" })
+      : isAgent
+        ? senderAgent?.displayName || senderAgentDmChannel?.peerDisplayName || senderAgent?.name || message.senderName || formatMessage({ id: "message.messageItem.senderAgentFallback" })
+        : message.senderName || formatMessage({ id: "message.messageItem.senderUserFallback" });
+  const senderSubtitle = readOnlyProjection
+    ? readOnlySender?.description ?? null
+    : isExternal
+      ? message.externalAuthor?.provider ?? null
+      : isAgent
+        ? senderAgent?.description || message.senderDescription || null
+        : senderMember?.description || message.senderDescription || formatMemberRole(senderMember?.role ?? "", formatMessage) || null;
   const senderMention = useMemo<MessageMention | null>(() => {
     if (isExternal) return null;
     const name = isAgent ? senderAgent?.name : senderMember?.name;
@@ -2896,8 +3037,11 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
   const followedThreads = useThreadStore((s) => s.followedThreads);
   const followThread = useThreadStore((s) => s.followThread);
   const unfollowThread = useThreadStore((s) => s.unfollowThread);
-  const openParentMessageId = useThreadStore((s) => s.openParentMessageId);
-  const openParentChannelId = useThreadStore((s) => s.openParentChannelId);
+  // Subscribe to this row's own answer, not the raw ids: every rendered row
+  // mounts this component, so selecting the ids re-rendered the whole list on
+  // each thread open/close. A boolean only changes for the old and new parent.
+  const isOpenThreadParent = useThreadStore((s) =>
+    s.openParentMessageId === message.id && s.openParentChannelId === message.channelId);
 
   // Select mode (multi-select share). Subscribed early because handleMobileTap
   // below intercepts clicks when scoped here.
@@ -2936,8 +3080,7 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
     !parentMessageId &&
     !hideThreadActions &&
     !(selectionActive && selectionThreadRootId === message.id) &&
-    message.id === openParentMessageId &&
-    message.channelId === openParentChannelId;
+    isOpenThreadParent;
   const showSelectedGroupedHeader = shouldShowGroupedMessageHeader(
     groupState,
     selectionScopedHere,
@@ -2947,7 +3090,7 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
   // Stryker restore all
   const openLegacyTask = useLegacyTaskPanelStore((s) => s.openLegacyTask);
   const closeProfile = useProfileStore((s) => s.closeProfile);
-  const canShowThreadFollowAction = !hideThreadActions || !!showThreadFollowAction;
+  const canShowThreadFollowAction = !readOnlyProjection && (!hideThreadActions || !!showThreadFollowAction);
   const messageRef = useRef<HTMLDivElement | null>(null);
   const messageBodyRef = useRef<HTMLDivElement | null>(null);
   // Stryker disable all: React effect wiring delegates branch decisions to
@@ -3103,8 +3246,10 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
     if (hideThreadActions) return;
     // Don't open thread if long-press context menu just fired
     if (longPressFired.current) return;
-    // Only on touch devices (no hover capability)
-    if (window.matchMedia("(hover: hover)").matches) return;
+    // Only on touch devices (no hover capability); jsdom suites without a
+    // matchMedia stub are treated as touch (the target filter below still
+    // exempts interactive elements, so the guard stays behavior-neutral).
+    if (typeof window.matchMedia === "function" && window.matchMedia("(hover: hover)").matches) return;
     // Don't intercept clicks on interactive elements (links, buttons, code blocks, images)
     const target = e.target as HTMLElement;
     if (target.closest("a, button, pre, code, img")) return;
@@ -3112,28 +3257,13 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
   }, [hideThreadActions, handleReplyInThread, selectionScopedHere, toggleSelection, message.id]);
 
   const [resolvingThreadRefKey, setResolvingThreadRefKey] = useState<string | null>(null);
-  // Store the message KEY (not a formatted string) so the notice re-localizes
-  // on a language switch while it is still on screen.
-  const [threadRefNotice, setThreadRefNotice] = useState<ThreadRefNoticeKey | null>(null);
-  const threadRefNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const clearThreadRefNoticeTimer = useCallback(() => {
-    if (threadRefNoticeTimerRef.current) {
-      clearTimeout(threadRefNoticeTimerRef.current);
-      threadRefNoticeTimerRef.current = null;
-    }
-  }, []);
-
+  // Transient ref-open failures surface through the standard RUI toast — the
+  // same component MainLayout uses for the identical message — instead of a
+  // hand-rolled inline box.
   const showThreadRefNotice = useCallback((notice: ThreadRefNoticeKey) => {
-    clearThreadRefNoticeTimer();
-    setThreadRefNotice(notice);
-    threadRefNoticeTimerRef.current = setTimeout(() => {
-      setThreadRefNotice(null);
-      threadRefNoticeTimerRef.current = null;
-    }, 4000);
-  }, [clearThreadRefNoticeTimer]);
-
-  useEffect(() => () => clearThreadRefNoticeTimer(), [clearThreadRefNoticeTimer]);
+    toast.error(formatMessageRef.current({ id: notice }));
+  }, []);
 
   const navigableChannels = useMemo(
     () => [...channels, ...dmChannels.filter((dm) => !channels.some((channel) => channel.id === dm.id))],
@@ -3147,8 +3277,6 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
 
   const handleOpenThreadRef = useCallback(async (intent: ThreadRefIntent) => {
     const threadRefKey = `${intent.serverSlug}:${intent.parentChannelName.toLowerCase()}:${intent.shortId.toLowerCase()}`;
-    clearThreadRefNoticeTimer();
-    setThreadRefNotice(null);
 
     if (threadRefAuthorityUnavailable) {
       showThreadRefNotice("message.messageItem.threadServerUnknown");
@@ -3218,7 +3346,7 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
       return;
     }
     showThreadRefNotice("message.messageItem.threadUnavailable");
-  }, [clearThreadRefNoticeTimer, nav, navigableChannels, openThread, serverSlug, showThreadRefNotice, threadRefAuthorityUnavailable]);
+  }, [nav, navigableChannels, openThread, serverSlug, showThreadRefNotice, threadRefAuthorityUnavailable]);
 
   // Stryker disable all: message-ref navigation dependency-array rewrites are
   // equivalent in the static mutation oracle; behavior coverage exercises the
@@ -3359,6 +3487,18 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
     for (const t of serverTasks) nums.add(t.taskNumber);
     return nums;
   }, [channelTasks, serverTasks]);
+  // Task #662 research prototype: full task payloads for inline task refs,
+  // from the same source as knownTaskNumbers. Channel tasks win over the
+  // server cache for the same number.
+  const taskByNumber = useMemo(() => {
+    const map = new Map<number, Task>();
+    for (const t of serverTasks) map.set(t.taskNumber, t);
+    for (const t of channelTasks) map.set(t.taskNumber, t);
+    // The message's own linked task is always the freshest source for a ref
+    // in that message's body.
+    if (linkedTask) map.set(linkedTask.taskNumber, linkedTask);
+    return map;
+  }, [channelTasks, serverTasks, linkedTask]);
   const updateTaskStatus = useTaskStore((s) => s.updateTaskStatus);
   const [converting, setConverting] = useState(false);
   const pendingReactionEmojisRef = useRef<Set<string>>(new Set());
@@ -3386,32 +3526,6 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
     setCtxMenu(null);
     handleReplyInThread();
   }, [handleReplyInThread]);
-  const handleOpenThreadInNewTab = useCallback(() => {
-    setCtxMenu(null);
-    const channelId = parentChannelId || message.channelId;
-    const routeKind = navigableChannels.find((channel) => channel.id === channelId)?.type === "dm" ? "dm" : "channel";
-    if (!serverSlug) return;
-    openPanelInNewTab(buildThreadWindowUrl(
-      { pathname: window.location.pathname, search: window.location.search, origin: window.location.origin },
-      { serverSlug, parentChannelId: channelId, parentMessageId: message.id, parentChannelType: routeKind },
-    ));
-  }, [message.channelId, message.id, navigableChannels, parentChannelId, serverSlug]);
-  const handleOpenLinkedTaskInNewTab = useCallback(() => {
-    if (!linkedTask || !serverSlug) return;
-    setCtxMenu(null);
-    const routeKind = navigableChannels.find((channel) => channel.id === linkedTask.channelId)?.type === "dm" ? "dm" : "channel";
-    const url = linkedTask.messageId
-      ? buildThreadWindowUrl(
-        { pathname: window.location.pathname, search: window.location.search, origin: window.location.origin },
-        { serverSlug, parentChannelId: linkedTask.channelId, parentMessageId: linkedTask.messageId, parentChannelType: routeKind },
-        "task",
-      )
-      : buildLegacyTaskWindowUrl(
-        { pathname: window.location.pathname, search: window.location.search, origin: window.location.origin },
-        { serverSlug, channelId: linkedTask.channelId, taskId: linkedTask.id, channelType: routeKind },
-      );
-    openPanelInNewTab(url);
-  }, [linkedTask, navigableChannels, serverSlug]);
   const [reactionPopover, setReactionPopover] = useState<{
     emoji: string;
     visibleNames: string[];
@@ -3972,11 +4086,45 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
     });
   }, [serverSlug, parentChannelId, parentMessageId, message.channelId, message.id, navigableChannels]);
 
-  const handleOpenPermalink = useCallback((href: string) => {
-    const permalink = parseRaftPermalink(href, currentHostname);
+  const handleOpenPermalink = useCallback(async (href: string) => {
+    let permalink = parseRaftPermalink(href, currentHostname);
     if (!permalink) {
       window.open(href, "_blank", "noopener,noreferrer");
       return;
+    }
+
+    if (serverSlug && permalink.serverSlug !== serverSlug && permalink.routeKind === "channel") {
+      const { serverEpoch, current } = useServerStore.getState();
+      try {
+        const { data } = await api.get<{
+          channelId: string;
+          targetMessageId: string;
+          canonicalTarget?: { kind: string; channelId: string; threadParentMessageId: string };
+        }>(`/messages/context/${encodeURIComponent(permalink.messageId)}`, {
+          params: { channelId: permalink.channelId },
+          headers: { "X-Server-Id": current?.id },
+        });
+        if (useServerStore.getState().serverEpoch !== serverEpoch) return;
+        // The context endpoint authorizes the local projection and returns its
+        // canonical navigation target, including reply-to-thread projection.
+        const target = data.canonicalTarget;
+        permalink = {
+          ...permalink,
+          serverSlug,
+          channelId: target?.kind === "thread" ? target.channelId : data.channelId,
+          messageId: data.targetMessageId ?? permalink.messageId,
+          threadParentMessageId: target?.kind === "thread" ? target.threadParentMessageId : permalink.threadParentMessageId,
+        };
+      } catch (error) {
+        if (useServerStore.getState().serverEpoch !== serverEpoch) return;
+        const status = (error as { response?: { status?: number } }).response?.status;
+        if (status !== 404) {
+          toast.error(formatMessageRef.current({ id: "message.messageItem.linkResolutionUnavailable" }));
+          return;
+        }
+        // No readable local projection exists. An unrelated workspace link
+        // keeps its original destination, whose own access checks still apply.
+      }
     }
 
     if (serverSlug && permalink.serverSlug === serverSlug) {
@@ -3995,7 +4143,7 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
       return;
     }
 
-    window.location.href = href;
+    window.open(href, "_blank", "noopener,noreferrer");
   }, [currentHostname, nav, serverSlug]);
 
   const handleOpenQuotedPermalink = useCallback((permalink: ReturnType<typeof parseRaftPermalink>) => {
@@ -4160,49 +4308,57 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
     const systemContentParts = splitReminderReceiptFireAtTokens(message.content);
     const systemContentTitle = formatReminderReceiptContentTitle(message.content, timeFormatOptions);
     return (
-      <div className="flex items-center justify-center gap-2 py-1.5 px-2 mb-1 min-w-0">
-        <span className="text-xs text-black/40 font-mono whitespace-nowrap shrink-0">{time}</span>
-        <span className="text-xs text-black/50 truncate min-w-0" title={systemContentTitle}>
+      <SystemMessage id={`message-${message.id}`}>
+        <SystemMessageTime>{time}</SystemMessageTime>
+        <SystemMessageContent>
+          <Tooltip content={systemContentTitle}>
+          <span>
           {systemContentParts.map((part, index) => (
             part.type === "reminderFireAt" ? (
-              <span key={`${part.value}-${index}`} title={formatReminderReceiptTooltip(part.value, timeFormatOptions)}>
+              <Tooltip key={`${part.value}-${index}`} content={formatReminderReceiptTooltip(part.value, timeFormatOptions)}>
+              <span>
                 {formatReminderReceiptTime(part.value, formatMessage, new Date(), timeFormatOptions)}
               </span>
+              </Tooltip>
             ) : (
               part.value
             )
           ))}
-        </span>
-      </div>
+          </span>
+          </Tooltip>
+        </SystemMessageContent>
+      </SystemMessage>
     );
   }
 
   return (
     <>
-    <div
+    <MessageItem
       ref={messageRef}
       id={`message-${message.id}`}
-      onClick={handleMobileTap}
-      onContextMenu={handleContextMenu}
-      onTouchStart={handleTouchStart}
-      onTouchEnd={handleTouchEnd}
-      onTouchMove={handleTouchMove}
+      onClick={readOnlyProjection ? undefined : handleMobileTap}
+      onContextMenu={readOnlyProjection ? undefined : handleContextMenu}
+      onTouchStart={readOnlyProjection ? undefined : handleTouchStart}
+      onTouchEnd={readOnlyProjection ? undefined : handleTouchEnd}
+      onTouchMove={readOnlyProjection ? undefined : handleTouchMove}
       onMouseEnter={handleReactionPickerBoundaryEnter}
       onMouseLeave={handleReactionPickerBoundaryLeave}
-      className={`group/message relative flex h-fit gap-3 py-1 ${showSelectedGroupedHeader ? "mt-1.5 min-h-[3rem]" : ""} px-2 ${
-        isHighlighted
-          ? "border-2 border-black bg-brutal-cyan/25 shadow-brutal mb-1"
-          : ctxMenu || reactionPicker
-          ? "border-2 border-black bg-white mb-1"
-          : isSelectedAsThreadParent
-          ? "border-2 border-black bg-white mb-1"
-          : selectionScopedHere
-          ? "border-2 border-transparent hover:bg-white active:bg-white mb-1"
-          : "border-2 border-transparent hover:border-black hover:bg-white active:border-black active:bg-white mb-1"
-      }`}
+      compact={!showSelectedGroupedHeader}
+      data-popup-open={ctxMenu || reactionPicker ? "" : undefined}
+      data-selected={isSelectedAsThreadParent || isSelected ? "true" : undefined}
+      data-selection-active={selectionScopedHere ? "true" : undefined}
+      data-highlighted={isHighlighted ? "true" : undefined}
+      className={isHighlighted
+ ? "bg-info/10 ring-1 ring-inset ring-info/50 theme-brutal:bg-brutal-cyan/25 theme-brutal:shadow-brutal"
+ : ctxMenu || reactionPicker
+ // Brutal keeps its framed "menu open" card. Elegant has no frame here: rui's
+ // data-popup-open state tints the row the same way hover does (task #694 —
+ // a strong border drew a black box around the message).
+ ? "theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
+ : undefined}
     >
       {selectionScopedHere && (
-        <CheckMarker
+        <MessageMultiSelectCheckbox
           // v1.5 (huxijin 2026-05-01): was `self-center`, which dropped the
           // circle into the vertical middle of the row. On long messages
           // this sits far below the viewport's top edge and users lose
@@ -4210,16 +4366,15 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
           // (`self-start`) at avatar height so the indicator is always
           // visible alongside the sender name.
           checked={isSelected}
-          shape="circle"
-          size="lg"
-          tone="yellow-fill"
-          className="self-start mt-1.5"
+          aria-hidden="true"
+          tabIndex={-1}
+          className="pointer-events-none self-start mt-1.5"
           data-testid={`message-select-circle-${message.id}`}
         />
       )}
       {/* Hover action toolbar — the "骑线按钮组" pill. Extracted into its own
           component (stdrc). */}
-      <MessageHoverToolbar
+      {!readOnlyProjection ? <MessageHoverToolbar
         isSaved={isSaved}
         reactionActive={!!reactionPicker}
         hideThreadActions={hideThreadActions}
@@ -4236,10 +4391,18 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
           }
         }}
         onToggleSave={handleToggleSave}
-      />
+      /> : null}
       {showSelectedGroupedHeader ? (
-        <MessageSenderAvatar
-          showAgent={isAgent && !!senderAgent}
+        <MessageItemGutter>
+          {/* flex + items-start: the slot is otherwise a block box whose lone
+              inline-block avatar button baseline-aligns; the agent avatar's
+              status-dot badge drops that baseline and sinks the agent avatar
+              ~9px below the human one. Flex items are blockified, so both
+              kinds sit at margin-top only. (rui#305 may later move this into
+              the recipe; the override stays harmless.) */}
+          <MessageItemAvatarSlot className="flex items-start">
+            <MessageSenderAvatar
+          showAgent={isAgent && (!!senderAgent || !!readOnlySender)}
           showExternal={isExternal}
           isDeactivatedAgent={isDeactivatedAgent}
           senderId={message.senderId}
@@ -4247,84 +4410,98 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
           avatarUrl={humanAvatarUrl}
           gravatarHash={senderMember?.gravatarHash}
           email={senderEmailForAvatar}
-          hoverAgent={senderAgent}
-          hoverMember={senderMember}
+          hoverAgent={readOnlyProjection ? undefined : senderAgent}
+          hoverMember={readOnlyProjection ? undefined : senderMember}
           externalAvatarUrl={externalAvatarUrl}
-          externalInitials={senderDisplayName}
+          externalDisplayName={senderDisplayName}
+          externalProvider={isExternal ? message.externalAuthor?.provider ?? null : null}
+          externalWorkspaceName={isExternal ? message.externalAuthor?.workspaceName ?? null : null}
+          externalActorKind={isExternal ? message.externalAuthor?.actorKind ?? null : null}
           testId={senderAvatarTestId}
-          onNavigateAgent={handleNavigateAgent}
-                onNavigateAgentActivity={handleNavigateAgentActivity}
-          onNavigateHuman={handleNavigateHuman}
-          onContextMenu={handleSenderContextMenu}
-          onLongPressMention={senderMention ? insertSenderMention : undefined}
-        />
+          onNavigateAgent={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateAgent}
+          onNavigateAgentActivity={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateAgentActivity}
+          onNavigateHuman={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateHuman}
+          onNavigateExternal={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateExternal}
+          onContextMenu={readOnlyProjection ? undefined : handleSenderContextMenu}
+          onLongPressMention={!readOnlyProjection && senderMention ? insertSenderMention : undefined}
+            />
+          </MessageItemAvatarSlot>
+        </MessageItemGutter>
       ) : (
         // Continuation row (task #44): reserve the avatar column so the body
         // stays aligned with grouped rows above, and show this message's clock
         // (HH:MM) in that gutter — every message keeps a visible timestamp
         // (stdrc), aligned in a consistent left column instead of the header.
-        <div className="relative w-9 shrink-0 self-stretch">
-          <span
-            title={gutterFullTimestamp}
+        <MessageItemGutter>
+          <Tooltip content={gutterFullTimestamp}>
+          <MessageItemContinuationTime
             // No transition — the time reveals instantly on hover, like the row
             // border (stdrc: 时间不要动画呈现，跟边框一样立即出现).
-            className="absolute right-1 top-1 select-none font-mono text-[10px] leading-none tabular-nums text-black/0 group-hover/message:text-black/40"
+          className="absolute right-1 top-1 select-none font-mono text-[10px] leading-none tabular-nums text-transparent group-hover/message:text-foreground-placeholder theme-brutal:group-hover/message:text-black/40"
           >
             {gutterClock}
-          </span>
-        </div>
+          </MessageItemContinuationTime>
+          </Tooltip>
+        </MessageItemGutter>
       )}
-      <div className="min-w-0 flex-1">
+      <MessageItemContent>
         {groupState?.showName === false && !showSelectedGroupedHeader ? null : (
-          <div className="flex min-w-0 items-center gap-2 overflow-hidden pr-24">
+          <MessageItemHeader>
           {senderMention ? (
-            <button
-              type="button"
+            <Tooltip content={formatMessage({ id: "message.messageItem.mentionSender" }, { name: senderMention.name })}>
+            <MessageItemSenderButton
               onClick={handleSenderNameMention}
-              onContextMenu={handleSenderContextMenu}
-              className="min-w-0 shrink-0 [cursor:pointer] truncate text-sm font-bold text-black hover:underline hover:decoration-2 hover:underline-offset-2"
-              title={formatMessage({ id: "message.messageItem.mentionSender" }, { name: senderMention.name })}
+              onContextMenu={readOnlyProjection ? undefined : handleSenderContextMenu}
               data-testid={`message-sender-mention-${message.id}`}
             >
               {senderDisplayName}
-            </button>
+            </MessageItemSenderButton>
+            </Tooltip>
           ) : (
-            <span
-              className="min-w-0 shrink-0 truncate text-sm font-bold text-black"
-              onContextMenu={handleSenderContextMenu}
+            <MessageItemSender
+              onContextMenu={readOnlyProjection ? undefined : handleSenderContextMenu}
             >
               {senderDisplayName}
-            </span>
+            </MessageItemSender>
           )}
           {agentModelLabelText && (
-            <span
-              className="shrink-0 whitespace-nowrap font-mono text-[11px] leading-none text-black/40"
-              title={agentModelLabelText}
+            <Tooltip content={agentModelLabelText}>
+            <MessageItemMeta
+              render={<span />}
+              className="shrink-0 whitespace-nowrap text-[11px]"
               data-testid={`message-sender-model-${message.id}`}
             >
               {agentModelLabelText}
-            </span>
+            </MessageItemMeta>
+            </Tooltip>
           )}
           {isDeactivatedAgent && (
-            <span className="inline-flex shrink-0 items-center whitespace-nowrap px-1.5 py-0.5 text-[10px] font-bold uppercase border border-black bg-gray-300 text-black/60">
+            <span className="inline-flex shrink-0 items-center whitespace-nowrap border border-line-muted bg-fill-muted px-1.5 py-0.5 text-[10px] font-bold uppercase text-foreground-muted theme-brutal:border-black theme-brutal:bg-gray-300 theme-brutal:text-black/60">
               {formatMessage({ id: "message.messageItem.deletedBadge" })}
             </span>
           )}
           {humanDepartureLabel && (
-            <span className="inline-flex shrink-0 items-center whitespace-nowrap px-1.5 py-0.5 text-[10px] font-bold uppercase border border-black bg-gray-300 text-black/60">
+            <span className="inline-flex shrink-0 items-center whitespace-nowrap border border-line-muted bg-fill-muted px-1.5 py-0.5 text-[10px] font-bold uppercase text-foreground-muted theme-brutal:border-black theme-brutal:bg-gray-300 theme-brutal:text-black/60">
               {humanDepartureLabel}
             </span>
           )}
           {senderSubtitle && (
-            <span className="min-w-0 truncate text-xs text-black/40 font-mono" title={senderSubtitle}>
+            <Tooltip content={senderSubtitle}>
+            <MessageItemMeta
+              render={<span />}
+              className="min-w-0 truncate"
+            >
               {senderSubtitle}
-            </span>
+            </MessageItemMeta>
+            </Tooltip>
           )}
-          <span className="shrink-0 text-xs text-black/40 font-mono whitespace-nowrap">{time}</span>
+          <MessageItemTime render={<span />} className="shrink-0 whitespace-nowrap">{time}</MessageItemTime>
           {converting && (
-            <span className="text-[10px] font-bold text-black/40">{formatMessage({ id: "message.messageItem.converting" })}</span>
+            <MessageItemInlineStatus render={<span />}>
+              {formatMessage({ id: "message.messageItem.converting" })}
+            </MessageItemInlineStatus>
           )}
-          </div>
+          </MessageItemHeader>
         )}
         <AttachmentCommentRefChip
           commentRef={message.commentRef}
@@ -4339,14 +4516,18 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
           measureBeforePaint={message.id.startsWith("optimistic-")}
           disabled={isActionCardMessage || !!forwardedBundleMetadata || !collapseLongMessages}
         >
-        <div
+        <MessageItemBody
           ref={messageBodyRef}
           data-message-selectable="true"
           data-message-id={message.id}
           data-quote-channel-id={quoteComposerChannelId}
           data-message-font-size={messageBodyFontSize}
-          className={`${messageBodyFontSizeClass} text-black break-words select-text [&_*]:select-text`}
-          style={{ userSelect: "text", WebkitUserSelect: "text" }}
+          className={messageBodyFontSizeClass}
+          style={{
+            ...getMessageBodyFontSizeStyle(messageBodyFontSize),
+            userSelect: "text",
+            WebkitUserSelect: "text",
+          }}
         >
           {(() => {
             // Operation card (B-mode): the message body IS the card. Skip
@@ -4382,33 +4563,39 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
                 channelParticipantAgentsById={channelParticipantAgentsById}
                 channelParticipantMembersById={channelParticipantMembersById}
                 unavailableQuotedPermalinkUrl={unavailableQuotedPermalinkUrl}
-                onNavigateChannel={handleNavigateChannel}
-                onNavigateDm={handleNavigateDm}
-                onNavigateAgent={handleNavigateAgent}
-                onNavigateHuman={handleNavigateHuman}
-                onNavigateComputer={handleNavigateComputer}
-                onOpenThread={handleOpenThreadRef}
+                onNavigateChannel={readOnlyProjection ? onReadOnlyNavigateChannel ?? ignoreReadOnlyProjectionNavigation : handleNavigateChannel}
+                onNavigateDm={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateDm}
+                onNavigateAgent={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateAgent}
+                onNavigateHuman={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateHuman}
+                onNavigateComputer={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateComputer}
+                onOpenThread={readOnlyProjection ? undefined : handleOpenThreadRef}
                 resolvingThreadRefKey={resolvingThreadRefKey}
-                onOpenTask={handleOpenTaskRef}
-                onOpenMessage={handleOpenMessageRef}
-                onOpenPermalink={handleOpenPermalink}
+                onOpenTask={readOnlyProjection ? undefined : handleOpenTaskRef}
+                onOpenMessage={readOnlyProjection ? undefined : handleOpenMessageRef}
+                onOpenPermalink={readOnlyProjection ? undefined : handleOpenPermalink}
                 serverSlug={serverSlug}
                 refAuthorityServerSlug={refAuthorityServerSlug}
-                threadRefAuthorityUnavailable={threadRefAuthorityUnavailable}
+                threadRefAuthorityUnavailable={readOnlyProjection || threadRefAuthorityUnavailable}
                 knownTaskNumbers={knownTaskNumbers}
+                taskByNumber={taskByNumber}
                 timeFormatOptions={timeFormatOptions}
                 threadSearchHighlightQuery={threadSearchHighlightQuery}
               />
             );
           })()}
-        </div>
+        </MessageItemBody>
         {showBilingualOriginal ? (
-          <div
-            className="mt-1.5 border-l-2 border-black/20 pl-2 text-black/70"
+          <MessageItemTranslationOriginal
+            className="mt-1.5"
             data-testid={`message-translation-bilingual-original-${message.id}`}
           >
-            <div className="mb-0.5 text-[10px] font-bold uppercase tracking-normal text-black/40">{formatMessage({ id: "message.messageItem.bilingualOriginal" })}</div>
-            <div className={`${messageBodyFontSizeClass} break-words select-text [&_*]:select-text`}>
+            <MessageItemTranslationOriginalLabel>
+              {formatMessage({ id: "message.messageItem.bilingualOriginal" })}
+            </MessageItemTranslationOriginalLabel>
+            <div
+              className={`${messageBodyFontSizeClass} break-words select-text [&_*]:select-text`}
+              style={getMessageBodyFontSizeStyle(messageBodyFontSize)}
+            >
               <MessageMarkdownBody
                 readReceiptChannelId={message.channelId}
                 readReceiptMessageSeq={message.seq}
@@ -4420,25 +4607,26 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
                 channelParticipantAgentsById={channelParticipantAgentsById}
                 channelParticipantMembersById={channelParticipantMembersById}
                 unavailableQuotedPermalinkUrl={unavailableQuotedPermalinkUrl}
-                onNavigateChannel={handleNavigateChannel}
-                onNavigateDm={handleNavigateDm}
-                onNavigateAgent={handleNavigateAgent}
-                onNavigateHuman={handleNavigateHuman}
-                onNavigateComputer={handleNavigateComputer}
-                onOpenThread={handleOpenThreadRef}
+                onNavigateChannel={readOnlyProjection ? onReadOnlyNavigateChannel ?? ignoreReadOnlyProjectionNavigation : handleNavigateChannel}
+                onNavigateDm={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateDm}
+                onNavigateAgent={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateAgent}
+                onNavigateHuman={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateHuman}
+                onNavigateComputer={readOnlyProjection ? ignoreReadOnlyProjectionNavigation : handleNavigateComputer}
+                onOpenThread={readOnlyProjection ? undefined : handleOpenThreadRef}
                 resolvingThreadRefKey={resolvingThreadRefKey}
-                onOpenTask={handleOpenTaskRef}
-                onOpenMessage={handleOpenMessageRef}
-                onOpenPermalink={handleOpenPermalink}
+                onOpenTask={readOnlyProjection ? undefined : handleOpenTaskRef}
+                onOpenMessage={readOnlyProjection ? undefined : handleOpenMessageRef}
+                onOpenPermalink={readOnlyProjection ? undefined : handleOpenPermalink}
                 serverSlug={serverSlug}
                 refAuthorityServerSlug={refAuthorityServerSlug}
-                threadRefAuthorityUnavailable={threadRefAuthorityUnavailable}
+                threadRefAuthorityUnavailable={readOnlyProjection || threadRefAuthorityUnavailable}
                 knownTaskNumbers={knownTaskNumbers}
+                taskByNumber={taskByNumber}
                 timeFormatOptions={timeFormatOptions}
                 threadSearchHighlightQuery={threadSearchHighlightQuery}
               />
             </div>
-          </div>
+          </MessageItemTranslationOriginal>
         ) : null}
         {forwardedBundleMetadata ? (
           <div className="mt-1.5">
@@ -4450,18 +4638,13 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
             />
           </div>
         ) : null}
-        {quotedPermalink && !quotedPermalinkUnavailable ? (
+        {!readOnlyProjection && quotedPermalink && !quotedPermalinkUnavailable ? (
           <div className="mt-1.5">
             <QuotedMessagePermalinkPreview
               permalink={quotedPermalink.parsed}
               onOpen={handleOpenQuotedPermalink}
               onUnavailable={handleQuotedPermalinkUnavailable}
             />
-          </div>
-        ) : null}
-        {threadRefNotice ? (
-          <div className="mt-1 inline-flex max-w-full border border-black bg-soft-signal/40 px-2 py-1 text-xs font-bold text-black/70">
-            {formatMessage({ id: threadRefNotice })}
           </div>
         ) : null}
         </CollapsibleMessageContent>
@@ -4473,7 +4656,7 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
             const imageAttachments = message.attachments.filter((att) => isPreviewableImageAttachment(att));
             const lightboxImages = imageAttachments.filter((att) => !isOptimisticAttachment(att));
             const renderedImages = imageAttachments.filter((att) => !!getImageGalleryPreviewSrc(att, imageFallbackUrls));
-            const imageRows = buildImageGalleryRows(renderedImages);
+            const imageRows = buildMessageImageGalleryRows(renderedImages);
             const videoAttachments = message.attachments.filter((att) => isPreviewableVideoAttachment(att));
             const audioAttachments = message.attachments.filter((att) => isPreviewableAudioAttachment(att));
             const otherAttachments = message.attachments.filter((att) => {
@@ -4485,13 +4668,14 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
           return (
             <div className="mt-1 space-y-2">
               {imageRows.length > 0 && (
-                <div className="max-w-[min(22rem,calc(100vw-7rem))] space-y-2 md:max-w-[28rem]">
+                <MessageImageGallery>
                   {imageRows.map((row, rowIndex) => (
-                    <div
-                      key={`${row.attachments.map((att) => att.id).join("-")}-${rowIndex}`}
-                      className={`grid gap-2 ${row.gridClass}`}
+                    <MessageImageGalleryRow
+                      key={`${row.items.map((item) => renderedImages[item.index].id).join("-")}-${rowIndex}`}
+                      row={row}
                     >
-                      {row.attachments.map((att) => {
+                      {row.items.map((item) => {
+                        const att = renderedImages[item.index];
                         const previewSrc = getImageGalleryPreviewSrc(att, imageFallbackUrls);
                         if (!previewSrc) return null;
                         const isOptimistic = isOptimisticAttachment(att);
@@ -4511,18 +4695,11 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
                           event.stopPropagation();
                           void handleDownloadAttachment(att);
                         };
-                        const isSingleImage = renderedImages.length === 1;
-                        const fitClass = getImageGalleryFitClass(att);
-                        const imageBackgroundClass = fitClass === "object-contain" ? imageGalleryBackgroundClass : "";
-                        const imageReserveStyle = isSingleImage ? getSingleImageReserveStyle(att) : undefined;
                         return (
-                          <div
-                            key={att.id}
-                            className={`group/img relative overflow-hidden border-2 border-black text-left ${
-                              isSingleImage ? "inline-block w-fit max-w-[26rem] justify-self-start" : row.heightClass
-                            } bg-brutal-cream/60 ${isOptimistic ? "opacity-70" : "hover:brightness-95"}`}
-                            style={imageReserveStyle}
-                            title={att.filename}
+                          <Tooltip key={att.id} content={att.filename}>
+                          <MessageImageGalleryItem
+                            className="bg-brutal-cream/60"
+                            layout={item}
                           >
                             <img
                               src={previewSrc}
@@ -4530,46 +4707,38 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
                               data-select-screenshot-attachment-id={att.id}
                               data-select-screenshot-attachment-width={att.width ?? undefined}
                               data-select-screenshot-attachment-height={att.height ?? undefined}
-                              className={
-                                isSingleImage
-                                  ? `block h-full w-full object-contain ${imageGalleryBackgroundClass}`
-                                  : `block h-full w-full ${fitClass} ${imageBackgroundClass}`
-                              }
                               width={att.width ?? undefined}
                               height={att.height ?? undefined}
                               loading="lazy"
                             />
                             {isOptimistic && (
-                              <div className="absolute inset-0 flex items-center justify-center">
-                                <Spinner size="md" variant="inverse" />
-                              </div>
+                              <MessageImageGalleryOverlay>
+                                <Spinner size="md" variant="inverse" aria-label={formatMessage({ id: "common.loadingLabel" })} />
+                              </MessageImageGalleryOverlay>
                             )}
                             {!isOptimistic && (
-                              <button
-                                type="button"
+                              <MessageImageGalleryPreview
                                 onClick={handleOpenImage}
-                                className="absolute inset-0 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-black"
                                 aria-label={formatMessage({ id: "message.messageItem.previewFile" }, { filename: att.filename })}
                               />
                             )}
                             {!isOptimistic && (
-                              <button
-                                type="button"
+                              <MessageImageGalleryAction
                                 onClick={handleDownloadImage}
                                 data-message-affordance="image-download"
-                                className="absolute bottom-1 right-1 z-10 hidden size-6 items-center justify-center border border-black bg-white/80 text-black/50 group-hover/img:flex hover:text-black focus:flex focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-black"
                                 aria-label={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: att.filename })}
                               >
                                 <Download size={12} />
-                              </button>
+                              </MessageImageGalleryAction>
                             )}
 
-                          </div>
+                          </MessageImageGalleryItem>
+                          </Tooltip>
                         );
                       })}
-                    </div>
+                    </MessageImageGalleryRow>
                   ))}
-                </div>
+                </MessageImageGallery>
               )}
               {videoAttachments.length > 0 && (
                 <div className="space-y-2">
@@ -4611,7 +4780,7 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
                 </div>
               )}
               {otherAttachments.length > 0 && (
-                <div className="flex max-w-[22.5rem] flex-wrap items-start gap-2">
+                <MessageAttachmentGroup className="max-w-[22.5rem]">
                   {otherAttachments.map((att) => {
                     const isImage = isPreviewableImageAttachment(att);
                     const isHtml = isPreviewableHtmlAttachment(att);
@@ -4653,7 +4822,7 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
                       />
                     );
                   })}
-                </div>
+                </MessageAttachmentGroup>
               )}
 	            </div>
 	          );
@@ -4683,12 +4852,12 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
           hasThreadFooterMetadata
           // Stryker restore all
         ) ? (
-          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <MessageItemFooter className="mt-1.5 flex flex-wrap items-center gap-1.5">
             {linkedTask && (() => {
               const fullLabel = linkedTask.claimedByName ? `task #${linkedTask.taskNumber} @${linkedTask.claimedByName}` : `task #${linkedTask.taskNumber}`;
-              const assignee = linkedTask.claimedByName ? (
-                <span className="min-w-0 truncate">@{linkedTask.claimedByName}</span>
-              ) : null;
+              const assignee = linkedTask.claimedByName
+                ? taskAssigneeHandle(linkedTask.claimedByName)
+                : null;
               // Source of truth: STATUS_BADGE_CONFIG in taskStatusUi.ts.
               // Before this dedup, the below-content variant had its own
               // inline 4-entry config (no `closed`) and silently fell
@@ -4708,40 +4877,44 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
               // Status editing lives in the modal's Properties region; quick
               // completion stays on the message context menu. (@stdrc)
               return (
+                <Tooltip content={fullLabel}>
                 <button
                   type="button"
                   onClick={openLinkedTask}
                   className="inline-flex min-w-0 max-w-full items-center overflow-hidden whitespace-nowrap"
-                  title={fullLabel}
                   aria-label={formatMessage({ id: "task.chip.openAria" }, { taskNumber: linkedTask.taskNumber, title: linkedTask.title })}
                   data-message-affordance="open-linked-task"
                 >
-                  <StatusBadge
-                    status={linkedTask.status}
+                  <TaskChip
+                    status={toRuiTaskStatus(linkedTask.status)}
+                    // rui's elegant default nudges the chip up 1px for inline
+                    // text; here it sits in an overflow-hidden button, where
+                    // that nudge cuts off its top border.
+                    className="mt-0"
                     data-testid="message-task-badge"
                     data-task-status={linkedTask.status}
                   >
+                    <TaskStatusIcon status={toRuiTaskStatus(linkedTask.status)} />
                     <span className="shrink-0">{taskNumberSigil(linkedTask.taskNumber)}</span>
                     {assignee}
-                  </StatusBadge>
+                  </TaskChip>
                 </button>
+                </Tooltip>
               );
             })()}
             {isSaved ? (
-              <button
-                type="button"
-                className="inline-flex h-5 min-w-0 max-w-full items-center gap-1 overflow-hidden whitespace-nowrap border border-black bg-brutal-orange/15 px-1.5 text-[10px] font-bold leading-none text-black transition-[filter] duration-100 hover:brightness-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-black"
+              <MessageItemSavedIndicator
+                render={<button type="button" />}
                 data-message-affordance="saved-badge"
-                title={formatMessage({ id: "message.messageItem.removeFromSaved" })}
                 aria-label={formatMessage({ id: "message.messageItem.removeFromSaved" })}
                 onClick={(event) => {
                   event.stopPropagation();
                   handleToggleSave();
                 }}
               >
-                <Bookmark size={10} fill="currentColor" className="shrink-0 text-brutal-orange" />
+                <Bookmark size={10} fill="currentColor" className="shrink-0" />
                 <span className="shrink-0">{formatMessage({ id: "message.messageItem.saved" })}</span>
-              </button>
+              </MessageItemSavedIndicator>
             ) : null}
             {shouldShowThreadRepliesBadge ? (
               <ThreadRepliesBadge
@@ -4767,12 +4940,12 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
                   <ReactionCount count={reaction.count} />
                 </>
               );
-              const reactionClassName = `inline-flex h-5 min-w-0 max-w-full items-center gap-1 overflow-hidden whitespace-nowrap rounded px-1.5 text-[12px] font-bold leading-none text-black ${
+              const reactionClassName = `inline-flex h-5 min-w-0 max-w-full items-center gap-1 overflow-hidden whitespace-nowrap rounded px-1.5 text-[12px] font-bold leading-none text-foreground-strong theme-brutal:text-black ${
                 showFailureFlash
-                  ? "bg-brutal-orange/30"
+                  ? "bg-warning/30 theme-brutal:bg-brutal-orange/30"
                   : currentViewerReacted
-                    ? "bg-brutal-pink/20"
-                    : "bg-black/[0.03]"
+                    ? "bg-accent-soft theme-brutal:bg-brutal-pink/20"
+                    : "bg-fill-muted/40"
               }`;
               return (
                 <span key={reaction.emoji} className="inline-flex">
@@ -4788,8 +4961,8 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
                       onFocus={(event) => showReactionPopover(reaction, event.currentTarget)}
                       onBlur={hideReactionPopover}
                       className={`${reactionClassName} transition-colors ${
-                        currentViewerReacted ? "hover:bg-brutal-pink/30" : "hover:bg-black/[0.08]"
-                      }`}
+ currentViewerReacted ? "hover:bg-accent-soft" : "hover:bg-fill-muted"
+ }`}
                       aria-label={formatMessage({ id: "message.messageItem.reactionAria" }, { emoji: reaction.emoji, reactors: reactorSummary })}
                     >
                       {reactionContent}
@@ -4807,6 +4980,7 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
             })}
               {!isSystem && canReact && visibleReactions.length > 0 ? (
                 <span className="inline-flex md:hidden">
+                  <Tooltip content={formatMessage({ id: "message.messageItem.addReaction" })}>
                   <button
                     type="button"
                     onClick={(event) => {
@@ -4819,13 +4993,13 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
                         openReactionPicker(event.currentTarget);
                       }
                     }}
-                    className="inline-flex h-5 min-w-0 items-center justify-center rounded bg-black/[0.03] px-1.5 text-black transition-colors hover:bg-black/[0.08] active:bg-black/[0.08]"
-                    title={formatMessage({ id: "message.messageItem.addReaction" })}
+                    className="inline-flex h-5 min-w-0 items-center justify-center rounded bg-fill-muted/40 px-1.5 text-foreground-strong transition-colors hover:bg-fill-muted active:bg-fill-muted theme-brutal:bg-black/[0.03] theme-brutal:text-black theme-brutal:hover:bg-black/[0.08] theme-brutal:active:bg-black/[0.08]"
                     aria-label={formatMessage({ id: "message.messageItem.addReaction" })}
                     data-message-affordance="mobile-reaction-add"
                   >
                     <Plus size={13} strokeWidth={2.5} />
                   </button>
+                  </Tooltip>
                 </span>
               ) : null}
             {showDmReadReceipt ? (
@@ -4834,17 +5008,18 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
               // chips it still sits to their LEFT once the row has any other
               // content. It must be the last child, so it is emitted here after
               // every other footer affordance.
+              <Tooltip content={formatMessage({ id: "message.messageItem.read" })}>
               <span
-                className="ml-auto inline-flex h-5 shrink-0 items-center gap-1 whitespace-nowrap text-[10px] font-bold leading-none text-black/45"
+                className="ml-auto inline-flex h-5 shrink-0 items-center gap-1 whitespace-nowrap text-[10px] font-bold leading-none text-foreground-placeholder theme-brutal:text-black/45"
                 data-message-affordance="read-receipt"
-                title={formatMessage({ id: "message.messageItem.read" })}
                 aria-label={formatMessage({ id: "message.messageItem.read" })}
               >
                 <CheckCircle size={10} className="shrink-0" />
                 <span>{formatMessage({ id: "message.messageItem.read" })}</span>
               </span>
+              </Tooltip>
             ) : null}
-          </div>
+          </MessageItemFooter>
         ) : null}
         {/* Inside the Thread panel the replies ARE the surface — previewing them
             on the parent is redundant (artin, #proj-message:a18243dc). */}
@@ -4866,12 +5041,13 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
             endgame is many tasks per message, at which point this is the shape
             and the badge is not. Do not delete as cruft. */}
         {/* <TaskChipList tasks={messageTasks} onOpenTask={openTaskFromChip} /> */}
-      </div>
-    </div>
+      </MessageItemContent>
+    </MessageItem>
     {reactionPicker && typeof document !== "undefined" && createPortal(
-      <div
-        className="fixed z-[80] flex items-center gap-0.5 border-2 border-black bg-white px-1.5 py-1 shadow-soft-popover"
+      <PopoverPopup
+        className="fixed z-[80] min-w-0 flex items-center gap-0.5 px-1.5 py-1"
         data-message-affordance="reaction-picker"
+        {...dismissLayerProps}
         style={{
           left: reactionPicker.x,
           top: reactionPicker.y,
@@ -4881,24 +5057,24 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
         onClick={(e) => e.stopPropagation()}
       >
         {QUICK_REACTION_EMOJIS.map((emoji) => (
+          <Tooltip key={emoji} content={formatMessage({ id: "message.messageItem.reactWith" }, { emoji })}>
           <button
-            key={emoji}
             type="button"
             onClick={() => handleQuickReactionClick(emoji)}
-            className="flex size-7 items-center justify-center rounded bg-transparent transition-colors hover:bg-brutal-pink/20"
-            title={formatMessage({ id: "message.messageItem.reactWith" }, { emoji })}
+            className="flex size-7 items-center justify-center rounded bg-transparent transition-colors hover:bg-accent-soft theme-brutal:hover:bg-brutal-pink/20"
           >
             <ReactionGlyph emoji={emoji} size={QUICK_REACTION_GLYPH_SIZE} className="block" />
           </button>
+          </Tooltip>
         ))}
-      </div>,
+      </PopoverPopup>,
       document.body,
     )}
     {reactionPopover && typeof document !== "undefined" && createPortal(
-        <div
+        <PopoverPopup
         role="tooltip"
         data-message-affordance="reaction-reactors-popover"
-        className="pointer-events-none fixed z-[80] max-w-[280px] border-2 border-black bg-white px-2 py-1.5 text-xs font-bold text-black"
+        className="pointer-events-none fixed z-[80] min-w-0 max-w-[280px] px-2 py-1.5 text-xs font-bold text-foreground-strong theme-brutal:text-black"
         style={{
           left: reactionPopover.x,
           top: reactionPopover.y,
@@ -4910,18 +5086,18 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
               <span key={`${reactionPopover.emoji}-${index}-${name}`} className="inline-flex min-w-0 items-baseline leading-5">
                 <span className="max-w-28 truncate">{name}</span>
                 {index < reactionPopover.visibleNames.length - 1 || reactionPopover.hiddenCount > 0 ? (
-                  <span className="shrink-0 text-black/45">, </span>
+                  <span className="shrink-0 text-foreground-placeholder theme-brutal:text-black/45">, </span>
                 ) : null}
               </span>
             ))}
             {reactionPopover.hiddenCount > 0 && (
-              <span className="leading-5 text-black/50">{formatMessage({ id: "message.messageItem.reactionHiddenMore" }, { count: reactionPopover.hiddenCount })}</span>
+              <span className="leading-5 text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "message.messageItem.reactionHiddenMore" }, { count: reactionPopover.hiddenCount })}</span>
             )}
           </div>
         ) : (
           <span className="block leading-5">{reactionPopover.emoji}</span>
         )}
-      </div>,
+      </PopoverPopup>,
       document.body,
     )}
     {ctxMenu && createPortal(
@@ -4932,9 +5108,9 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
           // it absorbs the iOS phantom outside-tap without blocking menu rows.
           <DismissBackdrop onDismiss={handleCloseCtx} zIndex={55} stopPropagation />
         )}
-        <div
+        <ContextMenuPopup
           ref={ctxMenuRef}
-          className="fixed z-[60] card-brutal overflow-hidden select-none"
+          className="fixed z-[60] select-none"
           role="menu"
           aria-label={formatMessage({ id: "message.messageItem.messageContextMenu" })}
           style={{ left: ctxMenu.x, top: ctxMenu.y, maxHeight: "calc(100dvh - 16px)", overflowY: "auto" }}
@@ -4955,26 +5131,25 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
           {!isSystem && canReact && (
             <>
               <div
-                className="flex h-9 items-center gap-1 bg-white px-2"
+                className="flex h-9 items-center gap-1 bg-layer-panel px-2 theme-brutal:bg-white"
                 data-message-affordance="reaction-quick-row"
               >
                 {QUICK_REACTION_EMOJIS.map((emoji) => (
+                  <Tooltip key={emoji} content={formatMessage({ id: "message.messageItem.reactWith" }, { emoji })}>
                   <button
-                    key={emoji}
                     type="button"
                     onClick={(event) => {
                       event.stopPropagation();
                       handleQuickReactionClick(emoji);
                     }}
-                    className="flex size-7 items-center justify-center rounded bg-transparent transition-colors hover:bg-brutal-pink/20 active:bg-brutal-pink/20"
-                    title={formatMessage({ id: "message.messageItem.reactWith" }, { emoji })}
+                    className="flex size-7 items-center justify-center rounded bg-transparent transition-colors hover:bg-accent-soft active:bg-accent-soft theme-brutal:hover:bg-brutal-pink/20 theme-brutal:active:bg-brutal-pink/20"
                     aria-label={formatMessage({ id: "message.messageItem.reactWith" }, { emoji })}
                   >
                     <ReactionGlyph emoji={emoji} size={QUICK_REACTION_GLYPH_SIZE} className="block" />
                   </button>
+                  </Tooltip>
                 ))}
               </div>
-              <ContextMenuDivider />
             </>
           )}
           <MenuItem
@@ -5050,9 +5225,10 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
               // user opens the panel and triggers select from there.
               enterSelection(message.channelId, [message.id]);
             };
-            // System messages can't be selected. Outside of those, every row
-            // path resolves to one of the three modes above.
-            if (isSystem) return null;
+            // System messages cannot be selected. Guests also cannot enter
+            // the image-share flow because it persists a public artifact;
+            // their server-side role check remains the authoritative guard.
+            if (isSystem || currentUserServerRole === "guest") return null;
             return (
               <MenuItem
                 icon={<CheckCircle size={14} />}
@@ -5065,18 +5241,10 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
           <ContextMenuDivider />
           {!hideThreadActions && (
             <MenuItem
-              icon={<MessageSquare size={14} />}
+              icon={<ThreadIcon width={14} height={14} />}
               onClick={handleOpenThreadFromContextMenu}
             >
               {formatMessage({ id: "message.messageItem.openThread" })}
-            </MenuItem>
-          )}
-          {!hideThreadActions && (
-            <MenuItem
-              icon={<ExternalLink size={14} />}
-              onClick={handleOpenThreadInNewTab}
-            >
-              {formatMessage({ id: "message.messageItem.openThreadInNewWindow" })}
             </MenuItem>
           )}
           <MenuItem
@@ -5105,12 +5273,6 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
                 >
                   {linkedTask.status === "done" ? formatMessage({ id: "message.messageItem.reopenTask" }) : formatMessage({ id: "message.messageItem.markAsDone" })}
                 </MenuItem>
-                <MenuItem
-                  icon={<ExternalLink size={14} />}
-                  onClick={handleOpenLinkedTaskInNewTab}
-                >
-                  {formatMessage({ id: "message.messageItem.openTaskInNewTab" })}
-                </MenuItem>
               </>
             ) : (
               <MenuItem
@@ -5122,15 +5284,15 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
             )) : null
           )}
           </>
-        </div>
+        </ContextMenuPopup>
       </>,
       document.body
     )}
     {senderCtxMenu && createPortal(
       <>
         <DismissBackdrop onDismiss={closeSenderCtxMenu} trapContextMenu />
-        <div
-          className="fixed z-[60] card-brutal overflow-hidden select-none"
+        <ContextMenuPopup
+          className="fixed z-[60] select-none"
           role="menu"
           aria-label={formatMessage({ id: "message.messageItem.senderContextMenu" })}
           style={{ left: senderCtxMenu.x, top: senderCtxMenu.y }}
@@ -5155,7 +5317,7 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
               {formatMessage({ id: "message.messageItem.copyHandle" })}
             </MenuItem>
           ) : null}
-        </div>
+        </ContextMenuPopup>
       </>,
       document.body
     )}
@@ -5163,4 +5325,4 @@ const MessageItem = memo(function MessageItem({ message, mentionMap, channels, p
   );
 });
 
-export default MessageItem;
+export default ConnectedMessageItem;

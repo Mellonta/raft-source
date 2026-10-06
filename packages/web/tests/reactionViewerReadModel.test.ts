@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 
-import api from "../src/api/client.js";
-import { useMessageStore } from "../src/store/messageStore.js";
-import { reactionReadModelStore } from "../src/store/reactionReadModels.js";
+import api from "../src/api/client";
+import { useMessageStore } from "../src/store/messageStore";
+import { reactionReadModelStore } from "../src/store/reactionReadModels";
 import {
   hydrateReactionViewerSnapshot,
   resetReactionViewerHydratesForTests,
-} from "../src/store/reactionViewerReadModel.js";
-import { useServerStore } from "../src/store/serverStore.js";
+} from "../src/store/reactionViewerReadModel";
+import { useServerStore } from "../src/store/serverStore";
 
 afterEach(() => {
   resetReactionViewerHydratesForTests();
@@ -17,7 +16,7 @@ afterEach(() => {
   useServerStore.setState({ current: null });
 });
 
-test("cold viewer GET enters the same versioned complete-snapshot projector", async (t) => {
+test("cold viewer GET enters the same versioned complete-snapshot projector", async () => {
   useServerStore.setState({
     current: {
       id: "server-a",
@@ -33,7 +32,7 @@ test("cold viewer GET enters the same versioned complete-snapshot projector", as
     },
   });
   useMessageStore.getState().setCurrentUserId("principal-a");
-  const get = t.mock.method(api, "get", async () => ({
+  const get = vi.spyOn(api, "get").mockImplementation(async () => ({
     data: {
       serverId: "server-a",
       messageId: "message-a",
@@ -47,7 +46,7 @@ test("cold viewer GET enters the same versioned complete-snapshot projector", as
     serverId: "server-a",
     messageId: "message-a",
   }), { kind: "applied" });
-  assert.equal(get.mock.calls[0]?.arguments[0], "/messages/message-a/reactions/viewer");
+  assert.equal(get.mock.calls[0][0], "/messages/message-a/reactions/viewer");
   assert.deepEqual(
     reactionReadModelStore.getState().readViewerOverlay(
       "principal-a",

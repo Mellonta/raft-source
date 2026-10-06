@@ -1,7 +1,15 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef } from "react";
 import { useIntl } from "react-intl";
-import { createPortal } from "react-dom";
 import { Bookmark, Copy, Link, MessageSquare } from "lucide-react";
+import {
+  Card,
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+  PanelToggleAction,
+} from "raft-ui";
 import { useSavedStore } from "../../store/savedStore";
 import type { SavedEntry } from "../../store/savedStore";
 import { useAgentStore } from "../../store/agentStore";
@@ -11,11 +19,8 @@ import { useThreadStore } from "../../store/threadStore";
 import { useAppNavigate, useMobileBack, buildMessagePermalink } from "../../hooks/useAppNavigate";
 import { resolveMessageSenderMemberFromList } from "../../utils/messageSenderMember";
 import { formatRelativeTime } from "../../utils/relativeTime";
-import ContextMenuDivider from "../ui/ContextMenuDivider";
-import MenuItem from "../ui/MenuItem";
 import AvatarSlot from "../ui/AvatarSlot";
 import PanelHeader from "../ui/PanelHeader";
-import DismissBackdrop from "../ui/DismissBackdrop";
 import EmptyState from "../ui/EmptyState";
 import { ConversationCardSkeleton } from "../ui/Skeleton";
 
@@ -30,7 +35,6 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
   const agents = useAgentStore((s) => s.agents);
   const members = useServerStore((s) => s.members);
   const currentUser = useAuthStore((s) => s.user);
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
 
   const isThread = entry.channelType === "thread";
   const isDm = isThread
@@ -51,14 +55,6 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
     : null;
   const senderName = senderAgent?.displayName ?? senderAgent?.name ?? senderMember?.displayName ?? senderMember?.name ?? entry.senderName;
 
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setCtxMenu({
-      x: Math.min(e.clientX, window.innerWidth - 200),
-      y: Math.min(e.clientY, window.innerHeight - 100),
-    });
-  }, []);
-
   const handleCopyLink = useCallback(() => {
     if (!serverSlug) return;
     const channelForLink = isThread ? entry.parentChannelId || entry.channelId : entry.channelId;
@@ -67,15 +63,14 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
       routeKind,
       threadParentMessageId: isThread ? entry.parentMessageId : null,
     });
-    navigator.clipboard.writeText(url).then(() => setCtxMenu(null));
+    navigator.clipboard.writeText(url);
   }, [serverSlug, isDm, isThread, entry.parentChannelId, entry.parentMessageId, entry.channelId, entry.messageId]);
 
   const handleCopyMarkdown = useCallback(() => {
-    navigator.clipboard.writeText(entry.content).then(() => setCtxMenu(null));
+    navigator.clipboard.writeText(entry.content);
   }, [entry.content]);
 
   const handleRemove = useCallback(() => {
-    setCtxMenu(null);
     onRemoveMessage(entry.messageId);
   }, [entry.messageId, onRemoveMessage]);
 
@@ -92,32 +87,36 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
     onDragEntry?.(event, entry);
   }, [entry, onDragEntry]);
 
-  const handleCloseCtx = useCallback(() => setCtxMenu(null), []);
-
   return (
-    <>
-      <button
-        onClick={handleOpen}
-        draggable={!!onDragEntry}
-        onDragStart={onDragEntry ? handleDragStart : undefined}
-        onContextMenu={handleContextMenu}
-        className={`relative flex items-start gap-3 border-2 transition-colors p-3 bg-white text-left w-full ${
-          ctxMenu
-            ? "border-black shadow-brutal-sm"
-            : "border-black/30 hover:border-black hover:shadow-brutal-sm active:border-black active:shadow-brutal-sm"
-        }`}
+    <ContextMenu>
+      <ContextMenuTrigger
+        render={
+          <Card
+            render={<div role="button" tabIndex={0} />}
+            onClick={handleOpen}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                handleOpen();
+              }
+            }}
+            draggable={!!onDragEntry}
+            onDragStart={onDragEntry ? (event) => handleDragStart(event as unknown as React.DragEvent<HTMLButtonElement>) : undefined}
+            className="relative flex flex-row items-center gap-3 transition-colors p-3 text-left w-full shadow-none border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-layer-panel theme-brutal:bg-white hover:bg-fill-muted data-[popup-open]:bg-fill-muted"
+          />
+        }
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 mb-1 text-xs">
-            <span className="font-bold text-black/50">{channelLabel}</span>
+            <span className="font-bold text-foreground-muted theme-brutal:text-black/50">{channelLabel}</span>
             {isThread && (
-              <span className="inline-flex items-center gap-1 font-bold text-black/40">
+              <span className="inline-flex items-center gap-1 font-bold text-foreground-muted theme-brutal:text-black/40">
                 <MessageSquare size={10} />
                 {formatMessage({ id: "saved.threadLabel" })}
               </span>
             )}
             {senderName && (
-              <span className="inline-flex items-center gap-1 font-bold text-black">
+              <span className="inline-flex items-center gap-1 font-bold text-foreground-strong theme-brutal:text-black">
                 {senderAgent ? (
                   <AvatarSlot context="preview-mini" type="agent" agentAvatarUrl={senderAgent.avatarUrl ?? null} />
                 ) : entry.senderType === "external_projection" ? (
@@ -128,7 +127,7 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
                 <span>{senderName}</span>
               </span>
             )}
-            <span className="text-xs text-black/40 font-mono">
+            <span className="text-xs text-foreground-muted font-mono theme-brutal:text-black/40">
               {formatRelativeTime(entry.createdAt, locale) ?? ""}
             </span>
           </div>
@@ -136,52 +135,35 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
             {entry.content}
           </p>
         </div>
-        <div className="group relative shrink-0">
-          <div
+        <div className="ml-auto shrink-0 self-center">
+          <PanelToggleAction
+            pressed
+            onKeyDown={(event) => event.stopPropagation()}
             onClick={handleRemoveButtonClick}
-            className="btn-brutal-sm inline-flex size-7 items-center justify-center bg-brutal-orange/15 p-0 text-brutal-orange transition-[filter] duration-100 hover:brightness-90"
-            title={formatMessage({ id: "saved.remove" })}
             aria-label={formatMessage({ id: "saved.remove" })}
-            role="button"
+            className="data-pressed:text-accent-strong theme-brutal:data-pressed:text-brutal-orange data-pressed:bg-accent-soft/30"
           >
-            <Bookmark size={14} fill="currentColor" />
-          </div>
-          <span className="pointer-events-none absolute right-full top-1/2 mr-2 hidden -translate-y-1/2 whitespace-nowrap border-2 border-black bg-brutal-orange/15 px-2 py-1 text-xs font-bold text-black shadow-brutal-sm group-hover:inline">
-            {formatMessage({ id: "saved.remove" })}
-          </span>
+            <Bookmark size={14} fill="currentColor" className="text-accent-strong theme-brutal:text-brutal-orange" aria-hidden />
+          </PanelToggleAction>
         </div>
-      </button>
-      {ctxMenu && createPortal(
-        <>
-          <DismissBackdrop onDismiss={handleCloseCtx} trapContextMenu />
-          <div
-            className="fixed z-50 card-brutal overflow-hidden"
-            style={{ left: ctxMenu.x, top: ctxMenu.y }}
-          >
-            <MenuItem
-              icon={<Link size={14} />}
-              onClick={handleCopyLink}
-            >
-              {formatMessage({ id: "saved.copyLink" })}
-            </MenuItem>
-            <MenuItem
-              icon={<Copy size={14} />}
-              onClick={handleCopyMarkdown}
-            >
-              {formatMessage({ id: "saved.copyMarkdown" })}
-            </MenuItem>
-            <ContextMenuDivider />
-            <MenuItem
-              icon={<Bookmark size={14} fill="currentColor" className="text-brutal-orange" />}
-              onClick={handleRemove}
-            >
-              {formatMessage({ id: "saved.remove" })}
-            </MenuItem>
-          </div>
-        </>,
-        document.body
-      )}
-    </>
+      </ContextMenuTrigger>
+
+      <ContextMenuContent>
+        <ContextMenuItem onClick={handleCopyLink}>
+          <Link size={14} />
+          <span>{formatMessage({ id: "saved.copyLink" })}</span>
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleCopyMarkdown}>
+          <Copy size={14} />
+          <span>{formatMessage({ id: "saved.copyMarkdown" })}</span>
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={handleRemove}>
+          <Bookmark size={14} />
+          <span>{formatMessage({ id: "saved.remove" })}</span>
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 });
 
@@ -203,6 +185,7 @@ export default function SavedPanel({ onOpenEntry, onDragEntry, embedded = false 
   const unsaveMessage = useSavedStore((s) => s.unsaveMessage);
   const openThread = useThreadStore((s) => s.openThread);
   const serverSlug = useServerStore((s) => s.current?.slug);
+  const serverId = useServerStore((s) => s.current?.id);
   const onMobileBack = useMobileBack(serverSlug ? `/s/${serverSlug}` : "/");
   const nav = useAppNavigate();
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -232,8 +215,13 @@ export default function SavedPanel({ onOpenEntry, onDragEntry, embedded = false 
   }, [unsaveMessage]);
 
   useEffect(() => {
+    // The route can mount one render before ServerResolver selects the URL's
+    // server.  An early request has no X-Server-Id and is rejected/empty;
+    // retry when the authoritative server context arrives so a refresh cannot
+    // make an existing Saved row appear to disappear permanently.
+    if (!serverId) return;
     void loadSaved({ query: "", sortDirection: "desc" });
-  }, [loadSaved]);
+  }, [loadSaved, serverId]);
 
   useEffect(() => {
     if (!hasMore || loading || saved.length === 0) return;
@@ -259,13 +247,13 @@ export default function SavedPanel({ onOpenEntry, onDragEntry, embedded = false 
   }, [hasMore, loadMore, loading, saved.length]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col bg-layer-canvas-muted theme-brutal:bg-white">
       {!embedded ? (
         <PanelHeader
           title={formatMessage({ id: "saved.header.title" })}
           subtitle={formatMessage({ id: "saved.header.subtitle" }, { count: savedTotal })}
           icon={<Bookmark size={18} />}
-          iconBg="bg-soft-signal"
+          iconBg="bg-primary-soft"
           onMobileBack={onMobileBack}
         />
       ) : null}
@@ -274,7 +262,7 @@ export default function SavedPanel({ onOpenEntry, onDragEntry, embedded = false 
       <div
         ref={scrollerRef}
         data-testid="saved-list-scroller"
-        className="flex-1 overflow-y-auto bg-white p-4 safe-bottom"
+        className="flex-1 overflow-y-auto bg-layer-canvas-muted p-4 safe-bottom theme-brutal:bg-white"
       >
         {loading && saved.length === 0 ? (
           <ConversationCardSkeleton />
@@ -305,7 +293,7 @@ export default function SavedPanel({ onOpenEntry, onDragEntry, embedded = false 
                 aria-live="polite"
               >
                 {loading ? (
-                  <span className="text-xs font-bold text-black/50">{formatMessage({ id: "common.loading" })}</span>
+                  <span className="text-xs font-bold text-foreground-muted">{formatMessage({ id: "common.loading" })}</span>
                 ) : (
                   <span className="sr-only">{formatMessage({ id: "saved.loadingMore" })}</span>
                 )}

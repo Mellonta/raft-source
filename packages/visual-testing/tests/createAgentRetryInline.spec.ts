@@ -15,9 +15,8 @@ import { expect, test } from "@playwright/test";
  * Class and structure assertions cannot see this. Only line boxes can, which is
  * why this file exists and why it lives in the browser suite.
  *
- * KNOWN BOUNDARY, and it is a real one: this suite is LOCAL-ONLY. No CI job runs
- * it, so Hosted is NOT COVERED for these assertions. That is precisely how the
- * defect above survived — do not read a green run here as a Hosted guarantee.
+ * Visual browser CI now covers these assertions on selected staging pushes
+ * and daily runs. Ordinary PR checks still do not exercise this browser suite.
  */
 
 type Theme = "brutal" | "elegant";

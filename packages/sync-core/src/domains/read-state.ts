@@ -1,4 +1,4 @@
-import type { SyncDomainConfig, SyncFrame, SyncScopeId, SyncSnapshot } from "../types.js";
+import type { SyncDomainConfig, SyncFrame, SyncScopeId, SyncSnapshot } from "../types";
 
 export const READ_STATE_DOMAIN = "read_state";
 

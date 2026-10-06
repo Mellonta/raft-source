@@ -1,4 +1,12 @@
 import type { HTMLAttributes, ReactNode } from "react";
+import {
+  EmptyState,
+  EmptyStateActions,
+  EmptyStateContent,
+  EmptyStateDescription,
+  EmptyStateIcon,
+  EmptyStateTitle,
+} from "raft-ui";
 
 /**
  * Canonical empty-state primitive — used everywhere a surface needs to say
@@ -15,11 +23,8 @@ import type { HTMLAttributes, ReactNode } from "react";
  *      and dialog titles. Empty-state titles are informational hints,
  *      neither category.
  *
- *   2. No icon frame. The previous wrapper rendered a soft-gray box that
- *      read as OS placeholder default, visually jarring next to
- *      brutal-bordered sibling surfaces. Removed. Icons render directly
- *      inside a `text-black/40` wrapper, letting the empty state recede
- *      naturally as a quiet info hint.
+ *   2. No page-owned icon frame. RUI owns the icon slot and muted treatment,
+ *      so the empty state recedes consistently across surfaces.
  *
  *   3. Icon size = 36 at the callsite. With the frame gone the icon loses
  *      visual mass; size 36 (up from 28) keeps empty states from looking
@@ -40,7 +45,7 @@ export interface EmptyStateProps extends Omit<HTMLAttributes<HTMLDivElement>, "t
   action?: ReactNode;
 }
 
-export default function EmptyState({
+export default function AppEmptyState({
   icon,
   title,
   description,
@@ -49,19 +54,18 @@ export default function EmptyState({
   ...props
 }: EmptyStateProps) {
   return (
-    <div
+    <EmptyState
       {...props}
-      className={[
-        "px-6 py-12 text-center",
-        className,
-      ].filter(Boolean).join(" ")}
+      className={className}
     >
-      <div className="mb-4 inline-flex items-center justify-center text-black/40">
+      <EmptyStateIcon>
         {icon}
-      </div>
-      <div className="mb-2 text-lg font-display font-semibold text-black/60">{title}</div>
-      {description ? <div className="mx-auto max-w-[32ch] text-sm leading-relaxed text-black/60">{description}</div> : null}
-      {action ? <div className="mt-5">{action}</div> : null}
-    </div>
+      </EmptyStateIcon>
+      <EmptyStateContent>
+        <EmptyStateTitle>{title}</EmptyStateTitle>
+        {description ? <EmptyStateDescription>{description}</EmptyStateDescription> : null}
+      </EmptyStateContent>
+      {action ? <EmptyStateActions>{action}</EmptyStateActions> : null}
+    </EmptyState>
   );
 }

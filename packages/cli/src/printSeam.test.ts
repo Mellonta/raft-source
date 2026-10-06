@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
-import test from "node:test";
 
-import { NL, axSurface, writeText } from "./core/renderer.js";
-import { formatTaskStatusUpdated } from "./commands/task/_format.js";
+import { NL, axSurface, writeText } from "./core/renderer";
+import { formatTaskStatusUpdated } from "./commands/task/_format";
 
 // --- Print-seam contracts (spec: notes cli-print-seam v0, D6) ---
 // Zero-tolerance rules below protect the actual output boundary. Migration of

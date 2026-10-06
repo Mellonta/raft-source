@@ -1,5 +1,5 @@
-import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -7,27 +7,28 @@ import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
 import * as XLSX from "xlsx";
-import { vi } from "vitest";
 import jwt from "jsonwebtoken";
-import { ATTACHMENT_PREVIEW_BRIDGE_SCRIPT } from "../services/attachmentPreviewBridge.js";
+import { ATTACHMENT_PREVIEW_BRIDGE_SCRIPT } from "../services/attachmentPreviewBridge";
 import { eq, inArray } from "drizzle-orm";
-import { openTestApp } from "../test/integration/app.js";
-import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness.js";
-import { getDb } from "../db/index.js";
-import { attachments, jointChannels, jointChannelServers, machines, servers, users } from "../db/schema.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { createSession, revokeAllUserSessions } from "../services/sessionService.js";
-import { assignMachine, createAgent } from "../services/agentService.js";
-import { clearAuthCache, registerMachine } from "../services/machineService.js";
-import { createServer } from "../services/serverService.js";
+import { openTestApp } from "../test/integration/app";
+import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness";
+import { getDb } from "../db/index";
+import { attachments, jointChannels, jointChannelServers, machines, servers, users } from "../db/schema";
+import { signAccessToken } from "../middleware/auth";
+import { createSession, revokeAllUserSessions } from "../services/sessionService";
+import { assignMachine, createAgent } from "../services/agentService";
+import { clearAuthCache, registerMachine } from "../services/machineService";
+import { createServer } from "../services/serverService";
 import { XLSX_PREVIEW_MAX_FILE_SIZE_BYTES, asServerId } from "@botiverse/raft-shared";
-import { addAgent, addHuman, createChannel } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
+import { addAgent, addHuman, createChannel } from "../services/channelService";
+import { createMessage } from "../services/messageService";
 import {
+  buildServerAttachmentStorageKey,
+  createAttachmentStorageRouter,
   __setStorageForTests,
   resetStorageForTests,
   type StorageBackend,
-} from "../services/storageService.js";
+} from "../services/storageService";
 import {
   ATTACHMENT_UPLOAD_DISABLED_MESSAGE,
   ATTACHMENT_PRESIGNED_URL_TTL_SECONDS,
@@ -37,7 +38,7 @@ import {
   isHtmlAttachmentMimeType,
   resolveAttachmentMimeType,
   shouldStreamAttachmentThroughServerForRequest,
-} from "./attachments.js";
+} from "./attachments";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -159,6 +160,63 @@ test("attachment URL route passes the bounded five-minute TTL to storage", async
   } finally {
     await app.close();
     resetStorageForTests();
+  }
+});
+
+test("attachment URL routing keeps CDN_BASE_URL out of original-file downloads", async ({ app }) => {
+  const previousCdnBaseUrl = process.env.CDN_BASE_URL;
+  try {
+    process.env.CDN_BASE_URL = "https://cdn.raft.build";
+    const { userB, serverB, channelB, attachmentId: legacyAttachmentId } = await seedCrossServerFixture();
+    const tokenB = await tokenForHuman(userB.email);
+    const currentAttachmentId = "00000000-0000-4000-8000-000000000002";
+    const currentStorageKey = buildServerAttachmentStorageKey(
+      serverB.id,
+      currentAttachmentId,
+      "00000000-0000-4000-8000-000000000003",
+      ".txt",
+    );
+    await getDb().insert(attachments).values({
+      id: currentAttachmentId,
+      channelId: channelB.id,
+      uploaderId: userB.id,
+      uploaderType: "user",
+      filename: "current.txt",
+      mimeType: "text/plain",
+      sizeBytes: 7,
+      storageKey: currentStorageKey,
+      thumbnailKey: null,
+      contentHash: "current-hash",
+    });
+    const backend = (url: string): StorageBackend => ({
+      async put() {},
+      async get() { throw new Error("streaming is not expected"); },
+      async delete() {},
+      async getPresignedUrl() { return url; },
+    });
+    __setStorageForTests(createAttachmentStorageRouter(
+      backend("https://a699.example.test/legacy-original"),
+      backend("https://a084.example.test/current-original"),
+    ));
+
+    const resolveUrl = async (id: string) => {
+      const response = await fetch(`${app.baseUrl}/api/attachments/${id}/url`, {
+        headers: {
+          Authorization: `Bearer ${tokenB}`,
+          "X-Server-Id": serverB.id,
+        },
+      });
+      assert.equal(response.status, 200);
+      return (await response.json() as { url: string }).url;
+    };
+
+    assert.equal(await resolveUrl(legacyAttachmentId), "https://a699.example.test/legacy-original");
+    assert.equal(await resolveUrl(currentAttachmentId), "https://a084.example.test/current-original");
+  } finally {
+    await app.close();
+    resetStorageForTests();
+    if (previousCdnBaseUrl === undefined) delete process.env.CDN_BASE_URL;
+    else process.env.CDN_BASE_URL = previousCdnBaseUrl;
   }
 });
 
@@ -320,6 +378,56 @@ test("malformed attachment id is a typed 400, and a well-formed absent id is sti
   for (const url of singleIdPaths("00000000-0000-4000-8000-0000000009ff")) {
     const res = await fetch(`${app.baseUrl}${url}`, { headers, redirect: "manual" });
     assert.equal(res.status, 404, `${url} expected 404, got ${res.status}`);
+  }
+});
+
+test("missing attachment object is a 404, not a 500", async ({ app }) => {
+  // Localizes the 2026-09-24 staging observation (trace 5edd937d): a preview
+  // request for an attachment row whose storage object is gone surfaced the
+  // AWS NoSuchKey error as a 500. A missing object is a not-found, mirroring
+  // the row-missing branch of the same routes.
+  const db = getDb();
+  const [owner] = await db.insert(users).values({
+    email: "missing-object-owner@slock.test",
+    name: "missing-object-owner",
+    displayName: "Missing Object Owner",
+    passwordHash: await fixturePasswordHash("password123"),
+    emailVerified: true,
+    profileSetupCompletedAt: new Date(),
+  }).returning();
+  const server = await createServer("Missing Object Server", `missing-object-${randomUUID()}`, owner.id);
+  const channel = await createChannel(server.id, "missing-object-channel", undefined, "channel");
+  await addHuman(channel.id, owner.id);
+  const attachmentId = "00000000-0000-4000-8000-0000000000f1";
+  await db.insert(attachments).values({
+    id: attachmentId,
+    channelId: channel.id,
+    uploaderId: owner.id,
+    uploaderType: "user",
+    filename: "gone.txt",
+    mimeType: "text/plain",
+    sizeBytes: 42,
+    storageKey: `${server.id}/gone.txt`,
+    thumbnailKey: null,
+    contentHash: "deadbeef",
+  });
+  const noSuchKey = new Error("The specified key does not exist.");
+  noSuchKey.name = "NoSuchKey";
+  __setStorageForTests({
+    async put() {},
+    async delete() {},
+    async get() { throw noSuchKey; },
+    async getPresignedUrl() { return "https://storage.example.test/gone"; },
+  });
+  try {
+    const token = await tokenForHuman(owner.email);
+    const response = await fetch(`${app.baseUrl}/api/attachments/${attachmentId}/preview`, {
+      headers: { Authorization: `Bearer ${token}`, "X-Server-Id": server.id },
+    });
+    assert.equal(response.status, 404, `missing object must 404, got ${response.status}`);
+    assert.deepEqual(await response.json(), { error: "Attachment not found" });
+  } finally {
+    resetStorageForTests();
   }
 });
 
@@ -603,16 +711,20 @@ test("GET /api/attachments/:id accepts serverId from query (for <img src> fallba
   const tokenB = await tokenForHuman(userB.email);
 
   // User B on server B reads their own attachment with serverId from query.
-  // Local storage is not configured in the pglite harness, so the
-  // download-stream path returns 503 — but we only care that auth+scope
-  // passed before the storage layer ran.
+  // Local storage is not configured in the pglite harness, so the storage layer
+  // answers 503 when it is unconfigured, and since #8209 a missing object is a
+  // 404 rather than a server fault. Either one proves what this case cares
+  // about: auth+scope passed before the storage layer ran.
   const res = await fetch(
     `${app.baseUrl}/api/attachments/${attachmentId}?serverId=${serverB.id}&token=${tokenB}`,
     { redirect: "manual" },
   );
   assert.notEqual(res.status, 400, "should not reject on missing scope");
   assert.notEqual(res.status, 403, "should not reject on membership");
-  assert.notEqual(res.status, 404, "attachment should be found");
+  assert.ok(
+    res.status === 404 || res.status === 503,
+    `auth+scope must pass before storage (404 missing object or 503 unconfigured), got ${res.status}`,
+  );
 });
 
 test("GET /api/attachments/:id serves both image and pdf attachments from local storage", async () => {
@@ -1237,14 +1349,21 @@ test("GET /api/attachments/:id/url two-hop flow: query-token caller gets a URL c
   assert.equal(parsed.searchParams.get("token"), tokenB, "hop 1 must propagate query token to the stream URL");
   assert.equal(parsed.searchParams.get("serverId"), serverB.id, "hop 1 must propagate serverId to the stream URL");
 
-  // Hop 2: fetch the URL that hop 1 handed back. Auth/scope must still
-  // pass (we're not checking the body — local storage will 503 in pglite,
-  // but auth runs before storage). The key assertion is: not 401 / 400 / 403.
+  // Hop 2: fetch the URL that hop 1 handed back. Auth/scope must still pass
+  // (we're not checking the body — local storage is not seeded in pglite, but
+  // auth runs before storage). The key assertion is: not 401 / 400 / 403.
+  //
+  // A 404 is NOT a failure of this contract: since #8209 a missing storage
+  // object is a not-found, which is exactly what an unseeded harness produces.
+  // Requiring anything other than 404 here would re-assert the old 500.
   const hop2 = await fetch(streamUrl, { redirect: "manual" });
   assert.notEqual(hop2.status, 401, "hop 2 must not reject on auth");
   assert.notEqual(hop2.status, 400, "hop 2 must not reject on scope");
   assert.notEqual(hop2.status, 403, "hop 2 must not reject on membership");
-  assert.notEqual(hop2.status, 404, "hop 2 must find the attachment");
+  assert.ok(
+    hop2.status === 404 || hop2.status === 503,
+    `hop 2 must reach storage (404 missing object or 503 unconfigured), got ${hop2.status}`,
+  );
 });
 
 test("GET /api/attachments/:id/html-preview-url returns scoped preview URL for HTML", async ({ app }) => {
@@ -1282,10 +1401,11 @@ test("GET /api/attachments/:id/html-preview-url returns scoped preview URL for H
   assert.notEqual(parsed.searchParams.get("previewToken"), tokenB);
   assert.equal(parsed.searchParams.get("serverId"), serverB.id);
 
-  // Local storage is not seeded in this harness. A 500 here proves the
-  // scoped preview token got past auth and failed only at the storage layer.
+  // Local storage is not seeded in this harness. A 404 here proves the
+  // scoped preview token got past auth and failed only at the storage layer:
+  // since #8209 a missing object is a not-found rather than a server fault.
   const previewRes = await fetch(url, { redirect: "manual" });
-  assert.equal(previewRes.status, 500, `expected valid preview token to reach storage, got ${previewRes.status}`);
+  assert.equal(previewRes.status, 404, `expected valid preview token to reach storage, got ${previewRes.status}`);
 });
 
 test("GET /api/attachments/:id/html-preview-url scoped token cannot be reused for another attachment", async ({ app }) => {
@@ -1485,7 +1605,7 @@ test("GET /api/attachments/:id/html-preview-url checks access before previewabil
 test("canUserAccessChannel returns false when channel belongs to another server", async ({ app }) => {
   const { userA, userB, serverA, channelB } = await seedCrossServerFixture();
 
-  const { canUserAccessChannel } = await import("../services/channelService.js");
+  const { canUserAccessChannel } = await import("../services/channelService");
 
   // User A (server A member) asking about channel in server B, claiming
   // server A as active — must refuse (cross-server guard).
@@ -1578,7 +1698,7 @@ test("authenticated preview forbids shared and persistent caches", async ({ app 
 
 test("legacy attachment visibility follows its message, not its original upload channel", async ({ app }) => {
   const { userA, userB, serverB, channelB, attachmentId } = await seedCrossServerFixture();
-  await getDb().insert((await import("../db/schema.js")).serverMembers).values({ serverId: serverB.id, userId: userA.id, role: "member" });
+  await getDb().insert((await import("../db/schema")).serverMembers).values({ serverId: serverB.id, userId: userA.id, role: "member" });
   const privateChannel = await createChannel(serverB.id, "audit-private-attachment", undefined, "private");
   await addHuman(privateChannel.id, userB.id);
   const message = await createMessage(privateChannel.id, "user", userB.id, "private document");
@@ -1598,8 +1718,8 @@ test("legacy attachment visibility follows its message, not its original upload 
 
 for (const denial of ["cannot-post", "quota"] as const) test(`legacy upload rejects ${denial} before storage`, async ({ app }) => {
   const { userB, serverB, channelB } = await seedCrossServerFixture();
-  const schema = await import("../db/schema.js");
-  const plan = await import("../services/planService.js");
+  const schema = await import("../db/schema");
+  const plan = await import("../services/planService");
   let writes = 0;
   const quota = vi.spyOn(plan, "isChannelReadOnlyByQuota").mockResolvedValue(denial === "quota");
   if (denial === "cannot-post") await getDb().delete(schema.channelHumans).where(eq(schema.channelHumans.channelId, channelB.id));

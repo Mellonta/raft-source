@@ -1,14 +1,15 @@
 import { and, asc, eq, inArray, isNotNull, or } from "drizzle-orm";
 import { currentDate } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   computers,
   newsletterAudienceContacts,
   onboardingEmailJourneys,
   users,
-} from "../db/schema.js";
-import { normalizeEmail } from "./emailNormalization.js";
-import { cancelScheduledEmail, sendMobileAppDownloadEmail } from "./emailService.js";
+} from "../db/schema";
+import { normalizeEmail } from "./emailNormalization";
+import { cancelScheduledEmail, sendMobileAppDownloadEmail } from "./emailService";
+import { mobileAppEmailUnsubscribeUrl } from "./mobileAppEmailUnsubscribeToken";
 
 type JourneyReleaseMode = "disabled" | "dry_run" | "allowlist" | "all";
 type SuppressionStatus = "unsubscribed" | "bounced" | "complained";
@@ -217,6 +218,7 @@ export async function enqueueComputerMobileAppEmailJourney(input: {
       idempotencyKey: idempotencyKey(input.userId),
       scheduledAt: deliverAt,
       locale: user.displayLanguage,
+      unsubscribeUrl: mobileAppEmailUnsubscribeUrl(input.userId, user.displayLanguage),
     });
     const persistEmail = testConfig?.persistAcceptedEmail ?? persistAcceptedEmail;
     await persistEmail(inserted.id, emailId);

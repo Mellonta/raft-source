@@ -12,6 +12,7 @@
     "isolatedModules": true,
     "jsx": "react-jsx",
     "outDir": "dist",
+    "rootDir": "../..",
     "noEmit": true
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "visual-testing/**/*.ts", "visual-testing/**/*.tsx"]

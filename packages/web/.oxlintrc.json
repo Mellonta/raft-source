@@ -47,6 +47,7 @@
       "error",
       "prefer-top-level"
     ],
+    "import/no-duplicates": "error",
     // Loading the import plugin also exposes two correctness-category rules.
     // Keep this migration scoped to type-import placement only.
     "import/default": "off",
@@ -198,6 +199,19 @@
     "react-doctor/iframe-has-title": "error",
     "react-doctor/no-access-key": "error",
     "react-doctor/no-distracting-elements": "error",
+
+    // ── React Compiler rules introduced in oxlint 1.83 (disabled per #proj-frontend:52311f41 decision).
+    // The 245 warnings across the repo come from these 7 new compiler rules:
+    // refs (134), set-state-in-effect (67), preserve-manual-memoization (23),
+    // void-use-memo (14), immutability (4), purity (2), incompatible-library (1).
+    // These will be addressed in a dedicated compiler cleanup pass rather than broadening the RUI PR.
+    "react/refs": "off",
+    "react/set-state-in-effect": "off",
+    "react/preserve-manual-memoization": "off",
+    "react/void-use-memo": "off",
+    "react/immutability": "off",
+    "react/purity": "off",
+    "react/incompatible-library": "off",
 
     // ───────────────────────── Tier-1 (error) ─────────────────────────
     // These four rules guard regressions for issues already fixed on

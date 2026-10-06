@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import { asChannelId, asMessageId } from "@botiverse/raft-shared";
 import {
@@ -8,9 +7,9 @@ import {
   createAgentApiClient,
   createAgentApiSurfaceClient,
   requestContractAgentRoute,
-} from "./agentApiPath.js";
-import type { ApiResponse, BinaryResponse } from "./client.js";
-import { CliError } from "./core/errors.js";
+} from "./agentApiPath";
+import type { ApiResponse, BinaryResponse } from "./client";
+import { CliError } from "./core/errors";
 
 test("contract path helpers encode typed query objects through route schemas", () => {
   assert.equal(
@@ -344,6 +343,14 @@ test("contract agent-api surface client exposes remaining command methods over i
           },
         } as ApiResponse<T>;
       }
+      if (path === "/internal/agent-api/threads") {
+        return {
+          ok: true,
+          status: 200,
+          error: null,
+          data: { threads: [] },
+        } as ApiResponse<T>;
+      }
       return {
         ok: true,
         status: 200,
@@ -370,6 +377,7 @@ test("contract agent-api surface client exposes remaining command methods over i
   const unmuted = await agentApi.channels.unmute({ channelId: asChannelId("chan-1") });
   const archived = await agentApi.channels.archive({ target: "#engineering" });
   const unarchived = await agentApi.channels.unarchive({ target: "#engineering" });
+  const followedThreads = await agentApi.threads.list();
   const pending = await agentApi.mentions.pendingActions();
   const executed = await agentApi.mentions.executeAction({ action: "notify", resolutionIds: ["r-1"] });
 
@@ -386,6 +394,7 @@ test("contract agent-api surface client exposes remaining command methods over i
   assert.equal(unmuted.ok, true);
   assert.equal(archived.ok, true);
   assert.equal(unarchived.ok, true);
+  assert.equal(followedThreads.ok, true);
   assert.equal(pending.ok, true);
   assert.equal(executed.ok, true);
   assert.deepEqual(requests, [
@@ -410,6 +419,7 @@ test("contract agent-api surface client exposes remaining command methods over i
     { method: "POST", path: "/internal/agent-api/channels/chan-1/unmute", body: undefined },
     { method: "POST", path: "/internal/agent-api/channels/archive", body: { target: "#engineering" } },
     { method: "POST", path: "/internal/agent-api/channels/unarchive", body: { target: "#engineering" } },
+    { method: "GET", path: "/internal/agent-api/threads", body: undefined },
     { method: "GET", path: "/internal/agent-api/mention-actions/pending", body: undefined },
     { method: "POST", path: "/internal/agent-api/mention-actions/execute", body: { action: "notify", resolutionIds: ["r-1"] } },
   ]);

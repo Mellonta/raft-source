@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { bothComputerVersionsKnown, isComputerOutdated, isDaemonOutdated } from "./index.js";
+import { bothComputerVersionsKnown, compareComputerVersions, COMPUTER_REMOTE_UPGRADE_MIN_VERSION, isComputerOutdated, isDaemonOutdated, isRemoteUpgradeSupported } from "./index";
 
 test("isComputerOutdated: prefer-miss-over-mistrigger when either side is null/empty", () => {
   // We never want to flash "update available" on a stale-row Computer where
@@ -73,4 +72,53 @@ test("bothComputerVersionsKnown: positive proof both sides parse as semver", () 
   assert.equal(bothComputerVersionsKnown("abc", "0.0.62"), false);
   assert.equal(bothComputerVersionsKnown("0.0.62", "abc"), false);
   assert.equal(bothComputerVersionsKnown("0.0.62-rc1", "0.0.62"), false);
+});
+
+test("isRemoteUpgradeSupported: null when unknown, false below the first v2-capable release, true at or above", () => {
+  // Unknown version is a distinct answer: the web shows neither the button
+  // state nor the local-upgrade hint for it.
+  assert.equal(isRemoteUpgradeSupported(null), null);
+  assert.equal(isRemoteUpgradeSupported(undefined), null);
+  assert.equal(isRemoteUpgradeSupported(""), null);
+  assert.equal(isRemoteUpgradeSupported("  "), null);
+  assert.equal(isRemoteUpgradeSupported("1.0.36"), false);
+  assert.equal(isRemoteUpgradeSupported("0.9.99"), false);
+  assert.equal(isRemoteUpgradeSupported(COMPUTER_REMOTE_UPGRADE_MIN_VERSION), true, "the threshold release itself is supported");
+  assert.equal(isRemoteUpgradeSupported("1.0.38"), true);
+  assert.equal(isRemoteUpgradeSupported("2.0.0"), true);
+});
+
+test("isRemoteUpgradeSupported reads full SemVer and fails closed: a prerelease sorts below its release", () => {
+  // Below the threshold, with or without a prerelease suffix.
+  assert.equal(isRemoteUpgradeSupported("1.0.36-rc.1"), false);
+  assert.equal(isRemoteUpgradeSupported("1.0.36-staging.20260901000000.sha.0123456789ab"), false);
+  // 1.0.37-rc.1 precedes 1.0.37, the first v2-capable release.
+  assert.equal(isRemoteUpgradeSupported("1.0.37-rc.1"), false);
+  assert.equal(isRemoteUpgradeSupported("1.0.37"), true);
+  assert.equal(isRemoteUpgradeSupported(" 1.0.37 "), true, "surrounding whitespace is not a different version");
+  assert.equal(isRemoteUpgradeSupported("1.0.38-rc.1"), true);
+  assert.equal(isRemoteUpgradeSupported("1.0.41-staging.20261003090435.sha.4f9786e3e10a"), true);
+  assert.equal(isRemoteUpgradeSupported("1.0.37+build.5"), true);
+  // Not SemVer: never supported.
+  for (const garbage of ["abc", "1.0", "1.0.x", "01.0.40", "1.0.40-", "1.0.40-rc.01", "v1.0.40"]) {
+    assert.equal(isRemoteUpgradeSupported(garbage), false, garbage);
+  }
+});
+
+test("compareComputerVersions: SemVer precedence (the server's already_current order)", () => {
+  const cases: Array<[string, string, number]> = [
+    ["1.0.41-staging.20261003090435.sha.4f9786e3e10a", "1.0.40", 1],
+    ["1.0.40-staging.20260930120000.sha.0123456789ab", "1.0.40", -1],
+    ["1.0.40-rc.1", "1.0.40", -1],
+    ["1.0.40-rc.2", "1.0.40-rc.10", -1],
+    ["1.0.40-alpha", "1.0.40-alpha.1", -1],
+    ["1.0.40-1", "1.0.40-alpha", -1],
+    ["1.0.40+a", "1.0.40+b", 0],
+    ["1.0.40", "1.0.40", 0],
+    ["1.10.0", "1.9.0", 1],
+  ];
+  for (const [a, b, expected] of cases) {
+    assert.equal(compareComputerVersions(a, b), expected, `${a} vs ${b}`);
+    assert.equal(compareComputerVersions(b, a), -expected || 0, `${b} vs ${a}`);
+  }
 });

@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import type { AppId } from "./rapRegistry.js";
-import type { RapTimerData } from "./rapSyscalls.js";
+import type { AppId } from "./rapRegistry";
+import type { RapTimerData } from "./rapSyscalls";
 import {
   createRapTimerRuntime,
   type RapTimerClock,
   type RapTimerDispatch,
-} from "./rapTimerRuntime.js";
+} from "./rapTimerRuntime";
 
 const APP_ID = "x.timer" as AppId;
 

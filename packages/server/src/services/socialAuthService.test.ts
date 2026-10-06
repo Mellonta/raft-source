@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { generateKeyPairSync } from "node:crypto";
 import jwt from "jsonwebtoken";
 import {
@@ -20,7 +19,7 @@ import {
   validateMobileOAuthReturnUri,
   validateSocialAuthCallbackState,
   verifySocialAuthState,
-} from "./socialAuthService.js";
+} from "./socialAuthService";
 
 test("social auth state round-trip preserves provider, mode, and nonce", () => {
   const previousJwtSecret = process.env.JWT_SECRET;

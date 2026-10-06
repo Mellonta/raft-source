@@ -9,8 +9,8 @@
 import { currentTimeMs } from "@botiverse/raft-shared";
 import { sql } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { messages } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { messages } from "../db/schema";
 
 export const INT4_MAX = 2147483647;
 

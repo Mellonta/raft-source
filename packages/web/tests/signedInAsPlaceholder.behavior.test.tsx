@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, screen } from "@testing-library/react";
 import SignedInAs from "../src/components/auth/SignedInAs";

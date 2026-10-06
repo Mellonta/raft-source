@@ -13,7 +13,13 @@ export type RuntimeAccountUsageReadResult =
 
 export type RuntimeAccountUsageRefreshResult = {
   accepted: boolean;
-  state: "requested" | "cooldown" | "computer_offline";
+  state: "requested" | "cooldown" | "computer_offline" | "fresh" | "timeout";
+  /**
+   * Present when `state === "fresh"`: the snapshot the machine just detected,
+   * in the same shape the read path returns. Manual refreshes await the
+   * machine's reply through the server relay and carry the value inline.
+   */
+  snapshot?: RuntimeAccountUsageSnapshot | null;
 };
 
 type GetJson = (url: string) => Promise<RuntimeAccountUsageReadResult>;
@@ -67,11 +73,35 @@ export class RuntimeAccountUsageClient {
     }
     this.refreshStartedAt.set(key, this.now());
     const url = `/servers/${serverId}/machines/${machineId}/runtime-account-usage/${provider}/refresh`;
-    const request = this.postJson(url, { reason }).finally(() => {
+    const request = this.postJson(url, { reason }).then((result) => {
+      // A manual refresh can wait for the machine's reply (server relay): a
+      // `fresh` result carries the snapshot itself. Write it in the read-path
+      // shape so the chip can render it in place and later reads reuse it.
+      if (result.state === "fresh" && result.snapshot) {
+        this.cache.set(key, {
+          value: { state: "fresh", snapshot: result.snapshot },
+          expiresAt: this.now() + RUNTIME_ACCOUNT_USAGE_CLIENT_CACHE_MS,
+        });
+      }
+      return result;
+    }).finally(() => {
       if (this.refreshes.get(key) === request) this.refreshes.delete(key);
     });
     this.refreshes.set(key, request);
     return request;
+  }
+
+  /** Milliseconds left before another refresh is allowed for this subject
+   *  (0 when the window is open). Drives the chip's disabled + countdown state
+   *  so a refused click is explained before it happens (task #704). */
+  refreshCooldownRemainingMs(
+    serverId: string,
+    machineId: string,
+    provider: RuntimeAccountUsageProvider,
+  ): number {
+    const lastStartedAt = this.refreshStartedAt.get(requestKey(serverId, machineId, provider));
+    if (lastStartedAt === undefined) return 0;
+    return Math.max(0, RUNTIME_ACCOUNT_USAGE_CLIENT_REFRESH_COOLDOWN_MS - (this.now() - lastStartedAt));
   }
 
   invalidate(serverId: string, machineId: string, provider: RuntimeAccountUsageProvider): void {

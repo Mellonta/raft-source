@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { createElement } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -101,22 +100,22 @@ test("mounted Search channel combobox filters live options and commits the first
     ),
   ));
 
-  fireEvent.click(screen.getByRole("button", { name: "Open channel filter" }));
-  assert.ok(screen.getByRole("button", { name: "#design" }));
-  assert.ok(screen.getByRole("button", { name: "#roadmap" }));
+  fireEvent.click(screen.getByRole("combobox", { name: "Open channel filter" }));
+  assert.ok(screen.getByRole("option", { name: "#design" }));
+  assert.ok(screen.getByRole("option", { name: "#roadmap" }));
 
-  const filterInput = screen.getAllByRole("textbox").at(-1);
+  const filterInput = screen.getByPlaceholderText("Search…");
   assert.ok(filterInput instanceof HTMLInputElement);
   fireEvent.change(filterInput, { target: { value: "road" } });
   const filteredLabels = screen
-    .getAllByRole("button")
-    .map((button) => button.textContent)
+    .getAllByRole("option")
+    .map((option) => option.textContent)
     .filter((label) => label?.startsWith("#"));
   fireEvent.keyDown(filterInput, { key: "Escape" });
   assert.deepEqual(filteredLabels, ["#roadmap"]);
 
-  fireEvent.click(screen.getByRole("button", { name: "Open channel filter" }));
-  fireEvent.click(screen.getByRole("button", { name: "#roadmap" }));
+  fireEvent.click(screen.getByRole("combobox", { name: "Open channel filter" }));
+  fireEvent.click(screen.getByRole("option", { name: "#roadmap" }));
   await waitFor(() => {
     assert.equal(screen.getByTestId("location").textContent, "/s/server/search?channelId=channel-roadmap");
   });

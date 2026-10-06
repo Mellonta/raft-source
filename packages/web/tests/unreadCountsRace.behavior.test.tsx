@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { parseUnreadSnapshot } from "../src/store/messageStore.js";
+import { parseUnreadSnapshot } from "../src/store/messageStore";
 
 test("sidebar mention flags ignore read mention history from unread summaries", () => {
   const snapshot = parseUnreadSnapshot({
@@ -30,4 +29,15 @@ test("sidebar mention flags ignore read mention history from unread summaries", 
   assert.deepEqual(snapshot.mentionFlags, {
     "channel-unread-mention": true,
   });
+});
+
+test("unread summary hasNew marks non-joined channels without inventing a count", () => {
+  const snapshot = parseUnreadSnapshot({
+    channels: {
+      "channel-not-joined": { unreadCount: 0, hasMention: false, hasAnyMention: false, hasNew: true },
+      "channel-joined": { unreadCount: 3, hasMention: false, hasAnyMention: false },
+    },
+  });
+  assert.deepEqual(snapshot.unreadCounts, { "channel-joined": 3 });
+  assert.deepEqual(snapshot.newFlags, { "channel-not-joined": true });
 });

@@ -2,15 +2,14 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import {
   GeminiDriver,
   buildGeminiArgs,
   buildGeminiManagedMcpSettings,
   buildGeminiSpawnEnv,
   resolveGeminiSpawn,
-} from "./gemini.js";
-import type { SpawnContext } from "./types.js";
+} from "./gemini";
+import type { SpawnContext } from "./types";
 
 // Mirrors Gemini CLI 0.40.1 atCommandProcessor parsing; revisit when upstream changes it.
 const geminiAtCommandRegex = /(?<!\\)@(?:(?:"(?:[^"]*)")|(?:\\.|[^ \t\n\r,;!?()[\]{}.]|\.(?!$|[ \t\n\r])))+/g;

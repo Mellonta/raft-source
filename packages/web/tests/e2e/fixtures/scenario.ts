@@ -1,6 +1,6 @@
 import { test as base } from "@playwright/test";
 import type { TestInfo } from "@playwright/test";
-import { evidenceConfig, observeLogin } from "../../../../../scripts/e2e/transportEvidence.js";
+import { evidenceConfig, observeLogin } from "../../../../../scripts/e2e/transportEvidence";
 import { waitForSeedState } from "./seedState";
 import type { ScenarioSeedState } from "./seedState";
 

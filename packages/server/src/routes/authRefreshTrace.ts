@@ -1,11 +1,12 @@
-import { addTraceEvent } from "../tracing/semanticTrace.js";
-import type { AuthRefreshReplayTrace } from "../services/sessionService.js";
+import { addTraceEvent } from "../tracing/semanticTrace";
+import type { AuthRefreshReplayTrace } from "../services/sessionService";
 
 export type AuthRefreshOutcome = { userId: string; sessionId: string; replayedRotation: boolean } | null;
 export type AuthSessionIssuedFlow =
   | "email_register"
   | "email_login"
   | "device_auth"
+  | "app_login"
   | "mobile_oauth"
   | "social_oauth";
 

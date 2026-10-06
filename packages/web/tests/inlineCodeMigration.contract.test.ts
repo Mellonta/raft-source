@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 import assert from "node:assert/strict";
 
 const repoRoot = resolve(import.meta.dirname, "..");
@@ -26,13 +25,13 @@ test("markdown inline code renderers use raft-ui InlineCode directly", () => {
   );
 });
 
-test("inline prose tokens use InlineCode while command blocks remain raw code", () => {
+test("inline prose tokens use InlineCode while command blocks retain code semantics through RUI", () => {
   const skillsPanel = readSource("src/components/agent/AgentSkills.tsx");
   const paletteAudit = readSource("src/pages/PaletteAuditPage.tsx");
   const computerCommandGuide = readSource("src/components/machine/ComputerCommandGuide.tsx");
 
-  assert.match(skillsPanel, /<InlineCode className="text-\[11px\] text-black\/40">\{path\}<\/InlineCode>/);
+  assert.match(skillsPanel, /<InlineCode className="text-\[11px\] text-foreground-placeholder theme-brutal:text-black\/40">\{path\}<\/InlineCode>/);
   assert.match(paletteAudit, /<InlineCode>file:line<\/InlineCode>/);
 
-  assert.match(computerCommandGuide, /<code className="min-w-0 flex-1 border-2 border-black bg-black px-3 py-2 font-mono text-xs text-brutal-lime/);
+  assert.match(computerCommandGuide, /<CopyableCode[\s>]/);
 });

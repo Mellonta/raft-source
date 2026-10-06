@@ -1,15 +1,14 @@
 import { strict as assert } from "node:assert";
-import { test } from "vitest";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
-import { runWithTraceSpan } from "../tracing/semanticTrace.js";
-import type { AuthRefreshReplayTrace } from "../services/sessionService.js";
+import { runWithTraceSpan } from "../tracing/semanticTrace";
+import type { AuthRefreshReplayTrace } from "../services/sessionService";
 import {
   authRefreshAttemptIdFromHeader,
   authRefreshInstallationIdFromHeader,
   type AuthRefreshOutcome,
   recordAuthRefreshTrace,
   recordAuthSessionIssuedTrace,
-} from "./authRefreshTrace.js";
+} from "./authRefreshTrace";
 
 function refreshEvent(
   refreshed: AuthRefreshOutcome,

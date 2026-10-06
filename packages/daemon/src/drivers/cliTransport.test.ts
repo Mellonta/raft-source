@@ -1,18 +1,19 @@
 // Tests for prepareCliTransport wrapper generation across platforms.
 
 import assert from "node:assert/strict";
-import { afterAll, beforeAll, test } from "vitest";
 import { spawnSync } from "node:child_process";
-import { readFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { deriveCliFallbackCandidates, deriveOpencliFallbackCandidates, prepareCliTransport, regenerateExistingOpencliWrappers, SLOCK_AGENT_LAUNCH_DIR_ENV, upgradeExistingAgentWrappers, writeOpencliWrapper } from "./cliTransport.js";
-import { applyLoopbackNoProxyEnv } from "../loopbackNoProxy.js";
-import type { SpawnContext } from "./types.js";
+import { buildCliTransportDir, deriveCliFallbackCandidates, deriveOpencliFallbackCandidates, prepareCliTransport, setProcSelfExeReaderForTests, regenerateExistingOpencliWrappers, SLOCK_AGENT_LAUNCH_DIR_ENV, upgradeExistingAgentWrappers, writeOpencliWrapper } from "./cliTransport";
+import { CONTEXT_GENERATION_FILENAME } from "@botiverse/raft-shared";
+import { applyLoopbackNoProxyEnv } from "../loopbackNoProxy";
+import type { SpawnContext } from "./types";
 
 const originalSlockHome = process.env.SLOCK_HOME;
 const testSlockHome = mkdtempSync(path.join(os.tmpdir(), "slock-cli-home-"));
 let nextLaunchId = 0;
+const LAUNCH_CREATED_AT_FILENAME = ".slock-launch-created-at";
 
 beforeAll(() => {
   process.env.SLOCK_HOME = testSlockHome;
@@ -77,6 +78,37 @@ test("prepareCliTransport: unix writes bash wrapper only", { skip: process.platf
   }
 });
 
+// D1 (RFC 072 §7.7): the context id exists before the runtime process does, in
+// the directory the process is told about, and every spawn gets a new one.
+test("prepareCliTransport publishes a fresh spawn context generation in the transport dir", async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-test-"));
+  try {
+    const ctx = { ...makeCtx(tmp, { runtime: "gemini" }), slockHome: testSlockHome };
+    const first = await prepareCliTransport(ctx, {}, "linux");
+    assert.equal(first.spawnEnv.SLOCK_CLI_TRANSPORT_DIR, first.slockDir);
+    // The APM derives the same directory for compaction writes from these inputs.
+    assert.equal(first.slockDir, buildCliTransportDir(testSlockHome, ctx.agentId, ctx.launchId));
+    const file = path.join(first.slockDir, CONTEXT_GENERATION_FILENAME);
+    const firstRecord = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(firstRecord.reason, "spawn");
+    assert.equal(firstRecord.runtime, "gemini");
+    assert.equal(firstRecord.compactionReported, false);
+    assert.equal(firstRecord.passiveAx, false, "no gate on the config ⇒ published off");
+    assert.match(firstRecord.contextId, /^[0-9a-f-]{36}$/);
+
+    // Same launchId means the same directory: a respawn must still replace the id.
+    const second = await prepareCliTransport(ctx, {}, "linux");
+    assert.equal(second.slockDir, first.slockDir);
+    assert.notEqual(JSON.parse(readFileSync(file, "utf8")).contextId, firstRecord.contextId);
+
+    // task #359: the composed gate on the spawn config is published as-is.
+    await prepareCliTransport({ ...ctx, config: { ...ctx.config, passiveAx: true } as typeof ctx.config }, {}, "linux");
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).passiveAx, true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("prepareCliTransport derives runtime env from structured runtimeConfig", async () => {
   const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-test-"));
   try {
@@ -101,6 +133,32 @@ test("prepareCliTransport derives runtime env from structured runtimeConfig", as
     assert.equal(result.spawnEnv.ANTHROPIC_CUSTOM_MODEL_OPTION, "claude-opus-4-6");
     assert.equal(result.spawnEnv.SHOULD_NOT_USE, undefined);
   } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("prepareCliTransport keeps an agent-configured PATH behind the wrapper dir (slock#8610)", async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-test-"));
+  const originalPath = process.env.PATH;
+  process.env.PATH = "/usr/bin:/bin:/usr/sbin:/sbin"; // minimal service PATH
+  try {
+    const configured = "/opt/homebrew/bin:/Users/x/.local/bin:/usr/bin:/bin";
+    const withAgentPath = await prepareCliTransport(makeCtx(tmp, {
+      runtimeConfig: { version: 1, runtime: "claude", provider: { kind: "default" }, model: { kind: "default" }, mode: { kind: "default" }, envVars: { PATH: configured } },
+    }), {}, "linux");
+    assert.equal(withAgentPath.spawnEnv.PATH, `${withAgentPath.slockDir}${path.delimiter}${configured}`);
+
+    // No configured PATH → the daemon's PATH, as before.
+    const plain = await prepareCliTransport(makeCtx(tmp), {}, "linux");
+    assert.equal(plain.spawnEnv.PATH, `${plain.slockDir}${path.delimiter}/usr/bin:/bin:/usr/sbin:/sbin`);
+
+    // A driver-supplied PATH wins over both (same precedence as other env vars).
+    const driver = await prepareCliTransport(makeCtx(tmp, {
+      runtimeConfig: { version: 1, runtime: "claude", provider: { kind: "default" }, model: { kind: "default" }, mode: { kind: "default" }, envVars: { PATH: configured } },
+    }), { PATH: "/driver/bin" }, "linux");
+    assert.equal(driver.spawnEnv.PATH, `${driver.slockDir}${path.delimiter}/driver/bin`);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -1143,6 +1201,20 @@ test("prepareCliTransport: win32 .cmd wrapper embeds launch forwarding guard aft
     assert.match(body, /if exist "!SLOCK_FORWARD_DIR!\\" \(/);
     assert.doesNotMatch(body, /!SLOCK_FORWARD_DIR!\\nul/);
     assert.match(body, /!SLOCK_FORWARD_DIR!\\%~nx0/);
+    assert.match(body, /!SLOCK_FORWARD_CREATED_AT:~13!"==""/, "cmd marker validation must require no 14th character");
+    assert.match(body, /!SLOCK_OWN_CREATED_AT:~13!"==""/, "cmd own-marker validation must require no 14th character");
+    assert.match(body, /if defined SLOCK_FORWARD_TARGET goto :slock_forward/);
+    assert.match(body, /:slock_forward/);
+    assert.match(body, /goto #_undefined_# 2>NUL \|\| title %COMSPEC% & "%%~fF" %\*/);
+    assert.ok(
+      body.indexOf(":slock_current") < body.indexOf('"%SLOCK_CLI%" %*'),
+      "cmd current label must precede the wrapper body so the node invocation remains the last normal-path command",
+    );
+    assert.match(body.trimEnd().split(/\r?\n/).at(-1) ?? "", /"%SLOCK_CLI%" %\*$/);
+    assert.doesNotMatch(body, /"!SLOCK_FORWARD_WRAPPER!" %\*/);
+    assert.doesNotMatch(body, /call "!SLOCK_FORWARD_WRAPPER!" %\*/);
+    assert.doesNotMatch(body, /exit \/b/i);
+    assert.match(body, /launch-forwarding skipped reason=!SLOCK_LAUNCH_FORWARD_SKIP_REASON!/);
     assert.doesNotMatch(body, /(?<!\r)\n/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -1285,9 +1357,10 @@ function runWrapper(wrapperPath: string, env: Record<string, string | undefined>
 
 async function setupForwardedLaunchFixture(tmp: string): Promise<{
   agentRoot: string;
+  w1Dir: string;
   w1Wrapper: string;
-  w2Wrapper: string;
   w2Dir: string;
+  w2Wrapper: string;
 }> {
   const slockHome = path.join(tmp, "home");
   process.env.SLOCK_HOME = slockHome;
@@ -1317,9 +1390,10 @@ async function setupForwardedLaunchFixture(tmp: string): Promise<{
 
   return {
     agentRoot,
+    w1Dir,
     w1Wrapper: path.join(w1Dir, "raft"),
-    w2Wrapper: path.join(transport.slockDir, "raft"),
     w2Dir: transport.slockDir,
+    w2Wrapper: path.join(transport.slockDir, "raft"),
   };
 }
 
@@ -1333,6 +1407,101 @@ test("launch forwarding guard: W2 selector executing W1 absolute wrapper forward
     const result = runWrapper(w1Wrapper, { SLOCK_AGENT_LAUNCH_DIR: "w2" });
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.equal(result.stdout.trim(), "W2", "W1 wrapper with W2 selector must forward to W2");
+  } finally {
+    if (oldSlockHome === undefined) delete process.env.SLOCK_HOME;
+    else process.env.SLOCK_HOME = oldSlockHome;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("launch forwarding guard: stale older selector on current wrapper falls through to current launch", { skip: process.platform === "win32" }, async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-stale-selector-"));
+  const oldSlockHome = process.env.SLOCK_HOME;
+  try {
+    const { w2Wrapper } = await setupForwardedLaunchFixture(tmp);
+
+    const result = runWrapper(w2Wrapper, { SLOCK_AGENT_LAUNCH_DIR: "w1" });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(result.stdout.trim(), "W2", "current wrapper must not forward backward to a retained old launch");
+  } finally {
+    if (oldSlockHome === undefined) delete process.env.SLOCK_HOME;
+    else process.env.SLOCK_HOME = oldSlockHome;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("launch forwarding guard: missing selected marker fails closed with a stale-launch diagnostic", { skip: process.platform === "win32" }, async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-marker-missing-"));
+  const oldSlockHome = process.env.SLOCK_HOME;
+  try {
+    const { w1Dir, w2Wrapper } = await setupForwardedLaunchFixture(tmp);
+    rmSync(path.join(w1Dir, LAUNCH_CREATED_AT_FILENAME), { force: true });
+    assert.equal(existsSync(path.join(w1Dir, LAUNCH_CREATED_AT_FILENAME)), false, "selected launch marker should be absent");
+
+    const result = runWrapper(w2Wrapper, { SLOCK_AGENT_LAUNCH_DIR: "w1" });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(result.stdout.trim(), "W2", "current wrapper must not forward to a selected launch with no marker");
+    assert.match(result.stderr, /\[cliTransport\] launch-forwarding skipped reason=selected_marker_missing/);
+    assert.doesNotMatch(result.stderr, /W1|W2|test-token-123/, "diagnostic must not expose token-like test payloads");
+  } finally {
+    if (oldSlockHome === undefined) delete process.env.SLOCK_HOME;
+    else process.env.SLOCK_HOME = oldSlockHome;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("launch forwarding guard: stale missing selector on current wrapper falls through to current launch", { skip: process.platform === "win32" }, async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-stale-selector-cleaned-"));
+  const oldSlockHome = process.env.SLOCK_HOME;
+  try {
+    const { w1Dir, w2Wrapper } = await setupForwardedLaunchFixture(tmp);
+    rmSync(w1Dir, { recursive: true, force: true });
+
+    const result = runWrapper(w2Wrapper, { SLOCK_AGENT_LAUNCH_DIR: "w1" });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(result.stdout.trim(), "W2", "current wrapper must fall through when the stale selected launch was cleaned");
+  } finally {
+    if (oldSlockHome === undefined) delete process.env.SLOCK_HOME;
+    else process.env.SLOCK_HOME = oldSlockHome;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("launch forwarding guard: marker ordering only forwards toward newer launches", { skip: process.platform === "win32" }, async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-marker-order-"));
+  const oldSlockHome = process.env.SLOCK_HOME;
+  try {
+    const { w1Dir, w1Wrapper, w2Dir, w2Wrapper } = await setupForwardedLaunchFixture(tmp);
+    writeFileSync(path.join(w1Dir, LAUNCH_CREATED_AT_FILENAME), "0000000000001");
+    writeFileSync(path.join(w2Dir, LAUNCH_CREATED_AT_FILENAME), "0000000000002");
+
+    const forward = runWrapper(w1Wrapper, { SLOCK_AGENT_LAUNCH_DIR: "w2" });
+    assert.equal(forward.status, 0, forward.stderr || forward.stdout);
+    assert.equal(forward.stdout.trim(), "W2", "old wrapper should still forward to newer current launch");
+
+    const stale = runWrapper(w2Wrapper, { SLOCK_AGENT_LAUNCH_DIR: "w1" });
+    assert.equal(stale.status, 0, stale.stderr || stale.stdout);
+    assert.equal(stale.stdout.trim(), "W2", "newer wrapper must ignore older retained launch selector");
+    assert.match(stale.stderr, /\[cliTransport\] launch-forwarding skipped reason=selected_not_newer/);
+  } finally {
+    if (oldSlockHome === undefined) delete process.env.SLOCK_HOME;
+    else process.env.SLOCK_HOME = oldSlockHome;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("launch forwarding guard: damaged selected marker fails closed to own launch", { skip: process.platform === "win32" }, async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-marker-damaged-"));
+  const oldSlockHome = process.env.SLOCK_HOME;
+  try {
+    const { w1Dir, w2Dir, w2Wrapper } = await setupForwardedLaunchFixture(tmp);
+    writeFileSync(path.join(w1Dir, LAUNCH_CREATED_AT_FILENAME), "not-a-launch-time");
+    writeFileSync(path.join(w2Dir, LAUNCH_CREATED_AT_FILENAME), "0000000000002");
+
+    const result = runWrapper(w2Wrapper, { SLOCK_AGENT_LAUNCH_DIR: "w1" });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(result.stdout.trim(), "W2", "current wrapper must not forward to a launch with a damaged marker");
+    assert.match(result.stderr, /\[cliTransport\] launch-forwarding skipped reason=selected_marker_invalid/);
   } finally {
     if (oldSlockHome === undefined) delete process.env.SLOCK_HOME;
     else process.env.SLOCK_HOME = oldSlockHome;
@@ -1527,7 +1696,7 @@ test("launch forwarding guard: win32 .cmd W2 selector forwards argv and exit cod
     const w1Dir = path.join(agentRoot, "w1");
     mkdirSync(w1Dir, { recursive: true });
     const w1Out = path.join(w1Dir, "w1-out.json");
-    const w1Cli = makeArgvEchoCli(w1Out, 0);
+    const w1Cli = makeArgvEchoCli(w1Out, 17);
     const w1Cmd = path.join(w1Dir, "raft.cmd");
     const w1Body = [
       "@echo off",
@@ -1613,9 +1782,29 @@ test("launch forwarding guard: win32 .cmd W2 selector forwards argv and exit cod
     const w1Ran = existsSync(w1Out);
     assert.equal(w2Ran, true, `W2 must execute (w2Out exists); status=${result.status}; stdout=${result.stdout}; stderr=${result.stderr}`);
     assert.equal(w1Ran, false, `W1 must not execute when selector forwards to W2; status=${result.status}`);
-    assert.equal(result.status, 42, `W2 exit code must propagate to outer cmd.exe; w2Ran=${w2Ran}, w1Ran=${w1Ran}`);
+    assert.equal(
+      result.status,
+      42,
+      `W2 exit code must propagate to outer cmd.exe; w2Ran=${w2Ran}, w1Ran=${w1Ran}; stdout=${result.stdout}; stderr=${result.stderr}`,
+    );
+    assert.doesNotMatch(result.stderr, /launch-forwarding skipped reason=/, "successful forwarding must not emit a skipped diagnostic");
     const forwardedArgv = JSON.parse(readFileSync(w2Out, "utf8")) as string[];
     assert.deepEqual(forwardedArgv, ["message", "check"], "W1.cmd must forward argv unchanged to W2");
+
+    // A 14-digit numeric marker must NOT be accepted as valid. POSIX/PowerShell
+    // use exact /^\d{13}$/; this executable cmd.exe branch pins the batch
+    // substring check to the same exact-length contract.
+    writeFileSync(path.join(agentRoot, "w2", LAUNCH_CREATED_AT_FILENAME), "00000000000022");
+    safeRemove(w1Out);
+    safeRemove(w2Out);
+    const overlongMarker = spawnSync("cmd.exe", ["/c", w1Cmd, "message", "check"], {
+      env: { ...process.env, SLOCK_AGENT_LAUNCH_DIR: "w2" },
+      encoding: "utf8",
+    }) as { status: number | null; stdout: string; stderr: string };
+    assert.equal(existsSync(w1Out), true, "overlong marker must fail-closed to W1 (w1Out exists)");
+    assert.equal(existsSync(w2Out), false, "overlong marker must not execute W2 (w2Out absent)");
+    assert.equal(overlongMarker.status, 17, overlongMarker.stderr || overlongMarker.stdout);
+    assert.match(overlongMarker.stderr, /launch-forwarding skipped reason=selected_marker_invalid/);
 
     // Traversal selector must be rejected and execute W1 instead.
     safeRemove(w1Out);
@@ -1626,7 +1815,7 @@ test("launch forwarding guard: win32 .cmd W2 selector forwards argv and exit cod
     }) as { status: number | null; stdout: string; stderr: string };
     assert.equal(existsSync(w1Out), true, "traversal selector must execute W1 (w1Out exists)");
     assert.equal(existsSync(w2Out), false, "traversal selector must not execute W2 (w2Out absent)");
-    assert.equal(traversal.status, 0, traversal.stderr || traversal.stdout);
+    assert.equal(traversal.status, 17, traversal.stderr || traversal.stdout);
     const traversalArgv = JSON.parse(readFileSync(w1Out, "utf8")) as string[];
     assert.deepEqual(traversalArgv, ["message", "check"], "traversal selector must fail-closed to W1");
 
@@ -1668,7 +1857,7 @@ test("launch forwarding guard: win32 .cmd W2 selector forwards argv and exit cod
       }) as { status: number | null; stdout: string; stderr: string };
       assert.equal(existsSync(w1Out), true, "junction launch dir must execute W1 (w1Out exists)");
       assert.equal(existsSync(foreignOut), false, "foreign wrapper must not execute when parent is a reparse point (foreignOut absent)");
-      assert.equal(linkResult.status, 0, linkResult.stderr || linkResult.stdout);
+      assert.equal(linkResult.status, 17, linkResult.stderr || linkResult.stdout);
       const linkArgv = JSON.parse(readFileSync(w1Out, "utf8")) as string[];
       assert.deepEqual(linkArgv, ["message", "check"], "symlink/junction launch dir parent must fail-closed to W1");
     }
@@ -1739,6 +1928,42 @@ test("prepareCliTransport treats an unidentified host explicitly, not as Electro
     const wrapper = readFileSync(path.join(result.slockDir, "slock"), "utf8");
     assert.doesNotMatch(wrapper, /ELECTRON_RUN_AS_NODE/, "an unidentified host must not be guessed into Electron mode");
   } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("a wrapper written while running from K's experiment slot still runs after promotion renames it to stable", { skip: process.platform === "win32" }, async () => {
+  // K starts an upgrade from slots/experiment and promotes it by renaming the
+  // directory to slots/stable under the running process (IT-armbian
+  // 2026-09-27: every new session's `raft` exec'd the vanished experiment
+  // path, exit 127). Run the real wrapper across the rename.
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-k-promote-"));
+  const originalExecPath = process.execPath;
+  try {
+    const experimentDir = path.join(tmp, "k", "slots", "experiment");
+    mkdirSync(experimentDir, { recursive: true });
+    const artifact = path.join(experimentDir, "artifact.bin");
+    writeFileSync(artifact, "#!/bin/sh\necho \"HOST:$0 ARGS:$*\"\n", { mode: 0o755 });
+    process.execPath = artifact;
+    // The fake artifact is not the running binary, so /proc/self/exe (node)
+    // must not be consulted here.
+    setProcSelfExeReaderForTests(() => null);
+    const ctx = makeCtx(path.join(tmp, "work"));
+    ctx.slockCliPath = "__cli";
+    const result = await prepareCliTransport(ctx, {}, "linux", false, () => true);
+    const wrapper = path.join(result.slockDir, "raft");
+
+    const before = runWrapper(wrapper, {});
+    assert.equal(before.status, 0, before.stderr);
+    assert.match(before.stdout, new RegExp(`HOST:${artifact} ARGS:__cli message check`));
+
+    renameSync(experimentDir, path.join(tmp, "k", "slots", "stable"));
+    const after = runWrapper(wrapper, {});
+    assert.equal(after.status, 0, `wrapper must follow the promoted slot: ${after.stderr}`);
+    assert.match(after.stdout, new RegExp(`HOST:${path.join(tmp, "k", "slots", "stable", "artifact.bin")} ARGS:__cli message check`));
+  } finally {
+    setProcSelfExeReaderForTests(null);
+    process.execPath = originalExecPath;
     rmSync(tmp, { recursive: true, force: true });
   }
 });

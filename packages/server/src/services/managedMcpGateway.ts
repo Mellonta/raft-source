@@ -40,6 +40,7 @@ export class ManagedMcpGatewayError extends Error {
       | "managed_mcp_endpoint_blocked"
       | "managed_mcp_unreachable"
       | "managed_mcp_oauth_required"
+      | "managed_mcp_endpoint_auth_rejected"
       | "managed_mcp_catalog_invalid"
       | "managed_mcp_result_too_large"
       | "managed_mcp_result_invalid",
@@ -49,13 +50,32 @@ export class ManagedMcpGatewayError extends Error {
   }
 }
 
-export function normalizeManagedMcpClientError(error: unknown, timedOut: boolean): ManagedMcpGatewayError {
+/**
+ * Error copy must follow the connection's auth mode. A 401/403 on an OAuth
+ * connection means the grant expired (reconnect); the same status on a
+ * none/headers connection is the endpoint rejecting our request and must never
+ * be described with OAuth wording (Astro MCP ticket afe07b8d: unauthenticated
+ * endpoint failing with "OAuth authorization expired").
+ */
+export type ManagedMcpAuthKind = "none" | "headers" | "oauth";
+
+export function normalizeManagedMcpClientError(error: unknown, timedOut: boolean, authKind: ManagedMcpAuthKind = "none"): ManagedMcpGatewayError {
   if (error instanceof ManagedMcpGatewayError) return error;
-  const oauthFailureRequiresReconnect = error instanceof UnauthorizedError
-    || (error instanceof StreamableHTTPError && (error.code === 401 || error.code === 403))
-    || (error instanceof OAuthError && !(error instanceof ServerError) && !(error instanceof TemporarilyUnavailableError));
-  if (oauthFailureRequiresReconnect) {
-    return new ManagedMcpGatewayError("MCP OAuth authorization expired; reconnect from Settings", "managed_mcp_oauth_required");
+  const endpointRejected = error instanceof StreamableHTTPError && (error.code === 401 || error.code === 403);
+  if (authKind === "oauth") {
+    const oauthFailureRequiresReconnect = error instanceof UnauthorizedError
+      || endpointRejected
+      || (error instanceof OAuthError && !(error instanceof ServerError) && !(error instanceof TemporarilyUnavailableError));
+    if (oauthFailureRequiresReconnect) {
+      return new ManagedMcpGatewayError("MCP OAuth authorization expired; reconnect from Settings", "managed_mcp_oauth_required");
+    }
+  } else if (endpointRejected) {
+    return new ManagedMcpGatewayError(
+      authKind === "headers"
+        ? "MCP endpoint rejected the configured credentials (401/403)"
+        : "MCP endpoint rejected the request (401/403) without credentials configured for it",
+      "managed_mcp_endpoint_auth_rejected",
+    );
   }
   return new ManagedMcpGatewayError(
     timedOut ? "MCP request timed out" : "MCP server could not be reached",
@@ -217,11 +237,27 @@ function normalizeCallResult(raw: unknown): ManagedMcpCallResult {
   return normalized;
 }
 
+export function normalizeManagedMcpClientErrorForConnection(
+  error: unknown,
+  timedOut: boolean,
+  headers: Record<string, string>,
+  authProvider?: OAuthClientProvider,
+  authKind: ManagedMcpAuthKind = "none",
+): ManagedMcpGatewayError {
+  const effectiveAuthKind = authProvider
+    ? "oauth"
+    : authKind === "none" && Object.keys(headers).length > 0
+      ? "headers"
+      : authKind;
+  return normalizeManagedMcpClientError(error, timedOut, effectiveAuthKind);
+}
+
 async function withClient<T>(
   endpoint: string,
   headers: Record<string, string>,
   operation: (client: Client, signal: AbortSignal) => Promise<T>,
   authProvider?: OAuthClientProvider,
+  authKind: ManagedMcpAuthKind = "none",
 ): Promise<T> {
   const url = validateManagedMcpEndpoint(endpoint);
   const controller = new AbortController();
@@ -238,7 +274,7 @@ async function withClient<T>(
     await client.connect(transport, { signal: controller.signal, timeout: MCP_TIMEOUT_MS });
     return await operation(client, controller.signal);
   } catch (error) {
-    throw normalizeManagedMcpClientError(error, controller.signal.aborted);
+    throw normalizeManagedMcpClientErrorForConnection(error, controller.signal.aborted, headers, authProvider, authKind);
   } finally {
     clearClockTimeout(timeout);
     await client.close().catch(() => undefined);

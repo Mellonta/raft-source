@@ -36,7 +36,7 @@ export class AgentStatusTransitionTrace {
     return {
       agentId: input.agentId,
       agent_id: input.agentId,
-      status: input.status,
+      agent_status: input.status,
       previous_status: previous?.status ?? "unknown",
       previous_status_present: Boolean(previous),
       status_changed: previous ? previous.status !== input.status : true,

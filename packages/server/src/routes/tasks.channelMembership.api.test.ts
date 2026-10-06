@@ -1,13 +1,13 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
-import { getDb } from "../db/index.js";
-import { serverMembers, users } from "../db/schema.js";
-import { createChannel, addHuman } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { createServer } from "../services/serverService.js";
-import * as taskService from "../services/taskService.js";
+import { getDb } from "../db/index";
+import { serverMembers, users } from "../db/schema";
+import { createChannel, addHuman } from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { createServer } from "../services/serverService";
+import * as taskService from "../services/taskService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

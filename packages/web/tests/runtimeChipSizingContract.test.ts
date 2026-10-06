@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -9,54 +8,36 @@ function readSource(path: string): string {
   return readFileSync(resolve(repoRoot, path), "utf8");
 }
 
-const compactChipTokens = ["px-2", "py-0.5", "text-xs"];
-const oversizedChipPattern = /\bpx-2\.5\b|\bpy-1\b|\btext-sm\b/;
-
-function assertCompactChipScale(className: string): void {
-  for (const token of compactChipTokens) {
-    assert.match(className, new RegExp(`\\b${token.replace(".", "\\.")}\\b`));
-  }
-  assert.doesNotMatch(className, oversizedChipPattern);
-}
-
-function assertCompactRuntimeChip(className: string): void {
-  assert.match(className, /\bh-6\b/);
-  assertCompactChipScale(className);
-}
-
-function extractRuntimeAccountUsageClass(source: string): string {
-  const matches = [...source.matchAll(
-    /<RuntimeAccountUsageGateChip[\s\S]*?className="([^"]+)"[\s\S]*?>/g,
-  )];
-  assert.equal(matches.length, 1, "Agent runtime chip target changed; update this contract");
-  return matches[0]![1];
-}
-
-function extractValueChipClassAfter(source: string, anchor: string): string {
-  const index = source.indexOf(anchor);
-  assert.notEqual(index, -1, `${anchor} anchor not found`);
-  const match = source.slice(index).match(/value=\{\s*<span className="([^"]+)"/);
-  assert.ok(match, `${anchor} className not found`);
-  return match[1];
-}
-
-test("agent runtime chip keeps the same compact type scale as adjacent config chips", () => {
+// The settings row delegates its visual scale and palette to RUI. These
+// attributes are the public component contract; pixel equality is checked in
+// the browser because a source check cannot measure the theme recipe.
+test("agent runtime configuration badges use standard RUI props without local visual overrides", () => {
   const source = readSource("src/components/agent/AgentDetailPanel.tsx");
-  const runtimeClassName = extractRuntimeAccountUsageClass(source);
+  const runtime = [...source.matchAll(/<RuntimeAccountUsageGateChip\b([^>]*?)>/g)];
+  assert.equal(runtime.length, 1);
+  assert.match(runtime[0]![1], /appearance="solid"/);
+  assert.match(runtime[0]![1], /variant="information"/);
+  assert.doesNotMatch(runtime[0]![1], /\b(?:className|style)=/);
 
-  assertCompactRuntimeChip(runtimeClassName);
-  assertCompactChipScale(extractValueChipClassAfter(source, "agent.runtimeConfig.model"));
-  assertCompactChipScale(extractValueChipClassAfter(source, "agent.runtimeConfig.reasoning"));
-  assertCompactChipScale(extractValueChipClassAfter(source, "agent.runtimeConfig.mode"));
+  for (const [field, variant] of [["model", "accent"], ["reasoning", "primary"], ["mode", "warning"]]) {
+    const label = `label={formatMessage({ id: "agent.runtimeConfig.${field}" })}`;
+    const index = source.indexOf(label);
+    assert.notEqual(index, -1, `${field} label missing`);
+    // The value is either a `value={…}` prop (KeyValueRow) or the first child of an
+    // InfoRow (label | value rows); either way it must be the standard Badge.
+    const badge = source.slice(index).match(/(?:value=\{\s*|<\/?InfoRow[^>]*>\s*|label=\{[^}]*\}\)\}>\s*)<Badge\b([^>]*?)>/);
+    assert.ok(badge, `${field} must use the standard Badge`);
+    assert.match(badge[1], /appearance="soft"/);
+    assert.ok(badge[1].includes(`variant="${variant}"`));
+    assert.doesNotMatch(badge[1], /\b(?:className|style)=/);
+  }
 });
 
-test("machine detected runtime chips keep the compact 24px recipe in both states", () => {
+test("machine runtime chips use the shared badge recipe without forcing a legacy border or height", () => {
   const source = readSource("src/components/machine/MachineDetailPanel.tsx");
-  const detectedMatch = source.match(
-    /\?\s*"([^"]*bg-brutal-cyan[^"]*)"\s*:\s*"([^"]*bg-gray-100[^"]*)";/,
-  );
-  assert.ok(detectedMatch, "Detected Runtimes chip class branches not found");
-
-  assertCompactRuntimeChip(detectedMatch[1]!);
-  assertCompactRuntimeChip(detectedMatch[2]!);
+  const branch = source.match(/const chipClassName = detected([\s\S]*?);/);
+  assert.ok(branch);
+  assert.match(branch[1], /bg-info-soft text-info-strong/);
+  assert.match(branch[1], /bg-fill-muted text-foreground-muted/);
+  assert.doesNotMatch(branch[1], /h-6|border-2/);
 });

@@ -2,7 +2,6 @@
 // guard-domain frontier. Display pairs, IDs, timestamps, reply counts, and
 // read-state projections are deliberately not substitutes for this value.
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import api from "../src/api/client";
 import { useInboxStore, getInboxItemKey } from "../src/store/inboxStore";

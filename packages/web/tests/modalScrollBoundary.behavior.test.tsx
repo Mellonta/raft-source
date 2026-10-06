@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 
 import Modal from "../src/components/Modal";

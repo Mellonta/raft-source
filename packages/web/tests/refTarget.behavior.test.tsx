@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { resolveRefTarget } from "../src/utils/refTarget";
 import type { RefNavContext } from "../src/utils/refTarget";
 

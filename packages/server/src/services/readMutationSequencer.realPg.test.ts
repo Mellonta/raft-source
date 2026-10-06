@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import pg from "pg";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
-import * as schema from "../db/schema.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
+import * as schema from "../db/schema";
 import {
   channelHumans,
   channels,
@@ -25,9 +24,9 @@ import {
   userChannelInboxStates,
   userChannelReadCursors,
   users,
-} from "../db/schema.js";
-import { getInboxItems } from "./channelService.js";
-import { createMessage } from "./messageService.js";
+} from "../db/schema";
+import { getInboxItems } from "./channelService";
+import { createMessage } from "./messageService";
 import {
   admitReadMutation,
   claimNextReadMutation,
@@ -35,7 +34,7 @@ import {
   drainReadMutationOutbox,
   executeReadMutationClaim,
   ReadMutationError,
-} from "./readMutationSequencer.js";
+} from "./readMutationSequencer";
 
 const REAL_PG_URL_ENV = "READ_MUTATION_REAL_PG_URL";
 const REAL_PG_URL = process.env[REAL_PG_URL_ENV];
@@ -970,6 +969,110 @@ test(
     } finally {
       await closeDatabase().catch(() => {});
       if (observer) await observer.end().catch(() => {});
+      await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)} WITH (FORCE)`).catch(() => {});
+      await admin.end().catch(() => {});
+    }
+  },
+);
+
+test(
+  "global_read_all holds the channel membership authorization lock until commit: a legacy delete blocks then hits lock_timeout",
+  {
+    skip: !(REAL_PG_URL || REAL_PG_REQUIRED),
+  },
+  async () => {
+    assert.ok(REAL_PG_URL, `${REAL_PG_URL_ENV} is required`);
+    const databaseName = `slock_read_mutation_membership_lock_${process.pid}_${randomBytes(4).toString("hex")}`;
+    const serviceApplication = `read-mutation-membership-service-${process.pid}`;
+    const admin = new pg.Client({ connectionString: REAL_PG_URL, application_name: "read-mutation-membership-admin" });
+    let legacyWriter: pg.Client | null = null;
+    await admin.connect();
+    try {
+      await admin.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
+      const migrationUrl = databaseUrlFor(REAL_PG_URL, databaseName, "read-mutation-membership-migrator");
+      const migrationPool = new pg.Pool({ connectionString: migrationUrl, max: 2 });
+      await migrate(drizzle(migrationPool, { schema }), { migrationsFolder: MIGRATIONS_FOLDER });
+      await migrationPool.end();
+
+      const testUrl = databaseUrlFor(REAL_PG_URL, databaseName, serviceApplication);
+      await initDatabase(testUrl);
+      const [owner] = await getDb().insert(users).values({
+        email: `read-membership-lock-${randomUUID()}@test.invalid`,
+        name: `ReadMembershipLock${randomUUID().replaceAll("-", "").slice(0, 8)}`,
+        passwordHash: "x",
+        emailVerified: true,
+      }).returning();
+      const [server] = await getDb().insert(servers).values({
+        name: "Read Membership Lock",
+        slug: `read-membership-lock-${randomUUID()}`,
+        ownerId: owner.id,
+      }).returning();
+      await getDb().insert(serverMembers).values({ serverId: server.id, userId: owner.id, role: "owner" });
+      const [privateChannel] = await getDb().insert(channels).values({
+        serverId: server.id,
+        name: `membership-lock-${randomUUID().slice(0, 8)}`,
+        type: "private",
+      }).returning();
+      await getDb().insert(channelHumans).values({ channelId: privateChannel.id, userId: owner.id });
+      await createMessage(privateChannel.id, "user", owner.id, "baseline");
+      await getDb().insert(userChannelReadCursors).values({
+        userId: owner.id,
+        channelId: privateChannel.id,
+        lastReadSeq: 0,
+        readStateVersion: 0,
+        lastAppliedAuthoritySeq: 0,
+      });
+
+      await admitReadMutation({
+        serverId: server.id,
+        principalId: owner.id,
+        mutationId: randomUUID(),
+        mutation: { kind: "global_read_all" },
+      });
+      const claim = await claimNextReadMutation({
+        serverId: server.id,
+        principalId: owner.id,
+        leaseOwner: "membership-lock-worker",
+        leaseMs: 60_000,
+      });
+      assert.ok(claim);
+
+      // Second connection with a short lock_timeout plays the legacy writer.
+      // afterBoundaryCaptured runs inside the claim transaction after the
+      // batched resolution — the membership KEY SHARE must be held, so the
+      // delete blocks and then fails with lock_timeout (55P03). Before the
+      // authorization-lock statement existed the delete succeeded and this
+      // assertion failed; that regression is what this test pins (Ray's
+      // review, 2026-09-24).
+      legacyWriter = new pg.Client({
+        connectionString: databaseUrlFor(REAL_PG_URL, databaseName, "read-mutation-legacy-writer", true),
+      });
+      await legacyWriter.connect();
+
+      let deleteError: unknown = null;
+      const ack = await executeReadMutationClaim({
+        claim,
+        afterBoundaryCaptured: async () => {
+          const outcome = await legacyWriter!.query(
+            "DELETE FROM channel_humans WHERE channel_id = $1 AND user_id = $2",
+            [privateChannel.id, owner.id],
+          ).then(() => null, (error) => error);
+          if (outcome !== null) {
+            deleteError = outcome;
+            return;
+          }
+          throw new assert.AssertionError({
+            message: "legacy delete of channel_humans must be blocked by the claim's KEY SHARE lock until lock_timeout; it succeeded, which means the authorization lock is missing",
+          });
+        },
+      });
+      assert.ok(ack.terminalState === "applied" || ack.terminalState === "retired_no_effect");
+      assert.ok(deleteError, "the legacy delete must have failed (lock_timeout); it did not error");
+      const pgError = deleteError as { code?: string };
+      assert.equal(pgError.code, "55P03", `expected lock_timeout (55P03), got code=${pgError.code}`);
+    } finally {
+      await legacyWriter?.end().catch(() => {});
+      await closeDatabase();
       await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)} WITH (FORCE)`).catch(() => {});
       await admin.end().catch(() => {});
     }

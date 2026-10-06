@@ -1,19 +1,19 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
-import { users, machines } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { createServer, addMember } from "../services/serverService.js";
+import { getDb } from "../db/index";
+import { users, machines } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { signAccessToken } from "../middleware/auth";
+import { createServer, addMember } from "../services/serverService";
 import {
   extractApiKeyFingerprint,
   registerMachine,
-} from "../services/machineService.js";
+} from "../services/machineService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -123,7 +123,7 @@ test("legacy-machines: cloak symmetry — unknown / deleted / non-member all ret
     const deletedSlug = `deleted-${randomUUID()}`;
     const deletedSrv = await createServer("Doomed Co", deletedSlug, userId);
     const db = getDb();
-    const { servers: serversTable } = await import("../db/schema.js");
+    const { servers: serversTable } = await import("../db/schema");
     await db
       .update(serversTable)
       .set({ deletedAt: new Date() })
@@ -167,7 +167,7 @@ test("legacy-machines: includeAll preserves cloak symmetry", async () => {
     const deletedSlug = `deleted-${randomUUID()}`;
     const deletedSrv = await createServer("Doomed Co", deletedSlug, userId);
     const db = getDb();
-    const { servers: serversTable } = await import("../db/schema.js");
+    const { servers: serversTable } = await import("../db/schema");
     await db
       .update(serversTable)
       .set({ deletedAt: new Date() })

@@ -7,8 +7,8 @@ import {
   type KnowledgeContextValidationResult,
 } from "@botiverse/raft-shared";
 import { and, eq, isNull } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agentKnowledgeEvents, agents } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agentKnowledgeEvents, agents } from "../db/schema";
 
 export const AGENT_KNOWLEDGE_STATUSES = ["success", "not_found", "denied", "error"] as const;
 export type AgentKnowledgeStatus = (typeof AGENT_KNOWLEDGE_STATUSES)[number];
@@ -404,6 +404,16 @@ const EXTRA_AGENT_KNOWLEDGE_ALIASES_BY_DOC_ID: Readonly<Record<string, readonly 
   // was missing. Deliberately NOT aliasing "reminding"/"schedule"/"schedules":
   // unobserved neighbors must stay visible in telemetry.
   reminder: ["reminders"],
+  // Same shape on the canonical Attachment page (meichen's reason-request digest
+  // 2026-09-16, task #182): two natural `get` rows, two Agents, two servers,
+  // `topic_or_path` byte-identical and verbatim `attachments`; both intents asked
+  // for the attachment size limit, which the page states (50MB). `manual search
+  // "attachments"` already ranks this page first, so only exact `get` was missing.
+  // `attach` joined the observed set in meichen's 2026-09-17 digest (two natural
+  // `get` rows, two Agents, one Server; byte-identical, lowercase ASCII). Same
+  // treatment. Still deliberately NOT aliasing "upload"/"file"/"files":
+  // unobserved neighbors must stay visible in telemetry.
+  attachment: ["attachments", "attach"],
   message: ["messaging", "messages"],
   mention: [
     "mentions",
@@ -715,6 +725,11 @@ export async function searchAgentKnowledgeDocsWithResolution(
   };
 }
 
+// Same carrier split as buildAgentKnowledgeSearchCommand below: the capable form
+// carries --intent/--reason, the legacy form must omit them (old CLIs reject
+// unknown flags). Mirrored here because the reason previously lived beside only
+// one of the two forks, so whoever opened this one first saw a bare conditional
+// with no explanation (Cat, 2026-09-23).
 export function buildAgentKnowledgeIndexCommand(contextRequired = true): string {
   return contextRequired ? MANUAL_INDEX_COMMAND : "raft manual get index";
 }

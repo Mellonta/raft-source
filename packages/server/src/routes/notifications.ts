@@ -2,7 +2,8 @@ import { Router, type Response, type Router as RouterType } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { clearClockInterval, currentTimeMs, setClockInterval } from "@botiverse/raft-shared";
 
-import { requireAuth, requireVerified } from "../middleware/auth.js";
+import { requireAuth, requireVerified } from "../middleware/auth";
+import { sharedSseStreamRegistry } from "../services/sseStreamRegistry";
 import {
   NativeNotificationError,
   authenticateNativeCredential,
@@ -16,7 +17,7 @@ import {
   revokeCurrentNativeCredential,
   revokeNativeNotificationDevice,
   rotateNativeCredential,
-} from "../services/nativeNotificationService.js";
+} from "../services/nativeNotificationService";
 
 export const notificationRouter: RouterType = Router();
 
@@ -184,6 +185,7 @@ notificationRouter.get("/stream", async (req, res) => {
       "x-accel-buffering": "no",
     });
     res.flushHeaders();
+    sharedSseStreamRegistry.register(res);
 
     let cursorSeq = prepared.cursorSeq;
     let closed = false;
@@ -200,6 +202,7 @@ notificationRouter.get("/stream", async (req, res) => {
     const close = () => {
       if (closed) return;
       closed = true;
+      sharedSseStreamRegistry.unregister(res);
       if (timer) clearClockInterval(timer);
       if (!res.writableEnded) res.end();
     };

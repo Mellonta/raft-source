@@ -17,13 +17,13 @@
 import {
   validateAppConfigWithinBounds,
   type AppConfigWireSnapshot,
-} from "@botiverse/raft-shared/src/appConfigTransport.js";
+} from "@botiverse/raft-shared/src/appConfigTransport";
 import {
   CLEANER_APP_ID,
   CLEANER_CONFIG_BOUNDS,
   CLEANER_STORE_KEYS,
   SECONDS_TO_MS,
-} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol.js";
+} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol";
 
 export type StoredConfigValue = boolean | number;
 

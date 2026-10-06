@@ -1,4 +1,3 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
@@ -79,7 +78,7 @@ test("slockdev start passes preview descriptions into the web dev tools", () => 
   assert.match(slockdevSource, /VITE_SLOCKDEV_EMAIL/);
   assert.match(appSource, /VITE_SLOCKDEV_PREVIEW_DESCRIPTION/);
   assert.match(appSource, /Preview description/);
-  assert.match(appSource, /<details[\s\S]+title=\{previewDescription\}/);
+  assert.match(appSource, /<Tooltip content=\{previewDescription\}>/);
   assert.match(viteEnvSource, /VITE_SLOCKDEV_PREVIEW_DESCRIPTION\?: string/);
   assert.match(viteEnvSource, /VITE_SLOCKDEV_EMAIL\?: string/);
 });
@@ -94,8 +93,11 @@ test("slockdev wires Report Issue to the local trace worker", () => {
   assert.match(slockdevSource, /TRACE_WEB_CORS_ORIGIN/);
   assert.match(slockdevSource, /smoke-feedback-report\.ts/);
   assert.match(slockdevSource, /script feedback-report/);
-  assert.match(traceWorkerPackage, /--var TRACE_WEB_CORS_ORIGIN/);
-  assert.match(traceWorkerPackage, /--var DEPLOYMENT_ENV/);
+  // Local dev runs the production Node entry against the local RustFS bucket.
+  assert.match(traceWorkerPackage, /"dev": "node [^"]*src\/node\.ts"/);
+  assert.match(slockdevSource, /envAssign\("TRACE_WEB_CORS_ORIGIN"/);
+  assert.match(slockdevSource, /envAssign\("DEPLOYMENT_ENV"/);
+  assert.match(slockdevSource, /envAssign\("R2_ENDPOINT", e\.S3_ENDPOINT\)/);
   assert.match(agentDetailSource, /VITE_FEEDBACK_EXPORT_URL/);
   assert.match(agentDetailSource, /id: "agent\.reportIssue\.title"/);
   assert.match(reportDialogSource, /id: "agent\.reportIssue\.uploaded"/);
@@ -106,7 +108,8 @@ test("slockdev wires Report Issue to the local trace worker", () => {
   const copyReportReference = /const handleCopyReportReference[\s\S]*?setReportRefCopied\(true\);\n  \};/.exec(reportDialogSource)?.[0] ?? "";
   assert.match(submittedReportType, /reportId/);
   assert.match(submittedReportType, /issueDescription/);
-  assert.match(copyReportReference, /artifactId/);
+  assert.match(submittedReportType, /ticketId/);
+  assert.match(copyReportReference, /serverId/);
   assert.match(copyReportReference, /issueDescription/);
   assert.doesNotMatch(submittedReportType, /expiresAt/);
   assert.doesNotMatch(copyReportReference, /expiresAt/);

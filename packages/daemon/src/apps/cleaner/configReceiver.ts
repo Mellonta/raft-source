@@ -3,22 +3,22 @@ import {
   appConfigTraceAttrs,
   appSnapshotTraceAttrs,
   type AppRuntimeTraceAttrs,
-} from "@botiverse/raft-shared/src/appRuntimeTrace.js";
+} from "@botiverse/raft-shared/src/appRuntimeTrace";
 import {
   normalizeAppConfigWireSnapshot,
   type AppConfigWireSnapshot,
-} from "@botiverse/raft-shared/src/appConfigTransport.js";
+} from "@botiverse/raft-shared/src/appConfigTransport";
 import {
   CLEANER_APP_ID,
   CLEANER_CONFIG_BOUNDS,
   CLEANER_CONFIG_KEYS,
-} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol.js";
+} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol";
 
 import {
   type CleanerConfigApplyResult,
   type CleanerConfigEnvelope,
   SystemCleanerRuntime,
-} from "./runtime.js";
+} from "./runtime";
 
 type AppConfigMessage = Extract<
   ServerToMachineMessage,

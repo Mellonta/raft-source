@@ -2,18 +2,17 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   AGENT_API_ATTACHMENT_DOWNLOAD_UNAVAILABLE_MESSAGE,
   AGENT_API_ATTACHMENT_DOWNLOAD_UNAVAILABLE_NEXT_ACTION,
 } from "@botiverse/raft-shared";
-import type { ApiResponse, BinaryResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import type { CliIo } from "../../core/io.js";
-import { attachmentViewCommand } from "./view.js";
+import type { ApiResponse, BinaryResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import { CliError } from "../../core/errors";
+import type { CliIo } from "../../core/io";
+import { attachmentViewCommand } from "./view";
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];

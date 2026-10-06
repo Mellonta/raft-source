@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   assertSurfaceProducerFactLineage,
   stripSurfaceProducerFactLineage,
 } from "@botiverse/raft-shared";
-import { buildFeedbackExportBundle } from "../src/utils/feedbackExportBundle.js";
+import { buildFeedbackExportBundle, snapshotAgentMachine } from "../src/utils/feedbackExportBundle";
 
 test("feedback export v2 distinguishes ephemeral activity buffer from durable trajectory history", () => {
   const bundle = buildFeedbackExportBundle({
@@ -35,6 +34,9 @@ test("feedback export v2 distinguishes ephemeral activity buffer from durable tr
       machineId: "m-1",
       machineName: "Mac mini",
       machineStatus: "online",
+      machineOs: "darwin",
+      machineComputerVersion: "1.0.40",
+      machineLastHeartbeat: "2026-04-16T13:51:30.000Z",
     },
     recentMessages: [{ id: "msg-1" }],
     ephemeralActivityBuffer: [{ activity: "working" }],
@@ -131,6 +133,9 @@ test("feedback export v2 keeps omitted log sections explicit", () => {
       machineId: null,
       machineName: null,
       machineStatus: null,
+      machineOs: null,
+      machineComputerVersion: null,
+      machineLastHeartbeat: null,
     },
     recentMessages: null,
     ephemeralActivityBuffer: null,
@@ -158,4 +163,47 @@ test("feedback export v2 keeps omitted log sections explicit", () => {
   assert.equal(bundle.logs.durableTrajectoryLog.entries, null);
   assert.equal(bundle.activityLog, null);
   assert.equal(bundle.trajectoryLog, null);
+});
+
+test("agent machine snapshot carries the machine's own OS, versions and heartbeat", () => {
+  assert.deepEqual(snapshotAgentMachine({
+    name: "Mac mini",
+    status: "online",
+    os: "darwin",
+    computerVersion: "1.0.40",
+    daemonVersion: "1.0.41",
+    lastHeartbeat: "2026-04-16T13:51:30.000Z",
+  }), {
+    machineName: "Mac mini",
+    machineStatus: "online",
+    machineOs: "darwin",
+    machineComputerVersion: "1.0.40",
+    machineLastHeartbeat: "2026-04-16T13:51:30.000Z",
+    daemonVersion: "1.0.41",
+  });
+});
+
+test("agent machine snapshot keeps unknown facts null", () => {
+  const unknown = {
+    machineName: null,
+    machineStatus: null,
+    machineOs: null,
+    machineComputerVersion: null,
+    machineLastHeartbeat: null,
+    daemonVersion: null,
+  };
+  assert.deepEqual(snapshotAgentMachine(null), unknown);
+  assert.deepEqual(snapshotAgentMachine(undefined), unknown);
+  assert.deepEqual(snapshotAgentMachine({
+    name: "raw daemon",
+    status: "offline",
+    os: "  ",
+    daemonVersion: "1.0.16",
+    lastHeartbeat: null,
+  }), {
+    ...unknown,
+    machineName: "raw daemon",
+    machineStatus: "offline",
+    daemonVersion: "1.0.16",
+  });
 });

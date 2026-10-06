@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 
-import api from "../src/api/client.js";
+import api from "../src/api/client";
 import {
   describeMessageReactionCommand,
   executeMessageReactionCommand,
-} from "../src/store/reactionCommandFacade.js";
+} from "../src/store/reactionCommandFacade";
 
-test("typed reaction facade maps set-interaction to the existing HTTP transport", async (t) => {
+test("typed reaction facade maps set-interaction to the existing HTTP transport", async () => {
   const command = describeMessageReactionCommand({
     serverId: "server-a",
     messageId: "message-a",
@@ -22,9 +21,9 @@ test("typed reaction facade maps set-interaction to the existing HTTP transport"
   });
 
   const response = { id: "message-a", channelId: "channel-a", reactions: [] };
-  const request = t.mock.method(api, "request", async () => ({ data: response }));
+  const request = vi.spyOn(api, "request").mockImplementation(async () => ({ data: response }));
   assert.equal(await executeMessageReactionCommand(command), response);
-  assert.deepEqual(request.mock.calls[0]?.arguments[0], {
+  assert.deepEqual(request.mock.calls[0][0], {
     method: "delete",
     url: "/messages/message-a/reactions",
     data: { emoji: "👍" },

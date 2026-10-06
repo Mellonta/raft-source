@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   TRACE_EVENT_ROW_V2_LEGACY_SCHEMA_FINGERPRINT,
   TRACE_EVENT_ROW_V2_SCHEMA_FINGERPRINT,
@@ -11,7 +10,7 @@ import {
   type EventBufferExportResult,
   type EventBufferExporter,
   type EventBufferOptions,
-} from "./core.js";
+} from "./core";
 
 const ENVELOPE = {
   table: TRACE_EVENT_ROW_V2_TABLE,

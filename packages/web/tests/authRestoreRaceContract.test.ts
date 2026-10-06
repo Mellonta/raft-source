@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { shouldLogoutAfterPostRefreshLoadUserFailure } from "../src/utils/authSessionPolicy.js";
-import { resolveSocketRefreshOutcome } from "../src/utils/socketSessionPolicy.js";
+import { shouldLogoutAfterPostRefreshLoadUserFailure } from "../src/utils/authSessionPolicy";
+import { resolveSocketRefreshOutcome } from "../src/utils/socketSessionPolicy";
 
 type Event = "post-refresh-me-401" | "socket-connect-error-auth-failed";
 

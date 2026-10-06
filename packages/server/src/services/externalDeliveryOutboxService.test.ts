@@ -1,17 +1,16 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
-import { afterEach, beforeEach } from "vitest";
 import { eq } from "drizzle-orm";
 import {
   __resetFailpointsForTests,
   __setFailpointsForTests,
   InMemoryFailpointRegistry,
 } from "@botiverse/raft-shared";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { getOrCreateThread } from "./channelService.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { getOrCreateThread } from "./channelService";
 import {
   agents,
   attachmentObjects,
@@ -19,7 +18,6 @@ import {
   channelAgents,
   channelHumans,
   channels,
-  externalAuthorPolicies,
   externalDeliveryPartitions,
   externalAttachmentTransferJobs,
   externalOutboundDeliveries,
@@ -31,11 +29,11 @@ import {
   serverMembers,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   __resetMessageServiceDepsForTests, broadcastAndDeliver,
   drainSenderReadReceiptsForTests
-} from "./messageService.js";
+} from "./messageService";
 import {
   __resetOrdinaryMessageOutboundAuthorizationResolverForTests,
   __setOrdinaryMessageOutboundAuthorizationResolverForTests,
@@ -53,7 +51,7 @@ import {
   type SlackBridgeOutboundPipelineStage,
   type ProviderNeutralOutboundRuntimeFact,
   type SlackBridgeRenderSnapshot,
-} from "./externalDeliveryOutboxService.js";
+} from "./externalDeliveryOutboxService";
 
 
 const ELIGIBLE_ORDINARY_DECISION = {
@@ -62,6 +60,7 @@ const ELIGIBLE_ORDINARY_DECISION = {
 } as const;
 
 const noopOrchestrator = { deliverMessage: async () => undefined } as any;
+const ORIGINAL_CDN_BASE_URL = process.env.CDN_BASE_URL;
 
 function createIo() {
   return {
@@ -75,6 +74,7 @@ function createIo() {
 }
 
 beforeEach(async () => {
+  process.env.CDN_BASE_URL = "https://cdn.raft.test";
   await openTestDatabase("pglite://");
   __setSlackBridgeReconciliationMarkerMinterForTests(({ deliveryId }) =>
     mintSlackBridgeReconciliationMarker("test-only-separate-reconciliation-key", deliveryId)
@@ -87,6 +87,8 @@ afterEach(async () => {
   __resetMessageServiceDepsForTests();
   await drainSenderReadReceiptsForTests();
   await closeTestDatabase();
+  if (ORIGINAL_CDN_BASE_URL === undefined) delete process.env.CDN_BASE_URL;
+  else process.env.CDN_BASE_URL = ORIGINAL_CDN_BASE_URL;
 });
 
 async function seedOutboundFixture() {
@@ -132,36 +134,6 @@ async function seedOutboundFixture() {
     executionMode: "byoc",
   }).returning();
   await db.insert(channelAgents).values({ channelId: channel.id, agentId: agent.id });
-  await db.insert(externalAuthorPolicies).values([
-    {
-      serverId: server.id,
-      provider: "slack",
-      appRegistrationId: "registration-outbox-1",
-      installId: "install-outbox-1",
-      bindingId: `binding-${channel.id}`,
-      bindingEpoch: 7,
-      authorType: "user",
-      authorId: owner.id,
-      displayName: owner.displayName ?? owner.name,
-      fallbackKind: "human",
-      consentRevision: 5,
-      state: "granted",
-    },
-    {
-      serverId: server.id,
-      provider: "slack",
-      appRegistrationId: "registration-outbox-1",
-      installId: "install-outbox-1",
-      bindingId: `binding-${channel.id}`,
-      bindingEpoch: 7,
-      authorType: "agent",
-      authorId: agent.id,
-      displayName: agent.name,
-      fallbackKind: "agent",
-      consentRevision: 5,
-      state: "granted",
-    },
-  ]);
   return { owner, target, server, channel, agent };
 }
 
@@ -184,7 +156,6 @@ function activeRuntime(
       bindingEpoch: 7,
       memberRevision: 3,
       contextRevision: 4,
-      consentRevision: 5,
       privacyClass: "public",
       raftChannelId: fixture.channel.id,
       providerAuthorityId: "workspace-outbox-1",
@@ -287,6 +258,9 @@ test("reconciliation marker has a purpose-bound known vector and closed format",
 
 test("source message, FIFO position, and frozen outbox row roll back together", async () => {
   const fixture = await seedOutboundFixture();
+  const avatarDigest = "b".repeat(32);
+  const avatarUrl = `https://cdn.raft.test/avatars/users/${avatarDigest}.webp`;
+  await getDb().update(users).set({ avatarUrl }).where(eq(users.id, fixture.owner.id));
 
   await assert.rejects(
     getDb().transaction(async (executor) => {
@@ -327,13 +301,82 @@ test("source message, FIFO position, and frozen outbox row roll back together", 
     snapshot.sourcePermalink,
     `https://app.slock.ai/s/${fixture.server.slug}/channel/${fixture.channel.id}?msg=${committed.message.id}`,
   );
-  assert.equal(snapshot.authorPolicy.serverId, fixture.server.id);
-  assert.equal(snapshot.authorPolicy.displayName, fixture.owner.displayName);
-  assert.equal(snapshot.authorPolicy.consentRevision, 5);
+  assert.equal(snapshot.authorPresentation.displayName, fixture.owner.displayName);
+  assert.deepEqual(snapshot.authorPresentation.avatar, {
+    publicUrl: avatarUrl,
+    contentDigest: avatarDigest,
+  });
   assert.equal(snapshot.sanitizedText, "commit me once\n\n[Attachment not synced]");
   assert.equal(JSON.stringify(snapshot).includes("private-name.png"), false);
   assert.equal(JSON.stringify(snapshot).includes("private/storage/key.png"), false);
   assert.deepEqual(snapshot.externalMentions, []);
+});
+
+test("Agent avatars freeze only owned immutable CDN artifacts", async () => {
+  const fixture = await seedOutboundFixture();
+  const avatarDigest = "c".repeat(32);
+  const avatarUrl = `https://cdn.raft.test/avatars/${fixture.server.id}/${avatarDigest}.webp`;
+  await getDb().update(agents).set({ avatarUrl }).where(eq(agents.id, fixture.agent.id));
+
+  const accepted = await getDb().transaction(async (executor) => {
+    const [message] = await executor.insert(messages).values({
+      channelId: fixture.channel.id,
+      senderType: "agent",
+      senderId: fixture.agent.id,
+      content: "agent avatar",
+      messageType: "chat",
+    }).returning();
+    return enqueueSlackBridgeOutboundDelivery({
+      executor,
+      message,
+      activeRuntime: activeRuntime(fixture),
+      canonicalConversationId: fixture.channel.id,
+      senderType: "agent",
+      senderId: fixture.agent.id,
+      authorName: fixture.agent.name,
+      sanitizedText: message.content,
+      mintReconciliationMarker: ({ deliveryId }) => (
+        mintSlackBridgeReconciliationMarker("test-only-separate-reconciliation-key", deliveryId)
+      ),
+    });
+  });
+  const snapshot = accepted.delivery.renderSnapshot as unknown as SlackBridgeRenderSnapshot;
+  assert.deepEqual(snapshot.authorPresentation.avatar, {
+    publicUrl: avatarUrl,
+    contentDigest: avatarDigest,
+  });
+
+  await getDb().update(agents).set({
+    avatarUrl: `https://provider.example.test/avatars/${fixture.server.id}/${avatarDigest}.webp`,
+  })
+    .where(eq(agents.id, fixture.agent.id));
+  const fallback = await getDb().transaction(async (executor) => {
+    const [message] = await executor.insert(messages).values({
+      channelId: fixture.channel.id,
+      senderType: "agent",
+      senderId: fixture.agent.id,
+      content: "provider hotlink is not authority",
+      messageType: "chat",
+    }).returning();
+    return enqueueSlackBridgeOutboundDelivery({
+      executor,
+      message,
+      activeRuntime: activeRuntime(fixture),
+      canonicalConversationId: fixture.channel.id,
+      senderType: "agent",
+      senderId: fixture.agent.id,
+      authorName: fixture.agent.name,
+      sanitizedText: message.content,
+      mintReconciliationMarker: ({ deliveryId }) => (
+        mintSlackBridgeReconciliationMarker("test-only-separate-reconciliation-key", deliveryId)
+      ),
+    });
+  });
+  assert.equal(
+    (fallback.delivery.renderSnapshot as unknown as SlackBridgeRenderSnapshot)
+      .authorPresentation.avatar,
+    null,
+  );
 });
 
 test("attachment child fuse freezes immutable objects and creates one transfer job per file", async () => {
@@ -370,7 +413,7 @@ test("attachment child fuse freezes immutable objects and creates one transfer j
     return { message, object, attachment, result };
   });
   const snapshot = committed.result.delivery.renderSnapshot as unknown as SlackBridgeRenderSnapshot;
-  assert.equal(snapshot.schema, "slack-bridge-render-snapshot.v2");
+  assert.equal(snapshot.schema, "slack-bridge-render-snapshot.v4");
   assert.equal(snapshot.sanitizedText, "send the file");
   assert.deepEqual(snapshot.attachments, [{
     sourceAttachmentId: committed.attachment.id,
@@ -410,7 +453,6 @@ test("Joint host top-level render authority links the local projection while fre
   }));
   const snapshot = result.delivery.renderSnapshot as unknown as SlackBridgeRenderSnapshot;
   assert.equal(snapshot.canonicalConversationId, fixture.canonicalChannel.id);
-  assert.equal(snapshot.authorPolicy.serverId, fixture.server.id);
   assert.equal(
     snapshot.sourcePermalink,
     `https://app.slock.ai/s/${fixture.server.slug}/channel/${fixture.channel.id}?msg=${message.id}`,
@@ -712,8 +754,6 @@ test("message transaction rolls source, mention, inbox, partition, and outbox ba
 test("outbound admission exposes only a privacy-safe non-production stage", async () => {
   const fixture = await seedOutboundFixture();
   installAuthorizationResolver(fixture);
-  await getDb().update(externalAuthorPolicies).set({ state: "revoked" })
-    .where(eq(externalAuthorPolicies.authorId, fixture.owner.id));
 
   let failure: unknown;
   try {
@@ -721,7 +761,7 @@ test("outbound admission exposes only a privacy-safe non-production stage", asyn
       channelId: fixture.channel.id,
       senderType: "user",
       senderId: fixture.owner.id,
-      senderName: fixture.owner.displayName ?? fixture.owner.name,
+      senderName: "Drifted display",
       content: "diagnostic stage only",
     });
   } catch (error) {
@@ -732,7 +772,7 @@ test("outbound admission exposes only a privacy-safe non-production stage", asyn
   assert.ok(failure.cause instanceof Error);
   assert.equal(
     failure.cause.message,
-    "Slack Bridge author consent or frozen display name is unavailable",
+    "Slack Bridge current author display does not match the source message",
   );
   assert.deepEqual(projectSlackBridgeOutboundAdmissionFailure(failure, "test"), {
     code: "slack_bridge_outbound_admission_failed",

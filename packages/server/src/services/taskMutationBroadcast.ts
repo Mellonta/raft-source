@@ -1,11 +1,11 @@
 import type { Server as SocketServer } from "socket.io";
-import * as taskService from "./taskService.js";
-import { emitTaskUpdated } from "./taskRealtimeEvents.js";
-import type { MessageRealtimeTarget } from "./messageRealtimeEvents.js";
+import * as taskService from "./taskService";
+import { emitTaskUpdated } from "./taskRealtimeEvents";
+import type { MessageRealtimeTarget } from "./messageRealtimeEvents";
 import {
   getTaskRealtimeSurfaceTargets,
   type TaskChannelSurface,
-} from "./taskChannelSurface.js";
+} from "./taskChannelSurface";
 
 /**
  * The identity facts a route needs after a task mutation, so no caller reaches

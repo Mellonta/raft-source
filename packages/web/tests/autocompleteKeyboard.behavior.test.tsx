@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import type { KeyboardEvent } from "react";

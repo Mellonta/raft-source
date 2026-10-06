@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
-import { publishHandsRelease, versionCodeFromVersion } from "./publish-hands-release.mjs";
+import { createHandsClient, publishHandsRelease, versionCodeFromVersion } from "./publish-hands-release.mjs";
+import { completeUpload, uploadAsset } from "./hands-hosted-transport.mjs";
 
 const targets = [
   "darwin-arm64",
@@ -22,7 +22,7 @@ async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), "computer-hands-publish-"));
   const manifest = {
     name: "raft-computer-app",
-    version: "1.2.3-staging.sha.abcdef123456",
+    version: "1.2.3-staging.20261003085512.sha.abcdef123456",
     nodeVersion: "24.15.0",
     targets: {},
   };
@@ -149,9 +149,9 @@ function options(fx, api) {
 }
 
 test("staging version codes are deterministic per exact prerelease and distinct across commits", () => {
-  const first = versionCodeFromVersion("1.0.17-staging.sha.aaaaaaaaaaaa");
-  const replay = versionCodeFromVersion("1.0.17-staging.sha.aaaaaaaaaaaa");
-  const next = versionCodeFromVersion("1.0.17-staging.sha.bbbbbbbbbbbb");
+  const first = versionCodeFromVersion("1.0.17-staging.20261003085512.sha.aaaaaaaaaaaa");
+  const replay = versionCodeFromVersion("1.0.17-staging.20261003085512.sha.aaaaaaaaaaaa");
+  const next = versionCodeFromVersion("1.0.17-staging.20261003090000.sha.bbbbbbbbbbbb");
   assert.equal(first, replay);
   assert.notEqual(first, next);
   assert.equal(Number.isSafeInteger(first), true);
@@ -502,4 +502,109 @@ test("register-or-exact-reuse rejects duplicate existing builds before any Hands
   } finally {
     await rm(fx.dir, { recursive: true, force: true });
   }
+});
+
+test("Hands API transport failures name the request and cause codes, never the bearer", async () => {
+  const api = createHandsClient({
+    apiBase: "https://hands.build",
+    token: "bearer-must-not-leak",
+    fetchImpl: async () => {
+      const cause = Object.assign(new Error("other side closed https://x/?sig=must-not-leak"), { code: "UND_ERR_SOCKET" });
+      throw new TypeError("fetch failed", { cause });
+    },
+  });
+  await assert.rejects(api("POST", "/api/apps/a1/builds/b1/assets/uploads", {}), (error) => {
+    assert.equal(error.message, "Hands POST /api/apps/a1/builds/b1/assets/uploads transport failed (TypeError <- UND_ERR_SOCKET)");
+    return true;
+  });
+});
+
+test("direct upload transport failures name the asset and host/path, never the signed query", async () => {
+  const workDir = await mkdtemp(join(tmpdir(), "hands-upload-test-"));
+  try {
+    const path = join(workDir, "raft-computer-linux-x64");
+    await writeFile(path, "bytes");
+    const api = async () => ({
+      state: "pending",
+      asset_id: "as1",
+      upload: { method: "PUT", url: "https://r2.example.com/bucket/key?X-Amz-Signature=must-not-leak", headers: {} },
+      complete_url: "/api/apps/a1/builds/b1/assets/as1/upload/complete",
+    });
+    const fetchImpl = async () => {
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) });
+    };
+    await assert.rejects(
+      uploadAsset({
+        api, appId: "a1", buildId: "b1", fetchImpl,
+        asset: { artifact_kind: "binary", platform: "linux", arch: "x64", filetype: "bin", sha256: "0".repeat(64), size_bytes: 5, file: "raft-computer-linux-x64", path },
+      }),
+      (error) => {
+        assert.equal(error.message, "Hands direct upload transport failed: raft-computer-linux-x64 -> r2.example.com/bucket/key (TypeError <- ECONNRESET)");
+        assert.doesNotMatch(error.message, /must-not-leak|Signature/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
+});
+
+test("a timed-out Hands API request names TimeoutError, not the numeric DOMException code", async () => {
+  const api = createHandsClient({
+    apiBase: "https://hands.build",
+    token: "bearer-must-not-leak",
+    fetchImpl: async () => { throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); },
+  });
+  await assert.rejects(api("POST", "/api/apps/a1/builds/b1/assets/as1/upload/complete", {}), (error) => {
+    assert.equal(error.message, "Hands POST /api/apps/a1/builds/b1/assets/as1/upload/complete transport failed (TimeoutError)");
+    return true;
+  });
+});
+
+function fakeClock(start = 1_000_000) {
+  let t = start;
+  const slept = [];
+  return { now: () => t, sleep: async (ms) => { slept.push(ms); t += ms; }, slept };
+}
+const busy = (payload = {}) => Object.assign(new Error("Hands POST complete failed with HTTP 409"), { status: 409, payload: { code: "ASSET_UPLOAD_BUSY", ...payload }, retryAfter: null });
+const verifyingAsset = { artifact_kind: "binary", platform: "linux", arch: "arm64", filetype: "gz", sha256: "0".repeat(64), size_bytes: 5, file: "raft-computer-linux-arm64.gz", path: "/nonexistent" };
+
+test("a verifying asset (old Hands: no lease fields) waits and retries completion, never re-uploads", async () => {
+  const clock = fakeClock();
+  const calls = [];
+  let completes = 0;
+  const api = async (method, path) => {
+    calls.push(`${method} ${path}`);
+    if (path.endsWith("/assets/uploads")) return { state: "verifying", asset_id: "as1", upload: null, complete_url: "/api/apps/a1/builds/b1/assets/as1/upload/complete" };
+    if (path.endsWith("/upload/complete")) { completes += 1; if (completes < 3) throw busy(); return { state: "ready" }; }
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  await uploadAsset({ api, appId: "a1", buildId: "b1", asset: verifyingAsset, fetchImpl: async () => { throw new Error("must not PUT"); }, recovery: { now: clock.now, sleep: clock.sleep } });
+  assert.equal(completes, 3);
+  assert.ok(clock.slept.length >= 3 && clock.slept.every((ms) => ms >= 1_000), String(clock.slept));
+  assert.ok(calls.every((c) => !c.includes(" PUT ")));
+});
+
+test("a completion that times out client-side is settled by reading state, not by re-uploading", async () => {
+  const clock = fakeClock();
+  const calls = [];
+  const api = async (method, path) => {
+    calls.push(`${method} ${path}`);
+    if (path.endsWith("/upload/complete")) throw Object.assign(new Error("Hands POST … transport failed (TimeoutError)"), { transport: true });
+    if (method === "GET" && path.endsWith("/assets/as1/upload")) return { state: "ready" };
+    throw new Error(`unexpected ${method} ${path}`);
+  };
+  await completeUpload({ api, appId: "a1", buildId: "b1", assetId: "as1", path: "/api/apps/a1/builds/b1/assets/as1/upload/complete", now: clock.now, sleep: clock.sleep });
+  assert.deepEqual(calls, ["POST /api/apps/a1/builds/b1/assets/as1/upload/complete", "GET /api/apps/a1/builds/b1/assets/as1/upload"]);
+});
+
+test("lease and upload-expiry fields (new Hands) drive the wait and bound the total", async () => {
+  const clock = fakeClock(1_000_000);
+  const lease = 1_000_000 + 90_000;
+  const api = async () => { throw busy({ verifier_lease_expires_at: lease, upload_expires_at: 1_000_000 + 100_000 }); };
+  await assert.rejects(
+    completeUpload({ api, appId: "a1", buildId: "b1", assetId: "as1", path: "/x/upload/complete", now: clock.now, sleep: clock.sleep }),
+    /did not finish before its deadline \(last: ASSET_UPLOAD_BUSY\)/,
+  );
+  assert.equal(clock.slept[0], 91_000);
 });

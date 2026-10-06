@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { Readable } from "node:stream";
-import test from "node:test";
 
 import {
   actionCardActionSchema,
@@ -9,7 +8,7 @@ import {
   validateActionCardAction,
 } from "@botiverse/raft-shared";
 
-import { resolveActionInput, PrepareActionInputError } from "./prepare.js";
+import { resolveActionInput, PrepareActionInputError } from "./prepare";
 
 test("resolveActionInput parses well-formed channel:create JSON", async () => {
   const input = Readable.from([

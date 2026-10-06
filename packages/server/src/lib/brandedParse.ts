@@ -1,6 +1,6 @@
 import type { Response } from "express";
 import type { Brand } from "@botiverse/raft-shared";
-import { UUID_RE } from "./messageId.js";
+import { UUID_RE } from "./messageId";
 
 /**
  * Parse a branded-UUID id out of an untyped request body.

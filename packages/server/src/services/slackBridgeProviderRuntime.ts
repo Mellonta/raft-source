@@ -8,30 +8,30 @@ import {
 } from "@botiverse/raft-shared";
 import { and, eq, gt, isNull, lte, or } from "drizzle-orm";
 
-import { getDb, type Database, type DatabaseTransaction } from "../db/index.js";
+import { getDb, type Database, type DatabaseTransaction } from "../db/index";
 import {
   externalAppCredentials,
   externalAppInstalls,
   externalChannelBindings,
   externalMessageLinks,
-} from "../db/schema.js";
-import type { SlackAudienceCredentialResolver } from "./slackAudienceRefreshService.js";
-import type { SlackBridgeCredentialCipher } from "./slackBridgeEnvSecrets.js";
-import type { ExternalAttachmentAuthority } from "./externalAttachmentProviderAdapter.js";
+} from "../db/schema";
+import type { SlackAudienceCredentialResolver } from "./slackAudienceRefreshService";
+import type { SlackBridgeCredentialCipher } from "./slackBridgeEnvSecrets";
+import type { ExternalAttachmentAuthority } from "./externalAttachmentProviderAdapter";
 import {
   SlackInboundAttachmentError,
   type SlackInboundAttachmentTransport,
-} from "./slackInboundAttachmentAdapter.js";
+} from "./slackInboundAttachmentAdapter";
 import {
   SlackOutboundAttachmentError,
   type SlackOutboundAttachmentTransport,
-} from "./slackOutboundAttachmentAdapter.js";
+} from "./slackOutboundAttachmentAdapter";
 import type {
   SlackBridgeProvisioningProvider,
   SlackBridgeProvisioningProviderAuthority,
   SlackBridgeProvisioningProviderResult,
   SlackBridgeProvisioningProviderUser,
-} from "./slackBridgeProvisioningControlPlane.js";
+} from "./slackBridgeProvisioningControlPlane";
 import {
   SLACK_BRIDGE_CREDENTIAL_LEASE_SCHEMA,
   type SlackBridgeCredentialHandle,
@@ -41,7 +41,11 @@ import {
   type SlackWebApiRequest,
   type SlackWebApiTransport,
   type SlackWebApiTransportResult,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
+import {
+  findAnyCurrentExternalInstallServerGrantAuthority,
+  resolveExternalInstallServerGrantAuthority,
+} from "./externalInstallServerGrantAuthority";
 
 const DEFAULT_CREDENTIAL_LEASE_TTL_MS = 60_000;
 const DEFAULT_FETCH_TIMEOUT_MS = 15_000;
@@ -106,6 +110,10 @@ export interface SlackBridgeAudienceProviderRuntime {
 
 export interface SlackBridgeProviderRuntime extends SlackBridgeAudienceProviderRuntime {
   provisioningProvider: SlackBridgeProvisioningProvider;
+  resolveUsers(
+    authority: SlackBridgeProvisioningProviderAuthority,
+    providerUserIds: readonly string[],
+  ): Promise<SlackBridgeProvisioningProviderResult<{ users: readonly SlackBridgeProvisioningProviderUser[] }>>;
 }
 
 export interface SlackBridgeProviderRuntimeDependencies {
@@ -141,6 +149,31 @@ export function slackProfileAvatarLocator(profile: Record<string, unknown>): str
   )) return null;
   // Missing/partial profile data is unknown, never an instruction to clear.
   return locator;
+}
+
+function slackProvisioningUser(value: unknown, expectedProviderUserId: string): SlackBridgeProvisioningProviderUser | null {
+  if (!record(value) || value.id !== expectedProviderUserId) return null;
+  const profile = record(value.profile) ? value.profile : {};
+  const displayName = nonEmpty(profile.display_name, 512)
+    ? profile.display_name
+    : nonEmpty(profile.real_name, 512)
+      ? profile.real_name
+      : nonEmpty(value.name, 512)
+        ? value.name
+        : expectedProviderUserId;
+  const handle = nonEmpty(value.name, 512) ? value.name : null;
+  const actorKind = value.is_bot === true || value.is_app_user === true
+    ? "remote" as const
+    : value.is_restricted === true || value.is_ultra_restricted === true
+      ? "guest" as const
+      : "human" as const;
+  return {
+    id: expectedProviderUserId,
+    displayName,
+    handle,
+    actorKind,
+    avatarLocator: slackProfileAvatarLocator(profile),
+  };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -282,6 +315,7 @@ export function createSlackBridgeProviderRuntime(
     const fields = {
       serverId: externalAppInstalls.serverId,
       installId: externalAppInstalls.id,
+      registrationId: externalAppInstalls.registrationId,
       installState: externalAppInstalls.state,
       providerAppId: externalAppInstalls.providerAppId,
       providerTeamId: externalAppInstalls.providerTeamId,
@@ -309,7 +343,12 @@ export function createSlackBridgeProviderRuntime(
       or(isNull(externalAppCredentials.leaseExpiresAt), lte(externalAppCredentials.leaseExpiresAt, requestedAt)),
     );
     if (request.binding) {
-      return tx.select(fields).from(externalAppCredentials)
+      return tx.select({
+        ...fields,
+        bindingServerId: externalChannelBindings.serverId,
+        bindingRegistrationId: externalChannelBindings.registrationId,
+        bindingGrantEpoch: externalChannelBindings.grantEpoch,
+      }).from(externalAppCredentials)
         .innerJoin(externalAppInstalls, eq(externalAppInstalls.id, externalAppCredentials.installId))
         .innerJoin(externalChannelBindings, and(
           eq(externalChannelBindings.id, request.binding.bindingId),
@@ -358,6 +397,31 @@ export function createSlackBridgeProviderRuntime(
         || !nonEmpty(current.providerTeamId)
         || !nonEmpty(current.botUserId)
       ) return null;
+      if (request.binding) {
+        if (
+          !("bindingServerId" in current)
+          || typeof current.bindingServerId !== "string"
+          || !("bindingRegistrationId" in current)
+          || typeof current.bindingRegistrationId !== "string"
+          || !("bindingGrantEpoch" in current)
+          || typeof current.bindingGrantEpoch !== "number"
+          || current.bindingRegistrationId !== current.registrationId
+        ) return null;
+        const serverAuthority = await resolveExternalInstallServerGrantAuthority(tx, {
+          installId: current.installId,
+          serverId: current.bindingServerId,
+          registrationId: current.bindingRegistrationId,
+        }, { lock: true });
+        if (!serverAuthority.current || current.bindingGrantEpoch !== serverAuthority.grant.grantEpoch) {
+          return null;
+        }
+      } else {
+        const serverAuthority = await findAnyCurrentExternalInstallServerGrantAuthority(tx, {
+          installId: current.installId,
+          registrationId: current.registrationId,
+        }, { lock: true });
+        if (!serverAuthority) return null;
+      }
       const claimed = await tx.update(externalAppCredentials).set({
         leaseOwner: leaseId,
         leaseExpiresAt,
@@ -1150,6 +1214,26 @@ export function createSlackBridgeProviderRuntime(
     };
   };
 
+  const resolveUsers: SlackBridgeProviderRuntime["resolveUsers"] = async (authority, providerUserIds) => {
+    if (
+      stopped
+      || !validDate(authority.now)
+      || providerUserIds.length === 0
+      || providerUserIds.length > 50
+      || new Set(providerUserIds).size !== providerUserIds.length
+      || providerUserIds.some((providerUserId) => !nonEmpty(providerUserId, 160))
+    ) return { kind: "unverified" };
+    const users: SlackBridgeProvisioningProviderUser[] = [];
+    for (const providerUserId of providerUserIds) {
+      const response = await provisioningCall(authority, "users.info", { user: providerUserId });
+      if (response.kind !== "fact") return response;
+      const user = slackProvisioningUser(response.fact.user, providerUserId);
+      if (!user) return { kind: "failed" };
+      users.push(user);
+    }
+    return { kind: "fact", fact: { users } };
+  };
+
   const provisioningProvider: SlackBridgeProvisioningProvider = {
     async readInstallGrant(authority) {
       if (stopped || !validDate(authority.now)) return { kind: "unverified" };
@@ -1297,25 +1381,9 @@ export function createSlackBridgeProviderRuntime(
       for (const providerUserId of observableMemberIds) {
         const response = await provisioningCall(authority, "users.info", { user: providerUserId });
         if (response.kind !== "fact") return response;
-        if (!record(response.fact.user) || response.fact.user.id !== providerUserId) {
-          return { kind: "failed" };
-        }
-        const profile = record(response.fact.user.profile) ? response.fact.user.profile : {};
-        const displayName = nonEmpty(profile.display_name, 512)
-          ? profile.display_name
-          : nonEmpty(profile.real_name, 512)
-            ? profile.real_name
-            : nonEmpty(response.fact.user.name, 512)
-              ? response.fact.user.name
-              : providerUserId;
-        const handle = nonEmpty(response.fact.user.name, 512) ? response.fact.user.name : null;
-        const actorKind = response.fact.user.is_bot === true || response.fact.user.is_app_user === true
-          ? "remote" as const
-          : response.fact.user.is_restricted === true || response.fact.user.is_ultra_restricted === true
-            ? "guest" as const
-            : "human" as const;
-        const avatarLocator = slackProfileAvatarLocator(profile);
-        users.push({ id: providerUserId, displayName, handle, actorKind, avatarLocator });
+        const user = slackProvisioningUser(response.fact.user, providerUserId);
+        if (!user) return { kind: "failed" };
+        users.push(user);
       }
       return {
         kind: "fact",
@@ -1334,6 +1402,7 @@ export function createSlackBridgeProviderRuntime(
     createOutboundAttachmentTransport,
     quarantineSink,
     releaseCredential,
+    resolveUsers,
     provisioningProvider,
     async stop() {
       if (stopped) return;

@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
-import type { Database } from "../../db/index.js";
-import { channels, servers, users } from "../../db/schema.js";
-import { createServer, addMember } from "../../services/serverService.js";
-import { createChannel, addHuman } from "../../services/channelService.js";
-import { createMessage } from "../../services/messageService.js";
-import { fixturePasswordHash } from "./credentials.js";
-import { measureIntegrationPhase } from "./lifecycle.js";
+import type { Database } from "../../db/index";
+import { channels, servers, users } from "../../db/schema";
+import { createServer, addMember } from "../../services/serverService";
+import { createChannel, addHuman } from "../../services/channelService";
+import { createMessage } from "../../services/messageService";
+import { fixturePasswordHash } from "./credentials";
+import { measureIntegrationPhase } from "./lifecycle";
 
 type Human = typeof users.$inferSelect;
 type Server = typeof servers.$inferSelect;

@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { runNamedCase } from "./test/runNamedCase.js";
+import { runNamedCase } from "./test/runNamedCase";
 
-import { collectMachineFacts, type MachineFacts, type RunnerMachineFacts } from "./machineFacts.js";
-import { machineReadiness, type MachineReadinessReasonCode } from "./machineReadiness.js";
-import { serverRunnerPidReadFallback } from "./paths.js";
+import { collectMachineFacts, type MachineFacts, type RunnerMachineFacts } from "./machineFacts";
+import { machineReadiness, type MachineReadinessReasonCode } from "./machineReadiness";
+import { serverRunnerPidReadFallback } from "./paths";
 
 const SERVER_A = "11111111-1111-4111-8111-111111111111";
 const EXPECTED_VERSION = "1.0.13";

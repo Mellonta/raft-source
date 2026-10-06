@@ -1,3 +1,4 @@
+import { assertChannelWritableInTransaction } from "../services/channelConversionFenceService";
 // User-facing API for committing action cards.
 //
 // Mounted at /api/actions after requireAuth + requireServer.
@@ -12,14 +13,15 @@
 import { Router, type Router as RouterType } from "express";
 import type { Request, Response } from "express";
 import type { Server as SocketServer } from "socket.io";
-import * as actionCardsService from "../services/actionCardsService.js";
-import * as productEventsService from "../services/productEventsService.js";
+import * as actionCardsService from "../services/actionCardsService";
+import * as productEventsService from "../services/productEventsService";
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { actionCards, messages } from "../db/schema.js";
-import * as channelService from "../services/channelService.js";
-import type { AgentOrchestrator } from "../services/agentOrchestrator.js";
-import type { ActionCardAction } from "@botiverse/raft-shared";
+import { getDb } from "../db/index";
+import { actionCards, messages } from "../db/schema";
+import type { AgentOrchestrator } from "../services/agentOrchestrator";
+import { asServerId, type ActionCardAction } from "@botiverse/raft-shared";
+import { reconfirmActionCard } from "../services/actionCardConversionService";
+import { sendJsonServerError } from "./errorResponse";
 
 export const actionsRouter: RouterType = Router();
 
@@ -31,13 +33,17 @@ function getOrchestrator(req: Request): AgentOrchestrator | null {
   return (req.app.get("agentOrchestrator") ?? null) as AgentOrchestrator | null;
 }
 
-function handleError(res: Response, err: unknown): void {
+function handleError(req: Request, res: Response, err: unknown): void {
   if (err instanceof actionCardsService.ActionCardError) {
     res.status(err.status).json({ error: err.message, errorCode: err.code });
     return;
   }
-  console.error("[actions] unexpected error:", err);
-  res.status(500).json({ error: "Internal error" });
+  if (err && typeof err === "object" && "status" in err && "code" in err && "message" in err) {
+    const typed = err as { status: number; code: string; message: string };
+    res.status(typed.status).json({ error: typed.message, errorCode: typed.code });
+    return;
+  }
+  sendJsonServerError(req, res, { error: "Internal error", logPrefix: "[actions] unexpected error:", err });
 }
 
 actionsRouter.post("/migration-export", async (req, res) => {
@@ -51,7 +57,7 @@ actionsRouter.post("/migration-export", async (req, res) => {
 // POST /api/actions/:messageId/execute
 actionsRouter.post("/:messageId/execute", async (req, res) => {
   try {
-    const body = (req.body ?? {}) as { expectedState?: unknown };
+    const body = (req.body ?? {}) as { expectedState?: unknown; expectedConfirmationVersion?: unknown };
     const expectedState =
       body.expectedState === "prepared" || body.expectedState === "executed"
         ? body.expectedState
@@ -61,12 +67,13 @@ actionsRouter.post("/:messageId/execute", async (req, res) => {
       serverId: req.serverId!,
       userId: req.userId!,
       expectedState,
+      expectedConfirmationVersion: typeof body.expectedConfirmationVersion === "number" ? body.expectedConfirmationVersion : undefined,
       io: getIo(req),
       orchestrator: getOrchestrator(req),
     });
     res.json({ messageId: out.messageId, metadata: out.metadata });
   } catch (err) {
-    handleError(res, err);
+    handleError(req, res, err);
   }
 });
 
@@ -148,11 +155,13 @@ actionsRouter.post("/:messageId/event", async (req, res) => {
       res.status(400).json({ error: "Message is not an action card" });
       return;
     }
-    const allowed = await channelService.canUserAccessChannel(
-      row.channelId,
-      req.userId!,
-      req.serverId!,
-    );
+    // Joint carriers live in canonical storage; resolve access through the
+    // viewer's own projection like every other card read path.
+    const allowed = await actionCardsService.assertActionCardVisibleToUser({
+      messageId: req.params.messageId,
+      serverId: asServerId(req.serverId!),
+      userId: req.userId!,
+    }).then(() => true, () => false);
     if (!allowed) {
       res.status(403).json({ error: "Not allowed to emit events for this card" });
       return;
@@ -237,7 +246,7 @@ actionsRouter.post("/:messageId/event", async (req, res) => {
 
     res.status(204).end();
   } catch (err) {
-    handleError(res, err);
+    handleError(req, res, err);
   }
 });
 
@@ -261,11 +270,43 @@ actionsRouter.post("/:messageId/mark-executed", async (req, res) => {
       serverId: req.serverId!,
       userId: req.userId!,
       result: body.result as Parameters<typeof actionCardsService.markActionCardExecuted>[0]["result"],
+      expectedConfirmationVersion: typeof (body as { expectedConfirmationVersion?: unknown }).expectedConfirmationVersion === "number"
+        ? (body as { expectedConfirmationVersion: number }).expectedConfirmationVersion
+        : undefined,
       io: getIo(req),
       orchestrator: getOrchestrator(req),
     });
     res.json({ messageId: out.messageId, metadata: out.metadata });
   } catch (err) {
-    handleError(res, err);
+    handleError(req, res, err);
+  }
+});
+
+// Explicit post-cutover confirmation. This endpoint is deliberately separate
+// from execute/mark-executed: old prepared credentials cannot be silently
+// revived by a stale click or a telemetry /event call.
+actionsRouter.post("/:messageId/reconfirm", async (req, res) => {
+  try {
+    await actionCardsService.assertActionCardVisibleToUser({
+      messageId: req.params.messageId,
+      serverId: req.serverId!,
+      userId: req.userId!,
+    });
+    const db = getDb();
+    const out = await db.transaction(async (tx) => {
+      const [message] = await tx.select({ channelId: messages.channelId }).from(messages).where(eq(messages.id, req.params.messageId));
+      if (!message) throw new actionCardsService.ActionCardError(404, "NOT_FOUND", "Card message not found");
+      await assertChannelWritableInTransaction(tx, message.channelId);
+      await actionCardsService.assertActionCardWritableByUser({
+        messageId: req.params.messageId, channelId: message.channelId,
+        userId: req.userId!, serverId: req.serverId!, executor: tx as ReturnType<typeof getDb>, lock: true,
+      });
+      return reconfirmActionCard(tx, { messageId: req.params.messageId, userId: req.userId! });
+    });
+    const io = getIo(req);
+    if (io) await actionCardsService.emitActionCardMessageUpdated(io, { id: req.params.messageId });
+    res.json({ messageId: req.params.messageId, metadata: out.metadata, confirmationVersion: out.confirmationVersion });
+  } catch (err) {
+    handleError(req, res, err);
   }
 });

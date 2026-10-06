@@ -4,11 +4,12 @@ export type RaftOAuthScopeId =
   | "openid"
   | "profile"
   | "email"
+  | "agent:read"
   | "identity"
   | "agent:event:write"
   | "agent:notification:write";
 
-export type OAuthScopeTier = "identity" | "agent_messaging";
+export type OAuthScopeTier = "identity" | "agent_directory" | "agent_messaging";
 
 export type OAuthScopePresentation = {
   scope: RaftOAuthScopeId;
@@ -30,6 +31,7 @@ export type OAuthScopePresentation = {
 
 export const IDENTITY_OAUTH_SCOPES: RaftOAuthScopeId[] = ["openid", "profile", "identity"];
 export const OPTIONAL_IDENTITY_OAUTH_SCOPES: RaftOAuthScopeId[] = ["email"];
+export const AGENT_DIRECTORY_OAUTH_SCOPES: RaftOAuthScopeId[] = ["agent:read"];
 export const AGENT_INBOUND_OAUTH_SCOPES: RaftOAuthScopeId[] = ["agent:event:write", "agent:notification:write"];
 export const DEFAULT_DECLARED_OAUTH_SCOPES: RaftOAuthScopeId[] = [...IDENTITY_OAUTH_SCOPES];
 
@@ -64,6 +66,12 @@ export const OAUTH_SCOPE_PRESENTATION: Record<RaftOAuthScopeId, OAuthScopePresen
     scope: "identity",
     tier: "identity",
     copyId: "oauth.scope.identity.copy",
+    requiresResource: false,
+  },
+  "agent:read": {
+    scope: "agent:read",
+    tier: "agent_directory",
+    copyId: "oauth.scope.agentRead.copy",
     requiresResource: false,
   },
   "agent:event:write": {
@@ -110,5 +118,6 @@ export function hasAgentInboundOAuthScope(scopes: readonly string[]): boolean {
 }
 
 export function scopeGroupLabelId(tier: OAuthScopeTier): MessageId {
-  return tier === "identity" ? "oauth.scopeGroup.identity" : "oauth.scopeGroup.agentMessaging";
+  return tier === "identity" ? "oauth.scopeGroup.identity"
+    : tier === "agent_directory" ? "oauth.scopeGroup.agentDirectory" : "oauth.scopeGroup.agentMessaging";
 }

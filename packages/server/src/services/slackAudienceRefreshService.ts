@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { currentDate } from "@botiverse/raft-shared";
 
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   channelHumans,
   externalActorProjections,
@@ -11,18 +11,19 @@ import {
   externalAppRegistrations,
   externalChannelBindings,
   serverMembers,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   listSlackProviderConversationMembers,
   type SlackBridgeCredentialHandle,
   type SlackProviderAuthorityFence,
   type SlackProviderAuthorityQuarantineSink,
   type SlackWebApiTransport,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
 import {
   reconcileSlackPrivateAudience,
   type SlackAudienceObservation,
-} from "./slackBindingLifecycleService.js";
+} from "./slackBindingLifecycleService";
+import { resolveExternalInstallServerGrantAuthority } from "./externalInstallServerGrantAuthority";
 
 const DEFAULT_AUDIENCE_FRESHNESS_MS = 30 * 60_000;
 
@@ -148,6 +149,7 @@ async function loadSlackPrivateAudienceAuthority(
     bindingState: externalChannelBindings.state,
     connectionEpoch: externalChannelBindings.connectionEpoch,
     bindingEpoch: externalChannelBindings.bindingEpoch,
+    bindingGrantEpoch: externalChannelBindings.grantEpoch,
     audienceRevision: externalChannelBindings.audienceRevision,
     registrationState: externalAppRegistrations.state,
     provider: externalAppRegistrations.provider,
@@ -212,6 +214,18 @@ async function loadSlackPrivateAudienceAuthority(
     || row.installConnectionEpoch !== row.connectionEpoch
     || row.credentialRevision !== row.installCredentialRevision
   ) {
+    return {
+      kind: "unavailable",
+      authority: baseAuthority,
+      reason: "authority_quarantined",
+    };
+  }
+  const serverAuthority = await resolveExternalInstallServerGrantAuthority(executor, {
+    installId: row.installId,
+    serverId: row.serverId,
+    registrationId: row.registrationId,
+  });
+  if (!serverAuthority.current || row.bindingGrantEpoch !== serverAuthority.grant.grantEpoch) {
     return {
       kind: "unavailable",
       authority: baseAuthority,

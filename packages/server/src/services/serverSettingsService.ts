@@ -1,7 +1,7 @@
-import * as serverService from "./serverService.js";
-import { isProductFeedbackConfigured } from "./productFeedbackService.js";
-import { isProductFeedbackConversationConfigured } from "./productFeedbackConversationService.js";
-import { isProductFeedbackRouteConfigured } from "./productFeedbackRouteBindingService.js";
+import * as serverService from "./serverService";
+import { isProductFeedbackConfigured } from "./productFeedbackService";
+import { isProductFeedbackConversationConfigured } from "./productFeedbackConversationService";
+import { isProductFeedbackRouteConfigured } from "./productFeedbackRouteBindingService";
 
 type ServerSettingsDependencies = {
   getOnboardSettings: typeof serverService.getServerOnboardingSettings;

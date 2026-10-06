@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { EventEmitter } from "node:events";
 import { BasicTracer, MemoryTraceSink, traceEventRowsForSpan, traceSpanFactRowForSpan } from "@botiverse/raft-shared";
-import { httpRequestDuration, httpRequestsTotal } from "../metrics.js";
-import { attachAuthTraceIdentity, bucketHttpStatus, inferHttpCallerKind, normalizeObservedRoutePattern, requestObservabilityMiddleware } from "./requestObservability.js";
+import { httpRequestDuration, httpRequestsTotal } from "../metrics";
+import { __traceUserIdForTests, rememberTraceUserId } from "../tracing/traceUserId";
+import { attachAuthTraceIdentity, bucketHttpStatus, inferHttpCallerKind, normalizeObservedRoutePattern, requestObservabilityMiddleware, setRequestTraceErrorCode } from "./requestObservability";
 
 const EXPECTED_LABELS = {
   route_pattern: "/api/servers/:id/members/:memberId/profile",
@@ -132,6 +132,8 @@ test("requestObservabilityMiddleware records an HTTP root span without sensitive
   assert.equal(spans[0].attrs?.agent_id_present, false);
   assert.equal(spans[0].attrs?.caller_kind, "human");
   assert.equal(Object.values(spans[0].attrs ?? {}).includes("user-1"), false);
+  // Not cached for "user-1" here, so no trace_user_id either (never the raw id).
+  assert.equal(spans[0].attrs?.trace_user_id, undefined);
 
   const [eventRow] = traceEventRowsForSpan(spans[0], TRACE_EVENT_ROW_TEST_RESOURCE);
   assert.equal(eventRow.row_kind, "event");
@@ -394,4 +396,67 @@ test("inferHttpCallerKind treats internal agent and machine routes as separate c
     inferHttpCallerKind({ machineId: "machine-1", header: () => undefined } as any, "/internal/machine/self"),
     "system",
   );
+});
+
+test("an authenticated request carries the user's cached trace_user_id, never the raw id", () => {
+  __traceUserIdForTests.reset();
+  __traceUserIdForTests.setLoader(async () => new Map());
+  try {
+    rememberTraceUserId("user-9", "9f8e7d6c-5b4a-4392-8180-7f6e5d4c3b2a");
+    const sink = new MemoryTraceSink();
+    const tracer = new BasicTracer({ sink });
+    const req: any = {
+      method: "GET",
+      originalUrl: "/api/channels/threads/followed",
+      url: "/api/channels/threads/followed",
+      baseUrl: "/api/channels",
+      route: { path: "/threads/followed" },
+      userId: "user-9",
+      app: { get: (key: string) => (key === "serverTracer" ? tracer : undefined) },
+    };
+    const res: any = new EventEmitter();
+    res.statusCode = 200;
+    res.locals = {};
+    requestObservabilityMiddleware(req, res, () => {});
+    res.emit("finish");
+    const [span] = sink.getAllSpans();
+    assert.equal(span.attrs?.trace_user_id, "9f8e7d6c-5b4a-4392-8180-7f6e5d4c3b2a");
+    assert.equal(span.attrs?.user_id, undefined);
+    assert.equal(Object.values(span.attrs ?? {}).includes("user-9"), false);
+  } finally {
+    __traceUserIdForTests.setLoader(null);
+    __traceUserIdForTests.reset();
+  }
+});
+
+test("requestObservabilityMiddleware records a route's error_code on the root span, leaving reason as before", () => {
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({ sink, traceIdGenerator: () => "3".repeat(32), spanIdGenerator: () => "4".repeat(16) });
+  const makeReq = (): any => ({
+    method: "GET",
+    originalUrl: "/api/channels/inbox",
+    url: "/api/channels/inbox",
+    baseUrl: "/api/channels",
+    route: { path: "/inbox" },
+    app: { get: (key: string) => (key === "serverTracer" ? tracer : undefined) },
+  });
+
+  const overloaded: any = new EventEmitter();
+  overloaded.statusCode = 503;
+  overloaded.locals = {};
+  requestObservabilityMiddleware(makeReq(), overloaded, () => {});
+  setRequestTraceErrorCode(overloaded, "rw_overloaded");
+  overloaded.emit("finish");
+
+  const plain: any = new EventEmitter();
+  plain.statusCode = 500;
+  plain.locals = {};
+  requestObservabilityMiddleware(makeReq(), plain, () => {});
+  plain.emit("finish");
+
+  const [overloadedSpan, plainSpan] = sink.getAllSpans();
+  assert.equal(overloadedSpan!.attrs?.error_code, "rw_overloaded");
+  assert.equal(overloadedSpan!.attrs?.reason, "http_5xx", "reason keeps its status-derived meaning");
+  assert.equal(overloadedSpan!.events.find((event) => event.name === "http.response.finished")?.attrs?.error_code, "rw_overloaded");
+  assert.equal(plainSpan!.attrs?.error_code, undefined);
 });

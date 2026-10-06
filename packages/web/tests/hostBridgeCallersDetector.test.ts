@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { afterEach, describe, test } from "node:test";
 
 /**
  * @MingQi review r5 #1: the layout-owner detector must have an EXECUTABLE counterfactual

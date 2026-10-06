@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { createSyncHarnessPrng, createSyncViolationBuffer } from "./index.js";
+import { createSyncHarnessPrng, createSyncViolationBuffer } from "./index";
 
 // sync-core moved to its own workspace package; this pins the compatibility
 // re-export so existing `@botiverse/raft-shared` consumers do not silently break.

@@ -1,11 +1,28 @@
+import { Input,
+  Badge,
+  Button,
+  CopyableCode,
+  CopyableCodeAction,
+  CopyableCodeRoot,
+  SortableTabsList,
+  SortableTabsTab,
+  Tabs,
+  TabsIndicator,
+  TabsLabel,
+  ProfilePanelBody,
+  useOrderedTabs,
+  ChatIcon,
+  DirectMessageIcon,
+} from "raft-ui";
+import CloseButton from "../ui/CloseButton";
+import Tooltip from "../ui/Tooltip";
+import EditProviderConnectionModal from "../settings/EditProviderConnectionModal";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback } from "react";
-import type { ComponentType, FormEvent, ReactNode } from "react";
+import type { ComponentType, ReactNode } from "react";
 import { useIntl } from "react-intl";
-import type { IntlShape } from "react-intl";
 import { createPortal } from "react-dom";
 import {
   Activity,
-  MessageSquare,
   Play,
   Square,
   Trash2,
@@ -18,36 +35,15 @@ import {
   BellOff,
   Link2,
   RotateCcw,
-  Menu,
   Hash,
   Lock,
   Bot,
   Plus,
-  Upload,
   Clipboard,
   HelpCircle,
   MoveRight,
-  CircleCheck,
-  TriangleAlert,
   Blocks,
 } from "lucide-react";
-import {
-  Badge,
-  Select,
-  SelectContent,
-  SelectIcon,
-  SelectItem,
-  SelectItemIndicator,
-  SelectItemText,
-  SelectList,
-  SelectTrigger,
-  SelectValue,
-  SortableTabsList,
-  SortableTabsTab,
-  Tabs,
-  TabsLabel,
-  useOrderedTabs,
-} from "raft-ui";
 import { useLocation } from "react-router-dom";
 import { SIDEBAR_TAB_QUERY_PARAM, useAppNavigate, useMobileBack } from "../../hooks/useAppNavigate";
 import {
@@ -62,10 +58,12 @@ import {
   REASONING_EFFORT_RUNTIMES,
   parseRaftPermalink,
   canChangeMemberRole,
+  clearClockTimeout,
   setClockTimeout,
-  TOPBAR_OVERFLOW_FEATURE_FLAG_KEY,
 } from "@botiverse/raft-shared";
 import type {
+  ExternalAgentDiagnosticsView,
+  ProviderConnectionSummary,
   ReasoningEffort,
   RuntimeReasoningEffort,
   ReminderSummary,
@@ -76,13 +74,23 @@ import type {
 import { formatRuntimeAvailabilitySuffix, formatRuntimeLabelWithStatus } from "../../utils/runtimeAvailabilityLabel";
 import { classifyRuntimeError, RUNTIME_ERROR_LABEL_ID } from "../../utils/classifyRuntimeError";
 import type { RuntimeErrorKind } from "../../utils/classifyRuntimeError";
-import { reasoningEffortLabelId } from "../../utils/reasoningEffortOptions";
+import { reasoningEffortLabelId, reconcileReasoningEffort } from "../../utils/reasoningEffortOptions";
 import { MachineRunLabel } from "../machine/MachineRunLabel";
 import { RuntimeAccountUsageGateChip } from "../machine/RuntimeAccountUsageChip";
 import { projectRuntimeModelLabelPresentation, runtimeModelSelectionIsRunnable, useRuntimeModels } from "../../hooks/useRuntimeModels";
 import { useExistingAgentRuntimeOptions as useExistingAgentRuntimeSelectionOptions } from "../../hooks/useRuntimeSelectionCatalog";
 import { runtimeFormDefinitionRefKey, useRuntimeFormDefinitionCatalog } from "../../hooks/useRuntimeFormDefinition";
+import { useRuntimeFormV2 } from "../../hooks/useRuntimeFormV2";
+import { RUNTIME_FORM_V2_WEB_FLAG_KEY, useServerFeatureFlag } from "../../store/serverFeatureFlags";
+import {
+  applyRuntimeFormV2Change,
+  initialRuntimeFormV2Values,
+  runtimeFormV2Submission,
+  validateRuntimeFormV2,
+} from "@botiverse/raft-runtime-form";
+import type { RuntimeFormV2Value, RuntimeFormV2Values } from "@botiverse/raft-runtime-form";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
+import { formatRelativeTime } from "../../utils/relativeTime";
 import { getSocket } from "../../api/socket";
 import {
   useAgentStore,
@@ -99,17 +107,14 @@ import { useChannelStore } from "../../store/channelStore";
 import { useMachineStore } from "../../store/machineStore";
 import { resolveAgentMachineRow } from "../../utils/agentMachineRow";
 import { resolveAgentServerRoleDisplay } from "../../utils/agentServerRoleDisplay";
-import type { Machine } from "../../store/machineStore";
 import { useServerStore } from "../../store/serverStore";
-import { useServerFeatureFlag } from "../../store/serverFeatureFlags";
+import { catalogModelLabel } from "../../store/modelLabelCatalogStore";
 import { useAuthStore } from "../../store/authStore";
 import { useProfileStore } from "../../store/profileStore";
 import { useThreadStore } from "../../store/threadStore";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
 import { useProviderConnections } from "../../hooks/useProviderConnections";
-import { useAgentMigrationStatus } from "../../hooks/useAgentMigrationStatus";
 import { useLiveSearchParams } from "../../hooks/useLiveSearchParams";
-import type { AgentMigrationNotice as MigrationNotice } from "../../store/agentMigrationRealtime";
 import { canViewAgentPrivateSurfaces } from "../../utils/agentVisibility";
 import {
   buildRuntimeConfig,
@@ -135,6 +140,7 @@ import {
   builtInProviderDefaultModel,
   isBuiltInGatewayProviderMode,
   piBuiltinProviderDefaultModel,
+  reconcileBuiltInProviderModelSelection,
   PI_PROVIDER_CONFIGURED,
   supportsRuntimeApiUrl,
   supportsRuntimeBuiltInProvider,
@@ -149,40 +155,26 @@ import type {
   RuntimeProviderMode,
 } from "../../utils/runtimeConfigForm";
 import { formatRuntimeConfigBuildError } from "../../utils/runtimeConfigBuildErrorPresentation";
-import { reconcileReasoningEffort } from "../../utils/reasoningEffortOptions";
-import {
-  migrationErrorPresentation,
-  parseMigrationComputerCapabilityDetails,
-  parseMigrationResumableCapabilityDetail,
-} from "../../utils/migrationErrorPresentation";
-import type {
-  MigrationErrorPresentation,
-} from "../../utils/migrationErrorPresentation";
-import {
-  agentMigrationRequiresUpgrade,
-  isMigrationProPlanRequiredError,
-} from "../../utils/agentMigrationBilling";
 import AgentProfileOverflowMenu from "./AgentProfileOverflowMenu";
 
-import { formatActivityText } from "../../utils/activity";
+import { formatActivityText, formatAgentDisplayStateText } from "../../utils/activity";
 import { getServerUrl } from "../../utils/server";
-import { avatarUploadApiErrorMessage, isAvatarFileTooLarge, isAvatarTooLargeError, PROFILE_AVATAR_ACCEPT } from "../../utils/avatarUpload";
 import { canViewMachineRuntimeAccountUsage } from "../../utils/machineRuntimeUsageVisibility";
 import StatusDot from "../ui/StatusDot";
-import ProgressBar from "../ui/ProgressBar";
 import { buildAgentDiagnosticInfo } from "../../utils/agentDiagnosticInfo";
 import { copyTextToClipboard } from "../../utils/selectMarkdown";
 import { ExternalAgentToken } from "./ExternalAgentToken";
-import { useCopyText } from "../../hooks/useCopyText";
+import { DEFAULT_COPY_FEEDBACK_TIMEOUT_MS, useCopyText } from "../../hooks/useCopyText";
 import CopyButton from "../ui/CopyButton";
-import PixelAvatar, { AVATAR_KEYS, parsePixelAvatar, DEFAULT_AVATAR_KEY, isCustomAvatar } from "./PixelAvatar";
+import { isCustomAvatar } from "./PixelAvatar";
 import { useImageLightboxStore } from "../../store/imageLightboxStore";
 import PanelHeader from "../ui/PanelHeader";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import SectionHeader from "../ui/SectionHeader";
 import ShowMoreToggle from "../ui/ShowMoreToggle";
-import KeyValueRow from "../ui/KeyValueRow";
 import AvatarSlot from "../ui/AvatarSlot";
+import AgentProfileEditDialog from "./AgentProfileEditDialog";
+import type { AgentProfileEditField } from "./AgentProfileEditDialog";
 import SurfaceListItem from "../ui/SurfaceListItem";
 import api from "../../api/client";
 import AgentWorkspace from "./AgentWorkspace";
@@ -190,11 +182,11 @@ import { AgentMcpTab } from "./AgentMcpTab";
 import AgentActivityLog from "./AgentActivityLog";
 import AgentSkills from "./AgentSkills";
 import AgentRemindersSection from "./AgentRemindersSection";
+import AgentAppAccessTab from "./AgentAppAccessTab";
 import ReportIssueDialog from "./ReportIssueDialog";
 import AvatarListRow from "../ui/AvatarListRow";
 import { AgentDMConversationList } from "./AgentDMConversationList";
 import type { AgentDMConversation } from "./AgentDMConversationList";
-import InlineBadgeEditor from "../InlineBadgeEditor";
 import RolePermissionHelpDialog from "../member/RolePermissionHelpDialog";
 import type { MessageId } from "../../i18n/messages/en";
 
@@ -202,7 +194,6 @@ import ResetAgentDialog from "./ResetAgentDialog";
 import ConfirmDialog from "../ConfirmDialog";
 import Banner from "../ui/Banner";
 import EmptyState from "../ui/EmptyState";
-import Spinner from "../ui/Spinner";
 import Modal from "../Modal";
 import RuntimeConfigFields from "./RuntimeConfigFields";
 import {
@@ -211,9 +202,12 @@ import {
 import type {
   ExternalSetupTab,
 } from "./ExternalSetupTabSegmentedControl";
-import { useAgentMigrationUiEnabled } from "./useAgentMigrationUiEnabled";
+import { AgentMigrationSection } from "../agentMigration/AgentMigrationSection";
+import { describeHostedRuntime, HostedRuntimeStatus } from "./HostedRuntimeStatus";
+import { AgentConnections } from "./AgentConnections";
+import { AgentHostedRuntimeUsage } from "./AgentHostedRuntimeUsage";
 
-const MAX_AGENT_DESCRIPTION_LENGTH = 3000;
+const HOSTED_RUNTIME_POLL_MS = 5_000;
 const FEEDBACK_EXPORT_ENABLED = Boolean(import.meta.env?.VITE_FEEDBACK_EXPORT_URL?.replace(/\/+$/, ""));
 const AGENT_TABS = ["profile", "activity", "chat", "reminders", "workspace", "integrations", "mcp"] as const;
 type AgentTab = typeof AGENT_TABS[number];
@@ -225,7 +219,7 @@ type PanelTabItem<T extends string> = {
 const AGENT_PANEL_TABS: PanelTabItem<AgentTab>[] = [
   { id: "profile", icon: Bot, labelId: "agent.detail.tab.profile" },
   { id: "activity", icon: Activity, labelId: "agent.detail.tab.activity" },
-  { id: "chat", icon: MessageSquare, labelId: "agent.detail.tab.chat" },
+  { id: "chat", icon: ChatIcon, labelId: "agent.detail.tab.chat" },
   { id: "reminders", icon: BellRing, labelId: "agent.detail.tab.reminders" },
   { id: "workspace", icon: FolderOpen, labelId: "agent.detail.tab.workspace" },
   { id: "integrations", icon: Link2, labelId: "agent.detail.tab.apps" },
@@ -241,35 +235,14 @@ const PUBLIC_AGENT_TABS = new Set<AgentTab>(["profile"]);
 // are visible to creator OR admin. The legacy Permissions tab is intentionally
 // no longer exposed from Agent detail; old saved tab orders are ignored because
 // they no longer match AGENT_TABS.
-const AGENT_ROLE_CONFIG: Record<Extract<ServerRole, "admin" | "member">, { labelId: MessageId; color: string }> = {
-  admin: { labelId: "agent.detail.roleAdmin", color: "bg-brutal-pink" },
-  member: { labelId: "agent.detail.roleMember", color: "bg-brutal-lavender" },
+const AGENT_ROLE_CONFIG: Record<Extract<ServerRole, "admin" | "member">, { labelId: MessageId; variant: "accent" | "muted" }> = {
+  admin: { labelId: "agent.detail.roleAdmin", variant: "accent" },
+  member: { labelId: "agent.detail.roleMember", variant: "muted" },
 };
 const EDITABLE_AGENT_ROLE_OPTIONS: { id: Extract<ServerRole, "admin" | "member">; labelId: MessageId }[] = [
   { id: "admin", labelId: "agent.detail.roleAdmin" },
   { id: "member", labelId: "agent.detail.roleMember" },
 ];
-
-interface AgentIntegrationItem {
-  id: string;
-  type: "pending" | "active";
-  serverId: string;
-  agentId: string;
-  agentName: string;
-  agentDisplayName: string | null;
-  clientId: string;
-  clientKey: string;
-  clientName: string;
-  clientDescription: string | null;
-  clientHomepageUrl: string | null;
-  clientAgentManifestUrl: string | null;
-  scopes: string[];
-  remember: boolean;
-  createdAt: string;
-  resolvedAt: string | null;
-  resolvedByUserId: string | null;
-  revokedAt: string | null;
-}
 
 interface AgentChannelMembership {
   id: string;
@@ -308,11 +281,11 @@ function visibleAgentChatChannels(items: AgentChannelMembership[]): AgentChannel
 function AgentChatInlineEmpty({ icon, title, description }: { icon: ReactNode; title: string; description: string }) {
   return (
     <div className="px-4 pb-4">
-      <div className="flex items-center gap-3 border border-black/15 bg-black/[0.015] px-3 py-2">
-        <div className="shrink-0 text-black/35">{icon}</div>
+      <div className="flex items-center gap-3 border border-line-muted theme-brutal:border-black/15 bg-fill-muted theme-brutal:bg-black/[0.015] px-3 py-2">
+        <div className="shrink-0 text-foreground-placeholder theme-brutal:text-black/35">{icon}</div>
         <div className="min-w-0">
-          <div className="text-sm font-bold text-black/65">{title}</div>
-          <div className="mt-0.5 text-xs text-black/45">{description}</div>
+          <div className="text-sm font-bold text-foreground-muted theme-brutal:text-black/65">{title}</div>
+          <div className="mt-0.5 text-xs text-foreground-placeholder theme-brutal:text-black/45">{description}</div>
         </div>
       </div>
     </div>
@@ -378,8 +351,8 @@ function AgentChatTab({ agentId }: { agentId: string }) {
     : channels.items.slice(0, AGENT_CHAT_CHANNEL_PREVIEW_LIMIT);
 
   return (
-    <div className="flex-1 overflow-y-auto bg-white">
-      <div className="border-b-2 border-black bg-white px-5 py-3">
+    <div className="flex-1 overflow-y-auto bg-layer-panel theme-brutal:bg-white">
+      <div className="border-b theme-brutal:border-b-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-5 py-3">
         <SectionEyebrow as="div">{formatMessage({ id: "agent.detail.channelsAndDms" })}</SectionEyebrow>
       </div>
 
@@ -389,7 +362,7 @@ function AgentChatTab({ agentId }: { agentId: string }) {
           icon={(
             <div className="flex items-center gap-3">
               <Hash size={34} />
-              <MessageSquare size={34} />
+              <ChatIcon width={34} height={34} />
             </div>
           )}
           title={formatMessage({ id: "emptyState.noChatsTitle" })}
@@ -397,15 +370,15 @@ function AgentChatTab({ agentId }: { agentId: string }) {
         />
       ) : (
         <>
-          <section className="border-b border-black/10">
+          <section className="border-b border-line-muted theme-brutal:border-black/10">
             <div className="px-5 py-3">
               <SectionHeader label={formatMessage({ id: "agent.detail.channels" })} />
-              <div className="mt-1 text-xs text-black/60">
+              <div className="mt-1 text-xs text-foreground-muted theme-brutal:text-black/60">
                 {formatMessage({ id: "agent.detail.channelsDescription" })}
               </div>
             </div>
             {channels.loading ? (
-              <div className="px-5 pb-4 font-mono text-xs text-black/40">
+              <div className="px-5 pb-4 font-mono text-xs text-foreground-placeholder theme-brutal:text-black/40">
                 {formatMessage({ id: "agent.detail.loadingAgentChannels" })}
               </div>
             ) : channels.error ? (
@@ -432,31 +405,32 @@ function AgentChatTab({ agentId }: { agentId: string }) {
                         <div className="min-w-0">
                           <div className="flex min-w-0 items-center gap-2">
                             {item.type === "private" ? (
-                              <Lock size={14} className="shrink-0 text-black/45" aria-label={formatMessage({ id: "agent.detail.privateChannel" })} />
+                              <Lock size={14} className="shrink-0 text-foreground-placeholder theme-brutal:text-black/45" aria-label={formatMessage({ id: "agent.detail.privateChannel" })} />
                             ) : (
-                              <Hash size={14} className="shrink-0 text-black/45" aria-label={formatMessage({ id: "agent.detail.channel" })} />
+                              <Hash size={14} className="shrink-0 text-foreground-placeholder theme-brutal:text-black/45" aria-label={formatMessage({ id: "agent.detail.channel" })} />
                             )}
-                            <span className="truncate text-sm font-bold text-black">{item.name}</span>
+                            <span className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{item.name}</span>
                             {item.activityMuted && (
-                              <span
-                                className="inline-flex shrink-0 items-center text-black/45"
-                                title={item.muteFromSeq != null
+                              <Tooltip content={item.muteFromSeq != null
                                   ? formatMessage({ id: "agent.detail.activityMutedFromSeq" }, { seq: item.muteFromSeq })
-                                  : formatMessage({ id: "agent.detail.activityMuted" })}
+                                  : formatMessage({ id: "agent.detail.activityMuted" })}>
+                              <span
+                                className="inline-flex shrink-0 items-center text-foreground-placeholder theme-brutal:text-black/45"
                                 aria-label={item.muteFromSeq != null
                                   ? formatMessage({ id: "agent.detail.activityMutedFromSeq" }, { seq: item.muteFromSeq })
                                   : formatMessage({ id: "agent.detail.activityMuted" })}
                               >
                                 <BellOff size={13} aria-hidden="true" />
                               </span>
+                              </Tooltip>
                             )}
                           </div>
                           {item.description && (
-                            <div className="mt-1 line-clamp-2 text-xs text-black/60">{item.description}</div>
+                            <div className="mt-1 line-clamp-2 text-xs text-foreground-muted theme-brutal:text-black/60">{item.description}</div>
                           )}
                         </div>
                         {item.type !== "channel" && (
-                          <div className="shrink-0 border border-black/20 px-2 py-0.5 text-[11px] font-mono text-black/55">
+                          <div className="shrink-0 border border-line-muted theme-brutal:border-black/20 px-2 py-0.5 text-[11px] font-mono text-foreground-muted theme-brutal:text-black/55">
                             {item.type === "private"
                               ? formatMessage({ id: "agent.detail.private" })
                               : formatMessage({ id: "agent.detail.joint" })}
@@ -483,12 +457,12 @@ function AgentChatTab({ agentId }: { agentId: string }) {
           <section>
             <div className="px-5 py-3">
               <SectionHeader label={formatMessage({ id: "agent.detail.agentDms" })} />
-              <div className="mt-1 text-xs text-black/60">
+              <div className="mt-1 text-xs text-foreground-muted theme-brutal:text-black/60">
                 {formatMessage({ id: "agent.detail.agentDmsDescription" })}
               </div>
             </div>
             {dms.loading ? (
-              <div className="px-5 pb-4 font-mono text-xs text-black/40">
+              <div className="px-5 pb-4 font-mono text-xs text-foreground-placeholder theme-brutal:text-black/40">
                 {formatMessage({ id: "agent.detail.loadingAgentDms" })}
               </div>
             ) : dms.error ? (
@@ -497,7 +471,7 @@ function AgentChatTab({ agentId }: { agentId: string }) {
               </div>
             ) : dms.items.length === 0 ? (
               <AgentChatInlineEmpty
-                icon={<MessageSquare size={18} />}
+                icon={<DirectMessageIcon width={18} height={18} />}
                 title={formatMessage({ id: "emptyState.noAgentDmsTitle" })}
                 description={formatMessage({ id: "emptyState.noAgentDmsDesc" })}
               />
@@ -507,114 +481,6 @@ function AgentChatTab({ agentId }: { agentId: string }) {
           </section>
         </>
       )}
-    </div>
-  );
-}
-
-function AgentIntegrationsTab({ agentId, canManageServer }: { agentId: string; canManageServer: boolean }) {
-  const { formatMessage } = useIntl();
-  const formatMessageRef = useRef(formatMessage);
-  formatMessageRef.current = formatMessage;
-  const { formatShortDateTime } = useTimeFormatter();
-  const [items, setItems] = useState<AgentIntegrationItem[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const { data } = await api.get(`/integrations/agents/${agentId}`);
-      setItems(data);
-    } catch (err: any) {
-      setError(err.response?.data?.error || formatMessageRef.current({ id: "agent.detail.loadIntegrationsFailed" }));
-    } finally {
-      setLoading(false);
-    }
-  }, [agentId]);
-
-  // `loading` is a transient async-fetch indicator (set true at request start,
-  // false in the finally block) — not a prop-derived value. react-doctor's
-  // no-derived-state flags any setState inside an effect-triggered async path,
-  // including legitimate async-loading-state patterns; ignore here.
-  useEffect(() => {
-    // oxlint-disable-next-line react-doctor/no-derived-state
-    load();
-  }, [load]);
-
-  const handleRevoke = async (grantId: string) => {
-    setError("");
-    try {
-      await api.post(`/integrations/grants/${grantId}/revoke`);
-      await load();
-    } catch (err: any) {
-      setError(err.response?.data?.error || formatMessage({ id: "agent.detail.revokeIntegrationFailed" }));
-    }
-  };
-
-  const active = items.filter((item) => item.type === "active");
-
-  return (
-    <div className="flex-1 overflow-y-auto bg-white px-5 py-4 space-y-4">
-      {error && (
-        <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
-      )}
-
-      <div className="space-y-3">
-        <div>
-          <SectionHeader
-            label={formatMessage({ id: "agent.detail.applications" })}
-            action={loading ? <span className="text-xs font-bold text-black/50">{formatMessage({ id: "common.loading" })}</span> : null}
-          />
-          <div className="mt-1 text-xs text-black/60">
-            {formatMessage({ id: "agent.detail.applicationsDescription" })}
-          </div>
-        </div>
-        {active.length === 0 ? (
-          <div className="text-sm text-black/50">{formatMessage({ id: "agent.detail.noConnectedApps" })}</div>
-        ) : (
-          <div className="space-y-3">
-            {active.map((item) => (
-              <SurfaceListItem key={item.id} className="space-y-2" interactive={false}>
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-bold text-black">{item.clientName}</div>
-                    <div className="text-xs text-black/60">{formatShortDateTime(item.createdAt)}</div>
-                  </div>
-                  <span className="inline-flex border border-black bg-brutal-lime px-1.5 py-0.5 text-[10px] font-bold uppercase">
-                    {formatMessage({ id: "agent.detail.active" })}
-                  </span>
-                </div>
-                {item.clientDescription && <div className="text-sm text-black/70">{item.clientDescription}</div>}
-                {item.clientAgentManifestUrl && (
-                  <div className="break-all font-mono text-xs text-black/60">
-                    {formatMessage({ id: "agent.detail.agentManifest" }, { url: item.clientAgentManifestUrl })}
-                  </div>
-                )}
-                <div className="flex flex-wrap gap-1">
-                  {item.scopes.map((scope) => (
-                    <span key={scope} className="inline-flex border border-black bg-white px-1.5 py-0.5 text-[10px] font-bold uppercase">
-                      {scope}
-                    </span>
-                  ))}
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {canManageServer && (
-                    <button onClick={() => handleRevoke(item.id)} className="btn-brutal bg-white px-3 py-1.5 text-xs">
-                      {formatMessage({ id: "agent.detail.revoke" })}
-                    </button>
-                  )}
-                  {item.clientHomepageUrl && (
-                    <a href={item.clientHomepageUrl} target="_blank" rel="noreferrer" className="text-xs font-bold underline text-black/70 self-center">
-                      {formatMessage({ id: "agent.detail.viewService" })}
-                    </a>
-                  )}
-                </div>
-              </SurfaceListItem>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -659,21 +525,23 @@ function EnvVarsSection({ agent, canManageAgent }: { agent: Agent; canManageAgen
           {formatMessage({ id: "agent.runtimeConfig.envVars" })}
         </SectionEyebrow>
         {canManageAgent && !editing && (
-          <button
+          <Tooltip content={formatMessage({ id: "agent.detail.editEnvironmentVariables" })}>
+<button
             type="button"
+            aria-label={formatMessage({ id: "agent.detail.editEnvironmentVariables" })}
             onClick={startEditing}
-            className="text-black/40 hover:text-black transition-colors"
-            title={formatMessage({ id: "agent.detail.editEnvironmentVariables" })}
+            className="text-foreground-muted hover:text-foreground-strong transition-colors"
           >
             <Pencil size={12} />
           </button>
+            </Tooltip>
         )}
       </div>
       {editing ? (
         <div className="space-y-2">
           {entries.map((entry, i) => (
             <div key={i} className="flex items-center gap-2">
-              <input
+              <Input
                 type="text"
                 value={entry.key}
                 onChange={(e) => {
@@ -681,11 +549,11 @@ function EnvVarsSection({ agent, canManageAgent }: { agent: Agent; canManageAgen
                   updated[i] = { ...updated[i], key: e.target.value };
                   setEntries(updated);
                 }}
-                className="border-2 border-black px-2 py-1 text-xs font-mono shadow-brutal-sm focus:outline-none w-1/3"
+                className="border border-line-muted bg-layer-card px-2 py-1 text-xs font-mono shadow-raft-sm focus:outline-none w-1/3 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
                 placeholder={formatMessage({ id: "agent.runtimeConfig.envVarName" })}
               />
-              <span className="text-black/40">=</span>
-              <input
+              <span className="text-foreground-muted">=</span>
+              <Input
                 type="text"
                 value={entry.value}
                 onChange={(e) => {
@@ -693,57 +561,57 @@ function EnvVarsSection({ agent, canManageAgent }: { agent: Agent; canManageAgen
                   updated[i] = { ...updated[i], value: e.target.value };
                   setEntries(updated);
                 }}
-                className="border-2 border-black px-2 py-1 text-xs font-mono shadow-brutal-sm focus:outline-none flex-1"
+                className="border border-line-muted bg-layer-card px-2 py-1 text-xs font-mono shadow-raft-sm focus:outline-none flex-1 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
                 placeholder={formatMessage({ id: "agent.runtimeConfig.envVarFallback" })}
               />
-              <button
+              <Button variant="danger" size="icon-sm"
                 type="button"
                 onClick={() => setEntries(entries.filter((_, j) => j !== i))}
-                className="btn-brutal-sm bg-white p-1"
+                className=""
               >
                 <Trash2 size={12} />
-              </button>
+              </Button>
             </div>
           ))}
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => setEntries([...entries, { key: "", value: "" }])}
-              className="flex items-center gap-1 text-xs font-bold text-black/60 hover:text-black"
+              className="flex items-center gap-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60 hover:text-foreground-strong theme-brutal:hover:text-black"
             >
               <Plus size={12} />
               {formatMessage({ id: "agent.runtimeConfig.addVariable" })}
             </button>
           </div>
           <div className="flex items-center gap-1.5">
-            <button
+            <Button variant="accent" size="sm"
               onClick={handleSave}
-              className="btn-brutal-sm bg-brutal-pink px-2 py-1 text-xs"
+              className=""
             >
               {formatMessage({ id: "machine.detail.save" })}
-            </button>
-            <button
+            </Button>
+            <Button variant="outline" size="sm"
               onClick={() => setEditing(false)}
-              className="btn-brutal-sm bg-white px-2 py-1 text-xs"
+              className=""
             >
               {formatMessage({ id: "common.confirm.cancel" })}
-            </button>
+            </Button>
           </div>
         </div>
       ) : hasVars ? (
         <div className="flex flex-wrap gap-2">
           {Object.entries(envVars!).map(([key, value]) => (
+            <Tooltip key={key} content={`${key}=${value}`}>
             <span
-              key={key}
-              className="inline-block border-2 border-black bg-white px-2 py-0.5 text-xs font-mono text-black"
-              title={`${key}=${value}`}
+              className="inline-block border border-line-muted bg-layer-card px-2 py-0.5 text-xs font-mono text-foreground-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:text-black"
             >
-              {key}=<span className="text-black/40">{"•".repeat(Math.min(value.length, 8))}</span>
+              {key}=<span className="text-foreground-muted">{"•".repeat(Math.min(value.length, 8))}</span>
             </span>
+            </Tooltip>
           ))}
         </div>
       ) : (
-        <p className="text-xs italic text-black/40">
+        <p className="text-xs italic text-foreground-muted">
           {formatMessage({ id: "agent.detail.noEnvironmentVariables" })}
         </p>
       )}
@@ -754,12 +622,73 @@ function EnvVarsSection({ agent, canManageAgent }: { agent: Agent; canManageAgen
 // Isolated info bar — role/model/reasoning editing state lives here,
 // so keystroke re-renders don't cascade to ChatPanel / tabs below.
 /** Profile tab: description, machine, model config, env vars, created date */
-function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenProfile, showOperationalInfo = true }: { agent: Agent; canManageAgent: boolean; canChangeAgentRole: boolean; onOpenProfile?: (type: "agent" | "human", id: string) => void; showOperationalInfo?: boolean }) {
+/**
+ * One label | value row of the profile's description lists (Info, Runtime config):
+ * fixed label column, value takes the rest; icons follow the label.
+ */
+function InfoRow({ label, actions, children, testId }: { label: ReactNode; actions?: ReactNode; children: ReactNode; testId?: string }) {
+  return (
+    <div className="grid grid-cols-[6.5rem_minmax(0,1fr)] items-start gap-x-4" data-testid={testId}>
+      <dt className="flex min-h-5 items-center gap-1.5 text-xs text-foreground-muted theme-brutal:text-black/50">
+        <span className="truncate">{label}</span>
+        {actions}
+      </dt>
+      <dd className="m-0 min-w-0 text-sm text-foreground-strong theme-brutal:text-black">{children}</dd>
+    </div>
+  );
+}
+
+const INFO_ICON_BUTTON_CLASS = "shrink-0 text-foreground-placeholder transition-colors hover:text-foreground-strong theme-brutal:text-black/40 theme-brutal:hover:text-black";
+
+/** Roles the viewer may assign to this agent (empty when the role is not editable). */
+function useEditableAgentRoleOptions(agent: Agent): { id: Extract<ServerRole, "admin" | "member">; label: string }[] {
+  const { formatMessage } = useIntl();
+  const { role: currentRole } = useServerPermissions();
+  const currentAgentServerRole = agent.serverRole === "admin" ? "admin" : agent.serverRole === "member" ? "member" : null;
+  return useMemo(
+    () => currentAgentServerRole
+      ? EDITABLE_AGENT_ROLE_OPTIONS
+        .filter((option) => canChangeMemberRole(currentRole, currentAgentServerRole, option.id))
+        .map((option) => ({ id: option.id, label: formatMessage({ id: option.labelId }) }))
+      : [],
+    [currentAgentServerRole, currentRole, formatMessage],
+  );
+}
+
+/**
+ * The profile header's name. It is the agent's display name (falling back to
+ * the @name); its pencil opens the profile edit dialog on the name field.
+ */
+function AgentHeaderName({ agent, onEdit }: { agent: Agent; onEdit?: () => void }) {
+  const { formatMessage } = useIntl();
+  return (
+    <>
+      <Tooltip content={agent.displayName || agent.name}>
+        <div className="min-w-0 truncate text-lg font-bold leading-tight text-foreground-strong">{agent.displayName || agent.name}</div>
+      </Tooltip>
+      {onEdit && (
+        <Tooltip content={formatMessage({ id: "agent.detail.editDisplayName" })}>
+          <button
+            type="button"
+            aria-label={formatMessage({ id: "agent.detail.editDisplayName" })}
+            onClick={onEdit}
+            className="shrink-0 text-foreground-placeholder transition-colors hover:text-foreground-strong theme-brutal:text-black/40 theme-brutal:hover:text-black"
+          >
+            <Pencil size={14} />
+          </button>
+        </Tooltip>
+      )}
+    </>
+  );
+}
+
+function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenProfile, onEdit, showOperationalInfo = true }: { agent: Agent; canManageAgent: boolean; canChangeAgentRole: boolean; onOpenProfile?: (type: "agent" | "human", id: string) => void; onEdit?: (field: AgentProfileEditField) => void; showOperationalInfo?: boolean }) {
   const { formatDate, formatList, formatMessage } = useIntl();
   const formatMessageRef = useRef(formatMessage);
   formatMessageRef.current = formatMessage;
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const fetchExternalAgentStatus = useAgentStore((s) => s.fetchExternalAgentStatus);
+  const retryHostedRuntimeProvisioning = useAgentStore((s) => s.retryHostedRuntimeProvisioning);
   const fetchOnboardingIdentityAdoption = useAgentStore((s) => s.fetchOnboardingIdentityAdoption);
   const adoptOnboardingIdentity = useAgentStore((s) => s.adoptOnboardingIdentity);
   const currentServer = useServerStore((s) => s.current);
@@ -768,7 +697,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   const nav = useAppNavigate();
   const isExternalAgent = agent.external === true || isExternalAgentRuntime(agent.runtime);
   const { formatShortDateTime } = useTimeFormatter();
-  const { role: currentRole, capabilities } = useServerPermissions();
+  const { capabilities } = useServerPermissions();
   const currentUserId = useAuthStore((s) => s.user?.id ?? null);
 
   const machineLoadStatus = useMachineStore((s) => s.loadStatus);
@@ -777,8 +706,6 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   const agentMachineRow = resolveAgentMachineRow(agent.machineId, machines, machineLoadStatus);
   const agentMachine = agentMachineRow.kind === "machine" ? agentMachineRow.machine : null;
   const machineStatus = agentMachine ? agentMachine.status : agent.machineId ? "offline" : null;
-  const displayNameRef = useRef<HTMLInputElement>(null);
-  const roleRef = useRef<HTMLTextAreaElement>(null);
   const configRef = useRef<HTMLDivElement>(null);
   const runtimeConfigModalRef = useRef<HTMLDivElement>(null);
   // oxlint-disable-next-line react-hooks/exhaustive-deps -- intentionally recompute only on the runtime-relevant agent fields (envVars/model/reasoningEffort/runtime/runtimeConfig); depending on the whole `agent` would recompute on every unrelated agent update (activity/status/name) and churn the hydrated form.
@@ -809,7 +736,9 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   const [draftBuiltInProviderApiKey, setDraftBuiltInProviderApiKey] = useState("");
   const [draftBuiltInProviderBaseUrl, setDraftBuiltInProviderBaseUrl] = useState("");
   const [draftBuiltInProviderSupportsImageInput, setDraftBuiltInProviderSupportsImageInput] = useState(false);
+  const [draftLoadLocalPlugins, setDraftLoadLocalPlugins] = useState(false);
   const [draftProviderConnectionId, setDraftProviderConnectionId] = useState("");
+  const [editingProviderConnection, setEditingProviderConnection] = useState<ProviderConnectionSummary | null>(null);
   const [draftPiProviderMode, setDraftPiProviderMode] = useState<PiProviderMode>(PI_PROVIDER_CONFIGURED);
   const [draftPiProviderApiKey, setDraftPiProviderApiKey] = useState("");
   const [draftFastMode, setDraftFastMode] = useState(false);
@@ -839,7 +768,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   const activeRuntime = editingRuntimeConfig ? draftRuntime : currentRuntimeConfig.runtime;
   const runtimeModels = useRuntimeModels(agent.machineId, activeRuntime);
   const currentRuntimeModelPresentation = activeRuntime === currentRuntimeConfig.runtime
-    ? projectRuntimeModelLabelPresentation(currentRuntimeConfig.runtime, currentRuntimeModel, runtimeModels)
+    ? projectRuntimeModelLabelPresentation(currentRuntimeConfig.runtime, currentRuntimeModel, runtimeModels, agent.machineId)
     : { kind: "resolved" as const, label: getModelLabel(currentRuntimeConfig.runtime, currentRuntimeModel) };
   const currentRuntimeModelLabel = currentRuntimeModelPresentation.kind === "pending"
     ? formatMessage({ id: "common.loading" })
@@ -870,6 +799,44 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   // Built-in edit keeps its established writeOnly-secret retention path. Kimi
   // has no writeOnly field and uses the same schema renderer on create/edit.
   const draftSchemaBacked = draftRuntime === "kimi-sdk" && draftFormDefinitionRef !== undefined;
+  // Protocol v2 edit: the same server-described form as create, pre-filled by the
+  // server with this agent's values (writeOnly fields blank = keep). Applies while
+  // the draft stays on the agent's saved runtime and that runtime carries the
+  // `runtimeFormV2` marker (independent of the v1 `formDefinitionRef`).
+  const runtimeFormV2Flag = useServerFeatureFlag(RUNTIME_FORM_V2_WEB_FLAG_KEY).enabled;
+  const v2EditEligible = runtimeFormV2Flag
+    && editingRuntimeConfig
+    && showOperationalInfo
+    && draftRuntime === agent.runtime
+    && draftRuntimeAdmission?.runtimeFormV2?.protocolVersion === 2
+    && !draftProviderConnectionId;
+  const runtimeFormV2Edit = useRuntimeFormV2(
+    v2EditEligible ? agent.machineId : null,
+    v2EditEligible ? draftRuntime : null,
+    agent.id,
+  );
+  // A runtime without an editable v2 form (the server answers 404), or whose v2
+  // form needs client capabilities this build lacks, stays on v1/legacy.
+  const v2EditActive = v2EditEligible && runtimeFormV2Edit.status !== "error" && runtimeFormV2Edit.status !== "unsupported";
+  const [v2EditDraft, setV2EditDraft] = useState<RuntimeFormV2Values | null>(null);
+  const [v2EditServerErrors, setV2EditServerErrors] = useState<Record<string, string>>({});
+  const v2EditInitial = useMemo(
+    () => runtimeFormV2Edit.status === "ready" ? initialRuntimeFormV2Values(runtimeFormV2Edit.form, runtimeFormV2Edit.sources) : null,
+    [runtimeFormV2Edit],
+  );
+  const v2EditValues = v2EditDraft ?? v2EditInitial;
+  const v2EditChanged = Boolean(v2EditDraft && v2EditInitial && JSON.stringify(v2EditDraft) !== JSON.stringify(v2EditInitial));
+  // The v2 form's own save gate: v1's gate reads v1 draft fields the v2 form does not use.
+  // A required field whose option source is unavailable cannot be saved (option_source.status).
+  const v2EditSourceUnavailable = runtimeFormV2Edit.status === "ready" && v2EditValues !== null
+    && Object.values(validateRuntimeFormV2(runtimeFormV2Edit.form, runtimeFormV2Edit.sources, v2EditValues, { editing: true }))
+      .includes("source_unavailable");
+  const v2EditSaveDisabled = savingRuntimeConfig || runtimeFormV2Edit.status !== "ready" || !v2EditChanged || v2EditSourceUnavailable;
+  const changeV2EditValue = (key: string, value: RuntimeFormV2Value) => {
+    if (runtimeFormV2Edit.status !== "ready" || !v2EditValues) return;
+    setV2EditServerErrors({});
+    setV2EditDraft(applyRuntimeFormV2Change(runtimeFormV2Edit.form, runtimeFormV2Edit.sources, v2EditValues, key, value));
+  };
   const draftFormDefinition = draftSchemaBacked ? draftFormDefinitionEntry?.definition ?? null : null;
   const draftSchemaModelSource = draftFormDefinition?.optionSources.model?.kind === "select"
     ? draftFormDefinition.optionSources.model
@@ -918,7 +885,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
       !providerConnectionCatalog.featureEnabled
       || !selectedProviderConnection
       || !selectedProviderConnection.enabled
-      || selectedProviderConnection.status !== "ready"
+      || !selectedProviderConnection.hasCredential
     );
   const existingRuntimeInfo = getExistingAgentRuntimeOptions(currentRuntimeConfig.runtime);
   const runtimeOptions = runtimeAdmissionOptions.flatMap((option) => {
@@ -935,19 +902,6 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     .find((option) => option.runtimeId === draftRuntime)
     ?.canSelectInThisContext === true;
 
-  const [editingDisplayName, setEditingDisplayName] = useState(false);
-  const [displayNameValue, setDisplayNameValue] = useState(agent.displayName || "");
-  const [displayNameError, setDisplayNameError] = useState("");
-  const [savingDisplayName, setSavingDisplayName] = useState(false);
-  const [editingRole, setEditingRole] = useState(false);
-  const [roleValue, setRoleValue] = useState(agent.description || "");
-  const [roleError, setRoleError] = useState("");
-  const [savingRole, setSavingRole] = useState(false);
-  const [editingServerRole, setEditingServerRole] = useState(false);
-  const [serverRoleValue, setServerRoleValue] = useState<Extract<ServerRole, "admin" | "member">>(agent.serverRole === "admin" ? "admin" : "member");
-  const [serverRolePickerOpen, setServerRolePickerOpen] = useState(false);
-  const [serverRoleSaving, setServerRoleSaving] = useState(false);
-  const [serverRoleError, setServerRoleError] = useState("");
   const [showRoleHelp, setShowRoleHelp] = useState(false);
   const [onboardingIdentityState, setOnboardingIdentityState] = useState<{
     agentId: string | null;
@@ -1041,17 +995,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
       ? externalHermesSetupSteps
       : null;
   const currentAgentServerRole = agent.serverRole === "admin" ? "admin" : agent.serverRole === "member" ? "member" : null;
-  const editableAgentRoleOptions = useMemo(
-    () => currentAgentServerRole
-      ? EDITABLE_AGENT_ROLE_OPTIONS
-        .filter((option) => canChangeMemberRole(currentRole, currentAgentServerRole, option.id))
-        .map((option) => ({
-          id: option.id,
-          label: formatMessage({ id: option.labelId }),
-        }))
-      : [],
-    [currentAgentServerRole, currentRole, formatMessage],
-  );
+  const editableAgentRoleOptions = useEditableAgentRoleOptions(agent);
   const canEditServerRole = canChangeAgentRole && currentAgentServerRole !== null && editableAgentRoleOptions.length > 0;
   const currentAgentServerRoleInfo = currentAgentServerRole ? AGENT_ROLE_CONFIG[currentAgentServerRole] : null;
   // task #261: unrecognized role -> show the name the server sent; no role / deleted -> no chip.
@@ -1096,82 +1040,33 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     };
   }, [agent.id, canManageAgent, fetchExternalAgentStatus, isExternalAgent]);
 
+  // Hosted runtime (antiproton): the provisioning record replaces the manual setup steps.
+  const hostedRuntime = externalStatus?.hostedRuntime ?? agent.hostedRuntime ?? null;
+  const hostedRuntimeInProgress = hostedRuntime ? describeHostedRuntime(hostedRuntime).inProgress : false;
+  useEffect(() => {
+    if (!isExternalAgent || !canManageAgent || !hostedRuntimeInProgress) return;
+    let canceled = false;
+    const timer = setInterval(() => {
+      void fetchExternalAgentStatus(agent.id)
+        .then((status) => { if (!canceled) setExternalStatus(status); })
+        .catch(() => undefined);
+    }, HOSTED_RUNTIME_POLL_MS);
+    return () => {
+      canceled = true;
+      clearInterval(timer);
+    };
+  }, [agent.id, canManageAgent, fetchExternalAgentStatus, hostedRuntimeInProgress, isExternalAgent]);
+  const handleRetryHostedRuntime = async () => {
+    await retryHostedRuntimeProvisioning(agent.id);
+    setExternalStatus(await fetchExternalAgentStatus(agent.id));
+  };
+
   const handleCopyExternalCommand = async (text = externalSetupInstruction, target = "setup") => {
     await copyTextToClipboard(text);
     setExternalCopiedTarget(target);
     window.setTimeout(() => setExternalCopiedTarget(null), 2000);
   };
 
-  const autoResizeTextarea = useCallback((el: HTMLTextAreaElement | null) => {
-    if (!el) return;
-    el.style.height = "auto";
-    const minH = parseFloat(getComputedStyle(el).minHeight) || 0;
-    el.style.height = `${Math.max(Math.min(el.scrollHeight, 160), minH)}px`;
-  }, []);
-
-  useEffect(() => {
-    // oxlint-disable-next-line react-doctor/no-event-handler -- YMNNE-family: pre-existing non-bug site grandfathered; rule now gates new code (see docs/frontend/render-cost-contract.md)
-    if (editingRole) autoResizeTextarea(roleRef.current);
-  }, [editingRole, roleValue, autoResizeTextarea]);
-
-  const handleSaveDisplayName = async () => {
-    const nextDisplayName = displayNameValue.trim();
-    setDisplayNameError("");
-    setSavingDisplayName(true);
-    try {
-      await updateAgent(agent.id, {
-        displayName: nextDisplayName || null,
-      });
-      setEditingDisplayName(false);
-    } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { error?: string } } };
-      setDisplayNameError(axiosErr.response?.data?.error || formatMessage({ id: "agent.detail.updateDisplayNameFailed" }));
-    } finally {
-      setSavingDisplayName(false);
-    }
-  };
-
-  const handleSaveRole = async () => {
-    const nextDescription = roleValue.trim();
-    if (nextDescription.length > MAX_AGENT_DESCRIPTION_LENGTH) {
-      setRoleError(formatMessage({ id: "agent.detail.descriptionMaxLength" }, { count: MAX_AGENT_DESCRIPTION_LENGTH }));
-      return;
-    }
-    setRoleError("");
-    setSavingRole(true);
-    try {
-      await updateAgent(agent.id, {
-        description: nextDescription || null,
-      });
-      setEditingRole(false);
-    } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { error?: string } } };
-      setRoleError(axiosErr.response?.data?.error || formatMessage({ id: "agent.detail.updateDescriptionFailed" }));
-    } finally {
-      setSavingRole(false);
-    }
-  };
-
-  const handleSaveServerRole = async () => {
-    if (!currentAgentServerRole || serverRoleValue === currentAgentServerRole) {
-      setEditingServerRole(false);
-      return;
-    }
-    setServerRoleError("");
-    setServerRoleSaving(true);
-    try {
-      await updateAgent(agent.id, {
-        serverRole: serverRoleValue,
-      });
-      setEditingServerRole(false);
-      setServerRolePickerOpen(false);
-    } catch (err: unknown) {
-      const axiosErr = err as { response?: { data?: { error?: string } } };
-      setServerRoleError(axiosErr.response?.data?.error || formatMessage({ id: "agent.detail.updateRoleFailed" }));
-    } finally {
-      setServerRoleSaving(false);
-    }
-  };
 
   const formatIdentityValue = (value: string | null) => value && value.trim()
     ? value
@@ -1191,7 +1086,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
         : formatMessage({ id: "agent.detail.updateOfficialIdentity" }),
       message: (
         <div className="space-y-4">
-          <p className="text-sm text-black/60">
+          <p className="text-sm text-foreground-muted theme-brutal:text-black/60">
             {formatMessage({ id: "agent.detail.reviewOfficialIdentityChanges" })}
           </p>
           <dl className="divide-y divide-black/10">
@@ -1201,11 +1096,11 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                 data-onboarding-identity-change={change.field}
                 className="grid grid-cols-[96px_minmax(0,1fr)] items-baseline gap-3 py-3 first:pt-0 last:pb-0"
               >
-                <dt className="text-xs font-bold uppercase tracking-wide text-black/50">{change.label}</dt>
+                <dt className="text-xs font-bold uppercase tracking-wide text-foreground-muted theme-brutal:text-black/50">{change.label}</dt>
                 <dd className="flex min-w-0 items-center gap-2 font-mono text-sm">
-                  <span className="min-w-0 break-words text-black/50">{formatIdentityValue(change.before)}</span>
-                  <MoveRight aria-hidden="true" size={16} className="shrink-0 text-black/30" />
-                  <span className="min-w-0 break-words font-bold text-black">{formatIdentityValue(change.after)}</span>
+                  <span className="min-w-0 break-words text-foreground-muted theme-brutal:text-black/50">{formatIdentityValue(change.before)}</span>
+                  <MoveRight aria-hidden="true" size={16} className="shrink-0 text-foreground-placeholder theme-brutal:text-black/30" />
+                  <span className="min-w-0 break-words font-bold text-foreground-strong theme-brutal:text-black">{formatIdentityValue(change.after)}</span>
                 </dd>
               </div>
             ))}
@@ -1215,7 +1110,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
               {formatMessage({ id: "agent.detail.grantsAdminWarning" })}
             </Banner>
           )}
-          <p className="text-xs text-black/50">{formatMessage({ id: "agent.detail.customizeAfterIdentityUpdate" })}</p>
+          <p className="text-xs text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "agent.detail.customizeAfterIdentityUpdate" })}</p>
         </div>
       ),
       confirmLabel: grantsServerAdmin
@@ -1239,6 +1134,8 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   });
 
   const closeRuntimeConfigEditor = () => {
+    setV2EditDraft(null);
+    setV2EditServerErrors({});
     setEditingRuntimeConfig(false);
     setRuntimeConfigSaveError("");
     setDraftRuntime(currentRuntimeConfig.runtime);
@@ -1251,6 +1148,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     setDraftBuiltInProviderApiKey(runtimeConfigBuiltInProviderApiKey(currentRuntimeConfig));
     setDraftBuiltInProviderBaseUrl(runtimeConfigBuiltInProviderBaseUrl(currentRuntimeConfig));
     setDraftBuiltInProviderSupportsImageInput(runtimeConfigBuiltInProviderSupportsImageInput(currentRuntimeConfig));
+    setDraftLoadLocalPlugins(currentRuntimeConfig.runtime === "builtin" && currentRuntimeConfig.loadLocalPlugins === true);
     setDraftProviderConnectionId(currentProviderConnectionId);
     setDraftPiProviderMode(runtimeConfigPiProviderMode(currentRuntimeConfig));
     setDraftPiProviderApiKey(runtimeConfigPiProviderApiKey(currentRuntimeConfig));
@@ -1295,6 +1193,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   const currentBuiltInProviderApiKey = runtimeConfigBuiltInProviderApiKey(currentRuntimeConfig);
   const currentBuiltInProviderBaseUrl = runtimeConfigBuiltInProviderBaseUrl(currentRuntimeConfig);
   const currentBuiltInProviderSupportsImageInput = runtimeConfigBuiltInProviderSupportsImageInput(currentRuntimeConfig);
+  const currentLoadLocalPlugins = currentRuntimeConfig.runtime === "builtin" && currentRuntimeConfig.loadLocalPlugins === true;
   const currentPiProviderMode = runtimeConfigPiProviderMode(currentRuntimeConfig);
   const currentPiProviderApiKey = runtimeConfigPiProviderApiKey(currentRuntimeConfig);
   const currentCustomModelMode = currentRuntimeConfig.model.kind === "custom";
@@ -1346,6 +1245,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
   const draftModelSourceInvalid = draftSchemaBacked
     ? !draftSchemaSelectedModel || draftSchemaEffortInvalid
     : !runtimeModelSelectionIsRunnable({
+        runtime: draftRuntime,
         source: runtimeModels.source,
         model: draftModel,
         modelIgnored: runtimeIgnoresModel(draftRuntime),
@@ -1353,8 +1253,9 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
         customAllowed: supportsRuntimeCustomModelName(draftRuntime),
         providerCatalog: draftRuntime === "pi" && draftPiProviderMode !== PI_PROVIDER_CONFIGURED,
         persistedModel: draftRetainsBuiltInPresetSelection ? currentRuntimeModel : undefined,
-        requireBuiltInCatalog:
+        builtInPreset:
           supportsRuntimeBuiltInProvider(draftRuntime) &&
+          !draftConnectionGateway &&
           !draftBuiltInProviderBaseUrlRequired,
       });
   const draftEnvVars = useMemo(() => {
@@ -1378,6 +1279,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     || draftBuiltInProviderApiKey.trim() !== currentBuiltInProviderApiKey
     || draftBuiltInProviderBaseUrl.trim() !== currentBuiltInProviderBaseUrl
     || draftBuiltInProviderSupportsImageInput !== currentBuiltInProviderSupportsImageInput
+    || draftLoadLocalPlugins !== currentLoadLocalPlugins
     || draftProviderConnectionId !== currentProviderConnectionId
     || draftPiProviderMode !== currentPiProviderMode
     || draftPiProviderApiKey.trim() !== currentPiProviderApiKey
@@ -1399,7 +1301,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     modelSourceInvalid: draftModelSourceInvalid || legacyKimiReasoningRequiresUpgrade,
   });
   const modelOptions = (() => {
-    const options = runtimeModels.models.map((m) => ({ value: m.id, label: m.label }));
+    const options = runtimeModels.models.map((m) => ({ value: m.id, label: catalogModelLabel(useServerStore.getState().current?.id, agent.machineId, draftRuntime, m.id) ?? m.label }));
     if (runtimeModels.source.kind === "live" && !draftCustomModelMode && draftModel && !options.some((option) => option.value === draftModel)) {
       options.push({
         value: draftModel,
@@ -1441,6 +1343,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     setDraftBuiltInProviderApiKey(runtimeConfigBuiltInProviderApiKey(currentRuntimeConfig));
     setDraftBuiltInProviderBaseUrl(runtimeConfigBuiltInProviderBaseUrl(currentRuntimeConfig));
     setDraftBuiltInProviderSupportsImageInput(runtimeConfigBuiltInProviderSupportsImageInput(currentRuntimeConfig));
+    setDraftLoadLocalPlugins(currentRuntimeConfig.runtime === "builtin" && currentRuntimeConfig.loadLocalPlugins === true);
     setDraftProviderConnectionId(currentProviderConnectionId);
     setDraftPiProviderMode(runtimeConfigPiProviderMode(currentRuntimeConfig));
     setDraftPiProviderApiKey(runtimeConfigPiProviderApiKey(currentRuntimeConfig));
@@ -1454,6 +1357,28 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     setRuntimeConfigAdvancedOpen(false);
     setDraftReasoningEffort(currentRuntimeConfig.reasoningEffort ?? null);
     setEditingRuntimeConfig(true);
+  };
+
+  const changeDraftProviderConnection = (connection: ProviderConnectionSummary | null) => {
+    setDraftProviderConnectionId(connection?.id ?? "");
+    if (!connection) {
+      if (draftProviderConnectionId) {
+        setDraftBuiltInProviderApiKey("");
+        setDraftBuiltInProviderBaseUrl("");
+        setDraftBuiltInProviderSupportsImageInput(false);
+      }
+      return;
+    }
+    setDraftBuiltInProviderApiKey("");
+    setDraftBuiltInProviderBaseUrl(connection.endpointUrl ?? "");
+    setDraftBuiltInProviderSupportsImageInput(connection.supportsImageInput === true);
+    setDraftBuiltInProviderMode(connection.providerId);
+    const nextModel = reconcileBuiltInProviderModelSelection({
+      providerId: connection.providerId,
+      currentModel: draftModel,
+    });
+    setDraftModel(nextModel.model);
+    setDraftCustomModelMode(nextModel.customModelMode);
   };
 
   const saveRuntimeConfiguration = async (
@@ -1481,8 +1406,76 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     );
   };
 
+  const saveRuntimeFormV2Edit = async () => {
+    if (runtimeFormV2Edit.status !== "ready" || !v2EditValues) return;
+    if (!v2EditChanged) {
+      closeRuntimeConfigEditor();
+      return;
+    }
+    const { form, sources } = runtimeFormV2Edit;
+    // Field errors are already shown beside the fields; nothing to send yet.
+    if (Object.keys(validateRuntimeFormV2(form, sources, v2EditValues, { editing: true })).length > 0) return;
+    const fields = {
+      formDefinitionRef: { protocolVersion: 2 as const, runtimeId: draftRuntime },
+      formValues: runtimeFormV2Submission(form, v2EditValues, sources),
+    };
+    const save = async (restartMode?: "restart") => {
+      try {
+        await updateAgent(agent.id, fields, restartMode ? { restartMode } : undefined);
+        setV2EditDraft(null);
+      } catch (err: unknown) {
+        const data = (err as { response?: { data?: { error?: string; issues?: Array<{ pointer?: string }> } } }).response?.data;
+        const fieldErrors: Record<string, string> = {};
+        for (const issue of data?.issues ?? []) {
+          const key = issue.pointer?.startsWith("/formValues/") ? issue.pointer.slice("/formValues/".length) : "";
+          if (key) fieldErrors[key] = data?.error ?? "";
+        }
+        setV2EditServerErrors(fieldErrors);
+        setRuntimeConfigSaveError(data?.error ?? formatMessage({ id: "agent.detail.runtimeConfigInvalid" }));
+        throw err;
+      }
+    };
+    if (!isActive) {
+      setSavingRuntimeConfig(true);
+      try {
+        await save();
+        closeRuntimeConfigEditor();
+      } catch {
+        // Shown beside the fields and in the banner.
+      } finally {
+        setSavingRuntimeConfig(false);
+      }
+      return;
+    }
+    const changedLabels = form.fields
+      .filter((field) => JSON.stringify(v2EditValues[field.key]) !== JSON.stringify(v2EditInitial?.[field.key]))
+      .map((field) => field.label);
+    requestConfirm({
+      title: formatMessage({ id: "agent.detail.restartToApplyRuntimeConfig" }),
+      message: formatMessage(
+        { id: "agent.detail.restartToApplyRuntimeConfigMessage" },
+        {
+          changes: formatList(changedLabels, { type: "conjunction" }),
+          model: typeof v2EditValues.model === "string" ? getModelLabel(draftRuntime, v2EditValues.model) : "",
+          reasoning: "",
+          mode: "",
+        },
+      ),
+      confirmLabel: formatMessage({ id: "agent.detail.restartAgent" }),
+      loadingLabel: formatMessage({ id: "machine.detail.restarting" }),
+      confirmColor: "bg-brutal-cyan",
+      onConfirm: async () => {
+        await save("restart");
+      },
+    });
+  };
+
   const handleSaveRuntimeConfiguration = async () => {
     setRuntimeConfigSaveError("");
+    if (v2EditActive) {
+      await saveRuntimeFormV2Edit();
+      return;
+    }
     if (!runtimeConfigChanged) {
       closeRuntimeConfigEditor();
       return;
@@ -1525,6 +1518,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
           })
         : managedConnectionActive && selectedProviderConnection
         ? buildManagedConnectionRuntimeConfig({
+            loadLocalPlugins: draftLoadLocalPlugins,
             connectionId: selectedProviderConnection.id,
             providerId: selectedProviderConnection.providerId,
             model: draftModel,
@@ -1547,6 +1541,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
           : draftBuiltInProviderApiKey,
         builtInProviderBaseUrl: draftBuiltInProviderBaseUrl,
         builtInProviderSupportsImageInput: draftBuiltInProviderSupportsImageInput,
+        loadLocalPlugins: draftLoadLocalPlugins,
         piProviderMode: draftPiProviderMode,
         piProviderApiKey: draftPiProviderApiKey,
         fastMode: draftSupportsFastMode ? draftFastMode : false,
@@ -1662,6 +1657,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
     const changeLabels: string[] = [];
     if (modelChanged || customModelModeChanged) changeLabels.push(formatMessage({ id: "agent.runtimeConfig.model" }));
     if (providerChanged) changeLabels.push(formatMessage({ id: "agent.runtimeConfig.provider" }));
+    if (draftLoadLocalPlugins !== currentLoadLocalPlugins) changeLabels.push(formatMessage({ id: "agent.runtimeConfig.loadLocalPlugins" }));
     if (fastModeChanged) changeLabels.push(formatMessage({ id: "agent.runtimeConfig.mode" }));
     if (commandChanged) changeLabels.push(formatMessage({ id: "agent.runtimeConfig.command" }));
     if (reasoningChanged) changeLabels.push(formatMessage({ id: "agent.runtimeConfig.reasoning" }));
@@ -1684,95 +1680,23 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
 
   return (
     <>
-      {/* Display Name */}
-      <div className="px-5 pt-4 pb-3">
-        <div className="flex items-center gap-2 mb-1">
-          <SectionEyebrow as="div">
-            {formatMessage({ id: "agent.detail.displayName" })}
-          </SectionEyebrow>
-          {canManageAgent && !editingDisplayName && (
-            <button
+      {/* Onboarding identity adoption. The display name itself is edited in the
+          profile header (AgentHeaderName), which shows the same value. */}
+      {(currentOnboardingIdentityPreview?.canAdopt || currentOnboardingIdentityError) && (
+        <div className="px-5 pt-4">
+          {currentOnboardingIdentityPreview?.canAdopt && (
+            <Button variant="accent" size="sm"
               type="button"
-              onClick={() => {
-                setDisplayNameValue(agent.displayName || "");
-                setDisplayNameError("");
-                setEditingDisplayName(true);
-              }}
-              className="text-black/40 hover:text-black transition-colors"
-              title={formatMessage({ id: "agent.detail.editDisplayName" })}
+              onClick={handleAdoptOnboardingIdentity}
             >
-              <Pencil size={12} />
-            </button>
+              {formatMessage({ id: "agent.detail.updateOfficialIdentity" })}
+            </Button>
+          )}
+          {currentOnboardingIdentityError && (
+            <div className="mt-2 text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange">{currentOnboardingIdentityError}</div>
           )}
         </div>
-        {canManageAgent && editingDisplayName ? (
-          <div className="space-y-[5px]">
-            <input
-              ref={displayNameRef}
-              value={displayNameValue}
-              onChange={(e) => {
-                setDisplayNameValue(e.target.value.replace(/[\r\n]+/g, " "));
-                if (displayNameError) setDisplayNameError("");
-              }}
-              placeholder={formatMessage({ id: "agent.detail.displayName" })}
-              className="h-8 w-full border-2 border-black px-2 py-1 text-sm shadow-brutal-sm focus:outline-none focus:shadow-brutal-sm"
-              autoFocus
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void handleSaveDisplayName();
-                }
-                if (e.key === "Escape") {
-                  setDisplayNameError("");
-                  setEditingDisplayName(false);
-                }
-              }}
-            />
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => void handleSaveDisplayName()}
-                disabled={savingDisplayName}
-                className="btn-brutal-sm bg-brutal-pink px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {formatMessage({ id: "machine.detail.save" })}
-              </button>
-              <button
-                onClick={() => {
-                  setDisplayNameError("");
-                  setEditingDisplayName(false);
-                }}
-                disabled={savingDisplayName}
-                className="btn-brutal-sm bg-white px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {formatMessage({ id: "common.confirm.cancel" })}
-              </button>
-            </div>
-            {displayNameError && (
-              <div className="text-xs font-bold text-brutal-orange">
-                {displayNameError}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm text-black">
-              {agent.displayName || agent.name}
-            </p>
-            {currentOnboardingIdentityPreview?.canAdopt && (
-              <button
-                type="button"
-                onClick={handleAdoptOnboardingIdentity}
-                className="btn-brutal-sm bg-brutal-pink px-2 py-1 text-xs"
-              >
-                {formatMessage({ id: "agent.detail.updateOfficialIdentity" })}
-              </button>
-            )}
-          </div>
-        )}
-        {currentOnboardingIdentityError && (
-          <div className="mt-2 text-xs font-bold text-brutal-orange">{currentOnboardingIdentityError}</div>
-        )}
-      </div>
+      )}
 
       {/* Description */}
       <div className="px-5 py-3">
@@ -1780,91 +1704,34 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
           <SectionEyebrow as="div">
             {formatMessage({ id: "machine.detail.description" })}
           </SectionEyebrow>
-          {canManageAgent && !editingRole && (
-            <button
-              type="button"
-              onClick={() => {
-                setRoleValue(agent.description || "");
-                setRoleError("");
-                setEditingRole(true);
-              }}
-              className="text-black/40 hover:text-black transition-colors"
-              title={formatMessage({ id: "agent.detail.editDescription" })}
-            >
-              <Pencil size={12} />
-            </button>
+          {canManageAgent && onEdit && (
+            <Tooltip content={formatMessage({ id: "agent.detail.editDescription" })}>
+              <button
+                type="button"
+                aria-label={formatMessage({ id: "agent.detail.editDescription" })}
+                onClick={() => onEdit("description")}
+                className="text-foreground-placeholder theme-brutal:text-black/40 hover:text-foreground-strong theme-brutal:hover:text-black transition-colors"
+              >
+                <Pencil size={12} />
+              </button>
+            </Tooltip>
           )}
         </div>
-        {canManageAgent && editingRole ? (
-          <div className="space-y-[5px]">
-            <textarea
-              ref={roleRef}
-              value={roleValue}
-              onChange={(e) => {
-                setRoleValue(e.target.value);
-                if (roleError) setRoleError("");
-              }}
-              placeholder={formatMessage({ id: "agent.detail.describeAgentPlaceholder" })}
-              className="m-0 min-h-10 w-full border-2 border-black px-2 py-1 text-sm leading-4 shadow-brutal-sm focus:outline-none focus:shadow-brutal-sm resize-none overflow-hidden"
-              rows={2}
-              autoFocus
-              maxLength={MAX_AGENT_DESCRIPTION_LENGTH}
-              onKeyDown={(e) => {
-                if (e.key === "Escape") {
-                  setRoleError("");
-                  setEditingRole(false);
-                }
-              }}
-            />
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => void handleSaveRole()}
-                disabled={savingRole}
-                className="btn-brutal-sm bg-brutal-pink px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {formatMessage({ id: "machine.detail.save" })}
-              </button>
-              <button
-                onClick={() => {
-                  setRoleError("");
-                  setEditingRole(false);
-                }}
-                disabled={savingRole}
-                className="btn-brutal-sm bg-white px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {formatMessage({ id: "common.confirm.cancel" })}
-              </button>
-            </div>
-            <div className="flex items-center justify-between gap-3 text-xs">
-              {roleError ? (
-                <span className="font-bold text-brutal-orange">
-                  {roleError}
-                </span>
-              ) : (
-                <span />
-              )}
-              <span className="font-mono text-black/50">
-                {roleValue.trim().length}/{MAX_AGENT_DESCRIPTION_LENGTH}
-              </span>
-            </div>
-          </div>
-        ) : (
-          <p className="text-sm text-black">
-            {agent.description || (
-              <span className="italic text-black/40">{formatMessage({ id: "machine.detail.noDescription" })}</span>
-            )}
-          </p>
-        )}
+        <p className="text-sm text-foreground-strong theme-brutal:text-black">
+          {agent.description || (
+            <span className="italic text-foreground-placeholder theme-brutal:text-black/40">{formatMessage({ id: "machine.detail.noDescription" })}</span>
+          )}
+        </p>
       </div>
 
       {showOperationalInfo && isExternalAgent && canManageAgent && (
-        <div className="border-t border-black/10 px-5 py-4">
+        <div className="border-t border-line-muted theme-brutal:border-black/10 px-5 py-4">
           <SectionEyebrow as="div" className="mb-2">
             {formatMessage({ id: "agent.detail.externalSetup" })}
           </SectionEyebrow>
-          <div className="space-y-3 border-2 border-black bg-brutal-cyan/15 p-3 shadow-brutal-sm">
+          <div className="space-y-3 border theme-brutal:border-2 border-line-muted theme-brutal:border-black bg-info-soft theme-brutal:bg-brutal-cyan/15 p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex border-2 border-black bg-white px-2 py-0.5 text-xs font-bold uppercase text-black">
+              <span className="inline-flex border theme-brutal:border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-2 py-0.5 text-xs font-bold uppercase text-foreground-strong theme-brutal:text-black">
                 {externalStatus?.setupState === "connected"
                   ? formatMessage({ id: "machine.detail.connected" })
                   : externalStatus?.setupState === "credential_minted"
@@ -1872,7 +1739,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                     : formatMessage({ id: "agent.detail.waitingForLogin" })}
               </span>
               {externalStatus?.credentialLastUsedAt && (
-                <span className="text-xs font-mono text-black/50">
+                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/50">
                   {formatMessage(
                     { id: "agent.detail.lastUsed" },
                     { time: formatShortDateTime(externalStatus.credentialLastUsedAt) },
@@ -1880,6 +1747,9 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                 </span>
               )}
             </div>
+            {hostedRuntime ? (
+              <HostedRuntimeStatus summary={hostedRuntime} onRetry={handleRetryHostedRuntime} />
+            ) : (<>
             {(capabilities.issueAgentCredentials || (agent.creatorType === "user" && agent.creatorId === currentUserId)) && (
               <ExternalAgentToken key={agent.id} agentId={agent.id} />
             )}
@@ -1892,7 +1762,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
             />
             {externalStepSetupSteps ? (
               <div className="space-y-3">
-                <p className="text-xs font-bold text-black/70">
+                <p className="text-xs font-bold text-foreground-muted theme-brutal:text-black/70">
                     {formatMessage({ id: "agent.detail.runStepsInTerminal" })}
                 </p>
                 <ol className="space-y-4">
@@ -1901,350 +1771,288 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                     return (
                       <li key={step.title} className="space-y-1.5">
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <span className="text-xs font-bold uppercase text-black/60">
+                          <span className="text-xs font-bold uppercase text-foreground-muted theme-brutal:text-black/60">
                             {formatMessage({ id: "agent.detail.stepNumber" }, { step: idx + 1 })}
                           </span>
-                          <button
+                          <Button variant="outline" size="sm"
                             type="button"
                             onClick={() => void handleCopyExternalCommand(step.command, copyTarget)}
-                            className="btn-brutal-sm bg-white px-2 py-1 text-xs"
+                            className=""
                           >
                             {externalCopiedTarget === copyTarget
                               ? formatMessage({ id: "agent.detail.copied" })
                               : formatMessage({ id: "agent.detail.copyStep" })}
-                          </button>
+                          </Button>
                         </div>
-                        <p className="text-sm font-bold text-black">{step.title}</p>
-                        <div className="break-all border border-black/20 bg-white/80 p-2 font-mono text-xs text-black whitespace-pre-wrap">
+                        <p className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{step.title}</p>
+                        <div className="break-all border border-line-muted theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white/80 p-2 font-mono text-xs text-foreground-strong theme-brutal:text-black whitespace-pre-wrap">
                           {step.command}
                         </div>
                         {step.description && (
-                          <p className="text-xs text-black/60">{step.description}</p>
+                          <p className="text-xs text-foreground-muted theme-brutal:text-black/60">{step.description}</p>
                         )}
                       </li>
                     );
                   })}
                 </ol>
-                <p className="text-xs text-black/60">
+                <p className="text-xs text-foreground-muted theme-brutal:text-black/60">
                     {formatMessage({ id: "agent.detail.raftProfileRequired" })}
                 </p>
                 {effectiveExternalSetupTab === "claude-code" ? (
-                  <p className="text-xs text-black/60">
+                  <p className="text-xs text-foreground-muted theme-brutal:text-black/60">
                     {formatMessage({ id: "agent.detail.claudeCodeKeepRunning" })}
                   </p>
                 ) : effectiveExternalSetupTab === "hermes" ? (
-                  <p className="text-xs text-black/60">
+                  <p className="text-xs text-foreground-muted theme-brutal:text-black/60">
                     {formatMessage({ id: "agent.detail.hermesGatewayDescription" })}
                   </p>
                 ) : null}
               </div>
             ) : (
               <div className="space-y-2">
-                <div className="break-all border-2 border-black bg-white p-2 font-mono text-xs text-black whitespace-pre-wrap">
+                <div className="break-all border theme-brutal:border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white p-2 font-mono text-xs text-foreground-strong theme-brutal:text-black whitespace-pre-wrap">
                   {externalOtherSetupInstruction}
                 </div>
-                <p className="text-xs text-black/60">
+                <p className="text-xs text-foreground-muted theme-brutal:text-black/60">
                       {formatMessage({ id: "agent.detail.otherAgentRuntimeDescription" })}
                 </p>
               </div>
             )}
+            </>)}
             <div className="flex flex-wrap items-center gap-2">
-              {effectiveExternalSetupTab === "other-agents" && (
-                <button
+              {!hostedRuntime && effectiveExternalSetupTab === "other-agents" && (
+                <Button variant="outline" size="sm"
                   type="button"
                   onClick={() => void handleCopyExternalCommand()}
-                  className="btn-brutal-sm bg-white px-2 py-1 text-xs"
+                  className=""
                 >
                   {externalCopiedTarget === "setup"
                     ? formatMessage({ id: "agent.detail.copied" })
                     : formatMessage({ id: "agent.detail.copySetup" })}
-                </button>
+                </Button>
               )}
               {externalStatusError && (
-                <span className="text-xs font-bold text-brutal-orange">{externalStatusError}</span>
+                <span className="text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange">{externalStatusError}</span>
               )}
             </div>
           </div>
         </div>
       )}
 
+      {showOperationalInfo && isExternalAgent && canManageAgent && hostedRuntime?.state === "active" && (
+        <>
+          <AgentConnections key={agent.id} agentId={agent.id} />
+          <AgentHostedRuntimeUsage key={`usage-${agent.id}`} agentId={agent.id} />
+        </>
+      )}
+
       {showOperationalInfo && (
         <>
           {/* Info */}
-          <div className="px-5 py-4 border-t border-black/10">
+          <div className="px-5 py-4 border-t border-line-muted theme-brutal:border-black/10">
             <SectionEyebrow as="div" className="mb-3">
               {formatMessage({ id: "machine.detail.info" })}
             </SectionEyebrow>
-            <div className="space-y-3">
+            <dl className="m-0 space-y-3">
               {/* Role */}
-              <div>
-                <div className="mb-1 flex items-center gap-2">
-                  <div className="text-xs text-black/50">{formatMessage({ id: "agent.detail.role" })}</div>
+              <InfoRow
+                label={formatMessage({ id: "agent.detail.role" })}
+                actions={
+                  <>
+                    <Tooltip content={formatMessage({ id: "agent.detail.rolePermissions" })}>
+                      <button type="button" onClick={() => setShowRoleHelp(true)} className={INFO_ICON_BUTTON_CLASS}>
+                        <HelpCircle size={12} />
+                      </button>
+                    </Tooltip>
+                    {canEditServerRole && onEdit && (
+                      <Tooltip content={formatMessage({ id: "agent.detail.editRole" })}>
+                        <button
+                          type="button"
+                          aria-label={formatMessage({ id: "agent.detail.editRole" })}
+                          onClick={() => onEdit("role")}
+                          className={INFO_ICON_BUTTON_CLASS}
+                        >
+                          <Pencil size={12} />
+                        </button>
+                      </Tooltip>
+                    )}
+                  </>
+                }
+              >
+                {currentAgentServerRoleInfo ? (
+                  <Badge appearance="soft" variant={currentAgentServerRoleInfo.variant} uppercase={false}>
+                    {formatMessage({ id: currentAgentServerRoleInfo.labelId })}
+                  </Badge>
+                ) : serverRoleDisplay.kind === "unrecognized" ? (
+                  <Tooltip content={agent.serverRole ?? ""}>
+                    <Badge appearance="soft" variant="muted" uppercase={false}
+                      className="theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-gray-100 text-xs theme-brutal:text-black"
+                    >
+                      {serverRoleDisplay.label}
+                    </Badge>
+                  </Tooltip>
+                ) : null}
+              </InfoRow>
+              {/* Computer: name, connection and version each get a row, so a long
+                  (wrapping) computer name never has the status wedged into it. */}
+              <InfoRow label={formatMessage({ id: "machine.detail.computer" })}>
+                {isExternalAgent ? (
+                  <span className="text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "agent.detail.externalRuntime" })}</span>
+                ) : agentMachineRow.kind === "pending" ? null : agentMachine ? (
+                  // Long names truncate; the full name shows on hover.
+                  <Tooltip content={agentMachine.name}>
+                    <button
+                      onClick={() => { useProfileStore.getState().closeProfile(); useThreadStore.getState().closeThread(); nav.toMachine(agentMachine.id); }}
+                      className="block max-w-full truncate text-left font-mono font-semibold text-foreground-strong theme-brutal:text-black hover:underline"
+                    >
+                      {agentMachine.name}
+                    </button>
+                  </Tooltip>
+                ) : (
+                  <span className="text-foreground-muted theme-brutal:text-black/50">
+                    {formatMessage({ id: "agent.detail.noComputerAssigned" })}
+                  </span>
+                )}
+              </InfoRow>
+              {!isExternalAgent && agentMachine && (
+                <>
+                  {/* "Computer status", not "Status": the header already shows the agent's own
+                      activity, and these are two different things. */}
+                  <InfoRow label={formatMessage({ id: "agent.detail.computerStatus" })} testId="agent-computer-connection">
+                    <span className="flex items-center gap-1.5">
+                      <StatusDot
+                        tone={machineStatus === "online" ? "bg-brutal-lime" : "bg-gray-400"}
+                        className="shrink-0"
+                      />
+                      {machineStatus === "online"
+                        ? formatMessage({ id: "machine.detail.connected" })
+                        : formatMessage({ id: "machine.detail.offline" })}
+                    </span>
+                  </InfoRow>
+                  <InfoRow label={formatMessage({ id: "machine.detail.computerVersion" })} testId="agent-computer-version">
+                    <span className="font-mono"><MachineRunLabel machine={agentMachine} /></span>
+                  </InfoRow>
+                </>
+              )}
+              {/* Created */}
+              <InfoRow label={formatMessage({ id: "machine.detail.created" })}>{createdDate}</InfoRow>
+              {/* Creator */}
+              <InfoRow label={formatMessage({ id: "agent.detail.creator" })}>
+                {agent.creator ? (
+                  <Tooltip content={agent.creator.displayName || agent.creator.name}>
                   <button
                     type="button"
-                    onClick={() => setShowRoleHelp(true)}
-                    className="text-black/35 transition-colors hover:text-black"
-                    title={formatMessage({ id: "agent.detail.rolePermissions" })}
+                    onClick={() => {
+                      const type = agent.creator!.type === "human" ? "human" : "agent";
+                      (onOpenProfile ?? openProfile)(type, agent.creator!.id);
+                    }}
+                    className="flex max-w-full items-center gap-2 text-left hover:underline"
                   >
-                    <HelpCircle size={12} />
-                  </button>
-                  {canEditServerRole && currentAgentServerRole && !editingServerRole && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setServerRoleValue(currentAgentServerRole);
-                        setServerRolePickerOpen(true);
-                        setServerRoleError("");
-                        setEditingServerRole(true);
-                      }}
-                      className="text-black/40 transition-colors hover:text-black"
-                      title={formatMessage({ id: "agent.detail.editRole" })}
-                    >
-                      <Pencil size={12} />
-                    </button>
-                  )}
-                </div>
-                {canEditServerRole && currentAgentServerRole && currentAgentServerRoleInfo ? (
-                  <div className="space-y-1.5">
-                    {editingServerRole ? (
-                      <>
-                        <InlineBadgeEditor
-                          displayValue={formatMessage({ id: AGENT_ROLE_CONFIG[serverRoleValue].labelId })}
-                          selectedId={serverRoleValue}
-                          options={editableAgentRoleOptions}
-                          onSelect={(nextRole) => {
-                            setServerRoleValue(nextRole as Extract<ServerRole, "admin" | "member">);
-                            setServerRolePickerOpen(false);
-                          }}
-                          open={serverRolePickerOpen}
-                          onToggle={() => setServerRolePickerOpen((value) => !value)}
-                          onRequestClose={() => setServerRolePickerOpen(false)}
-                          badgeClassName={AGENT_ROLE_CONFIG[serverRoleValue].color}
-                          uppercase={false}
-                          dropdownMinWidth="min-w-[140px]"
-                          dropdownAlign="left"
-                        />
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => void handleSaveServerRole()}
-                            disabled={serverRoleSaving || serverRoleValue === currentAgentServerRole}
-                            className="btn-brutal-sm bg-brutal-pink px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {formatMessage({ id: "machine.detail.save" })}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setServerRoleValue(currentAgentServerRole);
-                              setServerRolePickerOpen(false);
-                              setServerRoleError("");
-                              setEditingServerRole(false);
-                            }}
-                            disabled={serverRoleSaving}
-                            className="btn-brutal-sm bg-white px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            {formatMessage({ id: "common.confirm.cancel" })}
-                          </button>
-                        </div>
-                        {serverRoleError && (
-                          <div className="text-xs font-bold text-brutal-orange">{serverRoleError}</div>
-                        )}
-                      </>
+                    {agent.creator.type === "human" ? (
+                      <AvatarSlot
+                        context="creator-link"
+                        type="human"
+                        humanAvatarUrl={agent.creator.avatarUrl}
+                        gravatarHash={agent.creator.gravatarHash}
+                      />
                     ) : (
-                      <span className={`inline-block border-2 border-black px-2 py-0.5 text-xs font-bold text-black ${currentAgentServerRoleInfo.color}`}>
-                        {formatMessage({ id: currentAgentServerRoleInfo.labelId })}
-                      </span>
+                      <AvatarSlot
+                        context="creator-link"
+                        type="agent"
+                        agentAvatarUrl={agent.creator.avatarUrl}
+                      />
                     )}
-                  </div>
-                ) : currentAgentServerRoleInfo ? (
-                  <span className={`inline-block border-2 border-black px-2 py-0.5 text-xs font-bold text-black ${currentAgentServerRoleInfo.color}`}>
-                    {formatMessage({ id: currentAgentServerRoleInfo.labelId })}
+                    <span className="min-w-0 truncate font-medium">{agent.creator.displayName || agent.creator.name}</span>
+                    <span className="min-w-0 shrink truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/50">@{agent.creator.name}</span>
+                  </button>
+                  </Tooltip>
+                ) : (
+                  <span className="text-foreground-muted theme-brutal:text-black/50">
+                    {formatMessage({ id: "agent.detail.noCreatorAssigned" })}
                   </span>
-                ) : serverRoleDisplay.kind === "unrecognized" ? (
-                  <span
-                    className="inline-block border-2 border-black bg-gray-100 px-2 py-0.5 text-xs font-bold text-black"
-                    title={agent.serverRole ?? undefined}
-                  >
-                    {serverRoleDisplay.label}
-                  </span>
-                ) : null}
-              </div>
-              {/* Computer */}
-              <div>
-                <div className="text-xs text-black/50 mb-1">{formatMessage({ id: "machine.detail.computer" })}</div>
-                <div className="min-w-0 space-y-1.5 text-sm">
-                  {isExternalAgent ? (
-                    <span className="text-xs text-black/40 italic">{formatMessage({ id: "agent.detail.externalRuntime" })}</span>
-                  ) : agentMachineRow.kind === "pending" ? null : agentMachine ? (
-                    <>
-                      <button
-                        onClick={() => { useProfileStore.getState().closeProfile(); useThreadStore.getState().closeThread(); nav.toMachine(agentMachine.id); }}
-                        className="block max-w-full break-all text-left font-mono font-semibold text-black hover:underline"
-                      >
-                        {agentMachine.name}
-                      </button>
-                      <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-black/50">
-                        <StatusDot
-                          tone={machineStatus === "online" ? "bg-brutal-lime" : "bg-gray-400"}
-                          className="shrink-0"
-                        />
-                        <span>
-                          {machineStatus === "online"
-                            ? formatMessage({ id: "machine.detail.connected" })
-                            : formatMessage({ id: "machine.detail.offline" })}
-                        </span>
-                        {agentMachine && (
-                          <span className="font-mono">· <MachineRunLabel machine={agentMachine} /></span>
-                        )}
-                      </div>
-                    </>
-                  ) : (
-                    <span className="text-xs text-black/40 italic">
-                      {formatMessage({ id: "agent.detail.noComputerAssigned" })}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-x-8 gap-y-3">
-                {/* Created */}
-                <KeyValueRow label={formatMessage({ id: "machine.detail.created" })} value={createdDate} mono />
-                {/* Creator */}
-                <KeyValueRow
-                  label={formatMessage({ id: "agent.detail.creator" })}
-                  valueClassName="flex items-center gap-2"
-                  value={
-                    agent.creator ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const type = agent.creator!.type === "human" ? "human" : "agent";
-                          (onOpenProfile ?? openProfile)(type, agent.creator!.id);
-                        }}
-                        className="flex items-center gap-2 text-sm text-black hover:underline"
-                      >
-                        {agent.creator.type === "human" ? (
-                          <AvatarSlot
-                            context="creator-link"
-                            type="human"
-                            humanAvatarUrl={agent.creator.avatarUrl}
-                            gravatarHash={agent.creator.gravatarHash}
-                          />
-                        ) : (
-                          <AvatarSlot
-                            context="creator-link"
-                            type="agent"
-                            agentAvatarUrl={agent.creator.avatarUrl}
-                          />
-                        )}
-                        <span className="font-bold">{agent.creator.displayName || agent.creator.name}</span>
-                        <span className="font-mono text-xs text-black/50">@{agent.creator.name}</span>
-                      </button>
-                    ) : (
-                      <span className="text-sm italic text-black/40">
-                        {formatMessage({ id: "agent.detail.noCreatorAssigned" })}
-                      </span>
-                    )
-                  }
-                />
-              </div>
-            </div>
+                )}
+              </InfoRow>
+            </dl>
           </div>
 
           {!isExternalAgent && (
-            <div ref={configRef} className="px-5 py-4 border-t border-black/10">
+            <div ref={configRef} className="px-5 py-4 border-t border-line-muted theme-brutal:border-black/10">
               <div className="w-full">
-                <div className="flex items-center gap-2 mb-1">
+                <div className="flex items-center gap-2 mb-3">
                   <SectionEyebrow as="div">
                     {formatMessage({ id: "agent.detail.runtimeConfig" })}
                   </SectionEyebrow>
                   {canManageAgent && !editingRuntimeConfig && (
+                    <Tooltip content={formatMessage({ id: "agent.detail.editRuntimeConfig" })}>
                     <button
                       type="button"
+                      aria-label={formatMessage({ id: "agent.detail.editRuntimeConfig" })}
                       onClick={startRuntimeConfigEditing}
-                      className="text-black/40 hover:text-black transition-colors"
-                      title={formatMessage({ id: "agent.detail.editRuntimeConfig" })}
+                      className="text-foreground-placeholder theme-brutal:text-black/40 hover:text-foreground-strong theme-brutal:hover:text-black transition-colors"
                     >
                       <Pencil size={12} />
                     </button>
+                    </Tooltip>
                   )}
                 </div>
-                <div className="flex flex-wrap gap-4">
-                  <KeyValueRow
-                    label={formatMessage({ id: "agent.runtimeConfig.runtime" })}
-                    value={
-                      <RuntimeAccountUsageGateChip
+                {/* Vertical label | value rows (same as Info); values keep their original styling. */}
+                <dl className="m-0 space-y-3">
+                  <InfoRow label={formatMessage({ id: "agent.runtimeConfig.runtime" })}>
+                    <RuntimeAccountUsageGateChip
                         enabled={canViewRuntimeAccountUsage}
                         runtimeId={currentRuntimeConfig.runtime}
                         runtimeVersion={agentMachine?.runtimeVersions?.[currentRuntimeConfig.runtime]}
                         serverId={currentServer?.id ?? null}
                         machineId={agentMachine?.id ?? ""}
-                        className="h-6 border-2 border-black bg-brutal-cyan px-2 py-0.5 text-xs font-bold text-black"
+                        appearance="solid"
+                        variant="information"
                       >
                         {formatRuntimeLabelWithStatus(currentRuntimeConfig.runtime, formatMessage)}
                       </RuntimeAccountUsageGateChip>
-                    }
-                  />
+                  </InfoRow>
                   {currentRuntimeDeprecated && (
-                    <div className="basis-full">
-                      <Banner intent="warning" density="sm" className="font-bold">
-                        {formatMessage({ id: "agent.detail.deprecatedRuntimeWarning" })}
-                      </Banner>
-                    </div>
+                    <Banner intent="warning" density="sm" className="font-bold">
+                      {formatMessage({ id: "agent.detail.deprecatedRuntimeWarning" })}
+                    </Banner>
                   )}
-                  <KeyValueRow
-                    label={formatMessage({ id: "agent.runtimeConfig.model" })}
-                    value={
-                      <span className="inline-block border-2 border-black bg-brutal-lavender px-2 py-0.5 text-xs font-bold text-black">
+                  <InfoRow label={formatMessage({ id: "agent.runtimeConfig.model" })}>
+                    <Badge appearance="soft" variant="accent" uppercase={false}>
                         {currentRuntimeModelLabel}
-                      </span>
-                    }
-                  />
+                      </Badge>
+                  </InfoRow>
                   {REASONING_EFFORT_RUNTIMES.has(currentRuntimeConfig.runtime) && (
-                    <KeyValueRow
-                      label={formatMessage({ id: "agent.runtimeConfig.reasoning" })}
-                      value={
-                        <span className="inline-block border-2 border-black bg-soft-signal px-2 py-0.5 text-xs font-bold capitalize text-black">
+                    <InfoRow label={formatMessage({ id: "agent.runtimeConfig.reasoning" })}>
+                      <Badge appearance="soft" variant="primary" uppercase={false}>
                           {currentRuntimeConfig.reasoningEffort
                             ? formatMessage({ id: reasoningEffortLabelId(currentRuntimeConfig.reasoningEffort) ?? "agent.runtimeConfig.default" })
                             : formatMessage({ id: "agent.runtimeConfig.default" })}
-                        </span>
-                      }
-                    />
+                        </Badge>
+                    </InfoRow>
                   )}
                   {supportsRuntimeFastMode(currentRuntimeConfig.runtime) && (
-                    <KeyValueRow
-                      label={formatMessage({ id: "agent.runtimeConfig.mode" })}
-                      value={
-                        <span className="inline-block border-2 border-black bg-brutal-orange px-2 py-0.5 text-xs font-bold text-black">
+                    <InfoRow label={formatMessage({ id: "agent.runtimeConfig.mode" })}>
+                      <Badge appearance="soft" variant="warning" uppercase={false}>
                           {runtimeConfigFastMode(currentRuntimeConfig)
                             ? formatMessage({ id: "agent.runtimeConfig.fastMode" })
                             : formatMessage({ id: "agent.runtimeConfig.default" })}
-                        </span>
-                      }
-                    />
+                        </Badge>
+                    </InfoRow>
                   )}
                   {currentRuntimeConfig.runtime === "claude" && (
                     <>
-                      <KeyValueRow
-                        label={formatMessage({ id: "agent.runtimeConfig.provider" })}
-                        value={
-                          currentProviderApiUrl
-                            ? <span className="font-mono text-xs text-black">{currentProviderApiUrl}</span>
-                            : <span className="text-xs italic text-black/40">{formatMessage({ id: "agent.runtimeConfig.default" })}</span>
-                        }
-                      />
-                      <KeyValueRow
-                        label={formatMessage({ id: "agent.runtimeConfig.command" })}
-                        value={
-                          currentCommand
-                            ? <span className="font-mono text-xs text-black">{currentCommand}</span>
-                            : <span className="text-xs italic text-black/40">{formatMessage({ id: "agent.runtimeConfig.default" })}</span>
-                        }
-                      />
+                      <InfoRow label={formatMessage({ id: "agent.runtimeConfig.provider" })}>
+                        {currentProviderApiUrl
+                            ? <span className="font-mono text-xs text-foreground-strong theme-brutal:text-black">{currentProviderApiUrl}</span>
+                            : <span className="text-xs italic text-foreground-placeholder theme-brutal:text-black/40">{formatMessage({ id: "agent.runtimeConfig.default" })}</span>}
+                      </InfoRow>
+                      <InfoRow label={formatMessage({ id: "agent.runtimeConfig.command" })}>
+                        {currentCommand
+                            ? <span className="font-mono text-xs text-foreground-strong theme-brutal:text-black">{currentCommand}</span>
+                            : <span className="text-xs italic text-foreground-placeholder theme-brutal:text-black/40">{formatMessage({ id: "agent.runtimeConfig.default" })}</span>}
+                      </InfoRow>
                     </>
                   )}
-                </div>
+                </dl>
                 <div className="mt-3">
                   <EnvVarsSection agent={agent} canManageAgent={false} />
                 </div>
@@ -2287,9 +2095,9 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
           <div ref={runtimeConfigModalRef} className="w-full max-w-md card-brutal p-6">
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-bold uppercase">{formatMessage({ id: "agent.detail.editRuntimeConfig" })}</h2>
-              <button onClick={closeRuntimeConfigEditor} className="btn-brutal-sm bg-white p-1">
+              <CloseButton onClick={closeRuntimeConfigEditor} className="">
                 <X size={20} />
-              </button>
+              </CloseButton>
             </div>
             <form
               className="space-y-4"
@@ -2298,77 +2106,6 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                 void handleSaveRuntimeConfiguration();
               }}
             >
-              {providerConnectionCatalog.featureEnabled
-                && draftRuntime === "builtin"
-                && (providerConnectionCatalog.connections.length > 0 || currentProviderConnectionId) && (
-                <div>
-                  <label className="mb-1 block text-sm font-bold">
-                    {formatMessage({ id: "agent.create.providerConnection" })}
-                  </label>
-                  <Select
-                    // Agent Details' OWN select, not one of RuntimeConfigFields'.
-                    // Retiring the legacy arm deleted the stylesheet override this
-                    // used to inherit, so without `chrome="field"` it would fall
-                    // back to raft-ui's BUTTON metrics and sit visibly different
-                    // from the runtime-config fields directly beneath it.
-                    chrome="field"
-                    value={draftProviderConnectionId || "__inline_provider_connection__"}
-                    items={[
-                      { value: "__inline_provider_connection__", label: formatMessage({ id: "agent.create.providerConnectionInline" }) },
-                      ...providerConnectionCatalog.connections.map((connection) => ({
-                        value: connection.id,
-                        label: connection.name,
-                        disabled: !connection.enabled || connection.status !== "ready",
-                      })),
-                    ]}
-                    onValueChange={(value) => {
-                      if (value == null) return;
-                      const nextId = value === "__inline_provider_connection__" ? "" : value;
-                      setDraftProviderConnectionId(nextId);
-                      const connection = providerConnectionCatalog.connections.find((candidate) => candidate.id === nextId);
-                      if (!connection) return;
-                      setDraftBuiltInProviderMode(connection.providerId);
-                      setDraftBuiltInProviderApiKey("");
-                      setDraftBuiltInProviderBaseUrl("");
-                      if (isBuiltInGatewayProviderMode(connection.providerId)) {
-                        setDraftModel("");
-                        setDraftCustomModelMode(true);
-                      } else {
-                        setDraftModel(builtInProviderDefaultModel(connection.providerId) ?? "");
-                        setDraftCustomModelMode(false);
-                      }
-                    }}
-                  >
-                    <SelectTrigger className="w-full" data-testid="edit-agent-provider-connection">
-                      <SelectValue />
-                      <SelectIcon />
-                    </SelectTrigger>
-                    <SelectContent portalProps={{ container: runtimeConfigModalRef }}>
-                      <SelectList>
-                        <SelectItem value="__inline_provider_connection__">
-                          <SelectItemText>{formatMessage({ id: "agent.create.providerConnectionInline" })}</SelectItemText>
-                          <SelectItemIndicator />
-                        </SelectItem>
-                        {providerConnectionCatalog.connections.map((connection) => (
-                          <SelectItem
-                            key={connection.id}
-                            value={connection.id}
-                            disabled={!connection.enabled || connection.status !== "ready"}
-                          >
-                            <SelectItemText>{connection.name}</SelectItemText>
-                            <SelectItemIndicator />
-                          </SelectItem>
-                        ))}
-                      </SelectList>
-                    </SelectContent>
-                  </Select>
-                  {providerConnectionInvalid && (
-                    <p className="mt-1 text-xs font-bold text-brutal-red">
-                      {formatMessage({ id: "agent.create.providerConnectionUnavailable" })}
-                    </p>
-                  )}
-                </div>
-              )}
               <RuntimeConfigFields
                 runtime={draftRuntime}
                 onRuntimeChange={(id) => {
@@ -2383,6 +2120,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                   setDraftBuiltInProviderApiKey("");
                   setDraftBuiltInProviderBaseUrl("");
                   setDraftBuiltInProviderSupportsImageInput(false);
+                  setDraftLoadLocalPlugins(false);
                   setDraftProviderConnectionId("");
                   setDraftPiProviderMode(PI_PROVIDER_CONFIGURED);
                   setDraftPiProviderApiKey("");
@@ -2417,6 +2155,7 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                 onBuiltInProviderModeChange={(next) => {
                   setDraftBuiltInProviderMode(next);
                   setDraftBuiltInProviderSupportsImageInput(false);
+                  setDraftLoadLocalPlugins(false);
                   if (isBuiltInGatewayProviderMode(next)) {
                     setDraftModel("");
                     setDraftCustomModelMode(true);
@@ -2433,6 +2172,8 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                 onBuiltInProviderApiKeyChange={setDraftBuiltInProviderApiKey}
                 builtInProviderBaseUrl={draftBuiltInProviderBaseUrl}
                 onBuiltInProviderBaseUrlChange={setDraftBuiltInProviderBaseUrl}
+                loadLocalPlugins={draftLoadLocalPlugins}
+                onLoadLocalPluginsChange={setDraftLoadLocalPlugins}
                 builtInProviderSupportsImageInput={draftBuiltInProviderSupportsImageInput}
                 onBuiltInProviderSupportsImageInputChange={setDraftBuiltInProviderSupportsImageInput}
                 piProviderMode={draftPiProviderMode}
@@ -2467,7 +2208,18 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
                 selectedModelSuggestionOnly={draftModelSuggestionOnly}
                 selectPortalContainer={runtimeConfigModalRef}
                 managedConnectionActive={managedConnectionActive}
-                schemaBacked={draftSchemaBacked}
+                providerConnections={providerConnectionCatalog.connections}
+                providerConnectionId={draftProviderConnectionId}
+                onProviderConnectionChange={changeDraftProviderConnection}
+                onEditProviderConnection={capabilities.manageExternalAuth ? setEditingProviderConnection : undefined}
+                schemaBacked={draftSchemaBacked || v2EditActive}
+                runtimeFormV2={v2EditActive ? {
+                  state: runtimeFormV2Edit,
+                  values: v2EditValues,
+                  onChange: changeV2EditValue,
+                  serverErrors: v2EditServerErrors,
+                  editing: true,
+                } : undefined}
                 formDefinition={draftFormDefinition}
                 formDefinitionLoading={draftSchemaBacked && runtimeFormDefinitionCatalog.loading}
                 formDefinitionError={draftSchemaBacked && !runtimeFormDefinitionCatalog.loading && Boolean(draftFormDefinitionEntry?.error)}
@@ -2486,25 +2238,47 @@ function AgentProfileInfo({ agent, canManageAgent, canChangeAgentRole, onOpenPro
               ) : null}
 
               <div className="flex justify-end gap-3">
-                <button
+                <Button variant="outline" size="md"
                   type="button"
                   onClick={closeRuntimeConfigEditor}
                   disabled={savingRuntimeConfig}
-                  className="btn-brutal bg-white px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+                  className=""
                 >
                   {formatMessage({ id: "common.confirm.cancel" })}
-                </button>
-                <button
-                  type="submit"
-                  disabled={runtimeConfigSaveDisabled}
-                  className="btn-brutal bg-brutal-pink px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {formatMessage({ id: "agent.detail.saveRuntimeConfig" })}
-                </button>
+                </Button>
+                {v2EditActive ? (
+                  <Button variant="accent" size="md"
+                    type="submit"
+                    disabled={v2EditSaveDisabled}
+                    className=""
+                  >
+                    {formatMessage({ id: "agent.detail.saveRuntimeConfig" })}
+                  </Button>
+                ) : (
+                  <Button variant="accent" size="md"
+                    type="submit"
+                    disabled={runtimeConfigSaveDisabled}
+                    className=""
+                  >
+                    {formatMessage({ id: "agent.detail.saveRuntimeConfig" })}
+                  </Button>
+                )}
               </div>
             </form>
           </div>
         </Modal>
+      )}
+      {editingProviderConnection && (
+        <EditProviderConnectionModal
+          key={editingProviderConnection.id}
+          connection={editingProviderConnection}
+          providerOptions={providerConnectionCatalog.providerOptions}
+          onClose={() => setEditingProviderConnection(null)}
+          onCompleted={async () => {
+            setEditingProviderConnection(null);
+            await providerConnectionCatalog.refresh();
+          }}
+        />
       )}
     </>
   );
@@ -2514,9 +2288,10 @@ function AgentCreatedAgentsSection({ createdAgents, onOpenProfile }: { createdAg
   const { formatMessage } = useIntl();
   const openProfile = useProfileStore((s) => s.openProfile);
   return (
-    <div className="px-5 py-4 border-t border-black/10">
+    <div className="px-5 py-4 border-t border-line-muted theme-brutal:border-black/10">
+      {/* Empty: the header's count (0) is the whole section, no extra "none" line. */}
       <SectionHeader
-        className="mb-3"
+        className={createdAgents.length > 0 ? "mb-3" : undefined}
         label={formatMessage({ id: "agent.detail.createdAgents" })}
         count={createdAgents.length}
       />
@@ -2533,22 +2308,15 @@ function AgentCreatedAgentsSection({ createdAgents, onOpenProfile }: { createdAg
             />
           ))}
         </div>
-      ) : (
-        <span className="text-sm italic text-black/40">{formatMessage({ id: "agent.detail.noCreatedAgents" })}</span>
-      )}
+      ) : null}
     </div>
   );
 }
 
 function CreatedAgentStatusDot({ agentId }: { agentId: string }) {
-  const { formatMessage } = useIntl();
+  const intl = useIntl();
   const displayState = useAgentDisplayState(agentId);
-  const activityText = formatActivityText(
-    formatMessage,
-    displayState.activity,
-    displayState.activityDetail,
-    displayState.activityDetailKind,
-  );
+  const activityText = formatAgentDisplayStateText(intl, displayState);
   return <StatusDot activity={displayState.activity} title={activityText} />;
 }
 
@@ -2559,72 +2327,72 @@ function AgentStartStopButton({ agentId, onShowStopConfirm }: { agentId: string;
   const startAgent = useAgentStore((s) => s.startAgent);
   const isOnline = displayState.isOnline;
   return (
-    <button
+    <Button variant="outline" size="md"
       onClick={isOnline ? onShowStopConfirm : () => startAgent(agentId)}
-      className="btn-brutal flex w-full items-center justify-center gap-2 bg-white px-4 py-2 text-sm font-bold"
+      className="flex w-full items-center justify-center gap-2"
     >
       {isOnline ? <Square size={14} /> : <Play size={14} />}
       {isOnline
         ? formatMessage({ id: "agent.detail.stopAgent" })
         : formatMessage({ id: "agent.detail.startAgent" })}
-    </button>
+    </Button>
   );
 }
 
 // Isolated status badge — subscribes to activity for this agent only.
 function AgentStatusBadge({ agentId, showDetail, fallbackStatus, externalStatus }: { agentId: string; showDetail: boolean; fallbackStatus?: Agent["status"]; externalStatus?: ExternalAgentStatus | null }) {
-  const { formatMessage } = useIntl();
-  const displayState = useAgentDisplayState(agentId, fallbackStatus ? { status: fallbackStatus } : undefined);
-  const { formatShortDateTime } = useTimeFormatter();
+  const intl = useIntl();
+  const { formatMessage } = intl;
+  const rawDisplayState = useAgentDisplayState(agentId, fallbackStatus ? { status: fallbackStatus } : undefined);
+  const activityState = useAgentCurrentActivityState(agentId);
+  // task #1123: a failed start carries a typed reason; pick catalog copy by
+  // reason (never by parsing the detail text) and let it stand in for the
+  // daemon's detail so the existing offline + runtime_unavailable text path
+  // (which keeps the detail) renders it. Only model_not_found has its own copy
+  // today; other reasons keep the daemon's user message.
+  const spawnFailure = rawDisplayState.activityDetailKind === "runtime_unavailable"
+    ? activityState?.spawnFailure
+    : undefined;
+  const spawnFailureText = spawnFailure?.reason === "model_not_found"
+    ? formatMessage({ id: "activity.status.modelNotFound" }, { model: spawnFailure.model ?? "?" })
+    : null;
+  const displayState = spawnFailureText
+    ? { ...rawDisplayState, activityDetail: spawnFailureText }
+    : rawDisplayState;
 
-  // External agents use SHA-V0-014 observed-activity copy, not managed liveness
-  if (externalStatus) {
-    const setupState = externalStatus.setupState;
-
-    const ACTIVE_THRESHOLD_MS = 5 * 60 * 1000;
-    const RECENT_THRESHOLD_MS = 30 * 60 * 1000;
-    const lastAt = externalStatus.lastActivityAt ? new Date(externalStatus.lastActivityAt).getTime() : null;
-    const ageMs = lastAt ? Date.now() - lastAt : null;
-    const activityTone = ageMs !== null && ageMs < ACTIVE_THRESHOLD_MS
+  // External agents: presence = credential seen within the online window
+  // (same rule as every other agent dot); managers also see setup state.
+  // While seen with a non-idle activity (thinking/working/error from forwarded
+  // activity events) the badge renders exactly like a managed agent's.
+  const externalActivityShown = displayState.isExternal && displayState.isOnline && displayState.activity !== "online";
+  if (displayState.isExternal && !externalActivityShown) {
+    const setupState = externalStatus?.setupState;
+    const lastSeenRelative = !displayState.isOnline
+      ? formatRelativeTime(displayState.lastSeenAt, intl.locale)
+      : null;
+    const activityTone = displayState.isOnline
       ? "bg-brutal-lime"
-      : ageMs !== null && ageMs < RECENT_THRESHOLD_MS
-        ? "bg-brutal-cyan"
-        : setupState === "waiting_for_login"
-          ? "bg-gray-400"
-          : "bg-brutal-cyan";
-
-    // showDetail=false: external agents show only "External" (withhold timestamp detail)
-    if (!showDetail) {
-      return (
-        <div className="flex min-w-0 items-center gap-1.5">
-          <StatusDot tone={activityTone} className="shrink-0" />
-          <span className="min-w-0 truncate text-sm text-black/60 font-mono">
-            {formatMessage({ id: "agent.detail.external" })}
-          </span>
-        </div>
-      );
-    }
-    let externalText = formatMessage({ id: "agent.detail.externalNotConfigured" });
-    if (setupState === "waiting_for_login") {
+      : setupState === "waiting_for_login"
+        ? "bg-gray-400"
+        : "bg-brutal-cyan";
+    let externalText = formatMessage({ id: "agent.detail.external" });
+    if (showDetail && setupState === "waiting_for_login") {
       externalText = formatMessage({ id: "agent.detail.externalSetupRequired" });
-    } else if (lastAt && ageMs !== null && ageMs < ACTIVE_THRESHOLD_MS) {
-      externalText = formatMessage({ id: "agent.detail.externalActive" });
-    } else if (lastAt) {
-      externalText = formatMessage(
-        { id: "agent.detail.externalLastActivity" },
-        { time: formatShortDateTime(externalStatus.lastActivityAt!) },
-      );
-    } else if (setupState === "credential_minted") {
+    } else if (displayState.isOnline) {
+      externalText = formatMessage({ id: "agent.detail.externalOnline" });
+    } else if (lastSeenRelative) {
+      externalText = formatMessage({ id: "agent.detail.externalLastActive" }, { time: lastSeenRelative });
+    } else if (showDetail && (setupState === "credential_minted" || setupState === "connected")) {
       externalText = formatMessage({ id: "agent.detail.externalNoRaftActivity" });
-    } else if (setupState === "connected") {
-      externalText = formatMessage({ id: "agent.detail.externalNoRaftActivity" });
+    } else if (showDetail && externalStatus) {
+      externalText = formatMessage({ id: "agent.detail.externalNotConfigured" });
     }
     return (
       <div className="flex min-w-0 items-center gap-1.5">
         <StatusDot tone={activityTone} className="shrink-0" />
-        <span className="min-w-0 truncate text-sm text-black/60 font-mono" title={externalText}>
+        <Tooltip content={externalText}><span className="min-w-0 truncate text-sm text-foreground-muted theme-brutal:text-black/60 font-mono">
           {externalText}
-        </span>
+        </span></Tooltip>
       </div>
     );
   }
@@ -2637,803 +2405,53 @@ function AgentStatusBadge({ agentId, showDetail, fallbackStatus, externalStatus 
       displayState.activityDetailKind,
     )
     : formatActivityText(formatMessage, displayState.activity, "");
+  // task #1116: when the daemon reports deliveries the runtime never consumed,
+  // surface the typed counts (ids/classes only) in a truncating sibling so a
+  // human can see the observation without opening the trajectory log.
+  const deliveryConsumption = showDetail && displayState.activityDetailKind === "delivery_unconsumed"
+    ? activityState?.deliveryConsumption
+    : undefined;
+  const wakeCrashLoop = showDetail && displayState.activityDetailKind === "wake_crash_loop_blocked"
+    ? activityState?.wakeCrashLoop
+    : undefined;
+  const deliveryConsumptionText = deliveryConsumption
+    ? formatMessage(
+      { id: "activity.status.deliveryUnconsumedDetail" },
+      {
+        count: deliveryConsumption.unconsumedDeliveries,
+        episode: deliveryConsumption.episode,
+        path: deliveryConsumption.lastDeliveryPath ?? "unknown",
+      },
+    )
+    : wakeCrashLoop
+      ? formatMessage(
+        { id: "activity.status.wakeCrashLoopBlockedDetail" },
+        {
+          count: wakeCrashLoop.earlyExitCount,
+          episode: wakeCrashLoop.episode,
+          exitKind: wakeCrashLoop.lastExitKind ?? "unknown",
+          signal: wakeCrashLoop.lastSignal ? ` ${wakeCrashLoop.lastSignal}` : "",
+        },
+      )
+      : null;
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       <StatusDot activity={displayState.activity} className="shrink-0" />
-      <span className="min-w-0 truncate text-sm text-black/60 font-mono" title={activityText}>
+      <Tooltip content={activityText}><span className="min-w-0 truncate text-sm text-foreground-muted theme-brutal:text-black/60 font-mono">
         {activityText}
-      </span>
-    </div>
-  );
-}
-
-interface MigrationStartResponse {
-  migrationRef: string;
-  state: string;
-  sourceMachineId: string;
-  targetMachineId: string;
-  deadlines?: Record<string, string>;
-}
-
-const MIGRATION_PROGRESS_STEPS = [
-  "agent.detail.migrationStepSecureConnection",
-  "agent.detail.migrationStepPrepareFiles",
-  "agent.detail.migrationStepTransfer",
-  "agent.detail.migrationStepFinish",
-] as const;
-
-function normalizedMigrationState(state: string): string {
-  return state.toLowerCase();
-}
-
-function isActiveMigrationState(state: string): boolean {
-  return [
-    "provisioning",
-    "prep",
-    "ready",
-    "in_transit",
-    "arriving",
-    "starting",
-    "cancel_requested_pre_flip",
-    "cancel_requested_post_flip",
-  ].includes(
-    normalizedMigrationState(state),
-  );
-}
-
-function isCompletedMigrationState(state: string): boolean {
-  return ["completed", "arrived"].includes(normalizedMigrationState(state));
-}
-
-function isFailedMigrationState(state: string): boolean {
-  return ["failed", "aborted"].includes(normalizedMigrationState(state));
-}
-
-function isCanceledMigrationState(state: string): boolean {
-  return ["canceled_pre_flip", "canceled_post_flip"].includes(normalizedMigrationState(state));
-}
-
-function migrationProgressStep(notice: MigrationNotice): number {
-  const state = normalizedMigrationState(notice.state);
-  if (isCompletedMigrationState(state)) return MIGRATION_PROGRESS_STEPS.length;
-  if (state === "arriving" || state === "starting" || notice.arrivedAt || notice.flippedAt) return 3;
-  if (state === "ready" || state === "in_transit" || notice.readyAt) return 2;
-  if (state === "prep" || notice.transportProvisionedAt) return 1;
-  return 0;
-}
-
-function migrationStartErrorPresentation(
-  err: unknown,
-  formatMessage: IntlShape["formatMessage"],
-  computers: {
-    sourceComputerName?: string | null;
-    targetComputerName?: string | null;
-    sourceComputerId?: string | null;
-    targetComputerId?: string | null;
-  } = {},
-): MigrationErrorPresentation {
-  const e = err as {
-    response?: { data?: { error?: string; code?: string; details?: unknown } };
-    message?: string;
-  } | null;
-  return migrationErrorPresentation({
-    code: e?.response?.data?.code,
-    rawMessage: e?.response?.data?.error ?? e?.message,
-    context: "start",
-    computerCapabilityDetails: parseMigrationComputerCapabilityDetails(
-      e?.response?.data?.details,
-    ),
-    resumableCapabilityDetail: parseMigrationResumableCapabilityDetail(
-      e?.response?.data?.details,
-    ),
-    ...computers,
-  }, formatMessage);
-}
-
-function migrationFailurePresentation(
-  notice: MigrationNotice,
-  machines: Machine[],
-  formatMessage: IntlShape["formatMessage"],
-  formatTimestamp: (value: string) => string,
-): MigrationErrorPresentation {
-  const sourceMachine = machines.find((machine) => machine.id === notice.sourceMachineId);
-  const targetMachine = machines.find((machine) => machine.id === notice.targetMachineId);
-  const source = migrationTargetLabel(formatMessage, machines, notice.sourceMachineId);
-  const target = migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
-  if (normalizedMigrationState(notice.state) === "aborted") {
-    const fallback = migrationErrorPresentation({
-      context: "aborted",
-      reason: notice.abortReason,
-    }, formatMessage);
-    const id = notice.abortReason === "prep-deadline"
-      ? "agent.detail.migrationAbortedPrepDeadline"
-      : notice.abortReason === "transfer-deadline"
-        ? "agent.detail.migrationAbortedTransferDeadline"
-        : notice.abortReason === "arrival-deadline"
-          ? "agent.detail.migrationAbortedArrivalDeadline"
-          : "agent.detail.migrationAbortedFallback";
-    return {
-      message: formatMessage({ id }, { source, target }),
-      ...(fallback.technicalCode ? { technicalCode: fallback.technicalCode } : {}),
-    };
-  }
-  return migrationErrorPresentation({
-    code: notice.transportErrorCode ?? notice.failureReason,
-    rawMessage: notice.transportErrorMessage,
-    context: "failed",
-    reason: notice.abortReason,
-    sourceComputerName: source,
-    targetComputerName: target,
-    sourceComputerStatus: sourceMachine?.status,
-    targetComputerStatus: targetMachine?.status,
-    sourceComputerLastHeartbeat: sourceMachine?.lastHeartbeat,
-    targetComputerLastHeartbeat: targetMachine?.lastHeartbeat,
-    transportLostAt: notice.transportLostAt,
-    formatTimestamp,
-  }, formatMessage);
-}
-
-function MigrationErrorContent({ presentation }: { presentation: MigrationErrorPresentation }) {
-  const { formatMessage } = useIntl();
-  return (
-    <div className="space-y-1.5">
-      <div>{presentation.message}</div>
-      {presentation.issues?.length ? (
-        <ul className="list-disc space-y-1 pl-5">
-          {presentation.issues.map((issue, index) => <li key={`${index}:${issue}`}>{issue}</li>)}
-        </ul>
-      ) : null}
-      {presentation.technicalCode || presentation.diagnosticRef ? (
-        <details className="text-xs text-black/60">
-          <summary className="font-bold">{formatMessage({ id: "agent.detail.technicalDetails" })}</summary>
-          <div className="space-y-0.5">
-            {presentation.technicalCode ? (
-              <div>
-                {formatMessage({ id: "agent.detail.technicalErrorCode" })}: {" "}
-                <code>{presentation.technicalCode}</code>
-              </div>
-            ) : null}
-            {presentation.diagnosticRef ? (
-              <div>
-                {formatMessage({ id: "agent.detail.diagnosticReference" })}: {" "}
-                <code>{presentation.diagnosticRef}</code>
-              </div>
-            ) : null}
-          </div>
-        </details>
-      ) : null}
-    </div>
-  );
-}
-
-function migrationTargetLabel(formatMessage: IntlShape["formatMessage"], machines: Machine[], targetMachineId: string | null | undefined): string {
-  if (!targetMachineId) return formatMessage({ id: "agent.detail.unknownComputer" });
-  return machines.find((machine) => machine.id === targetMachineId)?.name ?? targetMachineId.slice(0, 8);
-}
-
-function migrationSupportRef(notice: MigrationNotice): string {
-  return notice.migrationRef;
-}
-
-function migrationStatusErrorPresentation(
-  error: { code?: string; message?: string },
-  formatMessage: IntlShape["formatMessage"],
-): MigrationErrorPresentation {
-  return migrationErrorPresentation({
-    code: error.code,
-    rawMessage: error.message,
-    context: "status",
-  }, formatMessage);
-}
-
-function MigrationReference({ notice }: { notice: MigrationNotice }) {
-  const { formatMessage } = useIntl();
-  const [copied, setCopied] = useState(false);
-  const ref = migrationSupportRef(notice);
-  const copy = async () => {
-    try {
-      await copyTextToClipboard(ref);
-      setCopied(true);
-      setClockTimeout(() => setCopied(false), 2_000);
-    } catch {
-      setCopied(false);
-    }
-  };
-  return (
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-black/55">
-      <span className="font-bold">{formatMessage({ id: "agent.migration.referenceLabel" })}</span>
-      <code className="min-w-0 break-all font-mono">{ref}</code>
-      <button
-        type="button"
-        onClick={() => void copy()}
-        className="btn-brutal-sm flex size-6 shrink-0 items-center justify-center bg-white"
-        title={copied
-          ? formatMessage({ id: "agent.migration.referenceCopied" })
-          : formatMessage({ id: "agent.migration.referenceCopy" })}
-        aria-label={copied
-          ? formatMessage({ id: "agent.migration.referenceCopied" })
-          : formatMessage({ id: "agent.migration.referenceCopyAria" }, { ref })}
-      >
-        {copied ? <Check size={12} aria-hidden="true" /> : <Clipboard size={12} aria-hidden="true" />}
-      </button>
-    </div>
-  );
-}
-
-function canCancelMigration(notice: MigrationNotice): boolean {
-  return ["provisioning", "prep", "ready", "in_transit", "arriving", "starting"].includes(
-    normalizedMigrationState(notice.state),
-  ) && Number.isInteger(notice.revision) && (notice.revision ?? 0) > 0;
-}
-
-function migrationNoticePresentation(
-  formatMessage: IntlShape["formatMessage"],
-  notice: MigrationNotice,
-  machines: Machine[],
-  formatTimestamp: (value: string) => string,
-) {
-  const source = migrationTargetLabel(formatMessage, machines, notice.sourceMachineId);
-  const target = migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
-  const normalizedState = notice.state.toLowerCase();
-  if (normalizedState === "failed") {
-    const failure = migrationFailurePresentation(notice, machines, formatMessage, formatTimestamp);
-    return {
-      intent: "warning" as const,
-      title: formatMessage({ id: "agent.detail.migrationFailed" }),
-      ...failure,
-    };
-  }
-  if (normalizedState === "aborted") {
-    const failure = migrationFailurePresentation(notice, machines, formatMessage, formatTimestamp);
-    return {
-      intent: "warning" as const,
-      title: formatMessage({ id: "agent.detail.migrationAborted" }),
-      ...failure,
-    };
-  }
-  if (normalizedState === "cancel_requested_pre_flip") {
-    return notice.cancelNeedsAttention
-      ? {
-          intent: "warning" as const,
-          title: formatMessage({ id: "agent.migration.cancellationNeedsAttention" }),
-          message: formatMessage({ id: "agent.migration.cancelPreAttentionMessage" }),
-          technicalCode: notice.cancelErrorCode ?? undefined,
-        }
-      : {
-          intent: "info" as const,
-          title: formatMessage({ id: "agent.migration.cancelingTitle" }),
-          message: formatMessage({ id: "agent.migration.cancelPreMessage" }),
-        };
-  }
-  if (normalizedState === "cancel_requested_post_flip") {
-    return notice.cancelNeedsAttention
-      ? {
-          intent: "warning" as const,
-          title: formatMessage({ id: "agent.migration.cancellationNeedsAttention" }),
-          message: formatMessage({ id: "agent.migration.cancelPostAttentionMessage" }),
-          technicalCode: notice.cancelErrorCode ?? undefined,
-        }
-      : {
-          intent: "info" as const,
-          title: formatMessage({ id: "agent.migration.stoppingMigratedAgentTitle" }),
-          message: formatMessage({ id: "agent.migration.cancelPostMessage" }),
-        };
-  }
-  if (normalizedState === "canceled_pre_flip") {
-    return {
-      intent: "info" as const,
-      title: formatMessage({ id: "agent.migration.canceledTitle" }),
-      message: formatMessage({ id: "agent.migration.canceledPreMessage" }),
-    };
-  }
-  if (normalizedState === "canceled_post_flip") {
-    return {
-      intent: "info" as const,
-      title: formatMessage({ id: "agent.migration.canceledTitle" }),
-      message: formatMessage({ id: "agent.migration.canceledPostMessage" }),
-    };
-  }
-  if (normalizedState === "provisioning") {
-    return {
-      intent: "info" as const,
-      title: formatMessage({ id: "agent.detail.migrationStatus" }),
-      message: formatMessage({ id: "agent.detail.migrationProvisioning" }, { target }),
-    };
-  }
-  if (normalizedState === "prep") {
-    return {
-      intent: "info" as const,
-      title: formatMessage({ id: "agent.detail.migrationStatus" }),
-      message: formatMessage({ id: "agent.detail.migrationPreparingSource" }, { source }),
-    };
-  }
-  if (normalizedState === "ready") {
-    return {
-      intent: "info" as const,
-      title: formatMessage({ id: "agent.detail.migrationStatus" }),
-      message: formatMessage({ id: "agent.detail.migrationReady" }, { target }),
-    };
-  }
-  if (normalizedState === "in_transit") {
-    return {
-      intent: "info" as const,
-      title: formatMessage({ id: "agent.detail.migrationStatus" }),
-      message: formatMessage({ id: "agent.detail.migrationTransferring" }, { target }),
-    };
-  }
-  if (normalizedState === "arriving") {
-    return {
-      intent: "info" as const,
-      title: formatMessage({ id: "agent.detail.migrationStatus" }),
-      message: formatMessage({ id: "agent.detail.migrationArriving" }, { target }),
-    };
-  }
-  if (normalizedState === "starting" && notice.failureReason === "auto_start_failed") {
-    return {
-      intent: "warning" as const,
-      title: formatMessage({ id: "agent.detail.agentDidNotStart" }),
-      message: formatMessage({ id: "agent.detail.agentDidNotStartMessage" }, { target }),
-      technicalCode: "auto_start_failed",
-    };
-  }
-  if (normalizedState === "starting") {
-    return {
-      intent: "info" as const,
-      title: formatMessage({ id: "agent.detail.migrationStatus" }),
-      message: formatMessage({ id: "agent.detail.migrationStarting" }, { target }),
-    };
-  }
-  if (normalizedState === "completed" || normalizedState === "arrived") {
-    return {
-      intent: "success" as const,
-      title: formatMessage({ id: "agent.detail.migrationStatus" }),
-      message: formatMessage({ id: "agent.detail.migrationCompleted" }, { target }),
-    };
-  }
-  return {
-    intent: "info" as const,
-    title: formatMessage({ id: "agent.detail.migrationStatus" }),
-    message: formatMessage({ id: "agent.detail.migrationUnknownState" }, { state: notice.state, target }),
-  };
-}
-
-function MigrationProgressPanel({
-  notice,
-  machines,
-  onShowCancel,
-}: {
-  notice: MigrationNotice;
-  machines: Machine[];
-  onShowCancel: () => void;
-}) {
-  const { formatMessage } = useIntl();
-  const { formatShortDateTime } = useTimeFormatter();
-  const source = migrationTargetLabel(formatMessage, machines, notice.sourceMachineId);
-  const target = migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
-  const presentation = migrationNoticePresentation(formatMessage, notice, machines, formatShortDateTime);
-  const completed = isCompletedMigrationState(notice.state);
-  const failed = isFailedMigrationState(notice.state)
-    || (normalizedMigrationState(notice.state) === "starting" && notice.failureReason === "auto_start_failed");
-  const canceled = isCanceledMigrationState(notice.state);
-  const active = isActiveMigrationState(notice.state);
-  const currentStep = migrationProgressStep(notice);
-  const progress = completed ? 100 : Math.min(88, currentStep * 25 + 13);
-  const cancelRequested = normalizedMigrationState(notice.state).startsWith("cancel_requested_");
-  const statusLabel = completed
-    ? formatMessage({ id: "agent.detail.migrationComplete" })
-    : canceled
-      ? formatMessage({ id: "agent.migration.canceledStatus" })
-    : failed || notice.cancelNeedsAttention
-      ? formatMessage({ id: "agent.detail.needsAttention" })
-      : cancelRequested
-        ? formatMessage({ id: "billing.canceling" })
-        : formatMessage({ id: "agent.detail.inProgress" });
-  const badgeVariant = completed
-    ? "success"
-    : canceled
-      ? "muted"
-    : failed || notice.cancelNeedsAttention
-      ? "warning"
-      : "information";
-  const headerMessageId = completed
-    ? "agent.detail.movedToTarget"
-    : canceled
-      ? "agent.detail.migrationToTargetCanceled"
-      : failed || notice.cancelNeedsAttention
-        ? "agent.detail.migrationToTargetNeedsAttention"
-        : cancelRequested
-          ? "agent.detail.cancelingMigrationToTarget"
-          : active
-            ? "agent.detail.movingToTarget"
-            : "agent.detail.migrationToTarget";
-
-  return (
-    <section aria-label={formatMessage({ id: "agent.detail.migrationToTarget" }, { target })}>
-      <SurfaceListItem interactive={false} className="space-y-3">
-      <div className="flex min-w-0 items-start justify-between gap-3">
-        <div className="flex min-w-0 items-center gap-2">
-          {completed ? (
-            <CircleCheck size={18} className="shrink-0 text-black" aria-hidden="true" />
-          ) : canceled ? (
-            <X size={18} className="shrink-0 text-black" aria-hidden="true" />
-          ) : failed ? (
-            <TriangleAlert size={18} className="shrink-0 text-black" aria-hidden="true" />
-          ) : (
-            <Spinner size="md" aria-hidden="true" />
-          )}
-          <div className="min-w-0">
-            <h3 className="break-words text-sm font-bold leading-tight text-black">
-              {formatMessage({ id: headerMessageId }, { target })}
-            </h3>
-            <p className="text-xs text-black/55">{formatMessage({ id: "agent.detail.workspaceAndAgentState" })}</p>
-          </div>
-        </div>
-        <Badge appearance="outline" variant={badgeVariant} uppercase className="shrink-0">
-          {statusLabel}
-        </Badge>
-      </div>
-
-      <MigrationReference notice={notice} />
-
-      <ProgressBar
-        value={progress}
-        tone={completed ? "lime" : failed || canceled ? "orange" : "pink"}
-        label={formatMessage({ id: "agent.detail.migrationProgressToTarget" }, { target })}
-      />
-
-      <ol className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-4">
-        {MIGRATION_PROGRESS_STEPS.map((labelId, index) => {
-          const stepComplete = completed || index < currentStep;
-          const stepCurrent = !completed && index === currentStep;
-          return (
-            <li key={labelId} className="flex min-w-0 items-center gap-1.5 text-[11px] font-bold">
-              <span
-                className={`flex size-4 shrink-0 items-center justify-center border border-black text-[9px] ${
-                  stepComplete
-                    ? "bg-brutal-lime"
-                    : stepCurrent
-                      ? failed
-                        ? "bg-brutal-orange"
-                        : "bg-brutal-pink"
-                      : "bg-white text-black/35"
-                }`}
-                aria-hidden="true"
-              >
-                {stepComplete ? <Check size={10} strokeWidth={3} /> : index + 1}
-              </span>
-              <span className={stepCurrent || stepComplete ? "text-black" : "text-black/40"}>
-                {formatMessage({ id: labelId })}
-              </span>
-            </li>
-          );
-        })}
-      </ol>
-
-      <Banner
-        intent={failed || notice.cancelNeedsAttention ? "warning" : completed ? "success" : "info"}
-        density="sm"
-        title={failed || cancelRequested ? presentation.title : undefined}
-        aria-live="polite"
-      >
-        {failed || notice.cancelNeedsAttention
-          ? <MigrationErrorContent presentation={presentation} />
-          : presentation.message}
-      </Banner>
-      {completed ? (
-        <div
-          className="space-y-2 border border-black/15 bg-black/[0.03] p-2.5 text-xs text-black/70"
-          data-testid="migration-completion-summary"
-        >
-          <p className="font-bold text-black">
-            {formatMessage({ id: "agent.detail.migrationCompletionRoute" }, { source, target })}
-          </p>
-          <p>{formatMessage({ id: "agent.detail.migrationCompletionAuthority" })}</p>
-          <p>{formatMessage({ id: "agent.detail.migrationSessionResetDetailed" })}</p>
-        </div>
-      ) : null}
-      {active ? (
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-[11px] text-black/45">
-            {formatMessage({ id: "agent.detail.updatesAutomatically" })}
-          </p>
-          {canCancelMigration(notice) ? (
-            <button
-              type="button"
-              onClick={onShowCancel}
-              className="btn-brutal-sm flex items-center gap-1.5 bg-white px-2 py-1 text-xs font-bold"
-            >
-              <X size={12} aria-hidden="true" />
-              {formatMessage({ id: "agent.migration.cancelAction" })}
-            </button>
-          ) : null}
-        </div>
-      ) : null}
-      </SurfaceListItem>
-    </section>
-  );
-}
-
-function AgentMigrationCancelDialog({
-  agentId,
-  notice,
-  machines,
-  onClose,
-  onRefresh,
-}: {
-  agentId: string;
-  notice: MigrationNotice;
-  machines: Machine[];
-  onClose: () => void;
-  onRefresh: () => Promise<void>;
-}) {
-  const { formatMessage } = useIntl();
-  const source = migrationTargetLabel(formatMessage, machines, notice.sourceMachineId);
-  const target = migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
-  const ref = migrationSupportRef(notice);
-
-  const submit = async () => {
-    if (!canCancelMigration(notice)) return;
-    try {
-      await api.post(`/agents/${agentId}/migration/cancel`, {
-        migrationRef: ref,
-        expectedRevision: notice.revision,
-      });
-      await onRefresh();
-    } catch (nextError: unknown) {
-      const value = nextError as {
-        response?: { data?: { code?: string } };
-      };
-      const code = value.response?.data?.code;
-      await onRefresh();
-      const message = code === "MIGRATION_REVISION_STALE" || code === "MIGRATION_CONCURRENT_UPDATE"
-        ? formatMessage({ id: "agent.migration.cancelDialogStaleError" })
-        : formatMessage({ id: "agent.migration.cancelDialogGenericError" });
-      const technicalCode = code && /^[A-Za-z][A-Za-z0-9_-]{1,127}$/.test(code) ? code : null;
-      throw new Error(technicalCode ? `${message} (${technicalCode})` : message);
-    }
-  };
-
-  return (
-    <ConfirmDialog
-      title={formatMessage({ id: "agent.migration.cancelDialogTitle" })}
-      confirmLabel={formatMessage({ id: "agent.migration.cancelAction" })}
-      loadingLabel={formatMessage({ id: "agent.migration.cancelDialogRequesting" })}
-      cancelLabel={formatMessage({ id: "agent.migration.cancelDialogKeepAction" })}
-      confirmIcon={<X size={14} aria-hidden="true" />}
-      confirmColor="bg-brutal-orange"
-      confirmDisabled={!canCancelMigration(notice)}
-      maxWidthClass="max-w-md"
-      plainMessage
-      chromeLocale="active"
-      onClose={onClose}
-      onConfirm={submit}
-      message={
-        <div className="space-y-3">
-          <Banner
-            intent="warning"
-            density="sm"
-            title={formatMessage({ id: "agent.migration.cancelDialogSafetyTitle" })}
-          >
-            {formatMessage({ id: "agent.migration.cancelDialogSafeMessage" }, { source, target })}
-          </Banner>
-          <MigrationReference notice={notice} />
-          <p className="text-xs text-black/60">
-            {formatMessage({ id: "agent.migration.cancelDialogExplanation" })}
-          </p>
-        </div>
-      }
-    />
-  );
-}
-
-function AgentMigrationDialog({
-  agent,
-  machines,
-  sourceMachineId,
-  onClose,
-  onProRequired,
-  onStarted,
-}: {
-  agent: Agent;
-  machines: Machine[];
-  sourceMachineId: string | null;
-  onClose: () => void;
-  onProRequired: () => void;
-  onStarted: (result: MigrationStartResponse) => Promise<void>;
-}) {
-  const { formatMessage } = useIntl();
-  const nav = useAppNavigate();
-  const targetComputers = useMemo(() =>
-    machines.filter((machine) =>
-      machine.id !== sourceMachineId &&
-      machine.isComputer === true
-    ),
-  [machines, sourceMachineId]);
-  const targetComputerOptions = useMemo(() =>
-    targetComputers.map((machine) => ({
-      value: machine.id,
-      label: machine.name,
-    })),
-  [targetComputers]);
-  const [targetComputer, setTargetComputer] = useState(targetComputers[0]?.id ?? "");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<MigrationErrorPresentation | null>(null);
-  const selectedTargetComputer = targetComputers.some((machine) => machine.id === targetComputer)
-    ? targetComputer
-    : targetComputers[0]?.id ?? "";
-  const sourceComputerName = machines.find((machine) => machine.id === sourceMachineId)?.name;
-  const targetComputerName = machines.find((machine) => machine.id === selectedTargetComputer)?.name;
-
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedTargetComputer) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      const { data } = await api.post<MigrationStartResponse>(`/agents/${agent.id}/migrate`, {
-        targetComputer: selectedTargetComputer,
-      });
-      await onStarted(data);
-    } catch (err: unknown) {
-      if (isMigrationProPlanRequiredError(err)) {
-        onProRequired();
-        return;
-      }
-      setError(migrationStartErrorPresentation(err, formatMessage, {
-        sourceComputerName,
-        targetComputerName,
-        sourceComputerId: sourceMachineId,
-        targetComputerId: selectedTargetComputer,
-      }));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <Modal onClose={onClose} closeOnBackdrop>
-      <form
-        onSubmit={handleSubmit}
-        className="w-full max-w-md border-2 border-black bg-white shadow-brutal"
-      >
-        <div className="flex items-center justify-between border-b-2 border-black px-4 py-3">
-          <h2 className="text-base font-bold text-black">
-            {formatMessage({ id: "agent.detail.moveToAnotherComputer" })}
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="btn-brutal-sm flex size-7 items-center justify-center bg-white"
-            title={formatMessage({ id: "common.close" })}
-          >
-            <X size={14} />
-          </button>
-        </div>
-        <div className="space-y-4 p-4">
-          <div>
-            <label
-              id="agent-migration-target-computer-label"
-              className="mb-1 block text-xs font-bold uppercase tracking-wide text-black/55"
-            >
-              {formatMessage({ id: "agent.detail.targetComputer" })}
-            </label>
-            <Select
-              value={selectedTargetComputer || null}
-              onValueChange={(value) => {
-                if (value == null) return;
-                setTargetComputer(value);
-              }}
-              disabled={submitting || targetComputers.length === 0}
-              items={targetComputerOptions}
-            >
-              <SelectTrigger
-                className="w-full"
-                aria-labelledby="agent-migration-target-computer-label"
-              >
-                <SelectValue placeholder={formatMessage({ id: "agent.detail.noOtherAttachedComputer" })} />
-                <SelectIcon />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectList>
-                  {targetComputerOptions.map((option) => (
-                    <SelectItem key={option.value} value={option.value}>
-                      <SelectItemText>{option.label}</SelectItemText>
-                      <SelectItemIndicator />
-                    </SelectItem>
-                  ))}
-                </SelectList>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="border border-black/15 bg-black/[0.03] p-2 text-xs font-bold text-black/60">
-            {formatMessage({ id: "agent.detail.migrationModeStopBeforeExport" })}
-          </div>
-          <div className="border border-black/15 bg-black/[0.03] p-2 text-xs font-bold text-black/60">
-            {formatMessage({ id: "agent.detail.migrationSessionResetDetailed" })}
-          </div>
-          {error ? (
-            <Banner intent="warning" density="sm">
-              <MigrationErrorContent presentation={error} />
-            </Banner>
-          ) : null}
-        </div>
-        <div className="flex justify-end gap-2 border-t-2 border-black bg-gray-50 px-4 py-3">
-          {error?.recovery === "open_computers_and_retry" ? (
-            <button
-              type="button"
-              onClick={() => {
-                onClose();
-                if (error.recoveryComputerId) {
-                  nav.toComputer(error.recoveryComputerId);
-                } else {
-                  nav.toComputers();
-                }
-              }}
-              className="btn-brutal bg-white px-3 py-2 text-sm font-bold"
-              disabled={submitting}
-            >
-              {formatMessage({ id: "agent.migration.error.openComputers" })}
-            </button>
-          ) : null}
-          <button
-            type="button"
-            onClick={onClose}
-            className="btn-brutal bg-white px-3 py-2 text-sm font-bold"
-            disabled={submitting}
-          >
-            {formatMessage({ id: "agent.detail.cancel" })}
-          </button>
-          <button
-            type="submit"
-            className="btn-brutal bg-brutal-lime px-3 py-2 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={submitting || !selectedTargetComputer}
-          >
-            {submitting
-              ? formatMessage({ id: "agent.detail.starting" })
-              : error?.recovery === "open_computers_and_retry"
-                ? formatMessage({ id: "agent.migration.error.tryAgain" })
-                : formatMessage({ id: "agent.detail.startMigration" })}
-          </button>
-        </div>
-      </form>
-    </Modal>
-  );
-}
-
-function AgentMigrationUpgradeDialog({
-  onClose,
-  onViewPlans,
-}: {
-  onClose: () => void;
-  onViewPlans: () => void;
-}) {
-  const { formatMessage } = useIntl();
-  return (
-    <ConfirmDialog
-      title={formatMessage({ id: "agent.migration.proRequired.title" })}
-      message={(
-        <div className="space-y-3 text-sm leading-relaxed text-black/75">
-          <p>{formatMessage({ id: "agent.migration.proRequired.description" })}</p>
-          <p className="font-bold text-black">
-            {formatMessage({ id: "agent.migration.proRequired.preservedAccess" })}
-          </p>
-        </div>
+      </span></Tooltip>
+      {deliveryConsumptionText && (
+        <Tooltip content={deliveryConsumptionText}><span className="min-w-0 truncate text-xs text-foreground-hint font-mono">
+          {deliveryConsumptionText}
+        </span></Tooltip>
       )}
-      confirmLabel={formatMessage({ id: "agent.migration.proRequired.viewPlans" })}
-      confirmColor="bg-brutal-lime"
-      onConfirm={onViewPlans}
-      onClose={onClose}
-      plainMessage
-      chromeLocale="active"
-      maxWidthClass="max-w-md"
-    />
+    </div>
   );
 }
 
 // Isolated header component — only re-renders on activity changes for this agent,
 // without triggering re-render of ChatPanel / tabs below.
-function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onMessage, onClose, onBack, onShowResetDialog, onShowStopConfirm, workspaceEmbedded = false, headerActionsHost = null }: {
-  agent: Agent;
+function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onMessage, onClose, onBack, onShowResetDialog, onShowStopConfirm, workspaceEmbedded = false, headerActionsHost = null }: {   agent: Agent;
   canControlAgentRuntime: boolean;
   canMessageAgent: boolean;
   onMessage: () => void;
@@ -3457,9 +2475,6 @@ function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onM
   const headerBack = onBack ?? responsiveBack;
   const displayState = useAgentDisplayState(agent.id, agent);
   const currentServerId = useServerStore((s) => s.current?.id);
-  const topbarOverflowEnabled = useServerFeatureFlag(
-    TOPBAR_OVERFLOW_FEATURE_FLAG_KEY,
-  ).enabled;
   const startAgent = useAgentStore((s) => s.startAgent);
   const isOnline = displayState.isOnline;
   const isDeleted = !!agent.deletedAt;
@@ -3474,119 +2489,11 @@ function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onM
       ? agent.serverName || agent.serverSlug || null
       : null;
   void sourceServerLabel;
-  const [showMobileActions, setShowMobileActions] = useState(false);
-  const mobileMenuRef = useRef<HTMLDivElement | null>(null);
-  const mobileActionsPopupRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!showMobileActions) return;
-    const handlePointerDown = (event: MouseEvent) => {
-      if (mobileMenuRef.current && !mobileMenuRef.current.contains(event.target as Node)) {
-        setShowMobileActions(false);
-      }
-    };
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setShowMobileActions(false);
-    };
-    document.addEventListener("mousedown", handlePointerDown);
-    // keydown-focus-on-open
-    document.addEventListener("keydown", handleEscape);
-    return () => {
-      document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleEscape);
-    };
-  }, [showMobileActions]);
-
-  // Move focus to the first action when the mobile actions menu opens, like the
-  // other popovers/menus — so Escape/keys reach it and a background element
-  // can't swallow them. (Same focus-on-open contract as ServerSwitcherMenu.)
-  useLayoutEffect(() => {
-    if (!showMobileActions) return;
-    mobileActionsPopupRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
-  }, [showMobileActions]);
-
   const handleStartStop = () => {
     if (isOnline) onShowStopConfirm();
     else void startAgent(agent.id);
   };
 
-  // Flag off preserves the pre-#187 desktop action row and its compact mobile
-  // popover. Flag on matches the Thread topbar: immediate commands live in a
-  // single Raft UI DropdownMenu, while structural Close remains outside.
-  const legacyActions = !isDeleted ? (
-    <>
-      {canMessageAgent && (
-        <button
-          onClick={onMessage}
-          className="btn-brutal-sm flex size-7 items-center justify-center bg-white"
-          title={formatMessage({ id: "agent.detail.messages" })}
-          aria-label={formatMessage({ id: "agent.detail.messages" })}
-        >
-          <MessageSquare size={14} />
-        </button>
-      )}
-      {canControlAgentRuntime && !isExternalAgent && (
-        <>
-          <div className="relative md:hidden" ref={mobileMenuRef}>
-            <button
-              type="button"
-              onClick={() => setShowMobileActions((value) => !value)}
-              className="btn-brutal-sm flex size-7 items-center justify-center bg-white"
-              title={formatMessage({ id: "agent.detail.moreActions" })}
-            >
-              <Menu size={14} />
-            </button>
-            {showMobileActions && (
-              <div ref={mobileActionsPopupRef} className="absolute right-0 top-full z-20 mt-2 min-w-[180px] border-2 border-black bg-white shadow-brutal">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileActions(false);
-                    handleStartStop();
-                  }}
-                  className="flex w-full items-center gap-2 border-b border-black/10 px-3 py-2 text-left text-sm font-bold hover:bg-black/5"
-                >
-                  {isOnline ? <Square size={14} /> : <Play size={14} />}
-                  <span>
-                    {isOnline
-                      ? formatMessage({ id: "agent.detail.stopAgent" })
-                      : formatMessage({ id: "agent.detail.startAgent" })}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowMobileActions(false);
-                    onShowResetDialog();
-                  }}
-                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-bold hover:bg-black/5"
-                >
-                  <RotateCcw size={14} />
-                  <span>{formatMessage({ id: "agent.detail.restartReset" })}</span>
-                </button>
-              </div>
-            )}
-          </div>
-          <button
-            onClick={handleStartStop}
-            className="btn-brutal-sm hidden size-7 items-center justify-center bg-white md:flex"
-            title={isOnline
-              ? formatMessage({ id: "agent.detail.stopAgent" })
-              : formatMessage({ id: "agent.detail.startAgent" })}
-          >
-            {isOnline ? <Square size={14} /> : <Play size={14} />}
-          </button>
-          <button
-            onClick={onShowResetDialog}
-            className="btn-brutal-sm hidden size-7 items-center justify-center bg-white md:flex"
-            title={formatMessage({ id: "agent.detail.restartReset" })}
-          >
-            <RotateCcw size={14} />
-          </button>
-        </>
-      )}
-    </>
-  ) : null;
   const overflowActions = !isDeleted ? (
     <AgentProfileOverflowMenu
       canMessageAgent={canMessageAgent}
@@ -3601,15 +2508,15 @@ function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onM
   ) : null;
   const actions = (
     <>
-      {topbarOverflowEnabled ? overflowActions : legacyActions}
+      {overflowActions}
       {onClose && (
-        <button
+        <CloseButton
           onClick={onClose}
-          className={`btn-brutal-sm size-7 items-center justify-center bg-white ${onBack ? "flex" : "hidden md:flex"}`}
+          className={` size-7 items-center justify-center ${onBack ? "flex" : "hidden md:flex"}`}
           title={formatMessage({ id: "common.close" })}
         >
           <X size={14} />
-        </button>
+        </CloseButton>
       )}
     </>
   );
@@ -3618,55 +2525,7 @@ function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onM
     if (!headerActionsHost) return null;
     const workspaceActions = (
       <div className="workspace-grid-tabset-actions" data-testid="workspace-grid-agent-actions">
-        {topbarOverflowEnabled && !isDeleted ? (
-          <AgentProfileOverflowMenu
-            canMessageAgent={canMessageAgent}
-            canControlAgentRuntime={canControlAgentRuntime && !isExternalAgent}
-            isOnline={isOnline}
-            messageLabel={formatMessage({ id: "agent.detail.directMessage" })}
-            onMessage={onMessage}
-            onStartStop={handleStartStop}
-            onRestartReset={onShowResetDialog}
-            responsive
-          />
-        ) : (
-          <>
-            {!isDeleted && canMessageAgent && (
-              <button
-                onClick={onMessage}
-                className="btn-brutal-sm flex size-7 items-center justify-center bg-white"
-                title={formatMessage({ id: "agent.detail.message" })}
-                aria-label={formatMessage({ id: "agent.detail.message" })}
-              >
-                <MessageSquare size={14} />
-              </button>
-            )}
-            {!isDeleted && canControlAgentRuntime && !isExternalAgent && (
-              <>
-                <button
-                  onClick={handleStartStop}
-                  className="btn-brutal-sm flex size-7 items-center justify-center bg-white"
-                  title={isOnline
-                    ? formatMessage({ id: "agent.detail.stopAgent" })
-                    : formatMessage({ id: "agent.detail.startAgent" })}
-                  aria-label={isOnline
-                    ? formatMessage({ id: "agent.detail.stopAgent" })
-                    : formatMessage({ id: "agent.detail.startAgent" })}
-                >
-                  {isOnline ? <Square size={14} /> : <Play size={14} />}
-                </button>
-                <button
-                  onClick={onShowResetDialog}
-                  className="btn-brutal-sm flex size-7 items-center justify-center bg-white"
-                  title={formatMessage({ id: "agent.detail.restartReset" })}
-                  aria-label={formatMessage({ id: "agent.detail.restartReset" })}
-                >
-                  <RotateCcw size={14} />
-                </button>
-              </>
-            )}
-          </>
-        )}
+        {overflowActions}
       </div>
     );
     return createPortal(workspaceActions, headerActionsHost);
@@ -3687,14 +2546,13 @@ function AgentDetailHeader({ agent, canControlAgentRuntime, canMessageAgent, onM
       }
       iconAlwaysVisible
       title={agent.displayName || agent.name}
-      subtitle={agent.description && !isDeleted ? agent.description : undefined}
       titleClickProps={{ title: agent.displayName || agent.name }}
       titleSuffix={
         isDeleted ? (
           <div className="flex min-w-0 items-center gap-1.5">
-            <span className="inline-flex shrink-0 items-center px-1.5 py-0.5 text-[10px] font-bold uppercase border border-black bg-gray-300 text-black/60">
+            <Badge appearance="soft" variant="muted" uppercase className="shrink-0 text-[10px]">
               {formatMessage({ id: "agent.detail.deleted" })}
-            </span>
+            </Badge>
           </div>
         ) : undefined
       }
@@ -3710,7 +2568,6 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
   formatMessageRef.current = formatMessage;
   const stopAgent = useAgentStore((s) => s.stopAgent);
   const deleteAgent = useAgentStore((s) => s.deleteAgent);
-  const updateAgent = useAgentStore((s) => s.updateAgent);
   const openDM = useChannelStore((s) => s.openDM);
   const { role: currentRole, capabilities } = useServerPermissions();
   const nav = useAppNavigate();
@@ -3718,26 +2575,20 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
   const activityLog = useAgentStore((s) => s.activityLogs[agent.id] ?? EMPTY_ACTIVITY_LOG);
   const machines = useMachineStore((s) => s.machines);
   const currentServer = useServerStore((s) => s.current);
-  const billing = useServerStore((s) => s.billing);
-  const loadingBilling = useServerStore((s) => s.loadingBilling);
-  const loadBilling = useServerStore((s) => s.loadBilling);
   const currentUser = useAuthStore((s) => s.user);
   const agentMachine = agent.machineId ? machines.find((m) => m.id === agent.machineId) : null;
   const isRemoteJointAgent = Boolean(currentServer?.id && agent.serverId && agent.serverId !== currentServer.id);
   const isBoundedPublicProjection = isRemoteJointAgent || agent.profileProjection === "channel_summary";
   const isExternalAgent = agent.external === true || isExternalAgentRuntime(agent.runtime);
-  const agentMigrationUiEnabled = useAgentMigrationUiEnabled();
 
-  const [showAvatarPicker, setShowAvatarPicker] = useState(false);
-  const [avatarPickerError, setAvatarPickerError] = useState("");
+  // Which profile field the edit dialog opened on; null = closed.
+  const [editField, setEditField] = useState<AgentProfileEditField | null>(null);
+  const editableRoleOptions = useEditableAgentRoleOptions(agent);
   const [startError, setStartError] = useState("");
   const [showResetDialog, setShowResetDialog] = useState(false);
   const [showReportDialog, setShowReportDialog] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
-  const [showMigrationDialog, setShowMigrationDialog] = useState(false);
-  const [showMigrationUpgradeDialog, setShowMigrationUpgradeDialog] = useState(false);
-  const [showMigrationCancel, setShowMigrationCancel] = useState(false);
   const fetchExternalAgentStatus = useAgentStore((s) => s.fetchExternalAgentStatus);
   const [panelExternalStatus, setPanelExternalStatus] = useState<ExternalAgentStatus | null>(null);
   const canManageAgent = !isBoundedPublicProjection && canViewAgentPrivateSurfaces(
@@ -3756,46 +2607,13 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
     capabilities.resetAgentWorkspace,
   );
   const canManageServer = !isBoundedPublicProjection && capabilities.manageExternalAuth;
-  const canChangeAgentRole = !isBoundedPublicProjection && capabilities.changeMemberRoles;
-  const migrationStatusEnabled = agentMigrationUiEnabled && canManageAgent && !isExternalAgent && !isBoundedPublicProjection;
-  const presentMigrationStatusError = useCallback(
-    (error: { code?: string; message?: string }) => migrationStatusErrorPresentation(error, formatMessage),
-    [formatMessage],
+  // Approve, deny, grant and revoke app access: the agent's creator or an owner/admin.
+  const canManageAgentAccess = !isBoundedPublicProjection && canViewAgentPrivateSurfaces(
+    agent,
+    currentUser?.id,
+    capabilities.manageExternalAuth,
   );
-  const {
-    model: migrationModel,
-    error: currentAgentMigrationStatusError,
-    refresh: refreshMigrationStatus,
-  } = useAgentMigrationStatus({
-    agentId: agent.id,
-    enabled: migrationStatusEnabled,
-    presentError: presentMigrationStatusError,
-  });
-  const currentAgentMigrationNotice = migrationModel.migration?.agentId === agent.id
-    ? migrationModel.migration
-    : null;
-  const currentAgentMigrationActive = currentAgentMigrationNotice
-    ? isActiveMigrationState(currentAgentMigrationNotice.state)
-    : false;
-  const migrationCanRetry = currentAgentMigrationNotice
-    ? isFailedMigrationState(currentAgentMigrationNotice.state)
-    : false;
-  const migrationRequiresUpgrade = agentMigrationRequiresUpgrade(billing?.plan);
-  const migrationBillingChecking = billing == null && loadingBilling;
-
-  useEffect(() => {
-    if (!agentMigrationUiEnabled || !canManageAgent || isExternalAgent || isBoundedPublicProjection) {
-      return;
-    }
-    void loadBilling();
-  }, [
-    agentMigrationUiEnabled,
-    canManageAgent,
-    isExternalAgent,
-    isBoundedPublicProjection,
-    loadBilling,
-  ]);
-
+  const canChangeAgentRole = !isBoundedPublicProjection && capabilities.changeMemberRoles;
   useEffect(() => {
     if (!isExternalAgent || isBoundedPublicProjection) return;
     let canceled = false;
@@ -3822,6 +2640,21 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
     currentUser?.id,
     canManageAgent,
   );
+  // External agents: the diagnostic copy text is built from the server's
+  // external-agent diagnostics (presence, status, push, pulls, provisioning).
+  const fetchExternalAgentDiagnostics = useAgentStore((s) => s.fetchExternalAgentDiagnostics);
+  // Keyed by agent: a switch to another agent never shows the previous one's facts.
+  const [loadedExternalDiagnostics, setLoadedExternalDiagnostics] = useState<{ agentId: string; view: ExternalAgentDiagnosticsView } | null>(null);
+  const externalDiagnostics = loadedExternalDiagnostics?.agentId === agent.id ? loadedExternalDiagnostics.view : null;
+  useEffect(() => {
+    if (!isExternalAgent || isBoundedPublicProjection || !canViewPrivateAgentSurfaces) return;
+    let canceled = false;
+    fetchExternalAgentDiagnostics(agent.id)
+      // A body without the view's shape (e.g. an older server) counts as unavailable.
+      .then((view) => { if (!canceled && view?.presence && view.status && view.push) setLoadedExternalDiagnostics({ agentId: agent.id, view }); })
+      .catch(() => undefined);
+    return () => { canceled = true; };
+  }, [agent.id, canViewPrivateAgentSurfaces, fetchExternalAgentDiagnostics, isBoundedPublicProjection, isExternalAgent]);
   const hasRuntimeError = activityState?.activity === "error" || Boolean(agent.lastRuntimeError);
   const rawRuntimeError = hasRuntimeError
     ? (activityState?.activity === "error" ? activityState.activityDetail : agent.lastRuntimeError?.message) ?? ""
@@ -3837,7 +2670,11 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
   const typedRuntimeErrorErrKind: RuntimeErrorKind | null =
     typedRuntimeError && (typedRuntimeError.errorReason === "auth_failed" || typedRuntimeError.errorClass === "AuthError")
       ? "authFailed"
-      : null;
+      : typedRuntimeError
+          && (typedRuntimeError.errorReason === "model_tool_args_invalid"
+            || typedRuntimeError.errorClass === "ToolArgumentParseError")
+        ? "toolArgsInvalid"
+        : null;
   // Runtime-error sentinel: known stable runtime errors map to catalog copy;
   // unknown errors keep the raw text / generic fallback (never mistranslated).
   const runtimeErrorKind = typedRuntimeErrorErrKind ?? (rawRuntimeError ? classifyRuntimeError(rawRuntimeError) : null);
@@ -3960,13 +2797,31 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
     activityState,
     activityLog,
     errorMessage: diagnosticErrorMessage,
+    externalDiagnostics,
     formatMessage,
-  }), [activityLog, activityState, agent, agentMachine, currentServer?.id, diagnosticErrorMessage, formatMessage]);
+  }), [activityLog, activityState, agent, agentMachine, currentServer?.id, diagnosticErrorMessage, externalDiagnostics, formatMessage]);
   const handleDiagnosticCopyError = useCallback(() => {
     setStartError(formatMessage({ id: "agent.detail.copyDiagnosticInfoFailed" }));
   }, [formatMessage]);
 
-  const currentPixelKey = parsePixelAvatar(agent.avatarUrl);
+  // The two compact diagnostic copy affordances (runtime banner + activity
+  // header) are the same action rendered twice in one view, so they share one
+  // feedback lifecycle: the RUI CopyableCodeAction reads its value from the
+  // visually hidden CopyableCode below, and this state keeps both triggers and
+  // their tooltips in step. The profile tab's full-width control is a
+  // different surface and keeps its own lifecycle via diagnosticCopyController.
+  const diagnosticInfoText = useMemo(() => getDiagnosticInfo(), [getDiagnosticInfo]);
+  const [diagnosticIconCopied, setDiagnosticIconCopied] = useState(false);
+  const diagnosticIconResetRef = useRef<unknown>(null);
+  const markDiagnosticIconCopied = useCallback(() => {
+    clearClockTimeout(diagnosticIconResetRef.current);
+    setDiagnosticIconCopied(true);
+    diagnosticIconResetRef.current = setClockTimeout(
+      () => setDiagnosticIconCopied(false),
+      DEFAULT_COPY_FEEDBACK_TIMEOUT_MS,
+    );
+  }, []);
+
   const [reminderItems, setReminderItems] = useState<ReminderSummary[]>([]);
   const [remindersLoading, setRemindersLoading] = useState(true);
   const [remindersError, setRemindersError] = useState<string | null>(null);
@@ -4131,45 +2986,8 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
     setShowDeleteConfirm(false);
   };
 
-  const handleSelectAvatar = async (key: string) => {
-    setAvatarPickerError("");
-    await updateAgent(agent.id, { avatarUrl: `pixel:${key}` });
-    setShowAvatarPicker(false);
-  };
-
-  const handleUploadAvatar = async (file: File) => {
-    if (isAvatarFileTooLarge(file)) {
-      setAvatarPickerError(formatMessage({ id: "avatar.tooLarge" }, { maxLabel: formatMessage({ id: "common.fileSize.maxLabel5mb" }) }));
-      return;
-    }
-    setAvatarPickerError("");
-    const formData = new FormData();
-    formData.append("avatar", file);
-    try {
-      const res = await api.post(`/agents/${agent.id}/avatar`, formData, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-      // Server already saved avatarUrl — just update local store
-      const updated = res.data;
-      useAgentStore.setState((state) => ({
-        agents: state.agents.map((a) => a.id === agent.id ? { ...a, ...updated } : a),
-      }));
-      setShowAvatarPicker(false);
-    } catch (err: unknown) {
-      setAvatarPickerError(isAvatarTooLargeError(err)
-        ? formatMessage({ id: "avatar.tooLarge" }, { maxLabel: formatMessage({ id: "common.fileSize.maxLabel5mb" }) })
-        : avatarUploadApiErrorMessage(err, formatMessage({ id: "agent.detail.uploadAvatarFailed" })));
-    }
-  };
-
-  const handleClearAvatar = async () => {
-    setAvatarPickerError("");
-    await updateAgent(agent.id, { avatarUrl: null });
-    setShowAvatarPicker(false);
-  };
-
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <ProfilePanelBody className="flex min-h-0 flex-1 flex-col bg-layer-panel theme-brutal:bg-white">
       {/* Header — isolated component to prevent activity changes from re-rendering ChatPanel */}
       <AgentDetailHeader
         agent={agent}
@@ -4195,11 +3013,11 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
 
       {/* Start error */}
       {startError && (
-        <div className="border-b-2 border-black bg-brutal-orange/20 px-5 py-2 flex items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-sm font-bold text-black" title={startError}>{startError}</span>
+        <div className="border-b theme-brutal:border-b-2 border-line-muted theme-brutal:border-black bg-warning-soft theme-brutal:bg-brutal-orange/20 px-5 py-2 flex items-center gap-2">
+          <Tooltip content={startError}><span className="min-w-0 flex-1 truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{startError}</span></Tooltip>
           <button
             onClick={() => setStartError("")}
-            className="shrink-0 text-black/40 hover:text-black transition-colors"
+            className="shrink-0 text-foreground-placeholder theme-brutal:text-black/40 hover:text-foreground-strong theme-brutal:hover:text-black transition-colors"
           >
             <X size={14} />
           </button>
@@ -4210,40 +3028,36 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
           `agent:activity` to all server members, so for non-creators we
           fall back to a generic message and hide the "View logs" link. */}
       {hasRuntimeError && (
-        <div className="flex items-start gap-2 border-b-2 border-black bg-brutal-orange/20 px-5 py-2">
+        <div className="flex items-start gap-2 border-b theme-brutal:border-b-2 border-line-muted theme-brutal:border-black bg-warning-soft theme-brutal:bg-brutal-orange/20 px-5 py-2">
           <StatusDot tone="bg-brutal-orange" className="mt-[0.1875rem] shrink-0" />
-          <span className="min-w-0 flex-1 line-clamp-2 break-words text-sm font-bold leading-snug text-black" title={canViewPrivateAgentSurfaces ? activityErrorText : activityFallbackErrorText}>
+          <Tooltip content={canViewPrivateAgentSurfaces ? activityErrorText : activityFallbackErrorText}><span className="min-w-0 flex-1 line-clamp-2 break-words text-sm font-bold leading-snug text-foreground-strong theme-brutal:text-black">
             {canViewPrivateAgentSurfaces
               ? activityErrorText
               : activityFallbackErrorText}
-          </span>
+          </span></Tooltip>
           {canViewPrivateAgentSurfaces && (
             <div className="flex shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-1">
-              <CopyButton
-                controller={diagnosticCopyController}
-                text={getDiagnosticInfo}
-                onCopyError={handleDiagnosticCopyError}
-              >
-                {({ copied, disabled, onClick, onMouseDown }) => (
-                  <button
-                    type="button"
-                    onClick={onClick}
-                    onMouseDown={onMouseDown}
-                    disabled={disabled}
-                    className="inline-flex items-center gap-1 text-xs font-bold text-black/60 hover:text-black underline whitespace-nowrap"
-                  >
-                    {copied ? <Check size={12} /> : <Clipboard size={12} />}
-                    {copied
-                      ? formatMessage({ id: "agent.detail.copied" })
-                      : formatMessage({ id: "agent.detail.copyInfo" })}
-                  </button>
-                )}
-              </CopyButton>
+              <Tooltip content={diagnosticIconCopied ? formatMessage({ id: "agent.detail.copied" }) : formatMessage({ id: "agent.detail.copyInfo" })}>
+                <CopyableCodeRoot
+                  size="sm"
+                  copied={diagnosticIconCopied}
+                  onCopy={markDiagnosticIconCopied}
+                  className="w-auto shrink-0"
+                  // The Tooltip trigger merge keeps a child's declared data-slot;
+                  // without it the action's own closest() lookup for the root fails.
+                  data-slot="copyable-code-root"
+                >
+                  <CopyableCode className="sr-only" aria-hidden="true">{diagnosticInfoText}</CopyableCode>
+                  <CopyableCodeAction
+                    aria-label={diagnosticIconCopied ? formatMessage({ id: "agent.detail.copied" }) : formatMessage({ id: "agent.detail.copyInfo" })}
+                  />
+                </CopyableCodeRoot>
+              </Tooltip>
               {activeTab !== "activity" && (
                 <button
                   type="button"
                   onClick={() => setActiveTab("activity")}
-                  className="text-xs font-bold text-black/60 hover:text-black underline whitespace-nowrap"
+                  className="text-xs font-bold text-foreground-muted theme-brutal:text-black/60 hover:text-foreground-strong theme-brutal:hover:text-black underline whitespace-nowrap"
                 >
                   {formatMessage({ id: "agent.detail.viewLogs" })}
                 </button>
@@ -4256,13 +3070,14 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
       {/* Tab bar — horizontally scrollable */}
       <div
         ref={agentTabsRef}
-        className={`min-w-0 max-w-full overflow-hidden ${workspaceEmbedded ? "workspace-grid-agent-secondary-nav" : ""}`}
+        className={`min-w-0 max-w-full overflow-x-auto overflow-y-hidden scrollbar-none ${workspaceEmbedded ? "workspace-grid-agent-secondary-nav" : ""}`}
       >
-        <Tabs<AgentTab> value={activeTab} onValueChange={setActiveTab} className="border-b-2 border-black bg-white">
+        <Tabs<AgentTab> value={activeTab} onValueChange={setActiveTab} className="border-b theme-brutal:border-b-2 border-line-muted bg-layer-panel theme-brutal:border-black theme-brutal:bg-white">
           <SortableTabsList<AgentTab>
             value={orderedAgentTabIds}
             onReorder={reorderAgentTabs}
-            className="max-w-full border-y-0 border-l-0 border-r-2 border-black bg-white"
+            variant="underline"
+            className="max-w-full theme-brutal:border-0 theme-brutal:bg-layer-panel"
           >
             {orderedAgentTabs.map((tab) => {
               const Icon = tab.icon;
@@ -4271,55 +3086,60 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
                   key={tab.id}
                   value={tab.id}
                   data-testid={`panel-tab-${tab.id}`}
-                  className="!cursor-default"
+                  className="!cursor-default h-7"
                 >
                   <Icon size={12} />
                   <TabsLabel>{formatMessage({ id: tab.labelId })}</TabsLabel>
                 </SortableTabsTab>
               );
             })}
+            <TabsIndicator />
           </SortableTabsList>
         </Tabs>
       </div>
 
       {/* Tab content — fills remaining space */}
       {activeTab === "profile" ? (
-        <div className="flex-1 overflow-y-auto bg-white">
+        <div className="flex-1 overflow-y-auto bg-layer-panel">
           {isRemoteJointAgent && (agent.serverName || agent.serverSlug) && (
-            <div className="border-b border-black/10 px-5 py-3">
+              <div className="border-b border-line-hairline px-5 py-3">
               <SectionEyebrow as="div" className="mb-1">
                 {formatMessage({ id: "agent.detail.from" })}
               </SectionEyebrow>
-              <div className="text-sm font-bold text-black">{agent.serverName || agent.serverSlug}</div>
+                <div className="text-sm font-bold text-foreground-strong">{agent.serverName || agent.serverSlug}</div>
             </div>
           )}
           {/* Profile header — avatar + name + status */}
-          <div className="flex items-start gap-4 px-5 py-5">
+          {/* min-h-[66px] theme-brutal:min-h-[72px] keeps the header stable across themes. */}
+          <div className="min-h-[66px] flex items-start gap-4 px-5 py-5 theme-brutal:min-h-[72px]">
             {canManageAgent ? (
-              <button
+              <Tooltip content={formatMessage({ id: "agent.detail.changeAvatar" })}>
+              <Button
                 type="button"
-                onClick={() => {
-                  setAvatarPickerError("");
-                  setShowAvatarPicker(!showAvatarPicker);
-                }}
-                className="group relative"
-                title={formatMessage({ id: "agent.detail.changeAvatar" })}
+                aria-label={formatMessage({ id: "agent.detail.changeAvatar" })}
+                data-testid="agent-change-avatar"
+                onClick={() => setEditField("avatar")}
+                variant="outline"
+                className="group relative size-16 shrink-0 !p-0"
               >
                 <AvatarSlot context="profile-tile" type="agent" agentAvatarUrl={agent.avatarUrl} />
-                <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
+                <div className="absolute inset-0 flex items-center justify-center rounded-[inherit] bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity">
                   <Pencil size={18} className="text-white" />
                 </div>
-              </button>
+              </Button>
+              </Tooltip>
             ) : isCustomAvatar(agent.avatarUrl) && !agent.deletedAt ? (
-              <button
+              <Tooltip content={formatMessage({ id: "agent.detail.viewAvatar" })}>
+              <Button
                 type="button"
                 onClick={() => useImageLightboxStore.getState().openImage(agent.avatarUrl!, agent.displayName || agent.name)}
-                className="group relative"
-                title={formatMessage({ id: "agent.detail.viewAvatar" })}
+                variant="outline"
+                className="group relative size-16 shrink-0 !p-0"
                 aria-label={formatMessage({ id: "agent.detail.viewAvatar" })}
               >
                 <AvatarSlot context="profile-tile" type="agent" agentAvatarUrl={agent.avatarUrl} />
-              </button>
+              </Button>
+              </Tooltip>
             ) : (
               <AvatarSlot
                 context="profile-tile"
@@ -4330,81 +3150,40 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
             )}
             <div className="min-w-0 flex-1">
               <div className="flex min-w-0 items-center gap-2">
-                <div className="min-w-0 truncate text-lg font-bold leading-tight text-black" title={agent.displayName || agent.name}>{agent.displayName || agent.name}</div>
-                {!agent.deletedAt && <AgentStatusBadge agentId={agent.id} fallbackStatus={agent.status} showDetail={canViewPrivateAgentSurfaces} externalStatus={isExternalAgent ? panelExternalStatus : undefined} />}
+                <AgentHeaderName
+                  agent={agent}
+                  onEdit={canManageAgent && !agent.deletedAt ? () => setEditField("displayName") : undefined}
+                />
               </div>
-              <div className="truncate text-sm text-black/50 font-mono" title={`@${agent.name}`}>@{agent.name}</div>
+              {/* The hover title duplicates the visible handle but is load-bearing
+                  for the i18n literal gate: scripts/i18n-literal-baseline.json audits
+                  this exact template literal (protocol class), so removing the
+                  attribute would force a three-baseline ratchet. Kept deliberately. */}
+              <div className="truncate text-sm text-foreground-muted font-mono" title={`@${agent.name}`}>@{agent.name}</div>
+              {/* Live activity has its own line under the handle, so it never squeezes the name. */}
+              {!agent.deletedAt && (
+                <div className="mt-1 min-w-0">
+                  <AgentStatusBadge agentId={agent.id} fallbackStatus={agent.status} showDetail={canViewPrivateAgentSurfaces} externalStatus={isExternalAgent ? panelExternalStatus : undefined} />
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Avatar picker — inline below avatar */}
-          {canManageAgent && showAvatarPicker && (
-            <div className="px-5 py-3 border-t border-black/10">
-              <SectionEyebrow as="div" className="mb-2">
-                {formatMessage({ id: "agent.detail.chooseAvatar" })}
-              </SectionEyebrow>
-              <div className="flex flex-wrap gap-2 justify-center">
-                {/* Upload custom image */}
-                <label
-                  className={`flex size-10 items-center justify-center border-2 transition-colors ${isCustomAvatar(agent.avatarUrl)
-                    ? "border-brutal-pink bg-brutal-pink/20"
-                    : "border-black hover:border-brutal-pink"
-                  }`}
-                  title={formatMessage({ id: "agent.detail.uploadImage" })}
-                >
-                  {isCustomAvatar(agent.avatarUrl) ? (
-                    <img src={agent.avatarUrl!} alt="" className="h-full w-full object-cover" />
-                  ) : (
-                    <Upload size={16} className="text-black/60" />
-                  )}
-                  <input
-                    type="file"
-                    accept={PROFILE_AVATAR_ACCEPT}
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      e.currentTarget.value = "";
-                      if (file) handleUploadAvatar(file);
-                    }}
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={handleClearAvatar}
-                  className={`flex size-10 items-center justify-center border-2 overflow-hidden transition-colors ${!currentPixelKey && !isCustomAvatar(agent.avatarUrl)
-                    ? "border-brutal-pink bg-brutal-pink/20"
-                    : "border-black hover:border-brutal-pink"
-                    }`}
-                  title={formatMessage({ id: "agent.detail.defaultRobotAvatar" })}
-                >
-                  <PixelAvatar avatarKey={DEFAULT_AVATAR_KEY} size={36} />
-                </button>
-                {AVATAR_KEYS.filter((key) => key !== DEFAULT_AVATAR_KEY).map((key) => (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => handleSelectAvatar(key)}
-                    className={`flex size-10 items-center justify-center border-2 overflow-hidden transition-colors ${currentPixelKey === key
-                      ? "border-brutal-pink bg-brutal-pink/20"
-                      : "border-black hover:border-brutal-pink"
-                      }`}
-                    title={key}
-                  >
-                    <PixelAvatar avatarKey={key} size={36} />
-                  </button>
-                ))}
-              </div>
-              {avatarPickerError ? (
-                <p className="mt-2 text-center text-xs font-bold text-brutal-red" role="alert">
-                  {avatarPickerError}
-                </p>
-              ) : null}
-            </div>
+
+          {editField && (
+            <AgentProfileEditDialog
+              agent={agent}
+              open
+              field={editField}
+              onClose={() => setEditField(null)}
+              roleOptions={canChangeAgentRole && !agent.deletedAt ? editableRoleOptions : []}
+            />
           )}
 
           {/* Profile info: description, computer, created */}
           <AgentProfileInfo
             agent={agent}
+            onEdit={canManageAgent && !agent.deletedAt ? setEditField : undefined}
             canManageAgent={canManageAgent && !agent.deletedAt}
             canChangeAgentRole={canChangeAgentRole && !agent.deletedAt}
             onOpenProfile={onOpenProfile}
@@ -4413,72 +3192,29 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
 
           {/* Skills */}
           {canViewPrivateAgentSurfaces && (
-            <div className="border-t border-black/10">
+            <div className="border-t border-line-muted theme-brutal:border-black/10">
               <AgentSkills agentId={agent.id} embedded />
             </div>
           )}
 
           {/* Actions */}
           {canManageAgent && !agent.deletedAt && (
-            <div className="px-5 py-4 border-t border-black/10">
+            <div className="px-5 py-4 border-t border-line-muted theme-brutal:border-black/10">
               <SectionEyebrow as="div" className="mb-3">
                 {formatMessage({ id: "agent.detail.actions" })}
               </SectionEyebrow>
               <div className="space-y-2">
                 {!isExternalAgent && (
                   <>
-                    {agentMigrationUiEnabled && agent.machineId ? (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (migrationRequiresUpgrade) {
-                              setShowMigrationUpgradeDialog(true);
-                              return;
-                            }
-                            setShowMigrationDialog(true);
-                          }}
-                          disabled={currentAgentMigrationActive || migrationBillingChecking}
-                          aria-busy={migrationBillingChecking}
-                          className="btn-brutal flex w-full items-center justify-center gap-2 bg-brutal-lime px-4 py-2 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-55"
-                        >
-                          {currentAgentMigrationActive ? (
-                            <Spinner size="sm" aria-hidden="true" />
-                          ) : (
-                            <MoveRight size={14} aria-hidden="true" />
-                          )}
-                          {currentAgentMigrationActive
-                            ? formatMessage({ id: "agent.detail.migrationInProgress" })
-                            : migrationCanRetry
-                              ? formatMessage({ id: "agent.detail.tryMigrationAgain" })
-                              : formatMessage({ id: "agent.detail.moveToAnotherComputer" })}
-                        </button>
-                        {currentAgentMigrationNotice ? (
-                          <MigrationProgressPanel
-                            notice={currentAgentMigrationNotice}
-                            machines={machines}
-                            onShowCancel={() => setShowMigrationCancel(true)}
-                          />
-                        ) : null}
-                        {currentAgentMigrationStatusError ? (
-                          <Banner
-                            intent="warning"
-                            density="sm"
-                            title={formatMessage({ id: "agent.detail.migrationStatusUnavailable" })}
-                          >
-                            <MigrationErrorContent presentation={currentAgentMigrationStatusError} />
-                          </Banner>
-                        ) : null}
-                      </>
-                    ) : null}
+                    <AgentMigrationSection agent={agent} />
                     <AgentStartStopButton agentId={agent.id} onShowStopConfirm={() => setShowStopConfirm(true)} />
-                    <button
+                    <Button variant="outline" size="md"
                       onClick={() => setShowResetDialog(true)}
-                      className="btn-brutal flex w-full items-center justify-center gap-2 bg-white px-4 py-2 text-sm font-bold"
+                      className="flex w-full items-center justify-center gap-2"
                     >
                       <RotateCcw size={14} />
                       {formatMessage({ id: "agent.detail.restartReset" })}
-                    </button>
+                    </Button>
                   </>
                 )}
                 <CopyButton
@@ -4487,35 +3223,35 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
                   onCopyError={handleDiagnosticCopyError}
                 >
                   {({ copied, disabled, onClick, onMouseDown }) => (
-                    <button
+                    <Button variant="outline" size="md"
                       onClick={onClick}
                       onMouseDown={onMouseDown}
                       disabled={disabled}
-                      className="btn-brutal flex w-full items-center justify-center gap-2 bg-white px-4 py-2 text-sm font-bold"
+                      className="flex w-full items-center justify-center gap-2"
                     >
                       {copied ? <Check size={14} /> : <Clipboard size={14} />}
                       {copied
                         ? formatMessage({ id: "agent.detail.diagnosticInfoCopied" })
                         : formatMessage({ id: "agent.detail.copyDiagnosticInfo" })}
-                    </button>
+                    </Button>
                   )}
                 </CopyButton>
                 {FEEDBACK_EXPORT_ENABLED && (
-                  <button
+                  <Button variant="warning" size="md"
                     onClick={() => setShowReportDialog(true)}
-                    className="btn-brutal flex w-full items-center justify-center gap-2 bg-brutal-orange px-4 py-2 text-sm font-bold"
+                    className="flex w-full items-center justify-center gap-2"
                   >
                     <Bug size={14} />
                     {formatMessage({ id: "agent.reportIssue.title" })}
-                  </button>
+                  </Button>
                 )}
-                <button
+                <Button variant="danger" size="md"
                   onClick={() => setShowDeleteConfirm(true)}
-                  className="btn-brutal flex w-full items-center justify-center gap-2 bg-brutal-red px-4 py-2 text-sm font-bold"
+                  className="flex w-full items-center justify-center gap-2"
                 >
                   <Trash2 size={14} />
                   {formatMessage({ id: "agent.detail.deleteAgent" })}
-                </button>
+                </Button>
               </div>
             </div>
           )}
@@ -4532,36 +3268,30 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
           onOpenMsgRef={handleOpenReminderMsgRef}
         />
       ) : activeTab === "workspace" ? (
-        <AgentWorkspace agentId={agent.id} compact={!!onClose} />
+        <AgentWorkspace agentId={agent.id} compact={!!onClose} hosted={isExternalAgent} />
       ) : activeTab === "activity" ? (
-        <div className="flex min-h-0 flex-1 flex-col bg-white">
-          <div className="flex items-center justify-between border-b-2 border-black bg-white px-5 py-2">
+        <div className="flex min-h-0 flex-1 flex-col bg-layer-panel theme-brutal:bg-white">
+          <div className="flex items-center justify-between border-b theme-brutal:border-b-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-5 py-2">
             <SectionEyebrow as="div">{formatMessage({ id: "agent.detail.activityDiagnostics" })}</SectionEyebrow>
-            <CopyButton
-              controller={diagnosticCopyController}
-              text={getDiagnosticInfo}
-              onCopyError={handleDiagnosticCopyError}
-            >
-              {({ copied, disabled, onClick, onMouseDown }) => (
-                <button
-                  type="button"
-                  onClick={onClick}
-                  onMouseDown={onMouseDown}
-                  disabled={disabled}
-                  className="btn-brutal-sm flex items-center gap-1.5 bg-white px-2 py-1 text-xs font-bold"
-                >
-                  {copied ? <Check size={12} /> : <Clipboard size={12} />}
-                  {copied
-                    ? formatMessage({ id: "agent.detail.copied" })
-                    : formatMessage({ id: "agent.detail.copyDiagnosticInfo" })}
-                </button>
-              )}
-            </CopyButton>
+            <Tooltip content={diagnosticIconCopied ? formatMessage({ id: "agent.detail.copied" }) : formatMessage({ id: "agent.detail.copyDiagnosticInfo" })}>
+              <CopyableCodeRoot
+                size="sm"
+                copied={diagnosticIconCopied}
+                onCopy={markDiagnosticIconCopied}
+                className="w-auto shrink-0"
+                data-slot="copyable-code-root"
+              >
+                <CopyableCode className="sr-only" aria-hidden="true">{diagnosticInfoText}</CopyableCode>
+                <CopyableCodeAction
+                  aria-label={diagnosticIconCopied ? formatMessage({ id: "agent.detail.copied" }) : formatMessage({ id: "agent.detail.copyDiagnosticInfo" })}
+                />
+              </CopyableCodeRoot>
+            </Tooltip>
           </div>
           <AgentActivityLog agentId={agent.id} />
         </div>
       ) : activeTab === "integrations" ? (
-        <AgentIntegrationsTab agentId={agent.id} canManageServer={canManageServer} />
+        <AgentAppAccessTab agentId={agent.id} canManageAgentAccess={canManageAgentAccess} />
       ) : activeTab === "mcp" ? (
         <AgentMcpTab agentId={agent.id} canManageServer={canManageServer} />
       ) : null}
@@ -4581,41 +3311,6 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
           agent={agent}
           dmChannelId={dmChannel?.id}
           onClose={() => setShowReportDialog(false)}
-        />
-      )}
-
-      {canManageAgent && showMigrationDialog && (
-        <AgentMigrationDialog
-          agent={agent}
-          machines={machines}
-          sourceMachineId={agent.machineId ?? null}
-          onClose={() => setShowMigrationDialog(false)}
-          onProRequired={() => {
-            setShowMigrationDialog(false);
-            setShowMigrationUpgradeDialog(true);
-            void loadBilling();
-          }}
-          onStarted={async () => {
-            setShowMigrationDialog(false);
-            await refreshMigrationStatus();
-          }}
-        />
-      )}
-
-      {canManageAgent && showMigrationUpgradeDialog && (
-        <AgentMigrationUpgradeDialog
-          onClose={() => setShowMigrationUpgradeDialog(false)}
-          onViewPlans={() => nav.toSettings("billing")}
-        />
-      )}
-
-      {canManageAgent && showMigrationCancel && currentAgentMigrationNotice && canCancelMigration(currentAgentMigrationNotice) && (
-        <AgentMigrationCancelDialog
-          agentId={agent.id}
-          notice={currentAgentMigrationNotice}
-          machines={machines}
-          onClose={() => setShowMigrationCancel(false)}
-          onRefresh={refreshMigrationStatus}
         />
       )}
 
@@ -4654,6 +3349,6 @@ export default function AgentDetailPanel({ agent, onClose, onBack, onOpenProfile
           onClose={() => setShowDeleteConfirm(false)}
         />
       )}
-    </div>
+    </ProfilePanelBody>
   );
 }

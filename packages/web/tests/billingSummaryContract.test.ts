@@ -19,7 +19,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -75,7 +74,9 @@ test("limit and joint-channel paywalls route users to billing", () => {
   assert.match(inviteDialog, /formatBillingCapacityLimitMessage\(\s*"human",\s*humanCapacityLimitState,\s*billing\.displayName,\s*formatMessage\(\{ id: "member\.invite\.upgradeForMore" \}\),\s*\)/);
   assert.match(inviteDialog, /getBillingUsage\(humanCount, 0\)/);
   assert.doesNotMatch(inviteDialog, /universalSeatUsage \+ 1/);
-  assert.match(inviteDialog, /humanSeatLimitReached && \([\s\S]*<Banner intent="warning" className="font-bold">/);
+  assert.match(inviteDialog, /emailInviteSeatLimitReached && \([\s\S]*<Banner intent="warning" className="font-bold">/);
+  assert.match(inviteDialog, /invitee\.email\.trim\(\) !== "" && invitee\.role !== "guest"/);
+  assert.match(inviteDialog, /disabled=\{sending \|\| emailInviteSeatLimitReached\}/);
   assert.match(inviteDialog, /nav\.toSettings\("billing"\)/);
 
   const jointDialog = read("src/components/channel/CreateJointChannelDialog.tsx");
@@ -101,19 +102,25 @@ test("limit and joint-channel paywalls route users to billing", () => {
   assert.match(chatPanel, /const billing = useServerStore\(\(s\) => s\.billing\)/);
   assert.match(chatPanel, /const plan = \(billing\?\.plan \|\| currentServer\?\.plan \|\| "free"\) as ServerPlan/);
   assert.match(chatPanel, /const maxChannels = getEffectiveLimits\(plan\)\.maxChannels/);
-  assert.match(chatPanel, /channel\.jointBillingLocked === true/);
+  // Contract v0.3 §18.8: one helper decides read-only (locked flag or deadline
+  // passed on the local clock); no plan check in the client.
+  assert.match(chatPanel, /isJointChannelReadOnly\(channel\)/);
   assert.doesNotMatch(chatPanel, /channel\.type === "joint" && !canUseProBillingFeatures\(plan\)/);
   // ChatPanel migrated to react-intl (B2a): the paywall copy now resolves through
   // the message.chatPanel.* catalog, but the billing-route wiring is unchanged.
-  assert.match(chatPanel, /<Banner intent="warning" density="sm"[\s\S]*message\.chatPanel\.historyLimit/);
-  assert.match(chatPanel, /message\.chatPanel\.historyLimit/);
+  // The plan history-limit banner is shared by ChatPanel and ThreadPanel.
+  const historyLimitBanner = read("src/components/message/HistoryLimitBanner.tsx");
+  assert.match(chatPanel, /<HistoryLimitBanner \/>/);
+  assert.match(historyLimitBanner, /<Banner intent="warning" density="sm"[\s\S]*message\.chatPanel\.historyLimit/);
+  assert.match(historyLimitBanner, /message\.chatPanel\.viewBilling/);
+  assert.match(historyLimitBanner, /nav\.toSettings\("billing"\)/);
   assert.match(chatPanel, /<Banner intent="warning" className="justify-center text-center font-bold">[\s\S]*message\.chatPanel\.jointLocked/);
   assert.match(chatPanel, /message\.chatPanel\.viewBilling/);
   assert.match(chatPanel, /message\.chatPanel\.readOnlyQuota/);
   assert.match(chatPanel, /nav\.toSettings\("billing"\)/);
 
   const threadPanel = read("src/components/message/ThreadPanel.tsx");
-  assert.match(threadPanel, /parentChannel\.jointBillingLocked === true/);
+  assert.match(threadPanel, /isJointChannelReadOnly\(parentChannel\)/);
   assert.doesNotMatch(threadPanel, /canUseProBillingFeatures/);
   assert.match(threadPanel, /<Banner intent="warning" className="justify-center text-center font-bold">[\s\S]*message\.chatPanel\.jointLocked/);
 

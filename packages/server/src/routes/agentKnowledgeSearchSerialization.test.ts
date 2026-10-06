@@ -1,7 +1,6 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { serializeKnowledgeSearch } from "./agentKnowledge.js";
-import type { AgentKnowledgeSearchResult } from "../services/agentKnowledgeService.js";
+import { serializeKnowledgeSearch } from "./agentKnowledge";
+import type { AgentKnowledgeSearchResult } from "../services/agentKnowledgeService";
 
 const result: AgentKnowledgeSearchResult = {
   slug: "channel",

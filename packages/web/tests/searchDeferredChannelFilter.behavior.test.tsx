@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -563,4 +562,26 @@ test("non-empty Search keeps the existing Escape back behavior", async () => {
   assert.equal(screen.getByTestId("location").textContent, "/s/server/search?q=roadmap");
   fireEvent.keyDown(screen.getByRole("textbox"), { key: "Escape" });
   assert.equal(screen.getByTestId("location").textContent, "/s/server");
+});
+
+test("only one search filter menu is open at a time — opening another closes the first (@WAWQAQ single-select)", async () => {
+  api.get = (async () => ({ data: { hasMore: false, results: [] } })) as typeof api.get;
+  await renderSearchPage("/s/server/search?q=hi");
+
+  // Open the Scope menu → its options render.
+  fireEvent.click(screen.getByRole("combobox", { name: "Scope" }));
+  await waitFor(() => assert.ok(screen.getByText(/@\s*Me/), "scope menu should be open"));
+
+  // Opening another menu (From / sender) must CLOSE the Scope menu, not stack —
+  // AND the From menu must actually be the one open now (guards against a
+  // "both closed" false pass).
+  fireEvent.click(screen.getByRole("combobox", { name: "From" }));
+  await waitFor(() =>
+    assert.equal(screen.queryByText(/@\s*Me/), null, "the scope menu must close when the sender menu opens"),
+  );
+  // The From trigger says "From" and the open menu's title also says "From".
+  assert.ok(
+    screen.getAllByText("From").length >= 2,
+    "the From menu should be open (trigger + panel title), not everything closed",
+  );
 });

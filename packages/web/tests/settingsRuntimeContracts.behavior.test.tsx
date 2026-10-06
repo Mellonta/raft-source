@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import type { ReactNode } from "react";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
@@ -167,8 +166,8 @@ test("billing renders a busy skeleton surface until both usage and billing resol
   assert.equal(container.querySelector('[aria-hidden="true"].animate-pulse'), null);
 });
 
-test("the mounted free-plan notice renders the global last active trial day", (t) => {
-  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-06-22T12:00:00.000Z") });
+test("the mounted free-plan notice renders the global last active trial day", () => {
+  vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-06-22T12:00:00.000Z") });
   seedSettings();
   renderEn(<PlanSection />);
 

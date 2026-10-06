@@ -1,19 +1,18 @@
 import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { eq } from "drizzle-orm";
 import pg from "pg";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
-import * as schema from "../db/schema.js";
-import { agents, channelAgents, channels, messages, tasks, users } from "../db/schema.js";
-import { addAgent, addHuman, createChannel } from "./channelService.js";
-import { createAgent, deleteAgent } from "./agentService.js";
-import { createServer } from "./serverService.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
+import * as schema from "../db/schema";
+import { agents, channelAgents, channels, messages, tasks, users } from "../db/schema";
+import { addAgent, addHuman, createChannel } from "./channelService";
+import { createAgent, deleteAgent } from "./agentService";
+import { createServer } from "./serverService";
 import {
   batchClaimTasks,
   claimTask,
@@ -23,7 +22,7 @@ import {
   TaskCreationAssigneeEligibilityError,
   unclaimTask,
   updateTaskStatus,
-} from "./taskService.js";
+} from "./taskService";
 
 // Force is an admin override; the actor is now required so the audit trail can
 // name who overrode the state machine. These call sites are arrangement, not
@@ -344,6 +343,80 @@ test(
       await closeDatabase().catch(() => {});
       await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)} WITH (FORCE)`).catch(() => {});
       await admin.end().catch(() => {});
+    }
+  },
+);
+
+test(
+  "assignment receipt persists causal actor and subtype (started and assigned both write createdBy)",
+  {
+    skip: !(REAL_PG_URL || REAL_PG_REQUIRED),
+  },
+  async () => {
+    assert.ok(REAL_PG_URL, `${REAL_PG_URL_ENV} is required`);
+    const databaseName = `slock_task_receipt_${process.pid}_${randomBytes(4).toString("hex")}`;
+    const admin = new pg.Client({ connectionString: REAL_PG_URL, application_name: "task-receipt-real-pg-admin" });
+    await admin.connect();
+    try {
+      await admin.query(`CREATE DATABASE ${quoteIdentifier(databaseName)}`);
+      const testUrl = databaseUrlFor(REAL_PG_URL, databaseName);
+      const setupPool = new pg.Pool({ connectionString: testUrl, application_name: "task-receipt-real-pg-setup", max: 2 });
+      await migrate(drizzle(setupPool, { schema }), { migrationsFolder: MIGRATIONS_FOLDER });
+      await setupPool.end();
+
+      await initDatabase(testUrl);
+      const db = getDb();
+      const suffix = randomUUID().slice(0, 8);
+      const [owner] = await db.insert(users).values({
+        email: `receipt-owner-${suffix}@slock.test`,
+        name: `receipt-owner-${suffix}`,
+        passwordHash: "test-only",
+        emailVerified: true,
+      }).returning();
+      const [target] = await db.insert(users).values({
+        email: `receipt-target-${suffix}@slock.test`,
+        name: `receipt-target-${suffix}`,
+        passwordHash: "test-only",
+        emailVerified: true,
+      }).returning();
+      const server = await createServer("Receipt Real PG", `receipt-real-pg-${suffix}`, owner.id);
+      const channel = await createChannel(server.id, `receipt-real-pg-${suffix}`);
+      await addHuman(channel.id, owner.id);
+      await addHuman(channel.id, target.id);
+      const agent = await createAgent(server.id, `receipt-agent-${suffix}`, { runtime: "external", model: "external" });
+      await addAgent(channel.id, agent.id);
+
+      // "assigned" branch: owner assigns to target (a different human).
+      const assigned = await createTasksWithAssignmentReceipt(
+        channel.id,
+        "user",
+        owner.id,
+        [{ title: "assigned receipt" }],
+        { type: "user", id: target.id },
+        { assigneeName: target.name },
+      );
+      const [assignedReceipt] = await db.select().from(messages).where(eq(messages.id, assigned.assignmentReceipt.message.id)).limit(1);
+      assert.equal(assignedReceipt?.systemSubtype, "task.assignment_receipt");
+      assert.equal(assignedReceipt?.causalActorType, "user");
+      assert.equal(assignedReceipt?.causalActorId, owner.id);
+
+      // "started" branch: the agent creates + starts its own task (assignee === creator).
+      const started = await createTasksWithAssignmentReceipt(
+        channel.id,
+        "agent",
+        agent.id,
+        [{ title: "started receipt" }],
+        { type: "agent", id: agent.id },
+        { assigneeName: agent.name },
+      );
+      const [startedReceipt] = await db.select().from(messages).where(eq(messages.id, started.assignmentReceipt.message.id)).limit(1);
+      assert.equal(startedReceipt?.systemSubtype, "task.assignment_receipt");
+      assert.equal(startedReceipt?.causalActorType, "agent");
+      assert.equal(startedReceipt?.causalActorId, agent.id);
+    } finally {
+      await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)} WITH (FORCE)`).catch(() => {});
+      await admin.end().catch(() => {});
+      await closeDatabase().catch(() => {});
     }
   },
 );

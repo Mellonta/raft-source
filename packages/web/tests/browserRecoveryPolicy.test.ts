@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   getLiveSessionRecoveryPlan,
   planStatusReconcile,
   shouldRecoverAuthOnBrowserSignal,
-} from "../src/utils/browserRecoveryPolicy.js";
+} from "../src/utils/browserRecoveryPolicy";
 
 test("foreground + online retries auth restore when a stored session is still restorable", () => {
   assert.equal(

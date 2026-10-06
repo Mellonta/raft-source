@@ -1,8 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach, beforeEach } from "node:test";
-import { vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -34,14 +32,14 @@ afterEach(() => {
 });
 
 for (const locale of ["en", "zh-cn"] as const) {
-  test(`token setup uses ${locale} resources and forgets the secret on agent switch`, async (t) => {
+  test(`token setup uses ${locale} resources and forgets the secret on agent switch`, async () => {
     const messages = locale === "en" ? en : zh;
     let mints = 0;
     const old = { id: "old-token", maskedToken: "sk_agent_82aa8***", name: "Existing deployment", scopes: ["read"], createdAt: "2026-01-01T00:00:00Z", lastUsedAt: null, revokedAt: null };
-    t.mock.method(api, "get", async (url: string) => ({ data: { agentId: url.split("/")[2], credentials: [old] } }));
+    vi.spyOn(api, "get").mockImplementation(async (url: string) => ({ data: { agentId: url.split("/")[2], credentials: [old] } }));
     const deleted: string[] = [];
-    t.mock.method(api, "delete", async (url: string) => { deleted.push(url); return {}; });
-    t.mock.method(api, "post", async () => {
+    vi.spyOn(api, "delete").mockImplementation(async (url: string) => { deleted.push(url); return {}; });
+    vi.spyOn(api, "post").mockImplementation(async () => {
       mints++;
       return { data: { agentId: "agent-a", credentialId: "new-token", apiKey: "sk_agent_ephemeral-fixture" } };
     });
@@ -74,9 +72,9 @@ for (const locale of ["en", "zh-cn"] as const) {
   });
 }
 
-test("ambiguous mint failure does not retry or expose the error payload", async (t) => {
+test("ambiguous mint failure does not retry or expose the error payload", async () => {
   let mints = 0;
-  t.mock.method(api, "post", async () => { mints++; throw new Error("sk_agent_error-fixture"); });
+  vi.spyOn(api, "post").mockImplementation(async () => { mints++; throw new Error("sk_agent_error-fixture"); });
   render(createElement(TestIntlProvider, { children: createElement(ExternalAgentToken, { agentId: "agent-a" }) }));
   fireEvent.click(screen.getByRole("button", { name: "Generate login token" }));
   await screen.findByRole("alert");
@@ -86,9 +84,9 @@ test("ambiguous mint failure does not retry or expose the error payload", async 
   assert.equal(screen.queryByRole("button", { name: "Copy token" }), null);
 });
 
-test("a late mint response from the previous agent cannot appear in the new panel", async (t) => {
+test("a late mint response from the previous agent cannot appear in the new panel", async () => {
   let resolveMint!: (value: unknown) => void;
-  t.mock.method(api, "post", () => new Promise((resolve) => { resolveMint = resolve; }));
+  vi.spyOn(api, "post").mockImplementation(() => new Promise((resolve) => { resolveMint = resolve; }));
   function panel(agentId: string) {
     return createElement(TestIntlProvider, { children: createElement(ExternalAgentToken, { key: agentId, agentId }) });
   }
@@ -101,13 +99,13 @@ test("a late mint response from the previous agent cannot appear in the new pane
   assert.ok(!document.body.innerHTML.includes("sk_agent_stale-fixture"));
 });
 
-test("failed revocation keeps the token, successful revocation clears only that secret", async (t) => {
+test("failed revocation keeps the token, successful revocation clears only that secret", async () => {
   const row = (id: string) => ({ id, name: id, createdAt: "2026-01-01T00:00:00Z", lastUsedAt: null, revokedAt: null });
   let minted = false;
-  t.mock.method(api, "get", async () => ({ data: { agentId: "agent-a", credentials: minted ? [row("new-token"), row("old-token")] : [row("old-token")] } }));
-  t.mock.method(api, "post", async () => { minted = true; return { data: { agentId: "agent-a", credentialId: "new-token", apiKey: "sk_agent_revocation-fixture" } }; });
+  vi.spyOn(api, "get").mockImplementation(async () => ({ data: { agentId: "agent-a", credentials: minted ? [row("new-token"), row("old-token")] : [row("old-token")] } }));
+  vi.spyOn(api, "post").mockImplementation(async () => { minted = true; return { data: { agentId: "agent-a", credentialId: "new-token", apiKey: "sk_agent_revocation-fixture" } }; });
   let attempts = 0;
-  t.mock.method(api, "delete", async (url: string) => {
+  vi.spyOn(api, "delete").mockImplementation(async (url: string) => {
     assert.equal(url, "/agents/agent-a/credentials/new-token");
     if (++attempts === 1) throw new Error("sk_agent_error-body");
     return {};
@@ -130,8 +128,8 @@ test("failed revocation keeps the token, successful revocation clears only that 
   assert.equal(attempts, 2);
 });
 
-test("failed token inventory is not presented as an empty list", async (t) => {
-  t.mock.method(api, "get", async () => { throw new Error("sk_agent_private-response"); });
+test("failed token inventory is not presented as an empty list", async () => {
+  vi.spyOn(api, "get").mockImplementation(async () => { throw new Error("sk_agent_private-response"); });
   render(createElement(TestIntlProvider, { children: createElement(ExternalAgentToken, { agentId: "agent-a" }) }));
   await screen.findByRole("alert");
   assert.equal(screen.queryByText("No tokens have been issued for this agent."), null);
@@ -184,10 +182,10 @@ test("a member can generate for their own agent but not somebody else's", async 
   assert.equal(screen.queryByRole("button", { name: "Generate login token" }), null);
 });
 
-test("external setup tabs render and switch the real AgentDetailPanel command surface", async (t) => {
+test("external setup tabs render and switch the real AgentDetailPanel command surface", async () => {
   let mints = 0;
   const token = "sk_agent_web-fixture-secret";
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     assert.equal(url, "/agents/external-agent-1/credentials");
     mints++;
     return { data: { agentId: "external-agent-1", credentialId: "new-token", apiKey: token } };
@@ -198,7 +196,7 @@ test("external setup tabs render and switch the real AgentDetailPanel command su
     configurable: true,
     value: { writeText: async (text: string) => { copied.push(text); } },
   });
-  t.after(() => {
+  onTestFinished(() => {
     if (clipboardDescriptor) Object.defineProperty(navigator, "clipboard", clipboardDescriptor);
     else Reflect.deleteProperty(navigator, "clipboard");
   });

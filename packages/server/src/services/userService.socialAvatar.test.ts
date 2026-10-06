@@ -4,13 +4,12 @@ import { Readable } from "node:stream";
 
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 import { eq } from "drizzle-orm";
-import { afterEach, beforeEach, test } from "vitest";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
-import { userAuthIdentities, users } from "../db/schema.js";
-import { createSocialUser, findExistingSocialLoginUser, linkSocialIdentity } from "./userService.js";
-import type { StorageBackend } from "./storageService.js";
-import { __setCdnStorageForTests, __setStorageForTests, resetStorageForTests } from "./storageService.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
+import { userAuthIdentities, users } from "../db/schema";
+import { createSocialUser, findExistingSocialLoginUser, linkSocialIdentity } from "./userService";
+import type { StorageBackend } from "./storageService";
+import { __setCdnStorageForTests, __setStorageForTests, resetStorageForTests } from "./storageService";
 
 const ONE_BY_ONE_GIF = Buffer.from(
   "R0lGODdhAQABAIABAP///wAAACwAAAAAAQABAAACAkQBADs=",

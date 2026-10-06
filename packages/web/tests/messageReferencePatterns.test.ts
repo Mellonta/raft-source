@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 import { createChannelRefRegex, createChannelThreadRefRegex } from "../src/utils/messageReferencePatterns";
 
 test("channel refs support CJK channel names", () => {
@@ -52,11 +51,7 @@ test("MessageItem resolves bare mention labels from the canonical identity direc
   assert.doesNotMatch(source, /pendingLabel=/);
 });
 
-test("all message reference chips share one height box (MSG_REF_CHIP)", () => {
-  const chipConst = readFileSync(
-    new URL("../src/components/message/messageRefChip.ts", import.meta.url),
-    "utf8",
-  );
+test("all message reference chips share one box from the RUI recipe (no local font scale)", () => {
   const source = readFileSync(new URL("../src/components/message/MessageItem.tsx", import.meta.url), "utf8");
   const mention = readFileSync(
     new URL("../src/components/message/MentionLink.tsx", import.meta.url),
@@ -79,52 +74,29 @@ test("all message reference chips share one height box (MSG_REF_CHIP)", () => {
     source.indexOf("const raftPermalink"),
   );
 
-  // Single source of truth lives in its OWN module so MentionLink can import
-  // the same constant (Huarong review #proj-message:ca65d96d found the
-  // self-mention chip drifting on its own leading box when the const
-  // was MessageItem-local). Every chip composes it → "all chips one height"
-  // is structurally guaranteed (stdrc task #28 msg=dee00ea3). The box uses
-  // relative font size + relative line-height keeps the token one step smaller
-  // than the message body while still following the body font-size preference;
-  // horizontal padding stays, vertical padding is explicitly zero. No `cursor`
-  // in the shared box: in-message refs are app chrome
-  // and stay on the arrow cursor (stdrc task #28 msg=ca65d96d) — each in-app
-  // chip appends `cursor-default` explicitly; only the trailing external-URL
-  // <a target="_blank"> keeps the browser link-hand. Long labels still need a
-  // hard max-width + overflow clipping envelope; otherwise comment labels can
-  // paint outside the chip border in narrow columns.
-  assert.match(
-    chipConst,
-    /export const MSG_REF_CHIP =\s*"inline-block max-w-full overflow-hidden text-ellipsis whitespace-nowrap align-bottom border border-black px-1 py-0 \[font-size:0\.875em\] font-bold leading-\[1\.3em\] select-text"/,
-  );
-  assert.doesNotMatch(chipConst, /text-sm font-bold leading-\[21px\]/);
-  assert.match(chipConst, /whitespace-nowrap.*task #16/s);
-  assert.match(chipConst, /max-width \+[\s\S]*overflow clipping/);
+  // Since raft-ui 0.5.16 (rui#319) the RUI message-reference recipe owns the
+  // whole chip box: body size on the body baseline, the box made of the
+  // text's own line box. slock composes MessageReferenceChip/Text and appends
+  // only behaviour classes (cursor, busy/unavailable opacity) — no font scale
+  // and no hand-spelled box. In-message refs stay on the arrow cursor (stdrc
+  // task #28 msg=ca65d96d).
+  for (const src of [source, mention, referenceChip, attachmentCommentRefChip]) {
+    assert.doesNotMatch(src, /MSG_REF_CHIP_FONT_SCALE|messageRefChip/, "the local font scale is retired");
+    assert.doesNotMatch(src, /\bMSG_REF_CHIP\b(?!\w)/, "old MSG_REF_CHIP box must stay retired");
+    assert.doesNotMatch(src, /inline-block max-w-full overflow-hidden text-ellipsis/);
+  }
+  assert.match(referenceChip, /className="cursor-default"/);
 
-  // MessageItem and MentionLink still import the constant and inline the box
-  // for the chips that are NOT the shared ReferenceChip (thread/#channel/task).
-  assert.match(source, /import \{ MSG_REF_CHIP \} from "\.\/messageRefChip"/);
-  assert.match(mention, /import \{ MSG_REF_CHIP \} from "\.\/messageRefChip"/);
-
-  // The permalink chip and the comment-ref chip now render through the shared
-  // ReferenceChip, which is where the MSG_REF_CHIP box now lives for them — so
-  // the "all chips one height" guarantee is repointed through ReferenceChip
-  // rather than re-inlined at each call site. ReferenceChip imports the one
-  // constant and composes it as the box (with the shared inline-flex layout).
-  assert.match(referenceChip, /import \{ MSG_REF_CHIP \} from "\.\/messageRefChip"/);
-  assert.match(referenceChip, /className=\{`\$\{MSG_REF_CHIP\} inline-flex max-w-full cursor-default items-center gap-1 \$\{colorClass\}`\}/);
-
-  // MessageItem chip variants that still inline the box compose it directly.
-  assert.match(source, /data-thread-ref[\s\S]*?className=\{`\$\{MSG_REF_CHIP\} bg-brutal-cyan\/30/);
-  assert.match(source, /dataChannel[\s\S]*?className=\{`\$\{MSG_REF_CHIP\} bg-brutal-pink\/30 text-black cursor-default/);
-  assert.match(source, /dataTaskRef[\s\S]*?className=\{`\$\{MSG_REF_CHIP\} bg-soft-signal\/40 text-black cursor-default/);
-  assert.match(source, /data-thread-ref[\s\S]*?cursor-wait opacity-80[\s\S]*?cursor-default hover:bg-brutal-cyan\/60/);
+  assert.match(source, /<MessageReferenceChip\s+variant="link"/);
+  assert.match(source, /<MessageReferenceChip\s+variant="accent"/);
+  assert.match(source, /<MessageReferenceText\s+variant="primary"/);
+  assert.match(source, /cursor-wait opacity-80/);
 
   // The permalink chip renders through ReferenceChip with the Link icon and the
   // in/out-of-server soft-signal color, plus the non-bold trailing "msg" badge.
   assert.match(source, /raftPermalink[\s\S]*?<ReferenceChip[\s\S]*?icon=\{Link\}/);
-  assert.match(source, /raftPermalink[\s\S]*?colorClass=\{[\s\S]*?bg-soft-signal\/40 text-black hover:bg-soft-signal/);
-  assert.match(source, /text-\[10px\] font-normal leading-none text-black\/50/);
+  assert.match(source, /raftPermalink[\s\S]*?variant="link"/);
+  assert.match(source, /text-\[10px\] font-normal leading-none text-foreground-placeholder/);
 
   // Comment ref chips render through ReferenceChip with the MessageSquare icon
   // and the stone color (distinct from the permalink's soft-signal, per stdrc).
@@ -133,7 +105,7 @@ test("all message reference chips share one height box (MSG_REF_CHIP)", () => {
   // span that can overflow the chip.
   assert.match(attachmentCommentRefChip, /<ReferenceChip[\s\S]*?icon=\{MessageSquare\}/);
   assert.match(attachmentCommentRefChip, /data-message-affordance="attachment-comment-ref-chip"/);
-  assert.match(attachmentCommentRefChip, /colorClass="bg-brutal-stone\/25 text-black/);
+  assert.match(attachmentCommentRefChip, /variant="muted"/);
   assert.match(
     attachmentCommentRefChip,
     /const detail = `\$\{commentRef\.filename\}\$\{commentRef\.anchorLabel \? ` · \$\{commentRef\.anchorLabel\}` : ""\}`/,
@@ -145,7 +117,7 @@ test("all message reference chips share one height box (MSG_REF_CHIP)", () => {
   assert.match(attachmentComments, /data-message-affordance="attachment-comment-pending-anchor"[\s\S]*?className="[^"]*overflow-hidden[^"]*"[\s\S]*?<span className="min-w-0 truncate">/);
 
   // MentionLink self-mention chip composes the SAME box (Huarong blocker).
-  assert.match(mention, /isSelfMention\s*\?\s*`\$\{MSG_REF_CHIP\} bg-soft-signal hover:bg-soft-signal\/80`/);
+  assert.match(mention, /variant=\{isSelfMention \? "primary" : "secondary"\}/);
 
   // No chip (in either renderer) may re-inline the old box or a link-hand cursor.
   assert.doesNotMatch(source, /inline-block border border-black[^"`]*leading-\[21px\]/);
@@ -161,4 +133,13 @@ test("all message reference chips share one height box (MSG_REF_CHIP)", () => {
   assert.doesNotMatch(taskRefSection, /leading-none/);
   assert.doesNotMatch(taskRefSection, /border-2/);
   assert.doesNotMatch(source, /inline-flex h-5 items-center/);
+});
+
+test("MessageItem permalink chip uses onOpenPermalink without cross-server branching (B1 / 73dddf321)", () => {
+  const source = readFileSync(new URL("../src/components/message/MessageItem.tsx", import.meta.url), "utf8");
+
+  // Verify staging 73dddf321 fix: cross-server permalinks must not branch on isCurrentServer
+  assert.doesNotMatch(source, /const _?isCurrentServer =/);
+  assert.doesNotMatch(source, /if \(_?isCurrentServer\)/);
+  assert.match(source, /onOpenPermalink\?\.(\(href\)|href)/);
 });

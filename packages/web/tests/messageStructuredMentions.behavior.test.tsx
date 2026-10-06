@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { TestIntlProvider } from "./helpers/intl";
@@ -225,7 +224,8 @@ test("Computer and App refs render as typed chips without becoming mentions", ()
   assert.match(html, /data-testid="computer-reference-550e8400-e29b-41d4-a716-446655440000"/);
   assert.match(html, /bg-brutal-cyan/);
   assert.match(html, /data-testid="app-reference-system.reminder"/);
-  assert.match(html, />@system\.reminder<\/span>/);
+  assert.match(html, /@system\.reminder/);
+  assert.match(html, /data-base-ui-tooltip-trigger/);
   assert.doesNotMatch(html, /data-mention=/);
 });
 

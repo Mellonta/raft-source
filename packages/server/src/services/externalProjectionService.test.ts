@@ -1,18 +1,16 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
-import { afterEach } from "vitest";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   agents,
   channelAgents,
   channels,
   externalActorProjections,
   externalAddressabilityProjections,
-  externalAuthorPolicies,
   externalMessageAuthorFacts,
   externalProjectionAvatarArtifacts,
   inboxNotificationFacts,
@@ -23,20 +21,19 @@ import {
   tasks,
   threadFollows,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   createCanonicalExternalMessage,
   insertCanonicalExternalMessage,
   loadExternalMessageAuthors,
-  resolveExternalAuthorPolicy,
   resolveExternalMentionFromDurableAuthority,
-} from "./externalProjectionService.js";
-import { deliverMessagesToAgents, listMessagesByIds } from "./messageService.js";
-import { convertMessageToTask } from "./taskService.js";
-import { searchMessagesForUser } from "./searchService.js";
-import { listSaved, saveMessage } from "./savedService.js";
-import { getFollowedThreads, getThreadSummaries } from "./channelService.js";
-import { normalizeRowForTest } from "./activitySyncService.js";
+} from "./externalProjectionService";
+import { deliverMessagesToAgents, listMessagesByIds } from "./messageService";
+import { convertMessageToTask } from "./taskService";
+import { searchMessagesForUser } from "./searchService";
+import { listSaved, saveMessage } from "./savedService";
+import { getFollowedThreads, getThreadSummaries } from "./channelService";
+import { normalizeRowForTest } from "./activitySyncService";
 
 
 afterEach(async () => {
@@ -117,6 +114,7 @@ function canonicalInput(surface: Awaited<ReturnType<typeof seedExternalProjectio
     appRegistrationId: surface.actor.appRegistrationId,
     installId: surface.actor.installId,
     workspaceId: surface.actor.workspaceId,
+    workspaceName: "Analytical Engines",
     externalActorId: surface.actor.externalActorId,
     externalConversationId: "C-RAFT",
     externalMessageId: "1722387723.000100",
@@ -133,11 +131,16 @@ test("canonical external message freezes human attribution, replays idempotently
   assert.equal(created.message.senderType, "external_projection");
   assert.equal(created.message.senderId, surface.actor.id);
   assert.equal(created.author.displayName, "Alice External");
+  assert.equal(created.author.workspaceName, "Analytical Engines");
   assert.equal(created.author.avatarUrl, surface.avatar.publicUrl);
 
-  const replay = await createCanonicalExternalMessage(input);
+  const replay = await createCanonicalExternalMessage({
+    ...input,
+    workspaceName: "Renamed Workspace Must Not Rewrite History",
+  });
   assert.equal(replay.kind, "duplicate");
   assert.equal(replay.message.id, created.message.id);
+  assert.equal(replay.author.workspaceName, "Analytical Engines");
   assert.equal(
     (await surface.db.select().from(messages).where(eq(messages.senderType, "external_projection"))).length,
     1,
@@ -149,6 +152,7 @@ test("canonical external message freezes human attribution, replays idempotently
   const [humanProjection] = await listMessagesByIds([created.message.id]);
   assert.equal(humanProjection.senderName, "Alice External");
   assert.equal(humanProjection.externalAuthor?.externalMessageId, input.externalMessageId);
+  assert.equal(humanProjection.externalAuthor?.workspaceName, "Analytical Engines");
   assert.equal(humanProjection.externalAuthor?.avatarUrl, surface.avatar.publicUrl);
 
   assert.equal(
@@ -380,51 +384,8 @@ test("external message reads fail closed when immutable author facts are missing
   );
 });
 
-test("outbound author consent and external mention authority fail closed on revoke, stale time, and Raft-handle collision", async () => {
+test("external mention authority fails closed on stale time and Raft-handle collision", async () => {
   const surface = await seedExternalProjectionSurface();
-  const authorAvatarId = randomUUID();
-  await surface.db.insert(externalProjectionAvatarArtifacts).values({
-    id: authorAvatarId,
-    ownerType: "user",
-    ownerId: surface.owner.id,
-    sourceDigest: DIGEST_B,
-    publicUrl: "https://cdn.slock.test/raft/owner.png",
-    mimeType: "image/png",
-    byteSize: 512,
-    width: 64,
-    height: 64,
-    artifactRevision: 3,
-    state: "active",
-  });
-  const [policy] = await surface.db.insert(externalAuthorPolicies).values({
-    serverId: surface.server.id,
-    provider: "slack",
-    appRegistrationId: "app-registration-1",
-    installId: "install-1",
-    bindingId: "binding-1",
-    bindingEpoch: 4,
-    authorType: "user",
-    authorId: surface.owner.id,
-    displayName: "Raft Owner",
-    avatarArtifactId: authorAvatarId,
-    fallbackKind: "human",
-    consentRevision: 2,
-    state: "granted",
-  }).returning();
-  const authorPolicyInput = {
-    serverId: surface.server.id,
-    provider: policy.provider,
-    appRegistrationId: policy.appRegistrationId,
-    installId: policy.installId,
-    bindingId: policy.bindingId,
-    bindingEpoch: policy.bindingEpoch,
-    authorType: "user" as const,
-    authorId: surface.owner.id,
-  };
-  assert.equal((await resolveExternalAuthorPolicy(authorPolicyInput))?.avatar?.publicUrl, "https://cdn.slock.test/raft/owner.png");
-  await surface.db.update(externalAuthorPolicies).set({ state: "revoked" }).where(eq(externalAuthorPolicies.id, policy.id));
-  assert.equal(await resolveExternalAuthorPolicy(authorPolicyInput), null);
-
   const context = {
     provider: "slack",
     appRegistrationId: "app-registration-1",

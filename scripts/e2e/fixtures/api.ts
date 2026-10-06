@@ -1,13 +1,18 @@
 // Isolated collector contract fixture. Never run against a shared test server.
 import { createServer } from "node:http";
-import { evidenceConfig, observeApiProcess } from "../transportEvidence.js";
+import { evidenceConfig, observeApiProcess } from "../transportEvidence";
 
 const observe = process.env.FIXTURE_OBSERVE === "off" ? undefined : observeApiProcess(evidenceConfig());
 let requests = 0;
+const heldResponses: import("node:http").ServerResponse[] = [];
 const server = createServer((request, response) => {
   requests++;
   const mode = process.env.FIXTURE_MODE;
-  if (mode === "reset" || (mode === "reset-once" && requests === 1)) {
+  const pathname = new URL(request.url ?? "/", "http://e2e.invalid").pathname;
+  if (mode === "hold-six" && pathname === "/api/hold") {
+    request.resume();
+    heldResponses.push(response);
+  } else if (mode === "reset" || (mode === "reset-once" && requests === 1)) {
     request.socket.resetAndDestroy();
   } else if (mode === "close") {
     server.close();
@@ -24,7 +29,13 @@ server.listen(0, "127.0.0.1", () => {
   if (address && typeof address === "object") process.send?.({ port: address.port });
 });
 process.on("message", (message) => {
+  if (message === "release-one") {
+    const response = heldResponses.shift();
+    response?.end(JSON.stringify({ released: true }));
+    process.send?.({ released: Boolean(response) });
+  }
   if (message === "close") {
+    for (const response of heldResponses.splice(0)) response.end(JSON.stringify({ closed: true }));
     server.close(() => { process.exit(0); });
     server.closeAllConnections();
   }

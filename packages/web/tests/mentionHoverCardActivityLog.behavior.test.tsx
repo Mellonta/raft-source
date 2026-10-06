@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { JSDOM } from "jsdom";
 import { act } from "react";
 import type { ReactElement } from "react";
@@ -43,6 +42,7 @@ const { useAgentStore } = await import("../src/store/agentStore");
 const { useAuthStore } = await import("../src/store/authStore");
 const { useMachineStore } = await import("../src/store/machineStore");
 const { useServerStore } = await import("../src/store/serverStore");
+const { resetSharedRuntimeModelRequestsForTests } = await import("../src/hooks/useRuntimeModels");
 const { TestIntlProvider } = await import("./helpers/intl");
 
 const defaultLoadTrajectoryLog = useAgentStore.getState().loadTrajectoryLog;
@@ -51,6 +51,7 @@ const defaultApiGet = api.get;
 afterEach(() => {
   cleanup();
   document.body.innerHTML = "";
+  resetSharedRuntimeModelRequestsForTests();
   useAgentStore.setState({
     agents: [],
     agentActivities: {},
@@ -155,6 +156,12 @@ test("agent profile preview card renders the latest five trajectory entries and 
     assert.match(row.className, /\bflex\b/, "timestamp, status dot, and status text should share one flex row");
     assert.doesNotMatch(row.className, /\bgrid\b/);
   }
+  const activityPreview = activityRows[0].closest("div.border-t-2");
+  assert.ok(activityPreview);
+  assert.match(activityPreview.className, /border-line-muted/);
+  assert.match(activityPreview.className, /theme-brutal:border-black/);
+  assert.match(activityRows[0].querySelector("span:last-child")?.className ?? "", /text-foreground-muted/);
+  assert.match(activityRows[0].querySelector("span:last-child")?.className ?? "", /theme-brutal:text-black\/70/);
   assert.equal(screen.queryByText("Step 1"), null, "hover card must cap the preview at five entries");
 
   act(() => {
@@ -596,4 +603,55 @@ test("user hover card renders a graceful fallback when the member is missing", (
 
   assert.ok(screen.getByText("@pi-pmo"), "graceful fallback must render for missing members too");
   assert.ok(screen.getByText("Profile unavailable"));
+});
+
+test("hover profile cards for the same agent share one runtime-model probe instead of asking the Computer on every hover", async () => {
+  const agentId = "agent-hover-shared-models";
+  const machineId = "machine-hover-shared-models";
+  const modelRequests: string[] = [];
+  let releaseModels!: () => void;
+  const modelsReady = new Promise<void>((resolve) => { releaseModels = resolve; });
+  api.get = (async (url: string) => {
+    if (String(url).includes("/runtime-models/")) {
+      modelRequests.push(String(url));
+      await modelsReady;
+      return { data: { kind: "live", value: { models: [{ id: "gpt-5.3-codex-high", label: "Codex 5.3 High", verified: "launchable" }], default: "auto" } } };
+    }
+    return defaultApiGet(url as never);
+  }) as typeof api.get;
+  seedViewer();
+  useServerStore.setState({ current: { id: "server-hover-shared-models" }, members: [] } as never);
+  useMachineStore.setState({ machines: [{ id: machineId, name: "CursorMac" }] } as never);
+  useAgentStore.setState({
+    agents: [{
+      id: agentId,
+      name: "cursor-agent",
+      displayName: "Cursor Agent",
+      status: "active",
+      avatarUrl: null,
+      creatorType: "user",
+      creatorId: "viewer-user",
+      runtime: "cursor",
+      model: "gpt-5.3-codex-high",
+      machineId,
+      runtimeConfig: { version: 1, runtime: "cursor", model: { kind: "custom", name: "gpt-5.3-codex-high" }, mode: { kind: "default" } },
+    }],
+    agentActivities: { [agentId]: { activity: "online", activityDetail: "" } },
+    trajectoryLogs: {},
+    loadTrajectoryLog: async () => {},
+  } as never);
+
+  // Two cards open at once (e.g. hovering the agent in two messages).
+  const first = renderPreview(<ProfilePreviewCardContent mentionType="agent" mentionId={agentId} />);
+  const second = renderPreview(<ProfilePreviewCardContent mentionType="agent" mentionId={agentId} />);
+  await waitFor(() => assert.equal(modelRequests.length, 1));
+  await act(async () => { releaseModels(); });
+  await waitFor(() => assert.equal(screen.getAllByText("Codex 5.3 High").length, 2));
+
+  // Hover away and back: the recent live catalog is reused.
+  first.unmount();
+  second.unmount();
+  renderPreview(<ProfilePreviewCardContent mentionType="agent" mentionId={agentId} />);
+  await waitFor(() => assert.ok(screen.getByText("Codex 5.3 High")));
+  assert.equal(modelRequests.length, 1, "repeat hovers must not make the Computer run the model probe again");
 });

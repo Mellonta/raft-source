@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
-import { runWithTraceSpan } from "../tracing/semanticTrace.js";
+import { runWithTraceSpan } from "../tracing/semanticTrace";
 import {
   AGENT_LIFECYCLE_EVENT_TRACE_NAME,
   AGENT_LIFECYCLE_PROJECTION_TRACE_NAME,
@@ -12,7 +11,7 @@ import {
   sanitizeLifecycleTraceAttrs,
   toAgentLifecycleEventTraceAttrs,
   toAgentLifecycleProjectionTraceAttrs,
-} from "./agentLifecycleEvents.js";
+} from "./agentLifecycleEvents";
 
 test("agent lifecycle event identity is canonical and independent from trace identity", () => {
   const event = createAgentLifecycleEvent(

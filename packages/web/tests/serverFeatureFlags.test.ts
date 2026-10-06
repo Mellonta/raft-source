@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 
 import {
@@ -9,7 +8,6 @@ import {
 } from "@botiverse/raft-shared";
 import api from "../src/api/client";
 import { connectSocket, getSocket, resetSocket } from "../src/api/socket";
-import { FEATURE_FLAG_REGISTRY } from "../src/analytics/flagRegistry";
 import { useAuthStore } from "../src/store/authStore";
 import { useServerStore } from "../src/store/serverStore";
 import {
@@ -20,6 +18,7 @@ import {
   prefetchServerFeatureFlags,
   publishServerFeatureFlagValuesFromLabsReadback,
   readServerFeatureFlag,
+  readServerFeatureFlagState,
   refreshServerFeatureFlags,
   resetServerFeatureFlagsForTests,
   setServerFeatureFlagForTests,
@@ -35,6 +34,21 @@ test("provider connections are registered and fail closed before server evaluati
   assert.equal(readServerFeatureFlag("server-a", PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY), false);
 });
 
+test("flag state distinguishes loading from a resolved disabled result", async () => {
+  assert.equal(
+    readServerFeatureFlagState("server-a", ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY),
+    "loading",
+  );
+  api.post = (async () => ({ data: { evaluations: [] } })) as typeof api.post;
+
+  await prefetchServerFeatureFlags("server-a");
+
+  assert.equal(
+    readServerFeatureFlagState("server-a", ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY),
+    "disabled",
+  );
+});
+
 test("channel-manager role actions are registered and fail closed before server evaluation", () => {
   assert.ok(REGISTERED_SERVER_FEATURE_FLAG_KEYS.includes(CHANNEL_MANAGER_ROLE_ACTIONS_FEATURE_FLAG_KEY));
   assert.equal(readServerFeatureFlag("server-a", CHANNEL_MANAGER_ROLE_ACTIONS_FEATURE_FLAG_KEY), false);
@@ -48,12 +62,6 @@ test("Slack Bridge master gate is registered and fail-closed before server evalu
 test("Activity sidebar inbox is registered and fail closed before server evaluation", () => {
   assert.ok(REGISTERED_SERVER_FEATURE_FLAG_KEYS.includes(ACTIVITY_SIDEBAR_INBOX_FLAG_KEY));
   assert.equal(readServerFeatureFlag("server-a", ACTIVITY_SIDEBAR_INBOX_FLAG_KEY), false);
-  assert.deepEqual(FEATURE_FLAG_REGISTRY.find((flag) => flag.key === ACTIVITY_SIDEBAR_INBOX_FLAG_KEY), {
-    key: ACTIVITY_SIDEBAR_INBOX_FLAG_KEY,
-    label: ACTIVITY_SIDEBAR_INBOX_FLAG_KEY,
-    variants: ["disabled", "enabled"],
-    default: "disabled",
-  });
 });
 
 afterEach(() => {
@@ -105,6 +113,10 @@ test("registered server flags evaluate once as one batch and repeated consumers 
   assert.equal(postCalls, 1);
   assert.equal(first.resolved, true);
   assert.equal(first.values[ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY], true);
+  assert.equal(
+    readServerFeatureFlagState("server-a", ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY),
+    "enabled",
+  );
   assert.equal(
     getServerFeatureFlagSnapshot("server-a").values[ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY],
     true,
@@ -183,6 +195,7 @@ test("retry backoff does not re-evaluate after the session cache is invalidated"
 test("server flag cache is scoped per server and repeated request failures resolve fail-closed", async () => {
   setServerFeatureFlagRetryBackoffForTests(0);
   const requestedServers: string[] = [];
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
   api.post = (async (_url: string, body?: unknown) => {
     const serverId = (body as { serverId: string }).serverId;
     requestedServers.push(serverId);
@@ -202,9 +215,97 @@ test("server flag cache is scoped per server and repeated request failures resol
   assert.deepEqual(requestedServers, ["server-a", "server-b", "server-b"]);
   assert.equal(serverA.values[ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY], true);
   assert.equal(serverB.resolved, true);
+  assert.equal(serverB.resolution, "undetermined");
+  assert.equal(
+    readServerFeatureFlagState("server-b", ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY),
+    "undetermined",
+    "a terminal evaluation failure must not masquerade as a disabled flag",
+  );
+  assert.equal(
+    readServerFeatureFlag("server-b", ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY),
+    false,
+    "undetermined flags remain fail-closed for existing boolean consumers",
+  );
   for (const key of REGISTERED_SERVER_FEATURE_FLAG_KEYS) {
     assert.equal(serverB.values[key], false);
   }
+  assert.equal(warn.mock.calls.length, 1);
+  assert.match(String(warn.mock.calls[0][0]), /evaluation failed/);
+  assert.deepEqual(warn.mock.calls[0][1], { serverId: "server-b" });
+});
+
+test("Lab readback stays determinate when the batch evaluator is undetermined", async () => {
+  setServerFeatureFlagRetryBackoffForTests(0);
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  api.post = (async () => {
+    throw new Error("feature flag service unavailable");
+  }) as typeof api.post;
+
+  await prefetchServerFeatureFlags("server-a");
+  publishServerFeatureFlagValuesFromLabsReadback({
+    serverId: "server-a",
+    serverLabVersion: 1,
+    masterEnabled: true,
+    labs: [{
+      key: ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
+      name: "Attachment comments",
+      description: "Attachment comments.",
+      state: "open",
+      enrolled: true,
+      effective: true,
+    }],
+  });
+
+  assert.equal(
+    readServerFeatureFlagState("server-a", ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY),
+    "enabled",
+  );
+  assert.equal(
+    readServerFeatureFlagState("server-a", PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY),
+    "undetermined",
+  );
+});
+
+test("Lab readback stays determinate while the batch evaluator is still loading", () => {
+  publishServerFeatureFlagValuesFromLabsReadback({
+    serverId: "server-enabled",
+    serverLabVersion: 1,
+    masterEnabled: true,
+    labs: [{
+      key: ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
+      name: "Attachment comments",
+      description: "Attachment comments.",
+      state: "open",
+      enrolled: true,
+      effective: true,
+    }],
+  });
+  publishServerFeatureFlagValuesFromLabsReadback({
+    serverId: "server-disabled",
+    serverLabVersion: 1,
+    masterEnabled: true,
+    labs: [{
+      key: ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
+      name: "Attachment comments",
+      description: "Attachment comments.",
+      state: "open",
+      enrolled: false,
+      effective: false,
+    }],
+  });
+
+  assert.equal(
+    readServerFeatureFlagState("server-enabled", ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY),
+    "enabled",
+  );
+  assert.equal(
+    readServerFeatureFlagState("server-disabled", ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY),
+    "disabled",
+  );
+  assert.equal(
+    readServerFeatureFlagState("server-enabled", PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY),
+    "loading",
+  );
 });
 
 test("Lab readback-derived flag values win over slower evaluator responses", async () => {
@@ -249,9 +350,14 @@ test("Lab readback-derived flag values win over slower evaluator responses", asy
     true,
     "a delayed evaluator refresh must not resurrect the older Lab gate result",
   );
+  assert.equal(
+    readServerFeatureFlagState("server-a", ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY),
+    "enabled",
+    "the Lab-derived state stays authoritative after batch evaluation resolves",
+  );
 });
 
-test("socket lifecycle prefetches the registered server flags", async (t) => {
+test("socket lifecycle prefetches the registered server flags", async () => {
   useServerStore.setState({
     current: {
       id: "server-socket-flags",
@@ -280,7 +386,7 @@ test("socket lifecycle prefetches the registered server flags", async (t) => {
   }) as typeof api.post;
 
   const socket = getSocket();
-  t.mock.method(socket, "connect", () => socket);
+  vi.spyOn(socket, "connect").mockImplementation(() => socket);
   connectSocket();
   await Promise.resolve();
   await Promise.resolve();

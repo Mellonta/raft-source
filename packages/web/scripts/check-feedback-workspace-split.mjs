@@ -5,7 +5,7 @@ import { gzipSync } from "node:zlib";
 import { initSync, parse } from "es-module-lexer";
 
 const FEEDBACK_DIALOG_SOURCE = "src/components/settings/AboutFeedbackDialog.tsx";
-const FEEDBACK_STYLE_SOURCE = /(?:^|[\/+])(?:hands-feedback-react|feedback-react)\/(?:src|source)\/styles\.css$/;
+const FEEDBACK_STYLE_SOURCE = /(?:^|[\/+])(?:hands-feedback-react|feedback-react)\/(?:src|source|dist)\/styles\.css$/;
 
 initSync();
 

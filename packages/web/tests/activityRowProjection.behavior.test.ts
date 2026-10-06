@@ -18,7 +18,6 @@
  * branch is unreachable today. All-or-nothing is enforced by the NARROW.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
 import { projectActivityRows } from "../src/store/activityPanel/projection";
 
 /** 2^53 + 1 — unrepresentable as a double. */

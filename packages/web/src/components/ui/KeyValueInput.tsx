@@ -69,7 +69,7 @@ export function KeyValueInputRow({
       <Field className="contents">
         <Input id={`${rowId}-value`} required={valueRequired} aria-label={resolvedValueLabel} type={valueType} value={value} onChange={(event) => onValueChange(event.target.value)} className="min-w-0 flex-1" placeholder={resolvedValuePlaceholder} />
       </Field>
-      <Button type="button" size="icon-xs" variant="default" onClick={onRemove} aria-label={resolvedRemoveLabel}>
+      <Button type="button" size="icon-xs" variant="danger" onClick={onRemove} aria-label={resolvedRemoveLabel}>
         <Trash2 size={14} />
       </Button>
     </div>

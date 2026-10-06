@@ -1,22 +1,21 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import pg from "pg";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
 import { eq } from "drizzle-orm";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb, getPool } from "../db/index.js";
-import { servers, users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { servers, users } from "../db/schema";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
 const DATABASE_URL = process.env.INBOX_PRESSURE_REAL_PG_URL;
 const REQUIRED = process.env.INBOX_PRESSURE_REAL_PG_REQUIRED === "1";
 const EXPECTATION = process.env.INBOX_PRESSURE_EXPECT;
-const APPLY_FIXED_INDEX = process.env.INBOX_PRESSURE_APPLY_FIXED_INDEX === "1";
 const CONCURRENCY = 24;
 const REQUEST_COUNT = 48;
 const NORMAL_CONCURRENCY = 2;
@@ -107,7 +106,7 @@ function latencyReceipt(results: readonly RequestResult[]) {
 }
 
 async function seedProductionShapedInbox(userId: string, serverId: string, fixtureId: string): Promise<void> {
-  const pool = getPool();
+  const pool = (getDb() as unknown as { $client: pg.Pool }).$client;
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -154,37 +153,10 @@ async function seedProductionShapedInbox(userId: string, serverId: string, fixtu
        FROM generate_series(1, 7357) AS i`,
       [userId, serverId, fixtureId],
     );
-    await client.query(
-      `INSERT INTO inbox_serving_rows (
-         receiver_type, receiver_id, server_id, kind, source_channel_id,
-         latest_notified_message_id, latest_notified_seq, latest_notified_at,
-         last_activity_at, first_unread_message_id, first_unread_seq,
-         unread_count, latest_personal_mention_message_id,
-         latest_personal_mention_seq, unread_mention_count, has_any_mention
-       )
-       SELECT 'user', $1::uuid, $2::uuid, 'channel',
-              md5($3 || '-channel-' || i::text)::uuid,
-              md5($3 || '-message-' || i::text)::uuid,
-              1000000000 + i, now(), now(),
-              md5($3 || '-message-' || i::text)::uuid,
-              1000000000 + i, 1,
-              md5($3 || '-message-' || i::text)::uuid,
-              1000000000 + i, 1, true
-       FROM generate_series(1, 1889) AS i`,
-      [userId, serverId, fixtureId],
-    );
-    if (APPLY_FIXED_INDEX) {
-      await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_inbox_serving_rows_receiver_server_last_activity
-          ON inbox_serving_rows
-            (receiver_type, receiver_id, server_id, last_activity_at)
-      `);
-    }
     await client.query("COMMIT");
     await client.query("ANALYZE channels");
     await client.query("ANALYZE messages");
     await client.query("ANALYZE message_mentions");
-    await client.query("ANALYZE inbox_serving_rows");
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -193,29 +165,6 @@ async function seedProductionShapedInbox(userId: string, serverId: string, fixtu
   }
 }
 
-async function explainReceiverPageKey(userId: string, serverId: string) {
-  const result = await getPool().query(
-    `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
-     SELECT source_channel_id, last_activity_at
-     FROM inbox_serving_rows
-     WHERE receiver_type = 'user'
-       AND receiver_id = $1::uuid
-       AND server_id = $2::uuid
-     ORDER BY last_activity_at DESC
-     LIMIT 30`,
-    [userId, serverId],
-  );
-  const report = result.rows[0]["QUERY PLAN"][0] as { Plan: ExplainNode; "Execution Time": number };
-  const nodes = flattenPlan(report.Plan);
-  return {
-    executionMs: report["Execution Time"],
-    nodeTypes: nodes.map((node) => String(node["Node Type"])),
-    indexNames: nodes.flatMap((node) => typeof node["Index Name"] === "string" ? [node["Index Name"]] : []),
-    actualRows: nodes.flatMap((node) => typeof node["Actual Rows"] === "number" ? [node["Actual Rows"]] : []),
-    sharedReadBlocks: nodes.reduce((sum, node) => sum + (typeof node["Shared Read Blocks"] === "number" ? node["Shared Read Blocks"] : 0), 0),
-    tempWrittenBlocks: nodes.reduce((sum, node) => sum + (typeof node["Temp Written Blocks"] === "number" ? node["Temp Written Blocks"] : 0), 0),
-  };
-}
 
 test(
   "production-shaped concurrent inbox pressure distinguishes timeout RED from bounded backpressure green",
@@ -268,7 +217,6 @@ test(
       const server = await createServer("Inbox Pressure", `inbox-pressure-${randomUUID()}`, user.id);
       await db.update(servers).set({ plan: "free" }).where(eq(servers.id, server.id));
       await seedProductionShapedInbox(user.id, server.id, fixtureId);
-      const pageKeyPlan = await explainReceiverPageKey(user.id, server.id);
       const token = await login(app.baseUrl, email);
       sink.clear();
 
@@ -361,7 +309,6 @@ test(
         errorBuckets,
         statementTimeouts,
         backpressureRejects,
-        pageKeyPlan,
       };
       console.error(`INBOX_PRESSURE_RECEIPT ${JSON.stringify(receipt)}`);
 
@@ -379,13 +326,6 @@ test(
         assert.deepEqual(receipt.overload.rejectionCodes, ["INBOX_BACKPRESSURE"], "every overload response must carry the closed rejection code");
         assert.ok(peakActiveBackends.overload <= 8, `backend peak must stay bounded, got ${peakActiveBackends.overload}`);
         assert.ok(receipt.p99Ms < 4_000, `route p99 must stay below 4s, got ${receipt.p99Ms}`);
-        assert.ok(
-          pageKeyPlan.indexNames.includes("idx_inbox_serving_rows_receiver_server_last_activity"),
-          `receiver/server/activity key producer must use the fixed index: ${pageKeyPlan.indexNames.join(",")}`,
-        );
-        assert.equal(pageKeyPlan.nodeTypes.includes("Sort"), false, "index order must avoid a page-key sort");
-        assert.equal(pageKeyPlan.tempWrittenBlocks, 0, "page-key production must not spill");
-        assert.ok(Math.max(...pageKeyPlan.actualRows) <= 30, "the index-ordered page key scan must stay page-bounded");
       }
     } finally {
       poll = false;

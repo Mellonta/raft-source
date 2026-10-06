@@ -1,7 +1,9 @@
 /** A committed authorization change invalidates the user's live subscriptions.
  * The Socket composition root supplies local eviction and acknowledged fanout. */
 export type SocketAccessRevocation =
-  | { userId: string; familyId?: string }
+  /** `removedFromServerId` marks a membership removal: connections attached to
+   * that server receive `server:membership-removed` as their last packet. */
+  | { userId: string; familyId?: string; removedFromServerId?: string }
   /** Every connection attached to the server (scope omitted or "all"), or only
    * its guest connections. */
   | { serverId: string; scope?: "all" | "guests" }

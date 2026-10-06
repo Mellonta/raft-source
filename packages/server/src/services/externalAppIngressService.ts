@@ -3,26 +3,27 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
 import { currentDate, SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   externalActorProjections,
   externalAddressabilityProjections,
   externalAppCredentials,
   externalAppIngressEndpoints,
+  externalAppInstallServerGrants,
   externalAppInstalls,
   externalAppRegistrations,
   externalAppRegistrationSecrets,
   externalChannelBindings,
   externalIngressDiscardReceipts,
   externalInboundEvents,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   resolveExternalBindingAuthority,
   type ExternalBindingAuthorityDecision,
-} from "./externalAppControlPlaneService.js";
-import { reconcileSlackChannelLifecycle } from "./slackBindingLifecycleService.js";
-import { evaluateFeatureFlag } from "./featureFlagService.js";
-import { slackBridgeDatabaseRuntimeRevision } from "./slackBridgeDatabaseRuntimeAuthority.js";
+} from "./externalAppControlPlaneService";
+import { reconcileSlackChannelLifecycle } from "./slackBindingLifecycleService";
+import { evaluateFeatureFlag } from "./featureFlagService";
+import { slackBridgeDatabaseRuntimeRevision } from "./slackBridgeDatabaseRuntimeAuthority";
 
 const SLACK_SIGNATURE_MAX_SKEW_SECONDS = 5 * 60;
 const EXTERNAL_EVENT_PAYLOAD_TTL_MS = 24 * 60 * 60_000;
@@ -480,6 +481,15 @@ async function revokeInstallForLifecycleEvent(input: {
         revokedAt: input.now,
         updatedAt: input.now,
       }).where(eq(externalAppCredentials.installId, install.id));
+      await tx.update(externalAppInstallServerGrants).set({
+        state: "revoked",
+        revokedAt: input.now,
+        revokeReason: input.reason,
+        updatedAt: input.now,
+      }).where(and(
+        eq(externalAppInstallServerGrants.installId, install.id),
+        eq(externalAppInstallServerGrants.state, "active"),
+      ));
       for (const binding of bindings) {
         await tx.update(externalChannelBindings).set({
           state: "revoked",
@@ -652,21 +662,23 @@ export async function verifyAndAdmitSlackIngress(input: {
     if (!providerConversationId) {
       throw new ExternalAppIngressError("Slack channel lifecycle event is invalid", "external_ingress_payload_invalid");
     }
-    const [install] = await getDb().select().from(externalAppInstalls).where(and(
+    const installs = await getDb().select().from(externalAppInstalls).where(and(
       eq(externalAppInstalls.registrationId, loaded.registration.id),
       eq(externalAppInstalls.providerAuthorityId, providerAuthorityId),
       eq(externalAppInstalls.state, "active"),
-    )).limit(1);
-    if (!install) {
+    )).limit(2);
+    if (installs.length !== 1) {
       throw new ExternalAppIngressError("Slack install authority is unavailable", "external_ingress_authority_unavailable");
     }
-    const [binding] = await getDb().select().from(externalChannelBindings).where(and(
+    const install = installs[0]!;
+    const bindings = await getDb().select().from(externalChannelBindings).where(and(
       eq(externalChannelBindings.installId, install.id),
       eq(externalChannelBindings.providerConversationId, providerConversationId),
-    )).limit(1);
-    if (!binding) {
+    )).limit(2);
+    if (bindings.length !== 1) {
       throw new ExternalAppIngressError("Slack binding authority is unavailable", "external_ingress_authority_unavailable");
     }
+    const binding = bindings[0]!;
     const expectsPrivateBinding = channelLifecycleType === "group_archive"
       || channelLifecycleType === "group_deleted";
     if ((binding.privacyClass === "private") !== expectsPrivateBinding) {
@@ -747,22 +759,24 @@ export async function verifyAndAdmitSlackIngress(input: {
         authority: null,
       };
     }
-    const [install] = await getDb().select().from(externalAppInstalls).where(and(
+    const installs = await getDb().select().from(externalAppInstalls).where(and(
       eq(externalAppInstalls.registrationId, loaded.registration.id),
       eq(externalAppInstalls.providerAuthorityId, providerAuthorityId),
       eq(externalAppInstalls.state, "active"),
-    )).limit(1);
-    if (!install?.botUserId) {
+    )).limit(2);
+    if (installs.length !== 1 || !installs[0]!.botUserId) {
       throw new ExternalAppIngressError("Slack install authority is unavailable", "external_ingress_authority_unavailable");
     }
-    const [binding] = await getDb().select().from(externalChannelBindings).where(and(
+    const install = installs[0]!;
+    const bindings = await getDb().select().from(externalChannelBindings).where(and(
       eq(externalChannelBindings.installId, install.id),
       eq(externalChannelBindings.providerConversationId, providerConversationId),
       eq(externalChannelBindings.state, "active"),
-    )).limit(1);
-    if (!binding) {
+    )).limit(2);
+    if (bindings.length !== 1) {
       throw new ExternalAppIngressError("Slack binding authority is unavailable", "external_ingress_authority_unavailable");
     }
+    const binding = bindings[0]!;
     const authorityDecision = await resolveExternalBindingAuthority({
       serverId: binding.serverId,
       bindingId: binding.id,
@@ -1067,22 +1081,24 @@ export async function verifyAndAdmitSlackIngress(input: {
     throw new ExternalAppIngressError("Slack runtime authority is unavailable", "external_ingress_authority_unavailable");
   }
 
-  const [install] = await getDb().select().from(externalAppInstalls).where(and(
+  const installs = await getDb().select().from(externalAppInstalls).where(and(
     eq(externalAppInstalls.registrationId, loaded.registration.id),
     eq(externalAppInstalls.providerAuthorityId, providerAuthorityId),
     eq(externalAppInstalls.state, "active"),
-  )).limit(1);
-  if (!install) {
+  )).limit(2);
+  if (installs.length !== 1) {
     throw new ExternalAppIngressError("Slack install authority is unavailable", "external_ingress_authority_unavailable");
   }
-  const [binding] = await getDb().select().from(externalChannelBindings).where(and(
+  const install = installs[0]!;
+  const bindings = await getDb().select().from(externalChannelBindings).where(and(
     eq(externalChannelBindings.installId, install.id),
     eq(externalChannelBindings.providerConversationId, providerConversationId),
     eq(externalChannelBindings.state, "active"),
-  )).limit(1);
-  if (!binding) {
+  )).limit(2);
+  if (bindings.length !== 1) {
     throw new ExternalAppIngressError("Slack binding authority is unavailable", "external_ingress_authority_unavailable");
   }
+  const binding = bindings[0]!;
   const authorityDecision = await resolveExternalBindingAuthority({
     serverId: binding.serverId,
     bindingId: binding.id,

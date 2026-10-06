@@ -1,18 +1,18 @@
-import { isProcessAlive, readPidfileAt } from "./internal/process-primitives.js";
+import { isProcessAlive, readPidfileAt } from "./internal/process-primitives";
 import {
   serverConnectedMarkerPath,
   serverRunnerPidReadFallback,
   serverRunnerVersionPath,
-} from "./paths.js";
-import { listManagedServerIds } from "./serverState.js";
+} from "./paths";
+import { listManagedServerIds } from "./serverState";
 import {
   readProcessVersionEvidence,
   type ProcessVersionEvidence,
-} from "./versionEvidence.js";
+} from "./versionEvidence";
 import {
   readResidentConnectedMarker,
   type ResidentConnectionEvidence,
-} from "./residentConnectionMarker.js";
+} from "./residentConnectionMarker";
 
 /** Raw process evidence for one managed runner. No health label is derived here. */
 export interface RunnerMachineFacts {

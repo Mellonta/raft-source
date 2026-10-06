@@ -1,14 +1,17 @@
+import { Badge, Card, ContextMenuPopup, SidebarItem, SidebarItemCount, SidebarItemMetaIcon, SidebarRoot, toast, DirectMessageIcon } from "raft-ui";
+import Tooltip from "../ui/Tooltip";
 import { createContext, useState, useEffect, useCallback, useContext, useLayoutEffect, useRef, useMemo, useSyncExternalStore, memo } from "react";
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useIntl } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
-import { Archive, Plus, Trash2, ChevronRight, ChevronDown, ChevronLeft, User, MessageSquare, MessageSquareCheck, MessageSquareDot, Monitor, Bot, X, Pencil, Bookmark, FileText, BookOpenText, Network, Search, Pin, PinOff, Square, RotateCcw, Play, Bell, BellOff, AtSign, Building2, Activity, ArrowUpDown, Languages, GitBranch, Type, CreditCard, Shield, Link2, BadgeInfo, Blocks, Check, FlaskConical, KeyRound, FolderInput, FolderPlus } from "lucide-react";
+import { Archive, ArrowRightLeft, Plus, Trash2, ChevronRight, ChevronDown, ChevronLeft, User, MessageSquare, MessageSquareCheck, MessageSquareDot, Monitor, Bot, X, Pencil, Bookmark, FileText, BookOpenText, Network, Search, Pin, PinOff, Square, RotateCcw, Play, Bell, BellOff, AtSign, Building2, Activity, ArrowUpDown, Languages, GitBranch, Type, CreditCard, Shield, Link2, BadgeInfo, Blocks, Check, FlaskConical, KeyRound, FolderInput, FolderPlus } from "lucide-react";
 import {
   DndContext,
   DragOverlay,
   KeyboardSensor,
+  MeasuringStrategy,
   PointerSensor,
   TouchSensor,
   closestCenter,
@@ -27,14 +30,15 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { Transform } from "@dnd-kit/utilities";
-import { toast } from "raft-ui";
 import api from "../../api/client";
 import { useChannelStore } from "../../store/channelStore";
 import type { Channel } from "../../store/channelStore";
+import { useAppearanceStore } from "../../store/appearanceStore";
 import { canToggleActivityMute, matchesActivityMuteState, normalizeActivityMuteState } from "../../store/channelDomain";
 import { selectAgentDisplayState, useAgentStore } from "../../store/agentStore";
 import type { Agent } from "../../store/agentStore";
 import { useMachineStore } from "../../store/machineStore";
+import { orderSidebarMachineIds } from "./sidebarMachineOrder";
 import { useShallow } from "zustand/react/shallow";
 import { useAuthStore } from "../../store/authStore";
 import { useServerStore } from "../../store/serverStore";
@@ -48,6 +52,7 @@ import { useSavedStore } from "../../store/savedStore";
 import { useProfileStore } from "../../store/profileStore";
 import { useAppNavigate } from "../../hooks/useAppNavigate";
 import { SidebarConversationFinder } from "./SidebarConversationFinder";
+import { serverRouteAgentId } from "../../utils/browserDocumentTitle";
 import { useRailMode } from "../../hooks/useSidebarTab";
 import AttentionDot from "../ui/AttentionDot";
 import ContextMenuDivider from "../ui/ContextMenuDivider";
@@ -64,6 +69,7 @@ import ChannelPinMenuItem from "../channel/ChannelPinMenuItem";
 import { ChannelKindIcon } from "../channel/channelKindIcon";
 import InviteHumanDialog from "../member/InviteHumanDialog";
 import CreateAgentDialog from "../agent/CreateAgentDialog";
+import { trackAgentCreateOpened } from "../../analytics/journey";
 import ResetAgentDialog from "../agent/ResetAgentDialog";
 import ConfirmDialog from "../ConfirmDialog";
 import AvatarSlot from "../ui/AvatarSlot";
@@ -76,6 +82,7 @@ import { sortSidebarChannels, sortSidebarDms, sortSidebarPinnedItems, sidebarDmL
 import type { SidebarSortMode } from "./sidebarSort";
 import {
   filterSidebarChannelsByMembership,
+  isSidebarJointChannel,
   readSidebarJoinedChannelsOnly,
   shouldShowSidebarChannelEmptyState,
   writeSidebarJoinedChannelsOnly,
@@ -86,25 +93,32 @@ import {
   getComputerRowDotStatus,
   getComputerRowDotTitleDescriptor,
   getComputerRowDotTone,
-  shouldShowComputerUpgradeIndicator,
 } from "../../utils/computerUpgradeIndicator";
+import { machineDiskLowPresentation } from "../../utils/machineDiskPresentation";
+import { getComputerAvailableVersion } from "../../utils/computerVersionFact";
 import { isElectronDesktopShell } from "../../utils/desktopShell";
+import HandoffDialog from "../handoff/HandoffDialog";
+import { isHandoffAvailable } from "../handoff/handoffSessions";
 import { getMachineRunLabelDescriptor } from "../../utils/machineRunLabel";
 import { MachineRunLabel } from "../machine/MachineRunLabel";
-import { hasOtherServerActivityUnread, parseServerUnreadSummaryRows, retainServerUnreadSummary } from "../../utils/serverUnreadSummary";
-import type { ServerUnreadSummary } from "../../utils/serverUnreadSummary";
+import { hasOtherServerActivityUnread } from "../../utils/serverUnreadSummary";
 import { mobileServerSelectorPolygon } from "./mobileServerSelectorGeometry";
 import {
   centeredSidebarScrollTop,
+  conversationFromPathname,
+  implicitSidebarFocusRequest,
   isSidebarDisclosureRestoreState,
+  nearestSidebarScrollTop,
   readSidebarChannelFocusRequest,
 } from "./sidebarChannelFocus";
+import type { SidebarChannelFocusRequest } from "./sidebarChannelFocus";
 import { emitWorkspaceGridDragPanel, emitWorkspaceGridOpenChannel, emitWorkspaceGridOpenDm, emitWorkspaceGridOpenPanel } from "../workspace/workspaceGridOpenEvents";
 import { useWorkspaceGridNavigationStore } from "../workspace/workspaceGridNavigationStore";
 import type { WorkspaceGridRailMode } from "../workspace/workspaceGridNavigationStore";
 import type { WorkspacePanelRef } from "../workspace/workspaceGridDemoConfig";
 import { canOpenSettingsTab, settingsTabIdForRouteSlug } from "../settings/settingsNavigation";
 import SidebarSectionDialog from "./SidebarSectionDialog";
+import SettingsSidebarList from "../settings/SettingsSidebarList";
 import {
   moveSidebarItemToCustomSection,
   moveSidebarItemToCustomSectionAtPosition,
@@ -141,17 +155,20 @@ import type {
   SidebarCollapsedSections,
 } from "./sidebarCollapsedSections";
 import {
+  isExternalAgentRuntime,
   PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY,
   SERVER_LABS_UI_FEATURE_FLAG_KEY,
   SLACK_BRIDGE_FEATURE_FLAG_KEYS,
-  WIKI_FEATURE_FLAG_KEY,
 } from "@botiverse/raft-shared";
 import { isSlackBridgeSurfaceEnabled } from "../settings/slackBridgeVisibility";
 import { useServerFeatureFlag } from "../../store/serverFeatureFlags";
 import {
   findSidebarDndContainer,
+  isPointerWithinSidebarDndBounds,
   isSidebarDndData,
   moveSidebarDndItem,
+  nextSidebarDndReservedHeight,
+  resolveSidebarDndRetainedContainer,
   replaceSidebarSubsetOrder,
   sidebarCustomContainerId,
   sidebarCustomSectionId,
@@ -160,7 +177,9 @@ import {
   SIDEBAR_JOINT_CHANNELS_CONTAINER_ID,
   SIDEBAR_PINNED_CONTAINER_ID,
 } from "./sidebarDnd";
+import { shouldHideEmptySidebarSection } from "./sidebarEmptySectionVisibility";
 import type { SidebarDndContainerData, SidebarDndData, SidebarDndItemData, SidebarDndProjection } from "./sidebarDnd";
+import { dismissLayerProps } from "../ui/dismissLayer";
 
 interface CtxMenu {
   x: number;
@@ -321,7 +340,7 @@ const SIDEBAR_SECTION_ROW_CLASS = "mb-1 mt-3 flex h-6 items-center justify-betwe
 // without removing the test pin.
 const SIDEBAR_SECTION_ROW_FIRST_CLASS = "mb-1 flex h-6 items-center justify-between px-2";
 void SIDEBAR_SECTION_ROW_FIRST_CLASS;
-const SIDEBAR_SECTION_TOGGLE_CLASS = "flex h-6 min-w-0 flex-1 items-center gap-1 text-xs font-bold uppercase text-black tracking-widest hover:text-black/70 transition-colors";
+const SIDEBAR_SECTION_TOGGLE_CLASS = "flex h-6 min-w-0 flex-1 items-center gap-1 text-xs font-bold uppercase text-foreground-strong tracking-widest transition-colors hover:text-foreground-muted theme-brutal:text-black theme-brutal:hover:text-black/70";
 const SIDEBAR_SECTION_ICON_BUTTON_CLASS = "btn-flat-sm flex size-6 items-center justify-center p-0";
 type SidebarSectionDescriptionProps = HTMLAttributes<HTMLDivElement> & {
   tone?: "muted" | "subtle" | "strong";
@@ -344,7 +363,7 @@ function SidebarSectionDescription({
     <div
       {...props}
       data-sidebar-section-description=""
-      className={`px-2 text-xs font-mono leading-snug ${tone === "strong" ? "text-black" : tone === "subtle" ? "text-black/45" : "text-black/50"} ${className}`}
+      className={`px-2 text-xs font-mono leading-snug ${tone === "strong" ? "text-foreground-strong theme-brutal:text-black" : tone === "subtle" ? "text-foreground-placeholder theme-brutal:text-black/45" : "text-foreground-muted theme-brutal:text-black/50"} ${className}`}
     >
       {children}
     </div>
@@ -457,13 +476,38 @@ function SidebarDndContainer({
     () => ({ type: "container", containerId: id, kind, manual }),
     [id, kind, manual],
   );
-  const { setNodeRef, isOver } = useDroppable({ id, data });
+  const { setNodeRef, isOver, active } = useDroppable({ id, data });
+  const activeData = active?.data.current;
+  const itemDragActive = isSidebarDndData(activeData) && activeData.type === "item";
+  const nodeRef = useRef<HTMLDivElement | null>(null);
+  const reservedHeightRef = useRef<number | null>(null);
+  const setContainerRef = useCallback((node: HTMLDivElement | null) => {
+    nodeRef.current = node;
+    setNodeRef(node);
+  }, [setNodeRef]);
+  // Never let a drop zone shrink while an item drag is in flight (see
+  // nextSidebarDndReservedHeight): projecting the row into/out of this
+  // container must not move the pointer onto a different container. Runs after
+  // every render, before dnd-kit's (parent) measuring effects read the rect.
+  // Written straight to the node so reserving height never re-renders.
+  useLayoutEffect(() => {
+    const node = nodeRef.current;
+    if (!node) return;
+    const next = nextSidebarDndReservedHeight(
+      itemDragActive,
+      reservedHeightRef.current,
+      node.getBoundingClientRect().height,
+    );
+    if (next === reservedHeightRef.current) return;
+    reservedHeightRef.current = next;
+    node.style.minHeight = next === null ? "" : `${next}px`;
+  });
   return (
     <SortableContext items={itemIds} strategy={verticalListSortingStrategy}>
       <div
-        ref={setNodeRef}
+        ref={setContainerRef}
         data-sidebar-dnd-container={id}
-        className={`relative ${empty ? "min-h-7" : ""} ${isOver ? "bg-white/60" : ""}`}
+        className={`relative ${empty ? "min-h-7" : ""} ${isOver ? "bg-fill-muted theme-brutal:bg-white/60" : ""}`}
       >
         {children}
       </div>
@@ -609,7 +653,7 @@ export function SavedNavCount({ total }: { total: number }) {
   const { formatMessage } = useIntl();
   if (total <= 0) return null;
   return (
-    <span className="ml-auto text-[10px] text-black/40 font-mono">
+    <span className="ml-auto text-[10px] font-mono text-foreground-placeholder theme-brutal:text-black/40">
       {formatMessage({ id: "layout.sidebar.savedCount" }, { count: total })}
     </span>
   );
@@ -628,63 +672,87 @@ export function ComputerRow({
 }) {
   const { formatMessage } = useIntl();
   const machine = useMachineStore((s) => s.machines.find((m) => m.id === machineId));
+  const latestComputerVersion = useMachineStore((s) => s.latestComputerVersion);
   if (!machine) return null;
-  const upgradeAvailable = shouldShowComputerUpgradeIndicator(machine);
-  const rowDotStatus = getComputerRowDotStatus(machine);
+  // "A newer version exists" is the web's own comparison, so the arrow also
+  // shows when web upgrade is off or this version is too old for the web; the
+  // detail page then gives the commands.
+  const availableVersion = getComputerAvailableVersion(machine, latestComputerVersion);
+  const diskLow = machineDiskLowPresentation(machine, formatMessage);
+  const rowDotStatus = getComputerRowDotStatus(machine, availableVersion);
   const rowDotTitle = getComputerRowDotTitleDescriptor(
     rowDotStatus,
     machine.status,
-    machine.computerBroadcastPolicy?.targetVersion,
+    availableVersion,
   );
   return (
-    <button
+    <SidebarItem variant="accent"
       onClick={(event) => onSelect(machine.id, event.detail)}
+      data-slot="sidebar-item"
+      active={selected}
       // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
       draggable={!!onDragStart}
       // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
       onDragStart={(event) => onDragStart?.(event, machine.id)}
       data-testid={`computer-list-item-${machine.id}`}
-      className={`mb-1.5 flex w-full items-center gap-2.5 px-2.5 py-2 [@media(max-height:600px)]:py-1 text-left border-2 transition-colors ${
-        selected
-          ? "border-black bg-brutal-pink shadow-brutal-sm"
-          : "border-transparent hover:border-black hover:bg-white hover:shadow-brutal-sm"
-      }`}
+      className={`mb-1.5 flex w-full items-center gap-2.5 px-2.5 py-2 [@media(max-height:600px)]:py-1 text-left border transition-colors theme-brutal:border-2 ${
+ selected
+ ? "border-line-strong bg-fill-muted shadow-raft-sm theme-brutal:border-black theme-brutal:bg-brutal-pink theme-brutal:shadow-brutal-sm"
+ : "border-transparent hover:border-line-strong hover:bg-fill-muted hover:shadow-raft-sm theme-brutal:hover:border-black theme-brutal:hover:bg-white theme-brutal:hover:shadow-brutal-sm"
+ }`}
     >
-      <div className="relative flex size-9 shrink-0 items-center justify-center border-2 border-black bg-soft-signal">
-        <Monitor size={18} />
+      <Card className="relative flex size-9 shrink-0 items-center justify-center overflow-visible p-0"><Monitor size={18} />
         <StatusDot
           className="absolute -right-1 -top-1"
           title={formatMessage({ id: rowDotTitle.id }, rowDotTitle.values)}
           tone={getComputerRowDotTone(rowDotStatus)}
           data-testid={`computer-status-dot-${machine.id}`}
         />
-      </div>
+      </Card>
       <div className="min-w-0 flex-1">
         <div className="flex items-center">
-          <span className="min-w-0 truncate text-sm font-bold text-black">{machine.name}</span>
+          <span className="min-w-0 truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{machine.name}</span>
         </div>
         {machine.description && (
-          <div className="mt-0.5 truncate text-[11px] leading-tight text-black/60">
+          <div className="mt-0.5 truncate text-[11px] leading-tight text-foreground-muted theme-brutal:text-black/60">
             {machine.description}
           </div>
         )}
-        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-black/50 font-mono">
+        <div className="mt-0.5 flex items-center gap-1.5 text-[11px] font-mono text-foreground-muted theme-brutal:text-black/50">
           {(() => {
             const label = getMachineRunLabelDescriptor(machine);
             return (
-              <span className={`truncate${label.isOffline ? " text-black/30 italic" : ""}`}>
+              <span className={`truncate${label.isOffline ? " text-foreground-placeholder italic theme-brutal:text-black/30" : ""}`}>
                 <MachineRunLabel machine={machine} />
               </span>
             );
           })()}
-          {upgradeAvailable && machine.computerBroadcastPolicy?.targetVersion && (
+          {availableVersion && (
             <span className="shrink-0 text-brutal-orange font-bold">
-              → v{machine.computerBroadcastPolicy.targetVersion}
+              → v{availableVersion}
             </span>
           )}
+          {diskLow && (
+            <span
+              className="shrink-0 text-brutal-orange font-bold"
+              data-testid={`computer-disk-low-${machine.id}`}
+              title={formatMessage({ id: "machine.diskLow.chipTitle" }, { free: diskLow.free, percent: diskLow.freePercent })}
+            >
+              {formatMessage({ id: "machine.diskLow.chip" })}
+            </span>
+          )}
+          {/* Host slot (desktop task #124): the Electron shell marks the row of
+              the machine it is running on ("This device") by portaling a small
+              badge in here, so the self machine keeps EXACTLY this row anatomy
+              instead of a substitute card. Empty (zero-width) on the web. */}
+          <span
+            data-testid={`computer-list-item-${machine.id}-meta-slot`}
+            data-machine-id={machine.id}
+            className="flex shrink-0 items-center empty:hidden"
+          />
         </div>
       </div>
-    </button>
+    </SidebarItem>
   );
 }
 
@@ -703,26 +771,16 @@ type SidebarLongPress = {
 // would change identity every parent render and defeat memoization).
 // Stryker disable all: row class-token variants are visual-equivalent under the DOM oracle; wrap/unread behavior is pinned by focused Sidebar DOM tests.
 function sidebarItemClass(selected: boolean, menuOpen = false, allowWrap = false) {
-  return `mb-1  flex w-full ${allowWrap ? "items-start" : "items-center"} gap-1.5 px-2 py-2 [@media(max-height:600px)]:py-1 md:py-1 text-sm font-medium border-2 ${
+  return `mx-0 w-full ${allowWrap ? "items-start whitespace-normal" : "items-center"} ${
     selected
-      ? "border-black bg-brutal-pink text-black shadow-brutal-sm font-bold"
-      : menuOpen
-      ? "border-black bg-white shadow-brutal-sm"
-      : "border-transparent hover:border-black hover:bg-white hover:shadow-brutal-sm active:border-black active:bg-white active:shadow-brutal-sm transition-colors"
+      ? "data-active:bg-fill-muted dark:data-active:bg-fill-muted data-active:shadow-none data-active:ring-0 theme-brutal:data-active:bg-brutal-pink theme-brutal:data-active:shadow-brutal-sm"
+      : menuOpen ? "bg-fill-muted" : ""
   }`;
 }
 // Stryker restore all
 
 function SidebarAgentActivityBadge({ agentId }: { agentId: string }) {
-  return (
-    <span data-sidebar-avatar-badge-shell="true" className="absolute bottom-0 right-0 block size-0">
-      <AgentActivityDot
-        agentId={agentId}
-        size="sm"
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
-      />
-    </span>
-  );
+  return <AgentActivityDot agentId={agentId} size="sm" data-sidebar-avatar-badge="true" />;
 }
 
 // Per-row leaf components. Two properties make them the fix for the
@@ -773,6 +831,7 @@ const ChannelRow = memo(function ChannelRow({
 }) {
   const unread = useMessageStore((s) => s.unreadCounts[channel.id] || 0);
   const mentionMarked = useMessageStore((s) => s.mentionFlags[channel.id] === true);
+  const hasNew = useMessageStore((s) => s.newFlags[channel.id] === true);
   const hasDraft = useMessageStore((s) => !!s.drafts[channel.id]);
   // Display-language (react-intl) — the row owns its own marker copy so the
   // memoized leaf does not need a new prop from the parent.
@@ -780,15 +839,18 @@ const ChannelRow = memo(function ChannelRow({
   const dimmed = !selected && !channel.joined;
   const activityMuted = channel.activityMuted === true;
   const showMutedIcon = shouldShowActivityMutedIcon({ activityMuted, joined: channel.joined });
-  const { showLoudUnreadBadge, showQuietUnreadCount } = getChannelUnreadIndicatorState({
+  const { showLoudUnreadBadge, showQuietUnreadCount, showQuietNewDot } = getChannelUnreadIndicatorState({
     unread,
     joined: channel.joined === true,
     showMutedIcon,
+    hasNew,
   });
   const showMentionMarker = mentionMarked && channel.joined;
   return (
-    <button
+    <SidebarItem variant="accent"
       data-sidebar-channel-id={channel.id}
+      data-slot="sidebar-item"
+      active={selected}
       // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
       draggable={!!onDragStart}
       // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
@@ -802,51 +864,57 @@ const ChannelRow = memo(function ChannelRow({
       className={sidebarItemClass(selected, menuOpen, allowWrap)}
     >
       <div className="flex size-[18px] shrink-0 items-center justify-center">
-        <ChannelKindIcon type={channel.type} className={dimmed ? "text-black/40" : ""} />
+        <ChannelKindIcon type={channel.type} className={dimmed ? "text-foreground-placeholder theme-brutal:text-black/40" : ""} />
       </div>
       <span className={`min-w-0 flex flex-1 ${allowWrap ? "items-start" : "items-center"} text-left`}>
-        <span className={`min-w-0 ${allowWrap ? "whitespace-normal break-words leading-tight" : "truncate"} ${dimmed ? "text-black/40" : activityMuted ? "text-black/70" : ""} ${showLoudUnreadBadge ? "font-bold" : ""}`}>{channel.name}</span>
+        <span className={`min-w-0 text-sm ${allowWrap ? "whitespace-normal break-words leading-tight" : "truncate"} ${dimmed ? "text-foreground-placeholder theme-brutal:text-black/40" : activityMuted ? "text-foreground-muted theme-brutal:text-black/70" : ""} ${showLoudUnreadBadge ? "font-bold" : ""}`}>{channel.name}</span>
         {channel.bridge?.provider === "slack" && (
-          <span
-            className="ml-1 shrink-0 border border-black bg-brutal-lavender px-1 font-mono text-[9px] font-bold uppercase leading-4 text-black"
-            title={formatMessage({ id: "settings.slackBridge.providerBadge" })}
-          >
+          <Badge appearance="soft" variant="accent" uppercase className="ml-1">
             {formatMessage({ id: "settings.slackBridge.providerBadge" })}
-          </span>
+          </Badge>
         )}
         {showMutedIcon && (
-          <span
-            className="ml-1 inline-flex size-4 shrink-0 items-center justify-center text-black/40"
-            title={formatMessage({ id: "layout.sidebar.activityMutedTitle" })}
+          <Tooltip content={formatMessage({ id: "layout.sidebar.activityMutedTitle" })}>
+          <SidebarItemMetaIcon
+            className="shrink-0"
+            data-slot="sidebar-item-meta-icon"
             data-testid="sidebar-activity-muted"
             aria-label={formatMessage({ id: "layout.sidebar.activityMutedAria" })}
           >
             <BellOff size={12} />
-          </span>
+          </SidebarItemMetaIcon>
+          </Tooltip>
         )}
       </span>
       {showMentionMarker && (
+        <Tooltip content={formatMessage({ id: "layout.sidebar.mentionedYouTitle" })}>
         <span
-          className="ml-1 inline-flex size-4 shrink-0 items-center justify-center rounded border border-black bg-soft-signal text-black"
-          title={formatMessage({ id: "layout.sidebar.mentionedYouTitle" })}
+          className="ml-1 inline-flex size-4 shrink-0 items-center justify-center rounded border border-line-strong bg-primary-soft text-primary-strong theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black"
           data-testid="sidebar-mention-marker"
           aria-label={formatMessage({ id: "layout.sidebar.mentionedYouAria" })}
         >
           <AtSign size={10} />
         </span>
+        </Tooltip>
       )}
       {showLoudUnreadBadge ? (
-        <span className="ml-auto shrink-0 rounded bg-brutal-pink px-1.5 py-0.5 text-[10px] font-bold leading-none text-white border border-black">
+        <SidebarItemCount variant="accent" className="ml-auto">
           {unread > 99 ? "99+" : unread}
-        </span>
+        </SidebarItemCount>
       ) : showQuietUnreadCount ? (
-        <span className={`${showMutedIcon || showMentionMarker ? "ml-1" : "ml-auto"} shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium leading-none text-black/50 font-mono`}>
+        <span className={`${showMutedIcon || showMentionMarker ? "ml-1" : "ml-auto"} shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium leading-none text-foreground-muted font-mono theme-brutal:text-black/50`}>
           {unread > 99 ? "99+" : unread}
         </span>
+      ) : showQuietNewDot ? (
+        <span
+          className="ml-auto size-1.5 shrink-0 rounded-full bg-foreground-muted theme-brutal:bg-black/50"
+          data-testid="sidebar-quiet-new-dot"
+          aria-label={formatMessage({ id: "layout.sidebar.newMessagesAria" })}
+        />
       ) : hasDraft && (
-        <Pencil size={12} className={`${showMutedIcon ? "ml-1" : "ml-auto"} shrink-0 text-black/40`} />
+        <Pencil size={12} className={`${showMutedIcon ? "ml-1" : "ml-auto"} shrink-0 text-foreground-placeholder theme-brutal:text-black/40`} />
       )}
-    </button>
+    </SidebarItem>
   );
 });
 // Stryker restore all
@@ -899,8 +967,10 @@ const DmRow = memo(function DmRow({
   // Stryker disable next-line all: pre-existing draft badge logic is outside the workspace mutation corpus.
   const hasDraft = useMessageStore((s) => !!s.drafts[dm.id]);
   return (
-    <button
+    <SidebarItem variant="accent"
       data-sidebar-channel-id={dm.id}
+      data-slot="sidebar-item"
+      active={selected}
       // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
       draggable={!!onDragStart}
       // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
@@ -934,19 +1004,19 @@ const DmRow = memo(function DmRow({
           {displayName}
         </span>
         {description && (
-          <span className={`min-w-0 ${allowWrap ? "max-w-full whitespace-normal break-words leading-tight" : "flex-1 truncate"} text-xs text-black/40`}>{description}</span>
+          <span className={`min-w-0 ${allowWrap ? "max-w-full whitespace-normal break-words leading-tight" : "flex-1 truncate"} text-xs text-foreground-muted theme-brutal:text-black/40`}>{description}</span>
         )}
       </div>
       <span className="flex shrink-0 self-center items-center gap-1.5">
         {unread > 0 ? (
-          <span className="rounded bg-brutal-pink px-1.5 py-0.5 text-[10px] font-bold leading-none text-white border border-black">
+          <SidebarItemCount variant="accent" className="">
             {unread > 99 ? "99+" : unread}
-          </span>
+          </SidebarItemCount>
         ) : hasDraft && (
-          <Pencil size={12} className="text-black/40" />
+          <Pencil size={12} className="text-foreground-placeholder theme-brutal:text-black/40" />
         )}
       </span>
-    </button>
+    </SidebarItem>
   );
   // Stryker restore all
 });
@@ -989,13 +1059,15 @@ export const AgentDmRow = memo(function AgentDmRow({
   const hasDraft = useMessageStore((s) => (dmId ? !!s.drafts[dmId] : false));
   const { displayName, description, avatarUrl } = resolveAgentDmProfileSource(agent, dm);
   return (
-    <button
+    <SidebarItem variant="accent"
       // The ordinary DM row publishes this too. Without it, the same pinned
       // conversation would gain or lose its channel identity purely from whether
       // the agent is still in the client's agent list — `pinnedItems` picks this
       // renderer on a cache hit and the DM renderer on a miss. Omitted when the
       // agent has no DM channel yet, since there is no channel to name.
       data-sidebar-channel-id={dmId}
+      data-slot="sidebar-item"
+      active={selected}
       // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
       draggable={!!onDragStart}
       // Stryker disable next-line all: optional workspace drag glue is browser-smoke verified.
@@ -1017,21 +1089,21 @@ export const AgentDmRow = memo(function AgentDmRow({
       <div className={`flex min-w-0 flex-1 ${allowWrap ? "flex-col items-start gap-0.5" : "items-baseline gap-1"} text-left`}>
         <span className={`${allowWrap ? "min-w-0 max-w-full whitespace-normal break-words leading-tight" : "shrink-0 max-w-[70%] truncate"} text-sm ${unread > 0 ? "font-bold" : ""}`}>{displayName}</span>
         {!hideDescription && description && (
-          <span className={`min-w-0 ${allowWrap ? "max-w-full whitespace-normal break-words leading-tight" : "flex-1 truncate"} text-xs text-black/40`}>{description}</span>
+          <span className={`min-w-0 ${allowWrap ? "max-w-full whitespace-normal break-words leading-tight" : "flex-1 truncate"} text-xs text-foreground-muted theme-brutal:text-black/40`}>{description}</span>
         )}
       </div>
       <span className="flex shrink-0 self-center items-center gap-1.5">
         {unread > 0 ? (
-          <span className="rounded bg-brutal-pink px-1.5 py-0.5 text-[10px] font-bold leading-none text-white border border-black">
+          <SidebarItemCount variant="accent" className="">
             {/* Stryker disable all: pre-existing unread cap is outside the workspace mutation corpus. */}
             {unread > 99 ? "99+" : unread}
             {/* Stryker restore all */}
-          </span>
+          </SidebarItemCount>
         ) : hasDraft && (
-          <Pencil size={12} className="text-black/40" />
+          <Pencil size={12} className="text-foreground-placeholder theme-brutal:text-black/40" />
         )}
       </span>
-    </button>
+    </SidebarItem>
   );
   // Stryker restore all
 });
@@ -1127,6 +1199,12 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   const machineNames = useMachineStore(
     useShallow((s) => Object.fromEntries(s.machines.map((m) => [m.id, m.name] as const))),
   );
+  // Display order of the Computers rows: host-pinned → attached by me → rest
+  // (sidebarMachineOrder.ts). Same subscription discipline: `useShallow` on the
+  // id array, so only an id, its group or the pin changing re-renders.
+  const sidebarMachineIds = useMachineStore(
+    useShallow((s) => orderSidebarMachineIds(s.machines, s.pinnedMachineId)),
+  );
   const setShowAddMachine = useMachineStore((s) => s.setShowAddMachine);
   const user = useAuthStore((s) => s.user);
   const server = useServerStore((s) => s.current);
@@ -1167,23 +1245,11 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   const navigate = useNavigate();
   const nav = useAppNavigate();
   const location = useLocation();
-  // React Router returns a new `navigate` function when location changes. Keep
-  // both route values behind refs so the memoized sidebar-row handlers do not
-  // change identity after a click and force every sibling row to reconcile.
-  const navigateRef = useRef(navigate);
-  navigateRef.current = navigate;
-  const pathnameRef = useRef(location.pathname);
-  pathnameRef.current = location.pathname;
-  const serverSlugRef = useRef(server?.slug);
-  serverSlugRef.current = server?.slug;
   const sidebarScrollRef = useRef<HTMLDivElement | null>(null);
   const handledSidebarFocusLocationKeyRef = useRef<string | null>(null);
   const workspaceEnabled = useWorkspaceGridNavigationStore(selectWorkspaceGridActive);
   const workspaceActiveRefKey = useWorkspaceGridNavigationStore(selectWorkspaceGridActiveRefKey);
   const workspaceActiveAncestorRefKey = useWorkspaceGridNavigationStore(selectWorkspaceGridActiveAncestorRefKey);
-  // Mobile-only Wiki entry: desktop reaches Wiki through the LeftRail, which
-  // is hidden on mobile, so the sidebar Home group is Wiki's mobile entry.
-  const wikiEnabled = useServerFeatureFlag(WIKI_FEATURE_FLAG_KEY).enabled;
   const labsUiEnabled = useServerFeatureFlag(SERVER_LABS_UI_FEATURE_FLAG_KEY).enabled;
   const providerConnectionsEnabled = useServerFeatureFlag(PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY).enabled;
   const slackBridgeGate = useServerFeatureFlag(SLACK_BRIDGE_FEATURE_FLAG_KEYS.master);
@@ -1193,8 +1259,14 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   const [showCreateAgentMenu, setShowCreateAgentMenu] = useState(false);
   const createAgentMenuRef = useRef<HTMLDivElement | null>(null);
   const [showCreateExternalAgent, setShowCreateExternalAgent] = useState(false);
+  // Task #110: "Take over a local session" (desktop Handoff) has its own entry
+  // in the Agents "+" menu and its own dialog; desktop shell + scanning bridge only.
+  const [showHandoff, setShowHandoff] = useState(false);
   const [showInviteHuman, setShowInviteHuman] = useState(false);
-  const [serverUnreadCounts, setServerUnreadCounts] = useState<Record<string, ServerUnreadSummary>>({});
+  // Single source of truth: the store owns the cross-server unread summary and
+  // coalesces concurrent loads, so this component no longer fetches it itself.
+  const serverUnreadCounts = useServerStore((s) => s.serverUnreadCounts);
+  const loadServerUnreadSummary = useServerStore((s) => s.loadServerUnreadSummary);
   const currentServerActivityCount = server?.id
     ? serverUnreadCounts[server.id]?.activityUnreadCount
     : undefined;
@@ -1208,6 +1280,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   const [moveToSectionMenuPosition, setMoveToSectionMenuPosition] = useState<{ x: number; y: number } | null>(null);
   const [sidebarDndProjection, setSidebarDndProjection] = useState<SidebarDndProjection | null>(null);
   const [sidebarDndActiveId, setSidebarDndActiveId] = useState<string | null>(null);
+  const [sidebarDndSourceContainerId, setSidebarDndSourceContainerId] = useState<string | null>(null);
   const sidebarDndSnapshotRef = useRef<SidebarDndProjection | null>(null);
   const sidebarDndProjectionRef = useRef<SidebarDndProjection | null>(null);
   const workspaceSidebarNativeDragIdRef = useRef<string | null>(null);
@@ -1406,6 +1479,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   const [joinedChannelsOnly, setJoinedChannelsOnly] = useState(() =>
     readSidebarJoinedChannelsOnly(server?.id),
   );
+  // Global display preference (not per-server): drop sections that are currently
+  // empty. Lives in appearanceStore so the Settings → Appearance toggle and this
+  // section context menu stay in sync. Defaults ON in the desktop shell.
+  const hideEmptySections = useAppearanceStore((s) => s.hideEmptySidebarSections);
 
   const updatePinnedSortMode = useCallback((mode: SidebarSortMode) => {
     void updateSidebarOrder({ pinnedSortMode: mode });
@@ -1427,6 +1504,29 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     setJoinedChannelsOnly(joinedOnly);
     writeSidebarJoinedChannelsOnly(server?.id, joinedOnly);
   }, [server?.id]);
+
+  const updateHideEmptySections = useAppearanceStore((s) => s.setHideEmptySidebarSections);
+
+  // A section is dropped only once its contents have settled and it is genuinely
+  // empty. Guards, in order: never mid-load (so it can't flash in on first
+  // paint); never while this section is the source of an in-flight drag —
+  // `count` comes from the LIVE drag projection, so dragging the last item out
+  // would otherwise unmount the source mid-drag and strand the gesture. Other
+  // hidden empty sections stay hidden unless a section opts into being a drag
+  // target. The main Channels section is intentionally exempt — its empty state
+  // carries the channel-discovery / onboarding hint.
+  const isEmptySectionHidden = useCallback(
+    (count: number, containerId?: string, revealWhileDragging?: boolean) =>
+      shouldHideEmptySidebarSection({
+        hideEmptySections,
+        loading: channelsLoading,
+        itemCount: count,
+        dragActive: Boolean(sidebarDndActiveId),
+        dragStartedInSection: containerId != null && containerId === sidebarDndSourceContainerId,
+        revealWhileDragging,
+      }),
+    [hideEmptySections, channelsLoading, sidebarDndActiveId, sidebarDndSourceContainerId],
+  );
 
   useEffect(() => {
     if (!openSortMenu) return;
@@ -1475,7 +1575,16 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     };
   }, [showCreateAgentMenu]);
 
+  // Server-switch inbox reset. The first eligible run is skipped: boot is
+  // covered by the rooms:joined authority load (or the offline fallback
+  // armed in the realtime bootstrap); only actual server switches after that
+  // must reset the inbox for the new server.
+  const bootInboxArmedRef = useRef(false);
   useEffect(() => {
+    if (!bootInboxArmedRef.current) {
+      bootInboxArmedRef.current = true;
+      return;
+    }
     void loadInbox({ reset: true });
   }, [loadInbox, server?.id]);
 
@@ -1538,27 +1647,16 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     });
   };
 
-  const loadServerUnreadSummary = useCallback(async () => {
-    try {
-      const { data } = await api.get("/servers/unread-summary");
-      const next = parseServerUnreadSummaryRows(data);
-      setServerUnreadCounts((previous) => retainServerUnreadSummary(previous, next));
-    } catch {
-      // Ignore fetch failures to avoid sidebar noise.
-    }
-  }, []);
-
   useEffect(() => {
-    if (!user || servers.length === 0) {
-      setServerUnreadCounts({});
-      return;
-    }
+    if (!user?.id || servers.length === 0) return;
 
-    loadServerUnreadSummary();
-
+    // No mount fetch here: App owns the single boot entry for the summary;
+    // this effect keeps only the interval + focus/visibility/prefs triggers.
+    // The 2-minute catch-all sweep below bounds OTHER servers' badge staleness
+    // (socket cannot tell us those; #8359) — live edges eager-refresh (#8294).
     const intervalId = window.setInterval(() => {
       loadServerUnreadSummary();
-    }, 30_000);
+    }, 120_000);
     const handleFocus = () => {
       loadServerUnreadSummary();
     };
@@ -1582,17 +1680,20 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
       document.removeEventListener("visibilitychange", handleVisibility);
       window.removeEventListener(SERVER_NOTIFICATION_PREFS_UPDATED_EVENT, handleNotificationPrefsUpdated);
     };
-  }, [user, servers, loadServerUnreadSummary]);
+    // Depend on servers.length, not the servers array identity: a store update
+    // that merely re-hydrates the array used to tear this effect down and re-run
+    // it, re-triggering the summary fetch (the extra "wave" per refresh).
+  }, [user?.id, servers.length, loadServerUnreadSummary]);
 
   // Refresh server unread summary eagerly when unread counters change
   // (e.g. incoming message or mark-read), instead of waiting for polling.
   useEffect(() => {
-    if (!user || servers.length === 0) return;
+    if (!user?.id || servers.length === 0) return;
     const timeoutId = window.setTimeout(() => {
       loadServerUnreadSummary();
     }, 150);
     return () => window.clearTimeout(timeoutId);
-  }, [hasLocalUnread, user, servers.length, loadServerUnreadSummary]);
+  }, [hasLocalUnread, user?.id, servers.length, loadServerUnreadSummary]);
 
   const hasOtherServerUnread = hasOtherServerActivityUnread(servers, server, serverUnreadCounts);
 
@@ -1774,12 +1875,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     if (longPressSuppressRef.current) return;
     markUnreadSidebarItemRead(channel.id);
     if (workspaceEnabled) {
-      emitWorkspaceGridOpenChannel(channel.id, { toggle: true });
-    } else if (serverSlugRef.current && pathnameRef.current === `/s/${serverSlugRef.current}/channel/${channel.id}`) {
-      // Classic chat has no tab model to close. Return to the server root with
-      // an explicit empty-chat navigation state; DefaultRoute honors this
-      // state instead of redirecting straight back to the first channel.
-      navigateRef.current(`/s/${serverSlugRef.current}`, { state: { suppressDefaultRouteRedirect: true } });
+      emitWorkspaceGridOpenChannel(channel.id);
     } else {
       nav.toChannel(channel.id);
     }
@@ -1791,9 +1887,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     (dmChannelId: string) => {
       markUnreadSidebarItemRead(dmChannelId);
       if (workspaceEnabled) {
-        emitWorkspaceGridOpenDm(dmChannelId, { toggle: true });
-      } else if (serverSlugRef.current && pathnameRef.current === `/s/${serverSlugRef.current}/dm/${dmChannelId}`) {
-        navigateRef.current(`/s/${serverSlugRef.current}`, { state: { suppressDefaultRouteRedirect: true } });
+        emitWorkspaceGridOpenDm(dmChannelId);
       } else {
         nav.toDm(dmChannelId);
       }
@@ -1824,7 +1918,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
       const agent = allAgents.find((candidate) => candidate.id === agentId);
       emitWorkspaceGridOpenPanel(
         { kind: "agent", id: agentId },
-        { title: `@${agent?.displayName || agent?.name || agentId}`, subtitle: formatMessage({ id: "workspace.panel.agent" }), toggle: true },
+        { title: `@${agent?.displayName || agent?.name || agentId}`, subtitle: formatMessage({ id: "workspace.panel.agent" }) },
       );
     } else {
       nav.toAgent(agentId);
@@ -1849,7 +1943,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     if (workspaceEnabled) {
       emitWorkspaceGridOpenPanel(
         { kind: "machine", id: machineId },
-        { title: machineNames[machineId] || formatMessage({ id: "machine.detail.computer" }), subtitle: formatMessage({ id: "workspace.panel.computer" }), toggle: true },
+        { title: machineNames[machineId] || formatMessage({ id: "machine.detail.computer" }), subtitle: formatMessage({ id: "workspace.panel.computer" }) },
       );
     } else {
       nav.toComputer(machineId);
@@ -1866,7 +1960,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
       const human = members.find((candidate) => candidate.userId === userId);
       emitWorkspaceGridOpenPanel(
         { kind: "human", id: userId },
-        { title: `@${human?.displayName || human?.name || userId}`, subtitle: formatMessage({ id: "workspace.panel.human" }), toggle: true },
+        { title: `@${human?.displayName || human?.name || userId}`, subtitle: formatMessage({ id: "workspace.panel.human" }) },
       );
     } else {
       nav.toHuman(userId);
@@ -2050,6 +2144,37 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     ? workspaceActiveRefKey === `machine:${machineId}`
     : location.pathname === `${pathBase}/computer/${machineId}`
       || location.pathname === `${pathBase}/machine/${machineId}`;
+  // Task #702 (artin): opening an agent page (/s/<server>/agent/<id>) lands
+  // the rail on the People tab; the left list must locate the agent on open,
+  // so scroll its row into view as soon as the list has it. `nearest` is a
+  // no-op when the row is already visible.
+  // Task #702 (artin): opening an agent page (/s/<server>/agent/<id>) lands
+  // the rail on the People tab; the left list must locate the agent on open.
+  // Center the row (artin: "往 center 靠一靠") so the located agent reads in
+  // context instead of pinned to an edge. Located once per open — later list
+  // churn (an agent added or removed) must not yank a user-scrolled list back
+  // (Josh's review); the effect retries until the list has rendered the row.
+  // The id is URL-decoded, so it is escaped before it reaches the selector —
+  // a crafted link must never turn into a querySelector SyntaxError that
+  // takes the render tree down (Josh's review).
+  const routeAgentId = serverSlug ? serverRouteAgentId(location.pathname, serverSlug) : null;
+  const locatedAgentRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (activeTab !== "members" || !routeAgentId) {
+      locatedAgentRef.current = null;
+      return;
+    }
+    if (locatedAgentRef.current === routeAgentId) return;
+    // `globalThis.CSS`: this module imports dnd-kit's `CSS` transform helper,
+    // which shadows the DOM `CSS` object.
+    const row = sidebarScrollRef.current?.querySelector<HTMLElement>(
+      `[data-agent-id="${globalThis.CSS.escape(routeAgentId)}"]`,
+    );
+    if (!row) return;
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    locatedAgentRef.current = routeAgentId;
+  }, [activeTab, routeAgentId, agents.length, collapsed.agents]);
+
   const isHumanSelected = createWorkspaceGridSidebarSelection({
     kind: "human",
     workspaceActive: workspaceEnabled,
@@ -2115,9 +2240,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           label: formatMessage({ id: "layout.sidebar.settingsGroupServer" }),
           items: [
             { id: "server", label: formatMessage({ id: "settings.tabs.server" }), icon: <Building2 size={14} className="shrink-0" />, onClick: () => navigate(`${pathBase}/settings/server`) },
-            ...(wikiEnabled && canManageServer
-              ? [{ id: "wiki", label: formatMessage({ id: "wiki.settings" }), icon: <Network size={14} className="shrink-0" />, onClick: () => navigate(`${pathBase}/settings/wiki`) }]
-              : []),
             ...(canViewBillingSettings
               ? [{ id: "billing", label: formatMessage({ id: "settings.tabs.billingHeader" }), icon: <CreditCard size={14} className="shrink-0" />, onClick: () => navigate(`${pathBase}/settings/billing`) }]
               : []),
@@ -2161,7 +2283,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   // leaves can use it too.
 
   // Stryker disable next-line StringLiteral: class composition is pinned by source-contract and real-browser scrollbar QA.
-  const sidebarScrollClassName = "scrollbar-quiet flex-1 overflow-x-hidden overflow-y-auto px-2 py-3";
+  const sidebarScrollClassName = "scrollbar-quiet flex-1 overflow-x-hidden overflow-y-auto px-2 py-3 mobile-nav-clearance";
 
   const renderSortMenu = (
     section: SidebarSortSection,
@@ -2179,6 +2301,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     // for single-select dropdowns).
     return (
       <div ref={isOpen ? sortMenuRef : undefined} className="relative shrink-0">
+        <Tooltip content={formatMessage(
+            { id: "layout.sidebar.sortTitle" },
+            { currentLabel: formatMessage({ id: SIDEBAR_SORT_LABEL_ID[value] }) },
+          )}>
         <button
           type="button"
           aria-label={formatMessage({ id: "layout.sidebar.sortAria" })}
@@ -2186,10 +2312,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           aria-expanded={isOpen}
           data-testid="sidebar-sort-menu-button"
           data-sort-section={section}
-          title={formatMessage(
-            { id: "layout.sidebar.sortTitle" },
-            { currentLabel: formatMessage({ id: SIDEBAR_SORT_LABEL_ID[value] }) },
-          )}
           onClick={(event) => {
             event.stopPropagation();
             setOpenSortMenu((current) => (current === section ? null : section));
@@ -2198,11 +2320,12 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
         >
           <ArrowUpDown size={14} />
         </button>
+        </Tooltip>
         {isOpen && (
           <SelectionPopover
             title={formatMessage({ id: "layout.sidebar.sortMenuTitle" })}
             showHeader={false}
-            className="absolute right-0 top-8 z-50 min-w-[136px] overflow-hidden border-2 border-black bg-white shadow-brutal"
+            className="absolute right-0 top-8 z-50 min-w-[136px] overflow-hidden border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal"
             options={SIDEBAR_SORT_MODES.map((mode) => ({
               key: mode,
               checked: mode === value,
@@ -2231,12 +2354,19 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
 
   const openCreateAgentDialog = () => {
     setShowCreateAgentMenu(false);
+    trackAgentCreateOpened("sidebar");
     setShowCreateAgent(true);
   };
 
   const openCreateExternalAgentDialog = () => {
     setShowCreateAgentMenu(false);
+    trackAgentCreateOpened("sidebar_external");
     setShowCreateExternalAgent(true);
+  };
+
+  const openHandoffDialog = () => {
+    setShowCreateAgentMenu(false);
+    setShowHandoff(true);
   };
 
   // Stryker disable all: rendered DOM and Playwright tests exercise both dedicated add buttons and their dialogs; this block is React event wiring.
@@ -2248,10 +2378,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
       : formatMessage({ id: "layout.sidebar.createChannel" });
 
     return (
+      <Tooltip content={label}>
       <button
         type="button"
         aria-label={label}
-        title={label}
         onClick={(event) => {
           event.stopPropagation();
           setOpenSortMenu(null);
@@ -2263,6 +2393,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
       >
         <Plus size={14} />
       </button>
+      </Tooltip>
     );
   };
   // Stryker restore all
@@ -2272,12 +2403,12 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
 
     return (
       <div ref={showCreateAgentMenu ? createAgentMenuRef : undefined} className="relative shrink-0">
+        <Tooltip content={formatMessage({ id: "layout.sidebar.addAgent" })}>
         <button
           type="button"
           aria-label={formatMessage({ id: "layout.sidebar.addAgent" })}
           aria-haspopup="menu"
           aria-expanded={showCreateAgentMenu}
-          title={formatMessage({ id: "layout.sidebar.addAgent" })}
           onClick={(event) => {
             event.stopPropagation();
             setOpenSortMenu(null);
@@ -2288,10 +2419,12 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
         >
           <Plus size={14} />
         </button>
+        </Tooltip>
         {showCreateAgentMenu && (
           <div
+            {...dismissLayerProps}
             role="menu"
-            className="absolute right-0 top-8 z-50 min-w-[190px] overflow-hidden border-2 border-black bg-white shadow-brutal"
+            className="absolute right-0 top-8 z-50 min-w-[190px] overflow-hidden border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal"
           >
             <MenuItem
               icon={<Bot size={14} className="shrink-0" />}
@@ -2311,6 +2444,18 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             >
               {formatMessage({ id: "layout.sidebar.createExternalAgent" })}
             </MenuItem>
+            {isHandoffAvailable() && (
+              <MenuItem
+                icon={<ArrowRightLeft size={14} className="shrink-0" />}
+                data-testid="sidebar-menu-handoff-session"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openHandoffDialog();
+                }}
+              >
+                {formatMessage({ id: "layout.sidebar.handoffSession" })}
+              </MenuItem>
+            )}
           </div>
         )}
       </div>
@@ -2358,7 +2503,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   );
   const orderedRegularChannels = useMemo(
     () => sortSidebarChannels(
-      orderByIds(activeChannels.filter((channel) => channel.type !== "joint"), channelOrderIds),
+      orderByIds(activeChannels.filter((channel) => !isSidebarJointChannel(channel)), channelOrderIds),
       channelSortMode,
       channelActivity,
       allChannelId,
@@ -2372,7 +2517,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   );
   const orderedJointChannels = useMemo(
     () => sortSidebarChannels(
-      orderByIds(activeChannels.filter((channel) => channel.type === "joint"), channelOrderIds),
+      orderByIds(activeChannels.filter((channel) => isSidebarJointChannel(channel)), channelOrderIds),
       jointChannelSortMode,
       channelActivity,
     ),
@@ -2395,84 +2540,6 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     () => orderedJointChannels.filter((channel) => !pinnedChannelIdSet.has(channel.id) && !customPlacedChannelIds.has(channel.id)),
     [orderedJointChannels, pinnedChannelIdSet, customPlacedChannelIds],
   );
-  const sidebarChannelFocusRequest = readSidebarChannelFocusRequest(location.state);
-  useLayoutEffect(() => {
-    if (
-      !showChatRail
-      || !sidebarChannelFocusRequest
-      || handledSidebarFocusLocationKeyRef.current === location.key
-    ) {
-      return;
-    }
-
-    const channelMatch = location.pathname.match(/\/channel\/([^/?]+)/);
-    if (channelMatch?.[1] !== sidebarChannelFocusRequest.id) return;
-
-    const targetChannel = activeChannels.find(
-      (channel) => channel.id === sidebarChannelFocusRequest.id,
-    );
-    if (!targetChannel) return;
-
-    const section = pinnedChannelIdSet.has(targetChannel.id)
-      ? "pinned"
-      : targetChannel.type === "joint"
-        ? "jointChannels"
-        : visibleRegularChannels.some((channel) => channel.id === targetChannel.id)
-          ? "channels"
-          : null;
-
-    if (!section) {
-      handledSidebarFocusLocationKeyRef.current = location.key;
-      return;
-    }
-
-    if (collapsed[section]) {
-      // Route-owned focus is allowed to reveal the destination row, matching
-      // the existing channel-route auto-expand behavior above.
-      // oxlint-disable-next-line react-doctor/no-chain-state-updates -- the follow-up render is required before the row exists to measure.
-      setCollapsed((previous) => ({ ...previous, [section]: false }));
-      return;
-    }
-
-    const frameId = window.requestAnimationFrame(() => {
-      const scroller = sidebarScrollRef.current;
-      if (!scroller) return;
-      const row = Array.from(
-        scroller.querySelectorAll<HTMLElement>("[data-sidebar-channel-id]"),
-      ).find((candidate) => (
-        candidate.dataset.sidebarChannelId === sidebarChannelFocusRequest.id
-      ));
-      if (!row) {
-        handledSidebarFocusLocationKeyRef.current = location.key;
-        return;
-      }
-
-      const viewportRect = scroller.getBoundingClientRect();
-      const itemRect = row.getBoundingClientRect();
-      scroller.scrollTo({
-        top: centeredSidebarScrollTop({
-          currentScrollTop: scroller.scrollTop,
-          itemHeight: itemRect.height,
-          itemTop: itemRect.top,
-          viewportHeight: scroller.clientHeight,
-          viewportTop: viewportRect.top,
-        }),
-        behavior: "auto",
-      });
-      handledSidebarFocusLocationKeyRef.current = location.key;
-    });
-
-    return () => window.cancelAnimationFrame(frameId);
-  }, [
-    activeChannels,
-    collapsed,
-    location.key,
-    location.pathname,
-    pinnedChannelIdSet,
-    showChatRail,
-    sidebarChannelFocusRequest,
-    visibleRegularChannels,
-  ]);
   const sortableChannelIds = useMemo(() => sortableChannels.map((channel) => channel.id), [sortableChannels]);
   const sortableJointChannelIds = useMemo(() => sortableJointChannels.map((channel) => channel.id), [sortableJointChannels]);
   const channelManualSort = channelSortMode === "manual";
@@ -2591,6 +2658,168 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     }
     return result;
   }, [agents, agentDmChannelByAgentId, channelActivity, channels, customSections, dmChannels, pinnedAgentIdSet, pinnedChannelIdSet, pinnedHumanIdSet, sectionPlacements]);
+
+  // Reveal the active conversation in the sidebar (task #125). Two sources:
+  //  - an explicit one-shot request carried in route state (search "Open"):
+  //    centre the row;
+  //  - the route change itself: whenever the active channel / DM changes after
+  //    mount, bring its row into view ("nearest" — no scroll if it is already
+  //    visible), so the conversation finder, ⌘K, deep links, mention clicks and
+  //    notifications all land with the sidebar showing where you are. Tracked
+  //    per location.key with React's adjust-state-during-render so the
+  //    follow-up render after a section expands still sees the same request;
+  //    the first render is never a navigation.
+  const explicitSidebarFocusRequest = readSidebarChannelFocusRequest(location.state);
+  const [sidebarRouteTrack, setSidebarRouteTrack] = useState<{
+    key: string;
+    pathname: string;
+    implicit: SidebarChannelFocusRequest | null;
+  }>(() => ({ key: location.key, pathname: location.pathname, implicit: null }));
+  if (sidebarRouteTrack.key !== location.key) {
+    setSidebarRouteTrack({
+      key: location.key,
+      pathname: location.pathname,
+      // A Chat-root redirect restores the page the user left; like the route
+      // auto-expand above, it is not a navigation and reveals nothing.
+      implicit: isSidebarDisclosureRestoreState(location.state)
+        ? null
+        : implicitSidebarFocusRequest(sidebarRouteTrack.pathname, location.pathname),
+    });
+  }
+  const routeConversation = conversationFromPathname(location.pathname);
+  // An explicit request only counts for the conversation the route actually
+  // shows; a stale or mismatched state falls back to the route's own reveal.
+  const sidebarChannelFocusRequest =
+    explicitSidebarFocusRequest
+    && routeConversation
+    && explicitSidebarFocusRequest.kind === routeConversation.kind
+    && explicitSidebarFocusRequest.id === routeConversation.id
+      ? explicitSidebarFocusRequest
+      : sidebarRouteTrack.key === location.key
+        ? sidebarRouteTrack.implicit
+        : null;
+  useLayoutEffect(() => {
+    if (
+      !showChatRail
+      || !sidebarChannelFocusRequest
+      || handledSidebarFocusLocationKeyRef.current === location.key
+    ) {
+      return;
+    }
+    const shown = conversationFromPathname(location.pathname);
+    if (!shown || shown.kind !== sidebarChannelFocusRequest.kind || shown.id !== sidebarChannelFocusRequest.id) return;
+
+    // Which disclosure owns the row — resolved from the SAME data the sidebar
+    // renders from, in render precedence: pinned → a custom section → joint /
+    // regular channels → the Direct Messages section (whose disclosure reuses
+    // `agents`; every non-pinned, non-custom DM lives there, human or agent).
+    // Guessing from the conversation's type is wrong (a pinned human DM is in
+    // `pinned`, a placed channel is in its custom section).
+    type Owner = { builtin: keyof typeof collapsed } | { custom: string };
+    let owner: Owner | null = null;
+    const customOwnerOf = (match: (item: CustomSectionDisplayItem) => boolean): Owner | null => {
+      for (const [sectionId, items] of customSectionItems) {
+        if (items.some(match)) return { custom: sectionId };
+      }
+      return null;
+    };
+    const targetId = sidebarChannelFocusRequest.id;
+    if (sidebarChannelFocusRequest.kind === "channel") {
+      const targetChannel = activeChannels.find((channel) => channel.id === targetId);
+      if (!targetChannel) return;
+      owner = pinnedChannelIdSet.has(targetId)
+        ? { builtin: "pinned" }
+        : customOwnerOf((item) => item.type === "channel" && item.channel.id === targetId)
+          ?? (isSidebarJointChannel(targetChannel)
+            ? { builtin: "jointChannels" }
+            : visibleRegularChannels.some((channel) => channel.id === targetId)
+              ? { builtin: "channels" }
+              : null);
+    } else {
+      const dm = dmChannels.find((candidate) => candidate.id === targetId);
+      if (!dm) return;
+      owner = pinnedDmIdSet.has(targetId)
+        ? { builtin: "pinned" }
+        : customOwnerOf((item) =>
+          (item.type === "dm" && item.dm.id === targetId)
+          || (item.type === "agent" && agentDmChannelByAgentId[item.agent.id]?.id === targetId))
+          ?? { builtin: "agents" };
+    }
+
+    if (!owner) {
+      handledSidebarFocusLocationKeyRef.current = location.key;
+      return;
+    }
+
+    const ownerCollapsed = "custom" in owner
+      ? collapsedCustomSections[owner.custom] === true
+      : collapsed[owner.builtin];
+    if (ownerCollapsed) {
+      // A reveal — explicit or implied by the navigation — may open the owning
+      // section transiently (it never writes the user's disclosure preference;
+      // only a header click does). The route auto-expand above only opens
+      // `channels`, so pinned / joint / custom sections and DMs depend on this.
+      // The first render and the Chat-root restore redirect never get here:
+      // they produce no request.
+      if ("custom" in owner) {
+        const sectionId = owner.custom;
+        // oxlint-disable-next-line react-doctor/no-chain-state-updates -- the follow-up render is required before the row exists to measure.
+        setCollapsedCustomSections((previous) => ({ ...previous, [sectionId]: false }));
+      } else {
+        const key = owner.builtin;
+        // oxlint-disable-next-line react-doctor/no-chain-state-updates -- the follow-up render is required before the row exists to measure.
+        setCollapsed((previous) => ({ ...previous, [key]: false }));
+      }
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      const scroller = sidebarScrollRef.current;
+      if (!scroller) return;
+      const row = Array.from(
+        scroller.querySelectorAll<HTMLElement>("[data-sidebar-channel-id]"),
+      ).find((candidate) => (
+        candidate.dataset.sidebarChannelId === sidebarChannelFocusRequest.id
+      ));
+      // A row inside a hidden container (custom sections keep collapsed rows
+      // mounted under `hidden`) has no geometry; never scroll to a zero rect.
+      if (!row || row.closest("[hidden]")) {
+        handledSidebarFocusLocationKeyRef.current = location.key;
+        return;
+      }
+
+      const viewportRect = scroller.getBoundingClientRect();
+      const itemRect = row.getBoundingClientRect();
+      const geometry = {
+        currentScrollTop: scroller.scrollTop,
+        itemHeight: itemRect.height,
+        itemTop: itemRect.top,
+        viewportHeight: scroller.clientHeight,
+        viewportTop: viewportRect.top,
+      };
+      const top = sidebarChannelFocusRequest.align === "center"
+        ? centeredSidebarScrollTop(geometry)
+        : nearestSidebarScrollTop(geometry);
+      if (top !== null) scroller.scrollTo({ top, behavior: "auto" });
+      handledSidebarFocusLocationKeyRef.current = location.key;
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [
+    activeChannels,
+    agentDmChannelByAgentId,
+    collapsed,
+    collapsedCustomSections,
+    customSectionItems,
+    dmChannels,
+    location.key,
+    location.pathname,
+    pinnedChannelIdSet,
+    pinnedDmIdSet,
+    showChatRail,
+    sidebarChannelFocusRequest,
+    visibleRegularChannels,
+  ]);
 
   // Narrowed unread aggregates. These subscribe to `unreadCounts` but collapse
   // it to 4 booleans (one per collapsible section) so the parent re-renders ONLY
@@ -2772,7 +3001,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     }
     const channel = channels.find((candidate) => candidate.id === parsed.id);
     if (!channel) return null;
-    return channel.type === "joint"
+    return isSidebarJointChannel(channel)
       ? SIDEBAR_JOINT_CHANNELS_CONTAINER_ID
       : SIDEBAR_CHANNELS_CONTAINER_ID;
   }, [channels, dmChannels]);
@@ -3024,25 +3253,32 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     if (itemCollision) return [itemCollision];
     if (pointerCollisions.length > 0) return pointerCollisions;
 
-    // A pointer can be directly over a droppable that is not a valid
-    // destination for the active item (for example, a regular channel passing
-    // through Joint Channels). Falling back to the nearest valid container in
-    // that case makes live projection alternate between the containers above
-    // and below the invalid section as their geometry changes. That feedback
-    // loop keeps dnd-kit remeasuring until React hits its update-depth guard.
-    // Restore the drag-start container while any invalid droppable is directly
-    // under the pointer. Returning no collision would preserve a transient
-    // projection picked while crossing the gap before the invalid section.
-    // Resolving the original container makes the projection deterministic and
-    // keeps closest-center as the keyboard/gap fallback.
-    if (pointerWithin(args).length > 0) {
-      const sourceContainerId = sidebarDndSnapshotRef.current
-        ? findSidebarDndContainer(sidebarDndSnapshotRef.current, activeId)
-        : null;
-      if (sourceContainerId) return [{ id: sourceContainerId }];
-      return [];
+    // Keyboard drags have no pointer, and a pointer outside the section list
+    // (past the last section, off the sidebar, or beyond an auto-scrolling
+    // edge) has no local target: snap to the nearest valid container.
+    if (
+      !args.pointerCoordinates
+      || !isPointerWithinSidebarDndBounds(args.pointerCoordinates, args.droppableRects.values())
+    ) {
+      return closestCenter(collisionArgs);
     }
-    return closestCenter(collisionArgs);
+
+    // Inside the list the pointer is over no valid destination: a gap between
+    // sections, a section header, or a section this item may not enter (a
+    // regular channel crossing Joint Channels). Keep the item where the live
+    // projection already put it. Any geometry-based answer here (nearest valid
+    // container, or the
+    // drag-start container) feeds back into itself: the projection changes the
+    // height of the containers the item leaves and enters, which moves the
+    // pointer in or out of them, which flips the answer again. dnd-kit re-runs
+    // collision detection on every remeasure, so that alternation loops without
+    // pointer movement until React hits its update-depth guard (#185).
+    const retainedContainerId = resolveSidebarDndRetainedContainer(
+      sidebarDndProjectionRef.current,
+      sidebarDndSnapshotRef.current,
+      activeId,
+    );
+    return retainedContainerId ? [{ id: retainedContainerId }] : [];
   }, [isValidSidebarDndDestination, sectionOrder]);
 
   const resetSidebarDnd = useCallback(() => {
@@ -3050,6 +3286,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     sidebarDndProjectionRef.current = null;
     setSidebarDndProjection(null);
     setSidebarDndActiveId(null);
+    setSidebarDndSourceContainerId(null);
   }, []);
 
   const handleSidebarDragStart = useCallback(({ active }: DragStartEvent) => {
@@ -3062,6 +3299,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
     sidebarDndProjectionRef.current = sidebarDndBaseProjection;
     setSidebarDndProjection(sidebarDndBaseProjection);
     setSidebarDndActiveId(data.itemId);
+    setSidebarDndSourceContainerId(findSidebarDndContainer(sidebarDndBaseProjection, data.itemId));
   }, [resetSidebarDnd, sidebarDndBaseProjection]);
 
   const projectSidebarDndOver = useCallback((
@@ -3092,6 +3330,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
       );
       destinationIndex = overIndex + (edge === "after" ? 1 : 0);
     } else if (overData.type === "item") {
+      return current;
+    } else if (destinationItems.includes(activeData.itemId)) {
+      // Container-level hover of the container that already holds the item
+      // (including the retained-container collision above) keeps its slot.
       return current;
     }
 
@@ -3344,8 +3586,9 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   // Stryker disable all: member-row interaction glue is contract-pinned and browser-smoke verified.
   const renderAgentItem = (agent: typeof agents[0]) => {
     return (
-      <button
+      <SidebarItem variant="accent"
         key={agent.id}
+        data-agent-id={agent.id}
         draggable={workspaceEnabled}
         onDragStart={(event) => dragWorkspacePanel(
           event,
@@ -3359,6 +3602,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           void handleOpenAgentDm(agent.id);
         }}
         onContextMenu={(e) => openCtxMenu(e, "member-agent", agent.id)}
+        data-slot="sidebar-item"
+        active={isAgentSelected(agent.id)}
         {...makeLongPressHandlers("member-agent", agent.id)}
         className={sidebarItemClass(isAgentSelected(agent.id), ctxMenu?.type === "member-agent" && ctxMenu.id === agent.id)}
       >
@@ -3371,10 +3616,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
         <div className="flex min-w-0 flex-1 items-baseline gap-1 text-left">
           <span className="shrink-0 max-w-[70%] truncate text-sm">{agent.displayName || agent.name}</span>
           {agent.description && (
-            <span className="min-w-0 flex-1 truncate text-xs text-black/40">{agent.description}</span>
+            <span className="min-w-0 flex-1 truncate text-xs text-foreground-muted theme-brutal:text-black/40">{agent.description}</span>
           )}
         </div>
-      </button>
+      </SidebarItem>
     );
   };
   // Stryker restore all
@@ -3504,9 +3749,9 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           - Mobile (mobileInline): no side-by-side; every tab interior
             is white per "移动端的每一个界面背景色都应该相应地变成白色".
             Sidebar full-screens as one tab → `bg-white`. */}
-      <div
+      <SidebarRoot
         // Stryker disable next-line StringLiteral: Tailwind composition is presentation-only and browser-smoke verified.
-        className={`relative flex h-full w-full flex-col ${mobileInline ? "" : workspaceEnabled && workspaceRailMode ? "border-r border-black/25" : "border-r-2 border-black"} ${mobileInline ? "bg-white" : "bg-brutal-cream"} ${workspaceEnabled ? "workspace-scrollbar-subtle" : ""} text-black font-display select-none`}
+        className={`relative flex h-full w-full flex-col ${mobileInline ? "" : workspaceEnabled && workspaceRailMode ? "border-r border-line-muted theme-brutal:border-black/25" : "border-r border-line-muted theme-brutal:border-r-2 theme-brutal:border-black"} ${mobileInline ? "theme-brutal:bg-white" : "bg-layer-canvas-muted theme-brutal:bg-brutal-cream"} ${workspaceEnabled ? "workspace-scrollbar-subtle" : ""} text-foreground-strong theme-brutal:text-black font-display select-none`}
         data-testid="sidebar-root"
       >
         {/* Mobile tab-root NavBar — yellow h-panel-header matching the level-2+
@@ -3522,7 +3767,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             access. On desktop the switcher lives in the LeftRail, so we
             only need this header on mobile. */}
         {mobileInline && (
-          <div className="relative flex h-panel-header shrink-0 items-center gap-3 border-b-2 border-black bg-soft-signal px-4">
+          <div className="relative flex h-panel-header shrink-0 items-center gap-3 border-b border-line-muted bg-layer-panel theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal px-4">
             {railMode === "chat" ? (
               /* Home tab: ServerName pill on the LEFT — it IS the header.
                  No other tab renders the pill: stdrc msg 7b1cf65a
@@ -3537,7 +3782,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                      在窄+矮屏（移动 + max-h:600）顶部 server-name 不要卡片，
                      直接文字 + chevron，UI 跟 Members / Settings 一致。
                      Tailwind 修饰符链 strip 掉 tilt / border / bg / shadow / pad。 */
-                  className="mobile-server-selector-vector relative inline-flex shrink-0 items-center border-2 [@media(max-height:600px)]:border-0 border-transparent bg-transparent px-3 [@media(max-height:600px)]:px-0 py-1 [@media(max-height:600px)]:py-0 font-display font-bold text-base text-soft-signal [@media(max-height:600px)]:text-black"
+                  className="mobile-server-selector-vector relative inline-flex shrink-0 items-center border-2 [@media(max-height:600px)]:border-0 border-transparent bg-transparent px-3 [@media(max-height:600px)]:px-0 py-1 [@media(max-height:600px)]:py-0 font-display font-bold text-base text-primary-strong theme-brutal:text-soft-signal"
                 >
                   <MobileServerSelectorVectorSurface />
                   {hasOtherServerUnread && (
@@ -3565,7 +3810,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               </>
             ) : (
               <div className="min-w-0 flex-1">
-                <div className="text-base font-bold text-black truncate">
+                <div className="text-base font-bold text-foreground-strong theme-brutal:text-black truncate">
                   {railLabel}
                 </div>
               </div>
@@ -3596,8 +3841,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           // stdrc 2026-05-02 #proj-uiux:95e25b5b: sidebar header matches
           // sidebar body at `bg-brutal-cream`. Whole sidebar column
           // reads as one cream surface; main panel is white.
-          <div className={`flex shrink-0 items-center bg-brutal-cream ${workspaceEnabled ? "h-12 border-b border-black/25 px-4" : "h-panel-header border-b-2 border-black px-5"}`}>
-            <div className={workspaceEnabled ? "text-base font-semibold text-black" : "text-lg font-bold text-black"}>
+          <div className={`flex shrink-0 items-center bg-layer-canvas-muted theme-brutal:bg-brutal-cream ${workspaceEnabled ? "h-12 border-b border-line-muted theme-brutal:border-black/25 px-4" : "h-panel-header border-b border-line-muted theme-brutal:border-b-2 theme-brutal:border-black px-5"}`}>
+            <div className={workspaceEnabled ? "text-base font-semibold text-foreground-strong theme-brutal:text-black" : "text-lg font-bold text-foreground-strong theme-brutal:text-black"}>
               {railLabel}
             </div>
           </div>
@@ -3640,42 +3885,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 overflow; scrollbars should appear only for real overflow. */}
             <div className="min-h-full">
           {showSettingsRail ? (
-            <div className="space-y-3">
-              {settingsSidebarGroups.map((group) => (
-                <div key={group.label}>
-                  <div className="mb-1 px-2 text-[10px] font-bold uppercase tracking-widest text-black/40">
-                    {group.label}
-                  </div>
-                  {group.items.map((item) => {
-                    // Stryker disable next-line all: pre-existing settings-row selection is outside the workspace mutation corpus.
-                    const active = settingsTabFromPath === item.id;
-                    const className = `${sidebarItemClass(active)} text-left`;
-                    return item.href ? (
-                      <a
-                        key={item.id}
-                        href={item.href}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={className}
-                      >
-                        {item.icon}
-                        {item.label}
-                      </a>
-                    ) : (
-                      <button
-                        key={item.id}
-                        onClick={item.onClick}
-                        // Stryker disable next-line all: pre-existing settings-row presentation is outside the workspace mutation corpus.
-                        className={className}
-                      >
-                        {item.icon}
-                        {item.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
+            <SettingsSidebarList groups={settingsSidebarGroups} activeId={settingsTabFromPath} />
           ) : showComputersRail ? (
             <>
               {/* Computers surface — larger card-style items showing the
@@ -3693,7 +3903,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                   type="button"
                   onClick={() => navigate(`${pathBase}/settings`)}
                   data-testid="computers-mobile-back"
-                  className="mb-2 flex w-full items-center gap-1 px-2 py-1.5 text-left text-sm font-medium text-black/60 hover:text-black transition-colors"
+                  className="mb-2 flex w-full items-center gap-1 px-2 py-1.5 text-left text-sm font-medium text-foreground-muted hover:text-foreground-strong transition-colors theme-brutal:text-black/60 theme-brutal:hover:text-black"
                   aria-label={formatMessage({ id: "layout.sidebar.backToSettings" })}
                 >
                   <ChevronLeft size={16} className="shrink-0" />
@@ -3704,21 +3914,22 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                   (items below use mb-1.5), not the 1-unit rhythm used in
                   Chat/Members sections where items sit closer together. */}
               <div className="mb-1.5 flex items-center justify-between px-2">
-                <div className="text-xs font-bold uppercase text-black tracking-widest">
-                  {formatMessage({ id: "layout.sidebar.computersSectionLabel" })} <span className="text-black/40 font-mono normal-case tracking-normal">{Object.keys(machineNames).length}</span>
+                <div className="text-xs font-bold uppercase text-foreground-strong tracking-widest theme-brutal:text-black">
+                  {formatMessage({ id: "layout.sidebar.computersSectionLabel" })} <span className="text-foreground-placeholder font-mono normal-case tracking-normal theme-brutal:text-black/40">{sidebarMachineIds.length}</span>
                 </div>
                 {canRegisterMachines && (
+                  <Tooltip content={formatMessage({ id: "layout.sidebar.addComputer" })}>
                   <button
                     onClick={() => setShowAddMachine(true)}
                     className={SIDEBAR_SECTION_ICON_BUTTON_CLASS}
-                    title={formatMessage({ id: "layout.sidebar.addComputer" })}
                   >
                     <Plus size={14} />
                   </button>
+                  </Tooltip>
                 )}
               </div>
 
-              {Object.keys(machineNames).map((machineId) => (
+              {sidebarMachineIds.map((machineId) => (
                 <ComputerRow
                   key={machineId}
                   machineId={machineId}
@@ -3746,7 +3957,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                   data-testid="mobile-home-search-entry"
                   // Stryker disable next-line all: pre-existing mobile Search routing is outside the workspace mutation corpus.
                   onClick={() => nav.toSearch(undefined, { flushSync: true })}
-                  className="mb-1 flex w-full items-center gap-1.5 px-2 py-2 [@media(max-height:600px)]:py-1 md:py-1 text-left text-sm font-medium border-2 border-transparent transition-colors hover:border-black hover:bg-white hover:shadow-brutal-sm active:border-black active:bg-white active:shadow-brutal-sm"
+                  className="mb-1 flex w-full items-center gap-1.5 px-2 py-2 [@media(max-height:600px)]:py-1 md:py-1 text-left text-sm font-medium border border-transparent transition-colors hover:border-line-strong hover:bg-fill-muted hover:shadow-raft-sm active:border-line-strong active:bg-fill-muted active:shadow-raft-sm theme-brutal:border-2 theme-brutal:hover:border-black theme-brutal:hover:bg-white theme-brutal:hover:shadow-brutal-sm theme-brutal:active:border-black theme-brutal:active:bg-white theme-brutal:active:shadow-brutal-sm"
                 >
                   <Search size={14} className="shrink-0" />
                   {formatMessage({ id: "layout.sidebar.search" })}
@@ -3773,19 +3984,19 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                     nav.toThreadsInbox();
                     focusFirstUnreadInboxItem();
                   }}
-                  className={`mb-1  flex w-full items-center gap-1.5 px-2 py-2 [@media(max-height:600px)]:py-1 md:py-1 text-left text-sm font-medium border-2 transition-colors ${
-                    location.pathname.endsWith("/activity") || location.pathname.endsWith("/inbox") || location.pathname.endsWith("/threads")
-                      ? "border-black bg-brutal-pink shadow-brutal-sm font-bold"
-                      : "border-transparent hover:border-black hover:bg-white hover:shadow-brutal-sm active:border-black active:bg-white active:shadow-brutal-sm"
-                  }`}
+                  className={`mb-1 flex w-full items-center gap-1.5 px-2 py-2 [@media(max-height:600px)]:py-1 md:py-1 text-left text-sm font-medium border transition-colors theme-brutal:border-2 ${
+ location.pathname.endsWith("/activity") || location.pathname.endsWith("/inbox") || location.pathname.endsWith("/threads")
+ ? "border-line-strong bg-fill-muted shadow-raft-sm font-bold theme-brutal:border-black theme-brutal:bg-brutal-pink theme-brutal:shadow-brutal-sm"
+ : "border-transparent hover:border-line-strong hover:bg-fill-muted hover:shadow-raft-sm active:border-line-strong active:bg-fill-muted active:shadow-raft-sm theme-brutal:hover:border-black theme-brutal:hover:bg-white theme-brutal:hover:shadow-brutal-sm theme-brutal:active:border-black theme-brutal:active:bg-white theme-brutal:active:shadow-brutal-sm"
+ }`}
                 >
                   <Activity size={14} className="shrink-0" />
                   {formatMessage({ id: "layout.sidebar.activity" })}
                   {(() => {
                     return activityUnreadCount !== undefined && activityUnreadCount > 0 ? (
-                      <span className="ml-auto shrink-0 rounded bg-brutal-pink px-1.5 py-0.5 text-[10px] font-bold leading-none text-white border border-black">
+                      <SidebarItemCount variant="accent" className="ml-auto">
                         {activityUnreadCount > 99 ? "99+" : activityUnreadCount}
-                      </span>
+                      </SidebarItemCount>
                     ) : null;
                   })()}
                 </button>
@@ -3797,40 +4008,22 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               {(() => {
                 // Stryker disable all: workspace-only Saved visibility and selected chrome are browser-smoke verified, outside this pinned-sidebar mutation corpus.
                 const savedEntry = !workspaceEnabled ? (
-                  <button
+                  <SidebarItem
+                    variant="accent"
+                    active={location.pathname.endsWith("/saved")}
                     onClick={() => nav.toSaved()}
-                    className={`mb-1  flex w-full items-center gap-1.5 px-2 py-2 [@media(max-height:600px)]:py-1 md:py-1 text-left text-sm font-medium border-2 transition-colors ${
-                      location.pathname.endsWith("/saved")
-                        ? "border-black bg-brutal-pink shadow-brutal-sm font-bold"
-                        : "border-transparent hover:border-black hover:bg-white hover:shadow-brutal-sm active:border-black active:bg-white active:shadow-brutal-sm"
-                    }`}
+                    className={`${sidebarItemClass(location.pathname.endsWith("/saved"))} mb-1`}
+                    data-testid="sidebar-saved-entry"
                   >
                     <Bookmark size={14} className="shrink-0" />
                     {formatMessage({ id: "layout.sidebar.saved" })}
                     <SavedNavCount total={savedTotal} />
-                  </button>
+                  </SidebarItem>
                 ) : null;
                 // Stryker restore all
                 return savedEntry;
               })()}
 
-              {/* Wiki - mobile-only entry (desktop uses the LeftRail tab).
-                  Sits with Search/Activity/Saved per the mobile Home model. */}
-              {mobileInline && wikiEnabled && (
-                <button
-                  type="button"
-                  data-testid="mobile-home-wiki-entry"
-                  onClick={() => nav.toWiki()}
-                  className={`mb-1 flex w-full items-center gap-1.5 px-2 py-2 [@media(max-height:600px)]:py-1 md:py-1 text-left text-sm font-medium border-2 transition-colors ${
-                    location.pathname.endsWith("/wiki")
-                      ? "border-black bg-brutal-pink shadow-brutal-sm font-bold"
-                      : "border-transparent hover:border-black hover:bg-white hover:shadow-brutal-sm active:border-black active:bg-white active:shadow-brutal-sm"
-                  }`}
-                >
-                  <Network size={14} className="shrink-0" />
-                  {formatMessage({ id: "layout.sidebar.wiki" })}
-                </button>
-              )}
 
               {(() => {
                 // Stryker disable all: sidebar drag/drop render composition is covered by source contracts and browser/manual preview; command-runner DOM mutation tests cannot perform dnd-kit drags.
@@ -3839,6 +4032,9 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               <DndContext
                 sensors={dndSensors}
                 collisionDetection={sidebarCollisionDetection}
+                // Empty drag-only sections can mount after activation; remeasure
+                // droppables deterministically instead of keeping pre-drag rects.
+                measuring={{ droppable: { strategy: MeasuringStrategy.Always } }}
                 onDragStart={handleSidebarDragStart}
                 onDragOver={handleSidebarDragOver}
                 onDragCancel={resetSidebarDnd}
@@ -3847,6 +4043,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               <SortableContext items={sectionOrder} strategy={verticalListSortingStrategy}>
               <div className="flex flex-col" data-testid="sidebar-section-list">
               {/* Pinned */}
+              {!isEmptySectionHidden(sidebarDndCurrentProjection[SIDEBAR_PINNED_CONTAINER_ID].length, SIDEBAR_PINNED_CONTAINER_ID, true) && (
               <SortableSidebarSection id="system:pinned" testId="sidebar-section-block-pinned" order={sectionOrder.indexOf("system:pinned")}>
                   <SidebarSectionHeader onContextMenu={(event) => openSectionCtxMenu(event, "pinned")}>
                     <SidebarSectionToggle
@@ -3861,7 +4058,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                         className={`transition-transform ${collapsed.pinned ? "" : "rotate-90"}`}
                       />
                       {formatMessage({ id: "layout.sidebar.pinned" })}
-                      <span className="text-black/40 font-mono normal-case tracking-normal">
+                      <span className="text-foreground-placeholder font-mono normal-case tracking-normal theme-brutal:text-black/40">
                         {sidebarDndCurrentProjection[SIDEBAR_PINNED_CONTAINER_ID].length}
                       </span>
                       {collapsed.pinned && unreadFlags.pinned && (
@@ -3907,6 +4104,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                     )}
                   </div>
                 </SortableSidebarSection>
+              )}
 
               {customSections
                 .slice()
@@ -3931,7 +4129,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                           <ChevronRight size={12} className={`transition-transform ${collapsedCustom ? "" : "rotate-90"}`} />
                           {section.emoji && <span aria-hidden>{section.emoji}</span>}
                           <span className="truncate">{section.name}</span>
-                          <span className="font-mono text-black/40 normal-case tracking-normal">{projectedItemIds.length}</span>
+                          <span className="font-mono text-foreground-placeholder normal-case tracking-normal theme-brutal:text-black/40">{projectedItemIds.length}</span>
                           {collapsedCustom && customUnreadSectionIdSet.has(section.id) && <AttentionDot size="lg" className="ml-1" />}
                         </SidebarSectionToggle>
                       </SidebarSectionHeader>
@@ -3961,6 +4159,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 })}
 
               {/* Joint Channels */}
+              {!isEmptySectionHidden(sidebarDndCurrentProjection[SIDEBAR_JOINT_CHANNELS_CONTAINER_ID].length, SIDEBAR_JOINT_CHANNELS_CONTAINER_ID, true) && (
               <SortableSidebarSection id="system:joint" testId="sidebar-section-block-joint" order={sectionOrder.indexOf("system:joint")}>
                   <SidebarSectionHeader onContextMenu={(event) => openSectionCtxMenu(event, "jointChannels")}>
                     <SidebarSectionToggle
@@ -3975,7 +4174,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                         className={`transition-transform ${collapsed.jointChannels ? "" : "rotate-90"}`}
                       />
                       <span className="truncate">{formatMessage({ id: "layout.sidebar.jointChannels" })}</span>
-                      <span className="text-black/40 font-mono normal-case tracking-normal">
+                      <span className="text-foreground-placeholder font-mono normal-case tracking-normal theme-brutal:text-black/40">
                         {sidebarDndCurrentProjection[SIDEBAR_JOINT_CHANNELS_CONTAINER_ID].length}
                       </span>
                       {collapsed.jointChannels && unreadFlags.joint && (
@@ -4015,6 +4214,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                     )}
                   </div>
               </SortableSidebarSection>
+              )}
 
               {/* Channels */}
               <SortableSidebarSection id="system:channels" testId="sidebar-section-block-channels" order={sectionOrder.indexOf("system:channels")}>
@@ -4031,7 +4231,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                     className={`transition-transform ${collapsed.channels ? "" : "rotate-90"}`}
                   />
                   <span className="truncate">{formatMessage({ id: "layout.sidebar.channels" })}</span>
-                  <span className="text-black/40 font-mono normal-case tracking-normal">
+                  <span className="text-foreground-placeholder font-mono normal-case tracking-normal theme-brutal:text-black/40">
                     {sidebarDndCurrentProjection[SIDEBAR_CHANNELS_CONTAINER_ID].length}
                   </span>
                   {collapsed.channels && unreadFlags.channels && (
@@ -4079,6 +4279,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
 
               {/* Direct Messages — show open DMs, auto-reopen on unread */}
               {/* Stryker disable all: pre-existing DM ordering and section chrome are outside the workspace mutation corpus. */}
+                {!isEmptySectionHidden(sidebarDndCurrentProjection[SIDEBAR_DMS_CONTAINER_ID].length, SIDEBAR_DMS_CONTAINER_ID) && (
                 <SortableSidebarSection id="system:dms" testId="sidebar-section-block-dms" order={sectionOrder.indexOf("system:dms")}>
                   <SidebarSectionHeader onContextMenu={(event) => openSectionCtxMenu(event, "dms")}>
                     <SidebarSectionToggle
@@ -4093,7 +4294,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                         className={`transition-transform ${collapsed.agents ? "" : "rotate-90"}`}
                       />
                       <span className="truncate">{formatMessage({ id: "layout.sidebar.directMessages" })}</span>
-                      <span className="text-black/40 font-mono normal-case tracking-normal">
+                  <span className="text-foreground-placeholder font-mono normal-case tracking-normal theme-brutal:text-black/40">
                         {sidebarDndCurrentProjection[SIDEBAR_DMS_CONTAINER_ID].length}
                       </span>
                       {collapsed.agents && unreadFlags.dms && (
@@ -4128,6 +4329,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                     )}
                   </div>
                 </SortableSidebarSection>
+                )}
                 {/* Stryker restore all */}
               </div>
               </SortableContext>
@@ -4135,7 +4337,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 {sidebarDndActiveId && sidebarDndDisplayItems.get(sidebarDndActiveId) ? (
                   <div
                     data-testid="sidebar-drag-overlay"
-                    className="max-w-72 border-2 border-black bg-white px-2 py-1.5 text-sm font-medium shadow-brutal-sm"
+                    className="max-w-72 border border-line-muted bg-layer-panel px-2 py-1.5 text-sm font-medium shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
                   >
                     {sidebarDndDisplayItems.get(sidebarDndActiveId)!.label}
                   </div>
@@ -4152,14 +4354,15 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               {/* People tab: Agents, Humans, Computers */}
               {/* Stryker disable all: classic-only graph visibility is browser-smoke verified. */}
               {!workspaceEnabled ? (
-                <button
-                  type="button"
+                <SidebarItem
+                  variant="accent"
+                  active={location.pathname === `${pathBase}/members/graph`}
                   onClick={() => navigate(`${pathBase}/members/graph`)}
                   className={`${sidebarItemClass(location.pathname === `${pathBase}/members/graph`)} text-left`}
                 >
                   <GitBranch size={14} className="shrink-0" />
                   {formatMessage({ id: "layout.sidebar.graph" })}
-                </button>
+                </SidebarItem>
               ) : null}
               {/* Stryker restore all */}
 
@@ -4178,7 +4381,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                     className={`transition-transform ${collapsed.agents ? "" : "rotate-90"}`}
                   />
                   {formatMessage({ id: "layout.sidebar.agents" })}
-                  <span className="text-black/40 font-mono normal-case tracking-normal">{agents.length}</span>
+                  <span className="text-foreground-placeholder font-mono normal-case tracking-normal theme-brutal:text-black/40">{agents.length}</span>
                 </button>
                 {renderAgentActionMenu()}
               </div>
@@ -4222,7 +4425,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                               onClick={() => toggleAgentMachineGroup(group.key)}
                               aria-expanded={!groupCollapsed}
                               data-testid={`sidebar-agent-machine-group-toggle-${group.key}`}
-                              className="flex w-full items-center gap-1 px-2 mt-1.5 mb-0.5 text-[10px] font-mono lowercase text-black/40 select-none text-left hover:text-black/60"
+                              className="flex w-full items-center gap-1 px-2 mt-1.5 mb-0.5 text-[10px] font-mono lowercase text-foreground-placeholder select-none text-left hover:text-foreground-muted theme-brutal:text-black/40 theme-brutal:hover:text-black/60"
                             >
                               <ChevronRight
                                 size={9}
@@ -4261,17 +4464,18 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                         className={`transition-transform ${collapsed.humans ? "" : "rotate-90"}`}
                       />
                       {formatMessage({ id: "layout.sidebar.humans" })}
-                      <span className="text-black/40 font-mono normal-case tracking-normal">{members.length}</span>
+                      <span className="text-foreground-placeholder font-mono normal-case tracking-normal theme-brutal:text-black/40">{members.length}</span>
                     </button>
                     {canInviteMembers && (
                       <div className="relative">
+                        <Tooltip content={formatMessage({ id: "layout.sidebar.inviteHuman" })}>
                         <button
                           onClick={() => setShowInviteHuman(true)}
                           className={SIDEBAR_SECTION_ICON_BUTTON_CLASS}
-                          title={formatMessage({ id: "layout.sidebar.inviteHuman" })}
                         >
                           <Plus size={14} />
                         </button>
+                        </Tooltip>
                       </div>
                     )}
                   </div>
@@ -4287,8 +4491,8 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                           {members.map((human) => {
                             const isSelf = human.userId === user?.id;
                             return (
-                              <button
-                                key={human.userId}
+                              <Tooltip key={human.userId} content={isSelf ? formatMessage({ id: "layout.sidebar.youTitle" }) : `${human.displayName || human.name}`}>
+                              <SidebarItem variant="accent"
                                 type="button"
                                 draggable={workspaceEnabled}
                                 onDragStart={(event) => dragWorkspacePanel(
@@ -4303,21 +4507,29 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                                   void handleOpenHumanDm(human.userId);
                                 }}
                                 onContextMenu={(e) => openCtxMenu(e, "member-human", human.userId)}
+                                data-slot="sidebar-item"
+                                active={isHumanSelected(human.userId)}
                                 {...makeLongPressHandlers("member-human", human.userId)}
                                 className={sidebarItemClass(isHumanSelected(human.userId), ctxMenu?.type === "member-human" && ctxMenu.id === human.userId)}
-                                title={isSelf ? formatMessage({ id: "layout.sidebar.youTitle" }) : `${human.displayName || human.name}`}
                               >
                                 <AvatarSlot context="sidebar-list" type="human" humanAvatarUrl={human.avatarUrl} gravatarHash={human.gravatarHash} />
                                 <div className="flex min-w-0 flex-1 items-baseline gap-1 text-left">
                                   <span className="shrink-0 max-w-[70%] truncate text-sm">
                                     {human.displayName || human.name}
-                                    {isSelf && <span className="text-black/40 ml-1">{formatMessage({ id: "layout.sidebar.youSuffix" })}</span>}
+                                    {isSelf && <span className="text-foreground-placeholder ml-1 theme-brutal:text-black/40">{formatMessage({ id: "layout.sidebar.youSuffix" })}</span>}
                                   </span>
+                                  {/* Only Guest is labeled: it is the rare role whose access differs. Same chip as ChannelMemberList. */}
+                                  {human.role === "guest" && (
+                                    <span className="shrink-0 self-center rounded-sm border border-line-muted bg-info-soft px-1.5 py-0.5 font-mono text-[10px] leading-3 text-foreground-strong theme-brutal:rounded-none theme-brutal:border-[1.5px] theme-brutal:border-black theme-brutal:bg-brutal-cyan theme-brutal:text-black">
+                                      {formatMessage({ id: "layout.sidebar.guestLabel" })}
+                                    </span>
+                                  )}
                                   {human.description && (
-                                    <span className="min-w-0 flex-1 truncate text-xs text-black/40">{human.description}</span>
+                                    <span className="min-w-0 flex-1 truncate text-xs text-foreground-muted theme-brutal:text-black/40">{human.description}</span>
                                   )}
                                 </div>
-                              </button>
+                              </SidebarItem>
+                              </Tooltip>
                             );
                           })}
                         </>
@@ -4348,7 +4560,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
         {/* Bottom user bar removed — account info, Settings, Release Notes,
             and Logout all live in the LeftRail's account-menu flyout (desktop)
             and the MobileTabBar's Settings tab (mobile). */}
-      </div>
+      </SidebarRoot>
 
       {showCreateChannel && (
         <CreateChannelDialog
@@ -4369,6 +4581,10 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           external
           onClose={() => setShowCreateExternalAgent(false)}
         />
+      )}
+
+      {showHandoff && (
+        <HandoffDialog onClose={() => setShowHandoff(false)} />
       )}
 
       {deleteConfirm && (() => {
@@ -4484,7 +4700,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
       {sectionCtxMenu && createPortal(
         <>
           <DismissBackdrop onDismiss={closeSectionCtx} trapContextMenu />
-          <div
+          <ContextMenuPopup
             ref={sectionCtxMenuRef}
             role="menu"
             aria-label={formatMessage(
@@ -4492,7 +4708,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               { section: sectionContextLabel },
             )}
             data-testid={`sidebar-section-context-menu-${sectionCtxMenu.section}`}
-            className="fixed z-50 card-brutal w-64 overflow-hidden select-none"
+            className="fixed z-50 w-64 select-none"
             style={getSidebarContextMenuStyle(sectionCtxMenu)}
             onMouseDown={stopSidebarContextMenuPropagation}
           >
@@ -4518,7 +4734,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 <ContextMenuDivider />
               </>
             )}
-            <div className="px-3 pb-1 pt-2 text-[10px] font-bold uppercase tracking-widest text-black/50">
+            <div className="px-3 pb-1 pt-2 text-[10px] font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">
               {formatMessage({ id: "layout.sidebar.sortMenuTitle" })}
             </div>
             {SIDEBAR_SORT_MODES.map((mode) => {
@@ -4548,25 +4764,34 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 </MenuItem>
               );
             })}
+            <ContextMenuDivider />
+            <div className="px-3 pb-1 pt-2 text-[10px] font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">
+              {formatMessage({ id: "layout.sidebar.displaySection" })}
+            </div>
             {sectionCtxMenu.section === "channels" && (
-              <>
-                <ContextMenuDivider />
-                <div className="px-3 pb-1 pt-2 text-[10px] font-bold uppercase tracking-widest text-black/50">
-                  {formatMessage({ id: "layout.sidebar.displaySection" })}
-                </div>
-                <MenuItem
-                  role="menuitemcheckbox"
-                  aria-checked={joinedChannelsOnly}
-                  trailing={joinedChannelsOnly ? <Check size={14} /> : null}
-                  onClick={() => {
-                    updateJoinedChannelsOnly(!joinedChannelsOnly);
-                    closeSectionCtx();
-                  }}
-                >
-                  {formatMessage({ id: "layout.sidebar.showJoinedChannelsOnly" })}
-                </MenuItem>
-              </>
+              <MenuItem
+                role="menuitemcheckbox"
+                aria-checked={joinedChannelsOnly}
+                trailing={joinedChannelsOnly ? <Check size={14} /> : null}
+                onClick={() => {
+                  updateJoinedChannelsOnly(!joinedChannelsOnly);
+                  closeSectionCtx();
+                }}
+              >
+                {formatMessage({ id: "layout.sidebar.showJoinedChannelsOnly" })}
+              </MenuItem>
             )}
+            <MenuItem
+              role="menuitemcheckbox"
+              aria-checked={hideEmptySections}
+              trailing={hideEmptySections ? <Check size={14} /> : null}
+              onClick={() => {
+                updateHideEmptySections(!hideEmptySections);
+                closeSectionCtx();
+              }}
+            >
+              {formatMessage({ id: "layout.sidebar.hideEmptySections" })}
+            </MenuItem>
             <ContextMenuDivider />
             {contextCustomSection && (
               <>
@@ -4604,7 +4829,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 </MenuItem>
               </>
             )}
-          </div>
+          </ContextMenuPopup>
         </>,
         document.body,
       )}
@@ -4612,12 +4837,12 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
       {sidebarSurfaceCtxMenu && createPortal(
         <>
           <DismissBackdrop onDismiss={closeSidebarSurfaceCtx} trapContextMenu />
-          <div
+          <ContextMenuPopup
             ref={sidebarSurfaceCtxMenuRef}
             role="menu"
             aria-label={formatMessage({ id: "layout.sidebar.sidebarOptionsAria" })}
             data-testid="sidebar-surface-context-menu"
-            className="fixed z-50 card-brutal w-64 overflow-hidden select-none"
+            className="fixed z-50 w-64 select-none"
             style={getSidebarContextMenuStyle(sidebarSurfaceCtxMenu)}
             onMouseDown={stopSidebarContextMenuPropagation}
           >
@@ -4653,7 +4878,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             >
               {formatMessage({ id: "layout.sidebar.newSectionMenu" })}
             </MenuItem>
-          </div>
+          </ContextMenuPopup>
         </>,
         document.body,
       )}
@@ -4669,9 +4894,9 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
           {ctxMenuClickShielded && (
             <DismissBackdrop onDismiss={closeCtx} zIndex={60} stopPropagation />
           )}
-          <div
+          <ContextMenuPopup
             ref={ctxMenuRef}
-            className="fixed z-50 card-brutal max-h-[calc(100vh-16px)] w-48 overflow-y-auto select-none"
+            className="fixed z-50 max-h-[calc(100vh-16px)] w-48 overflow-y-auto select-none"
             style={getSidebarContextMenuStyle(ctxMenu)}
             onMouseDown={stopSidebarContextMenuPropagation}
             onTouchStart={stopSidebarContextMenuPropagation}
@@ -4860,7 +5085,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             if (!human) return null;
             return (
               <MenuItem
-                icon={<MessageSquare size={14} />}
+                icon={<DirectMessageIcon width={14} height={14} />}
                 onClick={() => {
                   setCtxMenu(null);
                   void handleOpenHumanDm(human.userId);
@@ -4875,11 +5100,13 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
             const agent = agents.find((a) => a.id === ctxMenu.id);
             if (!agent) return null;
             const isOnline = selectAgentDisplayState(useAgentStore.getState(), agent.id, agent).isOnline;
+            // External agents have no managed runtime: no Start/Stop/Reset.
+            const isExternalAgent = agent.external === true || isExternalAgentRuntime(agent.runtime);
             const agentName = agent.displayName || agent.name;
             return (
               <>
                 <MenuItem
-                  icon={<MessageSquare size={14} />}
+                  icon={<DirectMessageIcon width={14} height={14} />}
                   onClick={() => {
                     setCtxMenu(null);
                     void handleOpenAgentDm(agent.id);
@@ -4887,7 +5114,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                 >
                   {formatMessage({ id: "layout.sidebar.message" })}
                 </MenuItem>
-                {capabilities.controlAgentRuntime && (
+                {capabilities.controlAgentRuntime && !isExternalAgent && (
                   <>
                     <ContextMenuDivider />
                     <MenuItem
@@ -4953,13 +5180,13 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
               </>
             );
           })()}
-          </div>
+          </ContextMenuPopup>
           {contextMovableItem && moveToSectionMenuOpen && (
-            <div
+            <ContextMenuPopup
               ref={setMoveToSectionMenuNode}
               role="menu"
               aria-label={formatMessage({ id: "layout.sidebar.moveToSection" })}
-              className="fixed z-[51] card-brutal max-h-[calc(100vh-16px)] w-56 overflow-y-auto select-none"
+              className="fixed z-[51] max-h-[calc(100vh-16px)] w-56 overflow-y-auto select-none"
               style={{
                 left: moveToSectionMenuPosition?.x ?? 0,
                 top: moveToSectionMenuPosition?.y ?? 0,
@@ -5016,7 +5243,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
                   {formatMessage({ id: "layout.sidebar.removeFromSection" })}
                 </MenuItem>
               )}
-            </div>
+            </ContextMenuPopup>
           )}
         </>,
         document.body

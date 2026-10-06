@@ -1,9 +1,28 @@
 import type { Server } from "socket.io";
 import { asServerId } from "@botiverse/raft-shared";
-import { canUserAccessChannel } from "./channelService.js";
-import { isMember } from "./serverService.js";
-import { fanoutWithAck } from "../socket/fanout.js";
-import { serializeErrorForLog } from "../tracing/safeErrorLog.js";
+import { attachJointChannelMetadata, canUserAccessChannel, getActiveJointChannelProjectionsByLocalChannel } from "./channelService";
+import { isMember } from "./serverService";
+import { fanoutWithAck } from "../socket/fanout";
+import { serializeErrorForLog } from "../tracing/safeErrorLog";
+import { socketServerAllRooms } from "../socket/platformScope";
+
+/**
+ * The one exit for "this joint channel changed": every active participant's
+ * projection gets `channel:updated` with fresh metadata. Every route that
+ * changes shared joint state (human or agent) goes through here (or
+ * emitJointLimitStateChange); channels.joint.api.test.ts walks each human
+ * route and fails if one is missed.
+ */
+export async function emitJointProjectionUpdates(io: Server | null | undefined, localChannelId: string) {
+  const projections = await getActiveJointChannelProjectionsByLocalChannel(localChannelId);
+  const projectionChannels = await attachJointChannelMetadata(
+    projections.map((projection) => ({ ...projection.channel, joined: true })),
+  );
+  for (const projection of projectionChannels) {
+    io?.to(`channel:${projection.id}`).emit("channel:updated", { channel: projection });
+  }
+  return projectionChannels;
+}
 
 /** Metadata and subscription grants have the same read authority. Address the
  * concrete socket IDs we checked so eviction during a DB await cannot grant a
@@ -39,7 +58,9 @@ export async function publishChannelUpdate<T extends { id: string; serverId: str
 export async function publishLocalChannelUpdate<T extends { id: string; serverId: string }>(
   io: Server, channel: T,
 ): Promise<void> {
-  const sockets = await io.local.in(`server:${channel.serverId}`).fetchSockets();
+  // Members and guests: guests are kept out of `server:<id>` (it carries
+  // metadata they may not read) but must still be granted channels they can read.
+  const sockets = await io.local.in(socketServerAllRooms(channel.serverId)).fetchSockets();
   const userIds = [...new Set(sockets.map((socket) => socket.data.userId).filter((id): id is string => typeof id === "string"))];
   const access = new Map<string, boolean>();
   await forEachBounded(userIds, ACCESS_CHECK_CONCURRENCY, async (userId) => {

@@ -1,13 +1,13 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { verifyScopeAttestation } from "../lib/scopeAttestation.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { signAccessToken } from "../middleware/auth";
+import { verifyScopeAttestation } from "../lib/scopeAttestation";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

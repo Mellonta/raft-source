@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 // Black-box regression guard for the task #169 global error boundary. Unlike
 // the DROP-TABLE middleware tests in servers.api.test.ts, this induces the
 // middleware-layer failure through a REAL client-reachable input path (no DB
@@ -14,8 +14,8 @@ import { createApiTest } from "../test/integration/apiTest.js";
 // caught by CI rather than by a client seeing raw SQL.
 import assert from "node:assert/strict";
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -57,11 +57,12 @@ async function login(baseUrl: string, email: string): Promise<string> {
   return (await res.json() as { accessToken: string }).accessToken;
 }
 
-// Malformed X-Server-Id (non-UUID) -> uuid cast error inside requireServer
-// (middleware layer) -> must be sanitized by the global boundary, not leaked.
+// Malformed path :id (non-UUID) -> 404 from requireServerMatchesParam before
+// any uuid-column query runs (task #12). The global boundary must not turn it
+// into a 500, and no internals may leak.
 // Path id and X-Server-Id use the SAME non-UUID value so requireServerMatchesParam
-// (header==path) passes and the request reaches the uuid-column query.
-test("malformed X-Server-Id is sanitized by the global error boundary (black-box, no raw DB error)", async ({ app }) => {
+// (header==path) passes the match check and reaches the UUID gate.
+test("malformed server :id is a clean 404, not a 500 (black-box, no raw DB error)", async ({ app }) => {
   const owner = await seedUser("hyg-blackbox-server@slock.test", "hyg-blackbox-server");
   const token = await login(app.baseUrl, owner.email);
   const malformed = "not-a-uuid";
@@ -70,14 +71,11 @@ test("malformed X-Server-Id is sanitized by the global error boundary (black-box
     headers: { Authorization: `Bearer ${token}`, "X-Server-Id": malformed },
   });
 
-  assert.equal(res.status, 500);
+  assert.equal(res.status, 404);
   const raw = await res.text();
-  assertNoLeak(raw, "malformed X-Server-Id");
-  const body = JSON.parse(raw) as { error: string; code?: string; correlationId?: string };
-  assert.equal(body.error, "Internal server error");
-  assert.equal(body.code, "internal_server_error");
-  assert.equal(typeof body.correlationId, "string");
-  assert.equal(res.headers.get("x-slock-error-id"), body.correlationId);
+  assertNoLeak(raw, "malformed server :id");
+  const body = JSON.parse(raw) as { error: string };
+  assert.equal(body.error, "Server not found");
 });
 
 // A mismatched X-Server-Id vs path id is a deliberate typed 4xx from

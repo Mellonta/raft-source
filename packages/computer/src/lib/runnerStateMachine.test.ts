@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   applyRunnerReset,
@@ -9,9 +8,9 @@ import {
   rehydrateRunnerRecord,
   RUNNER_TRIGGER,
   type RunnerRecord,
-} from "./runnerStateMachine.js";
-import { RUNNER_STATE_VALUES, type RunnerState } from "./state.js";
-import type { ChildExitClass } from "../service.js";
+} from "./runnerStateMachine";
+import { RUNNER_STATE_VALUES, type RunnerState } from "./state";
+import type { ChildExitClass } from "../service";
 
 // Runner supervision state machine (RFC v9.8 §3.2 transition surface).
 //

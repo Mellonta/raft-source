@@ -4,13 +4,13 @@
 // longer imports the lib/api facade (import-cycle decycle R0,
 // #wg-raft-computer:18ab6541). Output remains adapter-owned, and the
 // RunStartDeps/RunStopDeps shapes are preserved for the existing test harness.
-import { resolveRaftHome, serverRunnerLogPath, serviceLogPath } from "./paths.js";
-import { info, present } from "./output.js";
-import { createComputerApi } from "./lib/api.js";
-import { isProcessAlive, readPidfileAt } from "./internal/process-primitives.js";
-import type { ResidentCoreFactory, spawnDetachedService } from "./service.js";
-import type { MacosHostLifecycleDeps } from "./macosLoginCarrier.js";
-import type { convergeCliHostLifecycle } from "./macosLoginCarrier.js";
+import { resolveRaftHome, serverRunnerLogPath, serviceLogPath } from "./paths";
+import { info, present } from "./output";
+import { createComputerApi } from "./lib/api";
+import { isProcessAlive, readPidfileAt } from "./internal/process-primitives";
+import type { ResidentCoreFactory, spawnDetachedService } from "./service";
+import type { MacosHostLifecycleDeps } from "./macosLoginCarrier";
+import type { convergeCliHostLifecycle } from "./macosLoginCarrier";
 
 type RunStartDeps = {
   coreFactory?: ResidentCoreFactory;
@@ -117,8 +117,16 @@ export async function runStart(
               serverRunnerLogPath(slockHome, serverId),
             ),
           };
+        } else if (event.kind === "start.skipped_unlinked") {
+          for (const serverId of event.serverIds) {
+            info(
+              `Skipped ${serverId}: the server unlinked this Computer. Run \`raft-computer setup ${serverId}\` to reconnect it.`,
+            );
+          }
         } else if (event.kind === "start.ready") {
           info(formatReadySummary(event.ready, event.managedTargets, opts));
+        } else if (event.kind === "host_lifecycle.skipped") {
+          info(`Note: macOS startup cleanup skipped (${event.code ?? event.message}); ${event.operation} continues.`);
         }
       },
       {
@@ -204,6 +212,8 @@ export async function runStop(deps: RunStopDeps = {}): Promise<void> {
           info(`Service not running (cleared stale pidfile for pid ${event.pid}).`);
         } else if (event.kind === "stop.stopped") {
           info(`Stopped service (pid ${event.pid}).`);
+        } else if (event.kind === "host_lifecycle.skipped") {
+          info(`Note: macOS startup cleanup skipped (${event.code ?? event.message}); ${event.operation} continues.`);
         }
       },
       {

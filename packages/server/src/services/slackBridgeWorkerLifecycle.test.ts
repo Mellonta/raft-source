@@ -1,4 +1,3 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 import {
   applySlackBridgeWorkerEvent,
@@ -10,7 +9,7 @@ import {
   type SlackBridgePersistentWorkerClock,
   type SlackBridgeProbeRequest,
   type SlackBridgeWorkerCommand,
-} from "./slackBridgeWorkerLifecycle.js";
+} from "./slackBridgeWorkerLifecycle";
 
 const nowMs = Date.parse("2026-08-11T02:30:00.000Z");
 

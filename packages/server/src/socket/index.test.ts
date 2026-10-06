@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { parseSocketHandshakeAuth } from "./index.js";
+import { parseSocketHandshakeAuth, requiresSocketChannelAccessCheck } from "./index";
+
+test("socket join access check treats joint channels as explicit-membership surfaces", () => {
+  assert.equal(requiresSocketChannelAccessCheck("channel"), true);
+  assert.equal(requiresSocketChannelAccessCheck("private"), true);
+  assert.equal(requiresSocketChannelAccessCheck("joint"), true);
+  assert.equal(requiresSocketChannelAccessCheck("dm"), true);
+  assert.equal(requiresSocketChannelAccessCheck("thread"), true);
+  assert.equal(requiresSocketChannelAccessCheck("future-channel-type"), true);
+});
 
 test("socket handshake auth parser accepts current web auth shape", () => {
   assert.deepEqual(parseSocketHandshakeAuth({ token: "access-token", serverId: "server-1" }), {

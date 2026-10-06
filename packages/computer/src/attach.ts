@@ -5,10 +5,10 @@
 // SINK (`onEvent`) that maps attach events → `info()` lines, and `present()`
 // maps a thrown `ComputerError` → the shared stderr error contract. All §6/§9
 // closed-set codes and user-visible info() strings stay byte-identical.
-import { info, present } from "./output.js";
-import { resolveRaftHome } from "./paths.js";
-import { formatServerSlugDisplay } from "./serverState.js";
-import { createComputerApi } from "./lib/api.js";
+import { info, present } from "./output";
+import { resolveRaftHome } from "./paths";
+import { formatServerSlugDisplay } from "./serverState";
+import { createComputerApi } from "./lib/api";
 
 export async function runAttach(opts: {
   serverSlug: string;

@@ -114,12 +114,13 @@ test.describe("P0 thread task status sync from main panel", () => {
 
     // Find the TaskCard subtree for our task (board view).
     // Locate the unique TaskCard via a locator that walks up from the title
-    // text to the card's bordered container (TaskCard.tsx wraps in a
-    // `.shadow-brutal-sm` div). `.first()` on a bare `hasText` filter would
-    // match any ancestor and trip strict mode when prior tests pollute the
-    // DB with same-channel tasks.
+    // text to the card's root element. Since the RUI migration (#7347) the
+    // card root is the raft-ui TaskCard, identified by `data-slot="task-card"`
+    // (previously a `.shadow-brutal-sm` div). `.first()` on a bare `hasText`
+    // filter would match any ancestor and trip strict mode when prior tests
+    // pollute the DB with same-channel tasks.
     const taskTitle = page.getByTestId("channel-task-panel").getByText(tag, { exact: true });
-    const taskCard = taskTitle.locator("xpath=ancestor::div[contains(@class, 'shadow-brutal-sm')][1]");
+    const taskCard = taskTitle.locator("xpath=ancestor::*[@data-slot='task-card'][1]");
     await expect(taskCard).toBeVisible();
 
     // Open the side thread from the HOST MESSAGE, not the task title.
@@ -183,7 +184,7 @@ test.describe("P0 thread task status sync from main panel", () => {
     await page.getByTestId("channel-task-view-list").click();
 
     const taskTitle = page.getByTestId("channel-task-panel").getByText(tag, { exact: true });
-    const taskCard = taskTitle.locator("xpath=ancestor::div[contains(@class, 'shadow-brutal-sm')][1]");
+    const taskCard = taskTitle.locator("xpath=ancestor::*[@data-slot='task-card'][1]");
     await expect(taskCard).toBeVisible();
 
     // Open the side thread from the HOST MESSAGE, not the task title.
@@ -246,7 +247,7 @@ test.describe("P0 thread task status sync from main panel", () => {
     await expect(page.getByTestId("channel-task-panel")).toBeVisible();
 
     const taskTitle = page.getByTestId("channel-task-panel").getByText(tag, { exact: true });
-    const taskCard = taskTitle.locator("xpath=ancestor::div[contains(@class, 'shadow-brutal-sm')][1]");
+    const taskCard = taskTitle.locator("xpath=ancestor::*[@data-slot='task-card'][1]");
     await expect(taskCard).toBeVisible();
     await openSideThreadFromHostMessage(page, seedState.channel.id, hostMessageId);
 

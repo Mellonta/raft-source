@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv.js";
+import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv";
 
 test("Windows PowerShell child env removes every PSModulePath case variant without mutating the source", () => {
   const source: NodeJS.ProcessEnv = {

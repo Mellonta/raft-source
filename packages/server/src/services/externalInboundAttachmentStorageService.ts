@@ -4,23 +4,29 @@ import { Readable } from "node:stream";
 import { currentDate } from "@botiverse/raft-shared";
 import { and, eq } from "drizzle-orm";
 
-import type { Database, DatabaseTransaction } from "../db/index.js";
+import { isAttachmentOriginalStorageV2EnabledForServer } from "../config/attachmentOriginalStorage";
+import type { Database, DatabaseTransaction } from "../db/index";
 import {
   attachmentObjects,
   attachments,
+  attachmentTransferArtifacts,
   attachmentTransferIntents,
   type AttachmentUploaderType,
-} from "../db/schema.js";
-import { withFileUploadQuota } from "./fileUploadQuotaService.js";
+} from "../db/schema";
+import { withFileUploadQuota } from "./fileUploadQuotaService";
 import {
   createIdempotentPendingAttachmentProjectionForExistingObjectWithExecutor,
   createIdempotentPendingAttachmentProjectionWithExecutor,
-} from "./attachmentProjectionWriterService.js";
+} from "./attachmentProjectionWriterService";
 import {
   buildAttachmentTransferArtifactPlan,
   createAttachmentTransferIntent,
-} from "./attachmentTransferIntentService.js";
-import type { StorageBackend } from "./storageService.js";
+} from "./attachmentTransferIntentService";
+import {
+  buildLegacyServerAttachmentStorageKey,
+  buildServerAttachmentStorageKey,
+  type StorageBackend,
+} from "./storageService";
 
 export const EXTERNAL_INBOUND_ATTACHMENT_INTENT_TTL_MS = 15 * 60_000;
 
@@ -115,7 +121,33 @@ export async function storeExternalInboundAttachment(
   const projectionId = deterministicUuid("external-attachment-projection-v1", input.messageFactId);
   const objectId = deterministicUuid("external-attachment-object-v2", input.messageFactId);
   const transferIntentId = deterministicUuid("external-attachment-intent-v2", input.messageFactId);
-  const storageKey = `${input.serverId}/${projectionId}${safeExtension(input.filename)}`;
+  const extension = safeExtension(input.filename);
+  const legacyStorageKey = buildLegacyServerAttachmentStorageKey(input.serverId, projectionId, extension);
+  const currentStorageKey = buildServerAttachmentStorageKey(
+    input.serverId,
+    projectionId,
+    objectId,
+    extension,
+  );
+  const [persistedOriginal] = await input.db.select({ storageKey: attachmentTransferArtifacts.storageKey })
+    .from(attachmentTransferArtifacts)
+    .where(and(
+      eq(attachmentTransferArtifacts.intentId, transferIntentId),
+      eq(attachmentTransferArtifacts.role, "original"),
+    ))
+    .limit(1);
+  if (
+    persistedOriginal
+    && persistedOriginal.storageKey !== legacyStorageKey
+    && persistedOriginal.storageKey !== currentStorageKey
+  ) {
+    throw new Error("External inbound attachment replay conflicts with its storage route");
+  }
+  const storageKey = persistedOriginal?.storageKey ?? (
+    await isAttachmentOriginalStorageV2EnabledForServer(input.serverId, input.db)
+      ? currentStorageKey
+      : legacyStorageKey
+  );
   const existing = await input.db.select({
     projection: attachments,
     object: attachmentObjects,

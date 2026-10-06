@@ -175,20 +175,21 @@ type AppliedCountFn = () => Promise<number | null>;
 
 /**
  * SQLSTATEs that represent a transient CONCURRENCY loss rather than a defect in
- * the migration itself. 40P01 (deadlock_detected) and 40001
- * (serialization_failure) both mean "another live session won a lock race" —
- * Postgres aborted *our* transaction to break the cycle, and the identical
- * statement is expected to succeed once the other session commits. Every other
- * SQLSTATE is a real defect (bad SQL, missing relation, constraint violation)
- * and MUST fail on the first attempt: retrying those would convert a genuine
- * error into an accidental success and hide it.
+ * the migration itself. 40P01 (deadlock_detected), 40001
+ * (serialization_failure), and 55P03 (lock_not_available, including a bounded
+ * lock_timeout) mean another live session won a concurrency race. PostgreSQL
+ * aborted *our* transaction, and the identical phase is expected to succeed
+ * once the holder commits. Every other SQLSTATE is a real defect (bad SQL,
+ * missing relation, constraint violation) and MUST fail on the first attempt:
+ * retrying those would convert a genuine error into an accidental success and
+ * hide it.
  */
-const RETRYABLE_MIGRATION_SQLSTATES: ReadonlySet<string> = new Set(["40P01", "40001"]);
+const RETRYABLE_MIGRATION_SQLSTATES: ReadonlySet<string> = new Set(["40P01", "40001", "55P03"]);
 
-/** Budget for a deadlock retry. The whole phase rolls back on failure, so one
- * attempt costs a full re-run; the budget is deliberately small and the first
- * retry is delayed long enough for the lock holder to commit. Environment
- * overrides exist so the real-Postgres tooth can drive a fast run. */
+/** Budget for a transient concurrency retry. The whole phase rolls back on
+ * failure, so one attempt costs a full re-run; the budget is deliberately small
+ * and the first retry is delayed long enough for the lock holder to commit.
+ * Environment overrides exist so the real-Postgres tooth can drive a fast run. */
 export const MIGRATION_RETRY_MAX_ATTEMPTS = readPositiveIntEnv("SERVER_MIGRATION_RETRY_MAX_ATTEMPTS", 3);
 export const MIGRATION_RETRY_BASE_DELAY_MS = readPositiveIntEnv("SERVER_MIGRATION_RETRY_BASE_DELAY_MS", 2_000);
 
@@ -229,7 +230,7 @@ function retryDelayMs(attempt: number, baseDelayMs: number): number {
  * accounting: with N rows recorded in drizzle.__drizzle_migrations, journal[N]
  * is the migration that was in flight.
  *
- * A transient concurrency SQLSTATE (40P01/40001) is retried within a bounded
+ * A transient concurrency SQLSTATE (40P01/40001/55P03) is retried within a bounded
  * budget, because a failed phase rolls back wholesale — re-running from the
  * phase boundary is safe and is exactly the observable retry the deploy path
  * previously lacked. Each attempt emits its own reason= line so CloudWatch

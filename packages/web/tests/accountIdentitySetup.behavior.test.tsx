@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 // The page now calls useIntl(), so every mount needs the intl context. Using the

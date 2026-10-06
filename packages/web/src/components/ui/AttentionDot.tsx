@@ -37,6 +37,8 @@ type SpanPassthroughProps = HTMLAttributes<HTMLSpanElement> &
  * what makes the dot read as an "attention chip" rather than a decorative
  * pixel — don't drop it even at `sm`.
  */
+import Tooltip from "./Tooltip";
+
 export interface AttentionDotProps extends Omit<SpanPassthroughProps, "children"> {
   /** Size variant. `lg` (default) = `size-2.5` — canonical attention
    *  dot, use everywhere by default. `sm` = `size-1` — compact-only,
@@ -60,12 +62,21 @@ export default function AttentionDot({
   size = "lg",
   tone = "bg-brutal-pink",
   className,
+  title,
   ...rest
 }: AttentionDotProps) {
-  return (
+  // Theme-aware: brutal keeps the canonical pink dot with its hard black
+  // ring (production parity); elegant themes use the semantic accent dot
+  // with no border (RUI AppRail indicator style). Warning-kind tones map to
+  // the semantic warning color in elegant instead of the brutal literal.
+  const elegantTone = tone.includes("orange") ? "bg-warning" : "bg-accent";
+  const dot = (
     <span
       {...rest}
-      className={`inline-block shrink-0 rounded-full border border-black ${SIZE_CLASS[size]} ${tone} ${className ?? ""}`}
+      className={`inline-block shrink-0 rounded-full ${SIZE_CLASS[size]} ${elegantTone} theme-brutal:border theme-brutal:border-black theme-brutal:${tone} ${className ?? ""}`}
     />
   );
+  // Native title= on a span is only a hover tooltip; route it through the RUI
+  // Tooltip so it follows the theme recipe (title= migration, task #595).
+  return title ? <Tooltip content={title}>{dot}</Tooltip> : dot;
 }

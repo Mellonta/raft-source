@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { parse, TYPE } from "@formatjs/icu-messageformat-parser";
 import type { MessageFormatElement } from "@formatjs/icu-messageformat-parser";
 import { createIntl } from "react-intl";
 import { AGENT_MIGRATION_USER_ERROR_CODES } from "@botiverse/raft-shared";
 
-import { migrationErrorPresentation } from "../src/utils/migrationErrorPresentation";
+import {
+  conventionalAgentWorkspacePath,
+  migrationAbortDetailMessageId,
+  migrationErrorPresentation,
+} from "../src/components/agentMigration/errors";
 import { en as enMessages } from "../src/i18n/messages/en";
 import { zhCn as zhMessages } from "../src/i18n/messages/zh-cn";
 
@@ -99,7 +102,20 @@ test("every shared user-error code resolves to specific presentation copy", () =
     context: "failed",
   }, intl.formatMessage).message;
 
+  // Faults whose only remedy is a retry deliberately share the generic line.
+  const retryOnly = new Set([
+    "MIGRATION_CHUNK_DIGEST_MISMATCH",
+    "MIGRATION_WHOLE_BUNDLE_DIGEST_MISMATCH",
+    "MIGRATION_LEASE_EXPIRED",
+    "MIGRATION_GENERATION_STALE",
+  ]);
   for (const code of AGENT_MIGRATION_USER_ERROR_CODES) {
+    if (retryOnly.has(code)) {
+      const presentation = migrationErrorPresentation({ code, context: "failed" }, intl.formatMessage);
+      assert.equal(presentation.message, generic, `${code} should use the plain retry line`);
+      assert.equal(presentation.technicalCode, code, `${code} lost its support identifier`);
+      continue;
+    }
     const presentation = migrationErrorPresentation({ code, context: "failed" }, intl.formatMessage);
     assert.notEqual(presentation.message, generic, `${code} fell through to the generic copy`);
     assert.equal(presentation.technicalCode, code, `${code} lost its support identifier`);
@@ -154,13 +170,13 @@ test("the optional clause is an ICU select, not a concatenated fragment", () => 
     rawMessage: "x:maxBytes=3221225472:topEntries=.git%2F,2147483648",
     context: "failed",
   }, intl.formatMessage);
-  assert.match(withItems.message, /Largest workspace items before compression: \.git\/ \(2 GiB\)\./);
+  assert.match(withItems.message, /Largest items: \.git\/ \(2 GiB\)\./);
   const withoutItems = migrationErrorPresentation({
     code: "MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE",
     rawMessage: "x:maxBytes=3221225472",
     context: "failed",
   }, intl.formatMessage);
-  assert.doesNotMatch(withoutItems.message, /Largest workspace items/);
+  assert.doesNotMatch(withoutItems.message, /Largest items/);
   assert.doesNotMatch(withoutItems.message, /none/, "the select sentinel leaked into the output");
 
   // BOTH id variants must render the clause, not just the one the first fixture
@@ -173,15 +189,15 @@ test("the optional clause is an ICU select, not a concatenated fragment", () => 
     rawMessage: "x:topEntries=.git%2F,2147483648",
     context: "failed",
   }, intl.formatMessage);
-  assert.match(noLimitWithItems.message, /exceeds the size limit\./);
-  assert.match(noLimitWithItems.message, /Largest workspace items before compression: \.git\/ \(2 GiB\)\./);
+  assert.match(noLimitWithItems.message, /too large to move\./);
+  assert.match(noLimitWithItems.message, /Largest items: \.git\/ \(2 GiB\)\./);
   // …and the manifest pair, for the same reason.
   const manifestNoCount = migrationErrorPresentation({
     code: "MIGRATION_OBJECT_STORE_MANIFEST_TOO_LARGE",
     rawMessage: "x:topPaths=.git%2F,34214",
     context: "failed",
   }, intl.formatMessage);
-  assert.match(manifestNoCount.message, /Most entries are under: \.git\/ \(34,214 entries\)\./);
+  assert.match(manifestNoCount.message, /Most are in \.git\/ \(34,214\)\./);
 });
 
 test("counts group per locale, including the ones nested in the path list", () => {
@@ -192,8 +208,8 @@ test("counts group per locale, including the ones nested in the path list", () =
     rawMessage: "x:entryCount=97079:topPaths=.git%2F,34214",
     context: "failed",
   }, intl.formatMessage);
-  assert.match(p.message, /\(97,079 entries\)/, "top-level count lost grouping");
-  assert.match(p.message, /\.git\/ \(34,214 entries\)/, "nested count lost grouping");
+  assert.match(p.message, /\(97,079\)/, "top-level count lost grouping");
+  assert.match(p.message, /\.git\/ \(34,214\)/, "nested count lost grouping");
 });
 
 test("zh renders Chinese, and keeps the technical code untranslated", () => {
@@ -257,4 +273,183 @@ test("zh follows the vocabulary rulings", () => {
     assert.ok(!containsUntranslatedComputer(zh[id]),
       `${id} left "computer" untranslated`);
   }
+});
+
+// Task #229 — prep-deadline copy.
+//
+// Two properties this file now protects, both of which the previous sentence
+// broke:
+//
+//  1. The prep window slides while the source reports progress, so no fixed
+//     duration may be stated in copy.
+//  2. `prep-deadline` means the source stopped making progress: it went
+//     offline or packing stalled. The copy must not assert "large workspace"
+//     as the cause; a large workspace that keeps packing no longer aborts.
+
+const PREP_IDS = [
+  "agent.detail.migrationAbortedPrepDeadline",
+  "agent.detail.migrationAbortedPrepDeadlineAt",
+] as const;
+
+test("the prep-deadline variant is chosen by whether a deadline actually arrived", () => {
+  assert.equal(
+    migrationAbortDetailMessageId("prep-deadline", true),
+    "agent.detail.migrationAbortedPrepDeadlineAt",
+  );
+  assert.equal(
+    migrationAbortDetailMessageId("prep-deadline", false),
+    "agent.detail.migrationAbortedPrepDeadline",
+  );
+  // The realtime payload carries no deadline, so "absent" is a normal state,
+  // not an error path: it must still produce prep copy, never the fallback.
+  assert.notEqual(
+    migrationAbortDetailMessageId("prep-deadline", false),
+    "agent.detail.migrationAbortedFallback",
+  );
+});
+
+test("other abort reasons are untouched by the prep-deadline split", () => {
+  assert.equal(
+    migrationAbortDetailMessageId("transfer-deadline", false),
+    "agent.detail.migrationAbortedTransferDeadline",
+  );
+  assert.equal(
+    migrationAbortDetailMessageId("arrival-deadline", true),
+    "agent.detail.migrationAbortedArrivalDeadline",
+  );
+  assert.equal(
+    migrationAbortDetailMessageId("who-knows", true),
+    "agent.detail.migrationAbortedFallback",
+  );
+  assert.equal(
+    migrationAbortDetailMessageId(null, false),
+    "agent.detail.migrationAbortedFallback",
+  );
+});
+
+test("no prep-deadline copy states a fixed duration", () => {
+  for (const id of PREP_IDS) {
+    for (const [locale, catalog] of [["en", en], ["zh", zh]] as const) {
+      const copy = catalog[id];
+      assert.ok(copy, `${locale} is missing ${id}`);
+      assert.ok(
+        !/\b\d+\s*(minutes?|mins?|seconds?|hours?)\b/i.test(copy) && !/\d+\s*(分钟|秒|小时)/.test(copy),
+        `${locale} ${id} hard-codes a duration, but the window is caller-overridable: ${copy}`,
+      );
+    }
+  }
+});
+
+test("prep-deadline copy offers both causes and a recovery", () => {
+  for (const id of PREP_IDS) {
+    assert.match(en[id]!, /offline/i, `en ${id} drops the "source offline" cause`);
+    assert.match(en[id]!, /stalled/i, `en ${id} drops the "packing stalled" cause`);
+    assert.match(en[id]!, /try again/i, `en ${id} drops the recovery`);
+    assert.doesNotMatch(en[id]!, /raft migrate/, `en ${id} points at a removed CLI command`);
+    assert.match(zh[id]!, /离线/, `zh ${id} drops the "source offline" cause`);
+    assert.match(zh[id]!, /卡住/, `zh ${id} drops the "packing stalled" cause`);
+    assert.match(zh[id]!, /重试/, `zh ${id} drops the recovery`);
+  }
+});
+
+test("prep-deadline copy no longer leads with workspace size as the cause", () => {
+  // "Large workspaces can take longer" is about duration, not diagnosis; placed
+  // first it was read as the root cause. Size may not be asserted at all here —
+  // nothing in the record establishes it.
+  assert.ok(!/large workspace/i.test(en["agent.detail.migrationAbortedPrepDeadline"]!));
+  assert.ok(!/large workspace/i.test(en["agent.detail.migrationAbortedPrepDeadlineAt"]!));
+  assert.ok(!/大型工作区|工作区.*过大/.test(zh["agent.detail.migrationAbortedPrepDeadline"]!));
+  assert.ok(!/大型工作区|工作区.*过大/.test(zh["agent.detail.migrationAbortedPrepDeadlineAt"]!));
+});
+
+test("the dated variant renders the deadline it is given, in both locales", () => {
+  const values = { source: "isolani-awl", target: "koala-fife", deadline: "2026-09-13 09:45" };
+  const rendered = intl.formatMessage({ id: "agent.detail.migrationAbortedPrepDeadlineAt" }, values);
+  assert.match(rendered, /2026-09-13 09:45/);
+  assert.match(rendered, /isolani-awl/);
+  const zhRendered = zhIntl.formatMessage({ id: "agent.detail.migrationAbortedPrepDeadlineAt" }, values);
+  assert.match(zhRendered, /2026-09-13 09:45/);
+  assert.match(zhRendered, /isolani-awl/);
+  // The undated variant must not leave an empty parenthetical behind.
+  const undated = intl.formatMessage(
+    { id: "agent.detail.migrationAbortedPrepDeadline" },
+    { source: "isolani-awl", target: "koala-fife" },
+  );
+  assert.ok(!/\(\s*\)/.test(undated), `empty parenthetical in undated copy: ${undated}`);
+});
+
+// Workspace-conflict recovery guidance. @artin hit MIGRATION_WORKSPACE_ALREADY_EXISTS
+// on a real migration and asked the question the old copy could not answer:
+// "应该给用户一个恢复指南吧，比如说去移除哪个文件夹？不然我要怎么知道怎么修复呢".
+const WORKSPACE_CONFLICTS = [
+  ["MIGRATION_WORKSPACE_ALREADY_EXISTS", /already exists|There is a workspace/, /已(经)?存在|已有工作区/],
+  ["MIGRATION_WORKSPACE_COMPLETE_OLD_COPY", /previously completed|completed copy/, /之前已完成|上一次迁移留下的完整副本/],
+] as const;
+
+for (const [code, enMarker, zhMarker] of WORKSPACE_CONFLICTS) {
+  for (const [locale, fm, marker, rename, promise, hedge] of [
+    ["en", intl.formatMessage, enMarker, /Rename or move that folder/, /Raft never deletes it/, /appending \.(bak|old) to its name/],
+    ["zh-cn", zhIntl.formatMessage, zhMarker, /改名或移走/, /Raft 不会删除它/, /在名字后面加个 \.(bak|old)/],
+  ] as const) {
+    test(`${code} names where to look, in ${locale}`, () => {
+      const message = migrationErrorPresentation({
+        code,
+        context: "failed",
+        agentWorkspacePath: "~/.slock/agents/agent-1/workspace",
+      }, fm).message;
+
+      assert.match(message, marker, "the original diagnosis must survive");
+      // The whole point: the user is given a location instead of guessing.
+      assert.ok(
+        message.includes("~/.slock/agents/agent-1/workspace"),
+        `expected the workspace path in: ${message}`,
+      );
+      // Rename/move, never delete. This error fires precisely when two copies
+      // exist and the user does not yet know which is current, so a
+      // copy-pasteable delete is the one instruction that can destroy the answer.
+      assert.match(message, rename);
+      assert.doesNotMatch(message, /\brm -rf\b|\bdelete the\b/);
+      // The promise that made the old copy safe must not be dropped.
+      assert.match(message, promise);
+      // @AngLee: the caution must point at the specific action ("before you move
+      // it"), not a vague "before you act" — a reader needs to know where to
+      // pause, and a vague one just manufactures hesitation.
+      assert.match(message, /before you move it|移走前/);
+      // @AngLee: "rename or move" offers two actions but the parenthetical only
+      // demonstrates renaming, so it must be marked as ONE option — otherwise a
+      // reader takes "append .bak" as the whole instruction and never sees that
+      // moving the folder elsewhere is equally fine.
+      assert.match(message, /for example, appending|比如在名字后面/);
+      // The remedy must be concrete enough to act on without a second guess.
+      // @artin, reading the first version: "你这个提示我的不明不白的，到底要我干嘛".
+      // The hedge that used to sit here ("the exact location differs if that
+      // computer uses a different Raft home") was removed at their instruction:
+      // it undercut the one actionable fact in the message. It is safe to drop
+      // because the instruction is rename/move only -- if the path is not there,
+      // the user finds nothing, which is not a destructive outcome.
+      assert.match(message, hedge);
+    });
+
+    test(`${code} stays usable in ${locale} when no path is known`, () => {
+      // Negative control for the variant switch: with no path the sentence must
+      // fall back cleanly rather than render a hole.
+      const message = migrationErrorPresentation({ code, context: "failed" }, fm).message;
+      assert.match(message, marker);
+      assert.doesNotMatch(message, /\{path\}/);
+      assert.doesNotMatch(message, /undefined|null/);
+    });
+  }
+}
+
+// Regression: the agent workspace IS `<agentsDataDir>/<agentId>`, with no
+// `workspace` subdirectory. I invented that suffix, shipped it, and artin found
+// it by running `ls` on the real machine — the copy pointed at a path that does
+// not exist. The helper is asserted directly so a future "tidy-up" cannot put
+// the suffix back without this failing by name.
+test("the workspace hint has no invented subdirectory", () => {
+  const path = conventionalAgentWorkspacePath("b30ae06b-e0b4-4624-9b89-2e6ddde2589b");
+  assert.equal(path, "~/.slock/agents/b30ae06b-e0b4-4624-9b89-2e6ddde2589b");
+  assert.doesNotMatch(path ?? "", /\/workspace$/);
+  assert.equal(conventionalAgentWorkspacePath(""), null);
+  assert.equal(conventionalAgentWorkspacePath(null), null);
 });

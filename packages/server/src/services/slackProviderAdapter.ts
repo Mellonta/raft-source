@@ -4,7 +4,7 @@ import {
   currentDate,
   setClockTimeout,
 } from "@botiverse/raft-shared";
-import type { SealedExternalCredential } from "./externalAppControlPlaneService.js";
+import type { SealedExternalCredential } from "./externalAppControlPlaneService";
 import {
   ExternalAppIngressError,
   verifyAndAdmitSlackIngress,
@@ -12,8 +12,8 @@ import {
   type ExternalIngressRuntimeResolver,
   type ExternalIngressSecretResolver,
   type SlackIngressAdmission,
-} from "./externalAppIngressService.js";
-import type { SlackBridgeRenderSnapshot } from "./externalDeliveryOutboxService.js";
+} from "./externalAppIngressService";
+import type { SlackBridgeRenderSnapshot } from "./externalDeliveryOutboxService";
 
 export const SLACK_PROVIDER_ADAPTER_CONTRACT_VERSION =
   "slack-provider-adapter.v1" as const;
@@ -621,8 +621,11 @@ function buildPostMessageRequest(input: {
       },
     },
   };
-  if (snapshot.authorPolicy.avatar) body.icon_url = snapshot.authorPolicy.avatar.publicUrl;
-  else body.icon_emoji = snapshot.senderType === "agent" ? ":robot_face:" : ":bust_in_silhouette:";
+  if (snapshot.authorPresentation.avatar) {
+    body.icon_url = snapshot.authorPresentation.avatar.publicUrl;
+  } else {
+    body.icon_emoji = snapshot.senderType === "agent" ? ":robot_face:" : ":bust_in_silhouette:";
+  }
   if (input.providerThreadId) body.thread_ts = input.providerThreadId;
   return {
     method: "chat.postMessage",
@@ -733,6 +736,7 @@ export type SlackOAuthExchangeTransportResult =
       providerTeamId: string;
       providerEnterpriseId: string | null;
       providerUserId: string;
+      installerIsWorkspaceAdmin: true;
       botUserId: string;
       providerBotId: string | null;
       workspaceName: string | null;
@@ -1035,11 +1039,13 @@ export interface SlackOAuthHttpTransportDependencies {
   cancelTimeout?: (timeout: unknown) => void;
   endpoint?: string;
   authTestEndpoint?: string;
+  userInfoEndpoint?: string;
   timeoutMs?: number;
   maxResponseBytes?: number;
 }
 
 const DEFAULT_SLACK_AUTH_TEST_ENDPOINT = "https://slack.com/api/auth.test";
+const DEFAULT_SLACK_USER_INFO_ENDPOINT = "https://slack.com/api/users.info";
 
 export type SlackOAuthExchangeOutcome =
   | Extract<SlackOAuthExchangeTransportResult, { kind: "authorized" }>
@@ -1168,12 +1174,14 @@ export function createSlackOAuthHttpTransport(
   const cancelTimeout = dependencies.cancelTimeout ?? clearClockTimeout;
   const endpoint = dependencies.endpoint ?? DEFAULT_SLACK_OAUTH_ENDPOINT;
   const authTestEndpoint = dependencies.authTestEndpoint ?? DEFAULT_SLACK_AUTH_TEST_ENDPOINT;
+  const userInfoEndpoint = dependencies.userInfoEndpoint ?? DEFAULT_SLACK_USER_INFO_ENDPOINT;
   const timeoutMs = dependencies.timeoutMs ?? DEFAULT_SLACK_OAUTH_TIMEOUT_MS;
   const maxResponseBytes = dependencies.maxResponseBytes
     ?? DEFAULT_SLACK_OAUTH_MAX_RESPONSE_BYTES;
   if (
     !validSlackOAuthEndpoint(endpoint)
     || !validSlackOAuthEndpoint(authTestEndpoint)
+    || !validSlackOAuthEndpoint(userInfoEndpoint)
     || !validPositiveLimit(timeoutMs)
     || !validPositiveLimit(maxResponseBytes)
   ) {
@@ -1321,6 +1329,54 @@ export function createSlackOAuthHttpTransport(
           return { kind: "transport_failure", phase: "after_send" };
         }
 
+        // A shared workspace credential can authorize channel partitions for
+        // multiple Raft servers. The installer must therefore be a current
+        // workspace administrator, not merely a member who can see one
+        // channel. Verify the exact OAuth human with the newly issued bot
+        // token before persisting or rotating the shared credential.
+        const userInfoResponse = await fetchImpl(userInfoEndpoint, {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            authorization: `Bearer ${accessToken}`,
+            "content-type": "application/x-www-form-urlencoded",
+          },
+          body: new URLSearchParams({ user: providerUserId }),
+          redirect: "error",
+          signal: controller.signal,
+        });
+        const userInfoText = await readBoundedSlackOAuthBody(userInfoResponse, maxResponseBytes);
+        if (
+          userInfoText === null
+          || userInfoResponse.status < 200
+          || userInfoResponse.status >= 300
+        ) {
+          return { kind: "transport_failure", phase: "after_send" };
+        }
+        let userInfoBody: Record<string, unknown> | null;
+        try {
+          userInfoBody = slackOAuthObject(JSON.parse(userInfoText));
+        } catch {
+          userInfoBody = null;
+        }
+        const installer = slackOAuthObject(userInfoBody?.user);
+        if (
+          userInfoBody?.ok !== true
+          || !installer
+          || slackOAuthString(installer?.id) !== providerUserId
+          || installer?.deleted === true
+          || installer?.is_bot === true
+        ) {
+          return { kind: "transport_failure", phase: "after_send" };
+        }
+        if (
+          installer.is_admin !== true
+          && installer.is_owner !== true
+          && installer.is_primary_owner !== true
+        ) {
+          return { kind: "rejected", error: "installer_not_workspace_admin" };
+        }
+
         let sealedCredential: SealedExternalCredential;
         try {
           sealedCredential = await dependencies.credentialSealer.seal({
@@ -1348,6 +1404,7 @@ export function createSlackOAuthHttpTransport(
           providerTeamId,
           providerEnterpriseId: slackOAuthString(enterprise?.id),
           providerUserId,
+          installerIsWorkspaceAdmin: true,
           botUserId,
           providerBotId: authBotId,
           workspaceName: slackOAuthString(team?.name),
@@ -1408,6 +1465,9 @@ export function normalizeSlackOAuthExchangeResult(input: {
   }
   if (input.result.providerAppId !== input.request.expectedProviderAppId) {
     return { kind: "identity_conflict", reason: "app" };
+  }
+  if (input.result.installerIsWorkspaceAdmin !== true) {
+    return { kind: "deterministic_failure", reason: "provider_rejected" };
   }
   if (input.result.providerEnterpriseId !== null) {
     return { kind: "identity_conflict", reason: "enterprise" };

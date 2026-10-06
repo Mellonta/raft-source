@@ -1,0 +1,20 @@
+{
+  "_doc": [
+    "Acknowledged removals of preset model ids from piBuiltinModels.generated.ts.",
+    "Removing models is normal upstream behaviour; this file exists so that a removal is SEEN.",
+    "Enforced by scripts/ci/check-builtin-model-removals.mjs (task #320).",
+    "disposition: 'replaced-by' (set 'replacement') | 'no-replacement' | 'successor-not-substitutable'.",
+    "successor-not-substitutable: a same-name successor exists, but consumers pinned to the exact id",
+    "(frozen testbeds, recorded baselines) cannot swap to it without rebuilding their comparison surface.",
+    "If the successor is NOT in this preset catalogue (it lives on the gateway/connection surface, or the vendor changed), use 'no-replacement' and say where it went in 'note'. Do NOT invent an in-catalogue id to satisfy the check: the validation exists to stop a wrong id being recorded, and inventing one to go green is the failure it is meant to prevent."
+  ],
+  "removed": [
+    {
+      "id": "openrouter/deepseek/deepseek-v4-flash-0731:free",
+      "disposition": "replaced-by",
+      "replacement": "openrouter/deepseek/deepseek-v4-flash-0731",
+      "note": "0.86.1 dropped the free-tier VARIANT of this model. The base id is still offered on the SAME provider (openrouter), so the model itself is still available -- what is gone is the ':free' variant. Label changes from '...0731 (free)' to '...0731', hence labelChangeAcknowledged: this is the same model id without the free tier, not a different model wearing the same name. No in-repo consumer pins the ':free' id (checked packages/ fixtures and configs). NEW in 0.86.1; separate from the 33 ids removed in 0.86.0 (#8026), tracked on task #322.",
+      "labelChangeAcknowledged": true
+    }
+  ]
+}

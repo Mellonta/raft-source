@@ -2,6 +2,7 @@ import { useCallback, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useServerStore } from "../store/serverStore";
 import { readTabMemory } from "./useTabRouteMemory";
+import { searchEntryState } from "../components/search/searchOverlayLocation";
 
 // The left navigation rail surfaces a fixed set of modes; the entire left
 // column (rail button highlight + sidebar content + sidebar header text)
@@ -15,7 +16,7 @@ import { readTabMemory } from "./useTabRouteMemory";
 // visible) — same shape as `tasks`. Per stdrc #proj-uiux:c2313b1d task #311
 // 2026-05-25: Search entry promoted to the Rail's first button + opens a
 // fullscreen search page.
-export type RailMode = "search" | "activity" | "chat" | "wiki" | "members" | "computers" | "tasks" | "settings";
+export type RailMode = "search" | "activity" | "chat" | "members" | "computers" | "tasks" | "settings";
 
 // Back-compat alias for callers that only care about the chat/members
 // distinction inside the chat-or-members surface (e.g. existing tests).
@@ -28,7 +29,6 @@ function deriveRailModeFromPath(pathname: string, pathBase: string): RailMode {
   // Legacy /inbox still maps to the activity rail mode so the rail button stays
   // highlighted during the /inbox→/activity redirect tick.
   if (pathname === `${pathBase}/inbox` || pathname.startsWith(`${pathBase}/inbox/`)) return "activity";
-  if (pathname === `${pathBase}/wiki` || pathname.startsWith(`${pathBase}/wiki/`)) return "wiki";
   if (pathname.startsWith(`${pathBase}/settings`)) return "settings";
   if (pathname.startsWith(`${pathBase}/release-notes`)) return "settings";
   if (pathname === `${pathBase}/tasks` || pathname.startsWith(`${pathBase}/tasks/`)) return "tasks";
@@ -65,7 +65,8 @@ export function useRailMode() {
     // where the user was.
     if (mode === "search") {
       navigate(`${base}/search`, {
-        state: { searchEntry: "rail", searchFrom: `${location.pathname}${location.search}` },
+        // Desktop: the rail entry is the ⌘K overlay too (task #96); web keeps full page.
+        state: searchEntryState({ pathname: location.pathname, search: location.search }, { searchEntry: "rail" }),
       });
       return;
     }
@@ -75,7 +76,6 @@ export function useRailMode() {
     }
     const remembered = readTabMemory(serverSlug, mode);
     const fallback = mode === "chat" ? base
-      : mode === "wiki" ? `${base}/wiki`
       : mode === "members" ? `${base}/members`
       : mode === "computers" ? `${base}/computers`
       : mode === "tasks" ? `${base}/tasks`

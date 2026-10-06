@@ -1,14 +1,13 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { agents, servers, serverMembers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agents, servers, serverMembers, users } from "../db/schema";
 import {
   batchEnrichAgentsWithCreatorProfile,
   enrichAgentWithCreatorProfile,
-} from "./agentService.js";
-import type { DbQueryTracer } from "../tracing/dbQueryTrace.js";
+} from "./agentService";
+import type { DbQueryTracer } from "../tracing/dbQueryTrace";
 
 
 afterEach(async () => {

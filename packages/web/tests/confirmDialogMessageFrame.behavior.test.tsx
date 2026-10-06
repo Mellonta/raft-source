@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import ConfirmDialog from "../src/components/ConfirmDialog";
@@ -26,7 +25,9 @@ test("plain rich-content messages do not inherit the confirmation warning frame"
 
   const frame = screen.getByTestId("mode-picker").parentElement;
   assert.ok(frame);
-  assert.equal(frame.className, "mb-5");
+  // The rui Dialog recipe already spaces body and footer; the content slot
+  // carries no margin of its own (double-spacing regression, PR #8468).
+  assert.equal(frame.className, "");
   assert.equal(frame.querySelector("svg"), null, "plain rich content must not gain a warning icon");
   assert.doesNotMatch(frame.className, /border-2|bg-brutal-orange/);
 });
@@ -56,7 +57,7 @@ test("ordinary confirmations use one compact content block and compact semantic 
     assert.match(action.className, /\bpx-2\.5\b/);
     assert.match(action.className, /\btext-xs\b/);
   }
-  assert.match(cancel.className, /\bbg-white\b/);
+  assert.ok(!cancel.className.includes("bg-brutal"));
   assert.match(confirm.className, /\bbg-brutal-orange\b/);
 });
 
@@ -125,10 +126,13 @@ test("Reset Agent hides full workspace reset when only runtime control is grante
   assert.equal(screen.queryByText("Full Reset & Restart"), null);
 });
 
-test("a fully migrated caller can opt the whole shared chrome into active zh-cn", () => {
+// Artea 2026-09-22 (#proj-frontend:52311f41): Delete Computer showed a Chinese
+// dialog with an English "Cancel" because the chrome defaulted to English and
+// that caller never opted in. The default now follows the display locale, so a
+// caller that passes nothing still gets one-language chrome.
+test("a caller that passes no chromeLocale gets the shared chrome in active zh-cn", () => {
   render(
     <ConfirmDialog
-      chromeLocale="active"
       title="删除服务器"
       message="此操作无法撤销。"
       confirmLabel="删除服务器"
@@ -144,6 +148,17 @@ test("a fully migrated caller can opt the whole shared chrome into active zh-cn"
   assert.ok(screen.getByRole("button", { name: "取消" }));
   assert.ok(screen.getByRole("button", { name: "关闭对话框" }));
   assert.equal(screen.queryByRole("button", { name: "Cancel" }), null);
+});
+
+test("an explicit chromeLocale still pins the chrome to that locale", () => {
+  // Independently localized surfaces (billing WebView) keep their own locale.
+  render(
+    <ConfirmDialog chromeLocale="en" title="Delete" message="Gone." onConfirm={noop} onClose={noop} />,
+    { locale: "zh-cn" },
+  );
+
+  assert.ok(screen.getByRole("button", { name: "Cancel" }));
+  assert.ok(screen.queryByRole("button", { name: "取消" }) === null);
 });
 
 // Rendered replacement for the former source-regex "disables close affordances
@@ -223,6 +238,7 @@ test("narrow confirmation actions wrap without shrinking labels into each other"
 test("an unknown rejection uses the dialog chrome locale fallback", async () => {
   render(
     <ConfirmDialog
+      chromeLocale="en"
       title="Delete server"
       message="This cannot be undone."
       onConfirm={async () => {
@@ -237,6 +253,28 @@ test("an unknown rejection uses the dialog chrome locale fallback", async () => 
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
   });
 
-  assert.ok(screen.getByText("Something went wrong"), "default English surface keeps its fallback error English");
+  assert.ok(screen.getByText("Something went wrong"), "an English-pinned surface keeps its fallback error English");
   assert.equal(screen.queryByText("出了点问题"), null);
+});
+
+// task #677: the frame is the rui Dialog family now. The stacking contract that
+// matters to nested callers (layer=1 over the channel-settings drawer) is the
+// z-60 overlay/content pair; default stays z-50.
+test("layer=1 stacks overlay and content above the default dialog layer", () => {
+  const { unmount } = render(
+    <ConfirmDialog title="Nested" message="Over the sheet." layer={1} onConfirm={noop} onClose={noop} />,
+  );
+
+  const dialog = screen.getByRole("dialog");
+  assert.match(dialog.className, /\bz-60\b/, "layer=1 content stacks at z-60");
+  assert.ok(
+    document.querySelector('[data-slot="dialog-overlay"]')?.className.includes("z-60"),
+    "layer=1 overlay stacks at z-60",
+  );
+  unmount();
+
+  render(<ConfirmDialog title="Plain" message="Default layer." onConfirm={noop} onClose={noop} />);
+  const plainDialog = screen.getByRole("dialog");
+  assert.match(plainDialog.className, /\bz-50\b/, "default content stays at z-50");
+  assert.doesNotMatch(plainDialog.className, /\bz-60\b/);
 });

@@ -1,0 +1,1 @@
+ALTER TABLE "agents" ADD COLUMN "status_protocol_adopted_at" timestamp with time zone;

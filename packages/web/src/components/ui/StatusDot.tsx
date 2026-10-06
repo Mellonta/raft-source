@@ -1,6 +1,7 @@
 import type { HTMLAttributes } from "react";
 import type { AgentActivity } from "@botiverse/raft-shared";
 import { getActivityDotClass } from "../../utils/activity";
+import Tooltip from "./Tooltip";
 
 // React's `HTMLAttributes` doesn't expose `data-*` keys in TS, so widen
 // passthrough prop types with a string-key index signature so callsites
@@ -29,8 +30,8 @@ type SpanPassthroughProps = HTMLAttributes<HTMLSpanElement> &
  *   CLAUDE.md). `sm` = `size-2` (inline text contexts — profile preview cards,
  *   AgentActivityLog, AgentDetailPanel machine info). `lg` = `h-[11px]
  *   w-[11px]` (MessageItem avatar overlay).
- * - `pulse` adds `animate-pulse` — used for "waiting for input" / "thinking"
- *   affordances where the activity mapping does not already encode pulse.
+ * - No `pulse`: status dots mark AMBIENT states and never animate (task #136 —
+ *   an infinite pulse keeps the page rendering at display refresh rate).
  * - `className` passes through for positioning overrides (e.g. `absolute
  *   -bottom-0.5 -right-0.5`, `inline-block`, `shrink-0`, etc.).
  */
@@ -47,10 +48,6 @@ export interface StatusDotProps extends Omit<SpanPassthroughProps, "children"> {
   /** Size variant. `md` (default) = `size-2.5`. `sm` = `size-2` for
    *  inline text. `lg` = `size-[11px]` for avatar overlays. */
   size?: "sm" | "md" | "lg";
-  /** Adds `animate-pulse` on top of the chosen color. The color util
-   *  already pulses for `thinking`/`working`; only use this prop when the
-   *  pulse is orthogonal to activity mapping. */
-  pulse?: boolean;
 }
 
 const SIZE_CLASS: Record<NonNullable<StatusDotProps["size"]>, string> = {
@@ -64,17 +61,20 @@ export default function StatusDot({
   tone,
   external = false,
   size = "md",
-  pulse = false,
   className,
+  title,
   ...rest
 }: StatusDotProps) {
   const colorClass = external
     ? "bg-brutal-cyan"
     : activity ? getActivityDotClass(activity) : tone ?? "bg-gray-400";
-  return (
+  const dot = (
     <span
       {...rest}
-      className={`inline-block shrink-0 rounded-full border border-black ${SIZE_CLASS[size]} ${colorClass} ${pulse ? "animate-pulse" : ""} ${className ?? ""}`}
+      className={`inline-block shrink-0 rounded-full border border-line-strong theme-brutal:border-black ${SIZE_CLASS[size]} ${colorClass} ${className ?? ""}`}
     />
   );
+  // Native title= on a span is only a hover tooltip; route it through the RUI
+  // Tooltip so it follows the theme recipe (migration wave for title=, task #595).
+  return title ? <Tooltip content={title}>{dot}</Tooltip> : dot;
 }

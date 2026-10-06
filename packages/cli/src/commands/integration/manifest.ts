@@ -2,25 +2,25 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import type { AgentContext } from "../../auth/env.js";
+import type { AgentContext } from "../../auth/env";
 import {
   credentialFreeDiagnosticUrl,
   fetchWithCanonicalProxy,
   type FetchTransportCauseClass,
-} from "../../proxy.js";
+} from "../../proxy";
 import {
   AGENT_MANIFEST_SCHEMA_V1,
   RAFT_AGENT_MANIFEST_SCHEMA_V1,
   validateAgentManifestV1,
   type AgentManifestV1,
-} from "./manifestV1.js";
+} from "./manifestV1";
 
 export {
   AGENT_MANIFEST_SCHEMA_V1,
   RAFT_AGENT_MANIFEST_SCHEMA_V1,
   validateAgentManifestV1,
 };
-export type { AgentManifestActionV1, AgentManifestV1 } from "./manifestV1.js";
+export type { AgentManifestActionV1, AgentManifestV1 } from "./manifestV1";
 
 export const AGENT_MANIFEST_MAX_BYTES = 64 * 1024;
 export const AGENT_MANIFEST_SCHEMA_V0 = "slock-agent-manifest.v0";

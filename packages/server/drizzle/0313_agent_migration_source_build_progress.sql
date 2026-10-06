@@ -1,0 +1,1 @@
+ALTER TABLE "agent_migrations" ADD COLUMN "source_build_progress" jsonb;

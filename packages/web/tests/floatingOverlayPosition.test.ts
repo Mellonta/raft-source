@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { FLOATING_OVERLAY_VIEWPORT_PADDING, placeFloatingOverlay } from "../src/components/ui/floatingOverlayPosition";
 
 test("floating overlay flips left and upward from a bottom-right point anchor", () => {

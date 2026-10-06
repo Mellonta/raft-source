@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   REMINDER_FIRE_RECEIPT_CAPABILITY,
   REMINDER_FIRE_REQUEST_CAPABILITY,
-} from "@botiverse/raft-shared/src/apps/reminder/protocol.js";
+} from "@botiverse/raft-shared/src/apps/reminder/protocol";
 
 import {
   type ReminderProtocolConnectionFacts,
   selectReminderDueProtocol,
-} from "./protocolTransition.js";
+} from "./protocolTransition";
 
 type IsExactKeySet<Actual extends PropertyKey, Expected extends PropertyKey> =
   [Exclude<Actual, Expected>] extends [never]

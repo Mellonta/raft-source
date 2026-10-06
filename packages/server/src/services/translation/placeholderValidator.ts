@@ -1,8 +1,8 @@
 import {
   TranslationPlaceholderValidationError,
-} from "./errors.js";
-import type { TranslationPlaceholderPolicy } from "./placeholderPolicy.js";
-import type { TranslationProviderVersion } from "./types.js";
+} from "./errors";
+import type { TranslationPlaceholderPolicy } from "./placeholderPolicy";
+import type { TranslationProviderVersion } from "./types";
 
 export interface TranslationPlaceholderValidationResult {
   readonly sourcePlaceholders: readonly string[];

@@ -24,20 +24,20 @@
  * single list call.
  */
 
-import { writeDiagnostic } from "../../core/renderer.js";
-import { formatVerificationHandoff } from "./_format.js";
+import { writeDiagnostic } from "../../core/renderer";
+import { formatVerificationHandoff } from "./_format";
 import type { Command } from "commander";
 import { fetch as undiciFetch } from "undici";
 
 import {
   DeviceCodeLoginError,
   runDeviceCodeLogin,
-} from "../../agentLogin/deviceAuthClient.js";
-import { canInstallEnterToOpenUrl, installEnterToOpenUrl } from "../../core/browserHandoff.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeJson } from "../../core/renderer.js";
+} from "../../agentLogin/deviceAuthClient";
+import { canInstallEnterToOpenUrl, installEnterToOpenUrl } from "../../core/browserHandoff";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeJson } from "../../core/renderer";
 
 interface ManageableAgent {
   id: string;

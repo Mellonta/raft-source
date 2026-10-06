@@ -53,11 +53,11 @@ import {
   ServersClient,
   type LegacyMachineManualEntry,
   type LegacyMachineManualRosterResult,
-} from "./apiClient.js";
-import { runAttach } from "./attach.js";
+} from "./apiClient";
+import { runAttach } from "./attach";
 import {
   detectLegacyMigration,
-} from "./lib/migration.js";
+} from "./lib/migration";
 import {
   dismissedEvidenceKeys,
   evidenceKey,
@@ -65,43 +65,43 @@ import {
   zeroMatchDismissalIdentity,
   type MigrationDismissalEvidence,
   type ZeroMatchDismissalIdentity,
-} from "./lib/migrationDismissals.js";
-import type { LegacyMachineCandidate } from "./lib/types.js";
-import { runLogin } from "./login.js";
-import { CliExit, info, present } from "./output.js";
-import { ComputerError } from "./lib/errors.js";
-import type { ComputerTracer } from "./lib/traceTypes.js";
-import { formatUpgradeLogTimestamp, resolveRaftHome, serverAttachmentPath } from "./paths.js";
-import { resolveServerUrl, resolveServerUrlEnv } from "./serverUrl.js";
-import { formatServerSlugDisplay, migrateKnownServerUrl, normalizeServerSlug, resolveAttachedServerSlug } from "./serverState.js";
+} from "./lib/migrationDismissals";
+import type { LegacyMachineCandidate } from "./lib/types";
+import { runLogin } from "./login";
+import { CliExit, info, present } from "./output";
+import { ComputerError } from "./lib/errors";
+import type { ComputerTraceContext, ComputerTracer } from "./lib/traceTypes";
+import { formatUpgradeLogTimestamp, resolveRaftHome, serverAttachmentPath } from "./paths";
+import { resolveServerUrl, resolveServerUrlEnv } from "./serverUrl";
+import { formatServerSlugDisplay, migrateKnownServerUrl, normalizeServerSlug, resolveAttachedServerSlug } from "./serverState";
 import {
   adoptLegacyByDaemonId as adoptLegacyByDaemonIdService,
   adoptLegacyByFingerprint as adoptLegacyByFingerprintService,
-} from "./services/adoptLegacy.js";
+} from "./services/adoptLegacy";
 import {
   diagnosticsPush as diagnosticsPushService,
   type DiagnosticsPushResult,
-} from "./services/diagnosticsPush.js";
-import type { ComputerApiEvent } from "./lib/events.js";
-import { ComputerServiceError } from "./services/errors.js";
-import { start as startService, type StartDeps } from "./services/start.js";
-import { stop as stopService, type StopDeps } from "./services/stop.js";
-import { runStart, runStop } from "./startStop.js";
-import { readTerminalUnlinked } from "./health.js";
-import { attach as attachService } from "./services/attach.js";
-import { createComputerApi } from "./lib/api.js";
-import { createComputerTracer } from "./lib/computerTracer.js";
+} from "./services/diagnosticsPush";
+import type { ComputerApiEvent } from "./lib/events";
+import { ComputerServiceError } from "./services/errors";
+import { start as startService, type StartDeps } from "./services/start";
+import { stop as stopService, type StopDeps } from "./services/stop";
+import { runStart, runStop } from "./startStop";
+import { readTerminalUnlinked } from "./health";
+import { attach as attachService } from "./services/attach";
+import { createComputerApi } from "./lib/api";
+import { createComputerTracer } from "./lib/computerTracer";
 import {
   hasUnexpiredUserSessionShape,
   readUserSessionIdentity,
   readUserSessionAuth,
   refreshUserSession,
-} from "./lib/userSession.js";
+} from "./lib/userSession";
 import { noopTracer } from "@botiverse/raft-shared";
 import {
   accountUnavailableMessage,
   type AccountUnavailableMessageInput,
-} from "./accountUnavailable.js";
+} from "./accountUnavailable";
 
 export interface SetupOptions {
   serverSlug: string;
@@ -1006,15 +1006,23 @@ function recordMigrationDecision(
   migrationAttemptId: string,
   attrs: Record<string, string | number | boolean>,
 ): void {
-  const span = tracer.startSpan("computer.migration.decision", {
+  tracer.emitEvent("computer.migration.decision", {
     surface: "computer",
-    kind: "internal",
     attrs: {
       migration_attempt_id: migrationAttemptId,
       ...attrs,
+      status: "ok",
     },
   });
-  span.end("ok");
+}
+
+// Returns a tracer whose spans and events attach to `parent` unless the
+// caller sets another parent.
+function withDefaultParent(tracer: ComputerTracer, parent: ComputerTraceContext): ComputerTracer {
+  return {
+    startSpan: (name, options) => tracer.startSpan(name, { ...options, parent: options.parent ?? parent }),
+    emitEvent: (name, options) => tracer.emitEvent(name, { ...options, parent: options.parent ?? parent }),
+  };
 }
 
 function formatMigrationDiagnosticsResult(result: DiagnosticsPushResult): string {
@@ -1357,209 +1365,280 @@ export async function setupCore(
 
     let migrated = false;
 
-    if (typeof opts.machine === "string" && opts.machine.length > 0) {
-      // Identity-carried entry (v2.3 §19): carry the web machine row id and
-      // skip fingerprint matching. Server-side authority is `manageMachines`
-      // plus target-Server row binding; caller ownership and local evidence are
-      // not required, so wiped state and brand-new checkouts remain supported.
-      const machineId = opts.machine.trim();
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(machineId)) {
-        throw new ComputerError(
-          "SETUP_MACHINE_INVALID",
-          `--machine expects the machine id shown on the web Computers page (a UUID), got: ${machineId}. Open https://app.raft.build/s/${encodeURIComponent(opts.serverSlug)}/computers and copy the id from your computer's Migrate command.`,
-        );
-      }
-      recordMigrationDecision(tracer, migrationAttemptId, {
-        decision: "adopt",
-        reason: "machine-flag",
-      });
-      try {
-        await runRosterDaemonIdAdoption(
-          opts,
-          { daemonId: machineId, machineName: machineId, hostname: null, lastSeenAt: null, legacyKeyMigratedAt: null, hasFingerprint: false },
-          adoptLegacyByDaemonId,
-          emit,
-          tracer,
-          migrationAttemptId,
-        );
-      } catch (err) {
-        await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
-        throw err;
-      }
-      migrated = true;
-      migratedDuringSetup = true;
-      shouldPushMigrationDiagnosticsAfterStart = true;
-    } else {
-      let adjudication: SetupAdjudication = { kind: "no_local_evidence" };
-      discoveryLoop: while (true) {
-        const discoverySpan = tracer.startSpan("computer.migration.discovery", {
-          surface: "computer",
-          kind: "internal",
-          attrs: { migration_attempt_id: migrationAttemptId, mode: "setup" },
+    // One root span for the whole migration choice. Discovery, adopt and
+    // decision records are its children.
+    const migrationSpan = tracer.startSpan("computer.migration", {
+      surface: "computer",
+      kind: "internal",
+      attrs: { migration_attempt_id: migrationAttemptId, mode: "setup" },
+    });
+    const migrationTracer = withDefaultParent(tracer, migrationSpan.context);
+    try {
+      if (typeof opts.machine === "string" && opts.machine.length > 0) {
+        // Identity-carried entry (v2.3 §19): carry the web machine row id and
+        // skip fingerprint matching. Server-side authority is `manageMachines`
+        // plus target-Server row binding; caller ownership and local evidence are
+        // not required, so wiped state and brand-new checkouts remain supported.
+        const machineId = opts.machine.trim();
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(machineId)) {
+          throw new ComputerError(
+            "SETUP_MACHINE_INVALID",
+            `--machine expects the machine id shown on the web Computers page (a UUID), got: ${machineId}. Open https://app.raft.build/s/${encodeURIComponent(opts.serverSlug)}/computers and copy the id from your computer's Migrate command.`,
+          );
+        }
+        recordMigrationDecision(migrationTracer, migrationAttemptId, {
+          decision: "adopt",
+          reason: "machine-flag",
         });
         try {
-          const detection = await detectMigration(slockHome, opts.serverSlug, getRosterClient);
-          adjudication = normalizeMigrationDetection(detection);
-          discoverySpan.end("ok", {
-            attrs: migrationDiscoveryAttrs(adjudication),
-          });
+          await runRosterDaemonIdAdoption(
+            opts,
+            { daemonId: machineId, machineName: machineId, hostname: null, lastSeenAt: null, legacyKeyMigratedAt: null, hasFingerprint: false },
+            adoptLegacyByDaemonId,
+            emit,
+            migrationTracer,
+            migrationAttemptId,
+          );
         } catch (err) {
-          discoverySpan.end("error", { attrs: { error_code: "unexpected" } });
+          await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
           throw err;
         }
+        migrated = true;
+        migratedDuringSetup = true;
+        shouldPushMigrationDiagnosticsAfterStart = true;
+      } else {
+        let adjudication: SetupAdjudication = { kind: "no_local_evidence" };
+        discoveryLoop: while (true) {
+          const discoverySpan = migrationTracer.startSpan("computer.migration.discovery", {
+            surface: "computer",
+            kind: "internal",
+            attrs: { migration_attempt_id: migrationAttemptId, mode: "setup" },
+          });
+          try {
+            const detection = await detectMigration(slockHome, opts.serverSlug, getRosterClient);
+            adjudication = normalizeMigrationDetection(detection);
+            discoverySpan.end("ok", {
+              attrs: migrationDiscoveryAttrs(adjudication),
+            });
+          } catch (err) {
+            discoverySpan.end("error", { attrs: { error_code: "unexpected" } });
+            throw err;
+          }
 
-        if (adjudication.kind !== "roster_unavailable" || !isTty || opts.fresh === true) {
+          if (adjudication.kind !== "roster_unavailable" || !isTty || opts.fresh === true) {
+            break discoveryLoop;
+          }
+
+          const selection = await pickRosterUnavailable(adjudication.localCount);
+          if (selection.kind === "retry") {
+            continue discoveryLoop;
+          }
+          if (selection.kind === "quit") {
+            recordMigrationDecision(migrationTracer, migrationAttemptId, {
+              decision: "fail",
+              reason: "roster-unavailable-quit",
+              local_candidate_count: adjudication.localCount ?? -1,
+            });
+            throw new ComputerError(
+              "MIGRATION_ROSTER_UNAVAILABLE",
+              "Migration: legacy machine roster unavailable; setup stopped without changing local state.",
+            );
+          }
+          recordMigrationDecision(migrationTracer, migrationAttemptId, {
+            decision: "fresh",
+            reason: "roster-unavailable-picker-fresh",
+            local_candidate_count: adjudication.localCount ?? -1,
+          });
+          emit("WARNING: Migration roster unavailable; fresh attach selected explicitly and may duplicate an existing legacy daemon.");
           break discoveryLoop;
         }
 
-        const selection = await pickRosterUnavailable(adjudication.localCount);
-        if (selection.kind === "retry") {
-          continue discoveryLoop;
-        }
-        if (selection.kind === "quit") {
-          recordMigrationDecision(tracer, migrationAttemptId, {
-            decision: "fail",
-            reason: "roster-unavailable-quit",
+        if (adjudication.kind === "roster_unavailable") {
+          // Trigger #4 — non-interactive best-effort detection remains allowed,
+          // but it is now visible instead of silently creating fresh state.
+          recordMigrationDecision(migrationTracer, migrationAttemptId, {
+            decision: "fresh",
+            reason: opts.fresh === true ? "server-unavailable-explicit-fresh" : "server-unavailable",
             local_candidate_count: adjudication.localCount ?? -1,
           });
-          throw new ComputerError(
-            "MIGRATION_ROSTER_UNAVAILABLE",
-            "Migration: legacy machine roster unavailable; setup stopped without changing local state.",
+          emit(
+            opts.fresh === true
+              ? "WARNING: Migration roster unavailable; --fresh requested, falling back to fresh attach."
+              : "WARNING: Migration: legacy machine roster unavailable (fresh trigger: server-unavailable); falling back to fresh attach.",
           );
-        }
-        recordMigrationDecision(tracer, migrationAttemptId, {
-          decision: "fresh",
-          reason: "roster-unavailable-picker-fresh",
-          local_candidate_count: adjudication.localCount ?? -1,
-        });
-        emit("WARNING: Migration roster unavailable; fresh attach selected explicitly and may duplicate an existing legacy daemon.");
-        break discoveryLoop;
-      }
-
-      if (adjudication.kind === "roster_unavailable") {
-        // Trigger #4 — non-interactive best-effort detection remains allowed,
-        // but it is now visible instead of silently creating fresh state.
-        recordMigrationDecision(tracer, migrationAttemptId, {
-          decision: "fresh",
-          reason: opts.fresh === true ? "server-unavailable-explicit-fresh" : "server-unavailable",
-          local_candidate_count: adjudication.localCount ?? -1,
-        });
-        emit(
-          opts.fresh === true
-            ? "WARNING: Migration roster unavailable; --fresh requested, falling back to fresh attach."
-            : "WARNING: Migration: legacy machine roster unavailable (fresh trigger: server-unavailable); falling back to fresh attach.",
-        );
-      } else if (adjudication.kind === "no_local_evidence") {
-        // Trigger #1 — no local legacy evidence. No prompt.
-        recordMigrationDecision(tracer, migrationAttemptId, {
-          decision: "fresh",
-          reason: "empty-intersection",
-          candidate_count: 0,
-        });
-      } else if (adjudication.kind === "zero_match") {
-        const evidenceFromExcluded = (candidate: SetupExcludedCandidate): MigrationDismissalEvidence => ({
-          effectiveFingerprint: candidate.effectiveFingerprint,
-          ownerFingerprint: candidate.ownerFingerprint,
-          dirFingerprint: candidate.dirFingerprint,
-          localPath: candidate.localPath,
-        });
-        const dismissedKeys = await dismissedEvidenceKeys(slockHome, opts.serverSlug, baseUrl);
-        const activeExcluded = adjudication.excluded.filter((candidate) => {
-          const key = evidenceKey(evidenceFromExcluded(candidate));
-          return key === null || !dismissedKeys.has(key);
-        });
-        if (activeExcluded.length === 0) {
-          recordMigrationDecision(tracer, migrationAttemptId, {
+        } else if (adjudication.kind === "no_local_evidence") {
+          // Trigger #1 — no local legacy evidence. No prompt.
+          recordMigrationDecision(migrationTracer, migrationAttemptId, {
             decision: "fresh",
-            reason: "zero-match-dismissed-fresh",
-            excluded_count: adjudication.excluded.length,
+            reason: "empty-intersection",
+            candidate_count: 0,
           });
-        } else {
-          const dismissalIdentity = zeroMatchDismissalIdentity(
-            opts.serverSlug,
-            baseUrl,
-            activeExcluded.map(evidenceFromExcluded),
-          );
-          const suspiciousZeroMatch = isSuspiciousZeroMatch(activeExcluded);
-          if (opts.verbose === true) {
-            emitExcludedTable(
-              emit,
-              activeExcluded,
-              "Migration: local legacy daemon evidence was found, but no daemon automatically matches this server.",
-            );
-          } else if (!suspiciousZeroMatch || opts.fresh === true) {
-            emitZeroMatchSummary(emit, activeExcluded, label);
-          }
-          if (opts.fresh === true) {
-            recordMigrationDecision(tracer, migrationAttemptId, {
+        } else if (adjudication.kind === "zero_match") {
+          const evidenceFromExcluded = (candidate: SetupExcludedCandidate): MigrationDismissalEvidence => ({
+            effectiveFingerprint: candidate.effectiveFingerprint,
+            ownerFingerprint: candidate.ownerFingerprint,
+            dirFingerprint: candidate.dirFingerprint,
+            localPath: candidate.localPath,
+          });
+          const dismissedKeys = await dismissedEvidenceKeys(slockHome, opts.serverSlug, baseUrl);
+          const activeExcluded = adjudication.excluded.filter((candidate) => {
+            const key = evidenceKey(evidenceFromExcluded(candidate));
+            return key === null || !dismissedKeys.has(key);
+          });
+          if (activeExcluded.length === 0) {
+            recordMigrationDecision(migrationTracer, migrationAttemptId, {
               decision: "fresh",
-              reason: "zero-match-explicit-fresh",
-              excluded_count: activeExcluded.length,
+              reason: "zero-match-dismissed-fresh",
+              excluded_count: adjudication.excluded.length,
             });
-            emit("WARNING: --fresh requested after zero-match evidence; creating a new Computer connection may duplicate an existing legacy daemon.");
-            pendingZeroMatchFreshDismissal = dismissalIdentity;
-          } else if (!isTty) {
-            recordMigrationDecision(tracer, migrationAttemptId, {
-              decision: "fail",
-              reason: "zero-match-non-tty",
-              excluded_count: activeExcluded.length,
-            });
-            await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
-            throw new ComputerError(
-              "MIGRATION_LOCAL_EVIDENCE_UNMATCHED",
-              zeroMatchErrorMessage(activeExcluded),
-            );
-          } else if (suspiciousZeroMatch) {
-            recordMigrationDecision(tracer, migrationAttemptId, {
-              decision: "fail",
-              reason: "zero-match-suspicious",
-              excluded_count: activeExcluded.length,
-            });
-            throw new ComputerError(
-              "MIGRATION_LOCAL_EVIDENCE_UNMATCHED",
-              `This computer has traces of a ${label} connection, but the server does not recognize any of them. Common causes: you are signed in as a different account than the one that set up this computer, the traces belong to a different server, the computer's connect command was regenerated on the web (which rotates its key), or the computer was removed on the server. Setting up a new computer now could leave your agents stranded.`,
-            );
           } else {
-            let serverCandidates: LegacyMachineManualEntry[] = [];
-            const activeRosterClient = getRosterClient();
-            if (typeof activeRosterClient.listAll === "function") {
-              const manualRoster: LegacyMachineManualRosterResult = await activeRosterClient.listAll(opts.serverSlug);
-              if (manualRoster.status === "success") {
-                serverCandidates = manualRoster.entries;
-              } else if (manualRoster.status === "disabled" || manualRoster.status === "error") {
-                emit("Migration: server-row manual adoption is unavailable on this server; choose fresh or quit.");
-              } else {
-                emit(`Migration: server-row manual adoption unavailable (${manualRoster.status}); choose fresh or quit.`);
-              }
+            const dismissalIdentity = zeroMatchDismissalIdentity(
+              opts.serverSlug,
+              baseUrl,
+              activeExcluded.map(evidenceFromExcluded),
+            );
+            const suspiciousZeroMatch = isSuspiciousZeroMatch(activeExcluded);
+            if (opts.verbose === true) {
+              emitExcludedTable(
+                emit,
+                activeExcluded,
+                "Migration: local legacy daemon evidence was found, but no daemon automatically matches this server.",
+              );
+            } else if (!suspiciousZeroMatch || opts.fresh === true) {
+              emitZeroMatchSummary(emit, activeExcluded, label);
             }
-            const selection = await pickZeroMatch(activeExcluded, serverCandidates);
-            if (selection.kind === "quit") {
-              recordMigrationDecision(tracer, migrationAttemptId, {
-                decision: "fail",
-                reason: "zero-match-quit",
+            if (opts.fresh === true) {
+              recordMigrationDecision(migrationTracer, migrationAttemptId, {
+                decision: "fresh",
+                reason: "zero-match-explicit-fresh",
                 excluded_count: activeExcluded.length,
               });
-              emit(`Nothing was changed. Run raft-computer setup ${label} when ready.`);
+              emit("WARNING: --fresh requested after zero-match evidence; creating a new Computer connection may duplicate an existing legacy daemon.");
+              pendingZeroMatchFreshDismissal = dismissalIdentity;
+            } else if (!isTty) {
+              recordMigrationDecision(migrationTracer, migrationAttemptId, {
+                decision: "fail",
+                reason: "zero-match-non-tty",
+                excluded_count: activeExcluded.length,
+              });
+              await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
               throw new ComputerError(
                 "MIGRATION_LOCAL_EVIDENCE_UNMATCHED",
-                "Migration: setup stopped after unmatched local legacy evidence.",
+                zeroMatchErrorMessage(activeExcluded),
               );
-            }
-            if (selection.kind === "server-candidate") {
-              const candidate = serverCandidates[selection.index];
-              if (!candidate) {
+            } else if (suspiciousZeroMatch) {
+              recordMigrationDecision(migrationTracer, migrationAttemptId, {
+                decision: "fail",
+                reason: "zero-match-suspicious",
+                excluded_count: activeExcluded.length,
+              });
+              throw new ComputerError(
+                "MIGRATION_LOCAL_EVIDENCE_UNMATCHED",
+                `This computer has traces of a ${label} connection, but the server does not recognize any of them. Common causes: you are signed in as a different account than the one that set up this computer, the traces belong to a different server, the computer's connect command was regenerated on the web (which rotates its key), or the computer was removed on the server. Setting up a new computer now could leave your agents stranded.`,
+              );
+            } else {
+              let serverCandidates: LegacyMachineManualEntry[] = [];
+              const activeRosterClient = getRosterClient();
+              if (typeof activeRosterClient.listAll === "function") {
+                const manualRoster: LegacyMachineManualRosterResult = await activeRosterClient.listAll(opts.serverSlug);
+                if (manualRoster.status === "success") {
+                  serverCandidates = manualRoster.entries;
+                } else if (manualRoster.status === "disabled" || manualRoster.status === "error") {
+                  emit("Migration: server-row manual adoption is unavailable on this server; choose fresh or quit.");
+                } else {
+                  emit(`Migration: server-row manual adoption unavailable (${manualRoster.status}); choose fresh or quit.`);
+                }
+              }
+              const selection = await pickZeroMatch(activeExcluded, serverCandidates);
+              if (selection.kind === "quit") {
+                recordMigrationDecision(migrationTracer, migrationAttemptId, {
+                  decision: "fail",
+                  reason: "zero-match-quit",
+                  excluded_count: activeExcluded.length,
+                });
+                emit(`Nothing was changed. Run raft-computer setup ${label} when ready.`);
                 throw new ComputerError(
-                  "MIGRATE_PICKER_OUT_OF_RANGE",
-                  `Picker returned server candidate index ${selection.index} but only ${serverCandidates.length} candidate(s) were listed.`,
+                  "MIGRATION_LOCAL_EVIDENCE_UNMATCHED",
+                  "Migration: setup stopped after unmatched local legacy evidence.",
                 );
               }
-              recordMigrationDecision(tracer, migrationAttemptId, {
+              if (selection.kind === "server-candidate") {
+                const candidate = serverCandidates[selection.index];
+                if (!candidate) {
+                  throw new ComputerError(
+                    "MIGRATE_PICKER_OUT_OF_RANGE",
+                    `Picker returned server candidate index ${selection.index} but only ${serverCandidates.length} candidate(s) were listed.`,
+                  );
+                }
+                recordMigrationDecision(migrationTracer, migrationAttemptId, {
+                  decision: "adopt",
+                  reason: "server-row-picker",
+                  candidate_already_migrated: Boolean(candidate.legacyKeyMigratedAt),
+                });
+                try {
+                  await runRosterDaemonIdAdoption(opts, candidate, adoptLegacyByDaemonId, emit, migrationTracer, migrationAttemptId);
+                } catch (err) {
+                  await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
+                  throw err;
+                }
+                migrated = true;
+                migratedDuringSetup = true;
+                shouldPushMigrationDiagnosticsAfterStart = true;
+              } else {
+                recordMigrationDecision(migrationTracer, migrationAttemptId, {
+                  decision: "fresh",
+                  reason: "zero-match-picker-fresh",
+                  excluded_count: activeExcluded.length,
+                });
+                emit("Migration: fresh attach selected after unmatched local legacy evidence.");
+                await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
+              }
+            }
+          }
+        } else if (!isTty) {
+          recordMigrationDecision(migrationTracer, migrationAttemptId, {
+            decision: "fail",
+            reason: "non-tty-candidates",
+            candidate_count: adjudication.candidates.length,
+          });
+          await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
+          throw new ComputerError(
+            "MIGRATION_CANDIDATE_REQUIRES_INTERACTIVE",
+            `Migration: ${adjudication.candidates.length} legacy daemon(s) match this server but setup is non-interactive. Refusing to fresh attach because that would create a duplicate Computer identity. Re-run on a TTY to choose a legacy daemon, or pass --migrate-from <path> to adopt a specific install.`,
+          );
+        } else {
+          if (adjudication.excluded.length > 0) {
+            emitExcludedTable(
+              emit,
+              adjudication.excluded,
+              "Migration: some local daemon evidence could not be auto-matched; matching candidates remain available below.",
+            );
+          }
+          // §X.4 picker loop — RFC v9.9 (post-Jianwei FAIL `msg=ecc2e57e`
+          // B2). Interactive `m` validation failures surface their token
+          // then return to the picker so the operator can correct a typo
+          // without losing the whole setup run. Only the `--migrate-from`
+          // flag form (above) hard-fails on validation errors.
+          pickerLoop: while (true) {
+            const selection = await pickCandidate(adjudication.candidates, label);
+            if (selection.kind === "candidate") {
+              const candidate = adjudication.candidates[selection.index];
+              if (!candidate) {
+                // Defensive — picker promises 0..N-1 but we double-check at
+                // the boundary so an out-of-range index can never index
+                // into undefined and surface a misleading adoption error.
+                throw new ComputerError(
+                  "MIGRATE_PICKER_OUT_OF_RANGE",
+                  `Picker returned candidate index ${selection.index} but only ${adjudication.candidates.length} candidate(s) were detected.`,
+                );
+              }
+              recordMigrationDecision(migrationTracer, migrationAttemptId, {
                 decision: "adopt",
-                reason: "server-row-picker",
+                reason: "picker",
                 candidate_already_migrated: Boolean(candidate.legacyKeyMigratedAt),
               });
               try {
-                await runRosterDaemonIdAdoption(opts, candidate, adoptLegacyByDaemonId, emit, tracer, migrationAttemptId);
+                await runRosterAdoption(opts, candidate, adoptLegacyByFingerprint, emit, migrationTracer, migrationAttemptId);
               } catch (err) {
                 await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
                 throw err;
@@ -1567,93 +1646,38 @@ export async function setupCore(
               migrated = true;
               migratedDuringSetup = true;
               shouldPushMigrationDiagnosticsAfterStart = true;
-            } else {
-              recordMigrationDecision(tracer, migrationAttemptId, {
-                decision: "fresh",
-                reason: "zero-match-picker-fresh",
-                excluded_count: activeExcluded.length,
+              break pickerLoop;
+            } else if (selection.kind === "quit") {
+              recordMigrationDecision(migrationTracer, migrationAttemptId, {
+                decision: "fail",
+                reason: "picker-quit",
+                candidate_count: adjudication.candidates.length,
               });
-              emit("Migration: fresh attach selected after unmatched local legacy evidence.");
-              await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
-            }
-          }
-        }
-      } else if (!isTty) {
-        recordMigrationDecision(tracer, migrationAttemptId, {
-          decision: "fail",
-          reason: "non-tty-candidates",
-          candidate_count: adjudication.candidates.length,
-        });
-        await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
-        throw new ComputerError(
-          "MIGRATION_CANDIDATE_REQUIRES_INTERACTIVE",
-          `Migration: ${adjudication.candidates.length} legacy daemon(s) match this server but setup is non-interactive. Refusing to fresh attach because that would create a duplicate Computer identity. Re-run on a TTY to choose a legacy daemon, or pass --migrate-from <path> to adopt a specific install.`,
-        );
-      } else {
-        if (adjudication.excluded.length > 0) {
-          emitExcludedTable(
-            emit,
-            adjudication.excluded,
-            "Migration: some local daemon evidence could not be auto-matched; matching candidates remain available below.",
-          );
-        }
-        // §X.4 picker loop — RFC v9.9 (post-Jianwei FAIL `msg=ecc2e57e`
-        // B2). Interactive `m` validation failures surface their token
-        // then return to the picker so the operator can correct a typo
-        // without losing the whole setup run. Only the `--migrate-from`
-        // flag form (above) hard-fails on validation errors.
-        pickerLoop: while (true) {
-          const selection = await pickCandidate(adjudication.candidates, label);
-          if (selection.kind === "candidate") {
-            const candidate = adjudication.candidates[selection.index];
-            if (!candidate) {
-              // Defensive — picker promises 0..N-1 but we double-check at
-              // the boundary so an out-of-range index can never index
-              // into undefined and surface a misleading adoption error.
+              emit(`Nothing was changed. Run raft-computer setup ${label} when ready.`);
               throw new ComputerError(
-                "MIGRATE_PICKER_OUT_OF_RANGE",
-                `Picker returned candidate index ${selection.index} but only ${adjudication.candidates.length} candidate(s) were detected.`,
+                "SETUP_CANCELED",
+                "Setup stopped without changing local state.",
               );
+            } else {
+              // selection.kind === "fresh" — Trigger #2 (typed-new / eof).
+              recordMigrationDecision(migrationTracer, migrationAttemptId, {
+                decision: "fresh",
+                reason: "picker-fresh",
+                candidate_count: adjudication.candidates.length,
+              });
+              emit("Migration: fresh attach selected.");
+              await forceMigrationDiagnostics(slockHome, diagnosticsPush, emit, migrationAttemptId);
+              break pickerLoop;
             }
-            recordMigrationDecision(tracer, migrationAttemptId, {
-              decision: "adopt",
-              reason: "picker",
-              candidate_already_migrated: Boolean(candidate.legacyKeyMigratedAt),
-            });
-            try {
-              await runRosterAdoption(opts, candidate, adoptLegacyByFingerprint, emit, tracer, migrationAttemptId);
-            } catch (err) {
-              await forceMigrationDiagnosticsQuietly(slockHome, diagnosticsPush, emit, migrationAttemptId);
-              throw err;
-            }
-            migrated = true;
-            migratedDuringSetup = true;
-            shouldPushMigrationDiagnosticsAfterStart = true;
-            break pickerLoop;
-          } else if (selection.kind === "quit") {
-            recordMigrationDecision(tracer, migrationAttemptId, {
-              decision: "fail",
-              reason: "picker-quit",
-              candidate_count: adjudication.candidates.length,
-            });
-            emit(`Nothing was changed. Run raft-computer setup ${label} when ready.`);
-            throw new ComputerError(
-              "SETUP_CANCELED",
-              "Setup stopped without changing local state.",
-            );
-          } else {
-            // selection.kind === "fresh" — Trigger #2 (typed-new / eof).
-            recordMigrationDecision(tracer, migrationAttemptId, {
-              decision: "fresh",
-              reason: "picker-fresh",
-              candidate_count: adjudication.candidates.length,
-            });
-            emit("Migration: fresh attach selected.");
-            await forceMigrationDiagnostics(slockHome, diagnosticsPush, emit, migrationAttemptId);
-            break pickerLoop;
           }
         }
       }
+      migrationSpan.end("ok", { attrs: { migrated } });
+    } catch (err) {
+      migrationSpan.end("error", {
+        attrs: { error_code: err instanceof ComputerError ? err.code : "unexpected" },
+      });
+      throw err;
     }
 
     if (!migrated) {

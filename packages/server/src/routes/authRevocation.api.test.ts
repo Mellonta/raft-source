@@ -2,13 +2,12 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { eq } from "drizzle-orm";
 import WebSocket from "ws";
-import { vi } from "vitest";
-import { createApiTest } from "../test/integration/apiTest.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { createSession, revokeAllUserSessions, revokeSession } from "../services/sessionService.js";
-import * as serverService from "../services/serverService.js";
-import { createSocialAuthCompletion } from "../services/socialAuthService.js";
-import { userAuthIdentities } from "../db/schema.js";
+import { createApiTest } from "../test/integration/apiTest";
+import { signAccessToken } from "../middleware/auth";
+import { createSession, revokeAllUserSessions, revokeSession } from "../services/sessionService";
+import * as serverService from "../services/serverService";
+import { createSocialAuthCompletion } from "../services/socialAuthService";
+import { userAuthIdentities } from "../db/schema";
 
 const test = createApiTest({ onboardingOpenerFlagDefaultEnabled: false });
 

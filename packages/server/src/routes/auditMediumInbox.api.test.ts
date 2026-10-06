@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { and, eq } from "drizzle-orm";
 import { SERVER_GUEST_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
-import { createApiTest } from "../test/integration/apiTest.js";
-import { channels, featureFlagRules, serverMembers, threadFollows, userChannelInboxStates, messageMentions } from "../db/schema.js";
-import { getDoneInboxItems, getFollowedThreads, getInboxItems } from "../services/channelService.js";
+import { createApiTest } from "../test/integration/apiTest";
+import { channels, featureFlagRules, serverMembers, threadFollows, userChannelInboxStates, messageMentions } from "../db/schema";
+import { getDoneInboxItems, getFollowedThreads, getInboxItems } from "../services/channelService";
 
 const test = createApiTest({ onboardingOpenerFlagDefaultEnabled: false, humanActivityMuteFlagDefaultEnabled: true });
 for (const surface of ["done", "followed", "mention"] as const) {

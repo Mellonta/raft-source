@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { validateManifestSchema } from "../manifest.js";
+import { validateManifestSchema } from "../manifest";
 
 interface NamedValue {
   name: string;

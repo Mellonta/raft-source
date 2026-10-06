@@ -3,12 +3,11 @@ import { createServer, type Server } from "node:http";
 import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
 import type { AddressInfo } from "node:net";
 
-import { serverAttachmentPath } from "./paths.js";
-import { resolveTargetServerId } from "./targetServer.js";
-import { CliExit } from "./output.js";
+import { serverAttachmentPath } from "./paths";
+import { resolveTargetServerId } from "./targetServer";
+import { CliExit } from "./output";
 
 const SERVER_A = "11111111-1111-4111-8111-111111111111";
 const SERVER_B = "22222222-2222-4222-8222-222222222222";

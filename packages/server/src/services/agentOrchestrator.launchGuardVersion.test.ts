@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { supportsLaunchGuardForDaemonVersion } from "./agentOrchestrator.js";
+import { supportsLaunchGuardForDaemonVersion } from "./agentOrchestrator";
 
 test("supportsLaunchGuardForDaemonVersion rejects null, malformed, and pre-0.30.1 versions", () => {
   for (const version of [null, "", "main", "0.27.1-alpha.0", "0.28.0", "0.29.1-alpha.0", "0.30.0"]) {

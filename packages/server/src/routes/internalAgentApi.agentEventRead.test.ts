@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
-import { createApiTest } from "../test/integration/apiTest.js";
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { thirdPartyAgentEvents, users } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { createOAuthClient } from "../services/oauthService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
+import { createApiTest } from "../test/integration/apiTest";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { thirdPartyAgentEvents, users } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { createOAuthClient } from "../services/oauthService";
+import { mintAgentCredential } from "../services/agentCredentialService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

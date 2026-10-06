@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test, vi } from "vitest";
 import {
   __clearSessionServiceLocalReplayCacheForTests,
   __getSessionServiceLocalReplayCacheSizeForTests,
@@ -9,8 +8,9 @@ import {
   refreshSession,
   refreshSessionWithTrace,
   rotateSession,
-} from "./sessionService.js";
-import { sessionFamilies, sessions, sessionTokenPredecessors } from "../db/schema.js";
+} from "./sessionService";
+import { sessionFamilies, sessions, sessionTokenPredecessors } from "../db/schema";
+import { __traceUserIdForTests, cachedTraceUserId } from "../tracing/traceUserId";
 
 type DeleteCapture = { table?: unknown };
 type InsertCapture = { table?: unknown; values?: Record<string, unknown> };
@@ -85,7 +85,7 @@ function makeDb(options: {
       const tx = {
         select() {
           return { from: () => ({ where: () => ({ limit: () => ({
-            for: async () => [{ retiredAt: null }],
+            for: async () => [{ retiredAt: null, traceUserId: "trace-user-1" }],
           }) }) }) };
         },
         delete(table: unknown) {
@@ -142,6 +142,24 @@ test("rotateSession consumes a refresh token only once", async () => {
   assert.equal(insertCapture.values?.userId, "user-1");
   assert.equal(insertCapture.values?.familyId, "family-1", "refresh rotation must inherit the consumed session family");
   assert.equal(first.familyId, "family-1");
+});
+
+test("rotateSession fills the trace_user_id cache from the user row it already locks", async () => {
+  __traceUserIdForTests.reset();
+  __traceUserIdForTests.setLoader(async () => new Map());
+  try {
+    const db = makeDb({
+      deleteResults: [[{ userId: "user-1", familyId: "family-1" }]],
+      insertCaptures: [{}],
+    });
+    __setSessionServiceDbForTests(() => db as any);
+    assert.ok(await rotateSession("refresh-token-trace", "user-1"));
+    // Refresh spans (most user-attributed request spans) then export trace_user_id.
+    assert.equal(cachedTraceUserId("user-1"), "trace-user-1");
+  } finally {
+    __traceUserIdForTests.setLoader(null);
+    __traceUserIdForTests.reset();
+  }
 });
 
 test("refresh interleaving cannot fork one validated token into two child sessions", async () => {

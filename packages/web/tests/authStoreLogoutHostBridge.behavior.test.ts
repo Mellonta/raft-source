@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, test } from "node:test";
 import "./helpers/domSetup";
 import { useAuthStore } from "../src/store/authStore";
 import { useServerStore } from "../src/store/serverStore";

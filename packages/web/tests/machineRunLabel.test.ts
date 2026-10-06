@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { agentProfileMachineRunLabel } from "../src/utils/agentProfileMachineRunLabel.js";
-import { machineRunLabel } from "../src/utils/machineRunLabel.js";
+import { agentProfileMachineRunLabel } from "../src/utils/agentProfileMachineRunLabel";
+import { machineRunLabel } from "../src/utils/machineRunLabel";
 
 test("computer online + version → 'computer v<version>'", () => {
   assert.deepEqual(
@@ -58,23 +57,23 @@ test("computer offline → 'computer offline' regardless of version", () => {
   );
 });
 
-test("raw daemon online + version → 'daemon v<version>'", () => {
+test("raw daemon online + version → 'legacy v<version>'", () => {
   assert.deepEqual(
     machineRunLabel({ isComputer: false, status: "online", computerVersion: null, daemonVersion: "0.55.5" }),
-    { text: "daemon v0.55.5", isOffline: false },
+    { text: "legacy v0.55.5", isOffline: false },
   );
 });
 
-test("raw daemon online + null version → 'daemon online'", () => {
+test("raw daemon online + null version → 'legacy online'", () => {
   assert.deepEqual(
     machineRunLabel({ isComputer: false, status: "online", computerVersion: null, daemonVersion: null }),
-    { text: "daemon online", isOffline: false },
+    { text: "legacy online", isOffline: false },
   );
 });
 
-test("raw daemon offline → 'daemon offline'", () => {
+test("raw daemon offline → 'legacy offline'", () => {
   assert.deepEqual(
     machineRunLabel({ isComputer: false, status: "offline", computerVersion: null, daemonVersion: "0.55.5" }),
-    { text: "daemon offline", isOffline: true },
+    { text: "legacy offline", isOffline: true },
   );
 });

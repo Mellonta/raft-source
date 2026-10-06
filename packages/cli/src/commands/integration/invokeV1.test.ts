@@ -2,17 +2,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
 
-import type { AgentContext } from "../../auth/env.js";
-import type { RegisteredIntegrationService } from "./_format.js";
+import type { AgentContext } from "../../auth/env";
+import type { RegisteredIntegrationService } from "./_format";
 import {
   buildV1RequestPlan,
   effectiveContractDigest,
   resolveRegisteredActionBaseUrl,
-} from "./actionV1.js";
-import { IntegrationV1Error, invokeManifestActionV1 } from "./invokeV1.js";
-import { validateAgentManifestV1, type AgentManifestV1 } from "./manifestV1.js";
+} from "./actionV1";
+import { IntegrationV1Error, invokeManifestActionV1 } from "./invokeV1";
+import { validateAgentManifestV1, type AgentManifestV1 } from "./manifestV1";
 
 const actorContext: AgentContext = {
   agentId: "agent-123",

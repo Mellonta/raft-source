@@ -1,8 +1,10 @@
+import FeedbackUnreadDot from "../../feedback/FeedbackUnreadDot";
+import { SidebarItem } from "raft-ui";
 import { useIntl } from "react-intl";
 import { SETTINGS_GROUPS, SETTINGS_TAB_NAV_LABEL_ID } from "./settingsNavigation";
 import type { SettingsTabId } from "./settingsNavigation";
 
-// Pure presentational settings-nav sidebar. Extracted from WorkspaceSettingsModal
+// Settings-nav sidebar; the feedback badge subscribes independently. Extracted from WorkspaceSettingsModal
 // so the desktop nav's label localization can be exercised in a DOM test WITHOUT
 // mounting SettingsPanel (whose account-tab content reads the Vite-only
 // `import.meta.env.DEV` graph the node harness can't shim). It consumes the SAME
@@ -20,17 +22,17 @@ export default function SettingsNavList({
   const { formatMessage } = useIntl();
   return (
     <aside
-      className="flex w-[220px] shrink-0 flex-col border-r border-black/25 bg-brutal-cream"
+      className="flex w-[220px] shrink-0 flex-col border-r border-line-muted bg-layer-canvas-muted theme-brutal:border-black/25 theme-brutal:bg-brutal-cream"
       aria-label={formatMessage({ id: "settings.tabs.navAriaLabel" })}
       data-testid="workspace-settings-navigation"
     >
-      <div className="flex h-panel-header shrink-0 items-center border-b border-black/25 px-4 text-base font-bold">
+      <div className="flex h-panel-header shrink-0 items-center border-b border-line-muted px-4 text-base font-bold theme-brutal:border-black/25">
         {formatMessage({ id: "settings.tabs.navTitle" })}
       </div>
       <nav className="min-h-0 flex-1 px-2 py-3">
         {SETTINGS_GROUPS.map((group) => (
           <section key={group.key} className="mb-4 last:mb-0">
-            <div className="mb-1 px-2 text-[10px] font-bold uppercase tracking-widest text-black/45">
+            <div className="mb-1 px-2 text-[10px] font-bold uppercase tracking-widest text-foreground-placeholder theme-brutal:text-black/45">
               {formatMessage({ id: group.labelId })}
             </div>
             <div className="space-y-0.5">
@@ -39,17 +41,20 @@ export default function SettingsNavList({
                 const active = activeTab === item.id;
                 const navLabel = formatMessage({ id: SETTINGS_TAB_NAV_LABEL_ID[item.id] });
                 return (
-                  <button
+                  <SidebarItem
+                    variant="accent"
+                    active={active}
                     key={item.id}
                     type="button"
-                    className={`flex h-9 w-full items-center gap-2 px-2 text-left text-sm font-medium outline-none transition-colors ${active ? "bg-soft-signal font-bold" : "hover:bg-black/[0.06]"} focus-visible:outline focus-visible:outline-1 focus-visible:outline-black`}
+                    className="mx-0 w-full data-active:bg-fill-muted dark:data-active:bg-fill-muted data-active:shadow-none data-active:ring-0 theme-brutal:data-active:bg-brutal-pink theme-brutal:data-active:shadow-brutal-sm"
                     aria-current={active ? "page" : undefined}
                     data-testid={`workspace-settings-nav-${item.id}`}
                     onClick={() => onSelect(item.id)}
                   >
                     <Icon size={15} className="shrink-0" />
                     <span className="truncate">{navLabel}</span>
-                  </button>
+                    {item.id === "feedback" && <FeedbackUnreadDot className="ml-auto" />}
+                  </SidebarItem>
                 );
               })}
             </div>

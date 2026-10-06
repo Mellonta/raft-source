@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { requiresAccountProfileSetup } from "../src/utils/accountProfileSetup";
 import type { User } from "../src/store/authStore";
 

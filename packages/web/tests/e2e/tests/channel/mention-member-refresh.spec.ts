@@ -56,17 +56,27 @@ test.describe("Channel member mention autocomplete", () => {
     const composer = page.getByPlaceholder(`Message #${channel.name}`);
     await expect(composer).toBeVisible();
 
-    await page.getByTitle("View participants").click();
-    await page.getByRole("button", { name: "Add Member" }).click();
+    await page.getByTestId("channel-overflow-trigger").click();
+    await page.getByTestId("channel-overflow-members-entry").click();
+    await page.getByTestId("member-page-add").click();
     await page.getByPlaceholder("Name").fill(seedState.agent.name);
-    await page.getByRole("button", { name: new RegExp(seedState.agent.name) }).click();
-    await expect(page.locator('button[title="View participants"]')).toContainText("2");
+    // The existing agent's candidate row, never the "Create agent “<name>”" entry
+    // (its label also contains the name): waiting for it proves the roster loaded.
+    await page
+      .getByRole("button", { name: new RegExp(seedState.agent.name) })
+      .and(page.locator(':not([data-testid="add-member-create-agent-entry"])'))
+      .click();
+    await page.getByTestId("add-member-confirm").click();
+    await expect(page.getByTestId("member-page-count")).toHaveText("2");
     await page.keyboard.press("Escape");
     await page.keyboard.press("Escape");
 
     await composer.fill(`@${seedState.agent.name}`);
 
-    await expect(page.getByRole("button", { name: new RegExp(`@${seedState.agent.name}`) })).toBeVisible();
+    // The mention dropdown is the RUI ComposerSuggestionList: entries expose
+    // role "option" (not button).
+    const mentionPopover = page.getByTestId("mention-autocomplete-popover");
+    await expect(mentionPopover.getByRole("option", { name: new RegExp(`@${seedState.agent.name}`) })).toBeVisible();
     await expect(page.getByText("Not in this channel")).toHaveCount(0);
   });
 });

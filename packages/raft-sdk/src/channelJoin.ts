@@ -1,12 +1,12 @@
 import {
   joinRaftChannelByTarget as joinSharedRaftChannelByTarget,
   parseRaftRegularChannelTarget as parseSharedRaftRegularChannelTarget,
-} from "@botiverse/raft-shared/src/agentApiChannelJoin.js";
+} from "@botiverse/raft-shared/src/agentApiChannelJoin";
 import type {
   RaftChannelJoinClient,
   RaftChannelJoinRequest,
   RaftChannelJoinResult,
-} from "@botiverse/raft-shared/src/agentApiChannelJoin.js";
+} from "@botiverse/raft-shared/src/agentApiChannelJoin";
 
 export type {
   RaftChannelJoinClient,
@@ -18,7 +18,7 @@ export type {
   RaftChannelJoinResult,
   RaftChannelJoinSuccess,
   RaftChannelJoinTransportError,
-} from "@botiverse/raft-shared/src/agentApiChannelJoin.js";
+} from "@botiverse/raft-shared/src/agentApiChannelJoin";
 
 export function parseRaftRegularChannelTarget(target: string): string | null {
   return parseSharedRaftRegularChannelTarget(target);

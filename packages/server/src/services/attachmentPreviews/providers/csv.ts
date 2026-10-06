@@ -1,6 +1,6 @@
 import { CSV_PREVIEW_MAX_FILE_SIZE_BYTES, type CsvAttachmentPreviewData } from "@botiverse/raft-shared";
-import type { AttachmentPreviewProvider } from "../types.js";
-import { decodeUtf8Text } from "./text.js";
+import type { AttachmentPreviewProvider } from "../types";
+import { decodeUtf8Text } from "./text";
 
 export const CSV_PREVIEW_BYTE_LIMIT = 128 * 1024;
 export const CSV_PREVIEW_PAYLOAD_BYTE_LIMIT = 32 * 1024;

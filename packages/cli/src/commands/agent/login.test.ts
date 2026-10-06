@@ -11,13 +11,12 @@
  */
 
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import {
   describeInvalidAgentIdShape,
   describeMintError,
   formatAuthorizedLoginReport,
-} from "./login.js";
+} from "./login";
 
 test("authorized login report gives both audiences an executable Manual next step", () => {
   const report = formatAuthorizedLoginReport({
@@ -97,8 +96,8 @@ test("credential-mint denial names the action capability and human-creator recov
 // caused Jianwei's fresh-home smoke to write `agent-id` instead of the
 // operator-requested slug. ---
 import { Command } from "commander";
-import { registerAgentLoginCommand } from "./login.js";
-import { Readable } from "node:stream";
+import { registerAgentLoginCommand } from "./login";
+import { PassThrough, Readable } from "node:stream";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -120,11 +119,11 @@ test(`ordinary login consumes an existing token from ${inputMode} without device
     res.end(JSON.stringify({ agentId: "agent-1", agentName: "bot", serverId: "server-1", credentialId: "credential-1", scopes: ["send"] }));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  onTestFinished(() => new Promise<void>((resolve) => server.close(() => resolve())));
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const profileDir = await mkdtemp(path.join(tmpdir(), "raft-direct-login-"));
-  t.after(() => rm(profileDir, { recursive: true, force: true }));
+  onTestFinished(() => rm(profileDir, { recursive: true, force: true }));
   const { io, stdout, stderr } = loginMemoryIo();
   io.stdin = Readable.from([token + "\n"]);
   const rawModes: boolean[] = [];
@@ -142,8 +141,12 @@ test(`ordinary login consumes an existing token from ${inputMode} without device
   assert.ok(stdout.join("").includes("bot"));
   assert.ok(![...stdout, ...stderr].join("").includes(token), "token must not be printed");
   if (inputMode === "tty") assert.deepEqual(rawModes, [true, false], "restore terminal mode after hidden input");
+  if (inputMode === "tty") assert.doesNotMatch(stderr.join(""), /No interactive terminal/);
   if (inputMode === "pipe") {
-    const child = spawn(process.execPath, ["--import", "tsx", fileURLToPath(new URL("../../index.ts", import.meta.url)),
+    assert.match(stderr.join(""), /stdin/);
+    assert.match(stderr.join(""), /secret manager/);
+    assert.match(stderr.join(""), /< \/path\/to\/agent-token/);
+    const child = spawn(process.execPath, ["--import", "@oxc-node/core/register", fileURLToPath(new URL("../../index.ts", import.meta.url)),
       "agent", "login", "--server", `http://127.0.0.1:${address.port}`, "--agent", "agent-1", "--profile-dir", path.join(profileDir, "process")],
     { env: { PATH: process.env.PATH }, stdio: "pipe" });
     let output = "";
@@ -158,6 +161,50 @@ test(`ordinary login consumes an existing token from ${inputMode} without device
   }
 });
 }
+
+test("non-TTY login explains input before waiting and rejects empty input without creating a profile", { timeout: 5000 }, async (t) => {
+  const profileDir = await mkdtemp(path.join(tmpdir(), "raft-login-empty-"));
+  onTestFinished(() => rm(profileDir, { recursive: true, force: true }));
+  for (const ending of ["", "   \n"]) {
+    const { io, stdout, stderr } = loginMemoryIo();
+    const input = new PassThrough();
+    io.stdin = input;
+    let sawGuidance!: () => void;
+    const guidance = new Promise<void>((resolve) => { sawGuidance = resolve; });
+    io.stderr = { write(chunk: string | Uint8Array) { stderr.push(String(chunk)); sawGuidance(); return true; } };
+    const program = new Command();
+    program.exitOverride();
+    registerAgentLoginCommand(program.command("agent"), { io });
+    const pending = program.parseAsync(["agent", "login", "--server", "http://127.0.0.1:1", "--agent", "agent-1", "--profile-dir", profileDir], { from: "user" });
+    const rejected = assert.rejects(pending);
+    await guidance;
+    // No bytes or EOF yet: the caller must already know how to provide stdin.
+    assert.match(stderr.join(""), /No interactive terminal/);
+    assert.match(stderr.join(""), /secret manager/);
+    assert.match(stderr.join(""), /< \/path\/to\/agent-token/);
+    assert.equal(stdout.join(""), "");
+    input.end(ending);
+    await rejected;
+    assert.match(stderr.join(""), /AGENT_TOKEN_REQUIRED/);
+    assert.match(stderr.join(""), /No agent token was received on stdin/);
+    assert.doesNotMatch(stderr.join(""), /CREDENTIAL_CHECK_FAILED|INVALID_AGENT_TOKEN/);
+    await assert.rejects(readFile(path.join(profileDir, "credential.json")), { code: "ENOENT" });
+  }
+});
+
+test("login help explains non-TTY token input without a token argument", () => {
+  let help = "";
+  const program = new Command();
+  program.configureOutput({ writeOut: (text) => { help += text; } });
+  const agent = program.command("agent");
+  registerAgentLoginCommand(agent);
+  agent.commands.find((command) => command.name() === "login")!.outputHelp();
+  assert.match(help, /Without a TTY/);
+  assert.match(help, /secret manager/);
+  assert.match(help, /raft agent login .*< \/path\/to\/agent-token/);
+  assert.match(help, /first line/);
+  assert.doesNotMatch(help, /--token/);
+});
 
 for (const scenario of ["revoked", "wrong-agent", "malformed", "server-error", "redirect", "existing-mismatch", "existing-unreachable"] as const) {
   test(`direct login preserves the profile on ${scenario}`, async (t) => {
@@ -174,12 +221,12 @@ for (const scenario of ["revoked", "wrong-agent", "malformed", "server-error", "
       }));
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+    onTestFinished(() => new Promise<void>((resolve) => server.close(() => resolve())));
     const address = server.address();
     assert.ok(address && typeof address === "object");
     const serverUrl = `http://127.0.0.1:${address.port}`;
     const profileDir = await mkdtemp(path.join(tmpdir(), "raft-login-reject-"));
-    t.after(() => rm(profileDir, { recursive: true, force: true }));
+    onTestFinished(() => rm(profileDir, { recursive: true, force: true }));
     const file = path.join(profileDir, "credential.json");
     const existing = scenario.startsWith("existing-");
     const original = JSON.stringify({ apiKey: "sk_agent_prior", agentId: scenario === "existing-mismatch" ? "another-agent" : "agent-1", serverId: "server-1", serverUrl });
@@ -273,7 +320,7 @@ test("login exposes the agent-safe start / wait / status subcommands", () => {
 // even though --server was right there. Handler-direct tests can never catch
 // this class: the bug lives in argv parsing, so this test goes through a
 // real program.parseAsync. ---
-import type { CliIo } from "../../core/io.js";
+import type { CliIo } from "../../core/io";
 
 function loginMemoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -313,7 +360,7 @@ test("login start parses --server/--agent written after the subcommand (parent-s
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const serverUrl = `http://127.0.0.1:${(address as { port: number }).port}`;
-  t.after(() => new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve())));
+  onTestFinished(() => new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve())));
 
   const program = new Command();
   program.option("-p, --profile <slug>", "Use existing profile");
@@ -337,4 +384,70 @@ test("login start parses --server/--agent written after the subcommand (parent-s
   assert.doesNotMatch(err, /--server is required/, `start must see --server written after the subcommand; stderr: ${err}`);
   assert.match(out, /dev-code-1|USER-CODE|approve/, `start should print the device-code handoff; stdout: ${out}`);
   assert.match(out, /Browser authorization URL \(code pre-filled\)/, `start should print a browser authorization URL; stdout: ${out}`);
+});
+
+// Re-login through `login wait` rotates: the mint names the credential this
+// profile held (same agent + server), so the server revokes it in the same
+// transaction. A fresh profile, or one bound to another agent, names nothing.
+test("login wait sends the profile's previous credential as replacesCredentialId (rotation)", async (t) => {
+  const { io } = loginMemoryIo();
+  const agentId = "11111111-2222-3333-4444-555555555555";
+  const mintBodies: unknown[] = [];
+  const http = await import("node:http");
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      if (req.method === "POST" && req.url === "/api/auth/device/token") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ accessToken: "session-access", refreshToken: "session-refresh", userId: "user-1" }));
+        return;
+      }
+      if (req.method === "POST" && req.url === `/api/agents/${agentId}/credentials`) {
+        mintBodies.push(JSON.parse(raw || "{}"));
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          credentialId: `cred-${mintBodies.length}`,
+          apiKey: `sk_agent_test${mintBodies.length}`,
+          scopes: ["read", "send"],
+          agentId,
+          agentName: "Rotator",
+          serverId: "server-1",
+        }));
+        return;
+      }
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ code: "unexpected_route" }));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as { port: number };
+  const serverUrl = `http://127.0.0.1:${address.port}`;
+  const profileDir = await mkdtemp(path.join(tmpdir(), "raft-login-rotate-"));
+  onTestFinished(async () => {
+    await rm(profileDir, { recursive: true, force: true });
+    await new Promise<void>((resolve, reject) => server.close((err) => err ? reject(err) : resolve()));
+  });
+
+  const runWait = async () => {
+    const program = new Command();
+    program.exitOverride();
+    registerAgentLoginCommand(program.command("agent"), { io });
+    await program.parseAsync(
+      ["agent", "login", "wait", "--server", serverUrl, "--agent", agentId, "--device-code", "dev-1", "--profile-dir", profileDir],
+      { from: "user" },
+    );
+  };
+
+  await runWait();
+  assert.deepEqual(mintBodies[0], {}, "first login has nothing to rotate");
+  await runWait();
+  assert.deepEqual(mintBodies[1], { replacesCredentialId: "cred-1" }, "re-login rotates the profile's credential");
+  assert.equal(JSON.parse(await readFile(path.join(profileDir, "credential.json"), "utf8")).credentialId, "cred-2");
+
+  // A profile bound to another agent never names its credential.
+  const { readReplaceableCredentialId } = await import("./login");
+  assert.equal(await readReplaceableCredentialId(path.join(profileDir, "credential.json"), { server: serverUrl, agent: "other-agent" }), null);
+  assert.equal(await readReplaceableCredentialId(path.join(profileDir, "credential.json"), { server: "https://elsewhere.example", agent: agentId }), null);
+  assert.equal(await readReplaceableCredentialId(path.join(profileDir, "missing.json"), { server: serverUrl, agent: agentId }), null);
 });

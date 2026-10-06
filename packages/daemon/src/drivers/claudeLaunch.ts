@@ -1,9 +1,10 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, type AgentConfig } from "@botiverse/raft-shared";
-import { isClaudeCustomProviderConfig } from "./claudeProviderIsolation.js";
-import type { RuntimeProbeResult } from "./types.js";
-import { firstExistingPath, readCommandVersion, resolveCommandOnPath, resolveHomePath, type ProbeDeps } from "./probe.js";
+import { isClaudeCustomProviderConfig } from "./claudeProviderIsolation";
+import type { RuntimeProbeResult } from "./types";
+import { firstExistingPath, readCommandVersion, resolveCommandOnPath, resolveHomePath, type ProbeDeps } from "./probe";
+import { resolveRuntimeLaunch, resolveWindowsDirectLaunch, type DirectLaunch, type WindowsLaunchDeps } from "./windowsLaunch";
 
 export const CLAUDE_DESKTOP_CLI_RELATIVE_PATH = path.join("Applications", "Claude Code URL Handler.app", "Contents", "MacOS", "claude");
 export const CLAUDE_DESKTOP_CLI_SYSTEM_PATH = "/Applications/Claude Code URL Handler.app/Contents/MacOS/claude";
@@ -119,17 +120,15 @@ export function writeClaudeSystemPromptFile(standingPrompt: string, slockDir: st
 
 export function buildClaudeSpawnSpec(
   claudeCommand: string | null,
-  platform: NodeJS.Platform = process.platform,
-): { command: string; shell: boolean } {
-  const lowerClaudeCommand = claudeCommand?.toLowerCase();
-  const isBatchFile = Boolean(
-    platform === "win32" &&
-      lowerClaudeCommand &&
-      (lowerClaudeCommand.endsWith(".cmd") || lowerClaudeCommand.endsWith(".bat")),
-  );
-
-  return {
-    command: claudeCommand ?? "claude",
-    shell: platform === "win32" && (!claudeCommand || isBatchFile),
-  };
+  args: string[],
+  deps: WindowsLaunchDeps = {},
+): DirectLaunch {
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "win32") return { command: claudeCommand ?? "claude", args, shell: false };
+  // A bare configured name is looked up on PATH like the default; a path is
+  // used as given. Either way a .cmd/.bat shim is resolved, never run via cmd.exe.
+  if (!claudeCommand || !/[\\/]/.test(claudeCommand)) {
+    return resolveRuntimeLaunch("claude", claudeCommand ?? "claude", args, deps);
+  }
+  return resolveWindowsDirectLaunch("claude", claudeCommand, args, deps);
 }

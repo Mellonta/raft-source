@@ -22,7 +22,6 @@
 // The remaining baseline is the setup flagship family — scheduled to dissolve
 // in the setup→services/setup.ts rework (PR-2 of the decycle plan).
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname, resolve, relative, sep } from "node:path";
 

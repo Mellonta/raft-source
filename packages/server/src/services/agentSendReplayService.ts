@@ -1,9 +1,9 @@
 import { and, eq } from "drizzle-orm";
-import { getDb, type Database, type DatabaseExecutor } from "../db/index.js";
-import { attachments, messages } from "../db/schema.js";
-import { buildSearchText } from "./searchService.js";
-import { getThumbnailUrl, normalizeAttachmentFilename, resolveAttachmentMimeType } from "../routes/attachments.js";
-import { linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService.js";
+import { getDb, type Database, type DatabaseExecutor } from "../db/index";
+import { attachments, messages } from "../db/schema";
+import { buildSearchText } from "./searchService";
+import { getThumbnailUrl, normalizeAttachmentFilename, resolveAttachmentMimeType } from "../routes/attachments";
+import { AttachmentLinkError, linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService";
 
 type LinkedAttachment = {
   id: string;
@@ -33,6 +33,25 @@ type AgentSendInsertedCallback<T> =
   | ((input: AgentSendInsertedTransactionInput) => Promise<T>)
   | ((executor: DatabaseExecutor, message: typeof messages.$inferSelect) => Promise<T>);
 
+/**
+ * An agent send reused an idempotency key for a different payload: the key is
+ * already bound to a message with another target or content. Replaying the
+ * original would report a message the caller did not ask for as "sent", so
+ * the send is refused instead.
+ */
+export class AgentSendIdempotencyConflictError extends Error {
+  readonly status = 409 as const;
+  readonly code = "idempotency_key_reused" as const;
+  readonly suggestedNextAction = "use a new idempotencyKey for different content";
+  readonly mismatch: "target" | "content" | "attachments";
+
+  constructor(mismatch: "target" | "content" | "attachments") {
+    super(`idempotencyKey was already used for a message with a different ${mismatch}; use a new idempotencyKey for different content`);
+    this.name = "AgentSendIdempotencyConflictError";
+    this.mismatch = mismatch;
+  }
+}
+
 let dbOverride: (() => Database) | null = null;
 
 function resolveDb(): Database {
@@ -60,6 +79,14 @@ export async function createOrReplayAgentSend<TInserted = never>(opts: {
   agentSendKey: string;
   attachmentIds?: string[];
   /**
+   * Agent-facing sends (`idempotencyKey`): a replay whose target, content or
+   * ordered attachment set differs from the committed message is refused with
+   * AgentSendIdempotencyConflictError instead of reporting the original as
+   * sent. Server-internal producers that key re-runs of mutable templates
+   * (e.g. onboarding openers) leave this off and keep replaying the original.
+   */
+  rejectMismatchedReplay?: boolean;
+  /**
    * Runs at the start of the transaction, before the source insert attempts to
    * allocate messages.seq. Outbound admission uses it to serialize eligible
    * canonical conversations without moving replay lookup outside the same
@@ -73,13 +100,12 @@ export async function createOrReplayAgentSend<TInserted = never>(opts: {
    */
   onInserted?: AgentSendInsertedCallback<TInserted>;
   onReplay?: (executor: DatabaseExecutor, message: typeof messages.$inferSelect) => Promise<TInserted>;
-}): Promise<Omit<ReplayableAgentSendResult<TInserted>, "insertedTransactionResult"> & {
+}, executor?: DatabaseExecutor): Promise<Omit<ReplayableAgentSendResult<TInserted>, "insertedTransactionResult"> & {
   insertedTransactionResult: TInserted | null;
 }> {
   const { channelId, senderId, content, agentSendKey, attachmentIds = [] } = opts;
-  const db = resolveDb();
+  const run = async (tx: DatabaseExecutor): Promise<ReplayableAgentSendResult<TInserted>> => {
 
-  return db.transaction(async (tx) => {
     if (opts.beforeInsert) await opts.beforeInsert(tx);
     const [insertedMessage] = await tx
       .insert(messages)
@@ -133,6 +159,16 @@ export async function createOrReplayAgentSend<TInserted = never>(opts: {
     if (!replayedMessage) {
       throw new Error("Agent send replay lookup failed after idempotency conflict");
     }
+    // A replay must be the same send: same target, content and (below) the
+    // same ordered attachment set.
+    if (opts.rejectMismatchedReplay) {
+      if (replayedMessage.channelId !== channelId) {
+        throw new AgentSendIdempotencyConflictError("target");
+      }
+      if (replayedMessage.content !== content) {
+        throw new AgentSendIdempotencyConflictError("content");
+      }
+    }
 
     const linkedAttachments = await linkAttachmentsToMessageWithExecutor(
       tx,
@@ -140,7 +176,12 @@ export async function createOrReplayAgentSend<TInserted = never>(opts: {
       replayedMessage.id,
       senderId,
       "replay",
-    );
+    ).catch((error: unknown) => {
+      if (opts.rejectMismatchedReplay && error instanceof AttachmentLinkError && error.code === "attachment_replay_conflict") {
+        throw new AgentSendIdempotencyConflictError("attachments");
+      }
+      throw error;
+    });
     const transactionData = await opts.onReplay?.(tx, replayedMessage);
     return {
       replayed: true,
@@ -149,7 +190,9 @@ export async function createOrReplayAgentSend<TInserted = never>(opts: {
       transactionData,
       insertedTransactionResult: null,
     };
-  });
+  };
+  if (executor) return run(executor);
+  return resolveDb().transaction(run);
 }
 
 export function __setAgentSendReplayDbForTests(factory: () => Database) {
@@ -158,4 +201,8 @@ export function __setAgentSendReplayDbForTests(factory: () => Database) {
 
 export function __resetAgentSendReplayDbForTests() {
   dbOverride = null;
+}
+
+export function __hasAgentSendReplayDbOverrideForTests(): boolean {
+  return dbOverride !== null;
 }

@@ -1,9 +1,11 @@
+import { randomBytes } from "node:crypto";
 import { expect, test } from "@playwright/test";
 import { seedAgentMessages } from "../../fixtures/agentMessage";
 import { loginViaApi } from "../../fixtures/auth";
 import { waitForSeedState } from "../../fixtures/seedState";
 import { dismissOwnerOnboarding } from "../../fixtures/session";
 import { seedSparseAnchorReplies } from "../../fixtures/sparseAnchorReplies";
+import { evidenceConfig, readApiRequestOccupancyEvidence } from "../../../../../../scripts/e2e/transportEvidence";
 
 // Regression test for #67 (cindyz f84d85ec): a thread with one reply was
 // rendering the reply pushed against the very bottom of the panel, leaving a
@@ -167,7 +169,7 @@ test.describe("thread sparse-anchor", () => {
     );
     await seedAgentMessages(
       seedState,
-      seedState.agent.id,
+      seedState.externalAgent.id,
       login.accessToken,
       `#${seedState.channel.name}:${parentMessage.id.slice(0, 8)}`,
       agentReplyContents,
@@ -265,19 +267,60 @@ test.describe("thread sparse-anchor", () => {
     expect(parentResponse.ok()).toBeTruthy();
     const parentMessage = (await parentResponse.json()) as { id: string };
 
-    for (let index = 0; index < 125; index += 1) {
-      const replyResponse = await request.post(
-        `${seedState.urls.api}/api/channels/${seedState.channel.id}/threads`,
-        {
-          headers,
-          data: {
-            parentMessageId: parentMessage.id,
-            content: `${replyPrefix} ${index.toString().padStart(3, "0")}`,
+    const replyContents = Array.from(
+      { length: 125 },
+      (_, index) => `${replyPrefix} ${index.toString().padStart(3, "0")}`,
+    );
+    const transport = evidenceConfig();
+    const postReply = async (content: string) => {
+      // Correlate this setup write with the existing anonymous server evidence.
+      // A reset does not prove whether the write arrived; never retry the POST.
+      const traceId = transport ? randomBytes(16).toString("hex") : null;
+      const clientStartedAtEpochMs = Date.now();
+      try {
+        const replyResponse = await request.post(
+          `${seedState.urls.api}/api/channels/${seedState.channel.id}/threads`,
+          {
+            headers: traceId
+              ? { ...headers, traceparent: `00-${traceId}-${randomBytes(8).toString("hex")}-01` }
+              : headers,
+            data: {
+              parentMessageId: parentMessage.id,
+              content,
+            },
           },
-        },
-      );
-      expect(replyResponse.ok()).toBeTruthy();
-    }
+        );
+        expect(replyResponse.ok()).toBeTruthy();
+        return content;
+      } catch (error) {
+        if (traceId) {
+          const assertionEndedAtEpochMs = Date.now();
+          // Only identifiers and lifecycle facts: no URL, content, auth or error text.
+          try {
+            await test.info().attach(`sparse-anchor-seed-${traceId}`, {
+              contentType: "application/json",
+              body: JSON.stringify({
+                traceId, clientStartedAtEpochMs, assertionEndedAtEpochMs,
+                server: readApiRequestOccupancyEvidence(transport, [{
+                  traceId, clientStartedAtEpochMs, assertionEndedAtEpochMs,
+                }]),
+              }),
+            });
+          } catch { /* Evidence failure must not replace the original request failure. */ }
+        }
+        throw error;
+      }
+    };
+
+    // The first and last replies are the pagination anchors asserted below.
+    // Seed 000 before the bounded middle batches, then 124 after they settle,
+    // so concurrent setup cannot change either anchor's server ordering.
+    const seededReplyContents = await seedSparseAnchorReplies(
+      replyContents.slice(0, -1),
+      postReply,
+    );
+    seededReplyContents.push(await postReply(replyContents.at(-1)!));
+    expect(seededReplyContents).toEqual(replyContents);
 
     let olderPageResponses = 0;
     page.on("response", (response) => {
@@ -298,13 +341,13 @@ test.describe("thread sparse-anchor", () => {
     await parentMessageCard.getByLabel("Reply in thread").click();
 
     const threadScroller = page.getByTestId("thread-message-scroller");
-    await expect(threadScroller.getByText(`${replyPrefix} 124`)).toBeVisible();
-    await expect(threadScroller.getByText(`${replyPrefix} 000`)).toHaveCount(0);
+    await expect(threadScroller.getByText(seededReplyContents[124]!)).toBeVisible();
+    await expect(threadScroller.getByText(seededReplyContents[0]!)).toHaveCount(0);
 
     await page.getByTestId("thread-scroll-to-top").click();
 
     await expect(threadScroller.getByText(parentContent)).toBeVisible();
-    await expect(threadScroller.getByText(`${replyPrefix} 000`)).toBeVisible();
+    await expect(threadScroller.getByText(seededReplyContents[0]!)).toBeVisible();
     await expect(threadScroller.getByText("Beginning of replies")).toBeVisible();
     await expect
       .poll(() => olderPageResponses, { timeout: 10_000 })

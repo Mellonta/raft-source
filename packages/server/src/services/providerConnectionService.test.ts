@@ -1,16 +1,15 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { createCipheriv, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { RUNTIME_CONFIG_VERSION } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { integrationAuditEvents, providerConnectionCredentials, providerConnections, users } from "../db/schema.js";
-import { createAgent, updateAgent } from "./agentService.js";
-import { createServer } from "./serverService.js";
+import { getDb } from "../db/index";
+import { integrationAuditEvents, providerConnectionCredentials, providerConnections, users } from "../db/schema";
+import { createAgent, updateAgent } from "./agentService";
+import { createServer } from "./serverService";
 import {
   __setProviderConnectionFetchFactoryForTests,
   createProviderConnection,
@@ -24,7 +23,7 @@ import {
   resolveProviderConnectionSelection,
   testProviderConnection,
   updateProviderConnection,
-} from "./providerConnectionService.js";
+} from "./providerConnectionService";
 
 
 const ORIGINAL_KEY = process.env.SLOCK_PROVIDER_CREDENTIAL_KEY;
@@ -92,11 +91,7 @@ test("provider catalog is secret-free and launch resolves the exact assignment",
   });
   assert.equal(JSON.stringify(createdAudit).includes("deepseek-private-value"), false);
 
-  await assert.rejects(
-    () => resolveProviderConnectionSelection(server.id, created.id),
-    (error: unknown) => error instanceof ProviderConnectionError && error.code === "provider_connection_unavailable",
-  );
-  await markReady(created.id);
+  // Usability for selection/assignment depends strictly on enabled state, not test status
   const selected = await resolveProviderConnectionSelection(server.id, created.id);
   assertProviderConnectionModelCompatible(selected.providerId, { kind: "preset", id: "deepseek/deepseek-v4-pro" });
   assert.throws(
@@ -118,6 +113,7 @@ test("provider catalog is secret-free and launch resolves the exact assignment",
     },
     providerConnection: { ...selected, updatedByUserId: user.id },
   });
+  // Usability is decoupled from test status: an enabled connection launches directly without requiring ready status.
   assert.deepEqual(await resolveProviderConnectionLaunchEnv({
     serverId: server.id,
     agentId: agent.id,
@@ -177,11 +173,7 @@ test("credential rotation advances assignment versions and disabled connections 
   });
   assert.equal(rotated.status, "unchecked");
   assert.equal(rotated.credentialVersion, 2);
-  await assert.rejects(
-    () => resolveProviderConnectionLaunchEnv({ serverId: server.id, agentId: agent.id, connectionId: created.id }),
-    (error: unknown) => error instanceof ProviderConnectionError && error.code === "provider_connection_unavailable",
-  );
-  await markReady(created.id);
+  // Launch uses the new key immediately without requiring a connection check.
   assert.deepEqual(await resolveProviderConnectionLaunchEnv({ serverId: server.id, agentId: agent.id, connectionId: created.id }), {
     OPENAI_API_KEY: "new-private-value",
     OPENAI_BASE_URL: "https://gateway.example.test/v1",
@@ -197,6 +189,85 @@ test("credential rotation advances assignment versions and disabled connections 
     () => resolveProviderConnectionLaunchEnv({ serverId: server.id, agentId: agent.id, connectionId: created.id }),
     (error: unknown) => error instanceof ProviderConnectionError && error.code === "provider_connection_unavailable",
   );
+});
+
+test("unified update edits name, endpoint, image input support and optional API key", async () => {
+  const { user, server } = await seed();
+  const created = await createProviderConnection({
+    serverId: server.id,
+    userId: user.id,
+    name: "Original Gateway",
+    providerId: "openai-compatible",
+    endpointUrl: "https://gateway.example.test/v1",
+    apiKey: "original-api-key",
+  });
+  await markReady(created.id);
+  const selected = await resolveProviderConnectionSelection(server.id, created.id);
+  const agent = await createAgent(server.id, `agent-${randomUUID().slice(0, 8)}`, {
+    creatorType: "user",
+    creatorId: user.id,
+    runtime: "builtin",
+    model: "custom-model",
+    runtimeConfig: {
+      version: RUNTIME_CONFIG_VERSION,
+      runtime: "builtin",
+      provider: { kind: "connection", connectionId: created.id },
+      model: { kind: "custom", name: "custom-model" },
+      mode: { kind: "default" },
+      hostUserState: "forbidden",
+    },
+    providerConnection: { ...selected, updatedByUserId: user.id },
+  });
+
+  const updatedMetadata = await updateProviderConnection({
+    serverId: server.id,
+    userId: user.id,
+    connectionId: created.id,
+    name: "Renamed Gateway",
+    endpointUrl: "https://gateway2.example.test/v1",
+    supportsImageInput: true,
+  });
+  assert.equal(updatedMetadata.name, "Renamed Gateway");
+  assert.equal(updatedMetadata.endpointUrl, "https://gateway2.example.test/v1");
+  assert.equal(updatedMetadata.supportsImageInput, true);
+  assert.equal(updatedMetadata.configVersion, 2);
+  assert.equal(updatedMetadata.credentialVersion, 1);
+  assert.equal(updatedMetadata.status, "unchecked");
+
+  await markReady(created.id);
+  const launchAfterMetadata = await resolveProviderConnectionLaunch({
+    serverId: server.id,
+    agentId: agent.id,
+    connectionId: created.id,
+  });
+  assert.deepEqual(launchAfterMetadata, {
+    envVars: {
+      OPENAI_API_KEY: "original-api-key",
+      OPENAI_BASE_URL: "https://gateway2.example.test/v1",
+    },
+    providerConnection: {
+      providerId: "openai-compatible",
+      endpointUrl: "https://gateway2.example.test/v1",
+      supportsImageInput: true,
+    },
+  });
+
+  const updatedWithKey = await updateProviderConnection({
+    serverId: server.id,
+    userId: user.id,
+    connectionId: created.id,
+    apiKey: "rotated-api-key",
+  });
+  assert.equal(updatedWithKey.credentialVersion, 2);
+  assert.equal(updatedWithKey.status, "unchecked");
+
+  await markReady(created.id);
+  const launchAfterKey = await resolveProviderConnectionLaunch({
+    serverId: server.id,
+    agentId: agent.id,
+    connectionId: created.id,
+  });
+  assert.equal(launchAfterKey.envVars.OPENAI_API_KEY, "rotated-api-key");
 });
 
 test("editing an Agent replaces or removes its provider assignment atomically", async () => {

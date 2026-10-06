@@ -6,7 +6,7 @@
  * command authority.
  */
 
-import { currentDate } from "./clock.js";
+import { currentDate } from "./clock";
 
 export const EXTERNAL_PROJECTION_CONTRACT_VERSION = "external-projection.v1" as const;
 
@@ -36,6 +36,7 @@ export interface ExternalActorProjection extends ExternalProjectionIdentity {
  * message. It intentionally contains no Raft principal or membership fields.
  */
 export interface ExternalMessageAuthorProjection extends ExternalProjectionIdentity {
+  workspaceName: string | null;
   externalConversationId: string;
   externalMessageId: string;
   displayName: string;

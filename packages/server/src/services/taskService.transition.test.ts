@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { getTaskStatusTransitionError } from "./taskService.js";
+import { getTaskStatusTransitionError } from "./taskService";
 
 test("closed tasks allow direct assignee resumption but not unrelated active states", () => {
   assert.equal(getTaskStatusTransitionError("closed", "in_progress"), null);

@@ -3,15 +3,17 @@
 
 import type { Command } from "commander";
 
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import { writeText, adoptCliReplyText } from "../../core/renderer.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError } from "../../core/errors";
+import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { applyDmPeerKind, PEER_KIND_OPTION } from "../_target";
 
 interface UnfollowOpts {
   target?: string;
   reason?: string;
+  peerKind?: string;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -57,6 +59,7 @@ export const threadUnfollowCommand = defineCommand(
         flags: "--target <target>",
         description: "Thread target, e.g. '#engineering:abcd1234' or 'dm:@alice:abcd1234'",
       },
+      PEER_KIND_OPTION,
       {
         flags: "--reason <reason>",
         description: "Short reason shown in the thread-local unfollow notice",
@@ -64,7 +67,7 @@ export const threadUnfollowCommand = defineCommand(
     ],
   },
   async (ctx, opts: UnfollowOpts) => {
-    const thread = parseThreadTarget(opts.target ?? "");
+    const thread = parseThreadTarget(applyDmPeerKind(opts.target?.trim() ?? "", opts.peerKind));
     if (!thread) {
       throw new CliError({
         code: "INVALID_TARGET",

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
@@ -191,4 +190,58 @@ test("an in-place task projection update refreshes the mounted history timeline"
     assert.match(document.body.textContent ?? "", /Changed assignee/);
     assert.match(document.body.textContent ?? "", /Assigned to Human 2|Assigned to user/);
   });
+});
+
+// The history timeline is rendered through rui's Timeline (task #716). Pin the
+// rendered structure — rui slot names and the status→variant mapping — so a
+// future regression cannot quietly fall back to a local timeline or drop the
+// theme-following marker variant onto a hardcoded color.
+test("history renders through the rui Timeline with status-mapped variants", async () => {
+  cleanup();
+  primeStores();
+  useTaskStore.setState({
+    tasks: [task],
+    serverTasks: [task],
+    tasksByChannelId: { [task.channelId]: [task] },
+  });
+  api.get = (async (url: string) => {
+    if (url === "/channels/channel-1/members") {
+      return { data: { agents: [], humans: [], externalMembers: [] } };
+    }
+    assert.equal(url, "/tasks/task-1/history");
+    return {
+      data: {
+        events: [
+          { id: "e-created", eventType: "created", actorType: "user", actorName: "creator", createdAt: "2026-08-20T00:00:00.000Z", payload: { taskNumber: 1, status: "todo" } },
+          { id: "e-progress", eventType: "status_changed", actorType: "user", actorName: "creator", createdAt: "2026-08-20T00:01:00.000Z", payload: { from: "todo", to: "in_progress" } },
+          { id: "e-review", eventType: "status_changed", actorType: "user", actorName: "creator", createdAt: "2026-08-20T00:01:30.000Z", payload: { from: "in_progress", to: "in_review" } },
+          { id: "e-done", eventType: "status_changed", actorType: "user", actorName: "creator", createdAt: "2026-08-20T00:02:00.000Z", payload: { from: "in_review", to: "done" } },
+        ],
+      },
+    };
+  }) as typeof api.get;
+
+  render(
+    <TestIntlProvider locale="en">
+      <TaskProperties task={task} />
+    </TestIntlProvider>,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "History" }));
+  await waitFor(() => assert.match(document.body.textContent ?? "", /Task #1/));
+
+  const timeline = document.querySelector("[data-slot='timeline']");
+  assert.ok(timeline, "the history list must be the rui Timeline (data-slot=timeline)");
+  // task #716: the panel-density tier (gzj spec) — every history row renders at `sm`.
+  assert.ok(timeline.classList.contains("r-timeline--sm"), "history uses the rui sm (panel) density tier");
+  const items = timeline.querySelectorAll("[data-slot='timeline-item']");
+  assert.equal(items.length, 4, "one rui TimelineItem per visible history event");
+  // Status → rui variant: todo→warning, in_progress→information, in_review→accent, done→success.
+  assert.ok(items[0].classList.contains("r-timeline-item--warning"), "created(todo) maps to warning");
+  assert.ok(items[1].classList.contains("r-timeline-item--information"), "in_progress maps to information");
+  // The In Review tone must stay its own color, never collapse to default/grey (that is
+  // exactly the regression rui added the `accent` variant for).
+  assert.ok(items[2].classList.contains("r-timeline-item--accent"), "in_review maps to accent (not default)");
+  assert.ok(!items[2].classList.contains("r-timeline-item--default"), "in_review must not fall back to default");
+  assert.ok(items[3].classList.contains("r-timeline-item--success"), "done maps to success");
+  assert.ok(timeline.querySelector("[data-slot='timeline-item-marker']"), "rui axis marker is used");
 });

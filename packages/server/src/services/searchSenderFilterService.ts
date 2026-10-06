@@ -1,6 +1,6 @@
-import * as channelService from "./channelService.js";
-import { getActorServerRoleInServer } from "../lib/actorPermissions.js";
-import * as serverService from "./serverService.js";
+import * as channelService from "./channelService";
+import { getActorServerRoleInServer } from "../lib/actorPermissions";
+import * as serverService from "./serverService";
 
 type SearchSenderRequester =
   | { type: "agent"; id: string }

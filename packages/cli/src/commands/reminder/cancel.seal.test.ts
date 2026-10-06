@@ -1,0 +1,55 @@
+import assert from "node:assert/strict";
+
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import { reminderCancelCommand } from "./cancel";
+
+const reminderId = "12345678-1234-4123-8123-123456789abc";
+const agentContext: AgentContext = {
+  agentId: "agent-1",
+  serverUrl: "http://127.0.0.1:9898",
+  serverId: "server-1",
+  token: "proxy-token",
+  clientMode: "managed-runner",
+  secretSource: "agent-proxy-token-env",
+  activeCapabilities: null,
+};
+
+test("cancel is blocked by a reminder-id seal even when the exact Inbox item is absent", async () => {
+  const requests: Array<{ method: string; path: string }> = [];
+  const ctx = createCommandContext({
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (method: string, path: string): Promise<ApiResponse<unknown>> => {
+        requests.push({ method, path });
+        if (method === "GET" && path === "/internal/agent-api/inbox") {
+          return {
+            ok: true,
+            status: 200,
+            error: null,
+            data: {
+              rows: [],
+              items: [],
+              seals: [{
+                appId: "system.reminder",
+                notificationClass: "due",
+                sourceRef: { kind: "reminder", id: reminderId, revision: "7" },
+                owner: "@Stone",
+                until: "explicit release",
+                sealedAtMs: 1_000,
+              }],
+            },
+          };
+        }
+        throw new Error(`cancel escaped local seal guard: ${method} ${path}`);
+      },
+    }) as never,
+  });
+
+  await assert.rejects(
+    async () => reminderCancelCommand.handler(ctx, { id: "12345678" }),
+    /revision 7 is sealed/,
+  );
+  assert.deepEqual(requests, [{ method: "GET", path: "/internal/agent-api/inbox" }]);
+});

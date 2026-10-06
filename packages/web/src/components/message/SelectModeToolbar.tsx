@@ -1,10 +1,16 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { X, Image, Copy, Check, Send, MoreHorizontal } from "lucide-react";
+import { useLayoutEffect, useRef, useState } from "react";
+import { X, Image, Copy, Check, Send, MoreHorizontal, ListChecks } from "lucide-react";
 import { useIntl } from "react-intl";
 import { useSelectionStore } from "../../store/selectionStore";
-import Button from "../ui/Button";
-import MenuItem from "../ui/MenuItem";
-import Spinner from "../ui/Spinner";
+import {
+  Button,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+  Spinner,
+} from "raft-ui";
+import Tooltip from "../ui/Tooltip";
 
 export interface SelectModeToolbarProps {
   /** Channel id this toolbar is mounted under. Renders only when select mode is scoped here. */
@@ -49,34 +55,15 @@ export default function SelectModeToolbar({
   const selectionChannelId = useSelectionStore((s) => s.channelId);
   const count = useSelectionStore((s) => s.selectedIds.size);
   const exit = useSelectionStore((s) => s.exit);
-  const [moreOpen, setMoreOpen] = useState(false);
   const [compactLevel, setCompactLevel] = useState(0);
-  const moreRef = useRef<HTMLDivElement | null>(null);
   const actionsRef = useRef<HTMLDivElement | null>(null);
   const lastActionsWidthRef = useRef(0);
 
-  useEffect(() => {
-    if (!moreOpen) return;
-    const handlePointerDown = (event: PointerEvent) => {
-      if (moreRef.current?.contains(event.target as Node)) return;
-      setMoreOpen(false);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMoreOpen(false);
-    };
-    document.addEventListener("pointerdown", handlePointerDown);
-    // keydown-global-exempt: Escape closes the already-open More menu without moving focus.
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [moreOpen]);
-
   const canAct = count > 0 && !capturing;
   const canForward = canAct && !!onForward && !forwardDisabledReason;
-  const toolbarButtonClass = "box-border appearance-none whitespace-nowrap px-1 focus:outline-none focus-visible:outline-none";
-  const toolbarIconButtonClass = `${toolbarButtonClass} min-w-7 gap-0 sm:min-w-0`;
+  // Icon-only states use size="icon-sm". Do not zero RUI Button gap/padding
+  // or suppress the keyboard focus ring (those overrides were for the pre-RUI buttons).
+  const toolbarButtonClass = "whitespace-nowrap";
   const maxCompactLevel = 1 + (onCopyLinks ? 1 : 0) + (onForward ? 1 : 0) + (onSelectAll ? 1 : 0);
   const compactCopyLink = compactLevel >= 1;
   const compactForward = compactLevel >= 1 + (onCopyLinks ? 1 : 0);
@@ -94,11 +81,6 @@ export default function SelectModeToolbar({
   const generateImageLabel = formatMessage({ id: "message.selectModeToolbar.generateImage" });
   const copyMdLabel = formatMessage({ id: "message.selectModeToolbar.copyMd" });
   const copiedMdLabel = formatMessage({ id: "message.selectModeToolbar.copiedMd" });
-  const runMoreAction = (action: () => void) => {
-    setMoreOpen(false);
-    action();
-  };
-
   useLayoutEffect(() => {
     const actions = actionsRef.current;
     if (!actions) return;
@@ -139,122 +121,134 @@ export default function SelectModeToolbar({
   // forward, common copy-link, and a More menu for lower-frequency actions.
   return (
     <div
-      className="border-t-2 border-black bg-soft-signal safe-bottom"
+      className="relative z-30 border-t border-primary-edge bg-primary-soft safe-bottom-action-bar text-primary-strong theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black"
       data-testid="select-mode-toolbar"
     >
       <div className="flex items-center gap-1 px-2 py-2 sm:gap-1.5 sm:px-2">
         <span
-          className="font-mono text-xs font-bold text-black/70 whitespace-nowrap"
+          className="font-mono text-xs font-bold text-primary-strong/70 theme-brutal:text-black/70 whitespace-nowrap"
           data-testid="select-mode-count"
         >
           {formatMessage({ id: "message.selectModeToolbar.selectedCount" }, { count })}
         </span>
         <div ref={actionsRef} className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-1 sm:gap-1.5">
           {onSelectAll && (
+            <Tooltip content={selectAllLabel}>
             <Button
               type="button"
               onClick={onSelectAll}
               disabled={capturing}
-              size="sm"
-              shape={compactSelectAll ? "icon" : "text"}
-              tone="white"
+             
+              size={compactSelectAll ? "icon-sm" : "sm"}
+              variant="outline"
               aria-label={selectAllLabel}
-              title={selectAllLabel}
+              data-slot="button"
               className={toolbarButtonClass}
               data-testid="select-mode-select-all"
             >
-              {compactSelectAll ? <Check size={14} /> : selectAllLabel}
+              <ListChecks size={14} />
+              {!compactSelectAll && <span>{selectAllLabel}</span>}
             </Button>
+            </Tooltip>
           )}
+          <Tooltip content={cancelLabel}>
           <Button
             type="button"
             onClick={exit}
-            size="sm"
-            shape={compactCancel ? "icon" : "iconText"}
-            tone="white"
+           
+            size={compactCancel ? "icon-sm" : "sm"}
+            variant="outline"
             aria-label={cancelLabel}
-            title={cancelLabel}
-            className={toolbarIconButtonClass}
+            data-slot="button"
+            className={toolbarButtonClass}
             data-testid="select-mode-cancel"
           >
             <X size={14} />
             {!compactCancel && <span>{cancelLabel}</span>}
           </Button>
+          </Tooltip>
           {onForward && (
+            <Tooltip content={forwardDisabledReason || forwardLabel}>
             <Button
               type="button"
               onClick={onForward}
               disabled={!canForward}
-              size="sm"
-              shape={compactForward ? "icon" : "iconText"}
-              tone="pink"
+             
+              size={compactForward ? "icon-sm" : "sm"}
+              variant="accent"
               aria-label={forwardLabel}
-              title={forwardDisabledReason || forwardLabel}
-              className={toolbarIconButtonClass}
+              data-slot="button"
+              className={toolbarButtonClass}
               data-testid="select-mode-forward"
             >
               <Send size={14} />
               {!compactForward && <span>{forwardLabel}</span>}
             </Button>
+            </Tooltip>
           )}
           {onCopyLinks && (
+            <Tooltip content={copyLinkLabel}>
             <Button
               type="button"
               onClick={onCopyLinks}
               disabled={count === 0}
-              size="sm"
-              shape={compactCopyLink ? "icon" : "iconText"}
-              tone="white"
+             
+              size={compactCopyLink ? "icon-sm" : "sm"}
+              variant="outline"
               aria-label={copyLinkLabel}
-              title={copyLinkLabel}
-              className={toolbarIconButtonClass}
+              data-slot="button"
+              className={toolbarButtonClass}
               data-testid="select-mode-copy-link"
             >
               {copied ? <Check size={14} /> : <Copy size={14} />}
               {!compactCopyLink && <span>{copied ? copiedLabel : copyLinkLabel}</span>}
             </Button>
+            </Tooltip>
           )}
-          <div ref={moreRef} className="relative">
-            <Button
-              type="button"
-              onClick={() => setMoreOpen((current) => !current)}
+          <DropdownMenu>
+            <Tooltip content={moreLabel}>
+            <DropdownMenuTrigger
               disabled={moreDisabled}
-              size="sm"
-              shape="icon"
-              tone="white"
+              render={(
+                <Button
+                  type="button"
+                  size="icon-sm"
+                  variant="outline"
+                  aria-label={moreActionsLabel}
+                  data-slot="button"
+                  className={toolbarButtonClass}
+                  data-testid="select-mode-more"
+                >
+                  <MoreHorizontal size={14} />
+                </Button>
+              )}
+            />
+            </Tooltip>
+            <DropdownMenuContent
+              side="top"
+              align="end"
+              sideOffset={8}
               aria-label={moreActionsLabel}
-              title={moreLabel}
-              className={toolbarIconButtonClass}
-              data-testid="select-mode-more"
-              aria-expanded={moreOpen}
+              data-testid="select-mode-more-menu"
             >
-              <MoreHorizontal size={14} />
-            </Button>
-            {moreOpen && (
-              <div
-                className="absolute bottom-[calc(100%+8px)] right-0 z-20 min-w-44 border-2 border-black bg-white shadow-brutal"
-                role="menu"
-                data-testid="select-mode-more-menu"
+              <DropdownMenuItem
+                onClick={onSavePic}
+                disabled={!canAct}
+                data-testid="select-mode-share-open"
               >
-                <MenuItem
-                  icon={capturing ? <Spinner size="sm" /> : <Image size={14} />}
-                  onClick={() => runMoreAction(onSavePic)}
-                  disabled={!canAct}
-                  data-testid="select-mode-share-open"
-                >
-                  {capturing ? renderingLabel : generateImageLabel}
-                </MenuItem>
-                <MenuItem
-                  icon={copied ? <Check size={14} /> : <Copy size={14} />}
-                  onClick={() => runMoreAction(onCopyMd)}
-                  disabled={count === 0}
-                  data-testid="select-mode-copy-md"
-                >
-                  {copied ? copiedMdLabel : copyMdLabel}
-                </MenuItem>
-              </div>
-            )}
-          </div>
+                {capturing ? <Spinner size="sm" aria-label={formatMessage({ id: "common.loadingLabel" })} /> : <Image size={14} />}
+                {capturing ? renderingLabel : generateImageLabel}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={onCopyMd}
+                disabled={count === 0}
+                data-testid="select-mode-copy-md"
+              >
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+                {copied ? copiedMdLabel : copyMdLabel}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
     </div>

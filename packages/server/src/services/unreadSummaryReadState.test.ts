@@ -1,4 +1,4 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
+import { dbTest as test } from "../test/integration/dbTest";
 // Teeth for the /channels/unread exit of the #632 SSOT fix.
 //
 // Layer 1 (unit): applyUnreadSummaryReadStates — batch isolation at the EXIT
@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { formatInboxScopeCorruptionLine } from "@botiverse/raft-shared";
 import { sql } from "drizzle-orm";
 
-import { channelHumans, channels, messages, servers, users } from "../db/schema.js";
+import { channelHumans, channels, messages, servers, users } from "../db/schema";
 import {
   type ChannelUnreadSummaryEntry,
   type UnreadSummaryReadStateRow,
@@ -26,7 +26,7 @@ import {
   getFollowedThreads,
   getUnreadSummary,
   listChannels,
-} from "./channelService.js";
+} from "./channelService";
 
 
 function entry(unreadCount: number): ChannelUnreadSummaryEntry {

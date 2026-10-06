@@ -1,4 +1,3 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
 
 import {
@@ -7,7 +6,7 @@ import {
   isSupportedRecurrence,
   parseRecurrenceString,
   type Recurrence,
-} from "./recurrence.js";
+} from "./recurrence";
 
 function rule(r: Recurrence): Recurrence {
   return r;

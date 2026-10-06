@@ -1,10 +1,10 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
+import { dbTest as test } from "../test/integration/dbTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channelHumans,
   channels,
@@ -20,23 +20,23 @@ import {
   userChannelInboxStates,
   userChannelReadCursors,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   getInboxItems,
   markChannelInboxActive,
   markChannelInboxDone,
   markThreadDone,
-} from "./channelService.js";
+} from "./channelService";
 import {
   DoneFrontierAboveInt4AuthorityError,
   DoneFrontierBeyondLatestError,
   DoneFrontierRequiredError,
-} from "./inboxSuppressionWriters.js";
+} from "./inboxSuppressionWriters";
 import {
   admitReadMutation,
   claimNextReadMutation,
   executeReadMutationClaim,
-} from "./readMutationSequencer.js";
+} from "./readMutationSequencer";
 
 
 async function seedFixture() {

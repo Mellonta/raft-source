@@ -1,14 +1,14 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { currentTimeMs } from "@botiverse/raft-shared";
 import { eq } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { integrationSecretCommitments } from "../db/schema.js";
-import { productFeedbackReporterId } from "./productFeedbackService.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { integrationSecretCommitments } from "../db/schema";
+import { productFeedbackReporterId } from "./productFeedbackService";
 import {
   feedbackRouteTuple,
   mintProductFeedbackRouteSubject,
   ProductFeedbackRouteSubjectError,
-} from "./productFeedbackRouteSubject.js";
+} from "./productFeedbackRouteSubject";
 
 const COMMITMENT_LABEL = "hands-feedback-route-subject:v1";
 const CACHE_MAX = 10_000;

@@ -1,5 +1,5 @@
+import api from "../src/api/client";
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act } from "react";
 import { cleanup, fireEvent, render as rtlRender, screen } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -315,4 +315,30 @@ test("sender copy menu omits handle copy when the sender cannot be mentioned", a
 
   assert.ok(screen.getByText("Copy Name"));
   assert.equal(screen.queryByText("Copy Handle"), null);
+});
+
+
+test("own persisted agent mentions render the message without delivery diagnostics or lookup", async () => {
+  const originalGet = api.get;
+  const requests: string[] = [];
+  api.get = (async (url: string) => {
+    requests.push(url);
+    return { data: {} };
+  }) as typeof api.get;
+  try {
+    await act(async () => {
+      renderMessage(makeMessage({
+        id: "11111111-1111-4111-8111-111111111111",
+        senderType: "user", senderId: "user-current", senderName: "Current User",
+        content: "Please check this change",
+        mentions: [{ type: "agent", id: "agent-1", name: "agent-handle" }],
+      }), {});
+    });
+    assert.ok(screen.getByText("Please check this change"));
+    assert.ok(!screen.queryByTestId("sender-mention-delivery"));
+    assert.ok(!screen.queryByRole("button", { name: "Refresh status" }));
+    assert.ok(!requests.some((url) => url.includes("/mention-deliveries")));
+  } finally {
+    api.get = originalGet;
+  }
 });

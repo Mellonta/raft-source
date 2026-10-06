@@ -63,8 +63,10 @@ so install commands and references using the old names are not errors.
 
 - `@botiverse/raft` is the canonical agent-facing CLI (old name:
   `@slock-ai/cli`).
-- `@botiverse/raft-daemon` is the canonical daemon (old name:
-  `@slock-ai/daemon`). Both names publish in lockstep.
+- The daemon (`@botiverse/raft-daemon`, old name `@slock-ai/daemon`) is no
+  longer published to npm. It ships only inside Raft Computer and carries the
+  Computer version number; the npm packages under both names are frozen at
+  their last release.
 - Computer no longer has npm as a supported install or upgrade source.
   Historical npm package names such as `@slock-ai/computer` and
   `@botiverse/raft-computer` may appear in old logs or code-level library

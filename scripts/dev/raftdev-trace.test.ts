@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { appendFileSync, mkdtempSync, mkdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
 
 import {
   decodeAnyValue,
@@ -17,7 +16,7 @@ import {
   renderTrace,
   runTraceCli,
   traceBannerLines,
-} from "./raftdev-trace.ts";
+} from "./raftdev-trace";
 
 const TRACE_A = "1".repeat(32);
 const TRACE_B = "2".repeat(32);
@@ -217,7 +216,7 @@ test("attribute maps reject prototype keys and duplicate keys instead of forging
 
 test("JSONL reader deduplicates exact spans and tolerates only a final partial fragment", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([{
     service: "slock-server",
     spans: [{ name: "server.http.request", startMs: NOW_MS }],
@@ -232,7 +231,7 @@ test("JSONL reader deduplicates exact spans and tolerates only a final partial f
 
 test("newline-terminated malformed JSON and conflicting duplicates are hard diagnostics", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const first = otlpDocument([{
     service: "slock-server",
     spans: [{ name: "server.http.request", startMs: NOW_MS }],
@@ -331,7 +330,7 @@ test("renderTrace emits a complete forest, events, orphans, and explicit missing
 
 test("trace last skips health roots, selects newest request, and prints its whole trace", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([
     {
       service: "slock-server",
@@ -363,7 +362,7 @@ test("trace last skips health roots, selects newest request, and prints its whol
 
 test("trace last selects a server HTTP request that has a recorded web parent", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([
     {
       service: "slock-web",
@@ -394,7 +393,7 @@ test("trace last selects a server HTTP request that has a recorded web parent", 
 
 test("trace last settles briefly so an appended just-finished root beats an old persisted root", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const oldDocument = otlpDocument([{
     service: "slock-server",
     spans: [{ traceId: TRACE_A, name: "server.http.request", startMs: NOW_MS - 5_000, attributes: { "http.route": "/api/old" } }],
@@ -405,7 +404,7 @@ test("trace last settles briefly so an appended just-finished root beats an old 
   }]);
   const path = makeTraceSource(projectDir, "demo", `${JSON.stringify(oldDocument)}\n`);
   const timer = setTimeout(() => appendFileSync(path, `${JSON.stringify(newDocument)}\n`), 100);
-  t.after(() => clearTimeout(timer));
+  onTestFinished(() => clearTimeout(timer));
 
   const output = capture();
   const code = await runTraceCli(["last", "--env", "demo", "--wait", "1500ms"], {
@@ -419,7 +418,7 @@ test("trace last settles briefly so an appended just-finished root beats an old 
 
 test("trace find searches span and event dot-families and honors a bounded limit", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([{
     service: "slock-server",
     spans: [
@@ -449,7 +448,7 @@ test("trace find searches span and event dot-families and honors a bounded limit
 
 test("freshness is per actual service with safe replica aliases by default", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([
     {
       service: "slock-server-secret-env-server",
@@ -489,7 +488,7 @@ test("freshness is per actual service with safe replica aliases by default", asy
 
 test("freshness collision aliases retain slock.surface classification", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([
     {
       service: "opaque-private-a",
@@ -512,7 +511,7 @@ test("freshness collision aliases retain slock.surface classification", async (t
 
 test("trace show validates IDs and reports missing service segments without false zero", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([{
     service: "slock-web",
     spans: [{ traceId: TRACE_A, name: "web.send", startMs: NOW_MS }],
@@ -540,7 +539,7 @@ test("trace show validates IDs and reports missing service segments without fals
 
 test("trace show re-polls a partial collector tail before returning an already-matched root", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const rootDocument = otlpDocument([{
     service: "slock-server",
     spans: [{ traceId: TRACE_A, spanId: ROOT, name: "server.http.request", startMs: NOW_MS }],
@@ -555,7 +554,7 @@ test("trace show re-polls a partial collector tail before returning an already-m
     `${JSON.stringify(rootDocument)}\n${childDocumentText.slice(0, -1)}`,
   );
   const timer = setTimeout(() => appendFileSync(path, `${childDocumentText.slice(-1)}\n`), 100);
-  t.after(() => clearTimeout(timer));
+  onTestFinished(() => clearTimeout(timer));
 
   const output = capture();
   const code = await runTraceCli(["show", TRACE_A, "--env", "demo", "--wait", "750ms"], {
@@ -568,7 +567,7 @@ test("trace show re-polls a partial collector tail before returning an already-m
 
 test("trace show waits through a complete-line inter-batch child append", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const rootDocument = otlpDocument([{
     service: "slock-server",
     spans: [{ traceId: TRACE_A, spanId: ROOT, name: "server.http.request", startMs: NOW_MS }],
@@ -579,7 +578,7 @@ test("trace show waits through a complete-line inter-batch child append", async 
   }]);
   const path = makeTraceSource(projectDir, "demo", `${JSON.stringify(rootDocument)}\n`);
   const timer = setTimeout(() => appendFileSync(path, `${JSON.stringify(childDocument)}\n`), 100);
-  t.after(() => clearTimeout(timer));
+  onTestFinished(() => clearTimeout(timer));
 
   const output = capture();
   const started = Date.now();
@@ -593,7 +592,7 @@ test("trace show waits through a complete-line inter-batch child append", async 
 
 test("reader state rejects remote, disabled, and failed modes even with a retained artifact", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([{
     service: "slock-server",
     spans: [{ traceId: TRACE_A, name: "server.http.request", startMs: NOW_MS }],
@@ -618,7 +617,7 @@ test("reader state rejects remote, disabled, and failed modes even with a retain
 
 test("reader state waits for starting to become ready and labels stopped artifacts archived", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([{
     service: "slock-server",
     spans: [{ traceId: TRACE_A, name: "server.http.request", startMs: NOW_MS }],
@@ -626,7 +625,7 @@ test("reader state waits for starting to become ready and labels stopped artifac
   makeTraceSource(projectDir, "demo", `${JSON.stringify(document)}\n`);
   writeReaderState(projectDir, "demo", { status: "starting" });
   const timer = setTimeout(() => writeReaderState(projectDir, "demo", { status: "ready" }), 100);
-  t.after(() => clearTimeout(timer));
+  onTestFinished(() => clearTimeout(timer));
 
   const ready = capture();
   assert.equal(await runTraceCli(["show", TRACE_A, "--env", "demo", "--wait", "1s"], {
@@ -644,7 +643,7 @@ test("reader state waits for starting to become ready and labels stopped artifac
 
 test("an unresolved starting state and a pre-run artifact are actionable non-successes", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([{
     service: "slock-server",
     spans: [{ traceId: TRACE_A, name: "server.http.request", startMs: NOW_MS }],
@@ -691,7 +690,7 @@ test("an unresolved starting state and a pre-run artifact are actionable non-suc
 
 test("missing/empty sources are actionable nonzero results, never an empty success", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const missing = capture();
   assert.equal(await runTraceCli(["last", "--env", "demo", "--wait", "0s"], {
     projectDir, defaultEnvName: "fallback", ...missing.options,
@@ -709,7 +708,7 @@ test("missing/empty sources are actionable nonzero results, never an empty succe
 
 test("read failures report only a safe code beside a project-relative source path", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   mkdirSync(join(projectDir, ".slockdev", "demo", "traces", "otlp.json"), { recursive: true });
   const output = capture();
   assert.equal(await runTraceCli(["last", "--env", "demo", "--wait", "0s"], {
@@ -722,7 +721,7 @@ test("read failures report only a safe code beside a project-relative source pat
 
 test("raw mode warns before exposing attributes; data errors exit 2", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const document = otlpDocument([{
     service: "slock-server",
     spans: [{
@@ -765,7 +764,7 @@ test("raw mode warns before exposing attributes; data errors exit 2", async (t) 
 
 test("a line above the 16 MiB cap is a data error, not a false empty result", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const path = makeTraceSource(projectDir, "demo", "x".repeat(16 * 1024 * 1024 + 1));
   const result = await readTraceFile(path);
   assert.match(result.errors.join("\n"), /exceeds the 16777216 byte safety cap/);
@@ -780,7 +779,7 @@ test("a line above the 16 MiB cap is a data error, not a false empty result", as
 
 test("a sparse snapshot above 256 MiB fails before reading with an actionable error", async (t) => {
   const projectDir = mkdtempSync(join(tmpdir(), "raftdev-trace-"));
-  t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+  onTestFinished(() => rmSync(projectDir, { recursive: true, force: true }));
   const path = makeTraceSource(projectDir, "demo", "");
   truncateSync(path, 256 * 1024 * 1024 + 1);
   const result = await readTraceFile(path);

@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
-import type { Database } from "../db/index.js";
-import { migratePglite } from "../db/pgliteMigrations.js";
-import * as schema from "../db/schema.js";
+import type { Database } from "../db/index";
+import { migratePglite } from "../db/pgliteMigrations";
+import * as schema from "../db/schema";
 import {
+  agents,
   channels,
+  externalAppRegistrations,
+  oauthAccessTokens,
   notificationDeliveries,
   notificationEvents,
   notificationRecipients,
@@ -17,25 +19,29 @@ import {
   oauthClients,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
+  AppNotificationDeliveryError,
+  WebhookPostError,
   appWebhookDeliveryErrorCode,
   appWebhookDeliveryOutcomeForStatus,
   createAppWebhookPinnedLookup,
   drainAppNotificationDeliveries,
+  emitAppFacingMemberEvents,
   emitAppFacingNotificationEvent,
-} from "./appNotificationDeliveryService.js";
+} from "./appNotificationDeliveryService";
+import { __setAppMemberRefKeyForTests, deriveAppMemberRef } from "./appOutboundProjectionService";
 import {
   __resetOAuthServiceDbForTests,
   __setOAuthServiceDbForTests,
   uninstallMarketplaceOAuthClient,
-} from "./oauthService.js";
+} from "./oauthService";
 import {
   __setAppWebhookEncryptionKeyForTests,
   AppWebhookConfigError,
   configureAppWebhook,
   rotateAppWebhookSecret,
-} from "./appWebhookConfigService.js";
+} from "./appWebhookConfigService";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const SERVER_ID = "22222222-2222-4222-8222-222222222222";
@@ -112,6 +118,12 @@ test("webhook delivery errors persist only closed, non-sensitive codes", () => {
   assert.equal(appWebhookDeliveryErrorCode(new Error("Webhook request timed out")), "timeout");
   assert.equal(appWebhookDeliveryErrorCode(new AppWebhookConfigError("secret material")), "configuration_error");
   assert.equal(appWebhookDeliveryErrorCode(new Error("token=must-not-survive")), "network_error");
+  // The timeout phase goes to traces; the persisted code stays `timeout` (agents read it as lastError).
+  const timedOut = new Error("Webhook request timed out");
+  assert.equal(appWebhookDeliveryErrorCode(new WebhookPostError(timedOut, { dnsMs: 3, socketReused: false }, "connect")), "timeout");
+  assert.equal(appWebhookDeliveryErrorCode(new WebhookPostError(timedOut, { dnsMs: 3, connectMs: 40, tlsMs: 90, socketReused: false }, "response")), "timeout");
+  assert.equal(appWebhookDeliveryErrorCode(new WebhookPostError(Object.assign(new Error("reset"), { code: "ECONNRESET" }), { dnsMs: 3, socketReused: false }, null)), "network_error");
+  assert.equal(appWebhookDeliveryErrorCode(new WebhookPostError(new AppNotificationDeliveryError("private"), { dnsMs: 3, socketReused: false }, null)), "ssrf_blocked");
 });
 
 test("webhook DNS pinning supports scalar and all-address lookup callbacks", () => {
@@ -348,6 +360,254 @@ test("canonical fanout signs exact bodies and revalidates authority before retri
     const privateEvents = await db.select().from(notificationEvents)
       .where(eq(notificationEvents.id, privateEventId));
     assert.equal(privateEvents.length, 0, "private channel events must not enter the app-facing stream");
+  } finally {
+    __resetOAuthServiceDbForTests();
+    __setAppWebhookEncryptionKeyForTests(null);
+    await client.close();
+  }
+});
+
+test("retired and platform-managed clients cannot receive new App Notifications or drain queued delivery", async () => {
+  const { client, db } = await createTestDb();
+  __setAppWebhookEncryptionKeyForTests(Buffer.alloc(32, 9));
+  try {
+    await configureAppWebhook({
+      clientId: CLIENT_ID,
+      actorUserId: USER_ID,
+      endpointUrl: "https://hooks.example.com/raft",
+    }, db);
+    const queuedEventId = "abababab-abab-4bab-8bab-abababababab";
+    assert.deepEqual(await emitAppFacingNotificationEvent({
+      id: queuedEventId,
+      serverId: SERVER_ID,
+      eventType: "server.config_updated",
+      subjectType: "server",
+      subjectId: SERVER_ID,
+    }, db), { eventId: queuedEventId, recipientCount: 1 });
+
+    await db.update(oauthClients).set({ appType: "slock_builtin" }).where(eq(oauthClients.id, CLIENT_ID));
+    const retiredEventId = "bcbcbcbc-bcbc-4bcb-8bcb-bcbcbcbcbcbc";
+    assert.deepEqual(await emitAppFacingNotificationEvent({
+      id: retiredEventId,
+      serverId: SERVER_ID,
+      eventType: "server.config_updated",
+      subjectType: "server",
+      subjectId: SERVER_ID,
+    }, db), { eventId: retiredEventId, recipientCount: 0 });
+    assert.deepEqual(
+      await db.select({ id: notificationRecipients.id }).from(notificationRecipients)
+        .where(eq(notificationRecipients.eventId, retiredEventId)),
+      [],
+    );
+
+    let postCount = 0;
+    assert.deepEqual(await drainAppNotificationDeliveries({
+      executor: db,
+      post: async () => {
+        postCount += 1;
+        return { status: 204 };
+      },
+      now: new Date("2030-01-01T00:00:00.000Z"),
+    }), { claimed: 1, delivered: 0, retried: 0, suppressed: 1, deadLettered: 0 });
+    assert.equal(postCount, 0, "a queued notification must be suppressed before any HTTP POST after retirement");
+    const [queuedDelivery] = await db.select({ status: notificationDeliveries.status }).from(notificationDeliveries)
+      .innerJoin(notificationRecipients, eq(notificationRecipients.id, notificationDeliveries.notificationId))
+      .where(eq(notificationRecipients.eventId, queuedEventId));
+    assert.equal(queuedDelivery?.status, "suppressed");
+
+    await db.update(oauthClients).set({ appType: "third_party_global" }).where(eq(oauthClients.id, CLIENT_ID));
+    await db.insert(externalAppRegistrations).values({
+      oauthClientId: CLIENT_ID,
+      provider: "slack",
+      environment: "test",
+      state: "active",
+      providerAppId: "A_PLATFORM_NOTIFICATION",
+      providerOAuthClientId: "platform-notification-client",
+      capabilityManifestVersion: 1,
+      capabilityManifestHash: "b".repeat(64),
+      requiredCapabilities: ["channel_events"],
+    });
+    const platformEventId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+    assert.deepEqual(await emitAppFacingNotificationEvent({
+      id: platformEventId,
+      serverId: SERVER_ID,
+      eventType: "server.config_updated",
+      subjectType: "server",
+      subjectId: SERVER_ID,
+    }, db), { eventId: platformEventId, recipientCount: 0 });
+    assert.deepEqual(
+      await db.select({ id: notificationRecipients.id }).from(notificationRecipients)
+        .where(eq(notificationRecipients.eventId, platformEventId)),
+      [],
+    );
+  } finally {
+    __setAppWebhookEncryptionKeyForTests(null);
+    await client.close();
+  }
+});
+
+const OTHER_SERVER_ID = "99999999-9999-4999-8999-999999999999";
+const SIGNED_IN_USER_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const OTHER_SERVER_USER_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const NEVER_SIGNED_IN_USER_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const SIGNED_IN_AGENT_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+async function subscribeToMemberRemoved(db: Database) {
+  await db.update(oauthClients).set({
+    outboundCurrentEvents: ["server.config_updated", "server.public_channel_created", "server.member_removed"],
+  }).where(eq(oauthClients.id, CLIENT_ID));
+  await db.update(oauthClientInstalls).set({
+    subscribedEvents: ["server.member_removed"],
+    subscriptionRevision: 2,
+  }).where(eq(oauthClientInstalls.id, INSTALLATION_ID));
+}
+
+async function seedSignIns(db: Database) {
+  await db.insert(users).values([SIGNED_IN_USER_ID, OTHER_SERVER_USER_ID, NEVER_SIGNED_IN_USER_ID].map((id, index) => ({
+    id,
+    email: `member-event-${index}@example.com`,
+    name: `member-event-${index}`,
+    passwordHash: "test",
+  })));
+  await db.insert(servers).values({ id: OTHER_SERVER_ID, name: "Other", slug: "member-event-other", ownerId: USER_ID });
+  await db.insert(agents).values({ id: SIGNED_IN_AGENT_ID, serverId: SERVER_ID, name: "member-event-agent" });
+  const expiresAt = new Date("2026-01-01T00:00:00.000Z");
+  await db.insert(oauthAccessTokens).values([
+    // Expired and revoked still count: the app already received this `sub`.
+    { serverId: SERVER_ID, principalType: "human", userId: SIGNED_IN_USER_ID, clientId: CLIENT_ID, tokenHash: "h1", scopes: ["openid"], expiresAt, revokedAt: expiresAt },
+    // Signed in to the same app, but on another Server: not disclosed here.
+    { serverId: OTHER_SERVER_ID, principalType: "human", userId: OTHER_SERVER_USER_ID, clientId: CLIENT_ID, tokenHash: "h2", scopes: ["openid"], expiresAt },
+    { serverId: SERVER_ID, principalType: "agent", agentId: SIGNED_IN_AGENT_ID, clientId: CLIENT_ID, tokenHash: "h3", scopes: ["openid"], expiresAt },
+  ]);
+}
+
+test("member removal events name members by member_ref and add sub only for principals who signed in to this app on this Server", async () => {
+  const { client, db } = await createTestDb();
+  __setAppWebhookEncryptionKeyForTests(Buffer.alloc(32, 9));
+  __setAppMemberRefKeyForTests(Buffer.alloc(32, 7));
+  __setOAuthServiceDbForTests(() => db);
+  try {
+    await configureAppWebhook({ clientId: CLIENT_ID, actorUserId: USER_ID, endpointUrl: "https://hooks.example.com/raft" }, db);
+    await seedSignIns(db);
+
+    // Not subscribed yet: nothing is written at all.
+    assert.deepEqual(await emitAppFacingMemberEvents({
+      serverId: SERVER_ID,
+      eventType: "server.member_removed",
+      members: [{ principalType: "human", principalId: SIGNED_IN_USER_ID, role: "member" }],
+      provenance: { source: "server_service", actor_type: "human", reason: "removed" },
+    }, db), { eventCount: 0, recipientCount: 0 });
+    assert.equal((await db.select().from(notificationEvents)).length, 0);
+
+    await subscribeToMemberRemoved(db);
+    assert.deepEqual(await emitAppFacingMemberEvents({
+      serverId: SERVER_ID,
+      eventType: "server.member_removed",
+      members: [
+        { principalType: "human", principalId: SIGNED_IN_USER_ID, role: "admin" },
+        { principalType: "human", principalId: OTHER_SERVER_USER_ID, role: "member" },
+        { principalType: "human", principalId: NEVER_SIGNED_IN_USER_ID, role: "guest" },
+        { principalType: "agent", principalId: SIGNED_IN_AGENT_ID, role: "member" },
+      ],
+      provenance: { source: "server_service", actor_type: "human", reason: "removed", secret: "dropped" },
+    }, db), { eventCount: 4, recipientCount: 4 });
+
+    const posts: string[] = [];
+    assert.deepEqual(await drainAppNotificationDeliveries({
+      executor: db,
+      post: async ({ body }) => {
+        posts.push(body);
+        return { status: 204 };
+      },
+    }), { claimed: 4, delivered: 4, retried: 0, suppressed: 0, deadLettered: 0 });
+
+    const subjects = new Map(posts.map((body) => {
+      const envelope = JSON.parse(body) as { event: { type: string; subject: Record<string, unknown>; provenance: Record<string, unknown> } };
+      assert.equal(envelope.event.type, "server.member_removed");
+      assert.equal(envelope.event.provenance.reason, "removed");
+      assert.equal(envelope.event.provenance.secret, undefined);
+      assert.equal(envelope.event.subject.id, undefined, "the raw principal id is never the subject id");
+      return [envelope.event.subject.member_ref as string, envelope.event.subject];
+    }));
+    const ref = (principalId: string) => deriveAppMemberRef({ clientId: CLIENT_ID, installationId: INSTALLATION_ID, principalId });
+    assert.deepEqual(subjects.get(ref(SIGNED_IN_USER_ID).member_ref), {
+      type: "member", principal_type: "human", ...ref(SIGNED_IN_USER_ID), sub: SIGNED_IN_USER_ID,
+    });
+    assert.deepEqual(subjects.get(ref(OTHER_SERVER_USER_ID).member_ref), {
+      type: "member", principal_type: "human", ...ref(OTHER_SERVER_USER_ID),
+    });
+    assert.deepEqual(subjects.get(ref(NEVER_SIGNED_IN_USER_ID).member_ref), {
+      type: "member", principal_type: "human", ...ref(NEVER_SIGNED_IN_USER_ID),
+    });
+    assert.deepEqual(subjects.get(ref(SIGNED_IN_AGENT_ID).member_ref), {
+      type: "member", principal_type: "agent", ...ref(SIGNED_IN_AGENT_ID), sub: SIGNED_IN_AGENT_ID,
+    });
+  } finally {
+    __resetOAuthServiceDbForTests();
+    __setAppWebhookEncryptionKeyForTests(null);
+    __setAppMemberRefKeyForTests(null);
+    await client.close();
+  }
+});
+
+test("a Server deletion's member removals still deliver after the tombstone; other member events do not", async () => {
+  const { client, db } = await createTestDb();
+  __setAppWebhookEncryptionKeyForTests(Buffer.alloc(32, 9));
+  __setAppMemberRefKeyForTests(Buffer.alloc(32, 7));
+  __setOAuthServiceDbForTests(() => db);
+  try {
+    await configureAppWebhook({ clientId: CLIENT_ID, actorUserId: USER_ID, endpointUrl: "https://hooks.example.com/raft" }, db);
+    await subscribeToMemberRemoved(db);
+    for (const reason of ["server_deleted", "removed"]) {
+      await emitAppFacingMemberEvents({
+        serverId: SERVER_ID,
+        eventType: "server.member_removed",
+        members: [{ principalType: "human", principalId: USER_ID, role: "owner" }],
+        provenance: { source: "server_service", actor_type: "human", reason },
+      }, db);
+    }
+    await db.update(servers).set({ deletedAt: new Date() }).where(eq(servers.id, SERVER_ID));
+
+    const reasons: unknown[] = [];
+    assert.deepEqual(await drainAppNotificationDeliveries({
+      executor: db,
+      post: async ({ body }) => {
+        reasons.push((JSON.parse(body) as { event: { provenance: { reason: string } } }).event.provenance.reason);
+        return { status: 204 };
+      },
+    }), { claimed: 2, delivered: 1, retried: 0, suppressed: 1, deadLettered: 0 });
+    assert.deepEqual(reasons, ["server_deleted"]);
+  } finally {
+    __resetOAuthServiceDbForTests();
+    __setAppWebhookEncryptionKeyForTests(null);
+    __setAppMemberRefKeyForTests(null);
+    await client.close();
+  }
+});
+
+test("announcing a large Server's deletion stays a few bulk writes", async () => {
+  const { client, db } = await createTestDb();
+  __setAppWebhookEncryptionKeyForTests(Buffer.alloc(32, 9));
+  __setOAuthServiceDbForTests(() => db);
+  try {
+    await configureAppWebhook({ clientId: CLIENT_ID, actorUserId: USER_ID, endpointUrl: "https://hooks.example.com/raft" }, db);
+    await subscribeToMemberRemoved(db);
+    const members = Array.from({ length: 5000 }, (_, index) => ({
+      principalType: "human" as const,
+      principalId: `00000000-0000-4000-8000-${index.toString().padStart(12, "0")}`,
+      role: "member",
+    }));
+    const startedAt = performance.now();
+    assert.deepEqual(await emitAppFacingMemberEvents({
+      serverId: SERVER_ID,
+      eventType: "server.member_removed",
+      members,
+      provenance: { source: "server_service", actor_type: "human", reason: "server_deleted" },
+    }, db), { eventCount: 5000, recipientCount: 5000 });
+    const elapsedMs = performance.now() - startedAt;
+    console.log(JSON.stringify({ memberEventFanout: { members: 5000, elapsedMs: Math.round(elapsedMs) } }));
+    assert.equal((await db.select().from(notificationDeliveries)).length, 5000);
+    assert.ok(elapsedMs < 20_000, `5000 member events took ${Math.round(elapsedMs)}ms`);
   } finally {
     __resetOAuthServiceDbForTests();
     __setAppWebhookEncryptionKeyForTests(null);

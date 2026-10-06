@@ -50,7 +50,7 @@ export default function KeyValueRow({
   valueClassName,
 }: KeyValueRowProps) {
   const wrapperCls = className ? className : undefined;
-  const valueClsParts = ["text-sm text-black"];
+  const valueClsParts = ["text-sm text-foreground-strong theme-brutal:text-black"];
   if (mono) valueClsParts.push("font-mono");
   if (breakAll) valueClsParts.push("break-all");
   if (valueClassName) valueClsParts.push(valueClassName);
@@ -58,7 +58,7 @@ export default function KeyValueRow({
   return (
     <div className={wrapperCls}>
       <div className="mb-1 flex items-center gap-2">
-        <div className="text-xs text-black/50">{label}</div>
+    <div className="text-xs text-foreground-muted theme-brutal:text-black/50">{label}</div>
         {action ? <div className="shrink-0">{action}</div> : null}
       </div>
       <div className={valueCls}>{value}</div>

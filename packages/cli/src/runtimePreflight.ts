@@ -1,5 +1,5 @@
-export const supportedNodeMajor = 20;
-export const recommendedNodeVersion = "24.15.0";
+export const supportedNodeMajor = 24;
+export const recommendedNodeVersion = "24.21.0";
 export const supportedNodeRange = `>=${supportedNodeMajor}`;
 
 export type RuntimePreflightExit = (code?: number) => never;

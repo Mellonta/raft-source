@@ -1,16 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, lte, or, sql } from "drizzle-orm";
-import type { Database, DatabaseExecutor, DatabaseTransaction } from "../db/index.js";
-import { getDb } from "../db/index.js";
+import type { Database, DatabaseExecutor, DatabaseTransaction } from "../db/index";
+import { getDb } from "../db/index";
+import { errorClassOf } from "../tracing/semanticTrace";
 import {
   type AttachmentUploaderType,
   attachmentObjectArtifacts,
   attachmentStorageArtifacts,
   attachmentTransferArtifacts,
   attachmentTransferIntents,
-} from "../db/schema.js";
-import type { StorageBackend } from "./storageService.js";
-import { getCdnStorage, getStorage } from "./storageService.js";
+} from "../db/schema";
+import type { StorageBackend } from "./storageService";
+import { getCdnStorage, getStorage } from "./storageService";
+import {
+  assertChannelWritableInTransaction,
+  assertChannelWritableOrConversionDrainInTransaction,
+} from "./channelConversionFenceService";
 
 export type AttachmentTransferArtifactRole = "original" | "thumbnail" | "svg_raster_preview";
 export type AttachmentTransferArtifactBackend = "attachment" | "cdn";
@@ -62,8 +67,9 @@ function isSvgMimeType(mimeType: string): boolean {
   return mimeType.split(";")[0]?.trim().toLowerCase() === "image/svg+xml";
 }
 
+/** The raster preview shares its thumbnail's key generation and bucket. */
 export function buildSvgRasterTransferKey(thumbnailKey: string): string {
-  return thumbnailKey.replace(/^thumbs\//, "previews/");
+  return thumbnailKey.replace(/^(content\/v2\/)?thumbs\//, "$1previews/");
 }
 
 export function buildAttachmentTransferArtifactPlan(input: Readonly<{
@@ -144,6 +150,7 @@ export async function createAttachmentTransferIntentWithExecutor(
   input: CreateAttachmentTransferIntentInput,
   explicitNow?: Date,
 ): Promise<IntentRow> {
+  await assertChannelWritableInTransaction(executor, input.channelId);
   assertUniqueArtifactPlan(input.artifacts);
   const now = await resolveDatabaseNow(executor, explicitNow);
   const [inserted] = await executor.insert(attachmentTransferIntents).values({
@@ -222,6 +229,7 @@ export async function adoptAttachmentTransferIntentWithExecutor(
   input: AdoptAttachmentTransferIntentInput,
   explicitNow?: Date,
 ): Promise<void> {
+  await assertChannelWritableInTransaction(executor, input.channelId);
   const now = await resolveDatabaseNow(executor, explicitNow);
   const [intent] = await executor.select().from(attachmentTransferIntents)
     .where(eq(attachmentTransferIntents.id, input.id))
@@ -293,6 +301,7 @@ export async function terminalizeAttachmentTransferIntentWithExecutor(
   state: "canceled" | "expired" | "failed",
   terminalReason: string,
   explicitNow?: Date,
+  allowConversionDrain = false,
 ): Promise<IntentRow | null> {
   const now = await resolveDatabaseNow(executor, explicitNow);
   const [intent] = await executor.select().from(attachmentTransferIntents)
@@ -300,6 +309,14 @@ export async function terminalizeAttachmentTransferIntentWithExecutor(
     .for("update")
     .limit(1);
   if (!intent || intent.state === "completed") return intent ?? null;
+  if (allowConversionDrain) {
+    await assertChannelWritableOrConversionDrainInTransaction(executor, intent.channelId, {
+      kind: "transfer_intent",
+      id: intent.id,
+    });
+  } else {
+    await assertChannelWritableInTransaction(executor, intent.channelId);
+  }
   if (intent.state !== "planned") return intent;
   const [updated] = await executor.update(attachmentTransferIntents).set({
     state,
@@ -318,6 +335,7 @@ export async function terminalizeAttachmentTransferIntent(
   terminalReason: string,
   db: Database = getDb(),
   explicitNow?: Date,
+  allowConversionDrain = false,
 ): Promise<IntentRow | null> {
   return db.transaction((tx) => terminalizeAttachmentTransferIntentWithExecutor(
     tx,
@@ -325,6 +343,7 @@ export async function terminalizeAttachmentTransferIntent(
     state,
     terminalReason,
     explicitNow,
+    allowConversionDrain,
   ));
 }
 
@@ -461,7 +480,7 @@ async function processTransferCleanupClaim(
       // batch limit instead of handing one retry to a later scanner pass.
       state: "deleting",
       deleteLeaseExpiresAt: new Date(now.getTime() + TRANSFER_CLEANUP_RETRY_MS),
-      lastErrorClass: error instanceof Error ? error.name : typeof error,
+      lastErrorClass: errorClassOf(error),
       updatedAt: now,
     }).where(and(
       eq(attachmentTransferArtifacts.intentId, claim.intentId),

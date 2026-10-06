@@ -6,24 +6,25 @@ import {
   findMachineByApiKey,
   getMachine,
   extractApiKeyFingerprint,
-} from "../services/machineService.js";
+} from "../services/machineService";
 import {
   findComputerByApiKeyWithReason,
   isComputerApiKey,
   type ComputerAuthDenyReason,
-} from "../services/computerCredentialService.js";
-import { getServer } from "../services/serverService.js";
+} from "../services/computerCredentialService";
+import { getServer } from "../services/serverService";
 import type {
   AgentOrchestrator,
   MachineConnectionPrincipalKind,
-} from "../services/agentOrchestrator.js";
-import { sendAuthenticatedMachineContext } from "../services/machineContext.js";
+} from "../services/agentOrchestrator";
+import { sendAuthenticatedMachineContext } from "../services/machineContext";
+import { errorClassOf, recordTraceEvent, runWithTraceSpan } from "../tracing/semanticTrace";
 import type { MachineToServerMessage } from "@botiverse/raft-shared";
 import {
   buildMachineConnectTraceContext,
   projectMachineConnectTraceAttrs,
   type MachineConnectTraceContext,
-} from "../tracing/migrationTraceContext.js";
+} from "../tracing/migrationTraceContext";
 
 type MatchedMachine = { id: string; serverId: string; legacyKeyMigratedAt?: Date | null };
 
@@ -135,6 +136,37 @@ export function setupMachineWebSocket(
 ) {
   const wss = new WebSocketServer({ noServer: true });
 
+  // Every machine WS lifecycle step (connection setup, each message, and
+  // disconnect) runs in its own root span, so orchestrator spans nest under
+  // it. When a step throws, the span ends with error and records the
+  // `server.machine_ws.lifecycle_error` event (closed reason plus bounded
+  // error identity) inside it.
+  const traceLifecycleError = (machineId: string, reason: string, err: unknown) => {
+    recordTraceEvent("server.machine_ws.lifecycle_error", {
+      machine_id: machineId,
+      outcome: "error",
+      reason,
+      error_class: errorClassOf(err),
+    });
+  };
+  // The work starts right away (no await before it), so message order is kept.
+  // The work reports its own failures and returns the span status.
+  const runMachineWsStep = async (
+    name: "server.machine_ws.connection_setup" | "server.machine_ws.message" | "server.machine_ws.disconnect",
+    attrs: Record<string, string | number>,
+    work: () => Promise<"ok" | "error">,
+  ): Promise<void> => {
+    const activeTracer = tracer ?? noopTracer;
+    const span = activeTracer.startSpan(name, { surface: "server", kind: "internal", attrs });
+    try {
+      const status = await runWithTraceSpan(span, work, activeTracer);
+      span.end(status);
+    } catch (err) {
+      console.error(`[MachineWS] ${name} failed:`, err);
+      span.end("error", { attrs: { error_class: errorClassOf(err) } });
+    }
+  };
+
   server.on("upgrade", async (request, socket, head) => {
     const url = new URL(request.url || "", `http://${request.headers.host}`);
     if (url.pathname !== "/daemon/connect") {
@@ -213,7 +245,7 @@ export function setupMachineWebSocket(
         outcome: "error",
         reason: "exception",
         auth_stage: "exception",
-        error_class: err instanceof Error ? err.name : typeof err,
+        error_class: errorClassOf(err),
         ...traceAttrs,
       });
       // Closed-set reason/stage on the root so an exploded auth path is
@@ -234,48 +266,87 @@ export function setupMachineWebSocket(
     traceContext?: MachineConnectTraceContext,
     principalKind: MachineConnectionPrincipalKind = "unknown",
   ) => {
-    try {
-      sendAuthenticatedMachineContext(ws, {
-        machineId: machine.id,
-        serverId: machine.serverId,
-      });
-    } catch (err) {
-      console.error(`[Machine ${machine.id}] Failed to send authenticated context:`, err);
-      try { ws.close(1011, "machine_context_send_failed"); } catch { /* already closed */ }
-      return;
-    }
-    orchestrator.registerMachine(machine.id, machine.serverId, ws, traceContext, principalKind).catch((err) => {
-      console.error(`[Machine ${machine.id}] Registration failed:`, err);
-    });
-
-    ws.on("message", (data: Buffer) => {
+    let contextSent = true;
+    void runMachineWsStep("server.machine_ws.connection_setup", { machine_id: machine.id }, async () => {
       try {
-        const msg: MachineToServerMessage = JSON.parse(data.toString());
-        orchestrator.handleMachineMessage(machine.id, msg, ws).catch((err) => {
-          console.error(`[Machine ${machine.id}] Message handling failed:`, err);
+        sendAuthenticatedMachineContext(ws, {
+          machineId: machine.id,
+          serverId: machine.serverId,
         });
       } catch (err) {
-        console.error(`[Machine ${machine.id}] Invalid message:`, err);
+        console.error(`[Machine ${machine.id}] Failed to send authenticated context:`, err);
+        traceLifecycleError(machine.id, "context_send_threw", err);
+        try {
+          ws.close(1011, "machine_context_send_failed");
+        } catch {
+          // The socket is already closed.
+        }
+        contextSent = false;
+        return "error";
+      }
+      try {
+        await orchestrator.registerMachine(machine.id, machine.serverId, ws, traceContext, principalKind);
+        return "ok";
+      } catch (err) {
+        console.error(`[Machine ${machine.id}] Registration failed:`, err);
+        traceLifecycleError(machine.id, "registration_threw", err);
+        return "error";
       }
     });
+    // The context send above runs before the first await, so contextSent is
+    // already final here.
+    if (!contextSent) return;
+
+    ws.on("message", (data: Buffer) => {
+      void runMachineWsStep("server.machine_ws.message", { machine_id: machine.id }, async () => {
+        let msg: MachineToServerMessage;
+        try {
+          msg = JSON.parse(data.toString());
+        } catch (err) {
+          console.error(`[Machine ${machine.id}] Invalid message:`, err);
+          traceLifecycleError(machine.id, "message_parse_threw", err);
+          return "error";
+        }
+        try {
+          await orchestrator.handleMachineMessage(machine.id, msg, ws);
+          return "ok";
+        } catch (err) {
+          console.error(`[Machine ${machine.id}] Message handling failed:`, err);
+          traceLifecycleError(machine.id, "message_handling_threw", err);
+          return "error";
+        }
+      });
+    });
+
+    const handleDisconnect = (
+      cause: "socket_close" | "socket_error",
+      details: Parameters<AgentOrchestrator["handleMachineDisconnect"]>[2],
+    ) => {
+      void runMachineWsStep("server.machine_ws.disconnect", { machine_id: machine.id, cause }, async () => {
+        try {
+          await orchestrator.handleMachineDisconnect(machine.id, ws, details);
+          return "ok";
+        } catch (err) {
+          console.error(`[Machine ${machine.id}] Disconnect handling failed:`, err);
+          traceLifecycleError(machine.id, "disconnect_handling_threw", err);
+          return "error";
+        }
+      });
+    };
 
     ws.on("close", (code, reasonBuffer) => {
-      orchestrator.handleMachineDisconnect(machine.id, ws, {
+      handleDisconnect("socket_close", {
         cause: "socket_close",
         closeCode: code,
         closeReason: reasonBuffer.toString("utf8"),
-      }).catch((err) => {
-        console.error(`[Machine ${machine.id}] Disconnect handling failed:`, err);
       });
     });
 
     ws.on("error", (err: Error) => {
       console.error(`[Machine ${machine.id}] WebSocket error:`, err);
-      orchestrator.handleMachineDisconnect(machine.id, ws, {
+      handleDisconnect("socket_error", {
         cause: "socket_error",
         errorMessage: err.message,
-      }).catch((err2) => {
-        console.error(`[Machine ${machine.id}] Disconnect handling failed:`, err2);
       });
     });
   });

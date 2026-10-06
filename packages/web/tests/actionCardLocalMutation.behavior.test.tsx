@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ActionCardMetadata } from "@botiverse/raft-shared";
 import api from "../src/api/client";
@@ -134,10 +133,10 @@ afterEach(() => {
   useThreadStore.setState({ openThreadChannelId: null, openParentChannelId: null } as never);
 });
 
-test("inline approve cards apply returned metadata immediately", async (t) => {
+test("inline approve cards apply returned metadata immediately", async () => {
   seedMessage(preparedMetadata());
 
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     assert.equal(url, `/actions/${messageId}/execute`);
     return { data: { messageId, metadata: executedMetadata() } };
   });
@@ -170,8 +169,11 @@ test("public read without membership keeps a disabled action with a reason", () 
   assert.match(button.parentElement?.className ?? "", /\bgap-x-3\b/);
   assert.match(button.parentElement?.className ?? "", /\bgap-y-1\b/);
   assert.match(reason.className, /\btext-xs\b/);
-  assert.match(reason.className, /\btext-black\/70\b/);
-  assert.doesNotMatch(button.className, /disabled:opacity-50|disabled:cursor-not-allowed/);
+  assert.match(reason.className, /\btext-foreground-muted\b/);
+  // Match whole class tokens. raft-ui 0.5.14 adds aria-disabled:cursor-not-allowed,
+  // which a substring check would mistake for the legacy disabled: utilities.
+  const classes = button.className.split(/\s+/);
+  assert.equal(classes.some((token) => token === "disabled:opacity-50" || token === "disabled:cursor-not-allowed"), false);
 });
 
 test("archived channels show only the highest-priority blocked reason", () => {

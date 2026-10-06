@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { mapInboxPolicyRowsToItems } from "./inboxPolicyModel.js";
-import { normalizeRowForTest } from "./activitySyncService.js";
-import type { InboxItem } from "./channelService.js";
+import { mapInboxPolicyRowsToItems } from "./inboxPolicyModel";
+import { normalizeRowForTest } from "./activitySyncService";
+import type { InboxItem } from "./channelService";
 
 // Gate B1 P1 successor teeth (John/赵梓淇 independent repro): the SQL projects
 // latestActivitySeq, but every real inbox row flows through the shared

@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { request, type IncomingHttpHeaders } from "node:http";
+import { request } from "node:http";
+import type { IncomingHttpHeaders } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { test } from "node:test";
 
 const nginx = process.env.RAFT_TEST_NGINX_BIN || "nginx";
 const available = spawnSync(nginx, ["-v"]).status === 0;

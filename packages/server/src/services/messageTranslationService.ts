@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
 import { normalizeTranslationLanguageCode, type ServerId, type TraceAttributes } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { channels, messages, messageTranslations } from "../db/schema.js";
-import * as channelService from "./channelService.js";
-import { evaluateFeatureFlag, LLM_TRANSLATION_FEATURE_FLAG_KEY } from "./featureFlagService.js";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
+import { getDb } from "../db/index";
+import { channels, messages, messageTranslations } from "../db/schema";
+import * as channelService from "./channelService";
+import { evaluateFeatureFlag, LLM_TRANSLATION_FEATURE_FLAG_KEY } from "./featureFlagService";
+import { addTraceEvent, errorClassOf } from "../tracing/semanticTrace";
 import {
   AzureTranslationProvider,
   bracePlaceholderPolicy,
@@ -18,12 +18,12 @@ import {
   type TranslationProvider,
   type TranslationProviderVersion,
   VolcengineTranslationProvider,
-} from "./translation/index.js";
+} from "./translation/index";
 import {
   CachedTranslationSsmConfig,
   createAwsTranslationSsmReader,
   translationSsmIsConfigured,
-} from "./translation/ssmConfig.js";
+} from "./translation/ssmConfig";
 
 export type TranslationMode = "auto" | "manual";
 export type TranslationStatus = "translated" | "skipped" | "pending" | "failed" | "not_found";
@@ -736,7 +736,7 @@ export async function translateMessagesBatch(input: {
       target_language: targetLanguage,
       mode: input.mode,
       requested_count: input.messageIds.length,
-      error_class: error instanceof Error ? error.name : typeof error,
+      error_class: errorClassOf(error),
     });
     throw error;
   }
@@ -967,7 +967,7 @@ export async function translateMessagesBatch(input: {
         char_count: charCount,
         latency_ms: Date.now() - providerCallStart,
         outcome: "error",
-        error_class: error instanceof Error ? error.name : typeof error,
+        error_class: errorClassOf(error),
         ...(error instanceof TranslationProviderError ? {
           error_code: error.code,
           error_disposition: error.disposition,

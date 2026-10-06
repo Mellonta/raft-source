@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const read = (path: string) => {
@@ -67,36 +66,16 @@ test("Sidebar row select/contextmenu/longpress handlers are useCallback-stable",
   }
 });
 
-test("classic sidebar toggle handlers keep route reads behind stable refs", () => {
-  assert.match(
+test("sidebar re-click on already-selected item must be a no-op (no toggle, no navigate-to-root)", () => {
+  assert.doesNotMatch(
     src,
-    /const navigateRef = useRef\(navigate\);[\s\S]*navigateRef\.current = navigate;/,
-    "raw react-router navigate must be refreshed through a ref rather than captured in row-handler dependencies",
-  );
-  assert.match(
-    src,
-    /const pathnameRef = useRef\(location\.pathname\);[\s\S]*pathnameRef\.current = location\.pathname;/,
-    "the current pathname must be read through a ref so route changes do not invalidate every row callback",
-  );
-  assert.match(
-    src,
-    /const serverSlugRef = useRef\(server\?\.slug\);[\s\S]*serverSlugRef\.current = server\?\.slug;/,
-    "the current server slug must be refreshed through a ref so server changes do not invalidate every row callback",
+    /toggle:\s*true/,
+    "workspace-mode sidebar emitters must not pass toggle: true — re-click on the active item should not close the tab",
   );
   assert.doesNotMatch(
     src,
-    /\}, \[location\.pathname, longPressSuppressRef, markUnreadSidebarItemRead, navigate, nav,/,
-    "handleSelectChannel must not capture route-churn values that defeat ChannelRow memoization",
-  );
-  assert.doesNotMatch(
-    src,
-    /\[location\.pathname, markUnreadSidebarItemRead, navigate, nav,/,
-    "openDmSurface must not capture route-churn values that defeat DmRow memoization",
-  );
-  assert.doesNotMatch(
-    src,
-    /server\.slug, setSidebarOpen, workspaceEnabled\],/,
-    "high-fanout row callbacks must not capture the route server slug directly",
+    /suppressDefaultRouteRedirect/,
+    "classic-mode sidebar must not navigate to server root on re-click — the re-click should be a no-op",
   );
 });
 

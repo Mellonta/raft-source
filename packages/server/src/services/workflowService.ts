@@ -1,6 +1,6 @@
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import { currentDate } from "@botiverse/raft-shared";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   channels,
   messages,
@@ -11,8 +11,8 @@ import {
   workflowTemplates,
   type WorkflowStepOutput,
   type WorkflowTemplateStep,
-} from "../db/schema.js";
-import { enrichSingleLegacyTask } from "./taskService.js";
+} from "../db/schema";
+import { enrichSingleLegacyTask } from "./taskService";
 
 type ActorType = "user" | "agent";
 
@@ -123,7 +123,7 @@ async function createWorkflowTask(
 
 async function recordWorkflowTaskInbox(hostMessages: (typeof messages.$inferSelect)[]) {
   if (hostMessages.length === 0) return;
-  const { recordInboxFactsForPersistedMessages } = await import("./messageService.js");
+  const { recordInboxFactsForPersistedMessages } = await import("./messageService");
   await recordInboxFactsForPersistedMessages(hostMessages, {
     inboxFactPolicy: {
       mode: "record",

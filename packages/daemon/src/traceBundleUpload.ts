@@ -1,14 +1,178 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { DISTRIBUTION_POLICY, type Tracer } from "@botiverse/raft-shared";
-import { uploadWithSignedCapability } from "./directUploadCapability.js";
+import { DISTRIBUTION_POLICY, errorClassOf, errorCodeOf } from "@botiverse/raft-shared";
+import type { Tracer } from "@botiverse/raft-shared";
+import { uploadWithSignedCapability } from "./directUploadCapability";
 import { bucketDelayMs, computeTraceJitter, NO_JITTER, type TraceJitter } from "@botiverse/raft-trace-client";
 
 const TRACE_UPLOAD_SCOPE = "daemon-trace-bundle:create";
 const DEFAULT_UPLOAD_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_MIN_FILE_AGE_MS = 60 * 1000;
+
+/**
+ * What the uploader knows about itself across restarts.
+ *
+ * On disk so that a question like "when did this machine last try, and has it
+ * been failing since?" can be answered from the machine itself — the case
+ * #408 is about is one where nothing reached the server, so a server-side
+ * record is precisely what is missing.
+ *
+ * NOTE: nothing reads this file yet. It is written here so the history exists
+ * when someone goes looking; wiring a reader (the feedback/evidence bundle is
+ * the obvious candidate — it already collects from `machineDir`, though today
+ * only `traces/daemon-trace-*.jsonl`) is a separate change. Recorded rather
+ * than left implicit, so it does not quietly stay write-only (@Stone).
+ */
+interface UploaderState {
+  lastPassAt: string;
+  lastPassTrigger: string;
+  lastPassCandidates: number;
+  lastPassUploaded: number;
+  /** Consecutive passes that uploaded nothing while having something to upload. */
+  consecutiveFailedPasses: number;
+  lastSuccessAt?: string;
+}
+
+/**
+ * Read back defensively: the file is JSON off a disk that another version, or a
+ * half-finished edit, may have written. An unchecked `as UploaderState` lets a
+ * string through, and `"3" + 1` is `"31"` — which would then be written back to
+ * the file AND onto the span, turning one bad field into a permanent one
+ * (@Stone).
+ */
+function normalizeUploaderState(raw: Record<string, unknown>): UploaderState {
+  const count = raw.consecutiveFailedPasses;
+  const lastSuccessAt = raw.lastSuccessAt;
+  return {
+    lastPassAt: typeof raw.lastPassAt === "string" ? raw.lastPassAt : "",
+    lastPassTrigger: typeof raw.lastPassTrigger === "string" ? raw.lastPassTrigger : "",
+    lastPassCandidates: Number.isSafeInteger(raw.lastPassCandidates) ? raw.lastPassCandidates as number : 0,
+    lastPassUploaded: Number.isSafeInteger(raw.lastPassUploaded) ? raw.lastPassUploaded as number : 0,
+    consecutiveFailedPasses:
+      typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : 0,
+    ...(typeof lastSuccessAt === "string" ? { lastSuccessAt } : {}),
+  };
+}
+
+interface WriteFailureShape {
+  total: number;
+  lastCode: string | null;
+  lastOutcome: string | null;
+  rollbacks: number;
+  rotations: number;
+  droppedAttrsByReason?: Record<string, number>;
+  droppedAttrNames?: Record<string, number>;
+  droppedAttrNamesOverflow?: number;
+}
+
+interface AttrDropReportShape {
+  prunedNames: readonly string[];
+  prunedNamesOverflow: number;
+  prunedTotal: number;
+  windowByReason: Record<string, number>;
+  windowNames: Record<string, number>;
+  windowNamesFull: boolean;
+  cumulativeByReason: Record<string, number>;
+  reportsUndelivered: number;
+}
+
+/**
+ * Bounded attrs for one window of sanitizer drops.
+ *
+ * Emitted only when that window actually dropped something, so a healthy sink
+ * adds no keys. Names come from the window's table, which the sink caps; they
+ * are key names, never values.
+ */
+/**
+ * Pruned-without-receipt, always beside its denominator.
+ *
+ * **Precondition, for whoever adds cleanup to `trace-uploads/` later.** This
+ * figure is computed by checking pruned filenames against the receipts in that
+ * directory, so receipts must be retained at least as long as the OLDEST file
+ * still in `traces/`. A file's last chance to be uploaded is the span of time it
+ * remains in `traces/`; a receipt only has to outlive that. Delete receipts
+ * sooner and an already-uploaded file looks like one that was never sent, which
+ * inflates this number rather than breaking anything visibly (@Manjusaka,
+ * @Leiysky). The constraint is on the *action* of adding cleanup, which is why
+ * it is also recorded on the card — someone trimming that directory to save
+ * disk will be editing elsewhere and would never see this comment.
+ *
+ * "Three deleted with no receipt" means something entirely different when three
+ * files were deleted than when three thousand were, so the total is reported in
+ * the same breath and a reader can form the ratio without fetching a second
+ * number (@Leiysky). When the name buffer overflowed the figure is a LOWER
+ * bound, and `pruned_names_overflow` is what says so.
+ */
+function prunedAttrs(
+  report: AttrDropReportShape | null,
+  withoutReceipt: number,
+): Record<string, string | number> {
+  if (!report || !(report.prunedTotal > 0)) return {};
+  return {
+    pruned_total: report.prunedTotal,
+    pruned_without_receipt: withoutReceipt,
+    ...(report.prunedNamesOverflow > 0 ? { pruned_names_overflow: report.prunedNamesOverflow } : {}),
+  };
+}
+
+function attrDropReportAttrs(report: AttrDropReportShape | null): Record<string, string | number | boolean> {
+  if (!report) return {};
+  const windowTotal = Object.values(report.windowByReason).reduce((sum, n) => sum + n, 0);
+  const cumulativeTotal = Object.values(report.cumulativeByReason).reduce((sum, n) => sum + n, 0);
+  if (windowTotal <= 0 && cumulativeTotal <= 0 && report.reportsUndelivered <= 0) return {};
+  const names = Object.keys(report.windowNames).sort();
+  return {
+    sink_attrs_dropped_window: windowTotal,
+    sink_attrs_dropped_cumulative: cumulativeTotal,
+    ...(names.length > 0 ? { sink_attrs_dropped_window_names: names.join(",") } : {}),
+    ...(report.windowNamesFull ? { sink_attrs_dropped_window_names_full: true } : {}),
+    ...(report.reportsUndelivered > 0
+      ? { attr_drop_reports_undelivered: report.reportsUndelivered }
+      : {}),
+  };
+}
+
+/**
+ * Bounded attrs for sink write failures. Emitted only when there is something
+ * to report, so a healthy machine adds no keys. `last_error_code` is already
+ * folded to a closed set by the sink (`reportedFsErrorCode`).
+ */
+function traceWriteFailureAttrs(stats: WriteFailureShape | null | undefined): Record<string, string | number> {
+  if (!stats) return {};
+  // Attribute drops are NOT reported here: they belong to the window report,
+  // which is produced by the same drain call. Emitting them from both places
+  // would give a reader two numbers for one thing on different schedules.
+  if (stats.total <= 0) return {};
+  return {
+    sink_write_failures: stats.total,
+    sink_write_truncated: stats.rollbacks,
+    sink_write_rotated: stats.rotations,
+    ...(stats.lastCode ? { sink_write_last_error_code: stats.lastCode } : {}),
+    ...(stats.lastOutcome ? { sink_write_last_outcome: stats.lastOutcome } : {}),
+  };
+}
+
+/**
+ * Pull the server-minted upload identity out of the attestation metadata.
+ *
+ * Typed narrowly and defensively: the attestation `metadata` is
+ * `Record<string, unknown>` off the wire, and an older server may not send
+ * these at all. A missing value is recorded as absent rather than as a
+ * placeholder, so a receipt never claims a join key it does not have.
+ */
+function readServerUploadIdentity(metadata: Record<string, unknown> | undefined): {
+  uploadId?: string;
+  objectKey?: string;
+} {
+  const uploadId = metadata?.uploadId;
+  const objectKey = metadata?.objectKey;
+  return {
+    ...(typeof uploadId === "string" && uploadId.length > 0 ? { uploadId } : {}),
+    ...(typeof objectKey === "string" && objectKey.length > 0 ? { objectKey } : {}),
+  };
+}
 const DEFAULT_MAX_FILES_PER_RUN = 4;
 
 /**
@@ -51,6 +215,27 @@ export interface DaemonTraceBundleUploaderOptions {
   minFileAgeMs?: number;
   maxFilesPerRun?: number;
   currentFileProvider?: () => string | null;
+  /**
+   * Write-failure counters from the local sink.
+   *
+   * The sink cannot report its own failures through a span — it is the span
+   * writer, and the file it would write to is the one that just failed. So the
+   * counts ride out on the next upload that does succeed. See task #419.
+   */
+  /**
+   * Drains the sink's attribute-drop window. Called once per upload pass: the
+   * window advances on the read, and a pass that fails to deliver its report
+   * says so through `noteUndelivered` rather than by rewinding.
+   */
+  /**
+   * One call returns the write-failure snapshot and this window's attribute
+   * drops, and advances the window. Two separate reads would leave a name
+   * dropped between them with no defined window.
+   */
+  sinkReportProvider?: {
+    drain: () => { writeFailures: WriteFailureShape; attrDrops: AttrDropReportShape } | null;
+    noteUndelivered: () => void;
+  };
   /**
    * Stable machine identity used to derive deterministic jitter. We use
    * `DaemonMachineLockHandle.lockId` (sha256(apiKey) prefix) as the seed so
@@ -116,12 +301,89 @@ export class DaemonTraceBundleUploader {
    */
   async uploadOnce(trigger: UploadTrigger = "manual"): Promise<{ attempted: number; uploaded: number }> {
     if (!DISTRIBUTION_POLICY.diagnosticUploads) return { attempted: 0, uploaded: 0 };
-    const files = await this.findUploadCandidates();
-    let uploaded = 0;
-    for (const file of files.slice(0, this.options.maxFilesPerRun ?? DEFAULT_MAX_FILES_PER_RUN)) {
-      if (await this.uploadFile(file, trigger)) uploaded += 1;
+    // A span for the PASS, not just for each file. Today a pass that finds
+    // nothing emits no span at all, so "scanned and found zero" and "never ran"
+    // are the same absence — and #408 is a machine that quietly stopped
+    // uploading, which is precisely the first of those two.
+    const span = this.options.tracer?.startSpan("daemon.bundle.upload_pass", {
+      surface: "daemon",
+      kind: "internal",
+      attrs: { upload_trigger: trigger },
+    });
+    // Everything below is inside the try, including the drain. An exception
+    // anywhere in the pass would otherwise leave the span unended — and an
+    // unended span is no record, which is the same "never ran" appearance this
+    // span exists to remove. Today `findUploadCandidates` and `uploadFile`
+    // swallow their own failures, but that is a convention, not a guarantee,
+    // and a convention is not what a diagnostic should rest on (@Stone).
+    let report: { writeFailures: WriteFailureShape; attrDrops: AttrDropReportShape } | null = null;
+    let delivered = false;
+    try {
+      report = this.options.sinkReportProvider?.drain() ?? null;
+      const { files, readdirFailed } = await this.findUploadCandidates();
+      const considered = files.slice(0, this.options.maxFilesPerRun ?? DEFAULT_MAX_FILES_PER_RUN);
+      const prunedWithoutReceipt = report
+        ? await this.countPrunedWithoutReceipt(report.attrDrops.prunedNames ?? [])
+        : 0;
+      let uploaded = 0;
+      for (const file of considered) {
+        if (await this.uploadFile(file, trigger)) uploaded += 1;
+      }
+      // A pass counts as failing only when it had something to upload and
+      // uploaded none of it. A pass with nothing to do is not a failure, and
+      // counting it as one would make an idle machine look broken.
+      const passFailed = considered.length > 0 && uploaded === 0;
+      const previous = await this.readUploaderState();
+      const nowIso = new Date().toISOString();
+      await this.writeUploaderState({
+        lastPassAt: nowIso,
+        lastPassTrigger: trigger,
+        lastPassCandidates: files.length,
+        lastPassUploaded: uploaded,
+        consecutiveFailedPasses: passFailed ? (previous?.consecutiveFailedPasses ?? 0) + 1 : 0,
+        ...(uploaded > 0
+          ? { lastSuccessAt: nowIso }
+          : previous?.lastSuccessAt
+            ? { lastSuccessAt: previous.lastSuccessAt }
+            : {}),
+      });
+
+      delivered = span !== undefined;
+      span?.end(readdirFailed ? "error" : "ok", {
+        attrs: {
+          candidates: files.length,
+          considered: considered.length,
+          uploaded,
+          failed: considered.length - uploaded,
+          deferred: files.length - considered.length,
+          readdir_failed: readdirFailed,
+          consecutive_failed_passes: passFailed ? (previous?.consecutiveFailedPasses ?? 0) + 1 : 0,
+          ...attrDropReportAttrs(report?.attrDrops ?? null),
+          ...prunedAttrs(report?.attrDrops ?? null, prunedWithoutReceipt),
+          ...traceWriteFailureAttrs(report?.writeFailures ?? null),
+        },
+      });
+      return { attempted: files.length, uploaded };
+    } catch (err) {
+      // The pass still gets a record, carrying the window it already drained.
+      delivered = span !== undefined;
+      span?.end("error", {
+        attrs: {
+          pass_exception_class: errorClassOf(err),
+          ...((): Record<string, string> => {
+            const code = errorCodeOf(err);
+            return code ? { pass_exception_code: code } : {};
+          })(),
+          ...attrDropReportAttrs(report?.attrDrops ?? null),
+          ...traceWriteFailureAttrs(report?.writeFailures ?? null),
+        },
+      });
+      throw err;
+    } finally {
+      // The window advanced when it was read. If no span carried it, say so
+      // rather than rewinding — a name belongs to exactly one window.
+      if (report && !delivered) this.options.sinkReportProvider?.noteUndelivered();
     }
-    return { attempted: files.length, uploaded };
   }
 
   private scheduleNextTick(): void {
@@ -137,13 +399,18 @@ export class DaemonTraceBundleUploader {
     }, nextMs);
   }
 
-  private async findUploadCandidates(): Promise<string[]> {
+  private async findUploadCandidates(): Promise<{ files: string[]; readdirFailed: boolean }> {
     const traceDir = path.join(this.options.machineDir, "traces");
     let names: string[];
     try {
       names = await readdir(traceDir);
     } catch {
-      return [];
+      // "No candidates" has two causes that look identical from outside: the
+      // directory really is empty, or we could not read it. Without this flag a
+      // permanently unreadable trace directory reports the same zero as a
+      // healthy idle machine — and #408 is exactly a machine that silently
+      // stopped uploading (task #408 item 3).
+      return { files: [], readdirFailed: true };
     }
 
     const now = Date.now();
@@ -163,7 +430,74 @@ export class DaemonTraceBundleUploader {
         // Trace upload must stay fail-open.
       }
     }
-    return candidates;
+    return { files: candidates, readdirFailed: false };
+  }
+
+  /**
+   * How many files prune deleted this window that had never been uploaded.
+   *
+   * The sink records only what it deleted; the receipt set lives here, so the
+   * judging happens on this side. A name with no receipt means those spans left
+   * the machine without ever reaching the server — the loss #408 is about.
+   */
+  private async countPrunedWithoutReceipt(names: readonly string[]): Promise<number> {
+    let withoutReceipt = 0;
+    for (const name of names) {
+      // `uploadStatePath` takes a path and uses its basename, so a bare name is
+      // the same lookup the upload path performs.
+      if (!await this.isUploaded(path.join(this.options.machineDir, "traces", name))) withoutReceipt += 1;
+    }
+    return withoutReceipt;
+  }
+
+  private uploaderStatePath(): string {
+    return path.join(this.options.machineDir, "trace-uploads", "uploader-state.json");
+  }
+
+  private async readUploaderState(): Promise<UploaderState | null> {
+    try {
+      const parsed = JSON.parse(await readFile(this.uploaderStatePath(), "utf8")) as unknown;
+      if (!parsed || typeof parsed !== "object") return null;
+      return normalizeUploaderState(parsed as Record<string, unknown>);
+    } catch {
+      // Absent on first run, and unreadable or truncated is treated the same:
+      // the state is a convenience, so a bad file must never stop an upload.
+      return null;
+    }
+  }
+
+  /**
+   * Replace the state file atomically.
+   *
+   * Written to a temp name and renamed, so a reader never sees a half-written
+   * file and a crash mid-write cannot leave one behind. `writeFile` in place
+   * would publish the truncation before the content — and this file exists to
+   * be read after exactly the kind of abrupt stop that would cause that.
+   */
+  private async writeUploaderState(state: UploaderState): Promise<void> {
+    const target = this.uploaderStatePath();
+    const tmp = `${target}.${process.pid}-${randomBytes(4).toString("hex")}.tmp`;
+    try {
+      await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+      // fsync before the rename, matching the salt file. Without it a power
+      // loss just after the rename can leave a zero-length target; the next
+      // read then returns null, `consecutiveFailedPasses` quietly resets and
+      // `lastSuccessAt` is lost — on exactly the machines #408 is about, where
+      // that history is the only record there is (@Stone).
+      const handle = await open(tmp, "wx", 0o600);
+      try {
+        await handle.writeFile(`${JSON.stringify(state, null, 2)}\n`);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(tmp, target);
+    } catch {
+      // Never let bookkeeping break uploading. A crash between the write and
+      // the rename can still strand a `.tmp`; this cleanup only runs when the
+      // failure is an exception we catch.
+      await rm(tmp, { force: true }).catch(() => undefined);
+    }
   }
 
   private async uploadFile(file: string, trigger: UploadTrigger): Promise<boolean> {
@@ -187,7 +521,7 @@ export class DaemonTraceBundleUploader {
       const gzipped = gzipSync(raw);
       const bundleSha256 = sha256Hex(gzipped);
       const bundleId = randomUUID();
-      await uploadWithSignedCapability({
+      const { capability } = await uploadWithSignedCapability({
         serverUrl: this.options.serverUrl,
         apiKey: this.options.apiKey,
         workerUrl: this.options.workerUrl,
@@ -209,15 +543,36 @@ export class DaemonTraceBundleUploader {
         uploadBody: new Blob([new Uint8Array(gzipped)], { type: "application/x-ndjson" }),
         fetchImpl: this.options.fetchImpl,
       });
+      // The server mints the uploadId and derives the object key from it
+      // (`trace-bundles/<serverId>/<machineId>/<uploadId>.jsonl.gz`), and hands
+      // both back in the attestation metadata. Until now the daemon discarded
+      // them and the receipt recorded only `bundleId`, which is a local
+      // randomUUID — so a receipt on disk could not be joined to the stored
+      // object or to the upload ledger. Every "did this file actually land"
+      // question had to be answered by matching timestamps instead. Task #408.
+      const serverUpload = readServerUploadIdentity(capability.metadata);
       await this.markUploaded(file, {
         bundleId,
         bundleSha256,
         bundleSizeBytes: gzipped.byteLength,
+        ...serverUpload,
       });
       span?.end("ok", {
         attrs: {
           bundleId,
           bundle_size_bytes: gzipped.byteLength,
+          // Identity only, no content: this is the join key to the ledger.
+          //
+          // The key is `uploadId`, not `upload_id`, and that is load-bearing:
+          // `LocalRotatingTraceSink.sanitizeAttrs` drops any attribute whose
+          // normalized name ends in `_id` unless it is in DIAGNOSTIC_ID_ATTRS,
+          // and that allowlist holds the camelCase `uploadId`. Written as
+          // `upload_id` the value is silently deleted on the way to disk and
+          // only `upload_id_present` survives — the record would say the key
+          // exists while carrying no value. `bundleId` on this same span is
+          // spelled the same way for the same reason. (@Stone, #8641 review.)
+          ...(serverUpload.uploadId ? { uploadId: serverUpload.uploadId } : {}),
+          upload_id_present: Boolean(serverUpload.uploadId),
         },
       });
       return true;

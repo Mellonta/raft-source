@@ -25,17 +25,17 @@ import {
   MANUAL_CONTEXT_CAPABILITY,
   RAFT_CLIENT_CAPABILITIES_HEADER,
 } from "@botiverse/raft-shared";
-import { buildAgentApiEventsPath } from "./agentApiPath.js";
-import type { AgentContext } from "./auth/env.js";
-import { apiFailureError } from "./core/apiFailure.js";
-import { buildFetchDispatcher } from "./proxy.js";
+import { buildAgentApiEventsPath } from "./agentApiPath";
+import type { AgentContext } from "./auth/env";
+import { apiFailureError } from "./core/apiFailure";
+import { buildFetchDispatcher } from "./proxy";
 import {
   boundedOriginalMessage,
   emitCliTransportNormalizedError,
   routeFamilyForPath,
   targetHostClassForUrl,
   upstreamLayerForFetchError,
-} from "./transportTrace.js";
+} from "./transportTrace";
 
 type ProxyAwareRequestInit = RequestInit & { dispatcher?: Dispatcher };
 
@@ -117,6 +117,7 @@ export class ApiClient {
     if (suffix === "/integrations" || suffix.startsWith("/integrations/")) return `/internal/agent-api${suffix}`;
     if (suffix === "/upload") return "/internal/agent-api/upload";
     if (suffix === "/resolve-channel") return "/internal/agent-api/resolve-channel";
+    if (suffix === "/threads") return "/internal/agent-api/threads";
     if (suffix === "/threads/unfollow") return "/internal/agent-api/threads/unfollow";
     if (suffix === "/prepare-action") return "/internal/agent-api/prepare-action";
     if (suffix === "/channels") return "/internal/agent-api/channels";
@@ -321,11 +322,15 @@ export class ApiClient {
     method: string,
     pathname: string,
     body?: unknown,
+    options?: { headers?: Record<string, string>; signal?: AbortSignal },
   ): Promise<ApiResponse<T>> {
     pathname = this.rewriteAgentCredentialPath(pathname);
     const url = new URL(pathname, this.ctx.serverUrl);
     const headers = this.buildAuthHeaders();
     headers["Content-Type"] = "application/json";
+    // Per-request capability declarations (task #178 events ack lease). Auth
+    // and capability headers below stay authoritative over these.
+    Object.assign(headers, options?.headers);
     // Rollout carrier: new CLIs hard-require Manual intent/reason locally and
     // advertise that contract explicitly. New servers may therefore enforce
     // it without breaking older published CLI/daemon fleets.
@@ -342,6 +347,7 @@ export class ApiClient {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      signal: options?.signal,
     };
     if (dispatcher) init.dispatcher = dispatcher;
     const res = await this.fetchWithTransportTrace(url, pathname, init);

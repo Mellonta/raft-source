@@ -2,25 +2,24 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 
-import { resetRunner, resetService } from "./reset.js";
+import { resetRunner, resetService } from "./reset";
 import {
   recordCrash,
   isDegraded,
   resetRunnerHealth,
   markFatalConfig,
-} from "./health.js";
+} from "./health";
 import {
   clearServiceCrashHistory,
   readServiceState,
-} from "./serviceState.js";
+} from "./serviceState";
 import {
   serverAttachmentPath,
   serverHealthPath,
   serviceStatePath,
   serviceLogPath,
-} from "./paths.js";
+} from "./paths";
 
 // PR-impl-3 commit 1 — internal reset mutation type pins.
 //

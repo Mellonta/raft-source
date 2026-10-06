@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 
-import { migratePglite } from "./pgliteMigrations.js";
+import { migratePglite } from "./pgliteMigrations";
 
 test("0187 accepts the pre-0187 first-only writer and exposes first as the logical latest pair", async () => {
   const client = new PGlite();

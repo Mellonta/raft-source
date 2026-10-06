@@ -1,73 +1,77 @@
 import { randomUUID } from "node:crypto";
-import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
+import { SLACK_BRIDGE_FEATURE_FLAG_KEYS, type Tracer } from "@botiverse/raft-shared";
 import { and, eq } from "drizzle-orm";
 
-import { getDb, type Database, type DatabaseExecutor } from "../db/index.js";
-import { externalActorProjections, externalAppInstalls, externalChannelBindings } from "../db/schema.js";
+import { getDb, type Database, type DatabaseExecutor } from "../db/index";
+import {
+  externalActorProjections,
+  externalAppInstalls,
+  externalChannelBindings,
+} from "../db/schema";
+import { resolveExternalInstallServerGrantAuthority } from "./externalInstallServerGrantAuthority";
 import {
   createExternalInboundWorkerRuntime,
   type ExternalInboundWorkerDependencies,
-} from "./externalInboundWorkerService.js";
-import type { ExternalDeliveryAuthorityAlert } from "./externalDeliveryWorkerService.js";
+} from "./externalInboundWorkerService";
+import type { ExternalDeliveryAuthorityAlert } from "./externalDeliveryWorkerService";
 import {
   createExternalInboundAttachmentWorkerRuntime,
   type ExternalInboundAttachmentWorkerDependencies,
-} from "./externalInboundAttachmentWorkerService.js";
-import type { ExternalAttachmentAuthority } from "./externalAttachmentProviderAdapter.js";
+} from "./externalInboundAttachmentWorkerService";
+import type { ExternalAttachmentAuthority } from "./externalAttachmentProviderAdapter";
 import {
-  createSlackDatabaseAuthorPolicyAuthorityResolver,
   createSlackDatabaseAudienceIdentityAuthority,
   createSlackDatabaseInboundWorkerRuntimeResolver,
   createSlackDatabaseIngressRuntimeResolver,
-} from "./slackBridgeDatabaseRuntimeAuthority.js";
-import { createSlackBridgeDatabaseOutboundRuntime } from "./slackBridgeDatabaseOutboundRuntime.js";
+} from "./slackBridgeDatabaseRuntimeAuthority";
+import { createSlackBridgeDatabaseOutboundRuntime } from "./slackBridgeDatabaseOutboundRuntime";
 import {
   createSlackBridgeEnvSecretBackends,
   slackBridgeKeyFromEnv,
   SLACK_BRIDGE_OAUTH_CLIENT_SECRET_REF,
   SLACK_BRIDGE_SIGNING_SECRET_REF,
-} from "./slackBridgeEnvSecrets.js";
+} from "./slackBridgeEnvSecrets";
 import {
   createSlackBridgeManagedRuntime,
   type SlackBridgeManagedRuntime,
-} from "./slackBridgeManagedRuntime.js";
-import { createSlackBridgeOAuthCompletionRedirectPathResolver } from "./slackBridgeOAuthCompletionRedirect.js";
+} from "./slackBridgeManagedRuntime";
+import { createSlackBridgeOAuthCompletionRedirectPathResolver } from "./slackBridgeOAuthCompletionRedirect";
 import {
   createSlackBridgeProductionLifecycle,
-} from "./slackBridgeProductionLifecycle.js";
+} from "./slackBridgeProductionLifecycle";
 import {
   createSlackBridgeProviderRuntime,
-} from "./slackBridgeProviderRuntime.js";
+} from "./slackBridgeProviderRuntime";
 import {
   createSlackBridgeProvisioningControlPlane,
   slackBridgeProvisioningManifestHash,
   SLACK_BRIDGE_PROVISIONING_CAPABILITIES,
-} from "./slackBridgeProvisioningControlPlane.js";
+} from "./slackBridgeProvisioningControlPlane";
 import type {
   SlackBridgeLifecycleExecutionReceipt,
   SlackBridgePersistentWorkerClock,
-} from "./slackBridgeWorkerLifecycle.js";
-import { evaluateFeatureFlag } from "./featureFlagService.js";
-import { getAttachmentFileSizeLimitBytes } from "./attachmentUploadPolicy.js";
-import { getFileUploadQuotaSummary } from "./fileUploadQuotaService.js";
-import { getCdnStorage, getStorage } from "./storageService.js";
-import { createSlackInboundAttachmentAdapter } from "./slackInboundAttachmentAdapter.js";
-import { createSlackAvatarSourceAdapter } from "./slackAvatarSourceAdapter.js";
-import { materializeExternalProjectionAvatar } from "./externalAvatarMaterializerService.js";
-import { materializeCurrentRaftAuthorPolicyAvatar, syncCurrentRaftAuthorAvatar } from "./raftAvatarSourceAdapter.js";
-import { installExternalAuthorAvatarSyncHandler } from "./externalAuthorAvatarSyncRuntime.js";
-import { installExternalReactionCommandHandler } from "./externalReactionCommandRuntime.js";
-import { enqueueSlackReactionAggregateTransition } from "./externalReactionSyncService.js";
-import { createExternalReactionWorkerRuntime } from "./externalReactionWorkerService.js";
+} from "./slackBridgeWorkerLifecycle";
+import { evaluateFeatureFlag } from "./featureFlagService";
+import { getAttachmentFileSizeLimitBytes } from "./attachmentUploadPolicy";
+import { getFileUploadQuotaSummary } from "./fileUploadQuotaService";
+import { getCdnStorage, getStorage } from "./storageService";
+import { createSlackInboundAttachmentAdapter } from "./slackInboundAttachmentAdapter";
+import { createSlackAvatarSourceAdapter } from "./slackAvatarSourceAdapter";
+import { materializeExternalProjectionAvatar } from "./externalAvatarMaterializerService";
+import { installExternalReactionCommandHandler } from "./externalReactionCommandRuntime";
+import { enqueueSlackReactionAggregateTransition } from "./externalReactionSyncService";
+import { createExternalReactionWorkerRuntime } from "./externalReactionWorkerService";
+import { refreshSlackChannelBindingsPrivacy } from "./slackBindingPrivacyFreshnessService";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export interface SlackBridgeProductionServerRuntime extends SlackBridgeManagedRuntime {
   start(): void;
+  revalidateChannelPrivacy(input: { serverId: string; channelId: string; now: Date }): Promise<readonly { kind: string; reason?: string }[]>;
   inboundWorkerDependencies: Pick<
     ExternalInboundWorkerDependencies,
-    "decryptNormalizedPayload" | "resolveCurrentRuntime"
+    "decryptNormalizedPayload" | "resolveCurrentRuntime" | "resolveProviderMentionProfiles"
   >;
   inboundAttachmentWorkerDependencies: ExternalInboundAttachmentWorkerDependencies;
 }
@@ -95,6 +99,7 @@ export interface SlackBridgeServerRuntimeDependencies {
   onInboundRealtimeError?(error: unknown): void;
   onOutboundAuthorityAlert?(alert: ExternalDeliveryAuthorityAlert): void;
   onOutboundError?(error: unknown): void;
+  tracer?: Tracer;
 }
 
 async function slackAttachmentAuthorityIsCurrent(
@@ -109,6 +114,8 @@ async function slackAttachmentAuthorityIsCurrent(
   const rows = await executor.select({
     installId: externalAppInstalls.id,
     serverId: externalChannelBindings.serverId,
+    registrationId: externalChannelBindings.registrationId,
+    bindingGrantEpoch: externalChannelBindings.grantEpoch,
   }).from(externalAppInstalls)
     .innerJoin(externalChannelBindings, eq(externalChannelBindings.installId, externalAppInstalls.id))
     .where(and(
@@ -124,6 +131,15 @@ async function slackAttachmentAuthorityIsCurrent(
       eq(externalChannelBindings.state, "active"),
     )).limit(2);
   if (rows.length !== 1) return false;
+  const row = rows[0]!;
+  const serverAuthority = await resolveExternalInstallServerGrantAuthority(executor, {
+    installId: row.installId,
+    serverId: row.serverId,
+    registrationId: row.registrationId,
+  });
+  if (!serverAuthority.current || row.bindingGrantEpoch !== serverAuthority.grant.grantEpoch) {
+    return false;
+  }
   const [actor] = await executor.select({ id: externalActorProjections.id })
     .from(externalActorProjections)
     .where(and(
@@ -138,7 +154,7 @@ async function slackAttachmentAuthorityIsCurrent(
   if (!actor) return false;
   return (await evaluateFeatureFlag({
     key: SLACK_BRIDGE_FEATURE_FLAG_KEYS.attachmentTransfer,
-    serverId: rows[0]!.serverId,
+    serverId: row.serverId,
   }, executor as Database)).enabled;
 }
 
@@ -289,21 +305,10 @@ export async function createSlackBridgeServerRuntimeFromEnv(
       ...(dependencies.now ? { now: dependencies.now } : {}),
     }),
   } : undefined;
-  const authorAvatarMaterializer = avatarStorage
-    ? (policyId: string) => materializeCurrentRaftAuthorPolicyAvatar({
-      db: db ?? getDb(),
-      storage: avatarStorage,
-      policyId,
-      publicOrigin: new URL(eventsRequestUrl).origin,
-      cdnBaseUrl: env.CDN_BASE_URL,
-      ...(dependencies.now ? { now: dependencies.now } : {}),
-    })
-    : undefined;
   const provisioning = createSlackBridgeProvisioningControlPlane({
     ...(db ? { db } : {}),
     provider: provider.provisioningProvider,
     ...(avatarMaterializer ? { avatarMaterializer } : {}),
-    ...(authorAvatarMaterializer ? { authorAvatarMaterializer } : {}),
     bootstrap: {
       registrationId: runtimeRegistrationId,
       environment: runtimeEnvironment,
@@ -339,6 +344,7 @@ export async function createSlackBridgeServerRuntimeFromEnv(
     ...(dependencies.lifecycleIntervalMs ? { intervalMs: dependencies.lifecycleIntervalMs } : {}),
     ...(dependencies.onLifecycleReceipt ? { onReceipt: dependencies.onLifecycleReceipt } : {}),
     onError: dependencies.onLifecycleError,
+    tracer: dependencies.tracer,
   });
   const runtime = createSlackBridgeManagedRuntime({
     environment: runtimeEnvironment,
@@ -359,8 +365,6 @@ export async function createSlackBridgeServerRuntimeFromEnv(
     payloadSealer: secretBackends.payloadSealer,
     provisioning,
     runtimeResolver: createSlackDatabaseIngressRuntimeResolver(db),
-    resolveAuthorPolicyAuthority: createSlackDatabaseAuthorPolicyAuthorityResolver(db),
-    materializeAuthorAvatar: authorAvatarMaterializer,
     requestLifecycleReconcile: () => lifecycle.requestEventReconcile(),
     onLifecycleError: dependencies.onLifecycleError,
     ...(dependencies.fetch ? { fetch: dependencies.fetch } : {}),
@@ -369,6 +373,46 @@ export async function createSlackBridgeServerRuntimeFromEnv(
   const inboundWorkerDependencies = {
     decryptNormalizedPayload: secretBackends.decryptNormalizedPayload,
     resolveCurrentRuntime: createSlackDatabaseInboundWorkerRuntimeResolver(db, dependencies.now),
+    async resolveProviderMentionProfiles(input: {
+      frozenAuthority: Parameters<NonNullable<ExternalInboundWorkerDependencies["resolveProviderMentionProfiles"]>>[0]["frozenAuthority"];
+      providerUserIds: readonly string[];
+    }) {
+      if (input.frozenAuthority.provider !== "slack" || input.providerUserIds.length === 0) return [];
+      const executor = db ?? getDb();
+      const installs = await executor.select({
+        id: externalAppInstalls.id,
+        providerAppId: externalAppInstalls.providerAppId,
+        providerAuthorityId: externalAppInstalls.providerAuthorityId,
+        botUserId: externalAppInstalls.botUserId,
+        connectionEpoch: externalAppInstalls.connectionEpoch,
+        credentialRevision: externalAppInstalls.credentialRevision,
+      }).from(externalAppInstalls).where(and(
+        eq(externalAppInstalls.id, input.frozenAuthority.installId),
+        eq(externalAppInstalls.registrationId, input.frozenAuthority.appRegistrationId),
+        eq(externalAppInstalls.providerAuthorityId, input.frozenAuthority.providerAuthorityId),
+        eq(externalAppInstalls.connectionEpoch, input.frozenAuthority.connectionEpoch),
+        eq(externalAppInstalls.state, "active"),
+      )).limit(2);
+      const install = installs.length === 1 ? installs[0]! : null;
+      if (!install?.botUserId) return [];
+      const observedAt = dependencies.now?.() ?? new Date();
+      const resolved = await provider.resolveUsers({
+        installId: install.id,
+        providerAppId: install.providerAppId,
+        providerAuthorityId: install.providerAuthorityId,
+        botUserId: install.botUserId,
+        connectionEpoch: install.connectionEpoch,
+        credentialRevision: install.credentialRevision,
+        now: observedAt,
+      }, input.providerUserIds);
+      return resolved.kind === "fact"
+        ? resolved.fact.users.map((user) => ({
+          providerUserId: user.id,
+          displayName: user.displayName,
+          handle: user.handle,
+        }))
+        : [];
+    },
     ...(dependencies.onInboundMessageCommitted
       ? { onMessageCommitted: dependencies.onInboundMessageCommitted }
       : {}),
@@ -440,6 +484,7 @@ export async function createSlackBridgeServerRuntimeFromEnv(
       console.error("[Slock] Slack Bridge outbound authority alert", JSON.stringify(alert));
     }),
     ...(dependencies.onOutboundError ? { onError: dependencies.onOutboundError } : {}),
+    tracer: dependencies.tracer,
   });
   const uninstallReactionCommandHandler = installExternalReactionCommandHandler(
     enqueueSlackReactionAggregateTransition,
@@ -454,20 +499,15 @@ export async function createSlackBridgeServerRuntimeFromEnv(
       : {}),
     ...(dependencies.now ? { now: dependencies.now } : {}),
     onError: dependencies.onOutboundError,
+    tracer: dependencies.tracer,
   });
-  const uninstallAuthorAvatarSync = avatarStorage
-    ? installExternalAuthorAvatarSyncHandler(({ authorType, authorId }) => syncCurrentRaftAuthorAvatar({
-      db: db ?? getDb(),
-      storage: avatarStorage,
-      authorType,
-      authorId,
-      publicOrigin: new URL(eventsRequestUrl).origin,
-      cdnBaseUrl: env.CDN_BASE_URL,
-      ...(dependencies.now ? { now: dependencies.now } : {}),
-    }))
-    : () => {};
   return {
     ...runtime,
+    revalidateChannelPrivacy: (input) => refreshSlackChannelBindingsPrivacy({
+      ...input,
+      provider,
+      db: db ?? getDb(),
+    }),
     start() {
       lifecycle.start();
       inboundAttachmentWorker.start();
@@ -477,7 +517,6 @@ export async function createSlackBridgeServerRuntimeFromEnv(
     },
     async stop() {
       uninstallReactionCommandHandler();
-      uninstallAuthorAvatarSync();
       await reactionWorker.stop();
       await outboundWorker.stop();
       await inboundWorker.stop();

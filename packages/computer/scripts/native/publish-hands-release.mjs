@@ -183,6 +183,18 @@ export function versionCodeFromVersion(version) {
   return major * 1_000_000 + minor * 1_000 + patch;
 }
 
+/** Names a transport failure by its error codes only (e.g. ECONNRESET,
+ * UND_ERR_SOCKET); messages can carry URLs or credentials and are dropped. */
+export function transportCauseSuffix(error) {
+  const codes = [];
+  for (let e = error, depth = 0; e && depth < 5; e = e.cause, depth++) {
+    // DOMException (TimeoutError/AbortError) carries a numeric legacy code; its name is the signal.
+    const code = typeof e.code === "string" ? e.code : e.name;
+    if (typeof code === "string" && /^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(code) && !codes.includes(code)) codes.push(code);
+  }
+  return codes.length ? ` (${codes.join(" <- ")})` : "";
+}
+
 export function createHandsClient({ apiBase, token, fetchImpl = fetch }) {
   const base = exactHttpsUrl(apiBase, "HANDS_API");
   const bearer = required(token, "HANDS_BEARER_TOKEN");
@@ -191,15 +203,24 @@ export function createHandsClient({ apiBase, token, fetchImpl = fetch }) {
     if (url.origin !== base.origin || !url.pathname.startsWith("/api/")) {
       throw new Error("Hands API path escaped the configured origin");
     }
-    const response = await fetchImpl(url, {
-      method,
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${bearer}`,
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method,
+        redirect: "error",
+        signal: AbortSignal.timeout(300_000),
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${bearer}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch (error) {
+      const failure = new Error(`Hands ${method} ${url.pathname} transport failed${transportCauseSuffix(error)}`);
+      failure.transport = true;
+      throw failure;
+    }
     const text = await response.text();
     let payload = text;
     try { payload = text ? JSON.parse(text) : {}; } catch { /* retain text */ }
@@ -207,13 +228,14 @@ export function createHandsClient({ apiBase, token, fetchImpl = fetch }) {
       const error = new Error(`Hands ${method} ${url.pathname} failed with HTTP ${response.status}`);
       error.status = response.status;
       error.payload = payload;
+      error.retryAfter = response.headers?.get?.("retry-after") ?? null;
       throw error;
     }
     return payload;
   };
 }
 
-async function resolveAppAndChannel(api, appSlug, channelSlug) {
+export async function resolveAppAndChannel(api, appSlug, channelSlug) {
   const apps = await api("GET", "/api/apps");
   const matches = (apps.apps ?? []).filter((app) => app.slug === appSlug);
   if (matches.length !== 1) throw new Error(`Hands app '${appSlug}' resolved ${matches.length} times`);
@@ -379,7 +401,7 @@ async function findOptionalExactRelease(
   return row.id;
 }
 
-async function ensureActiveRelease(api, { appId, buildId, channelId, version, existingReleaseId }) {
+export async function ensureActiveRelease(api, { appId, buildId, channelId, version, existingReleaseId, requiredExternalTargets = REQUIRED_TARGETS }) {
   let releaseId = existingReleaseId ?? null;
   if (releaseId === null) {
     try {
@@ -407,7 +429,7 @@ async function ensureActiveRelease(api, { appId, buildId, channelId, version, ex
   await api("POST", `/api/apps/${appId}/releases/${releaseId}/publish`, {
     expected_revision: Number(row.revision),
     expected_scopes: scopes,
-    required_external_targets: REQUIRED_TARGETS,
+    ...(requiredExternalTargets === null ? {} : { required_external_targets: requiredExternalTargets }),
   });
   const terminal = await api("GET", `/api/apps/${appId}/releases/${releaseId}`);
   if (

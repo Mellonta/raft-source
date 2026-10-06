@@ -10,7 +10,6 @@ import type { ComputerOperationProgress, Machine } from "../machineStore";
 
 export interface MachineDomainState {
   machines: Machine[];
-  latestDaemonVersion: string | null;
   latestComputerVersion: string | null;
   computerOperationProgress: Record<string, ComputerOperationProgress | null>;
 }
@@ -19,7 +18,6 @@ export type MachineEvent =
   | {
       kind: "hydrate";
       machines: Machine[];
-      latestDaemonVersion: string | null;
       latestComputerVersion: string | null;
     }
   | {
@@ -46,23 +44,6 @@ export type MachineEvent =
       kind: "operation-set";
       machineId: string;
       progress: ComputerOperationProgress | null;
-    }
-  | {
-      kind: "upgrade-progress";
-      machineId: string;
-      requestId: string;
-      phase: "downloading" | "verifying" | "applying" | "restarting";
-      message?: string;
-      percent?: number;
-    }
-  | {
-      kind: "upgrade-done";
-      machineId: string;
-      requestId: string;
-      ok: boolean;
-      newVersion?: string;
-      rolledBack?: boolean;
-      error?: string;
     }
   | {
       kind: "restart-done";
@@ -93,16 +74,10 @@ export interface MachineApplyResult {
 
 const EMPTY_STATE: MachineDomainState = {
   machines: [],
-  latestDaemonVersion: null,
   latestComputerVersion: null,
   computerOperationProgress: {},
 };
 
-const PHASE_VALUE: Record<string, number> = {
-  downloading: 85,
-  verifying: 90,
-  applying: 95,
-};
 
 export function applyMachineEvent(
   state: MachineDomainState,
@@ -114,7 +89,6 @@ export function applyMachineEvent(
         state: {
           ...state,
           machines: event.machines,
-          latestDaemonVersion: event.latestDaemonVersion,
           latestComputerVersion: event.latestComputerVersion,
         },
         transition: {
@@ -169,11 +143,7 @@ export function applyMachineEvent(
         event.kind,
       );
 
-    case "upgrade-progress":
-      return applyUpgradeProgress(state, event);
 
-    case "upgrade-done":
-      return applyUpgradeDone(state, event);
 
     case "restart-done":
       return applyRestartDone(state, event);
@@ -275,55 +245,6 @@ function applyCapabilities(
       recoveryAction: null,
     },
   };
-}
-
-function applyUpgradeProgress(
-  state: MachineDomainState,
-  event: Extract<MachineEvent, { kind: "upgrade-progress" }>,
-): MachineApplyResult {
-  const cur = state.computerOperationProgress[event.machineId];
-  if (cur?.requestId && cur.requestId !== event.requestId) {
-    return noop(state, event.kind, event.machineId);
-  }
-  const progressValue =
-    event.phase === "downloading" && typeof event.percent === "number"
-      ? Math.min(85, Math.max(0, Math.round((event.percent / 100) * 85)))
-      : PHASE_VALUE[event.phase];
-  return updateOperation(
-    state,
-    event.machineId,
-    {
-      operation: "upgrade",
-      requestId: event.requestId,
-      phase: event.phase,
-      message: event.message,
-      progressValue,
-    },
-    event.kind,
-  );
-}
-
-function applyUpgradeDone(
-  state: MachineDomainState,
-  event: Extract<MachineEvent, { kind: "upgrade-done" }>,
-): MachineApplyResult {
-  const cur = state.computerOperationProgress[event.machineId];
-  if (!cur || cur.requestId !== event.requestId) {
-    return noop(state, event.kind, event.machineId);
-  }
-  return updateOperation(
-    state,
-    event.machineId,
-    {
-      ...cur,
-      done: true,
-      rolledBack: event.rolledBack ?? false,
-      newVersion: event.newVersion,
-      error: event.error,
-      progressValue: event.ok && !event.rolledBack ? 100 : cur.progressValue,
-    },
-    event.kind,
-  );
 }
 
 function updateOperation(

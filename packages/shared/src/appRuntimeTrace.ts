@@ -1,5 +1,5 @@
-import type { AgentInboxAppItem, AgentInboxSourceRef } from "./index.js";
-import type { AppConfigWireSnapshot } from "./appConfigTransport.js";
+import type { AgentInboxAppItem, AgentInboxSourceRef } from "./index";
+import type { AppConfigWireSnapshot } from "./appConfigTransport";
 
 /**
  * Content-free join attributes for Server/Computer built-in App telemetry.
@@ -48,6 +48,7 @@ export const SERVER_BUILT_IN_APP_TRACE_ALLOWED_KEYS = [
   "receipt_type",
   "outcome",
   "reason",
+  "error_class",
   "catchup",
 ] as const;
 

@@ -64,6 +64,127 @@ async function captureTopmostVisible(page: Page) {
   });
 }
 
+// ── Read-only readiness probe (task #497) ───────────────────────────────────
+//
+// Purpose: separate three candidate causes when `after.messageId` differs from
+// `before.messageId` after reload:
+//   (i)   the wrong id was persisted,
+//   (ii)  the correct id was persisted but had not been restored yet,
+//   (iii) the measurement ran before the window settled.
+//
+// This probe only READS state. It does not change the action sequence, the
+// 600ms wait, either assertion, or any product code. It reports only the
+// state this scenario needs — never the whole storage, and never credentials.
+//
+// The storage contract is taken from the product, not assumed:
+//   MessageTimeline.tsx — SCROLL_MEMORY_PREFIX = "slock.scroll-memory.v1."
+//   ChatPanel.tsx       — persistKey={`channel:${channel.id}`}
+//   MessageTimeline.tsx — falls back to an in-memory Map when sessionStorage
+//                         is unavailable (a Map does not survive reload).
+
+const SCROLL_MEMORY_PREFIX = "slock.scroll-memory.v1.";
+
+interface ProbeSnapshot {
+  /** sessionStorage availability, read the same way the product reads it. */
+  storageAvailable: boolean;
+  /**
+   * Value currently stored for this channel's persistKey, or null.
+   *
+   * NOTE: null here does NOT mean "never saved". The product calls
+   * forgetScroll() when the user returns to the live tail
+   * (MessageTimeline: `if (atBottom) forgetScroll(persistKey)`), which
+   * removes the entry. So this records "no value present *now*" only.
+   */
+  persistedId: string | null;
+  /** Whether the LRU index mentions this channel's key. */
+  indexHasKey: boolean;
+  /** Topmost visible message id at the moment of the probe. */
+  topmostVisibleId: string | null;
+  /** How many message rows are currently mounted. */
+  mountedRowCount: number;
+  /** Scroller presence + geometry at the moment of the probe. */
+  scrollerPresent: boolean;
+  bottomGap: number | null;
+}
+
+async function probeScrollState(
+  page: Page,
+  channelId: string,
+): Promise<ProbeSnapshot | { probeError: string }> {
+  // The probe must never fail the test. `page.evaluate` can reject if it lands
+  // during a navigation (execution context destroyed), so it is wrapped here:
+  // a probe failure is recorded, not thrown.
+  try {
+    return await probeScrollStateInner(page, channelId);
+  } catch (err) {
+    return { probeError: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function probeScrollStateInner(page: Page, channelId: string): Promise<ProbeSnapshot> {
+  return page.evaluate(
+    ({ prefix, id }) => {
+      const key = `${prefix}channel:${id}`;
+      // Read availability the way the product does (getStorage()).
+      let storage: Storage | null = null;
+      try {
+        storage = window.sessionStorage;
+      } catch {
+        storage = null;
+      }
+      let persistedId: string | null = null;
+      let indexHasKey = false;
+      if (storage) {
+        try {
+          persistedId = storage.getItem(prefix + key.slice(prefix.length));
+          const raw = storage.getItem(`${prefix}__index__`);
+          if (raw) {
+            const parsed: unknown = JSON.parse(raw);
+            indexHasKey =
+              Array.isArray(parsed) &&
+              parsed.some((v) => v === key.slice(prefix.length));
+          }
+        } catch {
+          /* quota / disabled */
+        }
+      }
+
+      const scroller = document.querySelector('[data-testid="message-scroller"]');
+      let topmostVisibleId: string | null = null;
+      let mountedRowCount = 0;
+      let bottomGap: number | null = null;
+      if (scroller instanceof HTMLElement) {
+        const rows = Array.from(
+          scroller.querySelectorAll<HTMLElement>("[data-message-id]"),
+        );
+        mountedRowCount = rows.length;
+        const scrollerRect = scroller.getBoundingClientRect();
+        const topGuard = scrollerRect.top + 1;
+        for (const row of rows) {
+          if (row.getBoundingClientRect().bottom > topGuard) {
+            topmostVisibleId = row.dataset.messageId ?? null;
+            break;
+          }
+        }
+        bottomGap = Math.max(
+          0,
+          scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight,
+        );
+      }
+      return {
+        storageAvailable: storage !== null,
+        persistedId,
+        indexHasKey,
+        topmostVisibleId,
+        mountedRowCount,
+        scrollerPresent: scroller instanceof HTMLElement,
+        bottomGap,
+      };
+    },
+    { prefix: SCROLL_MEMORY_PREFIX, id: channelId },
+  );
+}
+
 test.describe("message list scroll restore alignment", () => {
   test("persisted scroll resumes at the saved message's top, not centered", async ({
     page,
@@ -71,8 +192,9 @@ test.describe("message list scroll restore alignment", () => {
   }) => {
     const seedState = await waitForSeedState();
     await loginViaApi(request, seedState);
+    const channelId = seedState.channel.id;
 
-    await page.goto(`/s/${seedState.server.slug}/channel/${seedState.channel.id}`);
+    await page.goto(`/s/${seedState.server.slug}/channel/${channelId}`);
     await expect(page.getByTestId("message-scroller")).toBeVisible();
     await expect(page.getByText(seedState.messages.latestContent)).toBeVisible();
 
@@ -90,13 +212,30 @@ test.describe("message list scroll restore alignment", () => {
       "should be detached from bottom before reload (else save path doesn't fire)",
     ).toBeGreaterThan(150);
 
+    // Probe #1 — the saved value, read before reload. This is candidate (i)'s
+    // evidence: if the persisted id is already wrong here, nothing downstream
+    // can restore correctly.
+    const probeBefore = await probeScrollState(page, channelId);
+    console.log(`[scroll-restore-probe] phase=before-reload ${JSON.stringify(probeBefore)}`);
+
     // Reload — sessionStorage survives, ChatPanel sees the persisted id and
     // calls loadMessageWindowSilent(persistedId), MessageTimeline remounts
     // and runs the initial-position pick against persistKey.
     await page.reload();
     await expect(page.getByTestId("message-scroller")).toBeVisible();
+
+    // Probe #2 — immediately after reload, before the wait. Distinguishes
+    // candidate (ii)/(iii): what does the persisted value look like now, and
+    // has the window been populated yet?
+    const probeAfterReload = await probeScrollState(page, channelId);
+    console.log(`[scroll-restore-probe] phase=after-reload ${JSON.stringify(probeAfterReload)}`);
+
     // Wait for the timeline to settle on its initial position pick.
     await page.waitForTimeout(600);
+
+    // Probe #3 — at the measurement moment, i.e. the state the assertions see.
+    const probeAtMeasure = await probeScrollState(page, channelId);
+    console.log(`[scroll-restore-probe] phase=at-measure ${JSON.stringify(probeAtMeasure)}`);
 
     const after = await captureTopmostVisible(page);
     const afterMetrics = await readMetrics(page);

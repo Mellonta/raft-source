@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import type { AgentConfig } from "@botiverse/raft-shared";
 import {
   AgentLifecycleRecords,
@@ -7,7 +6,7 @@ import {
   buildAgentLifecycleRecords,
   type AgentLifecycleRecordSnapshot,
   type AgentRestartSnapshot,
-} from "./agentLifecycleRecord.js";
+} from "./agentLifecycleRecord";
 
 function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
@@ -168,4 +167,27 @@ test("AgentLifecycleRecord proof-of-catch: queued and starting cannot overlap", 
     })),
     /queued and starting facts overlap/,
   );
+});
+
+// task #1102 / invariant I2: terminal failure and an idle restart config are
+// mutually exclusive no-process states. Caching a restart config for an agent
+// is a decision to let it wake again, so it must retire any terminal-failure
+// record for that agent instead of leaving both facts visible to the owner
+// (field: jhf Mac 2026-09-11 "terminal failure and idle restart config both
+// present" made agent 653f60ad unstartable until a daemon restart).
+test("setRestartSnapshot retires a terminal failure for the same agent (I2 is structural)", () => {
+  const records = new AgentLifecycleRecords<{ untilMs: number }, { fenceId: string }>();
+  records.setTerminalFailure("agent-1", { detail: "runtime error", launchId: "launch-1" });
+  records.setRestartSnapshot("agent-1", restartSnapshot("agent-1"));
+  assert.equal(records.getTerminalFailure("agent-1"), undefined);
+  assert.deepEqual([...records.terminalFailureAgentIds()], []);
+  assert.ok(records.getRestartSnapshot("agent-1"));
+});
+
+test("setTerminalFailure retires an idle restart config for the same agent (I2 is structural)", () => {
+  const records = new AgentLifecycleRecords<{ untilMs: number }, { fenceId: string }>();
+  records.setRestartSnapshot("agent-1", restartSnapshot("agent-1"));
+  records.setTerminalFailure("agent-1", { detail: "runtime error", launchId: "launch-1" });
+  assert.equal(records.getRestartSnapshot("agent-1"), undefined);
+  assert.ok(records.getTerminalFailure("agent-1"));
 });

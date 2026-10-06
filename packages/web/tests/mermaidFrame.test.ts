@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { buildMermaidSrcDoc, parseSvgAspect } from "../src/components/markdown/mermaid/mermaidFrame";
+import { buildMermaidSrcDoc, parseSvgAspect } from "../src/components/mermaid/mermaidFrame";
 
 test("parseSvgAspect reads viewBox width/height", () => {
   assert.deepEqual(parseSvgAspect('<svg viewBox="0 0 640 480"></svg>'), { w: 640, h: 480 });

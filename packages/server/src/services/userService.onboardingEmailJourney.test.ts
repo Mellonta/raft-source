@@ -1,18 +1,17 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { emailVerifications, onboardingEmailJourneys, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { emailVerifications, onboardingEmailJourneys, users } from "../db/schema";
 import {
   resetOnboardingEmailJourneyTestOverrides,
   setOnboardingEmailJourneyConfigForTest,
-} from "./onboardingEmailJourneyService.js";
-import { completeProfile, createSocialUser, verifyEmail } from "./userService.js";
+} from "./onboardingEmailJourneyService";
+import { completeProfile, createSocialUser, verifyEmail } from "./userService";
 
 
 function hashToken(token: string): string {

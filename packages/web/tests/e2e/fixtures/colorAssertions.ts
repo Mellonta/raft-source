@@ -7,6 +7,13 @@ export async function expectCssColor(
   page: Page,
   actual: string | null,
   expected: string,
+  /**
+   * Per-channel tolerance. Default 0 (exact). Use 1 when the expected color
+   * is a hex literal but the actual comes from an oklch design token — the
+   * color-space round-trip can drift one channel by 1/255 (e.g. RUI's
+   * bg-primary oklch(0.883 0.162 91.89) → [255,212,65] vs #FFD440).
+   */
+  tolerance = 0,
 ): Promise<void> {
   expect(actual).not.toBeNull();
   const colors = await page.evaluate(
@@ -33,5 +40,14 @@ export async function expectCssColor(
     { actualColor: actual!, expectedColor: expected },
   );
 
-  expect(colors.actual).toEqual(colors.expected);
+  if (tolerance === 0) {
+    expect(colors.actual).toEqual(colors.expected);
+    return;
+  }
+  for (let i = 0; i < 4; i++) {
+    expect(
+      Math.abs(colors.actual[i] - colors.expected[i]),
+      `channel ${i} of ${actual} vs ${expected}`,
+    ).toBeLessThanOrEqual(tolerance);
+  }
 }

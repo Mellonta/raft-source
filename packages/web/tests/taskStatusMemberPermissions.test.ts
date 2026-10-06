@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { Task } from "../src/store/taskStore.js";
-import { canEditTaskStatus, getTaskStatusOptions } from "../src/components/task/taskStatusUi.js";
+import type { Task } from "../src/store/taskStore";
+import { canEditTaskStatus, getTaskStatusOptions } from "../src/components/task/taskStatusUi";
 
 /**
  * The browser half of @stdrc's 2026-08-03 ruling: only DELETE is

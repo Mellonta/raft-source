@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { manualQueryNeedsEnglish, searchAgentKnowledgeDocs } from "./agentKnowledgeService.js";
+import { manualQueryNeedsEnglish, searchAgentKnowledgeDocs } from "./agentKnowledgeService";
 
 // Search-layer fuzziness (Cindy asked 2026-09-01, #proj-docs thread 843fddc1).
 // Fuzziness lives ONLY here, in discovery — `manual get` stays exact.

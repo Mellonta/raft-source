@@ -1,26 +1,43 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   SLACK_BRIDGE_FEATURE_FLAG_KEYS,
   type SlackBridgeFeatureFlagKey,
 } from "@botiverse/raft-shared";
-import type { DatabaseExecutor } from "../db/index.js";
-import type { ExternalBindingAuthorityDecision } from "./externalAppControlPlaneService.js";
+import type { DatabaseExecutor } from "../db/index";
+import type { ExternalBindingAuthorityDecision } from "./externalAppControlPlaneService";
 import {
   SLACK_BRIDGE_ORACLE_RECEIPT_SCHEMA,
   SLACK_BRIDGE_RELEASE_CONTRACT_REVISION,
+  SLACK_BRIDGE_INTERNAL_FLAG_KEYS,
+  SLACK_BRIDGE_PRODUCT_FLAG_KEYS,
   resolveSlackBridgeBindingActive,
+  slackBridgeRequiredRuntimeFlagKeys,
   type SlackBridgeAppMembershipDecision,
   type SlackBridgeReleaseOracleDecision,
   type SlackBridgeRuntimeDependencies,
   type SlackBridgeRuntimeLevel,
-} from "./slackBridgeRuntimeService.js";
+} from "./slackBridgeRuntimeService";
 
 type ActiveAuthorityFact = Extract<ExternalBindingAuthorityDecision, { active: true }>["fact"];
 
 const NOW = new Date("2026-07-24T14:30:00.000Z");
 const LATER = new Date("2026-07-24T15:30:00.000Z");
 const EXECUTOR = {} as DatabaseExecutor;
+
+test("Slack runtime product/internal exports stay in lockstep with shared taxonomy", async () => {
+  const { SLACK_BRIDGE_INTERNAL_FEATURE_FLAG_KEYS, SLACK_BRIDGE_PRODUCT_FEATURE_FLAG_KEYS } =
+    await import("@botiverse/raft-shared");
+  assert.deepEqual([...SLACK_BRIDGE_PRODUCT_FLAG_KEYS], Object.values(SLACK_BRIDGE_PRODUCT_FEATURE_FLAG_KEYS));
+  assert.deepEqual([...SLACK_BRIDGE_INTERNAL_FLAG_KEYS], [...SLACK_BRIDGE_INTERNAL_FEATURE_FLAG_KEYS]);
+});
+
+test("Slack runtime required-key matrix is stable for all privacy and delivery levels", () => {
+  const base = [SLACK_BRIDGE_FEATURE_FLAG_KEYS.master];
+  assert.deepEqual(slackBridgeRequiredRuntimeFlagKeys("public", "top_level"), base);
+  assert.deepEqual(slackBridgeRequiredRuntimeFlagKeys("public", "thread"), base);
+  assert.deepEqual(slackBridgeRequiredRuntimeFlagKeys("private", "top_level"), base);
+  assert.deepEqual(slackBridgeRequiredRuntimeFlagKeys("private", "thread"), base);
+});
 
 function authorityFact(
   overrides: Partial<ActiveAuthorityFact> = {},
@@ -152,7 +169,7 @@ function request(
   };
 }
 
-test("public top-level active derives the master gate plus runtime fuses and excludes admission-only binding flag", async () => {
+test("public top-level active derives only the product master gate", async () => {
   const observedFlagKeys: SlackBridgeFeatureFlagKey[] = [];
   const observedExecutors: DatabaseExecutor[] = [];
   const result = await resolveSlackBridgeBindingActive(
@@ -166,19 +183,7 @@ test("public top-level active derives the master gate plus runtime fuses and exc
   assert.equal(result.fact.level, "top_level");
   assert.equal(result.fact.featureFlagConfigVersion, 11);
   assert.equal(result.fact.runtimePredicateRevision.length, 64);
-  assert.equal(observedFlagKeys.includes(SLACK_BRIDGE_FEATURE_FLAG_KEYS.binding), false);
-  assert.equal(observedFlagKeys.includes(SLACK_BRIDGE_FEATURE_FLAG_KEYS.privateBinding), false);
-  assert.equal(observedFlagKeys.includes(SLACK_BRIDGE_FEATURE_FLAG_KEYS.threadDelivery), false);
-  assert.deepEqual(observedFlagKeys, [
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.directory,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.master,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.customAuthorship,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.eventIngress,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.inboundProjection,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.nativeMention,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.enqueue,
-    SLACK_BRIDGE_FEATURE_FLAG_KEYS.dispatch,
-  ]);
+  assert.deepEqual(observedFlagKeys, [SLACK_BRIDGE_FEATURE_FLAG_KEYS.master]);
   assert.ok(observedExecutors.length >= 5);
   assert.ok(observedExecutors.every((executor) => executor === EXECUTOR));
 });
@@ -197,7 +202,7 @@ test("master launch gate disables every runtime level before provider authority 
   }
 });
 
-test("private thread derives immutable private/thread additions without a caller privacy input", async () => {
+test("private thread uses the same single master gate without hidden product switches", async () => {
   const authority = authorityFact({
     privacyClass: "private",
     audienceRevision: 9,
@@ -215,49 +220,7 @@ test("private thread derives immutable private/thread additions without a caller
   if (!result.active) assert.fail("expected private thread active");
   assert.equal(result.fact.privacyClass, "private");
   assert.equal(result.fact.bindingAuthority.audienceRevision, 9);
-  assert.ok(observedFlagKeys.includes(SLACK_BRIDGE_FEATURE_FLAG_KEYS.privateBinding));
-  assert.ok(observedFlagKeys.includes(SLACK_BRIDGE_FEATURE_FLAG_KEYS.threadDelivery));
-  assert.equal(observedFlagKeys.includes(SLACK_BRIDGE_FEATURE_FLAG_KEYS.binding), false);
-});
-
-test("private and thread fuse-down isolates only the applicable surface", async () => {
-  const privateAuthority = authorityFact({ privacyClass: "private", audienceRevision: 9 });
-  const privateOff = await resolveSlackBridgeBindingActive(
-    request(),
-    dependencies({
-      authority: { active: true, fact: privateAuthority },
-      disabledFlags: [SLACK_BRIDGE_FEATURE_FLAG_KEYS.privateBinding],
-    }),
-  );
-  assert.deepEqual(privateOff, {
-    active: false,
-    reason: "feature_flag_disabled",
-    disabledFlagKey: SLACK_BRIDGE_FEATURE_FLAG_KEYS.privateBinding,
-  });
-
-  const publicTopLevel = await resolveSlackBridgeBindingActive(
-    request(),
-    dependencies({
-      disabledFlags: [
-        SLACK_BRIDGE_FEATURE_FLAG_KEYS.privateBinding,
-        SLACK_BRIDGE_FEATURE_FLAG_KEYS.threadDelivery,
-        SLACK_BRIDGE_FEATURE_FLAG_KEYS.binding,
-      ],
-    }),
-  );
-  assert.equal(publicTopLevel.active, true);
-
-  const publicThread = await resolveSlackBridgeBindingActive(
-    request({ level: "thread" }),
-    dependencies({
-      disabledFlags: [SLACK_BRIDGE_FEATURE_FLAG_KEYS.threadDelivery],
-    }),
-  );
-  assert.deepEqual(publicThread, {
-    active: false,
-    reason: "feature_flag_disabled",
-    disabledFlagKey: SLACK_BRIDGE_FEATURE_FLAG_KEYS.threadDelivery,
-  });
+  assert.deepEqual(observedFlagKeys, [SLACK_BRIDGE_FEATURE_FLAG_KEYS.master]);
 });
 
 test("missing or duplicate feature evaluations fail closed", async () => {
@@ -282,8 +245,8 @@ test("missing or duplicate feature evaluations fail closed", async () => {
     request(),
     dependencies({
       evaluations: [
-        { key: SLACK_BRIDGE_FEATURE_FLAG_KEYS.directory, enabled: true, reason: "default" },
-        { key: SLACK_BRIDGE_FEATURE_FLAG_KEYS.directory, enabled: true, reason: "default" },
+        { key: SLACK_BRIDGE_FEATURE_FLAG_KEYS.master, enabled: true, reason: "default" },
+        { key: SLACK_BRIDGE_FEATURE_FLAG_KEYS.master, enabled: true, reason: "default" },
       ],
     }),
   );

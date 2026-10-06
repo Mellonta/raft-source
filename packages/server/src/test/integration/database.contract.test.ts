@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { sql } from "drizzle-orm";
-import { dbTest } from "./dbTest.js";
-import { apiTest } from "./apiTest.js";
-import { getDb, isDatabaseInitialized } from "../../db/index.js";
-import { featureFlags, users } from "../../db/schema.js";
-import { ONBOARDING_OPENER_V2_FEATURE_FLAG_KEY } from "../../services/featureFlagService.js";
+import { dbTest } from "./dbTest";
+import { apiTest } from "./apiTest";
+import { getDb, isDatabaseInitialized } from "../../db/index";
+import { featureFlags, users } from "../../db/schema";
+import { ONBOARDING_OPENER_V2_FEATURE_FLAG_KEY } from "../../services/featureFlagService";
 import { eq } from "drizzle-orm";
 
 // Expected assertion failure deliberately exercises the real runner's teardown.

@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { CURRENT_SCHEMA_VERSION, formatUpgradeLogTimestamp, migrationDismissalsPath } from "../paths.js";
-import { canonicalizeServerUrl } from "../serverUrl.js";
-import { normalizeServerSlug } from "../serverState.js";
+import { CURRENT_SCHEMA_VERSION, formatUpgradeLogTimestamp, migrationDismissalsPath } from "../paths";
+import { canonicalizeServerUrl } from "../serverUrl";
+import { normalizeServerSlug } from "../serverState";
 
 export interface MigrationDismissalEvidence {
   effectiveFingerprint?: string | null;

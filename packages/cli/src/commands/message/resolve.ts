@@ -5,13 +5,13 @@
 import type { Command } from "commander";
 
 import { asMessageId } from "@botiverse/raft-shared";
-import type { ApiResponse } from "../../client.js";
-import { buildAgentApiRoutePath, createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { CliError, type CliErrorCode } from "../../core/errors.js";
-import { writeText, NL } from "../../core/renderer.js";
-import { formatMessages } from "./_format.js";
+import type { ApiResponse } from "../../client";
+import { buildAgentApiRoutePath, createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { CliError, type CliErrorCode } from "../../core/errors";
+import { writeText, NL } from "../../core/renderer";
+import { formatMessages } from "./_format";
 
 interface ResolveMessageData {
   message?: {

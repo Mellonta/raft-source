@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   EMITTABLE_ROUTE_FAILURE_SUBKINDS,
   RouteFailureError,
@@ -7,7 +6,7 @@ import {
   resolveRouteFailureSubkind,
   sanitizeRouteErrorMessage,
   type RouteFailureSubkind,
-} from "./routeFailure.js";
+} from "./routeFailure";
 
 test("resolveRouteFailureSubkind returns the tagged subkind for a RouteFailureError", () => {
   assert.equal(
@@ -120,4 +119,52 @@ test("sanitizeRouteErrorMessage collapses whitespace and caps at 240 chars", () 
 test("trace errors redact daemon, Bearer and JWT credentials", () => {
   const secrets = ["sk_daemon_synthetic-secret", "Bearer opaque-synthetic-secret", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhdWRpdCJ9.c3ludGhldGlj"];
   for (const secret of secrets) assert.ok(!sanitizeRouteErrorMessage(`failed: ${secret}`).includes(secret), secret);
+});
+
+test("sanitizeRouteErrorMessage redacts connection strings in every form", () => {
+  // A connection string pasted into an error is the highest-value secret this
+  // function can meet, and it arrives in more than one shape. All three must be
+  // redacted; the earlier `https?`-only rule let two of them through whole.
+  const spilled = [
+    "postgres://raft:synthetic-pw@db.internal:5432/app",
+    "connection failed: host=db.internal user=raft password=synthetic-pw dbname=app",
+    "connect failed host=db.internal password=synthetic-pw",
+    "sslkey=/run/secrets/synthetic-client.key",
+  ];
+  for (const message of spilled) {
+    const clean = sanitizeRouteErrorMessage(`failed: ${message}`);
+    assert.ok(!clean.includes("synthetic-pw"), `password survived: ${clean}`);
+    assert.ok(!clean.includes("synthetic-client.key"), `sslkey survived: ${clean}`);
+  }
+  assert.equal(
+    sanitizeRouteErrorMessage("connect failed host=db password=synthetic-pw"),
+    "connect failed host=db password=[redacted]",
+    "the key name is kept and only the value replaced",
+  );
+
+  // A value may be QUOTED AND CONTAIN SPACES. A bare \S+ stops at the first
+  // space, so 'password="two words"' would leave ' words"' behind -- and the
+  // earlier tests, which all used a space-free value, stayed green while it did.
+  const spaced = [
+    'connect failed host=db password="synthetic two" dbname=app',
+    "connect failed host=db password='synthetic two' dbname=app",
+  ];
+  for (const message of spaced) {
+    const clean = sanitizeRouteErrorMessage(message);
+    assert.ok(!clean.includes("synthetic"), `spaced value survived: ${clean}`);
+    assert.ok(!clean.includes("two"), `spaced value remainder survived: ${clean}`);
+    // The KEY must survive: its name is what makes the line diagnostic, and the
+    // comment on SPILLED_DSN_SECRET says so. Asserting only that secret-looking
+    // things are gone would let the key be dropped without any test noticing.
+    assert.ok(clean.includes("password="), `key was dropped: ${clean}`);
+  }
+
+  // Positive control: a message with nothing sensitive is not mangled, so the
+  // rules above cannot pass by redacting indiscriminately.
+  assert.equal(sanitizeRouteErrorMessage("connection refused"), "connection refused");
+  assert.equal(
+    sanitizeRouteErrorMessage("failed: host=db.internal dbname=app"),
+    "failed: host=db.internal dbname=app",
+    "non-secret DSN keys stay readable for diagnosis",
+  );
 });

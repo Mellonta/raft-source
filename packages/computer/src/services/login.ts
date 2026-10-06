@@ -15,11 +15,11 @@
 //     codes in this seam-extraction PR.
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DeviceAuthClient, AuthClient } from "../apiClient.js";
-import { userSessionPath, CURRENT_SCHEMA_VERSION } from "../paths.js";
-import { resolveServerUrl, resolveServerUrlEnv } from "../serverUrl.js";
-import type { ComputerApiEvent } from "../lib/events.js";
-import { ComputerServiceError } from "./errors.js";
+import { DeviceAuthClient, AuthClient } from "../apiClient";
+import { userSessionPath, CURRENT_SCHEMA_VERSION } from "../paths";
+import { resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
+import type { ComputerApiEvent } from "../lib/events";
+import { ComputerServiceError } from "./errors";
 
 export interface LoginInput {
   serverUrl?: string;

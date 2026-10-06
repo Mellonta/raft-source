@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { normalizeOtlpTracesEndpoint, otlpRelayHandler } from "./otlpRelay.js";
+import { normalizeOtlpTracesEndpoint, otlpRelayHandler } from "./otlpRelay";
 
 function createResponse() {
   const result = {

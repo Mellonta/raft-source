@@ -1,5 +1,5 @@
 import type { TraceAttributes } from "@botiverse/raft-shared";
-import { addTraceEvent } from "./semanticTrace.js";
+import { addTraceEvent } from "./semanticTrace";
 
 type DecisionScalar = string | number | boolean;
 

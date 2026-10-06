@@ -2,7 +2,7 @@ import {
   hasServerCapability,
   type ServerCapability,
   type ServerRole,
-} from "./serverPermissions.js";
+} from "./serverPermissions";
 
 export const CHANNEL_ROLES = ["member", "admin"] as const;
 export type ChannelRole = typeof CHANNEL_ROLES[number];
@@ -90,10 +90,12 @@ export function canGuestJoinChannel(input: GuestChannelPolicyInput): boolean {
 }
 
 export function canGuestPostToChannel(input: GuestChannelPolicyInput): boolean {
-  if (!input.gateEnabled || input.serverRole !== "guest" || input.archived || input.deleted) return false;
-  if (input.channelName === "all") return false;
-  if (!input.isChannelMember || input.channelType === "joint" || input.channelType === "thread") return false;
-  return true;
+  // Guest membership is a visibility/subscription relationship only. It must
+  // never widen into shared-content mutation authority, including for joined
+  // channels, private channels, or existing DMs. Keep the full input shape so
+  // read/join/post policy callers continue to share one projection contract.
+  void input;
+  return false;
 }
 
 export function isValidGuestChannelPolicy(input: { guestVisible: boolean; guestJoinable: boolean }): boolean {

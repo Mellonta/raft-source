@@ -20,16 +20,17 @@
 // Once a producer emits the canonical event directly, delete the matching
 // adapter branch and its orchestrator/daemon call-site TODO instead of
 // extending this legacy mapping layer.
-import { createAgentLifecycleEvent, type AgentLifecycleEvent, type AgentLifecycleReason } from "./agentLifecycleEvents.js";
+import { createAgentLifecycleEvent, type AgentLifecycleEvent, type AgentLifecycleReason } from "./agentLifecycleEvents";
 import {
   RUNTIME_ERROR_CLASSES,
   RUNTIME_ERROR_REASONS,
   RUNTIME_ERROR_REASON_PROVENANCES,
+  runtimeErrorReasonForClass,
   type AgentActivity,
   type MachineShutdownReason,
   type RuntimeErrorActivityDiagnostic,
 } from "@botiverse/raft-shared";
-import type { ReadyReconcileLifecycleAction } from "./agentLifecycleReducer.js";
+import type { ReadyReconcileLifecycleAction } from "./agentLifecycleReducer";
 
 export interface LegacyLifecycleEventFactoryOptions {
   now: () => Date;
@@ -88,12 +89,12 @@ export interface AdaptStartInput extends LegacyLifecycleEventFactoryOptions {
   machineId: string;
   previousStatus?: string | null;
   serverId: string;
-  startCause: "manual" | "message" | "resume";
+  startCause: "manual" | "message" | "resume" | "app_inbox_wake";
 }
 
 export function adaptStartLifecycleEvent(input: AdaptStartInput): AdaptedLifecycleEvent {
   const reason: AgentLifecycleReason =
-    input.startCause === "message" ? "lazy_wake"
+    input.startCause === "message" || input.startCause === "app_inbox_wake" ? "lazy_wake"
       : input.startCause === "resume" ? "runtime_starting"
         : "manual_start";
 
@@ -199,6 +200,9 @@ export function normalizeRuntimeErrorActivityDiagnostic(
   const expectedReason = runtimeErrorReasonForClass(candidate.errorClass as RuntimeErrorActivityDiagnostic["errorClass"]);
   if (candidate.errorReason !== expectedReason) return null;
   if (candidate.reasonProvenance === "daemon_fallback" && candidate.nativeReasonPresent !== false) return null;
+  // task #1127 — a stderr signature exists precisely because the runtime emitted
+  // no native reason, so claiming one is a contradiction, not a detail.
+  if (candidate.reasonProvenance === "codex_stderr_signature" && candidate.nativeReasonPresent !== false) return null;
   if (candidate.reasonProvenance === "codex_native_reason" && candidate.nativeReasonPresent !== true) return null;
   if (candidate.reasonProvenance === "runtime_error_event" && candidate.nativeReasonPresent !== undefined) return null;
   return {
@@ -212,24 +216,6 @@ export function normalizeRuntimeErrorActivityDiagnostic(
   };
 }
 
-function runtimeErrorReasonForClass(
-  errorClass: RuntimeErrorActivityDiagnostic["errorClass"],
-): RuntimeErrorActivityDiagnostic["errorReason"] {
-  switch (errorClass) {
-    case "InputTooLargeError": return "input_too_large";
-    case "RateLimitError": return "rate_limited";
-    case "AuthError": return "auth_failed";
-    case "LauncherError": return "launcher_error";
-    case "NotFoundError": return "not_found";
-    case "ModelConfigError": return "model_config_error";
-    case "TimeoutError": return "provider_timeout";
-    case "ProviderConnectionError": return "provider_connection_error";
-    case "ProviderStreamError": return "provider_stream_error";
-    case "ProviderServerError": return "provider_server_error";
-    case "ProviderApiError": return "provider_api_error";
-    case "RuntimeError": return "unclassified_runtime_error";
-  }
-}
 
 function daemonActivityReason(activity: AgentActivity): AgentLifecycleReason {
   if (activity === "online") return "runtime_idle";

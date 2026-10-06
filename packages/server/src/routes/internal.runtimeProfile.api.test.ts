@@ -1,13 +1,13 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
-import { registerMachine } from "../services/machineService.js";
-import { createServer } from "../services/serverService.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { createAgent, assignMachine } from "../services/agentService";
+import { registerMachine } from "../services/machineService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

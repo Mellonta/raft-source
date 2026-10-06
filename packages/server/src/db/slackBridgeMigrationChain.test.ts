@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 
-import { migratePglite } from "./pgliteMigrations.js";
+import { migratePglite } from "./pgliteMigrations";
 
 const OUTBOX_MIGRATION = fileURLToPath(
   new URL("../../drizzle/0251_slack_bridge_control_plane.sql", import.meta.url),

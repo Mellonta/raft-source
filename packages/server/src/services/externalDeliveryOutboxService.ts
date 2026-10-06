@@ -1,29 +1,31 @@
 import { createHash, createHmac, randomUUID } from "node:crypto";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import {
   currentDate,
   SLACK_BRIDGE_DELIVERY_CONTRACT_VERSION,
 } from "@botiverse/raft-shared";
-import type { DatabaseExecutor } from "../db/index.js";
+import type { DatabaseExecutor } from "../db/index";
 import {
+  agents,
   attachmentObjects,
   attachments,
   channels,
-  externalAuthorPolicies,
   externalDeliveryPartitions,
   externalMentionFacts,
   externalOutboundDeliveries,
-  externalProjectionAvatarArtifacts,
   messages,
+  serverMembers,
   servers,
-} from "../db/schema.js";
-import type { OrdinaryMessageExternalProjectionDecision } from "./ordinaryMessageExternalProjection.js";
-import { resolveExternalConversationTarget } from "./externalConversationTargetService.js";
-import { appendSlackBridgeAttachmentMarker } from "./slackBridgeAttachmentPolicy.js";
-import { createOutboundExternalAttachmentTransferWithExecutor } from "./externalAttachmentTransferService.js";
+  users,
+} from "../db/schema";
+import type { OrdinaryMessageExternalProjectionDecision } from "./ordinaryMessageExternalProjection";
+import { resolveExternalConversationTarget } from "./externalConversationTargetService";
+import { appendSlackBridgeAttachmentMarker } from "./slackBridgeAttachmentPolicy";
+import { createOutboundExternalAttachmentTransferWithExecutor } from "./externalAttachmentTransferService";
+import { effectiveAgentSenderName, effectiveUserSenderName } from "./effectiveSenderName";
+import { isStoredServerScopedAvatarUrl, isStoredUserAvatarUrl } from "./avatarService";
 
-export const SLACK_BRIDGE_RENDER_SNAPSHOT_SCHEMA_V1 = "slack-bridge-render-snapshot.v1" as const;
-export const SLACK_BRIDGE_RENDER_SNAPSHOT_SCHEMA = "slack-bridge-render-snapshot.v2" as const;
+export const SLACK_BRIDGE_RENDER_SNAPSHOT_SCHEMA = "slack-bridge-render-snapshot.v4" as const;
 
 export interface ProviderNeutralOutboundBindingAuthority {
   provider: string;
@@ -36,7 +38,6 @@ export interface ProviderNeutralOutboundBindingAuthority {
   bindingEpoch: number;
   memberRevision: number;
   contextRevision: number;
-  consentRevision: number;
   privacyClass: "public" | "private";
   /** Raft parent channel bound to this provider conversation. */
   raftChannelId: string;
@@ -84,22 +85,50 @@ export interface SlackBridgeFrozenExternalMention {
   resolutionReason: "explicit_projection" | "unique_dangling_handle";
 }
 
-export interface SlackBridgeFrozenAuthorPolicy {
-  policyId: string;
-  serverId: string;
-  consentRevision: number;
+export interface SlackBridgeFrozenAuthorPresentation {
   displayName: string;
   fallbackKind: "human" | "agent";
-  avatar: null | {
-    artifactId: string;
+  avatar: {
     publicUrl: string;
-    sourceDigest: string;
-    artifactRevision: number;
-  };
+    contentDigest: string;
+  } | null;
+}
+
+function frozenAuthorAvatar(input: {
+  senderType: "user" | "agent";
+  serverId: string;
+  avatarUrl: string | null;
+}): SlackBridgeFrozenAuthorPresentation["avatar"] {
+  if (!input.avatarUrl) return null;
+  let url: URL;
+  let cdnBase: URL;
+  try {
+    url = new URL(input.avatarUrl);
+    cdnBase = new URL(process.env.CDN_BASE_URL ?? "");
+  } catch {
+    return null;
+  }
+  const basePath = cdnBase.pathname.replace(/\/$/u, "");
+  if (
+    url.protocol !== "https:"
+    || cdnBase.protocol !== "https:"
+    || url.origin !== cdnBase.origin
+    || !url.pathname.startsWith(`${basePath}/`)
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+  ) return null;
+  const owned = input.senderType === "user"
+    ? isStoredUserAvatarUrl(input.avatarUrl)
+    : isStoredServerScopedAvatarUrl(input.avatarUrl, input.serverId);
+  if (!owned) return null;
+  const digest = url.pathname.match(/\/([0-9a-f]{32})\.webp$/iu)?.[1]?.toLowerCase();
+  return digest ? { publicUrl: url.toString(), contentDigest: digest } : null;
 }
 
 export interface SlackBridgeRenderSnapshot {
-  schema: typeof SLACK_BRIDGE_RENDER_SNAPSHOT_SCHEMA | typeof SLACK_BRIDGE_RENDER_SNAPSHOT_SCHEMA_V1;
+  schema: typeof SLACK_BRIDGE_RENDER_SNAPSHOT_SCHEMA;
   sourceMessageId: string;
   sourceMessageSeq: number;
   canonicalConversationId: string;
@@ -109,8 +138,7 @@ export interface SlackBridgeRenderSnapshot {
   senderType: "user" | "agent";
   senderId: string;
   authorName: string;
-  authorAvatarDigest: string | null;
-  authorPolicy: SlackBridgeFrozenAuthorPolicy;
+  authorPresentation: SlackBridgeFrozenAuthorPresentation;
   sanitizedText: string;
   externalMentions: SlackBridgeFrozenExternalMention[];
   attachments: SlackBridgeFrozenAttachment[];
@@ -322,6 +350,17 @@ export function installOrdinaryMessageOutboundRuntime(input: {
  * and canonical storage row are locked in that order with duplicates skipped.
  * Holding the full chain through source insert, derived facts, and enqueue
  * prevents archive/conversion races and preserves FIFO allocation.
+ *
+ * The rows are locked FOR NO KEY UPDATE, not FOR UPDATE. That still excludes
+ * every other admission holder (FIFO) and every archive/delete write, but not
+ * the FOR KEY SHARE a foreign-key check takes. It must not: the same
+ * transaction later inserts inbox facts and push outbox rows whose
+ * source_channel_id is every Joint projection's local row, including the
+ * requested projection another server's sender holds here. With FOR UPDATE,
+ * sender A (holding its own projection and the canonical row) waited on
+ * sender B's projection for that key share while B, holding its projection,
+ * waited on the canonical row: a 40P01 cycle on every concurrent pair of sends
+ * into one Joint channel or Joint thread from two servers.
  */
 export async function lockOrdinaryMessageExternalDeliveryAdmission(input: {
   executor: DatabaseExecutor;
@@ -347,7 +386,7 @@ export async function lockOrdinaryMessageExternalDeliveryAdmission(input: {
       })
       .from(channels)
       .where(eq(channels.id, channelId))
-      .for("update")
+      .for("no key update")
       .limit(1);
     if (!conversation || conversation.archivedAt || conversation.deletedAt) {
       throw new Error("Slack Bridge outbound admission conversation is unavailable");
@@ -464,7 +503,6 @@ function validateBindingAuthority(authority: ProviderNeutralOutboundBindingAutho
   assertPositiveRevision(authority.bindingEpoch, "binding epoch");
   assertPositiveRevision(authority.memberRevision, "member revision");
   assertPositiveRevision(authority.contextRevision, "context revision");
-  assertPositiveRevision(authority.consentRevision, "consent revision");
 }
 
 function validateFrozenMentions(
@@ -605,33 +643,33 @@ async function resolveFrozenRenderAuthority(input: {
     sourcePermalink = `https://app.slock.ai/s/${encodeURIComponent(server.slug)}/${surface}/${parentChannel.id}?${params.toString()}`;
   }
 
-  const [policy] = await input.executor.select().from(externalAuthorPolicies).where(and(
-    eq(externalAuthorPolicies.serverId, server.id),
-    eq(externalAuthorPolicies.provider, authority.provider),
-    eq(externalAuthorPolicies.appRegistrationId, authority.appRegistrationId),
-    eq(externalAuthorPolicies.installId, authority.installId),
-    eq(externalAuthorPolicies.bindingId, authority.bindingId),
-    eq(externalAuthorPolicies.bindingEpoch, authority.bindingEpoch),
-    eq(externalAuthorPolicies.authorType, input.senderType),
-    eq(externalAuthorPolicies.authorId, input.senderId),
-    eq(externalAuthorPolicies.consentRevision, authority.consentRevision),
-    eq(externalAuthorPolicies.state, "granted"),
-  )).for("update").limit(1);
-  if (!policy || policy.displayName !== input.authorName) {
-    throw new Error("Slack Bridge author consent or frozen display name is unavailable");
+  const presentation = input.senderType === "user"
+    ? await input.executor.select({
+      name: users.name,
+      displayName: users.displayName,
+      avatarUrl: users.avatarUrl,
+    }).from(serverMembers).innerJoin(users, eq(users.id, serverMembers.userId)).where(and(
+      eq(serverMembers.serverId, server.id),
+      eq(serverMembers.userId, input.senderId),
+    )).limit(2)
+    : await input.executor.select({
+      name: agents.name,
+      displayName: agents.displayName,
+      avatarUrl: agents.avatarUrl,
+    }).from(agents).where(and(
+      eq(agents.serverId, server.id),
+      eq(agents.id, input.senderId),
+      isNull(agents.deletedAt),
+    )).limit(2);
+  if (presentation.length !== 1) {
+    throw new Error("Slack Bridge current author is unavailable");
   }
-  const [avatar] = policy.avatarArtifactId
-    ? await input.executor.select().from(externalProjectionAvatarArtifacts).where(and(
-        eq(externalProjectionAvatarArtifacts.id, policy.avatarArtifactId),
-        eq(externalProjectionAvatarArtifacts.ownerType, input.senderType),
-        eq(externalProjectionAvatarArtifacts.ownerId, input.senderId),
-        eq(externalProjectionAvatarArtifacts.state, "active"),
-      )).for("update").limit(1)
-    : [];
-  if (policy.avatarArtifactId && !avatar) {
-    throw new Error("Slack Bridge controlled author avatar is unavailable");
+  const displayName = input.senderType === "user"
+    ? effectiveUserSenderName(presentation[0])
+    : effectiveAgentSenderName(presentation[0]);
+  if (displayName !== input.authorName) {
+    throw new Error("Slack Bridge current author display does not match the source message");
   }
-
   const mentionRows = await input.executor.select().from(externalMentionFacts)
     .where(eq(externalMentionFacts.messageId, input.message.id));
   const linkedAttachments = await input.executor.select({
@@ -686,18 +724,14 @@ async function resolveFrozenRenderAuthority(input: {
       })
     : [];
 
-  const authorPolicy: SlackBridgeFrozenAuthorPolicy = {
-    policyId: policy.id,
-    serverId: policy.serverId,
-    consentRevision: policy.consentRevision,
-    displayName: policy.displayName,
-    fallbackKind: policy.fallbackKind,
-    avatar: avatar ? {
-      artifactId: avatar.id,
-      publicUrl: avatar.publicUrl,
-      sourceDigest: avatar.sourceDigest,
-      artifactRevision: avatar.artifactRevision,
-    } : null,
+  const authorPresentation: SlackBridgeFrozenAuthorPresentation = {
+    displayName,
+    fallbackKind: input.senderType === "user" ? "human" : "agent",
+    avatar: frozenAuthorAvatar({
+      senderType: input.senderType,
+      serverId: server.id,
+      avatarUrl: presentation[0]!.avatarUrl,
+    }),
   };
   const sanitizedText = linkedAttachments.length > 0 && !attachmentTransferEnabled
     ? appendSlackBridgeAttachmentMarker(input.sanitizedText)
@@ -717,8 +751,7 @@ async function resolveFrozenRenderAuthority(input: {
     senderType: input.senderType,
     senderId: input.senderId,
     authorName: input.authorName,
-    authorAvatarDigest: avatar?.sourceDigest ?? null,
-    authorPolicy,
+    authorPresentation,
     sanitizedText,
     externalMentions,
     attachments: frozenAttachments,

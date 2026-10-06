@@ -17,6 +17,11 @@ import {
   SegmentedControlCount,
   SegmentedControlItem,
   SegmentedControlLabel,
+  Button,
+  Spinner,
+  Textarea,
+  TextareaCounter,
+  Checkbox,
 } from "raft-ui";
 import LoginPage from "../src/components/auth/LoginPage";
 import RegisterPage from "../src/components/auth/RegisterPage";
@@ -35,19 +40,14 @@ import ChatPanel from "../src/components/message/ChatPanel";
 import ChannelFilesPanel from "../src/components/message/ChannelFilesPanel";
 import MessageItem, { buildMentionMap } from "../src/components/message/MessageItem";
 import MessageInput from "../src/components/message/MessageInput";
+import ExternalIdentityDetailPanel from "../src/components/profile/ExternalIdentityDetailPanel";
 import NotificationActivationBanner from "../src/components/message/NotificationActivationBanner";
 import SelectModeToolbar from "../src/components/message/SelectModeToolbar";
 import MessageSearchPage from "../src/components/search/MessageSearchPage";
-import NotificationCenter from "../src/components/ui/NotificationCenter";
-import type {
-  NotificationCenterEntry,
-} from "../src/components/ui/NotificationCenter";
 import AttentionDot from "../src/components/ui/AttentionDot";
 import AvatarListRow from "../src/components/ui/AvatarListRow";
 import AvatarSlot from "../src/components/ui/AvatarSlot";
-import Button from "../src/components/ui/Button";
 import CheckMarker from "../src/components/ui/CheckMarker";
-import Checkbox from "../src/components/ui/Checkbox";
 import FormField from "../src/components/ui/FormField";
 import MenuItem from "../src/components/ui/MenuItem";
 import ProgressBar from "../src/components/ui/ProgressBar";
@@ -56,10 +56,8 @@ import SectionEyebrow from "../src/components/ui/SectionEyebrow";
 import SelectionPopover from "../src/components/ui/SelectionPopover";
 import Skeleton, { SkeletonRow } from "../src/components/ui/Skeleton";
 import SlugInput from "../src/components/ui/SlugInput";
-import Spinner from "../src/components/ui/Spinner";
 import StatusDot from "../src/components/ui/StatusDot";
 import SurfaceListItem from "../src/components/ui/SurfaceListItem";
-import Textarea from "../src/components/ui/Textarea";
 import InlineBadgeEditor from "../src/components/InlineBadgeEditor";
 import TasksPanel from "../src/components/task/TasksPanel";
 import FeedbackSdkTrial from "./FeedbackSdkTrial";
@@ -78,9 +76,11 @@ import type { Machine } from "../src/store/machineStore";
 import { useMessageStore } from "../src/store/messageStore";
 import type { Message } from "../src/store/messageStore";
 import { useSavedStore } from "../src/store/savedStore";
-import { PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
+import {
+  PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY,
+  SERVER_GUEST_FEATURE_FLAG_KEY,
+} from "@botiverse/raft-shared";
 import { setServerFeatureFlagForTests } from "../src/store/serverFeatureFlags";
-import { SERVER_GUEST_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 import { useServerStore } from "../src/store/serverStore";
 import { useSelectionStore } from "../src/store/selectionStore";
 import { useTaskStore } from "../src/store/taskStore";
@@ -249,28 +249,6 @@ const COMPOSER_CASES: Record<string, ComposerVisualCase> = {
 const VISUAL_CHANNEL_ID = fxChannels.composerHost.id;
 const VISUAL_MACHINE_ID = fxPrimaryMachine.id;
 
-const VISUAL_NOTIFICATION_CENTER_ENTRIES: NotificationCenterEntry[] = [
-  {
-    id: "visual-agent-offline",
-    kind: "warning",
-    title: "Android-Developer lost connection",
-    body: "Last heartbeat was 4 minutes ago.",
-    actions: [
-      { id: "view", label: "View", variant: "primary" },
-      { id: "dismiss", label: "Dismiss", variant: "secondary" },
-    ],
-  },
-  {
-    id: "visual-release-blocker",
-    kind: "info",
-    title: "Release gate needs review",
-    body: "Two visual cases changed in the latest run.",
-    actions: [
-      { id: "open", label: "Open", variant: "primary" },
-      { id: "dismiss", label: "Dismiss", variant: "secondary" },
-    ],
-  },
-];
 
 // All five selectable statuses, in the order getTaskStatusOptions yields
 // them for a server manager — labels stay in lockstep with STATUS_STYLES.
@@ -391,7 +369,8 @@ type DirectVisualCase = {
     | "saved-results"
     | "activity-results"
     | "tasks-panel"
-    | "tasks-status-menu";
+    | "tasks-status-menu"
+    | "external-identity-detail";
 };
 
 type SettingsVisualCase = {
@@ -821,6 +800,10 @@ const DIRECT_CASES: Record<string, DirectVisualCase> = {
   "components.home.activity.results": {
     id: "components.home.activity.results",
     kind: "activity-results",
+  },
+  "components.message.external-identity-detail": {
+    id: "components.message.external-identity-detail",
+    kind: "external-identity-detail",
   },
   "components.tasks.panel.states": {
     id: "components.tasks.panel.states",
@@ -1873,7 +1856,7 @@ const visualMembers = [
   },
 ];
 
-function primeDirectVisualStores() {
+function primeDirectVisualStores(caseId?: string) {
   useAuthStore.setState({
     initialized: true,
     loading: false,
@@ -1906,6 +1889,13 @@ function primeDirectVisualStores() {
         type: "channel",
         createdAt: fxTimes.entityCreatedAtIso,
         joined: true,
+        // The add-member entry is gated on this capability
+        // (canUseChannelMemberAction -> hasChannelMemberCapability). Scoped to
+        // the one case that clicks it: granting it to every direct case would
+        // add an add-member affordance to unrelated channel captures.
+        ...(caseId === "components.channel.members.add-panel"
+          ? { channelCapabilities: { addChannelMembers: true } }
+          : {}),
       },
       {
         id: fxChannels.androidArtifacts.id,
@@ -1941,7 +1931,6 @@ function primeDirectVisualStores() {
   });
   useMachineStore.setState({
     machines: visualMachines,
-    latestDaemonVersion: fixtureData.latestVersions.daemon,
     latestComputerVersion: fixtureData.latestVersions.computer,
     loading: false,
     selectedMachineId: VISUAL_MACHINE_ID,
@@ -1998,8 +1987,12 @@ function primeDirectVisualStores() {
   });
   useTaskStore.setState({
     // Same rows the playwright /api/tasks/server stub serves (shared
-    // tasksFixture.json) — TasksPanel's mount-time loadServerTasks() then
-    // reconciles to identical data instead of wiping the cards (task #353).
+    // tasksFixture.json) — TasksPanel's mount-time summary-lane loads
+    // (loadActiveTaskSummaries, task #8) then reconcile to identical data
+    // instead of wiping the cards (task #353). The stub answers every
+    // /api/tasks/server URL (query included) with the same rows and no
+    // next_cursor, so each lane commits the fixture rows and reports no
+    // further pages.
     serverTasks: tasksFixture.tasks as never,
     serverLoading: false,
     // Channel-scoped task numbers referenced (bare, without a `task #` prefix)
@@ -2507,7 +2500,7 @@ function CreateChannelVisualCaseView({ caseConfig }: { caseConfig: CreateChannel
 }
 
 function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) {
-  useMemo(() => primeDirectVisualStores(), []);
+  useMemo(() => primeDirectVisualStores(caseConfig.id), [caseConfig.id]);
 
   if (caseConfig.kind === "navigation-tabbar") {
     return <NavigationTabbarVisualCaseView caseConfig={caseConfig} />;
@@ -2535,6 +2528,37 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
       <main className="min-h-screen bg-white p-0 font-display text-black">
         <div data-visual-case={caseConfig.id} style={{ width: 390, height: 360, overflow: "hidden" }}>
           <ChannelFilesPanel channel={channel} />
+        </div>
+      </main>
+    );
+  }
+
+  if (caseConfig.kind === "external-identity-detail") {
+    return (
+      <main className="min-h-screen bg-fill-muted p-6 font-display text-black">
+        <div
+          data-visual-case={caseConfig.id}
+          className="flex h-[640px] w-[380px] flex-col overflow-hidden border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black"
+        >
+          <ExternalIdentityDetailPanel
+            profile={{
+              projectionId: "visual-external-projection",
+              provider: "slack",
+              appRegistrationId: "visual-slack-app",
+              installId: "visual-slack-install",
+              workspaceId: "opaque-workspace-id-not-rendered",
+              workspaceName: "Acme Product Studio",
+              externalActorId: "visual-slack-actor",
+              externalConversationId: "visual-slack-channel",
+              externalMessageId: "visual-slack-message",
+              displayName: "Ada Lovelace",
+              actorKind: "human",
+              avatarUrl: null,
+              avatarDigest: null,
+              actorProjectionRevision: 1,
+            }}
+            onClose={() => undefined}
+          />
         </div>
       </main>
     );
@@ -2669,14 +2693,14 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
         >
           <div className="flex flex-col gap-3">
             <div className="flex items-center gap-3">
-              <Button size="sm" tone="white">Save</Button>
-              <Button size="sm" tone="yellow">Sync</Button>
-              <Button size="sm" tone="pink">Delete</Button>
+              <Button size="sm" variant="outline">Save</Button>
+              <Button size="sm" variant="primary">Sync</Button>
+              <Button size="sm" variant="accent">Delete</Button>
             </div>
             <div className="flex items-center gap-3">
-              <Button size="xs" tone="cyan">Add</Button>
-              <Button size="md" tone="lime">Continue</Button>
-              <Button size="sm" tone="stone" disabled>Disabled</Button>
+              <Button size="xs" variant="information">Add</Button>
+              <Button size="md" variant="success">Continue</Button>
+              <Button size="sm" variant="muted" disabled>Disabled</Button>
             </div>
           </div>
         </div>
@@ -2712,7 +2736,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
               >
                 Control who can post and how the channel appears to members.
               </div>
-              <Button size="sm" tone="yellow">Save changes</Button>
+              <Button size="sm" variant="primary">Save changes</Button>
             </div>
           </div>
         </div>
@@ -2773,21 +2797,19 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
         >
           <div className="flex flex-col gap-4">
             <Textarea
-              value="Capture the Android visual artifact and compare it with React."
-              readOnly
-              rows={3}
-              showCounter
-              limit={120}
-              hint="Plain helper text"
-            />
-            <Textarea
               value="This agreement copy is too long for the configured limit."
               readOnly
               rows={2}
-              showCounter
-              limit={40}
-              error="Agreement body must be shorter."
+              maxLength={40}
+              aria-invalid
+              aria-describedby="visual-prejoin-error"
             />
+            <div className="flex items-start justify-between gap-3">
+              <p id="visual-prejoin-error" role="alert" className="text-xs text-danger theme-brutal:text-brutal-red">
+                Agreement body must be shorter.
+              </p>
+              <TextareaCounter value="This agreement copy is too long for the configured limit." limit={40} />
+            </div>
           </div>
         </div>
       </main>
@@ -2904,10 +2926,6 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
               <StatusDot tone="bg-brutal-orange" size="sm" />
               <StatusDot tone="bg-gray-400" size="lg" />
               <StatusDot external />
-            </div>
-            <div className="flex items-center gap-2">
-              <StatusDot tone="bg-brutal-pink" pulse />
-              <span>Waiting pulse</span>
             </div>
           </div>
         </div>
@@ -3198,7 +3216,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
           <SectionHeader
             label="Applications"
             count={3}
-            action={<Button size="xs" tone="white">Add</Button>}
+            action={<Button size="xs" variant="outline">Add</Button>}
             className="border-b-2 border-black pb-2"
           />
         </div>
@@ -3260,7 +3278,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
               avatar={<AvatarSlot context="surface-list" type="human" humanPlaceholder />}
               name="Product UX Designer"
               subtitle="product@slock.ai"
-              rightContent={<Button size="xs" tone="white">Open</Button>}
+              rightContent={<Button size="xs" variant="outline">Open</Button>}
               selected
             />
           </div>
@@ -3283,15 +3301,6 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             padding: "48px 16px 0",
           }}
         >
-          <NotificationCenter
-            entries={VISUAL_NOTIFICATION_CENTER_ENTRIES}
-            viewport="mobile"
-            size="regular"
-            title="NOTIFICATIONS"
-            countLabel="2 items"
-            closeOnEscape={false}
-            style={{ width: 306 }}
-          />
         </div>
       </main>
     );

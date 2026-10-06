@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act } from "react";
 import { cleanup, render, screen } from "@testing-library/react";

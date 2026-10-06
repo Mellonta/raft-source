@@ -24,6 +24,7 @@ export interface TaskHistoryEvent {
 }
 
 export interface Task {
+  readOnlyReason?: "historical_joint_task" | null;
   id: string;
   /** Same as id for message-based tasks; legacy tasks use their own ID */
   messageId: string;
@@ -58,6 +59,22 @@ export interface Task {
   updatedAt: string;
   /** True for tasks from the deprecated tasks table (not message-based) */
   isLegacy?: boolean;
+  /** Storage source reported by server-list rows (full and summary shapes). */
+  source?: "tasks" | "message";
+  /** Present on detail=summary rows, which never project the description
+   *  body: these two stand in for it until a full row is fetched. */
+  hasDescription?: boolean;
+  descriptionBytes?: number;
+}
+
+/** Pagination state for one status lane of the summary /tasks/server reads. */
+export interface ServerTaskPageState {
+  /** Opaque keyset cursor from the last fetched page; null = no more pages. */
+  nextCursor: string | null;
+  loading: boolean;
+  /** True once at least one page for this status committed under the current
+   *  connection generation. Reset by invalidateServerTasks (socket drop). */
+  loaded: boolean;
 }
 
 interface TaskState {
@@ -78,6 +95,11 @@ interface TaskState {
    *  started under an older generation must NOT commit serverTasksLoaded=true —
    *  its snapshot predates the reconnect gap and may be missing events. */
   serverTasksGeneration: number;
+  /** Per-status pagination for the summary panel reads (see
+   *  loadActiveTaskSummaries / loadServerTaskStatusPage). The active statuses
+   *  (todo/in_progress/in_review) are fetched on panel mount; done/closed
+   *  lazily on section expand, with further pages via "Load more". */
+  serverTaskPages: Record<TaskStatus, ServerTaskPageState>;
   taskMetadataByMessageId: Record<string, TaskMetadataUpdate>;
   taskMessageIdByTaskId: Record<string, string>;
   /** Canonical history read model for open task dialogs. */
@@ -88,6 +110,13 @@ interface TaskState {
   taskHistoryGeneration: number;
   loadTasks: (channelId: string) => Promise<void>;
   loadServerTasks: () => Promise<void>;
+  /** Tasks-panel first screen: one small summary page per ACTIVE status
+   *  (todo/in_progress/in_review — the server API takes exactly one status
+   *  per call) instead of the legacy unbounded full-row load. */
+  loadActiveTaskSummaries: () => Promise<void>;
+  /** Fetch the next summary page for one status lane (the first page when
+   *  the lane was never loaded). No-op while loading or once exhausted. */
+  loadServerTaskStatusPage: (status: TaskStatus) => Promise<void>;
   /** Invalidate serverTasks completeness (wired to socket "disconnect"): mark
    *  it un-loaded and bump the connection generation so any in-flight load
    *  cannot commit as current. Lazy — does not re-fetch; catch-up happens on the
@@ -125,15 +154,47 @@ interface TaskState {
   removeTask: (taskId: string) => void;
 }
 
+const ACTIVE_TASK_STATUSES: TaskStatus[] = ["todo", "in_progress", "in_review"];
+
+/** Page size for the summary /tasks/server reads (server cap is 500). */
+const SERVER_TASKS_PAGE_LIMIT = 100;
+
+function createEmptyServerTaskPages(): Record<TaskStatus, ServerTaskPageState> {
+  return {
+    todo: { nextCursor: null, loading: false, loaded: false },
+    in_progress: { nextCursor: null, loading: false, loaded: false },
+    in_review: { nextCursor: null, loading: false, loaded: false },
+    done: { nextCursor: null, loading: false, loaded: false },
+    closed: { nextCursor: null, loading: false, loaded: false },
+  };
+}
+
 function shouldIncludeInServerTasks(task: Task): boolean {
   return task.channelType === "channel" || task.channelType === "private" || task.channelType === "joint";
+}
+
+/**
+ * Upgrade-only field merge: an incoming field that is undefined (absent from
+ * a summary projection) never overwrites an existing defined value; defined
+ * incoming values (including null) always win. Socket task events carry the
+ * full task shape and stay authoritative, while detail=summary rows cannot
+ * clobber fields they don't project (e.g. a fetched description).
+ */
+export function mergeTaskFields(existing: Task, incoming: Task): Task {
+  const merged = { ...incoming };
+  for (const [key, value] of Object.entries(existing)) {
+    if (value !== undefined && (merged as Record<string, unknown>)[key] === undefined) {
+      (merged as Record<string, unknown>)[key] = value;
+    }
+  }
+  return merged;
 }
 
 function upsertTaskInList(list: Task[], task: Task): Task[] {
   const index = list.findIndex((item) => item.id === task.id);
   if (index === -1) return [...list, task];
   const next = [...list];
-  next[index] = task;
+  next[index] = mergeTaskFields(next[index], task);
   return next;
 }
 
@@ -162,7 +223,7 @@ function taskProjectionChanged(previous: Task, next: Task): boolean {
 function patchTaskState(state: TaskState, task: Task): Partial<TaskState> {
   const taskExists = state.tasks.some((item) => item.id === task.id);
   const tasks = taskExists
-    ? state.tasks.map((item) => (item.id === task.id ? task : item))
+    ? state.tasks.map((item) => (item.id === task.id ? mergeTaskFields(item, task) : item))
     : state.currentChannelId === task.channelId
       ? [...state.tasks, task]
       : state.tasks;
@@ -315,6 +376,46 @@ function mergeServerTasksSnapshot(snapshot: Task[], touched: Set<string>, liveNo
   return result;
 }
 
+// Live task mutations that land while one or more summary page loads are in
+// flight. Refcounted so the parallel active-status first pages share one set; a
+// committing page skips touched ids (the live store value is newer) instead of
+// rolling them back to the pre-event snapshot — the same lossless rule
+// loadTouchedIds gives the legacy full load.
+let summaryLoadTouchedIds: Set<string> | null = null;
+let summaryLoadsInFlight = 0;
+
+function beginSummaryPageLoad(): Set<string> {
+  summaryLoadsInFlight += 1;
+  if (!summaryLoadTouchedIds) summaryLoadTouchedIds = new Set();
+  return summaryLoadTouchedIds;
+}
+
+function endSummaryPageLoad(): void {
+  summaryLoadsInFlight -= 1;
+  if (summaryLoadsInFlight === 0) summaryLoadTouchedIds = null;
+}
+
+// Merge a fetched summary page into serverTasks: upsert-only (a page never
+// shrinks the list — lanes outside this page and live-created tasks stay),
+// field-merged so summary rows can't clobber unprojected fields, and skipped
+// for ids touched live during the fetch (the live value is newer; a live
+// deletion is simply absent and must not be resurrected).
+function mergeServerTaskPage(current: Task[], page: Task[], touched: Set<string>): Task[] {
+  const indexById = new Map(current.map((task, index) => [task.id, index]));
+  const next = [...current];
+  for (const item of page) {
+    if (touched.has(item.id)) continue;
+    const index = indexById.get(item.id);
+    if (index === undefined) {
+      indexById.set(item.id, next.length);
+      next.push(item);
+    } else {
+      next[index] = mergeTaskFields(next[index], item);
+    }
+  }
+  return next;
+}
+
 export const useTaskStore = create<TaskState>((set, get) => ({
   tasks: [],
   loading: false,
@@ -327,6 +428,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   serverTasksLoaded: false,
   serverTasksGeneration: 0,
   serverTasksActiveConsumers: 0,
+  serverTaskPages: createEmptyServerTaskPages(),
   taskMetadataByMessageId: {},
   taskMessageIdByTaskId: {},
   taskHistoryByTaskId: {},
@@ -456,12 +558,92 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
   },
 
+  loadActiveTaskSummaries: async () => {
+    // Tasks-panel first screen: one small summary page per ACTIVE status
+    // (?detail=summary&status=<one>&limit=N — the API takes exactly one status
+    // per call) instead of the legacy unbounded full-row load. done/closed
+    // stay lazy: their first page is fetched when the user expands that
+    // section, further pages via the section's "Load more" affordance.
+    //
+    // Loaded-skip mirrors loadServerTasks: once the first pages commit, the
+    // socket keeps serverTasks live; invalidateServerTasks resets the lanes.
+    const pages = get().serverTaskPages;
+    const needed = ACTIVE_TASK_STATUSES.filter((status) => !pages[status].loaded && !pages[status].loading);
+    if (needed.length === 0) return;
+    set({ serverLoading: true });
+    try {
+      await Promise.all(needed.map((status) => get().loadServerTaskStatusPage(status)));
+    } finally {
+      set({ serverLoading: false });
+    }
+  },
+
+  loadServerTaskStatusPage: async (status) => {
+    const lane = get().serverTaskPages[status];
+    if (lane.loading || (lane.loaded && lane.nextCursor === null)) return;
+    const startGeneration = get().serverTasksGeneration;
+    const touched = beginSummaryPageLoad();
+    set((state) => ({
+      serverTaskPages: {
+        ...state.serverTaskPages,
+        [status]: { ...state.serverTaskPages[status], loading: true },
+      },
+    }));
+    try {
+      const query = `detail=summary&status=${status}&limit=${SERVER_TASKS_PAGE_LIMIT}`
+        + (lane.nextCursor ? `&cursor=${encodeURIComponent(lane.nextCursor)}` : "");
+      const { data } = await api.get(`/tasks/server?${query}`);
+      if (get().serverTasksGeneration !== startGeneration) {
+        // Same generation gate as loadServerTasks: the socket dropped (or the
+        // server switched) mid-flight, so this snapshot predates the gap.
+        return;
+      }
+      const page = (data as { tasks: Task[] }).tasks;
+      const nextCursor = (data as { next_cursor?: string | null }).next_cursor ?? null;
+      set((state) => reduceTaskWithTrace(
+        state,
+        "hydrate:server-page",
+        status,
+        (current) => ({
+          serverTasks: mergeServerTaskPage(current.serverTasks, page, touched),
+          serverTaskPages: {
+            ...current.serverTaskPages,
+            [status]: { nextCursor, loading: false, loaded: true },
+          },
+          ...hydrateTaskMetadataState(current, page),
+        }),
+      ));
+    } catch (err) {
+      console.error("Failed to load server task page:", err);
+      if (get().serverTasksGeneration !== startGeneration) return;
+      // A 400 is the server refusing a stale cursor (its channel fell out of
+      // the visible set); the documented remedy is to restart the walk from
+      // the beginning, so reset the lane instead of retrying the dead cursor.
+      const statusCode = (err as { response?: { status?: number } })?.response?.status;
+      set((state) => ({
+        serverTaskPages: {
+          ...state.serverTaskPages,
+          [status]: statusCode === 400
+            ? { nextCursor: null, loading: false, loaded: false }
+            : { ...state.serverTaskPages[status], loading: false },
+        },
+      }));
+    } finally {
+      endSummaryPageLoad();
+    }
+  },
+
   invalidateServerTasks: () => {
     // Wired to socket "disconnect": a gap may have dropped task events, so
     // serverTasks is no longer provably complete. Always bump the generation
     // (so an in-flight load cannot commit as current) and mark un-loaded. Lazy:
     // the next TasksPanel mount re-fetches; no eager refetch of the big list.
-    set((s) => ({ serverTasksLoaded: false, serverTasksGeneration: s.serverTasksGeneration + 1 }));
+    // The summary lanes reset too — their pages are just as gap-suspect.
+    set((s) => ({
+      serverTasksLoaded: false,
+      serverTasksGeneration: s.serverTasksGeneration + 1,
+      serverTaskPages: createEmptyServerTaskPages(),
+    }));
   },
 
   registerServerTasksConsumer: () => {
@@ -477,10 +659,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     // Only an open Tasks view catches up eagerly, and only after a real gap
     // (generation advanced by a disconnect) — never on the initial app connect,
     // and never when no Tasks view is mounted (that path stays lazy: next mount
-    // re-fetches). loadServerTasks is generation-keyed + single-flight, so this
-    // is a no-op if a load is already in flight or the list is already loaded.
-    if (s.serverTasksActiveConsumers > 0 && !s.serverTasksLoaded && s.serverTasksGeneration > 0) {
-      void get().loadServerTasks();
+    // re-fetches). The catch-up refetches the small active summary pages, never
+    // the legacy unbounded load. loadActiveTaskSummaries is generation-gated +
+    // lane-deduped, so this is a no-op if the lanes are already loading/loaded.
+    if (s.serverTasksActiveConsumers > 0 && s.serverTasksGeneration > 0
+      && ACTIVE_TASK_STATUSES.some((status) => !s.serverTaskPages[status].loaded)) {
+      void get().loadActiveTaskSummaries();
     }
   },
 
@@ -669,6 +853,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     // Record the live mutation so an in-flight loadServerTasks merges rather
     // than overwrites it (lossless snapshot commit).
     loadTouchedIds?.add(task.id);
+    summaryLoadTouchedIds?.add(task.id);
     const existing = findKnownTask(get(), task.id);
     const changed = !existing || taskProjectionChanged(existing, task);
     set((state) => reduceTaskWithTrace(
@@ -683,6 +868,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   removeTask: (taskId) => {
     loadTouchedIds?.add(taskId);
+    summaryLoadTouchedIds?.add(taskId);
     set((state) => reduceTaskWithTrace(
       state,
       "remove",
@@ -711,6 +897,7 @@ registerServerReset(() => {
     serverLoading: false,
     serverTasksLoaded: false,
     serverTasksGeneration: s.serverTasksGeneration + 1,
+    serverTaskPages: createEmptyServerTaskPages(),
     taskMetadataByMessageId: {},
     taskMessageIdByTaskId: {},
     taskHistoryByTaskId: {},

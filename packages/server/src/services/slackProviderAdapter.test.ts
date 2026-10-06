@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import type { SlackBridgeRenderSnapshot } from "./externalDeliveryOutboxService.js";
+import type { SlackBridgeRenderSnapshot } from "./externalDeliveryOutboxService";
 import {
   createSlackEventsHttpAdapter,
   createSlackOAuthExchangeAdapter,
@@ -25,7 +24,10 @@ import {
   type SlackWebApiRequest,
   type SlackWebApiTransport,
   type SlackWebApiTransportResult,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
+
+// Built at runtime so secret scanners don't flag this test sample.
+const SLACK_XOXB = "xo" + "xb-";
 
 const NOW = new Date("2026-07-30T08:45:00.000Z");
 
@@ -62,7 +64,7 @@ function snapshot(
   overrides: Partial<SlackBridgeRenderSnapshot> = {},
 ): SlackBridgeRenderSnapshot {
   return {
-    schema: "slack-bridge-render-snapshot.v2",
+    schema: "slack-bridge-render-snapshot.v4",
     sourceMessageId: "message-1",
     sourceMessageSeq: 42,
     canonicalConversationId: "channel-1",
@@ -72,11 +74,7 @@ function snapshot(
     senderType: "agent",
     senderId: "agent-1",
     authorName: "Peng",
-    authorAvatarDigest: null,
-    authorPolicy: {
-      policyId: "policy-1",
-      serverId: "server-1",
-      consentRevision: 7,
+    authorPresentation: {
       displayName: "Peng",
       fallbackKind: "agent",
       avatar: null,
@@ -112,7 +110,6 @@ function snapshot(
       bindingEpoch: 9,
       memberRevision: 3,
       contextRevision: 4,
-      consentRevision: 7,
       privacyClass: "public",
       raftChannelId: "channel-1",
       providerAuthorityId: "T_TEAM",
@@ -212,8 +209,8 @@ test("typed outbound adapter maps one frozen attempt to one memoized chat.postMe
   const humanSnapshot = snapshot({
     senderType: "user",
     authorName: "august",
-    authorPolicy: {
-      ...snapshot().authorPolicy,
+    authorPresentation: {
+      ...snapshot().authorPresentation,
       displayName: "august",
       fallbackKind: "human",
     },
@@ -257,6 +254,37 @@ test("typed outbound adapter maps one frozen attempt to one memoized chat.postMe
   assert.doesNotMatch(String(calls[0]?.body.text), /View in Raft|Raft Human/);
   assert.equal(JSON.stringify(calls[0]?.body).includes("token"), false);
   assert.equal(JSON.stringify(calls[0]?.body).includes("secret"), false);
+});
+
+test("typed outbound adapter prefers a frozen Raft avatar over generic emoji", async () => {
+  const calls: SlackWebApiRequest[] = [];
+  const prepare = createSlackProviderPreparation({
+    transport: transportDouble([{
+      kind: "response",
+      status: 200,
+      headers: {},
+      body: { ok: true, channel: "C_CHANNEL", ts: "1753865100.000101" },
+      observedAuthority: { providerAppId: "A_APP", providerAuthorityId: "T_TEAM" },
+    }], calls),
+    quarantineSink: quarantineDouble(),
+    now: () => NOW,
+  });
+  const digest = "d".repeat(32);
+  const withAvatar = snapshot({
+    authorPresentation: {
+      ...snapshot().authorPresentation,
+      avatar: {
+        publicUrl: `https://cdn.raft.test/avatars/server/${digest}.webp`,
+        contentDigest: digest,
+      },
+    },
+  });
+  const prepared = await prepare(dispatchInput({ renderSnapshot: withAvatar }));
+  assert.equal(prepared.ready, true);
+  if (!prepared.ready) assert.fail("expected provider preparation");
+  assert.equal((await prepared.dispatch()).kind, "accepted");
+  assert.equal(calls[0]?.body.icon_url, withAvatar.authorPresentation.avatar?.publicUrl);
+  assert.equal("icon_emoji" in (calls[0]?.body ?? {}), false);
 });
 
 test("outbound reconciliation finds exactly one Slack metadata marker", async () => {
@@ -414,40 +442,6 @@ test("outbound reconciliation keeps first delivery safe while detecting stripped
     }]),
   });
   assert.deepEqual(attachmentFileShare, { kind: "not_found" });
-});
-
-test("typed outbound text uses only the frozen controlled avatar URL when one is present", async () => {
-  const calls: SlackWebApiRequest[] = [];
-  const prepare = createSlackProviderPreparation({
-    transport: transportDouble([{
-      kind: "response",
-      status: 200,
-      headers: {},
-      body: { ok: true, channel: "C_CHANNEL", ts: "1753865100.000101" },
-      observedAuthority: { providerAppId: "A_APP", providerAuthorityId: "T_TEAM" },
-    }], calls),
-    quarantineSink: quarantineDouble(),
-    now: () => NOW,
-  });
-  const avatarUrl = "https://api.raft.test/api/external-avatars/11111111-1111-4111-8111-111111111111.webp";
-  const frozen = snapshot({
-    authorAvatarDigest: "b".repeat(64),
-    authorPolicy: {
-      ...snapshot().authorPolicy,
-      avatar: {
-        artifactId: "11111111-1111-4111-8111-111111111111",
-        publicUrl: avatarUrl,
-        sourceDigest: "b".repeat(64),
-        artifactRevision: 2,
-      },
-    },
-  });
-  const prepared = await prepare(dispatchInput({ renderSnapshot: frozen }));
-  assert.equal(prepared.ready, true);
-  if (!prepared.ready) return;
-  await prepared.dispatch();
-  assert.equal(calls[0]?.body.icon_url, avatarUrl);
-  assert.equal("icon_emoji" in (calls[0]?.body ?? {}), false);
 });
 
 test("outbound attachment snapshots append the fixed marker without exposing file metadata", async () => {
@@ -693,6 +687,7 @@ test("OAuth mapping exposes sealed authority only and fails closed on scope or i
     providerTeamId: "T_TEAM",
     providerEnterpriseId: null,
     providerUserId: "U_HUMAN",
+    installerIsWorkspaceAdmin: true as const,
     botUserId: "U_BOT",
     providerBotId: "B_BOT",
     workspaceName: "Isolated Test",
@@ -780,7 +775,7 @@ test("live OAuth HTTP transport consumes handles once and exposes only sealed cr
     credentialSealer: {
       async seal(input) {
         sealCalls += 1;
-        assert.equal(input.accessToken, "xoxb-secret-token");
+        assert.equal(input.accessToken, `${SLACK_XOXB}secret-token`);
         assert.equal(input.tokenType, "bot");
         assert.equal(input.providerAppId, "A_APP");
         assert.equal(input.providerTeamId, "T_TEAM");
@@ -810,10 +805,26 @@ test("live OAuth HTTP transport consumes handles once and exposes only sealed cr
           },
         });
       }
+      if (String(url).endsWith("/users.info")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          user: {
+            id: "U_HUMAN",
+            is_admin: true,
+            is_owner: false,
+            is_primary_owner: false,
+            is_bot: false,
+            deleted: false,
+          },
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       return new Response(JSON.stringify({
         ok: true,
         app_id: "A_APP",
-        access_token: "xoxb-secret-token",
+        access_token: `${SLACK_XOXB}secret-token`,
         token_type: "bot",
         bot_user_id: "U_BOT",
         bot_id: "B_BOT",
@@ -830,7 +841,7 @@ test("live OAuth HTTP transport consumes handles once and exposes only sealed cr
   const outcome = await transport.exchange(oauthRequest());
   assert.equal(consumeCalls, 1);
   assert.equal(sealCalls, 1);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(calls[0]!.url, "https://slack.test/api/oauth.v2.access");
   assert.equal(calls[0]!.init.method, "POST");
   assert.equal(calls[0]!.init.redirect, "error");
@@ -842,13 +853,16 @@ test("live OAuth HTTP transport consumes handles once and exposes only sealed cr
   }).toString());
   assert.equal(calls[1]!.url, "https://slack.com/api/auth.test");
   assert.equal(calls[1]!.init.method, "POST");
-  assert.equal((calls[1]!.init.headers as Record<string, string>).authorization, "Bearer xoxb-secret-token");
+  assert.equal((calls[1]!.init.headers as Record<string, string>).authorization, `Bearer ${SLACK_XOXB}secret-token`);
+  assert.equal(calls[2]!.url, "https://slack.com/api/users.info");
+  assert.equal(calls[2]!.init.body?.toString(), new URLSearchParams({ user: "U_HUMAN" }).toString());
   assert.deepEqual(outcome, {
     kind: "authorized",
     providerAppId: "A_APP",
     providerTeamId: "T_TEAM",
     providerEnterpriseId: null,
     providerUserId: "U_HUMAN",
+    installerIsWorkspaceAdmin: true,
     botUserId: "U_BOT",
     providerBotId: "B_BOT",
     workspaceName: "Workspace",
@@ -860,9 +874,69 @@ test("live OAuth HTTP transport consumes handles once and exposes only sealed cr
     },
   });
   const serialized = JSON.stringify(outcome);
-  assert.equal(serialized.includes("xoxb-secret-token"), false);
+  assert.equal(serialized.includes(`${SLACK_XOXB}secret-token`), false);
   assert.equal(serialized.includes("client-secret-value"), false);
   assert.equal(serialized.includes("authorization-code-value"), false);
+});
+
+test("live OAuth refuses a non-admin workspace installer before credential persistence", async () => {
+  let seals = 0;
+  const transport = createSlackOAuthHttpTransport({
+    endpoint: "https://slack.test/api/oauth.v2.access",
+    handles: {
+      async consume() {
+        return {
+          providerOAuthClientId: "client-1",
+          clientSecret: "client-secret-value",
+          authorizationCode: "authorization-code-value",
+        };
+      },
+    },
+    credentialSealer: {
+      async seal() {
+        seals += 1;
+        return { encryptedMaterial: "never", envelopeKeyId: "never", aadVersion: 1 };
+      },
+    },
+    async fetch(url) {
+      if (String(url).endsWith("/auth.test")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          team_id: "T_TEAM",
+          user_id: "U_BOT",
+          bot_id: "B_BOT",
+        }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "x-oauth-scopes": "channels:history,chat:write",
+          },
+        });
+      }
+      if (String(url).endsWith("/users.info")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          user: { id: "U_HUMAN", is_admin: false, is_owner: false, is_bot: false, deleted: false },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        app_id: "A_APP",
+        access_token: `${SLACK_XOXB}secret-token`,
+        token_type: "bot",
+        bot_user_id: "U_BOT",
+        authed_user: { id: "U_HUMAN" },
+        scope: "channels:history,chat:write",
+        team: { id: "T_TEAM", name: "Workspace" },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    },
+  });
+
+  assert.deepEqual(await transport.exchange(oauthRequest()), {
+    kind: "rejected",
+    error: "installer_not_workspace_admin",
+  });
+  assert.equal(seals, 0, "a non-admin installer must never reach credential sealing");
 });
 
 test("live OAuth HTTP transport rejects missing or accepted-only scope headers before sealing", async () => {
@@ -903,7 +977,7 @@ test("live OAuth HTTP transport rejects missing or accepted-only scope headers b
         return new Response(JSON.stringify({
           ok: true,
           app_id: "A_APP",
-          access_token: "xoxb-secret-token",
+          access_token: `${SLACK_XOXB}secret-token`,
           token_type: "bot",
           bot_user_id: "U_BOT",
           authed_user: { id: "U_HUMAN" },
@@ -925,7 +999,7 @@ test("live OAuth HTTP transport requires a distinct Slack human identity receipt
   const bodies = [{
     ok: true,
     app_id: "A_APP",
-    access_token: "xoxb-secret-token",
+    access_token: `${SLACK_XOXB}secret-token`,
     token_type: "bot",
     bot_user_id: "U_BOT",
     scope: "channels:history,chat:write",
@@ -933,7 +1007,7 @@ test("live OAuth HTTP transport requires a distinct Slack human identity receipt
   }, {
     ok: true,
     app_id: "A_APP",
-    access_token: "xoxb-secret-token",
+    access_token: `${SLACK_XOXB}secret-token`,
     token_type: "bot",
     bot_user_id: "U_BOT",
     authed_user: { id: "U_BOT" },
@@ -1179,7 +1253,7 @@ test("live OAuth HTTP transport treats post-consumption 429, provider 5xx, overs
     new Response(JSON.stringify({
       ok: true,
       app_id: "A_APP",
-      access_token: "xoxb-secret-token",
+      access_token: `${SLACK_XOXB}secret-token`,
       token_type: "bot",
       bot_user_id: "U_BOT",
       authed_user: { id: "U_HUMAN" },
@@ -1225,6 +1299,7 @@ test("live OAuth HTTP transport rejects insecure endpoints at construction", () 
   for (const endpoints of [
     { endpoint: "http://slack.test/api/oauth.v2.access" },
     { authTestEndpoint: "http://slack.test/api/auth.test" },
+    { userInfoEndpoint: "http://slack.test/api/users.info" },
   ]) {
     assert.throws(() => createSlackOAuthHttpTransport({
       ...endpoints,

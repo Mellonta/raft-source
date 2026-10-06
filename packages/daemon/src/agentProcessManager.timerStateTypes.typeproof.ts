@@ -10,7 +10,7 @@ import type {
   AgentProcessStartupState,
   PendingTrajectoryState,
   RuntimeErrorDeliveryBackoffState,
-} from "./agentProcessManager.js";
+} from "./agentProcessManager";
 
 const timeoutHandle = null as unknown as ReturnType<typeof setTimeout>;
 const intervalHandle = null as unknown as ReturnType<typeof setInterval>;

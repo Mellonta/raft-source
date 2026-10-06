@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const webRoot = resolve(import.meta.dirname, "..");
 const repoRoot = resolve(webRoot, "../..");
@@ -35,19 +34,23 @@ test("web test scripts use the cwd-independent Vitest runner", () => {
   assert.equal(webPackageJson.scripts["test:dom"], "node scripts/run-vitest-tests.mjs --dom");
 });
 
-test("Vitest keeps file isolation and the node:test compatibility boundary explicit", () => {
+test("Vitest keeps file isolation and restores per-test mocks and timers", () => {
   const source = readFileSync(resolve(webRoot, "vitest.config.ts"), "utf8");
 
-  assert.match(source, /find: \/\^node:test\$\//);
-  assert.match(source, /vitestNodeTestCompat\.ts/);
+  // The node:test compatibility alias is gone: suites import vitest directly.
+  assert.doesNotMatch(source, /find: \/\^node:test/);
+  assert.match(source, /restoreMocks: true/);
+  assert.match(source, /realTimersAfterEach\.ts/);
   assert.match(source, /pool: "forks"/);
   assert.match(source, /isolate: true/);
-  assert.match(source, /dom \? \{ minWorkers: 1, maxWorkers: "50%" \}/);
+  assert.match(source, /dom \? \{ maxWorkers: "50%" \}/);
 });
 
 test("the Vitest runner applies the same JSX transform from repo root and package cwd", () => {
-  const rootResult = runRunner(["packages/web/tests/fixtures/jsxTransformProbe.tsx"], repoRoot);
-  const webResult = runRunner(["tests/fixtures/jsxTransformProbe.tsx"]);
+  // Vitest 5's default reporter no longer lists passing files when not attached to a TTY;
+  // ask for the verbose reporter so the probe file is named in the output.
+  const rootResult = runRunner(["packages/web/tests/fixtures/jsxTransformProbe.tsx", "--reporter=verbose"], repoRoot);
+  const webResult = runRunner(["tests/fixtures/jsxTransformProbe.tsx", "--reporter=verbose"]);
 
   assert.equal(
     rootResult.status,
@@ -59,8 +62,8 @@ test("the Vitest runner applies the same JSX transform from repo root and packag
     0,
     `packages/web JSX probe should pass\nstdout:\n${webResult.stdout}\nstderr:\n${webResult.stderr}`,
   );
-  assert.match(rootResult.stdout + rootResult.stderr, /jsxTransformProbe\.tsx \(1 test\)/);
-  assert.match(webResult.stdout + webResult.stderr, /jsxTransformProbe\.tsx \(1 test\)/);
+  assert.match(rootResult.stdout + rootResult.stderr, /✓ tests\/fixtures\/jsxTransformProbe\.tsx > /);
+  assert.match(webResult.stdout + webResult.stderr, /✓ tests\/fixtures\/jsxTransformProbe\.tsx > /);
 });
 
 test("a missing path alongside a real one fails instead of producing a partial green", () => {

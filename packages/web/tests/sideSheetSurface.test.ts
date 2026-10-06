@@ -17,37 +17,47 @@
  *      black left border as its delineator, so the blur shadow is
  *      removed with no replacement.
  *
- * All three right-side sheet surfaces (the shared OverflowSheet shell and
- * both channel-settings dialogs) must stay on the same contract: cream
- * surface, hard 2px left border, no blurred shadow.
+ * Surface rule after the multitheme migration (Artea directive): each side
+ * sheet follows the SIDEBAR's themed background layer — a semantic
+ * `bg-layer-*` token for elegant/elegant-dark, with the production cream
+ * kept only inside the `theme-brutal:` variant. The channel-settings drawer
+ * uses the sidebar's muted canvas layer (`bg-layer-canvas-muted
+ * theme-brutal:bg-brutal-cream`); the shared OverflowSheet shell uses the
+ * panel layer (`bg-layer-panel theme-brutal:bg-brutal-cream`). In brutal
+ * both stay cream, visually identical to before.
  *
  * This test fails CI if a refactor:
  *   - reintroduces a Tailwind blur shadow (shadow-sm/md/lg/xl/2xl or
  *     arbitrary shadow-[...]) on any side sheet,
- *   - changes the sheet surface off `bg-brutal-cream` (sidebar token),
+ *   - changes a sheet surface off its semantic `bg-layer-*` +
+ *     `theme-brutal:bg-brutal-cream` pair (sidebar-layer contract),
  *   - drops the 2px left border that delineates the sheet edge.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
-const sideSheetSources = [
-  "../src/components/ui/OverflowSheet.tsx",
-  "../src/components/channel/EditChannelDialog.tsx",
-  "../src/components/channel/LegacyEditChannelDialog.tsx",
+const sideSheetSurfaces = [
+  {
+    rel: "../src/components/ui/OverflowSheet.tsx",
+    layer: "bg-layer-panel",
+  },
+  {
+    rel: "../src/components/channel/EditChannelDialog.tsx",
+    layer: "bg-layer-canvas-muted",
+  },
 ];
 
 const BLUR_SHADOW = /shadow-(?:sm|md|lg|xl|2xl)\b|shadow-\[/;
 
-for (const rel of sideSheetSources) {
-  test(`${rel}: side sheet stays cream, hard-bordered, blur-shadow free`, () => {
+for (const { rel, layer } of sideSheetSurfaces) {
+  test(`${rel}: side sheet keeps the sidebar layer in elegant, cream in brutal, hard-bordered, blur-shadow free`, () => {
     const source = readFileSync(resolve(import.meta.dirname, rel), "utf8");
 
     assert.match(
       source,
-      /DrawerContent[\s\S]*?bg-brutal-cream/,
-      "side sheet must keep the sidebar surface token bg-brutal-cream",
+      new RegExp(`DrawerContent[\\s\\S]*?${layer}[^\\n]*theme-brutal:bg-brutal-cream`),
+      `side sheet must pair the semantic sidebar layer ${layer} with theme-brutal:bg-brutal-cream`,
     );
     assert.match(
       source,

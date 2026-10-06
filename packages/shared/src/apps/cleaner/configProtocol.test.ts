@@ -1,7 +1,6 @@
-import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { validateAppConfigWithinBounds } from "../../appConfigTransport.js";
+import { validateAppConfigWithinBounds } from "../../appConfigTransport";
 import {
   CLEANER_APP_ID,
   CLEANER_CONFIG_BOUNDS,
@@ -9,7 +8,7 @@ import {
   CLEANER_CONFIG_DEFAULTS,
   CLEANER_STORE_KEYS,
   SECONDS_TO_MS,
-} from "./configProtocol.js";
+} from "./configProtocol";
 
 describe("Cleaner canonical config spec", () => {
   it("pins the app id both ends bind to", () => {

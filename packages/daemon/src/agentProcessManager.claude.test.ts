@@ -22,13 +22,13 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import type { ChildProcess } from "node:child_process";
 import { asAxSurfaceText, type AxSurfaceText,
   BasicTracer,
+  CONTEXT_GENERATION_FILENAME,
   MemoryTraceSink,
   type AgentConfig,
   type AgentMessage,
@@ -40,10 +40,10 @@ import {
   buildBehaviorDeltaRow,
   evaluateApmTracePredicateFixtures,
   serializeApmTraceArtifacts,
-} from "./apmStateMachineTrace.js";
-import { computeInboxNoticeFingerprint, RuntimeNotificationState } from "./runtimeNotificationState.js";
-import { setSessionReadyDeliveryRetrySchedulerFactoryForTesting } from "./agentInboxDeliveryDebt.js";
-import { FakeClock } from "./testing/fakeClock.js";
+} from "./apmStateMachineTrace";
+import { computeInboxNoticeFingerprint, RuntimeNotificationState } from "./runtimeNotificationState";
+import { setSessionReadyDeliveryRetrySchedulerFactoryForTesting } from "./agentInboxDeliveryDebt";
+import { FakeClock } from "./testing/fakeClock";
 import {
   buildApmFreshnessDecisionProducerFactId,
   createInitialApmDecisionState,
@@ -60,17 +60,25 @@ import {
   reduceApmStalledRecoveryTermination,
   reduceApmStartupTimeoutTermination,
   reduceAgentActivityProjection,
-} from "./apmStateMachine.js";
+} from "./apmStateMachine";
 import type {
   ApmObservedGatedStdinEffect,
   ApmTraceArtifactBundle,
   PredicateFixtureResult,
-} from "./apmStateMachineTrace.js";
-import { AgentProcessManager } from "./agentProcessManager.js";
-import { installDaemonFetchMockForTests } from "./daemonFetch.js";
-import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./drivers/index.js";
-import type { RuntimeLaunchVersionPolicy } from "./drivers/types.js";
-import { RuntimeVersionTooOldError } from "./runtimeLaunchVersion.js";
+} from "./apmStateMachineTrace";
+import { AgentProcessManager } from "./agentProcessManager";
+import { writeContextGeneration } from "./contextGeneration";
+import { buildCliTransportDir } from "./drivers/cliTransport";
+import { installManagedRunnerCredentialFetch } from "./testing/managedRunnerCredentialFetch";
+import { createAgentAppInboxStore, type AgentAppInboxStore } from "./agentAppInbox";
+import { REMINDER_AGENT_INBOX_REGISTRY } from "./apps/reminder/inboxDefinition";
+import { installDaemonFetchMockForTests } from "./daemonFetch";
+import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent } from "./drivers/index";
+import type { RuntimeLaunchVersionPolicy } from "./drivers/types";
+import { RuntimeVersionTooOldError } from "./runtimeLaunchVersion";
+import { traceRows } from "./testing/traceRows";
+import { makeDeterministicTracer } from "./testing/deterministicTracer";
+import { releaseAgentManagerForTests } from "./testing/agentManagerTeardown";
 
 class FakeChildProcess extends EventEmitter {
   stdout = new EventEmitter();
@@ -163,7 +171,9 @@ function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     serverUrl: "http://localhost:3001",
     authToken: "sk_machine_test",
     agentCredentialKey: "sk_agent_test",
-    agentCredentialId: "cred-test",
+    // No credential id by default: a stop would revoke it over the injected
+    // fetch, and tests that do not fake the server must not send anything.
+    agentCredentialId: null,
     ...overrides,
   };
 }
@@ -225,6 +235,7 @@ async function withManager(
     fetchImpl?: (input: string, init?: RequestInit) => Promise<Response>;
     sessionReadyDeliveryRetryMs?: number;
     sessionReadyDeliveryRetrySchedulerFactory?: () => RuntimeNotificationState;
+    appInboxForAgent?: (agentId: string) => AgentAppInboxStore;
   } = {},
 ): Promise<void> {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "slock-claude-apm-test-"));
@@ -242,6 +253,7 @@ async function withManager(
       fetchImpl: options.fetchImpl,
       daemonInstanceId: options.daemonInstanceId,
       sessionReadyDeliveryRetryMs: options.sessionReadyDeliveryRetryMs,
+      appInboxForAgent: options.appInboxForAgent,
     },
   );
   setSessionReadyDeliveryRetrySchedulerFactoryForTesting(options.sessionReadyDeliveryRetrySchedulerFactory ?? null);
@@ -249,23 +261,7 @@ async function withManager(
   try {
     await fn({ driver, manager, sent, dataDir });
   } finally {
-    setSessionReadyDeliveryRetrySchedulerFactoryForTesting(null);
-    if ((manager as any).agentStartPumpTimer) clearTimeout((manager as any).agentStartPumpTimer);
-    for (const ap of (manager as any).agents?.values?.() ?? []) {
-      ap.notifications.clearTimer();
-      if (ap.pendingTrajectory?.timer) clearTimeout(ap.pendingTrajectory.timer);
-      if (ap.activityHeartbeat?.kind === "active") clearInterval(ap.activityHeartbeat.timer);
-      if (ap.startup?.kind === "waiting" && ap.startup.timer) clearTimeout(ap.startup.timer);
-      if (ap.exit?.kind === "live" && ap.exit.stalledRecoverySigtermTimer) clearTimeout(ap.exit.stalledRecoverySigtermTimer);
-      if (ap.compaction?.kind === "active" && ap.compaction.watchdog) clearTimeout(ap.compaction.watchdog);
-      if (ap.runtimeErrorDeliveryBackoff?.kind === "backing_off" && ap.runtimeErrorDeliveryBackoff.timer) {
-        clearTimeout(ap.runtimeErrorDeliveryBackoff.timer);
-      }
-      if (ap.sessionReadyDeliveryRetry?.kind === "scheduled") {
-        ap.sessionReadyDeliveryRetry.scheduler.clearTimer();
-      }
-    }
-    (manager as any).agents?.clear?.();
+    await releaseAgentManagerForTests(manager);
     await rm(dataDir, { recursive: true, force: true });
   }
 }
@@ -348,6 +344,32 @@ test("Claude creation-time version gate visibly warns but starts an unproven old
 // Block 1 — shared runtime progress state (load-bearing subset)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// task #356: the stop-time credential revoke goes through the manager's
+// injectable fetch. Before, it called the module-level daemonFetch, so every
+// test that stopped an agent carrying `agentCredentialId` sent a real DELETE to
+// daemon.example.com; the package-wide network guard now fails such a test.
+test("stopAgent revokes the managed runner credential through the injected fetch", async () => {
+  const requests: Array<{ method: string; url: string; authorization: string | null }> = [];
+  const fetchImpl = async (input: string, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
+    requests.push({ method: init?.method ?? "GET", url: input, authorization: headers.get("authorization") });
+    return new Response(null, { status: 204 });
+  };
+  await withManager(async ({ manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1", agentCredentialId: "cred-test" }));
+    assert.deepEqual(requests, [], "start with a pre-minted credential sends nothing");
+
+    await manager.stopAgent("agent-1");
+    await flush();
+
+    assert.deepEqual(requests, [{
+      method: "DELETE",
+      url: "https://daemon.example.com/internal/computer/runners/agent-1/credentials/cred-test",
+      authorization: "Bearer sk_machine_test",
+    }]);
+  }, { fetchImpl });
+});
+
 test("Claude APM baseline: tool_call event increments outstandingToolUses", async () => {
   await withManager(async ({ driver, manager }) => {
     await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
@@ -400,6 +422,59 @@ test("Claude APM baseline: compaction_started sets compacting=true; compaction_f
     const apAfter = getProcess(manager, "agent-1");
     assert.equal(apAfter.gatedSteering.compacting, false);
   });
+});
+
+// D2 (RFC 072 §7.7): compaction_started issues a new context id into the
+// launch's transport dir; compaction_finished does not issue another.
+test("Claude APM: compaction_started replaces the context id; compaction_finished keeps it", async () => {
+  await withManager(async ({ driver, manager, dataDir }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    const ap = getProcess(manager, "agent-1");
+    // The process writes where prepareCliTransport put the spawn id.
+    assert.equal(ap.cliTransportDir, buildCliTransportDir((manager as any).slockHome, "agent-1", ap.launchId));
+    // Keep the test out of the real Raft home; the fake driver does not run
+    // prepareCliTransport, so seed its spawn write.
+    ap.cliTransportDir = path.join(dataDir, "cli-transport");
+    await mkdir(ap.cliTransportDir, { recursive: true });
+    const spawnId = writeContextGeneration(ap.cliTransportDir, { reason: "spawn", runtime: "claude", passiveAx: false });
+    const file = path.join(ap.cliTransportDir, CONTEXT_GENERATION_FILENAME);
+    const readId = async () => JSON.parse(await readFile(file, "utf8")).contextId as string;
+
+    driver.parsedLines.set("compact-start", [{ kind: "compaction_started" }]);
+    driver.parsedLines.set("compact-finish", [{ kind: "compaction_finished" }]);
+
+    driver.processes[0].stdout.emit("data", Buffer.from("compact-start\n"));
+    await flush();
+    const compactedId = await readId();
+    assert.notEqual(compactedId, spawnId);
+    assert.equal(JSON.parse(await readFile(file, "utf8")).reason, "compaction");
+
+    driver.processes[0].stdout.emit("data", Buffer.from("compact-finish\n"));
+    await flush();
+    assert.equal(await readId(), compactedId);
+  });
+});
+
+// task #359: compaction republishes the gate the process was spawned with,
+// read from the spawn config, not from the live config.
+test("Claude APM: compaction writes carry the passive AX gate from the spawn config", async () => {
+  for (const passiveAx of [true, undefined]) {
+    await withManager(async ({ driver, manager, dataDir }) => {
+      const config = { ...makeConfig({ sessionId: "session-1" }), ...(passiveAx === undefined ? {} : { passiveAx }) } as AgentConfig;
+      await manager.startAgent("agent-1", config);
+      const ap = getProcess(manager, "agent-1");
+      assert.equal(ap.passiveAx, passiveAx === true);
+      ap.cliTransportDir = path.join(dataDir, "cli-transport");
+      await mkdir(ap.cliTransportDir, { recursive: true });
+
+      driver.parsedLines.set("compact-start", [{ kind: "compaction_started" }]);
+      driver.processes[0].stdout.emit("data", Buffer.from("compact-start\n"));
+      await flush();
+      const record = JSON.parse(await readFile(path.join(ap.cliTransportDir, CONTEXT_GENERATION_FILENAME), "utf8"));
+      assert.equal(record.reason, "compaction");
+      assert.equal(record.passiveAx, passiveAx === true, "an older Server's config (no field) publishes the gate off");
+    });
+  }
 });
 
 test("Claude APM invariant: fresh-session parked pending input schedules retry without turn_end", async () => {
@@ -579,7 +654,7 @@ test.skip("RETIRED 2026-08-03 (task #524): Claude APM invariant: turn_end re-arm
     assert.equal(driver.encodedCalls[0].sessionId, "session-1");
     assert.match(driver.encodedCalls[0].text, /Raft inbox notice/);
     assert.ok(
-      sink.getAllSpans().some((span) => span.name === "daemon.agent.delivery_debt.rearmed_on_turn_end"),
+      traceRows(sink).some((span) => span.name === "daemon.agent.delivery_debt.rearmed_on_turn_end"),
       "turn_end flush must record that write-only debt was re-armed",
     );
   }, { tracer });
@@ -672,7 +747,7 @@ test("Claude token usage telemetry records result identity without refreshing tu
     assert.equal(ap.runtimeProgress.lastEventKind, "tool_output");
     assert.equal(ap.runtimeProgress.staleSince, 456);
 
-    const telemetrySpan = sink.getAllSpans()
+    const telemetrySpan = traceRows(sink)
       .find((candidate) => candidate.name === "daemon.runtime.telemetry.token_usage");
     assert.ok(telemetrySpan, "telemetry sidecar span should be recorded");
     assert.equal(telemetrySpan.attrs?.agentId, "agent-1");
@@ -721,7 +796,7 @@ test("runtime telemetry uses live driver session identity when event omits sessi
     driver.processes[0].stdout.emit("data", Buffer.from("usage-without-session\n"));
     await flush();
 
-    const telemetrySpan = sink.getAllSpans()
+    const telemetrySpan = traceRows(sink)
       .find((candidate) => candidate.name === "daemon.runtime.telemetry.token_usage");
     assert.ok(telemetrySpan, "telemetry sidecar span should be recorded");
     assert.equal(telemetrySpan.attrs?.agentId, "agent-1");
@@ -765,7 +840,7 @@ test("Claude token usage telemetry falls back to launch session and daemon resul
     driver.processes[0].stdout.emit("data", Buffer.from("usage-without-runtime-identity\n"));
     await flush();
 
-    const telemetrySpan = sink.getAllSpans()
+    const telemetrySpan = traceRows(sink)
       .find((candidate) => candidate.name === "daemon.runtime.telemetry.token_usage");
     assert.ok(telemetrySpan, "telemetry sidecar span should be recorded");
     assert.equal(telemetrySpan.attrs?.agentId, "agent-1");
@@ -825,22 +900,9 @@ function cloneTraceArtifacts(bundle: ApmTraceArtifactBundle): ApmTraceArtifactBu
   return JSON.parse(JSON.stringify(bundle)) as ApmTraceArtifactBundle;
 }
 
-function makeDeterministicTracer() {
-  let spanIndex = 0;
-  const traceId = "1".repeat(32);
-  const spanIds = ["2".repeat(16), "3".repeat(16), "4".repeat(16), "5".repeat(16)];
-  const sink = new MemoryTraceSink();
-  const tracer = new BasicTracer({
-    sink,
-    traceIdGenerator: () => traceId,
-    spanIdGenerator: () => spanIds[spanIndex++] ?? "6".repeat(16),
-  });
-  return { sink, tracer };
-}
-
 function observedGatedEffectsFromTrace(sink: MemoryTraceSink): ApmObservedGatedStdinEffect[] {
   const effects: ApmObservedGatedStdinEffect[] = [];
-  for (const span of sink.getAllSpans()) {
+  for (const span of traceRows(sink)) {
     if (span.name !== "daemon.apm.gated_effect") continue;
     const payload = {
       outcome: span.attrs?.outcome,
@@ -2276,7 +2338,7 @@ test("Claude APM: provider context-overflow error is recoverable and bounded in 
     assert.doesNotMatch(JSON.stringify(errorActivity.entries ?? []), /API Error|maximum context length|you requested/);
     assert.equal(sent.some((m) => m.type === "agent:status" && (m as any).status === "inactive"), false);
 
-    const runtimeError = sink.getAllSpans()
+    const runtimeError = traceRows(sink)
       .flatMap((span) => span.events)
       .find((event) => event.name === "runtime.error");
     assert.ok(runtimeError, "raw diagnostic payload must still reach runtime.error trace");
@@ -2666,7 +2728,7 @@ test("APM-managed start stores minted runner credential for process cleanup", as
 // ===========================================================================
 
 function deliveryOutcomes(sink: MemoryTraceSink): string[] {
-  return sink.getAllSpans()
+  return traceRows(sink)
     .filter((s) => s.name === "daemon.agent.delivery.routed")
     .map((s) => s.attrs?.outcome as string);
 }
@@ -2719,6 +2781,27 @@ test("delivery-gating baseline: no-ap + no-cache + user → rejected_no_process 
     assert.equal(lastDeliveryOutcome(sink), "rejected_no_process");
     assert.ok(sent.some((m) => m.type === "agent:status" && (m as any).status === "inactive"));
     assert.ok(activityEvents(sent).some((a) => a.activity === "offline"));
+  }, { tracer });
+});
+
+test("rejected_no_process reports a typed rejection once through onRejectedNoProcess; transient deliveries stay silent (task #1113)", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  await withManager(async ({ manager }) => {
+    const rejections: Array<{ deliveryId?: string }> = [];
+    const r = await manager.deliverMessage("agent-1", makeMessage("x"), {
+      deliveryId: "delivery-1",
+      onRejectedNoProcess: () => { rejections.push({ deliveryId: "delivery-1" }); },
+    });
+    assert.equal(r, false);
+    assert.equal(lastDeliveryOutcome(sink), "rejected_no_process");
+    assert.equal(rejections.length, 1, "the Server must hear exactly one typed rejection so it can fall back to agent:start");
+
+    const transient = await manager.deliverMessage("agent-1", makeMessage("y"), {
+      transient: true,
+      onRejectedNoProcess: () => { rejections.push({}); },
+    });
+    assert.equal(transient, true);
+    assert.equal(rejections.length, 1, "a transient delivery is dropped, not converted into a wake");
   }, { tracer });
 });
 
@@ -3328,7 +3411,7 @@ test("agent-start tracking cleanup: a settled successful start clears agentsStar
 // that request would enqueue (length 1) / get a different outcome → RED.
 // ===========================================================================
 function startIgnoredReasons(sink: MemoryTraceSink): Array<string | undefined> {
-  return sink.getAllSpans()
+  return traceRows(sink)
     .filter((s) => s.name === "daemon.agent.start.ignored")
     .map((s) => s.attrs?.reason as string | undefined);
 }
@@ -3352,6 +3435,40 @@ test("agent-start entry dedup: already-starting agent → start.ignored{already_
     assert.deepEqual(startIgnoredReasons(sink), ["already_starting"]);
     assert.equal(agentStartSnapshot(manager).queueDepth, 0, "already-starting start must not enqueue");
   }, { tracer });
+});
+
+// ===========================================================================
+// Two server starts for one agent a few ms apart (prod 2026-09/10, AndyLok's
+// stale_launch_guard census): the second arrives while the first spawn is being
+// prepared, after the deferred rebind was taken. The server armed its launch
+// guard for the second launch, so the running process must end up carrying it;
+// otherwise every frame of the first launch is dropped as stale for hours.
+// Teeth: drop the late-rebind block after spawn -> launchId stays L-1 -> RED.
+// ===========================================================================
+test("agent-start: a start that lands mid-spawn rebinds the running process to its newer launch", async () => {
+  await withManager(async ({ manager, sent }) => {
+    const realBuildSpawnConfig = (manager as any).buildSpawnConfig.bind(manager);
+    let releaseSpawnConfig!: () => void;
+    const spawnConfigGate = new Promise<void>((resolve) => { releaseSpawnConfig = resolve; });
+    let spawnConfigEntered!: () => void;
+    const enteredSpawnConfig = new Promise<void>((resolve) => { spawnConfigEntered = resolve; });
+    (manager as any).buildSpawnConfig = async (agentId: string, config: AgentConfig) => {
+      spawnConfigEntered();
+      await spawnConfigGate;
+      return realBuildSpawnConfig(agentId, config);
+    };
+
+    const first = manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }), undefined, undefined, undefined, "L-1");
+    await enteredSpawnConfig;
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }), undefined, undefined, undefined, "L-2");
+    releaseSpawnConfig();
+    await first;
+
+    assert.equal((manager as any).agents.get("agent-1")?.launchId, "L-2", "the running process carries the newer launch");
+    const lastStatus = sent.filter((msg) => msg.type === "agent:status" && msg.agentId === "agent-1").at(-1);
+    assert.equal((lastStatus as { launchId?: string } | undefined)?.launchId, "L-2", "the server is told the newer launch is the live one");
+    assert.equal((manager as any).lifecycleRecords.getPendingStartRebind("agent-1"), undefined, "no rebind is left pending");
+  });
 });
 
 test("agent-start entry dedup: already-queued agent → start.ignored{already_queued}, not double-queued", async () => {
@@ -4107,7 +4224,818 @@ test("runtime rate-limit telemetry remains diagnostic without publishing account
     }]);
     driver.processes[0].stdout.emit("data", Buffer.from("rate-limit\n"));
     await flush();
-    assert.ok(sink.getAllSpans().some((span) => span.name === "daemon.runtime.telemetry.rate_limits"));
+    assert.ok(traceRows(sink).some((span) => span.name === "daemon.runtime.telemetry.rate_limits"));
     assert.deepEqual(sent.filter((message) => message.type === "machine:runtime_account_usage:snapshot"), []);
   }, { tracer });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// task #1114 — delivery consumption observation. A stdin write is not a
+// consumption signal; only model-driven runtime events are. The daemon must
+// make "N writes since the last runtime signal" visible as typed, queryable
+// state (observation only: no stop, restart, retry or quota action).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function consumptionObservations(sink: MemoryTraceSink) {
+  return traceRows(sink).filter((span) => span.name === "daemon.agent.delivery.consumption");
+}
+
+async function idleDeliver(manager: AgentProcessManager, ap: any, n: number) {
+  // The field shape: the daemon believes the agent is idle before each write.
+  (manager as any).commitApmIdleState("agent-1", ap, true);
+  ap.sessionId = "s1";
+  await manager.deliverMessage("agent-1", makeMessage(`m${n}`, { message_id: `msg-${n}`, seq: n }));
+}
+
+test("task #1114 A: three idle stdin deliveries with no runtime event are observed as unconsumed, keyed to the launch", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  await withManager(async ({ manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }));
+    const ap = getProcess(manager, "agent-1");
+    for (const n of [1, 2, 3]) {
+      await idleDeliver(manager, ap, n);
+      assert.equal(lastDeliveryOutcome(sink), "stdin_idle_delivery");
+    }
+    const observations = consumptionObservations(sink);
+    assert.equal(observations.length, 3, "every stdin write must record a consumption observation");
+    const last = observations.at(-1)!.attrs!;
+    assert.equal(last.unconsumed_deliveries, 3);
+    assert.equal(last.episode, 1);
+    assert.equal(last.last_delivery_key, "msg-3");
+    assert.equal(last.last_consumption_kind, null);
+    assert.equal(last.process_alive, true);
+    assert.equal(typeof last.launch_id, "string");
+    assert.equal(last.threshold_crossed, true, "the third write in one episode crosses the observation-only threshold");
+    assert.equal(observations[1]!.attrs!.threshold_crossed, false);
+    // No credentials in the observation.
+    assert.ok(!JSON.stringify(last).includes("sk_"), "observation must not carry credentials");
+  }, { tracer });
+});
+
+test("task #1114 B: three app-inbox idle notices with no runtime event are observed as unconsumed", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  const store = createAgentAppInboxStore({ registry: REMINDER_AGENT_INBOX_REGISTRY });
+  await withManager(async ({ manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }));
+    const ap = getProcess(manager, "agent-1");
+    ap.sessionId = "s1";
+    for (const revision of ["1", "2", "3"]) {
+      (manager as any).commitApmIdleState("agent-1", ap, true);
+      const minted = store.mint({
+        appId: "system.reminder",
+        notificationClass: "due",
+        sourceRef: { kind: "reminder", id: "11111111-1111-4111-8111-111111111111", revision },
+      });
+      assert.equal(minted.ok, true);
+      if (!minted.ok) return;
+      assert.equal(await manager.notifyAgentAppInbox("agent-1", minted.item), true);
+    }
+    const observations = consumptionObservations(sink);
+    assert.equal(observations.length, 3);
+    assert.equal(observations.at(-1)!.attrs!.unconsumed_deliveries, 3);
+    assert.equal(observations.at(-1)!.attrs!.delivery_path, "app_inbox_notice");
+  }, { tracer, appInboxForAgent: () => store });
+});
+
+test("task #1114 C: a model-driven runtime event resets the counter and records the consumption kind", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  await withManager(async ({ manager, driver }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }));
+    const ap = getProcess(manager, "agent-1");
+    await idleDeliver(manager, ap, 1);
+    await idleDeliver(manager, ap, 2);
+    driver.parsedLines.set("assistant-text", [{ kind: "text", text: "on it" }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("assistant-text\n"));
+    await flush();
+    await idleDeliver(manager, ap, 3);
+    const last = consumptionObservations(sink).at(-1)!.attrs!;
+    assert.equal(last.unconsumed_deliveries, 1, "the text event consumed the first two writes; the third starts a new episode");
+    assert.equal(last.episode, 2);
+    assert.equal(last.last_consumption_kind, "text");
+  }, { tracer });
+});
+
+test("task #1114 D: a runtime error event is a turn result and resets the counter; a daemon-side write failure is not", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  await withManager(async ({ manager, driver }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }));
+    const ap = getProcess(manager, "agent-1");
+    await idleDeliver(manager, ap, 1);
+    driver.parsedLines.set("runtime-error", [{ kind: "error", message: "usage limit reached" } as ParsedEvent]);
+    driver.processes[0].stdout.emit("data", Buffer.from("runtime-error\n"));
+    await flush();
+    // A runtime error is a turn result: the pending write was consumed (and failed).
+    // Read the queryable state directly; after a runtime error the delivery path
+    // itself is gated, so no new observation is expected here.
+    const afterError = manager.getDeliveryConsumptionSnapshot("agent-1");
+    assert.ok(afterError, "the process is still live after a non-auth runtime error");
+    assert.equal(afterError.unconsumedDeliveries, 0);
+    assert.equal(afterError.lastRuntimeResult?.kind, "error");
+    assert.equal(typeof (afterError.lastRuntimeResult as { errorClass?: unknown }).errorClass, "string");
+    assert.ok(!JSON.stringify(afterError).includes("usage limit reached"), "runtime error text must not be copied into the observation");
+    assert.equal(afterError.lastDeliveryError, null, "a runtime error is not a daemon-side delivery error");
+  }, { tracer });
+});
+
+test("task #1114 F: a process restart clears the counter and starts the episode numbering over", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  await withManager(async ({ manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }));
+    let ap = getProcess(manager, "agent-1");
+    await idleDeliver(manager, ap, 1);
+    await idleDeliver(manager, ap, 2);
+    await manager.stopAgent("agent-1");
+    await flush();
+    assert.equal(manager.getDeliveryConsumptionSnapshot("agent-1"), null, "a stopped process has no consumption state");
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s2" }));
+    ap = getProcess(manager, "agent-1");
+    ap.sessionId = "s2";
+    await idleDeliver(manager, ap, 3);
+    // Only writes to the NEW process count; the old process's two writes are gone
+    // with it. (The spawn path itself may write once, so compare per launch.)
+    const newLaunch = consumptionObservations(sink).filter((span) => span.attrs?.launch_id === (ap.launchId || ""));
+    assert.ok(newLaunch.length >= 1);
+    assert.equal(newLaunch[0]!.attrs!.episode, 1, "episode numbering restarts with the new process");
+    assert.equal(newLaunch[0]!.attrs!.unconsumed_deliveries, 1, "the first write to the new process is its first unconsumed delivery");
+    assert.equal(newLaunch.at(-1)!.attrs!.episode, 1);
+  }, { tracer });
+});
+
+test("task #1114 G: a turn_end for the live session is consumption; a turn_end naming a stale session on the same process is not", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  await withManager(async ({ manager, driver }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }));
+    const ap = getProcess(manager, "agent-1");
+    await idleDeliver(manager, ap, 1);
+    await idleDeliver(manager, ap, 2);
+    // Live session: real consumption.
+    driver.parsedLines.set("live-turn-end", [{ kind: "turn_end", sessionId: "s1" }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("live-turn-end\n"));
+    await flush();
+    const afterLive = manager.getDeliveryConsumptionSnapshot("agent-1");
+    assert.equal(afterLive?.unconsumedDeliveries, 0, "the live session's turn_end consumes the pending writes");
+    assert.equal(afterLive?.lastConsumption?.kind, "turn_end");
+    assert.equal(afterLive?.lastRuntimeResult?.kind, "completed");
+
+    // Huaihuai's mutation: same bound process, live session s1, event claims another session.
+    await idleDeliver(manager, ap, 3);
+    await idleDeliver(manager, ap, 4);
+    const before = manager.getDeliveryConsumptionSnapshot("agent-1")!.unconsumedDeliveries;
+    assert.equal(before, 2);
+    driver.parsedLines.set("stale-turn-end", [{ kind: "turn_end", sessionId: "stale-session" }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("stale-turn-end\n"));
+    await flush();
+    const afterStale = manager.getDeliveryConsumptionSnapshot("agent-1");
+    // The turn_end still drives the ordinary turn-end redelivery (possibly one
+    // more write), so the counter may grow; what it must never do is reset.
+    assert.ok((afterStale?.unconsumedDeliveries ?? 0) >= 2, "a stale-session turn_end must not clear the counter");
+    assert.equal(afterStale?.lastConsumption?.kind, "turn_end", "no new consumption was recorded by the stale event");
+    assert.equal(afterStale?.lastConsumption?.atMs, afterLive?.lastConsumption?.atMs, "the last consumption is still the live one");
+    const ignored = traceRows(sink).filter((span) => span.name === "daemon.agent.delivery.consumption.ignored");
+    assert.equal(ignored.length, 1);
+    assert.equal(ignored[0]!.attrs!.reason, "session_mismatch");
+    assert.equal(ignored[0]!.attrs!.event_kind, "turn_end");
+  }, { tracer });
+});
+
+test("task #1114 H: a session-less consumption event only counts while a turn is live on the process", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  await withManager(async ({ manager, driver }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }));
+    const ap = getProcess(manager, "agent-1");
+    await idleDeliver(manager, ap, 1);
+    // Force the daemon's view back to idle with the write still unconsumed: a
+    // bare text event with no live turn cannot be attributed to that write.
+    (manager as any).commitApmIdleState("agent-1", ap, true);
+    driver.parsedLines.set("orphan-text", [{ kind: "text", text: "late" }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("orphan-text\n"));
+    await flush();
+    assert.equal(manager.getDeliveryConsumptionSnapshot("agent-1")?.unconsumedDeliveries, 1);
+    const ignored = traceRows(sink).filter((span) => span.name === "daemon.agent.delivery.consumption.ignored");
+    assert.equal(ignored.at(-1)?.attrs?.reason, "no_live_turn");
+  }, { tracer });
+});
+
+test("task #1114 H2: a named foreign-session event fails closed when the live session is unknown", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  await withManager(async ({ manager, driver }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }));
+    const ap = getProcess(manager, "agent-1");
+    await idleDeliver(manager, ap, 1);
+    // Huaihuai's H2 mutation: pending write, process busy, live session unknown,
+    // event names some other session.
+    ap.sessionId = null;
+    (manager as any).commitApmIdleState("agent-1", ap, false);
+    // Drive the handler directly: this pins the association predicate itself,
+    // independent of whether the binding fence would also drop the event.
+    (manager as any).handleParsedEvent("agent-1", { kind: "turn_end", sessionId: "foreign-session" }, driver);
+    await flush();
+    const trail = traceRows(sink)
+      .filter((span) => span.name.startsWith("daemon.agent.delivery.consumption"))
+      .map((span) => [span.name, span.attrs?.event_kind, span.attrs?.reason, span.attrs?.unconsumed_deliveries]);
+    // The turn_end handler still redelivers the pending inbox (a new write), so
+    // the counter may grow; what it must never do is reset.
+    const after = manager.getDeliveryConsumptionSnapshot("agent-1");
+    assert.ok((after?.unconsumedDeliveries ?? 0) >= 1, `an unknown live session must not accept a named foreign event; trail=${JSON.stringify(trail)}`);
+    assert.equal(after?.lastConsumption, null, "nothing was consumed");
+    const ignored = traceRows(sink).filter((span) => span.name === "daemon.agent.delivery.consumption.ignored");
+    assert.equal(ignored.at(-1)?.attrs?.reason, "session_mismatch");
+    assert.equal(ignored.at(-1)?.attrs?.session_id_present, false);
+  }, { tracer });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// task #1116 — web-visible projection of the #1114 observation. When one
+// episode reaches the observation threshold, the daemon must emit ONE
+// agent:activity carrying detailKind "delivery_unconsumed" and the typed
+// deliveryConsumption carrier (ids / classes / times only). Observation only.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function deliveryUnconsumedActivities(sent: MachineToServerMessage[]) {
+  return sent.filter((msg): msg is Extract<MachineToServerMessage, { type: "agent:activity" }> =>
+    msg.type === "agent:activity" && msg.detailKind === "delivery_unconsumed");
+}
+
+test("task #1116 daemon: the third unconsumed write in an episode emits one delivery_unconsumed activity with the typed carrier", async () => {
+  const { tracer } = makeDeterministicTracer();
+  await withManager(async ({ manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }));
+    const ap = getProcess(manager, "agent-1");
+    await idleDeliver(manager, ap, 1);
+    await idleDeliver(manager, ap, 2);
+    assert.equal(deliveryUnconsumedActivities(sent).length, 0, "below the threshold nothing is projected");
+    await idleDeliver(manager, ap, 3);
+    const projected = deliveryUnconsumedActivities(sent);
+    assert.equal(projected.length, 1, "the threshold write projects exactly once");
+    const carrier = (projected[0] as { deliveryConsumption?: Record<string, unknown> }).deliveryConsumption;
+    assert.ok(carrier, "the activity must carry the typed deliveryConsumption diagnostic");
+    assert.equal(carrier.unconsumedDeliveries, 3);
+    assert.equal(carrier.episode, 1);
+    assert.equal(carrier.lastDeliveryKey, "msg-3");
+    assert.equal(carrier.lastDeliveryPath, "stdin_idle_delivery");
+    assert.equal(carrier.processAlive, true);
+    assert.equal(typeof carrier.launchId, "string");
+    assert.equal(typeof carrier.firstUnconsumedAtMs, "number");
+    assert.equal(carrier.lastConsumptionKind, null);
+    const serialized = JSON.stringify(projected[0]);
+    assert.ok(!serialized.includes("sk_"), "no credentials in the projection");
+    assert.ok(!serialized.includes("m3"), "no message content in the projection");
+
+    // A fourth write in the same episode does not project again.
+    await idleDeliver(manager, ap, 4);
+    assert.equal(deliveryUnconsumedActivities(sent).length, 1);
+  }, { tracer });
+});
+
+test("task #1116 daemon: after a consumption signal a new episode may project again, numbered as episode 2", async () => {
+  const { tracer } = makeDeterministicTracer();
+  await withManager(async ({ manager, sent, driver }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "s1" }));
+    const ap = getProcess(manager, "agent-1");
+    for (const n of [1, 2, 3]) await idleDeliver(manager, ap, n);
+    driver.parsedLines.set("assistant-text", [{ kind: "text", text: "on it" }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("assistant-text\n"));
+    await flush();
+    for (const n of [4, 5, 6]) await idleDeliver(manager, ap, n);
+    const projected = deliveryUnconsumedActivities(sent);
+    assert.equal(projected.length, 2);
+    const second = (projected[1] as { deliveryConsumption?: Record<string, unknown> }).deliveryConsumption;
+    assert.equal(second?.episode, 2);
+    assert.equal(second?.lastConsumptionKind, "text");
+  }, { tracer });
+});
+
+// task #1119 — the server's wake crash-loop breaker records how a process
+// ended; the daemon must attach code/signal to the inactive status it reports
+// for a non-recoverable crash.
+test("task #1119 daemon: a crash-marked inactive status carries the exit code and signal", async () => {
+  await withManager(async ({ manager, sent, driver }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    const ap = getProcess(manager, "agent-1");
+    (manager as any).startRuntimeTrace("agent-1", ap, "e2e-turn", []);
+    ap.lastRuntimeError = "ProviderModelNotFoundError: failed with model 'claude-4' (500)";
+    ap.recentStderr = ["ProviderModelNotFoundError: failed with model 'claude-4' (500)"];
+
+    driver.processes[0].emit("exit", null, "SIGTERM");
+    driver.processes[0].emit("close", null, "SIGTERM");
+    await flush();
+
+    const inactive = sent.filter((m) =>
+      m.type === "agent:status" && (m as { status?: string }).status === "inactive",
+    ) as Array<Extract<MachineToServerMessage, { type: "agent:status" }>>;
+    assert.ok(inactive.length >= 1, "a non-recoverable crash reports inactive");
+    assert.deepEqual(inactive.at(-1)!.exit, { code: null, signal: "SIGTERM" }, "the inactive frame carries how the process ended");
+  });
+});
+
+// ===========================================================================
+// task #285 — a busy tracked mention whose content-free notice already
+// contributed during the turn must still reach a terminal state at turn_end.
+// Field shape (daemon 1.0.26): outcome=mention-accepted-awaiting-terminal-ack,
+// then the server re-sent the same occurrence every 5s for 15h+. At turn_end
+// the gated flush is suppressed as already-contributed, which returns false,
+// so completePendingTrackedMentions never runs and the occurrence stays pending;
+// every redelivery then hits duplicate_pending and returns true with no ack.
+// ===========================================================================
+
+test("task #285: a busy tracked mention whose notice already contributed is ACKed at turn_end, and a redelivery does not go silent", async () => {
+  await withManager(async ({ driver, manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }), undefined, undefined, undefined, "launch-285");
+    const ap = getProcess(manager, "agent-1");
+    assert.ok(ap.launchId, "precondition: tracking is identity-bound, so the live launch must carry a launchId");
+    assert.equal(ap.sessionId, "session-1");
+    ap.sessionReadyForDelivery = true;
+    (manager as any).commitApmIdleState("agent-1", ap, false);
+
+    const occurrenceId = "occ-285";
+    const message = makeMessage("tracked mention during a busy turn", { message_id: "m-285", seq: 285 });
+    const transitions: { state: string; outcome: string }[] = [];
+    const terminalErrors: string[] = [];
+    let ackCount = 0;
+    const context = () => ({
+      deliveryId: occurrenceId,
+      mentionDelivery: {
+        occurrenceId,
+        messageId: "m-285",
+        launchId: ap.launchId,
+        sessionId: ap.sessionId,
+      },
+      onMentionTransition: (state: string, outcome: string) => { transitions.push({ state, outcome }); },
+      onMentionAck: () => { ackCount += 1; },
+      onMentionTerminalError: (code: string) => { terminalErrors.push(code); },
+    }) as any;
+
+    assert.equal(await manager.deliverMessage("agent-1", message, context()), true);
+    assert.deepEqual(
+      transitions.map((t) => t.state),
+      ["daemon_received", "daemon_pending"],
+      "precondition: the mention took the busy tracked path and is pending",
+    );
+
+    // The runtime already received the content-free notice for this row during the turn.
+    ap.notifications.recordNoticeWritten(computeInboxNoticeFingerprint([message]), "session-1", [message]);
+
+    driver.parsedLines.set("turn-end-285", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("turn-end-285\n"));
+    for (let i = 0; i < 50; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(terminalErrors, [], "an already-notified mention is not a delivery failure");
+    assert.equal(ackCount, 1, "the pending occurrence must be ACKed once at turn_end, not left pending forever");
+
+    // A server redelivery of the same occurrence must be answered, never swallowed.
+    assert.equal(await manager.deliverMessage("agent-1", message, context()), true);
+    assert.equal(ackCount + terminalErrors.length, 2, "a redelivery must produce an ACK or a terminal error, not silence");
+  });
+});
+
+test("task #285: at turn_end a consumed tracked mention is ACKed, while a purged one and one never told to the runtime end with a terminal error that is reported once", async () => {
+  await withManager(async ({ driver, manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }), undefined, undefined, undefined, "launch-285b");
+    const ap = getProcess(manager, "agent-1");
+    ap.sessionReadyForDelivery = true;
+    (manager as any).commitApmIdleState("agent-1", ap, false);
+
+    const outcomes = new Map<string, { acks: number; errors: string[]; states: string[] }>();
+    const deliver = (occurrenceId: string, messageId: string, seq: number) => {
+      const record = { acks: 0, errors: [] as string[], states: [] as string[] };
+      outcomes.set(occurrenceId, record);
+      return manager.deliverMessage("agent-1", makeMessage(`tracked ${messageId}`, { message_id: messageId, seq }), {
+        deliveryId: occurrenceId,
+        mentionDelivery: { occurrenceId, messageId, launchId: ap.launchId, sessionId: ap.sessionId },
+        onMentionTransition: (state: string) => { record.states.push(state); },
+        onMentionAck: () => { record.acks += 1; },
+        onMentionTerminalError: (code: string) => { record.errors.push(code); },
+      } as any);
+    };
+
+    assert.equal(await deliver("occ-consumed", "m-consumed", 301), true);
+    assert.equal(await deliver("occ-untold", "m-untold", 302), true);
+    const purgedMessage = makeMessage("tracked m-purged", { message_id: "m-purged", seq: 303, channel_id: "channel-purged", channel_name: "purged" });
+    const purgedRecord = { acks: 0, errors: [] as string[], states: [] as string[] };
+    outcomes.set("occ-purged", purgedRecord);
+    assert.equal(await manager.deliverMessage("agent-1", purgedMessage, {
+      deliveryId: "occ-purged",
+      mentionDelivery: { occurrenceId: "occ-purged", messageId: "m-purged", launchId: ap.launchId, sessionId: ap.sessionId },
+      onMentionTransition: (state: string) => { purgedRecord.states.push(state); },
+      onMentionAck: () => { purgedRecord.acks += 1; },
+      onMentionTerminalError: (code: string) => { purgedRecord.errors.push(code); },
+    } as any), true);
+    for (const id of ["occ-consumed", "occ-untold", "occ-purged"]) {
+      assert.deepEqual(outcomes.get(id)!.states, ["daemon_received", "daemon_pending"], `precondition: ${id} took the busy tracked path`);
+    }
+
+    // The agent read m-consumed during the turn: the check/read path records it model-seen and drops it from the inbox.
+    const consumedMessage = ap.inbox.find((message: any) => message.message_id === "m-consumed");
+    (manager as any).consumeVisibleMessages("agent-1", { messages: [consumedMessage], source: "agent_api_events_local" });
+    assert.equal(ap.inbox.some((message: any) => message.message_id === "m-consumed"), false, "precondition: consumed rows leave the inbox");
+    // The server purged m-purged's channel (e.g. membership removed): gone from the inbox, never seen.
+    assert.equal(manager.purgeInboxMessagesForChannels("agent-1", ["channel-purged"], "channel_membership_removed").removedCount, 1);
+    // Make the boundary flush fail, so nothing tells the runtime about the rest.
+    (manager as any).executeApmGatedSteeringEffect = () => false;
+
+    const turnEnd = async (line: string) => {
+      driver.parsedLines.set(line, [{ kind: "turn_end", sessionId: "session-1" }]);
+      (manager as any).commitApmIdleState("agent-1", ap, false);
+      driver.processes[0].stdout.emit("data", Buffer.from(`${line}\n`));
+      await waitFor(() => (manager as any).isApmIdle(ap), `${line} settles to idle`);
+    };
+    await turnEnd("turn-end-285b");
+
+    assert.deepEqual(outcomes.get("occ-consumed"), { acks: 1, errors: [], states: ["daemon_received", "daemon_pending", "daemon_drained"] });
+    assert.equal(outcomes.get("occ-untold")!.acks, 0, "an occurrence never told to the runtime must not be ACKed");
+    assert.deepEqual(outcomes.get("occ-untold")!.errors, ["DELIVERY_REJECTED"], "it must end with a terminal error instead of staying pending");
+    assert.equal(purgedRecord.acks, 0, "a purged row was never seen by the runtime, so it must not be ACKed");
+    assert.deepEqual(purgedRecord.errors, ["DELIVERY_REJECTED"]);
+
+    // A later turn end must not report the same terminal occurrences again.
+    await turnEnd("turn-end-285c");
+    assert.deepEqual(outcomes.get("occ-untold")!.errors, ["DELIVERY_REJECTED"], "reported once");
+    assert.deepEqual(purgedRecord.errors, ["DELIVERY_REJECTED"], "reported once");
+    assert.equal(outcomes.get("occ-consumed")!.acks, 1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stalled-recovery must not measure idle time as stall time.
+//
+// Field incident (2026-09-22 05:55Z, 2026-09-25 11:57Z, same agent): after a
+// long idle gap, two deliveries arrived in the same second. The first went out
+// as an idle stdin notice and flipped the agent busy; the second queued and ran
+// the stalled-recovery check, whose clock still measured the idle gap (174m,
+// 114m). The process that had just been handed the notice was SIGTERMed, and
+// on resume the Claude CLI closed the unanswered notice with a `<synthetic>`
+// "No response requested." The model never saw that turn.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const STALL_THRESHOLD_MS = 15 * 60_000;
+
+async function settleIdleWithProgressAge(driver: FakeClaudeDriver, manager: any, progressAgeMs: number) {
+  await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+  const ap = getProcess(manager, "agent-1");
+  driver.parsedLines.set("turn-end-before-idle", [{ kind: "turn_end", sessionId: "session-1" }]);
+  driver.processes[0].stdout.emit("data", Buffer.from("turn-end-before-idle\n"));
+  await waitFor(() => manager.isApmIdle(ap), "agent settles to idle");
+  // The last runtime event was the previous turn's end, `progressAgeMs` ago.
+  ap.runtimeProgress.noteRuntimeEvent("turn_end", Date.now() - progressAgeMs);
+  const killSignals: Array<NodeJS.Signals | number | undefined> = [];
+  const proc = driver.processes[0];
+  const originalKill = proc.kill.bind(proc);
+  proc.kill = (signal?: NodeJS.Signals | number) => {
+    killSignals.push(signal);
+    return originalKill(signal);
+  };
+  return { ap, killSignals };
+}
+
+function withNowOffset<T>(offsetMs: number, fn: () => Promise<T>): Promise<T> {
+  const realNow = Date.now;
+  Date.now = () => realNow() + offsetMs;
+  return fn().finally(() => {
+    Date.now = realNow;
+  });
+}
+
+test("stalled recovery: idle over threshold, then two deliveries in the same second, does not terminate the runtime", async () => {
+  await withManager(async ({ driver, manager }) => {
+    const { ap, killSignals } = await settleIdleWithProgressAge(driver, manager, 114 * 60_000);
+
+    await manager.deliverMessage("agent-1", makeMessage("first after idle", { message_id: "m-idle-1", seq: 900 }));
+    assert.equal(driver.encodedCalls.length, 1, "precondition: first message goes out as an idle stdin notice");
+    assert.equal(driver.encodedCalls[0].mode, "idle");
+
+    await manager.deliverMessage("agent-1", makeMessage("second, same second", { message_id: "m-idle-2", seq: 901 }));
+
+    assert.notEqual(ap.gatedSteering.expectedTerminationReason, "stalled_recovery", "idle time is not stall time");
+    assert.deepEqual(killSignals, [], "the runtime that was just handed a notice must not be killed");
+  });
+});
+
+test("stalled recovery control: idle under threshold, then two deliveries in the same second, does not terminate", async () => {
+  await withManager(async ({ driver, manager }) => {
+    const { ap, killSignals } = await settleIdleWithProgressAge(driver, manager, STALL_THRESHOLD_MS - 60_000);
+
+    await manager.deliverMessage("agent-1", makeMessage("first", { message_id: "m-short-1", seq: 910 }));
+    await manager.deliverMessage("agent-1", makeMessage("second", { message_id: "m-short-2", seq: 911 }));
+
+    assert.notEqual(ap.gatedSteering.expectedTerminationReason, "stalled_recovery");
+    assert.deepEqual(killSignals, []);
+  });
+});
+
+test("stalled recovery control: idle over threshold, one delivery only, does not terminate", async () => {
+  await withManager(async ({ driver, manager }) => {
+    const { ap, killSignals } = await settleIdleWithProgressAge(driver, manager, 114 * 60_000);
+
+    await manager.deliverMessage("agent-1", makeMessage("only one", { message_id: "m-one", seq: 920 }));
+
+    assert.equal(driver.encodedCalls[0]?.mode, "idle");
+    assert.notEqual(ap.gatedSteering.expectedTerminationReason, "stalled_recovery");
+    assert.deepEqual(killSignals, []);
+  });
+});
+
+test("stalled recovery guard: a runtime that stays silent past the threshold after an idle delivery is still terminated", async () => {
+  // A restart strips the runner credential and mints a new one; answer the
+  // mint here so the restart under test does not reach the network.
+  onTestFinished(installManagedRunnerCredentialFetch());
+  await withManager(async ({ driver, manager }) => {
+    const { ap, killSignals } = await settleIdleWithProgressAge(driver, manager, 114 * 60_000);
+
+    await manager.deliverMessage("agent-1", makeMessage("first after idle", { message_id: "m-hang-1", seq: 930 }));
+    assert.equal(driver.encodedCalls[0]?.mode, "idle");
+
+    // No runtime event arrives; the next message comes after the threshold,
+    // measured from the idle delivery itself.
+    await withNowOffset(STALL_THRESHOLD_MS + 60_000, async () => {
+      await manager.deliverMessage("agent-1", makeMessage("still no answer", { message_id: "m-hang-2", seq: 931 }));
+    });
+
+    assert.equal(ap.gatedSteering.expectedTerminationReason, "stalled_recovery", "a real hang must still be recovered");
+    assert.deepEqual(killSignals, ["SIGTERM"]);
+  });
+});
+
+test("stalled recovery: idle over threshold, transient idle wake then a queued delivery, does not terminate the runtime", async () => {
+  await withManager(async ({ driver, manager }) => {
+    const { ap, killSignals } = await settleIdleWithProgressAge(driver, manager, 114 * 60_000);
+
+    await manager.deliverMessage("agent-1", makeMessage("autonomous wake", { message_id: "m-wake", seq: 940 }), { transient: true });
+    assert.equal(driver.encodedCalls[0]?.mode, "idle", "precondition: the transient wake is written through the idle stdin path");
+
+    await manager.deliverMessage("agent-1", makeMessage("queued behind the wake", { message_id: "m-after-wake", seq: 941 }));
+
+    assert.notEqual(ap.gatedSteering.expectedTerminationReason, "stalled_recovery");
+    assert.deepEqual(killSignals, []);
+  });
+});
+
+test("process exit telemetry: last_event_age_ms_bucket measures the last runtime event, not the turn-start anchor", async () => {
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({ sink });
+  await withManager(async ({ driver, manager }) => {
+    await settleIdleWithProgressAge(driver, manager, 114 * 60_000);
+
+    // The idle write anchors a new turn start; the stall age is now ~0.
+    await manager.deliverMessage("agent-1", makeMessage("first after idle", { message_id: "m-exit-1", seq: 950 }));
+    assert.equal(driver.encodedCalls[0]?.mode, "idle");
+
+    driver.processes[0].kill();
+    await waitFor(
+      () => traceRows(sink).some((span) => span.name === "daemon.runtime.process.exit"),
+      "process exit event recorded",
+    );
+
+    const exit = traceRows(sink).find((span) => span.name === "daemon.runtime.process.exit");
+    assert.equal(exit?.attrs?.last_event_age_ms_bucket, ">60m", "the 2026-06-22 contract column keeps its literal meaning");
+  }, { tracer });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task #353: a queued delivery the runtime never consumed is either carried
+// into the next start or recorded as dropped with its exit path. Before this,
+// the close handler and stopAgent deleted the process with its inbox and left
+// no trace, so a lost wake was invisible on every log surface.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function busyAgentWithTwoQueued(driver: FakeClaudeDriver, manager: any, configOverrides: Partial<AgentConfig> = {}) {
+  await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1", ...configOverrides }));
+  const ap = getProcess(manager, "agent-1");
+  manager.commitApmIdleState("agent-1", ap, false);
+  await manager.deliverMessage("agent-1", makeMessage("queued one", { message_id: "m-q-1", seq: 960 }));
+  await manager.deliverMessage("agent-1", makeMessage("queued two", { message_id: "m-q-2", seq: 961 }));
+  assert.equal(ap.inbox.length, 2, "precondition: two unconsumed deliveries queued while busy");
+  return ap;
+}
+
+function droppedOnExit(sink: MemoryTraceSink) {
+  return traceRows(sink).filter((span) => span.name === "daemon.agent.inbox.dropped_on_exit");
+}
+
+test("task #353: a non-recoverable crash records the unconsumed inbox as dropped with its exit path", async () => {
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({ sink });
+  await withManager(async ({ driver, manager }) => {
+    await busyAgentWithTwoQueued(driver, manager);
+
+    driver.processes[0].emit("exit", 1, null);
+    driver.processes[0].emit("close", 1, null);
+    await waitFor(() => droppedOnExit(sink).length > 0, "dropped_on_exit recorded");
+
+    const [event] = droppedOnExit(sink);
+    assert.equal(event.attrs?.exit_reason, "nonrecoverable_crash");
+    assert.equal(event.attrs?.dropped_count, 2);
+    assert.equal(event.attrs?.expected, false, "the agent is marked inactive, so nothing re-drives the wake");
+  }, { tracer });
+});
+
+test("task #353: stopAgent records the unconsumed inbox as dropped", async () => {
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({ sink });
+  await withManager(async ({ driver, manager }) => {
+    await busyAgentWithTwoQueued(driver, manager);
+
+    await manager.stopAgent("agent-1", { silent: true });
+
+    const [event] = droppedOnExit(sink);
+    assert.equal(event?.attrs?.exit_reason, "silent_stop");
+    assert.equal(event?.attrs?.dropped_count, 2);
+    assert.equal(event?.attrs?.expected, true, "stop relies on the server's unread catch-up by design");
+  }, { tracer });
+});
+
+test("task #353 control: a clean exit carries the queued inbox into the restart and records nothing dropped", async () => {
+  // A restart strips the runner credential and mints a new one; answer the
+  // mint here so the restart under test does not reach the network.
+  onTestFinished(installManagedRunnerCredentialFetch());
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({ sink });
+  await withManager(async ({ driver, manager }) => {
+    await busyAgentWithTwoQueued(driver, manager);
+    driver.parsedLines.set("turn-end-before-exit", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("turn-end-before-exit\n"));
+    await flush();
+
+    driver.processes[0].kill();
+    // One queued message becomes the restart's wake; the other is buffered for the new start.
+    await waitFor(() => (manager as any).startingInboxes.count("agent-1") === 1, "second message buffered for the restart");
+
+    assert.deepEqual(droppedOnExit(sink), [], "carried, so nothing is recorded as dropped");
+  }, { tracer });
+});
+
+test("task #353: a cold start after a missing resume session carries the queued inbox into the new start", async () => {
+  // The cold start strips the runner credential and mints a new one. The
+  // assertions below read the buffer while that mint is still outstanding, so
+  // it is left pending here (as a slow server would) instead of reaching the
+  // network.
+  onTestFinished(installManagedRunnerCredentialFetch({ mint: "outstanding" }));
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({ sink });
+  await withManager(async ({ driver, manager, sent }) => {
+    await busyAgentWithTwoQueued(driver, manager);
+
+    driver.parsedLines.set("missing-session-error", [{
+      kind: "error",
+      message: "No conversation found with session ID: session-1",
+    }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("missing-session-error\n"));
+    driver.processes[0].emit("exit", 1, null);
+    driver.processes[0].emit("close", 1, null);
+
+    await waitFor(
+      () => sent.some((msg) => msg.type === "agent:session:invalidate"),
+      "cold start after missing session",
+    );
+    await flush();
+    assert.equal((manager as any).startingInboxes.count("agent-1"), 2, "both queued deliveries are buffered for the new start");
+    assert.deepEqual(droppedOnExit(sink), [], "carried, so nothing is recorded as dropped");
+  }, { tracer });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task #355: a delivery routed into an active cooldown must not be dropped as an
+// orphan when the wall clock crosses untilMs before the invariant repair reads
+// it again. Field trace: #8645 CI, "Repaired residency: dropped 2 orphan pending
+// delivery message(s) … after delivery-spawn-fail-cooldown".
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("task #355: cooldown expiring between routing and invariant repair does not drop buffered deliveries", async () => {
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({ sink });
+  await withManager(async ({ manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    const m = manager as any;
+    const ap = getProcess(manager, "agent-1");
+    // The runtime closed after a recoverable error with one queued wake and one buffered message.
+    m.agents.delete("agent-1");
+    m.armRuntimeErrorProcessRestart(
+      "agent-1",
+      ap,
+      "provider_stream",
+      makeMessage("queued wake", { message_id: "m-wake", seq: 970 }),
+      [makeMessage("buffered", { message_id: "m-buf", seq: 971 })],
+    );
+    const untilMs = m.lifecycleRecords.getSpawnFailBackoff("agent-1").untilMs;
+
+    // The routing decision reads the clock just before untilMs; the invariant
+    // repair reads it just after. The restart timer has not fired yet.
+    let phase: "routing" | "repair" = "routing";
+    m.readWallClock = () => (phase === "repair" ? untilMs + 10 : untilMs - 1);
+    const repair = m.repairNoProcessResidency.bind(m);
+    m.repairNoProcessResidency = (context: string) => {
+      phase = "repair";
+      try {
+        return repair(context);
+      } finally {
+        phase = "routing";
+      }
+    };
+
+    await manager.deliverMessage("agent-1", makeMessage("arrives in the last millisecond", { message_id: "m-late", seq: 972 }));
+
+    assert.equal(m.startingInboxes.count("agent-1"), 3, "all three deliveries stay buffered for the pending restart");
+    assert.equal(
+      traceRows(sink).filter((span) => span.name === "daemon.agent.residency.repaired" && span.attrs?.repair === "orphan_pending_delivery").length,
+      0,
+      "nothing is dropped as an orphan",
+    );
+    m.cancelRuntimeErrorProcessRestart("agent-1");
+  }, { tracer });
+});
+
+test("task #355: when a spawn-fail cooldown ends, deliveries buffered during it start the agent instead of being dropped", async () => {
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({ sink });
+  await withManager(async ({ driver, manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    const m = manager as any;
+    const ap = getProcess(manager, "agent-1");
+    // Process gone, idle restart config cached, and a spawn failure put the agent in cooldown.
+    m.agents.delete("agent-1");
+    m.lifecycleRecords.setRestartSnapshot("agent-1", {
+      config: ap.config,
+      sessionId: ap.sessionId,
+      launchId: ap.launchId,
+      processInstanceId: ap.processInstanceId,
+    });
+    const report = m.recordSpawnFailure("agent-1", "spawn_error");
+    assert.equal(report.backoffActive, true, "precondition: cooldown active");
+
+    await manager.deliverMessage("agent-1", makeMessage("sent during cooldown", { message_id: "m-cd", seq: 980 }));
+    assert.equal(m.startingInboxes.count("agent-1"), 1, "precondition: buffered, not spawned");
+    const spawnsBefore = driver.spawnCalls.length;
+
+    // Fire the cooldown's expiry deterministically.
+    clearTimeout(m.lifecycleRecords.getSpawnFailBackoff("agent-1").timer);
+    m.onSpawnFailBackoffExpired("agent-1");
+
+    await waitFor(() => driver.spawnCalls.length === spawnsBefore + 1, "start from the pending inbox");
+    assert.equal(
+      traceRows(sink).filter((span) => span.name === "daemon.agent.residency.repaired" && span.attrs?.repair === "orphan_pending_delivery").length,
+      0,
+      "the buffered delivery is not dropped as an orphan",
+    );
+  }, { tracer });
+});
+
+test("task #353: dropped_on_exit keeps its exit reason through the real local trace sink", async () => {
+  const { LocalRotatingTraceSink } = await import("@botiverse/raft-trace-client");
+  const machineDir = await mkdtemp(path.join(os.tmpdir(), "slock-353-sink-"));
+  // CI flake 36577257233: `rmdir <machineDir>` failed with ENOTEMPTY. The late
+  // writer was `daemon.runner_credential.revoke` (found by @Kabi): stopAgent
+  // fires an un-awaited DELETE via the module-level daemonFetch (not the
+  // injectable fetchImpl) to the test serverUrl over the real network, and its
+  // `.then/.catch` records into this sink whenever the request settles
+  // (~seconds), which can recreate `traces/` during the `finally` rm. This
+  // test therefore runs an agent without a runner credential, so that writer
+  // does not exist here. The gate below stays as the guard: records before
+  // teardown reach the real sink unchanged; any record after teardown is not
+  // written and fails the test by name.
+  const realSink = new LocalRotatingTraceSink({ machineDir });
+  const lateRecords: string[] = [];
+  let sinkClosed = false;
+  const sink = {
+    record(span: Parameters<typeof realSink.record>[0]) {
+      if (sinkClosed) lateRecords.push(`span:${span.name}`);
+      else realSink.record(span);
+    },
+    recordLogEvent(event: { name: string } & Record<string, unknown>) {
+      if (sinkClosed) lateRecords.push(`event:${event.name}`);
+      else (realSink as any).recordLogEvent?.(event);
+    },
+  };
+  try {
+    const tracer = new BasicTracer({ sink: sink as any });
+    await withManager(async ({ driver, manager }) => {
+      // The default config carries no credential id; the explicit null keeps
+      // this test from depending on that default. Without a credential,
+      // stopAgent has no revoke, i.e. no request whose settlement would write
+      // into this sink later.
+      await busyAgentWithTwoQueued(driver, manager, { agentCredentialId: null });
+      await manager.stopAgent("agent-1", { silent: true });
+    }, { tracer });
+    sinkClosed = true;
+    // Short observation window: with the revoke writer removed, nothing should
+    // record after teardown. Giving the agent a credential (agentCredentialId:
+    // "cred-test") with a long enough window makes the assertion below fail
+    // with `event:daemon.runner_credential.revoke`.
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    const traceDir = path.join(machineDir, "traces");
+    const { readdir } = await import("node:fs/promises");
+    const rows = (await Promise.all((await readdir(traceDir))
+      .filter((name) => name.endsWith(".jsonl"))
+      .map((name) => readFile(path.join(traceDir, name), "utf8"))))
+      .flatMap((text) => text.split("\n").filter(Boolean).map((line) => JSON.parse(line)));
+    const record = rows.find((row) => row.name === "daemon.agent.inbox.dropped_on_exit");
+    assert.ok(record, "the event reaches the on-disk trace");
+    assert.equal(record.attrs.exit_reason, "silent_stop", "the reason survives the sink's attribute filter");
+    assert.equal(record.attrs.dropped_count, 2);
+    assert.equal(record.attrs.expected, true);
+    assert.deepEqual(lateRecords, [], "no trace record may reach the sink after the manager is torn down");
+  } finally {
+    sinkClosed = true;
+    await rm(machineDir, { recursive: true, force: true });
+  }
 });

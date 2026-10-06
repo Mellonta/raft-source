@@ -2,14 +2,14 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createSyncCore } from "../../../src/core.js";
-import type { SyncSeq } from "../../../src/types.js";
+import { createSyncCore } from "../../../src/core";
+import type { SyncSeq } from "../../../src/types";
 import {
   ACTIVITY_DOMAIN,
   createActivityDomain,
   encodeActivityScopeId,
-} from "../../../src/domains/activity.js";
-import type { SyncDomainConfig } from "../../../src/types.js";
+} from "../../../src/domains/activity";
+import type { SyncDomainConfig } from "../../../src/types";
 
 /**
  * Web (TypeScript) behavior-vector runner — milestone ① acceptance.

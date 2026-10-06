@@ -8,11 +8,12 @@ import {
   randomBytes,
   randomUUID,
 } from "node:crypto";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
-import { sessionFamilies, sessionRefreshRotationReceipts, sessionTokenPredecessors, sessions, users } from "../db/schema.js";
-import { getRedis, isRedisAvailable } from "../redis.js";
-import { revokeSocketAccess } from "../socket/accessRevocation.js";
-import { serializeErrorForLog } from "../tracing/safeErrorLog.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { sessionFamilies, sessionRefreshRotationReceipts, sessionTokenPredecessors, sessions, users } from "../db/schema";
+import { getRedis, isRedisAvailable } from "../redis";
+import { revokeSocketAccess } from "../socket/accessRevocation";
+import { serializeErrorForLog } from "../tracing/safeErrorLog";
+import { rememberTraceUserId } from "../tracing/traceUserId";
 
 let getDbForService = getDb;
 const ROTATED_REFRESH_REPLAY_GRACE_MS = AUTH_REFRESH_ROTATED_REPLAY_GRACE_MS;
@@ -110,8 +111,11 @@ function hashToken(token: string): string {
 }
 
 async function lockActiveUser(tx: DatabaseExecutor, userId: string): Promise<boolean> {
-  const [user] = await tx.select({ retiredAt: users.retiredAt }).from(users)
+  const [user] = await tx.select({ retiredAt: users.retiredAt, traceUserId: users.traceUserId }).from(users)
     .where(eq(users.id, userId)).limit(1).for("update");
+  // Same row read: login and refresh spans export the user as trace_user_id
+  // (refresh is most of the user-attributed request spans).
+  rememberTraceUserId(userId, user?.traceUserId);
   return Boolean(user && !user.retiredAt);
 }
 

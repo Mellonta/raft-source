@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import "./helpers/domSetup";
 
 const localStorageValues = new Map<string, string>();
@@ -63,12 +62,12 @@ function makeMainLayoutSocket() {
   };
 }
 
-test("global layout installs the channel-domain membership binding and removes that exact handler", async (t) => {
-  const { buildMainLayoutSocketBindings, installSocketBridge } = await import("../src/store/socketBridge.js");
-  const { useChannelStore } = await import("../src/store/channelStore.js");
+test("global layout installs the channel-domain membership binding and removes that exact handler", async () => {
+  const { buildMainLayoutSocketBindings, installSocketBridge } = await import("../src/store/socketBridge");
+  const { useChannelStore } = await import("../src/store/channelStore");
   const { socket, fire } = makeMainLayoutSocket();
   let loads = 0;
-  t.mock.method(useChannelStore.getState(), "loadChannels", async () => {
+  vi.spyOn(useChannelStore.getState(), "loadChannels").mockImplementation(async () => {
     loads += 1;
   });
 
@@ -90,19 +89,19 @@ test("global layout installs the channel-domain membership binding and removes t
   assert.equal(loads, 1, "cleanup removes only the installed channel membership handler");
 });
 
-test("global layout applies server plan payloads and refreshes request-shaped billing", async (t) => {
-  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge.js");
-  const { useServerStore } = await import("../src/store/serverStore.js");
+test("global layout applies server plan payloads and refreshes request-shaped billing", async () => {
+  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge");
+  const { useServerStore } = await import("../src/store/serverStore");
   const { socket } = makeMainLayoutSocket();
   const store = useServerStore.getState();
   const patches: Array<{ id: string; plan?: string }> = [];
   let serverLoads = 0;
   let billingLoads = 0;
   let usageLoads = 0;
-  t.mock.method(store, "applyServerPatch", (patch) => void patches.push(patch));
-  t.mock.method(store, "loadServers", async () => { serverLoads += 1; });
-  t.mock.method(store, "loadBilling", async () => { billingLoads += 1; });
-  t.mock.method(store, "loadUsage", async () => { usageLoads += 1; });
+  vi.spyOn(store, "applyServerPatch").mockImplementation((patch) => void patches.push(patch));
+  vi.spyOn(store, "loadServers").mockImplementation(async () => { serverLoads += 1; });
+  vi.spyOn(store, "loadBilling").mockImplementation(async () => { billingLoads += 1; });
+  vi.spyOn(store, "loadUsage").mockImplementation(async () => { usageLoads += 1; });
 
   const binding = buildMainLayoutSocketBindings(
     socket,
@@ -126,8 +125,8 @@ test("global layout applies server plan payloads and refreshes request-shaped bi
 });
 
 test("installed recovery persists lastSeq on pagehide but not beforeunload", async () => {
-  const { installMainLayoutSocketBridge } = await import("../src/store/socketBridge.js");
-  const { useMessageStore } = await import("../src/store/messageStore.js");
+  const { installMainLayoutSocketBridge } = await import("../src/store/socketBridge");
+  const { useMessageStore } = await import("../src/store/messageStore");
   const { socket } = makeMainLayoutSocket();
   const previousLastSeq = useMessageStore.getState().lastSeq;
   useMessageStore.setState({ lastSeq: 47 });
@@ -152,14 +151,14 @@ test("installed recovery persists lastSeq on pagehide but not beforeunload", asy
   }
 });
 
-test("new channels join their realtime socket room through the lazy socket import", async (t) => {
-  const { useChannelStore } = await import("../src/store/channelStore.js");
-  const api = (await import("../src/api/client.js")).default;
-  const { getSocket } = await import("../src/api/socket.js");
+test("new channels join their realtime socket room through the lazy socket import", async () => {
+  const { useChannelStore } = await import("../src/store/channelStore");
+  const api = (await import("../src/api/client")).default;
+  const { getSocket } = await import("../src/api/socket");
   const socket = getSocket();
   const emitted: Array<{ event: string; channelId: string }> = [];
 
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     assert.equal(url, "/channels");
     return {
       data: {
@@ -173,7 +172,7 @@ test("new channels join their realtime socket room through the lazy socket impor
       },
     };
   });
-  t.mock.method(socket, "emit", (event: string, channelId: string) => {
+  vi.spyOn(socket, "emit").mockImplementation((event: string, channelId: string) => {
     emitted.push({ event, channelId });
     return socket;
   });
@@ -194,8 +193,8 @@ test("new channels join their realtime socket room through the lazy socket impor
 });
 
 test("channel realtime binding applies channel:updated payloads through the channel store patch API", async () => {
-  const { createChannelRealtimeBindings } = await import("../src/store/channelRealtimeSync.js");
-  const { useChannelStore } = await import("../src/store/channelStore.js");
+  const { createChannelRealtimeBindings } = await import("../src/store/channelRealtimeSync");
+  const { useChannelStore } = await import("../src/store/channelStore");
   let inboxRefreshes = 0;
   useChannelStore.setState({
     channels: [{
@@ -238,10 +237,107 @@ test("channel realtime binding applies channel:updated payloads through the chan
   assert.equal(inboxRefreshes, 0);
 });
 
+test("channel:updated ignores another server's row, so a joint channel is not listed twice", async () => {
+  const { createChannelRealtimeBindings } = await import("../src/store/channelRealtimeSync");
+  const { useChannelStore } = await import("../src/store/channelStore");
+  const { useServerStore } = await import("../src/store/serverStore");
+  const originalCurrent = useServerStore.getState().current;
+  useServerStore.setState({ current: { id: "server-a" } } as never);
+  useChannelStore.setState({
+    channels: [{
+      id: "joint-a",
+      serverId: "server-a",
+      name: "partners",
+      description: null,
+      type: "joint",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      joined: true,
+    }],
+    dmChannels: [],
+    channelActivity: {},
+    channelLocalMembership: {},
+    loading: false,
+  });
+  try {
+    const binding = createChannelRealtimeBindings(
+      { emit: () => undefined },
+      () => undefined,
+    ).find((candidate) => candidate.event === "channel:updated");
+    assert.ok(binding);
+
+    // The same joint channel as seen from server-b (the user also admins it).
+    binding.handler({
+      channel: {
+        id: "joint-b",
+        serverId: "server-b",
+        name: "partners",
+        description: null,
+        type: "joint",
+        createdAt: "2026-07-07T00:00:00.000Z",
+        joined: true,
+      },
+    });
+    assert.deepEqual(useChannelStore.getState().channels.map((channel) => channel.id), ["joint-a"]);
+
+    binding.handler({
+      channel: {
+        id: "joint-a",
+        serverId: "server-a",
+        name: "partners renamed",
+        description: null,
+        type: "joint",
+        createdAt: "2026-07-07T00:00:00.000Z",
+        joined: true,
+      },
+    });
+    assert.equal(useChannelStore.getState().channels[0]?.name, "partners renamed");
+  } finally {
+    useServerStore.setState({ current: originalCurrent } as never);
+  }
+});
+
+test("an id-only channel:updated refetches the cached channel, so a lifted joint lock shows without a reload", async () => {
+  const { createChannelRealtimeBindings } = await import("../src/store/channelRealtimeSync");
+  const { useChannelStore } = await import("../src/store/channelStore");
+  const original = useChannelStore.getState().ensureChannel;
+  const calls: Array<{ channelId: string; opts: unknown }> = [];
+  useChannelStore.setState({
+    channels: [{
+      id: "joint-1",
+      name: "partners",
+      description: null,
+      type: "joint",
+      createdAt: "2026-07-07T00:00:00.000Z",
+      joined: true,
+      jointBillingLocked: true,
+    }],
+    dmChannels: [],
+    ensureChannel: async (channelId: string, opts?: unknown) => {
+      calls.push({ channelId, opts });
+      return null;
+    },
+  } as never);
+  try {
+    const binding = createChannelRealtimeBindings(
+      { emit: () => undefined },
+      () => undefined,
+    ).find((candidate) => candidate.event === "channel:updated");
+    assert.ok(binding);
+
+    binding.handler({ channelId: "joint-1" });
+
+    // The row is cached; without refresh ensureChannel would return it as is
+    // and the channel would stay read-only until the page reloads.
+    assert.deepEqual(calls, [{ channelId: "joint-1", opts: { refresh: true } }]);
+  } finally {
+    useChannelStore.setState({ ensureChannel: original } as never);
+  }
+});
+
 test("message channel activity suppresses muted channel traffic but promotes followed-thread traffic independently", async () => {
-  const { applyMessageChannelActivity } = await import("../src/store/channelRealtimeSync.js");
-  const { useChannelStore } = await import("../src/store/channelStore.js");
-  const { useMessageStore } = await import("../src/store/messageStore.js");
+  const { applyMessageChannelActivity } = await import("../src/store/channelRealtimeSync");
+  const { useChannelStore } = await import("../src/store/channelStore");
+  const { useMessageStore } = await import("../src/store/messageStore");
   let inboxRefreshes = 0;
   useMessageStore.getState().setCurrentUserId("user-current");
   useChannelStore.setState({
@@ -301,9 +397,9 @@ test("message channel activity suppresses muted channel traffic but promotes fol
 });
 
 test("message channel activity lets direct mentions pierce activity mute", async () => {
-  const { applyMessageChannelActivity } = await import("../src/store/channelRealtimeSync.js");
-  const { useChannelStore } = await import("../src/store/channelStore.js");
-  const { useMessageStore } = await import("../src/store/messageStore.js");
+  const { applyMessageChannelActivity } = await import("../src/store/channelRealtimeSync");
+  const { useChannelStore } = await import("../src/store/channelStore");
+  const { useMessageStore } = await import("../src/store/messageStore");
   let inboxRefreshes = 0;
   useMessageStore.getState().setCurrentUserId("user-current");
   useChannelStore.setState({
@@ -342,11 +438,11 @@ test("message channel activity lets direct mentions pierce activity mute", async
 });
 
 test("thread updated socket event promotes followed-thread activity independently from parent mute", async () => {
-  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge.js");
-  const { useChannelStore } = await import("../src/store/channelStore.js");
-  const { useInboxStore } = await import("../src/store/inboxStore.js");
-  const { useMessageStore } = await import("../src/store/messageStore.js");
-  const { useThreadStore } = await import("../src/store/threadStore.js");
+  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge");
+  const { useChannelStore } = await import("../src/store/channelStore");
+  const { useInboxStore } = await import("../src/store/inboxStore");
+  const { useMessageStore } = await import("../src/store/messageStore");
+  const { useThreadStore } = await import("../src/store/threadStore");
   let inboxRefreshes = 0;
   useMessageStore.getState().setCurrentUserId("user-current");
   useChannelStore.setState({
@@ -460,10 +556,10 @@ test("thread updated socket event promotes followed-thread activity independentl
 });
 
 test("message:new socket event promotes followed-thread activity independently from parent mute", async () => {
-  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge.js");
-  const { useChannelStore } = await import("../src/store/channelStore.js");
-  const { useInboxStore } = await import("../src/store/inboxStore.js");
-  const { useMessageStore } = await import("../src/store/messageStore.js");
+  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge");
+  const { useChannelStore } = await import("../src/store/channelStore");
+  const { useInboxStore } = await import("../src/store/inboxStore");
+  const { useMessageStore } = await import("../src/store/messageStore");
   let inboxRefreshes = 0;
   useMessageStore.getState().setCurrentUserId("user-current");
   useChannelStore.setState({
@@ -554,8 +650,8 @@ test("message:new socket event promotes followed-thread activity independently f
 });
 
 test("channel realtime binding refreshes existing DMs without socketBridge store logic", async () => {
-  const { createChannelRealtimeBindings } = await import("../src/store/channelRealtimeSync.js");
-  const { useChannelStore } = await import("../src/store/channelStore.js");
+  const { createChannelRealtimeBindings } = await import("../src/store/channelRealtimeSync");
+  const { useChannelStore } = await import("../src/store/channelStore");
   const emitted: Array<{ event: string; channelId: string }> = [];
   let inboxRefreshes = 0;
   useChannelStore.setState({
@@ -599,8 +695,8 @@ test("channel realtime binding refreshes existing DMs without socketBridge store
 });
 
 test("main socket bridge applies channel notification_prefs:updated to activity mute state", async () => {
-  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge.js");
-  const { useChannelStore } = await import("../src/store/channelStore.js");
+  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge");
+  const { useChannelStore } = await import("../src/store/channelStore");
 
   useChannelStore.setState({
     channels: [{
@@ -678,8 +774,8 @@ test("main socket bridge applies channel notification_prefs:updated to activity 
 });
 
 test("main socket bridge applies message_display_prefs:updated and drops stale prefsVersion", async () => {
-  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge.js");
-  const { useChannelStore } = await import("../src/store/channelStore.js");
+  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge");
+  const { useChannelStore } = await import("../src/store/channelStore");
 
   useChannelStore.setState({
     channels: [{
@@ -750,24 +846,24 @@ test("main socket bridge applies message_display_prefs:updated and drops stale p
   assert.equal(afterStalePatch?.displayPrefsVersion, 2);
 });
 
-test("main socket bridge gates channel notification_prefs:updated through sync-core when enabled", async (t) => {
-  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge.js");
-  const { useChannelStore } = await import("../src/store/channelStore.js");
-  const { useServerStore } = await import("../src/store/serverStore.js");
-  const api = (await import("../src/api/client.js")).default;
+test("main socket bridge gates channel notification_prefs:updated through sync-core when enabled", async () => {
+  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge");
+  const { useChannelStore } = await import("../src/store/channelStore");
+  const { useServerStore } = await import("../src/store/serverStore");
+  const api = (await import("../src/api/client")).default;
   const {
     REGISTERED_SERVER_FEATURE_FLAG_KEYS,
-  } = await import("../src/store/serverFeatureFlags.js");
+  } = await import("../src/store/serverFeatureFlags");
   const {
     SYNC_CORE_NOTIFICATION_PREFS_FLAG_KEY,
-  } = await import("../src/store/serverFeatureFlags.js");
+  } = await import("../src/store/serverFeatureFlags");
   const {
     refreshSyncCoreNotificationPrefsFlagForCurrentServer,
     resetSyncCoreNotificationPrefsFlagForTests,
-  } = await import("../src/store/notificationPrefsSyncFeatureFlag.js");
-  const { resetNotificationPrefsSyncCoreForTests } = await import("../src/store/notificationPrefsSyncDomain.js");
+  } = await import("../src/store/notificationPrefsSyncFeatureFlag");
+  const { resetNotificationPrefsSyncCoreForTests } = await import("../src/store/notificationPrefsSyncDomain");
 
-  t.after(() => {
+  onTestFinished(() => {
     resetSyncCoreNotificationPrefsFlagForTests();
     resetNotificationPrefsSyncCoreForTests();
   });
@@ -787,7 +883,7 @@ test("main socket bridge gates channel notification_prefs:updated through sync-c
       createdAt: "2026-07-10T00:00:00.000Z",
     },
   });
-  t.mock.method(api, "post", async (url: string, body?: unknown) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string, body?: unknown) => {
     assert.equal(url, "/feature-flags/evaluate");
     assert.deepEqual(body, {
       serverId: "server-prefs",
@@ -867,13 +963,13 @@ test("main socket bridge gates channel notification_prefs:updated through sync-c
   assert.equal(afterDuplicate?.prefsVersion, 3);
 });
 
-test("main socket bridge applies server notification_prefs:updated and emits UI refresh signal", async (t) => {
-  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge.js");
-  const { useServerStore } = await import("../src/store/serverStore.js");
-  const { useMessageStore } = await import("../src/store/messageStore.js");
+test("main socket bridge applies server notification_prefs:updated and emits UI refresh signal", async () => {
+  const { buildMainLayoutSocketBindings } = await import("../src/store/socketBridge");
+  const { useServerStore } = await import("../src/store/serverStore");
+  const { useMessageStore } = await import("../src/store/messageStore");
   const {
     SERVER_NOTIFICATION_PREFS_UPDATED_EVENT,
-  } = await import("../src/store/events/notificationPrefsEvents.js");
+  } = await import("../src/store/events/notificationPrefsEvents");
   const events: Array<{ serverId: string; serverPushMuted: boolean; prefsVersion?: number }> = [];
 
   useServerStore.setState({
@@ -894,13 +990,13 @@ test("main socket bridge applies server notification_prefs:updated and emits UI 
     }],
     current: null,
   });
-  const loadUnreadCountsMock = t.mock.method(useMessageStore.getState(), "loadUnreadCounts", async () => undefined);
+  const loadUnreadCountsMock = vi.spyOn(useMessageStore.getState(), "loadUnreadCounts").mockImplementation(async () => undefined);
   const handlePrefsEvent = (event: Event) => {
     const detail = (event as CustomEvent<{ serverId: string; serverPushMuted: boolean; prefsVersion?: number }>).detail;
     events.push(detail);
   };
   window.addEventListener(SERVER_NOTIFICATION_PREFS_UPDATED_EVENT, handlePrefsEvent);
-  t.after(() => {
+  onTestFinished(() => {
     window.removeEventListener(SERVER_NOTIFICATION_PREFS_UPDATED_EVENT, handlePrefsEvent);
   });
 
@@ -947,15 +1043,15 @@ test("main socket bridge applies server notification_prefs:updated and emits UI 
   assert.equal(loadUnreadCountsMock.mock.calls.length, 1);
 });
 
-test("lazy socket room join failures are logged with context", async (t) => {
-  const { useChannelStore } = await import("../src/store/channelStore.js");
-  const api = (await import("../src/api/client.js")).default;
-  const { getSocket } = await import("../src/api/socket.js");
+test("lazy socket room join failures are logged with context", async () => {
+  const { useChannelStore } = await import("../src/store/channelStore");
+  const api = (await import("../src/api/client")).default;
+  const { getSocket } = await import("../src/api/socket");
   const socket = getSocket();
   const logged: Array<{ message: string; error: unknown }> = [];
   const failure = new Error("socket emit failed");
 
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     assert.equal(url, "/channels");
     return {
       data: {
@@ -969,10 +1065,10 @@ test("lazy socket room join failures are logged with context", async (t) => {
       },
     };
   });
-  t.mock.method(socket, "emit", () => {
+  vi.spyOn(socket, "emit").mockImplementation(() => {
     throw failure;
   });
-  t.mock.method(console, "error", (message: string, error: unknown) => {
+  vi.spyOn(console, "error").mockImplementation((message: string, error: unknown) => {
     logged.push({ message, error });
   });
   useChannelStore.setState({

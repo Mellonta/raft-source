@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { assessFeedbackTranscriptWindow } from "./feedbackTranscriptWindow.js";
+import { assessFeedbackTranscriptWindow } from "./feedbackTranscriptWindow";
 
 test("feedback transcript window marks a near-report JSONL transcript covered", () => {
   const result = assessFeedbackTranscriptWindow({

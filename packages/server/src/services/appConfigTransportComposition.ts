@@ -17,15 +17,15 @@
  * Config truth only: no notification, timer, measurement, or audit consumer.
  */
 
-import type { AppConfigWireSnapshot } from "@botiverse/raft-shared/src/appConfigTransport.js";
+import type { AppConfigWireSnapshot } from "@botiverse/raft-shared/src/appConfigTransport";
 import {
   appConfigTraceAttrs,
   appSnapshotTraceAttrs,
-} from "@botiverse/raft-shared/src/appRuntimeTrace.js";
+} from "@botiverse/raft-shared/src/appRuntimeTrace";
 
-import { composeAppSnapshot } from "./appSnapshotComposition.js";
-import { BUILT_IN_APP_CONFIG_PROJECTORS } from "./rapBuiltinAppManifests.js";
-import { getRapAppConfig } from "./rapAppConfigService.js";
+import { composeAppSnapshot } from "./appSnapshotComposition";
+import { BUILT_IN_APP_CONFIG_PROJECTORS } from "./rapBuiltinAppManifests";
+import { getRapAppConfig } from "./rapAppConfigService";
 
 /** Read one app's durable config and project it onto the wire. */
 async function snapshotFor(

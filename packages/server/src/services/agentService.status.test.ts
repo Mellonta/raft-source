@@ -1,13 +1,13 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { agents, channelAgents, machines, notificationEvents, serverAgentMembers, users } from "../db/schema.js";
-import { countActiveAgentsMissingServerMembership, createServer, getAgentMemberRole } from "./serverService.js";
-import { createAgent, deleteAgent, getAgent, invalidateAgentSessionFromSignal, resetAgentSession, updateAgent, updateAgentStatus, updateAgentStatusFromSignal } from "./agentService.js";
-import { addAgent, createChannel, findOrCreateAgentDM } from "./channelService.js";
+import { getDb } from "../db/index";
+import { agents, channelAgents, machines, notificationEvents, serverAgentMembers, users } from "../db/schema";
+import { countActiveAgentsMissingServerMembership, createServer, getAgentMemberRole } from "./serverService";
+import { clearAgentLastRuntimeError, createAgent, deleteAgent, setAgentLastRuntimeError, getAgent, invalidateAgentSessionFromSignal, resetAgentSession, updateAgent, updateAgentStatus, updateAgentStatusFromSignal } from "./agentService";
+import { addAgent, createChannel, findOrCreateAgentDM } from "./channelService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -94,6 +94,72 @@ test("updateAgentStatusFromSignal still applies when the agent is not stopped", 
   const afterInactive = await getAgent(agent.id);
   assert.equal(inactiveApplied, true);
   assert.equal(afterInactive?.status, "inactive");
+});
+
+test("clearAgentLastRuntimeError writes only when an error is set", async ({ app }) => {
+  const agent = await seedAgent("runtime-error-clear-noop");
+  const db = getDb();
+  const readRow = async () => (await db.select({ lastRuntimeError: agents.lastRuntimeError, updatedAt: agents.updatedAt })
+    .from(agents).where(eq(agents.id, agent.id)).limit(1))[0];
+
+  const before = await readRow();
+  assert.equal(before.lastRuntimeError, null);
+  assert.equal(await clearAgentLastRuntimeError(agent.id), true);
+  assert.equal((await readRow()).updatedAt.getTime(), before.updatedAt.getTime());
+
+  assert.equal((await setAgentLastRuntimeError(agent.id, { message: "boom", at: new Date().toISOString(), actionRequired: true }))?.message, "boom");
+  assert.equal((await readRow()).lastRuntimeError?.message, "boom");
+  assert.equal(await clearAgentLastRuntimeError(agent.id), true);
+  assert.equal((await readRow()).lastRuntimeError, null);
+
+  await deleteAgent(agent.id);
+  assert.equal(await clearAgentLastRuntimeError(agent.id), false);
+  assert.equal(await clearAgentLastRuntimeError("00000000-0000-4000-8000-000000000000"), false);
+});
+
+test("setAgentLastRuntimeError keeps a repeated error for 5 minutes instead of rewriting it", async ({ app }) => {
+  const agent = await seedAgent("runtime-error-dedupe");
+  const db = getDb();
+  const readRow = async () => (await db.select({ lastRuntimeError: agents.lastRuntimeError, updatedAt: agents.updatedAt })
+    .from(agents).where(eq(agents.id, agent.id)).limit(1))[0];
+  const t0 = Date.parse("2026-10-05T12:00:00.000Z");
+  const at = (minutes: number) => new Date(t0 + minutes * 60_000).toISOString();
+  const limit = { message: "You've hit your usage limit", actionRequired: true, errorClass: "RuntimeError" as const };
+
+  const first = { ...limit, at: at(0), launchId: "launch-1" };
+  assert.deepEqual(await setAgentLastRuntimeError(agent.id, first), first);
+  const afterFirst = await readRow();
+
+  // Same error from the next launch, 4 minutes later: the row is not rewritten,
+  // and the caller gets the stored state back (to publish exactly the row).
+  const repeat = { ...limit, at: at(4), launchId: "launch-2" };
+  assert.deepEqual(await setAgentLastRuntimeError(agent.id, repeat), first);
+  const afterRepeat = await readRow();
+  assert.deepEqual(afterRepeat.lastRuntimeError, first);
+  assert.equal(afterRepeat.updatedAt.getTime(), afterFirst.updatedAt.getTime(), "no write for a repeat inside the window");
+
+  // A different error is written at once.
+  const other = { ...limit, message: "Request timed out.", errorClass: "TimeoutError" as const, at: at(4.5) };
+  assert.deepEqual(await setAgentLastRuntimeError(agent.id, other), other);
+  assert.deepEqual((await readRow()).lastRuntimeError, other);
+
+  // Same message but a different actionRequired is a different error.
+  const otherAction = { ...other, actionRequired: false, at: at(4.6) };
+  assert.deepEqual(await setAgentLastRuntimeError(agent.id, otherAction), otherAction);
+
+  // The same error again after the window (6th minute from the stored one) is rewritten.
+  const later = { ...otherAction, at: at(10.7) };
+  assert.deepEqual(await setAgentLastRuntimeError(agent.id, later), later);
+  assert.deepEqual((await readRow()).lastRuntimeError, later);
+
+  // A cleared error does not count as stored.
+  assert.equal(await clearAgentLastRuntimeError(agent.id), true);
+  const afterClear = { ...later, at: at(11) };
+  assert.deepEqual(await setAgentLastRuntimeError(agent.id, afterClear), afterClear);
+
+  await deleteAgent(agent.id);
+  assert.equal(await setAgentLastRuntimeError(agent.id, { ...limit, at: at(20) }), null);
+  assert.equal(await setAgentLastRuntimeError("00000000-0000-4000-8000-000000000000", { ...limit, at: at(20) }), null);
 });
 
 test("invalidateAgentSessionFromSignal clears only the exact current non-stopped session", async ({ app }) => {

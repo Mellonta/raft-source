@@ -3,14 +3,13 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { Readable } from "node:stream";
-import { test } from "vitest";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
 import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
-import type { Database } from "../db/index.js";
-import { migratePglite } from "../db/pgliteMigrations.js";
-import * as schema from "../db/schema.js";
+import type { Database } from "../db/index";
+import { migratePglite } from "../db/pgliteMigrations";
+import * as schema from "../db/schema";
 import {
   attachmentObjectArtifacts,
   attachmentObjectCharges,
@@ -23,20 +22,20 @@ import {
   messages,
   servers,
   users,
-} from "../db/schema.js";
-import type { StorageBackend } from "./storageService.js";
+} from "../db/schema";
+import type { StorageBackend } from "./storageService";
 import {
   expireAttachmentReservation,
   getAttachmentFoundationReadiness,
   runAttachmentLifecycleSweep,
-} from "./attachmentLifecycleService.js";
-import { runWithTraceSpan } from "../tracing/semanticTrace.js";
-import { createPendingAttachmentProjectionWithExecutor } from "./attachmentProjectionWriterService.js";
-import { AttachmentLinkError, linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService.js";
+} from "./attachmentLifecycleService";
+import { runWithTraceSpan } from "../tracing/semanticTrace";
+import { createPendingAttachmentProjectionWithExecutor } from "./attachmentProjectionWriterService";
+import { AttachmentLinkError, linkAttachmentsToMessageWithExecutor } from "./attachmentLinkingService";
 import {
   buildAttachmentTransferArtifactPlan,
   createAttachmentTransferIntent,
-} from "./attachmentTransferIntentService.js";
+} from "./attachmentTransferIntentService";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const SERVER_ID = "22222222-2222-4222-8222-222222222222";
@@ -558,16 +557,16 @@ test("historical shared artifacts remain blocked while any sibling object is act
 // carry; skipped when an exported snapshot's RELEASE_SOURCE marker is present.
 const inSourceSnapshot = existsSync(new URL("../../../../RELEASE_SOURCE", import.meta.url));
 
-test.skipIf(inSourceSnapshot)("required typecheck CI pins the attachment lifecycle real-PostgreSQL lock contract", async () => {
+test.skipIf(inSourceSnapshot)("staging integration CI pins the attachment lifecycle real-PostgreSQL lock contract", async () => {
   const workflow = await readFile(new URL("../../../../.github/workflows/test.yml", import.meta.url), "utf8");
-  const typecheckJob = workflow.match(/\n  typecheck:\n(?<body>[\s\S]*?)(?=\n  [a-z][a-z0-9-]+:\n)/)?.groups?.body;
-  assert.ok(typecheckJob, "typecheck job must remain present");
-  assert.match(typecheckJob, /services:\s*\n\s+postgres:\s*\n\s+image: postgres:16-alpine/);
-  assert.match(typecheckJob, /--health-cmd "pg_isready -U read_mutation_ci -d postgres"/);
-  const focusedStep = typecheckJob.match(
+  const integrationJob = workflow.match(/\n  integration-contracts:\n(?<body>[\s\S]*?)(?=\n  [a-z][a-z0-9-]+:\n)/)?.groups?.body;
+  assert.ok(integrationJob, "integration job must remain present");
+  assert.match(integrationJob, /services:\s*\n\s+postgres:\s*\n\s+image: postgres:16-alpine/);
+  assert.match(integrationJob, /--health-cmd "pg_isready -U read_mutation_ci -d postgres"/);
+  const focusedStep = integrationJob.match(
     /- name: Attachment lifecycle real PostgreSQL object-first lock contract(?<body>[\s\S]*?)(?=\n\s+- name:)/,
   )?.groups?.body;
-  assert.ok(focusedStep, "required typecheck job must execute the focused attachment lifecycle real-PG contract");
+  assert.ok(focusedStep, "required integration job must execute the focused attachment lifecycle real-PG contract");
   assert.match(focusedStep, /working-directory: packages\/server/);
   assert.match(focusedStep, /timeout-minutes: 3/);
   assert.match(focusedStep, /ATTACHMENT_LIFECYCLE_REAL_PG_REQUIRED: "1"/);

@@ -1,5 +1,5 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 // Teeth for the /channels/inbox exit of the #632 SSOT fix (task #632).
 //
 // Layer 1 (unit): mapInboxPolicyRowsToItems builds readState — the frozen
@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 
 import { eq } from "drizzle-orm";
 
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channelHumans,
   channels,
@@ -30,11 +30,10 @@ import {
   threadFollows,
   userChannelReadCursors,
   users,
-} from "../db/schema.js";
-import { getInboxItems, getUnreadSummary } from "./channelService.js";
-import { mapInboxPolicyRowsToItems } from "./inboxPolicyModel.js";
-import { recordInboxNotificationFacts } from "./inboxNotificationService.js";
-import { HUMAN_ACTIVITY_MUTE_FEATURE_FLAG_KEY } from "./featureFlagService.js";
+} from "../db/schema";
+import { getInboxItems, getUnreadSummary } from "./channelService";
+import { mapInboxPolicyRowsToItems } from "./inboxPolicyModel";
+import { recordInboxNotificationFacts } from "./inboxNotificationService";
 
 
 const SCOPE_A = "11111111-1111-4111-8111-111111111111";
@@ -334,7 +333,7 @@ async function initReadStateDatabase() {
   await getDb()
     .update(featureFlags)
     .set({ defaultEnabled: true })
-    .where(eq(featureFlags.key, HUMAN_ACTIVITY_MUTE_FEATURE_FLAG_KEY));
+    .where(eq(featureFlags.key, "human_activity_mute_v0"));
 }
 
 test("real DB: inbox items carry the authority union — absent / present-at-zero / zero-reply thread null frontier; cross-exit identical to /channels/unread", async () => {

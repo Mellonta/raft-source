@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   resolveCapturePixelRatio,
   SelectScreenshotTimeoutError,
   waitForDocumentFontsForScreenshot,
   withCaptureTimeout,
-} from "../src/utils/selectScreenshot.js";
+} from "../src/utils/selectScreenshot";
 
 test("withCaptureTimeout resolves normally before the timeout", async () => {
   const value = await withCaptureTimeout(Promise.resolve("ok"), 50);

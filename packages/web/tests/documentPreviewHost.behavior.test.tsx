@@ -1,6 +1,5 @@
 import "./helpers/domSetup";
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import DocumentPreviewHost from "../src/components/message/DocumentPreviewHost";
@@ -31,13 +30,18 @@ test("document preview host renders each supported data kind and closes", () => 
       truncated: false,
       url: preview.kind === "pdf" ? "https://example.invalid/routing.pdf" : null,
     }));
-    if (preview.kind === "text") assert.ok(screen.getByText("Text routing witness"));
+    // The text kind is copyable, so the shell carries a screen-reader-only copy
+    // of it in addition to the rendered pane: two nodes, one visible.
+    if (preview.kind === "text") assert.equal(screen.getAllByText("Text routing witness").length, 2);
     if (preview.kind === "markdown") assert.ok(screen.getByRole("heading", { name: "Markdown routing witness" }));
     if (preview.kind === "csv") assert.ok(screen.getByRole("cell", { name: "CSV routing witness" }));
     if (preview.kind === "pdf") {
       const frame = document.querySelector("iframe");
       assert.equal(frame?.getAttribute("src"), "https://example.invalid/routing.pdf");
-      assert.equal(frame?.getAttribute("sandbox"), "allow-scripts");
+      // No sandbox: Chromium's PDF viewer refuses to load in any sandboxed frame
+      // (task #91). Isolation is the cross-origin URL, enforced by CrossOriginPdfFrame.
+      assert.equal(frame?.hasAttribute("sandbox"), false);
+      assert.equal(frame?.getAttribute("referrerpolicy"), "no-referrer");
     }
     act(() => useDocumentPreviewStore.getState().close());
     assert.equal(document.querySelector("iframe"), null);

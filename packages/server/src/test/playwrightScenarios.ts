@@ -3,11 +3,11 @@ import argon2 from "argon2";
 import { eq, inArray } from "drizzle-orm";
 import { Router } from "express";
 import type { Router as RouterType } from "express";
-import { getDb } from "../db/index.js";
-import { announcements, channels, servers, serverMembers, users, userAnnouncementDismissals } from "../db/schema.js";
-import { addMember, createServer } from "../services/serverService.js";
-import { getOrCreateThread } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
+import { getDb } from "../db/index";
+import { announcements, channels, servers, serverMembers, users, userAnnouncementDismissals } from "../db/schema";
+import { addMember, createServer } from "../services/serverService";
+import { getOrCreateThread } from "../services/channelService";
+import { createMessage } from "../services/messageService";
 
 /** Per-attempt tenants in the disposable Playwright database. No production mount. */
 export function playwrightScenarios(capability: string): RouterType {

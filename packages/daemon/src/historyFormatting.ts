@@ -1,5 +1,5 @@
 import { formatUtcTimestamp } from "@botiverse/raft-shared";
-import { formatAttachmentSuffix } from "./attachmentFormatting.js";
+import { formatAttachmentSuffix } from "./attachmentFormatting";
 
 type HistoryAttachment = {
   id: string;

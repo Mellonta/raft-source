@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { AGENT_ACTIVITY_DETAIL_KINDS, type AgentActivityDetailKind, type AgentActivityKind } from "@botiverse/raft-shared";
-import { createAgentLifecycleEvent } from "./agentLifecycleEvents.js";
+import { createAgentLifecycleEvent } from "./agentLifecycleEvents";
 import {
   CANONICAL_DAEMON_ACTIVITY_BY_DETAIL_KIND,
   LEGACY_DAEMON_ACTIVITY_COMPAT_RULE_BY_DETAIL_KIND,
@@ -21,7 +20,7 @@ import {
   reduceStartLifecycle,
   reduceStopLifecycle,
   shouldEmitLiveActivity,
-} from "./agentLifecycleReducer.js";
+} from "./agentLifecycleReducer";
 
 function state(input: Parameters<typeof buildAgentLifecycleStateSnapshot>[0]) {
   return buildAgentLifecycleStateSnapshot({
@@ -314,6 +313,7 @@ test("canonical daemon activity signal reducer computes activityKind without tru
     ["thinking_started", "thinking"],
     ["thinking_end", "working"],
     ["model_request_started", "working"],
+    ["provider_request_status", "working"],
     ["model_response_started", "working"],
     ["tool_end", "working"],
   ] as const;
@@ -328,6 +328,13 @@ test("canonical daemon activity signal reducer computes activityKind without tru
       detailKind,
       source: "canonical",
     });
+  }
+});
+
+test("provider request observation preserves existing runtime error authority", () => {
+  const signal = reduceDaemonActivitySignal({ detailKind: "provider_request_status", legacyActivity: "error" });
+  for (const currentErrorPresent of [false, true]) {
+    assert.equal(reduceRuntimeErrorActivityAction({ signal, currentErrorPresent, isHeartbeat: false }), "preserve");
   }
 });
 
@@ -510,54 +517,6 @@ test("daemon activity reducer omits launchId/clientSeq/probeId/producerFactId on
     assert.equal(Object.prototype.hasOwnProperty.call(plan.liveActivity, "clientSeq"), false);
     assert.equal(Object.prototype.hasOwnProperty.call(plan.liveActivity, "probeId"), false);
     assert.equal(Object.prototype.hasOwnProperty.call(plan.liveActivity, "producerFactId"), false);
-  }
-});
-
-test("daemon activity reducer restores inactive agents when live runtime activity resumes", () => {
-  const plan = reduceDaemonActivityLifecycle({
-    action: "broadcast-activity",
-    activity: "thinking",
-    detail: "Resumed output",
-    detailKind: "daemon_activity",
-    event: lifecycleEvent(),
-    state: state({ dbStatus: "inactive", runtimeState: "thinking" }),
-  });
-
-  assert.deepEqual(plan.sideEffects, { updateCache: { runtimeState: "thinking", status: "active" } });
-  assert.deepEqual(plan.dbStatus, {
-    kind: "apply",
-    status: "active",
-    writer: "signal",
-    attrs: {
-      activity_status: "thinking",
-      legacy_status: "inactive",
-      runtime_state: "thinking",
-    },
-  });
-  assert.deepEqual(plan.wakeEligibility, { eligible: true });
-  assert.equal(plan.liveActivity.kind, "emit");
-  assert.equal(plan.activityLog.labelKind, "daemon_activity");
-});
-
-test("daemon activity reducer does not restore inactive agents from offline or error activity", () => {
-  for (const activity of ["offline", "error"] as const) {
-    const plan = reduceDaemonActivityLifecycle({
-      action: "broadcast-activity",
-      activity,
-      detail: activity,
-      detailKind: activity === "offline" ? "stopped" : "runtime_error",
-      event: lifecycleEvent(),
-      state: state({ dbStatus: "inactive", runtimeState: activity === "offline" ? "interrupted" : "crashed" }),
-    });
-
-    assert.deepEqual(plan.sideEffects, {
-      updateCache: { runtimeState: activity === "offline" ? "interrupted" : "crashed" },
-    });
-    assert.deepEqual(plan.dbStatus, {
-      kind: "skip",
-      skippedReason: "daemon_activity_does_not_change_db_status",
-      attrs: { activity_status: activity },
-    });
   }
 });
 
@@ -858,4 +817,30 @@ test("synthetic repair activity log carries repair_kind", () => {
 
   assert.equal(plan.activityLog.labelKind, "synthetic_repair");
   assert.deepEqual(plan.activityLog.attrs, { synthetic_repair: true, repair_kind: "stale_sweep" });
+});
+
+test("RFC 069 §8: activity from a sequenced-status daemon changes display only", () => {
+  const plan = reduceDaemonActivityLifecycle({
+    action: "broadcast-activity",
+    activity: "thinking",
+    detail: "Resumed output",
+    detailKind: "daemon_activity",
+    event: lifecycleEvent(),
+    state: state({ dbStatus: "inactive", runtimeState: "not_running" }),
+    activityDrivesInstanceState: false,
+  });
+  assert.equal(plan.sideEffects, undefined);
+  assert.equal(plan.dbStatus.kind, "skip");
+  assert.equal(plan.dbStatus.kind === "skip" ? plan.dbStatus.skippedReason : null, "status_reported_on_sequenced_channel");
+  assert.equal(plan.liveActivity.kind, "emit");
+});
+
+test("RFC 069 §8: sequenced status is accepted in order and only from the connected daemon process", async () => {
+  const { planSequencedStatus } = await import("./agentLifecycleReducer");
+  assert.deepEqual(planSequencedStatus({ connectionInstanceId: "d2", frameInstanceId: undefined, frameSeq: undefined, last: undefined }), { kind: "unsequenced" });
+  assert.deepEqual(planSequencedStatus({ connectionInstanceId: "d2", frameInstanceId: "d1", frameSeq: 50, last: undefined }), { kind: "stale_instance" });
+  assert.deepEqual(planSequencedStatus({ connectionInstanceId: "d2", frameInstanceId: "d2", frameSeq: 3, last: { daemonInstanceId: "d2", clientSeq: 3 } }), { kind: "stale_seq" });
+  assert.deepEqual(planSequencedStatus({ connectionInstanceId: "d2", frameInstanceId: "d2", frameSeq: 1, last: { daemonInstanceId: "d1", clientSeq: 90 } }), { kind: "accept", next: { daemonInstanceId: "d2", clientSeq: 1 } });
+  assert.deepEqual(planSequencedStatus({ connectionInstanceId: "d2", frameInstanceId: "d2", frameSeq: 4, last: { daemonInstanceId: "d2", clientSeq: 3 } }), { kind: "accept", next: { daemonInstanceId: "d2", clientSeq: 4 } });
+  assert.deepEqual(planSequencedStatus({ connectionInstanceId: null, frameInstanceId: "d1", frameSeq: 4, last: { daemonInstanceId: "d2", clientSeq: 3 } }), { kind: "unsequenced" });
 });

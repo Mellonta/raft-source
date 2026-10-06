@@ -1,3 +1,14 @@
+/**
+ * Thread/task window URL builders.
+ *
+ * The `/thread-window` route is intentionally kept even though the in-app
+ * "open in new tab" entry points (thread header / overflow menu, task card,
+ * message context menu) were removed on 2026-09-10 by product call. These
+ * builders, the route and the window components stay so the standalone window
+ * can be re-exposed later without rebuilding the plumbing. No UI code imports
+ * this module today; `tests/openPanelInNewTab.test.ts` still pins the URL
+ * contracts.
+ */
 export const TASK_INTENT_QUERY_PARAM = "task";
 export const LEGACY_TASK_QUERY_PARAM = "legacyTask";
 

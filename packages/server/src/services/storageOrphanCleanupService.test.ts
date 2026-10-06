@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/pglite";
-import type { Database } from "../db/index.js";
-import { migratePglite } from "../db/pgliteMigrations.js";
-import * as schema from "../db/schema.js";
-import { attachmentObjects, attachments, channels, messages, servers, users } from "../db/schema.js";
-import { cleanupLegacyOrphanAttachmentsWithDependencies } from "./storageService.js";
+import type { Database } from "../db/index";
+import { migratePglite } from "../db/pgliteMigrations";
+import * as schema from "../db/schema";
+import { attachmentObjects, attachments, channels, messages, servers, users } from "../db/schema";
+import { cleanupLegacyOrphanAttachmentsWithDependencies } from "./storageService";
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
 const SERVER_ID = "22222222-2222-4222-8222-222222222222";

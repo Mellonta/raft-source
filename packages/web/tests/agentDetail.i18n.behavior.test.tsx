@@ -1,11 +1,9 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { createIntl } from "react-intl";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { RUNTIME_ACCOUNT_USAGE_FEATURE_FLAG_KEY, TOPBAR_OVERFLOW_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 
 import { TestIntlProvider } from "./helpers/intl";
 import api from "../src/api/client";
@@ -20,7 +18,6 @@ import { useMachineStore } from "../src/store/machineStore";
 import { useServerStore } from "../src/store/serverStore";
 import {
   resetServerFeatureFlagsForTests,
-  setServerFeatureFlagForTests,
 } from "../src/store/serverFeatureFlags";
 import { runtimeAccountUsageClient } from "../src/utils/runtimeAccountUsageClient";
 
@@ -55,7 +52,6 @@ function seedAgentStores(
     current: { id: "server-1", slug: "playwright-server", name: "Playwright Server", role: opts.role ?? "owner" },
     members: [],
   } as never);
-  setServerFeatureFlagForTests("server-1", TOPBAR_OVERFLOW_FEATURE_FLAG_KEY, false);
   useMachineStore.setState({ machines: opts.machines ?? [] } as never);
   useChannelStore.setState({ openDM: () => undefined } as never);
   useAgentStore.setState({
@@ -229,7 +225,7 @@ test("mounted agent chat keeps a five-channel preview with a real show-all toggl
   assert.equal(screen.queryByText("channel-7") !== null, false);
 });
 
-test("mounted agent manager shares one copy lifecycle across every diagnostic trigger", async (t) => {
+test("mounted agent manager shares one copy lifecycle across every diagnostic trigger", async () => {
   const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   const copiedTexts: string[] = [];
   Object.defineProperty(navigator, "clipboard", {
@@ -240,7 +236,7 @@ test("mounted agent manager shares one copy lifecycle across every diagnostic tr
       },
     },
   });
-  t.after(() => {
+  onTestFinished(() => {
     if (clipboardDescriptor) Object.defineProperty(navigator, "clipboard", clipboardDescriptor);
     else Reflect.deleteProperty(navigator, "clipboard");
   });
@@ -261,17 +257,22 @@ test("mounted agent manager shares one copy lifecycle across every diagnostic tr
     assert.ok(screen.getByText(label));
   }
   assert.ok(screen.getAllByText(/manager-only diagnostic/).length >= 1);
-  assert.ok(document.querySelector('span.min-w-0.truncate.text-sm.font-mono[title*="manager-only diagnostic"]'));
+  assert.ok([...document.querySelectorAll('span.min-w-0.truncate.text-sm.font-mono')].find((el) => el.textContent?.includes('manager-only diagnostic')));
   const bannerCopy = screen.getByRole("button", { name: "Copy info" });
   const profileCopy = screen.getByRole("button", { name: "Copy Diagnostic Info" });
   fireEvent.click(bannerCopy);
   await waitFor(() => assert.equal(copiedTexts.length, 1));
   assert.match(copiedTexts[0] ?? "", /manager-only diagnostic/);
   await waitFor(() => assert.ok(screen.getByRole("button", { name: "Copied" })));
+  // Feedback is local to each control family now: the banner's compact icon
+  // action flips, while the profile tab's full-width control is a different
+  // surface and keeps its own lifecycle (it no longer shares the banner's).
   assert.ok(
-    screen.getByRole("button", { name: "Diagnostic Info Copied" }),
-    "every diagnostic trigger must reflect the one shared copied lifecycle",
+    screen.getByRole("button", { name: "Copy Diagnostic Info" }),
+    "the profile control keeps its own copied lifecycle",
   );
+  fireEvent.click(profileCopy);
+  await waitFor(() => assert.ok(screen.getByRole("button", { name: "Diagnostic Info Copied" })));
   assert.equal(profileCopy.hasAttribute("disabled"), false);
   assert.ok(screen.getAllByRole("button", { name: "Restart / Reset" }).length >= 1);
 });
@@ -293,9 +294,9 @@ test("mounted human creator keeps Agent management after server-role demotion", 
     assert.ok(screen.getByText(label));
   }
   assert.ok(screen.getAllByText(/creator-private diagnostic/).length >= 1);
-  assert.ok(document.querySelector('span.min-w-0.truncate.text-sm.font-mono[title*="creator-private diagnostic"]'));
+  assert.ok([...document.querySelectorAll('span.min-w-0.truncate.text-sm.font-mono')].find((el) => el.textContent?.includes('creator-private diagnostic')));
   assert.ok(screen.getAllByRole("button", { name: "Restart / Reset" }).length >= 1);
-  assert.ok(screen.getByTitle("Edit display name"));
+  assert.ok(screen.getByRole("button", { name: "Edit display name" }));
   assert.ok(screen.getByRole("button", { name: "Delete Agent" }));
 });
 
@@ -395,7 +396,6 @@ test("mounted agent runtime badge opens Computer account usage only across the e
     lastRuntimeError: null,
   };
 
-  setServerFeatureFlagForTests("server-1", RUNTIME_ACCOUNT_USAGE_FEATURE_FLAG_KEY, true);
   renderAgentEn(agent, { machines: [machine] });
 
   const runtimeBadge = await screen.findByRole("button", { name: "Codex CLI" });
@@ -409,7 +409,6 @@ test("mounted agent runtime badge opens Computer account usage only across the e
   runtimeAccountUsageClient.clear();
   usageReads = 0;
 
-  setServerFeatureFlagForTests("server-1", RUNTIME_ACCOUNT_USAGE_FEATURE_FLAG_KEY, true);
   renderAgentEn(agent, {
     role: "member",
     machines: [{ ...machine, computerAttachedByCurrentUser: false, creator: null }],

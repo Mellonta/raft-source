@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createIntl } from "react-intl";
 
 import { resolveCanonicalPanelDisplay } from "../src/components/workspace/workspaceGridUrlState";

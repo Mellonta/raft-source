@@ -1,5 +1,5 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -7,11 +7,11 @@ import { readFile } from "node:fs/promises";
 
 import { and, eq, inArray } from "drizzle-orm";
 
-import { closeDatabase, getDb } from "../db/index.js";
+import { closeDatabase, getDb } from "../db/index";
 import {
   readMutationWorkerDrainDuration,
   readMutationWorkerDrainsTotal,
-} from "../metrics.js";
+} from "../metrics";
 import {
   agentChannelReadCursors,
   channelAgents,
@@ -28,15 +28,15 @@ import {
   userChannelInboxStates,
   userChannelReadCursors,
   users,
-} from "../db/schema.js";
-import { createAgent } from "./agentService.js";
-import { markChannelInboxDone } from "./channelService.js";
+} from "../db/schema";
+import { createAgent } from "./agentService";
+import { markChannelInboxDone } from "./channelService";
 import {
   awaitPostPersistReadMutation,
   drainSenderReadReceiptsForTests,
   getSenderReadReceiptInFlightCountForTests,
   registerSenderReadReceiptForTests,
-} from "./messageService.js";
+} from "./messageService";
 import {
   admitReadMutation,
   claimNextFairReadMutation,
@@ -47,12 +47,13 @@ import {
   executeCompatibilityReadMutation,
   executeReadMutationClaim,
   getReadMutationFrontier,
+  isReadMutationFenceRefusal,
   ReadMutationError,
   ReadMutationFailpointError,
   resolveReadMutationUnreadBoundary,
   startReadMutationWorker,
   type ReadMutationAdmissionInput,
-} from "./readMutationSequencer.js";
+} from "./readMutationSequencer";
 
 
 async function seedAuthority() {
@@ -911,13 +912,20 @@ test("server membership revoke after admission retires without effects and does 
   const ack = await executeReadMutationClaim({ claim: await claim({ serverId: server.id, principalId: owner.id }) });
   assert.equal(ack.terminalReason, "authorization_revoked");
   assert.deepEqual(ack.scopes, []);
-  const replay = await admitReadMutation({
-    serverId: server.id,
-    principalId: owner.id,
-    mutationId,
-    mutation: { kind: "global_read_all" },
-  });
-  assert.equal(replay.outcome, "ALREADY_TERMINAL");
+  // Task #93 line B, declared behaviour delta: admission fences on the Server membership row before it looks up an
+  // existing receipt. Before line B this replay of the same mutation id answered ALREADY_TERMINAL — the terminal result
+  // of work that had already completed; a member removed after admission is now refused instead. The fresh admission
+  // below was refused too, but with SCOPE_NOT_FOUND from the scope read; the fence reason is the stricter one. Neither
+  // path writes or undoes anything, and the mutation stays terminal (asserted above).
+  await assert.rejects(
+    admitReadMutation({
+      serverId: server.id,
+      principalId: owner.id,
+      mutationId,
+      mutation: { kind: "global_read_all" },
+    }),
+    (error: unknown) => isReadMutationFenceRefusal(error),
+  );
   await assert.rejects(
     admitReadMutation({
       serverId: server.id,
@@ -925,7 +933,7 @@ test("server membership revoke after admission retires without effects and does 
       mutationId: randomUUID(),
       mutation: { kind: "global_read_all" },
     }),
-    (error: unknown) => error instanceof ReadMutationError && error.code === "SCOPE_NOT_FOUND",
+    (error: unknown) => isReadMutationFenceRefusal(error),
   );
 });
 
@@ -1262,16 +1270,16 @@ test("production worker owns independent stoppable drain and compaction timers",
 // carry; skipped when an exported snapshot's RELEASE_SOURCE marker is present.
 const inSourceSnapshot = existsSync(new URL("../../../../RELEASE_SOURCE", import.meta.url));
 
-test.skipIf(inSourceSnapshot)("required typecheck CI pins the real-PostgreSQL sequencer contract and cannot silently skip it", async () => {
+test.skipIf(inSourceSnapshot)("staging integration CI pins the real-PostgreSQL sequencer contract and cannot silently skip it", async () => {
   const workflow = await readFile(new URL("../../../../.github/workflows/test.yml", import.meta.url), "utf8");
-  const typecheckJob = workflow.match(/\n  typecheck:\n(?<body>[\s\S]*?)(?=\n  [a-z][a-z0-9-]+:\n)/)?.groups?.body;
-  assert.ok(typecheckJob, "typecheck job must remain present");
-  assert.match(typecheckJob, /services:\s*\n\s+postgres:\s*\n\s+image: postgres:16-alpine/);
-  assert.match(typecheckJob, /--health-cmd "pg_isready -U read_mutation_ci -d postgres"/);
-  const focusedStep = typecheckJob.match(
+  const integrationJob = workflow.match(/\n  integration-contracts:\n(?<body>[\s\S]*?)(?=\n  [a-z][a-z0-9-]+:\n)/)?.groups?.body;
+  assert.ok(integrationJob, "integration job must remain present");
+  assert.match(integrationJob, /services:\s*\n\s+postgres:\s*\n\s+image: postgres:16-alpine/);
+  assert.match(integrationJob, /--health-cmd "pg_isready -U read_mutation_ci -d postgres"/);
+  const focusedStep = integrationJob.match(
     /- name: Read mutation sequencer real PostgreSQL contract(?<body>[\s\S]*?)(?=\n\s+- name:)/,
   )?.groups?.body;
-  assert.ok(focusedStep, "required typecheck job must execute the focused real-PG contract");
+  assert.ok(focusedStep, "required integration job must execute the focused real-PG contract");
   assert.match(focusedStep, /timeout-minutes: 3/);
   assert.match(focusedStep, /READ_MUTATION_REAL_PG_REQUIRED: "1"/);
   assert.match(focusedStep, /READ_MUTATION_REAL_PG_URL: postgresql:\/\/read_mutation_ci:/);

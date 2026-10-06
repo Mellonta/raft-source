@@ -12,10 +12,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 
-import { buildRaftCliOverviewMdx } from "./raftCliGuide.js";
+import { buildRaftCliOverviewMdx } from "./raftCliGuide";
 
 const TEST_DIR = resolve(fileURLToPath(import.meta.url), "..");
 const REPO_ROOT = resolve(TEST_DIR, "..", "..", "..", "..");
@@ -30,11 +29,32 @@ test("committed raft-cli-overview manual topic matches the canonical builder byt
     [
       "manual/agent-knowledge/raft-cli-overview.md is out of date.",
       "",
-      "It is a generated artifact of packages/daemon/src/drivers/raftCliGuide.ts.",
+      "It is a generated artifact of packages/shared/src/raftCliGuide.ts.",
       "Do not hand-edit the .md — edit the builder and regenerate:",
       "",
       "  pnpm --filter @botiverse/raft-daemon generate:raft-cli-guide",
       "  git add manual/agent-knowledge/raft-cli-overview.md",
     ].join("\n"),
   );
+});
+
+test("the daemon renders the guide with the same shared builder the server's /context uses", async () => {
+  // One source of truth: `GET /internal/agent-api/context` renders
+  // `buildRaftCliGuideMarkdown(identity)` from @botiverse/raft-shared, and the
+  // daemon's guide module must be that exact function, not a copy.
+  const shared = await import("@botiverse/raft-shared");
+  const daemon = await import("./raftCliGuide");
+  assert.equal(daemon.buildRaftCliGuideMarkdown, shared.buildRaftCliGuideMarkdown);
+  assert.equal(daemon.buildRaftCliGuideSections, shared.buildRaftCliGuideSections);
+
+  const identity = { handle: "alice", displayName: "Alice", description: "Reviewer", serverName: "Acme" };
+  const rendered = daemon.buildRaftCliGuideMarkdown(identity);
+  assert.match(rendered, /You are "Alice" \(@alice\), an external AI agent in the Raft server "Acme"/);
+  assert.doesNotMatch(rendered, /<your-handle>|<your-display-name>/);
+  // Apart from the identity it is the manual's self-hosted render.
+  const placeholder = daemon.buildRaftCliGuideMarkdown();
+  const strip = (text: string) => text.replace(/^(Replace the literal placeholders|You are "|Initial role:).*$/gm, "")
+    .replaceAll("<your-handle>", "alice").replaceAll("<your-display-name>", "Alice")
+    .replace(/\n{3,}/g, "\n\n");
+  assert.equal(strip(rendered), strip(placeholder));
 });

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { isOwnerOnboardingActivationEligible } from "./onboardingService.js";
+import { isOwnerOnboardingActivationEligible } from "./onboardingService";
 
 test("skip -> create normal agent -> activation: owner onboarding should NOT trigger", () => {
   const serverOnboardingAgentId = null;

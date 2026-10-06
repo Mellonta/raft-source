@@ -17,7 +17,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -76,7 +75,10 @@ test("joint channel chrome uses a distinct connected-server surface", () => {
   assert.match(channelKindIcon, /if \(type === "private"\) return <Lock size=\{size\}/);
   assert.match(channelKindIcon, /if \(type === "joint"\) return <GitBranch size=\{size\}/);
   assert.match(channelKindIcon, /if \(type === "channel"\) return <Hash size=\{size\}/);
-  assert.match(chatPanel, /const channelSubtitle =\s*isRegularChannel\s*\?\s*channel\.description \|\| undefined\s*:\s*undefined;/);
+  assert.match(
+    chatPanel,
+    /const channelSubtitle =\s*isRegularChannel\s*\?\s*channel\.description\s*\?\s*<ChannelDescription description=\{channel\.description\} \/>\s*:\s*undefined\s*:\s*undefined;/,
+  );
   assert.doesNotMatch(chatPanel, /Joint with \$\{channel\.jointPeerServerName \|\| channel\.jointPeerServerSlug\}/);
   // Chrome labels are catalog ids now; assert the id at the call site and the
   // wording in en.ts, so neither the wiring nor the copy can drift unnoticed.
@@ -84,12 +86,11 @@ test("joint channel chrome uses a distinct connected-server surface", () => {
   assert.match(editDialog, /id: "channel\.edit\.connectedServers"/);
   assert.match(editDialog, /id: "channel\.edit\.inviteServerSection"/);
   assert.match(chromeMsgs, /"channel\.edit\.connectedServers": "Connected servers"/);
-  assert.match(chromeMsgs, /"channel\.edit\.inviteServerSection": "Invite server"/);
+  assert.match(chromeMsgs, /"channel\.edit\.inviteServerSection": "Channel connection invitation"/);
   assert.match(editDialog, /jointServers/);
   assert.match(editDialog, /jointPendingInvites/);
   assert.match(editDialog, /invite\.fromServerId === channel\.serverId/);
-  assert.match(editDialog, /id: "message\.channelSettings\.jointTitle"/);
-  assert.match(chromeMsgs, /"message\.channelSettings\.jointTitle": "Joint channel"/);
+  assert.doesNotMatch(editDialog, /id: "message\.channelSettings\.jointTitle"/);
   assert.match(editDialog, /!isJointChannel &&/);
 });
 
@@ -99,7 +100,7 @@ test("joint channel edit can invite another server", () => {
 
   assert.match(editDialog, /MAX_JOINT_CHANNEL_SERVERS/);
   assert.match(editDialog, /validateNameReason/);
-  assert.match(editDialog, /validateServerSlugReason/);
+  assert.match(editDialog, /validateServerSlugReferenceReason/);
   assert.match(editDialog, /inviteJointChannelServer/);
   assert.match(editDialog, /handleInviteJointServer/);
   const inviteMsgs = readSource("i18n/messages/en.ts");
@@ -120,21 +121,36 @@ test("joint channel edit can invite another server", () => {
 
 test("ordinary channel edit can convert the channel to a joint channel", () => {
   const editDialog = readSource("components/channel/EditChannelDialog.tsx");
+  const conversionSection = readSource("components/channel/JointConversionSection.tsx");
   const channelStore = readSource("store/channelStore.ts");
 
   assert.match(editDialog, /const plan = useServerStore\(\(s\) => s\.current\?\.plan\) \|\| "free"/);
-  assert.match(editDialog, /const canShowConvertToJointEntry = useServerStore\(\(s\) => s\.current\?\.slug === "botiverse"\)/);
-  assert.match(editDialog, /const canUseJointChannels = plan !== "free"/);
-  assert.match(editDialog, /const showConvertAction = showManageActions &&\s*canShowConvertToJointEntry &&\s*canUseJointChannels &&\s*!isAllChannel &&\s*!isJointChannel/);
+  assert.match(editDialog, /useServerFeatureFlag\(\s*CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,?\s*\)\.enabled/);
+  assert.doesNotMatch(editDialog, /slug\s*===\s*["']botiverse["']/);
+  // Contract v0.3: any plan may convert; limits apply when servers are invited.
+  assert.doesNotMatch(editDialog, /canUseJointChannels/);
+  assert.match(editDialog, /const showConvertAction = canEditChannel &&\s*capabilities\.federateChannels &&\s*channelToJointConversionEnabled &&\s*!isAllChannel &&\s*!isJointChannel/);
   assert.match(editDialog, /convertChannelToJoint/);
   const convertMsgs = readSource("i18n/messages/en.ts");
-  assert.match(editDialog, /id: "channel\.edit\.convertToJoint"/);
-  assert.match(editDialog, /id: "channel\.edit\.confirmConvert"/);
+  assert.match(editDialog, /<JointConversionSection/);
+  assert.match(conversionSection, /id: "channel\.edit\.convertToJoint"/);
+  assert.match(conversionSection, /id: "channel\.edit\.convertSectionDescription"/);
+  assert.match(conversionSection, /id: "channel\.edit\.convertConfirmIntro"/);
+  assert.match(conversionSection, /from "raft-ui"/);
+  assert.match(conversionSection, /<section[\s\S]*data-testid="channel-settings-joint-conversion-section"/);
+  assert.doesNotMatch(conversionSection, /<Card/);
+  assert.match(conversionSection, /<Progress/);
+  assert.match(conversionSection, /<Badge/);
+  assert.match(conversionSection, /<Dialog/);
+  assert.match(conversionSection, /<Banner status="warning"/);
+  assert.doesNotMatch(conversionSection, /\.\/\.\/ui\/(Button|Banner|ProgressBar)/);
+  assert.doesNotMatch(editDialog, /testId="channel-settings-convert-action"/);
+  assert.doesNotMatch(conversionSection, /targetServerSlug|SlugInput|<select/);
   assert.match(convertMsgs, /"channel\.edit\.convertToJoint": "Convert to Joint Channel"/);
-  assert.match(convertMsgs, /may be read-only while conversion runs/);
-  assert.match(convertMsgs, /any server invited later can see that history through its joint projection/);
-  assert.match(channelStore, /convertChannelToJoint:\s*\(\s*channelId: string,\s*opts\?:\s*\{\s*confirmTaskIdentityDrop\?: boolean;?\s*\}\s*\)\s*=> Promise<Channel>/);
-  assert.match(channelStore, /confirmTaskIdentityDrop: true/);
+  assert.match(convertMsgs, /"channel\.edit\.convertSectionTitle": "Chat with members from other servers"/);
+  assert.match(convertMsgs, /People invited after conversion can see the existing channel history/);
+  assert.match(channelStore, /convertChannelToJoint:\s*\(\s*channelId: string,\s*opts\?:\s*\{\s*observeProgress\?: boolean;?\s*commandId\?: string;?\s*\}\s*\)\s*=> Promise<Channel>/);
+  assert.doesNotMatch(channelStore, /confirmTaskIdentityDrop/);
   assert.match(channelStore, /api\.post\([\s\S]{0,320}convert-to-joint/);
 });
 

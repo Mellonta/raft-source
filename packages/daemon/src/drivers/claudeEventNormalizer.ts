@@ -1,5 +1,5 @@
 import type { SubagentLineage } from "@botiverse/raft-shared";
-import type { ParsedEvent } from "./types.js";
+import type { ParsedEvent } from "./types";
 
 type TelemetryAttrs = Extract<ParsedEvent, { kind: "telemetry" }>["attrs"];
 

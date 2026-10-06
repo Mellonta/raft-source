@@ -1,15 +1,15 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
-import type { ExternalInboundWorkerDependencies } from "./externalInboundWorkerService.js";
+import type { ExternalInboundWorkerDependencies } from "./externalInboundWorkerService";
 import type {
   ExternalInboundPayloadAad,
   ExternalIngressPayloadSealer,
   ExternalIngressSecretResolver,
-} from "./externalAppIngressService.js";
+} from "./externalAppIngressService";
 import type {
   SlackBotCredentialSealer,
   SlackOAuthAppSecretLeaseProvider,
-} from "./slackProviderAdapter.js";
+} from "./slackProviderAdapter";
 
 const CREDENTIAL_SCHEMA = "slack-env-credential.v1" as const;
 const PAYLOAD_SCHEMA = "slack-env-inbound-payload.v1" as const;

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { lazy } from "react";
 import type { ComponentType } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";

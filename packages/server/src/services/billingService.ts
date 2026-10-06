@@ -1,8 +1,8 @@
 import Stripe from "stripe";
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { and, eq, isNull, lt } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { subscriptions, servers, webhookEvents } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { subscriptions, servers, webhookEvents } from "../db/schema";
 import type { Server as SocketIOServer } from "socket.io";
 import {
   PRO_AGENT_SEAT_BLOCK_SIZE,
@@ -18,9 +18,9 @@ import {
   type BillingPriceSummary,
   type ServerPlan,
 } from "@botiverse/raft-shared";
-import { getServerBillingEntitlement, getServerBillingUsage } from "./planService.js";
-import { getWebFrameAncestorOrigins } from "../config/appUrl.js";
-import { addTraceEvent, traceAttrs } from "../tracing/semanticTrace.js";
+import { getServerBillingEntitlement, getServerBillingUsage } from "./planService";
+import { getWebFrameAncestorOrigins } from "../config/appUrl";
+import { addTraceEvent, traceAttrs } from "../tracing/semanticTrace";
 
 // ── Socket.io reference for broadcasting plan changes ──
 
@@ -127,7 +127,7 @@ export async function getBillingSummary(serverId: string) {
   });
   const db = getDb();
   await refreshSubscriptionForServer(serverId);
-  const { getFileUploadQuotaSummary } = await import("./fileUploadQuotaService.js");
+  const { getFileUploadQuotaSummary } = await import("./fileUploadQuotaService");
   const [server] = await db
     .select({ plan: servers.plan })
     .from(servers)
@@ -1836,6 +1836,16 @@ async function syncStripeSubscriptionProjection(
       updatedAt: now,
     })
     .where(and(eq(servers.id, serverId), isNull(servers.deletedAt)));
+
+  // Contract v0.3 §18.8: a plan change can move a joint over (or back within)
+  // its free-server cap. Observe it now instead of waiting for the hourly
+  // sweep. Best effort: the sweep is the backstop if this fails.
+  try {
+    const { reconcileJointsForServer } = await import("./jointChannelLimitService");
+    await reconcileJointsForServer(serverId, new Date(now));
+  } catch (err) {
+    console.error(`[Billing] Joint over-limit reconcile failed for server ${serverId}:`, err instanceof Error ? err.message : err);
+  }
 
   if (shouldBroadcast) {
     console.log(`[Billing] Synced Stripe subscription ${stripeSub.id} for server ${serverId}: ${projection.plan}/${status}`);

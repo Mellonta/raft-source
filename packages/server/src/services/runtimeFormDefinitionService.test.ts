@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import type { ResolvedAgentCreateFormDefinition } from "@botiverse/raft-shared";
+import { parseRuntimeConfig, type ResolvedAgentCreateFormDefinition } from "@botiverse/raft-shared";
 import {
   buildBuiltInPiFormDefinition,
   buildBuiltInPiFormOptionSource,
@@ -13,7 +12,8 @@ import {
   validateKimiSdkSelection,
   validateBuiltInPiDefinitionProjection,
   validateRuntimeFormDefinitionRef,
-} from "./runtimeFormDefinitionService.js";
+} from "./runtimeFormDefinitionService";
+import { buildRuntimeConfigFromFormValues, formValuesPointerForRuntimeConfigPointer } from "./runtimeFormV2Registry";
 
 const cloneDefinition = () => JSON.parse(JSON.stringify(buildBuiltInPiResolvedFormDefinition())) as ResolvedAgentCreateFormDefinition;
 
@@ -32,7 +32,9 @@ test("Built-in Pi form definition is a version-bound parser/registry projection"
   assert.equal(apiKeySchema.type, "string");
   assert.equal(apiKeySchema.type === "string" ? apiKeySchema.writeOnly : false, true);
   assert.equal("default" in definition.dataSchema.properties.apiKey, false);
-  assert.equal(definition.schemaVersion, "builtin-pi.create.v2");
+  assert.equal(definition.schemaVersion, "builtin-pi.create.v3");
+  assert.equal(definition.dataSchema.properties.loadLocalPlugins?.type, "boolean");
+  assert.ok(definition.uiSchema.layout.advanced.includes("/loadLocalPlugins"));
   assert.equal(definition.dataSchema.properties.supportsImageInput?.type, "boolean");
   assert.deepEqual(
     definition.uiSchema.visibility.find((rule) => rule.pointer === "/supportsImageInput"),
@@ -51,6 +53,32 @@ test("Built-in Pi form definition is a version-bound parser/registry projection"
   assert.equal(buildBuiltInPiFormOptionSource("provider")?.kind, "select");
   assert.equal(buildBuiltInPiFormOptionSource("model")?.kind, "dependent_select");
   assert.equal(buildBuiltInPiFormOptionSource("unknown"), null);
+});
+
+test("Built-in Pi dataSchema stays byte-compatible with released mobile clients for this schemaVersion", () => {
+  // Released iOS/Android builds (botiverse/mobile ComputersApi.kt toBuiltInPiDomain)
+  // compare every dataSchema field, title included, literally and refuse to render
+  // the whole form on any difference. Changing anything here needs a new
+  // schemaVersion and a mobile release that accepts it; display copy that may
+  // change freely lives in uiSchema.localization.
+  const definition = buildBuiltInPiFormDefinition();
+  assert.equal(definition.schemaVersion, BUILTIN_PI_FORM_DEFINITION_REF.schemaVersion);
+  assert.deepEqual(definition.dataSchema, {
+    type: "object",
+    additionalProperties: false,
+    required: ["providerId", "apiKey", "model"],
+    properties: {
+      providerId: { type: "string", title: "Provider", minLength: 1 },
+      apiKey: { type: "string", title: "API Key", minLength: 1, writeOnly: true },
+      baseUrl: { type: "string", title: "Base URL", minLength: 1, format: "uri" },
+      supportsImageInput: { type: "boolean", title: "Image input" },
+      loadLocalPlugins: { type: "boolean", title: "Load local Pi plugins" },
+      model: { type: "string", title: "Model", minLength: 1 },
+      envVars: { type: "object", title: "Environment Variables", additionalProperties: { type: "string" } },
+    },
+  });
+  assert.deepEqual(definition.uiSchema.order, ["providerId", "apiKey", "baseUrl", "supportsImageInput", "model", "loadLocalPlugins", "envVars"]);
+  assert.deepEqual(definition.uiSchema.layout.advanced, ["/loadLocalPlugins", "/envVars"]);
 });
 
 test("Built-in Pi form lists Qwen Token Plan global and CN as first-class presets", () => {
@@ -236,4 +264,65 @@ test("Kimi form registry and live option source preserve per-model effort author
     "/runtimeConfig/reasoningEffort",
   );
   assert.deepEqual(validateKimiSdkSelection({ source, model: "kimi-code/k2", reasoningEffort: null }), []);
+});
+
+test("protocol v2 form values assemble the same runtimeConfig a v1 client built", () => {
+  const preset = buildRuntimeConfigFromFormValues("builtin", {
+    providerId: "deepseek",
+    apiKey: " sk-test ",
+    model: "deepseek/deepseek-v4-pro",
+    loadLocalPlugins: true,
+    envVars: { FOO: "bar", "": "dropped" },
+    somethingTheClientDidNotRender: 1,
+  });
+  assert.ok(preset.ok);
+  // A v2 submit is validated against the v2 registry, never a v1 ref.
+  assert.deepEqual(preset.formDefinitionRef, { protocolVersion: 2, runtimeId: "builtin" });
+  assert.deepEqual(preset.runtimeConfig, {
+    version: 1,
+    runtime: "builtin",
+    provider: { kind: "preset", providerId: "deepseek", apiKey: "sk-test" },
+    model: { kind: "preset", id: "deepseek/deepseek-v4-pro" },
+    mode: { kind: "default" },
+    reasoningEffort: null,
+    envVars: { FOO: "bar" },
+    hostUserState: "forbidden",
+    loadLocalPlugins: true,
+  });
+  const parsed = parseRuntimeConfig({ runtimeConfig: preset.runtimeConfig });
+  assert.ok(parsed.ok, JSON.stringify(parsed));
+
+  const kimi = buildRuntimeConfigFromFormValues("kimi-sdk", { model: "kimi-k2", reasoningEffort: "" });
+  assert.ok(kimi.ok);
+  assert.deepEqual(kimi.formDefinitionRef, { protocolVersion: 2, runtimeId: "kimi-sdk" });
+  assert.equal((kimi.runtimeConfig as { reasoningEffort: unknown }).reasoningEffort, null);
+});
+
+test("protocol v2 form values point at the offending field", () => {
+  const issue = (runtimeId: string, values: unknown) => {
+    const result = buildRuntimeConfigFromFormValues(runtimeId, values);
+    return result.ok ? null : result.issue;
+  };
+  assert.deepEqual(issue("builtin", { providerId: "nope" }), { code: "select_valid_provider", pointer: "/formValues/providerId" });
+  assert.deepEqual(issue("builtin", { providerId: "deepseek", model: "deepseek/deepseek-v4-pro" }), { code: "api_key_required", pointer: "/formValues/apiKey" });
+  assert.deepEqual(
+    issue("builtin", { providerId: "deepseek", apiKey: "k", model: "not-a-deepseek-model" }),
+    { code: "select_valid_provider_model", pointer: "/formValues/model" },
+  );
+  assert.deepEqual(issue("builtin", { providerId: "deepseek", apiKey: "k", model: "m", envVars: { A: 1 } }), { code: "invalid_string_map", pointer: "/formValues/envVars" });
+  assert.deepEqual(issue("kimi-sdk", {}), { code: "model_required", pointer: "/formValues/model" });
+  assert.deepEqual(issue("codex", {}), { code: "model_required", pointer: "/formValues/model" });
+  assert.deepEqual(issue("pi", {}), { code: "select_valid_provider", pointer: "/formValues/provider" });
+  // Every catalog runtime has a v2 form since batch 4: an unknown id stands for "no v2 form".
+  assert.deepEqual(issue("not-a-runtime", {}), { code: "unknown_form_runtime", pointer: "/formDefinitionRef/runtimeId" });
+  assert.deepEqual(issue("builtin", null), { code: "form_values_required", pointer: "/formValues" });
+});
+
+test("runtimeConfig issue pointers map back to the submitted form field", () => {
+  assert.equal(formValuesPointerForRuntimeConfigPointer("builtin", "/runtimeConfig/provider/apiKey"), "/formValues/apiKey");
+  assert.equal(formValuesPointerForRuntimeConfigPointer("builtin", "/runtimeConfig/model/id"), "/formValues/model");
+  assert.equal(formValuesPointerForRuntimeConfigPointer("builtin", "/runtimeConfig/provider/baseUrl"), "/formValues/baseUrl");
+  assert.equal(formValuesPointerForRuntimeConfigPointer("kimi-sdk", "/runtimeConfig/reasoningEffort"), "/formValues/reasoningEffort");
+  assert.equal(formValuesPointerForRuntimeConfigPointer("kimi-sdk", "/runtimeConfig/mode"), "/formValues");
+  assert.equal(formValuesPointerForRuntimeConfigPointer("builtin", "/formDefinitionRef/runtimeId"), "/formDefinitionRef/runtimeId");
 });

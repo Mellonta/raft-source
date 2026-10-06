@@ -1,0 +1,1 @@
+ALTER TABLE "agent_migrations" ADD COLUMN "transport_max_archive_entries" integer;

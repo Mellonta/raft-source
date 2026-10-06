@@ -1,7 +1,7 @@
 import { useContext, useRef } from "react";
 import type { ReactNode } from "react";
 import { IntlContext } from "react-intl";
-import { PreviewCard, PreviewCardContent, PreviewCardTrigger } from "raft-ui";
+import { MessageReferenceText, PreviewCard, PreviewCardContent, PreviewCardTrigger } from "raft-ui";
 import { en } from "../../i18n/messages/en";
 import { useAuthStore } from "../../store/authStore";
 import type { Agent } from "../../store/agentStore";
@@ -9,7 +9,7 @@ import { useReadReceiptStore } from "../../store/readReceiptStore";
 import { projectAgentReadReceipt } from "../../store/readReceiptDomain";
 import type { ServerMember } from "../../store/serverStore";
 import ProfilePreviewCardContent from "./ProfilePreviewCardContent";
-import { MSG_REF_CHIP } from "./messageRefChip";
+import Tooltip from "../ui/Tooltip";
 import { useMessageReadReceiptScope } from "./messageReadReceiptScope";
 
 interface MentionLinkProps {
@@ -58,19 +58,20 @@ export default function MentionLink({ mentionType, mentionId, onNavigate, childr
   const readBadge = agentReadState === "unknown"
     ? null
     : (
+      <Tooltip content={readLabel}>
       <span
         data-mention-read-state={agentReadState}
         data-testid={`mention-read-${mentionId}`}
-        title={readLabel}
         aria-label={readLabel}
         // The mention is inline text, so the span's box top sits well above the
         // glyphs (line-height), which made a `-top-1` badge read as floating
         // above the row rather than sitting on the mention's corner. Anchor it
         // down onto the corner and slightly further right (artin, 7-28).
         className={`pointer-events-none absolute -right-1.5 top-0 size-2 shrink-0 rounded-full border border-black ${
-          agentReadState === "read" ? "bg-brutal-lime" : "bg-white"
-        }`}
+ agentReadState === "read" ? "bg-brutal-lime" : "bg-white"
+ }`}
       />
+      </Tooltip>
     );
 
   const trigger = (
@@ -78,17 +79,18 @@ export default function MentionLink({ mentionType, mentionId, onNavigate, childr
       <PreviewCardTrigger
         delay={200}
         closeDelay={120}
-        href="#"
+        render={(
+          <MessageReferenceText
+            variant={isSelfMention ? "primary" : "secondary"}
+            className="cursor-default"
+            render={<a href="#">{children}</a>}
+          />
+        )}
         onClick={(e) => {
           e.preventDefault();
           previewActionsRef.current?.close();
           onNavigate();
         }}
-        className={`cursor-default select-text font-bold text-black ${
-          isSelfMention
-            ? `${MSG_REF_CHIP} bg-soft-signal hover:bg-soft-signal/80`
-            : "underline decoration-black/30 decoration-2 underline-offset-2 hover:text-brutal-pink hover:decoration-brutal-pink"
-        }`}
       >
         {children}
       </PreviewCardTrigger>

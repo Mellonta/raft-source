@@ -12,13 +12,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
 import { Command } from "commander";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import type { CliIo } from "../../core/io.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import type { CliIo } from "../../core/io";
 import {
   integrationAppPrepareRecoverOwnerCommand,
   integrationAppPrepareRegisterCommand,
@@ -36,12 +35,12 @@ import {
   integrationAppListCommand,
   integrationAppStatusCommand,
   registerIntegrationAppCommands,
-} from "./app.js";
+} from "./app";
 import {
   closePrivateSecretSink,
   preparePrivateSecretSink,
   writePrivateSecretSink,
-} from "./privateSecretSink.js";
+} from "./privateSecretSink";
 
 test("integration app list/status reconstruct pending and committed state without secret-shaped fields", async () => {
   const listIo = memoryIo();
@@ -60,6 +59,7 @@ test("integration app list/status reconstruct pending and committed state withou
     scopes: ["openid"],
     category: "Developer Tools",
     dataAccessSummary: "Reads basic profile information",
+    installationId: "98765432-1234-4321-8765-123456789abc",
     appType: "oauth2",
     enabled: true,
     recoveryCommand: "raft integration app rotate-secret --client demo-app --output <new-private-path>",
@@ -82,6 +82,7 @@ test("integration app list/status reconstruct pending and committed state withou
   assert.match(listText, /description: Agent-managed demo/);
   assert.match(listText, /app type: oauth2/);
   assert.match(listText, /enabled: yes/);
+  assert.match(listText, /installation ID: 98765432-1234-4321-8765-123456789abc/);
   assert.match(listText, /updated: 2026-07-23T00:00:00.000Z/);
   assert.match(listText, /homepage URL: https:\/\/demo\.example/);
   assert.match(listText, /agent manifest URL: https:\/\/demo\.example\/\.well-known\/raft-app\.json/);
@@ -105,6 +106,7 @@ test("integration app list/status reconstruct pending and committed state withou
   assert.deepEqual(requests.shift(), { method: "GET", path: "/internal/agent-api/integrations/app/status?client=demo-app" });
   const json = JSON.parse(statusIo.stdout.join(""));
   assert.equal(json.data.app.clientKey, "demo-app");
+  assert.equal(json.data.app.installationId, "98765432-1234-4321-8765-123456789abc");
   assert.doesNotMatch(JSON.stringify(json), /clientSecret|client_secret|secretHash|secret_hash|ownerAgentId/);
 
   await assert.rejects(
@@ -749,7 +751,7 @@ test("integration app update and transfer-owner call owner-or-admin direct route
     }) as any,
   });
 
-  await integrationAppUpdateCommand.handler(ctx, { client: "demo-app", name: "Demo App 2", category: "Storage" });
+  await integrationAppUpdateCommand.handler(ctx, { client: "demo-app", name: "Demo App 2", category: "Storage", whenToUse: "when the queue backs up" });
   await integrationAppTransferOwnerCommand.handler(ctx, { client: "demo-app", toAgent: "box" });
   await assert.rejects(
     async () => integrationAppUpdateCommand.handler(ctx, { client: "demo-app", redirectUrl: "" }),
@@ -768,6 +770,7 @@ test("integration app update and transfer-owner call owner-or-admin direct route
         clientKey: "demo-app",
         name: "Demo App 2",
         description: undefined,
+        whenToUse: "when the queue backs up",
         category: "Infrastructure",
         homepageUrl: undefined,
         returnUrl: undefined,
@@ -896,7 +899,7 @@ test("integration app distribution commands use the shared manage route without 
               : action === "request_unpublish" ? "unpublish_requested" : undefined,
             logoUrl: action === "clear_logo" ? null : undefined,
             shareUrl: action === "share_link_create"
-              ? "https://raft.example/integration-invite/raft_share_show_once"
+              ? "https://raft.example/integration-invites/raft_share_show_once"
               : undefined,
             link: action.startsWith("share_link")
               ? {
@@ -934,7 +937,7 @@ test("integration app distribution commands use the shared manage route without 
   ]);
   const rendered = stdout.join("");
   assert.match(rendered, /credential-like token/);
-  assert.match(rendered, /https:\/\/raft\.example\/integration-invite\/raft_share_show_once/);
+  assert.match(rendered, /https:\/\/raft\.example\/integration-invites\/raft_share_show_once/);
   assert.match(rendered, /regenerate it to receive a usable URL/);
   assert.match(rendered, /Marketplace review requested/);
   assert.match(rendered, /Marketplace removal requested/);

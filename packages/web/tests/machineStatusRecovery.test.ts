@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   __resetFailpointsForTests,
   __setFailpointsForTests,
   InMemoryFailpointRegistry,
 } from "@botiverse/raft-shared";
-import { handleMachineStatusRecoveryEvent } from "../src/utils/machineStatusRecovery.js";
+import { handleMachineStatusRecoveryEvent } from "../src/utils/machineStatusRecovery";
 
 function createHarness(options: { machineVersions?: Record<string, number> } = {}) {
   const calls: string[] = [];

@@ -1,4 +1,4 @@
-import type { SyncViolationBuffer, SyncViolationDrain, SyncViolationRecord } from "./types.js";
+import type { SyncViolationBuffer, SyncViolationDrain, SyncViolationRecord } from "./types";
 
 export interface SyncViolationBufferOptions {
   capacity?: number;

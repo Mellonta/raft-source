@@ -1,4 +1,4 @@
-import { sanitizeRouteErrorMessage } from "./routeFailure.js";
+import { sanitizeRouteErrorMessage } from "./routeFailure";
 
 /** Logging boundary: never pass driver params, detail, cause or stack to console. */
 export function serializeErrorForLog(error: unknown): { name: string; message: string } {

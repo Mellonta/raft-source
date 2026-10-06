@@ -10,9 +10,10 @@
  * Machine→replica mapping is stored in Redis: `machine:{machineId}:replica` → replicaId
  */
 import crypto from "node:crypto";
-import { MachineResponseRelay, redisMachineReplyStore } from "./machineResponseRelay.js";
+import { MachineResponseRelay, redisMachineReplyStore } from "./machineResponseRelay";
 import type Redis from "ioredis";
-import { getRedis, getRedisReplicaSub, isRedisAvailable, resetRedisReplicaSub } from "./redis.js";
+import { getRedis, getRedisReplicaSub, isRedisAvailable, resetRedisReplicaSub } from "./redis";
+import { notifyLocalAgentCredentialRevocation } from "./services/agentCredentialRevocationBus";
 import {
   normalizeActivity,
   normalizeActivityDetailKind,
@@ -20,19 +21,85 @@ import {
   setClockInterval,
   setClockTimeout,
   clearClockTimeout,
+  noopTracer,
   type AgentActivityDetailKind,
   type AgentActivityKind,
   type AgentRuntimeErrorState,
   type ServerToMachineMessage,
   type AgentMessage,
+  type Tracer,
 } from "@botiverse/raft-shared";
+import type { PersistedActivityTypedCarriers, PersistedAgentActivity } from "./services/replicaStateStore";
+import { normalizeDeliveryConsumptionActivityDiagnostic } from "./services/deliveryConsumptionActivityDiagnostic";
+import { normalizeSpawnFailureActivityDiagnostic } from "./services/spawnFailureActivityDiagnostic";
+import {
+  InMemoryWakeCrashLoopStateStore,
+  freshWakeCrashLoopEpisode,
+  normalizeWakeCrashLoopActivityDiagnostic,
+  type WakeCrashLoopEpisodeState,
+  type WakeCrashLoopStateRecord,
+} from "./services/wakeCrashLoopBreaker";
 import {
   buildRuntimeTraceContext,
   type MachineConnectTraceContext,
-} from "./tracing/migrationTraceContext.js";
+} from "./tracing/migrationTraceContext";
+import { errorClassOf, getCurrentTraceContext, runWithTraceSpan } from "./tracing/semanticTrace";
 
 // Each server instance gets a unique ID
 export const REPLICA_ID = crypto.randomUUID();
+
+// Error-system boundary: replica-router failures (dropped receipt-required
+// deliveries, subscriber subscribe/health failures) happen on Redis pub/sub
+// and cross-replica routing paths with no request trace root, so they exit
+// through process-owned root spans via this injected tracer. Never set in
+// unit tests → the helper below stays a no-op there.
+let _replicaRouterTracer: Tracer | null = null;
+
+export function setReplicaRouterTracer(tracer: Tracer | null): void {
+  _replicaRouterTracer = tracer;
+}
+
+function traceReplicaRouterError(input: {
+  site: string;
+  reason: string;
+  error: unknown;
+  attrs?: Record<string, unknown>;
+}): void {
+  const tracer = _replicaRouterTracer;
+  if (!tracer) return;
+  tracer.emitEvent("server.replica_router.error", {
+    surface: "server",
+    parent: getCurrentTraceContext(),
+    attrs: {
+      site: input.site,
+      outcome: "error",
+      reason: input.reason,
+      error_class: errorClassOf(input.error),
+      ...input.attrs,
+    },
+  });
+}
+
+/**
+ * Run one background replica router task in its own root span. The work
+ * reports its own failures, so the returned status only picks the span status.
+ * It never throws, so callers can start it without waiting.
+ */
+async function runReplicaRouterRoot(
+  name: "server.replica_router.health_check" | "server.replica_router.receipt_delivery",
+  attrs: Record<string, string>,
+  work: () => Promise<"ok" | "error">,
+): Promise<void> {
+  const tracer = _replicaRouterTracer ?? noopTracer;
+  const span = tracer.startSpan(name, { surface: "server", kind: "internal", attrs });
+  try {
+    const status = await runWithTraceSpan(span, work, tracer);
+    span.end(status);
+  } catch (error) {
+    console.warn(`[ReplicaRouter] ${name} failed:`, error instanceof Error ? error.message : error);
+    span.end("error", { attrs: { error_class: errorClassOf(error) } });
+  }
+}
 
 // Fly.io instance ID for fly-replay header routing
 const FLY_INSTANCE = process.env.FLY_MACHINE_ID || process.env.FLY_ALLOC_ID || null;
@@ -46,7 +113,6 @@ export interface RoutedInboxDeliveryOptions {
   transient?: boolean;
   adminAuthority?: boolean;
   intrinsic?: boolean;
-  migrationProtocol?: boolean;
   reconcileNonMemberMention?: boolean;
   mentionDeliveryOccurrenceId?: string;
 }
@@ -79,15 +145,20 @@ let _machinePrincipalFenceHandler: MachinePrincipalFenceHandler | null = null;
 let _replicaReplayEndpoint: string | null = null;
 
 // Cross-replica wake signal for EXTERNAL agents (option C, #wg-external-agent
-// 2026-06-11): external deliveries buffer process-locally and the SSE
-// wake-hint stream listens to an in-process emitter, so a fan-out handled by
-// another replica was invisible to a connected stream until the 25s heartbeat
+// 2026-06-11): the SSE wake-hint stream listens to an in-process emitter,
+// so a fan-out handled by another replica was invisible to a connected
+// stream until the 25s heartbeat
 // durable peek (#2809). This broadcast carries agentId ONLY (content-free);
-// receivers re-emit locally and the stream's flush re-audits durable truth,
-// so duplicate/reordered/lost signals never affect correctness — the
-// heartbeat peek remains the correctness floor.
+// receivers re-emit locally and the stream's flush pulls the agent's durable
+// inbox, so duplicate/reordered/lost signals never affect correctness — the
+// heartbeat pull remains the correctness floor.
 const EXTERNAL_WAKE_CHANNEL = "slock:replica:external-wake";
 const MACHINE_PRINCIPAL_FENCE_CHANNEL = "slock:replica:machine-principal-fence";
+// Content-free "re-validate this agent's sk_agent_* credentials" broadcast
+// (credential revoked / agent deleted). Carries agentId only; receivers make
+// their open wake-hint streams re-check the database. See
+// services/agentCredentialRevocationBus.ts.
+const AGENT_CREDENTIAL_REVOCATION_CHANNEL = "slock:replica:agent-credential-revocation";
 
 const MACHINE_REPLICA_TTL = 300; // 5 minutes, refreshed on heartbeat
 const STALE_OWNER_CLEANUP_MIN_AGE_MS = 60_000;
@@ -203,7 +274,183 @@ type ReceiptRequiredInboxDeliveryMessage = {
   payload: unknown;
 };
 
+/**
+ * An operation on an agent, routed to the replica that owns the agent's
+ * machine socket so that replica performs it with its own state. The owner is
+ * the replica that later checks the daemon's frames (launch guard, session,
+ * reset window), so state it did not write itself goes stale: a start prepared
+ * elsewhere mints a launchId the owner never saw and the owner drops the new
+ * launch's frames as stale_launch_guard; a stop or reset performed elsewhere
+ * clears guards and trackers only on the requester.
+ */
+export interface StartIntentOptions {
+  startCause?: "app_inbox_wake";
+  resumePrompt?: string;
+  wakeMessage?: AgentMessage;
+  wakeMessageTransient?: boolean;
+  requireQueueReceipt?: boolean;
+  /** RFC 071 §5: an explicit human start. An owner on an older build ignores it. */
+  control?: "human_start";
+}
+export type OwnerIntent =
+  | { kind: "start"; options: StartIntentOptions }
+  | { kind: "stop"; reason: "manual" | "internal" }
+  | {
+      kind: "reset";
+      mode: "restart" | "session" | "full";
+      options: {
+        restartEvenIfInactive?: boolean;
+        restartIfStopped?: boolean;
+        /** RFC 071 §5: a human E3 reset or a real runtime-config change. */
+        terminalControl?: "human_reset" | "runtime_config_changed";
+      };
+    };
+export interface StartIntentRequest {
+  requestId: string;
+  machineId: string;
+  agentId: string;
+  intent: OwnerIntent;
+}
+export type StartIntentResult =
+  | { outcome: "dispatched" }
+  | {
+    outcome: "skipped";
+    reason:
+      | "manual_stop"
+      | "wake_lock_held"
+      | "wake_crash_loop_blocked"
+      | "terminal_failure_paused"
+      | "terminal_failure_probe_in_flight"
+      | "terminal_failure_needs_manual";
+  }
+  | { outcome: "done" };
+/** An owner-side failure, carried back so the requester can rethrow it with its original class. */
+export interface StartIntentFailure { name: string; message: string; subkind?: string }
+export class StartIntentRemoteError extends Error {
+  constructor(readonly failure: StartIntentFailure) {
+    super(failure.message);
+    this.name = failure.name;
+  }
+}
+/** The owner did not answer in time; it may still have run the operation. */
+export class StartIntentTimeoutError extends Error {
+  constructor() {
+    super("Outcome unknown: the machine's replica did not answer in time");
+    this.name = "StartIntentTimeoutError";
+  }
+}
+/**
+ * The intent could not be sent: Redis is unavailable, or the publish failed.
+ * Almost certainly nothing ran, but a publish that fails after the command
+ * was written cannot prove that; the owner's wake lock covers that case.
+ */
+export class StartIntentTransportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StartIntentTransportError";
+  }
+}
+/**
+ * Thrown by the receiving replica before it runs anything, when it no longer
+ * holds the machine's socket. Crosses the wire by `name`, so the requester can
+ * safely look the owner up again.
+ */
+export const START_INTENT_OWNER_MOVED = "StartIntentOwnerMovedError";
+export class StartIntentOwnerMovedError extends Error {
+  constructor() {
+    super("Intent reached a replica that no longer owns the machine");
+    this.name = START_INTENT_OWNER_MOVED;
+  }
+}
+type StartIntentHandler = (request: StartIntentRequest) => Promise<StartIntentResult>;
+let _startIntentHandler: StartIntentHandler | null = null;
+
+/**
+ * Each replica that can answer routed intents advertises it, so a requester
+ * never sends one to a replica still running an older build during a rolling
+ * deploy (that replica would ignore it and the requester would time out).
+ */
+const INTENT_CAPABILITY_TTL_SECONDS = 24 * 60 * 60;
+const intentCapabilityKey = (replicaId: string) => `replica-cap:owner-intent:v1:${replicaId}`;
+async function advertiseIntentCapability(): Promise<void> {
+  if (!_startIntentHandler || !isRedisAvailable()) return;
+  try {
+    await getRedis().set(intentCapabilityKey(REPLICA_ID), "1", "EX", INTENT_CAPABILITY_TTL_SECONDS);
+  } catch (error) {
+    console.warn("[ReplicaRouter] Failed to advertise intent capability:", error instanceof Error ? error.message : error);
+  }
+}
+/** Whether `replicaId` has advertised that it answers routed intents. Any error reads as no. */
+export async function replicaSupportsOwnerIntents(replicaId: string): Promise<boolean> {
+  if (!isRedisAvailable()) return false;
+  try {
+    return (await getRedis().exists(intentCapabilityKey(replicaId))) === 1;
+  } catch {
+    return false;
+  }
+}
+const START_INTENT_TIMEOUT_MS = 30_000;
+const pendingStartIntents = new Map<string, {
+  resolve: (result: StartIntentResult) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}>();
+
+/**
+ * Ask `ownerReplicaId` to run the start. A timeout means the outcome is
+ * unknown (the owner may still dispatch), so it is reported as such and never
+ * retried here.
+ */
+export async function routeStartIntent(ownerReplicaId: string, request: StartIntentRequest): Promise<StartIntentResult> {
+  if (!isRedisAvailable()) throw new StartIntentTransportError("Start intent transport unavailable");
+  return new Promise<StartIntentResult>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingStartIntents.delete(request.requestId);
+      reject(new StartIntentTimeoutError());
+    }, START_INTENT_TIMEOUT_MS);
+    timer.unref?.();
+    pendingStartIntents.set(request.requestId, { resolve, reject, timer });
+    void getRedis().publish(replicaChannel(ownerReplicaId), JSON.stringify({
+      type: "agent:start:intent", request, replyReplicaId: REPLICA_ID,
+    })).catch((error) => {
+      const pending = pendingStartIntents.get(request.requestId);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      pendingStartIntents.delete(request.requestId);
+      pending.reject(new StartIntentTransportError(
+        `Start intent publish failed: ${error instanceof Error ? error.message : String(error)}`,
+      ));
+    });
+  });
+}
+
+async function handleStartIntent(request: StartIntentRequest, replyReplicaId: string): Promise<void> {
+  let reply: { result: StartIntentResult } | { failure: StartIntentFailure };
+  try {
+    if (!_startIntentHandler) throw new Error("Start intent handler unavailable");
+    reply = { result: await _startIntentHandler(request) };
+  } catch (error) {
+    const err = error instanceof Error ? error : new Error(String(error));
+    const subkind = (err as { subkind?: unknown }).subkind;
+    reply = { failure: { name: err.name, message: err.message, ...(typeof subkind === "string" ? { subkind } : {}) } };
+  }
+  await getRedis().publish(replicaChannel(replyReplicaId), JSON.stringify({
+    type: "agent:start:intent:result", requestId: request.requestId, ...reply,
+  })).catch((error) => console.error("[ReplicaRouter] Failed to publish start intent result:", error));
+}
+
+function settleStartIntent(requestId: string, result?: StartIntentResult, failure?: StartIntentFailure): void {
+  const pending = pendingStartIntents.get(requestId);
+  if (!pending) return;
+  clearTimeout(pending.timer);
+  pendingStartIntents.delete(requestId);
+  if (result && (result.outcome === "dispatched" || result.outcome === "skipped" || result.outcome === "done")) pending.resolve(result);
+  else pending.reject(new StartIntentRemoteError(failure ?? { name: "Error", message: "Invalid start intent result" }));
+}
+
 type ReplicaMessage =
+  | { type: "agent:start:intent"; request: StartIntentRequest; replyReplicaId: string }
+  | { type: "agent:start:intent:result"; requestId: string; result?: StartIntentResult; failure?: StartIntentFailure }
   | { type: "machine:response:ready"; requestId: string }
   | {
       type: "machine:command";
@@ -250,7 +497,6 @@ function normalizeRoutedInboxDeliveryOptions(value: unknown): RoutedInboxDeliver
     ...(typeof candidate.transient === "boolean" ? { transient: candidate.transient } : {}),
     ...(typeof candidate.adminAuthority === "boolean" ? { adminAuthority: candidate.adminAuthority } : {}),
     ...(typeof candidate.intrinsic === "boolean" ? { intrinsic: candidate.intrinsic } : {}),
-    ...(typeof candidate.migrationProtocol === "boolean" ? { migrationProtocol: candidate.migrationProtocol } : {}),
     ...(typeof candidate.reconcileNonMemberMention === "boolean"
       ? { reconcileNonMemberMention: candidate.reconcileNonMemberMention }
       : {}),
@@ -316,15 +562,16 @@ async function subscribeReplicaRouter(reason: "startup" | "health_check" | "rese
   let sub = getRedisReplicaSub();
   bindReplicaSubscriber(sub);
   try {
-    await sub.subscribe(replicaChannel(REPLICA_ID), EXTERNAL_WAKE_CHANNEL, MACHINE_PRINCIPAL_FENCE_CHANNEL);
+    await sub.subscribe(replicaChannel(REPLICA_ID), EXTERNAL_WAKE_CHANNEL, MACHINE_PRINCIPAL_FENCE_CHANNEL, AGENT_CREDENTIAL_REVOCATION_CHANNEL);
   } catch (err) {
     console.warn(
       `[ReplicaRouter] Subscribe failed (${reason}); resetting replica subscriber:`,
       err instanceof Error ? err.message : err,
     );
+    traceReplicaRouterError({ site: "subscriber_subscribe", reason: "subscribe_threw", error: err });
     sub = resetRedisReplicaSub();
     bindReplicaSubscriber(sub);
-    await sub.subscribe(replicaChannel(REPLICA_ID), EXTERNAL_WAKE_CHANNEL, MACHINE_PRINCIPAL_FENCE_CHANNEL);
+    await sub.subscribe(replicaChannel(REPLICA_ID), EXTERNAL_WAKE_CHANNEL, MACHINE_PRINCIPAL_FENCE_CHANNEL, AGENT_CREDENTIAL_REVOCATION_CHANNEL);
   }
 
   const subscriberCount = await getReplicaSubscriberCount();
@@ -334,7 +581,7 @@ async function subscribeReplicaRouter(reason: "startup" | "health_check" | "rese
     console.warn(`[ReplicaRouter] Replica ${REPLICA_ID.slice(0, 8)} subscriber missing after ${reason}; resetting`);
     sub = resetRedisReplicaSub();
     bindReplicaSubscriber(sub);
-    await sub.subscribe(replicaChannel(REPLICA_ID), EXTERNAL_WAKE_CHANNEL, MACHINE_PRINCIPAL_FENCE_CHANNEL);
+    await sub.subscribe(replicaChannel(REPLICA_ID), EXTERNAL_WAKE_CHANNEL, MACHINE_PRINCIPAL_FENCE_CHANNEL, AGENT_CREDENTIAL_REVOCATION_CHANNEL);
     return getReplicaSubscriberCount();
   }
   return subscriberCount;
@@ -343,22 +590,27 @@ async function subscribeReplicaRouter(reason: "startup" | "health_check" | "rese
 function startReplicaSubscriptionHealthCheck() {
   if (_replicaSubscriptionHealthTimer || !isRedisAvailable()) return;
   _replicaSubscriptionHealthTimer = setClockInterval(() => {
-    void (async () => {
+    if (!isRedisAvailable()) return;
+    void runReplicaRouterRoot("server.replica_router.health_check", {}, async () => {
       try {
-        if (!isRedisAvailable()) return;
+        await advertiseIntentCapability();
         const subscriberCount = await getReplicaSubscriberCount();
-        if (subscriberCount > 0) return;
+        if (subscriberCount > 0) return "ok";
         const recoveredCount = await subscribeReplicaRouter("health_check");
         if (recoveredCount <= 0) {
           console.error(`[ReplicaRouter] Replica ${REPLICA_ID.slice(0, 8)} subscriber remains missing after reset`);
+          return "error";
         }
+        return "ok";
       } catch (err) {
         console.warn(
           "[ReplicaRouter] Replica subscriber health check failed:",
           err instanceof Error ? err.message : err,
         );
+        traceReplicaRouterError({ site: "subscriber_health_check", reason: "health_check_threw", error: err });
+        return "error";
       }
-    })();
+    });
   }, REPLICA_SUBSCRIPTION_HEALTH_INTERVAL_MS);
   if (
     _replicaSubscriptionHealthTimer
@@ -381,7 +633,9 @@ export async function initReplicaRouter(
   replicaReplayEndpoint?: string | null,
   onMachinePrincipalFence?: MachinePrincipalFenceHandler,
   onInboxDeliveryReceipt?: InboxDeliveryReceiptHandler,
+  onStartIntent?: StartIntentHandler,
 ) {
+  _startIntentHandler = onStartIntent ?? null;
   _machineCommandHandler = onMachineCommand;
   _inboxDeliveryHandler = onInboxDelivery;
   _inboxDeliveryReceiptHandler = onInboxDeliveryReceipt ?? null;
@@ -397,6 +651,7 @@ export async function initReplicaRouter(
   if (_replicaReplayEndpoint) {
     await registerReplicaReplayEndpoint(_replicaReplayEndpoint);
   }
+  await advertiseIntentCapability();
   startReplicaSubscriptionHealthCheck();
 
   console.log(`[ReplicaRouter] Replica ${REPLICA_ID.slice(0, 8)} listening (subscribers=${subscriberCount})`);
@@ -413,6 +668,14 @@ export function handleReplicaMessage(channel: string, raw: string): void {
       // Self-published signals are skipped: the local emit already ran.
       if (signal.agentId && signal.from !== REPLICA_ID && _externalWakeSignalHandler) {
         _externalWakeSignalHandler(signal.agentId);
+      }
+      return;
+    }
+    if (channel === AGENT_CREDENTIAL_REVOCATION_CHANNEL) {
+      const signal = JSON.parse(raw) as { agentId?: string; from?: string };
+      // Self-published signals are skipped: the local notify already ran.
+      if (typeof signal.agentId === "string" && signal.agentId && signal.from !== REPLICA_ID) {
+        notifyLocalAgentCredentialRevocation(signal.agentId);
       }
       return;
     }
@@ -433,7 +696,11 @@ export function handleReplicaMessage(channel: string, raw: string): void {
       return;
     }
     const msg: ReplicaMessage = JSON.parse(raw);
-    if (msg.type === "machine:response:ready" && typeof msg.requestId === "string") {
+    if (msg.type === "agent:start:intent" && msg.request && typeof msg.replyReplicaId === "string") {
+      void handleStartIntent(msg.request, msg.replyReplicaId);
+    } else if (msg.type === "agent:start:intent:result" && typeof msg.requestId === "string") {
+      settleStartIntent(msg.requestId, msg.result, msg.failure);
+    } else if (msg.type === "machine:response:ready" && typeof msg.requestId === "string") {
       void machineResponseRelay.consume(msg.requestId);
     } else if (msg.type === "machine:command" && msg.machineId && _machineCommandHandler) {
       _machineCommandHandler(msg.machineId, msg.payload as ServerToMachineMessage);
@@ -445,7 +712,11 @@ export function handleReplicaMessage(channel: string, raw: string): void {
       && typeof msg.requestId === "string"
       && typeof msg.replyReplicaId === "string"
     ) {
-      void handleReceiptRequiredInboxDelivery(msg);
+      void runReplicaRouterRoot(
+        "server.replica_router.receipt_delivery",
+        { message_type: msg.type, agent_id: msg.agentId },
+        () => handleReceiptRequiredInboxDelivery(msg),
+      );
     } else if (msg.type === "inbox:deliver" && msg.agentId && _inboxDeliveryHandler) {
       _inboxDeliveryHandler(msg.agentId, msg.machineId ?? null, msg.payload as AgentMessage);
     }
@@ -456,7 +727,8 @@ export function handleReplicaMessage(channel: string, raw: string): void {
 
 async function handleReceiptRequiredInboxDelivery(
   msg: ReceiptRequiredInboxDeliveryMessage,
-): Promise<void> {
+): Promise<"ok" | "error"> {
+  let status: "ok" | "error" = "ok";
   let receipt: RoutedInboxDeliveryReceipt;
   try {
     receipt = _inboxDeliveryReceiptHandler
@@ -474,7 +746,14 @@ async function handleReceiptRequiredInboxDelivery(
       : { status: "dropped", reason: "cross_replica_receipt_unavailable" };
   } catch (error) {
     console.error(`[ReplicaRouter] Receipt-required inbox delivery failed for ${msg.agentId}:`, error);
+    traceReplicaRouterError({
+      site: "receipt_required_delivery",
+      reason: "delivery_threw",
+      error,
+      attrs: { agent_id: msg.agentId },
+    });
     receipt = { status: "dropped", reason: "cross_replica_receipt_unavailable" };
+    status = "error";
   }
 
   try {
@@ -490,7 +769,15 @@ async function handleReceiptRequiredInboxDelivery(
     }
   } catch (error) {
     console.error(`[ReplicaRouter] Failed to publish inbox receipt for ${msg.agentId}:`, error);
+    traceReplicaRouterError({
+      site: "receipt_publish",
+      reason: "publish_threw",
+      error,
+      attrs: { agent_id: msg.agentId },
+    });
+    status = "error";
   }
+  return status;
 }
 
 export function __setInboxDeliveryReceiptRuntimeForTests(
@@ -535,6 +822,24 @@ export async function fenceMachinePrincipalConnections(
 
 export function __setReplicaReplayEndpointForTests(endpoint: string | null): void {
   _replicaReplayEndpoint = normalizeReplicaReplayEndpoint(endpoint);
+}
+
+/**
+ * Tell every replica (this one synchronously, the others via Redis) that the
+ * `sk_agent_*` credentials of `agentId` may have become invalid — a
+ * credential was revoked or the agent was deleted. Call AFTER the write has
+ * committed: receivers re-validate against the database. Best-effort: if the
+ * publish fails, open streams still close at their next heartbeat
+ * re-validation.
+ */
+export async function broadcastAgentCredentialRevocation(agentId: string): Promise<void> {
+  notifyLocalAgentCredentialRevocation(agentId);
+  if (!isRedisAvailable()) return;
+  try {
+    await getRedis().publish(AGENT_CREDENTIAL_REVOCATION_CHANNEL, JSON.stringify({ agentId, from: REPLICA_ID }));
+  } catch (err) {
+    console.error("[ReplicaRouter] Failed to publish agent credential revocation:", err);
+  }
 }
 
 /**
@@ -1069,6 +1374,12 @@ export async function routeInboxDeliveryWithReceipt(
     targetReplica = await runtime.getTargetReplica(machineId);
   } catch (error) {
     console.error(`[ReplicaRouter] Failed to resolve receipt delivery owner for ${agentId}:`, error);
+    traceReplicaRouterError({
+      site: "receipt_owner_resolve",
+      reason: "owner_resolve_threw",
+      error,
+      attrs: { agent_id: agentId },
+    });
     return {
       routed: true,
       receipt: { status: "dropped", reason: "cross_replica_receipt_unavailable" },
@@ -1112,6 +1423,12 @@ export async function routeInboxDeliveryWithReceipt(
     }
   } catch (error) {
     console.error(`[ReplicaRouter] Failed to publish receipt-required inbox delivery for ${agentId}:`, error);
+    traceReplicaRouterError({
+      site: "receipt_route_publish",
+      reason: "publish_threw",
+      error,
+      attrs: { agent_id: agentId },
+    });
     settlePendingInboxDeliveryReceipt(requestId, {
       status: "dropped",
       reason: "cross_replica_receipt_unavailable",
@@ -1149,42 +1466,96 @@ export async function releaseWakeLock(agentId: string) {
 /**
  * Store agent activity in Redis for cross-replica consistency.
  */
+/**
+ * task #1116: the snapshot is one HSET so a concurrent reader never observes a
+ * new detail beside an old carrier (or vice versa). Absent optional fields are
+ * written as "" (cleared) in the same command; decode treats "" as absent.
+ */
+export function buildAgentActivityHashFields(input: {
+  activity: AgentActivityKind;
+  detail: string;
+  detailKind: AgentActivityDetailKind;
+  observedAtMs?: number;
+  carriers?: PersistedActivityTypedCarriers;
+  updatedAtMs: number;
+}): Record<string, string> {
+  return {
+    activity: input.activity,
+    detail: input.detail,
+    detailKind: input.detailKind,
+    updatedAt: String(input.updatedAtMs),
+    observedAtMs: input.observedAtMs !== undefined ? String(input.observedAtMs) : "",
+    carriers: encodeActivityTypedCarriers(input.carriers) ?? "",
+  };
+}
+
 export async function setAgentActivity(
   agentId: string,
   activity: AgentActivityKind,
   detail: string,
   detailKind: AgentActivityDetailKind,
   observedAtMs?: number,
+  carriers?: PersistedActivityTypedCarriers,
 ) {
   if (!isRedisAvailable()) return;
   const redis = getRedis();
   const key = `slock:agent:${agentId}:activity`;
+  const fields = buildAgentActivityHashFields({ activity, detail, detailKind, observedAtMs, carriers, updatedAtMs: Date.now() });
   const pipeline = redis.pipeline();
-  pipeline.hset(key, "activity", activity, "detail", detail, "detailKind", detailKind, "updatedAt", String(Date.now()));
-  if (observedAtMs !== undefined) {
-    pipeline.hset(key, "observedAtMs", String(observedAtMs));
-  } else {
-    pipeline.hdel(key, "observedAtMs");
-  }
+  pipeline.hset(key, fields);
   pipeline.expire(key, 600); // 10 min TTL
   await pipeline.exec();
 }
 
-export function projectAgentActivityFromRedisHash(data: Record<string, string>): {
-  activity: AgentActivityKind;
-  detail: string;
-  detailKind: AgentActivityDetailKind;
-  observedAtMs?: number;
-  updatedAt: number;
-} | null {
+function encodeActivityTypedCarriers(carriers: PersistedActivityTypedCarriers | undefined): string | null {
+  if (!carriers) return null;
+  const encoded: PersistedActivityTypedCarriers = {
+    ...(carriers.deliveryConsumption ? { deliveryConsumption: carriers.deliveryConsumption } : {}),
+    ...(carriers.wakeCrashLoop ? { wakeCrashLoop: carriers.wakeCrashLoop } : {}),
+    ...(carriers.spawnFailure ? { spawnFailure: carriers.spawnFailure } : {}),
+  };
+  return Object.keys(encoded).length > 0 ? JSON.stringify(encoded) : null;
+}
+
+/**
+ * Decode the mirrored carrier field. Each known carrier is run through its
+ * normalizer; anything that does not validate is dropped rather than propagated.
+ */
+export function decodeActivityTypedCarriers(raw: string | undefined): PersistedActivityTypedCarriers | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  const carriers: PersistedActivityTypedCarriers = {};
+  const deliveryConsumption = normalizeDeliveryConsumptionActivityDiagnostic(
+    record.deliveryConsumption as Record<string, unknown> | null | undefined,
+  );
+  if (deliveryConsumption) carriers.deliveryConsumption = deliveryConsumption;
+  const wakeCrashLoop = normalizeWakeCrashLoopActivityDiagnostic(record.wakeCrashLoop);
+  if (wakeCrashLoop) carriers.wakeCrashLoop = wakeCrashLoop;
+  const spawnFailure = normalizeSpawnFailureActivityDiagnostic(
+    record.spawnFailure as Record<string, unknown> | null | undefined,
+  );
+  if (spawnFailure) carriers.spawnFailure = spawnFailure;
+  return Object.keys(carriers).length > 0 ? carriers : undefined;
+}
+
+export function projectAgentActivityFromRedisHash(data: Record<string, string>): PersistedAgentActivity | null {
   if (!data.activity) return null;
-  const observedAtMs = Number(data.observedAtMs);
+  const observedAtMs = data.observedAtMs ? Number(data.observedAtMs) : NaN;
+  const carriers = decodeActivityTypedCarriers(data.carriers);
   return {
     activity: normalizeActivity(data.activity),
     detail: data.detail || "",
     detailKind: normalizeActivityDetailKind(data.detailKind),
     ...(Number.isFinite(observedAtMs) ? { observedAtMs } : {}),
     updatedAt: Number(data.updatedAt) || 0,
+    ...(carriers ? { carriers } : {}),
   };
 }
 
@@ -1193,11 +1564,194 @@ export function projectAgentActivityFromRedisHash(data: Record<string, string>):
  */
 export async function getAgentActivity(
   agentId: string,
-): Promise<{ activity: AgentActivityKind; detail: string; detailKind: AgentActivityDetailKind; observedAtMs?: number; updatedAt: number } | null> {
+): Promise<PersistedAgentActivity | null> {
   if (!isRedisAvailable()) return null;
   const redis = getRedis();
   const data = await redis.hgetall(`slock:agent:${agentId}:activity`);
   return projectAgentActivityFromRedisHash(data);
+}
+
+// --- Wake crash-loop breaker state in Redis (task #1119) ---
+
+export const wakeCrashLoopKey = (agentId: string) => `slock:agent:${agentId}:wake_crash_loop`;
+/**
+ * A blocked episode must survive until a human start/resume clears it, so a
+ * blocked record has no TTL. An unblocked streak is only meaningful while the
+ * agent keeps being restarted; it expires after 7 days of no writes.
+ */
+export const WAKE_CRASH_LOOP_UNBLOCKED_TTL_SEC = 7 * 86_400;
+
+/**
+ * KEYS[1] = hash {version, state}; ARGV[1] = expected version ("0" when absent);
+ * ARGV[2] = state JSON; ARGV[3] = ttl seconds ("0" = persist).
+ * Writes only when the stored version equals the expected one; returns 1/0.
+ */
+export const CAS_WAKE_CRASH_LOOP_LUA = `
+local current = redis.call('HGET', KEYS[1], 'version')
+if current == false then current = '0' end
+if current ~= ARGV[1] then return 0 end
+local next = tonumber(current) + 1
+redis.call('HSET', KEYS[1], 'version', tostring(next), 'state', ARGV[2])
+if tonumber(ARGV[3]) > 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[3])
+else
+  redis.call('PERSIST', KEYS[1])
+end
+return 1
+`;
+
+/** No-Redis fallback: a single replica keeps the state in-process (still CAS-shaped). */
+export const localWakeCrashLoopStateStore = new InMemoryWakeCrashLoopStateStore();
+
+const WAKE_CRASH_LOOP_EXIT_KINDS_PERSISTED: ReadonlySet<string> = new Set(["machine_disconnected", "agent_process_exited"]);
+
+export interface DecodedWakeCrashLoopState {
+  /**
+   * `Required`: the decoder must produce every field the state type declares,
+   * optional ones included, so a field added to the type without a decode step
+   * is a type error here instead of a value that silently vanishes on the
+   * Redis read (RFC 071 F1: the task #1221 fields were written but not read).
+   */
+  state: Required<WakeCrashLoopEpisodeState>;
+  /** Fields the stored record did not carry in a valid shape; empty when the record was whole. */
+  repaired: string[];
+}
+
+function finiteOrNull(record: Record<string, unknown>, key: string, repaired: string[]): number | null {
+  const value = record[key];
+  if (value === null || value === undefined) { if (value === undefined) repaired.push(key); return null; }
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  repaired.push(key);
+  return null;
+}
+
+function stringOrNull(record: Record<string, unknown>, key: string, repaired: string[]): string | null {
+  const value = record[key];
+  if (value === null || value === undefined) { if (value === undefined) repaired.push(key); return null; }
+  if (typeof value === "string" && value.length <= 128) return value;
+  repaired.push(key);
+  return null;
+}
+
+/** Optional field (added after the first records were written): absent is legal and means null. */
+function optionalStringOrNull(record: Record<string, unknown>, key: string, repaired: string[]): string | null {
+  return record[key] === undefined ? null : stringOrNull(record, key, repaired);
+}
+
+/** Optional flag: absent is legal and means false; a non-boolean is repaired to false. */
+function optionalBoolean(record: Record<string, unknown>, key: string, repaired: string[]): boolean {
+  const value = record[key];
+  if (value === undefined) return false;
+  if (typeof value === "boolean") return value;
+  repaired.push(key);
+  return false;
+}
+
+/** The Redis write form of an episode; `decodeWakeCrashLoopState` is its inverse. */
+export function encodeWakeCrashLoopState(state: WakeCrashLoopEpisodeState): string {
+  return JSON.stringify(state);
+}
+
+/**
+ * Decode a persisted crash-loop episode. Every field is checked against the
+ * shape `WakeCrashLoopEpisodeState` declares; the breaker does arithmetic on
+ * the times and branches on the booleans, so an unchecked field would flow
+ * into a time comparison as a string or a truthy "false" (task audit,
+ * skyzh 2026-09-15). A field that is missing or has the wrong type is
+ * replaced by its neutral value (null / false) and named in `repaired`, so
+ * the record stays readable and the CAS version is preserved. Legal nulls are
+ * legal. The three core fields decide whether the record is a state at all:
+ * `blocked === true` is always honoured — a damaged blocked record is never
+ * turned into an unblocked one by decoding — and an unreadable core yields
+ * null, which the reader reports rather than silently treating as fresh.
+ */
+export function decodeWakeCrashLoopState(raw: unknown): DecodedWakeCrashLoopState | null {
+  if (typeof raw !== "string") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  if (typeof record.blocked !== "boolean") return null;
+  const repaired: string[] = [];
+  const episode = typeof record.episode === "number" && Number.isInteger(record.episode) && record.episode >= 1 ? record.episode : null;
+  const earlyExitCount = typeof record.earlyExitCount === "number" && Number.isInteger(record.earlyExitCount) && record.earlyExitCount >= 0
+    ? record.earlyExitCount
+    : null;
+  if (episode === null || earlyExitCount === null) {
+    // The counters are unreadable. Only a blocked record is worth keeping:
+    // the block must survive until a human start clears it. An unblocked
+    // record with broken counters carries nothing the breaker can use.
+    if (!record.blocked) return null;
+    if (episode === null) repaired.push("episode");
+    if (earlyExitCount === null) repaired.push("earlyExitCount");
+  }
+  const lastStartCounted = typeof record.lastStartCounted === "boolean" ? record.lastStartCounted : (repaired.push("lastStartCounted"), false);
+  const lastExitKindRaw = record.lastExitKind;
+  let lastExitKind: WakeCrashLoopEpisodeState["lastExitKind"] = null;
+  if (lastExitKindRaw === undefined || (lastExitKindRaw !== null && !(typeof lastExitKindRaw === "string" && WAKE_CRASH_LOOP_EXIT_KINDS_PERSISTED.has(lastExitKindRaw)))) {
+    repaired.push("lastExitKind");
+  } else {
+    lastExitKind = lastExitKindRaw as WakeCrashLoopEpisodeState["lastExitKind"];
+  }
+  const state: Required<WakeCrashLoopEpisodeState> = {
+    episode: episode ?? 1,
+    earlyExitCount: earlyExitCount ?? 0,
+    blocked: record.blocked,
+    blockedAtMs: finiteOrNull(record, "blockedAtMs", repaired),
+    lastStartAtMs: finiteOrNull(record, "lastStartAtMs", repaired),
+    lastStartLaunchId: stringOrNull(record, "lastStartLaunchId", repaired),
+    lastStartCounted,
+    firstExitAtMs: finiteOrNull(record, "firstExitAtMs", repaired),
+    lastExitAtMs: finiteOrNull(record, "lastExitAtMs", repaired),
+    lastExitKind,
+    lastSignal: stringOrNull(record, "lastSignal", repaired),
+    lastLaunchId: stringOrNull(record, "lastLaunchId", repaired),
+    // task #1221 fields. Records written before them lack them; absent is not a repair.
+    needsActionReason: optionalStringOrNull(record, "needsActionReason", repaired),
+    catchupOwed: optionalBoolean(record, "catchupOwed", repaired),
+    catchupCarriedLaunchId: optionalStringOrNull(record, "catchupCarriedLaunchId", repaired),
+  };
+  return { state, repaired };
+}
+
+export async function getWakeCrashLoopState(agentId: string): Promise<WakeCrashLoopStateRecord | null> {
+  if (!isRedisAvailable()) return localWakeCrashLoopStateStore.getWakeCrashLoopState(agentId);
+  const data = await getRedis().hgetall(wakeCrashLoopKey(agentId));
+  if (data.state === undefined && data.version === undefined) return null;
+  const version = Number(data.version);
+  const decoded = decodeWakeCrashLoopState(data.state);
+  if (!Number.isInteger(version) || version <= 0 || !decoded) {
+    // A record exists but cannot be read as an episode. Say so; the breaker
+    // then starts from a fresh episode at this version instead of looping on
+    // a compare-and-set against version 0.
+    console.warn(`[ReplicaRouter] wake crash-loop state for agent ${agentId} is unreadable (version=${String(data.version)}); treating as fresh`);
+    return Number.isInteger(version) && version > 0 ? { state: freshWakeCrashLoopEpisode(1), version } : null;
+  }
+  if (decoded.repaired.length > 0) {
+    console.warn(`[ReplicaRouter] wake crash-loop state for agent ${agentId} repaired on read: ${decoded.repaired.join(", ")}${decoded.state.blocked ? " (blocked preserved)" : ""}`);
+  }
+  return { state: decoded.state, version };
+}
+
+export async function compareAndSetWakeCrashLoopState(
+  agentId: string,
+  expectedVersion: number,
+  state: WakeCrashLoopEpisodeState,
+): Promise<boolean> {
+  if (!isRedisAvailable()) return localWakeCrashLoopStateStore.compareAndSetWakeCrashLoopState(agentId, expectedVersion, state);
+  const result = await getRedis().eval(
+    CAS_WAKE_CRASH_LOOP_LUA,
+    1,
+    wakeCrashLoopKey(agentId),
+    String(expectedVersion),
+    encodeWakeCrashLoopState(state),
+    String(state.blocked ? 0 : WAKE_CRASH_LOOP_UNBLOCKED_TTL_SEC),
+  );
+  return result === 1;
 }
 
 // --- Agent runtime errors in Redis ---
@@ -1345,6 +1899,17 @@ export interface MachineMeta {
   migrationTransportCapturedAt?: string | null;
   migrationTransportProtocol?: string | null;
   migrationTransportCapabilities?: string | null;
+  /** Probe carrier fact (F1): JSON string[] of ready-handshake capabilities. */
+  probeCapabilities?: string | null;
+  probeConnectionEpochId?: string | null;
+  probeReplicaGeneration?: string | null;
+  /** ISO timestamp of the owner replica's latest observation of this fact. */
+  probeObservedAt?: string | null;
+  /** JSON-encoded Record<runtimeId, version> observed by the owner replica. */
+  probeRuntimeVersions?: string | null;
+  /** Latest `machine:disk_status`, decimal strings. */
+  diskAvailableBytes?: string | null;
+  diskTotalBytes?: string | null;
 }
 
 // 1h TTL: long enough that brief Redis hiccups don't drop live metadata,

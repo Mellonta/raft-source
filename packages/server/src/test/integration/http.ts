@@ -1,4 +1,4 @@
-import { signAccessToken } from "../../middleware/auth.js";
+import { signAccessToken } from "../../middleware/auth";
 
 export function createHttpClient(baseUrl: string) {
   return {

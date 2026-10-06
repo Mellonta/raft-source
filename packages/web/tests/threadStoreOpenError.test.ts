@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { useThreadStore } from "../src/store/threadStore.js";
-import api from "../src/api/client.js";
+import { useThreadStore } from "../src/store/threadStore";
+import api from "../src/api/client";
 
 // Regression coverage for #engineering task #417: a thread permalink opened
 // while the parent channel was still private / mid private→public conversion
@@ -54,10 +53,10 @@ test("openThread flags openThreadError when resolution fails and there is no fal
   }
 });
 
-test("openThread treats a read-only 404 as a valid empty thread without persisting a channel", async () => {
+test("openThread treats the route's explicit no-thread 404 as a valid empty thread without persisting a channel", async () => {
   resetStore();
   api.get = (async () => {
-    throw { response: { status: 404 } };
+    throw { response: { status: 404, data: { code: "THREAD_NOT_FOUND", error: "No thread found for this message" } } };
   }) as typeof api.get;
 
   try {
@@ -192,3 +191,73 @@ test("a successful openThread clears a stale openThreadError", async () => {
     resetStore();
   }
 });
+
+// Task #14: the lookup route 404s for "channel not visible / wrong server" as
+// well as for "no thread yet". Only the latter is an empty thread; treating
+// every 404 as empty rendered a populated thread as "No replies yet".
+for (const [label, error] of [
+  ["channel-not-visible 404", { response: { status: 404, data: { error: "Channel not found or not visible" } } }],
+  ["bodyless 404", { response: { status: 404 } }],
+  ["403", { response: { status: 403, data: { error: "Access denied" } } }],
+  ["500", { response: { status: 500, data: { error: "Failed to get thread info" } } }],
+] as const) {
+  test(`openThread surfaces a ${label} lookup failure as an error, not an empty thread`, async () => {
+    resetStore();
+    api.get = (async () => {
+      throw error;
+    }) as typeof api.get;
+    const originalConsoleError = console.error;
+    console.error = () => {};
+
+    try {
+      await useThreadStore.getState().openThread({
+        parentChannelId: "channel-1",
+        parentMessageId: "parent-1",
+      });
+
+      const state = useThreadStore.getState();
+      assert.equal(state.openThreadChannelId, null);
+      assert.equal(state.openThreadLoading, false);
+      assert.deepEqual(state.openThreadError, { parentChannelId: "channel-1", parentMessageId: "parent-1" });
+    } finally {
+      console.error = originalConsoleError;
+      restoreApi();
+      resetStore();
+    }
+  });
+}
+
+// The "no thread yet" signal is `code: "THREAD_NOT_FOUND"`; the exact error
+// text is only a fallback for servers that predate the code.
+for (const [label, data, expectEmpty] of [
+  ["code only", { code: "THREAD_NOT_FOUND" }, true],
+  ["legacy server: error text, no code", { error: "No thread found for this message" }, true],
+  ["another code with the same text", { code: "CHANNEL_NOT_FOUND", error: "No thread found for this message" }, false],
+  ["code-less other text", { error: "Channel not found or not visible" }, false],
+] as const) {
+  test(`openThread no-thread detection: ${label}`, async () => {
+    resetStore();
+    api.get = (async () => {
+      throw { response: { status: 404, data } };
+    }) as typeof api.get;
+    const originalConsoleError = console.error;
+    console.error = () => {};
+
+    try {
+      await useThreadStore.getState().openThread({
+        parentChannelId: "channel-1",
+        parentMessageId: "parent-1",
+      });
+      const state = useThreadStore.getState();
+      assert.equal(state.openThreadLoading, false);
+      assert.deepEqual(
+        state.openThreadError,
+        expectEmpty ? null : { parentChannelId: "channel-1", parentMessageId: "parent-1" },
+      );
+    } finally {
+      console.error = originalConsoleError;
+      restoreApi();
+      resetStore();
+    }
+  });
+}

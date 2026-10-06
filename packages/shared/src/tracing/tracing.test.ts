@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import test from "node:test";
 import {
   assertSpanEvent,
   assertSpanOrder,
@@ -8,6 +7,7 @@ import {
   BasicTracer,
   createTraceScopeStack,
   createScopedTracer,
+  createSpanAttrContractTracer,
   createTraceScopeTracer,
   createTraceContext,
   eventsForSpan,
@@ -38,7 +38,9 @@ import {
   type CompletedTraceSpan,
   type TraceFieldDefinition,
   type TraceEventRecord,
-} from "../index.js";
+  type TraceLogEvent,
+  type TraceSink,
+} from "../index";
 
 function makeSequence(values: string[]) {
   let index = 0;
@@ -523,7 +525,7 @@ test("memory sink is fixture-owned and resettable", () => {
 // breaking the old workers' 59-column insert. These literal snapshots pin the
 // exact column sets, so any insertion/removal/reorder goes red and an additive
 // rollout must append here explicitly (review-visible). (task #137)
-const TRACE_EVENT_ROW_V2_FULL_SNAPSHOT_66 = [
+const TRACE_EVENT_ROW_V2_FULL_SNAPSHOT_67 = [
   "row_kind", "service_name", "deployment_environment", "service_version",
   "service_revision", "service_instance_id", "deployment_instance_source", "deployment_identity_state",
   "ecs_task_id", "ecs_task_family", "ecs_task_revision", "trace_id",
@@ -540,7 +542,7 @@ const TRACE_EVENT_ROW_V2_FULL_SNAPSHOT_66 = [
   "shadow_legacy_outcome", "shadow_action", "shadow_reason", "shadow_direction",
   "shadow_plan_kind", "machine_affinity_route", "replay_status", "db_system",
   "query_name", "phase", "sqlstate", "query_fingerprint",
-  "timeout_bucket", "retryable",
+  "timeout_bucket", "retryable", "error_message",
 ] as const;
 
 const TRACE_EVENT_ROW_V2_LEGACY_SNAPSHOT_59 = [
@@ -564,7 +566,7 @@ const TRACE_EVENT_ROW_V2_LEGACY_SNAPSHOT_59 = [
 test("Trace V2 projection columns match the frozen snapshots exactly", () => {
   assert.deepEqual(
     TRACE_EVENT_ROW_V2_PROJECTION_COLUMNS.map(([column]) => column),
-    [...TRACE_EVENT_ROW_V2_FULL_SNAPSHOT_66],
+    [...TRACE_EVENT_ROW_V2_FULL_SNAPSHOT_67],
   );
   assert.deepEqual(
     TRACE_EVENT_ROW_V2_LEGACY_PROJECTION_COLUMNS.map(([column]) => column),
@@ -574,9 +576,9 @@ test("Trace V2 projection columns match the frozen snapshots exactly", () => {
 
 test("Trace V2 ingest statements preserve the additive 59-to-66 column rollout", () => {
   const columnNames = TRACE_EVENT_ROW_V2_PROJECTION_COLUMNS.map(([column]) => column);
-  assert.equal(columnNames.length, 66);
-  assert.equal(new Set(columnNames).size, 66);
-  assert.deepEqual(columnNames.slice(-7), [
+  assert.equal(columnNames.length, 67);
+  assert.equal(new Set(columnNames).size, 67);
+  assert.deepEqual(columnNames.slice(-8), [
     "db_system",
     "query_name",
     "phase",
@@ -584,6 +586,7 @@ test("Trace V2 ingest statements preserve the additive 59-to-66 column rollout",
     "query_fingerprint",
     "timeout_bucket",
     "retryable",
+    "error_message",
   ]);
   assert.equal(TRACE_EVENT_ROW_V2_LEGACY_PROJECTION_COLUMNS.length, 59);
   const legacyColumnNames = TRACE_EVENT_ROW_V2_LEGACY_PROJECTION_COLUMNS.map(([column]) => column);
@@ -642,7 +645,7 @@ test("Trace V2 ingest statements preserve the additive 59-to-66 column rollout",
   ]));
   assert.throws(
     () => assertTraceEventRowV2TableSchema(liveShape.slice(0, -1)),
-    /required column retryable is missing/,
+    /required column error_message is missing/,
   );
   assert.throws(
     () => assertTraceEventRowV2TableSchema(liveShape.map((field, index) => (
@@ -763,6 +766,7 @@ test("trace event row projection promotes query axes and closed fields", () => {
     repair_kind: null,
     action: null,
     error_class: null,
+    error_message: null,
     error_kind: null,
     error_subkind: null,
     rw_failure_stage: null,
@@ -988,4 +992,43 @@ test("TraceScopeStack composes scopes and remains compatible with span attr cont
   assert.equal(eventRow?.agent_id, "agent-1");
   assert.equal(eventRow?.route_pattern, "/api/agents/:id/activity");
   assert.equal(eventRow?.hint_source, "redis");
+});
+
+test("emitEvent attaches the parent context and scope attrs to the log event", () => {
+  const events: TraceLogEvent[] = [];
+  const sink: TraceSink = { record() {}, recordLogEvent: (event) => events.push(event) };
+  const tracer = createScopedTracer(new BasicTracer({
+    sink,
+    clock: () => 7,
+    traceIdGenerator: () => "1".repeat(32),
+    spanIdGenerator: () => "2".repeat(16),
+  }), { server_id: "server-1" });
+
+  const span = tracer.startSpan("server.work", { surface: "server" });
+  tracer.emitEvent("server.work.noticed", { surface: "server", parent: span.context, attrs: { reason: "retry" } });
+  tracer.emitEvent("server.started", { surface: "server" });
+
+  assert.deepEqual(events[0], {
+    name: "server.work.noticed",
+    timeMs: 7,
+    surface: "server",
+    context: span.context,
+    attrs: { reason: "retry", server_id: "server-1" },
+  });
+  assert.equal(events[1]?.context, null);
+});
+
+test("emitEvent keeps only span and end contract attrs", () => {
+  const events: TraceLogEvent[] = [];
+  const sink: TraceSink = { record() {}, recordLogEvent: (event) => events.push(event) };
+  const tracer = createSpanAttrContractTracer(new BasicTracer({ sink }), {
+    "daemon.launch.noticed": { spanAttrs: ["runtime"], endAttrs: ["outcome"] },
+  });
+
+  tracer.emitEvent("daemon.launch.noticed", {
+    surface: "daemon",
+    attrs: { runtime: "claude", outcome: "ok", prompt: "secret" },
+  });
+
+  assert.deepEqual(events[0]?.attrs, { runtime: "claude", outcome: "ok" });
 });

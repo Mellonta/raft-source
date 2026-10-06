@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { createElement, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
@@ -245,7 +244,7 @@ test("destination attachment projections are clickable while legacy excluded sna
   assert.doesNotMatch(excludedHtml, /data-testid="forwarded-bundle-attachment"/);
   assert.match(excludedHtml, /legacy\.pdf/);
 });
-test("projected Forward images use a three-column scrolling gallery while files stay chips", () => {
+test("projected Forward images render as message-gallery rows while files stay chips", () => {
   const projected = makeForwardedMessage("Forwarded 1 message", 1);
   const projectedMetadata = projected.actionMetadata as { forwardedItems: Array<Record<string, unknown>> };
   projectedMetadata.forwardedItems[0] = {
@@ -261,11 +260,15 @@ test("projected Forward images use a three-column scrolling gallery while files 
   };
 
   const html = renderMessage(projected);
-  assert.match(html, /data-testid="forwarded-bundle-image-strip"/);
-  assert.match(html, /data-testid="forwarded-bundle-image-scroller"/);
+  // The three-up scroller is gone: the images render through the shared
+  // message gallery — a lone buffer of five splits three-and-two — and the
+  // gallery element itself carries the message-gallery slot.
+  assert.match(html, /data-testid="forwarded-bundle-image-gallery"/);
+  assert.match(html, /data-slot="message-image-gallery"/);
+  assert.equal((html.match(/data-slot="message-forwarded-bundle-gallery-row"/g) ?? []).length, 2);
   assert.equal((html.match(/data-testid="forwarded-bundle-image"/g) ?? []).length, 4);
-  assert.match(html, /data-testid="forwarded-bundle-image-shadow-right"/);
-  assert.doesNotMatch(html, /data-testid="forwarded-bundle-image-shadow-left"/);
+  assert.doesNotMatch(html, /data-testid="forwarded-bundle-image-scroller"/);
+  assert.doesNotMatch(html, /data-testid="forwarded-bundle-image-shadow-/);
   assert.doesNotMatch(html, /bg-gradient-to-[rl] from-white\/80 to-transparent/);
   assert.match(html, /data-testid="forwarded-bundle-file-chips"/);
   assert.match(html, /notes\.txt/);

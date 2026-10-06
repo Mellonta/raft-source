@@ -1,16 +1,25 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
+
+import { SIDEBAR_PANEL_BOUNDS } from "../src/lib/panelBounds";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
 test("desktop chat sidebar has a compact max width to avoid empty right gutter", () => {
   const source = readFileSync(resolve(repoRoot, "src/components/layout/MainLayout.tsx"), "utf8");
 
+  // The bounds moved into lib/panelBounds so the signed-in shell and the public server page cannot drift apart
+  // (cindyz, 2026-09-21). This now pins the VALUE rather than MainLayout's spelling of it: a regex over source text
+  // would pass again the moment someone re-inlined a different number, and would say nothing about what the shared
+  // module actually holds.
+  assert.equal(SIDEBAR_PANEL_BOUNDS.max, 320, "compact max width is what avoids the empty right gutter");
+  assert.equal(SIDEBAR_PANEL_BOUNDS.min, 180);
+  assert.equal(SIDEBAR_PANEL_BOUNDS.defaultWidth, 240);
+  // ...and that this surface still consumes the shared bounds instead of re-declaring its own.
   assert.match(
     source,
-    /useResizablePanel\(\{ storageKey: "slock:sidebarWidth", min: 180, max: 320, defaultWidth: 240 \}\)/,
+    /useResizablePanel\(\{ storageKey: "slock:sidebarWidth", \.\.\.SIDEBAR_PANEL_BOUNDS \}\)/,
   );
   assert.doesNotMatch(source, /storageKey: "slock:sidebarWidth"[^}]*max: 400/);
 });
@@ -25,7 +34,11 @@ test("desktop chat sidebar uses shrink-0 so the resize handle changes visible wi
     // parent (otherwise its `flex-1` doesn't constrain height and the
     // results list overflows the viewport, killing scroll). Reported by
     // stdrc #proj-uiux:c2313b1d msg=86b31b78 (2026-05-28).
-    /className=\{`bg-brutal-cream relative min-w-0 \$\{mobileShowSidebarInline \? "flex-1" : "shrink-0"\} \$\{searchMasterDetail \? "flex flex-col border-r-2 border-black" : ""\}`\}/,
+    /const masterDetailShellClassName = searchMasterDetail[\s\S]*?isInboxRoute \? "theme-brutal:border-black" : "theme-brutal:border-r-2 theme-brutal:border-black"/,
+  );
+  assert.match(
+    source,
+    /className=\{`relative h-full min-w-0 bg-layer-canvas-muted theme-brutal:bg-brutal-cream \$\{mobileShowSidebarInline \? "flex-1" : "shrink-0"\} \$\{masterDetailShellClassName\}`\}/,
   );
   // task #311 master/detail: when /search has an open slot, col 2 hosts the
   // search panel. At lg+ (≥1024) it uses the search-specific persisted
@@ -67,6 +80,16 @@ test("desktop chat sidebar uses shrink-0 so the resize handle changes visible wi
   );
   assert.doesNotMatch(source, /className="bg-brutal-cream relative min-w-0 flex-1"/);
   assert.doesNotMatch(source, /className="bg-brutal-cream relative min-w-0 shrink-0"/);
+});
+
+test("Activity parent-channel detail remains a bounded flex column", () => {
+  const source = readFileSync(resolve(repoRoot, "src/components/layout/MainLayout.tsx"), "utf8");
+
+  assert.match(
+    source,
+    /className="flex min-h-0 flex-1 flex-col overflow-hidden"\s+data-testid="activity-parent-channel-detail"/,
+    "the Activity thread→channel detail host must pass its bounded height to ChatPanel so the timeline owns scroll and the composer stays visible",
+  );
 });
 
 test("activity thread plus profile uses compact master width inside 1470px viewport budget", () => {
@@ -137,7 +160,7 @@ test("thread side panel browser resize path stays CSS-only", () => {
   );
   assert.match(
     styles,
-    /thread-profile-side-column\s*> \[data-testid="profile-panel"\][\s\S]*?min-width:\s*0[\s\S]*?max-width:\s*100%[\s\S]*?overflow:\s*hidden;/,
+    /thread-profile-side-column\s*> \[data-testid="profile-panel"\][\s\S]*?min-width:\s*0[\s\S]*?max-width:\s*(?:100%|calc\(100% - \d+px\))[\s\S]*?overflow:\s*hidden;/,
     "profile tab content must not grow the flex row and push shell columns out of view",
   );
   assert.match(
@@ -183,7 +206,7 @@ test("sidebar section headers share row, toggle, and icon-button geometry", () =
   );
   assert.match(
     source,
-    /const SIDEBAR_SECTION_TOGGLE_CLASS = "flex h-6 min-w-0 flex-1 items-center gap-1 text-xs font-bold uppercase text-black tracking-widest hover:text-black\/70 transition-colors"/,
+    /const SIDEBAR_SECTION_TOGGLE_CLASS = "flex h-6 min-w-0 flex-1 items-center gap-1 text-xs font-bold uppercase text-foreground-strong tracking-widest transition-colors hover:text-foreground-muted theme-brutal:text-black theme-brutal:hover:text-black\/70"/,
   );
   assert.match(
     source,

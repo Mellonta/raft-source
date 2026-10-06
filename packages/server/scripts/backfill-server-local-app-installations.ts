@@ -1,11 +1,11 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 /** Dry-run by default; use --apply only in an explicitly authorized migration. */
-import { initDatabase, closeDatabase, getDb } from "../src/db/index.js";
-import { backfillLocalAppSourceInstallations } from "../src/services/appSourceInstallationService.js";
+import { initDatabase, closeDatabase, getDb } from "../src/db/index";
+import { backfillLocalAppSourceInstallations } from "../src/services/appSourceInstallationService";
 
 const apply = process.argv.slice(2).includes("--apply");
 if (process.argv.slice(2).some((arg) => arg !== "--apply" && arg !== "--help")) {
-  throw new Error("Usage: DATABASE_URL=... pnpm --filter @botiverse/raft-server exec tsx scripts/backfill-server-local-app-installations.ts [--apply]");
+  throw new Error("Usage: DATABASE_URL=... pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/backfill-server-local-app-installations.ts [--apply]");
 }
 if (process.argv.includes("--help")) {
   console.log("Usage: ...backfill-server-local-app-installations.ts [--apply] (defaults to dry-run)");

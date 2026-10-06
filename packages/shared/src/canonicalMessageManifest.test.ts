@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
 
 import {
   CANONICAL_MESSAGE_MANIFEST,
@@ -10,7 +9,7 @@ import {
   OPTIONAL_AGGREGATE_MESSAGE_FIELDS,
   TASK_STATUS_FAMILY_PRESENT_AGGREGATES,
   canonicalMessageManifestJson,
-} from "./canonicalMessageManifest.js";
+} from "./canonicalMessageManifest";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -53,7 +52,7 @@ test("canonical message manifest: classes are declaration-sorted for stable JSON
     const names = fields.map((f) => f.name);
     assert.deepEqual(names, [...names].sort());
   }
-  assert.equal(CANONICAL_MESSAGE_MANIFEST.version, 5);
+  assert.equal(CANONICAL_MESSAGE_MANIFEST.version, 6);
 });
 
 test("canonical message manifest v2: descriptors carry type/nullability/family presence", () => {

@@ -1,25 +1,30 @@
 import {
   currentDate,
+  errorClassOf,
+  formatTraceparent,
   type AgentInboxAppItem,
   type MachineToServerMessage,
   type ReminderJob,
   type ServerToMachineMessage,
+  type TraceContext,
+  type Tracer,
 } from "@botiverse/raft-shared";
 import {
   appSnapshotTraceAttrs,
   appSourceTraceAttrs,
-} from "@botiverse/raft-shared/src/appRuntimeTrace.js";
+} from "@botiverse/raft-shared/src/appRuntimeTrace";
+import { getActiveTraceContext, runWithActiveSpan } from "@botiverse/raft-trace-client";
 
-import type { AgentAppInboxStore } from "../../agentAppInbox.js";
-import type { Clock } from "../../connection.js";
-import { systemClock } from "../../connection.js";
-import { logger } from "../../logger.js";
-import type { ScopedAppStorage } from "../../scopedAppStorage.js";
+import type { AgentAppInboxStore } from "../../agentAppInbox";
+import type { Clock } from "../../connection";
+import { systemClock } from "../../connection";
+import { logger } from "../../logger";
+import type { ScopedAppStorage } from "../../scopedAppStorage";
 import {
   isReminderDueInboxItem,
   projectReminderInboxTitle,
   reminderItemId,
-} from "./inboxDefinition.js";
+} from "./inboxDefinition";
 import {
   createReminderDueIdentity,
   createReminderPhaseTruth,
@@ -30,7 +35,7 @@ import {
   type ReminderBoundedAlertPhaseTruth,
   type ReminderFireContext,
   type ReminderPhaseTransitionEvidence,
-} from "./reminderCache.js";
+} from "./reminderCache";
 
 type ReminderServerMessage = Extract<ServerToMachineMessage, { type: `reminder.${string}` }>;
 
@@ -98,16 +103,32 @@ export interface ReminderRuntimeOptions {
   getInbox(agentId: string): AgentAppInboxStore;
   notifyInbox(agentId: string, item: AgentInboxAppItem): Promise<boolean>;
   send(message: MachineToServerMessage): void;
-  trace?: (
-    name: string,
-    attrs: Record<string, unknown>,
-    status?: "ok" | "error",
-  ) => void;
+  /**
+   * Single tracing entry point. Owns the `daemon.app_source.fire` span (the
+   * fire body runs with that span active so the inbox mint and the wake notice
+   * join its trace) and records every point fact this runtime emits. Required:
+   * a silently substituted no-op tracer would drop the fire span and every
+   * receipt/retry fact without any test noticing.
+   */
+  tracer: Tracer;
 }
 
 /** App-owned adapter between the generic daemon runtime and Reminder state. */
 export function createReminderRuntime(options: ReminderRuntimeOptions) {
-  const trace = options.trace ?? (() => {});
+  const tracer = options.tracer;
+  // Point facts nest under whatever span is active, the same way the daemon
+  // core records its events; status rides in attrs so the row reads like a span.
+  const trace = (
+    name: string,
+    attrs: Record<string, unknown>,
+    status: "ok" | "error" = "ok",
+  ) => {
+    tracer.emitEvent(name, {
+      parent: getActiveTraceContext(),
+      surface: "daemon",
+      attrs: { ...attrs, status },
+    });
+  };
   const clock = options.clock ?? systemClock;
   const pendingSnapshotRequests = new Set<string>();
   type OccurrencePhase =
@@ -264,6 +285,9 @@ export function createReminderRuntime(options: ReminderRuntimeOptions) {
 
   const cache = new ReminderCache({
     clock: options.clock,
+    // Extends the existing fire-receipt trace events with error_class at the
+    // retry origin; the no-op default keeps untraced runtimes logger-only.
+    trace,
     onOccurrenceFired: ({ job, requestId, firedAtClient, retryDeadlineAt }) => {
       const initialTruth = createReminderPhaseTruth({ occurrenceId: requestId, firedAtClient });
       const occurrence = getOccurrence(job, {
@@ -283,6 +307,15 @@ export function createReminderRuntime(options: ReminderRuntimeOptions) {
       return occurrence.phaseTruth.fired;
     },
     onFire: (job, context) => materializeFire(job, context),
+    onReconciliationAttempt: (exhaustion) => {
+      trace("daemon.app_source.retry", {
+        ...reminderTraceAttrs(exhaustion),
+        outcome: "reconciling",
+        acceptance: "unknown",
+        first_exhausted_at: exhaustion.exhaustedAt,
+        request_id: exhaustion.requestId,
+      });
+    },
     onRetryExhausted: (exhaustion) => {
       logger.error(
         `[Daemon] Reminder ${exhaustion.reminderId} delivery retry exhausted at ${exhaustion.stage}`,
@@ -298,6 +331,8 @@ export function createReminderRuntime(options: ReminderRuntimeOptions) {
         stage: exhaustion.stage,
         attempts: exhaustion.attempts,
         deadline_at: exhaustion.deadlineAt,
+        exhausted_at: exhaustion.exhaustedAt,
+        ...(exhaustion.stage === "fire_request" ? { acceptance: "unknown" } : {}),
       }, "error");
       const state = occurrencesByDue.get(dueKey(exhaustion));
       if (state?.occurrenceId === exhaustion.requestId) {
@@ -367,25 +402,62 @@ export function createReminderRuntime(options: ReminderRuntimeOptions) {
     }
   };
 
+  // Trace context of the first fire request sent for each occurrence, keyed by
+  // request id (stable across retries of one occurrence). The Server receipt is
+  // parented to it over the wire, and the fire span opened once the Server has
+  // answered joins the same trace instead of starting a new root. Entries leave
+  // when the occurrence fires or the Server declares the request obsolete.
+  const fireRequestTraces = new Map<string, TraceContext>();
+
   const sendFireRequest = (job: ReminderJob, context: ReminderFireContext) => {
-    options.send({
-      type: "reminder.fire_request",
-      agentId: job.ownerAgentId,
+    const identity = reminderTraceAttrs({
+      ownerAgentId: job.ownerAgentId,
       reminderId: job.reminderId,
       version: job.version,
-      requestId: context.requestId,
-      firedAtClient: context.firedAtClient,
     });
-    trace("daemon.app_source.receipt", {
-      ...reminderTraceAttrs({
-        ownerAgentId: job.ownerAgentId,
+    const requestSpan = tracer.startSpan("daemon.app_source.fire_request", {
+      // The first request roots the occurrence's trace; later attempts for the
+      // same request id join it. Deliberately not the ambient active span: the
+      // due timer that lands here may have been armed inside a previous
+      // occurrence's fire scope, and that span must not become this parent.
+      parent: fireRequestTraces.get(context.requestId) ?? null,
+      surface: "daemon",
+      kind: "producer",
+      attrs: { ...identity, request_id: context.requestId, catchup: context.catchup },
+    });
+    if (!fireRequestTraces.has(context.requestId)) {
+      fireRequestTraces.set(context.requestId, requestSpan.context);
+    }
+    try {
+      options.send({
+        type: "reminder.fire_request",
+        agentId: job.ownerAgentId,
         reminderId: job.reminderId,
         version: job.version,
-      }),
-      outcome: "sent",
-      request_id: context.requestId,
-    });
+        requestId: context.requestId,
+        firedAtClient: context.firedAtClient,
+        traceparent: formatTraceparent(requestSpan.context),
+      });
+      logger.info(`[Reminder] fire request sent ${job.reminderId} v${job.version} requestId=${context.requestId}`);
+      runWithActiveSpan(requestSpan, () => {
+        trace("daemon.app_source.receipt", {
+          ...identity,
+          outcome: "sent",
+          request_id: context.requestId,
+        });
+      });
+      requestSpan.end("ok", { attrs: { outcome: "sent" } });
+    } catch (error) {
+      requestSpan.end("error", { attrs: { outcome: "send_failed", error_class: errorClassOf(error) } });
+      throw error;
+    }
   };
+
+  /** Status and end attrs of one `daemon.app_source.fire` span. */
+  interface FireOutcome {
+    status: "ok" | "error";
+    attrs: Record<string, unknown>;
+  }
 
   async function materializeFire(job: ReminderJob, context: ReminderFireContext) {
     // One fail-closed authority gate: a local timer may request a transition,
@@ -395,6 +467,32 @@ export function createReminderRuntime(options: ReminderRuntimeOptions) {
       if (!context.serverAcked) sendFireRequest(job, context);
       return { wakeEnqueued: false, retryStage: "fire_request" as const };
     }
+    const fireSpan = tracer.startSpan("daemon.app_source.fire", {
+      // Join the trace the fire request opened for this occurrence; the
+      // Server receipt already hangs off it.
+      parent: fireRequestTraces.get(context.requestId) ?? getActiveTraceContext(),
+      surface: "daemon",
+      kind: "internal",
+      attrs: reminderTraceAttrs({
+        ownerAgentId: job.ownerAgentId,
+        reminderId: job.reminderId,
+        version: job.version,
+      }),
+    });
+    fireRequestTraces.delete(context.requestId);
+    const fireOutcome: FireOutcome = { status: "error", attrs: { outcome: "error" } };
+    try {
+      return await runWithActiveSpan(fireSpan, () => presentFire(job, context, fireOutcome));
+    } catch (error) {
+      fireOutcome.status = "error";
+      fireOutcome.attrs = { outcome: "error", error_class: errorClassOf(error) };
+      throw error;
+    } finally {
+      fireSpan.end(fireOutcome.status, { attrs: fireOutcome.attrs });
+    }
+  }
+
+  async function presentFire(job: ReminderJob, context: ReminderFireContext, fireOutcome: FireOutcome) {
     logger.info(`[Daemon] Reminder ${job.reminderId} fired locally (agent=${job.ownerAgentId})`);
     const inbox = options.getInbox(job.ownerAgentId);
     if (context.itemConsumed) {
@@ -402,16 +500,12 @@ export function createReminderRuntime(options: ReminderRuntimeOptions) {
       // rematerializing or re-waking the already-read source item.
       const itemId = reminderItemId({ kind: "reminder", id: job.reminderId, revision: String(job.version) });
       if (itemId) inbox.ack(itemId);
-      trace("daemon.app_source.fire", {
-        ...reminderTraceAttrs({
-          ownerAgentId: job.ownerAgentId,
-          reminderId: job.reminderId,
-          version: job.version,
-          ...(itemId ? { itemId } : {}),
-        }),
+      fireOutcome.status = "ok";
+      fireOutcome.attrs = {
+        ...(itemId ? { item_id: itemId } : {}),
         outcome: "already_consumed",
         wake_enqueued: true,
-      });
+      };
       return { wakeEnqueued: true };
     }
 
@@ -438,15 +532,8 @@ export function createReminderRuntime(options: ReminderRuntimeOptions) {
     });
     if (!mint.ok) {
       logger.error(`[Daemon] Reminder ${job.reminderId} Inbox mint failed: ${mint.code}: ${mint.message}`);
-      trace("daemon.app_source.fire", {
-        ...reminderTraceAttrs({
-          ownerAgentId: job.ownerAgentId,
-          reminderId: job.reminderId,
-          version: job.version,
-        }),
-        outcome: "mint_rejected",
-        reason: mint.code,
-      }, "error");
+      fireOutcome.status = "error";
+      fireOutcome.attrs = { outcome: "mint_rejected", reason: mint.code };
       emitOccurrence(occurrence, "error", "mint_rejected");
       return { wakeEnqueued: false, retryStage: "inbox_materialization" as const };
     }
@@ -473,21 +560,13 @@ export function createReminderRuntime(options: ReminderRuntimeOptions) {
         emitOccurrence(occurrence, "wake_request_error", "wake_not_enqueued");
       }
     }
-    trace(
-      "daemon.app_source.fire",
-      {
-        ...reminderTraceAttrs({
-          ownerAgentId: job.ownerAgentId,
-          reminderId: job.reminderId,
-          version: job.version,
-          itemId: mint.item.itemId,
-        }),
-        outcome: wakeEnqueued ? "presented" : "wake_not_enqueued",
-        wake_enqueued: wakeEnqueued,
-        catchup: context.catchup,
-      },
-      wakeEnqueued ? "ok" : "error",
-    );
+    fireOutcome.status = wakeEnqueued ? "ok" : "error";
+    fireOutcome.attrs = {
+      item_id: mint.item.itemId,
+      outcome: wakeEnqueued ? "presented" : "wake_not_enqueued",
+      wake_enqueued: wakeEnqueued,
+      catchup: context.catchup,
+    };
     return {
       wakeEnqueued,
       phaseTruth: clonePhaseTruth(occurrence.phaseTruth),
@@ -660,6 +739,22 @@ export function createReminderRuntime(options: ReminderRuntimeOptions) {
             : message.outcome === "premature"
               ? cache.rearmFireRequest(identity, message.requestId, message.retryAfterMs)
               : cache.discardFireRequest(identity, message.requestId);
+          // An applied, fired acceptance is followed by the `fired locally`
+          // line; every other result (including accepted but not fired) is logged so a refused or orphaned fire is visible
+          // in runner.log without traces.
+          if (!applied || message.outcome !== "accepted" || message.fired !== true) {
+            const detail = message.outcome === "premature"
+              ? ` retryAfterMs=${message.retryAfterMs}`
+              : message.outcome === "obsolete"
+                ? ` reason=${message.reason}`
+                : ` fired=${String(message.fired)}`;
+            logger.info(
+              `[Reminder] fire request result ${message.reminderId} v${message.version} requestId=${message.requestId} outcome=${message.outcome}${detail}${applied ? "" : " (no pending request; ignored)"}`,
+            );
+          }
+          if (message.outcome !== "accepted" && message.outcome !== "premature") {
+            fireRequestTraces.delete(message.requestId);
+          }
           trace(
             "daemon.app_source.receipt",
             {

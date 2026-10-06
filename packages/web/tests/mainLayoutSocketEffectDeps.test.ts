@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import test from "node:test";
 
 /**
  * Regression contract for #proj-frontend:4e6a01a6 task #1

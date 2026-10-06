@@ -1,7 +1,7 @@
 import { and, eq, isNull, ne } from "drizzle-orm";
 
-import { getDb, type Database } from "../db/index.js";
-import { servers } from "../db/schema.js";
+import { getDb, type Database } from "../db/index";
+import { servers } from "../db/schema";
 
 export function createSlackBridgeOAuthCompletionRedirectPathResolver(
   dependencies: { db?: Database } = {},

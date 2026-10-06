@@ -9,10 +9,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_UPGRADE_BASE_URL } from "./computerRelease.js";
-import { createComputerReleaseSource } from "./kReleaseSource.js";
+import { DEFAULT_UPGRADE_BASE_URL } from "./computerRelease";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "../../..");
@@ -90,25 +88,6 @@ function writeNativeFixture(
     })}\n`,
   );
 }
-
-test("Computer exact target resolves the no-env default root manifest and fails closed on 404", async () => {
-  const version = "1.0.16-staging.sha.95dbe9596b68";
-  const expectedUrl = `${DEFAULT_UPGRADE_BASE_URL}/${version}/manifest.json`;
-  let requestedUrl = "";
-  const source = createComputerReleaseSource(DEFAULT_UPGRADE_BASE_URL, {
-    backend: "legacy-cdn",
-    fetchFn: (async (input: string | URL | Request) => {
-      requestedUrl = String(input);
-      return new Response("", { status: 404 });
-    }) as typeof fetch,
-  });
-
-  await assert.rejects(
-    source.fetchRelease(version, { currentVersion: "1.0.16", platformKey: "linux-x64" }),
-    /K_SOURCE_UNAVAILABLE: .*manifest\.json answered HTTP 404/u,
-  );
-  assert.equal(requestedUrl, expectedUrl);
-});
 
 test("Computer release tag classifier keeps RC bytes on the final package version", () => {
   const run = (tag: string, packageVersion = "1.0.18") =>

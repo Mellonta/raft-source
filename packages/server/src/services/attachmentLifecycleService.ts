@@ -13,8 +13,8 @@ import {
   or,
   sql,
 } from "drizzle-orm";
-import type { Database, DatabaseExecutor, DatabaseTransaction } from "../db/index.js";
-import { getDb } from "../db/index.js";
+import type { Database, DatabaseExecutor, DatabaseTransaction } from "../db/index";
+import { getDb } from "../db/index";
 import {
   type AttachmentUploaderType,
   attachmentObjectArtifacts,
@@ -23,20 +23,24 @@ import {
   attachmentStorageArtifacts,
   attachments,
   attachmentUploadReservations,
-} from "../db/schema.js";
-import type { StorageBackend } from "./storageService.js";
-import { getCdnStorage, getStorage } from "./storageService.js";
+} from "../db/schema";
+import type { StorageBackend } from "./storageService";
+import { getCdnStorage, getStorage } from "./storageService";
 import {
   attachmentLifecycleGcJobs,
   attachmentLifecycleGcOldestPendingSeconds,
   attachmentLifecycleGcOutcomesTotal,
   attachmentLifecycleSweepsTotal,
-} from "../metrics.js";
-import { addTraceEvent, withTraceRoot } from "../tracing/semanticTrace.js";
+} from "../metrics";
+import { addTraceEvent, errorClassOf, withTraceRoot } from "../tracing/semanticTrace";
 import {
   adoptAttachmentTransferIntentWithExecutor,
   cleanupAttachmentTransferArtifacts,
-} from "./attachmentTransferIntentService.js";
+} from "./attachmentTransferIntentService";
+import {
+  assertChannelWritableInTransaction,
+  assertChannelWritableOrConversionDrainInTransaction,
+} from "./channelConversionFenceService";
 
 export const ATTACHMENT_RESERVATION_TTL_MS = 60 * 60 * 1000;
 export const ATTACHMENT_LIFECYCLE_SWEEP_INTERVAL_MS = 15 * 60 * 1000;
@@ -339,10 +343,19 @@ export async function terminateAttachmentReservationWithExecutor(
   reason: string,
   now: Date,
   hooks: AttachmentLifecycleHooks = {},
+  allowConversionDrain = false,
 ): Promise<ReservationRow | null> {
   const locked = await lockObjectThenReservation(executor, reservationId);
   if (!locked) return null;
   const { reservation, object } = locked;
+  if (allowConversionDrain) {
+    await assertChannelWritableOrConversionDrainInTransaction(executor, reservation.channelId, {
+      kind: "reservation",
+      id: reservation.id,
+    });
+  } else {
+    await assertChannelWritableInTransaction(executor, reservation.channelId);
+  }
   await hooks.afterObjectAndReservationLock?.(reservation, terminalState);
   if (reservation.state !== "pending") return reservation;
   if (terminalState === "expired" && reservation.expiresAt > now) return null;
@@ -376,6 +389,7 @@ export async function expireAttachmentReservation(
   explicitNow?: Date,
   db: Database = getDb(),
   hooks: AttachmentLifecycleHooks = {},
+  allowConversionDrain = false,
 ): Promise<ReservationRow | null> {
   return db.transaction(async (tx) => {
     const now = await resolveAttachmentLifecycleDatabaseNow(tx, explicitNow);
@@ -386,6 +400,7 @@ export async function expireAttachmentReservation(
       "Completed upload expired before it was sent.",
       now,
       hooks,
+      allowConversionDrain,
     );
   });
 }
@@ -395,6 +410,7 @@ export async function cancelAttachmentReservation(
   explicitNow?: Date,
   db: Database = getDb(),
   hooks: AttachmentLifecycleHooks = {},
+  allowConversionDrain = false,
 ): Promise<ReservationRow | null> {
   return db.transaction(async (tx) => {
     const now = await resolveAttachmentLifecycleDatabaseNow(tx, explicitNow);
@@ -405,6 +421,7 @@ export async function cancelAttachmentReservation(
       "Canceled by member.",
       now,
       hooks,
+      allowConversionDrain,
     );
   });
 }
@@ -593,7 +610,7 @@ async function deleteClaimedArtifact(
     await db.update(attachmentStorageArtifacts).set({
       deleteLeaseId: null,
       deleteLeaseExpiresAt: null,
-      lastErrorClass: error instanceof Error ? error.name : typeof error,
+      lastErrorClass: errorClassOf(error),
       updatedAt: now,
     }).where(and(
       eq(attachmentStorageArtifacts.id, claimed.id),
@@ -605,7 +622,7 @@ async function deleteClaimedArtifact(
       artifact_delete_token: deleteToken,
       artifact_delete_lease_id: artifactLeaseId,
       outcome: "retry",
-      error_class: error instanceof Error ? error.name : typeof error,
+      error_class: errorClassOf(error),
     });
     return "retry";
   }

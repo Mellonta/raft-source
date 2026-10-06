@@ -13,7 +13,7 @@ export function isFullPageAgentDetailPath(pathname: string): boolean {
 export function shouldDeleteAgentTabDuringProfileSync(
   pathname: string,
   previousProfileParam: string | null,
-  nextProfileType: "agent" | "human" | null,
+  nextProfileType: "agent" | "human" | "external" | null,
   nextProfileId: string | null,
   options: { resetAgentTabForProfileReopen?: boolean } = {},
 ): boolean {

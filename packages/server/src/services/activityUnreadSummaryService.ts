@@ -20,7 +20,7 @@
  * presentation.
  */
 
-import * as channelService from "./channelService.js";
+import * as channelService from "./channelService";
 
 export interface ActivityUnreadInput {
   serverId: string;

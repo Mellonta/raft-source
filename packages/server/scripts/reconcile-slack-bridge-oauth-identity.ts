@@ -1,17 +1,17 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 
 import { pathToFileURL } from "node:url";
-import { closeDatabase, initDatabase } from "../src/db/index.js";
+import { closeDatabase, initDatabase } from "../src/db/index";
 import {
   reconcileSlackBridgeOAuthIdentityAppType,
   slackBridgeProvisioningManifestHash,
   SLACK_BRIDGE_PROVISIONING_CAPABILITIES,
   type SlackBridgeOAuthIdentityAppType,
-} from "../src/services/slackBridgeProvisioningControlPlane.js";
+} from "../src/services/slackBridgeProvisioningControlPlane";
 import {
   SLACK_BRIDGE_OAUTH_CLIENT_SECRET_REF,
   SLACK_BRIDGE_SIGNING_SECRET_REF,
-} from "../src/services/slackBridgeEnvSecrets.js";
+} from "../src/services/slackBridgeEnvSecrets";
 
 function requiredEnv(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name]?.trim();

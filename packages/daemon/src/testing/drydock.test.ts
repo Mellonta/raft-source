@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { test } from "vitest";
-import { createChildProcessEventProbe, createEventProbe, FakeClock, waitForCount, waitForExactCount, waitForState } from "./drydock.js";
+import { createChildProcessEventProbe, createEventProbe, FakeClock, waitForCount, waitForExactCount, waitForState } from "./drydock";
 
 test("FakeClock advances timers deterministically and honors cancellation", () => {
   const clock = new FakeClock();

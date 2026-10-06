@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const srcRoot = resolve(repoRoot, "src");
@@ -24,7 +23,7 @@ test("top panel tabs use the shared reorderable tab bar", () => {
   const agentPanel = readSource("src/components/agent/AgentDetailPanel.tsx");
   const sidebar = readSource("src/components/layout/Sidebar.tsx");
 
-  assert.match(chatPanel, /import \{ SortableTabsList, SortableTabsTab, Tabs, TabsLabel, useOrderedTabs \} from "raft-ui";/);
+  assert.match(chatPanel, /SortableTabsList[\s\S]*SortableTabsTab[\s\S]*Tabs[\s\S]*TabsLabel[\s\S]*useOrderedTabs[\s\S]*from "raft-ui"/);
   assert.match(
     agentPanel,
     /import \{[^}]*\bSortableTabsList\b[^}]*\bSortableTabsTab\b[^}]*\bTabs\b[^}]*\bTabsLabel\b[^}]*\buseOrderedTabs\b[^}]*\} from "raft-ui";/,
@@ -46,19 +45,27 @@ test("top panel tabs use the shared reorderable tab bar", () => {
   assert.match(chatPanel, /useOrderedTabs\(chatPanelTabs, channelPanelTabOrder\)/);
   assert.match(chatPanel, /sidebarOrder\.channelPanelTabOrder/);
   assert.match(chatPanel, /updateSidebarOrder\(\{ channelPanelTabOrder: nextOrder \}\)/);
-  assert.match(chatPanel, /<Tabs<ChatPanelTab>[\s\S]*?className="overflow-hidden border-b-2 border-black bg-white"/);
+  // The actual panel/tab-list parent boundary is covered by the rendered
+  // ChatPanel test; source order alone can preserve the wrong composition.
   assert.match(chatPanel, /<SortableTabsList<ChatPanelTab>/);
-  assert.match(chatPanel, /<SortableTabsTab[\s\S]*?data-testid=\{`panel-tab-\$\{tab\.id\}`\}[\s\S]*?className="!cursor-default"[\s\S]*?>/);
+  assert.match(chatPanel, /<SortableTabsTab[\s\S]*?data-testid=\{`panel-tab-\$\{tab\.id\}`\}[\s\S]*?className="!cursor-default h-7"[\s\S]*?>/);
 
   assert.match(agentPanel, /useOrderedTabs\(visibleAgentTabItems, normalizedAgentPanelTabOrder\)/);
   assert.match(agentPanel, /sidebarOrder\.agentPanelTabOrder/);
   assert.match(agentPanel, /tab === "channels" \|\| tab === "dms" \? "chat" : tab/);
   assert.match(agentPanel, /updateSidebarOrder\(\{ agentPanelTabOrder: nextOrder \}\)/);
   assert.match(agentPanel, /<SortableTabsList<AgentTab>/);
-  assert.match(agentPanel, /<div\s+ref=\{agentTabsRef\}[\s\S]*?className=\{`min-w-0 max-w-full overflow-hidden/);
-  assert.match(agentPanel, /className="max-w-full border-y-0 border-l-0 border-r-2 border-black bg-white"/);
-  assert.doesNotMatch(agentPanel, /className="max-w-none border-y-0 border-l-0 border-r-2 border-black bg-white"/);
-  assert.match(agentPanel, /<SortableTabsTab[\s\S]*?data-testid=\{`panel-tab-\$\{tab\.id\}`\}[\s\S]*?className="!cursor-default"[\s\S]*?>/);
+  assert.match(
+    agentPanel,
+    /<div\s+ref=\{agentTabsRef\}[\s\S]*?className=\{`min-w-0 max-w-full overflow-x-auto overflow-y-hidden scrollbar-none/,
+  );
+  // The tab list owns no border: its parent Tabs owns the single boundary.
+  // This prevents the Brutal tab strip and section header from rendering a
+  // doubled horizontal/vertical edge at the same seam.
+  assert.match(agentPanel, /className="max-w-full theme-brutal:border-0 theme-brutal:bg-layer-panel"/);
+  assert.match(agentPanel, /<TabsIndicator \/>/);
+  assert.doesNotMatch(agentPanel, /border-r-2 border-line-strong bg-layer-panel/);
+  assert.match(agentPanel, /<SortableTabsTab[\s\S]*?data-testid=\{`panel-tab-\$\{tab\.id\}`\}[\s\S]*?className="!cursor-default h-7"[\s\S]*?>/);
   assert.doesNotMatch(agentPanel, /showMoreMenu/);
 });
 

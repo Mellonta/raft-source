@@ -20,6 +20,14 @@
 import { memo, useMemo } from "react";
 import { useIntl } from "react-intl";
 import { Pencil } from "lucide-react";
+import {
+  MessageReplies,
+  MessageRepliesItem,
+  MessageRepliesItemContent,
+  MessageRepliesItemSender,
+  MessageRepliesItemTime,
+  MessageRepliesSummary,
+} from "raft-ui";
 import AvatarSlot from "../ui/AvatarSlot";
 import { useAgentStore } from "../../store/agentStore";
 import type { Agent } from "../../store/agentStore";
@@ -146,9 +154,9 @@ export const InlineThreadReplies = memo(function InlineThreadReplies({
     { count: replyCount },
   );
   const countLabel = (
-    <span
+    <MessageRepliesSummary
       data-message-affordance="inline-thread-replies-count"
-      className="shrink-0 text-[12.5px] font-bold text-black/55 transition-colors group-hover:text-black"
+      className="shrink-0 text-[12.5px] font-bold text-foreground-muted transition-colors group-hover:text-foreground-strong"
     >
       {countText}
       {unreadCount > 0
@@ -167,22 +175,19 @@ export const InlineThreadReplies = memo(function InlineThreadReplies({
         </>
       ) : null}
       {" ›"}
-    </span>
+    </MessageRepliesSummary>
   );
 
   return (
-    <button
-      type="button"
+    <MessageReplies
       onClick={onOpenThread}
       data-message-affordance="inline-thread-replies"
-      /* This is an intuitive row-level action, not a web link; keep the app's
-         default arrow cursor while the full gray surface remains clickable. */
-      className="group mt-1.5 flex min-w-0 w-full max-w-full flex-col gap-1 bg-black/[0.03] px-2.5 py-2 text-left transition-colors hover:bg-black/[0.08] focus-visible:outline focus-visible:outline-1 focus-visible:outline-black"
+      className="group mt-1.5 flex min-w-0 w-full max-w-full flex-col gap-1 text-left"
     >
       {countLabel}
       {previews.map((reply) => {
         return (
-          <span
+          <MessageRepliesItem
             key={reply.messageId}
             data-inline-thread-reply-row
             className="flex min-w-0 w-full max-w-full items-center gap-1.5 text-[12.5px] leading-tight"
@@ -197,20 +202,22 @@ export const InlineThreadReplies = memo(function InlineThreadReplies({
             {/* The clock remains fixed, so the sender must be allowed to give
                 width back on narrow panes; otherwise its intrinsic width can
                 push the entire row past the preview surface. */}
-            <span className="min-w-0 shrink truncate font-semibold text-black/70">
+            <MessageRepliesItemSender className="min-w-0 shrink truncate font-semibold text-foreground-muted">
               {reply.senderDisplayName || reply.senderName}
-            </span>
-            <span className="min-w-0 flex-1 truncate text-black/60">{reply.preview}</span>
-            <time
+            </MessageRepliesItemSender>
+            <MessageRepliesItemContent className="min-w-0 flex-1 truncate text-foreground-muted">
+              {reply.preview}
+            </MessageRepliesItemContent>
+            <MessageRepliesItemTime
               dateTime={reply.createdAt}
               data-inline-thread-reply-time
-              className="ml-auto shrink-0 text-[11.5px] tabular-nums text-black/40"
+              className="ml-auto shrink-0 text-[11.5px] tabular-nums text-foreground-placeholder"
             >
               {formatMessageTime(reply.createdAt)}
-            </time>
-          </span>
+            </MessageRepliesItemTime>
+          </MessageRepliesItem>
         );
       })}
-    </button>
+    </MessageReplies>
   );
 });

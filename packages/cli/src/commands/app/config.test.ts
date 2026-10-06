@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
 import type { AgentApiAppConfigResponse } from "@botiverse/raft-shared";
 
-import type { AgentContext } from "../../auth/env.js";
-import type { ApiResponse } from "../../client.js";
-import { createCommandContext } from "../../core/context.js";
-import { CliError } from "../../core/errors.js";
-import type { CliIo } from "../../core/io.js";
-import { appConfigCommand } from "./config.js";
+import type { AgentContext } from "../../auth/env";
+import type { ApiResponse } from "../../client";
+import { createCommandContext } from "../../core/context";
+import { CliError } from "../../core/errors";
+import type { CliIo } from "../../core/io";
+import { appConfigCommand } from "./config";
 
 const agentContext: AgentContext = {
   agentId: "agent-1",

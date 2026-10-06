@@ -4,7 +4,7 @@ import {
   hashApmStable,
   reduceAgentActivityProjection,
   stableStringifyApm,
-} from "./apmStateMachine.js";
+} from "./apmStateMachine";
 import type {
   AgentActivityMessage,
   AgentActivitySequenceSnapshot,
@@ -13,7 +13,7 @@ import type {
   ApmTraceInputKind,
   ApmTraceInputRow,
   ApmTraceTransitionRow,
-} from "./apmStateMachine.js";
+} from "./apmStateMachine";
 
 export type {
   AgentActivityMessage,
@@ -34,7 +34,7 @@ export type {
   ApmTraceInputRow,
   ApmTraceProjectorOutputRow,
   ApmTraceTransitionRow,
-} from "./apmStateMachine.js";
+} from "./apmStateMachine";
 
 export type ApmObservedGatedStdinEffect =
   | {

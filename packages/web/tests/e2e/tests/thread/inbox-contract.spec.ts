@@ -84,13 +84,24 @@ async function registerEphemeralHuman(
     `ephemeral inbox peer profile completion failed: ${completeProfileResponse.status()}`,
   ).toBeTruthy();
 
-  const addMemberResponse = await request.post(`${seedState.urls.api}/api/servers/${seedState.server.id}/members`, {
+  // Join the way a real member does: the owner mints a single-use join link
+  // and the new account accepts it.
+  const joinLinkResponse = await request.post(`${seedState.urls.api}/api/servers/${seedState.server.id}/join-links`, {
     headers: headers(seedState, ownerAccessToken),
-    data: { userId: registered.user.id, role: "member" },
+    data: { maxUses: 1 },
   });
   expect(
-    addMemberResponse.ok(),
-    `ephemeral inbox peer membership failed: ${addMemberResponse.status()}`,
+    joinLinkResponse.ok(),
+    `ephemeral inbox peer join link failed: ${joinLinkResponse.status()}`,
+  ).toBeTruthy();
+  const { token: joinToken } = await joinLinkResponse.json() as { token: string };
+  const acceptResponse = await request.post(`${seedState.urls.api}/api/auth/accept-invite`, {
+    headers: { Authorization: `Bearer ${registered.accessToken}` },
+    data: { token: joinToken },
+  });
+  expect(
+    acceptResponse.ok(),
+    `ephemeral inbox peer membership failed: ${acceptResponse.status()}`,
   ).toBeTruthy();
 
   return { ...registered.user, accessToken: registered.accessToken };
@@ -384,7 +395,14 @@ test.describe("Inbox contract", () => {
     await loadInboxUntilVisible(page, page.getByTestId("inbox-row").filter({ hasText: activeLatestMessage }));
 
     const activeRow = rows.filter({ hasText: activeLatestMessage });
-    await activeRow.getByTitle("Mark as Done").click();
+    // The done affordance is a RUI icon Button with an aria-label (the Tooltip
+    // carries the text; there is no title attribute anymore). It is hover-gated
+    // (pointer-events-none until group-hover) and overlapped by the row
+    // timestamp, which stays hit-testable while fading out — Playwright's
+    // hit-target check does not hover first, so hover the row explicitly to
+    // make the button the topmost hit target before clicking.
+    await activeRow.hover();
+    await activeRow.getByTestId("inbox-row-done").click();
     await expect(rows.filter({ hasText: activeLatestMessage })).toHaveCount(0);
     const reopenedMessage = `inbox active reopened ${runId}`;
     await createMessage(request, seedState, peer.accessToken, activeChannel.id, reopenedMessage);
@@ -402,6 +420,19 @@ test.describe("Inbox contract", () => {
     const seedState = await waitForSeedState();
     const ownerLogin = await loginViaApi(request, seedState);
     await dismissOwnerOnboarding(request, seedState, ownerLogin.accessToken);
+    await page.route("**/api/feature-flags/evaluate", async (route) => {
+      const body = route.request().postDataJSON() as { keys?: string[] };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          evaluations: (body.keys ?? []).map((key) => ({
+            key,
+            enabled: key === "activity_sidebar_inbox_v0",
+          })),
+        }),
+      });
+    });
     const runId = `${Date.now().toString(36)}-route-${testInfo.workerIndex}`;
     const channel = await createChannel(
       request,
@@ -429,6 +460,13 @@ test.describe("Inbox contract", () => {
     });
     expect(replyResponse.ok()).toBeTruthy();
     const thread = await replyResponse.json() as { threadChannelId: string };
+    const channelHistory = Array.from(
+      { length: 36 },
+      (_, index) => `inbox route channel history ${index + 1}/36 ${runId} — scroll contract`,
+    );
+    for (const content of channelHistory) {
+      await createMessage(request, seedState, ownerLogin.accessToken, channel.id, content);
+    }
 
     await expect.poll(async () => {
       const items = await readInboxProjection(request, seedState, ownerLogin.accessToken);
@@ -491,7 +529,9 @@ test.describe("Inbox contract", () => {
     };
 
     try {
-      await gotoInbox(page, seedState);
+      await page.goto(`/s/${seedState.server.slug}/inbox`, { waitUntil: "domcontentloaded" });
+      await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
+      await expect(page.getByTestId("activity-nav-all")).toBeVisible();
       const row = page.getByTestId("inbox-row").filter({ hasText: replyText });
       await loadInboxUntilVisible(page, row);
       await expect(row).toContainText(parentText);
@@ -502,6 +542,47 @@ test.describe("Inbox contract", () => {
       await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
       await expect(page.getByTestId("thread-message-scroller")).toBeVisible();
       await observeRoute("visible-thread-asserted");
+
+      await page.getByTestId("thread-overflow-trigger").click();
+      await page.getByTestId("thread-overflow-view-in-channel").click();
+      await expect(page.getByTestId("activity-return-thread")).toBeVisible();
+      const composer = page.getByPlaceholder(`Message #${channel.name}`);
+      await expect(composer).toBeVisible();
+      await composer.fill(`composer remains interactive ${runId}`);
+      await expect(composer).toHaveValue(`composer remains interactive ${runId}`);
+      await composer.fill("");
+      const parentChannelScroller = page
+        .getByTestId("activity-parent-channel-detail")
+        .getByTestId("message-scroller");
+      await expect(parentChannelScroller).toBeVisible();
+      await expect.poll(async () => parentChannelScroller.evaluate((scroller) => (
+        scroller.scrollHeight - scroller.clientHeight
+      ))).toBeGreaterThan(100);
+      await parentChannelScroller.evaluate((scroller) => {
+        scroller.scrollTop = 0;
+      });
+      await expect.poll(async () => parentChannelScroller.evaluate((scroller) => scroller.scrollTop)).toBe(0);
+      await parentChannelScroller.hover();
+      await page.mouse.wheel(0, 700);
+      await expect.poll(async () => parentChannelScroller.evaluate((scroller) => scroller.scrollTop)).toBeGreaterThan(0);
+      await expect(composer).toBeVisible();
+      const parentDetailLayout = await page.getByTestId("activity-parent-channel-detail").evaluate((host) => {
+        const chat = host.firstElementChild as HTMLElement | null;
+        const scroller = host.querySelector<HTMLElement>('[data-testid="message-scroller"]');
+        if (!chat || !scroller) throw new Error("Activity parent channel must mount ChatPanel and its timeline");
+        const hostRect = host.getBoundingClientRect();
+        const chatRect = chat.getBoundingClientRect();
+        return {
+          hostHeight: Math.round(hostRect.height),
+          chatHeight: Math.round(chatRect.height),
+          scrollerClientHeight: scroller.clientHeight,
+          scrollerScrollHeight: scroller.scrollHeight,
+        };
+      });
+      expect(parentDetailLayout.hostHeight).toBeGreaterThan(0);
+      expect(parentDetailLayout.chatHeight).toBeLessThanOrEqual(parentDetailLayout.hostHeight);
+      expect(parentDetailLayout.scrollerClientHeight).toBeGreaterThan(0);
+      expect(parentDetailLayout.scrollerScrollHeight).toBeGreaterThan(parentDetailLayout.scrollerClientHeight);
     } finally {
       try {
         await observeRoute("final");
@@ -513,6 +594,95 @@ test.describe("Inbox contract", () => {
         contentType: "application/json",
       });
     }
+  });
+
+  test("keeps the Activity channel detail composer and scroll owner with a side thread open", async ({ page, request }, testInfo) => {
+    const seedState = await waitForSeedState();
+    const ownerLogin = await loginViaApi(request, seedState);
+    await dismissOwnerOnboarding(request, seedState, ownerLogin.accessToken);
+    await page.setViewportSize({ width: 1950, height: 1100 });
+    await page.addInitScript(() => {
+      window.localStorage.setItem("slock:searchPanelCompactWidth", "480");
+      window.localStorage.setItem("slock:threadPanelWidth", "900");
+    });
+
+    const runId = `${Date.now().toString(36).slice(-6)}-ct-${testInfo.workerIndex}`;
+    const channel = await createChannel(
+      request,
+      seedState,
+      ownerLogin.accessToken,
+      `act-${runId}`,
+    );
+    for (let i = 0; i < 24; i += 1) {
+      await createMessage(
+        request,
+        seedState,
+        ownerLogin.accessToken,
+        channel.id,
+        `inbox channel thread older ${runId} ${i.toString().padStart(2, "0")}`,
+      );
+    }
+    const parentText = `inbox channel thread parent ${runId}`;
+    const parentMessage = await createMessage(
+      request,
+      seedState,
+      ownerLogin.accessToken,
+      channel.id,
+      parentText,
+    );
+    const followResponse = await request.post(`${seedState.urls.api}/api/channels/threads/follow`, {
+      headers: headers(seedState, ownerLogin.accessToken),
+      data: { parentMessageId: parentMessage.id },
+    });
+    expect(followResponse.ok()).toBeTruthy();
+    const replyResponse = await request.post(`${seedState.urls.api}/api/channels/${channel.id}/threads`, {
+      headers: headers(seedState, ownerLogin.accessToken),
+      data: { parentMessageId: parentMessage.id, content: `inbox channel thread reply ${runId}` },
+    });
+    expect(replyResponse.ok()).toBeTruthy();
+    for (let i = 0; i < 24; i += 1) {
+      await createMessage(
+        request,
+        seedState,
+        ownerLogin.accessToken,
+        channel.id,
+        `inbox channel thread newer ${runId} ${i.toString().padStart(2, "0")}`,
+      );
+    }
+
+    const thread = await replyResponse.json() as { threadChannelId: string };
+    const params = new URLSearchParams({
+      open: `channel:${channel.id}`,
+      msg: parentMessage.id,
+      thread: `${channel.id}:${parentMessage.id}`,
+    });
+    await page.goto(`/s/${seedState.server.slug}/activity?${params.toString()}`, {
+      waitUntil: "domcontentloaded",
+    });
+
+    await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
+    await expect(page.getByTestId("message-scroller").getByText(parentText)).toBeVisible();
+    await expect(page.getByTestId("thread-message-scroller")).toBeVisible();
+    await expect(page.getByPlaceholder("Message thread")).toBeVisible();
+
+    const channelComposer = page.getByPlaceholder(`Message #${channel.name}`);
+    await expect(channelComposer).toBeVisible();
+    await channelComposer.fill(`middle pane composer still works ${runId}`);
+    await expect(channelComposer).toHaveValue(`middle pane composer still works ${runId}`);
+
+    const channelScroller = page.getByTestId("message-scroller");
+    await expect(channelScroller).toBeVisible();
+    const before = await channelScroller.evaluate((node) => ({
+      scrollTop: node.scrollTop,
+      scrollHeight: node.scrollHeight,
+      clientHeight: node.clientHeight,
+    }));
+    expect(before.scrollHeight).toBeGreaterThan(before.clientHeight);
+    await channelScroller.hover();
+    await page.mouse.wheel(0, 600);
+    await expect.poll(async () => channelScroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(before.scrollTop);
+    expect(new URL(page.url()).searchParams.get("thread")).toBe(`${channel.id}:${parentMessage.id}`);
+    expect(thread.threadChannelId).toBeTruthy();
   });
 
   test("opens a chat at the earliest unread message while previewing the latest message", async ({ page, request }) => {
@@ -587,8 +757,32 @@ test.describe("Inbox contract", () => {
     );
     await addChannelHuman(request, seedState, ownerLogin.accessToken, channel.id, peer.id);
 
+    // Adding a member persists its own channel system message. Isolate that
+    // setup activity so the assertion below measures only the target message.
+    const readAll = await request.post(`${seedState.urls.api}/api/channels/${channel.id}/read-all`, {
+      headers: headers(seedState, ownerLogin.accessToken),
+    });
+    expect(readAll.ok()).toBeTruthy();
+    await expect.poll(async () => {
+      const response = await request.get(`${seedState.urls.api}/api/channels/inbox`, {
+        headers: headers(seedState, ownerLogin.accessToken),
+      });
+      const body = await response.json() as { items: Array<{ channelId?: string; unreadCount?: number }> };
+      return body.items.find((item) => item.channelId === channel.id)?.unreadCount ?? -1;
+    }).toBe(0);
+
     const messageText = `inbox read sync target ${runId}`;
-    await createMessage(request, seedState, peer.accessToken, channel.id, messageText);
+    const targetMessage = await createMessage(request, seedState, peer.accessToken, channel.id, messageText);
+    await expect.poll(async () => {
+      const response = await request.get(`${seedState.urls.api}/api/channels/inbox`, {
+        headers: headers(seedState, ownerLogin.accessToken),
+      });
+      const body = await response.json() as {
+        items: Array<{ channelId?: string; firstUnreadMessageId?: string | null; unreadCount?: number }>;
+      };
+      const item = body.items.find((candidate) => candidate.channelId === channel.id);
+      return { firstUnreadMessageId: item?.firstUnreadMessageId ?? null, unreadCount: item?.unreadCount ?? -1 };
+    }).toEqual({ firstUnreadMessageId: targetMessage.id, unreadCount: 1 });
 
     await gotoInbox(page, seedState);
     const cachedActivityRow = page.getByTestId("inbox-row").filter({ hasText: messageText });

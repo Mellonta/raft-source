@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import test, { after, afterEach, before } from "node:test";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
+import { AppThemeContext } from "../src/hooks/useAppTheme";
+import type { AppThemeContextValue } from "../src/hooks/useAppTheme";
+import { renderMermaidDiagram } from "../src/components/mermaid/mermaidRenderer";
 import MarkdownContent from "../src/components/markdown/MarkdownContent";
 import { TestIntlProvider } from "./helpers/intl";
 
@@ -18,7 +20,7 @@ function restoreProperty(target: object, key: PropertyKey, descriptor?: Property
   else Reflect.deleteProperty(target, key);
 }
 
-before(() => {
+beforeAll(() => {
   Object.defineProperty(SVGElement.prototype, "getBBox", {
     configurable: true,
     value: () => ({ x: 0, y: 0, width: 100, height: 20 }),
@@ -33,7 +35,7 @@ before(() => {
   });
 });
 
-after(() => {
+afterAll(() => {
   restoreProperty(SVGElement.prototype, "getBBox", bbox);
   restoreProperty(SVGElement.prototype, "getComputedTextLength", textLength);
   restoreProperty(HTMLCanvasElement.prototype, "getContext", canvasContext);
@@ -90,11 +92,11 @@ test("valid Mermaid exposes the isolated surface, view controls, and sharp zoom 
 
   const toolbar = screen.getByTestId("mermaid-toolbar");
   assert.ok(toolbar.classList.contains("r-mermaid-toolbar"));
-  const diagramTab = screen.getByRole("button", { name: "Diagram" });
-  const codeTab = screen.getByRole("button", { name: "Code" });
+  const diagramTab = screen.getByRole("radio", { name: "Diagram" });
+  const codeTab = screen.getByRole("radio", { name: "Code" });
   assert.ok(diagramTab.classList.contains("r-mermaid-toolbar__tab"));
-  assert.equal(diagramTab.getAttribute("aria-pressed"), "true");
-  assert.equal(codeTab.getAttribute("aria-pressed"), "false");
+  assert.equal(diagramTab.getAttribute("aria-checked"), "true");
+  assert.equal(codeTab.getAttribute("aria-checked"), "false");
   assert.ok(screen.getByRole("group", { name: "Mermaid zoom controls" }).classList.contains("r-mermaid-toolbar__zoom"));
   for (const name of [
     "Zoom Mermaid diagram out",
@@ -108,8 +110,8 @@ test("valid Mermaid exposes the isolated surface, view controls, and sharp zoom 
   assert.equal(diagram?.getAttribute("data-dom-capture-snapshot"), "",
     "capture always uses the complete rendered diagram, independent of the active tab");
   assert.match(result.container.querySelector("pre")?.textContent ?? "", /flowchart TD/);
-  assert.equal(diagramTab.getAttribute("aria-pressed"), "false");
-  assert.equal(codeTab.getAttribute("aria-pressed"), "true");
+  assert.equal(diagramTab.getAttribute("aria-checked"), "false");
+  assert.equal(codeTab.getAttribute("aria-checked"), "true");
   assert.equal(screen.queryByRole("button", { name: "Zoom Mermaid diagram in" }), null);
   assert.equal(screen.queryByRole("button", { name: "Open Mermaid diagram fullscreen" }), null);
   assert.equal(screen.queryByRole("button", { name: "Copy code" }), null);
@@ -257,9 +259,9 @@ test("invalid Mermaid is generic, keeps source, and logs diagnostics only", asyn
     assert.match(screen.getByRole("alert").textContent ?? "", /Couldn't render this diagram/);
     assert.doesNotMatch(result.container.textContent ?? "", /No diagram type detected|for text:/);
     assert.equal(screen.getByRole<HTMLButtonElement>("button", { name: "Zoom Mermaid diagram in" }).disabled, true);
-    fireEvent.click(screen.getByRole("button", { name: "Code" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Code" }));
     assert.match(result.container.querySelector("pre")?.textContent ?? "", /not a diagram/);
-    assert.equal(screen.queryByRole("alert"), null);
+    assert.ok(screen.queryByRole("alert") === null);
     assert.equal(logged[0]?.[0], "[Mermaid] render failed");
     assert.match(String(logged[0]?.[1]), /No diagram type detected/);
   } finally {
@@ -267,31 +269,22 @@ test("invalid Mermaid is generic, keeps source, and logs diagnostics only", asyn
   }
 });
 
-test("copy exposes pending, success, and persistent failure without duplicates", async () => {
+test("copy rides the RUI CopyableCodeAction and reports the copied state", async () => {
   const descriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
   const writes: string[] = [];
-  let resolveCopy: (() => void) | undefined;
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
-    value: { writeText: (text: string) => {
-      writes.push(text);
-      return new Promise<void>((resolve) => { resolveCopy = resolve; });
-    } },
+    value: { writeText: (text: string) => { writes.push(text); return Promise.resolve(); } },
   });
   try {
     await renderValid();
     fireEvent.click(screen.getByRole("button", { name: "Copy Mermaid source" }));
-    const copying = screen.getByRole<HTMLButtonElement>("button", { name: "Copying Mermaid source" });
-    assert.equal(copying.disabled, true);
-    fireEvent.click(copying);
-    assert.equal(writes.length, 1);
-    await act(async () => {
-      resolveCopy?.();
-      await Promise.resolve();
-    });
     const copied = await screen.findByRole("button", { name: "Copied Mermaid source" });
     assert.deepEqual(writes, ["flowchart TD\n  A --> B"]);
 
+    // The RUI action owns the clipboard lifecycle; a denied write is a no-op
+    // (its foxact hook swallows the rejection and falls back to execCommand),
+    // so the surface stays stable instead of surfacing a copy-failure banner.
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText: () => Promise.reject(new Error("denied")) },
@@ -300,9 +293,8 @@ test("copy exposes pending, success, and persistent failure without duplicates",
       fireEvent.click(copied);
       await Promise.resolve();
     });
-    await waitFor(() => assert.match(screen.getByRole("alert").textContent ?? "", /Couldn't copy/));
-    fireEvent.click(screen.getByRole("button", { name: "Code" }));
-    assert.match(screen.getByRole("alert").textContent ?? "", /Couldn't copy/);
+    assert.equal(screen.queryByRole("alert"), null);
+    assert.ok(screen.getByRole("button", { name: /Copied Mermaid source|Copy Mermaid source/ }));
   } finally {
     restoreProperty(navigator, "clipboard", descriptor);
   }
@@ -346,8 +338,8 @@ test("Mermaid chrome and generic errors are localized in zh-cn", async () => {
     </TestIntlProvider>,
   );
   await waitFor(() => assert.ok(valid.container.querySelector("[data-mermaid-status=valid]")));
-  assert.ok(screen.getByRole("button", { name: "图表" }));
-  assert.ok(screen.getByRole("button", { name: "代码" }));
+  assert.ok(screen.getByRole("radio", { name: "图表" }));
+  assert.ok(screen.getByRole("radio", { name: "代码" }));
   valid.unmount();
 
   const original = console.error;
@@ -361,7 +353,7 @@ test("Mermaid chrome and generic errors are localized in zh-cn", async () => {
     await waitFor(() => assert.ok(invalid.container.querySelector("[data-mermaid-status=error]")));
     assert.equal(screen.getByRole("alert").textContent, "渲染失败");
     assert.doesNotMatch(invalid.container.textContent ?? "", /No diagram type detected|for text:/);
-    fireEvent.click(screen.getByRole("button", { name: "代码" }));
+    fireEvent.click(screen.getByRole("radio", { name: "代码" }));
     assert.match(invalid.container.querySelector("pre")?.textContent ?? "", /仍然不是图表/);
   } finally {
     console.error = original;
@@ -375,7 +367,7 @@ test("an older render cannot overwrite an edited Mermaid message", async () => {
     const result = render(<MarkdownContent source={block("gantt\n  title Earlier\n  dateFormat YYYY-MM-DD\n  Build :2026-01-01, 2d")} enableMermaid />);
     result.rerender(<MarkdownContent source={block("not the edited diagram")} enableMermaid />);
     await waitFor(() => assert.ok(result.container.querySelector("[data-mermaid-status=error]")));
-    fireEvent.click(screen.getByRole("button", { name: "Code" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Code" }));
     assert.match(result.container.querySelector("pre")?.textContent ?? "", /not the edited diagram/);
     await new Promise((resolve) => window.setTimeout(resolve, 50));
     assert.ok(result.container.querySelector("[data-mermaid-status=error]"));
@@ -383,4 +375,50 @@ test("an older render cannot overwrite an edited Mermaid message", async () => {
   } finally {
     console.error = original;
   }
+});
+
+test("concurrent light/dark diagrams keep their own palette and reuse only matching cached SVG", async () => {
+  const code = "flowchart LR\n ThemeStart[Start] --> ThemeFinish[Finish]";
+  const [light, dark] = await Promise.all([
+    renderMermaidDiagram(code, "light"),
+    renderMermaidDiagram(code, "dark"),
+  ]);
+  assert.equal(light.theme, "light");
+  assert.equal(dark.theme, "dark");
+  assert.match(light.svg, /#141111/);
+  assert.match(dark.svg, /#f0f3f6/);
+  assert.match(light.svg, /background-color: rgb\(255, 255, 255\)/);
+  assert.match(dark.svg, /background-color: rgb\(10, 12, 16\)/);
+  assert.notEqual(light.svg, dark.svg);
+  assert.equal(await renderMermaidDiagram(code, "light"), light);
+  assert.equal(await renderMermaidDiagram(code, "dark"), dark);
+});
+
+test("an existing diagram follows resolved mode changes and preserves its source view", async () => {
+  const code = "sequenceDiagram\n Alice->>Bob: Theme switch";
+  function content(mode: "light" | "dark") {
+    const value: AppThemeContextValue = {
+      preset: mode === "dark" ? "elegant-dark" : "elegant-light",
+      preferences: { mode: "system", lightThemeId: "elegant", darkThemeId: "elegant" },
+      resolvedMode: mode,
+      setPreferences: () => {}, setMode: () => {}, setThemeForMode: () => {},
+      setPreset: () => {},
+    };
+    return <AppThemeContext.Provider value={value}>
+      <MarkdownContent source={block(code)} enableMermaid />
+    </AppThemeContext.Provider>;
+  }
+  const result = render(content("light"));
+  const readSrc = () => result.container.querySelector<HTMLIFrameElement>("iframe")?.srcdoc ?? "";
+  await waitFor(() => assert.match(readSrc(), /#141111/), { timeout: 15_000 });
+  const lightSrc = readSrc();
+  fireEvent.click(screen.getByRole("radio", { name: "Code", exact: true }));
+  result.rerender(content("dark"));
+  assert.equal(result.container.querySelector("pre code")?.textContent, code);
+  assert.equal(screen.getByRole("radio", { name: "Code", exact: true }).getAttribute("aria-checked"), "true");
+  await waitFor(() => assert.ok(result.container.querySelector("[data-mermaid-status=valid]")));
+  fireEvent.click(screen.getByRole("radio", { name: "Diagram", exact: true }));
+  await waitFor(() => assert.match(readSrc(), /#f0f3f6/));
+  result.rerender(content("light"));
+  await waitFor(() => assert.equal(readSrc(), lightSrc));
 });

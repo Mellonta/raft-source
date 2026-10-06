@@ -1,3 +1,4 @@
+import type { ServerId } from "./brandedIds";
 // Operation cards (B-mode) — agents prepare a privileged action and post it
 // inline as a chat message; a human admin clicks the action button to commit
 // it under their own identity. The card is the entire body of the system
@@ -421,10 +422,9 @@ export function validateActionCardAction(action: ActionCardAction): string | nul
 
 // ── Card state on the carrier message ───────────────────────────────────────
 //
-// State lives on `messages.action_metadata` (jsonb) — no separate table. The
-// state machine is intentionally tiny:
-//
-//   prepared → executed   (admin clicked the action button, action succeeded)
+// State lives on `messages.action_metadata` (jsonb) and is mirrored by the
+// durable action_cards row. Conversion adds an authority-aware lifecycle:
+//   prepared → frozen → reconfirm_required → prepared/ready → executed
 //   prepared → failed     (admin clicked, action failed; card shows error and
 //                          stays "prepared" so click can be retried —
 //                          `failed` is a UI hint, the canonical state stays
@@ -433,10 +433,19 @@ export function validateActionCardAction(action: ActionCardAction): string | nul
 // The action is idempotent at the server level: a click while state is
 // already `executed` is rejected.
 
-export type ActionCardState = "prepared" | "executed";
+export type ActionCardState = "prepared" | "executed" | "frozen" | "reconfirm_required";
 
 export interface ActionCardMetadata {
   kind: "action-card";
+  /**
+   * The card's target server, fixed at prepare time (the preparing agent's
+   * server). Execution always acts on this server and the confirmer's
+   * permissions are checked there, whichever joint projection they view it
+   * from. Read paths overwrite it from `action_cards.server_id`.
+   */
+  sourceServerId?: ServerId | null;
+  /** Display name of `sourceServerId` at prepare time ("Acts on <name>"). */
+  targetServerName?: string | null;
   /** Frozen at prepare time. */
   action: ActionCardAction;
   /** Safe fallback presentation for older clients. */
@@ -448,6 +457,12 @@ export interface ActionCardMetadata {
   executedByUserName?: string | null;
   /** Resource produced by the execute step (e.g. created channel id). */
   result?: ActionCardResult | null;
+  /** Persisted optimistic credential. Conversion retires the old value. */
+  confirmationVersion?: number;
+  /** Durable conversion identity; present only after this card was frozen. */
+  conversionJobId?: string;
+  conversionEpoch?: string;
+  reconfirmedAt?: string;
 }
 
 export type ActionCardResult =
@@ -513,9 +528,23 @@ export type ActionCardResult =
 export interface ExecuteActionRequestBody {
   /** Optimistic-concurrency guard against double-execute. */
   expectedState?: ActionCardState;
+  expectedConfirmationVersion?: number;
 }
 
 // Body shape for POST /api/actions/:messageId/mark-executed (dialog flow)
 export interface MarkActionExecutedRequestBody {
   result: ActionCardResult;
+  expectedConfirmationVersion?: number;
+}
+
+export interface ActionCardRegularWriterContext {
+  messageId: string;
+  confirmationVersion: number;
+}
+
+/** A shared history copy never grants authority to execute in another workspace. */
+export function isActionCardReadOnlyInServer(sourceServerId: ServerId | null | undefined, viewerServerId: string | undefined): boolean {
+  // Undefined is the additive-protocol fallback for an older server. Current
+  // servers explicitly send null if the canonical card owner is unavailable.
+  return sourceServerId !== undefined && (sourceServerId === null || sourceServerId !== viewerServerId);
 }

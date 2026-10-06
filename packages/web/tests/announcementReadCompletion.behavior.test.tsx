@@ -15,7 +15,6 @@
  *      persisted, so the row returns on the next load.
  */
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { toast } from "raft-ui";
@@ -61,9 +60,9 @@ afterEach(() => {
   useAnnouncementStore.getState().reset();
 });
 
-test("a single-page announcement is read-complete only after explicit confirmation", async (t) => {
+test("a single-page announcement is read-complete only after explicit confirmation", async () => {
   const posted: string[] = [];
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     posted.push(url);
     return { data: {} };
   });
@@ -80,9 +79,9 @@ test("a single-page announcement is read-complete only after explicit confirmati
   assert.equal(screen.queryByTestId("announcement-modal"), null);
 });
 
-test("a multi-page announcement parked on page 1 is NOT read-complete", async (t) => {
+test("a multi-page announcement parked on page 1 is NOT read-complete", async () => {
   const posted: string[] = [];
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     posted.push(url);
     return { data: {} };
   });
@@ -96,9 +95,9 @@ test("a multi-page announcement parked on page 1 is NOT read-complete", async (t
   assert.deepEqual(useAnnouncementStore.getState().markedReadIds, []);
 });
 
-test("reaching the last page waits for explicit confirmation before read-complete", async (t) => {
+test("reaching the last page waits for explicit confirmation before read-complete", async () => {
   const posted: string[] = [];
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     posted.push(url);
     return { data: {} };
   });
@@ -116,9 +115,9 @@ test("reaching the last page waits for explicit confirmation before read-complet
   assert.equal(screen.queryByTestId("announcement-modal"), null);
 });
 
-test("leaving the last page and returning still waits for one explicit confirmation", async (t) => {
+test("leaving the last page and returning still waits for one explicit confirmation", async () => {
   const posted: string[] = [];
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     posted.push(url);
     return { data: {} };
   });
@@ -139,9 +138,9 @@ test("leaving the last page and returning still waits for one explicit confirmat
   await waitFor(() => assert.equal(posted.length, 1));
 });
 
-test("closing before the last page does not record read-complete", async (t) => {
+test("closing before the last page does not record read-complete", async () => {
   const posted: string[] = [];
-  t.mock.method(api, "post", async (url: string) => {
+  vi.spyOn(api, "post").mockImplementation(async (url: string) => {
     posted.push(url);
     return { data: {} };
   });
@@ -157,12 +156,12 @@ test("closing before the last page does not record read-complete", async (t) => 
   assert.deepEqual(posted, [], "closing early must not report the row as read");
 });
 
-test("a failed read-complete write skips the row for this session so the queue advances", async (t) => {
-  t.mock.method(api, "post", async () => {
+test("a failed read-complete write skips the row for this session so the queue advances", async () => {
+  vi.spyOn(api, "post").mockImplementation(async () => {
     throw new Error("network down");
   });
   const errors: string[] = [];
-  t.mock.method(toast, "error", (msg: string) => {
+  vi.spyOn(toast, "error").mockImplementation((msg: string) => {
     errors.push(msg);
   });
   useAnnouncementStore.setState({ pending: [onePage], loaded: true });
@@ -181,7 +180,7 @@ test("a failed read-complete write skips the row for this session so the queue a
   // The real API returns at most one row. The client must pass its session-only
   // frontier back to the server so selection advances BEFORE LIMIT 1; a mock
   // returning [onePage, newer] would hide the production contract defect.
-  t.mock.method(api, "get", async (url: string, config?: { params?: { after?: string } }) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string, config?: { params?: { after?: string } }) => {
     assert.equal(url, "/announcements/active");
     assert.equal(config?.params?.after, onePage.id);
     return { data: { announcements: [newer] } };
@@ -194,11 +193,11 @@ test("a failed read-complete write skips the row for this session so the queue a
   );
 });
 
-test("a failed read-complete write is never persisted, so a fresh session sees the row again", async (t) => {
-  t.mock.method(api, "post", async () => {
+test("a failed read-complete write is never persisted, so a fresh session sees the row again", async () => {
+  vi.spyOn(api, "post").mockImplementation(async () => {
     throw new Error("network down");
   });
-  t.mock.method(toast, "error", () => undefined);
+  vi.spyOn(toast, "error").mockImplementation(() => undefined);
   useAnnouncementStore.setState({ pending: [onePage], loaded: true });
 
   renderModal();
@@ -211,7 +210,7 @@ test("a failed read-complete write is never persisted, so a fresh session sees t
   // on purpose: the server holds no dismissal, so the client must not be the
   // more authoritative of the two about what was read.
   useAnnouncementStore.getState().reset();
-  t.mock.method(api, "get", async (_url: string, config?: { params?: { after?: string } }) => {
+  vi.spyOn(api, "get").mockImplementation(async (_url: string, config?: { params?: { after?: string } }) => {
     assert.equal(config?.params?.after, undefined, "fresh sessions must not inherit a frontier");
     return { data: { announcements: [onePage] } };
   });
@@ -224,9 +223,9 @@ test("a failed read-complete write is never persisted, so a fresh session sees t
   );
 });
 
-test("101 failed writes still advance with one constant-size frontier", async (t) => {
-  t.mock.method(console, "error", () => undefined);
-  t.mock.method(api, "post", async () => {
+test("101 failed writes still advance with one constant-size frontier", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.spyOn(api, "post").mockImplementation(async () => {
     throw new Error("write path unavailable");
   });
   const failedIds = Array.from({ length: 101 }, (_, index) =>
@@ -239,7 +238,7 @@ test("101 failed writes still advance with one constant-size frontier", async (t
     id: "10000000-0000-4000-8000-999999999999",
   };
 
-  t.mock.method(api, "get", async (url: string, config?: { params?: { after?: string } }) => {
+  vi.spyOn(api, "get").mockImplementation(async (url: string, config?: { params?: { after?: string } }) => {
     assert.equal(url, "/announcements/active");
     assert.deepEqual(
       config?.params,

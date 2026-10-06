@@ -1,6 +1,6 @@
 /**
  * Unit tests for slockdev's latency profile parser. Run locally:
- *   node --import tsx --test scripts/dev/slockdev-latency.test.ts
+ *   pnpm exec vitest run scripts/dev/slockdev-latency.test.ts
  *
  * The parser is the only piece of slockdev's latency support that is pure
  * logic — the proxy itself is exercised by manual / Sammy's
@@ -9,14 +9,13 @@
  * malformed values early.
  */
 import assert from "node:assert/strict";
-import test from "node:test";
 // Matches the .js-extension convention used elsewhere in the repo for
-// relative test imports; tsx resolves it to raftdev.ts at runtime.
+// relative test imports; the oxc-node loader resolves it to raftdev.ts at runtime.
 import {
   packageManagerCommand,
   packageManagerSpawnShell,
   parseLatencyProfile,
-} from "./raftdev.js";
+} from "./raftdev";
 
 test("parseLatencyProfile: single integer is treated as a fixed delay", () => {
   const p = parseLatencyProfile("250");

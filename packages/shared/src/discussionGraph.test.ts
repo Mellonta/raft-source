@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
 
 import {
   DISCUSSION_RELATION_REGISTRY,
@@ -12,7 +11,7 @@ import {
   sendReply,
   setInteraction,
   syncScopeWindow,
-} from "./discussionGraph.js";
+} from "./discussionGraph";
 
 const parentScopeKey = { serverId: "server-a", scopeKind: "channel", scopeId: "channel-a" };
 const message = messageRef("server-a", "message-a");

@@ -1,13 +1,14 @@
 // Canonical freshness-hold reply formatting for agent-facing output (moved
 // from commands/freshnessHold.ts in the error/hold-face AX coverage pass).
 // This is an AX contract, not an implementation detail.
-import { axSurface } from "../../core/renderer.js";
-import { historyCursorText } from "../message/_format.js";
+import { PASSIVE_RESOURCES } from "@botiverse/raft-shared";
+import { axSurface } from "../../core/renderer";
+import { historyCursorText } from "../message/_format";
 
 export interface FreshnessHoldOutputData {
   producerFactId?: string;
   decision?: "local_hold" | "syncing_hold";
-  heldMessages?: any[];
+  heldMessages?: unknown[];
   newMessageCount?: number;
   shownMessageCount?: number;
   omittedMessageCount?: number;
@@ -101,7 +102,7 @@ export const formatFreshnessHoldOutput = axSurface(
   }
   const newMessageCount = data.newMessageCount ?? 0;
   const shownMessageCount = data.shownMessageCount ?? data.heldMessages?.length ?? 0;
-  const heldMessages = data.heldMessages ?? [];
+  const heldMessages = (data.heldMessages ?? []) as Array<Record<string, unknown>>;
   const mentionNote = (data.mentionAnnotation?.formalMentionCount ?? 0) > 0
     ? `\nNote: ${data.mentionAnnotation!.formalMentionCount} of these messages formally @mention you.`
     : "";
@@ -139,7 +140,8 @@ export const formatFreshnessHoldOutput = axSurface(
     lines.push(`  ├ Latest ${shownMessageCount} ${"─".repeat(28)}`);
     for (const message of heldMessages) lines.push(heldMessagePreview(message));
   }
-  lines.push(`  └ Previews are truncated. Full text: raft message read --target "${target}"`);
+  // The thread row of the RFC 072 registry names this active command.
+  lines.push(`  └ Previews are truncated. Full text: ${PASSIVE_RESOURCES.thread.activeCommand(target)}`);
 
   const openingLine = `Held — ${newMessageCount} unread ${newMessageNoun} in ${target}. ${opts.heldAction}`;
 

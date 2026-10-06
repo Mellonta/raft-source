@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { test } from "vitest";
 import {
   BasicTracer,
   MemoryTraceSink,
   createSpanAttrContractTracer,
 } from "@botiverse/raft-shared";
-import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core.js";
-import { buildCodexInstructionShapeAttrs } from "./codexInstructionShape.js";
+import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core";
+import { buildCodexInstructionShapeAttrs } from "./codexInstructionShape";
 
 function sha256(value: string): string {
   return createHash("sha256").update(Buffer.from(value, "utf8")).digest("hex");

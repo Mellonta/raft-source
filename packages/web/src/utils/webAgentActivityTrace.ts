@@ -1,5 +1,5 @@
 import type { AgentActivity } from "@botiverse/raft-shared";
-import { emitWebTrace } from "./webAuthTrace";
+import { emitWebEvent } from "./webAuthTrace";
 import type { WebAgentActivityTraceEventName } from "./webAuthTrace";
 
 type ActivityTraceOutcome = "received" | "applied" | "stale_server_seq" | "invalid_activity";
@@ -91,6 +91,9 @@ interface StatusDotTrace extends ActivityTraceBase {
 
 export interface AgentActivityTraceJoin {
   clientEventId?: string;
+  // Client clock (Date.now()) when the socket event arrived. Only used to
+  // compute arrival_to_applied_ms at apply time; never stored or emitted raw.
+  arrivedAtMs?: number;
 }
 
 function detailLengthBucket(detail: string | null | undefined): "absent" | "empty" | "short" | "medium" | "long" {
@@ -136,7 +139,7 @@ function buildTraceJoin(input: AgentActivityTraceJoin | undefined): { clientEven
 }
 
 function emitAgentActivityTrace(name: WebAgentActivityTraceEventName, attrs: Record<string, unknown>): void {
-  emitWebTrace(name, attrs);
+  emitWebEvent(name, attrs);
 }
 
 export function traceAgentActivitySocketReceived(input: ActivityTraceBase): void {

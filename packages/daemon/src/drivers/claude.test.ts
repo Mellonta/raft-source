@@ -3,12 +3,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { once } from "node:events";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
-import { buildClaudeProviderIsolationEnv, ClaudeDriver } from "./claude.js";
-import { buildClaudeManagedMcpConfig } from "./claudeLaunch.js";
-import { CLAUDE_CUSTOM_PROVIDER_HOST_ENV_KEYS, LEGACY_CLAUDE_PROVIDER_CONFIG_DIR } from "./claudeProviderIsolation.js";
-import { subscribeDaemonLogs, type DaemonLogEvent } from "../logger.js";
-import type { SpawnContext } from "./types.js";
+import { buildClaudeProviderIsolationEnv, ClaudeDriver } from "./claude";
+import { buildClaudeManagedMcpConfig } from "./claudeLaunch";
+import { CLAUDE_CUSTOM_PROVIDER_HOST_ENV_KEYS, LEGACY_CLAUDE_PROVIDER_CONFIG_DIR } from "./claudeProviderIsolation";
+import { subscribeDaemonLogs, type DaemonLogEvent } from "../logger";
+import type { SpawnContext } from "./types";
 
 const driver = new ClaudeDriver();
 const config = {

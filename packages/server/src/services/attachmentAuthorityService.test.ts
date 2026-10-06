@@ -1,10 +1,11 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 
 import { asServerId } from "@botiverse/raft-shared";
-import type { Database } from "../db/index.js";
-import { getDb } from "../db/index.js";
+import type { Database } from "../db/index";
+import { getDb } from "../db/index";
 import {
   agents,
   attachmentObjects,
@@ -17,13 +18,13 @@ import {
   messages,
   serverMembers,
   users,
-} from "../db/schema.js";
-import { createServer } from "./serverService.js";
+} from "../db/schema";
+import { createServer } from "./serverService";
 import {
   resolveBoundAttachmentAuthorityContext,
   resolveReadableAttachmentAuthorityContext,
   type AttachmentAuthorityPrincipal,
-} from "./attachmentAuthorityService.js";
+} from "./attachmentAuthorityService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -226,6 +227,7 @@ test("attachment authority resolves both joint channel and joint thread faces wi
     { serverId: serverB.id, name: `joint-thread-b-${randomUUID()}`, type: "thread" },
     { serverId: storageServer.id, name: `joint-thread-canonical-${randomUUID()}`, type: "thread", parentMessageId: jointParent.id },
   ]).returning();
+  await db.update(messages).set({ threadId: canonicalThread.id }).where(eq(messages.id, jointParent.id));
   const [jointThread] = await db.insert(jointChannels).values({
     canonicalChannelId: canonicalThread.id,
     createdByServerId: serverA.id,

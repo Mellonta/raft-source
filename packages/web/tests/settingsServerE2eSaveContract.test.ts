@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 
 const e2eSource = readFileSync(
   new URL("./e2e/tests/settings-server.spec.ts", import.meta.url),

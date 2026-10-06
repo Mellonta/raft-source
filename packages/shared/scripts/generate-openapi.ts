@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { renderOpenApiArtifacts } from "./openapi-artifacts.js";
+import { renderOpenApiArtifacts } from "./openapi-artifacts";
 
 const packageRoot = resolve(import.meta.dirname, "..");
 const openApiFile = resolve(packageRoot, "openapi/openapi.json");

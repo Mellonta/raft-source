@@ -1,10 +1,9 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
-import { afterEach, beforeEach } from "vitest";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channelHumans,
   jointChannels,
@@ -13,16 +12,16 @@ import {
   serverMembers,
   servers,
   users,
-} from "../db/schema.js";
-import { assignMachine, createAgent } from "../services/agentService.js";
-import { createChannel } from "../services/channelService.js";
-import { registerMachine } from "../services/machineService.js";
+} from "../db/schema";
+import { assignMachine, createAgent } from "../services/agentService";
+import { createChannel } from "../services/channelService";
+import { registerMachine } from "../services/machineService";
 import {
   __resetMessageTranslationServiceDepsForTests,
   __setMessageTranslationServiceDepsForTests,
-} from "../services/messageTranslationService.js";
-import { createMessage } from "../services/messageService.js";
-import { createServer } from "../services/serverService.js";
+} from "../services/messageTranslationService";
+import { createMessage } from "../services/messageService";
+import { createServer } from "../services/serverService";
 import {
   TranslationPlaceholderValidationError,
   TranslationProviderError,
@@ -30,8 +29,8 @@ import {
   type TranslationBatchResult,
   type TranslationProvider,
   type TranslationProviderVersion,
-} from "../services/translation/index.js";
-import { openTestApp } from "../test/integration/app.js";
+} from "../services/translation/index";
+import { openTestApp } from "../test/integration/app";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { rankBasicComposerSuggestions, rankComposerSuggestions } from "../src/utils/composerSuggestionSearch.js";
-import type { ComposerSuggestionSearchEntry } from "../src/utils/composerSuggestionSearch.js";
+import { rankBasicComposerSuggestions, rankComposerSuggestions } from "../src/utils/composerSuggestionSearch";
+import type { ComposerSuggestionSearchEntry } from "../src/utils/composerSuggestionSearch";
 
 interface ChannelSuggestion {
   name: string;

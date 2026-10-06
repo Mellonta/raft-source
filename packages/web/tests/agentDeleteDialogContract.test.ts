@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { act, createElement } from "react";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -127,6 +126,7 @@ function seedStores() {
     }
     if (url === "/servers/unread-summary") return { data: [] };
     if (url === "/provider-connections") return { data: { connections: [], providerOptions: [] } };
+    if (url.includes("/runtime-account-usage/")) return { data: { state: "missing", snapshot: null } };
     return { data: [] };
   }) as typeof api.get;
   api.post = (async (url: string) => {

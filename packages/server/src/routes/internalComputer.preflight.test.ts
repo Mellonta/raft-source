@@ -1,17 +1,17 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 
-import { getDb } from "../db/index.js";
-import { computers, users, agentCredentials } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { registerMachine } from "../services/machineService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { generateComputerApiKeyMaterial } from "../services/computerCredentialService.js";
-import { routeAuthPolicy } from "../middleware/routeAuthPolicy.js";
+import { getDb } from "../db/index";
+import { computers, users, agentCredentials } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { registerMachine } from "../services/machineService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { generateComputerApiKeyMaterial } from "../services/computerCredentialService";
+import { routeAuthPolicy } from "../middleware/routeAuthPolicy";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

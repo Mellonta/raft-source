@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { formatAppConfig } from "./_format.js";
+import { formatAppConfig } from "./_format";
 
 // Byte pin: expected string copied from the PRE-MOVE formatAppConfig in
 // config.ts (print-seam S2). The move must not change a single output byte.

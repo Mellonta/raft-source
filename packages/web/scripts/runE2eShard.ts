@@ -10,9 +10,9 @@
  * wall-clock time.
  *
  * Usage:
- *   tsx scripts/runE2eShard.ts <shard-index>
+ *   node --import @oxc-node/core/register scripts/runE2eShard.ts <shard-index>
  * Example:
- *   tsx scripts/runE2eShard.ts 3        # run shard 3 from manifest
+ *   node --import @oxc-node/core/register scripts/runE2eShard.ts 3        # run shard 3 from manifest
  *
  * Coverage safety: any `*.spec.ts` file present on disk but absent from the
  * manifest (added since the manifest was last refreshed) is distributed
@@ -26,7 +26,7 @@ import { readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { prepareTransportEvidence } from "../../../scripts/e2e/transportEvidence.js";
+import { prepareTransportEvidence } from "../../../scripts/e2e/transportEvidence";
 
 interface ShardSummary {
   shard: number;
@@ -87,7 +87,7 @@ async function main() {
   const arg = process.argv[2];
   const shardIndex = Number(arg);
   if (!Number.isInteger(shardIndex) || shardIndex < 1) {
-    console.error("Usage: tsx scripts/runE2eShard.ts <shard-index>");
+    console.error("Usage: node --import @oxc-node/core/register scripts/runE2eShard.ts <shard-index>");
     process.exit(2);
   }
 

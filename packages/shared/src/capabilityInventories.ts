@@ -3,7 +3,6 @@ const AGENT_LOGIN_INVENTORY_LABELS = {
     registered_agent_login_integrations: "Raft Agent Login integration inventory",
   },
   includes: {
-    built_in_raft_apps: "built-in Raft apps",
     registered_services: "installed registered Agent Login services",
     active_agent_logins: "this Agent's active logins",
   },
@@ -35,7 +34,7 @@ export const AGENT_LOGIN_INTEGRATION_INVENTORY_MANUAL_DOC_ID = "integration" as 
 
 export const AGENT_LOGIN_INTEGRATION_INVENTORY_SCOPE = {
   inventory: "registered_agent_login_integrations",
-  includes: ["built_in_raft_apps", "registered_services", "active_agent_logins"],
+  includes: ["registered_services", "active_agent_logins"],
   excludes: [
     "runtime_tools",
     "server_managed_mcp_tools",

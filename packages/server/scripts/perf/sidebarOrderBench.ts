@@ -1,7 +1,7 @@
 /**
  * Benchmark: GET /api/servers/:id/sidebar-order restore path.
  *
- * Run: pnpm --filter @botiverse/raft-server exec tsx scripts/perf/sidebarOrderBench.ts
+ * Run: pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/perf/sidebarOrderBench.ts
  *
  * Seeds an in-memory PGlite database with N ordered sidebar ids, enables the
  * request trace sink, and exercises the HTTP route. This is the POC guard for
@@ -10,14 +10,14 @@
  */
 import argon2 from "argon2";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
-import { openTestApp } from "../../src/test/integration/app.js";
-import { getDb } from "../../src/db/index.js";
+import { openTestApp } from "../../src/test/integration/app";
+import { getDb } from "../../src/db/index";
 import {
   users,
   serverMembers, agents
-} from "../../src/db/schema.js";
-import { createServer, updateMemberSidebarOrder } from "../../src/services/serverService.js";
-import { createChannel, findOrCreateDM, addHuman } from "../../src/services/channelService.js";
+} from "../../src/db/schema";
+import { createServer, updateMemberSidebarOrder } from "../../src/services/serverService";
+import { createChannel, findOrCreateDM, addHuman } from "../../src/services/channelService";
 
 type Scale = { label: string; ids: number };
 

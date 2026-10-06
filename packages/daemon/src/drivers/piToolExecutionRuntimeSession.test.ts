@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { test } from "vitest";
 
 import type {
   AgentSession,
@@ -11,10 +10,11 @@ import {
   createSpanAttrContractTracer,
   MemoryTraceSink,
 } from "@botiverse/raft-shared";
-import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core.js";
-import { PiSdkRuntimeSession } from "./pi.js";
-import type { PiToolExecutionObserver } from "./piToolExecutionObservability.js";
-import type { SpawnContext } from "./types.js";
+import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core";
+import { PiSdkRuntimeSession } from "./pi";
+import type { PiToolExecutionObserver } from "./piToolExecutionObservability";
+import type { SpawnContext } from "./types";
+import { traceRows } from "../testing/traceRows";
 
 class FakeChildProcess extends EventEmitter {
   readonly pid = process.pid;
@@ -124,14 +124,23 @@ test("Pi SDK runtime wires accepted turn, SDK update, and manual diagnosis throu
     observationIntervalMs: 60_000,
   });
   assert.equal(snapshots[0]?.classification, "running_with_recent_progress");
-  const snapshot = [...sink.getAllSpans()]
+  const snapshot = [...traceRows(sink)]
     .reverse()
     .find((span) => span.name === "daemon.runtime.tool.diagnostic.snapshot");
-  assert.equal(snapshot?.attrs?.runtime_session_id, "pi-session-runtime-observer");
+  // #424: the raw runtime session id is no longer on the stuck-tool contract, so
+  // it never reaches the span — previously it arrived and was dropped later by
+  // the sink, which cost a dropped-attribute count on every one of these spans.
+  // The fact it carried is unchanged and still asserted, on the flag below
+  // (#422 class B: the flag is that fact's only carrier).
+  assert.equal(
+    snapshot?.attrs?.runtime_session_id,
+    undefined,
+    "the raw id must not reach the span at all",
+  );
   assert.equal(snapshot?.attrs?.runtime_session_id_present, true);
   assert.equal(snapshot?.attrs?.runtime_tool_call_id_present, true);
   assert.equal(snapshot?.attrs?.process_liveness, "alive");
-  assert.doesNotMatch(JSON.stringify(sink.getAllSpans()), /must-not-export|upstream-id-private/);
+  assert.doesNotMatch(JSON.stringify(traceRows(sink)), /must-not-export|upstream-id-private/);
 
   hold.resolve();
   await running;

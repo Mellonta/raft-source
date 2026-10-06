@@ -12,9 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { test } from "vitest";
 
-import { ComputerServiceError } from "./errors.js";
+import { ComputerServiceError } from "./errors";
 import {
   adoptLegacy,
   adoptLegacyByDaemonId,
@@ -22,8 +21,8 @@ import {
   type AdoptLegacyEvent,
   appendAdoptionLog,
   legacyLockOwnerPath,
-} from "./adoptLegacy.js";
-import { adoptionLogPath } from "../paths.js";
+} from "./adoptLegacy";
+import { adoptionLogPath } from "../paths";
 
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
 

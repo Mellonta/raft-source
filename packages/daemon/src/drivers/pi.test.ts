@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createConnection, type AddressInfo, type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { onTestFinished, test } from "vitest";
-import { BasicTracer, BUILTIN_RUNTIME_HOST_PROVIDER_ENV_SCRUB_KEYS, eventsForSpan, MemoryTraceSink, RUNTIME_CONFIG_VERSION } from "@botiverse/raft-shared";
+import { BUILTIN_RUNTIME_HOST_PROVIDER_ENV_SCRUB_KEYS, eventsForSpan, providerRequestId, RUNTIME_CONFIG_VERSION } from "@botiverse/raft-shared";
 import fc from "fast-check";
 import {
   BuiltInDriver,
@@ -17,6 +16,7 @@ import {
   buildBuiltInSessionDir,
   buildPiLegacyRpcArgs,
   buildPiSessionDir,
+  configureBuiltInGatewayCustomModel,
   createPiAgentSessionForContext,
   createPiSdkEventMappingState,
   detectPiModels,
@@ -25,11 +25,16 @@ import {
   projectPiCompactionInputTelemetry,
   resolveBuiltInGatewayModelInput,
   resolveBuiltInGatewayLaunch,
+  resolvePiModelFromRegistry,
+  safeDiagnosticErrorClass,
+  safeDiagnosticErrorCode,
   seedPiSessionModelRuntime,
+  assertProviderApiKeyIsHeaderSafe,
   withProcessEnvPatch,
   __piPromptsInFlightForTest,
-} from "./pi.js";
-import { waitForState } from "../testing/drydock.js";
+} from "./pi";
+import { waitForState } from "../testing/drydock";
+import type { ProviderRequestObserver } from "../providerRequestFetch";
 import {
   ModelRegistry,
   ModelRuntime,
@@ -38,11 +43,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { streamSimple as streamSimpleOpenAICompletions } from "@earendil-works/pi-ai/api/openai-completions";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { streamSimple as streamSimpleAnthropicMessages } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { getGlobalDispatcher } from "undici";
 import net from "node:net";
-import { resolveRuntimeSessionRef } from "./runtimeArtifacts.js";
-import type { ParsedEvent, SpawnContext } from "./types.js";
+import { resolveRuntimeSessionRef, writeRuntimeLifecycleDiagnosticRecord } from "./runtimeArtifacts";
+import type { ParsedEvent, SpawnContext } from "./types";
+import { traceRows } from "../testing/traceRows";
+import { makeDeterministicTracer } from "../testing/deterministicTracer";
 
 function makeSpawnContext(
   overrides: Partial<SpawnContext["config"]> = {},
@@ -71,19 +79,6 @@ function makeSpawnContext(
     },
     ...ctxOverrides,
   };
-}
-
-function makeDeterministicTracer() {
-  let spanIndex = 0;
-  const traceId = "1".repeat(32);
-  const spanIds = ["2".repeat(16), "3".repeat(16), "4".repeat(16)];
-  const sink = new MemoryTraceSink();
-  const tracer = new BasicTracer({
-    sink,
-    traceIdGenerator: () => traceId,
-    spanIdGenerator: () => spanIds[spanIndex++] ?? "5".repeat(16),
-  });
-  return { sink, tracer, traceId };
 }
 
 const serverSockets = new WeakMap<Server, Set<Socket>>();
@@ -194,7 +189,8 @@ test("Built-in driver is a separate preset runtime with static launchable models
       runtimeVersion: driver.probe().version,
     });
     assert.equal(detected.value.models.some((model) => model.id === "deepseek/deepseek-v4-pro" && model.verified === "launchable"), true);
-    assert.equal(detected.value.models.some((model) => model.id === "deepseek/deepseek-v4-flash" && model.verified === "launchable"), true);
+    // 0.86.0 renamed this entry: deepseek-v4-flash -> deepseek-flash ("DeepSeek V4.1 Flash").
+    assert.equal(detected.value.models.some((model) => model.id === "deepseek/deepseek-flash" && model.verified === "launchable"), true);
     assert.equal(detected.value.models.some((model) => model.id === "openai/gpt-5.4" && model.verified === "launchable"), true);
     assert.equal(detected.value.models.some((model) => model.id === "moonshotai-cn/kimi-k2.7-code" && model.verified === "launchable"), true);
     assert.equal(detected.value.models.some((model) => model.id === "xiaomi/mimo-v2.5-pro" && model.verified === "launchable"), true);
@@ -303,7 +299,7 @@ test("createPiAgentSessionForContext resolves explicit Pi package extension mode
   try {
     assert.equal(session.model?.provider, fixture.provider);
     assert.equal(session.model?.id, fixture.model);
-    const traceSpan = sink.getTrace(traceId).find((span) => span.name === "daemon.pi.session.create");
+    const traceSpan = traceRows(sink, traceId).find((span) => span.name === "daemon.pi.session.create");
     assert.equal(traceSpan?.attrs?.requested_model, fixture.modelId);
     assert.equal(traceSpan?.attrs?.resolved_model, fixture.modelId);
     assert.equal(traceSpan?.attrs?.outcome, "started");
@@ -314,6 +310,78 @@ test("createPiAgentSessionForContext resolves explicit Pi package extension mode
     );
   } finally {
     session.dispose();
+  }
+});
+
+test("createPiAgentSessionForContext persists an early startup failure without a native transcript", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "pi-startup-failure-"));
+  const workingDirectory = path.join(root, "workspace");
+  mkdirSync(workingDirectory, { recursive: true });
+
+  try {
+    await assert.rejects(
+      createPiAgentSessionForContext(
+        makeSpawnContext(
+          {
+            runtime: "builtin",
+            model: "definitely-missing-model",
+            runtimeConfig: {
+              version: RUNTIME_CONFIG_VERSION,
+              runtime: "builtin",
+              provider: {
+                kind: "preset",
+                providerId: "qwen-token-plan-cn",
+                apiKey: "sk-startup-failure-test",
+              },
+              hostUserState: "forbidden",
+              model: { kind: "preset", id: "definitely-missing-model" },
+              mode: { kind: "default" },
+              envVars: null,
+            },
+          },
+          { workingDirectory, launchId: "startup-failure-launch" },
+        ),
+        "builtin-startup-failure",
+        {
+          agentDir: path.join(root, "agent"),
+          sessionDir: path.join(root, "sessions"),
+          isolateHostProviderEnv: true,
+        },
+      ),
+    );
+
+    const records = readFileSync(
+      path.join(
+        workingDirectory,
+        ".slock",
+        "runtime-sessions",
+        "builtin-builtin-startup-failure.jsonl",
+      ),
+      "utf8",
+    )
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(
+      records
+        .filter((record) => record.type === "runtime_lifecycle")
+        .map((record) => [record.event?.kind, record.event?.phase]),
+      [
+        ["session_start", "started"],
+        ["model_resolved", undefined],
+        ["session_start", "failed"],
+      ],
+    );
+    assert.equal(
+      records.at(-1)?.event?.errorClass,
+      "RuntimeModelNotFoundError",
+    );
+    assert.doesNotMatch(
+      JSON.stringify(records),
+      /standing instructions|wake prompt|agent-token/iu,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -347,7 +415,7 @@ test("unchecked unknown gateways downgrade image blocks before OpenAI and Anthro
   let openAIPayload: unknown;
   const openAIResult = await streamSimpleOpenAICompletions(
     { ...common, provider: "openai", api: "openai-completions" },
-    { messages },
+    normalizeContext({ messages }),
     {
       apiKey: "sk-test",
       onPayload: (payload) => {
@@ -366,7 +434,7 @@ test("unchecked unknown gateways downgrade image blocks before OpenAI and Anthro
   let anthropicPayload: unknown;
   const anthropicResult = await streamSimpleAnthropicMessages(
     { ...common, provider: "anthropic", api: "anthropic-messages" },
-    { messages },
+    normalizeContext({ messages }),
     {
       apiKey: "sk-test",
       onPayload: (payload) => {
@@ -441,7 +509,7 @@ test("Built-in gateway custom model is registered for SDK session launch", { tim
       let fetchCalls = 0;
       const result = await streamSimpleOpenAICompletions(
         gatewayModel!,
-        {
+        normalizeContext({
           messages: [{
             role: "user",
             content: [
@@ -450,7 +518,7 @@ test("Built-in gateway custom model is registered for SDK session launch", { tim
             ],
             timestamp: 1,
           }],
-        },
+        }),
         {
           apiKey: "sk-gateway-test",
           onPayload: (payload) => {
@@ -492,7 +560,7 @@ test("Built-in gateway custom model is registered for SDK session launch", { tim
       assert.ok(Array.isArray(userContent));
       assert.ok(userContent.some((block) => block.type === "image_url"));
 
-      const traceSpan = sink.getTrace(traceId).find((span) => span.name === "daemon.builtin.session.create");
+      const traceSpan = traceRows(sink, traceId).find((span) => span.name === "daemon.builtin.session.create");
       assert.equal(traceSpan?.attrs?.outcome, "started");
       assert.equal(traceSpan?.attrs?.requested_model, "gateway-e2e-model");
       assert.equal(traceSpan?.attrs?.resolved_model, "openai/gateway-e2e-model");
@@ -505,10 +573,212 @@ test("Built-in gateway custom model is registered for SDK session launch", { tim
           .find((event) => event.name === "daemon.builtin.session.services_ready")?.attrs?.available_models_count,
         1,
       );
+        session.sessionManager.appendMessage({
+          role: "user",
+          content: "persist lifecycle proof",
+          timestamp: Date.now(),
+        });
+        session.sessionManager.appendMessage({
+          role: "assistant",
+          content: [{ type: "text", text: "ok" }],
+          api: "openai-completions",
+          provider: "openai",
+          model: "gateway-e2e-model",
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 2,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+          },
+          stopReason: "stop",
+          timestamp: Date.now(),
+        });
+        const lifecyclePath = path.join(
+          workingDirectory,
+          ".slock",
+          "runtime-sessions",
+          "builtin-builtin-gateway-session.jsonl",
+        );
+        const lifecycleRecords = readFileSync(lifecyclePath, "utf8")
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line));
+        const resolved = lifecycleRecords.find(
+          (record) =>
+            record.type === "runtime_lifecycle" &&
+            record.event?.kind === "model_resolved",
+        );
+        assert.deepEqual(resolved?.event, {
+          kind: "model_resolved",
+          requestedModel: "gateway-e2e-model",
+          providerId: "openai",
+          modelId: "gateway-e2e-model",
+          modelApi: "openai-completions",
+          configSource: "agent_config",
+        });
+        assert.deepEqual(
+          lifecycleRecords
+            .filter(
+              (record) =>
+                record.type === "runtime_lifecycle" &&
+                (record.event?.kind === "session_start" ||
+                  record.event?.kind === "model_resolved"),
+            )
+            .map((record) => [record.event?.kind, record.event?.phase]),
+          [
+            ["session_start", "started"],
+            ["model_resolved", undefined],
+            ["session_start", "ready"],
+          ],
+        );
+        assert.ok(
+          lifecycleRecords.some(
+            (record) =>
+              record.event?.kind === "transcript_persist" &&
+              record.event?.outcome === "deferred",
+          ),
+        );
+        assert.ok(
+          lifecycleRecords.some(
+            (record) =>
+              record.event?.kind === "transcript_persist" &&
+              record.event?.outcome === "persisted",
+          ),
+        );
+        assert.doesNotMatch(
+          JSON.stringify(lifecycleRecords),
+          /sk-gateway-test|host-openai-should-not-win|127\.0\.0\.1|persist lifecycle proof/iu,
+        );
     } finally {
       session.dispose();
     }
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Built-in records a transcript persistence failure outside the transcript", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "builtin-persist-failure-"));
+  const workingDirectory = path.join(root, "workspace");
+  mkdirSync(workingDirectory, { recursive: true });
+  let session: AgentSession | undefined;
+
+  try {
+    session = await createPiAgentSessionForContext(
+      makeSpawnContext(
+        {
+          runtime: "builtin",
+          model: "persist-failure-model",
+          runtimeConfig: {
+            version: RUNTIME_CONFIG_VERSION,
+            runtime: "builtin",
+            provider: {
+              kind: "gateway",
+              providerId: "openai-compatible",
+              baseUrl: "http://127.0.0.1:8787/v1",
+              apiKey: "sk-persist-failure-test",
+            },
+            hostUserState: "forbidden",
+            model: { kind: "custom", name: "persist-failure-model" },
+            mode: { kind: "default" },
+            envVars: null,
+          },
+        },
+        { workingDirectory, launchId: "persist-failure-launch" },
+      ),
+      "builtin-persist-failure",
+      {
+        agentDir: path.join(root, "agent"),
+        sessionDir: path.join(root, "sessions"),
+        isolateHostProviderEnv: true,
+      },
+    );
+    session.sessionManager.appendMessage({
+      role: "user",
+      content: "private transcript content",
+      timestamp: Date.now(),
+    });
+    session.sessionManager.appendMessage({
+      role: "assistant",
+      content: [{ type: "text", text: "private assistant content" }],
+      api: "openai-completions",
+      provider: "openai",
+      model: "persist-failure-model",
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 0,
+        },
+      },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    });
+    const transcriptPath = session.sessionManager.getSessionFile();
+    assert.ok(transcriptPath);
+    chmodSync(transcriptPath, 0o400);
+
+    assert.throws(() =>
+      session!.sessionManager.appendMessage({
+        role: "user",
+        content: "must not enter diagnostics",
+        timestamp: Date.now(),
+      }),
+    );
+
+    const diagnostics = readFileSync(
+      path.join(
+        workingDirectory,
+        ".slock",
+        "runtime-sessions",
+        "builtin-builtin-persist-failure.jsonl",
+      ),
+      "utf8",
+    );
+    const failed = diagnostics
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line))
+      .find(
+        (record) =>
+          record.event?.kind === "transcript_persist" &&
+          record.event?.outcome === "failed",
+      );
+    assert.deepEqual(
+      {
+        kind: failed?.event?.kind,
+        outcome: failed?.event?.outcome,
+        entryType: failed?.event?.entryType,
+        errorCode: failed?.event?.errorCode,
+      },
+      {
+        kind: "transcript_persist",
+        outcome: "failed",
+        entryType: "message",
+        errorCode: "EACCES",
+      },
+    );
+    assert.doesNotMatch(
+      diagnostics,
+      /private transcript content|private assistant content|must not enter diagnostics/iu,
+    );
+  } finally {
+    session?.dispose();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -562,7 +832,7 @@ test("managed compatible connection materializes a secret-free gateway projectio
       assert.equal(session.model?.baseUrl, "http://127.0.0.1:8788/v1");
       assert.deepEqual(session.model?.input, ["text", "image"]);
       assert.equal((await session.modelRuntime.getAuth("openai"))?.auth.apiKey, "managed-launch-key");
-      const traceSpan = sink.getTrace(traceId)
+      const traceSpan = traceRows(sink, traceId)
         .find((span) => span.name === "daemon.builtin.managed.session.create");
       assert.equal(traceSpan?.attrs?.provider_id, "openai-compatible");
       assert.equal(traceSpan?.attrs?.base_url_present, true);
@@ -924,10 +1194,10 @@ test("Built-in gateway inherits Qwen Token Plan payload compatibility from the P
       let capturedPayload: unknown;
       const result = await streamSimpleOpenAICompletions(
         openAIModel,
-        {
+        normalizeContext({
           systemPrompt: "standing instructions",
           messages: [{ role: "user", content: "wake prompt", timestamp: 1 }],
-        },
+        }),
         {
           apiKey: "sk-qwen-token-plan-test",
           reasoning: "high",
@@ -1009,10 +1279,10 @@ test("Built-in Qwen Token Plan CN preset resolves without a custom gateway and e
       let capturedPayload: unknown;
       const result = await streamSimpleOpenAICompletions(
         openAIModel,
-        {
+        normalizeContext({
           systemPrompt: "standing instructions",
           messages: [{ role: "user", content: "wake prompt", timestamp: 1 }],
-        },
+        }),
         {
           apiKey: "sk-qwen-token-plan-cn-test",
           reasoning: "high",
@@ -1093,7 +1363,7 @@ test("Built-in gateway custom model resolution stays pinned when another provide
       let capturedPayload: unknown;
       const result = await streamSimpleAnthropicMessages(
         session.model as Model<"anthropic-messages">,
-        {
+        normalizeContext({
           messages: [{
             role: "user",
             content: [
@@ -1102,7 +1372,7 @@ test("Built-in gateway custom model resolution stays pinned when another provide
             ],
             timestamp: 1,
           }],
-        },
+        }),
         {
           apiKey: "sk-gateway-test",
           onPayload: (payload) => {
@@ -1647,6 +1917,13 @@ test("SDK event mapping keeps overflow owned by compaction after an ordinary ret
       kind: "error",
       message: "InputTooLargeError",
       terminalReason: "compaction_failed_or_exhausted",
+      compaction: {
+        outcome: "compaction_failed_or_exhausted", reason: "overflow", failureReason: "recovery_exhausted", willRetry: false,
+        failureDiagnostic: {
+          errorClass: "RuntimeError", errorReason: "unclassified_runtime_error",
+          fingerprint: "f41d728e908b7992", reasonProvenance: "runtime_error_event",
+        },
+      },
     },
   ]);
   assert.doesNotMatch(JSON.stringify(events), /429|invalid_parameter_error/iu);
@@ -1678,12 +1955,6 @@ test("SDK event mapping preserves failed compaction as one terminal outcome, nev
     events.filter((event) => event.kind !== "session_init"),
     [
       {
-        kind: "compaction_interrupted",
-        outcome: "compaction_failed_or_exhausted",
-        reason: "overflow",
-        failureReason: "recovery_exhausted",
-      },
-      {
         kind: "telemetry",
         name: "recovery",
         source: "pi_compaction",
@@ -1703,6 +1974,13 @@ test("SDK event mapping preserves failed compaction as one terminal outcome, nev
         kind: "error",
         message: "InputTooLargeError",
         terminalReason: "compaction_failed_or_exhausted",
+        compaction: {
+          outcome: "compaction_failed_or_exhausted", reason: "overflow", failureReason: "recovery_exhausted", willRetry: false,
+          failureDiagnostic: {
+            errorClass: "RuntimeError", errorReason: "unclassified_runtime_error",
+            fingerprint: "ef9d078ca16bfdc2", reasonProvenance: "runtime_error_event",
+          },
+        },
       },
     ],
   );
@@ -1728,12 +2006,6 @@ test("SDK event mapping runtime-normalizes a malicious compaction reason before 
 
   assert.deepEqual(events, [
     {
-      kind: "compaction_interrupted",
-      outcome: "compaction_failed_or_exhausted",
-      reason: "unknown",
-      failureReason: "compaction_failed",
-    },
-    {
       kind: "telemetry",
       name: "recovery",
       source: "pi_compaction",
@@ -1751,8 +2023,15 @@ test("SDK event mapping runtime-normalizes a malicious compaction reason before 
     },
     {
       kind: "error",
-      message: "InputTooLargeError",
+      message: "RuntimeError: context compaction failed",
       terminalReason: "compaction_failed_or_exhausted",
+      compaction: {
+        outcome: "compaction_failed_or_exhausted", reason: "unknown", failureReason: "compaction_failed", willRetry: false,
+        failureDiagnostic: {
+          errorClass: "RuntimeError", errorReason: "unclassified_runtime_error",
+          fingerprint: "224df98fdcdd429c", reasonProvenance: "runtime_error_event",
+        },
+      },
     },
   ]);
   assert.doesNotMatch(JSON.stringify(events), /reviewer|secret|provider\.example|private/iu);
@@ -1805,6 +2084,7 @@ test("SDK event mapping distinguishes successful and aborted compaction outcomes
       kind: "compaction_interrupted",
       outcome: "aborted",
       reason: "manual",
+      willRetry: false,
     },
     {
       kind: "telemetry",
@@ -1916,7 +2196,8 @@ test("SDK event mapping permits one compact-and-retry chain, then terminalizes a
 
   assert.equal(events.filter((event) => event.kind === "compaction_started").length, 1);
   assert.equal(events.filter((event) => event.kind === "compaction_finished").length, 1);
-  assert.equal(events.filter((event) => event.kind === "compaction_interrupted").length, 1);
+  assert.equal(events.filter((event) => event.kind === "compaction_interrupted").length, 0);
+  assert.equal(events.find((event) => event.kind === "error")?.compaction?.failureReason, "recovery_exhausted");
   assert.equal(events.filter((event) => event.kind === "error").length, 1);
   assert.equal(events.filter((event) => event.kind === "turn_end").length, 1);
   assert.equal(events.at(-1)?.kind, "turn_end");
@@ -2286,7 +2567,7 @@ test("Pi library egress traverses both interception faces, and apiKey seeding pr
   } as never;
 
   try {
-    // --- POSITIVE CONTROL: real 0.85.1 OAuth flow, real fetch, pointed at loopback -------------
+    // --- POSITIVE CONTROL: real 1.0.2 OAuth flow, real fetch, pointed at loopback -------------
     process.env.KIMI_CODE_OAUTH_HOST = `http://127.0.0.1:${port}`;
     const { kimiCodingProvider } = await import("@earendil-works/pi-ai/providers/kimi-coding");
     const provider = kimiCodingProvider() as unknown as {
@@ -2372,12 +2653,27 @@ test("pi pin is the version this offline guarantee was verified against", () => 
   //      (models.getAvailable / models.checkAuth / credentials.read).
   //   If the credential path is untouched, the guarantee holds. 0.84.4 -> 0.85.1 was a 7-line
   //   diff, entirely a fetchDeferred -> streamDeferred refactor, with the seeding path
-  //   byte-identical.
+  //   byte-identical. 0.85.1 -> 0.86.0 was re-verified the same way: the model-runtime.js
+  //   diff is confined to `stream`/`streamSimple` gaining a `normalizeContext(context)`
+  //   call before delegating to the provider (the TranscriptContext hardening). The
+  //   `synchronizeCredentialState` body is byte-identical between the two versions and
+  //   `allowNetwork: false` still appears exactly 4 times in each -- the seeding path is
+  //   untouched, so the offline guarantee holds.
+  //
+  //   0.86.0 -> 0.86.1 was re-verified the same way and is stronger: `diff` of
+  //   dist/core/model-runtime.js between the two packed artifacts is EMPTY (byte-identical), the
+  //   `synchronizeCredentialState` body is byte-identical, and `allowNetwork: false` still appears
+  //   exactly 4 times in each. The offline seeding guarantee is untouched.
+  //
+  //   0.86.1 -> 1.0.2 was re-verified the same way: `synchronizeCredentialState` and
+  //   `refreshProviderAvailability` are byte-identical, and the credential sync still refreshes
+  //   with `allowNetwork: false`. The other changes in model-runtime.js only add more
+  //   `refresh({ allowNetwork: false })` calls (6 occurrences, up from 4); none of them enables the network.
   //
   // Then update VERIFIED_AGAINST *and* the three sibling 0.8x.y labels below (the positive-control
   // comment, the "never triggers a remote model refresh (pi X)" test name, and its comment) --
   // otherwise they assert a version nobody re-checked.
-  const VERIFIED_AGAINST = "0.85.1";
+  const VERIFIED_AGAINST = "1.0.2";
   const pkg = JSON.parse(
     readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
   ) as { dependencies: Record<string, string> };
@@ -2394,8 +2690,8 @@ test("pi pin is the version this offline guarantee was verified against", () => 
   }
 });
 
-test("Pi auth seeding never triggers a remote model refresh (pi 0.85.1)", async () => {
-  // Under 0.85.1 the offline guarantee lives inside the library: credential synchronization
+test("Pi auth seeding never triggers a remote model refresh (pi 1.0.2)", async () => {
+  // Under 1.0.2 the offline guarantee lives inside the library: credential synchronization
   // refreshes with allowNetwork:false and reconciles only local catalog/composition/availability.
   // Our side of the contract is that seeding issues NO refresh of its own — remote freshness is a
   // separate, deliberate caller decision. This counts refreshes rather than inspecting arguments,
@@ -2832,6 +3128,138 @@ test("PiSdkRuntimeSession suppresses a late deferred delivery rejection after cl
   assert.equal(events.some((event) => event.kind === "delivery_error"), false);
 });
 
+test("PiSdkRuntimeSession persists provider, compaction, and requested-stop order without a native transcript", async () => {
+  const workingDirectory = mkdtempSync(
+    path.join(os.tmpdir(), "pi-lifecycle-order-"),
+  );
+  const calls: string[] = [];
+  const unsafeCompactionText =
+    "context too large Bearer sk-unsafe https://provider.example/private";
+  const fake = createFakeAgentSession("builtin-lifecycle-session", calls, {
+    promptEvents: [
+      {
+        type: "compaction_start",
+        reason: "overflow",
+      } as unknown as AgentSessionEvent,
+      {
+        type: "compaction_end",
+        reason: "overflow",
+        errorMessage: unsafeCompactionText,
+        willRetry: false,
+      } as unknown as AgentSessionEvent,
+    ],
+  });
+  let providerObserver: ProviderRequestObserver | undefined;
+  const originalAbort = fake.abort.bind(fake);
+  fake.abort = async () => {
+    providerObserver?.({
+      schemaVersion: 1,
+      requestId: providerRequestId("11111111-1111-4111-8111-111111111111"),
+      provider: "xai",
+      phase: "cancelled",
+      startedAt: "2026-09-18T03:33:00.000Z",
+      observedAt: "2026-09-18T03:33:01.000Z",
+    });
+    await originalAbort();
+  };
+  const runtime = new PiSdkRuntimeSession(
+    makeSpawnContext(
+      { runtime: "builtin" },
+      {
+        workingDirectory,
+        agentId: "agent-lifecycle",
+        launchId: "launch-lifecycle",
+        processInstanceId: "process-lifecycle",
+      },
+    ),
+    () => undefined,
+    async (_ctx, _sessionId, _toolObserver, observeProvider) => {
+      providerObserver = observeProvider;
+      observeProvider?.({
+        schemaVersion: 1,
+        requestId: providerRequestId("11111111-1111-4111-8111-111111111111"),
+        provider: "xai",
+        phase: "waiting",
+        startedAt: "2026-09-18T03:33:00.000Z",
+        observedAt: "2026-09-18T03:33:00.000Z",
+      });
+      return fake as unknown as AgentSession;
+    },
+  );
+
+  try {
+    assert.deepEqual(
+      await runtime.start({
+        text: "private prompt",
+        sessionId: "builtin-lifecycle-session",
+      }),
+      {
+        ok: true,
+        acceptedAs: "prompt",
+      },
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    fake.__setStreaming(true);
+    await runtime.stop({
+      signal: "SIGTERM",
+      reason: "operator stop with private detail",
+    });
+
+    const lifecyclePath = path.join(
+      workingDirectory,
+      ".slock",
+      "runtime-sessions",
+      "builtin-builtin-lifecycle-session.jsonl",
+    );
+    const resolvedRef = resolveRuntimeSessionRef(
+      "builtin",
+      "builtin-lifecycle-session",
+      path.join(workingDirectory, "home"),
+      workingDirectory,
+      {
+        agentId: "agent-lifecycle",
+        workingDirectory,
+        launchId: "launch-lifecycle",
+        processInstanceId: "process-lifecycle",
+      },
+    );
+    assert.equal(resolvedRef.path, lifecyclePath);
+    const records = readFileSync(lifecyclePath, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const events = records
+      .filter((record) => record.type === "runtime_lifecycle")
+      .map((record) => record.event);
+    assert.equal(
+      records.filter((record) => record.type === "runtime_session_handoff").length,
+      1,
+      "fallback transcript resolution must append without clobbering lifecycle facts",
+    );
+    assert.deepEqual(
+      events.map((event) => [
+        event.kind,
+        event.phase ?? event.outcome ?? event.source,
+      ]),
+      [
+        ["provider_request", "waiting"],
+        ["compaction", "started"],
+        ["compaction", "failed"],
+        ["cancel_requested", "requested_stop"],
+        ["provider_request", "cancelled"],
+      ],
+    );
+    assert.equal(events[2]?.failureReason, "compaction_failed");
+    assert.equal(events[4]?.cancelSource, "requested_stop");
+    assert.doesNotMatch(
+      JSON.stringify(events),
+      /private prompt|operator stop|sk-unsafe|provider\.example|Bearer/iu,
+    );
+  } finally {
+    rmSync(workingDirectory, { recursive: true, force: true });
+  }
+});
+
 test("PiSdkRuntimeSession emits a closed-set provider diagnostic for a bodyless startup 403", async () => {
   const { sink, tracer, traceId } = makeDeterministicTracer();
   const events: ParsedEvent[] = [];
@@ -2873,7 +3301,7 @@ test("PiSdkRuntimeSession emits a closed-set provider diagnostic for a bodyless 
   let provenanceVisibleBeforeTerminalError = false;
   runtime.on("runtime_event", (event) => {
     if (event.kind === "error") {
-      provenanceVisibleBeforeTerminalError = sink.getTrace(traceId)
+      provenanceVisibleBeforeTerminalError = traceRows(sink, traceId)
         .flatMap((span) => span.events ?? [])
         .some((traceEvent) => traceEvent.name === "daemon.pi.provider_request.failed");
     }
@@ -2885,12 +3313,12 @@ test("PiSdkRuntimeSession emits a closed-set provider diagnostic for a bodyless 
     acceptedAs: "prompt",
   });
   await waitForState(
-    () => sink.getTrace(traceId).some((span) => span.name === "daemon.pi.prompt" && span.status === "error"),
+    () => traceRows(sink, traceId).some((span) => span.name === "daemon.pi.prompt" && span.status === "error"),
     "daemon.pi.prompt error span recorded",
     { timeoutMs: 500, pollIntervalMs: 10 },
   );
 
-  const failureEvents = sink.getTrace(traceId)
+  const failureEvents = traceRows(sink, traceId)
     .filter((span) => span.name === "daemon.pi.prompt")
     .flatMap((span) => span.events ?? [])
     .filter((event) => event.name === "daemon.pi.provider_request.failed");
@@ -2900,8 +3328,10 @@ test("PiSdkRuntimeSession emits a closed-set provider diagnostic for a bodyless 
     response_started: true,
     reason: "provider_auth_denied",
     http_status: 403,
-    session_id_present: true,
-    runtime_session_id: "builtin-session-403",
+    // #424: one flag in the same family as the value, and no raw id — the sink
+    // drops the raw one and it has no hash form. The deepEqual is the point:
+    // it fails if the raw id comes back, not just if the flag goes missing.
+    runtime_session_id_present: true,
     launch_id_present: true,
     launch_id: "launch-terminal-cause",
   });
@@ -3008,11 +3438,11 @@ test("PiSdkRuntimeSession classifies the real message_end string channel for pre
         acceptedAs: "prompt",
       });
       await waitForState(
-        () => sink.getTrace(traceId).some((span) => span.name === "daemon.pi.prompt" && span.status === "error"),
+        () => traceRows(sink, traceId).some((span) => span.name === "daemon.pi.prompt" && span.status === "error"),
         "daemon.pi.prompt error span recorded",
         { timeoutMs: 500, pollIntervalMs: 10 },
       );
-      return sink.getTrace(traceId)
+      return traceRows(sink, traceId)
         .flatMap((span) => span.events ?? [])
         .find((event) => event.name === "daemon.pi.provider_request.failed")?.attrs;
     } finally {
@@ -3027,12 +3457,14 @@ test("PiSdkRuntimeSession classifies the real message_end string channel for pre
   assert.equal(preResponse?.phase, "prompt_request");
   assert.equal(preResponse?.response_started, false);
   assert.equal(preResponse?.reason, "pre_response_transport_error");
-  assert.equal(preResponse?.runtime_session_id, "phase-session-false");
+  assert.equal(preResponse?.runtime_session_id, undefined, "#424: the raw id is not emitted");
+  assert.equal(preResponse?.runtime_session_id_present, true, "…and the fact is carried by the flag");
   assert.equal(preResponse?.launch_id, "phase-launch-false");
   assert.equal(responseStarted?.phase, "prompt_request");
   assert.equal(responseStarted?.response_started, true);
   assert.equal(responseStarted?.reason, "stream_read_error");
-  assert.equal(responseStarted?.runtime_session_id, "phase-session-true");
+  assert.equal(responseStarted?.runtime_session_id, undefined);
+  assert.equal(responseStarted?.runtime_session_id_present, true);
   assert.equal(responseStarted?.launch_id, "phase-launch-true");
   assert.doesNotMatch(
     JSON.stringify([preResponse, responseStarted]),
@@ -3367,7 +3799,7 @@ test("concurrent pi agents do not queue behind each other, and spans prove it", 
   // resolves a single span by name, so with one span per agent it would only ever
   // show agent 0's event (prompts_in_flight = 1) and hide the very concurrency we
   // are proving.
-  const promptSpans = sink.getTrace(traceId).filter((span) => span.name === "daemon.pi.prompt");
+  const promptSpans = traceRows(sink, traceId).filter((span) => span.name === "daemon.pi.prompt");
   assert.equal(promptSpans.length, AGENTS, "one daemon.pi.prompt span per agent prompt");
   const startEvents = promptSpans
     .flatMap((span) => span.events ?? [])
@@ -3385,4 +3817,323 @@ test("concurrent pi agents do not queue behind each other, and spans prove it", 
     promptSpans.every((span) => typeof span.attrs?.duration_ms === "number"),
     "each prompt span must carry duration_ms",
   );
+});
+
+test("Built-in loads enabled host directory and package extensions only while opted in", { timeout: 30_000 }, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "raft-builtin-local-plugins-"));
+  const hostDir = path.join(root, "host");
+  const workspace = path.join(root, "workspace");
+  const packageDir = path.join(root, "plugin-package");
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  mkdirSync(path.join(hostDir, "extensions"), { recursive: true });
+  mkdirSync(workspace, { recursive: true });
+  mkdirSync(packageDir, { recursive: true });
+  const extension = (name: string) => `import { writeFileSync } from "node:fs";
+  export default function(pi) {
+    pi.on("session_start", () => writeFileSync(${JSON.stringify(root)} + "/" + "${name}-started", "started"));
+    pi.registerTool({ name: "${name}", label: "${name}", description: "Local plugin probe",
+      parameters: { type: "object", properties: {} },
+      async execute() { return { content: [{ type: "text", text: "loaded" }], details: {} }; }
+    });
+  }`;
+  writeFileSync(path.join(hostDir, "extensions", "probe.ts"), extension("host_probe"));
+  writeFileSync(path.join(hostDir, "extensions", "disabled.ts"), extension("disabled_probe"));
+  writeFileSync(path.join(packageDir, "index.ts"), extension("package_probe"));
+  writeFileSync(path.join(packageDir, "package.json"), JSON.stringify({ name: "probe", pi: { extensions: ["./index.ts"] } }));
+  writeFileSync(path.join(hostDir, "settings.json"), JSON.stringify({
+    packages: [packageDir], extensions: ["-extensions/disabled.ts"],
+    defaultProvider: "host-provider", defaultModel: "host-model",
+  }));
+  process.env.PI_CODING_AGENT_DIR = hostDir;
+  try {
+    for (const loadLocalPlugins of [undefined, true, false]) {
+      const session = await createPiAgentSessionForContext(makeSpawnContext({
+        runtime: "builtin",
+        runtimeConfig: {
+          version: RUNTIME_CONFIG_VERSION, runtime: "builtin", hostUserState: "forbidden",
+          ...(loadLocalPlugins !== undefined ? { loadLocalPlugins } : {}),
+          provider: { kind: "gateway", providerId: "openai-compatible", baseUrl: "http://localhost:9876/v1", apiKey: "agent-key" },
+          model: { kind: "custom", name: "agent-model" }, mode: { kind: "default" },
+        },
+      }, { workingDirectory: workspace }), `local-plugin-${String(loadLocalPlugins)}`, {
+        agentDir: buildBuiltInAgentDir(workspace), sessionDir: buildBuiltInSessionDir(workspace),
+        isolateHostProviderEnv: true, exposeLaunchEnvToTools: false,
+      });
+      try {
+        const tools = session.getActiveToolNames();
+        assert.equal(tools.includes("host_probe"), loadLocalPlugins === true);
+        assert.equal(tools.includes("package_probe"), loadLocalPlugins === true);
+        assert.equal(tools.includes("disabled_probe"), false);
+        assert.equal(existsSync(path.join(root, "host_probe-started")), loadLocalPlugins === true);
+        assert.equal(existsSync(path.join(root, "package_probe-started")), loadLocalPlugins === true);
+        assert.equal(existsSync(path.join(root, "disabled_probe-started")), false);
+        rmSync(path.join(root, "host_probe-started"), { force: true });
+        rmSync(path.join(root, "package_probe-started"), { force: true });
+        assert.equal(session.model?.id, "agent-model");
+        assert.equal(session.model?.baseUrl, "http://localhost:9876/v1");
+      } finally { session.dispose(); }
+    }
+  } finally {
+    restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// task #1203/#1204: a managed-connection custom model named like a catalog model
+// (kimi-k3 also exists as github-copilot/kimi-k3, listed first) resolved to the
+// first same-name catalog entry, so the launch asked for Copilot credentials.
+// Selection must use the same gateway provider the custom model is registered
+// under, for direct gateways and managed connections alike.
+async function freshBuiltInModelRegistry(): Promise<ModelRegistry> {
+  const runtime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    modelsPath: null,
+    allowModelNetwork: false,
+  });
+  return new ModelRegistry(runtime);
+}
+
+function builtInConnectionCustomConfig(name: string) {
+  return {
+    version: RUNTIME_CONFIG_VERSION,
+    runtime: "builtin",
+    provider: { kind: "connection", connectionId: "11111111-1111-4111-8111-111111111111" },
+    hostUserState: "forbidden",
+    model: { kind: "custom", name },
+    mode: { kind: "default" },
+  } as const;
+}
+
+for (const [providerId, registryProvider] of [
+  ["openai-compatible", "openai"],
+  ["anthropic-compatible", "anthropic"],
+] as const) {
+  test(`managed ${providerId} connection custom model selects its own gateway entry, not a same-name catalog model`, async () => {
+    const registry = await freshBuiltInModelRegistry();
+    // The first catalog entry is what a by-name fallback returns for its id, so
+    // naming the custom model after it makes the collision real for both
+    // gateway providers regardless of where they sit in catalog order.
+    const colliding = registry.getAll()[0]!;
+    assert.notEqual(colliding.provider, registryProvider, "fixture precondition: collision must come from another provider");
+    const config = builtInConnectionCustomConfig(colliding.id);
+    const projection = { providerId, endpointUrl: "https://gateway.example.test/v1", supportsImageInput: false } as const;
+    configureBuiltInGatewayCustomModel(registry, config, projection);
+
+    const model = resolvePiModelFromRegistry(colliding.id, registry, config, projection);
+    assert.equal(model?.provider, registryProvider);
+    assert.equal(model?.id, colliding.id);
+  });
+}
+
+test("field case: managed openai-compatible connection kimi-k3 does not select github-copilot/kimi-k3", async () => {
+  const registry = await freshBuiltInModelRegistry();
+  assert.equal(registry.getAll().find((model) => model.id === "kimi-k3")?.provider, "github-copilot",
+    "fixture precondition: the SDK catalog lists github-copilot/kimi-k3 first");
+  const config = builtInConnectionCustomConfig("kimi-k3");
+  const projection = { providerId: "openai-compatible", endpointUrl: "https://gateway.example.test/v1", supportsImageInput: false } as const;
+  configureBuiltInGatewayCustomModel(registry, config, projection);
+
+  const model = resolvePiModelFromRegistry("kimi-k3", registry, config, projection);
+  assert.equal(model?.provider, "openai");
+  assert.equal(model?.id, "kimi-k3");
+});
+
+test("managed connection custom model name containing a slash stays one gateway model id", async () => {
+  const registry = await freshBuiltInModelRegistry();
+  const config = builtInConnectionCustomConfig("moonshotai/kimi-k3");
+  const projection = { providerId: "openai-compatible", endpointUrl: "https://gateway.example.test/v1", supportsImageInput: false } as const;
+  configureBuiltInGatewayCustomModel(registry, config, projection);
+
+  const model = resolvePiModelFromRegistry("moonshotai/kimi-k3", registry, config, projection);
+  assert.equal(model?.provider, "openai");
+  assert.equal(model?.id, "moonshotai/kimi-k3");
+});
+
+test("managed connection custom model that was not registered fails closed instead of falling back by name", async () => {
+  const registry = await freshBuiltInModelRegistry();
+  const config = builtInConnectionCustomConfig("kimi-k3");
+  const projection = { providerId: "openai-compatible", endpointUrl: "https://gateway.example.test/v1", supportsImageInput: false } as const;
+
+  assert.equal(resolvePiModelFromRegistry("kimi-k3", registry, config, projection), undefined);
+});
+
+test("direct gateway custom models and ordinary catalog presets keep resolving as before", async () => {
+  const registry = await freshBuiltInModelRegistry();
+  const gatewayConfig = {
+    ...builtInConnectionCustomConfig("kimi-k3"),
+    provider: { kind: "gateway", providerId: "anthropic-compatible", baseUrl: "https://gateway.example.test", apiKey: "gateway-test-key" },
+  } as const;
+  configureBuiltInGatewayCustomModel(registry, gatewayConfig, null);
+  assert.equal(resolvePiModelFromRegistry("kimi-k3", registry, gatewayConfig, null)?.provider, "anthropic");
+
+  const presetConfig = {
+    ...builtInConnectionCustomConfig("unused"),
+    model: { kind: "preset", id: "moonshotai/kimi-k3" },
+  } as const;
+  const preset = resolvePiModelFromRegistry("moonshotai/kimi-k3", registry, presetConfig, null);
+  assert.equal(preset?.provider, "moonshotai");
+  assert.equal(preset?.id, "kimi-k3");
+});
+
+test("Runtime lifecycle diagnostics stay bounded and keep appending after truncation", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "runtime-lifecycle-cap-"));
+  try {
+    const write = (phase: "started" | "ready") =>
+      writeRuntimeLifecycleDiagnosticRecord({
+        runtime: "builtin",
+        sessionId: "cap-session",
+        fallbackDir: root,
+        agentId: "cap-agent",
+        launchId: "cap-launch",
+        processInstanceId: "cap-process",
+        event: { kind: "session_start", phase },
+      });
+    const filePath = write("started")?.path;
+    assert.ok(filePath);
+    const cap = 4 * 1024 * 1024;
+    // Fill the sidecar up to the cap with content that must not survive truncation.
+    appendFileSync(filePath, `${"sk-cap-secret-filler".repeat(64)}\n`.repeat(Math.ceil(cap / 1281)));
+    assert.ok(statSync(filePath).size > cap);
+
+    assert.ok(write("ready"));
+    assert.ok(write("started"));
+
+    assert.ok(statSync(filePath).size < 4096);
+    assert.equal(statSync(filePath).mode & 0o777, 0o600);
+    const text = readFileSync(filePath, "utf8");
+    assert.doesNotMatch(text, /sk-cap-secret-filler/u);
+    const records = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    assert.deepEqual(
+      records.map((record) => [record.type, record.event?.phase]),
+      [
+        ["runtime_lifecycle_history_truncated", undefined],
+        ["runtime_lifecycle", "ready"],
+        ["runtime_lifecycle", "started"],
+      ],
+    );
+    assert.deepEqual(
+      [...new Set(records.map((record) => record.joinKey))],
+      ["runtime_lifecycle:cap-agent:cap-launch:cap-process:cap-session"],
+    );
+    assert.deepEqual(Object.keys(records[0]).sort(), [
+      "agentId",
+      "artifactVersion",
+      "createdAt",
+      "joinKey",
+      "launchId",
+      "processInstanceId",
+      "runtime",
+      "sessionId",
+      "type",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Runtime lifecycle diagnostics persist only known error classes; identifier-shaped unknown names become UnknownError", () => {
+  // Known categories keep their class: the shared runtime taxonomy, the daemon's
+  // own startup classes, and JS built-ins.
+  assert.equal(safeDiagnosticErrorClass(Object.assign(new Error("x"), { name: "InputTooLargeError" })), "InputTooLargeError");
+  assert.equal(safeDiagnosticErrorClass(Object.assign(new Error("x"), { name: "RuntimeModelNotFoundError" })), "RuntimeModelNotFoundError");
+  assert.equal(safeDiagnosticErrorClass(new TypeError("x")), "TypeError");
+  assert.equal(safeDiagnosticErrorClass(new Error("x")), "Error");
+
+  // A name that satisfies the old identifier shape and length limit but carries a
+  // synthetic sensitive marker must not be copied into the sidecar.
+  const syntheticSecretName = "sk-ant-api03-SYNTHETIC_SECRET_MARKER.v1";
+  assert.match(syntheticSecretName, /^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/u, "fixture must pass the old shape gate");
+  assert.equal(safeDiagnosticErrorClass(Object.assign(new Error("x"), { name: syntheticSecretName })), "UnknownError");
+  assert.equal(safeDiagnosticErrorClass(Object.assign(new Error("x"), { name: "VendorSpecificError" })), "UnknownError");
+
+  // Non-Error throws and shapeless names never leak a value either.
+  assert.equal(safeDiagnosticErrorClass("sk-synthetic-string-throw"), "UnknownError");
+  assert.equal(safeDiagnosticErrorClass({ name: "InputTooLargeError" }), "UnknownError");
+  assert.equal(safeDiagnosticErrorClass(Object.assign(new Error("x"), { name: "Error: token=sk-synthetic" })), "UnknownError");
+});
+
+test("Runtime lifecycle diagnostics persist only known error codes; identifier-shaped unknown codes are omitted", () => {
+  // Supported transport and file-system codes are copied as-is.
+  assert.equal(safeDiagnosticErrorCode(Object.assign(new Error("x"), { code: "ECONNRESET" })), "ECONNRESET");
+  assert.equal(safeDiagnosticErrorCode(Object.assign(new Error("x"), { code: "UND_ERR_CONNECT_TIMEOUT" })), "UND_ERR_CONNECT_TIMEOUT");
+  assert.equal(safeDiagnosticErrorCode(Object.assign(new Error("x"), { code: "ENOENT" })), "ENOENT");
+  assert.equal(safeDiagnosticErrorCode({ code: "ETIMEDOUT" }), "ETIMEDOUT");
+
+  // A code that satisfies the old identifier shape but carries a synthetic
+  // credential-shaped marker (AWS access key id style) must not be persisted.
+  // Built at runtime so secret scanners don't flag this test sample.
+  const syntheticKeyCode = "AK" + "IASYNTHETICKEY0001";
+  assert.match(syntheticKeyCode, /^[A-Z][A-Z0-9_]{0,31}$/u, "fixture must pass the old shape gate");
+  assert.equal(safeDiagnosticErrorCode(Object.assign(new Error("x"), { code: syntheticKeyCode })), undefined);
+  assert.equal(safeDiagnosticErrorCode(Object.assign(new Error("x"), { code: "VENDOR_SPECIFIC_CODE" })), undefined);
+
+  // Non-string, lowercase, non-object, and shapeless codes never leak a value either.
+  assert.equal(safeDiagnosticErrorCode(Object.assign(new Error("x"), { code: 42 })), undefined);
+  assert.equal(safeDiagnosticErrorCode(Object.assign(new Error("x"), { code: "econnreset" })), undefined);
+  assert.equal(safeDiagnosticErrorCode("ECONNRESET"), undefined);
+  assert.equal(safeDiagnosticErrorCode(Object.assign(new Error("x"), { code: "ECONNRESET token=sk-synthetic" })), undefined);
+});
+
+// jianghanfeng 2026-09-27: every DeepSeek V4.1 Flash agent on a shared provider
+// connection failed with Node's "Cannot convert argument to a ByteString because
+// the character at index 7 has a value of 27993" — index 7 is the first key
+// character after "Bearer ", i.e. the configured key began with "浙".
+test("a provider key that cannot go into an HTTP header is refused with a readable error before any request", async () => {
+  const badKey = "浙江-deepseek-key";
+  // The symptom this guards: Node refuses the header value itself.
+  assert.throws(() => new Headers({ Authorization: `Bearer ${badKey}` }), /ByteString/);
+
+  const config = {
+    version: RUNTIME_CONFIG_VERSION,
+    runtime: "builtin",
+    provider: { kind: "connection", connectionId: "11111111-1111-4111-8111-111111111111" },
+    hostUserState: "forbidden",
+    model: { kind: "preset", id: "deepseek/deepseek-flash" },
+    mode: { kind: "default" },
+  } as const;
+  const runtime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    modelsPath: null,
+    allowModelNetwork: false,
+  });
+  await assert.rejects(
+    seedPiSessionModelRuntime(
+      runtime,
+      config,
+      { providerId: "deepseek", endpointUrl: null, supportsImageInput: false },
+      { DEEPSEEK_API_KEY: badKey },
+    ),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /^DEEPSEEK_API_KEY contains a character that cannot be sent in an HTTP header \(position 1, code 27993\)/);
+      assert.doesNotMatch(error.message, /deepseek-key/, "the key value must not be echoed");
+      return true;
+    },
+  );
+  assert.equal(await runtime.getAuth("deepseek"), undefined, "a rejected key must not be seeded");
+
+  // Never newly refuse a key that some header form accepts: fetch trims edge
+  // whitespace, so a trailing newline or space kept working and must still.
+  const cases = [
+    "sk-a", "sk-a\n", "sk-a\r", "sk-a\r\n", "\nsk-a", " sk-a", "sk-a ", "sk-a\t", "\tsk-a", "sk\ta", "sk-\u00e9",
+    "sk-\na", "sk-\ra", "sk-\u0000a", "sk-a\u0000", "\u0000sk-a", "\u6d59sk", "sk-\u6d59",
+  ];
+  const headerFormThrows = (key: string) => [
+    () => new Headers({ Authorization: `Bearer ${key}` }),
+    () => new Headers({ "x-api-key": key }),
+  ].map((build) => { try { build(); return false; } catch { return true; } });
+  for (const key of cases) {
+    let refused = false;
+    try { assertProviderApiKeyIsHeaderSafe(key, "K"); } catch { refused = true; }
+    if (refused) {
+      assert.deepEqual(headerFormThrows(key), [true, true], `refused ${JSON.stringify(key)} although a header form accepts it`);
+    }
+  }
+  for (const key of ["sk-a\n", "sk-a\r", " sk-a", "sk-a\t", "sk-\u00e9"]) {
+    assert.doesNotThrow(() => assertProviderApiKeyIsHeaderSafe(key, "K"), JSON.stringify(key));
+  }
+  for (const key of ["sk-\na", "sk-\u0000a", "\u6d59sk"]) {
+    assert.throws(() => assertProviderApiKeyIsHeaderSafe(key, "K"), JSON.stringify(key));
+  }
+  assert.throws(() => assertProviderApiKeyIsHeaderSafe("  \u6d59sk", "K"), /position 3, code 27993/);
 });

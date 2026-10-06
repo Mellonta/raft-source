@@ -1,29 +1,33 @@
+import { PROVIDER_PROBE_CAPABILITY } from "@botiverse/raft-shared";
 import type {
+  AgentAppInboxNoticeOptions,
   AgentAppInboxRegistry,
   AgentAppInboxStore,
-} from "./agentAppInbox.js";
+} from "./agentAppInbox";
 import type {
   AgentInboxAppItem,
   MachineToServerMessage,
   ServerToMachineMessage,
+  Tracer,
 } from "@botiverse/raft-shared";
-import { CLEANER_CONFIG_BOUNDS } from "@botiverse/raft-shared/src/apps/cleaner/configProtocol.js";
-import { REMINDER_FIRE_REQUEST_CAPABILITY } from "@botiverse/raft-shared/src/apps/reminder/protocol.js";
-import { REMINDER_AGENT_INBOX_REGISTRY } from "./apps/reminder/inboxDefinition.js";
-import { createReminderRuntime } from "./apps/reminder/runtime.js";
-import { receiveCleanerConfigMessage } from "./apps/cleaner/configReceiver.js";
-import { createSystemCleanerAppRegistry } from "./apps/cleaner/definition.js";
+import { CLEANER_CONFIG_BOUNDS } from "@botiverse/raft-shared/src/apps/cleaner/configProtocol";
+import { REMINDER_FIRE_REQUEST_CAPABILITY } from "@botiverse/raft-shared/src/apps/reminder/protocol";
+import { REMINDER_AGENT_INBOX_REGISTRY } from "./apps/reminder/inboxDefinition";
+import { createReminderRuntime } from "./apps/reminder/runtime";
+import { receiveCleanerConfigMessage } from "./apps/cleaner/configReceiver";
+import { createSystemCleanerAppRegistry } from "./apps/cleaner/definition";
 import {
   SystemCleanerRuntime,
   type CleanerClock,
   type CleanerMeasurement,
   type CleanerTrace,
-} from "./apps/cleaner/runtime.js";
-import type { Clock } from "./connection.js";
-import type { ScopedAppStorageFactory } from "./scopedAppStorage.js";
+} from "./apps/cleaner/runtime";
+import type { Clock } from "./connection";
+import type { ScopedAppStorageFactory } from "./scopedAppStorage";
 
 export const BUILT_IN_READY_CAPABILITIES = [
   REMINDER_FIRE_REQUEST_CAPABILITY,
+  PROVIDER_PROBE_CAPABILITY,
 ] as const;
 
 export interface BuiltInLocalAppRuntimeOptions {
@@ -36,10 +40,13 @@ export interface BuiltInLocalAppRuntimeOptions {
     literalFileName: "MEMORY.md";
     absolutePath: string;
   }) => Promise<CleanerMeasurement>;
+  /** Raft Computer's own disk use, attached to the cleaner's low-disk decision. */
+  cleanerMeasureRaftDiskFootprint?: () => Promise<Readonly<Record<string, unknown>>>;
   getInbox(agentId: string): AgentAppInboxStore;
-  notifyInbox(agentId: string, item: AgentInboxAppItem): Promise<boolean>;
+  notifyInbox(agentId: string, item: AgentInboxAppItem, notice?: AgentAppInboxNoticeOptions): Promise<boolean>;
   send(message: MachineToServerMessage): void;
   trace?: CleanerTrace;
+  tracer: Tracer;
 }
 
 // Generic daemon core consumes the built-in local scheduling adapter without
@@ -51,16 +58,20 @@ export function createBuiltInLocalScheduleRuntime(options: BuiltInLocalAppRuntim
     getInbox: options.getInbox,
     notifyInbox: options.notifyInbox,
     send: options.send,
-    trace: options.trace,
+    tracer: options.tracer,
   });
+  // Owners asked once per connection for app config on agent:start.
+  const appConfigRequested = new Set<string>();
   const cleaner = new SystemCleanerRuntime({
     agentsDataDir: options.agentsDataDir,
     clock: options.cleanerClock,
     measurementTimeoutMs: options.cleanerMeasurementTimeoutMs,
     measureMemoryFile: options.cleanerMeasureMemoryFile,
+    measureRaftDiskFootprint: options.cleanerMeasureRaftDiskFootprint,
     getInbox: options.getInbox,
+    // Cleaner hints are advisory: never start a stopped agent for one.
     wake: async (agentId: string, item: AgentInboxAppItem) => {
-      await options.notifyInbox(agentId, item);
+      await options.notifyInbox(agentId, item, { startStoppedAgent: false });
     },
     trace: options.trace,
   });
@@ -118,13 +129,27 @@ export function createBuiltInLocalScheduleRuntime(options: BuiltInLocalAppRuntim
     beforeServerAuthorizedAck: (agentId: string, item: AgentInboxAppItem) =>
       reminder.beforeServerAuthorizedAck(agentId, item),
     replayPendingReceipts: () => reminder.replayPendingReceipts(),
-    onConnect: () => reminder.onConnect(),
+    onConnect() {
+      appConfigRequested.clear();
+      reminder.onConnect();
+    },
     requestSnapshot(agentId: string) {
       reminder.requestSnapshot(agentId);
       options.send({ type: "app_config.snapshot.request", agentId });
     },
     requestReminderSnapshotIfUnsynchronized(agentId: string): boolean {
       return reminder.requestSnapshotIfUnsynchronized(agentId);
+    },
+    /**
+     * agent:start fallback for app config, mirroring reminders: an owner that
+     * arrived after connect (e.g. by migration) has no applied Cleaner config,
+     * so its schedule never arms. Ask once per connection.
+     */
+    requestAppConfigSnapshotIfMissing(agentId: string): boolean {
+      if (cleaner.getAppliedConfig(agentId) !== null || appConfigRequested.has(agentId)) return false;
+      appConfigRequested.add(agentId);
+      options.send({ type: "app_config.snapshot.request", agentId });
+      return true;
     },
   };
 }

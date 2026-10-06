@@ -1,9 +1,9 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env -S node --import=@oxc-node/core/register
 import { randomUUID } from "node:crypto";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import pg from "pg";
-import * as schema from "../src/db/schema.js";
+import * as schema from "../src/db/schema";
 
 type CliOptions = {
   batchSize: number;
@@ -94,7 +94,7 @@ function usage() {
   console.error(
     [
       "Usage:",
-      "  DATABASE_URL=... tsx scripts/backfill-message-mentions.ts [--batch-size 500] [--limit 5000] [--server-id <uuid>] [--dry-run]",
+      "  DATABASE_URL=... node --import @oxc-node/core/register scripts/backfill-message-mentions.ts [--batch-size 500] [--limit 5000] [--server-id <uuid>] [--dry-run]",
       "",
       "Options:",
       "  --batch-size <n>  Number of candidate messages per batch (default: 500)",

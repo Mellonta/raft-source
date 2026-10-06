@@ -18,7 +18,6 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type {
@@ -32,7 +31,7 @@ import {
   registerManagedMcpRuntimeProxy,
   unregisterManagedMcpRuntimeProxyForLaunch,
   writeManagedMcpRuntimeConfigFile,
-} from "./managedMcpRuntimeProxy.js";
+} from "./managedMcpRuntimeProxy";
 
 const mcpServerId = "22222222-2222-4222-8222-222222222222";
 

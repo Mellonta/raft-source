@@ -1,3 +1,4 @@
+import { Banner, BannerAction, BannerDescription, Button, Card, PanelHeader, PanelHeading, PanelTitle } from "raft-ui";
 import { useIntl } from "react-intl";
 import RootFallbackScroller from "./RootFallbackScroller";
 
@@ -11,74 +12,51 @@ export function AppRefreshRequiredScreen({
   const { formatMessage } = useIntl();
 
   return (
-    <RootFallbackScroller
-      style={{
-        background: "rgba(17, 17, 17, 0.12)",
-        color: "#111",
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        padding: 24,
-        fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-      }}
-    >
-      <main
+    <RootFallbackScroller className="flex min-h-full items-center justify-center bg-layer-canvas p-6 font-display safe-top safe-bottom theme-brutal:bg-brutal-cream">
+      <Card
         role="alert"
         aria-live="assertive"
-        style={{
-          width: "min(100%, 448px)",
-          border: "2px solid #111",
-          background: "#fff",
-          boxShadow: "6px 6px 0 #111",
-          padding: 24,
-          flexShrink: 0,
-          margin: "auto 0",
-        }}
+        className="w-full max-w-md border border-line-muted bg-layer-panel p-6 shadow-raft-lg theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal"
       >
-        <h1 style={{ margin: "0 0 12px", fontSize: 28, lineHeight: 1.1, fontWeight: 900 }}>
-          {formatMessage({ id: "app.update.refreshToContinue" })}
-        </h1>
-        <p style={{ margin: 0, fontSize: 15, lineHeight: 1.55, color: "#333" }}>
+        <PanelHeader className="mb-4 -mx-6 -mt-6 border-b border-line-muted px-6 py-4 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal">
+          <PanelHeading>
+            <PanelTitle
+              render={
+                <h1 className="text-xl font-black text-foreground-strong theme-brutal:text-black">
+                  {formatMessage({ id: "app.update.refreshToContinue" })}
+                </h1>
+              }
+            />
+          </PanelHeading>
+        </PanelHeader>
+        <p className="m-0 text-sm leading-relaxed text-foreground-muted theme-brutal:text-black/80">
           {formatMessage({ id: "app.update.staleBuildBody" })}
         </p>
-        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", marginTop: 20 }}>
-          <button
-            type="button"
-            onClick={onRecoverAndRefresh}
-            style={{
-              border: "2px solid #111",
-              background: "#ff5ca8",
-              color: "#111",
-              boxShadow: "3px 3px 0 #111",
-              padding: "10px 16px",
-              fontSize: 14,
-              fontWeight: 900,
-              cursor: "pointer",
-            }}
-          >
-            {formatMessage({ id: "app.update.refreshNow" })}
-          </button>
-          <button
+        <div className="mt-6 flex flex-wrap items-center justify-end gap-3">
+          <Button
+            variant="outline"
+            size="md"
             type="button"
             onClick={onContinueAnyway}
-            style={{
-              border: 0,
-              background: "transparent",
-              color: "#111",
-              padding: "6px 0",
-              fontSize: 13,
-              fontWeight: 700,
-              cursor: "pointer",
-              textDecoration: "underline",
-            }}
+            className="font-bold"
           >
             {formatMessage({ id: "app.update.continueAnyway" })}
-          </button>
+          </Button>
+          <Button
+            variant="accent"
+            size="md"
+            type="button"
+            onClick={onRecoverAndRefresh}
+            className="font-black"
+          >
+            {formatMessage({ id: "app.update.refreshNow" })}
+          </Button>
         </div>
-      </main>
+      </Card>
     </RootFallbackScroller>
   );
 }
+
 
 export function AppRefreshWarningBanner({ onRefresh }: { onRefresh: () => void }) {
   const { formatMessage } = useIntl();
@@ -87,45 +65,29 @@ export function AppRefreshWarningBanner({ onRefresh }: { onRefresh: () => void }
     <div
       role="status"
       aria-live="polite"
-      style={{
-        position: "fixed",
-        top: 12,
-        left: "50%",
-        transform: "translateX(-50%)",
-        zIndex: 40,
-        width: "min(calc(100% - 24px), 560px)",
-        border: "2px solid #111",
-        background: "#fff",
-        boxShadow: "4px 4px 0 #111",
-        color: "#111",
-        padding: "10px 12px",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 12,
-        fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
-        fontSize: 13,
-        lineHeight: 1.35,
-      }}
+      className="fixed top-3 left-1/2 z-40 w-[min(calc(100%-24px),560px)] -translate-x-1/2"
     >
-      <span>{formatMessage({ id: "app.update.newerVersionAvailable" })}</span>
-      <button
-        type="button"
-        onClick={onRefresh}
-        style={{
-          border: "2px solid #111",
-          background: "#fff",
-          color: "#111",
-          boxShadow: "2px 2px 0 #111",
-          padding: "6px 10px",
-          fontSize: 12,
-          fontWeight: 900,
-          cursor: "pointer",
-          whiteSpace: "nowrap",
-        }}
+      <Banner
+        status="warning"
+        size="md"
+        className="shadow-raft-md theme-brutal:shadow-brutal-sm"
       >
-        {formatMessage({ id: "app.update.refresh" })}
-      </button>
+        <BannerDescription>
+          {formatMessage({ id: "app.update.newerVersionAvailable" })}
+        </BannerDescription>
+        <BannerAction>
+          <Button
+            variant="outline"
+            size="sm"
+            type="button"
+            onClick={onRefresh}
+            className="font-bold whitespace-nowrap"
+          >
+            {formatMessage({ id: "app.update.refresh" })}
+          </Button>
+        </BannerAction>
+      </Banner>
     </div>
   );
 }
+

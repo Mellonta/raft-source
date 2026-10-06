@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import {
   BUILTIN_RUNTIME_GATEWAY_PROVIDER_BASE_URL_ENV_KEYS,
   BUILTIN_RUNTIME_GATEWAY_PROVIDER_ENV_KEYS,
@@ -14,18 +14,24 @@ import {
   PI_BUILTIN_PROVIDER_MODELS,
   setClockTimeout,
   type RuntimeModelConfig,
+  type ProviderConnectionAssignedAgentList,
   type ProviderConnectionLaunchProjection,
   type ProviderConnectionProviderId,
   type ProviderConnectionSummary,
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   agentProviderConnections,
+  agents,
+  machines,
   providerConnectionCredentials,
   providerConnections,
-} from "../db/schema.js";
-import { createSafeFetch, validateManagedMcpEndpoint } from "./managedMcpGateway.js";
-import { recordIntegrationAuditEvent } from "./integrationAuditService.js";
+  providerProbeIntents,
+  providerProbeReceipts,
+} from "../db/schema";
+import { createSafeFetch, validateManagedMcpEndpoint } from "./managedMcpGateway";
+import { isProviderProbeEnforcementEnabled } from "./providerConnectionFeature";
+import { recordIntegrationAuditEvent } from "./integrationAuditService";
 
 const KEY_ENV = "SLOCK_PROVIDER_CREDENTIAL_KEY";
 const SECRET_VERSION = "v1";
@@ -46,9 +52,12 @@ export type ProviderConnectionErrorCode =
   | "provider_connection_key_missing"
   | "provider_connection_not_found"
   | "provider_connection_in_use"
+  | "provider_connection_assignment_active"
   | "provider_connection_unavailable"
   | "provider_connection_model_list_failed"
-  | "provider_connection_test_failed";
+  | "provider_connection_test_failed"
+  | "provider_connection_retired"
+  | "provider_connection_unverified";
 
 export class ProviderConnectionError extends Error {
   constructor(message: string, readonly code: ProviderConnectionErrorCode) {
@@ -216,6 +225,7 @@ function projectSummary(row: {
     credentialVersion: row.credentialVersion ?? 0,
     hasCredential: row.credentialVersion !== null,
     assignedAgentCount: Number(row.assignedAgentCount),
+    latestVerified: null,
     lastCheckedAt: connection.lastCheckedAt?.toISOString() ?? null,
     lastErrorCategory: connection.lastErrorCategory,
     createdAt: connection.createdAt.toISOString(),
@@ -242,7 +252,181 @@ export async function listProviderConnections(serverId: string): Promise<Provide
     .where(eq(providerConnections.serverId, serverId))
     .groupBy(providerConnections.id, providerConnectionCredentials.credentialVersion)
     .orderBy(providerConnections.name);
-  return rows.map(projectSummary);
+  const summaries = rows.map(projectSummary);
+  // One batched read for the whole catalog: the latest durable success receipt
+  // per connection (plus its Computer name), so the settings page never fans
+  // out one request per row.
+  const verified = await getDb().select({
+    connectionId: providerProbeIntents.connectionId,
+    computerId: providerProbeIntents.computerId,
+    computerName: machines.name,
+    runtime: providerProbeIntents.runtime,
+    model: providerProbeIntents.model,
+    verifiedAt: providerProbeReceipts.verifiedAt,
+  }).from(providerProbeReceipts)
+    .innerJoin(providerProbeIntents, eq(providerProbeIntents.id, providerProbeReceipts.probeId))
+    .leftJoin(machines, eq(machines.id, providerProbeIntents.computerId))
+    .where(and(
+      eq(providerProbeIntents.serverId, serverId),
+      eq(providerProbeReceipts.outcome, "success"),
+    ))
+    .orderBy(sql`${providerProbeIntents.connectionId}`, sql`${providerProbeReceipts.verifiedAt} desc`);
+  const latestByConnection = new Map<string, (typeof verified)[number]>();
+  for (const row of verified) {
+    if (!latestByConnection.has(row.connectionId)) latestByConnection.set(row.connectionId, row);
+  }
+  return summaries.map((summary) => {
+    const row = latestByConnection.get(summary.id);
+    return {
+      ...summary,
+      latestVerified: row
+        ? {
+          computerId: row.computerId,
+          computerName: row.computerName,
+          runtime: row.runtime,
+          model: row.model,
+          verifiedAt: row.verifiedAt.toISOString(),
+        }
+        : null,
+    };
+  });
+}
+
+async function assertConnectionInServer(serverId: string, connectionId: string): Promise<void> {
+  const [connection] = await getDb().select({ id: providerConnections.id })
+    .from(providerConnections)
+    .where(and(
+      eq(providerConnections.serverId, serverId),
+      eq(providerConnections.id, connectionId),
+    ))
+    .limit(1);
+  if (!connection) {
+    throw new ProviderConnectionError("Provider connection not found", "provider_connection_not_found");
+  }
+}
+
+/**
+ * Names the Agents that hold an assignment to one connection. Read-only and
+ * server-scoped: a connection id from another server is a neutral 404, and the
+ * projection carries identity only — never credential or provider config.
+ */
+export async function listProviderConnectionAssignedAgents(input: {
+  serverId: string;
+  connectionId: string;
+}): Promise<ProviderConnectionAssignedAgentList> {
+  await assertConnectionInServer(input.serverId, input.connectionId);
+  const assigned = await getDb().select({
+    id: agents.id,
+    name: agents.name,
+    displayName: agents.displayName,
+    runtime: agents.runtime,
+    status: agents.status,
+    computerName: machines.name,
+    deletedAt: agents.deletedAt,
+  }).from(agentProviderConnections)
+    .innerJoin(agents, and(
+      eq(agents.id, agentProviderConnections.agentId),
+      eq(agents.serverId, agentProviderConnections.serverId),
+    ))
+    .leftJoin(machines, and(
+      eq(machines.id, agents.machineId),
+      eq(machines.serverId, agentProviderConnections.serverId),
+    ))
+    .where(and(
+      eq(agentProviderConnections.serverId, input.serverId),
+      eq(agentProviderConnections.connectionId, input.connectionId),
+    ))
+    .orderBy(asc(agents.name), asc(agents.id));
+  return {
+    agents: assigned.map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      displayName: agent.displayName,
+      runtime: agent.runtime,
+      status: agent.status,
+      computerName: agent.computerName ?? null,
+      deleted: agent.deletedAt !== null,
+    })),
+  };
+}
+
+/**
+ * Releases the assignment left behind by a soft-deleted Agent. Deleting an Agent
+ * clears its own assignment, so this is the recovery path for rows that already
+ * existed; without it a connection could stay permanently undeletable with no
+ * reachable Agent to unbind it from. Active Agents are refused: their provider
+ * is changed in the Agent editor, which owns assignment versions.
+ */
+export async function detachProviderConnectionDeletedAgent(input: {
+  serverId: string;
+  userId: string;
+  connectionId: string;
+  agentId: string;
+}): Promise<void> {
+  await getDb().transaction(async (tx) => {
+    const [connection] = await tx.select({
+      id: providerConnections.id,
+      providerId: providerConnections.providerId,
+      configVersion: providerConnections.configVersion,
+      credentialVersion: providerConnectionCredentials.credentialVersion,
+    }).from(providerConnections).innerJoin(providerConnectionCredentials, and(
+      eq(providerConnectionCredentials.serverId, providerConnections.serverId),
+      eq(providerConnectionCredentials.connectionId, providerConnections.id),
+    )).where(and(
+      eq(providerConnections.serverId, input.serverId),
+      eq(providerConnections.id, input.connectionId),
+    )).limit(1).for("update");
+    if (!connection) {
+      throw new ProviderConnectionError("Provider connection not found", "provider_connection_not_found");
+    }
+    const [assignment] = await tx.select({
+      agentId: agentProviderConnections.agentId,
+      deletedAt: agents.deletedAt,
+    }).from(agentProviderConnections)
+      .innerJoin(agents, and(
+        eq(agents.id, agentProviderConnections.agentId),
+        eq(agents.serverId, agentProviderConnections.serverId),
+      ))
+      .where(and(
+        eq(agentProviderConnections.serverId, input.serverId),
+        eq(agentProviderConnections.connectionId, input.connectionId),
+        eq(agentProviderConnections.agentId, input.agentId),
+      ))
+      .limit(1);
+    if (!assignment) {
+      throw new ProviderConnectionError(
+        "Agent is not assigned to this provider connection",
+        "provider_connection_not_found",
+      );
+    }
+    if (assignment.deletedAt === null) {
+      throw new ProviderConnectionError(
+        "Provider connection is assigned to an active Agent",
+        "provider_connection_assignment_active",
+      );
+    }
+    await tx.delete(agentProviderConnections).where(and(
+      eq(agentProviderConnections.serverId, input.serverId),
+      eq(agentProviderConnections.connectionId, input.connectionId),
+      eq(agentProviderConnections.agentId, input.agentId),
+    ));
+    await recordIntegrationAuditEvent({
+      serverId: input.serverId,
+      eventType: "provider_connection.assignment_detached",
+      outcome: "success",
+      source: "web",
+      actor: { type: "human", id: input.userId },
+      subject: { type: "agent", id: input.agentId },
+      target: { type: "provider_connection", id: input.connectionId },
+      metadata: {
+        providerId: connection.providerId,
+        configVersion: connection.configVersion,
+        credentialVersion: connection.credentialVersion,
+        agentId: input.agentId,
+        reason: "agent_deleted",
+      },
+    }, tx);
+  });
 }
 
 export async function createProviderConnection(input: {
@@ -297,53 +481,113 @@ export async function updateProviderConnection(input: {
   connectionId: string;
   name?: unknown;
   enabled?: unknown;
+  endpointUrl?: unknown;
+  supportsImageInput?: unknown;
+  apiKey?: unknown;
 }): Promise<ProviderConnectionSummary> {
   await getDb().transaction(async (tx) => {
-    const [current] = await tx.select().from(providerConnections).where(and(
+    const [row] = await tx.select({
+      connection: providerConnections,
+      credential: providerConnectionCredentials,
+    }).from(providerConnections).innerJoin(providerConnectionCredentials, and(
+      eq(providerConnectionCredentials.serverId, providerConnections.serverId),
+      eq(providerConnectionCredentials.connectionId, providerConnections.id),
+    )).where(and(
       eq(providerConnections.serverId, input.serverId),
       eq(providerConnections.id, input.connectionId),
     )).limit(1);
-    if (!current) throw new ProviderConnectionError("Provider connection not found", "provider_connection_not_found");
+    if (!row) throw new ProviderConnectionError("Provider connection not found", "provider_connection_not_found");
+
     if (input.enabled !== undefined && typeof input.enabled !== "boolean") {
       throw new ProviderConnectionError("Enabled state must be a boolean", "provider_connection_invalid");
     }
-    const metadataChanged = input.name !== undefined || input.enabled !== undefined;
-    const nextConfigVersion = current.configVersion + (metadataChanged ? 1 : 0);
-    if (metadataChanged) {
-      await tx.update(providerConnections).set({
-        ...(input.name !== undefined ? { name: normalizeName(input.name) } : {}),
-        ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+
+    const name = input.name !== undefined ? normalizeName(input.name) : row.connection.name;
+    const enabled = input.enabled !== undefined ? input.enabled : row.connection.enabled;
+    const endpointUrl = input.endpointUrl !== undefined
+      ? normalizeEndpointUrl(row.connection.providerId, input.endpointUrl)
+      : row.connection.endpointUrl;
+    const supportsImageInput = input.supportsImageInput !== undefined
+      ? normalizeSupportsImageInput(row.connection.providerId, input.supportsImageInput)
+      : row.connection.supportsImageInput;
+
+    const hasNewApiKey = input.apiKey !== undefined && input.apiKey !== null && String(input.apiKey).trim() !== "";
+    const apiKey = hasNewApiKey ? normalizeApiKey(input.apiKey) : null;
+
+    const nameChanged = name !== row.connection.name;
+    const enabledChanged = enabled !== row.connection.enabled;
+    const endpointUrlChanged = endpointUrl !== row.connection.endpointUrl;
+    const supportsImageInputChanged = supportsImageInput !== row.connection.supportsImageInput;
+    const configChanged = nameChanged || enabledChanged || endpointUrlChanged || supportsImageInputChanged;
+    const credentialChanged = hasNewApiKey;
+
+    if (!configChanged && !credentialChanged) {
+      return;
+    }
+
+    const nextConfigVersion = row.connection.configVersion + (configChanged ? 1 : 0);
+    const nextCredentialVersion = row.credential.credentialVersion + (credentialChanged ? 1 : 0);
+    const shouldResetStatus = endpointUrlChanged || credentialChanged;
+
+    await tx.update(providerConnections).set({
+      name,
+      enabled,
+      endpointUrl,
+      supportsImageInput,
+      configVersion: nextConfigVersion,
+      ...(shouldResetStatus ? {
+        status: "unchecked",
+        lastCheckedAt: null,
+        lastErrorCategory: null,
+      } : {}),
+      updatedByUserId: input.userId,
+      updatedAt: currentDate(),
+    }).where(and(
+      eq(providerConnections.serverId, input.serverId),
+      eq(providerConnections.id, input.connectionId),
+    ));
+
+    if (credentialChanged && apiKey) {
+      await tx.update(providerConnectionCredentials).set({
+        encryptedApiKey: encryptApiKey(apiKey, `${input.serverId}:${input.connectionId}`),
+        credentialVersion: nextCredentialVersion,
+        updatedAt: currentDate(),
+      }).where(eq(providerConnectionCredentials.id, row.credential.id));
+    }
+
+    await tx.update(agentProviderConnections).set({
+      expectedConfigVersion: nextConfigVersion,
+      expectedCredentialVersion: nextCredentialVersion,
+      updatedByUserId: input.userId,
+      updatedAt: currentDate(),
+    }).where(and(
+      eq(agentProviderConnections.serverId, input.serverId),
+      eq(agentProviderConnections.connectionId, input.connectionId),
+    ));
+
+    const changedFields = [
+      ...(nameChanged ? ["name"] : []),
+      ...(enabledChanged ? ["enabled"] : []),
+      ...(endpointUrlChanged ? ["endpointUrl"] : []),
+      ...(supportsImageInputChanged ? ["supportsImageInput"] : []),
+      ...(credentialChanged ? ["apiKey"] : []),
+    ];
+
+    await recordIntegrationAuditEvent({
+      serverId: input.serverId,
+      eventType: credentialChanged ? "provider_connection.credential_rotated" : "provider_connection.updated",
+      outcome: "success",
+      source: "web",
+      actor: { type: "human", id: input.userId },
+      target: { type: "provider_connection", id: input.connectionId },
+      metadata: {
+        changedFields,
         configVersion: nextConfigVersion,
-        updatedByUserId: input.userId,
-        updatedAt: currentDate(),
-      }).where(and(eq(providerConnections.serverId, input.serverId), eq(providerConnections.id, input.connectionId)));
-    }
-    if (metadataChanged) {
-      await tx.update(agentProviderConnections).set({
-        expectedConfigVersion: nextConfigVersion,
-        updatedByUserId: input.userId,
-        updatedAt: currentDate(),
-      }).where(and(
-        eq(agentProviderConnections.serverId, input.serverId),
-        eq(agentProviderConnections.connectionId, input.connectionId),
-      ));
-      await recordIntegrationAuditEvent({
-        serverId: input.serverId,
-        eventType: "provider_connection.updated",
-        outcome: "success",
-        source: "web",
-        actor: { type: "human", id: input.userId },
-        target: { type: "provider_connection", id: input.connectionId },
-        metadata: {
-          changedFields: [
-            ...(input.name !== undefined ? ["name"] : []),
-            ...(input.enabled !== undefined ? ["enabled"] : []),
-          ],
-          configVersion: nextConfigVersion,
-          enabled: input.enabled ?? current.enabled,
-        },
-      }, tx);
-    }
+        credentialVersion: nextCredentialVersion,
+        enabled,
+        status: shouldResetStatus ? "unchecked" : row.connection.status,
+      },
+    }, tx);
   });
   const result = (await listProviderConnections(input.serverId)).find((connection) => connection.id === input.connectionId);
   if (!result) throw new ProviderConnectionError("Provider connection not found", "provider_connection_not_found");
@@ -483,7 +727,7 @@ export async function resolveProviderConnectionSelection(serverId: string, conne
     eq(providerConnections.serverId, serverId),
     eq(providerConnections.id, connectionId),
   )).limit(1);
-  if (!row || !row.connection.enabled || row.connection.status !== "ready") {
+  if (!row || !row.connection.enabled) {
     throw new ProviderConnectionError("Provider connection is unavailable", "provider_connection_unavailable");
   }
   return {
@@ -720,7 +964,6 @@ export async function resolveProviderConnectionLaunch(input: {
   if (
     !row
     || !row.connection.enabled
-    || row.connection.status !== "ready"
     || row.assignment.expectedConfigVersion !== row.connection.configVersion
     || row.assignment.expectedCredentialVersion !== row.credential.credentialVersion
   ) {
@@ -737,10 +980,73 @@ export async function resolveProviderConnectionLaunch(input: {
   };
 }
 
+/**
+ * Probe-scoped materialization: credential env + projection for one connection
+ * WITHOUT the enabled/ready/assignment gates, because a Computer probe is what
+ * establishes verification before any of those can mean anything. Callers must
+ * already hold a one-time claim (providerProbeService); the env carries the
+ * decrypted key and must never be logged, audited or persisted.
+ */
+let probeMaterializationCalls = 0;
+
+/** Test seam: count credential-decrypting materializations (0-credential teeth). */
+export function __providerConnectionProbeMaterializationCallCount(): number {
+  return probeMaterializationCalls;
+}
+
+export function __resetProviderConnectionProbeMaterializationCallCount(): void {
+  probeMaterializationCalls = 0;
+}
+
+export async function resolveProviderConnectionProbeMaterialization(input: {
+  serverId: string;
+  connectionId: string;
+}): Promise<{
+  envVars: Record<string, string>;
+  providerConnection: ProviderConnectionLaunchProjection;
+  envKeyNames: string[];
+  configVersion: number;
+  credentialVersion: number;
+}> {
+  const [row] = await getDb().select({
+    connection: providerConnections,
+    credential: providerConnectionCredentials,
+  }).from(providerConnections).innerJoin(providerConnectionCredentials, and(
+    eq(providerConnectionCredentials.serverId, providerConnections.serverId),
+    eq(providerConnectionCredentials.connectionId, providerConnections.id),
+  )).where(and(
+    eq(providerConnections.serverId, input.serverId),
+    eq(providerConnections.id, input.connectionId),
+  )).limit(1);
+  if (!row) throw new ProviderConnectionError("Provider connection not found", "provider_connection_not_found");
+  probeMaterializationCalls += 1;
+  const apiKey = decryptApiKey(row.credential.encryptedApiKey, `${input.serverId}:${input.connectionId}`);
+  const envVars = connectionEnv(row.connection.providerId, row.connection.endpointUrl, apiKey);
+  return {
+    envVars,
+    providerConnection: {
+      providerId: row.connection.providerId,
+      endpointUrl: row.connection.endpointUrl,
+      supportsImageInput: row.connection.supportsImageInput,
+    },
+    envKeyNames: Object.keys(envVars).sort(),
+    configVersion: row.connection.configVersion,
+    credentialVersion: row.credential.credentialVersion,
+  };
+}
+
 export async function listProviderConnectionModels(input: {
   serverId: string;
   connectionId: string;
 }): Promise<{ models: string[] }> {
+  // Wave 3 retirement: with enforcement on, the Server no longer performs any
+  // provider I/O for discovery; verification happens on a Computer instead.
+  if (await isProviderProbeEnforcementEnabled(input.serverId)) {
+    throw new ProviderConnectionError(
+      "Provider discovery is retired; verify on a Computer instead",
+      "provider_connection_retired",
+    );
+  }
   const [row] = await getDb().select({ connection: providerConnections, credential: providerConnectionCredentials })
     .from(providerConnections)
     .innerJoin(providerConnectionCredentials, and(
@@ -782,6 +1088,14 @@ export async function testProviderConnection(input: {
   model?: unknown;
   message?: unknown;
 }): Promise<ProviderConnectionSummary> {
+  // Wave 3 retirement: with enforcement on, the Server no longer performs any
+  // provider I/O for tests; verification happens on a Computer instead.
+  if (await isProviderProbeEnforcementEnabled(input.serverId)) {
+    throw new ProviderConnectionError(
+      "Server-side provider tests are retired; verify on a Computer instead",
+      "provider_connection_retired",
+    );
+  }
   const [row] = await getDb().select({ connection: providerConnections, credential: providerConnectionCredentials })
     .from(providerConnections)
     .innerJoin(providerConnectionCredentials, and(
@@ -866,3 +1180,4 @@ export async function testProviderConnection(input: {
   if (!result) throw new ProviderConnectionError("Provider connection not found", "provider_connection_not_found");
   return result;
 }
+

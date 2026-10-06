@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 
 // task #535 / #537: the agent-detail Computer row has five reachable web states
 // (AgentDetailPanel.tsx blob c549c316acf5, :771-772 and :2053-2084). The default

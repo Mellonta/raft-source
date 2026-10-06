@@ -7,7 +7,7 @@ import {
   type AgentApiRequestQueryByRoute,
   type AgentApiResponseByRoute,
   type AgentApiRouteKey,
-} from "./agentApiContract.js";
+} from "./agentApiContract";
 import {
   createAgentApiRawClient,
   requestAgentApiRawRoute,
@@ -20,7 +20,7 @@ import {
   type AgentApiRawTransport,
   type AgentApiRawTransportRequest,
   type AgentApiRawTransportResponse,
-} from "./agentApiRawClient.js";
+} from "./agentApiRawClient";
 
 export type AgentApiClientResponse<K extends AgentApiRouteKey> = AgentApiResponseByRoute[K];
 export type AgentApiClientErrorKind = "transport" | "http" | "validation";
@@ -135,7 +135,7 @@ async function authHeadersForRequest(
   return typeof auth === "function" ? auth(request) : auth;
 }
 
-async function parseFetchResponse(response: Response, responseKind: "json" | "binary"): Promise<unknown | null> {
+async function parseFetchResponse(response: Response, responseKind: "json" | "binary" | "empty"): Promise<unknown | null> {
   if (response.ok && responseKind === "binary") {
     return new Uint8Array(await response.arrayBuffer());
   }

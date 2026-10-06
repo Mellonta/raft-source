@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 /**
  * Integration tests for `GET /api/agents/manageable` — the agent-readable
  * discovery surface that `slock agent list` and friends call.
@@ -27,10 +27,10 @@ import { createApiTest } from "../test/integration/apiTest.js";
 import assert from "node:assert/strict";
 
 
-import { getDb } from "../db/index.js";
-import { users, serverMembers } from "../db/schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
+import { getDb } from "../db/index";
+import { users, serverMembers } from "../db/schema";
+import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

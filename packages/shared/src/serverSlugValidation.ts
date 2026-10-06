@@ -1,33 +1,58 @@
+/**
+ * Minimum length for a NEWLY chosen server slug. Historical servers may carry
+ * shorter slugs, so this floor applies only when a slug is being created —
+ * never when an existing slug is referenced (lookups, invites, routing).
+ */
 export const SERVER_SLUG_MIN_LENGTH = 5;
 
-export type ServerSlugValidationReason =
+const SERVER_SLUG_PATTERN = /^[a-z][a-z0-9-]*$/;
+
+export type ServerSlugReferenceValidationReason =
   | { code: "required" }
-  | { code: "too_short"; minLength: number }
   | { code: "pattern" };
 
+export type ServerSlugValidationReason =
+  | ServerSlugReferenceValidationReason
+  | { code: "too_short"; minLength: number };
+
 /**
- * Canonical server-slug validation shared by the create-server API and every
- * client surface that accepts an existing server slug.
- *
- * Keep this intentionally narrower than a generic URL-slug helper: server
- * slugs start with a lowercase ASCII letter and then contain only lowercase
- * ASCII letters, digits, or hyphens.
+ * Format validation for a slug that REFERENCES an existing server (joint
+ * channel invites, lookups, routing). Server slugs start with a lowercase
+ * ASCII letter and then contain only lowercase ASCII letters, digits, or
+ * hyphens. Deliberately no minimum length: existing servers created before
+ * the creation-time floor may have slugs shorter than
+ * {@link SERVER_SLUG_MIN_LENGTH}, and they must stay addressable.
  */
-export function validateServerSlugReason(slug: unknown): ServerSlugValidationReason | null {
+export function validateServerSlugReferenceReason(
+  slug: unknown,
+): ServerSlugReferenceValidationReason | null {
+  if (typeof slug !== "string" || slug.length === 0) {
+    return { code: "required" };
+  }
+  if (!SERVER_SLUG_PATTERN.test(slug)) {
+    return { code: "pattern" };
+  }
+  return null;
+}
+
+/**
+ * Validation for a slug being CREATED (new server). Adds the
+ * {@link SERVER_SLUG_MIN_LENGTH} floor on top of the reference format rules.
+ * Any future "change slug to a new value" path must use this too.
+ */
+export function validateNewServerSlugReason(slug: unknown): ServerSlugValidationReason | null {
   if (typeof slug !== "string" || slug.length === 0) {
     return { code: "required" };
   }
   if (slug.length < SERVER_SLUG_MIN_LENGTH) {
     return { code: "too_short", minLength: SERVER_SLUG_MIN_LENGTH };
   }
-  if (!/^[a-z][a-z0-9-]*$/.test(slug)) {
-    return { code: "pattern" };
-  }
-  return null;
+  return validateServerSlugReferenceReason(slug);
 }
 
-export function validateServerSlug(slug: unknown): string | null {
-  const reason = validateServerSlugReason(slug);
+/** API error copy for {@link validateNewServerSlugReason}. */
+export function validateNewServerSlug(slug: unknown): string | null {
+  const reason = validateNewServerSlugReason(slug);
   switch (reason?.code) {
     case "required":
       return "Slug is required";

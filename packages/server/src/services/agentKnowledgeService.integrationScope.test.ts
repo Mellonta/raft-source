@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService.js";
+import { resolveAgentKnowledgeDoc } from "./agentKnowledgeService";
 
 // Live staging regression (peng, #proj-aiax): Server-managed Notion MCP was
 // correctly injected, but the agent ran `raft integration list`, read "Notion

@@ -1,15 +1,22 @@
-import { serializeErrorForLog } from "../tracing/safeErrorLog.js";
+import {
+  conversionReadChannelPredicate,
+  resolveConversionReadChannelIds,
+  resolvedConversionReadChannelPredicate,
+} from "./channelConversionReadScope";
+import { serializeErrorForLog } from "../tracing/safeErrorLog";
 import { randomUUID } from "node:crypto";
-import { eq, desc, gt, gte, lt, and, inArray, isNull, isNotNull, not, sql, or } from "drizzle-orm";
+import { eq, asc, desc, gt, gte, lt, and, inArray, isNull, isNotNull, not, sql, or, getTableColumns, type SQL } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
-import { getDb, registerDatabaseCloseHookForTests, withDbTraceAttributes, type DatabaseExecutor } from "../db/index.js";
-import { messages, messageReactions, agents, users, channels, threadFollows, servers, serverMembers, serverMembershipDepartures, userChannelInboxStates, channelHumans, channelAgents, messageMentions, mentionDeliveryOccurrences, jointChannels, jointChannelServers, agentChannelReadCursors, attachmentCommentRefs, attachments, inboxNotificationFacts, tasks, externalReactionStates, externalActorProjections } from "../db/schema.js";
+import { getDb, isDatabaseInitialized, registerDatabaseCloseHookForTests, withDbTraceAttributes, type DatabaseExecutor } from "../db/index";
+import { mapBounded } from "../lib/boundedConcurrency";
+import { withTransientTransactionRetry } from "../db/transientTransactionRetry";
+import { actionCards, messages, messageReactions, agents, users, channels, threadFollows, servers, serverMembers, serverMembershipDepartures, userChannelInboxStates, channelHumans, channelAgents, messageMentions, mentionDeliveryOccurrences, jointChannels, jointChannelServers, agentChannelReadCursors, attachmentCommentRefs, attachments, inboxNotificationFacts, inboxTargetMuteStates, tasks, externalReactionStates, externalActorProjections } from "../db/schema";
 import type { Server as SocketServer } from "socket.io";
 import type {
   AgentMessageDeliveryResult,
   AgentOrchestrator,
   DeliverMessageOptions,
-} from "./agentOrchestrator.js";
+} from "./agentOrchestrator";
 import {
   SERVER_GUEST_FEATURE_FLAG_KEY,
   isAgentApiExternalMessageForbiddenAuthorityField,
@@ -33,87 +40,101 @@ import {
   type RaftTargetString,
   type TraceAttributes,
 } from "@botiverse/raft-shared";
-import * as channelService from "./channelService.js";
-import * as mentionDeliveryOccurrenceService from "./mentionDeliveryOccurrenceService.js";
-import { CompatibilityReadMutationPendingError } from "./readMutationSequencer.js";
-import { emitScopeReadUpdated } from "./readReceiptService.js";
-import { ensureTaskForMessage, enrichSingleLegacyTask, type TaskRow } from "./taskService.js";
+import * as channelService from "./channelService";
+import * as mentionDeliveryOccurrenceService from "./mentionDeliveryOccurrenceService";
+import { CompatibilityReadMutationPendingError, isReadMutationFenceRefusal } from "./readMutationSequencer";
+import { emitScopeReadUpdated } from "./readReceiptService";
+import { ensureTaskForMessage, enrichSingleLegacyTask, type TaskRow } from "./taskService";
 import {
   loadCanonicalTaskFactsByMessageId,
   projectTaskFactsOntoRows,
   toAgentTaskCurrentProjection,
   withProjectedTaskFacts,
-} from "./messageTaskProjection.js";
+} from "./messageTaskProjection";
 import {
   getAttachmentsForMessages,
   getThumbnailUrl,
   normalizeAttachmentFilename,
   resolveAttachmentMimeType,
-} from "../routes/attachments.js";
-import { updateMaxSeqRedis, getMaxSeqRedis } from "../replicaRouter.js";
-import { redisSyncDuration } from "../metrics.js";
-import { buildSearchText } from "./searchService.js";
-import * as agentPermalinkRenderService from "./agentPermalinkRenderService.js";
-import * as agentService from "./agentService.js";
-import * as serverService from "./serverService.js";
+} from "../routes/attachments";
+import { updateMaxSeqRedis, getMaxSeqRedis } from "../replicaRouter";
+import { redisSyncDuration } from "../metrics";
+import { buildSearchText } from "./searchService";
+import * as agentPermalinkRenderService from "./agentPermalinkRenderService";
+import * as agentService from "./agentService";
+import { getServerPlan, getHistoryCutoff } from "./planService";
+import * as serverService from "./serverService";
 import {
   actorHasServerCapabilityInServer,
   actorRoleHasServerCapability,
   getActorServerRoleInServer,
-} from "../lib/actorPermissions.js";
-import { actorHasChannelCapability } from "../lib/channelActorPermissions.js";
-import { sendPushNotifications, type PushPayload } from "./pushService.js";
-import { createOrReplayAgentSend, type AgentSendInsertedTransactionInput } from "./agentSendReplayService.js";
-import { traceQuerySpan } from "../tracing/queryTrace.js";
+} from "../lib/actorPermissions";
+import { actorHasChannelCapability } from "../lib/channelActorPermissions";
+import { sendPushNotifications, type PushPayload } from "./pushService";
+import {
+  assertChannelWritableInTransaction,
+  withChannelWriterFence,
+} from "./channelConversionFenceService";
+import { assertActionCardWritableInTransaction } from "./actionCardConversionService";
+import { AgentSendIdempotencyConflictError, createOrReplayAgentSend, __hasAgentSendReplayDbOverrideForTests, type AgentSendInsertedTransactionInput } from "./agentSendReplayService";
+export { AgentSendIdempotencyConflictError } from "./agentSendReplayService";
+import { traceQuerySpan } from "../tracing/queryTrace";
 import {
   AttachmentLinkError,
   linkAttachmentsToMessageWithExecutor as linkAttachmentRowsToMessageWithExecutor,
-} from "./attachmentLinkingService.js";
-import { emitTaskCreated } from "./taskRealtimeEvents.js";
-import { projectRichMessageSocketPayload } from "./messageRealtimeEvents.js";
+} from "./attachmentLinkingService";
+import { emitTaskCreated } from "./taskRealtimeEvents";
+import { projectRichMessageSocketPayload } from "./messageRealtimeEvents";
 import {
   recordInboxNotificationFacts,
   type InboxNotificationFactInput,
-} from "./inboxNotificationService.js";
-import { renderAnchorLabel } from "./attachmentCommentAnchorLabel.js";
-import { SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION } from "./systemMessageBornReadRegistry.js";
+} from "./inboxNotificationService";
+import {
+  type AgentCommentScopeProjection,
+  projectAgentCommentScope,
+  readFullAnchorQuote,
+  renderAgentCommentScopedContent,
+  renderAnchorLabel,
+} from "./attachmentCommentAnchorLabel";
+import { type RequiresCausalActorProducer } from "./systemMessageBornReadRegistry";
+import { isMessageUnreadEligibleForReceiver, messageUnreadEligibleForReceiverSql } from "./inboxUnreadEligibility";
 import {
   ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
   COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY,
   evaluateFeatureFlag,
-} from "./featureFlagService.js";
-import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace.js";
-import { isMessageShortId, messageIdShortPrefixConditions, UUID_RE, uuidShortIdRange } from "../lib/messageId.js";
-import { getConfiguredAppUrl } from "../config/appUrl.js";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
-import { sanitizeRouteErrorMessage } from "../tracing/routeFailure.js";
-import { isNotificationPushSocketEnabled } from "./receiverStatePushService.js";
-import { emitPlatformScopedUserEvent, socketUserServerRoom } from "../socket/platformScope.js";
+} from "./featureFlagService";
+import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace";
+import { isMessageShortId, messageIdShortPrefixConditions, UUID_RE, uuidShortIdRange } from "../lib/messageId";
+import { getConfiguredAppUrl } from "../config/appUrl";
+import { addTraceEvent, errorClassOf } from "../tracing/semanticTrace";
+import { sanitizeRouteErrorMessage } from "../tracing/routeFailure";
+import { isNotificationPushSocketEnabled } from "./receiverStatePushService";
+import { emitPlatformScopedUserEvent, socketUserServerRoom } from "../socket/platformScope";
 import {
   formatPushBody,
   formatPushServerLabel,
   formatPushSurfaceTitle,
   summarizePushBody,
-} from "./pushDisplay.js";
+} from "./pushDisplay";
 import {
   persistNativeNotificationIntents,
   resolveNotificationIntents,
-} from "./nativeNotificationService.js";
-import { loadExternalMessageAuthors } from "./externalProjectionService.js";
+} from "./nativeNotificationService";
+import { loadExternalMessageAuthors } from "./externalProjectionService";
 import {
   classifyOrdinaryMessageExternalProjection,
   type OrdinaryMessageExternalProjectionDecision,
-} from "./ordinaryMessageExternalProjection.js";
+} from "./ordinaryMessageExternalProjection";
 import {
   lockOrdinaryMessageExternalDeliveryAdmission,
   maybeEnqueueOrdinaryMessageExternalDelivery,
   runSlackBridgeOutboundAdmissionStage,
   runSlackBridgeOutboundPipelineStage,
   type SlackBridgeOutboundPipelineTopology,
-} from "./externalDeliveryOutboxService.js";
-import { getComputerLinkedMachineIds } from "./computerCredentialService.js";
-import { getInstalledApp } from "./rapRegistryStore.js";
-import { isAppId, type AppId } from "./rapRegistry.js";
+} from "./externalDeliveryOutboxService";
+import { getComputerLinkedMachineIds } from "./computerCredentialService";
+import { getInstalledApp } from "./rapRegistryStore";
+import { isAppId, type AppId } from "./rapRegistry";
 const THREAD_JOIN_CONTEXT_WINDOW = 6;
 const AGENT_FORWARDED_ITEM_CONTENT_CHAR_LIMIT = 2_000;
 const AGENT_FORWARDED_BUNDLE_CHAR_LIMIT = 12_000;
@@ -196,7 +217,7 @@ function getMessageDbErrorTraceAttrs(error: unknown): TraceAttributes {
       : "none";
 
   return {
-    error_class: error instanceof Error ? error.name : typeof error,
+    error_class: errorClassOf(error),
     ...(chain.length > 1 && chain[1] instanceof Error ? { error_cause_class: chain[1].name } : {}),
     ...(sqlstate ? { sqlstate } : {}),
     timeout_subkind: timeoutSubkind,
@@ -298,7 +319,8 @@ export async function getHumanThreadFollowerIds(
       eq(threadFollows.followerType, "user"),
       isNull(threadFollows.unfollowedAt),
       sql`(
-        (${parentChannels.type} = 'channel' AND ${serverMembers.userId} IS NOT NULL)
+        (${parentChannels.type} = 'channel' AND ${serverMembers.userId} IS NOT NULL
+          AND (${serverMembers.role} <> 'guest' OR ${parentChannels.guestVisible} = true))
         OR ${channelHumans.userId} IS NOT NULL
       )`,
     ));
@@ -404,11 +426,20 @@ async function listExplicitThreadUnfollows(
     ));
 }
 
+const JOINT_DELIVERY_PROJECTION_CONCURRENCY = 4;
+
 type MessageServiceDeps = {
   createMessage: typeof createMessage;
   getChannel: typeof channelService.getChannel;
   getChannelHumans: typeof channelService.getChannelHumans;
   getChannelAgents: typeof channelService.getChannelAgents;
+  /**
+   * Batched member lookup across every joint projection of one message, so
+   * the in-transaction round trips stay constant as the number of servers
+   * grows (contract v0.3 §18.10.1). Optional: doubles fall back to the
+   * per-projection getChannelHumans/getChannelAgents loop.
+   */
+  getJointProjectionMembers?: (localChannelIds: readonly string[]) => Promise<JointProjectionMembers>;
   getChannelMembers: typeof channelService.getChannelMembers;
   getChannelMembershipAuthorityChannelId: typeof channelService.getChannelMembershipAuthorityChannelId;
   actorHasChannelCapability: typeof actorHasChannelCapability;
@@ -416,6 +447,8 @@ type MessageServiceDeps = {
   clearThreadDoneForAll: typeof channelService.clearThreadDoneForAll;
   markRead: (userId: string, channelId: string, seq: number) => Promise<unknown>;
   markAgentLegacyRead: (agentId: string, channelId: string, seq: number) => Promise<unknown>;
+  /** An agent's own send (see channelService.markAgentOwnSendRead). Stubs without it fall back to markAgentLegacyRead. */
+  markAgentOwnSendRead?: (agentId: string, channelId: string, seq: number, storageChannelId?: string) => Promise<unknown>;
   assertChannelNotArchived: typeof channelService.assertChannelNotArchived;
   getActiveJointChannelProjectionsByLocalChannel: typeof channelService.getActiveJointChannelProjectionsByLocalChannel;
   getActiveJointThreadProjectionsByCanonicalThread: typeof channelService.getActiveJointThreadProjectionsByCanonicalThread;
@@ -525,6 +558,7 @@ function scheduleSenderReadReceipt(input: {
       changed: state.changed,
     });
   }).catch((error) => {
+    if (isReadMutationFenceRefusal(error)) return;
     if (!(error instanceof CompatibilityReadMutationPendingError)) throw error;
     console.warn("[MessageService] sender read receipt remains pending", {
       serverId: error.serverId,
@@ -549,6 +583,7 @@ const defaultMessageServiceDeps: MessageServiceDeps = {
   clearThreadDoneForAll: channelService.clearThreadDoneForAll,
   markRead: channelService.markRead,
   markAgentLegacyRead: channelService.markAgentLegacyRead,
+  markAgentOwnSendRead: channelService.markAgentOwnSendRead,
   assertChannelNotArchived: channelService.assertChannelNotArchived,
   getActiveJointChannelProjectionsByLocalChannel: channelService.getActiveJointChannelProjectionsByLocalChannel,
   getActiveJointThreadProjectionsByCanonicalThread: channelService.getActiveJointThreadProjectionsByCanonicalThread,
@@ -584,12 +619,13 @@ let messageServiceDepsOverride: Partial<MessageServiceDeps> | null = null;
 
 function resolveMessageServiceDeps(): MessageServiceDeps {
   const usesMockPersistence = Boolean(messageServiceDepsOverride?.createMessage);
+  const persistenceUnavailable = !isDatabaseInitialized();
   const testFallbacks: Partial<MessageServiceDeps> = messageServiceDepsOverride
     ? {
       getActiveJointChannelProjectionsByLocalChannel: async () => [],
       getActiveJointThreadProjectionsByCanonicalThread: async () => [],
       getJointThreadProjectionForMember: async () => null,
-      ...(usesMockPersistence ? {
+      ...(usesMockPersistence || persistenceUnavailable ? {
         getServerIdentity: async () => null,
         shouldHideHumanDirectoryFromRequester: async () => false,
         shouldHideHumanDirectoryFromAgentRequester: async () => false,
@@ -625,6 +661,9 @@ export async function awaitPostPersistReadMutation(readMutation: Promise<unknown
   try {
     await readMutation;
   } catch (error) {
+    // Task #93 line B: the sender lost membership after the message committed; the read-state side effect is refused
+    // and the primary action stays successful. Any other error still surfaces.
+    if (isReadMutationFenceRefusal(error)) return;
     if (!(error instanceof CompatibilityReadMutationPendingError)) throw error;
     // The message/follow transaction is already committed. Keep that primary
     // result successful while the durable sequencer worker/frontier recovers
@@ -660,6 +699,24 @@ async function getPostPersistThreadFollowerCandidates(
 }
 
 type AgentDeliveryCandidate = { id: string };
+
+export type SenderDeliveryWarning = {
+  targetType: "agent";
+  targetId: string;
+  reason: "agent_stopped";
+};
+
+type SenderDeliveryOutcome = {
+  agentId: string;
+  result: AgentMessageDeliveryResult | null;
+};
+
+const senderDeliveryWarningTimeoutMs = 1000;
+
+type SenderDeliveryOutcomeCollection = {
+  outcomes: SenderDeliveryOutcome[];
+  timedOut: boolean;
+};
 
 function uniqueAgentDeliveryCandidates(candidates: readonly AgentDeliveryCandidate[]): AgentDeliveryCandidate[] {
   const byId = new Map<string, AgentDeliveryCandidate>();
@@ -722,10 +779,12 @@ async function resolveThreadAgentDeliveryCandidates(opts: {
     };
   }
 
-  const persistedAudience = await getPersistedThreadAgentDeliveryAudience(
-    opts.messageId,
-    opts.threadChannelId,
-  );
+  // A focused test override for follower resolution intentionally exercises
+  // the post-persist fallback and its degradation trace; production always
+  // prefers the durable inbox-facts audience below.
+  const persistedAudience = messageServiceDepsOverride?.getThreadFollowerCandidates
+    ? null
+    : await getPersistedThreadAgentDeliveryAudience(opts.messageId, opts.threadChannelId);
   if (persistedAudience && persistedAudience.length > 0) {
     return {
       candidates: persistedAudience,
@@ -876,13 +935,13 @@ function withFrontendConversationContext<T extends Record<string, unknown>>(
 
 function projectFrontendMessagePayload<T extends Record<string, unknown>>(
   payload: T,
-): Omit<T, "agentSendKey" | "searchText" | "searchVector" | "senderHandle"> {
+): Omit<T, "agentSendKey" | "searchText" | "searchVector" | "senderHandle" | "serverId"> {
   return projectRichMessageSocketPayload(payload);
 }
 
 function projectThreadLatestReplyPayload<T extends Record<string, unknown>>(
   payload: T,
-): Omit<T, "agentSendKey" | "searchText" | "searchVector" | "senderHandle"> & {
+): Omit<T, "agentSendKey" | "searchText" | "searchVector" | "senderHandle" | "serverId"> & {
   senderDisplayName: string;
   senderAvatarUrl: string | null;
 } {
@@ -1212,6 +1271,7 @@ function isMessageRouteDomainError(error: unknown): boolean {
   return error instanceof channelService.ChannelArchivedError
     || error instanceof MentionValidationError
     || error instanceof UserRandomIdConflictError
+    || error instanceof AgentSendIdempotencyConflictError
     || error instanceof AttachmentLinkError;
 }
 
@@ -1220,7 +1280,10 @@ export type SystemMessageInboxFactProducer =
   | "agent.migration_completed_receipt"
   | "agent.migration_canceled_receipt"
   | "agent.migration_failed_receipt"
+  | "agent.migration_aborted_receipt"
+  | "app.agent_reminder"
   | "action_card.carrier"
+  | "action_card.result_reply"
   | "channel.agent_membership"
   | "channel.human_membership"
   | "channel.self_unfollow_thread"
@@ -1241,18 +1304,6 @@ export type SystemMessageInboxFactProducer =
   | "external_projection.inbound"
   | `test.${string}`;
 
-export type SystemMessageInboxFactPolicy = {
-  mode: "record" | "skip";
-  producer: SystemMessageInboxFactProducer;
-  reason: string;
-};
-
-export type ResolvedMentionFact = {
-  type: "user" | "agent";
-  id: string;
-  name: string;
-};
-
 /**
  * The real human/agent whose action produced a system message. System-message
  * fact rows always carry `senderType:"system"`, so the ordinary
@@ -1265,6 +1316,46 @@ export type CausalActor = {
   id: string;
 };
 
+/**
+ * Compile-time gate on a system-message fact's producer -> causalActor coupling,
+ * derived from SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION (single source of truth):
+ *
+ * - `born-read` producer      -> `causalActor: CausalActor` (REQUIRED).
+ * - `notify-exclude` / `skip` -> `causalActor?: never` (passing it is a type
+ *    error, not merely optional) — these must stay unread for the actor.
+ * - `real-sender` producer    -> no `causalActor` (the persisted message's own
+ *    real sender already drives born-read), so `?: never` here too.
+ * - `test.*` producer         -> exempt (tests may pass anything).
+ *
+ * The three states are enforced at compile time by the discriminated union; there
+ * is deliberately NO runtime double-guard in broadcastSystemMessage.
+ */
+export type SystemMessageInboxFactPolicy = {
+  mode: "record" | "skip";
+  reason: string;
+} & (
+  | { producer: RequiresCausalActorProducer; causalActor: CausalActor }
+  | { producer: Exclude<SystemMessageInboxFactProducer, RequiresCausalActorProducer | `test.${string}`>; causalActor?: never }
+  | { producer: `test.${string}`; causalActor?: CausalActor }
+);
+
+/**
+ * A persisted message paired with the causal actor that produced it, for the
+ * born-read producers. The pair shape is what makes "every message has its
+ * actor" structural: a message without a causalActor simply cannot be written
+ * on this path.
+ */
+export type PersistedMessageWithCausalActor = {
+  message: typeof messages.$inferSelect;
+  causalActor: CausalActor;
+};
+
+export type ResolvedMentionFact = {
+  type: "user" | "agent";
+  id: string;
+  name: string;
+};
+
 function messageReceiverUnreadEligible(
   receiverType: "user" | "agent",
   receiverId: string,
@@ -1274,11 +1365,15 @@ function messageReceiverUnreadEligible(
 ) {
   // Per-item born-read: the actor who caused this (system) message is not
   // unread-eligible for their own row. This is a fact-level flag only; it does
-  // NOT touch any read cursor/watermark.
-  if (causalActor && causalActor.type === receiverType && causalActor.id === receiverId) {
-    return false;
-  }
-  return !(receiverType === senderType && receiverId === senderId);
+  // NOT touch any read cursor/watermark. Same rule as delivery and the chain
+  // (inboxUnreadEligibility); causal actors are only ever set on system messages.
+  return isMessageUnreadEligibleForReceiver({
+    senderType,
+    senderId,
+    messageType: causalActor ? "system" : null,
+    causalActorType: causalActor?.type,
+    causalActorId: causalActor?.id,
+  }, { type: receiverType, id: receiverId });
 }
 
 async function recordInboxFactsForPersistedMessage(opts: {
@@ -1378,12 +1473,17 @@ async function recordInboxFactsForPersistedMessage(opts: {
       explicitUnfollowKeys.has(`${actorType}:${actorId}`);
     if (opts.channel.parentMessageId) {
       const [parentMsg] = await (executor ?? getDb())
-        .select({ senderType: messages.senderType, senderId: messages.senderId })
+        .select({
+          senderType: messages.senderType,
+          senderId: messages.senderId,
+          messageType: messages.messageType,
+        })
         .from(messages)
         .where(eq(messages.id, opts.channel.parentMessageId))
         .limit(1);
       if (
         parentMsg
+        && !isSystemMessageIdentity(parentMsg.messageType, parentMsg.senderId)
         && (opts.senderType === "system" || !(parentMsg.senderType === opts.senderType && parentMsg.senderId === opts.senderId))
         && (parentMsg.senderType === "user" || parentMsg.senderType === "agent")
         && !hasExplicitThreadUnfollow(parentMsg.senderType, parentMsg.senderId)
@@ -1482,11 +1582,16 @@ async function recordInboxFactsForPersistedMessage(opts: {
       }
     }
   } else if (opts.jointProjections.length > 0) {
+    const batched = opts.deps.getJointProjectionMembers
+      ? await opts.deps.getJointProjectionMembers(opts.jointProjections.map((projection) => projection.localChannelId))
+      : null;
     for (const projection of opts.jointProjections) {
-      const [humans, agents] = await Promise.all([
-        opts.deps.getChannelHumans(projection.localChannelId),
-        opts.deps.getChannelAgents(projection.localChannelId),
-      ]);
+      const [humans, agents] = batched
+        ? [batched.humansByChannel.get(projection.localChannelId) ?? [], batched.agentsByChannel.get(projection.localChannelId) ?? []]
+        : await Promise.all([
+          opts.deps.getChannelHumans(projection.localChannelId),
+          opts.deps.getChannelAgents(projection.localChannelId),
+        ]);
       for (const human of humans) addReceiver("user", human.id, projection.serverId, "channel", projection.localChannelId);
       for (const agent of agents) addReceiver("agent", agent.id, projection.serverId, "channel", projection.localChannelId);
     }
@@ -1500,7 +1605,22 @@ async function recordInboxFactsForPersistedMessage(opts: {
     for (const agent of agents) addReceiver("agent", agent.id, opts.channel.serverId, kind, opts.channel.id);
   }
 
+  // Illumination span (2026-09-21): the per-receiver facts write is the last
+  // O(receivers) cost in the send transaction and previously hid inside the
+  // messages.insert blob. receiver_count on the span makes its cost curve
+  // directly readable (span duration vs receiver_count scatter = the ms price
+  // of Stage 3's retirement target).
+  const factsFanoutStartMs = Date.now();
   const recorded = await opts.deps.recordInboxNotificationFacts(facts, executor);
+  addTraceEvent("send.facts_fanout.finished", {
+    event_kind: "send_phase",
+    outcome: "success",
+    reason: "facts_recorded",
+    receiver_count: facts.length,
+    recorded_count: recorded,
+    duration_ms: Date.now() - factsFanoutStartMs,
+    channel_kind: opts.channel.type,
+  });
   const threadAgentDeliveryCandidates = opts.channel.type === "thread"
     ? buildThreadAgentDeliveryCandidatesFromFacts(facts, opts.channel.id)
     : undefined;
@@ -1561,9 +1681,9 @@ async function stampSendPathPersonalMentionDelivery(opts: {
 }
 
 export async function recordInboxFactsForPersistedMessages(
-  persistedMessages: readonly (typeof messages.$inferSelect)[],
+  persistedMessages: readonly (typeof messages.$inferSelect)[] | readonly PersistedMessageWithCausalActor[],
   opts: {
-    inboxFactPolicy: SystemMessageInboxFactPolicy;
+    inboxFactPolicy: Pick<SystemMessageInboxFactPolicy, "mode" | "producer" | "reason">;
     executor?: DatabaseExecutor;
     channel?: typeof channels.$inferSelect;
     /**
@@ -1579,13 +1699,17 @@ export async function recordInboxFactsForPersistedMessages(
     jointThreadProjection?: channelService.JointThreadProjection | null;
     jointProjections?: readonly channelService.JointChannelProjection[];
     recordJointLocalFace?: boolean;
-    causalActorByMessageId?: ReadonlyMap<string, CausalActor>;
     targetVisibleMentionsByMessageId?: ReadonlyMap<string, readonly ResolvedMentionFact[]>;
     /** Collapse a joint member present on multiple projections to one global receipt. */
     dedupeLogicalReceiverAcrossJointProjections?: boolean;
   },
 ): Promise<number> {
-  if (persistedMessages.length === 0) return 0;
+  // Normalize both input shapes to { message, causalActor? }.
+  const normalized: ReadonlyArray<{ message: typeof messages.$inferSelect; causalActor?: CausalActor }> =
+    persistedMessages.map((item) =>
+      "message" in item ? item : { message: item, causalActor: undefined },
+    );
+  if (normalized.length === 0) return 0;
   const baseDeps = resolveMessageServiceDeps();
   const executor = opts.executor;
   const deps: MessageServiceDeps = executor
@@ -1593,6 +1717,7 @@ export async function recordInboxFactsForPersistedMessages(
         ...baseDeps,
         getChannelHumans: (channelId) => getChannelHumansWithExecutor(executor, channelId, opts.channel),
         getChannelAgents: (channelId) => getChannelAgentsWithExecutor(executor, channelId, opts.channel),
+        getJointProjectionMembers: (localChannelIds) => getJointProjectionMembersWithExecutor(executor, localChannelIds),
         recordInboxNotificationFacts: (facts, factExecutor) => baseDeps.recordInboxNotificationFacts(
           facts,
           factExecutor ?? executor,
@@ -1605,8 +1730,8 @@ export async function recordInboxFactsForPersistedMessages(
     : baseDeps;
   const mentionsByMessage = opts.targetVisibleMentionsByMessageId
     ?? (executor
-      ? await getMentionFactsForMessagesWithExecutor(executor, persistedMessages.map((message) => message.id))
-      : await deps.getMentionFactsForMessages(persistedMessages.map((message) => message.id)));
+      ? await getMentionFactsForMessagesWithExecutor(executor, normalized.map((m) => m.message.id))
+      : await deps.getMentionFactsForMessages(normalized.map((m) => m.message.id)));
   let totalFacts = 0;
   const jointProjectionLookups = new Map<string, Promise<channelService.JointChannelProjection[]>>();
   const getJointProjectionsForChannel = (channelId: string) => {
@@ -1618,7 +1743,7 @@ export async function recordInboxFactsForPersistedMessages(
     return lookup;
   };
 
-  for (const message of persistedMessages) {
+  for (const { message, causalActor } of normalized) {
     const channel = opts.channel?.id === message.channelId
       ? opts.channel
       : executor
@@ -1679,7 +1804,7 @@ export async function recordInboxFactsForPersistedMessages(
       message,
       senderType: persistedSenderType,
       senderId: message.senderId,
-      causalActor: opts.causalActorByMessageId?.get(message.id),
+      causalActor: causalActor,
       targetVisibleMentions: [...(mentionsByMessage.get(message.id) ?? [])],
       jointProjections,
       jointThreadProjection,
@@ -1712,6 +1837,8 @@ type AddMemberWithMembershipSystemMessageInput = {
   memberName: string;
   memberType: "human" | "agent";
   causalActor: CausalActor;
+  actionCardMessageId?: string;
+  actionCardConfirmationVersion?: number;
   executor?: DatabaseExecutor;
 };
 
@@ -1749,12 +1876,19 @@ async function addMemberWithMembershipSystemMessage(
     storageChannel = canonicalChannel;
   }
   const apply = async (tx: DatabaseExecutor) => {
+    await assertChannelWritableInTransaction(tx, input.channel.id);
+    if (input.actionCardMessageId) {
+      await assertActionCardWritableInTransaction(tx, input.actionCardMessageId, input.actionCardConfirmationVersion);
+    }
     const added = input.memberType === "human"
       ? await channelService.addHuman(input.channel.id, input.memberId, { executor: tx })
       : await channelService.addAgent(input.channel.id, input.memberId, { executor: tx });
     if (!added) return { added: false };
 
     const content = `@${input.memberName} was added to this channel.`;
+    const producer = input.memberType === "human"
+      ? "channel.human_membership"
+      : "channel.agent_membership";
     const message = await deps.createMessage(
       storageChannel.id,
       "user",
@@ -1762,21 +1896,22 @@ async function addMemberWithMembershipSystemMessage(
       content,
       "system",
       undefined,
-      undefined,
+      {
+        causalActorType: input.causalActor.type,
+        causalActorId: input.causalActor.id,
+        systemSubtype: producer,
+      },
       tx,
     );
-    await recordInboxFactsForPersistedMessages([message], {
+    await recordInboxFactsForPersistedMessages([{ message, causalActor: input.causalActor }], {
       inboxFactPolicy: {
         mode: "record",
-        producer: input.memberType === "human"
-          ? "channel.human_membership"
-          : "channel.agent_membership",
+        producer,
         reason: `${input.memberType} membership changes are shared channel activity`,
       },
       executor: tx,
       channel: storageChannel,
       jointProjections,
-      causalActorByMessageId: new Map([[message.id, input.causalActor]]),
     });
     await failpoints.hit("server.channel.membership.afterPersist", {
       channelId: input.channel.id,
@@ -1795,6 +1930,8 @@ export async function addHumanWithMembershipSystemMessage(input: {
   userName: string;
   causalActor: CausalActor;
   executor?: DatabaseExecutor;
+  actionCardMessageId?: string;
+  actionCardConfirmationVersion?: number;
 }): Promise<{ added: boolean; message?: typeof messages.$inferSelect }> {
   return addMemberWithMembershipSystemMessage({
     channel: input.channel,
@@ -1803,6 +1940,8 @@ export async function addHumanWithMembershipSystemMessage(input: {
     memberType: "human",
     causalActor: input.causalActor,
     executor: input.executor,
+    actionCardMessageId: input.actionCardMessageId,
+    actionCardConfirmationVersion: input.actionCardConfirmationVersion,
   });
 }
 
@@ -1812,6 +1951,8 @@ export async function addAgentWithMembershipSystemMessage(input: {
   agentName: string;
   causalActor: CausalActor;
   executor?: DatabaseExecutor;
+  actionCardMessageId?: string;
+  actionCardConfirmationVersion?: number;
 }): Promise<{ added: boolean; message?: typeof messages.$inferSelect }> {
   return addMemberWithMembershipSystemMessage({
     channel: input.channel,
@@ -1820,6 +1961,8 @@ export async function addAgentWithMembershipSystemMessage(input: {
     memberType: "agent",
     causalActor: input.causalActor,
     executor: input.executor,
+    actionCardMessageId: input.actionCardMessageId,
+    actionCardConfirmationVersion: input.actionCardConfirmationVersion,
   });
 }
 
@@ -1970,30 +2113,41 @@ export async function createMessage(
   content: string,
   messageType: "chat" | "system" = "chat",
   taskFields?: { taskStatus: "todo"; taskNumber: number },
-  extraFields?: { threadId?: string | null; agentSendKey?: string | null; randomId?: string | null; actionMetadata?: unknown | null },
-  executor: DatabaseExecutor = getDb(),
+  extraFields?: { threadId?: string | null; agentSendKey?: string | null; randomId?: string | null; actionMetadata?: unknown | null; causalActorType?: "user" | "agent" | null; causalActorId?: string | null; systemSubtype?: string | null },
+  executor?: DatabaseExecutor,
 ) {
-  const db = executor;
-  const [message] = await db
-    .insert(messages)
-    .values({
-      channelId,
-      senderType,
-      senderId,
-      content,
-      messageType,
-      searchText: buildSearchText(content),
-      ...taskFields,
-      ...extraFields,
-    })
-    .returning();
-  await db.update(userChannelInboxStates)
-    .set({ doneAt: null, updatedAt: new Date() })
-    .where(and(
-      eq(userChannelInboxStates.channelId, channelId),
-      isNotNull(userChannelInboxStates.doneAt),
-    ));
-  return message;
+  const persist = async (db: DatabaseExecutor) => {
+    const [message] = await db
+      .insert(messages)
+      .values({
+        channelId,
+        senderType,
+        senderId,
+        content,
+        messageType,
+        searchText: buildSearchText(content),
+        ...taskFields,
+        ...extraFields,
+      })
+      .returning();
+    await db.update(userChannelInboxStates)
+      .set({ doneAt: null, updatedAt: currentDate() })
+      .where(and(
+        eq(userChannelInboxStates.channelId, channelId),
+        isNotNull(userChannelInboxStates.doneAt),
+      ));
+    return message;
+  };
+
+  // Callers that already own a transaction must re-read the durable fence in
+  // that same transaction. The standalone path acquires the exact per-source
+  // lock before checking and inserting, so a conversion cannot win between
+  // the check and the message row.
+  if (executor) {
+    await assertChannelWritableInTransaction(executor, channelId);
+    return persist(executor);
+  }
+  return withChannelWriterFence(channelId, persist);
 }
 
 /**
@@ -2010,6 +2164,7 @@ export async function prepareSystemMessageForOrderedDelivery(
   channelId: string,
   content: string,
   eventId: string,
+  provenance?: { causalActor?: CausalActor; systemSubtype?: string },
 ): Promise<typeof messages.$inferSelect> {
   const sequenceResult = await getDb().execute(sql`
     SELECT nextval(pg_get_serial_sequence('messages', 'seq')) AS seq
@@ -2033,6 +2188,8 @@ export async function prepareSystemMessageForOrderedDelivery(
     actionMetadata: null,
     searchText: buildSearchText(content),
     searchVector: null,
+    // Set by the insert trigger from the channel.
+    serverId: null,
     threadId: null,
     taskStatus: null,
     taskNumber: null,
@@ -2040,6 +2197,9 @@ export async function prepareSystemMessageForOrderedDelivery(
     taskAssigneeId: null,
     taskClaimedAt: null,
     taskCompletedAt: null,
+    causalActorType: provenance?.causalActor?.type ?? null,
+    causalActorId: provenance?.causalActor?.id ?? null,
+    systemSubtype: provenance?.systemSubtype ?? null,
     createdAt: now,
     updatedAt: now,
   };
@@ -2079,6 +2239,9 @@ export async function persistPreparedSystemMessage(
         messageType: prepared.messageType,
         content: prepared.content,
         searchText: prepared.searchText,
+        causalActorType: prepared.causalActorType,
+        causalActorId: prepared.causalActorId,
+        systemSubtype: prepared.systemSubtype,
         createdAt: prepared.createdAt,
         updatedAt: prepared.updatedAt,
       })
@@ -2232,6 +2395,7 @@ async function finalizeNewChatMessageInTransaction(opts: {
         getChannelHumansWithExecutor(executor, localChannelId, channel),
       getChannelAgents: (localChannelId) =>
         getChannelAgentsWithExecutor(executor, localChannelId, channel),
+      getJointProjectionMembers: (localChannelIds) => getJointProjectionMembersWithExecutor(executor, localChannelIds),
       recordInboxNotificationFacts: (facts, factExecutor) =>
         opts.deps.recordInboxNotificationFacts(facts, factExecutor ?? executor),
     };
@@ -2322,9 +2486,8 @@ async function createOrReplayUserRandomSend(opts: {
   jointThreadProjection: channelService.JointThreadProjection | null;
   ordinaryExternalProjectionDecision: OrdinaryMessageExternalProjectionDecision;
   deps: MessageServiceDeps;
-}) {
-  const db = getDb();
-  return db.transaction(async (tx) => {
+}, executor?: DatabaseExecutor) {
+  const run = async (tx: DatabaseExecutor) => {
     await runSlackBridgeOutboundAdmissionStage(
       "conversation_lock",
       () => lockOrdinaryMessageExternalDeliveryAdmission({
@@ -2495,7 +2658,9 @@ async function createOrReplayUserRandomSend(opts: {
       attachments: linkedAttachments,
       ...facts,
     };
-  });
+  };
+  if (executor) return run(executor);
+  return getDb().transaction(run);
 }
 
 async function emitFrontendSocketBestEffort(input: {
@@ -2622,7 +2787,12 @@ async function emitPersistedMessageToFrontend(
       const parentMessageId = channel.parentMessageId;
       const db = getDb();
       const [parentMsg] = await db
-        .select({ channelId: messages.channelId, senderType: messages.senderType, senderId: messages.senderId })
+        .select({
+          channelId: messages.channelId,
+          senderType: messages.senderType,
+          senderId: messages.senderId,
+          messageType: messages.messageType,
+        })
         .from(messages)
         .where(eq(messages.id, channel.parentMessageId));
 
@@ -2637,7 +2807,7 @@ async function emitPersistedMessageToFrontend(
           senderProjection.localThreadChannelId,
           channel.parentMessageId,
           "replied",
-          { reactivateUnfollowed: true },
+          { reactivateUnfollowed: true, joinedThroughSeq: message.seq },
         );
         if (senderType === "user") {
           await awaitPostPersistReadMutation(
@@ -2648,6 +2818,7 @@ async function emitPersistedMessageToFrontend(
 
       if (
         parentMsg
+        && !isSystemMessageIdentity(parentMsg.messageType, parentMsg.senderId)
         && (parentMsg.senderType === "user" || parentMsg.senderType === "agent")
         && parentMsg.senderId !== senderId
       ) {
@@ -2663,6 +2834,7 @@ async function emitPersistedMessageToFrontend(
             authorProjection.localThreadChannelId,
             channel.parentMessageId,
             "authored",
+            { joinedThroughSeq: message.seq - 1 },
           );
         }
       }
@@ -2727,6 +2899,7 @@ async function emitPersistedMessageToFrontend(
     channelId: string;
     senderType: StoredMessageSenderType;
     senderId: string;
+    messageType: "chat" | "system";
   } | null = null;
   if (channel?.type === "thread" && channel.parentMessageId) {
     // Reply-path auto-follows must happen before the room join + message:new
@@ -2735,7 +2908,12 @@ async function emitPersistedMessageToFrontend(
     // later refresh/reply creates the follow projection.
     const db = getDb();
     const [parentMsg] = await db
-      .select({ channelId: messages.channelId, senderType: messages.senderType, senderId: messages.senderId })
+      .select({
+        channelId: messages.channelId,
+        senderType: messages.senderType,
+        senderId: messages.senderId,
+        messageType: messages.messageType,
+      })
       .from(messages)
       .where(eq(messages.id, channel.parentMessageId));
     parentMsgForThread = parentMsg ?? null;
@@ -2747,7 +2925,7 @@ async function emitPersistedMessageToFrontend(
         channelId,
         channel.parentMessageId,
         "replied",
-        { reactivateUnfollowed: true },
+        { reactivateUnfollowed: true, joinedThroughSeq: message.seq },
       );
       if (senderType === "user") {
         await awaitPostPersistReadMutation(channelService.markReadLatest(senderId, channelId));
@@ -2756,6 +2934,7 @@ async function emitPersistedMessageToFrontend(
 
     if (
       parentMsgForThread
+      && !isSystemMessageIdentity(parentMsgForThread.messageType, parentMsgForThread.senderId)
       && (parentMsgForThread.senderType === "user" || parentMsgForThread.senderType === "agent")
       && parentMsgForThread.senderId !== senderId
     ) {
@@ -2765,6 +2944,7 @@ async function emitPersistedMessageToFrontend(
         channelId,
         channel.parentMessageId,
         "authored",
+        { joinedThroughSeq: message.seq - 1 },
       );
     }
 
@@ -2916,6 +3096,23 @@ export function summarizeForSystemMessage(text: string, maxLen: number = SYSTEM_
   return single.slice(0, maxLen - 1).trimEnd() + "…";
 }
 
+const TASK_STATUS_EMOJI: Record<string, string> = { todo: "📝", in_progress: "🔄", in_review: "👀", done: "✅", closed: "🚫" };
+const TASK_STATUS_LABEL: Record<string, string> = { todo: "Todo", in_progress: "In Progress", in_review: "In Review", done: "Done", closed: "Closed" };
+
+/**
+ * Shared task-status notice text for both the human and agent lifecycle paths.
+ * Single source so a label/emoji tweak reaches every caller (they must not
+ * drift — same lesson as the missing agent send this extracted helper fixes).
+ */
+export function buildTaskStatusChangeNotice(
+  actorName: string,
+  taskNumber: number,
+  title: string,
+  status: string,
+): string {
+  return `${TASK_STATUS_EMOJI[status] || "📝"} ${actorName} moved #${taskNumber} "${summarizeForSystemMessage(title)}" to ${TASK_STATUS_LABEL[status] || status}`;
+}
+
 /**
  * Create and broadcast a **system message** to a channel/thread/DM.
  *
@@ -3038,14 +3235,6 @@ export async function broadcastSystemMessage(
   opts: {
     inboxFactPolicy: SystemMessageInboxFactPolicy;
     /**
-     * Real actor who caused this system message. When their own inbox row is
-     * built it is born-read (unreadEligible=false) — a self-caused system
-     * message must not show as unread to its own actor. Per-item only; does
-     * not touch read cursors. Omit for producers that must stay unread for
-     * everyone (e.g. onboarding, where the joiner is the intended reader).
-     */
-    causalActor?: CausalActor;
-    /**
      * Server-resolved personal-attention targets represented by explicit
      * @handles in `content`. Unlike ordinary system broadcasts, these targets
      * get durable mention facts and may pierce their own channel mute. Other
@@ -3071,29 +3260,6 @@ export async function broadcastSystemMessage(
     dedupeLogicalReceiverAcrossJointProjections?: boolean;
   },
 ) {
-  // Structural coupling: a producer the registry declares "born-read" MUST pass
-  // a causalActor when it actually records facts, otherwise the actor's own row
-  // is silently left unread (declared ≠ actual). Fail loudly at the call site
-  // instead of shipping a silent regression. Scoped to `mode:"record"`: a
-  // skip-mode call records no facts, so there is no actor row to suppress and a
-  // causalActor would be meaningless. Test-only producers (`test.*`) are not in
-  // the registry and are intentionally exempt.
-  const bornReadClassification =
-    SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION[
-      opts.inboxFactPolicy.producer as keyof typeof SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION
-    ];
-  if (
-    bornReadClassification === "born-read"
-    && opts.inboxFactPolicy.mode === "record"
-    && !opts.causalActor
-  ) {
-    throw new Error(
-      `born-read producer '${opts.inboxFactPolicy.producer}' must pass causalActor `
-        + `(the real actor whose action caused this system message). Without it the `
-        + `actor's own inbox row is incorrectly left unread.`,
-    );
-  }
-
   const deps = resolveMessageServiceDeps();
   if (
     opts.persistedMessage
@@ -3108,7 +3274,11 @@ export async function broadcastSystemMessage(
   }
   const messageWasPersisted = opts.persistedMessage !== undefined;
   const message = opts.persistedMessage
-    ?? await deps.createMessage(channelId, "user", "system", content, "system");
+    ?? await deps.createMessage(channelId, "user", "system", content, "system", undefined, {
+      causalActorType: opts.inboxFactPolicy.causalActor?.type ?? null,
+      causalActorId: opts.inboxFactPolicy.causalActor?.id ?? null,
+      systemSubtype: opts.inboxFactPolicy.producer,
+    });
   const personalAttentionTargets = opts.personalAttentionTargets ?? [];
   const enriched = {
     ...message,
@@ -3142,7 +3312,7 @@ export async function broadcastSystemMessage(
   });
 
   if (!messageWasPersisted && channel && opts.inboxFactPolicy.mode === "record") {
-    const inboxFactStart = Date.now();
+    const inboxFactStart = currentTimeMs();
     const jointProjections = channel.type === "thread"
       ? []
       : await deps.getActiveJointChannelProjectionsByLocalChannel(channelId);
@@ -3154,7 +3324,7 @@ export async function broadcastSystemMessage(
       message,
       senderType: "system",
       senderId: "system",
-      causalActor: opts.causalActor,
+      causalActor: opts.inboxFactPolicy.causalActor,
       targetVisibleMentions: personalAttentionTargets,
       jointProjections,
       jointThreadProjection: jointThreadProjections[0] ?? null,
@@ -3164,7 +3334,7 @@ export async function broadcastSystemMessage(
     });
     addTraceEvent("message_pipeline.system_inbox_notification_facts.recorded", {
       ...traceAttrs,
-      duration_ms: Date.now() - inboxFactStart,
+      duration_ms: currentTimeMs() - inboxFactStart,
       fact_count: factCount,
       // born-read observability (stdrc 7/11): per-producer count of self-caused
       // receiver rows suppressed to born-read. Post-release confirmation that the
@@ -3260,9 +3430,16 @@ export async function broadcastSystemMessage(
     ? await getThreadAgentFollowers(channelId)
     : await deps.getChannelAgents(channelId);
   const targetAgentIdSet = opts.targetAgentIds ? new Set(opts.targetAgentIds) : null;
-  const unfilteredTargetedAgents = targetAgentIdSet
+  // Only agents for which the message is unread: the agent that caused it (it
+  // joined, or added itself) or a noise subtype is born-read in its inbox, so
+  // delivering it would wake the agent / show it in an inbox notice that its
+  // pull never returns.
+  const unfilteredTargetedAgents = (targetAgentIdSet
     ? agentsInChannel.filter((agent) => targetAgentIdSet.has(agent.id))
-    : agentsInChannel;
+    : agentsInChannel
+  ).filter((agent) => isMessageUnreadEligibleForReceiver(message, { type: "agent", id: agent.id }, {
+    personallyMentioned: personalAttentionTargets.some((target) => target.type === "agent" && target.id === agent.id),
+  }));
   const piercedAgentIds = new Set(
     personalAttentionTargets
       .filter((target) => target.type === "agent")
@@ -3296,12 +3473,12 @@ export async function broadcastSystemMessage(
   const parentFields = channel.type === "thread"
     ? await resolveThreadParentFields(channel.id)
     : {};
-  const deliverToAgent = (agent: typeof targetedAgents[number]) =>
+  const deliverToAgent = async (agent: typeof targetedAgents[number]) =>
     agentOrchestrator.deliverMessage(agent.id, {
       channel_id: channelId,
-      channel_name: channel.name,
       channel_type: toAgentVisibleChannelType(channel.type),
       ...parentFields,
+      ...await resolveRecipientDeliveryNames(channel.serverId, agent.id, channel, parentFields),
       sender_id: "system",
       sender_name: "system",
       sender_type: "system",
@@ -3508,7 +3685,7 @@ export async function deliverSystemNoticeToAgent(
     sender_name: "system",
     sender_type: "system",
     content: renderedContent,
-    timestamp: notice.timestamp ?? new Date().toISOString(),
+    timestamp: notice.timestamp ?? currentDate().toISOString(),
   }, effectiveOptions);
 }
 
@@ -3534,9 +3711,20 @@ export async function deliverMessageToAgents(
  */
 export async function deliverMessagesToAgents(
   agentOrchestrator: AgentOrchestrator,
-  rawMessageBatch: readonly (typeof messages.$inferSelect)[],
+  // Search-index columns are never read here; accepting rows without them lets
+  // history reads (which skip them) feed delivery too.
+  rawMessageBatch: readonly Omit<typeof messages.$inferSelect, "searchText" | "searchVector">[],
   senderName: string,
-  opts: { personalAttentionTargets?: readonly ResolvedMentionFact[] } = {},
+  opts: {
+    personalAttentionTargets?: readonly ResolvedMentionFact[];
+    /**
+     * Caller-resolved audience override (agent ids). Used by the external
+     * inbound commit hook, where the durable receivers are the persisted
+     * inbox-notification facts — covering threads and Joint local faces that
+     * have no channel_agents rows on the stored channel.
+     */
+    recipientAgentIds?: readonly string[];
+  } = {},
 ) {
   if (rawMessageBatch.length === 0) return;
 
@@ -3570,7 +3758,18 @@ export async function deliverMessagesToAgents(
     ? await resolveThreadParentFields(channel.id)
     : {};
 
-  const agentsInChannel = await deps.getChannelAgents(firstMessage.channelId);
+  // Threads carry no channel_agents rows; their agent audience resolves the
+  // same way the send path resolves it — durable inbox-facts receivers with
+  // the follower set as fallback (same contract, same helper).
+  const agentsInChannel: AgentDeliveryCandidate[] = opts.recipientAgentIds
+    ? uniqueAgentDeliveryCandidates(opts.recipientAgentIds.map((id) => ({ id })))
+    : channel.type === "thread"
+      ? (await resolveThreadAgentDeliveryCandidates({
+          deps,
+          threadChannelId: channel.id,
+          messageId: firstMessage.id,
+        })).candidates
+      : await deps.getChannelAgents(firstMessage.channelId);
   const candidateAgents = agentsInChannel.filter((agent) => !(
     firstMessage.senderType === "agent" && agent.id === firstMessage.senderId
   ));
@@ -3605,6 +3804,10 @@ export async function deliverMessagesToAgents(
     );
   const payloadsByAgent = new Map<string, AgentMessage[]>();
 
+  const recipientNames = new Map(await Promise.all(candidateAgents.map(async (agent) => [
+    agent.id, await resolveRecipientDeliveryNames(channel.serverId, agent.id, channel, parentFields),
+  ] as const)));
+
   for (const [index, message] of messageBatch.entries()) {
     const piercedAgentIds = new Set(
       (opts.personalAttentionTargets ?? [])
@@ -3623,18 +3826,27 @@ export async function deliverMessagesToAgents(
     );
     for (const agent of candidateAgents) {
       if (mutedAgentDeliveryIds.has(agent.id)) continue;
+      // Deliver only what the agent's inbox counts as unread (inboxUnreadEligibility).
+      if (!isMessageUnreadEligibleForReceiver(message, { type: "agent", id: agent.id }, {
+        personallyMentioned: piercedAgentIds.has(agent.id),
+      })) continue;
       const payloads = payloadsByAgent.get(agent.id) ?? [];
       payloads.push({
         channel_id: message.channelId,
         channel_name: channel.name,
         channel_type: channel.type === "thread" ? "thread" : channel.type === "dm" ? "dm" : channel.type === "private" ? "private" : "channel",
         ...parentFields,
+        ...recipientNames.get(agent.id),
         sender_id: message.senderId,
         sender_name: message.externalAuthor?.displayName ?? senderIdentity.uniqueName,
         sender_description: senderIdentity.description,
         sender_type: toAgentVisibleSenderType(message.senderType, message.messageType),
         ...toAgentVisibleExternalMessage(message),
-        ...(message.senderType === "external_projection" && { mentioned: false }),
+        // A resolved mention fact on an external_projection message carries the
+        // same weight as a user/agent mention: it means the provider-side
+        // sender addressed this agent through an identity link, not arbitrary
+        // Slack text. Fail-open to mentioned=true only when we minted that fact.
+        ...(message.senderType === "external_projection" && { mentioned: piercedAgentIds.has(agent.id) }),
         ...(message.senderType !== "external_projection" && piercedAgentIds.has(agent.id) && { mentioned: true }),
         content: renderAgentVisibleMessageContent(message, renderedContents[index]!),
         timestamp: message.createdAt.toISOString(),
@@ -3703,20 +3915,66 @@ export async function deliverMessagesToAgents(
   }));
 }
 
+/** Storage names are not addresses. Resolve DM peers for this recipient,
+ * including the parent of a thread; never infer them from a system sender. */
+async function resolveRecipientDeliveryNames(
+  serverId: string,
+  agentId: string,
+  channel: { id: string; name: string; type: string },
+  parent: Pick<AgentMessage, "parent_channel_name" | "parent_channel_id" | "parent_channel_type"> = {},
+): Promise<Pick<AgentMessage, "channel_name" | "parent_channel_name">> {
+  const dmId = channel.type === "dm" ? channel.id
+    : parent.parent_channel_type === "dm" ? parent.parent_channel_id : undefined;
+  if (!dmId) return { channel_name: channel.name, ...parent };
+  const ref = await channelService.resolveAgentFacingChannelRef(serverId, agentId, dmId);
+  // A DM with no resolvable peer is not automatically an error. Agent-facing
+  // private surfaces such as the migration receipt DM have exactly one agent
+  // member, no dm_channel_identities row, and no human peer, so all three
+  // resolution fallbacks decline and there is genuinely no peer name to use.
+  // Falling back to the channel's own name keeps the message readable and keeps
+  // the delivery working; throwing here would break the whole catch-up page for
+  // such a channel rather than degrade its label.
+  if (!ref?.startsWith("dm:@")) return { channel_name: channel.name, ...parent };
+  const peer = ref.slice(4);
+  return channel.type === "dm"
+    ? { channel_name: peer }
+    : { channel_name: channel.name, ...parent, parent_channel_name: peer };
+}
+
 async function resolveThreadParentFields(
   threadChannelId: string,
 ): Promise<Pick<AgentMessage, "parent_channel_name" | "parent_channel_id" | "parent_channel_type">> {
   const threadChannel = await channelService.getChannel(threadChannelId);
-  if (threadChannel?.type !== "thread" || !threadChannel.parentMessageId) return {};
+  if (threadChannel?.type !== "thread") return {};
   const db = getDb();
-  const [parentMessage] = await db
-    .select({ channelId: messages.channelId })
-    .from(messages)
-    .where(eq(messages.id, threadChannel.parentMessageId))
-    .limit(1);
-  const parentChannel = parentMessage ? await channelService.getChannel(parentMessage.channelId) : null;
+  let parentChannelId: string | null = null;
+  if (threadChannel.parentMessageId) {
+    const [parentMessage] = await db
+      .select({ channelId: messages.channelId })
+      .from(messages)
+      .where(eq(messages.id, threadChannel.parentMessageId))
+      .limit(1);
+    parentChannelId = parentMessage?.channelId ?? null;
+  } else {
+    // Joint thread local faces carry no parent_message_id — the durable
+    // local↔canonical anchor is the projection row, so the parent context is
+    // that face's local parent channel (agent payload contract).
+    const jointThread = await channelService.getJointThreadProjectionByLocalThread(
+      threadChannelId,
+      threadChannel.serverId,
+      db,
+    );
+    parentChannelId = jointThread?.localParentChannelId ?? null;
+  }
+  if (!parentChannelId) return {};
+  const parentChannel = await channelService.getChannel(parentChannelId);
   if (!parentChannel) return {};
-  const parentChannelType = toAgentVisibleChannelType(parentChannel.type);
+  // channel_type flattens joint → channel (existing agent envelope contract),
+  // but parent_channel_type carries the real type so a Joint thread reply
+  // reaches the agent with parent_channel_type: "joint" (send path parity).
+  const parentChannelType = parentChannel.type === "joint"
+    ? "joint"
+    : toAgentVisibleChannelType(parentChannel.type);
   return {
     parent_channel_name: parentChannel.name,
     parent_channel_id: parentChannel.id,
@@ -3801,7 +4059,6 @@ export async function deliverMessageToAgent(
 
   const deliveryPayload: AgentMessage = {
       channel_id: message.channelId,
-      channel_name: channel.name,
       channel_type: toAgentVisibleChannelType(channel.type),
       sender_id: message.senderId,
       sender_name: senderName,
@@ -3812,9 +4069,10 @@ export async function deliverMessageToAgent(
       timestamp: message.createdAt.toISOString(),
       seq: message.seq,
       message_id: message.id,
-      mentioned: message.senderType === "external_projection" ? false : true,
-      ...(message.senderType !== "external_projection" && options.nonMemberMention === true && { non_member_mention: true }),
+      mentioned: true,
+      ...(options.nonMemberMention === true && { non_member_mention: true }),
       ...parentFields,
+      ...await resolveRecipientDeliveryNames(channel.serverId, agentId, channel, parentFields),
       ...(message.senderType !== "external_projection" && message.taskStatus != null && {
         task_status: message.taskStatus as "todo" | "in_progress" | "in_review" | "done" | "closed",
         task_number: message.taskNumber,
@@ -3869,105 +4127,105 @@ export async function deliverMessageToAgent(
 }
 
 /**
- * CS-4 (CL-CURSOR-SPLIT): rebuild an EXTERNAL agent's pending deliveries from
- * the durable per-channel ack watermark after the volatile delivery buffer is
- * lost (server restart/deploy). Without this, messages fanned out before a
- * restart become permanently invisible to `message check` — they were claimed
- * by no one, and the only delivery state was in-memory.
- *
- * Contract pins (Kai, #wg-external-agent):
- * - Per-channel watermark only. NEVER a global/merged cursor: consuming
- *   channel A at seq 500 says nothing about unseen channel B at 480.
- * - Channels without a cursor row are NOT rebuilt (v1 boundary — there is no
- *   horizon to rebuild from; fabricating one would either replay full history
- *   or skip unseen rows).
- * - The watermark is an ack/usability checkpoint, never model-seen proof.
- *   Nothing here may feed freshness gates; send still requires explicit
- *   `seenUpToSeq` (CS-2).
- * - Shape parity: rebuilt entries are constructed as buffer-native snake_case
- *   `AgentMessage` (same builder family as `deliverMessageToAgents`), so
- *   `/events` and wake-hint peeks serve them indistinguishably from live
- *   fan-out. `/history`'s camelCase enriched rows never leak into the buffer.
- *
- * Scope: external-runtime agents only. Managed runtimes deliver through the
- * machine wake path (`deliverMessage` plans daemon wakes), where re-driving
- * durable rows would double-wake old daemons; their restart recovery is the
- * daemon's own concern. For external agents `deliverMessage` only appends to
- * the local inbox and emits the content-free SSE wake signal — exactly the
- * two effects a rebuild should have.
- *
- * Known v1 boundaries (documented, deliberate):
- * - joint channels are skipped (canonical-storage vs local-projection mapping
- *   needs its own slice);
- * - DM-parent thread names fall back to the stored channel name instead of
- *   the per-agent peer name;
- * - transient notices have no durable row and are not recoverable by design;
- * - rows the agent acknowledged via `/history` reads or its own sends are
- *   below the watermark and intentionally not replayed.
+ * Post-commit agent delivery for a committed external inbound message (the
+ * Slack-bridge onInboundMessageCommitted hook). External commits persist on
+ * the canonical channel/thread, so the audience is the durable inbox-fact
+ * receiver set grouped by face (sourceChannelId = the local face id), with a
+ * per-face channel projection so each face's agents receive their own local
+ * channel identity. Minted mention targets outside the fact audience get the
+ * same non-member wake the send path produces — exactly once per agent.
  */
-const CURSOR_REBUILD_MAX_ROWS_PER_CHANNEL = 100;
-const cursorRebuildInFlight = new Map<string, Promise<number>>();
+/**
+ * Run the post-commit side effects of a committed external inbound message
+ * (frontend emit + agent delivery) so that one leg's failure cannot suppress
+ * the other: the worker treats a thrown callback as a degraded-commit log
+ * point and never replays it, so an early throw would permanently skip every
+ * effect behind it. Both effects always run; failures are re-raised (as an
+ * AggregateError when both fail) so the worker still records the degraded
+ * commit.
+ */
+export async function runExternalInboundCommitSideEffects(
+  emitFrontend: () => Promise<void>,
+  deliverToAgents: () => Promise<void>,
+): Promise<void> {
+  const [emitResult, deliveryResult] = await Promise.allSettled([
+    emitFrontend(),
+    deliverToAgents(),
+  ]);
+  const errors = [emitResult, deliveryResult]
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason);
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "External inbound post-commit side effects failed");
+}
 
-const RESUME_CATCHUP_MAX_CHANNELS = 8;
+export async function deliverExternalInboundCommittedMessageToAgents(
+  agentOrchestrator: AgentOrchestrator,
+  messageId: string,
+): Promise<void> {
+  const db = getDb();
+  const [message] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
+  if (!message) return;
+  const [channel] = await db.select().from(channels).where(eq(channels.id, message.channelId)).limit(1);
+  if (!channel) return;
+
+  const mentionRows = await db
+    .select({
+      targetType: messageMentions.targetType,
+      targetId: messageMentions.targetId,
+      handleAtSendTime: messageMentions.handleAtSendTime,
+    })
+    .from(messageMentions)
+    .where(and(
+      eq(messageMentions.messageId, messageId),
+      eq(messageMentions.notifiableAtSend, true),
+    ));
+  const personalAttentionTargets: ResolvedMentionFact[] = mentionRows.map((row) => ({
+    type: row.targetType,
+    id: row.targetId,
+    name: row.handleAtSendTime,
+  }));
+
+  const agentFactRows = await db
+    .select({
+      receiverId: inboxNotificationFacts.receiverId,
+      sourceChannelId: inboxNotificationFacts.sourceChannelId,
+    })
+    .from(inboxNotificationFacts)
+    .where(and(
+      eq(inboxNotificationFacts.messageId, messageId),
+      eq(inboxNotificationFacts.receiverType, "agent"),
+    ));
+  const faceAgentIds = new Map<string, string[]>();
+  for (const row of agentFactRows) {
+    const ids = faceAgentIds.get(row.sourceChannelId) ?? [];
+    ids.push(row.receiverId);
+    faceAgentIds.set(row.sourceChannelId, ids);
+  }
+  const deliveredAgentIds = new Set<string>();
+  for (const [faceChannelId, agentIds] of faceAgentIds) {
+    await deliverMessagesToAgents(
+      agentOrchestrator,
+      [{ ...message, channelId: faceChannelId }],
+      "external user",
+      { personalAttentionTargets, recipientAgentIds: agentIds },
+    );
+    for (const id of agentIds) deliveredAgentIds.add(id);
+  }
+  for (const target of personalAttentionTargets) {
+    if (target.type !== "agent" || deliveredAgentIds.has(target.id)) continue;
+    if (!await channelService.canAgentAccessChannel(channel.id, target.id)) continue;
+    await deliverMessageToAgent(agentOrchestrator, messageId, target.id, {
+      nonMemberMention: true,
+      reconcileNonMemberMention: true,
+    });
+  }
+}
+
+export const RESUME_CATCHUP_MAX_CHANNELS = 8;
+const RESUME_CATCHUP_MAX_CANDIDATES = RESUME_CATCHUP_MAX_CHANNELS * 4;
 const RESUME_CATCHUP_MAX_ROWS_PER_CHANNEL = 5;
 const RESUME_CATCHUP_MAX_ROWS_TOTAL = 20;
-
-/**
- * "This message is a task assigned to me" — the resume-catchup piercing rule,
- * expressed across both task representations.
- *
- * v1.4 moved task assignment off `messages.task_*` onto the canonical `tasks`
- * row. This predicate is a *filter*, not a payload, so the read-side projection
- * cannot cover it: without the EXISTS arm, a task assigned to an agent would
- * silently stop pushing past that agent's channel mute on resume.
- */
-function taskAssignedToAgentSql(agentId: string) {
-  return sql`(
-    (${messages.taskAssigneeType} = 'agent' AND ${messages.taskAssigneeId} = ${agentId})
-    OR EXISTS (
-      SELECT 1
-      FROM ${tasks}
-      WHERE ${tasks.messageId} = ${messages.id}
-        AND ${tasks.claimedByType} = 'agent'
-        AND ${tasks.claimedById} = ${agentId}
-    )
-  )`;
-}
-
-function resumeCatchupPiercingSeqSql(agentId: string) {
-  return sql<number | null>`max(CASE WHEN (
-    ${channels.type} = 'dm'
-    OR ${taskAssignedToAgentSql(agentId)}
-    OR COALESCE(${inboxNotificationFacts.personalMention}, false)
-  ) THEN ${messages.seq} ELSE NULL END)::int`;
-}
-
-function resumeCatchupChannelOrderSql(agentId: string) {
-  const piercingSeq = resumeCatchupPiercingSeqSql(agentId);
-  return [
-    sql`CASE WHEN ${piercingSeq} IS NULL THEN 1 ELSE 0 END asc`,
-    sql`${piercingSeq} desc`,
-    sql`max(${messages.seq}) desc`,
-  ];
-}
-
-function resumeCatchupRowOrderSql(agentId: string, channelType: typeof channels.$inferSelect["type"]) {
-  return [
-    sql`CASE WHEN (
-      ${channelType} = 'dm'
-      OR ${taskAssignedToAgentSql(agentId)}
-      OR EXISTS (
-        SELECT 1
-        FROM ${inboxNotificationFacts}
-        WHERE ${inboxNotificationFacts.receiverType} = 'agent'
-          AND ${inboxNotificationFacts.receiverId} = ${agentId}
-          AND ${inboxNotificationFacts.messageId} = ${messages.id}
-          AND ${inboxNotificationFacts.personalMention} = true
-      )
-    ) THEN 0 ELSE 1 END asc`,
-    desc(messages.seq),
-  ];
-}
 
 type ResumeCatchupCandidate = {
   channelId: string;
@@ -3990,8 +4248,20 @@ function compareResumeCatchupCandidates(a: ResumeCatchupCandidate, b: ResumeCatc
   return b.firstUnreadSeq - a.firstUnreadSeq;
 }
 
+/** Where a catch-up message came from: what delivery needs beyond the AgentMessage. */
+export interface AgentResumeCatchupSource {
+  serverId: string;
+  senderType: StoredMessageSenderType;
+  senderId: string;
+  system: boolean;
+}
+
 export interface AgentResumeCatchupResult {
   messages: AgentMessage[];
+  /** Parallel to `messages`. Managed resume sends only `messages`; the external inbox pull derives delivery options from these. */
+  sources: AgentResumeCatchupSource[];
+  /** Every conversation whose rows were read, and whether unread rows remain beyond the ones returned. */
+  conversations: Array<{ channelId: string; truncated: boolean }>;
   candidateChannelCount: number;
   maxSeq: number | null;
 }
@@ -4007,197 +4277,267 @@ export interface AgentResumeCatchupResult {
  */
 export async function getAgentResumeCatchupMessages(
   agentId: string,
-  historyCutoff?: Date,
+  historyCutoff: Date | undefined,
+  opts: { chain: channelService.AgentInboxChainRow[] },
 ): Promise<AgentResumeCatchupResult> {
   const deps = resolveMessageServiceDeps();
   const db = getDb();
-  const baseConditions = [
-    isNull(channels.deletedAt),
-    gt(messages.seq, sql`COALESCE(${agentChannelReadCursors.lastReadSeq}, 0)`),
-    sql`NOT (${messages.senderType} = 'agent' AND ${messages.senderId} = ${agentId})`,
-  ];
-  if (historyCutoff) {
-    baseConditions.push(gt(messages.createdAt, historyCutoff));
-  }
 
-  const nonThreadCandidates = await db
-    .select({
-      channelId: channels.id,
-      channelName: channels.name,
-      channelType: channels.type,
-      serverId: channels.serverId,
-      parentMessageId: channels.parentMessageId,
-      addedAt: channelAgents.addedAt,
-      lastReadSeq: sql<number>`COALESCE(${agentChannelReadCursors.lastReadSeq}, 0)::int`,
-      firstUnreadSeq: sql<number>`min(${messages.seq})::int`,
-      latestUnreadSeq: sql<number>`max(${messages.seq})::int`,
-      latestPiercingSeq: resumeCatchupPiercingSeqSql(agentId),
-    })
-    .from(channels)
-    .innerJoin(channelAgents, eq(channelAgents.channelId, channels.id))
-    .innerJoin(messages, eq(messages.channelId, channels.id))
-    .leftJoin(inboxNotificationFacts, and(
-      eq(inboxNotificationFacts.receiverType, "agent"),
-      eq(inboxNotificationFacts.receiverId, agentId),
-      eq(inboxNotificationFacts.sourceChannelId, channels.id),
-      eq(inboxNotificationFacts.messageId, messages.id),
-    ))
-    .leftJoin(
-      agentChannelReadCursors,
-      and(
-        eq(agentChannelReadCursors.channelId, channels.id),
-        eq(agentChannelReadCursors.agentId, agentId),
-      ),
-    )
-    .where(and(
-      ...baseConditions,
-      sql`${channels.type} <> 'thread'`,
-      eq(channelAgents.agentId, agentId),
-      gte(messages.createdAt, channelAgents.addedAt),
-    ))
-    .groupBy(
-      channels.id,
-      channels.name,
-      channels.type,
-      channels.serverId,
-      channels.parentMessageId,
-      channelAgents.addedAt,
-      agentChannelReadCursors.lastReadSeq,
-    )
-    .orderBy(...resumeCatchupChannelOrderSql(agentId))
-    .limit(RESUME_CATCHUP_MAX_CHANNELS);
-
-  const resumeParentMessages = alias(messages, "agent_resume_thread_parent_messages");
-  const resumeParentChannels = alias(channels, "agent_resume_thread_parent_channels");
-  const resumeParentChannelAgents = alias(channelAgents, "agent_resume_thread_parent_channel_agents");
-  const threadCandidates = await db
-    .select({
-      channelId: channels.id,
-      channelName: channels.name,
-      channelType: channels.type,
-      serverId: channels.serverId,
-      parentMessageId: channels.parentMessageId,
-      addedAt: threadFollows.createdAt,
-      lastReadSeq: sql<number>`COALESCE(${agentChannelReadCursors.lastReadSeq}, 0)::int`,
-      firstUnreadSeq: sql<number>`min(${messages.seq})::int`,
-      latestUnreadSeq: sql<number>`max(${messages.seq})::int`,
-      latestPiercingSeq: resumeCatchupPiercingSeqSql(agentId),
-    })
-    .from(channels)
-    .innerJoin(threadFollows, and(
-      eq(threadFollows.threadChannelId, channels.id),
-      eq(threadFollows.followerType, "agent"),
-      eq(threadFollows.followerId, agentId),
-      isNull(threadFollows.unfollowedAt),
-    ))
-    .innerJoin(agents, and(
-      eq(agents.id, threadFollows.followerId),
-      isNull(agents.deletedAt),
-    ))
-    .innerJoin(resumeParentMessages, eq(resumeParentMessages.id, channels.parentMessageId))
-    .innerJoin(resumeParentChannels, and(
-      eq(resumeParentChannels.id, resumeParentMessages.channelId),
-      isNull(resumeParentChannels.deletedAt),
-    ))
-    .leftJoin(resumeParentChannelAgents, and(
-      eq(resumeParentChannelAgents.channelId, resumeParentMessages.channelId),
-      eq(resumeParentChannelAgents.agentId, agents.id),
-    ))
-    .innerJoin(messages, eq(messages.channelId, channels.id))
-    .leftJoin(inboxNotificationFacts, and(
-      eq(inboxNotificationFacts.receiverType, "agent"),
-      eq(inboxNotificationFacts.receiverId, agentId),
-      eq(inboxNotificationFacts.sourceChannelId, channels.id),
-      eq(inboxNotificationFacts.messageId, messages.id),
-    ))
-    .leftJoin(
-      agentChannelReadCursors,
-      and(
-        eq(agentChannelReadCursors.channelId, channels.id),
-        eq(agentChannelReadCursors.agentId, agentId),
-      ),
-    )
-    .where(and(
-      ...baseConditions,
-      eq(channels.type, "thread"),
-      gte(messages.createdAt, threadFollows.createdAt),
-      sql`(
-        (${resumeParentChannels.type} = 'channel' AND ${agents.serverId} = ${resumeParentChannels.serverId})
-        OR ${resumeParentChannelAgents.agentId} IS NOT NULL
-      )`,
-    ))
-    .groupBy(
-      channels.id,
-      channels.name,
-      channels.type,
-      channels.serverId,
-      channels.parentMessageId,
-      threadFollows.createdAt,
-      agentChannelReadCursors.lastReadSeq,
-    )
-    .orderBy(...resumeCatchupChannelOrderSql(agentId))
-    .limit(RESUME_CATCHUP_MAX_CHANNELS * 4);
-
-  const deliverableThreadCandidates: ResumeCatchupCandidate[] = [];
-  for (const candidate of threadCandidates) {
-    if (await channelService.canAgentReceiveChannelDelivery(candidate.channelId, agentId)) {
-      deliverableThreadCandidates.push(candidate);
-    }
-  }
-
-  const candidates = [...nonThreadCandidates, ...deliverableThreadCandidates]
+  // Walk in priority order. The chain holds only offered rows, deliverable
+  // threads included, so every row is a candidate. The page is wider than the
+  // channel cap because a candidate can yield no rows once the per-row filters
+  // apply (its unread predates the agent's join, or is its own), and such a
+  // channel must not take the slot of one that has something to deliver.
+  const candidates = resumeCatchupCandidatesFromChain(opts.chain)
     .sort(compareResumeCatchupCandidates)
-    .slice(0, RESUME_CATCHUP_MAX_CHANNELS);
+    .slice(0, RESUME_CATCHUP_MAX_CANDIDATES);
 
+  return buildResumeCatchupBatch(deps, db, agentId, historyCutoff, candidates);
+}
+
+/**
+ * Candidate channels from the unified chain. The chain already applies the
+ * offer rules (joined, offered unread, thread deliverability), the
+ * self / causal-actor / noise-subtype exclusions and resolves joint storage, so
+ * this only maps rows. Rows are still fetched from Postgres by
+ * buildResumeCatchupBatch with the per-row self and mute filters, from the
+ * candidate's storage channel (resolveResumeCatchupTarget).
+ */
+function resumeCatchupCandidatesFromChain(chain: channelService.AgentInboxChainRow[]): ResumeCatchupCandidate[] {
+  const candidates: ResumeCatchupCandidate[] = [];
+  for (const row of chain) {
+    const latestPiercingSeq = row.kind === "dm"
+      ? row.latestSeq
+      : row.mentionUnread > 0 ? row.maxMentionSeq : null;
+    const candidate: ResumeCatchupCandidate = {
+      channelId: row.targetId,
+      channelName: row.channelName,
+      channelType: row.channelType,
+      serverId: row.serverId,
+      parentMessageId: row.parentMessageId,
+      addedAt: row.joinedAt,
+      lastReadSeq: row.lastReadSeq,
+      firstUnreadSeq: row.firstUnreadSeq ?? row.lastReadSeq + 1,
+      latestUnreadSeq: row.latestSeq ?? row.maxMentionSeq ?? row.lastReadSeq + 1,
+      latestPiercingSeq,
+    };
+    candidates.push(candidate);
+  }
+  return candidates;
+}
+
+type ResumeCatchupParentFields = Pick<AgentMessage, "parent_channel_name" | "parent_channel_id" | "parent_channel_type">;
+
+/**
+ * Where a candidate's messages are stored, and the parent labels the agent sees.
+ * The candidate is always the agent-facing conversation: the read cursor, the
+ * membership or follow, and mute are all keyed by it, for humans and agents alike.
+ * A joint (cross-server) channel or thread stores its messages once, under the
+ * canonical channel, and each server sees them through its local projection; so
+ * rows are read from storage and labelled with the local projection, exactly as
+ * live delivery labels them (broadcastAndDeliver / handleJointThreadPostBroadcastSideEffects).
+ * A joint thread's local projection has no parent_message_id, so its parent is
+ * the projection's local parent channel, not a lookup of the parent message.
+ */
+async function resolveResumeCatchupTarget(
+  deps: MessageServiceDeps,
+  db: ReturnType<typeof getDb>,
+  candidate: Pick<ResumeCatchupCandidate, "channelId" | "channelType" | "serverId" | "parentMessageId">,
+): Promise<{ storageChannelId: string; parentFields: ResumeCatchupParentFields }> {
+  if (candidate.channelType === "joint") {
+    return { storageChannelId: await channelService.getMessageStorageChannelIdWithExecutor(db, candidate.channelId), parentFields: {} };
+  }
+  if (candidate.channelType !== "thread") return { storageChannelId: candidate.channelId, parentFields: {} };
+
+  let parentChannel: Awaited<ReturnType<MessageServiceDeps["getChannel"]>> | null = null;
+  let storageChannelId = candidate.channelId;
+  const jointThread = await channelService.getJointThreadProjectionByLocalThread(candidate.channelId, candidate.serverId, db);
+  if (jointThread) {
+    storageChannelId = jointThread.canonicalThreadChannelId;
+    parentChannel = await deps.getChannel(jointThread.localParentChannelId);
+  } else if (candidate.parentMessageId) {
+    const [parentMessage] = await db
+      .select({ channelId: messages.channelId })
+      .from(messages)
+      .where(eq(messages.id, candidate.parentMessageId))
+      .limit(1);
+    parentChannel = parentMessage ? await deps.getChannel(parentMessage.channelId) : null;
+  }
+  if (!parentChannel || parentChannel.type === "thread") return { storageChannelId, parentFields: {} };
+  const parentChannelType = toAgentVisibleChannelType(parentChannel.type);
+  return {
+    storageChannelId,
+    parentFields: {
+      parent_channel_name: parentChannel.name,
+      parent_channel_id: parentChannel.id,
+      parent_channel_type: parentChannelType === "thread" ? "channel" : parentChannelType,
+    },
+  };
+}
+
+export type AgentConversationIdentity = Pick<
+  AgentMessage,
+  "channel_id" | "channel_type" | "channel_name" | "parent_channel_name" | "parent_channel_id" | "parent_channel_type"
+>;
+
+/**
+ * The conversation identity (`channel_type`, `channel_name`, and for threads
+ * the `parent_channel_*` fields) that this agent sees for one agent-facing
+ * conversation, labelled exactly as resume catch-up labels its rows: DM peers
+ * resolved for this agent, joint channels and joint threads by the local
+ * projection the agent's server sees. Resolve once per conversation and spread
+ * it onto envelopes built from bare message rows (for example the held send
+ * context), which otherwise carry no reply target and are dropped by clients.
+ */
+export async function resolveAgentConversationIdentity(
+  serverId: string,
+  agentId: string,
+  channelId: string,
+): Promise<AgentConversationIdentity | null> {
+  const deps = resolveMessageServiceDeps();
+  const channel = await deps.getChannel(channelId);
+  if (!channel) return null;
+  const { parentFields } = await resolveResumeCatchupTarget(deps, getDb(), {
+    channelId: channel.id,
+    channelType: channel.type,
+    serverId,
+    parentMessageId: channel.parentMessageId ?? null,
+  });
+  const names = await resolveRecipientDeliveryNames(serverId, agentId, channel, parentFields);
+  return {
+    channel_id: channel.id,
+    channel_type: toAgentVisibleChannelType(channel.type),
+    ...parentFields,
+    ...names,
+  };
+}
+
+/**
+ * For an activity-muted conversation, the SQL form of the per-row mute filter in
+ * buildResumeCatchupBatch (getMutedAgentDeliveryIdsForPersistedMessage): a row is
+ * deliverable when it predates the mute (seq < mute_from_seq), was promoted for the
+ * agent (an inbox notification fact), personally @mentions the agent (a notifiable
+ * mention), or assigns the agent a task. Applying it in the fetch makes the
+ * per-conversation LIMIT count only deliverable rows; otherwise a muted
+ * conversation with more than LIMIT muted rows ahead of a piercing mention would
+ * never reach the mention, and since dropped rows are never acked, never advance.
+ * Returns null when the conversation is not muted for the agent. Threads are never
+ * muted: a followed thread is independent of its parent channel's mute. The mute
+ * state is keyed by the agent-facing conversation (a joint channel's local
+ * projection), exactly as the per-row filter keys it.
+ */
+async function resumeCatchupMuteRowCondition(
+  db: ReturnType<typeof getDb>,
+  agentId: string,
+  candidate: Pick<ResumeCatchupCandidate, "channelId" | "channelType" | "serverId">,
+): Promise<SQL | null> {
+  if (candidate.channelType === "thread") return null;
+  const [mute] = await db
+    .select({ muteFromSeq: inboxTargetMuteStates.muteFromSeq })
+    .from(inboxTargetMuteStates)
+    .where(and(
+      eq(inboxTargetMuteStates.receiverType, "agent"),
+      eq(inboxTargetMuteStates.receiverId, agentId),
+      eq(inboxTargetMuteStates.serverId, candidate.serverId),
+      eq(inboxTargetMuteStates.sourceChannelId, candidate.channelId),
+      eq(inboxTargetMuteStates.activityMuted, true),
+      isNotNull(inboxTargetMuteStates.muteFromSeq),
+    ))
+    .limit(1);
+  if (!mute || mute.muteFromSeq == null) return null;
+  return sql`(
+    ${messages.seq} < ${mute.muteFromSeq}
+    OR (${messages.senderType} <> 'external_projection'
+        AND ${messages.taskAssigneeType} = 'agent' AND ${messages.taskAssigneeId} = ${agentId})
+    OR EXISTS (
+      SELECT 1 FROM ${messageMentions}
+      WHERE ${messageMentions.messageId} = ${messages.id}
+        AND ${messageMentions.targetType} = 'agent' AND ${messageMentions.targetId} = ${agentId}
+        AND (${messageMentions.notifiableAtSend} OR ${messageMentions.notifiedAt} IS NOT NULL)
+    )
+    OR EXISTS (
+      SELECT 1 FROM ${inboxNotificationFacts}
+      WHERE ${inboxNotificationFacts.messageId} = ${messages.id}
+        AND ${inboxNotificationFacts.receiverType} = 'agent' AND ${inboxNotificationFacts.receiverId} = ${agentId}
+    )
+  )`;
+}
+
+async function buildResumeCatchupBatch(
+  deps: MessageServiceDeps,
+  db: ReturnType<typeof getDb>,
+  agentId: string,
+  historyCutoff: Date | undefined,
+  candidates: ResumeCatchupCandidate[],
+): Promise<AgentResumeCatchupResult> {
   const output: AgentMessage[] = [];
+  const sources: AgentResumeCatchupSource[] = [];
+  const conversations: AgentResumeCatchupResult["conversations"] = [];
   let maxSeq: number | null = null;
+  let contributingChannels = 0;
   for (const candidate of candidates) {
     if (output.length >= RESUME_CATCHUP_MAX_ROWS_TOTAL) break;
+    if (contributingChannels >= RESUME_CATCHUP_MAX_CHANNELS) break;
+    const outputBefore = output.length;
 
-    let parentFields: Pick<AgentMessage, "parent_channel_name" | "parent_channel_id" | "parent_channel_type"> = {};
-    if (candidate.channelType === "thread" && candidate.parentMessageId) {
-      const [parentMessage] = await db
-        .select({ channelId: messages.channelId })
-        .from(messages)
-        .where(eq(messages.id, candidate.parentMessageId))
-        .limit(1);
-      const parentChannel = parentMessage ? await deps.getChannel(parentMessage.channelId) : null;
-      if (parentChannel && parentChannel.type !== "thread") {
-        const parentChannelType = toAgentVisibleChannelType(parentChannel.type);
-        parentFields = {
-          parent_channel_name: parentChannel.name,
-          parent_channel_id: parentChannel.id,
-          parent_channel_type: parentChannelType === "thread" ? "channel" : parentChannelType,
-        };
-      }
-    }
+    const { storageChannelId, parentFields } = await resolveResumeCatchupTarget(deps, db, candidate);
+
+    const recipientNames = await resolveRecipientDeliveryNames(candidate.serverId, agentId,
+      { id: candidate.channelId, name: candidate.channelName, type: candidate.channelType }, parentFields);
 
     const rowConditions = [
-      eq(messages.channelId, candidate.channelId),
-      gte(messages.createdAt, candidate.addedAt),
+      eq(messages.channelId, storageChannelId),
       gt(messages.seq, candidate.lastReadSeq),
-      sql`NOT (${messages.senderType} = 'agent' AND ${messages.senderId} = ${agentId})`,
+      // The chain's unread rule, so a pull returns exactly what the chain counts.
+      messageUnreadEligibleForReceiverSql({ type: "agent", id: agentId }),
     ];
     if (historyCutoff) {
       rowConditions.push(gt(messages.createdAt, historyCutoff));
     }
+    const deliverableUnderMute = await resumeCatchupMuteRowCondition(db, agentId, candidate);
+    if (deliverableUnderMute) rowConditions.push(deliverableUnderMute);
+    // Contiguous, oldest first from the read position: an ack advances the
+    // read position to the highest seq acked in the conversation, so returning
+    // anything but the oldest unread rows would mark the older ones read unseen.
+    const rowLimit = Math.min(RESUME_CATCHUP_MAX_ROWS_PER_CHANNEL, RESUME_CATCHUP_MAX_ROWS_TOTAL - output.length);
     const eligibleRows = await db
       .select()
       .from(messages)
       .where(and(...rowConditions))
-      .orderBy(...resumeCatchupRowOrderSql(agentId, candidate.channelType))
-      .limit(Math.min(RESUME_CATCHUP_MAX_ROWS_PER_CHANNEL, RESUME_CATCHUP_MAX_ROWS_TOTAL - output.length));
-    const rows = await enrichWithSenderNames(eligibleRows);
+      .orderBy(asc(messages.seq))
+      .limit(rowLimit + 1);
+    const conversation = { channelId: candidate.channelId, truncated: eligibleRows.length > rowLimit };
+    conversations.push(conversation);
+    const rows = await enrichWithSenderNames(eligibleRows.slice(0, rowLimit));
+    // The same `mentioned` flag live delivery sets: the agent was @-mentioned in
+    // the message (a notifiable mention row), so a recovered message reads the
+    // same as the live one would have.
+    const mentionedMessageIds = rows.length === 0 ? new Set<string>() : new Set((await db
+      .select({ messageId: messageMentions.messageId })
+      .from(messageMentions)
+      .where(and(
+        inArray(messageMentions.messageId, rows.map((row) => row.id)),
+        eq(messageMentions.targetType, "agent"),
+        eq(messageMentions.targetId, agentId),
+        or(eq(messageMentions.notifiableAtSend, true), isNotNull(messageMentions.notifiedAt)),
+      ))).map((mention) => mention.messageId));
 
     for (const row of rows) {
-      if (output.length >= RESUME_CATCHUP_MAX_ROWS_TOTAL) break;
+      if (output.length >= RESUME_CATCHUP_MAX_ROWS_TOTAL) {
+        conversation.truncated = true;
+        break;
+      }
       if (typeof row.seq !== "number" || row.seq <= candidate.lastReadSeq) continue;
-      if (row.createdAt < candidate.addedAt) continue;
-      if (row.senderType === "agent" && row.senderId === agentId) continue;
+      if (!isMessageUnreadEligibleForReceiver(row, { type: "agent", id: agentId }, {
+        personallyMentioned: mentionedMessageIds.has(row.id),
+      })) continue;
       const piercedAgentIds = new Set<string>();
       if (row.senderType !== "external_projection" && row.taskAssigneeType === "agent" && row.taskAssigneeId === agentId) {
         piercedAgentIds.add(agentId);
       }
+      // A personal @mention pierces a mute, as it does for live delivery (its
+      // personal attention targets) and for the inbox view the candidate came from.
+      if (mentionedMessageIds.has(row.id)) piercedAgentIds.add(agentId);
       const mutedAgentDeliveryIds = await getMutedAgentDeliveryIdsForPersistedMessage(
         deps,
         {
@@ -4223,21 +4563,21 @@ export async function getAgentResumeCatchupMessages(
       const renderedContent = await deps.renderAgentReadablePermalinks(row.content, candidate.serverId);
       output.push({
         channel_id: candidate.channelId,
-        channel_name: candidate.channelType === "dm" && row.senderType === "user" && !isSystemMessageIdentity(row.messageType, row.senderId)
-          ? identity.uniqueName
-          : candidate.channelName,
         channel_type: toAgentVisibleChannelType(candidate.channelType),
         sender_id: row.senderId,
         sender_name: identity.uniqueName,
         sender_description: identity.description,
         sender_type: toAgentVisibleSenderType(row.senderType, row.messageType),
         ...toAgentVisibleExternalMessage(row),
-        ...(row.senderType === "external_projection" && { mentioned: false }),
+        ...(row.senderType === "external_projection"
+          ? { mentioned: false }
+          : (mentionedMessageIds.has(row.id) || piercedAgentIds.has(agentId)) && { mentioned: true }),
         content: renderAgentVisibleMessageContent(row, renderedContent),
         timestamp: row.createdAt.toISOString(),
         seq: row.seq,
         message_id: row.id,
         ...parentFields,
+        ...recipientNames,
         ...(row.attachments.length > 0 && {
           attachments: row.attachments.map((a) => ({
             id: a.id,
@@ -4254,365 +4594,328 @@ export async function getAgentResumeCatchupMessages(
           task_assignee_name: getAgentVisibleTaskAssigneeName(row),
         }),
       });
+      sources.push({
+        serverId: candidate.serverId,
+        senderType: row.senderType as StoredMessageSenderType,
+        senderId: row.senderId,
+        system: isSystemMessageIdentity(row.messageType, row.senderId),
+      });
       maxSeq = maxSeq == null ? row.seq : Math.max(maxSeq, row.seq);
     }
+    if (output.length > outputBefore) contributingChannels += 1;
   }
 
   return {
     messages: output,
-    candidateChannelCount: candidates.length,
+    sources,
+    conversations,
+    candidateChannelCount: contributingChannels,
     maxSeq,
   };
 }
 
-export type ExternalAgentCursorRebuildRoute =
+export type ExternalAgentInboxPullRoute =
   | "events"
   | "wake_hints"
   | "wake_hints_stream_open"
-  | "wake_hints_stream_flush";
+  | "wake_hints_stream_flush"
+  | "push";
 
-export async function rebuildExternalAgentPendingFromAckCursors(
-  agentOrchestrator: AgentOrchestrator,
-  agentId: string,
-  route: ExternalAgentCursorRebuildRoute = "events",
-): Promise<number> {
-  // Serialize per agent: concurrent /events + /wake-hints calls would both
-  // pass the pending-seq dedupe check and double-deliver.
-  const inFlight = cursorRebuildInFlight.get(agentId);
-  if (inFlight) return inFlight;
-  const run = rebuildExternalAgentPendingInner(agentOrchestrator, agentId, route)
-    .finally(() => cursorRebuildInFlight.delete(agentId));
-  cursorRebuildInFlight.set(agentId, run);
-  return run;
+/**
+ * Who shares a pull's rate limit: `/events` (an explicit drain, never
+ * throttled), the wake-hints poll, and the wake-hints streams. The inbox push
+ * does not use a slot (see pullExternalAgentInboxUnshared).
+ */
+export type ExternalAgentInboxPullSlot = "events" | "wake_hints" | "stream";
+
+export type ExternalAgentInboxPull =
+  | {
+    status: "pulled";
+    /** Persisted messages to hand the agent, seq ascending (oldest first within each conversation). */
+    messages: AgentMessage[];
+    /** Rows read but not deliverable (passive scope revoked, target no longer accessible). */
+    droppedSeqs: number[];
+    /** Conversations that still have unread after these messages are acked. */
+    remainingConversations: number;
+    /**
+     * The pull left unread behind: a conversation was cut at the per-conversation
+     * row cap, or the total-row / conversation / candidate cap stopped the walk.
+     * A caller paging with `has_more` must page again.
+     */
+    truncated: boolean;
+  }
+  | { status: "unavailable" };
+
+/** Minimum time between two chain reads for the same agent and slot (except forced ones). */
+export const EXTERNAL_AGENT_INBOX_PULL_MIN_INTERVAL_MS = 2_000;
+let externalInboxPullMinIntervalMsForTests: number | null = null;
+
+/** Test seam: override the pull rate limit (null restores the default). */
+export function __setExternalAgentInboxPullMinIntervalMsForTests(ms: number | null): void {
+  externalInboxPullMinIntervalMsForTests = ms;
 }
 
-async function rebuildExternalAgentPendingInner(
-  agentOrchestrator: AgentOrchestrator,
-  agentId: string,
-  route: ExternalAgentCursorRebuildRoute,
-): Promise<number> {
-  const deps = resolveMessageServiceDeps();
-  const db = getDb();
-  const startedAt = Date.now();
+/**
+ * RisingWave derives the agent inbox chain from Postgres and trails it by about
+ * a second. A wake signal fires right after the send, so the pull it forces
+ * usually runs before the new message is in the chain and finds nothing. Wake
+ * streams therefore pull again at these delays after a signal, instead of
+ * leaving the message to the next heartbeat (25s by default).
+ */
+export const EXTERNAL_WAKE_FOLLOW_UP_PULL_DELAYS_MS: readonly number[] = [1_500, 5_000];
+let externalWakeFollowUpPullDelaysMsForTests: readonly number[] | null = null;
 
-  // Candidate channels: cursor rows with durable messages above the watermark.
-  // One query; in the steady state (everything acked) this returns no rows.
-  const cursorChannels = alias(channels, "cursor_rebuild_channels");
-  const cursorCandidates = await db
-    .select({
-      channelId: agentChannelReadCursors.channelId,
-      lastReadSeq: agentChannelReadCursors.lastReadSeq,
-    })
-    .from(agentChannelReadCursors)
-    .innerJoin(cursorChannels, and(
-      eq(cursorChannels.id, agentChannelReadCursors.channelId),
-      isNull(cursorChannels.deletedAt),
-    ))
-    .where(and(
-      eq(agentChannelReadCursors.agentId, agentId),
-      sql`EXISTS (
-        SELECT 1 FROM ${messages}
-        WHERE ${messages.channelId} = ${agentChannelReadCursors.channelId}
-          AND ${messages.seq} > ${agentChannelReadCursors.lastReadSeq}
-      )`,
-    ));
-
-  // Cold-start fallback: channels the agent is a member of but has never
-  // read/acked (no cursor row). Without this, external agents that have
-  // never run `message check` or `message read` on a channel cannot be
-  // woken via the durable rebuild path — the volatile inbox is the only
-  // delivery vector, and it is lost on server restart or cross-replica.
-  // The baseline seq is the last message sent at or before the agent's
-  // channel join time — pre-join history is treated as already consumed.
-  const coldStartChannels = alias(channels, "cold_start_channels");
-  const coldStartCandidates = await db
-    .select({
-      channelId: channelAgents.channelId,
-      lastReadSeq: sql<number>`COALESCE(
-        (SELECT MAX(${messages.seq}) FROM ${messages}
-         WHERE ${messages.channelId} = ${channelAgents.channelId}
-           AND ${messages.createdAt} <= ${channelAgents.addedAt}),
-        0
-      )`.as("last_read_seq"),
-    })
-    .from(channelAgents)
-    .innerJoin(coldStartChannels, and(
-      eq(coldStartChannels.id, channelAgents.channelId),
-      isNull(coldStartChannels.deletedAt),
-    ))
-    .where(and(
-      eq(channelAgents.agentId, agentId),
-      sql`NOT EXISTS (
-        SELECT 1 FROM ${agentChannelReadCursors}
-        WHERE ${agentChannelReadCursors.agentId} = ${agentId}
-          AND ${agentChannelReadCursors.channelId} = ${channelAgents.channelId}
-      )`,
-      sql`EXISTS (
-        SELECT 1 FROM ${messages}
-        WHERE ${messages.channelId} = ${channelAgents.channelId}
-          AND ${messages.createdAt} > ${channelAgents.addedAt}
-      )`,
-    ));
-
-  const candidates = [...cursorCandidates, ...coldStartCandidates];
-  if (candidates.length === 0) {
-    emitExternalAgentCursorRebuildTrace({
-      route,
-      durationMs: Date.now() - startedAt,
-      cursorCandidateCount: 0,
-      coldStartCandidateCount: 0,
-      pendingBeforeCount: 0,
-      inspectedMessageCount: 0,
-      rebuiltMessageCount: 0,
-      dedupedPendingCount: 0,
-      skippedJointCount: 0,
-      skippedNoMembershipCount: 0,
-      skippedOwnSendCount: 0,
-      skippedMutedCount: 0,
-      deliveryFailureCount: 0,
-    });
-    return 0;
-  }
-
-  const pendingSeqs = new Set(
-    agentOrchestrator.peekPendingMessages(agentId)
-      .map((m) => m.seq)
-      .filter((seq): seq is number => Number.isInteger(seq)),
-  );
-  let inspectedMessages = 0;
-  let dedupedPending = 0;
-  let skippedJoint = 0;
-  let skippedNoMembership = 0;
-  let skippedOwnSend = 0;
-  let skippedMuted = 0;
-  let deliveryFailures = 0;
-  const deliveryOptionsBySender = new Map<string, DeliverMessageOptions>();
-  const identityBySender = new Map<string, { uniqueName: string; description: string | null }>();
-  let delivered = 0;
-
-  for (const candidate of candidates) {
-    const channel = await deps.getChannel(candidate.channelId);
-    if (!channel || channel.type === "joint") {
-      skippedJoint += 1;
-      continue;
-    }
-
-    // Membership recheck at rebuild time: the cursor row may predate a
-    // leave/unfollow. Thread delivery goes to followers, not parent members.
-    const isThread = channel.type === "thread";
-    const memberAgents = isThread
-      ? await getThreadAgentFollowers(candidate.channelId)
-      : await deps.getChannelAgents(candidate.channelId);
-    if (!memberAgents.some((member) => member.id === agentId)) {
-      skippedNoMembership += 1;
-      continue;
-    }
-
-    // Thread parent fields, resolved once per channel.
-    let parentChannelId: string | undefined;
-    let parentChannelName: string | undefined;
-    let parentChannelType: "channel" | "private" | "joint" | "dm" | undefined;
-    if (isThread && channel.parentMessageId) {
-      const [parentMessage] = await db
-        .select({ channelId: messages.channelId })
-        .from(messages)
-        .where(eq(messages.id, channel.parentMessageId))
-        .limit(1);
-      const parentChannel = parentMessage ? await deps.getChannel(parentMessage.channelId) : null;
-      if (parentChannel && parentChannel.type !== "thread") {
-        parentChannelId = parentChannel.id;
-        parentChannelName = parentChannel.name;
-        parentChannelType = parentChannel.type as "channel" | "private" | "joint" | "dm";
-      }
-    }
-
-    // Enriched (senderName/attachments/task fields), chronological from the
-    // watermark. Content is NOT permalink-rendered here: `/events` renders at
-    // serve time, so rebuilt rows reach the wire rendered exactly once.
-    const rows = await listMessages(
-      candidate.channelId,
-      CURSOR_REBUILD_MAX_ROWS_PER_CHANNEL,
-      undefined,
-      candidate.lastReadSeq,
-    );
-
-    for (const row of rows) {
-      if (typeof row.seq !== "number" || row.seq <= candidate.lastReadSeq) continue;
-      inspectedMessages += 1;
-      // Live-buffer dedupe: delivered-but-unacked rows are both in the volatile
-      // buffer and above the watermark; rebuild must not double them.
-      if (pendingSeqs.has(row.seq)) {
-        dedupedPending += 1;
-        continue;
-      }
-      // An agent never receives its own sends (live fan-out excludes sender).
-      if (row.senderType === "agent" && row.senderId === agentId) {
-        skippedOwnSend += 1;
-        continue;
-      }
-      const piercedAgentIds = new Set<string>();
-      if (row.senderType !== "external_projection" && row.taskAssigneeType === "agent" && row.taskAssigneeId === agentId) {
-        piercedAgentIds.add(agentId);
-      }
-      const mutedAgentDeliveryIds = await getMutedAgentDeliveryIdsForPersistedMessage(
-        deps,
-        channel,
-        row,
-        [agentId],
-        piercedAgentIds,
-      );
-      if (mutedAgentDeliveryIds.has(agentId)) {
-        skippedMuted += 1;
-        continue;
-      }
-
-      const senderKey = `${row.senderType}:${row.senderId}`;
-      let deliveryOptions = deliveryOptionsBySender.get(senderKey);
-      if (!deliveryOptions) {
-        deliveryOptions = isSystemMessageIdentity(row.messageType, row.senderId)
-          ? {}
-          : row.senderType === "external_projection"
-          ? {}
-          : await getAgentDeliveryOptionsForSender(
-              deps,
-              channel.serverId,
-              row.senderType as InternalActorType,
-              row.senderId,
-            );
-        deliveryOptionsBySender.set(senderKey, deliveryOptions);
-      }
-      // Live fan-out parity: buffer entries carry the sender's UNIQUE name
-      // (the @mention handle), not the enriched display name.
-      let identity = identityBySender.get(senderKey);
-      if (!identity) {
-        identity = isSystemMessageIdentity(row.messageType, row.senderId)
-          ? { uniqueName: "system", description: null }
-          : row.senderType === "external_projection"
-          ? { uniqueName: row.externalAuthor?.displayName ?? "External user", description: null }
-          : await deps.getSenderIdentity(
-              row.senderType as InternalActorType,
-              row.senderId,
-              row.senderName,
-            );
-        identityBySender.set(senderKey, identity);
-      }
-
-      try {
-        await agentOrchestrator.deliverMessage(agentId, {
-          channel_id: candidate.channelId,
-          // DM parity with live fan-out: the channel is named after the human
-          // peer from the agent's perspective, not the stored channel name.
-          channel_name: channel.type === "dm" && row.senderType === "user" && !isSystemMessageIdentity(row.messageType, row.senderId)
-            ? identity.uniqueName
-            : channel.name,
-          channel_type: toAgentVisibleChannelType(channel.type),
-          sender_id: row.senderId,
-          sender_name: identity.uniqueName,
-          sender_description: identity.description,
-          sender_type: toAgentVisibleSenderType(row.senderType, row.messageType),
-          ...toAgentVisibleExternalMessage(row),
-          ...(row.senderType === "external_projection" && { mentioned: false }),
-          content: renderAgentVisibleMessageContent(row, row.content),
-          timestamp: row.createdAt.toISOString(),
-          seq: row.seq,
-          message_id: row.id,
-          ...(parentChannelId && parentChannelType && {
-            parent_channel_name: parentChannelName,
-            parent_channel_id: parentChannelId,
-            parent_channel_type: parentChannelType,
-          }),
-          ...(row.attachments.length > 0 && {
-            attachments: row.attachments.map((a) => ({
-              id: a.id,
-              filename: a.filename,
-              mimeType: a.mimeType,
-              sizeBytes: a.sizeBytes ?? undefined,
-            })),
-          }),
-          ...(row.senderType !== "external_projection" && row.taskStatus != null && {
-            task_status: row.taskStatus as "todo" | "in_progress" | "in_review" | "done" | "closed",
-            task_number: row.taskNumber,
-            task_assignee_type: toAgentVisibleTaskAssigneeType(row.taskAssigneeType as InternalActorType | null),
-            task_assignee_id: row.taskAssigneeId,
-            task_assignee_name: getAgentVisibleTaskAssigneeName(row),
-          }),
-        }, deliveryOptions);
-        delivered += 1;
-      } catch (err) {
-        deliveryFailures += 1;
-        console.error(`[MessageService] CS-4 rebuild delivery failed for agent ${agentId} seq ${row.seq}:`, serializeErrorForLog(err));
-      }
-    }
-  }
-  emitExternalAgentCursorRebuildTrace({
-    route,
-    durationMs: Date.now() - startedAt,
-    cursorCandidateCount: cursorCandidates.length,
-    coldStartCandidateCount: coldStartCandidates.length,
-    pendingBeforeCount: pendingSeqs.size,
-    inspectedMessageCount: inspectedMessages,
-    rebuiltMessageCount: delivered,
-    dedupedPendingCount: dedupedPending,
-    skippedJointCount: skippedJoint,
-    skippedNoMembershipCount: skippedNoMembership,
-    skippedOwnSendCount: skippedOwnSend,
-    skippedMutedCount: skippedMuted,
-    deliveryFailureCount: deliveryFailures,
-  });
-  return delivered;
+/** Test seam: override the follow-up pull delays (null restores the default). */
+export function __setExternalWakeFollowUpPullDelaysMsForTests(delays: readonly number[] | null): void {
+  externalWakeFollowUpPullDelaysMsForTests = delays;
 }
 
-type ExternalAgentCursorRebuildTraceStats = {
-  route: ExternalAgentCursorRebuildRoute;
-  durationMs: number;
-  cursorCandidateCount: number;
-  coldStartCandidateCount: number;
-  pendingBeforeCount: number;
-  inspectedMessageCount: number;
-  rebuiltMessageCount: number;
-  dedupedPendingCount: number;
-  skippedJointCount: number;
-  skippedNoMembershipCount: number;
-  skippedOwnSendCount: number;
-  skippedMutedCount: number;
-  deliveryFailureCount: number;
+export function externalWakeFollowUpPullDelaysMs(): readonly number[] {
+  return externalWakeFollowUpPullDelaysMsForTests ?? EXTERNAL_WAKE_FOLLOW_UP_PULL_DELAYS_MS;
+}
+
+type AgentInboxChainSelector = (agentId: string) => Promise<channelService.AgentInboxChainSelection>;
+let externalInboxChainSelectorForTests: AgentInboxChainSelector | null = null;
+
+/** Test seam: CI has no RisingWave, so tests supply the chain read. */
+export function __setExternalAgentInboxChainSelectorForTests(selector: AgentInboxChainSelector | null): void {
+  externalInboxChainSelectorForTests = selector;
+}
+
+type ExternalInboxPullSlotState = {
+  lastStartedAtMs: number | null;
+  last: ExternalAgentInboxPull | null;
+  running: Promise<ExternalAgentInboxPull> | null;
+  rerun: Promise<ExternalAgentInboxPull> | null;
 };
 
-function emitExternalAgentCursorRebuildTrace(stats: ExternalAgentCursorRebuildTraceStats): void {
-  const totalCandidates = stats.cursorCandidateCount + stats.coldStartCandidateCount;
-  // Emit when candidates exist — even if nothing was rebuilt. The absence
-  // of rebuilt messages when candidates exist IS negative evidence: it means
-  // "rebuild ran, found candidate channels, but no deliverable messages above
-  // the watermark." This is load-bearing for diagnosing wake-then-empty-check
-  // gaps in external agent delivery.
-  if (totalCandidates === 0) return;
+// Rate-limit bookkeeping only, keyed by the orchestrator (one per process).
+// No message state lives here: every result is re-derived from the chain.
+const externalInboxPullSlots = new WeakMap<AgentOrchestrator, Map<string, ExternalInboxPullSlotState>>();
 
-  const rebuildOutcome = stats.rebuiltMessageCount > 0
-    ? "messages_rebuilt"
-    : stats.deliveryFailureCount > 0
-      ? "delivery_failed"
-      : stats.inspectedMessageCount > 0
-        ? "all_filtered"
-        : (stats.skippedJointCount + stats.skippedNoMembershipCount) > 0
-          ? "candidates_skipped"
-          : "no_messages_above_watermark";
+/**
+ * An EXTERNAL agent's persisted messages come from one place: its durable
+ * inbox (the agent inbox chain). For an external agent delivery, ack and read
+ * are the same act, so what is unread is exactly what it has not yet received;
+ * the server keeps no per-process copy of persisted messages (only items with
+ * no durable row, such as third-party app events, are buffered). Each call
+ * pulls the same bounded batch managed resume uses (getAgentResumeCatchupMessages):
+ * conversations by priority, rows contiguous and oldest first from the read
+ * position, so acking a batch never skips an unread row.
+ *
+ * Calls sharing a slot are serialized per agent; outside `/events` a slot reads
+ * the chain at most once per EXTERNAL_AGENT_INBOX_PULL_MIN_INTERVAL_MS and
+ * otherwise answers with its previous result. `force` (a wake signal: something
+ * was just delivered) skips the interval and, if a read is in flight, queues
+ * one more after it.
+ */
+export function pullExternalAgentInbox(
+  agentOrchestrator: AgentOrchestrator,
+  agentId: string,
+  opts: { route: ExternalAgentInboxPullRoute; slot: ExternalAgentInboxPullSlot; force?: boolean },
+): Promise<ExternalAgentInboxPull> {
+  let slots = externalInboxPullSlots.get(agentOrchestrator);
+  if (!slots) {
+    slots = new Map();
+    externalInboxPullSlots.set(agentOrchestrator, slots);
+  }
+  const key = `${agentId}:${opts.slot}`;
+  let slot = slots.get(key);
+  if (!slot) {
+    slot = { lastStartedAtMs: null, last: null, running: null, rerun: null };
+    slots.set(key, slot);
+  }
+  const state = slot;
+  const minIntervalMs = opts.slot === "events"
+    ? 0
+    : externalInboxPullMinIntervalMsForTests ?? EXTERNAL_AGENT_INBOX_PULL_MIN_INTERVAL_MS;
+  const start = (): Promise<ExternalAgentInboxPull> => {
+    state.lastStartedAtMs = currentTimeMs();
+    const run = pullExternalAgentInboxOnce(agentOrchestrator, agentId, opts.route)
+      .then((result) => {
+        state.last = result;
+        return result;
+      })
+      .finally(() => {
+        if (state.running === run) state.running = null;
+      });
+    state.running = run;
+    return run;
+  };
+  if (state.running) {
+    if (!opts.force) return state.running;
+    state.rerun ??= state.running.catch(() => undefined).then(() => {
+      state.rerun = null;
+      return start();
+    });
+    return state.rerun;
+  }
+  if (
+    !opts.force
+    && state.last
+    && state.lastStartedAtMs !== null
+    && currentTimeMs() - state.lastStartedAtMs < minIntervalMs
+  ) {
+    return Promise.resolve(state.last);
+  }
+  return start();
+}
 
-  addTraceEvent("external_agent.cursor_rebuild.finished", {
-    route: stats.route,
-    duration_ms: stats.durationMs,
-    rebuild_outcome: rebuildOutcome,
-    candidate_channel_count: totalCandidates,
-    cursor_candidate_channel_count: stats.cursorCandidateCount,
-    cold_start_candidate_channel_count: stats.coldStartCandidateCount,
-    pending_before_count: stats.pendingBeforeCount,
-    inspected_message_count: stats.inspectedMessageCount,
-    rebuilt_message_count: stats.rebuiltMessageCount,
-    deduped_pending_count: stats.dedupedPendingCount,
-    skipped_joint_count: stats.skippedJointCount,
-    skipped_no_membership_count: stats.skippedNoMembershipCount,
-    skipped_own_send_count: stats.skippedOwnSendCount,
-    skipped_muted_count: stats.skippedMutedCount,
-    delivery_failure_count: stats.deliveryFailureCount,
+/**
+ * One chain read for the inbox push, outside the slot bookkeeping: the push's
+ * per-agent lease already serializes it, and a slot would hand a later call
+ * the same in-flight promise, so a stalled read would stall every retry on
+ * this replica too.
+ */
+export function pullExternalAgentInboxUnshared(
+  agentOrchestrator: AgentOrchestrator,
+  agentId: string,
+): Promise<ExternalAgentInboxPull> {
+  return pullExternalAgentInboxOnce(agentOrchestrator, agentId, "push");
+}
+
+async function pullExternalAgentInboxOnce(
+  agentOrchestrator: AgentOrchestrator,
+  agentId: string,
+  route: ExternalAgentInboxPullRoute,
+): Promise<ExternalAgentInboxPull> {
+  const startedAt = currentTimeMs();
+  const stats: ExternalAgentInboxPullStats = {
+    messageCount: 0, droppedCount: 0, truncatedConversationCount: 0, remainingConversationCount: 0,
+    lastReadSeq: null, chainLatestSeq: null,
+  };
+  try {
+    const agent = await agentService.getAgent(agentId);
+    if (!agent) return { status: "unavailable" };
+    const selectChain = externalInboxChainSelectorForTests ?? channelService.selectAgentInboxChainRows;
+    const inbox = await selectChain(agentId);
+    if (inbox.source === "unavailable") {
+      // No fallback: persisted messages wait for the chain; buffered items are unaffected.
+      emitExternalAgentInboxPullTrace(route, "inbox_unavailable", startedAt, stats);
+      return { status: "unavailable" };
+    }
+    // What the chain showed, before durable read positions: a chain_latest_seq
+    // below a delivered message's seq means the chain had not caught up yet.
+    for (const row of inbox.rows) {
+      stats.lastReadSeq = Math.max(stats.lastReadSeq ?? 0, row.lastReadSeq);
+      if (row.latestSeq !== null) stats.chainLatestSeq = Math.max(stats.chainLatestSeq ?? 0, row.latestSeq);
+    }
+    const chain = await withDurableReadPositions(agentId, inbox.rows);
+    const historyCutoff = getHistoryCutoff(await getServerPlan(agent.serverId));
+    const catchup = await getAgentResumeCatchupMessages(agentId, historyCutoff, { chain });
+
+    // The gates live delivery applies (passive scope unless the sender has
+    // admin authority, target access), evaluated at pull time.
+    const deps = resolveMessageServiceDeps();
+    const deliveryOptionsBySender = new Map<string, DeliverMessageOptions>();
+    const items: Array<{ message: AgentMessage; options: DeliverMessageOptions }> = [];
+    for (const [index, message] of catchup.messages.entries()) {
+      const source = catchup.sources[index]!;
+      const senderKey = `${source.senderType}:${source.senderId}`;
+      let options = deliveryOptionsBySender.get(senderKey);
+      if (!options) {
+        options = source.system || source.senderType === "external_projection"
+          ? {}
+          : await getAgentDeliveryOptionsForSender(deps, source.serverId, source.senderType, source.senderId);
+        deliveryOptionsBySender.set(senderKey, options);
+      }
+      items.push({ message, options });
+    }
+    const deliverable = await agentOrchestrator.filterExternalInboxDeliveries(agentId, items);
+    const messages: AgentMessage[] = [];
+    const droppedSeqs: number[] = [];
+    items.forEach(({ message }, index) => {
+      if (deliverable[index]) messages.push(message);
+      else if (typeof message.seq === "number") droppedSeqs.push(message.seq);
+    });
+    messages.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+
+    const covered = new Set(catchup.conversations.filter((c) => !c.truncated).map((c) => c.channelId));
+    const unread = chain.map((row) => row.targetId);
+    stats.messageCount = messages.length;
+    stats.droppedCount = droppedSeqs.length;
+    stats.truncatedConversationCount = catchup.conversations.filter((c) => c.truncated).length;
+    stats.remainingConversationCount = unread.filter((id) => !covered.has(id)).length;
+    emitExternalAgentInboxPullTrace(route, messages.length > 0 || stats.remainingConversationCount > 0 ? "pulled" : "nothing_unread", startedAt, stats);
+    return {
+      status: "pulled",
+      messages,
+      droppedSeqs,
+      remainingConversations: stats.remainingConversationCount,
+      truncated: stats.truncatedConversationCount > 0 || stats.remainingConversationCount > 0,
+    };
+  } catch (err) {
+    emitExternalAgentInboxPullTrace(route, "failed", startedAt, stats);
+    throw err;
+  }
+}
+
+/**
+ * The chain is derived from Postgres and trails it; the read position an ack
+ * just wrote is authoritative. Without this, a drain that calls again right
+ * after acking would be handed the rows it just acked.
+ */
+async function withDurableReadPositions(
+  agentId: string,
+  chain: channelService.AgentInboxChainRow[],
+): Promise<channelService.AgentInboxChainRow[]> {
+  if (chain.length === 0) return chain;
+  const cursorRows = await getDb()
+    .select({
+      channelId: agentChannelReadCursors.channelId,
+      lastReadSeq: sql<string>`COALESCE(${agentChannelReadCursors.lastReadSeq8}, ${agentChannelReadCursors.lastReadSeq})`,
+    })
+    .from(agentChannelReadCursors)
+    .where(and(
+      eq(agentChannelReadCursors.agentId, agentId),
+      inArray(agentChannelReadCursors.channelId, chain.map((row) => row.targetId)),
+    ));
+  const cursors = new Map(cursorRows.map((row) => [row.channelId, Number(row.lastReadSeq)]));
+  const adjusted: channelService.AgentInboxChainRow[] = [];
+  for (const row of chain) {
+    const cursor = cursors.get(row.targetId);
+    if (cursor === undefined || cursor <= row.lastReadSeq) {
+      adjusted.push(row);
+      continue;
+    }
+    if (cursor >= Math.max(row.latestSeq ?? 0, row.maxMentionSeq ?? 0)) continue;
+    adjusted.push({
+      ...row,
+      lastReadSeq: cursor,
+      firstUnreadSeq: row.firstUnreadSeq !== null && row.firstUnreadSeq > cursor ? row.firstUnreadSeq : null,
+    });
+  }
+  return adjusted;
+}
+
+interface ExternalAgentInboxPullStats {
+  messageCount: number;
+  droppedCount: number;
+  truncatedConversationCount: number;
+  remainingConversationCount: number;
+  /** Max read seq across the chain's rows (null: no rows). */
+  lastReadSeq: number | null;
+  /** Max latest seq across the chain's rows (null: no rows). */
+  chainLatestSeq: number | null;
+}
+
+/** One aggregate, id-free event per chain read. Rate-limited calls emit nothing. */
+function emitExternalAgentInboxPullTrace(
+  route: ExternalAgentInboxPullRoute,
+  outcome: "pulled" | "nothing_unread" | "inbox_unavailable" | "failed",
+  startedAt: number,
+  stats: ExternalAgentInboxPullStats,
+): void {
+  addTraceEvent("external_agent.inbox_pull.finished", {
+    route,
+    outcome,
+    duration_ms: currentTimeMs() - startedAt,
+    message_count: stats.messageCount,
+    dropped_count: stats.droppedCount,
+    truncated_conversation_count: stats.truncatedConversationCount,
+    remaining_conversation_count: stats.remainingConversationCount,
+    last_read_seq: stats.lastReadSeq,
+    chain_latest_seq: stats.chainLatestSeq,
   });
 }
 
@@ -4640,6 +4943,8 @@ type MessageQueryTraceOptions = {
     senderType: "user" | "agent";
     senderId: string;
   };
+  executor?: DatabaseExecutor;
+  resolvedReadChannelIds?: string[];
 };
 
 type MessageReactionSummary = {
@@ -4648,6 +4953,47 @@ type MessageReactionSummary = {
   reactorIds: string[];
   reactorNames: string[];
 };
+
+// Columns for message-history reads. `searchText`/`searchVector` only feed the
+// full-text index (the tsvector is ~1.4KB/row); no read surface serves them, and
+// the realtime path already strips them. Leaving them out of the SELECT keeps
+// them off the wire from Postgres and out of every HTTP message response.
+const { searchText: _searchText, searchVector: _searchVector, ...messageReadColumns } = getTableColumns(messages);
+
+async function loadMessageRows(
+  limit: number,
+  beforeSeq: number | undefined,
+  afterSeq: number | undefined,
+  historyCutoff: Date | undefined,
+  opts: MessageQueryTraceOptions & { executor: DatabaseExecutor; resolvedReadChannelIds: string[] },
+) {
+  const traceQuery = opts.traceQuery ?? untracedDbQuery;
+  const conditions = [resolvedConversionReadChannelPredicate(messages.channelId, opts.resolvedReadChannelIds)];
+  if (beforeSeq !== undefined) conditions.push(lt(messages.seq, beforeSeq));
+  if (afterSeq !== undefined) conditions.push(gt(messages.seq, afterSeq));
+  if (historyCutoff) conditions.push(gt(messages.createdAt, historyCutoff));
+  if (opts.excludeSender) {
+    conditions.push(not(and(
+      eq(messages.senderType, opts.excludeSender.senderType),
+      eq(messages.senderId, opts.excludeSender.senderId),
+    )!));
+  }
+  const direction = afterSeq !== undefined ? "after" : beforeSeq !== undefined ? "before" : "latest";
+  return traceQuery(
+    "messages.channel.loaded_page",
+    () => opts.executor
+      .select(messageReadColumns)
+      .from(messages)
+      .where(and(...conditions))
+      .orderBy(afterSeq !== undefined ? messages.seq : desc(messages.seq))
+      .limit(limit),
+    () => ({
+      limit,
+      direction,
+      history_cutoff_present: Boolean(historyCutoff),
+    }),
+  );
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -5083,6 +5429,16 @@ async function enrichWithSenderNames<T extends MessageRowForEnrichment>(
   const db = getDb();
   const traceQuery = opts.traceQuery ?? untracedDbQuery;
   const messageIds = inputRows.map((m) => m.id);
+  const cardIds = inputRows.filter((row) => {
+    const metadata = "actionMetadata" in row ? row.actionMetadata : null;
+    return row.senderType !== "external_projection" && metadata !== null && typeof metadata === "object" && "kind" in metadata && metadata.kind === "action-card";
+  }).map((row) => row.id);
+  const cardOrigins = new Map(cardIds.length === 0 ? [] : (await db
+    .select({ messageId: actionCards.messageId, serverId: actionCards.serverId })
+    .from(actionCards).where(inArray(actionCards.messageId, cardIds)))
+    .map((card) => [card.messageId, card.serverId] as const));
+
+
 
   // v1.4: task facts live in `tasks`, but the message-shaped task fields are a
   // published interface (CLI `[task #N status=...]` suffix, socket payloads,
@@ -5470,15 +5826,20 @@ async function enrichWithSenderNames<T extends MessageRowForEnrichment>(
           ...(row.hostChildThreadChannelId ? { rootThreadChannelId: row.hostChildThreadChannelId } : {}),
         };
       }
-      const anchorData = row.anchorData as Record<string, unknown> | null;
-      const rawQuote = anchorData && typeof anchorData.quote === "string" ? anchorData.quote.trim() : null;
+      const filename = normalizeAttachmentFilename(row.filename);
+      const agentScope = projectAgentCommentScope(filename, row.anchorType, row.anchorData);
       commentRefMap.set(row.commentMessageId, {
         attachmentId: row.attachmentId,
-        filename: normalizeAttachmentFilename(row.filename),
+        filename,
         hostMessageId: row.hostMessageId,
         hostSource,
-        anchorLabel: renderAnchorLabel(row.anchorType, row.anchorData),
-        anchorQuote: rawQuote || null,
+        // Human API reads retain the Web card's compact quote preview. Agent
+        // enrichment has no user identity and projects location only because
+        // the complete quotation immediately follows as a blockquote.
+        anchorLabel: opts.attachmentCommentViewerUserId
+          ? renderAnchorLabel(row.anchorType, row.anchorData)
+          : agentScope.anchorLabel,
+        anchorQuote: agentScope.anchorQuote,
       });
     }
   }
@@ -5488,7 +5849,9 @@ async function enrichWithSenderNames<T extends MessageRowForEnrichment>(
     return projectForwardDestinationMessage({
     ...msg,
     actionMetadata: await scrubForwardedBundleMetadataForViewer(
-      "actionMetadata" in msg ? msg.actionMetadata : undefined,
+      cardIds.includes(msg.id) && "actionMetadata" in msg && msg.actionMetadata !== null && typeof msg.actionMetadata === "object"
+        ? { ...msg.actionMetadata, sourceServerId: cardOrigins.get(msg.id) ?? null }
+        : "actionMetadata" in msg ? msg.actionMetadata : undefined,
       resolveForwardedBundleViewer(opts),
     ),
     commentRef: commentRefMap.get(msg.id) ?? null,
@@ -5709,14 +6072,7 @@ function toThreadContextMessage(message: EnrichedMessageRow): AgentThreadContext
   // joining late reads what an agent present at creation read. Outside the
   // feature flag gate, commentRef is suppressed at enrichment (F11) — nothing to
   // render, nothing leaks.
-  const ref = message.commentRef;
-  const scopeLine = ref
-    ? (ref.anchorLabel ? `[re: ${ref.filename} · ${ref.anchorLabel}]` : `[re: ${ref.filename}]`)
-    : null;
-  const quoteLine = ref?.anchorQuote ? `> ${ref.anchorQuote}` : null;
-  const scopedContent = scopeLine
-    ? [scopeLine, quoteLine, message.content].filter(Boolean).join("\n")
-    : message.content;
+  const scopedContent = renderAgentCommentScopedContent(message.content, message.commentRef);
   return {
     message_id: message.id,
     sender_name: message.senderHandle ?? message.senderName,
@@ -5788,7 +6144,7 @@ export async function messageShortIdExistsInChannel(
   const [row] = await db
     .select({ id: messages.id })
     .from(messages)
-    .where(and(eq(messages.channelId, channelId), ...messageIdShortPrefixConditions(shortId)))
+    .where(and(conversionReadChannelPredicate(messages.channelId, channelId), ...messageIdShortPrefixConditions(shortId)))
     .limit(1);
   return Boolean(row);
 }
@@ -5973,34 +6329,52 @@ export async function getMessageContext(
   if (historyCutoff) {
     targetConditions.push(gt(messages.createdAt, historyCutoff));
   }
-  const [target] = await db.select().from(messages).where(and(...targetConditions)).limit(1);
+  const [target] = await db.select(messageReadColumns).from(messages).where(and(...targetConditions)).limit(1);
   if (!target) return null;
 
-  const previousConditions = [eq(messages.channelId, target.channelId), lt(messages.seq, target.seq)];
-  if (historyCutoff) {
-    const cutoffSeq = await getHistoryCutoffSeq(target.channelId, historyCutoff);
-    if (cutoffSeq !== null) {
-      previousConditions.push(gte(messages.seq, cutoffSeq));
-    }
-    previousConditions.push(gt(messages.createdAt, historyCutoff));
-  }
-  const previousRows = await db
-    .select()
-    .from(messages)
-    .where(and(...previousConditions))
-    .orderBy(desc(messages.seq))
-    .limit(before + 1);
+  const traceQuery = opts.traceQuery ?? untracedDbQuery;
+  const { previousRows, nextRows } = await db.transaction(async (tx) => {
+    const resolvedReadChannelIds = await resolveConversionReadChannelIds(tx, target.channelId);
+    const channelPred = resolvedConversionReadChannelPredicate(messages.channelId, resolvedReadChannelIds);
 
-  const nextConditions = [eq(messages.channelId, target.channelId), gt(messages.seq, target.seq)];
-  if (historyCutoff) {
-    nextConditions.push(gt(messages.createdAt, historyCutoff));
-  }
-  const nextRows = await db
-    .select()
-    .from(messages)
-    .where(and(...nextConditions))
-    .orderBy(messages.seq)
-    .limit(after + 1);
+    const previousConditions = [channelPred, lt(messages.seq, target.seq)];
+    if (historyCutoff) {
+      const cutoffSeq = await getHistoryCutoffSeq(target.channelId, historyCutoff, tx, resolvedReadChannelIds);
+      if (cutoffSeq !== null) {
+        previousConditions.push(gte(messages.seq, cutoffSeq));
+      }
+      previousConditions.push(gt(messages.createdAt, historyCutoff));
+    }
+    const previousRows = await traceQuery(
+      "messages.context.previous",
+      () => tx
+        .select(messageReadColumns)
+        .from(messages)
+        .where(and(...previousConditions))
+        .orderBy(desc(messages.seq))
+        .limit(before + 1),
+      () => ({ limit: before + 1, direction: "before" }),
+    );
+
+    const nextConditions = [channelPred, gt(messages.seq, target.seq)];
+    if (historyCutoff) {
+      nextConditions.push(gt(messages.createdAt, historyCutoff));
+    }
+    const nextRows = await traceQuery(
+      "messages.context.next",
+      () => tx
+        .select(messageReadColumns)
+        .from(messages)
+        .where(and(...nextConditions))
+        .orderBy(messages.seq)
+        .limit(after + 1),
+      () => ({ limit: after + 1, direction: "after" }),
+    );
+    return { previousRows, nextRows };
+  }, {
+    isolationLevel: "repeatable read",
+    accessMode: "read only",
+  });
 
   const hasOlder = previousRows.length > before;
   const hasNewer = nextRows.length > after;
@@ -6017,12 +6391,19 @@ export async function getMessageContext(
   };
 }
 
-async function getHistoryCutoffSeq(channelId: string, historyCutoff: Date): Promise<number | null> {
-  const db = getDb();
-  const [row] = await db
+async function getHistoryCutoffSeq(
+  channelId: string,
+  historyCutoff: Date,
+  executor: DatabaseExecutor = getDb(),
+  resolvedReadChannelIds?: string[],
+): Promise<number | null> {
+  const channelPred = resolvedReadChannelIds
+    ? resolvedConversionReadChannelPredicate(messages.channelId, resolvedReadChannelIds)
+    : conversionReadChannelPredicate(messages.channelId, channelId);
+  const [row] = await executor
     .select({ cutoffSeq: sql<number | null>`MIN(${messages.seq})::bigint` })
     .from(messages)
-    .where(and(eq(messages.channelId, channelId), gt(messages.createdAt, historyCutoff)));
+    .where(and(channelPred, gt(messages.createdAt, historyCutoff)));
   const cutoffSeq = row?.cutoffSeq;
   if (cutoffSeq == null) return null;
   return typeof cutoffSeq === "number" ? cutoffSeq : Number(cutoffSeq);
@@ -6037,7 +6418,7 @@ export async function getMessageContextInChannel(
   opts: MessageQueryTraceOptions = {},
 ) {
   const db = getDb();
-  const conditions = [eq(messages.channelId, channelId), eq(messages.id, messageId)];
+  const conditions = [conversionReadChannelPredicate(messages.channelId, channelId), eq(messages.id, messageId)];
   if (historyCutoff) {
     conditions.push(gt(messages.createdAt, historyCutoff));
   }
@@ -6060,7 +6441,7 @@ export async function getThreadReplyContextForParentChannel(
   const conditions = [
     eq(messages.id, replyMessageId),
     eq(threadChannels.type, "thread"),
-    eq(parentMessages.channelId, parentChannelId),
+    conversionReadChannelPredicate(parentMessages.channelId, parentChannelId),
   ];
   if (historyCutoff) {
     conditions.push(gt(messages.createdAt, historyCutoff));
@@ -6106,7 +6487,7 @@ export async function getThreadReplyContextByShortIdForParentChannel(
   const conditions = [
     ...messageIdShortPrefixConditions(shortId),
     eq(threadChannels.type, "thread"),
-    eq(parentMessages.channelId, parentChannelId),
+    conversionReadChannelPredicate(parentMessages.channelId, parentChannelId),
   ];
   if (historyCutoff) {
     conditions.push(gt(messages.createdAt, historyCutoff));
@@ -6155,7 +6536,7 @@ export async function getThreadParentContextByThreadChannelIdForParentChannel(
     .where(and(
       ...threadIdConditions,
       eq(threadChannels.type, "thread"),
-      eq(parentMessages.channelId, parentChannelId),
+      conversionReadChannelPredicate(parentMessages.channelId, parentChannelId),
       isNull(threadChannels.deletedAt),
     ))
     .limit(2);
@@ -6172,7 +6553,7 @@ export async function getMessageContextBySeq(
   opts: MessageQueryTraceOptions = {},
 ) {
   const db = getDb();
-  const conditions = [eq(messages.channelId, channelId), eq(messages.seq, seq)];
+  const conditions = [conversionReadChannelPredicate(messages.channelId, channelId), eq(messages.seq, seq)];
   if (historyCutoff) {
     conditions.push(gt(messages.createdAt, historyCutoff));
   }
@@ -6193,7 +6574,7 @@ export async function getMessageContextByShortId(
 
   const db = getDb();
   const conditions = [
-    eq(messages.channelId, channelId),
+    conversionReadChannelPredicate(messages.channelId, channelId),
     ...messageIdShortPrefixConditions(shortId),
   ];
   if (historyCutoff) {
@@ -6231,7 +6612,7 @@ export async function resolveMessageSeqAnchor(
   }
 
   const db = getDb();
-  const conditions = [eq(messages.channelId, channelId)];
+  const conditions = [conversionReadChannelPredicate(messages.channelId, channelId)];
   if (isMessageShortId(anchor)) {
     conditions.push(...messageIdShortPrefixConditions(anchor));
   } else if (/^\d+$/.test(anchor)) {
@@ -6263,43 +6644,49 @@ export async function listMessages(
   historyCutoff?: Date,
   opts: MessageQueryTraceOptions = {},
 ) {
-  const db = getDb();
-  const traceQuery = opts.traceQuery ?? untracedDbQuery;
-  const conditions = [eq(messages.channelId, channelId)];
-  if (beforeSeq !== undefined) {
-    conditions.push(lt(messages.seq, beforeSeq));
+  if (opts.resolvedReadChannelIds === undefined) {
+    return listMessagesForHistoryRead(channelId, limit, beforeSeq, afterSeq, historyCutoff, opts);
   }
-  if (afterSeq !== undefined) {
-    conditions.push(gt(messages.seq, afterSeq));
-  }
-  if (historyCutoff) {
-    conditions.push(gt(messages.createdAt, historyCutoff));
-  }
-  if (opts.excludeSender) {
-    conditions.push(not(and(
-      eq(messages.senderType, opts.excludeSender.senderType),
-      eq(messages.senderId, opts.excludeSender.senderId),
-    )!));
-  }
-  const direction = afterSeq !== undefined ? "after" : beforeSeq !== undefined ? "before" : "latest";
-  const rows = await traceQuery(
-    "messages.channel.loaded_page",
-    () => db
-      .select()
-      .from(messages)
-      .where(and(...conditions))
-      // When using `after`, fetch oldest-first so we get messages right after the cursor;
-      // otherwise fetch newest-first (default behavior for "latest N messages").
-      .orderBy(afterSeq !== undefined ? messages.seq : desc(messages.seq))
-      .limit(limit),
-    () => ({
-      limit,
-      direction,
-      history_cutoff_present: Boolean(historyCutoff),
-    }),
-  );
+
+  const executor = opts.executor ?? getDb();
+  const rows = await loadMessageRows(limit, beforeSeq, afterSeq, historyCutoff, {
+    ...opts,
+    executor,
+    resolvedReadChannelIds: opts.resolvedReadChannelIds,
+  });
 
   if (afterSeq !== undefined) return enrichWithSenderNames(rows, opts); // already chronological
+  const enriched = await enrichWithSenderNames(rows, opts);
+  return enriched.reverse();
+}
+
+/**
+ * History reads need both conversion-era storage ids and an indexable
+ * channel_id predicate. Resolve the ids and consume them in one repeatable-read
+ * snapshot: this preserves cutover correctness without leaving Postgres to
+ * apply an `IN (subquery)` join filter while walking the global seq index.
+ */
+export async function listMessagesForHistoryRead(
+  channelId: string,
+  limit = 50,
+  beforeSeq?: number,
+  afterSeq?: number,
+  historyCutoff?: Date,
+  opts: MessageQueryTraceOptions = {},
+) {
+  const rows = await getDb().transaction(async (tx) => {
+    const resolvedReadChannelIds = await resolveConversionReadChannelIds(tx, channelId);
+    return loadMessageRows(limit, beforeSeq, afterSeq, historyCutoff, {
+      ...opts,
+      executor: tx,
+      resolvedReadChannelIds,
+    });
+  }, {
+    isolationLevel: "repeatable read",
+    accessMode: "read only",
+  });
+
+  if (afterSeq !== undefined) return enrichWithSenderNames(rows, opts);
   const enriched = await enrichWithSenderNames(rows, opts);
   return enriched.reverse();
 }
@@ -6334,7 +6721,12 @@ export async function listMessagesWithCoverage(
   const traceQuery = opts.traceQuery ?? untracedDbQuery;
   const direction = afterSeq !== undefined ? "after" : beforeSeq !== undefined ? "before" : "latest";
   const result = await db.transaction(async (tx) => {
-    const conditions = [eq(messages.channelId, channelId)];
+    const resolvedReadChannelIds = await resolveConversionReadChannelIds(tx, channelId);
+    const readChannelPredicate = () => resolvedConversionReadChannelPredicate(
+      messages.channelId,
+      resolvedReadChannelIds,
+    );
+    const conditions = [readChannelPredicate()];
     if (beforeSeq !== undefined) conditions.push(lt(messages.seq, beforeSeq));
     if (afterSeq !== undefined) conditions.push(gt(messages.seq, afterSeq));
     if (historyCutoff) conditions.push(gt(messages.createdAt, historyCutoff));
@@ -6348,7 +6740,7 @@ export async function listMessagesWithCoverage(
     const rows = await traceQuery(
         "messages.channel.loaded_page",
         () => tx
-          .select()
+          .select(messageReadColumns)
           .from(messages)
           .where(and(...conditions))
           .orderBy(afterSeq !== undefined ? messages.seq : desc(messages.seq))
@@ -6371,7 +6763,7 @@ export async function listMessagesWithCoverage(
             : sql<number>`coalesce(max(${messages.seq}) filter (where ${messages.seq} < ${firstReturnedSeq}), 0)`.mapWith(Number),
         })
         .from(messages)
-        .where(eq(messages.channelId, channelId)),
+        .where(readChannelPredicate()),
       () => ({ direction }),
     );
     return {
@@ -6413,7 +6805,7 @@ export async function listMessagesByIds(
   const rows = await traceQuery(
     "messages.by_ids.loaded",
     () => db
-      .select()
+      .select(messageReadColumns)
       .from(messages)
       .where(inArray(messages.id, [...messageIds])),
     () => ({ count: messageIds.length }),
@@ -6421,6 +6813,54 @@ export async function listMessagesByIds(
   const order = new Map(messageIds.map((id, index) => [id, index]));
   const enriched = await enrichWithSenderNames(rows, opts);
   return enriched.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+}
+
+/**
+ * Search rows intentionally skip the full message enrichment pipeline. Load
+ * only the attachment-comment scope required by the Agent projection for the
+ * already-authorized result ids. This is server-scoped by design: Agent
+ * attachment-comment APIs have no human user identity, so user-targeted rules
+ * remain human-viewer policy while server/default/kill-switch rules apply.
+ */
+export async function loadAgentCommentScopesForMessages(
+  messageIds: readonly string[],
+  serverId: string,
+): Promise<Map<string, AgentCommentScopeProjection>> {
+  const result = new Map<string, AgentCommentScopeProjection>();
+  if (messageIds.length === 0) return result;
+
+  const evaluation = await evaluateFeatureFlag({
+    key: ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
+    serverId,
+  });
+  if (!evaluation.enabled) return result;
+
+  const commentMessages = alias(messages, "agent_comment_scope_messages");
+  const commentChannels = alias(channels, "agent_comment_scope_channels");
+  const rows = await getDb()
+    .select({
+      commentMessageId: attachmentCommentRefs.commentMessageId,
+      filename: attachments.filename,
+      anchorType: attachmentCommentRefs.anchorType,
+      anchorData: attachmentCommentRefs.anchorData,
+    })
+    .from(attachmentCommentRefs)
+    .innerJoin(attachments, eq(attachments.id, attachmentCommentRefs.attachmentId))
+    .innerJoin(commentMessages, eq(commentMessages.id, attachmentCommentRefs.commentMessageId))
+    .innerJoin(commentChannels, eq(commentChannels.id, commentMessages.channelId))
+    .where(and(
+      inArray(attachmentCommentRefs.commentMessageId, [...messageIds]),
+      eq(commentChannels.serverId, serverId),
+    ));
+
+  for (const row of rows) {
+    result.set(row.commentMessageId, projectAgentCommentScope(
+      normalizeAttachmentFilename(row.filename),
+      row.anchorType,
+      row.anchorData,
+    ));
+  }
+  return result;
 }
 
 export function projectMessagesToChannel<T extends { channelId: string }>(msgs: T[], channelId: string): T[] {
@@ -6435,14 +6875,16 @@ export async function projectJointMessagesToLocalChannel<T extends { channelId: 
   const canonicalThreadIds = [...new Set(msgs.map((message) => message.threadId).filter((threadId): threadId is string => Boolean(threadId)))];
   if (canonicalThreadIds.length === 0) return projectMessagesToChannel(msgs, channelId);
 
+  // One batched lookup for the whole page (was one query per thread id, run
+  // concurrently: 10-20 round trips per message page).
   const threadIdByCanonicalId = new Map<string, string>();
-  await Promise.all(canonicalThreadIds.map(async (canonicalThreadId) => {
-    const projection = (await channelService.getActiveJointThreadProjectionsByCanonicalThread(canonicalThreadId))
-      .find((candidate) => candidate.localServerId === serverId);
-    if (projection) {
-      threadIdByCanonicalId.set(canonicalThreadId, projection.localThreadChannelId);
+  const projections = await channelService.getActiveJointThreadProjectionsByCanonicalThreadsForServer(canonicalThreadIds, serverId);
+  for (const projection of projections) {
+    // Rows come ordered by joined_at; keep the first per canonical Thread, as .find() did.
+    if (!threadIdByCanonicalId.has(projection.canonicalThreadChannelId)) {
+      threadIdByCanonicalId.set(projection.canonicalThreadChannelId, projection.localThreadChannelId);
     }
-  }));
+  }
 
   return msgs.map((message) => ({
     ...message,
@@ -6464,7 +6906,7 @@ export async function hasOlderMessages(
   const db = getDb();
   const traceQuery = opts.traceQuery ?? untracedDbQuery;
   const conditions = [
-    eq(messages.channelId, channelId),
+    conversionReadChannelPredicate(messages.channelId, channelId),
     lt(messages.createdAt, cutoff),
   ];
   if (beforeSeq) {
@@ -6504,7 +6946,7 @@ export async function syncMessages(
 
   const conditions = [gt(messages.seq, sinceSeq)];
   if (channelId) {
-    conditions.push(eq(messages.channelId, channelId));
+    conditions.push(conversionReadChannelPredicate(messages.channelId, channelId));
   }
   if (historyCutoff) {
     conditions.push(gt(messages.createdAt, historyCutoff));
@@ -6524,13 +6966,18 @@ export async function syncMessages(
     const visibilityCondition = userId && !channelId
       ? sql`
         AND (
-          (${channels.type} = 'channel' AND (
-            ${!isGuest} OR ${channels.guestVisible}
-            OR (${channels.name} <> 'all' AND EXISTS (
-              SELECT 1 FROM ${channelHumans} ch
-              WHERE ch.channel_id = ${channels.id} AND ch.user_id = ${userId}
-            ))
-          ))
+          (
+            ${channels.type} = 'channel'
+            AND EXISTS (
+              SELECT 1 FROM ${serverMembers} sm
+              WHERE sm.server_id = ${channels.serverId}
+                AND sm.user_id = ${userId}
+                AND (
+                  sm.role <> 'guest'
+                  OR (${channels.guestVisible} = true AND ${channels.name} <> 'all')
+                )
+            )
+          )
           OR (
             ${channels.type} IN ('private', 'dm')
             AND EXISTS (
@@ -6565,9 +7012,19 @@ export async function syncMessages(
                     AND jp.status = 'active'
                 )))
                 AND (
-                  (pc.type = 'channel' AND (${!isGuest} OR pc.guest_visible
-                    OR (pc.name <> 'all' AND pch.user_id IS NOT NULL)))
-                  OR (pc.type <> 'channel' AND pch.user_id IS NOT NULL)
+                  (
+                    pc.type = 'channel'
+                    AND EXISTS (
+                      SELECT 1 FROM ${serverMembers} psm
+                      WHERE psm.server_id = pc.server_id
+                        AND psm.user_id = ${userId}
+                        AND (
+                          psm.role <> 'guest'
+                          OR (pc.guest_visible = true AND pc.name <> 'all')
+                        )
+                    )
+                  )
+                  OR pch.user_id IS NOT NULL
                 )
             )
           )
@@ -6584,7 +7041,6 @@ export async function syncMessages(
         ${messages.senderId} AS "senderId",
         ${messages.messageType} AS "messageType",
         ${messages.content},
-        ${messages.searchText} AS "searchText",
         ${messages.threadId} AS "threadId",
         ${messages.taskStatus} AS "taskStatus",
         ${messages.taskNumber} AS "taskNumber",
@@ -6611,7 +7067,7 @@ export async function syncMessages(
   }
 
   const rows = await db
-    .select()
+    .select(messageReadColumns)
     .from(messages)
     .where(and(...conditions))
     .orderBy(messages.seq)
@@ -6679,6 +7135,17 @@ export function stopMaxSeqRedisSync(serverId: string) {
     clearInterval(timer);
     serverMaxSeqSyncTimers.delete(serverId);
   }
+}
+
+function traceSendTransactionRetry(senderType: "user" | "agent") {
+  return (info: { attempt: number; sqlState: string; delayMs: number }) => {
+    addTraceEvent("message_pipeline.persist.transaction_retry", {
+      sender_type: senderType,
+      attempt: info.attempt,
+      sql_state: info.sqlState,
+      delay_ms: info.delayMs,
+    });
+  };
 }
 
 export function updateMaxSeq(serverId: string, seq: number) {
@@ -7124,7 +7591,7 @@ async function handleJointThreadPostBroadcastSideEffects(input: {
           projection.localThreadChannelId,
           canonicalParentMessageId,
           "mentioned",
-          { reactivateUnfollowed: true, preserveExistingReason: true },
+          { reactivateUnfollowed: true, preserveExistingReason: true, joinedThroughSeq: input.message.seq - 1 },
         );
         const [activeFollow] = await db
           .select({ followerId: threadFollows.followerId })
@@ -7167,7 +7634,7 @@ async function handleJointThreadPostBroadcastSideEffects(input: {
             projection.localThreadChannelId,
             canonicalParentMessageId,
             "mentioned",
-            { reactivateUnfollowed: true, preserveExistingReason: true },
+            { reactivateUnfollowed: true, preserveExistingReason: true, joinedThroughSeq: input.message.seq - 1 },
           );
         }
       }
@@ -7468,6 +7935,7 @@ async function pendingMentionAvailableActions(
 
 const senderPendingMentionActionsKey: unique symbol = Symbol("senderPendingMentionActions");
 const senderUnresolvedMentionHandlesKey: unique symbol = Symbol("senderUnresolvedMentionHandles");
+const senderDeliveryWarningsKey: unique symbol = Symbol("senderDeliveryWarnings");
 
 export function getSenderPendingMentionActions(message: unknown): PendingMentionAction[] {
   if (!message || typeof message !== "object") return [];
@@ -7478,6 +7946,12 @@ export function getSenderPendingMentionActions(message: unknown): PendingMention
 export function getSenderUnresolvedMentionHandles(message: unknown): string[] {
   if (!message || typeof message !== "object") return [];
   const value = (message as { [senderUnresolvedMentionHandlesKey]?: string[] })[senderUnresolvedMentionHandlesKey];
+  return Array.isArray(value) ? value : [];
+}
+
+export function getSenderDeliveryWarnings(message: unknown): SenderDeliveryWarning[] {
+  if (!message || typeof message !== "object") return [];
+  const value = (message as { [senderDeliveryWarningsKey]?: SenderDeliveryWarning[] })[senderDeliveryWarningsKey];
   return Array.isArray(value) ? value : [];
 }
 
@@ -7497,6 +7971,50 @@ function attachSenderUnresolvedMentionHandles<T extends object>(message: T, unre
     enumerable: false,
   });
   return message;
+}
+
+function attachSenderDeliveryWarnings<T extends object>(message: T, warnings: SenderDeliveryWarning[]): T {
+  if (warnings.length === 0) return message;
+  Object.defineProperty(message, senderDeliveryWarningsKey, {
+    value: warnings,
+    enumerable: false,
+  });
+  return message;
+}
+
+function buildSenderDeliveryWarnings(
+  outcomes: readonly SenderDeliveryOutcome[],
+  opts: { isDM: boolean },
+): SenderDeliveryWarning[] {
+  if (!opts.isDM) return [];
+  return outcomes
+    .filter((outcome) => (
+      outcome.result?.status === "dropped"
+      && outcome.result.reason === "wake_suppressed"
+    ))
+    .map((outcome) => ({
+      targetType: "agent" as const,
+      targetId: outcome.agentId,
+      reason: "agent_stopped" as const,
+    }));
+}
+
+async function collectSenderDeliveryWarningOutcomes(
+  deliveryOutcomePromises: readonly Promise<SenderDeliveryOutcome>[],
+): Promise<SenderDeliveryOutcomeCollection> {
+  if (deliveryOutcomePromises.length === 0) return { outcomes: [], timedOut: false };
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race<SenderDeliveryOutcomeCollection>([
+      Promise.all(deliveryOutcomePromises).then((outcomes) => ({ outcomes, timedOut: false })),
+      new Promise<SenderDeliveryOutcomeCollection>((resolve) => {
+        timeout = setTimeout(() => resolve({ outcomes: [], timedOut: true }), senderDeliveryWarningTimeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 function findUnresolvedMentionHandles(
@@ -7566,7 +8084,12 @@ async function getChannelHumansWithExecutor(
       .from(serverMembers)
       .innerJoin(servers, eq(servers.id, serverMembers.serverId))
       .innerJoin(users, eq(serverMembers.userId, users.id))
-      .where(eq(serverMembers.serverId, channel.serverId));
+      // Shared with channelService.getServerAudienceHumans rather than restated.
+      // This function is a module-private copy only because the transactional
+      // send paths need a `DatabaseExecutor`; the audience predicate itself has
+      // no reason to be duplicated, and duplicating it is exactly how the Guest
+      // delivery defect arose.
+      .where(channelService.serverAudienceMemberCondition(channel.serverId));
     return rows as Awaited<ReturnType<typeof channelService.getChannelHumans>>;
   }
   const rows = await executor
@@ -7591,6 +8114,77 @@ async function getChannelHumansWithExecutor(
     ))
     .where(eq(channelHumans.channelId, channelId));
   return rows as Awaited<ReturnType<typeof channelService.getChannelHumans>>;
+}
+
+type JointProjectionMembers = {
+  humansByChannel: Map<string, Awaited<ReturnType<typeof channelService.getChannelHumans>>>;
+  agentsByChannel: Map<string, Awaited<ReturnType<typeof channelService.getChannelAgents>>>;
+};
+
+/**
+ * Same rows as getChannelHumansWithExecutor/getChannelAgentsWithExecutor for
+ * ordinary channels, for many joint projections in two queries. Joint
+ * projections are never the virtual #all channel, so that branch is not needed.
+ */
+async function getJointProjectionMembersWithExecutor(
+  executor: DatabaseExecutor,
+  localChannelIds: readonly string[],
+): Promise<JointProjectionMembers> {
+  const humansByChannel: JointProjectionMembers["humansByChannel"] = new Map();
+  const agentsByChannel: JointProjectionMembers["agentsByChannel"] = new Map();
+  if (localChannelIds.length === 0) return { humansByChannel, agentsByChannel };
+  const ids = [...new Set(localChannelIds)];
+  const [humanRows, agentRows] = await Promise.all([
+    executor
+      .select({
+        channelId: channelHumans.channelId,
+        id: users.id,
+        serverId: channels.serverId,
+        serverName: servers.name,
+        serverSlug: servers.slug,
+        name: users.name,
+        displayName: users.displayName,
+        description: users.description,
+        avatarUrl: users.avatarUrl,
+        role: serverMembers.role,
+      })
+      .from(channelHumans)
+      .innerJoin(channels, eq(channelHumans.channelId, channels.id))
+      .innerJoin(servers, eq(servers.id, channels.serverId))
+      .innerJoin(users, eq(channelHumans.userId, users.id))
+      .innerJoin(serverMembers, and(
+        eq(serverMembers.serverId, channels.serverId),
+        eq(serverMembers.userId, users.id),
+      ))
+      .where(inArray(channelHumans.channelId, ids)),
+    executor
+      .select({
+        channelId: channelAgents.channelId,
+        id: agents.id,
+        serverId: agents.serverId,
+        serverName: servers.name,
+        serverSlug: servers.slug,
+        name: agents.name,
+        displayName: agents.displayName,
+        status: agents.status,
+        avatarUrl: agents.avatarUrl,
+      })
+      .from(channelAgents)
+      .innerJoin(agents, eq(channelAgents.agentId, agents.id))
+      .innerJoin(servers, eq(servers.id, agents.serverId))
+      .where(and(inArray(channelAgents.channelId, ids), isNull(agents.deletedAt))),
+  ]);
+  for (const { channelId, ...human } of humanRows) {
+    const list = humansByChannel.get(channelId) ?? [];
+    list.push(human as Awaited<ReturnType<typeof channelService.getChannelHumans>>[number]);
+    humansByChannel.set(channelId, list);
+  }
+  for (const { channelId, ...agent } of agentRows) {
+    const list = agentsByChannel.get(channelId) ?? [];
+    list.push(agent as Awaited<ReturnType<typeof channelService.getChannelAgents>>[number]);
+    agentsByChannel.set(channelId, list);
+  }
+  return { humansByChannel, agentsByChannel };
 }
 
 async function getChannelAgentsWithExecutor(
@@ -8020,7 +8614,7 @@ async function buildPendingMentionActions(
       targetAvatarUrl: avatarUrlByTarget.get(`${row.targetType}:${row.targetId}`) ?? null,
       reason: "not_member" as const,
       availableActions,
-      expiresAt: new Date(Date.now() + PENDING_MENTION_TTL_MS).toISOString(),
+      expiresAt: new Date(currentTimeMs() + PENDING_MENTION_TTL_MS).toISOString(),
     }));
 }
 
@@ -8077,6 +8671,12 @@ export async function broadcastAndDeliver(
     mentionContract?: "v1" | "v2";
     attachmentIds?: string[];
     agentSendKey?: string;
+    /**
+     * With `agentSendKey`: refuse a replay whose target, content or attachments
+     * differ from the committed message (AgentSendIdempotencyConflictError,
+     * 409 `idempotency_key_reused`). Set by the agent-facing send routes.
+     */
+    rejectMismatchedAgentSendReplay?: boolean;
     randomId?: string;
     actionMetadata?: unknown | null;
     asTask?: boolean;
@@ -8100,9 +8700,11 @@ export async function broadcastAndDeliver(
   }
 ) {
   const deps = resolveMessageServiceDeps();
-  // Tests that replace persistence keep their deliberately tiny legacy seam.
-  // Runtime production always uses the executor-bound transaction below.
-  const useAtomicMessageTransaction = messageServiceDepsOverride === null;
+  // Explicit persistence replacement keeps the lightweight fixture seam; all
+  // production calls (and calls without a replacement) use the atomic writer
+  // transaction and fence. Side-effect-only dependency overrides remain
+  // compatible with the focused pipeline fixtures and never alter production.
+  const useAtomicMessageTransaction = !messageServiceDepsOverride?.createMessage;
   const { channelId, senderType, senderId, senderName, content, mentions, attachmentIds, agentSendKey, randomId, actionMetadata, asTask } = opts;
   const mentionContract = opts.mentionContract ?? "v1";
   const ordinaryExternalProjectionDecision = classifyOrdinaryMessageExternalProjection({
@@ -8124,7 +8726,7 @@ export async function broadcastAndDeliver(
     ? await channelService.getActiveJointChannelProjectionsByLocalChannel(jointThreadProjection?.canonicalThreadChannelId ?? channelId)
     : [];
   const jointProjection = jointProjections.find((projection) => projection.localChannelId === channelId);
-  const storageChannelId = jointProjection?.canonicalChannelId ?? channelId;
+  const storageChannelId = jointThreadProjection?.canonicalThreadChannelId ?? jointProjection?.canonicalChannelId ?? channelId;
   const externalDeliveryAuthorityChannelId = jointThreadProjection?.localParentChannelId ?? channelId;
   const channel = await runSlackBridgeOutboundPipelineStage(
     "channel_resolution",
@@ -8155,7 +8757,7 @@ export async function broadcastAndDeliver(
     await validateStructuredResourceReferences(content, requestedChannel.serverId);
   }
   addTraceEvent("message_pipeline.channel.resolved", {
-    duration_ms: Date.now() - channelResolveStart,
+    duration_ms: currentTimeMs() - channelResolveStart,
     sender_type: senderType,
     target_type: channel?.type ?? "missing",
     joint_projection_present: jointProjection != null,
@@ -8215,7 +8817,7 @@ export async function broadcastAndDeliver(
 
   // 1. v1.4: `asTask` no longer pre-allocates task columns on the message.
   // The host message is persisted as a plain chat message and the task fact is
-  // created against it afterwards (see `ensureTaskForMessage` below), so a
+  // created against it in the same writer transaction, so a
   // send-as-task can never produce both a message-task and a canonical task.
 
   type MessageAttachment = {
@@ -8292,6 +8894,7 @@ export async function broadcastAndDeliver(
         ...deps,
         getChannelHumans: (localChannelId) => getChannelHumansWithExecutor(executor, localChannelId, channel),
         getChannelAgents: (localChannelId) => getChannelAgentsWithExecutor(executor, localChannelId, channel),
+        getJointProjectionMembers: (localChannelIds) => getJointProjectionMembersWithExecutor(executor, localChannelIds),
         recordInboxNotificationFacts: (facts, nestedExecutor) => deps.recordInboxNotificationFacts(facts, nestedExecutor ?? executor),
       };
       await recordInboxFactsForPersistedMessage({
@@ -8315,7 +8918,8 @@ export async function broadcastAndDeliver(
     };
   };
 
-  const persistStart = Date.now();
+  let createdTask: TaskRow | null = null;
+  const persistStart = currentTimeMs();
   const persistence = await traceQuerySpan({
     queryName: "messages.insert",
     phase: "message_persist",
@@ -8341,51 +8945,66 @@ export async function broadcastAndDeliver(
         mentionAndInboxFinalizedInPersistence,
       };
     }
-    if (senderType === "agent" && agentSendKey) {
+    if (senderType === "agent" && agentSendKey
+      && (useAtomicMessageTransaction || __hasAgentSendReplayDbOverrideForTests())) {
+      const runAgentReplay = async (tx?: DatabaseExecutor) => {
+        const result = await createOrReplayAgentSend({
+          channelId: storageChannelId,
+          senderId,
+          content,
+          agentSendKey,
+          attachmentIds,
+          rejectMismatchedReplay: opts.rejectMismatchedAgentSendReplay === true,
+          beforeInsert: tx && useAtomicMessageTransaction
+            ? (executor) => lockOrdinaryMessageExternalDeliveryAdmission({
+              executor,
+              authorityChannelId: externalDeliveryAuthorityChannelId,
+              requestedChannelId: channelId,
+              canonicalConversationId: storageChannelId,
+              decision: ordinaryExternalProjectionDecision,
+            })
+            : undefined,
+          onInserted: tx && useAtomicMessageTransaction
+            ? async ({ executor, message: insertedMessage }: AgentSendInsertedTransactionInput) => {
+              if (idempotentMentionResolutionError) throw idempotentMentionResolutionError;
+              return finalizeNewChatMessageInTransaction({
+                executor,
+                message: insertedMessage,
+                channel,
+                requestedChannelId: channelId,
+                senderType,
+                senderId,
+                authorName: senderName,
+                mentionHandles,
+                mentionResolution,
+                mentionScope,
+                mentions,
+                jointProjection,
+                jointProjections,
+                jointThreadProjection,
+                ordinaryExternalProjectionDecision,
+                mentionContract,
+                deps,
+              });
+            }
+            : undefined,
+        }, tx);
+        if (asTask && tx) createdTask = await ensureTaskForMessage(result.message.id, senderType, senderId, tx);
+        return result;
+      };
       const replayResult = await traceMessageDbPhase({
         phase: "message_pipeline.persist",
         queryName: "messages.agent_send_transaction",
         dbOperation: "transaction",
-      }, () => createOrReplayAgentSend({
-        channelId: storageChannelId,
-        senderId,
-        content,
-        agentSendKey,
-        attachmentIds,
-        beforeInsert: useAtomicMessageTransaction
-          ? (executor) => lockOrdinaryMessageExternalDeliveryAdmission({
-            executor,
-            authorityChannelId: externalDeliveryAuthorityChannelId,
-            requestedChannelId: channelId,
-            canonicalConversationId: storageChannelId,
-            decision: ordinaryExternalProjectionDecision,
-          })
-          : undefined,
-        onInserted: useAtomicMessageTransaction
-          ? async ({ executor, message: insertedMessage }: AgentSendInsertedTransactionInput) => {
-            if (idempotentMentionResolutionError) throw idempotentMentionResolutionError;
-            return finalizeNewChatMessageInTransaction({
-              executor,
-              message: insertedMessage,
-              channel,
-              requestedChannelId: channelId,
-              senderType,
-              senderId,
-              authorName: senderName,
-              mentionHandles,
-              mentionResolution,
-              mentionScope,
-              mentions,
-              jointProjection,
-              jointProjections,
-              jointThreadProjection,
-              ordinaryExternalProjectionDecision,
-              mentionContract,
-              deps,
-            });
-          }
-          : undefined,
-      }));
+      }, () => __hasAgentSendReplayDbOverrideForTests()
+        ? runAgentReplay()
+        // Every write of this send, including derived facts and the outbound
+        // enqueue, lives in this one transaction, so a deadlock/serialization
+        // abort leaves nothing behind and the idempotent send can re-run.
+        : withTransientTransactionRetry(
+          () => withChannelWriterFence(channelId, runAgentReplay),
+          { onRetry: traceSendTransactionRetry("agent") },
+        ));
       const transactionFacts = replayResult.insertedTransactionResult;
       return {
         replayed: replayResult.replayed,
@@ -8398,12 +9017,13 @@ export async function broadcastAndDeliver(
         threadAgentDeliveryCandidates: transactionFacts?.threadAgentDeliveryCandidates,
       };
     }
-    if (senderType === "user" && randomId) {
+    if (useAtomicMessageTransaction && senderType === "user" && randomId) {
       const replayResult = await traceMessageDbPhase({
         phase: "message_pipeline.persist",
         queryName: "messages.user_random_send_transaction",
         dbOperation: "transaction",
-      }, () => createOrReplayUserRandomSend({
+      }, () => withTransientTransactionRetry(() => withChannelWriterFence(channelId, async (tx) => {
+        const result = await createOrReplayUserRandomSend({
         channelId: storageChannelId,
         authorityChannelId: externalDeliveryAuthorityChannelId,
         requestedChannelId: channelId,
@@ -8425,7 +9045,10 @@ export async function broadcastAndDeliver(
         jointThreadProjection,
         ordinaryExternalProjectionDecision,
         deps,
-      }));
+      }, tx);
+        if (asTask) createdTask = await ensureTaskForMessage(result.message.id, senderType, senderId, tx);
+        return result;
+      }), { onRetry: traceSendTransactionRetry("user") }));
       return {
         replayed: replayResult.replayed,
         message: replayResult.message,
@@ -8446,7 +9069,7 @@ export async function broadcastAndDeliver(
         "chat",
         // v1.4: never a task-message — the task fact is created separately.
         undefined,
-        { actionMetadata: actionMetadata ?? null },
+        { actionMetadata: actionMetadata ?? null, randomId: randomId ?? null },
         executor,
       );
       const linked = executor && attachmentIds && attachmentIds.length > 0
@@ -8484,6 +9107,7 @@ export async function broadcastAndDeliver(
           outboundDeliveryId: null,
           threadAgentDeliveryCandidates: undefined,
         };
+      if (asTask && executor) createdTask = await ensureTaskForMessage(createdMessage.id, senderType, senderId, executor);
       return {
         replayed: false,
         message: createdMessage,
@@ -8498,7 +9122,7 @@ export async function broadcastAndDeliver(
         phase: "message_pipeline.persist",
         queryName: "messages.direct_send_transaction",
         dbOperation: "transaction",
-      }, () => getDb().transaction(async (tx) => {
+      }, () => withChannelWriterFence(channelId, async (tx) => {
         await lockOrdinaryMessageExternalDeliveryAdmission({
           executor: tx,
           authorityChannelId: externalDeliveryAuthorityChannelId,
@@ -8524,7 +9148,7 @@ export async function broadcastAndDeliver(
   mentionAndInboxFinalizedInPersistence = persistence.mentionAndInboxFinalizedInPersistence;
   threadAgentDeliveryCandidatesFromFacts = persistence.threadAgentDeliveryCandidates;
   addTraceEvent("message_pipeline.message.persisted", {
-    duration_ms: Date.now() - persistStart,
+    duration_ms: currentTimeMs() - persistStart,
     sender_type: senderType,
     target_type: channel?.type ?? "missing",
     replayed,
@@ -8535,12 +9159,11 @@ export async function broadcastAndDeliver(
   // 1b. Create the canonical task fact for `asTask` sends. Runs after persist so
   // it associates to a real message id, and is idempotent so an idempotency-key
   // replay converges on the same task row rather than minting a second one.
-  let createdTask: TaskRow | null = null;
   if (asTask) {
-    const taskCreateStart = Date.now();
-    createdTask = await ensureTaskForMessage(message.id, senderType, senderId);
+    const taskCreateStart = currentTimeMs();
+    createdTask ??= await ensureTaskForMessage(message.id, senderType, senderId);
     addTraceEvent("message_pipeline.task_number.allocated", {
-      duration_ms: Date.now() - taskCreateStart,
+      duration_ms: currentTimeMs() - taskCreateStart,
       sender_type: senderType,
     });
     // The remaining pipeline (socket payloads, agent delivery) reads task facts
@@ -8560,7 +9183,7 @@ export async function broadcastAndDeliver(
     }
   }
 
-  const mentionWriteStart = Date.now();
+  const mentionWriteStart = currentTimeMs();
 
   // 2. Write message_mentions — send-time resolved mention intent/fact.
   // Awaited before broadcast/delivery so mention facts are durable.
@@ -8604,7 +9227,7 @@ export async function broadcastAndDeliver(
   }
   if (mentionHandles && mentionHandles.length > 0) {
     addTraceEvent("message_pipeline.mentions.recorded", {
-      duration_ms: Date.now() - mentionWriteStart,
+      duration_ms: currentTimeMs() - mentionWriteStart,
       sender_type: senderType,
       target_type: channel?.type ?? "missing",
       mention_count: mentionHandles.length,
@@ -8619,7 +9242,7 @@ export async function broadcastAndDeliver(
   let inboxFactsRecorded = false;
   const recordInboxFactsForSend = async () => {
     if (!channel || replayed || inboxFactsRecorded || mentionAndInboxFinalizedInPersistence) return;
-    const inboxFactStart = Date.now();
+    const inboxFactStart = currentTimeMs();
     const { recorded: factCount, threadAgentDeliveryCandidates } = await recordInboxFactsForPersistedMessage({
       channel,
       message,
@@ -8633,7 +9256,7 @@ export async function broadcastAndDeliver(
     threadAgentDeliveryCandidatesFromFacts = threadAgentDeliveryCandidates;
     inboxFactsRecorded = true;
     addTraceEvent("message_pipeline.inbox_notification_facts.recorded", {
-      duration_ms: Date.now() - inboxFactStart,
+      duration_ms: currentTimeMs() - inboxFactStart,
       sender_type: senderType,
       target_type: channel.type,
       fact_count: factCount,
@@ -8645,7 +9268,9 @@ export async function broadcastAndDeliver(
 
   const enriched = {
     ...message,
-    channelId: jointProjection?.localChannelId ?? message.channelId,
+    channelId: jointThreadProjection?.localThreadChannelId
+      ?? jointProjection?.localChannelId
+      ?? message.channelId,
     senderName,
     senderMembershipStatus: senderType === "user" && message.messageType !== "system" ? "active" as const : null,
     attachments: msgAttachments,
@@ -8669,7 +9294,7 @@ export async function broadcastAndDeliver(
   }
 
   if (channel?.type === "thread" && jointThreadProjection && channel.parentMessageId && !replayed) {
-    const jointThreadSideEffectsStart = Date.now();
+    const jointThreadSideEffectsStart = currentTimeMs();
     const { uniqueName: senderUniqueName, description: senderDescription } = await deps.getSenderIdentity(senderType, senderId, senderName);
     await handleJointThreadPostBroadcastSideEffects({
       io,
@@ -8690,7 +9315,7 @@ export async function broadcastAndDeliver(
       targetVisibleMentions,
     });
     addTraceEvent("message_pipeline.joint_thread_side_effects.finished", {
-      duration_ms: Date.now() - jointThreadSideEffectsStart,
+      duration_ms: currentTimeMs() - jointThreadSideEffectsStart,
       sender_type: senderType,
       attachment_count: msgAttachments.length,
       mention_count: resolvedMentions.length,
@@ -8725,7 +9350,7 @@ export async function broadcastAndDeliver(
     { preserveError: isMessageRouteDomainError, topology: frontendTopology },
   );
   addTraceEvent("message_pipeline.frontend_emitted", {
-    duration_ms: Date.now() - frontendEmitStart,
+    duration_ms: currentTimeMs() - frontendEmitStart,
     sender_type: senderType,
     target_type: channel?.type ?? "missing",
     replayed,
@@ -8735,10 +9360,15 @@ export async function broadcastAndDeliver(
     return enriched;
   }
 
-  // 4. Advance sender's legacy read-ish cursor so their own message isn't counted as unread
+  // 4. Advance sender's legacy read-ish cursor so their own message isn't counted as unread.
+  // An agent's cursor only moves when that reads through nothing it has not
+  // been handed: unread from others below its message stays unread (and is
+  // still delivered) instead of being marked read by the send.
   const senderReadMutation = senderType === "user"
     ? deps.markRead(senderId, channelId, message.seq)
-    : deps.markAgentLegacyRead(senderId, channelId, message.seq);
+    : deps.markAgentOwnSendRead
+      ? deps.markAgentOwnSendRead(senderId, channelId, message.seq, storageChannelId)
+      : deps.markAgentLegacyRead(senderId, channelId, message.seq);
   const sourceServerId = requestedChannel?.serverId ?? channel?.serverId;
   if (sourceServerId) {
     scheduleSenderReadReceipt({
@@ -8770,7 +9400,7 @@ export async function broadcastAndDeliver(
     return enriched;
   }
   if (jointProjection && jointProjections.length > 0) {
-    const jointDeliveryScheduleStart = Date.now();
+    const jointDeliveryScheduleStart = currentTimeMs();
     const { uniqueName: senderUniqueName, description: senderDescription } = await deps.getSenderIdentity(senderType, senderId, senderName);
     const senderAuthorityServerId = jointProjection?.serverId ?? channel.serverId;
     const agentDeliveryOptions = await getAgentDeliveryOptionsForSender(deps, senderAuthorityServerId, senderType, senderId);
@@ -8778,7 +9408,10 @@ export async function broadcastAndDeliver(
     const mentionNames = getMentionNameSet(content);
     const mentionedUserIds = new Set(targetVisibleMentions.filter((mention) => mention.type === "user").map((mention) => mention.id));
     const body = summarizePushBody(content, msgAttachments.length);
-    const deliveries = jointProjections.map(async (projection): Promise<NotificationPushProjectionGroup | null> => {
+    // Bounded: each projection runs ~8 queries plus per-agent delivery. With up
+    // to 30 servers per joint, starting them all at once could exhaust the
+    // connection pool for the whole server (contract v0.3 §18.10.1).
+    const deliveries = mapBounded(jointProjections, JOINT_DELIVERY_PROJECTION_CONCURRENCY, async (projection): Promise<NotificationPushProjectionGroup | null> => {
       const projectionAgents = await deps.getChannelAgents(projection.localChannelId);
       const renderedBaseContent = await deps.renderAgentReadablePermalinks(agentFacingBaseContent, projection.serverId);
       const piercedAgentIds = new Set(targetVisibleMentionedAgentIds);
@@ -8873,12 +9506,12 @@ export async function broadcastAndDeliver(
         identity: notificationPushSocketIdentity,
       };
     });
-    Promise.all(deliveries).then(async (groups) => {
+    deliveries.then(async (groups) => {
       const projectionTargets = buildNotificationPushProjectionTargets(
         groups.filter((group): group is NotificationPushProjectionGroup => group != null),
       );
       addTraceEvent("message_pipeline.joint_delivery.scheduled", {
-        duration_ms: Date.now() - jointDeliveryScheduleStart,
+        duration_ms: currentTimeMs() - jointDeliveryScheduleStart,
         projection_count: jointProjections.length,
         push_target_count: projectionTargets.length,
         sender_type: senderType,
@@ -8908,7 +9541,7 @@ export async function broadcastAndDeliver(
     }).catch(() => {});
     return enriched;
   }
-  const deliveryPrepStart = Date.now();
+  const deliveryPrepStart = currentTimeMs();
   const threadAgentDeliveryResolution = isThread
     ? await resolveThreadAgentDeliveryCandidates({
         deps,
@@ -8924,18 +9557,10 @@ export async function broadcastAndDeliver(
   // Resolve the unique sender name (for @mentions) and description for agent-visible metadata.
   const { uniqueName: senderUniqueName, description: senderDescription } = await deps.getSenderIdentity(senderType, senderId, senderName);
 
-  // For DMs, resolve the human peer's unique name for each agent
-  let dmHumanUniqueNames: Map<string, string> | undefined;
-  if (isDM) {
-    const humans = await deps.getChannelHumans(channelId);
-    dmHumanUniqueNames = new Map(humans.map((h) => [h.id, h.name]));
-  }
-
   // For threads, resolve parent channel info and auto-join @mentioned agents
   let parentChannelName: string | undefined;
   let parentChannelId: string | undefined;
   let parentChannelType: string | undefined;
-  let parentDmHumanNames: Map<string, string> | undefined;
   let threadShortId: string | undefined;
   const newlyJoinedThreadAgentIds = new Set<string>();
   const reactivatedThreadAgentIds = new Set<string>();
@@ -8950,11 +9575,6 @@ export async function broadcastAndDeliver(
       if (parentChannel) {
         parentChannelName = parentChannel.name;
         parentChannelType = parentChannel.type;
-        // For DM parent channels, resolve human peer names so each agent gets the right target
-        if (parentChannel.type === "dm") {
-          const humans = await channelService.getChannelHumans(parentChannelId);
-          parentDmHumanNames = new Map(humans.map((h) => [h.id, h.name]));
-        }
       }
 
       // Mention auto-follow (see thread contract in schema.ts):
@@ -8997,7 +9617,7 @@ export async function broadcastAndDeliver(
               channelId,
               channel.parentMessageId!,
               "mentioned",
-              { reactivateUnfollowed: true, preserveExistingReason: true },
+              { reactivateUnfollowed: true, preserveExistingReason: true, joinedThroughSeq: message.seq - 1 },
             );
             const followRows = await db
               .select({ followerId: threadFollows.followerId })
@@ -9048,7 +9668,7 @@ export async function broadcastAndDeliver(
                 channelId,
                 channel.parentMessageId!,
                 "mentioned",
-                { reactivateUnfollowed: true, preserveExistingReason: true },
+                { reactivateUnfollowed: true, preserveExistingReason: true, joinedThroughSeq: message.seq - 1 },
               );
             }
           }
@@ -9065,11 +9685,12 @@ export async function broadcastAndDeliver(
     }
   }
 
-  // Fire-and-forget: deliver to agents in parallel, don't block the response.
-  // Messages are already persisted in DB, so no durability risk.
+  // Deliver to agents in parallel. Ordinary channel sends stay non-blocking;
+  // direct DMs wait for typed receipts so the sender can see manual-stop drops.
+  // Messages are already persisted in DB, so delivery warnings never fail the send.
   const renderedBaseContent = await deps.renderAgentReadablePermalinks(agentFacingBaseContent, channel.serverId);
   const deliveryOptions = await getAgentDeliveryOptionsForSender(deps, channel.serverId, senderType, senderId);
-  const deliveryPromises: Promise<unknown>[] = [];
+  const deliveryOutcomePromises: Promise<SenderDeliveryOutcome>[] = [];
   const preparedDeliveries: { agentId: string; deliveryPayload: AgentMessage }[] = [];
   const mentionNames = getMentionNameSet(content);
   // Mention-driven delivery to non-joined agents is gated on target-visible
@@ -9110,22 +9731,12 @@ export async function broadcastAndDeliver(
     );
     const renderedContent = appendAgentForwardedSnapshot(renderedBaseContent, recipientForwardedSnapshot);
 
-    // For DM channels, use the human peer's unique name (not the channel's stored name)
-    let channelNameForAgent = channel?.name || "unknown";
-    if (isDM && dmHumanUniqueNames) {
-      // The DM peer from the agent's perspective is the sender (if human)
-      channelNameForAgent = senderUniqueName;
-    }
-
-    // For threads in DMs, resolve the parent DM peer name per agent
-    let parentNameForAgent = parentChannelName;
-    if (isThread && parentChannelType === "dm" && parentDmHumanNames) {
-      // Find any human in the DM as the peer name (from the agent's perspective)
-      for (const [, name] of parentDmHumanNames) {
-        parentNameForAgent = name;
-        break;
-      }
-    }
+    const recipientNames = await resolveRecipientDeliveryNames(channel.serverId, agent.id, channel, {
+      parent_channel_id: parentChannelId, parent_channel_name: parentChannelName,
+      parent_channel_type: parentChannelType as AgentMessage["parent_channel_type"],
+    });
+    const channelNameForAgent = recipientNames.channel_name;
+    const parentNameForAgent = recipientNames.parent_channel_name ?? parentChannelName;
 
     let threadJoinContext: AgentThreadJoinContext | undefined;
     if (
@@ -9223,36 +9834,47 @@ export async function broadcastAndDeliver(
   // broadcastAndDeliver returns.
   for (const { agentId, deliveryPayload } of preparedDeliveries) {
     const mentionDeliveryOccurrenceId = mentionDeliveryOccurrenceIds.get(agentId);
-    deliveryPromises.push(
+    deliveryOutcomePromises.push(
       agentOrchestrator.deliverMessage(agentId, deliveryPayload, {
         ...deliveryOptions,
         ...(mentionDeliveryOccurrenceId && { mentionDeliveryOccurrenceId }),
-      }).catch((err) => {
+      }).then((result) => ({ agentId, result })).catch((err) => {
         console.error(`[MessageService] Failed to deliver to agent ${agentId}:`, serializeErrorForLog(err));
+        return { agentId, result: null };
       }),
     );
   }
   // These delivery promises now carry real DB work, so the aggregate joins this file's existing
   // drainable lifecycle instead of staying an unregistered fire-and-forget. Registration is
-  // synchronous, so it is visible before we return; the product path stays non-blocking because
-  // nothing here is awaited.
-  trackSenderReadReceipt(Promise.all(deliveryPromises).then(() => undefined));
+  // synchronous, so it is visible before we return. Direct DMs also sample typed receipts with a
+  // bounded wait, so a sender warning can never turn successful persistence into a slow send.
+  trackSenderReadReceipt(Promise.all(deliveryOutcomePromises).then(() => undefined));
+  let senderDeliveryWarningsTimedOut = false;
+  if (isDM && deliveryOutcomePromises.length > 0) {
+    const { outcomes: deliveryOutcomes, timedOut } = await collectSenderDeliveryWarningOutcomes(deliveryOutcomePromises);
+    senderDeliveryWarningsTimedOut = timedOut;
+    attachSenderDeliveryWarnings(
+      enriched,
+      buildSenderDeliveryWarnings(deliveryOutcomes, { isDM }),
+    );
+  }
   addTraceEvent("message_pipeline.agent_delivery.scheduled", {
     ...traceChannelAudienceAttrs(channel),
-    duration_ms: Date.now() - deliveryPrepStart,
+    duration_ms: currentTimeMs() - deliveryPrepStart,
     sender_type: senderType,
     channel_agent_count: channelAgentList.length,
     agent_audience_count: channelAgentList.length,
     mention_only_agent_count: mentionOnlyAgents.length,
     muted_agent_suppressed_count: mutedAgentDeliveryIds.size,
-    delivery_count: deliveryPromises.length,
-    agent_delivery_count: deliveryPromises.length,
+    delivery_count: deliveryOutcomePromises.length,
+    agent_delivery_count: deliveryOutcomePromises.length,
+    ...(senderDeliveryWarningsTimedOut && { sender_delivery_warning_timed_out: true }),
     newly_joined_thread_agent_count: newlyJoinedThreadAgentIds.size,
     reactivated_thread_agent_count: reactivatedThreadAgentIds.size,
     ...(threadAgentDeliveryResolution && { thread_agent_audience_source: threadAgentDeliveryResolution.source }),
   });
 
-  const pushBuildStart = Date.now();
+  const pushBuildStart = currentTimeMs();
   const pushTargets = await deps.buildPushTargets({
     channel,
     messageId: message.id,
@@ -9267,7 +9889,7 @@ export async function broadcastAndDeliver(
   const pushTraceAttrs = getPushTargetTraceAttrs(pushTargets);
   addTraceEvent("message_pipeline.push_targets.built", {
     ...traceChannelAudienceAttrs(channel),
-    duration_ms: Date.now() - pushBuildStart,
+    duration_ms: currentTimeMs() - pushBuildStart,
     sender_type: senderType,
     target_count: pushTargets.size,
     ...pushTraceAttrs,

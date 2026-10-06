@@ -22,8 +22,8 @@ import {
   routeAuthPolicy,
   type PrincipalKind,
   type RouteAuthPolicyEntry,
-} from "./routeAuthPolicy.js";
-import { requireMachineAuth, requireAgentCredentialAuth, requireComputerAuth } from "./auth.js";
+} from "./routeAuthPolicy";
+import { requireMachineAuth, requireAgentCredentialAuth, requireComputerAuth } from "./auth";
 
 function fullRequestPath(req: Request): string {
   return `${req.baseUrl ?? ""}${req.path ?? ""}` || req.path;

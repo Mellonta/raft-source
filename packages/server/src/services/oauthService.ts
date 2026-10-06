@@ -13,8 +13,10 @@ import {
   type OAuthClientCategory,
   isRaftOAuthScope,
   raftOAuthScopeRequiresResource,
+  renderThirdPartyInertText,
+  type AgentInstalledAppCatalogEntry,
 } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import {
   agents,
   integrationAuditEvents,
@@ -24,6 +26,7 @@ import {
   oauthAccessTokens,
   oauthClientMaintainers,
   oauthClients,
+  oauthAgentAutoGrantBlocks,
   oauthGrants,
   serverAgentMembers,
   notificationDeliveries,
@@ -32,18 +35,25 @@ import {
   servers,
   thirdPartyAgentEvents,
   users,
-} from "../db/schema.js";
-import { getThumbnailUrl } from "../routes/attachments.js";
+} from "../db/schema";
+import { actorHasServerCapabilityInServer } from "../lib/actorPermissions";
+import { getThumbnailUrl } from "../routes/attachments";
 import {
   sendAppReviewRequestEmail,
   type AppReviewRequestEmailInput,
-} from "./emailService.js";
-import { getCdnStorage, getStorage } from "./storageService.js";
-import * as integrationAuditService from "./integrationAuditService.js";
+} from "./emailService";
+import { getCdnStorage, getStorage } from "./storageService";
+import * as integrationAuditService from "./integrationAuditService";
 import {
   oauthClientIdIsUserManagedPredicate,
   oauthClientIsUserManagedPredicate,
-} from "./oauthClientManagementPolicy.js";
+} from "./oauthClientManagementPolicy";
+import {
+  projectOfficialAppDiscovery,
+  prepareExplicitUserInstallState,
+  recordExplicitUserInstallState,
+  recordExplicitUserUninstallState,
+} from "./officialAppAutoInstallService";
 
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000;
 export const HUMAN_AUTHORIZATION_CODE_TTL_MS = 10 * 60 * 1000;
@@ -56,6 +66,7 @@ const THIRD_PARTY_EVENT_MAX_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const THIRD_PARTY_EVENT_DEFAULT_TTL_MS = 24 * 60 * 60 * 1000;
 let getDbForService = getDb;
 let sendAppReviewRequestEmailForService = sendAppReviewRequestEmail;
+let createOAuthClientObserverForService: (() => void) | null = null;
 
 export const PUBLIC_RAFT_OAUTH_SCOPES = RAFT_OAUTH_PUBLIC_DISCOVERY_SCOPES;
 
@@ -87,6 +98,14 @@ export function __setOAuthServiceDbForTests(mockGetDb: typeof getDb) {
 export function __resetOAuthServiceDbForTests() {
   getDbForService = getDb;
   sendAppReviewRequestEmailForService = sendAppReviewRequestEmail;
+  createOAuthClientObserverForService = null;
+}
+
+export function __setOAuthServiceCreateClientObserverForTests(observer: (() => void) | null): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("OAuth service observers are test-only");
+  }
+  createOAuthClientObserverForService = observer;
 }
 
 export function __setOAuthServiceReviewEmailSenderForTests(
@@ -117,6 +136,8 @@ export type IntegrationOverviewItem = {
   resolvedAt: string | null;
   resolvedByUserId: string | null;
   revokedAt: string | null;
+  /** Active grants: how access was granted (null for grants older than this field, and for pending requests). */
+  grantSource: "person" | "agent_login" | "app_request" | null;
 };
 
 export type OAuthClientRecord = {
@@ -130,6 +151,7 @@ export type OAuthClientRecord = {
   publishRejectionReason: string | null;
   name: string;
   description: string | null;
+  whenToUse: string | null;
   homepageUrl: string | null;
   returnUrl: string | null;
   agentManifestUrl: string | null;
@@ -142,6 +164,8 @@ export type OAuthClientRecord = {
 };
 
 export type MarketplaceOAuthClientRecord = OAuthClientRecord & {
+  official: boolean;
+  purpose: string;
   installedAt: Date | null;
   marketplaceInstallBadge: MarketplaceInstallBadge;
   publisherName: string | null;
@@ -213,6 +237,12 @@ export type AgentManifestUrlSource = "explicit" | "well_known";
 type AuthenticatedClient = OAuthClientRecord;
 type OAuthPrincipalType = "agent" | "human";
 
+export async function projectOfficialAppDiscoveryForAgent(
+  client: Pick<OAuthClientRecord, "id" | "serverId" | "clientId">,
+) {
+  return projectOfficialAppDiscovery({ clientId: client.id, sourceServerId: client.serverId, clientKey: client.clientId });
+}
+
 function isServerLocalAppForServerPredicate(serverId: string) {
   return and(
     eq(oauthClients.serverId, serverId),
@@ -220,11 +250,18 @@ function isServerLocalAppForServerPredicate(serverId: string) {
   );
 }
 
-function isLiveBuiltInAppPredicate() {
+// Directory-facing variant: what an agent should see in `integrationList`.
+// Disabled server-local apps are excluded here (same semantics as the
+// third-party branch, which already requires `enabled = true`), so neither
+// the daemon prompt render nor `raft integration list` surfaces a stopped
+// app. getOAuthClientForServer deliberately does NOT use this variant: it
+// backs the OAuth authorize flow, where `enabled` currently only acts as a
+// kill switch for third-party apps; hiding a disabled local app from the
+// authorize flow is a separate product decision and is left unchanged.
+function isDiscoverableServerLocalAppForServerPredicate(serverId: string) {
   return and(
+    isServerLocalAppForServerPredicate(serverId),
     eq(oauthClients.enabled, true),
-    eq(oauthClients.publishStatus, "published"),
-    eq(oauthClients.appType, "slock_builtin"),
   );
 }
 
@@ -301,6 +338,7 @@ const OAUTH_CLIENT_PUBLIC_COLUMNS = {
   publishRejectionReason: oauthClients.publishRejectionReason,
   name: oauthClients.name,
   description: oauthClients.description,
+  whenToUse: oauthClients.whenToUse,
   homepageUrl: oauthClients.homepageUrl,
   returnUrl: oauthClients.returnUrl,
   agentManifestUrl: oauthClients.agentManifestUrl,
@@ -700,7 +738,43 @@ function scopesEqual(a: string[], b: string[]) {
 }
 
 function canAutoGrantAgentClient(appType: OAuthClientAppType, installed: boolean): boolean {
-  return appType === "server_local" || appType === "slock_builtin" || installed;
+  return appType === "server_local" || (appType === "third_party_global" && installed);
+}
+
+/**
+ * Whether an app gets a grant for this agent with no person involved. Only
+ * when whoever stands behind the app already has authority over the agent:
+ * an installed published app (installing needs an owner/admin), or a
+ * server-local app created by a server owner/admin or by the agent's own
+ * creator, or when the agent itself asked. Never after a person revoked this
+ * app's grant for this agent.
+ */
+async function mayAutoGrantAgentClient(
+  executor: DatabaseExecutor,
+  client: { id: string; appType: OAuthClientAppType; createdByUserId: string; installed: boolean },
+  agent: { agentId: string; serverId: string; creatorType: string | null; creatorId: string | null },
+  initiatedByAgent: boolean,
+): Promise<boolean> {
+  if (!canAutoGrantAgentClient(client.appType, client.installed)) return false;
+  const [blocked] = await executor.select({ agentId: oauthAgentAutoGrantBlocks.agentId })
+    .from(oauthAgentAutoGrantBlocks)
+    .where(and(
+      eq(oauthAgentAutoGrantBlocks.agentId, agent.agentId),
+      eq(oauthAgentAutoGrantBlocks.clientId, client.id),
+    ))
+    .limit(1);
+  if (blocked) return false;
+  if (initiatedByAgent || client.appType === "third_party_global") return true;
+  if (agent.creatorType === "user" && agent.creatorId === client.createdByUserId) return true;
+  return actorHasServerCapabilityInServer(agent.serverId, "user", client.createdByUserId, "manageExternalAuth", executor);
+}
+
+/** A person granted this app access to this agent again: automatic grants may resume. */
+export async function clearAgentAutoGrantBlock(executor: DatabaseExecutor, agentId: string, clientId: string): Promise<void> {
+  await executor.delete(oauthAgentAutoGrantBlocks).where(and(
+    eq(oauthAgentAutoGrantBlocks.agentId, agentId),
+    eq(oauthAgentAutoGrantBlocks.clientId, clientId),
+  ));
 }
 
 function defaultClientId(name: string) {
@@ -821,6 +895,50 @@ function normalizeCategory(raw: unknown): OAuthClientCategory {
   throw new Error(`category must be one of: ${OAUTH_CLIENT_CATEGORIES.join(", ")}`);
 }
 
+// whenToUse (task #319) is agent-facing prompt material: a daemon renders it
+// verbatim into every agent's system prompt, so the write path is the only
+// place that can keep an injectable shape out. One validator shared by the
+// Web PATCH route and the agent `app update` route; either path hitting it
+// must produce the same verdict.
+//
+// Rules:
+//  - null/undefined/empty trims to null (field cleared);
+//  - at most 160 Unicode code points;
+//  - no control characters (covers newlines — the value is one line);
+//  - a bare `@scope/pkg` package name outside inline code is refused with a
+//    hint to wrap it in backticks, because the prompt renderer would turn the
+//    leading `@` into a reference-shaped line. Backticked or otherwise
+//    code-wrapped occurrences are stored as-is.
+const WHEN_TO_USE_MAX_CODE_POINTS = 160;
+const WHEN_TO_USE_BARE_SCOPED_PACKAGE = /(?<=^|[\s(])@[a-z0-9][a-z0-9-]*\/[a-z0-9._-]+/gi;
+
+function stripInlineCode(value: string): string {
+  // Backtick spans (`` `…` ``) plus fenced blocks (```…```); rendered text
+  // treats both as verbatim, so neither should participate in the bare-package
+  // check.
+  return value
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`]*`/g, " ");
+}
+
+export function normalizeWhenToUse(raw: string | null | undefined): string | null {
+  const value = raw?.trim() || null;
+  if (value === null) return null;
+  const codePoints = [...value].length;
+  if (codePoints > WHEN_TO_USE_MAX_CODE_POINTS) {
+    throw new Error(`whenToUse must be at most ${WHEN_TO_USE_MAX_CODE_POINTS} characters`);
+  }
+  if (/[\u0000-\u001F\u007F]/.test(value)) {
+    throw new Error("whenToUse must be a single line without control characters");
+  }
+  const bare = WHEN_TO_USE_BARE_SCOPED_PACKAGE;
+  bare.lastIndex = 0;
+  if (bare.test(stripInlineCode(value))) {
+    throw new Error("whenToUse must not contain a bare scoped package name like @scope/pkg; wrap it in backticks like `@scope/pkg`");
+  }
+  return value;
+}
+
 function hasMarketplaceListingDescription(value: string | null | undefined): boolean {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -834,7 +952,7 @@ function auditClientDiff(
   after: Partial<OAuthClientRecord>,
 ) {
   const diff: Record<string, { before: unknown; after: unknown }> = {};
-  for (const key of ["name", "description", "homepageUrl", "returnUrl", "agentManifestUrl", "allowedScopes", "category", "logoUrl"] as const) {
+  for (const key of ["name", "description", "whenToUse", "homepageUrl", "returnUrl", "agentManifestUrl", "allowedScopes", "category", "logoUrl"] as const) {
     if (before[key] !== after[key]) {
       diff[key] = { before: before[key] ?? null, after: after[key] ?? null };
     }
@@ -853,6 +971,7 @@ export async function createOAuthClient(input: {
   name: string;
   appType?: OAuthClientAppType;
   description?: string | null;
+  whenToUse?: string | null;
   homepageUrl?: string | null;
   returnUrl?: string | null;
   agentManifestUrl?: string | null;
@@ -869,18 +988,23 @@ export async function createOAuthClient(input: {
   const normalizedClientId = normalizeClientId(input.clientId, trimmedName);
   const rawSecret = generateOAuthClientSecret();
   const appType = input.appType ?? "server_local";
+  if (appType === "slock_builtin") {
+    throw new Error("slock_builtin OAuth clients are retired");
+  }
   const allowedScopes = normalizeAllowedScopes(input.allowedScopes);
+  createOAuthClientObserverForService?.();
 
   return db.transaction(async (tx) => {
     const [created] = await tx.insert(oauthClients).values({
       serverId: input.serverId,
       clientId: normalizedClientId,
       clientSecretHash: hashSecret(rawSecret),
-      clientSecret: appType === "slock_builtin" ? rawSecret : null,
+      clientSecret: null,
       appType,
-      publishStatus: appType === "slock_builtin" ? "published" : "private",
+      publishStatus: "private",
       name: trimmedName,
       description: input.description?.trim() || null,
+      whenToUse: normalizeWhenToUse(input.whenToUse),
       homepageUrl: input.homepageUrl?.trim() || null,
       returnUrl: normalizeReturnUrl(input.returnUrl),
       agentManifestUrl: normalizeAgentManifestUrl(input.agentManifestUrl),
@@ -1260,6 +1384,7 @@ export async function updateOAuthClientForAgent(input: {
   actorAgentId: string;
   name?: string;
   description?: string | null;
+  whenToUse?: string | null;
   category?: unknown;
   homepageUrl?: string | null;
   returnUrl?: string | null;
@@ -1301,6 +1426,7 @@ export async function updateOAuthClientForAgent(input: {
       updates.name = name;
     }
     if (input.description !== undefined) updates.description = input.description?.trim() || null;
+    if (input.whenToUse !== undefined) updates.whenToUse = normalizeWhenToUse(input.whenToUse);
     if (input.category !== undefined) updates.category = normalizeCategory(input.category);
     if (input.homepageUrl !== undefined) updates.homepageUrl = input.homepageUrl?.trim() || null;
     if (input.returnUrl !== undefined) updates.returnUrl = normalizeReturnUrl(input.returnUrl);
@@ -1457,12 +1583,13 @@ export async function listMarketplaceOAuthClients(serverId: string) {
     .orderBy(asc(oauthClients.category), asc(oauthClients.name));
 
   const now = currentDate();
-  return clients.map(({ effectiveInstallCount, publishedAt, ...client }) => ({
+  return Promise.all(clients.map(async ({ effectiveInstallCount, publishedAt, ...client }) => ({
     ...client,
+    ...await projectOfficialAppDiscovery({ clientId: client.id, sourceServerId: client.serverId, clientKey: client.clientId }, db),
     marketplaceInstallBadge: isPublicMarketplaceLifecycle(client.publishStatus) && client.humanMarketplaceVisible
       ? projectMarketplaceInstallBadge({ effectiveInstallCount, publishedAt, now })
       : { kind: "none" as const },
-  }));
+  })));
 }
 
 export async function searchPublicMarketplaceOAuthClients(input: {
@@ -2395,6 +2522,7 @@ export async function installMarketplaceOAuthClient(input: {
   const install = async (tx: ReturnType<typeof getDb>) => {
     const [client] = await tx.select({
       ...OAUTH_CLIENT_PUBLIC_COLUMNS,
+      sourceServerId: oauthClients.serverId,
       outboundCurrentRevisionId: oauthClients.outboundCurrentRevisionId,
       outboundCurrentGroups: oauthClients.outboundCurrentGroups,
     })
@@ -2416,6 +2544,13 @@ export async function installMarketplaceOAuthClient(input: {
       return null;
     }
 
+    await prepareExplicitUserInstallState({
+      serverId: input.serverId,
+      clientId: client.id,
+      clientKey: client.clientId,
+      sourceServerId: client.sourceServerId,
+    }, tx);
+
     const installed = await tx.insert(oauthClientInstalls).values({
       serverId: input.serverId,
       clientId: client.id,
@@ -2424,6 +2559,22 @@ export async function installMarketplaceOAuthClient(input: {
       approvedGroups: client.outboundCurrentGroups,
       grantRevision: client.outboundCurrentRevisionId ? 1 : 0,
     }).onConflictDoNothing().returning({ id: oauthClientInstalls.id });
+
+    const installationId = installed[0]?.id ?? (await tx.select({ id: oauthClientInstalls.id })
+      .from(oauthClientInstalls)
+      .where(and(
+        eq(oauthClientInstalls.serverId, input.serverId),
+        eq(oauthClientInstalls.clientId, client.id),
+      )).limit(1))[0]?.id;
+    if (!installationId) throw new Error("Marketplace app installation could not be persisted");
+    await recordExplicitUserInstallState({
+      serverId: input.serverId,
+      clientId: client.id,
+      clientKey: client.clientId,
+      sourceServerId: client.sourceServerId,
+      installationId,
+      actorUserId: input.installedByUserId,
+    }, tx);
 
     if (installed.length > 0) {
       await integrationAuditService.recordIntegrationAuditEvent({
@@ -2442,7 +2593,12 @@ export async function installMarketplaceOAuthClient(input: {
       }, tx);
     }
 
-    const { outboundCurrentRevisionId: _revisionId, outboundCurrentGroups: _groups, ...publicClient } = client;
+    const {
+      outboundCurrentRevisionId: _revisionId,
+      outboundCurrentGroups: _groups,
+      sourceServerId: _sourceServerId,
+      ...publicClient
+    } = client;
     return publicClient;
   };
   return "transaction" in dbOrTx
@@ -2477,6 +2633,14 @@ export async function uninstallMarketplaceOAuthClient(input: {
     if (!isPublicMarketplaceLifecycle(client.publishStatus) && client.serverId === input.serverId) {
       return null;
     }
+
+    await recordExplicitUserUninstallState({
+      serverId: input.serverId,
+      clientId: client.id,
+      clientKey: client.clientId,
+      sourceServerId: client.serverId,
+      actorUserId: input.revokedByUserId,
+    }, tx);
 
     const [install] = await tx.delete(oauthClientInstalls)
       .where(and(
@@ -2576,37 +2740,34 @@ export async function listAgentAvailableOAuthClients(serverId: string) {
     .where(and(
       oauthClientIsUserManagedPredicate(),
       or(
-        and(
-          eq(oauthClients.serverId, serverId),
-          eq(oauthClients.appType, "server_local"),
-        ),
-        isLiveBuiltInAppPredicate(),
+        isDiscoverableServerLocalAppForServerPredicate(serverId),
         isInstalledThirdPartyAppPredicate(),
       ),
     )).orderBy(asc(oauthClients.appType), asc(oauthClients.name));
 }
 
-export async function listBuiltInOAuthClients() {
-  const db = getDbForService();
-  return db.select({
-    id: oauthClients.id,
-    clientId: oauthClients.clientId,
-    appType: oauthClients.appType,
-    name: oauthClients.name,
-    description: oauthClients.description,
-    homepageUrl: oauthClients.homepageUrl,
-    agentManifestUrl: oauthClients.agentManifestUrl,
-    humanMarketplaceVisible: oauthClients.humanMarketplaceVisible,
-    createdAt: oauthClients.createdAt,
-    updatedAt: oauthClients.updatedAt,
-  }).from(oauthClients)
-    .where(and(
-      eq(oauthClients.appType, "slock_builtin"),
-      eq(oauthClients.enabled, true),
-      eq(oauthClients.publishStatus, "published"),
-      eq(oauthClients.humanMarketplaceVisible, true),
-    ))
-    .orderBy(oauthClients.name);
+// task #319 — prompt-facing app directory for `agent:start`. Same app set as
+// `integrationList`'s services (which already excludes disabled apps), then
+// narrowed to entries with a non-empty whenToUse, and every string is
+// inert-rendered here so the daemon never has to. The catalog is sent as part
+// of AgentConfig.installedApps; see that field's docstring for the contract.
+export async function listInstalledAppPromptCatalog(
+  serverId: string,
+): Promise<AgentInstalledAppCatalogEntry[]> {
+  const clients = await listAgentAvailableOAuthClients(serverId);
+  const catalog: AgentInstalledAppCatalogEntry[] = [];
+  for (const client of clients) {
+    const whenToUse = client.whenToUse?.trim();
+    if (!whenToUse) continue;
+    catalog.push({
+      name: renderThirdPartyInertText({ field: "app_name", value: client.name }),
+      description: client.description
+        ? renderThirdPartyInertText({ field: "description", value: client.description })
+        : null,
+      whenToUse: renderThirdPartyInertText({ field: "when_to_use", value: whenToUse }),
+    });
+  }
+  return catalog;
 }
 
 export async function getOAuthClientForServer(input: {
@@ -2627,7 +2788,6 @@ export async function getOAuthClientForServer(input: {
           eq(oauthClients.serverId, input.serverId),
           eq(oauthClients.appType, "server_local"),
         ),
-        isLiveBuiltInAppPredicate(),
         isInstalledThirdPartyAppPredicate(),
       ),
     ))
@@ -2642,6 +2802,7 @@ export async function updateOAuthClient(input: {
   actorUserId?: string;
   name?: string;
   description?: string | null;
+  whenToUse?: string | null;
   homepageUrl?: string | null;
   returnUrl?: string | null;
   agentManifestUrl?: string | null;
@@ -2676,6 +2837,9 @@ export async function updateOAuthClient(input: {
 
     if (input.description !== undefined) {
       updates.description = input.description?.trim() || null;
+    }
+    if (input.whenToUse !== undefined) {
+      updates.whenToUse = normalizeWhenToUse(input.whenToUse);
     }
     if (input.homepageUrl !== undefined) {
       updates.homepageUrl = input.homepageUrl?.trim() || null;
@@ -2992,7 +3156,10 @@ export async function getOAuthClientLogoStorageKey(input: {
   const [client] = await db.select({
     logoStorageKey: oauthClients.logoStorageKey,
   }).from(oauthClients)
-    .where(eq(oauthClients.id, input.clientId))
+    .where(and(
+      eq(oauthClients.id, input.clientId),
+      oauthClientIsUserManagedPredicate(),
+    ))
     .limit(1);
 
   if (!client?.logoStorageKey) return null;
@@ -3017,13 +3184,6 @@ export async function authenticateOAuthClient(clientKey: string, clientSecret: s
   }
 
   if (
-    client.appType === "slock_builtin"
-    && (!client.enabled || client.publishStatus !== "published")
-  ) {
-    return null;
-  }
-
-  if (
     client.appType === "third_party_global"
     && !client.enabled
   ) {
@@ -3037,8 +3197,15 @@ export async function authenticateOAuthClient(clientKey: string, clientSecret: s
 export async function requestAgentAccess(input: {
   clientId: string;
   serverSlug: string;
-  agentName: string;
+  /** The agent by name, or by `agentId` (stable across renames). */
+  agentName?: string;
+  agentId?: string;
   scopes: unknown;
+  /**
+   * The agent itself asked (`raft integration login`): its own consent stands
+   * in for authority over it. A person's revoke still holds.
+   */
+  initiatedByAgent?: boolean;
 }) {
   const db = getDbForService();
 
@@ -3048,11 +3215,15 @@ export async function requestAgentAccess(input: {
     agentDisplayName: agents.displayName,
     serverId: agents.serverId,
     serverSlug: servers.slug,
+    creatorType: agents.creatorType,
+    creatorId: agents.creatorId,
   }).from(agents)
     .innerJoin(servers, eq(agents.serverId, servers.id))
     .where(and(
       eq(servers.slug, input.serverSlug),
-      eq(agents.name, input.agentName),
+      input.agentId !== undefined
+        ? eq(agents.id, input.agentId)
+        : eq(agents.name, input.agentName ?? ""),
       isNull(agents.deletedAt),
       isNull(servers.deletedAt),
     ))
@@ -3085,7 +3256,6 @@ export async function requestAgentAccess(input: {
           eq(oauthClients.serverId, agent.serverId),
           eq(oauthClients.appType, "server_local"),
         ),
-        isLiveBuiltInAppPredicate(),
         isInstalledThirdPartyAppPredicate(),
       ),
     ))
@@ -3126,7 +3296,13 @@ export async function requestAgentAccess(input: {
   }
 
   const now = new Date();
-  if (!canAutoGrantAgentClient(client.appType, client.installId !== null)) {
+  const autoGrant = await mayAutoGrantAgentClient(db, {
+    id: client.id,
+    appType: client.appType,
+    createdByUserId: client.createdByUserId,
+    installed: client.installId !== null,
+  }, agent, input.initiatedByAgent === true);
+  if (!autoGrant) {
     const pendingRequests = await db.select().from(oauthAccessRequests).where(and(
       eq(oauthAccessRequests.serverId, agent.serverId),
       eq(oauthAccessRequests.agentId, agent.agentId),
@@ -3171,6 +3347,7 @@ export async function requestAgentAccess(input: {
       clientId: client.id,
       scopes,
       grantedByUserId: client.createdByUserId,
+      grantSource: input.initiatedByAgent === true ? "agent_login" : "app_request",
       createdAt: now,
       updatedAt: now,
     });
@@ -3229,7 +3406,6 @@ export async function issueHumanAuthorizationCode(input: {
           eq(oauthClients.serverId, input.serverId),
           eq(oauthClients.appType, "server_local"),
         ),
-        isLiveBuiltInAppPredicate(),
         isInstalledThirdPartyAppPredicate(),
       ),
     ))
@@ -3377,9 +3553,11 @@ export async function approveAccessRequest(input: {
           clientId: request.clientId,
           scopes: request.scopes,
           grantedByUserId: input.resolvedByUserId,
+          grantSource: "person",
         }).returning();
         createdGrantId = grant.id;
       }
+      await clearAgentAutoGrantBlock(tx, request.agentId, request.clientId);
     }
 
     const [updated] = await tx.update(oauthAccessRequests).set({
@@ -3397,6 +3575,155 @@ export async function approveAccessRequest(input: {
   });
 }
 
+export class AgentAccessGrantError extends Error {
+  constructor(readonly status: 400 | 404, message: string) {
+    super(message);
+    this.name = "AgentAccessGrantError";
+  }
+}
+
+/**
+ * A person (the agent's creator or a server owner/admin; the route checks)
+ * grants an app access to an agent without the agent asking. The app must
+ * already be usable on the agent's server: a server-local app of that server
+ * or an installed published app. Reuses an active grant that covers the
+ * scopes. Clears a revoke block for the pair.
+ */
+export async function grantAgentAccessOnBehalf(input: {
+  serverId: string;
+  agentId: string;
+  clientId: string;
+  scopes: unknown;
+  grantedByUserId: string;
+}): Promise<{ grantId: string; created: boolean; scopes: string[] }> {
+  const db = getDbForService();
+  return db.transaction(async (tx) => {
+    const [agent] = await tx.select({ id: agents.id }).from(agents).where(and(
+      eq(agents.id, input.agentId),
+      eq(agents.serverId, input.serverId),
+      isNull(agents.deletedAt),
+    )).limit(1);
+    if (!agent) throw new AgentAccessGrantError(404, "Agent not found");
+
+    const [client] = await tx.select({
+      id: oauthClients.id,
+      clientId: oauthClients.clientId,
+      allowedScopes: oauthClients.allowedScopes,
+    }).from(oauthClients)
+      .leftJoin(oauthClientInstalls, and(
+        eq(oauthClientInstalls.clientId, oauthClients.id),
+        eq(oauthClientInstalls.serverId, input.serverId),
+      ))
+      .where(and(
+        eq(oauthClients.id, input.clientId),
+        oauthClientIsUserManagedPredicate(),
+        or(
+          and(
+            eq(oauthClients.serverId, input.serverId),
+            eq(oauthClients.appType, "server_local"),
+          ),
+          isInstalledThirdPartyAppPredicate(),
+        ),
+      ))
+      .limit(1);
+    if (!client) throw new AgentAccessGrantError(404, "App not found on this server");
+
+    let scopes: string[];
+    try {
+      scopes = normalizeScopes(input.scopes, client);
+    } catch (error) {
+      if (error instanceof OAuthScopeNotAllowedError) throw new AgentAccessGrantError(400, error.message);
+      throw error;
+    }
+    if (scopes.length === 0) throw new AgentAccessGrantError(400, "scopes must name at least one scope");
+
+    const activeGrants = await tx.select().from(oauthGrants).where(and(
+      eq(oauthGrants.serverId, input.serverId),
+      eq(oauthGrants.agentId, agent.id),
+      eq(oauthGrants.clientId, client.id),
+      isNull(oauthGrants.revokedAt),
+    ));
+    await clearAgentAutoGrantBlock(tx, agent.id, client.id);
+    const covering = activeGrants.find((grant) => scopesCover(grant.scopes ?? [], scopes));
+    if (covering) return { grantId: covering.id, created: false, scopes: covering.scopes ?? [] };
+
+    const [grant] = await tx.insert(oauthGrants).values({
+      serverId: input.serverId,
+      agentId: agent.id,
+      clientId: client.id,
+      scopes,
+      grantedByUserId: input.grantedByUserId,
+      grantSource: "person",
+    }).returning();
+    return { grantId: grant.id, created: true, scopes };
+  });
+}
+
+/** Apps a person may grant to an agent on this server (the on-behalf grant picker). */
+export async function listGrantableAgentApps(serverId: string): Promise<Array<{
+  clientId: string;
+  clientKey: string;
+  name: string;
+  description: string | null;
+  logoUrl: string | null;
+  scopes: string[];
+}>> {
+  const rows = await getDbForService().select({
+    id: oauthClients.id,
+    clientKey: oauthClients.clientId,
+    name: oauthClients.name,
+    description: oauthClients.description,
+    logoUrl: oauthClients.logoUrl,
+    allowedScopes: oauthClients.allowedScopes,
+  }).from(oauthClients)
+    .leftJoin(oauthClientInstalls, and(
+      eq(oauthClientInstalls.clientId, oauthClients.id),
+      eq(oauthClientInstalls.serverId, serverId),
+    ))
+    .where(and(
+      oauthClientIsUserManagedPredicate(),
+      eq(oauthClients.enabled, true),
+      or(
+        and(eq(oauthClients.serverId, serverId), eq(oauthClients.appType, "server_local")),
+        isInstalledThirdPartyAppPredicate(),
+      ),
+    ))
+    .orderBy(asc(oauthClients.name));
+  return rows.map((row) => ({
+    clientId: row.id,
+    clientKey: row.clientKey,
+    name: row.name,
+    description: row.description,
+    logoUrl: row.logoUrl,
+    scopes: row.allowedScopes ?? [],
+  }));
+}
+
+/** The agent an access request or grant is about, for the route's permission check. */
+export async function getAgentForAccessRequest(serverId: string, requestId: string) {
+  const [row] = await getDbForService().select({
+    id: agents.id,
+    creatorType: agents.creatorType,
+    creatorId: agents.creatorId,
+  }).from(oauthAccessRequests)
+    .innerJoin(agents, eq(agents.id, oauthAccessRequests.agentId))
+    .where(and(eq(oauthAccessRequests.id, requestId), eq(oauthAccessRequests.serverId, serverId)))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function getAgentForGrant(serverId: string, grantId: string) {
+  const [row] = await getDbForService().select({
+    id: agents.id,
+    creatorType: agents.creatorType,
+    creatorId: agents.creatorId,
+  }).from(oauthGrants)
+    .innerJoin(agents, eq(agents.id, oauthGrants.agentId))
+    .where(and(eq(oauthGrants.id, grantId), eq(oauthGrants.serverId, serverId)))
+    .limit(1);
+  return row ?? null;
+}
+
 export async function denyAccessRequest(input: {
   serverId: string;
   requestId: string;
@@ -3409,6 +3736,7 @@ export async function denyAccessRequest(input: {
       .where(and(
         eq(oauthAccessRequests.id, input.requestId),
         eq(oauthAccessRequests.serverId, input.serverId),
+        oauthClientIdIsUserManagedPredicate(oauthAccessRequests.clientId),
       ))
       .limit(1)
       .for("update");
@@ -3442,6 +3770,7 @@ export async function revokeGrant(input: {
       .where(and(
         eq(oauthGrants.id, input.grantId),
         eq(oauthGrants.serverId, input.serverId),
+        oauthClientIdIsUserManagedPredicate(oauthGrants.clientId),
       ))
       .limit(1)
       .for("update");
@@ -3458,6 +3787,14 @@ export async function revokeGrant(input: {
       revokedAt,
       updatedAt: revokedAt,
     }).where(eq(oauthGrants.id, input.grantId)).returning();
+    // A person's revoke sticks: the app's next request for this agent waits
+    // for a person instead of being granted again automatically.
+    await tx.insert(oauthAgentAutoGrantBlocks).values({
+      agentId: grant.agentId,
+      clientId: grant.clientId,
+      serverId: grant.serverId,
+      blockedByUserId: input.revokedByUserId,
+    }).onConflictDoNothing();
 
     await tx.update(oauthAccessTokens).set({
       revokedAt,
@@ -3654,12 +3991,22 @@ export async function markThirdPartyAgentEventDelivered(eventId: string) {
   await markThirdPartyAgentEventsDelivered([eventId]);
 }
 
-export async function markThirdPartyAgentEventsDelivered(eventIds: string[]) {
+/**
+ * Idempotent by event id: only queued/delivering rows move to delivered, so a
+ * replayed report leaves an already-delivered row (and its deliveredAt)
+ * untouched. `agentId` scopes the update to one agent's events for callers that
+ * take ids from the agent rather than from its own inbox. Returns the number
+ * of rows this call moved to delivered.
+ */
+export async function markThirdPartyAgentEventsDelivered(
+  eventIds: string[],
+  options: { agentId?: string } = {},
+): Promise<number> {
   const ids = [...new Set(eventIds.filter(Boolean))];
-  if (ids.length === 0) return;
+  if (ids.length === 0) return 0;
   const db = getDbForService();
   const now = new Date();
-  await db.update(thirdPartyAgentEvents)
+  const updated = await db.update(thirdPartyAgentEvents)
     .set({
       status: "delivered",
       deliveredAt: now,
@@ -3667,18 +4014,22 @@ export async function markThirdPartyAgentEventsDelivered(eventIds: string[]) {
     })
     .where(and(
       inArray(thirdPartyAgentEvents.id, ids),
+      options.agentId ? eq(thirdPartyAgentEvents.agentId, options.agentId) : undefined,
       or(
         eq(thirdPartyAgentEvents.status, "queued"),
         eq(thirdPartyAgentEvents.status, "delivering"),
       ),
-    ));
+    ))
+    .returning({ id: thirdPartyAgentEvents.id });
+  return updated.length;
 }
 
-export async function rebuildPendingThirdPartyAgentEventMessages(input: {
+/** Third-party events an agent has not acknowledged yet and that have not expired. Read-only. */
+async function selectPendingThirdPartyAgentEvents(input: {
   agentId: string;
   excludeEventIds?: string[];
   limit?: number;
-}): Promise<AgentMessage[]> {
+}) {
   const db = getDbForService();
   const now = new Date();
   const excludeIds = [...new Set(input.excludeEventIds?.filter(Boolean) ?? [])];
@@ -3694,7 +4045,7 @@ export async function rebuildPendingThirdPartyAgentEventMessages(input: {
     whereClauses.push(not(inArray(thirdPartyAgentEvents.id, excludeIds)));
   }
 
-  const rows = await db.select({
+  return db.select({
     event: thirdPartyAgentEvents,
     clientKey: oauthClients.clientId,
     clientName: oauthClients.name,
@@ -3704,7 +4055,32 @@ export async function rebuildPendingThirdPartyAgentEventMessages(input: {
     .where(and(...whereClauses))
     .orderBy(asc(thirdPartyAgentEvents.createdAt), asc(thirdPartyAgentEvents.id))
     .limit(input.limit ?? 100);
+}
 
+/**
+ * The pending third-party events as inbox messages, without claiming them:
+ * the inbox push sweep announces what is still unacknowledged, and announcing
+ * must not change delivery state.
+ */
+export async function listPendingThirdPartyAgentEventMessages(input: {
+  agentId: string;
+  limit?: number;
+}): Promise<AgentMessage[]> {
+  const rows = await selectPendingThirdPartyAgentEvents(input);
+  return rows.map((row) => buildThirdPartyAgentMessage({
+    event: row.event,
+    clientKey: row.clientKey,
+    clientName: row.clientName,
+  }));
+}
+
+export async function rebuildPendingThirdPartyAgentEventMessages(input: {
+  agentId: string;
+  excludeEventIds?: string[];
+  limit?: number;
+}): Promise<AgentMessage[]> {
+  const db = getDbForService();
+  const rows = await selectPendingThirdPartyAgentEvents(input);
   if (rows.length === 0) return [];
   const ids = rows.map((row) => row.event.id);
   await db.update(thirdPartyAgentEvents)
@@ -3778,6 +4154,7 @@ export async function getOAuthAccessRequestAuditContext(input: {
     .where(and(
       eq(oauthAccessRequests.id, input.requestId),
       eq(oauthAccessRequests.clientId, input.clientId),
+      oauthClientIdIsUserManagedPredicate(oauthAccessRequests.clientId),
     ))
     .limit(1);
   return row ?? null;
@@ -3799,6 +4176,7 @@ export async function getIdentityByAccessToken(
     clientRecordId: oauthClients.id,
     clientKey: oauthClients.clientId,
     clientName: oauthClients.name,
+    clientEnabled: oauthClients.enabled,
     serverId: servers.id,
     serverSlug: servers.slug,
     serverName: servers.name,
@@ -3861,6 +4239,22 @@ export async function getIdentityByAccessToken(
   return token;
 }
 
+/** Minimal directory projection; callers must check the OAuth agent:read scope. */
+export async function listOAuthAgentDirectory(serverId: string) {
+  return getDbForService().select({
+    id: agents.id,
+    handle: agents.name,
+    display_name: agents.displayName,
+    avatar_url: agents.avatarUrl,
+  }).from(agents)
+    .innerJoin(serverAgentMembers, and(
+      eq(serverAgentMembers.agentId, agents.id),
+      eq(serverAgentMembers.serverId, serverId),
+    ))
+    .where(isNull(agents.deletedAt))
+    .orderBy(asc(agents.name), asc(agents.id));
+}
+
 export async function getServerIntegrationsOverview(serverId: string): Promise<IntegrationOverviewItem[]> {
   const db = getDbForService();
   const [pendingRows, activeRows] = await Promise.all([
@@ -3908,6 +4302,7 @@ export async function getServerIntegrationsOverview(serverId: string): Promise<I
       createdAt: oauthGrants.createdAt,
       revokedAt: oauthGrants.revokedAt,
       resolvedByUserId: oauthGrants.grantedByUserId,
+      grantSource: oauthGrants.grantSource,
     }).from(oauthGrants)
       .innerJoin(agents, eq(oauthGrants.agentId, agents.id))
       .innerJoin(oauthClients, eq(oauthGrants.clientId, oauthClients.id))
@@ -3939,6 +4334,7 @@ export async function getServerIntegrationsOverview(serverId: string): Promise<I
     resolvedAt: row.resolvedAt?.toISOString() ?? null,
     resolvedByUserId: row.resolvedByUserId,
     revokedAt: null,
+    grantSource: null,
   }));
 
   const active = activeRows.map((row) => ({
@@ -3961,6 +4357,7 @@ export async function getServerIntegrationsOverview(serverId: string): Promise<I
     resolvedAt: row.createdAt.toISOString(),
     resolvedByUserId: row.resolvedByUserId,
     revokedAt: row.revokedAt?.toISOString() ?? null,
+    grantSource: row.grantSource,
   }));
 
   return [...pending, ...active];

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import type { APIResponse } from "@playwright/test";
 import { assertApiOk } from "../tests/e2e/fixtures/apiResponse";
 

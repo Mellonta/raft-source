@@ -1,5 +1,5 @@
-import { tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -10,158 +10,43 @@ import {
   BasicTracer,
   MemoryTraceSink, traceEventRowsForSpan
 } from "@botiverse/raft-shared";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { untracedDbQuery } from "../tracing/dbQueryTrace.js";
-import { createTraceDbQueryTracer, runWithTraceSpan } from "../tracing/semanticTrace.js";
-import { closeRisingWavePool } from "../db/risingwave.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { untracedDbQuery } from "../tracing/dbQueryTrace";
+import { createTraceDbQueryTracer, runWithTraceSpan } from "../tracing/semanticTrace";
+import { closeRisingWavePool } from "../db/risingwave";
 import {
   servers as serversTable,
   serverMembers,
   channels,
   channelHumans, messages, messageMentions, threadFollows, userChannelReadCursors,
   agentChannelReadCursors,
-  inboxServingRows, inboxNotificationFacts,
+  inboxNotificationFacts,
   inboxSuppressionStates,
   userChannelInboxStates, jointChannels,
   jointChannelServers, featureFlags
-} from "../db/schema.js";
-import { addMember, createServer as createServerService } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { RESIDUE_ONLY_READ_ALL_RECEIPT_FIELDS, __testReadStateAuthority, createChannel, getOrCreateThread, addHuman, addAgent, removeHuman, removeAgent, findOrCreateDM, findOrCreateUserDM, isChannelHuman, deleteChannel, markRead, markReadLatest, getInboxItems } from "../services/channelService.js";
+} from "../db/schema";
+import { addMember, createServer as createServerService } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { RESIDUE_ONLY_READ_ALL_RECEIPT_FIELDS, __testReadStateAuthority, createChannel, getOrCreateThread, addHuman, addAgent, removeHuman, removeAgent, findOrCreateDM, findOrCreateUserDM, isChannelHuman, deleteChannel, markRead, markReadLatest, getInboxItems } from "../services/channelService";
 import {
   __resetMessageServiceDepsForTests,
   __setMessageServiceDepsForTests,
   createMessage,
-} from "../services/messageService.js";
+} from "../services/messageService";
 import {
   recordInboxNotificationFacts
-} from "../services/inboxNotificationService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { INBOX_VISIBILITY_V3_FEATURE_FLAG_KEY } from "../services/featureFlagService.js";
-import { READ_RECEIPT_PEER_STATE_LIMIT } from "../services/readReceiptService.js";
+} from "../services/inboxNotificationService";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { READ_RECEIPT_PEER_STATE_LIMIT } from "../services/readReceiptService";
 import {
   resolveThreadSuppressionTarget
-} from "../services/inboxSuppressionWriters.js";
-import { InboxRouteBackpressure } from "../services/inboxRouteBackpressure.js";
-import { signAccessToken } from "../middleware/auth.js";
-import { createServer, installFakeIo, enableReadReceiptsForServer, recordTestInboxFact, seedThreadFixture, headers, channelDoneBody, threadDoneBody, seedUser, fetchInboxAll, oracleProbes } from "./channels.api.fixtures.js";
+} from "../services/inboxSuppressionWriters";
+import { InboxRouteBackpressure } from "../services/inboxRouteBackpressure";
+import { signAccessToken } from "../middleware/auth";
+import { createServer, installFakeIo, enableReadReceiptsForServer, recordTestInboxFact, seedThreadFixture, headers, channelDoneBody, threadDoneBody, seedUser, fetchInboxAll, oracleProbes } from "./channels.api.fixtures";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
-
-
-test("historyCutoff inbox with v3 flag enabled selects RW v2 before PG serving-row fallback", async () => {
-  const app = await openTestApp("pglite://", 0, { onboardingOpenerFlagDefaultEnabled: false, humanActivityMuteFlagDefaultEnabled: false });
-  const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
-  const previousRfc056ServingMode = process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE;
-  const originalPoolConnect = pg.Pool.prototype.connect;
-  try {
-    const db = getDb();
-    await db.insert(featureFlags).values({
-      key: INBOX_VISIBILITY_V3_FEATURE_FLAG_KEY,
-      description: "test inbox visibility v3",
-      enabled: true,
-      killSwitch: false,
-      randomizationUnit: "server",
-      defaultEnabled: true,
-      salt: "history-cutoff-selector-test",
-    }).onConflictDoUpdate({
-      target: featureFlags.key,
-      set: {
-        enabled: true,
-        killSwitch: false,
-        randomizationUnit: "server",
-        defaultEnabled: true,
-        salt: "history-cutoff-selector-test",
-      },
-    });
-
-    process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_cutoff_selector_test";
-    process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = "on";
-    await closeRisingWavePool();
-
-    const rwQueries: Array<{ query: string; params: unknown[] }> = [];
-    (pg.Pool.prototype as unknown as { connect: () => Promise<{
-      query: (...args: unknown[]) => Promise<{ rows: unknown[] }>;
-      release: () => void;
-    }> }).connect = async () => {
-      return {
-        query: async (...args: unknown[]) => {
-          rwQueries.push({
-            query: String(args[0]),
-            params: Array.isArray(args[1]) ? args[1] : [],
-          });
-          return {
-            rows: [{
-              kind: null,
-              totalCount: 0,
-              totalUnreadCount: 0,
-              activeUnreadCount: 0,
-              readAuthorityPresent: false,
-              readAuthoritySeq: 0,
-            }],
-          };
-        },
-        release: () => {},
-      };
-    };
-
-    const cutoff = new Date("2100-01-01T00:00:00Z");
-    const tracedQueries: Array<{ queryName: string; attrs: Record<string, unknown> }> = [];
-    await getInboxItems(randomUUID(), randomUUID(), {
-      filter: "all",
-      limit: 30,
-      offset: 0,
-      historyCutoff: cutoff,
-      humanActivityMuteEnabled: true,
-      traceQuery: async (queryName, work, onComplete) => {
-        const result = await work();
-        tracedQueries.push({
-          queryName,
-          attrs: (onComplete?.(result) ?? {}) as Record<string, unknown>,
-        });
-        return result;
-      },
-    });
-
-    assert.deepEqual(
-      tracedQueries.map((event) => event.queryName),
-      ["channels.inbox_items_by_user", "channels.inbox_read_authority_by_user"],
-      "flag-on historyCutoff traffic must stay on RW after the primary authority fence and not call PG serving rows",
-    );
-    assert.equal(rwQueries.length, 1);
-    assert.match(rwQueries[0].query, /rw_inbox_items_v2_suppressed_v3_4/);
-    assert.doesNotMatch(rwQueries[0].query, /FROM rw_inbox_items_v2\b/);
-    assert.doesNotMatch(rwQueries[0].query, /rw_inbox_items_v3_2/);
-    assert.deepEqual(rwQueries[0].params.slice(2), ["all", cutoff, null, null]);
-
-    const rwTrace = tracedQueries[0];
-    assert.equal(rwTrace.attrs["inbox.backend"], "rw_mv");
-    assert.equal(rwTrace.attrs["inbox.fallback_reason"], "none");
-    assert.equal(rwTrace.attrs.contract_version, 2);
-    assert.equal(rwTrace.attrs.rw_inbox_items_version, 2);
-    assert.equal(rwTrace.attrs.rw_inbox_items_requested_version, 3);
-    assert.equal(rwTrace.attrs.rw_inbox_items_version_forced, true);
-    assert.equal(rwTrace.attrs.rw_inbox_items_version_force_reason, "history_cutoff");
-    assert.equal(rwTrace.attrs.rw_inbox_visibility_v3_flag_enabled, true);
-    assert.equal(rwTrace.attrs.history_cutoff_present, true);
-    assert.equal(rwTrace.attrs.channel_id_present, false);
-  } finally {
-    (pg.Pool.prototype as unknown as { connect: typeof originalPoolConnect }).connect = originalPoolConnect;
-    if (previousRisingWaveDatabaseUrl === undefined) {
-      delete process.env.RISINGWAVE_DATABASE_URL;
-    } else {
-      process.env.RISINGWAVE_DATABASE_URL = previousRisingWaveDatabaseUrl;
-    }
-    if (previousRfc056ServingMode === undefined) {
-      delete process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE;
-    } else {
-      process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = previousRfc056ServingMode;
-    }
-    await closeRisingWavePool();
-    await app.close();
-  }
-});
 
 
 test("adding a human rolls membership and message back when inbox fact persistence fails", async ({ app }) => {
@@ -415,6 +300,11 @@ test("GET /api/channels/inbox/unfollowed retains frozen Activity history across 
     headers: headers(f.ownerToken, f.serverId),
   });
   assert.equal(res.status, 200);
+  assert.equal(
+    res.headers.get("cache-control"),
+    "private, no-store",
+    "per-user Activity responses must forbid heuristic caching (stale-inbox incident 2026-09-21)",
+  );
   const active = await res.json() as { items: Array<{
     kind: string;
     threadChannelId?: string;
@@ -529,8 +419,10 @@ test("GET /api/channels/inbox records inbox phases and query shape", async ({ ap
       "inbox.backpressure.admitted",
       "inbox.load.started",
       "history.policy.checked",
-      "inbox.rw.rfc056_serving_guard.decision",
-      "inbox.backend.selected",
+        "inbox.backend.selected",
+      // The unfollowed-active thread list (getFollowedThreads, legacy path:
+      // state "unfollowed_active").
+      "followed_threads.source_selected",
       "inbox.loaded",
       "response.ready",
       "inbox.backpressure.released",
@@ -562,34 +454,31 @@ test("GET /api/channels/inbox records inbox phases and query shape", async ({ ap
 
     const dbEvents = span.events.filter((event) => event.name === "db.query.finished");
     assert.deepEqual(dbEvents.map((event) => event.attrs?.query_name), [
-      "channels.inbox_items_serving_rows_by_user",
-      "channels.inbox_profile_names.users",
+      "channels.inbox_items_by_user",
       "channels.inbox_read_state_authority",
       "channels.followed_threads_by_user",
       "channels.followed_joint_threads_by_user",
     ]);
-    const inboxDbEvent = dbEvents.find((event) => event.attrs?.query_name === "channels.inbox_items_serving_rows_by_user");
+    const inboxDbEvent = dbEvents.find((event) => event.attrs?.query_name === "channels.inbox_items_by_user");
     assert.ok(inboxDbEvent);
     assert.equal(inboxDbEvent.attrs?.phase, "inbox.loaded");
     assert.equal(inboxDbEvent.attrs?.filter, "all");
     assert.equal(inboxDbEvent.attrs?.limit, 11, "mixed All compositor reads one lookahead row for hasMore");
     assert.equal(inboxDbEvent.attrs?.history_cutoff_present, false);
     assert.equal(inboxDbEvent.attrs?.row_count, body.items.length);
-    assert.equal(inboxDbEvent.attrs?.["inbox.backend"], "pg_serving_rows");
+    // No RisingWave in CI: the installed test reference (src/test/risingWaveReadReference.ts)
+    // serves the RW read through the canonical Postgres read, forced.
+    assert.equal(inboxDbEvent.attrs?.["inbox.backend"], "pg_legacy");
     assert.equal(inboxDbEvent.attrs?.["inbox.route"], "all");
     assert.equal(inboxDbEvent.attrs?.["inbox.fallback_reason"], "none");
-    assert.equal(inboxDbEvent.attrs?.["inbox.contract_version"], 2);
-    assert.equal(inboxDbEvent.attrs?.["inbox.postgres_selection_reason"], "human_activity_mute_uses_serving_rows");
-    assert.equal(inboxDbEvent.attrs?.["inbox.legacy_retire_gate"], undefined);
+    assert.equal(inboxDbEvent.attrs?.inbox_pg_selection_reason, "forced_canonical");
 
     const backendEvent = span.events.find((event) => event.name === "inbox.backend.selected");
     assert.ok(backendEvent);
-    assert.equal(backendEvent.attrs?.["inbox.backend"], "pg_serving_rows");
+    assert.equal(backendEvent.attrs?.["inbox.backend"], "pg_legacy");
     assert.equal(backendEvent.attrs?.["inbox.route"], "all");
     assert.equal(backendEvent.attrs?.["inbox.fallback_reason"], "none");
-    assert.equal(backendEvent.attrs?.["inbox.contract_version"], 2);
-    assert.equal(backendEvent.attrs?.["inbox.postgres_selection_reason"], "human_activity_mute_uses_serving_rows");
-    assert.equal(backendEvent.attrs?.["inbox.legacy_retire_gate"], undefined);
+    assert.equal(backendEvent.attrs?.inbox_pg_selection_reason, "forced_canonical");
 
     const loadedEvent = span.events.find((event) => event.name === "inbox.loaded");
     assert.ok(loadedEvent);
@@ -741,236 +630,6 @@ test("legacy PG inbox policy query keeps SQL-side paging bounded", () => {
 });
 
 
-test("legacy Activity Inbox path emits explicit retire gate when serving rows are bypassed", async () => {
-  const app = await openTestApp("pglite://", 0, { onboardingOpenerFlagDefaultEnabled: false, humanActivityMuteFlagDefaultEnabled: false });
-  const previousRfc056ServingMode = process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE;
-  try {
-    process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = "on";
-    const tracedQueries: Array<{ queryName: string; attrs: Record<string, unknown> }> = [];
-    await getInboxItems(randomUUID(), randomUUID(), {
-      filter: "all",
-      limit: 5,
-      offset: 0,
-      humanActivityMuteEnabled: false,
-      traceQuery: async (queryName, work, onComplete) => {
-        const result = await work();
-        tracedQueries.push({
-          queryName,
-          attrs: (onComplete?.(result) ?? {}) as Record<string, unknown>,
-        });
-        return result;
-      },
-    });
-
-    const legacyQuery = tracedQueries.find((event) => event.queryName === "channels.inbox_items_by_user");
-    assert.ok(legacyQuery, "expected direct no-mute/no-cutoff PG fallback to use the inline legacy query");
-    assert.equal(legacyQuery.attrs["inbox.backend"], "pg_legacy");
-    assert.equal(legacyQuery.attrs["inbox.fallback_reason"], "pglite_dev");
-    assert.equal(
-      legacyQuery.attrs["inbox.postgres_selection_reason"],
-      "legacy_inline_policy_pending_serving_rows_migration",
-    );
-    assert.equal(legacyQuery.attrs["inbox.legacy_retire_gate"], "pending_serving_rows_parity");
-  } finally {
-    if (previousRfc056ServingMode === undefined) {
-      delete process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE;
-    } else {
-      process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = previousRfc056ServingMode;
-    }
-    await app.close();
-  }
-});
-
-
-test("historyCutoff inbox uses serving-row activity filter instead of legacy PG cutoff joins", async ({ app }) => {
-
-  const previousRfc056ServingMode = process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE;
-  try {
-    process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = "on";
-    const db = getDb();
-    const readSessionStatementTimeout = async () => {
-      const current = await db.execute(sql`
-        SELECT current_setting('statement_timeout')::text AS "statementTimeout"
-      `);
-      return String(current.rows[0]?.statementTimeout);
-    };
-    await db.execute(sql`SELECT set_config('statement_timeout', '15s', false)`);
-    const sessionStatementTimeoutBefore = await readSessionStatementTimeout();
-    const f = await seedThreadFixture(app.baseUrl);
-    const cutoff = new Date("2026-06-01T00:00:00Z");
-    const oldDate = new Date("2026-05-01T00:00:00Z");
-    const newDate = new Date("2026-06-02T00:00:00Z");
-
-    const oldOnlyChannel = await createChannel(f.serverId, "old-only-cutoff-room");
-    await addHuman(oldOnlyChannel.id, f.ownerId);
-    const mixedChannel = await createChannel(f.serverId, "mixed-cutoff-room");
-    await addHuman(mixedChannel.id, f.ownerId);
-
-    const oldOnlyMessage = await createMessage(oldOnlyChannel.id, "user", f.memberBId, "old only");
-    const mixedOldMessage = await createMessage(mixedChannel.id, "user", f.memberBId, "mixed old");
-    const mixedNewMessage = await createMessage(mixedChannel.id, "user", f.memberBId, "mixed new");
-    await db.update(messages).set({ createdAt: oldDate }).where(eq(messages.id, oldOnlyMessage.id));
-    await db.update(messages).set({ createdAt: oldDate }).where(eq(messages.id, mixedOldMessage.id));
-    await db.update(messages).set({ createdAt: newDate }).where(eq(messages.id, mixedNewMessage.id));
-
-    await recordInboxNotificationFacts([
-      {
-        receiverType: "user",
-        receiverId: f.ownerId,
-        serverId: f.serverId,
-        kind: "channel",
-        sourceChannelId: oldOnlyChannel.id,
-        messageId: oldOnlyMessage.id,
-        messageSeq: oldOnlyMessage.seq,
-        activityAt: oldDate,
-        personalMention: false,
-        unreadEligible: true,
-      },
-      {
-        receiverType: "user",
-        receiverId: f.ownerId,
-        serverId: f.serverId,
-        kind: "channel",
-        sourceChannelId: mixedChannel.id,
-        messageId: mixedOldMessage.id,
-        messageSeq: mixedOldMessage.seq,
-        activityAt: oldDate,
-        personalMention: false,
-        unreadEligible: true,
-      },
-      {
-        receiverType: "user",
-        receiverId: f.ownerId,
-        serverId: f.serverId,
-        kind: "channel",
-        sourceChannelId: mixedChannel.id,
-        messageId: mixedNewMessage.id,
-        messageSeq: mixedNewMessage.seq,
-        activityAt: newDate,
-        personalMention: false,
-        unreadEligible: true,
-      },
-    ]);
-    await db
-      .update(inboxServingRows)
-      .set({
-        latestNotifiedAt: oldDate,
-        lastActivityAt: newDate,
-      })
-      .where(eq(inboxServingRows.sourceChannelId, mixedChannel.id));
-
-    const queryEvents: Array<{ queryName: string; attrs: Record<string, unknown> }> = [];
-    const inbox = await getInboxItems(f.serverId, f.ownerId, {
-      filter: "all",
-      limit: 30,
-      offset: 0,
-      historyCutoff: cutoff,
-      humanActivityMuteEnabled: false,
-      traceQuery: async (queryName, work, onComplete) => {
-        const result = await work();
-        queryEvents.push({
-          queryName,
-          attrs: (onComplete?.(result) ?? {}) as Record<string, unknown>,
-        });
-        return result;
-      },
-    });
-
-    assert.equal(
-      queryEvents.some((event) => event.queryName === "channels.inbox_items_by_user"),
-      false,
-      "cutoff traffic must not use the legacy PG message-join cutoff query",
-    );
-    const servingQuery = queryEvents.find((event) => event.queryName === "channels.inbox_items_serving_rows_by_user");
-    assert.ok(servingQuery, "expected cutoff traffic to use PG serving rows when RW is unavailable");
-    assert.equal(servingQuery.attrs.history_cutoff_present, true);
-    assert.equal(servingQuery.attrs["inbox.backend"], "pg_serving_rows");
-    assert.equal(servingQuery.attrs["inbox.fallback_reason"], "history_cutoff");
-    assert.equal(servingQuery.attrs["inbox.postgres_selection_reason"], "history_cutoff_uses_serving_rows");
-    assert.equal(servingQuery.attrs["inbox.legacy_retire_gate"], undefined);
-    assert.equal(servingQuery.attrs["pg.fallback.query_name"], "channels.inbox_items_serving_rows_by_user");
-    assert.equal(servingQuery.attrs["pg.fallback.query_identity"], "inbox_items_serving_rows_v13");
-    assert.equal(
-      servingQuery.attrs["pg.fallback.query_hash"],
-      "6f4da8f02685590c",
-      "the timeout contract must hash the complete normalized v13 serving-key SQL, not only its displayed prefix",
-    );
-    assert.equal(
-      servingQuery.attrs["pg.fallback.legacy_query_hash"],
-      "ff11a9e16bc68872",
-      "the exact v2 identity retains a direct link to the historical 41s plan's truncated hash",
-    );
-    assert.equal(servingQuery.attrs["pg.fallback.timeout_scope"], "transaction_local");
-    assert.equal(servingQuery.attrs["pg.fallback.statement_timeout_cap_ms"], 3_000);
-    assert.equal(servingQuery.attrs["pg.fallback.inherited_statement_timeout_ms"], 15_000);
-    assert.equal(servingQuery.attrs["pg.fallback.effective_statement_timeout_ms"], 3_000);
-    assert.equal(servingQuery.attrs["pg.fallback.outcome"], "query_completed");
-    assert.equal(servingQuery.attrs.receiver_scope_row_count, 2);
-    assert.equal(
-      await readSessionStatementTimeout(),
-      sessionStatementTimeoutBefore,
-      "the fallback query's transaction-local timeout must not alter the shared session used by unrelated queries",
-    );
-
-    assert.equal(
-      inbox.items.some((item) => item.kind === "channel" && item.channelId === oldOnlyChannel.id),
-      false,
-      "rows whose serving activity is before the cutoff are filtered out",
-    );
-    const mixedItem = inbox.items.find((item) => item.kind === "channel" && item.channelId === mixedChannel.id);
-    assert.ok(mixedItem?.kind === "channel");
-    assert.equal(mixedItem.lastMessageId, mixedNewMessage.id);
-    assert.equal(
-      mixedItem.unreadCount,
-      2,
-      "accepted #6 approximation: cutoff filters the row set, while full serving-row unread count can include older unread",
-    );
-    assert.equal(inbox.totalUnreadCount, 2);
-
-    queryEvents.length = 0;
-    await db.execute(sql`SELECT set_config('statement_timeout', '2s', false)`);
-    const strictSessionTimeoutBefore = await readSessionStatementTimeout();
-    await getInboxItems(f.serverId, f.ownerId, {
-      filter: "all",
-      limit: 30,
-      offset: 0,
-      historyCutoff: cutoff,
-      humanActivityMuteEnabled: false,
-      traceQuery: async (queryName, work, onComplete) => {
-        const result = await work();
-        queryEvents.push({
-          queryName,
-          attrs: (onComplete?.(result) ?? {}) as Record<string, unknown>,
-        });
-        return result;
-      },
-    });
-    const strictServingQuery = queryEvents.find((event) => event.queryName === "channels.inbox_items_serving_rows_by_user");
-    assert.ok(strictServingQuery);
-    assert.equal(strictServingQuery.attrs["pg.fallback.statement_timeout_cap_ms"], 3_000);
-    assert.equal(strictServingQuery.attrs["pg.fallback.inherited_statement_timeout_ms"], 2_000);
-    assert.equal(
-      strictServingQuery.attrs["pg.fallback.effective_statement_timeout_ms"],
-      2_000,
-      "the fallback cap must not widen a stricter inherited role/session timeout",
-    );
-    assert.equal(
-      await readSessionStatementTimeout(),
-      strictSessionTimeoutBefore,
-      "the stricter inherited timeout remains active after the fallback transaction",
-    );
-    await db.execute(sql`SELECT set_config('statement_timeout', '0', false)`);
-  } finally {
-    if (previousRfc056ServingMode === undefined) {
-      delete process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE;
-    } else {
-      process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = previousRfc056ServingMode;
-    }
-    await app.close();
-  }
-});
-
-
 test("bounded inbox serving prefix filters inaccessible newest rows before LIMIT", async ({ app }) => {
   const db = getDb();
   const f = await seedThreadFixture(app.baseUrl);
@@ -996,14 +655,6 @@ test("bounded inbox serving prefix filters inaccessible newest rows before LIMIT
       message,
     });
   }
-  const validActivity = new Date("2026-08-25T10:00:00Z");
-  const inaccessibleActivity = new Date("2026-08-25T11:00:00Z");
-  await db.update(inboxServingRows)
-    .set({ lastActivityAt: validActivity })
-    .where(inArray(inboxServingRows.sourceChannelId, validChannels.map((channel) => channel.id)));
-  await db.update(inboxServingRows)
-    .set({ lastActivityAt: inaccessibleActivity })
-    .where(inArray(inboxServingRows.sourceChannelId, inaccessibleChannels.map((channel) => channel.id)));
 
   const inbox = await getInboxItems(f.serverId, f.ownerId, {
     filter: "all",
@@ -1020,22 +671,10 @@ test("bounded inbox serving prefix filters inaccessible newest rows before LIMIT
 });
 
 
-test("RisingWave inbox serving query applies historyCutoff to suppressed v2 activity_at", () => {
-  const source = readFileSync(new URL("../services/channelService.ts", import.meta.url), "utf8");
-
-  assert.match(source, /AND \(\$4::timestamptz IS NULL OR i\.activity_at > \$4::timestamptz\)/);
-  assert.match(source, /historyCutoff: Boolean\(opts\.historyCutoff\)/);
-  assert.match(source, /if \(opts\.historyCutoff && requestedVersion === 3\) return 2/);
-  assert.match(source, /if \(opts\.historyCutoff && inboxItemsVersion !== 2\) return null/);
-  assert.match(source, /RW_INBOX_ITEMS_V2_SERVING_VIEW = "rw_inbox_items_v2_suppressed_v3_4"/);
-  assert.doesNotMatch(source, /if \(!client \|\| opts\.historyCutoff\) return null/);
-});
-
-
 test("RisingWave inbox serving emits payload-free null thread reply_count contract signal", () => {
   const source = readFileSync(new URL("../services/channelService.ts", import.meta.url), "utf8");
   const eventStart = source.indexOf("function recordRisingWaveInboxThreadReplyCountNullContractViolation");
-  const eventEnd = source.indexOf("function inboxTargetTraceJoinKey", eventStart);
+  const eventEnd = source.indexOf("async function getActivityUnreadTotalsBatchFromRisingWave", eventStart);
   const eventSource = source.slice(eventStart, eventEnd);
 
   assert.match(source, /recordRisingWaveInboxThreadReplyCountNullContractViolation\(read\.result\.rows/);
@@ -1044,22 +683,6 @@ test("RisingWave inbox serving emits payload-free null thread reply_count contra
   assert.match(eventSource, /contract: "thread_reply_count_non_null"/);
   assert.match(eventSource, /null_thread_reply_count_rows: nullThreadReplyCountRows/);
   assert.doesNotMatch(eventSource, /parentMessagePreview|latestActivityPreview|lastMessagePreview|content/);
-});
-
-
-test("RisingWave inbox v3 serving is behind the Feature Flag v0 fail-closed gate", () => {
-  const source = readFileSync(new URL("../services/channelService.ts", import.meta.url), "utf8");
-
-  assert.match(source, /INBOX_VISIBILITY_V3_FEATURE_FLAG_KEY/);
-  assert.match(source, /evaluateFeatureFlag\(\{/);
-  assert.match(source, /return evaluation\.enabled \? 3 : getRisingWaveInboxItemsServingVersion\(\)/);
-  assert.match(source, /selectRisingWaveInboxItemsServingVersionForRequest\(requestedInboxItemsVersion, opts\)/);
-  assert.match(source, /RW_INBOX_ITEMS_V3_SERVING_VIEW = "rw_inbox_items_v3_2"/);
-  assert.match(source, /RW_INBOX_ITEMS_V2_SERVING_VIEW = "rw_inbox_items_v2_suppressed_v3_4"/);
-  assert.match(source, /i\.visibility_contract_version = 3/);
-  assert.match(source, /rw_inbox_visibility_v3_flag_enabled: requestedInboxItemsVersion === 3/);
-  assert.match(source, /rw_inbox_items_version_force_reason: forcedV2ForHistoryCutoff \? "history_cutoff" : "none"/);
-  assert.match(source, /if \(opts\.historyCutoff && inboxItemsVersion !== 2\) return null/);
 });
 
 
@@ -2583,7 +2206,6 @@ test("read_receipts_v0 degrades large scopes to anonymous summary hydrate and re
   const server = await createServer("Receipt Large Server", "receipt-large-server", owner.id);
   const channel = await createChannel(server.id, "receipt-large-channel", undefined, "private");
   await addHuman(channel.id, owner.id);
-  const first = await createMessage(channel.id, "user", owner.id, "receipt large first");
   // #693: only AGENTS are exposed as read peers, so the summary-degradation
   // threshold is now reached by agent count. Seeding humans here would leave
   // the exposed peer set empty and silently stop exercising this path.
@@ -2593,6 +2215,10 @@ test("read_receipts_v0 degrades large scopes to anonymous summary hydrate and re
     peers.push(peer);
     await addAgent(channel.id, peer.id);
   }
+  // Posted AFTER the agents join: a member's read position starts at its join
+  // (#8292), so a message already present when an agent joins is read for it and
+  // reading history would advance nothing.
+  const first = await createMessage(channel.id, "user", owner.id, "receipt large first");
   await getDb().insert(agentChannelReadCursors).values({
     channelId: channel.id,
     agentId: peers[0]!.id,
@@ -2671,7 +2297,6 @@ test("read_receipts_v0 at exactly LIMIT+1 agents keeps hydrate and realtime on t
   const server = await createServer("Receipt Edge Server", "receipt-edge-server", owner.id);
   const channel = await createChannel(server.id, "receipt-edge-channel", undefined, "private");
   await addHuman(channel.id, owner.id);
-  const first = await createMessage(channel.id, "user", owner.id, "receipt edge first");
 
   // EXACTLY LIMIT+1 exposed agents. This is the boundary the LIMIT+2 test
   // jumps over: the emitter used to compute `members.length - 1`, a leftover
@@ -2686,6 +2311,8 @@ test("read_receipts_v0 at exactly LIMIT+1 agents keeps hydrate and realtime on t
     await addAgent(channel.id, agent.id);
   }
   assert.equal(agents.length, READ_RECEIPT_PEER_STATE_LIMIT + 1);
+  // Posted after the agents join, so it is unread for them (read position starts at join).
+  const first = await createMessage(channel.id, "user", owner.id, "receipt edge first");
   await enableReadReceiptsForServer(server.id);
   const ownerToken = await tokenForHuman(owner.email);
 
@@ -3159,26 +2786,10 @@ test("threads/done retires caller-owned residue for active threads below a delet
     }),
   });
   assert.equal(done.status, 200, await done.clone().text());
-  const body = await done.json() as {
-    ok: boolean;
-    terminalReason: string;
-    legacyNoop: boolean;
-    retiredThroughActivitySeq: number;
-    changed: boolean;
-  };
-  assert.deepEqual({
-    ok: body.ok,
-    terminalReason: body.terminalReason,
-    legacyNoop: body.legacyNoop,
-    retiredThroughActivitySeq: body.retiredThroughActivitySeq,
-    changed: body.changed,
-  }, {
-    ok: true,
-    terminalReason: "legacy_done_target_unavailable",
-    legacyNoop: true,
-    retiredThroughActivitySeq: residueMessage.seq,
-    changed: true,
-  });
+  // Task #67: activity-v1 declares this 200 as `{ ok: true }` and forbids extra
+  // properties. The retired boundary that used to be read off the body is asserted
+  // on the caller's cursor row immediately below.
+  assert.deepEqual(await done.json(), { ok: true });
 
   const [cursor] = await db.select()
     .from(userChannelReadCursors)
@@ -3264,6 +2875,43 @@ test("fetchReadStateAuthorityRows excludes soft-deleted channels regardless of w
     [],
     "a soft-deleted channel must not be returned even when a caller passes its id directly -- "
       + "removing `AND c.deleted_at IS NULL` makes this red",
+  );
+});
+
+
+test("a followed thread under a soft-deleted parent channel leaves the inbox and the followed list", async ({ app }) => {
+  const f = await seedThreadFixture(app.baseUrl);
+  const db = getDb();
+  const ownerHeaders = headers(f.ownerToken, f.serverId);
+  const followedThreadIds = async (): Promise<string[]> => {
+    const res = await fetch(`${app.baseUrl}/api/channels/threads/followed`, { headers: ownerHeaders });
+    assert.equal(res.status, 200);
+    const body = await res.json() as { threads: Array<{ threadChannelId: string }> };
+    return body.threads.map((thread) => thread.threadChannelId);
+  };
+  const inboxThreadIds = async (): Promise<string[]> =>
+    (await fetchInboxAll(app.baseUrl, f.ownerToken, f.serverId))
+      .flatMap((item) => (item.kind === "thread" ? [item.threadChannelId] : []));
+
+  await createMessage(f.threadId, "user", f.memberBId, "reply that keeps the followed thread active");
+  assert.ok((await inboxThreadIds()).includes(f.threadId), "precondition: the followed thread is in the inbox");
+  assert.ok((await followedThreadIds()).includes(f.threadId), "precondition: the followed thread is listed");
+
+  await deleteChannel(f.parentChannelId);
+  const [thread] = await db.select({ deletedAt: channels.deletedAt })
+    .from(channels)
+    .where(eq(channels.id, f.threadId));
+  assert.equal(thread?.deletedAt, null, "fixture: deleting the parent leaves the child thread row active");
+
+  assert.equal(
+    (await inboxThreadIds()).includes(f.threadId),
+    false,
+    "a followed thread must not surface in the inbox once its parent channel is soft-deleted",
+  );
+  assert.equal(
+    (await followedThreadIds()).includes(f.threadId),
+    false,
+    "a followed thread must not be listed once its parent channel is soft-deleted",
   );
 });
 
@@ -3366,10 +3014,21 @@ test("task #48 U1: a caller with residue but no access can retire it -- both pop
     method: "POST", headers: h, body: JSON.stringify({}),
   });
   assert.equal(joined.status, 200, "precondition: a member can clear, so residue exists");
+  // Receiver-owned unread residue: a notification the member got but never read.
+  const unreadWhileMember = await createMessage(room.id, "user", f.ownerId, "unread while still a member");
+  await recordTestInboxFact({
+    serverId: f.serverId,
+    receiverId: f.outsiderId,
+    kind: "channel",
+    sourceChannelId: room.id,
+    message: unreadWhileMember,
+  });
   await removeHuman(room.id, f.outsiderId);
 
-  // The channel moves on after they lose access, so there IS unread residue.
-  await createMessage(room.id, "user", f.ownerId, "after removal");
+  // The channel keeps moving after they lose access. Task #64: that activity is
+  // the channel's live frontier, and read-all must never carry it into the
+  // former member's state.
+  const afterRemoval = await createMessage(room.id, "user", f.ownerId, "after removal");
   const db = getDb();
   const cursorBefore = await db
     .select({ lastReadSeq: userChannelReadCursors.lastReadSeq })
@@ -3400,6 +3059,14 @@ test("task #48 U1: a caller with residue but no access can retire it -- both pop
   assert.ok(
     cursorAfter[0].lastReadSeq > (cursorBefore[0]?.lastReadSeq ?? -1),
     `residue was not actually retired: cursor stayed at ${cursorAfter[0].lastReadSeq}`,
+  );
+  // Task #64: retired exactly through the receiver-owned notification. Before
+  // the fix this tooth only asked for "moved", and the cursor moved to the
+  // post-removal message, which is the live-frontier leak itself.
+  assert.equal(
+    cursorAfter[0].lastReadSeq,
+    unreadWhileMember.seq,
+    `residue read-all must stop at receiver-owned data, not the live frontier (${afterRemoval.seq})`,
   );
 
   // Population 2: soft-deleted DM. @Tenny: an instance, not a new branch --
@@ -3586,218 +3253,3 @@ test("task #48 U6: the residue path emits no socket event carrying the live fron
 // This first tooth drives the error path through an injected failing executor so it
 // runs on PGlite too (CI has no real PG). The second tooth below proves the same
 // contract under a REAL statement_timeout, which PGlite does not enforce.
-test("inbox PG serving-rows query failure reports receiver scope as unavailable, never as a measured 0", async ({ app }) => {
-  // Deliberately PGlite even when DATABASE_URL is set: the harness does not isolate
-  // fixtures between tests on a shared real database, so exactly one test in this file
-  // may seed real PG (the REAL statement_timeout tooth below). This one is engine
-  // agnostic anyway — it injects the failure rather than provoking a real timeout.
-
-  const previousRfc056ServingMode = process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE;
-  try {
-    process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = "on";
-    const f = await seedThreadFixture(app.baseUrl);
-    const cutoff = new Date("2026-06-01T00:00:00Z");
-    const errorEvents: Array<{ queryName: string; attrs: Record<string, unknown> }> = [];
-    const statementTimeout = Object.assign(
-      new Error("canceling statement due to statement timeout"),
-      { code: "57014" },
-    );
-    const failingExecutor = {
-      select: getDb().select.bind(getDb()),
-      execute: async () => {
-        throw statementTimeout;
-      },
-    } as never;
-    await assert.rejects(async () => {
-      await getInboxItems(f.serverId, f.ownerId, {
-        filter: "all",
-        limit: 30,
-        offset: 0,
-        historyCutoff: cutoff,
-        humanActivityMuteEnabled: false,
-        executor: failingExecutor,
-        traceQuery: async (queryName, work, onComplete, onError) => {
-          try {
-            const result = await work();
-            onComplete?.(result);
-            return result;
-          } catch (error) {
-            errorEvents.push({
-              queryName,
-              attrs: (onError?.(error) ?? {}) as Record<string, unknown>,
-            });
-            throw error;
-          }
-        },
-      });
-    });
-    const servingError = errorEvents.find(
-      (event) => event.queryName === "channels.inbox_items_serving_rows_by_user",
-    );
-    assert.ok(
-      servingError,
-      `expected the serving-rows query to fail; saw ${JSON.stringify(errorEvents.map((e) => e.queryName))}`,
-    );
-    assert.equal(
-      "receiver_scope_row_count" in servingError.attrs,
-      false,
-      "a failed statement never produced a receiver-scope count, so the numeric field must be absent rather than a plausible 0",
-    );
-    assert.equal(
-      servingError.attrs.receiver_scope_row_count_state,
-      "unavailable_query_failed",
-      "absence must be stated, so a reader can tell 'not measured' from 'measured zero'",
-    );
-  } finally {
-    process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = previousRfc056ServingMode;
-    // Every test in this file closes its app; omitting this leaked a live app and the
-    // shard died with PROCESS_DID_NOT_EXIT / exit 124 even though both teeth passed.
-    await app.close();
-  }
-});
-
-
-// task #135: PG-vs-RW discrimination control. A 57014 on the PG path must be
-// labeled db_system="postgresql" with sqlstate + retryable, so it is
-// distinguishable from the same shape served by RisingWave (RW failures carry
-// db_system="risingwave" via risingWaveInboxTrace; that counterpart is covered
-// by channelService.risingwaveFailsoft.test.ts and risingWaveInboxTrace.test.ts).
-test("inbox PG serving-rows failure event carries db_system=postgresql, sqlstate and retryable", async ({ app }) => {
-  // Deliberately PGlite like the task #62 tooth above: the failure is injected,
-  // so the engine does not matter.
-
-  const previousRfc056ServingMode = process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE;
-  try {
-    process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = "on";
-    const sink = new MemoryTraceSink();
-    const tracer = new BasicTracer({ sink });
-    const f = await seedThreadFixture(app.baseUrl);
-    const cutoff = new Date("2026-06-01T00:00:00Z");
-    const statementTimeout = Object.assign(
-      new Error("canceling statement due to statement timeout"),
-      { code: "57014" },
-    );
-    const failingExecutor = {
-      select: getDb().select.bind(getDb()),
-      execute: async () => {
-        throw statementTimeout;
-      },
-    } as never;
-    const span = tracer.startSpan("server.http.request", { surface: "server", kind: "server" });
-    await assert.rejects(
-      runWithTraceSpan(span, () => getInboxItems(f.serverId, f.ownerId, {
-        filter: "all",
-        limit: 30,
-        offset: 0,
-        historyCutoff: cutoff,
-        humanActivityMuteEnabled: false,
-        executor: failingExecutor,
-        traceQuery: createTraceDbQueryTracer("inbox.loaded"),
-      }), tracer),
-      statementTimeout,
-    );
-    span.end("error");
-
-    const rows = sink.getAllSpans().flatMap((recorded) => traceEventRowsForSpan(recorded, {
-      serviceName: "slock-server",
-      deploymentEnvironment: "test",
-    }));
-    const servingRow = rows.find(
-      (row) => row.event_name === "db.query.failed"
-        && row.query_name === "channels.inbox_items_serving_rows_by_user",
-    );
-    assert.ok(
-      servingRow,
-      `expected the serving-rows query failure event; saw ${JSON.stringify(rows.map((row) => [row.event_name, row.query_name]))}`,
-    );
-    assert.equal(servingRow.db_system, "postgresql");
-    assert.notEqual(
-      servingRow.db_system,
-      "risingwave",
-      "the same 57014 shape on a PG path must be distinguishable from an RW failure",
-    );
-    assert.equal(servingRow.sqlstate, "57014");
-    assert.equal(servingRow.retryable, "true");
-    assert.match(servingRow.timeout_bucket ?? "", /^(<1s|1-5s|5-15s|>15s)$/);
-    assert.equal(
-      JSON.stringify(servingRow).includes("canceling statement"),
-      false,
-      "raw database error text must never land in the row",
-    );
-  } finally {
-    process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = previousRfc056ServingMode;
-    // Every test in this file closes its app; omitting this leaked a live app and the
-    // shard died with PROCESS_DID_NOT_EXIT / exit 124 even though both teeth passed.
-    await app.close();
-  }
-});
-
-
-// Real statement_timeout semantics: PGlite does not enforce statement_timeout, so this
-// tooth is skipped unless DATABASE_URL points at a real PostgreSQL. It is NOT redundant
-// with the injected-failure tooth above: that one proves the attribute contract, this
-// one proves a real timeout actually reaches that contract.
-// Set DATABASE_URL to a disposable PostgreSQL 16 test database before running.
-// For a local database, start an isolated env with ./raftdev start pg-test and
-// read its Postgres connection URL from ./raftdev status.
-test("inbox PG serving-rows REAL statement_timeout reports receiver scope as unavailable", { skip: !process.env.DATABASE_URL }, async () => {
-  // task #62: the receiver-scope count is produced BY the serving-rows statement, so a
-  // statement_timeout leaves it unmeasured. It used to be reported as its `0` initial
-  // value on the error path, which would invert any "do timeouts correlate with receiver
-  // scope size?" analysis. The numeric field must be ABSENT and the state explicit.
-  // statement_timeout semantics differ between PGlite (WASM) and real PG, so this
-  // tooth must be runnable against real PG16 (also provided by raftdev).
-  const app = await openTestApp(process.env.DATABASE_URL ?? "pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
-  const previousRfc056ServingMode = process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE;
-  try {
-    process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = "on";
-    const db = getDb();
-    const f = await seedThreadFixture(app.baseUrl);
-    const cutoff = new Date("2026-06-01T00:00:00Z");
-    const errorEvents: Array<{ queryName: string; attrs: Record<string, unknown> }> = [];
-    // Tighten the inherited policy so the fallback's own cap resolves to it
-    // (min(inherited, 3000)) and the serving-rows statement really times out.
-    await db.execute(sql`SET statement_timeout = '1ms'`);
-    await assert.rejects(async () => {
-      await getInboxItems(f.serverId, f.ownerId, {
-        filter: "all",
-        limit: 30,
-        offset: 0,
-        historyCutoff: cutoff,
-        humanActivityMuteEnabled: false,
-        traceQuery: async (queryName, work, onComplete, onError) => {
-          try {
-            const result = await work();
-            onComplete?.(result);
-            return result;
-          } catch (error) {
-            errorEvents.push({
-              queryName,
-              attrs: (onError?.(error) ?? {}) as Record<string, unknown>,
-            });
-            throw error;
-          }
-        },
-      });
-    });
-    const servingError = errorEvents.find(
-      (event) => event.queryName === "channels.inbox_items_serving_rows_by_user",
-    );
-    assert.ok(servingError, `expected the serving-rows query to fail; saw ${JSON.stringify(errorEvents.map((e) => e.queryName))}`);
-    assert.equal(
-      "receiver_scope_row_count" in servingError.attrs,
-      false,
-      "a timed-out statement never produced a receiver-scope count, so the numeric field must be absent rather than a plausible 0",
-    );
-    assert.equal(
-      servingError.attrs.receiver_scope_row_count_state,
-      "unavailable_query_failed",
-      "absence must be stated, so a reader can tell 'not measured' from 'measured zero'",
-    );
-  } finally {
-    process.env.RISINGWAVE_INBOX_RFC056_SERVING_MODE = previousRfc056ServingMode;
-    // Every test in this file closes its app; omitting this leaked a live app and the
-    // shard died with PROCESS_DID_NOT_EXIT / exit 124 even though both teeth passed.
-    await app.close();
-  }
-});

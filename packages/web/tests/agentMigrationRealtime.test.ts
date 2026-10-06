@@ -2,21 +2,21 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
 import type { AgentMigrationUpdatedPayload } from "@botiverse/raft-shared";
 import {
   applyAgentMigrationSnapshot,
   createAgentMigrationRealtimeSync,
-} from "../src/store/agentMigrationRealtime.js";
+} from "../src/components/agentMigration/realtime";
 import type {
   AgentMigrationRealtimeSocket,
   AgentMigrationStatusResponse,
-} from "../src/store/agentMigrationRealtime.js";
+} from "../src/components/agentMigration/realtime";
+import type { AgentMigrationState } from "../src/components/agentMigration/state";
 
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const MIGRATION_REF = "mig_abcdefghijklmnopqrstuv";
 
-function snapshot(revision: number, state = "prep"): AgentMigrationStatusResponse {
+function snapshot(revision: number, state: AgentMigrationState = "provisioning"): AgentMigrationStatusResponse {
   return {
     migration: {
       agentId: AGENT_ID,
@@ -114,7 +114,7 @@ test("a late response from a stopped controller cannot overwrite a newer control
   });
   newSync.start();
   await flush();
-  oldRead.resolve(snapshot(1, "prep"));
+  oldRead.resolve(snapshot(1, "provisioning"));
   await flush();
 
   assert.deepEqual(applied, [snapshot(9, "completed")]);
@@ -123,7 +123,7 @@ test("a late response from a stopped controller cannot overwrite a newer control
 
 test("socket event payloads only invalidate and never project state into the read model", async () => {
   const socket = new FakeSocket();
-  const reads = [snapshot(1, "prep"), snapshot(2, "arriving")];
+  const reads = [snapshot(1, "provisioning"), snapshot(2, "arriving")];
   const applied: AgentMigrationStatusResponse[] = [];
   const sync = createAgentMigrationRealtimeSync({
     agentId: AGENT_ID,
@@ -140,7 +140,7 @@ test("socket event payloads only invalidate and never project state into the rea
   socket.emit("agent:migration-updated", event(99, "canceled_post_flip"));
   await flush();
 
-  assert.deepEqual(applied.map((value) => value.migration?.state), ["prep", "arriving"]);
+  assert.deepEqual(applied.map((value) => value.migration?.state), ["provisioning", "arriving"]);
   assert.equal(applied.some((value) => value.migration?.revision === 99), false);
   sync.stop();
 });
@@ -169,7 +169,7 @@ test("initial, connect, rooms, event, and manual signals coalesce through one la
   assert.equal(reads, 1);
   assert.equal(sync.debugState().refreshQueued, true);
 
-  first.resolve(snapshot(1, "prep"));
+  first.resolve(snapshot(1, "provisioning"));
   await manual;
   assert.equal(reads, 2);
   assert.equal(sync.debugState().requestInFlight, false);
@@ -178,7 +178,7 @@ test("initial, connect, rooms, event, and manual signals coalesce through one la
 
 test("the same latest read polls every two seconds only while the authoritative state is active", async () => {
   const socket = new FakeSocket();
-  const reads = [snapshot(1, "prep"), snapshot(2, "completed")];
+  const reads = [snapshot(1, "provisioning"), snapshot(2, "completed")];
   const scheduled = new Map<number, { callback: () => void; delayMs: number }>();
   let nextTimer = 1;
   const sync = createAgentMigrationRealtimeSync({

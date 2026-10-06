@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -59,7 +58,7 @@ test("administration settings expose hide #all as a checkbox setting", () => {
   assert.match(settingsSource, /label=\{formatMessage\(\{ id: "settings\.systemChannels\.sectionLabel" \}\)\}/);
   assert.match(settingsSource, /<Checkbox/);
   assert.match(settingsSource, /checked=\{allChannelHidden\}/);
-  assert.match(settingsSource, /setAllChannelHidden\(event\.currentTarget\.checked\)/);
+  assert.match(settingsSource, /setAllChannelHidden\(checked\)/);
   assert.match(settingsSource, /settings\.systemChannels\.hideAllTitle/);
   assert.match(settingsSource, /settings\.systemChannels\.hideAllDescription/);
   assert.match(settingsSource, /const dirty = allChannelHidden !== currentAllChannelHidden/);

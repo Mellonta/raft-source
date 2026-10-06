@@ -1,3 +1,5 @@
+import { indentAgentBodyContinuationLines } from "@botiverse/raft-shared";
+
 export type AttachmentDownloadHintStyle = "slock_cli" | "mcp_tool";
 
 type FormattableAttachment = {
@@ -19,8 +21,11 @@ export function formatAttachmentSuffix(
   style: AttachmentDownloadHintStyle = "slock_cli",
 ): string {
   if (!attachments?.length) return "";
+  // Filenames come from the multipart upload (`file.originalname` ->
+  // normalizeAttachmentFilename, which only repairs mojibake) and land on the
+  // header line, so a newline in a filename could forge a following line.
   const attachmentList = attachments
-    .map((attachment) => `${attachment.filename} (id:${attachment.id})`)
+    .map((attachment) => `${indentAgentBodyContinuationLines(attachment.filename)} (id:${attachment.id})`)
     .join(", ");
   return ` [${attachments.length} attachment${attachments.length > 1 ? "s" : ""}: ${attachmentList} — ${attachmentDownloadHint(style)}]`;
 }

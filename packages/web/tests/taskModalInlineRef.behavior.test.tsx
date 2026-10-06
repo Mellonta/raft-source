@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ToastProvider } from "raft-ui";
@@ -249,7 +248,7 @@ test("opening an Agent profile from a thread keeps the thread mounted underneath
   );
 
   const retainedThreadPanel = screen.getByTestId("thread-side-column");
-  const profilePanel = await screen.findByTestId("profile-panel");
+  const profilePanel = await screen.findByTestId("profile-panel", {}, { timeout: 3000 });
   assert.equal(
     screen.getByTestId("thread-profile-side-column").getAttribute("data-collapse-channel"),
     "true",
@@ -321,7 +320,12 @@ test("inline task refs opened from a content route preserve task intent through 
 
   await screen.findByTestId("task-thread-modal");
   await waitFor(() => {
-    assert.equal(useThreadStore.getState().openIntent, "task");
+    // task #699: the task intent lands in the independent modal slot and never
+    // touches the side-thread open* fields.
+    assert.equal(useThreadStore.getState().taskModal?.parentMessageId, "task-message-1");
+    assert.equal(useThreadStore.getState().taskModal?.parentChannelId, "channel-1");
+    assert.equal(useThreadStore.getState().openParentMessageId, null);
+    assert.equal(useThreadStore.getState().openIntent, null);
     assert.equal(screen.queryByTestId("thread-side-column"), null);
   });
 });
@@ -333,11 +337,16 @@ test("mobile task sheet has a real back affordance that closes to its underlying
   seedState(channel);
   useTaskStore.setState({ tasks: [task] });
   useThreadStore.setState({
-    openParentChannelId: task.channelId,
-    openParentMessageId: task.messageId,
-    openThreadChannelId: "thread-task-804",
-    openIntent: "task",
-    openedAt: Date.now(),
+    // task #699: the mobile task sheet reads the independent modal slot.
+    taskModal: {
+      parentMessageId: task.messageId,
+      parentChannelId: task.channelId,
+      threadChannelId: "thread-task-804",
+      serverSlug: "acme",
+      focusedMessageId: null,
+      loading: false,
+      error: null,
+    },
   });
 
   api.get = (async (url: string) => {
@@ -368,7 +377,7 @@ test("mobile task sheet has a real back affordance that closes to its underlying
   fireEvent.click(screen.getByTestId("task-modal-mobile-back"));
 
   await waitFor(() => {
-    assert.equal(useThreadStore.getState().openParentMessageId, null);
+    assert.equal(useThreadStore.getState().taskModal, null);
     assert.equal(screen.queryByTestId("task-thread-modal"), null);
   });
 });

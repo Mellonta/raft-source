@@ -1,13 +1,13 @@
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
-import { seedPlaywrightScenario } from "../test/seedPlaywrightScenario.js";
-import { getDb } from "../db/index.js";
-import { announcements, users, serverMembers } from "./schema.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
+import { seedPlaywrightScenario } from "../test/seedPlaywrightScenario";
+import { getDb } from "../db/index";
+import { announcements, users, serverMembers } from "./schema";
+import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

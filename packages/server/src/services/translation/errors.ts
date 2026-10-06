@@ -1,4 +1,4 @@
-import type { TranslationProviderVersion } from "./types.js";
+import type { TranslationProviderVersion } from "./types";
 
 export type TranslationFailureDisposition = "transient" | "content_driven";
 

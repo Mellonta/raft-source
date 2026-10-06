@@ -1,10 +1,10 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   channels,
   messages,
@@ -15,10 +15,10 @@ import {
   workflowInstances,
   workflowStepInstances,
   workflowTemplates,
-} from "../db/schema.js";
-import { createChannel, getOrCreateThread, addHuman, removeHuman } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { createServer } from "../services/serverService.js";
+} from "../db/schema";
+import { createChannel, getOrCreateThread, addHuman, removeHuman } from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -120,6 +120,34 @@ async function moveTask(baseUrl: string, token: string, serverId: string, taskId
   });
   assert.equal(res.status, 200, await res.clone().text());
 }
+
+test("Guest cannot create server-shared workflow templates", async ({ app }) => {
+  const { server } = await setup("workflow-guest-template");
+  const guest = await seedUser("workflow-guest-template-guest");
+  await getDb().insert(serverMembers).values({
+    serverId: server.id,
+    userId: guest.id,
+    role: "guest",
+  });
+  const guestToken = await login(app.baseUrl, guest.email);
+  const before = await countWorkflowWrites();
+
+  const response = await fetch(`${app.baseUrl}/api/workflows/templates`, {
+    method: "POST",
+    headers: headers(guestToken, server.id),
+    body: JSON.stringify({
+      name: "Guest template",
+      steps: [{ key: "draft", title: "Draft" }],
+    }),
+  });
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(
+    await countWorkflowWrites(),
+    before,
+    "denied Guest template creation must not persist shared workflow rows",
+  );
+});
 
 test("workflow instance creates one active task at a time and advances only after the current task is done", async ({ app }) => {
   const { owner, server, channel } = await setup("workflow-serial");

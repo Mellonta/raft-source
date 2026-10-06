@@ -1,0 +1,2 @@
+ALTER TABLE "oauth_clients" ADD COLUMN "when_to_use" text;--> statement-breakpoint
+ALTER TABLE "oauth_clients" ADD CONSTRAINT "oauth_clients_when_to_use_valid" CHECK ("oauth_clients"."when_to_use" IS NULL OR (length("oauth_clients"."when_to_use") <= 160 AND "oauth_clients"."when_to_use" !~ '[\x00-\x1F\x7F]'));

@@ -1,6 +1,6 @@
 import type { AgentConfig } from "@botiverse/raft-shared";
-import type { PendingStartRebind } from "./agentStartCoordinator.js";
-import { AgentStatusTransitionTrace, type AgentStatusTransitionInput } from "./agentStatusTransitionTrace.js";
+import type { PendingStartRebind } from "./agentStartCoordinator";
+import { AgentStatusTransitionTrace, type AgentStatusTransitionInput } from "./agentStatusTransitionTrace";
 
 export type AgentRestartSnapshot = {
   config: AgentConfig;
@@ -135,8 +135,17 @@ export class AgentLifecycleRecords<SpawnFailBackoff = unknown, FingerprintFence 
     return this.idleRestartSnapshots.get(agentId);
   }
 
-  setRestartSnapshot(agentId: string, snapshot: AgentRestartSnapshot): void {
+  /**
+   * Cache an idle restart config. Invariant I2: terminal runtime failure and an
+   * idle restart config are mutually exclusive no-process states, so caching a
+   * restart config is also the decision to retire any terminal-failure record
+   * for that agent. Returns true when a terminal failure was retired, so the
+   * owner can log the transition (task #1102: the two facts coexisting made an
+   * agent permanently unstartable until a daemon restart).
+   */
+  setRestartSnapshot(agentId: string, snapshot: AgentRestartSnapshot): boolean {
     this.idleRestartSnapshots.set(agentId, snapshot);
+    return this.terminalFailures.delete(agentId);
   }
 
   deleteRestartSnapshot(agentId: string): boolean {
@@ -159,8 +168,14 @@ export class AgentLifecycleRecords<SpawnFailBackoff = unknown, FingerprintFence 
     return this.terminalFailures.get(agentId);
   }
 
-  setTerminalFailure(agentId: string, failure: AgentTerminalFailure): void {
+  /**
+   * Record a terminal runtime failure. Invariant I2 (see setRestartSnapshot):
+   * a terminal failure supersedes any cached idle restart config. Returns true
+   * when a restart config was retired.
+   */
+  setTerminalFailure(agentId: string, failure: AgentTerminalFailure): boolean {
     this.terminalFailures.set(agentId, failure);
+    return this.idleRestartSnapshots.delete(agentId);
   }
 
   deleteTerminalFailure(agentId: string): boolean {

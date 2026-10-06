@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { test } from "vitest";
 import { fileURLToPath } from "node:url";
 import {
   classifyOrdinaryMessageExternalProjection,
   ORDINARY_MESSAGE_PRODUCER_CLASSIFICATION,
-} from "./ordinaryMessageExternalProjection.js";
+} from "./ordinaryMessageExternalProjection";
 
 const SERVER_SRC = fileURLToPath(new URL("../", import.meta.url));
 const MARKER = /slack-bridge-ordinary-message-producer:\s*([a-z0-9._-]+)/g;

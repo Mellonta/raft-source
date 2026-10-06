@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { Readable } from "node:stream";
 import vm from "node:vm";
 
@@ -7,7 +6,7 @@ import {
   ATTACHMENT_PREVIEW_BRIDGE_SCRIPT,
   createAttachmentPreviewBridgeTransform,
   findHtmlPreviewCspMetaStart,
-} from "./attachmentPreviewBridge.js";
+} from "./attachmentPreviewBridge";
 
 type Rect = { left: number; top: number; right: number; bottom: number; width?: number; height?: number };
 type TextNode = { nodeType: 3; textContent: string; rects: Rect[] };

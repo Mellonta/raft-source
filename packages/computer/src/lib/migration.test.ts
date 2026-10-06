@@ -3,15 +3,14 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 
 import {
   detectLegacyMigration,
   type LegacyMachineRosterClient,
-} from "./migration.js";
-import type { LegacyMachineRosterEntry } from "../apiClient.js";
-import { serverAttachmentPath } from "../paths.js";
-import { MIGRATION_DETECTION_KINDS, isMigrationDetectionKind } from "./types.js";
+} from "./migration";
+import type { LegacyMachineRosterEntry } from "../apiClient";
+import { serverAttachmentPath } from "../paths";
+import { MIGRATION_DETECTION_KINDS, isMigrationDetectionKind } from "./types";
 
 // PR-v9.9 §X.4 migration detection — server-roster ∩ local-history
 // intersection on apiKeyFingerprint, plus three-gate `--migrate-from`

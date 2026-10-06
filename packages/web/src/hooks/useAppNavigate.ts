@@ -1,7 +1,9 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useLocation, useNavigate, useNavigationType } from "react-router-dom";
+import { searchEntryState } from "../components/search/searchOverlayLocation";
 import { useServerStore } from "../store/serverStore";
 import { buildSidebarChannelFocusState } from "../components/layout/sidebarChannelFocus";
+import { shareableWebOrigin } from "../utils/desktopShell";
 
 export type NavigationKindForDepth = "PUSH" | "POP" | "REPLACE";
 
@@ -19,6 +21,9 @@ export function nextNavigationDepth(
   return depth;
 }
 
+// Compressed stack (one entry per commit). Only used when the browser entry
+// index is unavailable (MemoryRouter, non-browser): it cannot represent a
+// history.go(±n) that travels several entries in one popstate.
 export function nextNavigationStack(
   stack: readonly string[],
   navigationType: NavigationKindForDepth,
@@ -30,6 +35,42 @@ export function nextNavigationStack(
     return [...nextStack];
   }
   return [...nextStack, locationPath];
+}
+
+/**
+ * Index-keyed history records (the browser path). react-router stamps each
+ * entry's index on history.state.idx, so a commit can be recorded AT its real
+ * position: a POP or Forward that travels n entries in one popstate lands on
+ * index i and records i; the entries behind it stay exactly what was observed
+ * there. A PUSH discards every record at or after its index (they are gone
+ * from the browser too). Entries never observed in this document (before a
+ * reload, before the app mounted) are UNKNOWN — a back decision treats them
+ * like "no in-app history", the same conservative answer a cold start gives.
+ */
+export const UNKNOWN_NAVIGATION_ENTRY = "\u0000unknown-history-entry";
+export type NavigationEntries = Readonly<Record<number, string>>;
+
+export function nextNavigationEntries(
+  entries: NavigationEntries,
+  navigationType: NavigationKindForDepth,
+  index: number,
+  locationPath: string,
+): Record<number, string> {
+  const next: Record<number, string> = {};
+  for (const [key, path] of Object.entries(entries)) {
+    const at = Number(key);
+    if (navigationType === "PUSH" && at >= index) continue;
+    next[at] = path;
+  }
+  next[index] = locationPath;
+  return next;
+}
+
+/** The path sequence 0..index for the mobile-back decision; gaps are UNKNOWN. */
+export function navigationStackFromEntries(entries: NavigationEntries, index: number): string[] {
+  const stack: string[] = [];
+  for (let at = 0; at <= index; at += 1) stack.push(entries[at] ?? UNKNOWN_NAVIGATION_ENTRY);
+  return stack;
 }
 
 export type MobileBackAction =
@@ -47,7 +88,7 @@ export function resolveMobileBackAction(
   }
   const stack = stackOrDepth;
   const previousPath = stack.at(-2);
-  if (previousPath && canUseBrowserBack(previousPath, scopePath)) {
+  if (previousPath && previousPath !== UNKNOWN_NAVIGATION_ENTRY && canUseBrowserBack(previousPath, scopePath)) {
     return { kind: "back" };
   }
   return { kind: "fallback", path: fallbackPath };
@@ -88,19 +129,23 @@ function fallbackScopePath(
 function syncMobileBackNavigationState(
   navigationType: NavigationKindForDepth,
   path: string,
+  browserHistoryIndex: number | null,
 ) {
   inAppPushDepth = nextNavigationDepth(inAppPushDepth, navigationType);
-  inAppNavigationStack = nextNavigationStack(
-    inAppNavigationStack,
-    navigationType,
-    path,
-  );
+  if (browserHistoryIndex === null) {
+    // No entry index (MemoryRouter / non-browser): compressed stack.
+    inAppNavigationStack = nextNavigationStack(inAppNavigationStack, navigationType, path);
+    return;
+  }
+  inAppNavigationEntries = nextNavigationEntries(inAppNavigationEntries, navigationType, browserHistoryIndex, path);
+  inAppNavigationStack = navigationStackFromEntries(inAppNavigationEntries, browserHistoryIndex);
 }
 
 function initializeMobileBackNavigationState(path: string) {
   inAppPushDepth = 0;
   inAppNavigationStack = [path];
   trackedBrowserHistoryIndex = readBrowserHistoryIndex();
+  inAppNavigationEntries = trackedBrowserHistoryIndex === null ? {} : { [trackedBrowserHistoryIndex]: path };
   pendingSynchronousNavigation = null;
 }
 
@@ -112,6 +157,7 @@ function readBrowserHistoryIndex(): number | null {
 
 // Stryker disable next-line ArrayDeclaration: NavigationDepthTracker overwrites the module default on app mount before mobile-back reads it.
 let inAppNavigationStack: string[] = [];
+let inAppNavigationEntries: Record<number, string> = {};
 let inAppPushDepth = 0;
 let trackedBrowserHistoryIndex: number | null = null;
 export interface SynchronousNavigationRecord {
@@ -188,7 +234,9 @@ export function recordSynchronousMobileBackNavigation(
   if (inAppNavigationStack.length === 0 && typeof window !== "undefined") {
     initializeMobileBackNavigationState(locationPath(window.location));
   }
-  syncMobileBackNavigationState(navigationType, path);
+  // Callers record AFTER BrowserRouter wrote history (synchronously), so the
+  // entry index already points at the destination.
+  syncMobileBackNavigationState(navigationType, path, readBrowserHistoryIndex());
   trackedBrowserHistoryIndex = readBrowserHistoryIndex();
   pendingSynchronousNavigation = {
     navigationType,
@@ -242,6 +290,11 @@ export function NavigationDepthTracker() {
       if (browserHistoryIndex < trackedBrowserHistoryIndex) committedNavigationType = "POP";
       else if (browserHistoryIndex > trackedBrowserHistoryIndex) committedNavigationType = "PUSH";
     }
+    // For the index-keyed records a Forward traversal (router POP, index up)
+    // must NOT be recorded as a PUSH: it lands on an existing entry and
+    // discards nothing. Only a real push (router PUSH) truncates.
+    const recordNavigationType: NavigationKindForDepth =
+      committedNavigationType === "PUSH" && navigationType === "POP" ? "POP" : committedNavigationType;
     if (shouldConsumeSynchronousNavigation(pendingSynchronousNavigation, {
       navigationType: committedNavigationType,
       historyIndex: browserHistoryIndex,
@@ -254,8 +307,9 @@ export function NavigationDepthTracker() {
     trackedBrowserHistoryIndex = browserHistoryIndex;
     pendingSynchronousNavigation = null;
     syncMobileBackNavigationState(
-      committedNavigationType,
+      browserHistoryIndex === null ? committedNavigationType : recordNavigationType,
       path,
+      browserHistoryIndex,
     );
   }, [hash, key, navigationType, pathname, search, synchronousNavigationSnapshotAtRender]);
   return null;
@@ -413,6 +467,11 @@ export function useAppNavigate() {
   const navigate = useNavigate();
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
+  // Current router location for search entries (kept in a ref so the returned
+  // callbacks stay referentially stable across location changes).
+  const currentLocation = useLocation();
+  const currentLocationRef = useRef(currentLocation);
+  currentLocationRef.current = currentLocation;
   const slug = useServerStore((s) => s.current?.slug);
   const base = slug ? `/s/${slug}` : "";
   // Memoized so the returned object has a STABLE identity across renders
@@ -437,7 +496,12 @@ export function useAppNavigate() {
         ? { state: buildSidebarChannelFocusState(channelId) }
         : undefined,
     ),
-    toDm: (dmChannelId: string, opts?: NavOptions) => navigateRef.current(withQuery(`${base}/dm/${dmChannelId}`, opts)),
+    toDm: (dmChannelId: string, opts?: NavOptions) => navigateRef.current(
+      withQuery(`${base}/dm/${dmChannelId}`, opts),
+      opts?.sidebarFocus
+        ? { state: buildSidebarChannelFocusState(dmChannelId, "dm") }
+        : undefined,
+    ),
     toMessage: (channelId: string, messageId: string, opts?: NavOptions) => navigateRef.current(
       buildMessagePath(base, channelId, messageId),
       opts?.sidebarFocus
@@ -467,26 +531,34 @@ export function useAppNavigate() {
       navigateRef.current(
         opts?.filter ? `${base}/computers?filter=${opts.filter}` : `${base}/computers`,
       ),
+    // Desktop: every search entry floats as the ⌘K overlay over the current
+    // view (task #96) — carry it as backgroundLocation. Web: full-page /search.
     toSearch: (query?: string, opts?: SearchNavOptions) => navigateRef.current(
       buildSearchPath(base, query, opts),
-      opts?.flushSync ? { flushSync: true } : undefined,
+      {
+        state: searchEntryState({ pathname: currentLocationRef.current.pathname, search: currentLocationRef.current.search }),
+        ...(opts?.flushSync ? { flushSync: true } : {}),
+      },
     ),
     toSettings: (tab?: string) => navigateRef.current(tab ? `${base}/settings/${tab}` : `${base}/settings`),
     toReleaseNotes: () => navigateRef.current(`${base}/release-notes`),
     toThreadsInbox: () => navigateRef.current(`${base}/activity`),
     toTasks: () => navigateRef.current(`${base}/tasks`),
     toSaved: () => navigateRef.current(`${base}/saved`),
-    toWiki: () => navigateRef.current(`${base}/wiki`),
     };
   }, [base]);
 }
 
-/** Build a shareable permalink URL for a message. */
+/** Build a shareable permalink URL for a message.
+ *
+ * Uses shareableWebOrigin() rather than window.location.origin so that in the Electron
+ * desktop shell (page origin `app://raft`) copied/shared permalinks are real, openable
+ * web URLs. On Web this returns the page origin unchanged. (task #84) */
 export function buildMessagePermalink(
   serverSlug: string,
   channelId: string,
   messageId: string,
   options: MessagePermalinkOptions = {}
 ): string {
-  return `${window.location.origin}${buildMessagePath(`/s/${serverSlug}`, channelId, messageId, options)}`;
+  return `${shareableWebOrigin()}${buildMessagePath(`/s/${serverSlug}`, channelId, messageId, options)}`;
 }

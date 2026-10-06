@@ -15,7 +15,7 @@ import { randomUUID } from "node:crypto";
 import {
   manifestPermitsSyscall,
   type AppId,
-} from "./rapRegistry.js";
+} from "./rapRegistry";
 import {
   getInstalledApp,
   // The STORE primitive. Deliberately aliased: it resolves a grant but never
@@ -25,9 +25,9 @@ import {
   // subject-addressed public syscall of the same name is defined below.
   resolveConversation as resolveConversationInStore,
   type RapRegistryReader,
-} from "./rapRegistryStore.js";
-import { currentRapEventId } from "./rapInvocationContext.js";
-import { productionRapTimerSeam } from "./rapTimerRuntime.js";
+} from "./rapRegistryStore";
+import { currentRapEventId } from "./rapInvocationContext";
+import { productionRapTimerSeam } from "./rapTimerRuntime";
 
 /** An app addresses a SUBJECT. Never a channel, thread, or raw target (§2 Q1). */
 export interface Subject {

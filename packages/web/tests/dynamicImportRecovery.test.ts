@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { dynamicImportFailureKey, isDynamicImportFailure } from "../src/utils/dynamicImportRecovery.js";
+import { dynamicImportFailureKey, isDynamicImportFailure } from "../src/utils/dynamicImportRecovery";
 
 test("dynamic import fetch failures are recognized by chunk URL", () => {
   const error = new TypeError(

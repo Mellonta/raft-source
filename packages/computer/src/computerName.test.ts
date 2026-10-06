@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
-import { deriveDefaultComputerName } from "./paths.js";
+import { deriveDefaultComputerName } from "./paths";
 
 test("deriveDefaultComputerName: strips common local-network suffixes", () => {
   assert.equal(deriveDefaultComputerName("MacBook-Pro.local"), "MacBook-Pro");

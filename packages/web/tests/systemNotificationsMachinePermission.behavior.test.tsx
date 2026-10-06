@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import type { ReactElement } from "react";
 import { cleanup, renderHook } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -82,7 +81,6 @@ function seedMachineNotificationWorld(role: ServerRole): void {
       }),
     ],
     latestComputerVersion: "1.2.3",
-    latestDaemonVersion: "1.0.0",
     loading: false,
   });
   useAgentStore.setState({
@@ -120,7 +118,6 @@ afterEach(() => {
   useServerStore.getState().clearCurrent();
   useMachineStore.setState({
     machines: [],
-    latestDaemonVersion: null,
     latestComputerVersion: null,
     loading: true,
     selectedMachineId: null,
@@ -144,7 +141,8 @@ test("members receive machine system notifications through viewMachines", () => 
 
   const ids = result.current.map((notification) => notification.id);
   assert.ok(ids.includes("machine-offline"));
-  assert.ok(ids.includes("machine-outdated"));
+  // Retired with the standalone daemon release: no version notice is derived any more.
+  assert.ok(!ids.includes("machine-outdated"));
 });
 
 test("machine managers see machine system notifications", () => {
@@ -154,7 +152,8 @@ test("machine managers see machine system notifications", () => {
 
   const ids = result.current.map((notification) => notification.id);
   assert.ok(ids.includes("machine-offline"));
-  assert.ok(ids.includes("machine-outdated"));
+  // Retired with the standalone daemon release: no version notice is derived any more.
+  assert.ok(!ids.includes("machine-outdated"));
   assert.ok(!ids.includes("computer-attention"));
   assert.ok(
     result.current.every((notification) => !notification.title.includes("Computer")),

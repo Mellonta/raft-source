@@ -1,18 +1,18 @@
-import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash, tokenForHuman } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
 import {
-  agents, channels,
+  agents, channels, userChannelReadCursors,
   externalAppInstalls,
   externalAppRegistrations,
   externalAppServerGrants,
@@ -21,13 +21,13 @@ import {
   externalOutboundDeliveries,
   jointChannels,
   jointChannelServers,
-  messages,
+  messages, tasks, taskEvents, channelConversionJobs, channelConversionPhaseLedger,
   oauthClients,
   serverMembers,
   servers as serversTable,
   users
-} from "../db/schema.js";
-import { createServer as createServerService } from "./serverService.js";
+} from "../db/schema";
+import { createServer as createServerService } from "./serverService";
 import {
   addAgent,
   addHuman,
@@ -36,9 +36,10 @@ import {
   getOrCreateThread,
   getOrCreateThreadForChannel,
   setLocalChannelArchivedByAgent,
-} from "./channelService.js";
-import { createMessage } from "./messageService.js";
+} from "./channelService";
+import { createMessage } from "./messageService";
 import {
+  cancelChannelConversionJob,
   getChannelConversionJob,
   getJointShapeForLocalChannel,
   describeChannelConversionPreJobFailure,
@@ -46,9 +47,9 @@ import {
   runChannelConversionJob,
   startChannelToJointConversion,
   type ChannelConversionPhase,
-} from "./channelConversionService.js";
+} from "./channelConversionService";
 
-const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false, channelToJointConversionFlagDefaultEnabled: true });
 
 const CHANNEL_CONVERSION_REAL_PG_URL = process.env.CHANNEL_CONVERSION_REAL_PG_URL;
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
@@ -252,6 +253,26 @@ function normalizeShape(shape: Awaited<ReturnType<typeof getJointShapeForLocalCh
   };
 }
 
+// 0317: messages.server_id follows the parent message's channel through the
+// conversion move and the compensation move back (trigger-derived).
+async function assertParentServer(messageId: string, expectedServerId: string, label: string) {
+  const [row] = await getDb().select({ serverId: messages.serverId }).from(messages).where(eq(messages.id, messageId));
+  assert.equal(row?.serverId, expectedServerId, label);
+}
+
+// 0297: every thread's parent_channel_id follows its parent message through
+// conversion (parent move) and compensation (move back), with no app writes.
+async function assertThreadParentChannelsFollowParents(threadId: string, expectedChannelId: string | null, label: string) {
+  const [thread] = await getDb().select({ parentChannelId: channels.parentChannelId }).from(channels).where(eq(channels.id, threadId));
+  assert.equal(thread?.parentChannelId, expectedChannelId, label);
+  const drift = await getDb().execute(sql`
+    SELECT thread.id FROM channels thread
+    JOIN messages parent ON parent.id = thread.parent_message_id
+    WHERE thread.type = 'thread' AND thread.parent_channel_id IS DISTINCT FROM parent.channel_id
+  `);
+  assert.deepEqual(drift.rows, [], `${label}: no thread drifts from its parent message's channel`);
+}
+
 test("channel conversion pre-job failures produce bounded retryable response copy", () => {
   const failure = describeChannelConversionPreJobFailure(
     "eligibility_check",
@@ -276,6 +297,8 @@ test("channel conversion drains and epoch-freezes a public Slack binding before 
     agentId: agent.id,
     name: `${prefix}-room`,
   });
+  await getDb().update(channels).set({ guestVisible: true, guestJoinable: true })
+    .where(eq(channels.id, fixture.channel.id));
   const binding = await seedPublicSlackBinding({
     serverId: server.id,
     ownerId: owner.id,
@@ -333,6 +356,7 @@ test("channel conversion drains and epoch-freezes a public Slack binding before 
     sourceChannelId: fixture.channel.id,
     createdByUserId: owner.id,
   });
+  await runChannelConversionJob(job.id, { maxPhases: 1 });
   const frozen = (await getDb().select().from(externalChannelBindings)
     .where(eq(externalChannelBindings.id, binding.id)))[0]!;
   assert.equal(frozen.channelId, fixture.channel.id, "permission-facing binding anchor stays local");
@@ -344,6 +368,8 @@ test("channel conversion drains and epoch-freezes a public Slack binding before 
   const [converted] = await getDb().select().from(channels)
     .where(eq(channels.id, fixture.channel.id));
   assert.equal(converted!.type, "joint");
+  assert.equal(converted!.guestVisible, false, "Joint conversion closes the ordinary Guest discovery policy");
+  assert.equal(converted!.guestJoinable, false, "Joint conversion releases the Server Guest Join slot");
   assert.equal((await getDb().select().from(externalChannelBindings)
     .where(eq(externalChannelBindings.id, binding.id)))[0]!.bindingEpoch, 2);
 });
@@ -470,6 +496,43 @@ test("channel conversion fails closed for a private Slack audience without a mig
   );
   assert.equal((await getDb().select().from(channels)
     .where(eq(channels.id, fixture.channel.id)))[0]!.archivedAt, null);
+});
+
+test("channel conversion requires fresh provider privacy while a verified public positive control still starts", async ({ app }) => {
+  void app;
+  const prefix = `convert-privacy-${randomUUID().slice(0, 8)}`;
+  const { owner, member, server, agent } = await seedConversionActors(prefix);
+  const fixture = await seedOrdinaryChannel({
+    serverId: server.id, ownerId: owner.id, memberId: member.id, agentId: agent.id,
+    name: `${prefix}-room`,
+  });
+  await seedPublicSlackBinding({ serverId: server.id, ownerId: owner.id, channelId: fixture.channel.id });
+  let calls = 0;
+  await assert.rejects(startChannelToJointConversion({
+    serverId: server.id,
+    sourceChannelId: fixture.channel.id,
+    createdByUserId: owner.id,
+    async revalidateExternalPrivacy() {
+      calls += 1;
+      return [{ kind: "unavailable", reason: "provider_unavailable" }];
+    },
+  }), (error: unknown) => error instanceof Error
+    && "code" in error
+    && error.code === "external_binding_privacy_unavailable");
+  assert.equal(calls, 1);
+  assert.equal((await getDb().select().from(channelConversionJobs)).length, 0);
+
+  const job = await startChannelToJointConversion({
+    serverId: server.id,
+    sourceChannelId: fixture.channel.id,
+    createdByUserId: owner.id,
+    async revalidateExternalPrivacy() {
+      calls += 1;
+      return [{ kind: "fresh" }];
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(job.status, "pending");
 });
 
 test("POST /api/channels/:id/convert-to-joint preserves history and late invite accept backfills threads", async ({ app }) => {
@@ -633,7 +696,6 @@ test("channel conversion retries converge to direct joint identity after every p
   const directShape = normalizeShape(await getJointShapeForLocalChannel(direct.id));
   const phases: ChannelConversionPhase[] = [
     "prepare",
-    "drop_task_identity",
     "move_parent_messages",
     "prepare_threads",
     "move_thread_messages",
@@ -656,14 +718,16 @@ test("channel conversion retries converge to direct joint identity after every p
       createdByUserId: owner.id,
     });
     let current = job;
-    while (current.phase !== phase) {
+    const entryPhase = phase === "finalize" ? "audience_cutover" : phase;
+    for (let attempts = 0; current.phase !== entryPhase; attempts++) {
+      assert.ok(attempts < 15 && current.status !== "done", `job must reach ${entryPhase}`);
       current = await runChannelConversionJob(current.id, { maxPhases: 1 });
       assert.notEqual(current.status, "failed", `job should reach ${phase} without failing first`);
     }
 
     const failed = await runChannelConversionJob(job.id, { failBeforePhase: phase });
     assert.equal(failed.status, "failed", `injected ${phase} failure should mark the job failed`);
-    assert.equal(failed.phase, phase, `injected ${phase} failure should not advance the phase`);
+    assert.equal(failed.phase, entryPhase, `injected ${phase} failure rolls back the whole terminal transaction`);
 
     await retryChannelConversionJob(job.id);
     const completed = await runChannelConversionJob(job.id);
@@ -677,101 +741,29 @@ test("channel conversion retries converge to direct joint identity after every p
   }
 });
 
-test("channel conversion failure before parent move unlocks intact source and retry re-locks before resuming", async ({ app }) => {
-  const prefix = `convert-unlock-${randomUUID().slice(0, 8)}`;
+test("conversion failure and retry preserve existing archive provenance", async ({ app }) => {
+  assert.ok(app.baseUrl);
+  const prefix = `convert-archive-${randomUUID().slice(0, 8)}`;
   const { owner, member, server, agent } = await seedConversionActors(prefix);
-  const fixture = await seedOrdinaryChannel({
-    serverId: server.id,
-    ownerId: owner.id,
-    memberId: member.id,
-    agentId: agent.id,
-    name: `${prefix}-room`,
-    type: "private",
-  });
-  const agentArchive = await setLocalChannelArchivedByAgent(fixture.channel.id, agent.id, true);
-  assert.equal(agentArchive.changed, true);
-  assert.equal(agentArchive.channel.archivedByAgentId, agent.id);
-  const job = await startChannelToJointConversion({
-    serverId: server.id,
-    sourceChannelId: fixture.channel.id,
-    createdByUserId: owner.id,
-  });
-  const [sourceLock] = await getDb()
-    .select({
-      archivedAt: channels.archivedAt,
-      archivedByUserId: channels.archivedByUserId,
-      archivedByAgentId: channels.archivedByAgentId,
-    })
-    .from(channels)
-    .where(eq(channels.id, fixture.channel.id));
-  assert.ok(sourceLock.archivedAt);
-  assert.equal(sourceLock.archivedByUserId, owner.id, "conversion lock must record its human initiator");
-  assert.equal(sourceLock.archivedByAgentId, null, "conversion lock must replace prior agent provenance");
-
+  const fixture = await seedOrdinaryChannel({ serverId: server.id, ownerId: owner.id, memberId: member.id, agentId: agent.id, name: `${prefix}-room`, type: "private" });
+  await setLocalChannelArchivedByAgent(fixture.channel.id, agent.id, true);
+  const snapshot = async () => (await getDb().select({ archivedAt: channels.archivedAt, archivedByUserId: channels.archivedByUserId, archivedByAgentId: channels.archivedByAgentId }).from(channels).where(eq(channels.id, fixture.channel.id)))[0];
+  const archived = await snapshot();
+  const job = await startChannelToJointConversion({ serverId: server.id, sourceChannelId: fixture.channel.id, createdByUserId: owner.id });
+  assert.deepEqual(await snapshot(), archived);
   const failed = await runChannelConversionJob(job.id, { failBeforePhase: "move_parent_messages" });
   assert.equal(failed.status, "failed");
-  assert.equal(failed.phase, "move_parent_messages");
-
-  const [unlockedSource] = await getDb()
-    .select({
-      archivedAt: channels.archivedAt,
-      archivedByUserId: channels.archivedByUserId,
-      archivedByAgentId: channels.archivedByAgentId,
-    })
-    .from(channels)
-    .where(eq(channels.id, fixture.channel.id));
-  assert.equal(unlockedSource.archivedAt, null, "pre-move failure must release the read-only archive lock");
-  assert.equal(unlockedSource.archivedByUserId, null);
-  assert.equal(unlockedSource.archivedByAgentId, null);
-  const stillLocalParentMessages = await getDb()
-    .select({ id: messages.id })
-    .from(messages)
-    .where(and(eq(messages.id, fixture.parent.id), eq(messages.channelId, fixture.channel.id)));
-  assert.equal(stillLocalParentMessages.length, 1, "pre-move failure should leave source history intact");
-  const postFailureParent = await createMessage(fixture.channel.id, "user", owner.id, "post-failure parent");
-
+  assert.equal(failed.progress.sourceLock, "released");
+  assert.deepEqual(await snapshot(), archived, "compensation must not unarchive the user's channel");
   const retried = await retryChannelConversionJob(job.id);
-  assert.equal(retried.phase, "prepare", "failed retry should restart idempotent phases to sweep post-failure writes");
-  const [relockedSource] = await getDb()
-    .select({
-      archivedAt: channels.archivedAt,
-      archivedByUserId: channels.archivedByUserId,
-      archivedByAgentId: channels.archivedByAgentId,
-    })
-    .from(channels)
-    .where(eq(channels.id, fixture.channel.id));
-  assert.ok(relockedSource.archivedAt, "retry should re-lock while conversion is running");
-  assert.equal(relockedSource.archivedByUserId, owner.id);
-  assert.equal(relockedSource.archivedByAgentId, null);
-
+  assert.notEqual(retried.conversionEpoch, job.conversionEpoch);
+  assert.deepEqual(await snapshot(), archived);
   const completed = await runChannelConversionJob(job.id);
   assert.equal(completed.status, "done");
-  const [finalSource] = await getDb()
-    .select({
-      type: channels.type,
-      archivedAt: channels.archivedAt,
-      archivedByUserId: channels.archivedByUserId,
-      archivedByAgentId: channels.archivedByAgentId,
-    })
-    .from(channels)
-    .where(eq(channels.id, fixture.channel.id));
-  assert.equal(finalSource.type, "joint");
-  assert.equal(finalSource.archivedAt, null);
-  assert.equal(finalSource.archivedByUserId, null);
-  assert.equal(finalSource.archivedByAgentId, null);
-  const convertedShape = normalizeShape(await getJointShapeForLocalChannel(fixture.channel.id));
-  assert.ok(
-    convertedShape.parentMessages.some((message) => message.content === "post-failure parent" && !message.hasThread),
-    "retry should move parent messages written after failure unlock",
-  );
-  const localPostFailureMessages = await getDb()
-    .select({ id: messages.id })
-    .from(messages)
-    .where(and(eq(messages.id, postFailureParent.id), eq(messages.channelId, fixture.channel.id)));
-  assert.deepEqual(localPostFailureMessages, []);
+  assert.deepEqual(await snapshot(), archived, "conversion and lifecycle are independent");
 });
 
-test("channel conversion failure after task identity drop retains source lock before parent move", async ({ app }) => {
+test("channel conversion failure preserves task identity and releases source lock before parent move", async ({ app }) => {
   const prefix = `convert-task-drop-lock-${randomUUID().slice(0, 8)}`;
   const { owner, member, server, agent } = await seedConversionActors(prefix);
   const fixture = await seedOrdinaryChannel({
@@ -791,7 +783,6 @@ test("channel conversion failure after task identity drop retains source lock be
     serverId: server.id,
     sourceChannelId: fixture.channel.id,
     createdByUserId: owner.id,
-    confirmTaskIdentityDrop: true,
   });
 
   const failed = await runChannelConversionJob(job.id, { failBeforePhase: "move_parent_messages" });
@@ -799,19 +790,19 @@ test("channel conversion failure after task identity drop retains source lock be
   assert.equal(failed.phase, "move_parent_messages");
   assert.equal(failed.progress.taskRowsAffected, 1);
   assert.equal(failed.progress.retryState, "awaiting_retry");
-  assert.equal(failed.progress.sourceLock, "retained");
+  assert.equal(failed.progress.sourceLock, "released");
 
   const [lockedSource] = await getDb()
     .select({ archivedAt: channels.archivedAt, archivedByUserId: channels.archivedByUserId })
     .from(channels)
     .where(eq(channels.id, fixture.channel.id));
-  assert.ok(lockedSource.archivedAt, "post-task-drop failure must retain the source lock");
-  assert.equal(lockedSource.archivedByUserId, owner.id);
+  assert.equal(lockedSource.archivedAt, null, "compensated failure releases the source lock");
+  assert.equal(lockedSource.archivedByUserId, null);
   const [droppedTask] = await getDb()
     .select({ taskStatus: messages.taskStatus, channelId: messages.channelId })
     .from(messages)
     .where(eq(messages.id, task.id));
-  assert.equal(droppedTask.taskStatus, null, "task identity has already been destructively dropped");
+  assert.equal(droppedTask.taskStatus, "todo", "task identity remains canonical after compensation");
   assert.equal(droppedTask.channelId, fixture.channel.id, "parent messages have not moved yet");
 
   const writeRes = await fetch(`${app.baseUrl}/api/messages`, {
@@ -819,9 +810,7 @@ test("channel conversion failure after task identity drop retains source lock be
     headers: headers(ownerToken, server.id),
     body: JSON.stringify({ channelId: fixture.channel.id, content: "write after dropped task identity" }),
   });
-  const writeBody = await writeRes.json() as { code?: string };
-  assert.equal(writeRes.status, 409);
-  assert.equal(writeBody.code, "channel_archived");
+  assert.equal(writeRes.status, 200, "compensated failure restores ordinary writes");
 
   const completed = await runChannelConversionJob((await retryChannelConversionJob(job.id)).id);
   assert.equal(completed.status, "done");
@@ -829,11 +818,11 @@ test("channel conversion failure after task identity drop retains source lock be
     .select({ taskStatus: messages.taskStatus, channelId: messages.channelId })
     .from(messages)
     .where(eq(messages.id, task.id));
-  assert.equal(convertedTask.taskStatus, null);
+  assert.equal(convertedTask.taskStatus, "todo");
   assert.notEqual(convertedTask.channelId, fixture.channel.id, "retry should still move the message into canonical history");
 });
 
-test("channel conversion failure after parent move keeps source locked and marks awaiting retry", async ({ app }) => {
+test("channel conversion failure after parent move restores history and releases the source", async ({ app }) => {
   const prefix = `convert-await-retry-${randomUUID().slice(0, 8)}`;
   const { owner, member, server, agent } = await seedConversionActors(prefix);
   const fixture = await seedOrdinaryChannel({
@@ -855,19 +844,21 @@ test("channel conversion failure after parent move keeps source locked and marks
   assert.equal(failed.status, "failed");
   assert.equal(failed.phase, "prepare_threads");
   assert.equal(failed.progress.retryState, "awaiting_retry");
-  assert.equal(failed.progress.sourceLock, "retained");
+  assert.equal(failed.progress.sourceLock, "released");
 
   const [lockedSource] = await getDb()
     .select({ archivedAt: channels.archivedAt, archivedByUserId: channels.archivedByUserId })
     .from(channels)
     .where(eq(channels.id, fixture.channel.id));
-  assert.ok(lockedSource.archivedAt, "post-move failure should keep the source read-only");
-  assert.equal(lockedSource.archivedByUserId, owner.id);
+  assert.equal(lockedSource.archivedAt, null);
+  assert.equal(lockedSource.archivedByUserId, null);
   const localParentMessages = await getDb()
     .select({ id: messages.id })
     .from(messages)
     .where(and(eq(messages.id, fixture.parent.id), eq(messages.channelId, fixture.channel.id)));
-  assert.deepEqual(localParentMessages, [], "post-move failure has partial history and must not expose source as writable");
+  assert.deepEqual(localParentMessages, [{ id: fixture.parent.id }], "compensation restores the source history");
+  await assertParentServer(fixture.parent.id, server.id, "compensation restores the origin server_id");
+  await assertThreadParentChannelsFollowParents(fixture.thread.id, fixture.channel.id, "after compensation");
 
   const writeRes = await fetch(`${app.baseUrl}/api/messages`, {
     method: "POST",
@@ -875,8 +866,7 @@ test("channel conversion failure after parent move keeps source locked and marks
     body: JSON.stringify({ channelId: fixture.channel.id, content: "write during partial conversion" }),
   });
   const writeBody = await writeRes.json() as { code?: string; error?: string };
-  assert.equal(writeRes.status, 409);
-  assert.equal(writeBody.code, "channel_archived");
+  assert.equal(writeRes.status, 200);
 
   const retried = await retryChannelConversionJob(job.id);
   assert.equal(retried.phase, "prepare");
@@ -890,6 +880,16 @@ test("channel conversion failure after parent move keeps source locked and marks
   assert.equal(finalSource.type, "joint");
   assert.equal(finalSource.archivedAt, null);
   assert.equal(finalSource.archivedByUserId, null);
+  // The local thread is detached from the parent (a projection now) and the
+  // canonical thread copy follows the parent into the joint storage channel.
+  await assertThreadParentChannelsFollowParents(fixture.thread.id, null, "after completed conversion");
+  const [parentAfter] = await getDb().select({ channelId: messages.channelId }).from(messages).where(eq(messages.id, fixture.parent.id));
+  const [canonicalThread] = await getDb().select({ id: channels.id }).from(channels)
+    .where(and(eq(channels.parentMessageId, fixture.parent.id), eq(channels.type, "thread")));
+  assert.ok(canonicalThread, "fixture: the canonical thread copy exists");
+  await assertThreadParentChannelsFollowParents(canonicalThread.id, parentAfter!.channelId, "canonical thread after completed conversion");
+  const [storage] = await getDb().select({ id: serversTable.id }).from(serversTable).where(eq(serversTable.kind, "joint_storage"));
+  await assertParentServer(fixture.parent.id, storage!.id, "the converted parent carries the joint_storage server_id");
 });
 
 test("POST /api/channels/:id/convert-to-joint retries a failed persisted job and emits conversion spans", async ({ app }) => {
@@ -937,8 +937,9 @@ test("POST /api/channels/:id/convert-to-joint retries a failed persisted job and
     && span.attrs?.["http.route"] === "/api/channels/:id/convert-to-joint"
   );
   assert.ok(rootSpan, "route should emit an HTTP root span");
-  const rootJobEvent = rootSpan.events.find((event) => event.name === "server.channel_conversion.job.started");
-  assert.ok(rootJobEvent, "HTTP root span should carry a conversion job event");
+  const rootJobEvent = traceSink.getAllLogEvents().find((event) => event.name === "server.channel_conversion.job.started");
+  assert.ok(rootJobEvent, "HTTP request trace should carry a conversion job event");
+  assert.equal(rootJobEvent.context?.traceId, rootSpan.context.traceId);
   assert.equal(rootJobEvent.attrs?.job_id, job.id);
   assert.equal(rootJobEvent.attrs?.channel_id, fixture.channel.id);
 
@@ -948,8 +949,9 @@ test("POST /api/channels/:id/convert-to-joint retries a failed persisted job and
   assert.equal(jobSpan.attrs?.job_id, job.id);
   assert.equal(jobSpan.attrs?.channel_id, fixture.channel.id);
   assert.equal(jobSpan.attrs?.outcome, "ok");
-  assert.equal(jobSpan.context.traceId, rootSpan.context.traceId);
-  assert.equal(jobSpan.context.parentSpanId, rootSpan.context.spanId);
+  assert.equal(jobSpan.context.parentSpanId, null);
+  assert.equal(jobSpan.attrs?.request_trace_id, rootSpan.context.traceId);
+  assert.equal(rootJobEvent.attrs?.job_trace_id, jobSpan.context.traceId);
 
   const phaseSpans = spans.filter((span) => span.name === "server.channel_conversion.phase");
   assert.ok(phaseSpans.length >= 6, "route retry should emit one span per conversion phase");
@@ -963,161 +965,104 @@ test("POST /api/channels/:id/convert-to-joint retries a failed persisted job and
   assert.ok(phaseSpans.every((span) => span.context.parentSpanId === jobSpan.context.spanId));
 });
 
-test("POST /api/channels/:id/convert-to-joint requires explicit task identity drop confirmation before locking history", async ({ app }) => {
-  const prefix = `convert-task-confirm-${randomUUID().slice(0, 8)}`;
+test("POST /api/channels/:id/convert-to-joint preserves direct and thread task identity", async ({ app }) => {
+  const prefix = `convert-task-preserve-${randomUUID().slice(0, 8)}`;
   const { owner, member, server, agent } = await seedConversionActors(prefix);
-  const fixture = await seedOrdinaryChannel({
-    serverId: server.id,
-    ownerId: owner.id,
-    memberId: member.id,
-    agentId: agent.id,
-    name: `${prefix}-room`,
-  });
-  const directTask = await createMessage(fixture.channel.id, "user", owner.id, "blocked task", "chat", {
-    taskStatus: "todo",
-    taskNumber: 1,
-  });
-  const threadTask = await createMessage(fixture.thread.id, "user", owner.id, "blocked thread task", "chat", {
-    taskStatus: "todo",
-    taskNumber: 2,
-  });
+  const fixture = await seedOrdinaryChannel({ serverId: server.id, ownerId: owner.id, memberId: member.id, agentId: agent.id, name: `${prefix}-room` });
+  const directTask = await createMessage(fixture.channel.id, "user", owner.id, "direct task", "chat", { taskStatus: "todo", taskNumber: 1 });
+  const threadTask = await createMessage(fixture.thread.id, "user", owner.id, "thread task", "chat", { taskStatus: "todo", taskNumber: 2 });
   const ownerToken = await tokenForHuman(owner.email);
-
-  const convertRes = await fetch(`${app.baseUrl}/api/channels/${fixture.channel.id}/convert-to-joint`, {
-    method: "POST",
-    headers: headers(ownerToken, server.id),
-    body: JSON.stringify({}),
-  });
-  const body = await convertRes.json() as {
-    code?: string;
-    requiresConfirmation?: boolean;
-    taskIdentityDrop?: {
-      policy?: string;
-      acknowledged?: boolean;
-      inventory?: {
-        directTaskCount?: number;
-        threadTaskCount?: number;
-        totalCount?: number;
-        directTasks?: Array<{ messageId: string; taskNumber: number | null }>;
-        threadTasks?: Array<{ messageId: string; taskNumber: number | null }>;
-      };
-    };
-  };
-  assert.equal(convertRes.status, 409);
-  assert.equal(body.code, "channel_conversion_task_identity_drop_required");
-  assert.equal(body.requiresConfirmation, true);
-  assert.equal(body.taskIdentityDrop?.policy, "drop_task_identity");
-  assert.equal(body.taskIdentityDrop?.acknowledged, false);
-  assert.equal(body.taskIdentityDrop?.inventory?.directTaskCount, 1);
-  assert.equal(body.taskIdentityDrop?.inventory?.threadTaskCount, 1);
-  assert.equal(body.taskIdentityDrop?.inventory?.totalCount, 2);
-  assert.deepEqual(body.taskIdentityDrop?.inventory?.directTasks?.map((task) => task.messageId), [directTask.id]);
-  assert.deepEqual(body.taskIdentityDrop?.inventory?.threadTasks?.map((task) => task.messageId), [threadTask.id]);
-
-  const [source] = await getDb()
-    .select({ archivedAt: channels.archivedAt })
-    .from(channels)
-    .where(eq(channels.id, fixture.channel.id));
-  assert.equal(source.archivedAt, null, "unconfirmed task-drop conversion should not archive-lock the source");
-  const stillTasks = await getDb()
-    .select({ id: messages.id, taskStatus: messages.taskStatus, taskNumber: messages.taskNumber })
-    .from(messages)
-    .where(eq(messages.taskStatus, "todo"));
-  assert.ok(stillTasks.some((task) => task.id === directTask.id && task.taskNumber === 1));
-});
-
-test("POST /api/channels/:id/convert-to-joint drops direct and thread task identity after confirmation", async ({ app }) => {
-  const traceSink = new MemoryTraceSink();
-  app.app.set("serverTracer", new BasicTracer({ sink: traceSink }));
-  const prefix = `convert-task-drop-${randomUUID().slice(0, 8)}`;
-  const { owner, member, server, agent } = await seedConversionActors(prefix);
-  const fixture = await seedOrdinaryChannel({
-    serverId: server.id,
-    ownerId: owner.id,
-    memberId: member.id,
-    agentId: agent.id,
-    name: `${prefix}-room`,
-  });
-  const directTask = await createMessage(fixture.channel.id, "user", owner.id, "confirmed task", "chat", {
-    taskStatus: "todo",
-    taskNumber: 1,
-  });
-  const threadTask = await createMessage(fixture.thread.id, "user", owner.id, "confirmed thread task", "chat", {
-    taskStatus: "todo",
-    taskNumber: 2,
-  });
-  await getDb().update(messages).set({
-    taskAssigneeType: "user",
-    taskAssigneeId: owner.id,
-    taskClaimedAt: new Date(),
-  }).where(eq(messages.id, directTask.id));
-  await getDb().update(messages).set({
-    taskAssigneeType: "agent",
-    taskAssigneeId: agent.id,
-    taskClaimedAt: new Date(),
-    taskCompletedAt: new Date(),
-  }).where(eq(messages.id, threadTask.id));
-  const ownerToken = await tokenForHuman(owner.email);
-
-  const convertRes = await fetch(`${app.baseUrl}/api/channels/${fixture.channel.id}/convert-to-joint`, {
-    method: "POST",
-    headers: headers(ownerToken, server.id),
-    body: JSON.stringify({ confirmTaskIdentityDrop: true }),
-  });
+  const convertRes = await fetch(`${app.baseUrl}/api/channels/${fixture.channel.id}/convert-to-joint`, { method: "POST", headers: headers(ownerToken, server.id), body: JSON.stringify({}) });
   const body = await convertRes.json() as { channel?: { type?: string }; conversionJob?: { status?: string; progress?: Record<string, unknown> } };
   assert.equal(convertRes.status, 200);
   assert.equal(body.channel?.type, "joint");
   assert.equal(body.conversionJob?.status, "done");
-  assert.equal(body.conversionJob?.progress?.taskConversionPolicy, "drop_task_identity");
-  assert.equal(body.conversionJob?.progress?.taskDropAcknowledged, true);
-  assert.equal(body.conversionJob?.progress?.taskRowsAffected, 1);
-  assert.equal(body.conversionJob?.progress?.threadTaskRowsAffected, 1);
-  const dropPhaseSpan = traceSink.getAllSpans().find((span) =>
-    span.name === "server.channel_conversion.phase"
-    && span.attrs?.phase === "drop_task_identity"
-  );
-  assert.ok(dropPhaseSpan, "confirmed conversion should trace the drop_task_identity phase");
-  const dropFinishedEvent = dropPhaseSpan.events.find((event) =>
-    event.name === "server.channel_conversion.phase.finished"
-  );
-  assert.equal(dropFinishedEvent?.attrs?.task_conversion_policy, "drop_task_identity");
-  assert.equal(dropFinishedEvent?.attrs?.task_rows_affected, 1);
-  assert.equal(dropFinishedEvent?.attrs?.thread_task_rows_affected, 1);
-  assert.equal(dropFinishedEvent?.attrs?.acknowledged, true);
-  const traceAttrs = JSON.stringify(dropFinishedEvent?.attrs ?? {});
-  assert.equal(traceAttrs.includes("confirmed task"), false, "trace attrs must not include raw direct task text");
-  assert.equal(traceAttrs.includes("confirmed thread task"), false, "trace attrs must not include raw thread task text");
-  assert.equal(traceAttrs.includes(owner.name), false, "trace attrs must not include assignee display text");
-  assert.equal(traceAttrs.includes(agent.name), false, "trace attrs must not include assignee display text");
-  for (const attrName of Object.keys(dropFinishedEvent?.attrs ?? {})) {
-    assert.doesNotMatch(attrName, /title|body|content|text|assignee/i, "trace attrs should only expose policy/count/outcome fields");
+  assert.equal(body.conversionJob?.progress?.taskIdentityPreservedAt != null, true);
+  const [direct] = await getDb().select({ taskStatus: messages.taskStatus, taskNumber: messages.taskNumber, channelId: messages.channelId }).from(messages).where(eq(messages.id, directTask.id));
+  const [thread] = await getDb().select({ taskStatus: messages.taskStatus, taskNumber: messages.taskNumber, channelId: messages.channelId }).from(messages).where(eq(messages.id, threadTask.id));
+  assert.equal(direct.taskStatus, "todo");
+  assert.equal(direct.taskNumber, 1);
+  assert.equal(thread.taskStatus, "todo");
+  assert.equal(thread.taskNumber, 2);
+  assert.notEqual(direct.channelId, fixture.channel.id);
+  assert.notEqual(thread.channelId, fixture.thread.id);
+  const canonicalTasks = await getDb().select().from(tasks).where(inArray(tasks.messageId, [directTask.id, threadTask.id]));
+  assert.equal(canonicalTasks.length, 2, "legacy tasks must be promoted to canonical Task v2 rows");
+  for (const task of canonicalTasks) {
+    assert.ok(task.id);
+    assert.equal(task.channelId, task.messageId === directTask.id ? direct.channelId : thread.channelId);
+    assert.equal(task.status, "todo");
+    assert.equal(task.taskNumber, task.messageId === directTask.id ? 1 : 2);
   }
 
-  const [source] = await getDb()
-    .select({ type: channels.type, archivedAt: channels.archivedAt })
-    .from(channels)
-    .where(eq(channels.id, fixture.channel.id));
-  assert.equal(source.type, "joint");
-  assert.equal(source.archivedAt, null);
-  const clearedTasks = await getDb()
-    .select({
-      id: messages.id,
-      taskStatus: messages.taskStatus,
-      taskNumber: messages.taskNumber,
-      taskAssigneeType: messages.taskAssigneeType,
-      taskAssigneeId: messages.taskAssigneeId,
-      taskClaimedAt: messages.taskClaimedAt,
-      taskCompletedAt: messages.taskCompletedAt,
-    })
-    .from(messages)
-    .where(inArray(messages.id, [directTask.id, threadTask.id]));
-  assert.equal(clearedTasks.length, 2);
-  for (const task of clearedTasks) {
-    assert.equal(task.taskStatus, null);
-    assert.equal(task.taskNumber, null);
-    assert.equal(task.taskAssigneeType, null);
-    assert.equal(task.taskAssigneeId, null);
-    assert.equal(task.taskClaimedAt, null);
-    assert.equal(task.taskCompletedAt, null);
-  }
+});
+
+test("POST /api/channels/:id/convert-to-joint keeps task assignees and history", async ({ app }) => {
+  const prefix = `convert-task-history-${randomUUID().slice(0, 8)}`;
+  const { owner, member, server, agent } = await seedConversionActors(prefix);
+  const fixture = await seedOrdinaryChannel({ serverId: server.id, ownerId: owner.id, memberId: member.id, agentId: agent.id, name: `${prefix}-room` });
+  const directTask = await createMessage(fixture.channel.id, "user", owner.id, "assigned task", "chat", { taskStatus: "todo", taskNumber: 1 });
+  const threadTask = await createMessage(fixture.thread.id, "user", owner.id, "assigned thread task", "chat", { taskStatus: "todo", taskNumber: 2 });
+  await getDb().update(messages).set({ taskAssigneeType: "user", taskAssigneeId: owner.id, taskClaimedAt: new Date() }).where(eq(messages.id, directTask.id));
+  await getDb().update(messages).set({ taskStatus: "done", taskAssigneeType: "agent", taskAssigneeId: agent.id, taskCompletedAt: new Date() }).where(eq(messages.id, threadTask.id));
+  const [existingTask] = await getDb().insert(tasks).values({
+    channelId: fixture.channel.id, messageId: directTask.id, taskNumber: 1, title: "assigned task",
+    createdByType: "user", createdById: owner.id, claimedByType: "user", claimedById: owner.id,
+  }).returning();
+  const [history] = await getDb().insert(taskEvents).values({ taskId: existingTask.id, eventType: "assignee_changed", actorType: "user", actorId: owner.id, payload: { assigneeId: owner.id } }).returning();
+  const ownerToken = await tokenForHuman(owner.email);
+  const convertRes = await fetch(`${app.baseUrl}/api/channels/${fixture.channel.id}/convert-to-joint`, { method: "POST", headers: headers(ownerToken, server.id), body: JSON.stringify({}) });
+  const body = await convertRes.json() as { channel?: { type?: string }; conversionJob?: { status?: string } };
+  assert.equal(convertRes.status, 200);
+  assert.equal(body.channel?.type, "joint");
+  assert.equal(body.conversionJob?.status, "done");
+  const rows = await getDb().select({ id: messages.id, taskStatus: messages.taskStatus, taskNumber: messages.taskNumber, taskAssigneeType: messages.taskAssigneeType, taskAssigneeId: messages.taskAssigneeId }).from(messages).where(inArray(messages.id, [directTask.id, threadTask.id]));
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((row) => [row.taskStatus, row.taskNumber, row.taskAssigneeType, row.taskAssigneeId]), [["todo", 1, "user", owner.id], ["done", 2, "agent", agent.id]]);
+  const canonical = await getDb().select().from(tasks).where(inArray(tasks.messageId, [directTask.id, threadTask.id]));
+  assert.equal(canonical.length, 2, "canonical task rows, not only legacy message shadows, must survive");
+  const preserved = canonical.find(task => task.id === existingTask.id)!;
+  const promoted = canonical.find(task => task.messageId === threadTask.id)!;
+  assert.equal(preserved.claimedById, owner.id);
+  assert.notEqual(preserved.channelId, fixture.channel.id);
+  assert.equal(promoted.status, "done");
+  assert.equal(promoted.claimedByType, "agent");
+  assert.equal(promoted.claimedById, agent.id);
+  assert.ok(promoted.completedAt);
+  assert.deepEqual(await getDb().select().from(taskEvents).where(eq(taskEvents.id, history.id)), [history]);
+
+});
+
+test("atomic cutover drains every cleanup batch before committing success", async ({ app }) => {
+  assert.ok(app.baseUrl);
+  const prefix = `convert-cleanup-${randomUUID().slice(0, 8)}`;
+  const { owner, member, server, agent } = await seedConversionActors(prefix);
+  const fixture = await seedOrdinaryChannel({ serverId: server.id, ownerId: owner.id, memberId: member.id, agentId: agent.id, name: prefix });
+  const passwordHash = await fixturePasswordHash("password123");
+  const people = await getDb().insert(users).values(Array.from({ length: 129 }, (_, i) => ({ email: `${prefix}-${i}@slock.test`, name: `${prefix}-${i}`, passwordHash }))).returning({ id: users.id });
+  await getDb().insert(serverMembers).values(people.map(person => ({ serverId: server.id, userId: person.id, role: "member" as const })));
+  await getDb().insert(userChannelReadCursors).values(people.map(person => ({ channelId: fixture.channel.id, userId: person.id })));
+  const job = await startChannelToJointConversion({ serverId: server.id, sourceChannelId: fixture.channel.id, createdByUserId: owner.id });
+  const completed = await runChannelConversionJob(job.id);
+  assert.equal(completed.status, "done", "cleanup crossing the 128-row boundary must finish in the terminal transaction");
+  assert.deepEqual(await getDb().select().from(userChannelReadCursors).where(eq(userChannelReadCursors.channelId, fixture.channel.id)), []);
+});
+
+test("cancel compensates every task created by an incomplete promotion batch", async ({ app }) => {
+  assert.ok(app.baseUrl);
+  const prefix = `convert-task-batch-${randomUUID().slice(0, 8)}`;
+  const { owner, server } = await seedConversionActors(prefix);
+  const channel = await createChannel(server.id, prefix, undefined, "private");
+  await addHuman(channel.id, owner.id);
+  await getDb().insert(messages).values(Array.from({ length: 129 }, (_, i) => ({
+    channelId: channel.id, senderType: "user" as const, senderId: owner.id,
+    content: `legacy task ${i}`, taskStatus: "todo" as const, taskNumber: i + 1,
+  })));
+  const job = await startChannelToJointConversion({ serverId: server.id, sourceChannelId: channel.id, createdByUserId: owner.id });
+  const partial = await runChannelConversionJob(job.id, { maxPhases: 2 });
+  assert.equal(partial.phase, "prepare_tasks");
+  assert.equal((await getDb().select().from(tasks).where(eq(tasks.channelId, channel.id))).length, 128);
+  assert.equal((await cancelChannelConversionJob(job.id)).status, "canceled");
+  assert.deepEqual(await getDb().select().from(tasks).where(eq(tasks.channelId, channel.id)), []);
+  assert.equal((await getDb().select().from(messages).where(eq(messages.channelId, channel.id))).length, 129);
 });

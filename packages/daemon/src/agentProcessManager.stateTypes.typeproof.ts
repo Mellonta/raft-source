@@ -8,8 +8,8 @@ import type {
   AgentProcessCompactionState,
   AgentProcessExitState,
   AgentProcessStartupState,
-} from "./agentProcessManager.js";
-import type { LaunchActivationTransitionState } from "./launchPhaseTransition.js";
+} from "./agentProcessManager";
+import type { LaunchActivationTransitionState } from "./launchPhaseTransition";
 
 const fakeTimer = {} as ReturnType<typeof setTimeout>;
 const fakeTransition = {} as LaunchActivationTransitionState;

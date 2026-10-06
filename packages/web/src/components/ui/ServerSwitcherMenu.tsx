@@ -21,12 +21,16 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { useIntl } from "react-intl";
 import { useNavigate } from "react-router-dom";
-import { Check, GripVertical, Plus } from "lucide-react";
-import { Badge } from "raft-ui";
+import { Check, GripVertical, Plus, UserPlus } from "lucide-react";
+import { Badge, PopoverPopup } from "raft-ui";
+import Tooltip from "./Tooltip";
 import { useServerStore } from "../../store/serverStore";
+import { useServerPermissions } from "../../hooks/useServerPermissions";
+import InviteHumanDialog from "../member/InviteHumanDialog";
 import type { CommunityServerSlug, Server } from "../../store/serverStore";
 import { serverPersistence } from "../../store/serverPersistenceRegistry";
 import { useJoinCommunityFlow } from "../../hooks/useJoinCommunityFlow";
+import { computeServerSwitcherLayout } from "./serverSwitcherMenuLayout";
 import {
   DEFAULT_COMMUNITY_SERVER_SLUG,
   hasJoinedCommunity,
@@ -40,6 +44,7 @@ import type { ServerUnreadSummary } from "../../utils/serverUnreadSummary";
 import AvatarSlot from "./AvatarSlot";
 import ContextMenuDivider from "./ContextMenuDivider";
 import { requestHostedOnboardingServerSwitch } from "../../embed/hostBridge";
+import { dismissLayerProps } from "./dismissLayer";
 
 /**
  * Shared dropdown content for the "switch server" surfaces. The same menu
@@ -134,7 +139,7 @@ function SortableServerRow({
       ref={setNodeRef}
       style={style}
       onAuxClick={(event) => onAuxSelect(event, server, targetHref)}
-      className="relative flex h-12 w-full items-stretch text-sm font-medium text-black transition-colors hover:bg-soft-signal"
+      className="group/server-row relative flex h-12 w-full items-stretch text-sm font-medium text-foreground-strong theme-brutal:text-black transition-colors hover:bg-primary-soft hover:text-primary-strong focus-within:bg-primary-soft focus-within:text-primary-strong theme-brutal:hover:bg-primary-400 theme-brutal:hover:text-primary-950 theme-brutal:focus-within:bg-primary-400 theme-brutal:focus-within:text-primary-950"
     >
       <a
         href={targetHref}
@@ -154,18 +159,19 @@ function SortableServerRow({
         <AvatarSlot context="surface-list" type="server" serverAvatarUrl={server.avatarUrl} serverInitial={initial} />
         <div className="min-w-0 flex-1 text-left">
           <div className="truncate">{server.name}</div>
-          <div className="truncate font-mono text-xs text-black/40">/{server.slug}</div>
+          <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/40 group-hover/server-row:text-primary-strong group-focus-within/server-row:text-primary-strong theme-brutal:group-hover/server-row:text-primary-950 theme-brutal:group-focus-within/server-row:text-primary-950">/{server.slug}</div>
         </div>
         {!isCurrent && unread !== undefined && unread > 0 && (
           isMuted ? (
-            <span
-              className="ml-auto shrink-0 font-mono text-[10px] font-medium leading-none text-black/50"
-              title={intl.formatMessage({ id: "ui.serverSwitcher.notificationsMuted" })}
-            >
-              {unread > 99 ? "99+" : unread}
-            </span>
+            <Tooltip content={intl.formatMessage({ id: "ui.serverSwitcher.notificationsMuted" })}>
+              <span
+                className="ml-auto shrink-0 font-mono text-[10px] font-medium leading-none text-foreground-muted theme-brutal:text-black/50"
+              >
+                {unread > 99 ? "99+" : unread}
+              </span>
+            </Tooltip>
           ) : (
-            <Badge variant="accent" uppercase={false} className="ml-auto h-auto min-w-0 shrink-0 justify-center rounded px-1.5 py-0.5 leading-none text-white">
+            <Badge variant="accent" uppercase={false} className="ml-auto h-auto min-w-0 shrink-0 justify-center px-1.5 py-0.5 leading-none">
               {unread > 99 ? "99+" : unread}
             </Badge>
           )
@@ -176,7 +182,7 @@ function SortableServerRow({
         aria-label={intl.formatMessage({ id: "ui.serverSwitcher.reorderServer" }, { name: server.name })}
         {...attributes}
         {...listeners}
-        className="flex w-6 shrink-0 touch-none cursor-grab items-center justify-center text-black/45 hover:text-black active:cursor-grabbing"
+        className="flex w-6 shrink-0 touch-none cursor-grab items-center justify-center text-foreground-muted theme-brutal:text-black/45 group-hover/server-row:text-primary-strong group-focus-within/server-row:text-primary-strong theme-brutal:group-hover/server-row:text-primary-950 theme-brutal:group-focus-within/server-row:text-primary-950 active:cursor-grabbing"
       >
         <GripVertical size={14} />
       </button>
@@ -199,6 +205,8 @@ export default function ServerSwitcherMenu({
   const updateServerOrder = useServerStore((s) => s.updateServerOrder);
   const [hostedSwitchPending, setHostedSwitchPending] = useState(false);
   const [hostedSwitchError, setHostedSwitchError] = useState("");
+  const [showInviteHuman, setShowInviteHuman] = useState(false);
+  const { capabilities } = useServerPermissions();
   const hostedSwitchTimeoutRef = useRef<ReturnType<typeof setClockTimeout> | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const dndSensors = useSensors(
@@ -231,6 +239,37 @@ export default function ServerSwitcherMenu({
   useEffect(() => () => {
     if (hostedSwitchTimeoutRef.current !== null) clearClockTimeout(hostedSwitchTimeoutRef.current);
   }, []);
+
+  // Keep the menu inside the window so a long server list scrolls internally and the
+  // footer stays reachable, for any trigger position (task #83). Apply the window-bounded
+  // max-height FIRST, then measure the resulting (capped) height + anchored top and shift
+  // the menu up by whatever it would still overflow below. Clearing the transform before
+  // reading gives the anchored top; transforms don't change size, so applying the shift
+  // never re-triggers the observer — it converges. The ResizeObserver also re-fits when
+  // growing to the cap, on window resize, and if the list changes while open.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const fit = () => {
+      // maxHeight depends only on the viewport; apply it FIRST so the re-read below sees
+      // the menu's capped height (rect.height under a stale cap would mis-size the shift).
+      const { maxHeight } = computeServerSwitcherLayout(0, 0, window.innerHeight);
+      el.style.maxHeight = `${maxHeight}px`;
+      el.style.transform = "none"; // read the anchored top with no shift applied
+      const rect = el.getBoundingClientRect();
+      const { shiftUp } = computeServerSwitcherLayout(rect.top, rect.height, window.innerHeight);
+      el.style.transform = shiftUp > 0 ? `translateY(-${shiftUp}px)` : "none";
+    };
+    fit();
+    const observer = new ResizeObserver(() => fit());
+    observer.observe(el);
+    window.addEventListener("resize", fit);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", fit);
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -299,7 +338,17 @@ export default function ServerSwitcherMenu({
     void updateServerOrder(reordered);
   }, [servers, updateServerOrder]);
 
-  if (!open) return null;
+  // Stay mounted while the invite dialog is open even after the menu itself
+  // closes — the dialog is a child here, so an early `!open` return would
+  // unmount it the moment the menu dismisses (invite click closes the menu).
+  if (!open && !showInviteHuman) return null;
+
+  const inviteDialog = showInviteHuman ? (
+    <InviteHumanDialog onClose={() => setShowInviteHuman(false)} />
+  ) : null;
+
+  // When only the dialog is up (menu already dismissed), render just the dialog.
+  if (!open) return inviteDialog;
 
   const joinOptions: Array<
     { kind: "community-server"; slug: CommunityServerSlug; label: string }
@@ -313,10 +362,14 @@ export default function ServerSwitcherMenu({
   };
 
   return (
-    <div
+    <>
+    <PopoverPopup
       ref={menuRef}
       tabIndex={-1}
       data-testid={testId}
+      {...dismissLayerProps}
+      // Height cap + upward shift are applied imperatively by the layout effect above
+      // (task #83) so the menu always fits the window; the list scrolls internally.
       className={`card-brutal z-50 flex flex-col overflow-hidden outline-none ${className ?? ""}`}
       onMouseDown={(e) => e.stopPropagation()}
     >
@@ -353,10 +406,8 @@ export default function ServerSwitcherMenu({
       {joinOptions.map((option) => (
         <button
           key={option.slug}
-          onClick={() => {
-            void handleJoinCommunity(option.slug);
-          }}
-          className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-black hover:bg-brutal-pink transition-colors"
+          onClick={() => void handleJoinCommunity(option.slug)}
+          className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-foreground-strong theme-brutal:text-black hover:bg-primary-soft hover:text-primary-strong focus-visible:bg-primary-soft focus-visible:text-primary-strong transition-colors theme-brutal:hover:bg-primary-400 theme-brutal:hover:text-primary-950 theme-brutal:focus-visible:bg-primary-400 theme-brutal:focus-visible:text-primary-950"
         >
           <Plus size={14} />
           <span className="min-w-0 flex-1 text-left">{option.label}</span>
@@ -371,11 +422,31 @@ export default function ServerSwitcherMenu({
           serverPersistence.clearLastServerSlug();
           navigate("/");
         }}
-        className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-black hover:bg-brutal-pink transition-colors"
+        className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-foreground-strong theme-brutal:text-black hover:bg-primary-soft hover:text-primary-strong focus-visible:bg-primary-soft focus-visible:text-primary-strong transition-colors theme-brutal:hover:bg-primary-400 theme-brutal:hover:text-primary-950 theme-brutal:focus-visible:bg-primary-400 theme-brutal:focus-visible:text-primary-950"
       >
         <Plus size={14} />
         <span className="min-w-0 flex-1 text-left">{intl.formatMessage({ id: "ui.serverSwitcher.switchOrCreate" })}</span>
       </button>
-    </div>
+
+      {/* "Invite people" sits right under "Switch or create server" so inviting
+          teammates is one click from the workspace menu instead of buried in
+          Settings → Administration. Gated by the same capability the Settings
+          invites section uses; opens the shared InviteHumanDialog. */}
+      {capabilities.inviteMembers ? (
+        <button
+          data-testid="server-switcher-invite"
+          onClick={() => {
+            onClose();
+            setShowInviteHuman(true);
+          }}
+          className="flex w-full items-center justify-start gap-2 px-3 py-2 [@media(max-height:600px)]:py-1 text-left text-sm font-bold text-foreground-strong theme-brutal:text-black hover:bg-primary-soft hover:text-primary-strong focus-visible:bg-primary-soft focus-visible:text-primary-strong theme-brutal:hover:bg-brutal-pink transition-colors"
+        >
+          <UserPlus size={14} />
+          <span className="min-w-0 flex-1 text-left">{intl.formatMessage({ id: "layout.sidebar.inviteHuman" })}</span>
+        </button>
+      ) : null}
+    </PopoverPopup>
+    {inviteDialog}
+    </>
   );
 }

@@ -51,13 +51,15 @@ test.describe("Joint channel member management", () => {
     await page.goto(`/s/${seedState.server.slug}/channel/${hostProjection.id}`);
     await expect(page.getByPlaceholder(`Message #${hostProjection.name}`)).toBeVisible();
 
-    await page.getByTitle("View participants").click();
-    const addMember = page.getByRole("button", { name: "Add Member" });
+    await page.getByTestId("channel-overflow-trigger").click();
+    await page.getByTestId("channel-overflow-members-entry").click();
+    const addMember = page.getByTestId("member-page-add");
     await expect(addMember, "joint channel must offer the Add Member entry").toBeVisible();
 
     await addMember.click();
     await page.getByPlaceholder("Name").fill(seedState.agent.name);
     await page.getByRole("button", { name: new RegExp(seedState.agent.name) }).click();
-    await expect(page.locator('button[title="View participants"]')).toContainText("2");
+    await page.getByTestId("add-member-confirm").click();
+    await expect(page.getByTestId("member-page-count")).toHaveText("2");
   });
 });

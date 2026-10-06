@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
-import type { Database, DatabaseTransaction } from "../db/index.js";
+import type { Database, DatabaseTransaction } from "../db/index";
 import {
   channels,
   externalActorProjections,
@@ -17,13 +17,13 @@ import {
   externalReactionStates,
   messageReactionDiscussionVersions,
   messages,
-} from "../db/schema.js";
-import { evaluateFeatureFlag } from "./featureFlagService.js";
+} from "../db/schema";
+import { evaluateFeatureFlag } from "./featureFlagService";
 import {
   EXTERNAL_REACTION_MAPPING_REVISION,
   externalReactionFromSlack,
   externalReactionToSlack,
-} from "./externalReactionEmojiMap.js";
+} from "./externalReactionEmojiMap";
 
 function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");

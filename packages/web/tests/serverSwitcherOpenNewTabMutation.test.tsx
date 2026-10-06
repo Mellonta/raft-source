@@ -1,6 +1,5 @@
-import test from "node:test";
+import "./helpers/installResizeObserver";
 import assert from "node:assert/strict";
-import { afterEach } from "node:test";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, useLocation, useNavigationType } from "react-router-dom";
 import ServerSwitcherMenu from "../src/components/ui/ServerSwitcherMenu";
@@ -300,12 +299,13 @@ test("server switcher renders the known Activity count, not the broader legacy c
   assert.equal(unreadCount.getAttribute("data-slot"), "badge");
   assert.equal(unreadCount.getAttribute("data-variant"), "accent");
   assert.equal(unreadCount.classList.contains("bg-accent-400"), true);
-  assert.equal(unreadCount.classList.contains("rounded"), true);
+  assert.equal(unreadCount.getAttribute("data-slot"), "badge");
+  assert.equal(unreadCount.classList.contains("text-white"), false);
   assert.equal(unreadCount.classList.contains("h-auto"), true);
   assert.equal(unreadCount.classList.contains("min-w-0"), true);
   assert.equal(unreadCount.classList.contains("px-1.5"), true);
   assert.equal(unreadCount.classList.contains("py-0.5"), true);
-  assert.equal(unreadCount.classList.contains("text-white"), true);
+  assert.equal(unreadCount.classList.contains("text-accent-950"), true);
   assert.equal(unreadCount.classList.contains("text-black/50"), false);
   assert.equal(unreadCount.classList.contains("ml-auto"), true);
   assert.equal(unreadCount.classList.contains("justify-center"), true);
@@ -319,9 +319,10 @@ test("server switcher renders muted Activity counts as quiet right-aligned numbe
 
   assert.equal(unreadCount.classList.contains("bg-brutal-pink"), false);
   assert.equal(unreadCount.classList.contains("font-mono"), true);
-  assert.equal(unreadCount.classList.contains("text-black/50"), true);
+  assert.equal(unreadCount.classList.contains("theme-brutal:text-black/50"), true);
   assert.equal(unreadCount.classList.contains("ml-auto"), true);
-  assert.equal(unreadCount.getAttribute("title"), "Notifications muted");
+  assert.equal(unreadCount.getAttribute("title"), null);
+  assert.ok(unreadCount.hasAttribute("data-base-ui-tooltip-trigger"), "muted count uses the RUI tooltip instead of native title");
 });
 
 test("server switcher target helpers preserve remembered surfaces and ignore left clicks", () => {

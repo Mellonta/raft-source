@@ -1,11 +1,11 @@
 import { and, eq, inArray, or } from "drizzle-orm";
-import { getDb } from "../db/index.js";
-import { newsletterAudienceContacts, onboardingEmailJourneys } from "../db/schema.js";
-import { normalizeEmail } from "./emailNormalization.js";
+import { getDb } from "../db/index";
+import { newsletterAudienceContacts, onboardingEmailJourneys } from "../db/schema";
+import { normalizeEmail } from "./emailNormalization";
 import {
   sendOnboardingDayOneCheckInEmail,
   sendOnboardingWelcomeEmail,
-} from "./emailService.js";
+} from "./emailService";
 
 type JourneyReleaseMode = "disabled" | "dry_run" | "allowlist" | "all";
 type SuppressionStatus = "unsubscribed" | "bounced" | "complained";

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import ServerSelector from "../src/components/auth/ServerSelector";
@@ -85,8 +84,8 @@ afterEach(() => {
   delete (window as unknown as { RaftHost?: unknown }).RaftHost;
 });
 
-test("hosted server selection emits the frozen switch intent, then times out to a retryable error", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+test("hosted server selection emits the frozen switch intent, then times out to a retryable error", () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   const first = server();
   const second = server({ id: "server-2", name: "Second", slug: "second" });
   resetStores({ servers: [first, second] });
@@ -117,7 +116,7 @@ test("hosted server selection emits the frozen switch intent, then times out to 
     },
   }]);
   assert.equal(screen.getByRole("button", { name: /Second/ }).hasAttribute("disabled"), true);
-  act(() => t.mock.timers.tick(5000));
+  act(() => vi.advanceTimersByTime(5000));
   assert.ok(screen.getByText("Could not switch servers. Please try again."));
   assert.equal(screen.getByRole("button", { name: /Second/ }).hasAttribute("disabled"), false);
   assert.deepEqual(selected, [], "timeout must never fall back to a local Web selection");
@@ -138,8 +137,8 @@ test("first-server flow always renders Screen A", () => {
   assert.ok(shell?.className.includes("font-display"));
   assert.ok(grid?.className.includes("lg:grid-cols-[minmax(320px,2fr)_minmax(0,3fr)]"));
   assert.ok(formPanel?.className.includes("overflow-y-auto"));
-  assert.ok(formPanel?.className.includes("bg-white"));
-  assert.ok(dotGrid?.className.includes("radial-gradient(#111_1px,transparent_1px)"));
+  assert.ok(formPanel?.className.includes("bg-layer-canvas"));
+  assert.ok(dotGrid?.className.includes("radial-gradient(var(--line-strong)_1px,transparent_1px)"));
   assert.ok(dotGrid?.className.includes("[background-size:16px_16px]"));
   assert.ok(screen.getByTestId("server-create-preview"));
   assert.ok(preview.className.includes("rotate-[-1deg]"));
@@ -206,6 +205,38 @@ test("first-server flow always renders Screen A", () => {
   fireEvent.click(dmsSection);
   assert.equal(dmsSection.getAttribute("aria-expanded"), "true");
   assert.equal(within(preview).queryAllByText("Cindy").length, 2, "expanded DMs show the Cindy row plus the message author");
+});
+
+// Task #686 (Artea 2026-09-28): the first-server intro copy was hardcoded
+// `text-black*`, so on elegant-dark it rendered black-on-dark and nearly
+// disappeared. The fix moves it onto the surface tokens; Brutal keeps its
+// exact old values behind `theme-brutal:`, so this pins both halves.
+test("first-server title block follows the theme tokens", () => {
+  resetStores();
+  renderSelector();
+
+  const eyebrow = screen.getByText("Create your first server");
+  const heading = screen.getByRole("heading", { name: "Name the server where your agents will work." });
+  const description = screen.getByText(
+    "A server is the workspace for your people, agents, channels, and computers.",
+  );
+
+  assert.ok(eyebrow.className.includes("text-foreground-muted"));
+  assert.ok(eyebrow.className.includes("theme-brutal:text-black/50"));
+  assert.ok(heading.className.includes("text-foreground-strong"));
+  assert.ok(heading.className.includes("theme-brutal:text-black"));
+  assert.ok(description.className.includes("text-foreground-muted"));
+  assert.ok(description.className.includes("theme-brutal:text-black/65"));
+
+  // No bare black text left: a future edit must not silently regress these to
+  // light-theme-only values again.
+  for (const element of [eyebrow, heading, description]) {
+    assert.doesNotMatch(
+      element.className,
+      /(?<!theme-brutal:)text-black(?=["/\s])/,
+      `${element.tagName} keeps its copy on semantic tokens`,
+    );
+  }
 });
 
 test("Screen A preview reflects server name and slug before create", () => {

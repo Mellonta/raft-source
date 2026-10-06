@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import ChannelMembers from "../src/components/agent/ChannelMembers";
 import { useAgentStore } from "../src/store/agentStore";
@@ -7,8 +6,7 @@ import { useAuthStore } from "../src/store/authStore";
 import { useChannelStore } from "../src/store/channelStore";
 import { useServerStore } from "../src/store/serverStore";
 import { IntlProviderWrapper } from "../src/i18n/IntlProviderWrapper";
-import { resetServerFeatureFlagsForTests, setServerFeatureFlagForTests } from "../src/store/serverFeatureFlags";
-import { TOPBAR_OVERFLOW_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
+import { resetServerFeatureFlagsForTests } from "../src/store/serverFeatureFlags";
 import { LocaleProvider } from "../src/i18n/LocaleProvider";
 
 const channelId = "channel-1";
@@ -56,7 +54,6 @@ function seed(role: "guest" | "member" | "owner") {
   useAgentStore.setState({ agents: [] } as never);
   useAuthStore.setState({ user: { id: "me" } } as never);
   resetServerFeatureFlagsForTests();
-  setServerFeatureFlagForTests(serverId, TOPBAR_OVERFLOW_FEATURE_FLAG_KEY, true);
 }
 
 function renderMembers() {
@@ -74,7 +71,7 @@ afterEach(() => {
 });
 
 // Behaviour contract replacing the former source-grep assertion on
-// ChannelMembers/LegacyChannelMembers. The roster entry must reach the same
+// ChannelMembers. The roster entry must reach the same
 // human profile the chat panel already reaches; the panel itself does the
 // capability filtering, so gating the entry made one surface disagree with
 // the other.

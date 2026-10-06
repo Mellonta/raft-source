@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import { resolveHumanProfile } from "../src/components/member/resolveHumanProfile";
 import type { HumanProfile } from "../src/components/member/HumanDetailPanel";
 import type { ServerMember } from "../src/store/serverStore";

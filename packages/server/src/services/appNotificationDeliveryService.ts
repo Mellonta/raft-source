@@ -1,15 +1,18 @@
-import { createHmac } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
 import {
   clearClockInterval,
   clearClockTimeout,
   currentDate,
+  noopTracer,
   setClockInterval,
   setClockTimeout,
+  type Tracer,
 } from "@botiverse/raft-shared";
 import { and, asc, eq, isNull, lt, lte, or, sql } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index.js";
+import { getDb, type DatabaseExecutor } from "../db/index";
+import { addTraceEvent, withTraceRoot } from "../tracing/semanticTrace";
 import {
   agents,
   channels,
@@ -18,44 +21,68 @@ import {
   notificationDeliveryAttempts,
   notificationEvents,
   notificationRecipients,
+  oauthAccessTokens,
   oauthAppWebhookConfigs,
   oauthClientInstalls,
   oauthClients,
   servers,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   APP_OUTBOUND_EVENT_GROUPS,
   appOutboundEventRequiredGroups,
   computeEffectiveAppOutboundAuthority,
   type AppOutboundEventType,
   type AppOutboundGroup,
-} from "./appOutboundPermissionService.js";
+} from "./appOutboundPermissionService";
 import {
   AppWebhookConfigError,
   decryptAppWebhookSigningSecret,
   isPublicWebhookAddress,
-} from "./appWebhookConfigService.js";
+} from "./appWebhookConfigService";
+import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy";
+import { deriveAppMemberRef } from "./appOutboundProjectionService";
+import { responseRequestId } from "./externalRequestCorrelation";
 
 const DELIVERY_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
 const DELIVERY_TIMEOUT_MS = 10_000;
 const DELIVERY_BATCH_SIZE = 25;
 const MAX_DELIVERY_ATTEMPTS = 6;
-const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 12 * 60 * 60_000];
+// The first retry is short: membership events drive access suspension in the
+// receiving app, so a single transient failure should not cost a minute.
+const RETRY_DELAYS_MS = [10_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 12 * 60 * 60_000];
 const SAFE_PROVENANCE_KEYS = new Set([
   "actor_type",
   "source",
   "changed_fields",
+  "principal_type",
+  "reason",
+  "role",
+  "previous_role",
   "outage_occurrence_id",
   "recovery_for_event_id",
 ]);
 const SAFE_UUID_PROVENANCE_KEYS = new Set(["outage_occurrence_id", "recovery_for_event_id"]);
 
-type WebhookPost = (input: {
+export type WebhookPost = (input: {
   endpointUrl: string;
   body: string;
   headers: Record<string, string>;
   timeoutMs: number;
-}) => Promise<{ status: number }>;
+}) => Promise<WebhookPostResponse>;
+
+/** `requestId`: the receiver's own request id header, when it sent one (see externalRequestCorrelation). */
+/**
+ * Where the POST's time went, in ms from the start of the call (DNS lookup
+ * included). connect/tls are absent when an idle keep-alive socket was reused.
+ */
+export type WebhookPostTiming = {
+  dnsMs: number;
+  connectMs?: number;
+  tlsMs?: number;
+  ttfbMs?: number;
+  socketReused: boolean;
+};
+export type WebhookPostResponse = { status: number; retryAfter?: string; requestId?: string; timing?: WebhookPostTiming };
 
 type PinnedLookupAddress = { address: string; family: number };
 type PinnedLookupCallback = (
@@ -68,12 +95,34 @@ let scheduledDrain: (() => void) | null = null;
 
 export class AppNotificationDeliveryError extends Error {}
 
+/**
+ * A POST that failed after it started, with the phases that completed first.
+ * A timeout records where it stopped: before the connection was up (TCP or
+ * TLS never finished) or while waiting for the response's first byte. Without
+ * this a receiver that accepts the connection and then never answers looks
+ * exactly like one that cannot be reached. The phase goes to traces only: the
+ * error code stays `timeout`, because external agents read it as `lastError`.
+ */
+export class WebhookPostError extends Error {
+  constructor(
+    readonly original: unknown,
+    readonly timing: WebhookPostTiming,
+    readonly timeoutPhase: "connect" | "response" | null,
+  ) {
+    super(original instanceof Error ? original.message : String(original));
+    this.name = "WebhookPostError";
+  }
+}
+
 function boundedError(error: unknown): string {
   const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
   return message.slice(0, 500);
 }
 
 export function appWebhookDeliveryErrorCode(error: unknown): string {
+  if (error instanceof WebhookPostError) {
+    return error.timeoutPhase ? "timeout" : appWebhookDeliveryErrorCode(error.original);
+  }
   if (error instanceof AppNotificationDeliveryError) return "ssrf_blocked";
   if (error instanceof AppWebhookConfigError) return "configuration_error";
   const code = error && typeof error === "object" && "code" in error
@@ -132,8 +181,21 @@ async function eventSubjectIsVisible(input: {
   subjectType: string;
   subjectId: string | null;
   groups: readonly AppOutboundGroup[];
+  provenance?: Record<string, unknown>;
 }, executor: DatabaseExecutor): Promise<boolean> {
   if (!input.subjectId) return false;
+  if (input.subjectType === "member") {
+    // The member is gone by the time a removal is delivered, so visibility is
+    // the Server's, not the principal's. A Server deletion announces its
+    // members' removal after the tombstone is set.
+    if (!input.groups.includes("server")) return false;
+    const [row] = await executor.select({ id: servers.id }).from(servers)
+      .where(input.provenance?.reason === "server_deleted"
+        ? eq(servers.id, input.serverId)
+        : and(eq(servers.id, input.serverId), isNull(servers.deletedAt)))
+      .limit(1);
+    return !!row;
+  }
   if (input.subjectType === "server") {
     if (!input.groups.includes("server") || input.subjectId !== input.serverId) return false;
     const [row] = await executor.select({ id: servers.id }).from(servers)
@@ -183,11 +245,13 @@ export async function emitAppFacingNotificationEvent(input: {
     throw new AppNotificationDeliveryError("Unknown app-facing event type");
   }
   const requiredGroups = appOutboundEventRequiredGroups(input.eventType);
+  const provenance = sanitizeProvenance(input.provenance);
   if (!await eventSubjectIsVisible({
     serverId: input.serverId,
     subjectType: input.subjectType,
     subjectId: input.subjectId,
     groups: requiredGroups,
+    provenance,
   }, executor)) {
     return { eventId: input.id ?? "", recipientCount: 0 };
   }
@@ -199,37 +263,15 @@ export async function emitAppFacingNotificationEvent(input: {
     requiredGroups,
     subjectType: input.subjectType,
     subjectId: input.subjectId,
-    provenance: sanitizeProvenance(input.provenance),
+    provenance,
     occurredAt: input.occurredAt ?? currentDate(),
   }).onConflictDoNothing().returning({ id: notificationEvents.id });
   const eventId = created?.id ?? input.id;
   if (!eventId) throw new AppNotificationDeliveryError("Event id collision without caller-supplied id");
   if (!created) return { eventId, recipientCount: 0 };
 
-  const candidates = await executor.select({
-    installation: oauthClientInstalls,
-    currentGroups: oauthClients.outboundCurrentGroups,
-    currentEvents: oauthClients.outboundCurrentEvents,
-    configRevision: oauthAppWebhookConfigs.revision,
-  }).from(oauthClientInstalls)
-    .innerJoin(oauthClients, eq(oauthClients.id, oauthClientInstalls.clientId))
-    .innerJoin(oauthAppWebhookConfigs, eq(oauthAppWebhookConfigs.clientId, oauthClients.id))
-    .where(and(
-      eq(oauthClientInstalls.serverId, input.serverId),
-      eq(oauthClientInstalls.status, "active"),
-      eq(oauthClients.enabled, true),
-      eq(oauthAppWebhookConfigs.enabled, true),
-    ));
-
   let recipientCount = 0;
-  for (const candidate of candidates) {
-    const effective = computeEffectiveAppOutboundAuthority({
-      currentGroups: candidate.currentGroups,
-      currentEvents: candidate.currentEvents,
-      approvedGroups: candidate.installation.approvedGroups,
-      subscribedEvents: candidate.installation.subscribedEvents,
-    });
-    if (!effective.events.includes(input.eventType) || !includesAll(effective.groups, requiredGroups)) continue;
+  for (const candidate of await eligibleRecipientInstallations(input.serverId, input.eventType, executor)) {
     const [recipient] = await executor.insert(notificationRecipients).values({
       eventId,
       serverId: input.serverId,
@@ -250,10 +292,171 @@ export async function emitAppFacingNotificationEvent(input: {
   return { eventId, recipientCount };
 }
 
-async function postPublicHttps(input: Parameters<WebhookPost>[0]): Promise<{ status: number }> {
+async function eligibleRecipientInstallations(
+  serverId: string,
+  eventType: AppOutboundEventType,
+  executor: DatabaseExecutor,
+) {
+  const requiredGroups = appOutboundEventRequiredGroups(eventType);
+  const candidates = await executor.select({
+    installation: oauthClientInstalls,
+    currentGroups: oauthClients.outboundCurrentGroups,
+    currentEvents: oauthClients.outboundCurrentEvents,
+    configRevision: oauthAppWebhookConfigs.revision,
+  }).from(oauthClientInstalls)
+    .innerJoin(oauthClients, eq(oauthClients.id, oauthClientInstalls.clientId))
+    .innerJoin(oauthAppWebhookConfigs, eq(oauthAppWebhookConfigs.clientId, oauthClients.id))
+    .where(and(
+      eq(oauthClientInstalls.serverId, serverId),
+      eq(oauthClientInstalls.status, "active"),
+      eq(oauthClients.enabled, true),
+      oauthClientIsUserManagedPredicate(),
+      eq(oauthAppWebhookConfigs.enabled, true),
+    ));
+  return candidates.filter((candidate) => {
+    const effective = computeEffectiveAppOutboundAuthority({
+      currentGroups: candidate.currentGroups,
+      currentEvents: candidate.currentEvents,
+      approvedGroups: candidate.installation.approvedGroups,
+      subscribedEvents: candidate.installation.subscribedEvents,
+    });
+    return effective.events.includes(eventType) && includesAll(effective.groups, requiredGroups);
+  });
+}
+
+export type AppFacingMemberEventType = "server.member_added" | "server.member_removed" | "server.member_role_changed";
+export type AppFacingMember = { principalType: "human" | "agent"; principalId: string; role: string };
+
+const MEMBER_EVENT_INSERT_CHUNK = 500;
+
+/**
+ * Emit one membership event per member, in the caller's transaction (the
+ * outbox). Installations are resolved once, so announcing every member of a
+ * deleted Server stays a few bulk inserts. When no installation subscribes,
+ * nothing is written. Call kickAppNotificationDelivery() after commit.
+ */
+export async function emitAppFacingMemberEvents(input: {
+  serverId: string;
+  eventType: AppFacingMemberEventType;
+  members: readonly AppFacingMember[];
+  occurredAt?: Date;
+  provenance: Record<string, unknown>;
+}, executor: DatabaseExecutor = getDb()): Promise<{ eventCount: number; recipientCount: number }> {
+  if (input.members.length === 0) return { eventCount: 0, recipientCount: 0 };
+  const requiredGroups = appOutboundEventRequiredGroups(input.eventType);
+  const baseProvenance = sanitizeProvenance(input.provenance);
+  if (!await eventSubjectIsVisible({
+    serverId: input.serverId,
+    subjectType: "member",
+    subjectId: input.serverId,
+    groups: requiredGroups,
+    provenance: baseProvenance,
+  }, executor)) return { eventCount: 0, recipientCount: 0 };
+  const recipients = await eligibleRecipientInstallations(input.serverId, input.eventType, executor);
+  if (recipients.length === 0) return { eventCount: 0, recipientCount: 0 };
+
+  const occurredAt = input.occurredAt ?? currentDate();
+  let recipientCount = 0;
+  for (let offset = 0; offset < input.members.length; offset += MEMBER_EVENT_INSERT_CHUNK) {
+    const chunk = input.members.slice(offset, offset + MEMBER_EVENT_INSERT_CHUNK);
+    const events = chunk.map((member) => ({
+      id: randomUUID(),
+      serverId: input.serverId,
+      eventType: input.eventType,
+      requiredGroups,
+      subjectType: "member",
+      subjectId: member.principalId,
+      provenance: sanitizeProvenance({
+        ...baseProvenance,
+        principal_type: member.principalType,
+        role: member.role,
+      }),
+      occurredAt,
+    }));
+    await executor.insert(notificationEvents).values(events);
+    const recipientRows = events.flatMap((event) => recipients.map((candidate) => ({
+      id: randomUUID(),
+      eventId: event.id,
+      serverId: input.serverId,
+      recipientType: "app_installation" as const,
+      recipientId: candidate.installation.id,
+      candidate,
+    })));
+    await executor.insert(notificationRecipients).values(recipientRows.map(({ candidate: _candidate, ...row }) => row));
+    await executor.insert(notificationDeliveries).values(recipientRows.map(({ id, candidate }) => ({
+      notificationId: id,
+      adapter: "webhook" as const,
+      configRevision: candidate.configRevision,
+      grantRevision: candidate.installation.grantRevision,
+      subscriptionRevision: candidate.installation.subscriptionRevision,
+    })));
+    recipientCount += recipientRows.length;
+  }
+  return { eventCount: input.members.length, recipientCount };
+}
+
+/**
+ * Start a drain now. Emits run inside the caller's transaction, so a drain
+ * started from there can run before commit and find nothing; callers that
+ * need prompt delivery call this after commit. The poll is the fallback.
+ */
+export function kickAppNotificationDelivery(): void {
+  scheduledDrain?.();
+}
+
+/**
+ * Render an event subject for one installation. A member is identified by the
+ * installation-scoped member_ref. `sub` is added only when this principal has
+ * already signed in to this same app on this same Server, and it is exactly
+ * the `sub` that app received then (RFC 051 amendment, 2026-10-05): it tells
+ * the app nothing it does not already know.
+ */
+async function renderEventSubject(
+  event: typeof notificationEvents.$inferSelect,
+  installation: typeof oauthClientInstalls.$inferSelect,
+  executor: DatabaseExecutor,
+): Promise<Record<string, unknown>> {
+  if (event.subjectType !== "member" || !event.subjectId) {
+    return { type: event.subjectType, id: event.subjectId };
+  }
+  const principalType = event.provenance.principal_type === "agent" ? "agent" : "human";
+  // Any token ever issued counts, expired or revoked included, on purpose: a
+  // removal revokes the member's tokens in the same commit, and the App still
+  // needs `sub` to know whose access to suspend. Do not add `revokedAt IS
+  // NULL`. If expired tokens are ever pruned, keep a separate record of which
+  // principal signed in to which App first, or early sign-ins lose `sub`.
+  const [signedIn] = await executor.select({ id: oauthAccessTokens.id }).from(oauthAccessTokens)
+    .where(and(
+      eq(oauthAccessTokens.clientId, installation.clientId),
+      eq(oauthAccessTokens.serverId, installation.serverId),
+      eq(oauthAccessTokens.principalType, principalType),
+      principalType === "agent"
+        ? eq(oauthAccessTokens.agentId, event.subjectId)
+        : eq(oauthAccessTokens.userId, event.subjectId),
+    )).limit(1);
+  return {
+    type: "member",
+    principal_type: principalType,
+    ...deriveAppMemberRef({
+      clientId: installation.clientId,
+      installationId: installation.id,
+      principalId: event.subjectId,
+    }),
+    ...(signedIn ? { sub: event.subjectId } : {}),
+  };
+}
+
+/**
+ * POST to a public HTTPS endpoint: DNS-pinned to a public address, no
+ * redirects, TLS verified. Shared by app webhooks and the agent inbox push.
+ */
+export async function postPublicHttps(input: Parameters<WebhookPost>[0]): Promise<WebhookPostResponse> {
   const url = new URL(input.endpointUrl);
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const startedAt = performance.now();
+  const sinceStart = () => Math.round(performance.now() - startedAt);
   const addresses = await lookup(hostname, { all: true, verbatim: true });
+  const timing: WebhookPostTiming = { dnsMs: sinceStart(), socketReused: false };
   if (addresses.length === 0 || addresses.some((entry) => !isPublicWebhookAddress(entry.address))) {
     throw new AppNotificationDeliveryError("Webhook host resolved to a private or special-use address");
   }
@@ -270,22 +473,42 @@ async function postPublicHttps(input: Parameters<WebhookPost>[0]): Promise<{ sta
       rejectUnauthorized: true,
       lookup: createAppWebhookPinnedLookup(pinned) as never,
     }, (response) => {
+      timing.ttfbMs = sinceStart();
       response.resume();
-      resolve({ status: response.statusCode ?? 0 });
+      const retryAfter = response.headers["retry-after"];
+      const requestId = responseRequestId((name) => {
+        const value = response.headers[name];
+        return typeof value === "string" ? value : undefined;
+      });
+      resolve({
+        status: response.statusCode ?? 0,
+        ...(typeof retryAfter === "string" ? { retryAfter } : {}),
+        ...(requestId ? { requestId } : {}),
+        timing,
+      });
     });
-    const timeout = setClockTimeout(
-      () => request.destroy(new Error("Webhook request timed out")),
-      input.timeoutMs,
-    );
+    let timedOut = false;
+    const timeout = setClockTimeout(() => {
+      timedOut = true;
+      request.destroy(new Error("Webhook request timed out"));
+    }, input.timeoutMs);
     request.once("close", () => clearClockTimeout(timeout));
     request.on("socket", (socket) => {
+      // A reused keep-alive socket is already connected: no connect/TLS phase.
+      timing.socketReused = !socket.connecting;
+      socket.once("connect", () => { timing.connectMs = sinceStart(); });
+      socket.once("secureConnect", () => { timing.tlsMs = sinceStart(); });
       socket.once("connect", () => {
         if (!socket.remoteAddress || !isPublicWebhookAddress(socket.remoteAddress)) {
           request.destroy(new Error("Webhook connection reached a non-public address"));
         }
       });
     });
-    request.on("error", reject);
+    request.on("error", (error) => {
+      // Connected means TLS finished, or a kept-alive socket was reused.
+      const connected = timing.tlsMs !== undefined || timing.socketReused;
+      reject(new WebhookPostError(error, { ...timing }, timedOut ? (connected ? "response" : "connect") : null));
+    });
     request.end(input.body);
   });
 }
@@ -388,7 +611,10 @@ export async function drainAppNotificationDeliveries(input: {
     }).from(oauthClientInstalls)
       .innerJoin(oauthClients, eq(oauthClients.id, oauthClientInstalls.clientId))
       .innerJoin(oauthAppWebhookConfigs, eq(oauthAppWebhookConfigs.clientId, oauthClients.id))
-      .where(eq(oauthClientInstalls.id, base.notification.recipientId)).limit(1) : [];
+      .where(and(
+        eq(oauthClientInstalls.id, base.notification.recipientId),
+        oauthClientIsUserManagedPredicate(),
+      )).limit(1) : [];
 
     const attemptNumber = claimed.attemptCount;
     if (!base || !authority || authority.installation.status !== "active" || !authority.clientEnabled || !authority.config.enabled
@@ -420,6 +646,7 @@ export async function drainAppNotificationDeliveries(input: {
         subjectType: base.event.subjectType,
         subjectId: base.event.subjectId,
         groups: effective.groups,
+        provenance: base.event.provenance,
       }, executor);
     if (!eligible) {
       await finishDeliveryAttempt({
@@ -434,23 +661,25 @@ export async function drainAppNotificationDeliveries(input: {
       continue;
     }
 
-    const body = JSON.stringify({
-      installation_id: authority.installation.id,
-      delivery_id: claimed.id,
-      attempt: attemptNumber,
-      event: {
-        id: base.event.id,
-        type: base.event.eventType,
-        server_id: base.event.serverId,
-        occurred_at: base.event.occurredAt.toISOString(),
-        subject: { type: base.event.subjectType, id: base.event.subjectId },
-        provenance: base.event.provenance,
-      },
-    });
     const timestamp = Math.floor(now.getTime() / 1000).toString();
     let status = 0;
     let errorCode: string | null = null;
+    let timing: WebhookPostTiming | undefined;
+    let timeoutPhase: WebhookPostError["timeoutPhase"] = null;
     try {
+      const body = JSON.stringify({
+        installation_id: authority.installation.id,
+        delivery_id: claimed.id,
+        attempt: attemptNumber,
+        event: {
+          id: base.event.id,
+          type: base.event.eventType,
+          server_id: base.event.serverId,
+          occurred_at: base.event.occurredAt.toISOString(),
+          subject: await renderEventSubject(base.event, authority.installation, executor),
+          provenance: base.event.provenance,
+        },
+      });
       const secret = decryptAppWebhookSigningSecret(authority.config, claimed.configRevision, now);
       const signature = createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
       const response = await (input.post ?? postPublicHttps)({
@@ -467,11 +696,32 @@ export async function drainAppNotificationDeliveries(input: {
         },
       });
       status = response.status;
+      timing = response.timing;
       if (!(status >= 200 && status < 300)) errorCode = `http_${status || "invalid"}`;
     } catch (error) {
       errorCode = appWebhookDeliveryErrorCode(error);
+      if (error instanceof WebhookPostError) {
+        timing = error.timing;
+        timeoutPhase = error.timeoutPhase;
+      }
     }
     const outcome = appWebhookDeliveryOutcomeForStatus(status, attemptNumber);
+    // One event per attempt on the drain span: the outcome and, when the POST
+    // started, where its time went (connect/TLS kept on a timeout).
+    addTraceEvent("app_webhook.delivery.attempted", {
+      outcome,
+      attempt: attemptNumber,
+      http_status: status || null,
+      error_code: errorCode,
+      "webhook.timeout_phase": timeoutPhase,
+      ...(timing ? {
+        "webhook.dns_ms": timing.dnsMs,
+        "webhook.connect_ms": timing.connectMs ?? null,
+        "webhook.tls_ms": timing.tlsMs ?? null,
+        "webhook.ttfb_ms": timing.ttfbMs ?? null,
+        "webhook.socket_reused": timing.socketReused,
+      } : {}),
+    });
     await finishDeliveryAttempt({
       deliveryId: claimed.id,
       attemptNumber,
@@ -493,11 +743,21 @@ export function startAppNotificationDeliveryWorker(input: {
   batchSize?: number;
   scheduleEvery?: (fn: () => void, intervalMs: number) => unknown;
   clear?: (handle: unknown) => void;
+  tracer?: Tracer;
 } = {}) {
   const intervalMs = input.intervalMs ?? 15_000;
   const batchSize = input.batchSize ?? DELIVERY_BATCH_SIZE;
+  const tracer = input.tracer ?? noopTracer;
   const run = () => {
-    drainAppNotificationDeliveries({ batchSize }).catch((error) => {
+    // Each drain is a root span. A failure also records the
+    // `server.app_notification_delivery.error` event inside it.
+    withTraceRoot(
+      tracer,
+      "server.app_notification_delivery.drain",
+      { surface: "server", kind: "internal", attrs: { batch_size: batchSize } },
+      () => drainAppNotificationDeliveries({ batchSize }),
+      "server.app_notification_delivery.error",
+    ).catch((error) => {
       console.error("[AppNotificationDelivery] drain failed", boundedError(error));
     });
   };

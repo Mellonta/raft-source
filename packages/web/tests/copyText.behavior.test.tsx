@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { Suspense } from "react";
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";

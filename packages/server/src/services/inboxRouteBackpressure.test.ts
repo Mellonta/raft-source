@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   InboxBackpressureRejectedError,
   InboxRouteBackpressure,
-} from "./inboxRouteBackpressure.js";
+} from "./inboxRouteBackpressure";
 
 test("inbox backpressure bounds active work, queues FIFO, and never double-releases", async () => {
   const gate = new InboxRouteBackpressure({

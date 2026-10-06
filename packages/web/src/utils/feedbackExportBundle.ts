@@ -1,4 +1,5 @@
 import type { Agent } from "../store/agentStore";
+import type { Machine } from "../store/machineStore";
 
 export interface FeedbackExportBundleV2 {
   schemaVersion: "slock-feedback-export-v2";
@@ -31,6 +32,15 @@ export interface FeedbackExportBundleV2 {
     machineId: string | null;
     machineName: string | null;
     machineStatus: string | null;
+    // Facts reported by the machine RUNNING the agent (not the reporter's
+    // browser/desktop; that is `browser`), as last seen by this client.
+    // null = unknown: no machine, not loaded, or never reported. Never
+    // substituted from the client platform.
+    machineOs: string | null;
+    machineComputerVersion: string | null;
+    // Last time the server heard from the machine (ISO); the freshness
+    // reference for the machine facts above. null = unknown/never.
+    machineLastHeartbeat: string | null;
   };
   logs: {
     recentMessages: {
@@ -67,6 +77,33 @@ export interface FeedbackExportBundleV2 {
     timezone: string;
     viewport: { width: number; height: number };
     screen: { width: number; height: number };
+  };
+}
+
+export type AgentMachineSnapshot = Pick<
+  FeedbackExportBundleV2["agent"],
+  "machineName" | "machineStatus" | "machineOs" | "machineComputerVersion" | "machineLastHeartbeat"
+> & {
+  daemonVersion: FeedbackExportBundleV2["daemonVersion"];
+};
+
+function reportedOrNull(value: string | null | undefined): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+// Snapshot of the agent's machine for the report. `machine` must be the row
+// for the agent's own machineId (or null/undefined when unassigned or not
+// loaded); every missing fact stays null.
+export function snapshotAgentMachine(
+  machine: Pick<Machine, "name" | "status" | "os" | "computerVersion" | "daemonVersion" | "lastHeartbeat"> | null | undefined,
+): AgentMachineSnapshot {
+  return {
+    machineName: machine?.name ?? null,
+    machineStatus: machine?.status ?? null,
+    machineOs: reportedOrNull(machine?.os),
+    machineComputerVersion: reportedOrNull(machine?.computerVersion),
+    machineLastHeartbeat: reportedOrNull(machine?.lastHeartbeat),
+    daemonVersion: machine?.daemonVersion ?? null,
   };
 }
 

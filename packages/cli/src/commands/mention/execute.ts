@@ -3,16 +3,16 @@
 
 import type { Command } from "commander";
 
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeJson, writeText } from "../../core/renderer.js";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeJson, writeText } from "../../core/renderer";
 import {
   formatMentionActionResults,
   normalizeMentionActionResults,
   type MentionActionKind,
-} from "./_format.js";
+} from "./_format";
 
 interface ExecuteOpts {
   json?: boolean;

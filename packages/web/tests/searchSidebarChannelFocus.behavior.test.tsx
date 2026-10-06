@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import {
   createMemoryRouter,
   MemoryRouter,
@@ -15,7 +14,9 @@ import Sidebar from "../src/components/layout/Sidebar";
 import { __testInternals } from "../src/components/layout/MainLayout";
 import {
   sidebarCollapsedSectionStorageKey,
+  sidebarCustomSectionCollapsedStorageKey,
   writeSidebarCollapsedSection,
+  writeSidebarCustomSectionCollapsed,
 } from "../src/components/layout/sidebarCollapsedSections";
 import {
   buildSidebarChannelFocusState,
@@ -114,7 +115,8 @@ function installDomGeometry() {
   };
   HTMLElement.prototype.getBoundingClientRect = function getBoundingClientRect() {
     const channelId = this.dataset.sidebarChannelId;
-    if (channelId === TARGET_CHANNEL_ID) {
+    // The target channel and the DM sit below the 200px viewport (top 300).
+    if (channelId === TARGET_CHANNEL_ID || channelId === "dm-target") {
       return {
         bottom: 340,
         height: 40,
@@ -507,7 +509,7 @@ test("the mounted desktop Chat root redirect preserves the remembered collapsed 
   }
 });
 
-test("classic sidebar toggles the active channel and DM back to an empty server root", async () => {
+test("classic sidebar re-click on the active channel or DM is a no-op", async () => {
   seedStores();
   const dm = makeDmChannel("dm-target", "user-2", "Design Friend");
   useChannelStore.setState({ dmChannels: [dm] });
@@ -527,28 +529,16 @@ test("classic sidebar toggles the active channel and DM back to an empty server 
   const channelRow = () => document.querySelector<HTMLButtonElement>(
     `[data-sidebar-channel-id="${TARGET_CHANNEL_ID}"]`,
   );
-  // The row is intentionally selected by its stable data attribute rather than
-  // the route's visual class: this verifies the actual sidebar click contract.
   assert.ok(channelRow());
   fireEvent.click(channelRow()!);
 
-  await waitFor(() => {
-    assert.equal(screen.getByTestId("location-probe").getAttribute("data-pathname"), "/s/server");
-    assert.equal(
-      screen.getByTestId("location-probe").getAttribute("data-state"),
-      JSON.stringify({ suppressDefaultRouteRedirect: true }),
-    );
-    assert.ok(screen.getByText("Select a channel"));
-  });
-
-  assert.ok(channelRow());
-  fireEvent.click(channelRow()!);
   await waitFor(() => {
     assert.equal(
       screen.getByTestId("location-probe").getAttribute("data-pathname"),
       `/s/server/channel/${TARGET_CHANNEL_ID}`,
     );
     assert.equal(screen.getByTestId("location-probe").getAttribute("data-state"), "null");
+    assert.equal(screen.queryByText("Select a channel"), null, "re-click must not clear the chat panel");
   });
 
   const dmRow = () => document.querySelector<HTMLButtonElement>(
@@ -563,11 +553,8 @@ test("classic sidebar toggles the active channel and DM back to an empty server 
   assert.ok(dmRow());
   fireEvent.click(dmRow()!);
   await waitFor(() => {
-    assert.equal(screen.getByTestId("location-probe").getAttribute("data-pathname"), "/s/server");
-    assert.equal(
-      screen.getByTestId("location-probe").getAttribute("data-state"),
-      JSON.stringify({ suppressDefaultRouteRedirect: true }),
-    );
+    assert.equal(screen.getByTestId("location-probe").getAttribute("data-pathname"), "/s/server/dm/dm-target");
+    assert.equal(screen.getByTestId("location-probe").getAttribute("data-state"), "null");
   });
 });
 
@@ -615,25 +602,126 @@ test("Search Open routes through useAppNavigate, reveals the owning section, and
   );
 });
 
-test("Sidebar focus fails closed for DM, missing state, and route/state mismatch", async () => {
+// Task #125 (reviewer round 2): the owning section is resolved from the same
+// data the sidebar renders from, not guessed from the conversation's type. A
+// pinned channel and a pinned human DM live in `pinned`; a placed channel lives
+// in its custom section (with its own collapse map). Each opens transiently,
+// scrolls nearest once (top 120), keeps the user's preference, and a repeat
+// navigation scrolls nothing.
+test("a plain navigation reveals a channel inside the collapsed Pinned section", async () => {
+  installDomGeometry();
+  seedStores();
+  useServerStore.setState({ sidebarOrder: { ...DEFAULT_SIDEBAR_ORDER, pinned: [{ kind: "channel", id: TARGET_CHANNEL_ID }] } } as never);
+  writeSidebarCollapsedSection("user-1", "pinned", true, localStorage);
+  renderRouteSurface({ includeRouteWriter: true });
+  assert.ok(document.querySelector(`[data-sidebar-channel-id="${TARGET_CHANNEL_ID}"]`) === null, "collapsed Pinned starts without the row");
+
+  fireEvent.click(screen.getByRole("button", { name: "route-without-state" }));
+  await waitFor(() => assert.ok(document.querySelector(`[data-sidebar-channel-id="${TARGET_CHANNEL_ID}"]`), "Pinned opened for the reveal"));
+  await flushAnimationFramesUntilIdle();
+  assert.deepEqual(scrollCalls.map((call) => call.options), [{ top: 120, behavior: "auto" }]);
+  assert.equal(localStorage.getItem(sidebarCollapsedSectionStorageKey("user-1", "pinned")), "true");
+});
+
+test("a plain navigation reveals a pinned human DM in the collapsed Pinned section, not the Direct Messages section", async () => {
+  installDomGeometry();
+  seedStores();
+  useChannelStore.setState({ dmChannels: [makeDmChannel("dm-target", "user-2", "Design Friend")] });
+  useServerStore.setState({ sidebarOrder: { ...DEFAULT_SIDEBAR_ORDER, pinned: [{ kind: "human", id: "user-2" }] } } as never);
+  writeSidebarCollapsedSection("user-1", "pinned", true, localStorage);
+  renderRouteSurface({ includeRouteWriter: true });
+  assert.ok(document.querySelector('[data-sidebar-channel-id="dm-target"]') === null);
+
+  fireEvent.click(screen.getByRole("button", { name: "route-dm" }));
+  await waitFor(() => assert.ok(document.querySelector('[data-sidebar-channel-id="dm-target"]'), "the pinned DM row exists once Pinned opens"));
+  await flushAnimationFramesUntilIdle();
+  assert.deepEqual(scrollCalls.map((call) => call.options), [{ top: 120, behavior: "auto" }]);
+  assert.equal(localStorage.getItem(sidebarCollapsedSectionStorageKey("user-1", "pinned")), "true");
+
+  fireEvent.click(screen.getByRole("button", { name: "route-dm" }));
+  await flushAnimationFramesUntilIdle();
+  assert.equal(scrollCalls.length, 1, "same conversation again → no scroll");
+});
+
+test("a plain navigation reveals a channel placed in a collapsed custom section", async () => {
+  installDomGeometry();
+  seedStores();
+  useServerStore.setState({
+    sidebarOrder: {
+      ...DEFAULT_SIDEBAR_ORDER,
+      customSections: [{ id: "custom-1", name: "Team", emoji: null, sortMode: "manual" }],
+      sectionPlacements: [{ kind: "channel", id: TARGET_CHANNEL_ID, sectionId: "custom-1", position: 0 }],
+    },
+  } as never);
+  writeSidebarCustomSectionCollapsed("user-1", "custom-1", true, localStorage);
+  renderRouteSurface({ includeRouteWriter: true });
+  // Custom sections keep their rows mounted inside a hidden container while
+  // collapsed (built-in sections unmount theirs), so "collapsed" here means
+  // the row has a hidden ancestor.
+  const customRow = () => document.querySelector(`[data-sidebar-channel-id="${TARGET_CHANNEL_ID}"]`);
+  assert.ok(customRow()?.closest("[hidden]"), "collapsed custom section starts with its row hidden");
+
+  fireEvent.click(screen.getByRole("button", { name: "route-without-state" }));
+  await waitFor(() => assert.ok(customRow() && !customRow()!.closest("[hidden]"), "the custom section opened for the reveal"));
+  await flushAnimationFramesUntilIdle();
+  assert.deepEqual(scrollCalls.map((call) => call.options), [{ top: 120, behavior: "auto" }]);
+  assert.equal(localStorage.getItem(sidebarCustomSectionCollapsedStorageKey("user-1", "custom-1")), "true", "a reveal never rewrites the user's preference");
+});
+
+// Task #125: a DM in the collapsed Direct Messages section (disclosure reused
+// from `agents`) is revealed by a plain nav.toDm: the section opens
+// transiently, the row scrolls into view once, the remembered preference is
+// untouched, and a repeat navigation scrolls nothing.
+test("a plain navigation to a DM inside a collapsed Direct Messages section opens it and scrolls nearest once", async () => {
+  installDomGeometry();
+  seedStores();
+  useChannelStore.setState({ dmChannels: [makeDmChannel("dm-target", "user-2", "Design Friend")] });
+  writeSidebarCollapsedSection("user-1", "agents", true, localStorage);
+  renderRouteSurface({ includeRouteWriter: true });
+
+  assert.ok(document.querySelector('[data-sidebar-channel-id="dm-target"]') === null, "collapsed section starts without the DM row");
+  fireEvent.click(screen.getByRole("button", { name: "route-dm" }));
+  await waitFor(() => {
+    assert.equal(screen.getByTestId("location-probe").getAttribute("data-pathname"), "/s/server/dm/dm-target");
+    assert.ok(document.querySelector('[data-sidebar-channel-id="dm-target"]'), "the Direct Messages section opened for the reveal");
+  });
+  await flushAnimationFramesUntilIdle();
+  assert.deepEqual(scrollCalls.map((call) => call.options), [{ top: 120, behavior: "auto" }]);
+  assert.equal(localStorage.getItem(sidebarCollapsedSectionStorageKey("user-1", "agents")), "true", "a reveal never rewrites the user's collapsed preference");
+
+  fireEvent.click(screen.getByRole("button", { name: "route-dm" }));
+  await flushAnimationFramesUntilIdle();
+  assert.equal(scrollCalls.length, 1, "same conversation again → no scroll");
+});
+
+// Task #125: navigating to a conversation reveals its row by default (finder,
+// ⌘K, deep links… all go through a plain route change). "Nearest" alignment:
+// the target row sits below the 200px viewport in this geometry, so the list
+// scrolls just enough to show it (280 - (200 - 40) = 120), not to centre it.
+// A DM route whose row is not rendered (no DM seeded) still does nothing; a
+// mismatched explicit state is ignored in favour of the route's own reveal.
+test("a plain route change reveals the destination row (nearest); no row or no change → no scroll", async () => {
   const cases = [
     {
       buttonName: "route-dm",
       pathname: "/s/server/dm/dm-target",
       state: null,
       expectExpandedRows: false,
+      expectedScrolls: [] as ScrollToOptions[],
     },
     {
       buttonName: "route-without-state",
       pathname: `/s/server/channel/${TARGET_CHANNEL_ID}`,
       state: null,
-      expectExpandedRows: false,
+      expectExpandedRows: true,
+      expectedScrolls: [{ top: 120, behavior: "auto" }] as ScrollToOptions[],
     },
     {
       buttonName: "route-mismatch",
       pathname: `/s/server/channel/${TARGET_CHANNEL_ID}`,
       state: buildSidebarChannelFocusState(OTHER_CHANNEL_ID),
       expectExpandedRows: true,
+      expectedScrolls: [{ top: 120, behavior: "auto" }] as ScrollToOptions[],
     },
   ] as const;
 
@@ -642,6 +730,7 @@ test("Sidebar focus fails closed for DM, missing state, and route/state mismatch
     pathname,
     state,
     expectExpandedRows,
+    expectedScrolls,
   } of cases) {
     installDomGeometry();
     seedStores();
@@ -664,7 +753,14 @@ test("Sidebar focus fails closed for DM, missing state, and route/state mismatch
       }
     });
     await flushAnimationFramesUntilIdle();
-    assert.equal(scrollCalls.length, 0, `${buttonName} must not scroll the Sidebar`);
+    assert.deepEqual(scrollCalls.map((call) => call.options), expectedScrolls, `${buttonName}: reveal scrolls`);
+
+    if (expectedScrolls.length > 0) {
+      // Navigating again to the SAME conversation is not a change → no scroll.
+      fireEvent.click(screen.getByRole("button", { name: buttonName }));
+      await flushAnimationFramesUntilIdle();
+      assert.equal(scrollCalls.length, expectedScrolls.length, `${buttonName}: repeat navigation does not scroll again`);
+    }
 
     cleanup();
   }

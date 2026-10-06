@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { relative, resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -47,8 +46,8 @@ test("search sort uses the filter-chip pattern (Sort dropdown, not SegmentedCont
   assert.doesNotMatch(source, /import SegmentedControl from "\.\.\/ui\/SegmentedControl";/);
   assert.doesNotMatch(source, /<SegmentedControl<SearchSort>/);
   assert.match(source, /data-testid="search-sort-chip"/);
-  assert.match(source, /title=\{formatMessage\(\{ id: "search\.sort" \}\)\}/);
-  assert.match(source, /\["relevance", "recent"\] as SearchSort\[\]/);
+  assert.match(source, /(?:aria-label|title)=\{formatMessage\(\{ id: "search\.sort" \}\)\}/);
+  assert.match(source, /SEARCH_SORTS/);
 });
 
 // GAP, RECORDED ON PURPOSE — do not read this space as "nothing to cover here".
@@ -93,6 +92,23 @@ test("business selects use raft-ui directly without the deprecated local adapter
   // selected rows while search/filter popovers continue to use soft-signal hover.
   assert.doesNotMatch(popoverSource, /bg-soft-signal(?!\/30)/);
   assert.match(popoverSource, /hover:bg-soft-signal\/30/);
+});
+
+test("SettingsPanel and ReportIssueDialog use raft-ui Checkbox without the retired local shell", () => {
+  // The local ui/Checkbox shell (sr-only native input + CheckMarker) was
+  // deleted once every consumer moved onto raft-ui's Checkbox (Base UI
+  // span[role=checkbox] + hidden native input). CheckMarker stays — it is
+  // used directly by MessageInput / ChannelMembers / MachineDetailPanel.
+  assert.equal(existsSync(resolve(repoRoot, "src/components/ui/Checkbox.tsx")), false);
+  for (const sourcePath of [
+    "src/components/settings/SettingsPanel.tsx",
+    "src/components/agent/ReportIssueDialog.tsx",
+  ]) {
+    const source = readSource(sourcePath);
+    assert.match(source, /from "raft-ui";/, `${sourcePath} should import Checkbox from raft-ui`);
+    assert.match(source, /<Checkbox[\s>]/, `${sourcePath} should render raft-ui Checkbox at the business callsite`);
+    assert.doesNotMatch(source, /\.\.\/ui\/Checkbox"|from "\.\.\/\.\.\/ui\/Checkbox"/);
+  }
 });
 
 test("components do not hand-roll switch primitives before a canonical Toggle exists", () => {

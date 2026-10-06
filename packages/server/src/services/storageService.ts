@@ -1,6 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { Agent as HttpsAgent } from "node:https";
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
@@ -9,7 +9,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { TraceAttributes, Tracer } from "@botiverse/raft-shared";
 import { noopTracer } from "@botiverse/raft-shared";
-import { s3PutDuration, s3PutRequestsTotal, s3SocketPoolQueueLength, s3SocketPoolSaturationTotal, s3SocketPoolSocketsInUse } from "../metrics.js";
+import { s3PutDuration, s3PutRequestsTotal, s3SocketPoolQueueLength, s3SocketPoolSaturationTotal, s3SocketPoolSocketsInUse } from "../metrics";
 
 /**
  * Pattern the SDK uses to format its socket-pool saturation warning, e.g.
@@ -51,7 +51,7 @@ export function buildSdkLoggerWithSaturationCounter(labels: { bucket: string; en
     error: (...args: unknown[]) => console.error(...args),
   };
 }
-import { getCurrentTraceContext } from "../tracing/semanticTrace.js";
+import { errorClassOf, getCurrentTraceContext } from "../tracing/semanticTrace";
 
 const DEFAULT_S3_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_S3_MAX_SOCKETS = 300;
@@ -72,22 +72,6 @@ export function isStorageTimeoutError(error: unknown): error is StorageTimeoutEr
   );
 }
 
-export class StoragePreconditionFailedError extends Error {
-  constructor(
-    public readonly key: string,
-    public readonly condition: StorageWriteCondition,
-  ) {
-    super(`Storage write precondition failed for ${key}`);
-    this.name = "StoragePreconditionFailedError";
-  }
-}
-
-export function isStoragePreconditionFailedError(error: unknown): error is StoragePreconditionFailedError {
-  return error instanceof StoragePreconditionFailedError || (
-    error instanceof Error && error.name === "StoragePreconditionFailedError"
-  );
-}
-
 export function isStorageNotFoundError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if (error.message === "File not found on disk") return true;
@@ -95,19 +79,6 @@ export function isStorageNotFoundError(error: unknown): boolean {
   return "$metadata" in error
     && (error as Error & { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404;
 }
-
-export type StorageWriteCondition =
-  | { ifMatch: string; ifNoneMatch?: never }
-  | { ifNoneMatch: "*"; ifMatch?: never };
-
-export type VersionedStorageObject = {
-  body: Readable;
-  etag: string;
-};
-
-export type StorageWriteReceipt = {
-  etag: string | null;
-};
 
 export function parseS3RequestTimeoutMs(raw = process.env.S3_REQUEST_TIMEOUT_MS): number {
   if (!raw) return DEFAULT_S3_REQUEST_TIMEOUT_MS;
@@ -157,17 +128,8 @@ export interface StorageBackend {
     contentType: string,
     contentLength: number,
   ): Promise<void>;
-  /** Store a file only when the supplied ETag/create condition still holds. */
-  putConditional?(
-    key: string,
-    data: Buffer,
-    contentType: string,
-    condition: StorageWriteCondition,
-  ): Promise<StorageWriteReceipt>;
   /** Get a readable stream for a file. */
   get(key: string): Promise<Readable>;
-  /** Get a readable stream and the strong object version used for conditional writes. */
-  getVersioned?(key: string): Promise<VersionedStorageObject>;
   /** Get a readable stream for a byte range. Local/dev storage uses this for media previews. */
   getRange?(key: string, start: number, end: number): Promise<Readable>;
   /** Delete a file. */
@@ -199,15 +161,55 @@ export interface StorageBackend {
 }
 
 /**
- * Immutable namespace for objects that live in the dedicated browser-direct
- * upload bucket. The prefix is persisted as part of attachment storage keys,
- * so every later read and lifecycle operation can resolve the physical
- * backend without copying bytes back to the legacy attachment bucket.
+ * Immutable namespaces for objects that live in the dedicated attachment
+ * bucket. v1 contains historical browser-direct uploads. v2 separates new
+ * browser-direct and server-mediated writes below one versioned namespace.
+ * The full prefix is persisted in storage keys so every later read, URL, and
+ * lifecycle operation resolves the same physical backend.
  */
 export const ATTACHMENT_DIRECT_UPLOAD_STORAGE_KEY_PREFIX = "attachments/v1/";
+export const ATTACHMENT_STORAGE_KEY_PREFIX = "attachments/v2/";
 
 export function isAttachmentDirectUploadStorageKey(key: string): boolean {
   return key.startsWith(ATTACHMENT_DIRECT_UPLOAD_STORAGE_KEY_PREFIX);
+}
+
+export function isDedicatedAttachmentStorageKey(key: string): boolean {
+  return isAttachmentDirectUploadStorageKey(key)
+    || key.startsWith(ATTACHMENT_STORAGE_KEY_PREFIX);
+}
+
+export function buildDirectAttachmentStorageKey(
+  serverId: string,
+  uploadId: string,
+  objectId: string,
+): string {
+  return `${ATTACHMENT_STORAGE_KEY_PREFIX}${serverId}/direct/${uploadId}/${objectId}`;
+}
+
+export function buildLegacyDirectAttachmentStorageKey(
+  serverId: string,
+  uploadId: string,
+  objectId: string,
+): string {
+  return `${ATTACHMENT_DIRECT_UPLOAD_STORAGE_KEY_PREFIX}${serverId}/${uploadId}/${objectId}`;
+}
+
+export function buildServerAttachmentStorageKey(
+  serverId: string,
+  attachmentId: string,
+  objectId: string,
+  extension = "",
+): string {
+  return `${ATTACHMENT_STORAGE_KEY_PREFIX}${serverId}/server/${attachmentId}/${objectId}${extension}`;
+}
+
+export function buildLegacyServerAttachmentStorageKey(
+  serverId: string,
+  attachmentId: string,
+  extension = "",
+): string {
+  return `${serverId}/${attachmentId}${extension}`;
 }
 
 const VERSIONED_ATTACHMENT_STORAGE_KEY_PATTERN = /^attachments\/v\d+\//;
@@ -238,8 +240,8 @@ function requireStorageOperation<K extends keyof StorageBackend>(
 }
 
 /**
- * Route immutable direct-upload keys to their dedicated bucket while keeping
- * historical keys on the legacy attachment backend. Optional capabilities
+ * Route immutable versioned attachment keys to their dedicated bucket while
+ * keeping unversioned historical keys on the legacy attachment backend. Optional capabilities
  * are exposed only when both physical backends support them, preserving the
  * capability checks used by callers such as media range reads and CAS writes.
  */
@@ -248,7 +250,7 @@ export function createAttachmentStorageRouter(
   directUpload: StorageBackend | null,
 ): StorageBackend {
   const backendFor = (key: string) => {
-    if (isAttachmentDirectUploadStorageKey(key)) {
+    if (isDedicatedAttachmentStorageKey(key)) {
       if (!directUpload) throw new AttachmentDirectUploadStorageUnavailableError();
       return directUpload;
     }
@@ -270,13 +272,6 @@ export function createAttachmentStorageRouter(
       requireStorageOperation(backendFor(key), "putStream")(key, data, contentType, contentLength);
   }
 
-  if (legacy.putConditional && (!directUpload || directUpload.putConditional)) {
-    routed.putConditional = (key, data, contentType, condition) =>
-      requireStorageOperation(backendFor(key), "putConditional")(key, data, contentType, condition);
-  }
-  if (legacy.getVersioned && (!directUpload || directUpload.getVersioned)) {
-    routed.getVersioned = (key) => requireStorageOperation(backendFor(key), "getVersioned")(key);
-  }
   if (legacy.getRange && (!directUpload || directUpload.getRange)) {
     routed.getRange = (key, start, end) => requireStorageOperation(backendFor(key), "getRange")(key, start, end);
   }
@@ -288,6 +283,123 @@ export function createAttachmentStorageRouter(
       requireStorageOperation(backendFor(key), "getPresignedUrl")(key, options);
   }
   if (legacy.getPresignedPutUrl && (!directUpload || directUpload.getPresignedPutUrl)) {
+    routed.getPresignedPutUrl = (key, options) =>
+      requireStorageOperation(backendFor(key), "getPresignedPutUrl")(key, options);
+  }
+
+  return routed;
+}
+
+/**
+ * Immutable namespace for public derived assets (attachment thumbnails and
+ * SVG raster previews) stored in the dedicated public-content bucket and
+ * served from its own domain. The prefix is persisted in the storage key, so
+ * every later read, URL, delete, and GC resolves the same backend no matter
+ * which generation the write flag currently selects.
+ */
+export const PUBLIC_CONTENT_V2_KEY_PREFIX = "content/v2/";
+
+const VERSIONED_PUBLIC_CONTENT_KEY_PATTERN = /^content\/v\d+\//;
+
+export type PublicAssetKeyGeneration = "legacy" | "v2" | "unknown";
+
+/** The single classifier shared by public-asset writers, readers, URLs, and cleanup. */
+export function classifyPublicAssetKey(key: string): PublicAssetKeyGeneration {
+  if (key.startsWith(PUBLIC_CONTENT_V2_KEY_PREFIX)) return "v2";
+  // A future or malformed version must never drift into the legacy CDN bucket.
+  if (VERSIONED_PUBLIC_CONTENT_KEY_PATTERN.test(key)) return "unknown";
+  return "legacy";
+}
+
+export function buildAttachmentThumbnailKey(
+  serverId: string,
+  attachmentId: string,
+  generation: Exclude<PublicAssetKeyGeneration, "unknown">,
+): string {
+  const key = `thumbs/${serverId}/${attachmentId}.webp`;
+  return generation === "v2" ? `${PUBLIC_CONTENT_V2_KEY_PREFIX}${key}` : key;
+}
+
+function normalizePublicBaseUrl(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed.replace(/\/$/, "") : null;
+}
+
+/** Public origin for content/v2 keys; null keeps fresh writes on legacy keys. */
+export function getPublicContentBaseUrl(): string | null {
+  return normalizePublicBaseUrl(process.env.PUBLIC_CONTENT_BASE_URL);
+}
+
+/**
+ * Resolve the public URL for a persisted public-asset key. The base URL is
+ * chosen from the key's generation, never from the current write flag.
+ */
+export function resolvePublicAssetUrl(key: string | null | undefined): string | null {
+  if (!key) return null;
+  const generation = classifyPublicAssetKey(key);
+  if (generation === "unknown") {
+    console.warn("[Storage] Public asset key uses an unsupported versioned namespace");
+    return null;
+  }
+  const base = generation === "v2"
+    ? getPublicContentBaseUrl()
+    : normalizePublicBaseUrl(process.env.CDN_BASE_URL);
+  return base ? `${base}/${key}` : null;
+}
+
+export class UnknownPublicContentStorageRouteError extends Error {
+  constructor() {
+    super("Public asset storage key uses an unsupported versioned namespace");
+    this.name = "UnknownPublicContentStorageRouteError";
+  }
+}
+
+export class PublicContentStorageUnavailableError extends Error {
+  constructor() {
+    super("Dedicated public-content storage is unavailable");
+    this.name = "PublicContentStorageUnavailableError";
+  }
+}
+
+/**
+ * Route content/v2 public-asset keys to the dedicated public-content bucket
+ * while every other key keeps using the legacy CDN backend. Optional
+ * capabilities are exposed only when both physical backends support them.
+ */
+export function createPublicContentStorageRouter(
+  legacy: StorageBackend,
+  publicContent: StorageBackend | null,
+): StorageBackend {
+  const backendFor = (key: string) => {
+    const generation = classifyPublicAssetKey(key);
+    if (generation === "unknown") throw new UnknownPublicContentStorageRouteError();
+    if (generation === "v2") {
+      if (!publicContent) throw new PublicContentStorageUnavailableError();
+      return publicContent;
+    }
+    return legacy;
+  };
+  const routed: StorageBackend = {
+    put: (key, data, contentType) => backendFor(key).put(key, data, contentType),
+    get: (key) => backendFor(key).get(key),
+    delete: (key) => backendFor(key).delete(key),
+  };
+
+  if (legacy.putStream && (!publicContent || publicContent.putStream)) {
+    routed.putStream = (key, data, contentType, contentLength) =>
+      requireStorageOperation(backendFor(key), "putStream")(key, data, contentType, contentLength);
+  }
+  if (legacy.getRange && (!publicContent || publicContent.getRange)) {
+    routed.getRange = (key, start, end) => requireStorageOperation(backendFor(key), "getRange")(key, start, end);
+  }
+  if (legacy.head && (!publicContent || publicContent.head)) {
+    routed.head = (key) => requireStorageOperation(backendFor(key), "head")(key);
+  }
+  if (legacy.getPresignedUrl && (!publicContent || publicContent.getPresignedUrl)) {
+    routed.getPresignedUrl = (key, options) =>
+      requireStorageOperation(backendFor(key), "getPresignedUrl")(key, options);
+  }
+  if (legacy.getPresignedPutUrl && (!publicContent || publicContent.getPresignedPutUrl)) {
     routed.getPresignedPutUrl = (key, options) =>
       requireStorageOperation(backendFor(key), "getPresignedPutUrl")(key, options);
   }
@@ -342,46 +454,12 @@ class LocalStorage implements StorageBackend {
     }
   }
 
-  async putConditional(
-    key: string,
-    data: Buffer,
-    _contentType: string,
-    condition: StorageWriteCondition,
-  ): Promise<StorageWriteReceipt> {
-    const filePath = this.resolveSafe(key);
-    const exists = fs.existsSync(filePath);
-    if ("ifNoneMatch" in condition) {
-      if (exists) throw new StoragePreconditionFailedError(key, condition);
-    } else {
-      if (!exists) throw new StoragePreconditionFailedError(key, condition);
-      const currentEtag = this.etag(fs.readFileSync(filePath));
-      if (currentEtag !== condition.ifMatch) {
-        throw new StoragePreconditionFailedError(key, condition);
-      }
-    }
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, data);
-    return { etag: this.etag(data) };
-  }
-
   async get(key: string): Promise<Readable> {
     const filePath = this.resolveSafe(key);
     if (!fs.existsSync(filePath)) {
       throw new Error("File not found on disk");
     }
     return fs.createReadStream(filePath);
-  }
-
-  async getVersioned(key: string): Promise<VersionedStorageObject> {
-    const filePath = this.resolveSafe(key);
-    if (!fs.existsSync(filePath)) {
-      throw new Error("File not found on disk");
-    }
-    const data = fs.readFileSync(filePath);
-    return {
-      body: Readable.from(data),
-      etag: this.etag(data),
-    };
   }
 
   async getRange(key: string, start: number, end: number): Promise<Readable> {
@@ -402,10 +480,6 @@ class LocalStorage implements StorageBackend {
     if (!fs.existsSync(filePath)) return null;
     const stat = fs.statSync(filePath);
     return { sizeBytes: stat.size, contentType: null, etag: null };
-  }
-
-  private etag(data: Buffer): string {
-    return `"sha256:${createHash("sha256").update(data).digest("hex")}"`;
   }
 }
 
@@ -449,6 +523,12 @@ class S3Storage implements StorageBackend {
       // SDK's WHEN_SUPPORTED default otherwise injects CRC32 for the empty
       // PutObjectCommand body, binding every presigned URL to an empty upload.
       requestChecksumCalculation: "WHEN_REQUIRED",
+      // Under WHEN_SUPPORTED the SDK asks for response checksums on every GET
+      // and, when the object has one, hands back a validating wrapper instead
+      // of the socket's own stream. Destroying that wrapper after a partial
+      // read (preview prefix, client abort) leaves the source stream paused
+      // with its socket checked out of the pool forever.
+      responseChecksumValidation: "WHEN_REQUIRED",
       requestHandler: new NodeHttpHandler({
         requestTimeout: requestTimeoutMs,
         throwOnRequestTimeout: true,
@@ -484,25 +564,15 @@ class S3Storage implements StorageBackend {
     if (!Number.isSafeInteger(contentLength) || contentLength <= 0) {
       throw new Error("Storage stream content length is invalid");
     }
-    await this.putObject(key, data, contentType, undefined, contentLength);
-  }
-
-  async putConditional(
-    key: string,
-    data: Buffer,
-    contentType: string,
-    condition: StorageWriteCondition,
-  ): Promise<StorageWriteReceipt> {
-    return this.putObject(key, data, contentType, condition);
+    await this.putObject(key, data, contentType, contentLength);
   }
 
   private async putObject(
     key: string,
     data: Buffer | Readable,
     contentType: string,
-    condition?: StorageWriteCondition,
     declaredContentLength?: number,
-  ): Promise<StorageWriteReceipt> {
+  ): Promise<void> {
     const sizeBytes = Buffer.isBuffer(data) ? data.byteLength : declaredContentLength;
     if (typeof sizeBytes !== "number" || !Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
       throw new Error("Storage object content length is invalid");
@@ -529,17 +599,12 @@ class S3Storage implements StorageBackend {
     const abortController = new AbortController();
     const timeout = setTimeout(() => abortController.abort(), this.requestTimeoutMs);
     try {
-      const response = await this.client.send(new PutObjectCommand({
+      await this.client.send(new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
         Body: data,
         ContentLength: sizeBytes,
         ContentType: contentType,
-        ...(!condition
-          ? {}
-          : "ifMatch" in condition
-            ? { IfMatch: condition.ifMatch }
-            : { IfNoneMatch: condition.ifNoneMatch }),
       }), { abortSignal: abortController.signal });
       const durationMs = Date.now() - start;
       s3PutRequestsTotal.labels(metricLabels.bucket, metricLabels.endpoint_host, "ok").inc();
@@ -561,31 +626,9 @@ class S3Storage implements StorageBackend {
           ...this.socketPoolAttrs("end"),
         },
       });
-      return { etag: response.ETag ?? null };
     } catch (err) {
       const timedOut = abortController.signal.aborted;
       const durationMs = Date.now() - start;
-      const httpStatusCode = typeof err === "object" && err !== null && "$metadata" in err
-        ? (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode
-        : undefined;
-      if (condition && (httpStatusCode === 409 || httpStatusCode === 412)) {
-        const outcome = "precondition_failed";
-        s3PutRequestsTotal.labels(metricLabels.bucket, metricLabels.endpoint_host, outcome).inc();
-        s3PutDuration.labels(metricLabels.bucket, metricLabels.endpoint_host, outcome).observe(durationMs / 1000);
-        this.recordSocketPoolMetrics();
-        const traceAttrs: TraceAttributes = {
-          event_kind: "storage_s3_put",
-          duration_ms: durationMs,
-          outcome,
-          reason: "write_precondition_failed",
-          http_status_code: httpStatusCode,
-          error_class: err instanceof Error ? err.name : typeof err,
-          ...this.socketPoolAttrs("conflict"),
-        };
-        span.addEvent("storage.s3.put.precondition_failed", traceAttrs);
-        span.end("error", { attrs: traceAttrs });
-        throw new StoragePreconditionFailedError(key, condition);
-      }
       const outcome = timedOut ? "timeout" : "error";
       s3PutRequestsTotal.labels(metricLabels.bucket, metricLabels.endpoint_host, outcome).inc();
       s3PutDuration.labels(metricLabels.bucket, metricLabels.endpoint_host, outcome).observe(durationMs / 1000);
@@ -596,7 +639,7 @@ class S3Storage implements StorageBackend {
         outcome,
         reason: timedOut ? "request_timeout" : "put_failed",
         timed_out: timedOut,
-        error_class: err instanceof Error ? err.name : typeof err,
+        error_class: errorClassOf(err),
         ...this.socketPoolAttrs("error"),
       };
       span.addEvent("storage.s3.put.failed", traceAttrs);
@@ -651,19 +694,6 @@ class S3Storage implements StorageBackend {
     }));
     if (!response.Body) throw new Error("Empty response from S3");
     return response.Body as Readable;
-  }
-
-  async getVersioned(key: string): Promise<VersionedStorageObject> {
-    const response = await this.client.send(new GetObjectCommand({
-      Bucket: this.bucket,
-      Key: key,
-    }));
-    if (!response.Body) throw new Error("Empty response from S3");
-    if (!response.ETag) throw new Error("S3 response did not include an ETag");
-    return {
-      body: response.Body as Readable,
-      etag: response.ETag,
-    };
   }
 
   async delete(key: string): Promise<void> {
@@ -737,8 +767,8 @@ class S3Storage implements StorageBackend {
 // --- Orphan cleanup ---
 
 import { lt, isNull, and, eq } from "drizzle-orm";
-import { getDb, type Database } from "../db/index.js";
-import { attachments } from "../db/schema.js";
+import { getDb, type Database } from "../db/index";
+import { attachments } from "../db/schema";
 
 const ORPHAN_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 
@@ -820,6 +850,8 @@ let _storageResolved = false;
 let _storageTracer: Tracer | null = null;
 let _directUploadStorage: StorageBackend | null = null;
 let _directUploadStorageResolved = false;
+let _publicContentStorage: StorageBackend | null = null;
+let _publicContentStorageResolved = false;
 
 export function setStorageTracer(tracer: Tracer | null): void {
   _storageTracer = tracer;
@@ -863,7 +895,9 @@ export function getStorage(): StorageBackend | null {
     const dir = path.resolve(process.env.UPLOADS_DIR || path.join(process.cwd(), "uploads"));
     console.log(`[Storage] Using local disk: ${dir}`);
     const legacyStorage = new LocalStorage(dir);
-    _storage = createAttachmentStorageRouter(legacyStorage, getDirectUploadStorage());
+    // Local development has one physical root. Keep versioned routing active
+    // without requiring production R2 credentials on a developer machine.
+    _storage = createAttachmentStorageRouter(legacyStorage, getDirectUploadStorage() ?? legacyStorage);
   } else {
     console.log(`[Storage] Uploads disabled (no S3 configured, UPLOADS_LOCAL=false)`);
     _storage = null;
@@ -919,6 +953,61 @@ export function getDirectUploadStorage(): StorageBackend | null {
   return _directUploadStorage;
 }
 
+/**
+ * Dedicated S3-compatible backend for content/v2 public derived assets.
+ * Every setting is explicit: this path never inherits the legacy CDN or
+ * attachment credentials, and partial configuration disables it.
+ */
+export function getPublicContentStorage(): StorageBackend | null {
+  if (_publicContentStorageResolved) return _publicContentStorage;
+  _publicContentStorageResolved = true;
+
+  const config = {
+    endpoint: process.env.S3_PUBLIC_CONTENT_ENDPOINT,
+    region: process.env.S3_PUBLIC_CONTENT_REGION || "auto",
+    accessKeyId: process.env.S3_PUBLIC_CONTENT_ACCESS_KEY_ID,
+    secretAccessKey: process.env.S3_PUBLIC_CONTENT_SECRET_ACCESS_KEY,
+    bucket: process.env.S3_PUBLIC_CONTENT_BUCKET,
+    forcePathStyle: process.env.S3_PUBLIC_CONTENT_FORCE_PATH_STYLE === "true",
+  };
+  const required = [
+    ["S3_PUBLIC_CONTENT_ENDPOINT", config.endpoint],
+    ["S3_PUBLIC_CONTENT_ACCESS_KEY_ID", config.accessKeyId],
+    ["S3_PUBLIC_CONTENT_SECRET_ACCESS_KEY", config.secretAccessKey],
+    ["S3_PUBLIC_CONTENT_BUCKET", config.bucket],
+  ] as const;
+  const configuredCount = required.filter(([, value]) => Boolean(value)).length;
+  if (configuredCount === 0) return null;
+  if (configuredCount !== required.length) {
+    console.warn("[Storage] Public-content bucket configuration is incomplete; content/v2 storage is disabled", {
+      missing: required.filter(([, value]) => !value).map(([name]) => name),
+    });
+    return null;
+  }
+
+  console.log(`[Storage] Public-content S3 bucket: ${config.endpoint} / ${config.bucket}`);
+  _publicContentStorage = new S3Storage({
+    endpoint: config.endpoint!,
+    region: config.region,
+    accessKeyId: config.accessKeyId!,
+    secretAccessKey: config.secretAccessKey!,
+    bucket: config.bucket!,
+    forcePathStyle: config.forcePathStyle,
+    requestTimeoutMs: parseS3RequestTimeoutMs(),
+    maxSockets: parseS3MaxSockets(),
+    tracer: _storageTracer,
+  });
+  return _publicContentStorage;
+}
+
+/**
+ * Fresh writes may select content/v2 keys only when the object can be both
+ * stored in and served from the dedicated public-content bucket.
+ */
+export function isPublicContentV2WriteConfigured(): boolean {
+  return getPublicContentStorage() !== null && getPublicContentBaseUrl() !== null;
+}
+
 export function resetStorageForTests(): void {
   _storage = null;
   _storageResolved = false;
@@ -926,6 +1015,8 @@ export function resetStorageForTests(): void {
   _directUploadStorageResolved = false;
   _cdnStorage = null;
   _cdnStorageResolved = false;
+  _publicContentStorage = null;
+  _publicContentStorageResolved = false;
 }
 
 export function __setStorageForTests(storage: StorageBackend | null): void {
@@ -944,13 +1035,21 @@ export function __setCdnStorageForTests(storage: StorageBackend | null): void {
   _cdnStorageResolved = true;
 }
 
+/** Test seam for the dedicated content/v2 public-content bucket. */
+export function __setPublicContentStorageForTests(storage: StorageBackend | null): void {
+  _publicContentStorage = storage;
+  _publicContentStorageResolved = true;
+}
+
 let _cdnStorage: StorageBackend | null = null;
 let _cdnStorageResolved = false;
 
 /**
- * Returns the CDN storage backend for public thumbnails.
- * Uses S3_CDN_BUCKET (same credentials as main storage, different bucket).
- * Falls back to main storage if S3_CDN_BUCKET is not set.
+ * Returns the storage backend for public derived assets.
+ * Legacy keys use S3_CDN_BUCKET (same credentials as main storage, different
+ * bucket) and fall back to main storage if S3_CDN_BUCKET is not set.
+ * content/v2 keys always route to the dedicated public-content bucket and
+ * never fall back to either legacy backend.
  */
 export function getCdnStorage(): StorageBackend | null {
   if (_cdnStorageResolved) return _cdnStorage;
@@ -963,9 +1062,10 @@ export function getCdnStorage(): StorageBackend | null {
   const s3SecretKey = process.env.S3_SECRET_ACCESS_KEY;
   const s3ForcePathStyle = process.env.S3_FORCE_PATH_STYLE === "true";
 
+  let legacyCdnStorage: StorageBackend | null;
   if (cdnBucket && s3Endpoint && s3AccessKey && s3SecretKey) {
     console.log(`[Storage] CDN bucket: ${s3Endpoint} / ${cdnBucket}`);
-    _cdnStorage = new S3Storage({
+    legacyCdnStorage = new S3Storage({
       endpoint: s3Endpoint,
       region: s3Region,
       accessKeyId: s3AccessKey,
@@ -978,8 +1078,11 @@ export function getCdnStorage(): StorageBackend | null {
     });
   } else {
     // Fall back to main storage (thumbnails stored in same bucket)
-    _cdnStorage = getStorage();
+    legacyCdnStorage = getStorage();
   }
 
+  _cdnStorage = legacyCdnStorage
+    ? createPublicContentStorageRouter(legacyCdnStorage, getPublicContentStorage())
+    : null;
   return _cdnStorage;
 }

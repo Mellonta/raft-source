@@ -1,12 +1,11 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach } from "vitest";
 import { and, eq } from "drizzle-orm";
 import type { Server as SocketServer } from "socket.io";
 import { asServerId } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
+import { getDb } from "../db/index";
 import {
   agentMigrationReceiptChannels,
   agentMigrationReceiptOutbox,
@@ -19,43 +18,49 @@ import {
   jointChannelServers,
   machines,
   messages,
+  servers,
   users,
-} from "../db/schema.js";
-import type { AgentOrchestrator, AgentMessageDeliveryResult } from "./agentOrchestrator.js";
-import { createAgent } from "./agentService.js";
+} from "../db/schema";
+import type { AgentOrchestrator, AgentMessageDeliveryResult } from "./agentOrchestrator";
+import { createAgent } from "./agentService";
 import {
   canAgentAccessChannel,
   canUserAccessChannel,
   findOrCreateDM,
   listDMChannels,
-} from "./channelService.js";
-import { registerMachine } from "./machineService.js";
+} from "./channelService";
+import { registerMachine } from "./machineService";
 import {
   getAgentResumeCatchupMessages,
   listMessages,
-} from "./messageService.js";
-import { createServer } from "./serverService.js";
-import { searchMessagesForAgent, searchMessagesForUser } from "./searchService.js";
+} from "./messageService";
+import { createServer } from "./serverService";
+import { searchMessagesForAgent, searchMessagesForUser } from "./searchService";
 import {
-  abortAgentMigration,
   acknowledgeAgentMigrationCancellation,
   agentMigrationGeneration,
-  beginAgentMigration,
   completeAgentMigrationAutoStart,
-  flipAgentMigrationMachine,
-  markAgentMigrationSourceReadyForComputer,
   markAgentMigrationTargetImportArrived,
   markAgentMigrationTransportLostForComputer,
   recordAgentMigrationAutoStartFailure,
   recordAgentMigrationSourceWorkspaceArchived,
   requestAgentMigrationCancellation,
-  startAgentMigrationTransfer,
-  markAgentMigrationTransportLost,
-} from "./agentMigrationService.js";
+} from "./agentMigrationService";
 import {
+  beginTestAgentMigration,
+  flipTestAgentMigration,
+  markTestAgentMigrationReady,
+  startTestAgentMigrationTransfer,
+} from "../test/agentMigrationFixture";
+import {
+  AGENT_MIGRATION_RECEIPT_MAX_ATTEMPTS,
+  agentMigrationReceiptRetryDelayMs,
   drainAgentMigrationReceiptOutbox,
   formatAgentMigrationCompletedReceipt,
-} from "./agentMigrationReceiptService.js";
+  formatReceiptBytes,
+  formatAgentMigrationTerminalReceipt,
+} from "./agentMigrationReceiptService";
+import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
 
 
 const TRANSFER_SUMMARY = {
@@ -101,8 +106,12 @@ function fakeIo(targets: string[] = []): SocketServer {
 
 function fakeOrchestrator(
   deliver: (agentId: string, message: Record<string, unknown>) => Promise<AgentMessageDeliveryResult>,
+  machineStatus: (machineId: string) => "online" | "offline" = () => "online",
 ): AgentOrchestrator {
-  return { deliverMessage: deliver } as unknown as AgentOrchestrator;
+  return {
+    deliverMessage: deliver,
+    getMachineStatus: async (machineId: string) => machineStatus(machineId),
+  } as unknown as AgentOrchestrator;
 }
 
 function rejectionContains(expected: string) {
@@ -131,36 +140,32 @@ async function seedStartingMigration(driveToStarting = true) {
     machineId: sourceMachine.id,
   });
   const startedAt = new Date("2026-07-20T12:00:00.000Z");
-  const migration = await beginAgentMigration({
+  const provisioning = await beginTestAgentMigration({
     agentId: agent.id,
     targetMachineId: targetMachine.id,
     initiatedByUserId: owner.id,
     now: startedAt,
   });
+  const { migration } = provisioning;
   assert.ok(migration.receiptChannelId);
   if (!driveToStarting) {
     return { owner, server, sourceMachine, targetMachine, agent, receiptChannelId: migration.receiptChannelId, migration };
   }
-  const ready = await markAgentMigrationSourceReadyForComputer({
-    migrationId: migration.id,
-    serverId: server.id,
-    sourceMachineId: sourceMachine.id,
-    manifestPath: "object-store:test/manifest.json",
-    manifestSha256: "sha256:test",
-    transferSummary: TRANSFER_SUMMARY,
+  await markTestAgentMigrationReady(provisioning, {
     now: new Date("2026-07-20T12:01:00.000Z"),
+    transferSummary: TRANSFER_SUMMARY,
   });
-  await startAgentMigrationTransfer(ready.grantKey, new Date("2026-07-20T12:02:00.000Z"));
-  const arriving = await flipAgentMigrationMachine(ready.grantKey, new Date("2026-07-20T12:03:00.000Z"));
+  await startTestAgentMigrationTransfer(migration.id, new Date("2026-07-20T12:02:00.000Z"));
+  const arriving = await flipTestAgentMigration(migration.id, new Date("2026-07-20T12:03:00.000Z"));
   const archived = await recordAgentMigrationSourceWorkspaceArchived({
-    grantKey: ready.grantKey,
+    migrationId: arriving.id,
     migrationGeneration: agentMigrationGeneration(arriving),
     serverId: server.id,
     targetMachineId: targetMachine.id,
     now: new Date("2026-07-20T12:03:30.000Z"),
   });
   const arrival = await markAgentMigrationTargetImportArrived({
-    grantKey: ready.grantKey,
+    migrationId: arriving.id,
     migrationGeneration: archived.migrationGeneration,
     serverId: server.id,
     targetMachineId: targetMachine.id,
@@ -287,7 +292,7 @@ test("authoritative completion atomically persists one private frozen-name recei
     .where(eq(machines.id, fixture.targetMachine.id));
 
   const completed = await completeAgentMigrationAutoStart({
-    grantKey: fixture.migration.grantKey,
+    migrationId: fixture.migration.id,
     agentId: fixture.agent.id,
     targetMachineId: fixture.targetMachine.id,
     now: new Date("2026-07-20T12:05:00.000Z"),
@@ -332,7 +337,10 @@ test("authoritative completion atomically persists one private frozen-name recei
   assert.equal(agentSearch.results[0]!.channelId, fixture.receiptChannelId);
   const agentRead = await listMessages(fixture.receiptChannelId, 10);
   assert.deepEqual(agentRead.map((message) => message.id), [rows.messages[0]!.id]);
-  const reconnect = await getAgentResumeCatchupMessages(fixture.agent.id);
+  // The fixture clock dates the receipt 2026-07-20; the chain drops a free-plan
+  // conversation whose latest message is older than 30 days, so lift the window.
+  await getDb().update(servers).set({ plan: "pro" }).where(eq(servers.id, fixture.server.id));
+  const reconnect = await getAgentResumeCatchupMessages(fixture.agent.id, undefined, { chain: await referenceAgentInboxChain(fixture.agent.id) });
   assert.deepEqual(
     reconnect.messages.map((message) => message.message_id),
     [rows.messages[0]!.id],
@@ -345,7 +353,7 @@ test("authoritative completion atomically persists one private frozen-name recei
   assert.equal(humanSearch.results.length, 0);
 
   const duplicate = await completeAgentMigrationAutoStart({
-    grantKey: fixture.migration.grantKey,
+    migrationId: fixture.migration.id,
     agentId: fixture.agent.id,
     targetMachineId: fixture.targetMachine.id,
   });
@@ -361,7 +369,7 @@ test("completion rolls back state, message, inbox facts, and outbox together", a
   const fixture = await seedStartingMigration();
   await assert.rejects(
     completeAgentMigrationAutoStart({
-      grantKey: fixture.migration.grantKey,
+      migrationId: fixture.migration.id,
       agentId: fixture.agent.id,
       targetMachineId: fixture.targetMachine.id,
     }, {
@@ -405,14 +413,14 @@ test("legacy completion without a receipt is rejected atomically and new complet
   assert.deepEqual(await receiptRows(), { messages: [], facts: [], outbox: [] });
 
   const completed = await completeAgentMigrationAutoStart({
-    grantKey: fixture.migration.grantKey,
+    migrationId: fixture.migration.id,
     agentId: fixture.agent.id,
     targetMachineId: fixture.targetMachine.id,
     now: new Date("2026-07-20T12:06:00.000Z"),
   });
   assert.equal(completed.state, "completed");
   const duplicate = await completeAgentMigrationAutoStart({
-    grantKey: fixture.migration.grantKey,
+    migrationId: fixture.migration.id,
     agentId: fixture.agent.id,
     targetMachineId: fixture.targetMachine.id,
     now: new Date("2026-07-20T12:07:00.000Z"),
@@ -466,12 +474,14 @@ test("canceled and failed terminal migrations require exactly one durable receip
   );
 
   const failedFixture = await seedStartingMigration();
-  const failed = await markAgentMigrationTransportLost({
+  const failed = await markAgentMigrationTransportLostForComputer({
     migrationId: failedFixture.migration.id,
+    serverId: failedFixture.server.id,
+    machineId: failedFixture.targetMachine.id,
     message: "transport disappeared",
     now: new Date("2026-07-21T12:00:00.000Z"),
   });
-  assert.equal(failed?.state, "failed");
+  assert.equal(failed.state, "failed");
   assert.equal((await receiptRows()).outbox.filter((row) => row.receiptKind === "failed").length, 1);
 });
 
@@ -507,7 +517,7 @@ test("receipt surface audience and identity are immutable while ordinary DM chan
   );
 
   const completed = await completeAgentMigrationAutoStart({
-    grantKey: fixture.migration.grantKey,
+    migrationId: fixture.migration.id,
     agentId: fixture.agent.id,
     targetMachineId: fixture.targetMachine.id,
   });
@@ -536,7 +546,7 @@ test("projected receipt surface resolves through joint scope without widening th
   );
 
   const completed = await completeAgentMigrationAutoStart({
-    grantKey: fixture.migration.grantKey,
+    migrationId: fixture.migration.id,
     agentId: fixture.agent.id,
     targetMachineId: fixture.targetMachine.id,
     now: new Date("2026-07-20T12:16:00.000Z"),
@@ -573,7 +583,7 @@ test("projected receipt surface fails closed when the effective joint mapping is
 
   await assert.rejects(
     completeAgentMigrationAutoStart({
-      grantKey: fixture.migration.grantKey,
+      migrationId: fixture.migration.id,
       agentId: fixture.agent.id,
       targetMachineId: fixture.targetMachine.id,
     }),
@@ -592,7 +602,7 @@ test("receipt outbox validates its full identity and cannot retarget or release 
   const fixture = await seedStartingMigration();
   const db = getDb();
   await completeAgentMigrationAutoStart({
-    grantKey: fixture.migration.grantKey,
+    migrationId: fixture.migration.id,
     agentId: fixture.agent.id,
     targetMachineId: fixture.targetMachine.id,
   });
@@ -677,7 +687,7 @@ test("outbox retries drop and crash-after-broadcast with the same durable identi
 
   const fixture = await seedStartingMigration();
   await completeAgentMigrationAutoStart({
-    grantKey: fixture.migration.grantKey,
+    migrationId: fixture.migration.id,
     agentId: fixture.agent.id,
     targetMachineId: fixture.targetMachine.id,
   });
@@ -695,7 +705,8 @@ test("outbox retries drop and crash-after-broadcast with the same durable identi
       : { status: "queued", reason: "replayable_inbox" };
   });
 
-  assert.deepEqual(await drainAgentMigrationReceiptOutbox({ io: fakeIo(socketTargets), orchestrator }), {
+  const t0 = new Date();
+  assert.deepEqual(await drainAgentMigrationReceiptOutbox({ io: fakeIo(socketTargets), orchestrator, now: t0 }), {
     attempted: 1,
     sent: 0,
     failed: 1,
@@ -703,6 +714,7 @@ test("outbox retries drop and crash-after-broadcast with the same durable identi
   assert.deepEqual(await drainAgentMigrationReceiptOutbox({
     io: fakeIo(socketTargets),
     orchestrator,
+    now: new Date(t0.getTime() + 5_000),
     afterBroadcast: () => {
       throw new Error("simulated_server_crash");
     },
@@ -711,7 +723,11 @@ test("outbox retries drop and crash-after-broadcast with the same durable identi
     sent: 0,
     failed: 1,
   });
-  assert.deepEqual(await drainAgentMigrationReceiptOutbox({ io: fakeIo(socketTargets), orchestrator }), {
+  assert.deepEqual(await drainAgentMigrationReceiptOutbox({
+    io: fakeIo(socketTargets),
+    orchestrator,
+    now: new Date(t0.getTime() + 15_000),
+  }), {
     attempted: 1,
     sent: 1,
     failed: 0,
@@ -726,11 +742,129 @@ test("outbox retries drop and crash-after-broadcast with the same durable identi
   assert.equal(rows.outbox[0]!.attemptCount, 3);
 });
 
+async function seedPendingCompletedReceipt() {
+  const fixture = await seedStartingMigration();
+  await completeAgentMigrationAutoStart({
+    migrationId: fixture.migration.id,
+    agentId: fixture.agent.id,
+    targetMachineId: fixture.targetMachine.id,
+  });
+  const [row] = await getDb().select().from(agentMigrationReceiptOutbox)
+    .where(eq(agentMigrationReceiptOutbox.migrationId, fixture.migration.id));
+  assert.ok(row);
+  return { fixture, row };
+}
+
+async function outboxRow(id: string) {
+  const [row] = await getDb().select().from(agentMigrationReceiptOutbox).where(eq(agentMigrationReceiptOutbox.id, id));
+  assert.ok(row);
+  return row;
+}
+
+test("outbox skips rows whose computer is offline without spending attempts", async ({ db }) => {
+  const { fixture, row } = await seedPendingCompletedReceipt();
+  let online = false;
+  let deliveries = 0;
+  const statusChecks: string[] = [];
+  const orchestrator = fakeOrchestrator(async () => {
+    deliveries += 1;
+    return { status: "dropped", reason: "cross_replica_receipt_unavailable" };
+  }, (machineId) => {
+    statusChecks.push(machineId);
+    return online ? "online" : "offline";
+  });
+  const t0 = new Date(row.updatedAt.getTime() + 1_000);
+
+  for (let tick = 0; tick < 3; tick += 1) {
+    assert.deepEqual(await drainAgentMigrationReceiptOutbox({
+      io: fakeIo(),
+      orchestrator,
+      now: new Date(t0.getTime() + tick * 5_000),
+    }), { attempted: 0, sent: 0, failed: 0 });
+  }
+  assert.equal(deliveries, 0);
+  assert.deepEqual(new Set(statusChecks), new Set([fixture.targetMachine.id]), "checks the agent's current computer");
+  const idle = await outboxRow(row.id);
+  assert.equal(idle.attemptCount, 0);
+  assert.equal(idle.status, "pending");
+  assert.equal(idle.updatedAt.getTime(), row.updatedAt.getTime(), "a skipped row is not written");
+
+  // Back online: delivered at once, failure counted.
+  online = true;
+  const t1 = new Date(t0.getTime() + 60_000);
+  assert.deepEqual(await drainAgentMigrationReceiptOutbox({ io: fakeIo(), orchestrator, now: t1 }), {
+    attempted: 1,
+    sent: 0,
+    failed: 1,
+  });
+  assert.equal((await outboxRow(row.id)).attemptCount, 1);
+
+  // Offline again: the earlier failure is forgotten (one write), then the row idles.
+  online = false;
+  await drainAgentMigrationReceiptOutbox({ io: fakeIo(), orchestrator, now: new Date(t1.getTime() + 10_000) });
+  const reset = await outboxRow(row.id);
+  assert.equal(reset.attemptCount, 0);
+  await drainAgentMigrationReceiptOutbox({ io: fakeIo(), orchestrator, now: new Date(t1.getTime() + 20_000) });
+  assert.equal((await outboxRow(row.id)).updatedAt.getTime(), reset.updatedAt.getTime());
+  assert.equal(deliveries, 1);
+});
+
+test("outbox backs off exponentially, parks after the cap with one report, and revives after the computer returns", async ({ db }) => {
+  const { row } = await seedPendingCompletedReceipt();
+  let online = true;
+  let deliveries = 0;
+  const orchestrator = fakeOrchestrator(async () => {
+    deliveries += 1;
+    return { status: "dropped", reason: "cross_replica_receipt_unavailable" };
+  }, () => (online ? "online" : "offline"));
+  const exhausted: Array<{ outboxId: string; attemptCount: number; lastError: string | null }> = [];
+  const drain = (now: Date) => drainAgentMigrationReceiptOutbox({
+    io: fakeIo(),
+    orchestrator,
+    now,
+    onRetryExhausted: (parked) => exhausted.push(parked),
+  });
+
+  assert.equal(agentMigrationReceiptRetryDelayMs(1), 5_000);
+  assert.equal(agentMigrationReceiptRetryDelayMs(2), 10_000);
+  assert.equal(agentMigrationReceiptRetryDelayMs(7), 300_000);
+  assert.equal(agentMigrationReceiptRetryDelayMs(19), 300_000);
+
+  let now = new Date(row.updatedAt.getTime() + 1_000);
+  assert.equal((await drain(now)).attempted, 1);
+  for (let attempts = 1; attempts < AGENT_MIGRATION_RECEIPT_MAX_ATTEMPTS; attempts += 1) {
+    const delay = agentMigrationReceiptRetryDelayMs(attempts);
+    assert.equal((await drain(new Date(now.getTime() + delay - 1))).attempted, 0, `still backing off after ${attempts}`);
+    now = new Date(now.getTime() + delay);
+    assert.equal((await drain(now)).attempted, 1, `retried after ${attempts}`);
+  }
+  assert.equal(deliveries, AGENT_MIGRATION_RECEIPT_MAX_ATTEMPTS);
+  const parked = await outboxRow(row.id);
+  assert.equal(parked.status, "pending");
+  assert.equal(parked.attemptCount, AGENT_MIGRATION_RECEIPT_MAX_ATTEMPTS);
+  assert.equal(exhausted.length, 1);
+  assert.equal(exhausted[0]!.outboxId, row.id);
+  assert.equal(exhausted[0]!.attemptCount, AGENT_MIGRATION_RECEIPT_MAX_ATTEMPTS);
+  assert.match(exhausted[0]!.lastError ?? "", /cross_replica_receipt_unavailable/);
+
+  // Parked: no more attempts, however long it waits, while the computer stays up.
+  assert.equal((await drain(new Date(now.getTime() + 24 * 60 * 60_000))).attempted, 0);
+  assert.equal(exhausted.length, 1);
+
+  // The computer drops and comes back: the row gets a fresh budget.
+  online = false;
+  await drain(new Date(now.getTime() + 25 * 60 * 60_000));
+  assert.equal((await outboxRow(row.id)).attemptCount, 0);
+  online = true;
+  assert.equal((await drain(new Date(now.getTime() + 26 * 60 * 60_000))).attempted, 1);
+  assert.equal(deliveries, AGENT_MIGRATION_RECEIPT_MAX_ATTEMPTS + 1);
+});
+
 test("concurrent outbox drainers claim one row and dispatch once", async ({ db }) => {
 
   const fixture = await seedStartingMigration();
   await completeAgentMigrationAutoStart({
-    grantKey: fixture.migration.grantKey,
+    migrationId: fixture.migration.id,
     agentId: fixture.agent.id,
     targetMachineId: fixture.targetMachine.id,
   });
@@ -748,11 +882,11 @@ test("concurrent outbox drainers claim one row and dispatch once", async ({ db }
   assert.equal(deliveredIds.length, 1);
 });
 
-test("auto-start-failed and aborted migrations create no receipt while failed and canceled terminalize with one receipt", async ({ db }) => {
+test("auto-start-failed migrations create no receipt while failed and canceled terminalize with one receipt", async ({ db }) => {
 
   const failedFixture = await seedStartingMigration();
   await recordAgentMigrationAutoStartFailure({
-    grantKey: failedFixture.migration.grantKey,
+    migrationId: failedFixture.migration.id,
     agentId: failedFixture.agent.id,
     targetMachineId: failedFixture.targetMachine.id,
     stage: "start_agent",
@@ -775,11 +909,6 @@ test("auto-start-failed and aborted migrations create no receipt while failed an
     ["failed"],
   );
 
-  await closeTestDatabase();
-  await openTestDatabase("pglite://");
-  const abortFixture = await seedStartingMigration(false);
-  await abortAgentMigration({ grantKey: abortFixture.migration.grantKey, reason: "test_abort" });
-  assert.deepEqual(await receiptRows(), { messages: [], facts: [], outbox: [] });
 
   await closeTestDatabase();
   await openTestDatabase("pglite://");
@@ -841,4 +970,133 @@ test("receipt copy conditionally names key workspace entries and never serialize
   assert.match(noEntries, /Moved from Source to Target/);
   assert.doesNotMatch(noEntries, /existed in the workspace/);
   assert.doesNotMatch(noEntries, /sourcePath|ignore|hint|secret|grant/i);
+});
+
+test("legacy migrations without a transfer summary still get a completed receipt", () => {
+  const legacy = formatAgentMigrationCompletedReceipt({
+    sourceMachineName: "Source",
+    targetMachineName: "Target",
+    supportRef: "mig_AAAAAAAAAAAAAAAAAAAAAA",
+    summary: null,
+  });
+  assert.match(legacy, /Migration completed\. Moved from Source to Target\./);
+  assert.match(legacy, /Transfer details are unavailable for this legacy migration\./);
+  assert.doesNotMatch(legacy, /Moved \d+ files/);
+});
+
+test("completed receipt lists paths left out by .raftmigrateignore and where to recover them", () => {
+  const summary = {
+    includedFileCount: 3,
+    includedBytes: 30,
+    excludedRegenerableCount: 0,
+    excludedRegenerableByCategory: {
+      thirdPartyDependencies: 0,
+      caches: 0,
+      buildArtifacts: 0,
+      otherRegenerable: 0,
+    },
+    keyWorkspaceEntries: { memoryMdPresent: true, notesPresent: false },
+  };
+  const text = formatAgentMigrationCompletedReceipt({
+    sourceMachineName: "Source",
+    targetMachineName: "Target",
+    supportRef: "mig_AAAAAAAAAAAAAAAAAAAAAA",
+    summary: {
+      ...summary,
+      excludedIgnored: {
+        count: 2,
+        fileCount: 7,
+        bytes: 1_050,
+        largest: [{ path: "datasets", bytes: 1_000 }, { path: "cache.sqlite", bytes: 50 }],
+      },
+    },
+  });
+  assert.match(text, /Not moved, as listed in \.raftmigrateignore: 2 paths, 7 files \(1 KB\); largest: datasets \(1000 bytes\), cache\.sqlite \(50 bytes\)\./);
+  assert.match(text, /archived on Source and kept for up to 30 days/);
+  assert.match(text, /按 \.raftmigrateignore 未迁移：2 个路径/);
+  const withoutIgnores = formatAgentMigrationCompletedReceipt({
+    sourceMachineName: "Source",
+    targetMachineName: "Target",
+    supportRef: "mig_AAAAAAAAAAAAAAAAAAAAAA",
+    summary,
+  });
+  assert.doesNotMatch(withoutIgnores, /raftmigrateignore|30 days/);
+});
+
+test("receipt sizes are readable binary units", () => {
+  assert.equal(formatReceiptBytes(0), "0 bytes");
+  assert.equal(formatReceiptBytes(1023), "1023 bytes");
+  assert.equal(formatReceiptBytes(1536), "1.5 KB");
+  assert.equal(formatReceiptBytes(2.3 * 1024 ** 3), "2.3 GB");
+  assert.equal(formatReceiptBytes(42 * 1024 ** 2 + 1), "42 MB");
+});
+
+test("completed receipt notes pending source cleanup only while the archive is outstanding", () => {
+  const base = {
+    sourceMachineName: "Source",
+    targetMachineName: "Target",
+    supportRef: "mig_AAAAAAAAAAAAAAAAAAAAAA",
+    summary: null,
+  };
+  assert.match(
+    formatAgentMigrationCompletedReceipt({ ...base, sourceCleanupPending: true }),
+    /The old copy on Source is still being cleaned up in the background/,
+  );
+  assert.doesNotMatch(formatAgentMigrationCompletedReceipt(base), /cleaned up/);
+});
+
+test("aborted receipt names the deadline and releases the migration gate", () => {
+  const text = formatAgentMigrationTerminalReceipt({
+    kind: "aborted",
+    sourceMachineName: "Source",
+    targetMachineName: "Target",
+    supportRef: "mig_AAAAAAAAAAAAAAAAAAAAAA",
+    reason: "prep-deadline",
+  });
+  assert.match(text, /^Migration aborted\. The migration from Source to Target ran out of time/);
+  assert.match(text, /Reason: prep-deadline\./);
+  assert.match(text, /no longer the active gate/);
+  assert.match(text, /You are still on Source; your workspace there was not changed\./);
+});
+
+test("failed receipt says where the agent is now", () => {
+  const base = {
+    kind: "failed" as const,
+    sourceMachineName: "Source",
+    targetMachineName: "Target",
+    supportRef: "mig_AAAAAAAAAAAAAAAAAAAAAA",
+    reason: "MIGRATION_TRANSPORT_LOST",
+  };
+  const beforeFlip = formatAgentMigrationTerminalReceipt({ ...base, flipped: false });
+  assert.match(beforeFlip, /\nYou are still on Source; your workspace there was not changed\.\n/);
+  assert.match(beforeFlip, /This migration has ended; a new migration can be started separately\./);
+  const afterFlip = formatAgentMigrationTerminalReceipt({ ...base, reason: "auto_start_failed", flipped: true });
+  assert.match(afterFlip, /\nYour workspace is now on Target\.\n/);
+  assert.doesNotMatch(afterFlip, /still on Source/);
+});
+
+test("failed receipt states the measured workspace size for size-limit failures only", () => {
+  const base = {
+    kind: "failed" as const,
+    sourceMachineName: "Source",
+    targetMachineName: "Target",
+    supportRef: "mig_AAAAAAAAAAAAAAAAAAAAAA",
+    reason: "MIGRATION_OBJECT_STORE_ENTRY_COUNT_LIMIT_EXCEEDED",
+  };
+  const entries = formatAgentMigrationTerminalReceipt({
+    ...base,
+    detail: "MIGRATION_OBJECT_STORE_ENTRY_COUNT_LIMIT_EXCEEDED:entryCount=1060088:maxEntries=250000:topPathCounts=worktrees%2F,565351;repos%2F,293174;bad%0A,1",
+  });
+  assert.match(entries, /The workspace has 1060088 files and folders; the limit is 250000\. Largest: worktrees\/ \(565351\), repos\/ \(293174\)\./);
+  assert.match(entries, /Paths listed in \.raftmigrateignore are not moved\./);
+
+  const bytes = formatAgentMigrationTerminalReceipt({
+    ...base,
+    detail: "MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE:actualBytes=12884901888:maxBytes=10737418240:topEntries=data%2F,8589934592",
+  });
+  assert.match(bytes, /The workspace is 12 GB; the limit is 10 GB\. Largest: data\/ \(8 GB\)\./);
+
+  for (const detail of [null, "MIGRATION_TRANSPORT_LOST", "MIGRATION_OBJECT_STORE_ENTRY_COUNT_LIMIT_EXCEEDED:entryCount=x"]) {
+    assert.doesNotMatch(formatAgentMigrationTerminalReceipt({ ...base, detail }), /raftmigrateignore/);
+  }
 });

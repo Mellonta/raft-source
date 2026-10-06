@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { slackProfileAvatarLocator } from "./slackBridgeProviderRuntime.js";
+import { slackProfileAvatarLocator } from "./slackBridgeProviderRuntime";
 
 test("Slack profile distinguishes uploaded image, real default-avatar removal, and unknown data", () => {
   const uploaded = "https://avatars.slack-edge.com/uploaded_72.png";

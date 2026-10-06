@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 
 import {
   planReminderFireReceiptAction,
   shouldEmitReminderFiredLifecycle,
-} from "./agentOrchestrator.js";
+} from "./agentOrchestrator";
 
 const base = {
   reminderExists: true,

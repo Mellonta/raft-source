@@ -2,26 +2,31 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "vitest";
 
-import type {
-  MachineToServerMessage,
-  ReminderJob,
+import {
+  BasicTracer,
+  formatTraceparent,
+  MemoryTraceSink,
+  type Tracer,
+  type MachineToServerMessage,
+  type ReminderJob,
 } from "@botiverse/raft-shared";
+import { getActiveTraceContext } from "@botiverse/raft-trace-client";
 
-import { createAgentAppInboxStore, type AgentAppInboxStore } from "../../agentAppInbox.js";
-import { createScopedAppStorageFactory } from "../../scopedAppStorage.js";
-import { FakeClock } from "../../testing/fakeClock.js";
-import { REMINDER_AGENT_INBOX_REGISTRY } from "./inboxDefinition.js";
+import { createAgentAppInboxStore, type AgentAppInboxStore } from "../../agentAppInbox";
+import { createScopedAppStorageFactory } from "../../scopedAppStorage";
+import { FakeClock } from "../../testing/fakeClock";
+import { logger } from "../../logger";
+import { REMINDER_AGENT_INBOX_REGISTRY } from "./inboxDefinition";
 import {
   createReminderPhaseTruth,
   REMINDER_BOUNDED_ALERT_PHASES,
-} from "./reminderCache.js";
+} from "./reminderCache";
 import {
   createReminderRuntime,
   reminderBoundedAlertPhaseAttrs,
   REMINDER_OWNER_FENCE_KINDS,
-} from "./runtime.js";
+} from "./runtime";
 
 const AGENT_A = "agent-a";
 const AGENT_B = "agent-b";
@@ -83,11 +88,33 @@ function createHarness(options: {
     attrs: Record<string, unknown>;
     status?: "ok" | "error";
   }> = [];
+  const sink = new MemoryTraceSink();
+  const sinkTracer = new BasicTracer({ sink });
+  // The runtime's only tracing entry point. Point facts it emits are mirrored
+  // into `traces` (status split back out of attrs) so assertions stay simple;
+  // spans go straight to the sink.
+  const tracer: Tracer = {
+    startSpan: (name, spanOptions) => sinkTracer.startSpan(name, spanOptions),
+    emitEvent: (name, eventOptions) => {
+      const { status, ...attrs } = eventOptions.attrs ?? {};
+      traces.push({ name, attrs, status: status as "ok" | "error" | undefined });
+      sinkTracer.emitEvent(name, eventOptions);
+    },
+  };
+  // Same shape as the daemon core trace callback: one closed span per call,
+  // parented to whatever span is active.
+  const recordTrace = (name: string, attrs: Record<string, unknown>, status?: "ok" | "error") => {
+    sinkTracer.startSpan(name, { parent: getActiveTraceContext(), surface: "daemon", attrs }).end(status);
+  };
   const inboxes = new Map<string, AgentAppInboxStore>();
   const getInbox = (agentId: string) => {
     let inbox = inboxes.get(agentId);
     if (!inbox) {
-      inbox = createAgentAppInboxStore({ registry: REMINDER_AGENT_INBOX_REGISTRY });
+      inbox = createAgentAppInboxStore({
+        registry: REMINDER_AGENT_INBOX_REGISTRY,
+        ownerAgentId: agentId,
+        trace: recordTrace,
+      });
       inboxes.set(agentId, inbox);
     }
     return inbox;
@@ -100,7 +127,7 @@ function createHarness(options: {
       return options.notifyInbox ? options.notifyInbox(agentId) : true;
     },
     send: (message) => sent.push(message),
-    trace: (name, attrs, status) => traces.push({ name, attrs, status }),
+    tracer,
   });
   const storageFactory = createScopedAppStorageFactory({
     slockHome: root,
@@ -121,11 +148,13 @@ function createHarness(options: {
   }
   sent.length = 0;
   traces.length = 0;
+  sink.clear();
   return {
     clock,
     getInbox,
     runtime,
     sent,
+    sink,
     traces,
     wakes,
     cleanup: () => {
@@ -525,14 +554,19 @@ test("Reminder waits for Server acceptance before item/wake and keeps one conten
     assert.deepEqual(harness.wakes, [], "due request alone cannot wake the owner");
     await acceptLatestRequest(harness, AGENT_B);
 
-    const stages = harness.traces.filter((trace) =>
-      [
-        "daemon.app_source.receive",
-        "daemon.app_source.arm",
-        "daemon.app_source.fire",
-        "daemon.app_source.receipt",
-      ].includes(trace.name),
-    );
+    const fireSpans = harness.sink.getAllSpans().filter((span) => span.name === "daemon.app_source.fire");
+    assert.equal(fireSpans.length, 1);
+    const fire = fireSpans[0]!;
+    const stages = [
+      ...harness.traces.filter((trace) =>
+        [
+          "daemon.app_source.receive",
+          "daemon.app_source.arm",
+          "daemon.app_source.receipt",
+        ].includes(trace.name),
+      ),
+      { name: fire.name, attrs: fire.attrs ?? {}, status: fire.status },
+    ];
     assert.deepEqual(
       stages.map((trace) => trace.name),
       [
@@ -547,9 +581,27 @@ test("Reminder waits for Server acceptance before item/wake and keeps one conten
       new Set(stages.map((trace) => trace.attrs.app_correlation_id)).size,
       1,
     );
-    assert.equal(stages.at(-1)!.attrs.outcome, "presented");
+    assert.equal(fire.status, "ok");
+    assert.equal(fire.attrs?.outcome, "presented");
+    assert.equal(fire.attrs?.wake_enqueued, true);
+    assert.equal(fire.attrs?.item_id, harness.getInbox(AGENT_B).list()[0]?.itemId);
     assert.equal(harness.getInbox(AGENT_B).list().length, 1);
     assert.deepEqual(harness.wakes, [AGENT_B]);
+    // The inbox mint runs inside the fire span, so both share one trace.
+    const mint = harness.sink.getAllSpans().find((span) => span.name === "daemon.app_inbox.mint");
+    assert.equal(mint?.context.traceId, fire.context.traceId);
+    // The fire request opened the occurrence's trace: its traceparent went to
+    // the Server on the wire, and the fire span joined it instead of rooting a
+    // second trace.
+    const requestSpans = harness.sink.getAllSpans().filter((span) => span.name === "daemon.app_source.fire_request");
+    assert.equal(requestSpans.length, 1);
+    const request = requestSpans[0]!;
+    assert.equal(request.context.parentSpanId, null);
+    assert.equal(request.attrs?.request_id, findLatestRequest(harness.sent, AGENT_B)?.requestId);
+    assert.equal(findLatestRequest(harness.sent, AGENT_B)?.traceparent, formatTraceparent(request.context));
+    assert.equal(fire.context.traceId, request.context.traceId);
+    assert.equal(fire.context.parentSpanId, request.context.spanId);
+    assert.equal(mint?.context.parentSpanId, fire.context.spanId);
     for (const trace of stages) {
       assert.equal(Object.hasOwn(trace.attrs, "title"), false);
       assert.equal(Object.hasOwn(trace.attrs, "summary"), false);
@@ -597,6 +649,8 @@ test("unanswered fire request exhausts with one privacy-safe typed retry trace",
         stage: "fire_request",
         attempts: 8,
         deadline_at: new Date(900_005).toISOString(),
+        exhausted_at: new Date(123_005).toISOString(),
+        acceptance: "unknown",
       },
       status: "error",
     }]);
@@ -779,10 +833,10 @@ test("stale cancel, missing receipt ACK, and filtered snapshot are error termina
         { name: "daemon.app_source.receive", outcome: "stale", status: "error" },
         { name: "daemon.app_source.receipt", outcome: "missing", status: "error" },
         { name: "daemon.app_source.receive", outcome: "stale", status: "error" },
-        { name: "daemon.app_source.arm", outcome: "armed", status: undefined },
+        { name: "daemon.app_source.arm", outcome: "armed", status: "ok" },
         { name: "daemon.app_source.receive", outcome: "rejected", status: "error" },
         { name: "daemon.app_source.receive", outcome: "owner_mismatch", status: "error" },
-        { name: "daemon.app_source.receive", outcome: "applied_empty", status: undefined },
+        { name: "daemon.app_source.receive", outcome: "applied_empty", status: "ok" },
       ],
     );
   } finally {
@@ -1107,6 +1161,14 @@ test("production beforeAck forwards the per-agent owner into local receipt consu
   const clock = new FakeClock();
   const sent: MachineToServerMessage[] = [];
   const traces: Array<{ name: string; attrs: Record<string, unknown> }> = [];
+  const sinkTracer = new BasicTracer({ sink: new MemoryTraceSink() });
+  const tracer: Tracer = {
+    startSpan: (name, spanOptions) => sinkTracer.startSpan(name, spanOptions),
+    emitEvent: (name, eventOptions) => {
+      traces.push({ name, attrs: eventOptions.attrs ?? {} });
+      sinkTracer.emitEvent(name, eventOptions);
+    },
+  };
   const inboxes = new Map<string, AgentAppInboxStore>();
   const getInbox = (agentId: string) => {
     let inbox = inboxes.get(agentId);
@@ -1126,7 +1188,7 @@ test("production beforeAck forwards the per-agent owner into local receipt consu
       getInbox,
       notifyInbox: async () => true,
       send: (message) => sent.push(message),
-      trace: (name, attrs) => traces.push({ name, attrs }),
+      tracer,
     });
     runtime.bindStorageProvider((agentId) =>
       storageFactory.open({ appId: "system.reminder", agentId })
@@ -1256,6 +1318,128 @@ test("agent-start fallback requests a snapshot only for unsynchronized owners", 
     assert.equal(harness.runtime.requestSnapshotIfUnsynchronized(AGENT_A), true);
     assert.equal(countRequests(AGENT_A), 1);
   } finally {
+    harness.cleanup();
+  }
+});
+
+test("a local fire, its request and every non-accepted result reach runner.log with the requestId", async () => {
+  const lines: string[] = [];
+  const info = vi.spyOn(logger, "info").mockImplementation((msg: string) => { lines.push(msg); });
+  const harness = createHarness();
+  try {
+    const job = makeJob({ ownerAgentId: AGENT_B, fireAt: new Date(5).toISOString() });
+    harness.runtime.handleServerMessage({ type: "reminder.upsert", agentId: AGENT_B, reminder: job });
+    harness.clock.advanceBy(5);
+    await new Promise((resolve) => setImmediate(resolve));
+    const request = findLatestRequest(harness.sent);
+    assert.ok(request);
+    const id = request.reminderId;
+    assert.ok(
+      lines.some((l) => l.startsWith(`[ReminderCache] timer fired ${id} v${request.version} requestId=${request.requestId} catchup=`)),
+      lines.join("\n"),
+    );
+    assert.ok(
+      lines.includes(`[Reminder] fire request sent ${id} v${request.version} requestId=${request.requestId}`),
+      lines.join("\n"),
+    );
+
+    harness.runtime.handleServerMessage({
+      type: "reminder.fire_request.result",
+      agentId: AGENT_B,
+      reminderId: id,
+      version: request.version,
+      requestId: request.requestId,
+      outcome: "obsolete",
+      reason: "version_mismatch",
+    });
+    assert.ok(
+      lines.includes(`[Reminder] fire request result ${id} v${request.version} requestId=${request.requestId} outcome=obsolete reason=version_mismatch`),
+      lines.join("\n"),
+    );
+
+    // A late result for a request that is no longer pending is logged as ignored.
+    harness.runtime.handleServerMessage({
+      type: "reminder.fire_request.result",
+      agentId: AGENT_B,
+      reminderId: id,
+      version: request.version,
+      requestId: request.requestId,
+      outcome: "accepted",
+      fired: true,
+      catchup: false,
+    });
+    assert.ok(
+      lines.includes(`[Reminder] fire request result ${id} v${request.version} requestId=${request.requestId} outcome=accepted fired=true (no pending request; ignored)`),
+      lines.join("\n"),
+    );
+  } finally {
+    info.mockRestore();
+    harness.cleanup();
+  }
+});
+
+test("a premature result is logged with its retry delay", async () => {
+  const lines: string[] = [];
+  const info = vi.spyOn(logger, "info").mockImplementation((msg: string) => { lines.push(msg); });
+  const harness = createHarness();
+  try {
+    const job = makeJob({ ownerAgentId: AGENT_B, fireAt: new Date(5).toISOString() });
+    harness.runtime.handleServerMessage({ type: "reminder.upsert", agentId: AGENT_B, reminder: job });
+    harness.clock.advanceBy(5);
+    await new Promise((resolve) => setImmediate(resolve));
+    const request = findLatestRequest(harness.sent);
+    assert.ok(request);
+    harness.runtime.handleServerMessage({
+      type: "reminder.fire_request.result",
+      agentId: AGENT_B,
+      reminderId: request.reminderId,
+      version: request.version,
+      requestId: request.requestId,
+      outcome: "premature",
+      reason: "premature_fire",
+      serverNow: new Date(0).toISOString(),
+      dueAt: new Date(1_000).toISOString(),
+      retryAfterMs: 1_000,
+    });
+    assert.ok(
+      lines.includes(`[Reminder] fire request result ${request.reminderId} v${request.version} requestId=${request.requestId} outcome=premature retryAfterMs=1000`),
+      lines.join("\n"),
+    );
+  } finally {
+    info.mockRestore();
+    harness.cleanup();
+  }
+});
+
+test("an accepted result that the Server did not fire is logged, since no `fired locally` follows it", async () => {
+  const lines: string[] = [];
+  const info = vi.spyOn(logger, "info").mockImplementation((msg: string) => { lines.push(msg); });
+  const harness = createHarness();
+  try {
+    const job = makeJob({ ownerAgentId: AGENT_B, fireAt: new Date(5).toISOString() });
+    harness.runtime.handleServerMessage({ type: "reminder.upsert", agentId: AGENT_B, reminder: job });
+    harness.clock.advanceBy(5);
+    await new Promise((resolve) => setImmediate(resolve));
+    const request = findLatestRequest(harness.sent);
+    assert.ok(request);
+    harness.runtime.handleServerMessage({
+      type: "reminder.fire_request.result",
+      agentId: AGENT_B,
+      reminderId: request.reminderId,
+      version: request.version,
+      requestId: request.requestId,
+      outcome: "accepted",
+      fired: false,
+      catchup: false,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(
+      lines.includes(`[Reminder] fire request result ${request.reminderId} v${request.version} requestId=${request.requestId} outcome=accepted fired=false`),
+      lines.join("\n"),
+    );
+    assert.ok(!lines.some((l) => l.includes("fired locally")), "no local fire follows an unfired acceptance");
+  } finally {
+    info.mockRestore();
     harness.cleanup();
   }
 });

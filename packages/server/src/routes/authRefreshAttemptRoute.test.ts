@@ -1,14 +1,14 @@
 /// <reference path="../../../web/src/vite-env.d.ts" />
-import { createApiTest } from "../test/integration/apiTest.js";
+import { createApiTest } from "../test/integration/apiTest";
 
 import assert from "node:assert/strict";
 
 import argon2 from "argon2";
-import axios from "../../../web/node_modules/axios/index.js";
+import axios from "../../../web/node_modules/axios/index";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { refreshTokensWithDedupe } from "../../../web/src/utils/refreshCoordinator.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { refreshTokensWithDedupe } from "../../../web/src/utils/refreshCoordinator";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 

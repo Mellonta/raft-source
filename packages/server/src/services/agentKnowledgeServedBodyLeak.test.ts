@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "vitest";
 
-import { sanitizeAgentKnowledgeContent } from "./agentKnowledgeService.js";
+import { sanitizeAgentKnowledgeContent } from "./agentKnowledgeService";
 
 // Why this exists: on 2026-08-27 a prompt-source rewrite (PR #6964) introduced a literal
 // repo path into the *body* of an agent-served Manual topic. The reviewed gates counted a

@@ -1,18 +1,17 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { buildMainLayoutSocketBindings } from "../src/store/socketBridge.js";
+import { buildMainLayoutSocketBindings } from "../src/store/socketBridge";
 import type {
   MainLayoutSocketBridgeSocket,
   SocketBinding,
-} from "../src/store/socketBridge.js";
-import { useAgentStore } from "../src/store/agentStore.js";
-import { useChannelStore } from "../src/store/channelStore.js";
-import { useInboxStore } from "../src/store/inboxStore.js";
-import { useMachineStore } from "../src/store/machineStore.js";
-import { useMessageStore } from "../src/store/messageStore.js";
-import { useServerStore } from "../src/store/serverStore.js";
-import { useThreadStore } from "../src/store/threadStore.js";
+} from "../src/store/socketBridge";
+import { useAgentStore } from "../src/store/agentStore";
+import { useChannelStore } from "../src/store/channelStore";
+import { useInboxStore } from "../src/store/inboxStore";
+import { useMachineStore } from "../src/store/machineStore";
+import { useMessageStore } from "../src/store/messageStore";
+import { useServerStore } from "../src/store/serverStore";
+import { useThreadStore } from "../src/store/threadStore";
 
 /**
  * One reconnect must fetch each thing once.
@@ -29,7 +28,7 @@ import { useThreadStore } from "../src/store/threadStore.js";
  * the thing the change is for.
  */
 
-const SERIAL = { concurrency: false };
+const SERIAL = {};
 
 class FakeSocket implements MainLayoutSocketBridgeSocket {
   connected = true;

@@ -1,6 +1,5 @@
-import { test } from "vitest";
 import assert from "node:assert/strict";
-import { summarizeForSystemMessage } from "./messageService.js";
+import { summarizeForSystemMessage } from "./messageService";
 
 test("summarizeForSystemMessage: passes short single-line text through", () => {
   assert.equal(summarizeForSystemMessage("Fix the login bug"), "Fix the login bug");

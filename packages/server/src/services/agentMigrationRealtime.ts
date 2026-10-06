@@ -1,12 +1,12 @@
 import { getServerCapabilities } from "@botiverse/raft-shared";
 import { eq } from "drizzle-orm";
 import type { Server as SocketServer } from "socket.io";
-import { getDb } from "../db/index.js";
-import { agentMigrations, serverMembers } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agentMigrations, serverMembers } from "../db/schema";
 import {
   projectAgentMigrationUpdatedPayload,
   type AgentMigrationRow,
-} from "./agentMigrationService.js";
+} from "./agentMigrationService";
 
 export async function emitAgentMigrationUpdated(
   io: SocketServer | undefined,

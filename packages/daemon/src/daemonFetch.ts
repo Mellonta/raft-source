@@ -1,11 +1,12 @@
 import { fetch as undiciFetch, type Dispatcher } from "undici";
+import { providerRequestFetch, type ProviderRequestObserver } from "./providerRequestFetch";
 import {
   buildFetchDispatcher,
   buildIsolatedFetchDispatcher,
   evictFetchDispatcher,
   evictIsolatedFetchDispatcher,
   validateProviderProxyEnv,
-} from "./proxy.js";
+} from "./proxy";
 
 export type DaemonFetchInput = RequestInfo | URL;
 export type DaemonRequestInit = RequestInit & { duplex?: "half" };
@@ -26,11 +27,27 @@ type DaemonFetchFn = (
   init?: Parameters<typeof undiciFetch>[1],
 ) => ReturnType<typeof undiciFetch>;
 
-let daemonFetchImpl: DaemonFetchFn = undiciFetch;
+// The transport daemonFetch falls back to when no per-test mock is installed.
+// Production never changes it; the daemon test setup replaces it with a guard
+// so a request no test mocked fails that test instead of leaving the process.
+let daemonFetchBaseline: DaemonFetchFn = undiciFetch;
+let daemonFetchImpl: DaemonFetchFn = daemonFetchBaseline;
 
 /** Test-only: intercept daemon outbound fetch without using globalThis.fetch. */
 export function setDaemonFetchImplForTests(fn: DaemonFetchFn | undefined): void {
-  daemonFetchImpl = fn ?? undiciFetch;
+  daemonFetchImpl = fn ?? daemonFetchBaseline;
+}
+
+/**
+ * Test-only: replace the transport used when no per-test mock is installed.
+ * `setDaemonFetchImplForTests(undefined)` and the restore returned by
+ * `installDaemonFetchMockForTests` return to this baseline, so a guard set here
+ * survives every test's own mock/restore cycle.
+ */
+export function setDaemonFetchBaselineForTests(fn: DaemonFetchFn | undefined): void {
+  const previousBaseline = daemonFetchBaseline;
+  daemonFetchBaseline = fn ?? undiciFetch;
+  if (daemonFetchImpl === previousBaseline) daemonFetchImpl = daemonFetchBaseline;
 }
 
 /** Test-only: mock both globalThis.fetch and daemonFetch's injectable impl. */
@@ -59,6 +76,7 @@ const PROVIDER_PROXY_ENV_KEYS = [
 
 export type ProviderHttpClient = {
   fetch: typeof globalThis.fetch;
+  forProvider?(provider: string): typeof globalThis.fetch;
   dispose(): void;
 };
 
@@ -186,26 +204,31 @@ export async function daemonFetch(
 export function createProviderHttpClient(
   env: NodeJS.ProcessEnv,
   isolationKey: string,
+  requestOptions?: { provider: string; observe?: ProviderRequestObserver },
 ): ProviderHttpClient {
   const proxyEnv = snapshotProviderProxyEnv(env);
   validateProviderProxyEnv(proxyEnv);
   const targetUrls = new Set<string>();
   let disposed = false;
 
-  const providerFetch = (async (input: DaemonFetchInput, init?: RequestInit) => {
+  const makeProviderFetch = (provider = requestOptions?.provider ?? "custom") => (async (input: DaemonFetchInput, init?: RequestInit) => {
     if (disposed) throw new Error("Pi provider HTTP client is disposed");
     const targetUrl = daemonFetchTargetUrl(input);
     targetUrls.add(targetUrl);
-    return daemonFetch(input, init as DaemonRequestInit | undefined, proxyEnv, {
+    const transport = (requestInput: DaemonFetchInput, requestInit?: RequestInit) => daemonFetch(requestInput, requestInit as DaemonRequestInit | undefined, proxyEnv, {
       isolationKey,
       // Provider responses can be long-lived streams. Pi owns request and idle
       // cancellation; undici must not impose its default body-idle deadline.
       bodyTimeoutMs: 0,
     });
+    return requestOptions
+      ? providerRequestFetch(transport, input, init, { ...requestOptions, provider })
+      : transport(input, init);
   }) as typeof globalThis.fetch;
 
   return {
-    fetch: providerFetch,
+    fetch: makeProviderFetch(),
+    forProvider: makeProviderFetch,
     dispose() {
       if (disposed) return;
       disposed = true;

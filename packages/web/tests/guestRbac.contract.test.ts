@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
@@ -9,10 +8,9 @@ function readSource(path: string): string {
   return readFileSync(resolve(repoRoot, path), "utf8");
 }
 
-test("both channel-settings implementations gate and preserve the Guest policy invariant", () => {
+test("channel settings gate and preserve the Guest policy invariant", () => {
   for (const path of [
     "src/components/channel/EditChannelDialog.tsx",
-    "src/components/channel/LegacyEditChannelDialog.tsx",
   ]) {
     const source = readSource(path);
     assert.match(source, /SERVER_GUEST_FEATURE_FLAG_KEY/);
@@ -30,7 +28,6 @@ test("both channel-settings implementations gate and preserve the Guest policy i
 test("Guest roster surfaces stay summary-only", () => {
   const humanDetail = readSource("src/components/member/HumanDetailPanel.tsx");
   const members = readSource("src/components/agent/ChannelMembers.tsx");
-  const legacyMembers = readSource("src/components/agent/LegacyChannelMembers.tsx");
   const memberRows = readSource("src/components/channel/ChannelMemberList.tsx");
 
   assert.match(humanDetail, /currentRole !== "guest" && human\.role !== "guest"/);
@@ -39,7 +36,7 @@ test("Guest roster surfaces stay summary-only", () => {
   // tests/guestRosterProfileEntry.behavior.test.tsx renders the members page
   // as a guest and asserts the human row is reachable. Guests may open human
   // profiles; HumanDetailPanel filters the contents by capability.
-  for (const source of [members, legacyMembers]) {
+  for (const source of [members]) {
     assert.match(source, /canOpenAgentProfiles/);
     assert.match(source, /canOpenHumanProfiles/);
   }
@@ -71,6 +68,14 @@ test("Guest navigation hides directories while preserving bounded Agent profiles
   assert.match(settings, /role === "admin" \|\| role === "member" \|\| role === "guest"/);
   assert.match(chatPanel, /data-testid="guest-readonly-channel-banner"/);
   assert.match(chatPanel, /message\.chatPanel\.guestReadOnlyChannel/);
+  assert.match(chatPanel, /const canReactInChannel = !isGuest/);
+  assert.match(chatPanel, /const showForwardAction = !isGuest/);
+  const threadPanel = readSource("src/components/message/ThreadPanel.tsx");
+  assert.match(threadPanel, /const canReplyInParentThread = parentJoined === true && !isGuest/);
+  assert.match(threadPanel, /const canReactToThread = !isGuest/);
+  assert.match(threadPanel, /data-testid="guest-readonly-thread-banner"/);
+  const messageItem = readSource("src/components/message/MessageItem.tsx");
+  assert.match(messageItem, /if \(isSystem \|\| currentUserServerRole === "guest"\) return null;/);
   assert.match(agentDetail, /agent\.profileProjection === "channel_summary"/);
   assert.match(agentDetail, /showOperationalInfo=\{!isBoundedPublicProjection\}/);
   assert.match(agentDetail, /canMessageAgent=\{!isBoundedPublicProjection\}/);
@@ -101,7 +106,10 @@ test("Guest task surfaces render read-only state with no edit or drag affordance
   assert.match(taskCard, /canEditTaskStatus\(task, currentUser\?\.id, canManageServer, role\)/);
   assert.match(taskCard, /data-testid="task-status-readonly"/);
   assert.match(taskProperties, /data-testid="task-properties-status-readonly"/);
-  assert.match(taskProperties, /data-testid="task-properties-assignee-readonly"/);
+  // Completed tasks keep the assignee picker visible for historical context,
+  // but the control is disabled and cannot issue a write.
+  assert.match(taskProperties, /buttonTestId="task-properties-assignee"/);
+  assert.match(taskProperties, /disabled=\{busy \|\| !canEditAssignee\}/);
   assert.match(tasksPanel, /const canModifyTasks = role !== "guest"/);
   assert.match(tasksPanel, /useDraggable\(\{ id: task\.id, disabled \}\)/);
   assert.match(tasksPanel, /useDroppable\(\{ id: status, disabled: !canModifyTasks \}\)/);
@@ -122,6 +130,6 @@ test("unavailable linked messages collapse to one chip instead of an empty previ
   assert.match(messageItem, /onClick=\{quotedMessageUnavailable \? undefined/);
   assert.match(messageItem, /title=\{quotedMessageUnavailable \? undefined/);
   assert.match(preview, /if \(state\.status === "unavailable"\) \{\s*return null;/);
-  assert.match(chatPanel, /const canReactInChannel = !readOnly\s*&& !channel\?\.archivedAt\s*&& \(channel\?\.type === "dm" \|\| channel\?\.type === "thread" \|\| channel\?\.joined === true\)/);
-  assert.match(threadPanel, /const canReactToThread = parentJoined === true\s*&& !parentChannel\?\.archivedAt\s*&& !parentJointFeatureLocked/);
+  assert.match(chatPanel, /const canReactInChannel = !isGuest\s*&& !readOnly\s*&& !channel\?\.archivedAt\s*&& \(channel\?\.type === "dm" \|\| channel\?\.type === "thread" \|\| channel\?\.joined === true\)/);
+  assert.match(threadPanel, /const canReactToThread = !isGuest\s*&& parentJoined === true\s*&& !parentChannel\?\.archivedAt\s*&& !parentJointFeatureLocked/);
 });

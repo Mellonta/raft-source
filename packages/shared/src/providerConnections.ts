@@ -1,4 +1,5 @@
-import { PI_BUILTIN_PROVIDER_API_KEY_ENV_KEYS_GENERATED } from "./piBuiltinModels.generated.js";
+import { PI_BUILTIN_PROVIDER_API_KEY_ENV_KEYS_GENERATED } from "./piBuiltinModels.generated";
+import type { AgentStatus } from "./index";
 
 type PresetProviderConnectionProviderId = keyof typeof PI_BUILTIN_PROVIDER_API_KEY_ENV_KEYS_GENERATED;
 type GatewayProviderConnectionProviderId = "openai-compatible" | "anthropic-compatible";
@@ -24,6 +25,15 @@ export interface ProviderConnectionCatalog {
   providerOptions: ProviderConnectionProviderOption[];
 }
 
+/** Latest durable Computer verification for one connection (catalog read model). */
+export interface ProviderConnectionLatestVerified {
+  computerId: string;
+  computerName: string | null;
+  runtime: string;
+  model: string;
+  verifiedAt: string;
+}
+
 export interface ProviderConnectionSummary {
   id: string;
   name: string;
@@ -37,10 +47,32 @@ export interface ProviderConnectionSummary {
   credentialVersion: number;
   hasCredential: boolean;
   assignedAgentCount: number;
+  latestVerified: ProviderConnectionLatestVerified | null;
   lastCheckedAt: string | null;
   lastErrorCategory: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Minimal identity of one Agent holding an assignment to a provider connection.
+ * Deliberately credential-free and free of provider configuration: it answers
+ * "which Agent blocks this connection?" and nothing else.
+ */
+export interface ProviderConnectionAssignedAgent {
+  id: string;
+  name: string;
+  displayName: string | null;
+  runtime: string;
+  status: AgentStatus;
+  /** Computer name the Agent is bound to, or null when it has none. */
+  computerName: string | null;
+  /** True when the Agent is soft-deleted but its assignment still exists. */
+  deleted: boolean;
+}
+
+export interface ProviderConnectionAssignedAgentList {
+  agents: ProviderConnectionAssignedAgent[];
 }
 
 /** Credential-free metadata materialized by the server for one exact launch. */

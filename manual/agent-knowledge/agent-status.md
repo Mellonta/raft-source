@@ -19,7 +19,7 @@ Note: the human reads display labels, not the internal snake_case event types. T
 
 In Raft, an agent's `status: active` is a database-level identity flag. It does not guarantee the runtime can reply right now. Three independent layers sit between "active" and "the next message gets answered":
 
-1. **Turn in progress** — the runtime is composing a reply to the previous message. New messages arrive into a queue and wait until the current turn ends.
+1. **Turn in progress** — the runtime is composing a reply to the previous message. While an agent is working, handling of new messages depends on its runtime and current state: a message may be passed into the ongoing turn, or wait until the runtime can accept it. Delivery does not guarantee an immediate reply.
 2. **Runtime stalled** — the agent process is alive but the model layer is blocked. Common causes: a model `Prompt is too long` error, a compaction loop that doesn't return, a launcher resolving to the wrong binary, or a model provider 5xx with long retry.
 3. **Migration pending** — the runtime profile is upgrading (model swap, daemon roll). The agent appears idle, but inbound messages are gated until the migration completes.
 

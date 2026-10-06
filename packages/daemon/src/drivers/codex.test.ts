@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { expect, test } from "vitest";
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,10 +9,11 @@ import {
   MemoryTraceSink,
   createSpanAttrContractTracer,
 } from "@botiverse/raft-shared";
-import { buildCodexAppServerArgs, CodexDriver, clearCodexProbeCacheForTests, detectCodexModels, detectCodexModelsFromAppServer, probeCodex, compareCodexVersions, parseCodexVersion, resolveCodexCommand, resolveCodexSpawn } from "./codex.js";
-import { resolveCodexHomeRootFromEnv } from "./codexHome.js";
-import type { ParsedEvent, SpawnContext } from "./types.js";
-import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core.js";
+import { buildCodexAppServerArgs, CodexDriver, clearCodexProbeCacheForTests, detectCodexModels, detectCodexModelsFromAppServer, probeCodex, compareCodexVersions, parseCodexVersion, resolveCodexCommand, resolveCodexSpawn } from "./codex";
+import { resolveCodexHomeRootFromEnv } from "./codexHome";
+import type { ParsedEvent, SpawnContext } from "./types";
+import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core";
+import { traceRows } from "../testing/traceRows";
 
 const codexConfig = {
   name: "codex-agent",
@@ -387,7 +387,7 @@ test("codex launch trace records only derived host facts and launch generation",
   const tracer = new BasicTracer({ sink });
 
   await withScriptedCodexAppServer("fresh", async () => {
-    const spans = sink.getAllSpans().filter((span) => span.name === "daemon.runtime.node_host_launch");
+    const spans = traceRows(sink).filter((span) => span.name === "daemon.runtime.node_host_launch");
     assert.equal(spans.length, 1);
     assert.deepEqual(spans[0]?.attrs, {
       agentId: "agent-1",
@@ -420,7 +420,7 @@ test("codex instruction-shape trace covers actual fresh and resume thread reques
         `scripted codex ${expectedMethod} and initial turn/start`,
       );
 
-      const spans = sink.getAllSpans().filter(
+      const spans = traceRows(sink).filter(
         (span) => span.name === "daemon.codex.request_instruction_shape",
       );
       assert.equal(spans.length, 1);
@@ -476,7 +476,7 @@ test("codex resume fallback recomputes instruction shape from the second request
   assert.equal(requests[1].params.developerInstructions, fallbackDeveloper);
   assert.equal(requests[1].params.baseInstructions, fallbackBase);
 
-  const spans = sink.getAllSpans().filter(
+  const spans = traceRows(sink).filter(
     (span) => span.name === "daemon.codex.request_instruction_shape",
   );
   assert.equal(spans.length, 2);
@@ -529,7 +529,7 @@ test("codex instruction-shape trace covers compaction and its first subsequent r
     const encoded = driver.encodeStdinMessage("after compaction", driver.currentSessionId, { mode: "idle" });
     assert.ok(encoded);
 
-    const spans = sink.getAllSpans().filter(
+    const spans = traceRows(sink).filter(
       (span) => span.name === "daemon.codex.request_instruction_shape",
     );
     assert.deepEqual(spans.map((span) => span.attrs?.observation_phase), [
@@ -545,7 +545,7 @@ test("codex instruction-shape trace covers compaction and its first subsequent r
     assert.equal(spans[3]!.attrs?.session_id, "fresh-thread-1");
 
     driver.encodeStdinMessage("second request", driver.currentSessionId, { mode: "idle" });
-    assert.equal(sink.getAllSpans().filter(
+    assert.equal(traceRows(sink).filter(
       (span) => span.name === "daemon.codex.request_instruction_shape",
     ).length, 4);
   }, { tracer });
@@ -3054,12 +3054,14 @@ test("resolveCodexSpawn runs the Windows npm entry through a genuine Node host",
   assert.equal(result.env?.ELECTRON_RUN_AS_NODE, undefined);
 });
 
-test("resolveCodexSpawn skips an npm JS entry in a Windows SEA and selects the PATH cmd shim", () => {
+test("resolveCodexSpawn in a Windows SEA runs the PATH wrapper's entry with the wrapper's node, not cmd.exe", () => {
   clearCodexProbeCacheForTests();
   const seaExecutable = String.raw`C:\Program Files\Raft\raft-computer.exe`;
   const globalRoot = String.raw`C:\Users\bot\AppData\Roaming\npm\node_modules`;
   const npmEntry = String.raw`C:\Users\bot\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js`;
   const shim = String.raw`C:\Users\bot\AppData\Roaming\npm\codex.cmd`;
+  const pathNode = String.raw`C:\Program Files\nodejs\node.exe`;
+  const shimContent = 'CALL :find_dp0\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n';
   const invoked: string[] = [];
 
   const result = resolveCodexSpawn(["app-server", "--listen", "stdio://"], {
@@ -3070,25 +3072,32 @@ test("resolveCodexSpawn skips an npm JS entry in a Windows SEA and selects the P
     execIsSea: true,
     hasNodeRuntime: true,
     existsSyncFn: (candidate) => candidate === npmEntry || candidate === shim,
+    readFileSyncFn: (file) => {
+      assert.equal(file, shim);
+      return shimContent;
+    },
     windowsEnvironmentReaderFn: () => ({}),
     execFileSyncFn: ((command: string, args?: readonly string[]) => {
       invoked.push(command);
       if (command === "npm") return Buffer.from(`${globalRoot}\r\n`);
-      if (command === "powershell.exe") return Buffer.from(`${shim}\r\n`);
+      if (command === "powershell.exe") {
+        return Buffer.from(`${args?.[args.length - 1] === "node" ? pathNode : shim}\r\n`);
+      }
       if (command === seaExecutable) assert.fail("a SEA executable must never be used as the Node host");
-      if (command === shim && args?.[0] === "app-server") {
-        assert.deepEqual(args, ["app-server", "--help"]);
+      if (command === shim) assert.fail("a .cmd wrapper must not be executed");
+      if (command === pathNode && args?.[1] === "app-server") {
+        assert.deepEqual(args, [npmEntry, "app-server", "--help"]);
         return Buffer.from("Usage: codex app-server\r\n");
       }
-      if (command === shim && args?.[0] === "--version") return Buffer.from("codex-cli 0.149.0\r\n");
+      if (command === pathNode && args?.[1] === "--version") return Buffer.from("codex-cli 0.149.0\r\n");
       throw new Error(`unexpected command ${command}`);
     }) as any,
   });
 
   assert.deepEqual(result, {
-    command: shim,
-    args: ["app-server", "--listen", "stdio://"],
-    shell: true,
+    command: pathNode,
+    args: [npmEntry, "app-server", "--listen", "stdio://"],
+    shell: false,
     source: "path",
   });
   assert.ok(!invoked.includes(seaExecutable));
@@ -3169,27 +3178,23 @@ test("probeCodex reports a bounded missing-node-host rejection when a Windows SE
   clearCodexProbeCacheForTests();
 });
 
-test("resolveCodexSpawn uses shell:true on Windows when PATH resolves to a .cmd shim", () => {
+test("resolveCodexSpawn never runs a .cmd wrapper it cannot resolve", () => {
   const shim = "C:\\Users\\test\\AppData\\Local\\npm\\codex.cmd";
-  const result = resolveCodexSpawn(["app-server", "--listen", "stdio://"], {
+  assert.throws(() => resolveCodexSpawn(["app-server", "--listen", "stdio://"], {
     platform: "win32",
+    existsSyncFn: (candidate) => candidate === shim,
+    readFileSyncFn: () => "@echo off\r\npowershell -File \"%SCRIPT_DIR%\\codex.ps1\" %*\r\n",
+    windowsEnvironmentReaderFn: () => ({}),
     execFileSyncFn: ((command: string, args?: readonly string[]) => {
       if (command === "npm") throw new Error("npm install not found");
-      if (command === shim && args?.[0] === "app-server") {
-        assert.deepEqual(args, ["app-server", "--help"]);
-        return Buffer.from("Usage: codex app-server\r\n");
-      }
+      if (command === shim) assert.fail("a .cmd wrapper must not be executed");
       if (command === "powershell.exe") {
         assert.deepEqual(args?.slice(0, 3), ["-NoProfile", "-NonInteractive", "-Command"]);
         return Buffer.from(`${shim}\r\n`);
       }
-      return Buffer.from("");
+      throw new Error(`unexpected command ${command}`);
     }) as any,
-  });
-
-  assert.equal(result.command, shim);
-  assert.deepEqual(result.args, ["app-server", "--listen", "stdio://"]);
-  assert.equal(result.shell, true);
+  }), /batch wrapper rejected: batch_target_unresolved/);
 });
 
 test("resolveCodexSpawn falls back to standard Codex Desktop install path on Windows", () => {

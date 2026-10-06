@@ -1,4 +1,3 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildLaunchPlan,
@@ -9,7 +8,7 @@ import {
   runtimeConfigToLaunchFields,
   stripControlledRuntimeEnvVars,
   type ReasoningEffort,
-} from "./index.js";
+} from "./index";
 
 test("hydrates legacy Claude env vars into structured provider config", () => {
   const config = hydrateRuntimeConfig({
@@ -1028,4 +1027,80 @@ test("malformed Built-in runtimeConfig hydrates without inventing a provider", (
 
   assert.equal(config.runtime, "builtin");
   assert.equal("provider_id" in trace, false);
+});
+
+test("Built-in local plugins opt-in survives writes and launch hydration without changing provider configuration", () => {
+  const base = {
+    version: 1,
+    runtime: "builtin",
+    provider: { kind: "gateway", providerId: "openai-compatible", baseUrl: "http://localhost:9876/v1", apiKey: "test-key" },
+    model: { kind: "custom", name: "test-model" },
+    mode: { kind: "default" },
+  };
+  for (const enabled of [undefined, false, true]) {
+    const runtimeConfig = { ...base, ...(enabled !== undefined ? { loadLocalPlugins: enabled } : {}) };
+    const parsed = parseRuntimeConfig({ runtimeConfig });
+    assert.equal(parsed.ok, true);
+    if (!parsed.ok || parsed.config.runtime !== "builtin") throw new Error("Expected Built-in config");
+    assert.equal(parsed.config.loadLocalPlugins, enabled);
+    const hydrated = hydrateRuntimeConfig({ runtimeConfig: parsed.config });
+    assert.equal(hydrated.runtime, "builtin");
+    assert.ok(hydrated.runtime === "builtin");
+    assert.equal(hydrated.loadLocalPlugins, enabled);
+    assert.deepEqual(hydrated.provider, parsed.config.provider);
+    assert.equal(hydrated.hostUserState, "forbidden");
+  }
+  assert.equal(parseRuntimeConfig({ runtimeConfig: { ...base, loadLocalPlugins: "true" } }).ok, false);
+  assert.equal(parseRuntimeConfig({ runtimeConfig: { ...base, runtime: "pi", loadLocalPlugins: true } }).ok, false);
+});
+
+// artin 2026-09-27: every installed mobile client failed to save a model (PATCH
+// 400 "runtimeConfig.loadLocalPlugins must be a boolean"). The mobile PATCH
+// encoder (kotlinx.serialization, encodeDefaults + explicit nulls) sends every
+// optional field, unset ones as null. These are the exact wire shapes.
+const MOBILE_NULLS = { reasoningEffort: null, envVars: null, command: null, loadLocalPlugins: null, hostUserState: null };
+
+test("mobile-serialized runtime configs with null optional fields are accepted", () => {
+  const claude = parseRuntimeConfig({
+    runtimeConfig: {
+      version: 1,
+      runtime: "claude",
+      provider: { kind: "default" },
+      model: { kind: "preset", id: "sonnet" },
+      mode: { kind: "default" },
+      ...MOBILE_NULLS,
+    },
+  });
+  assert.equal(claude.ok, true, JSON.stringify(claude));
+
+  const builtin = parseRuntimeConfig({
+    runtimeConfig: {
+      version: 1,
+      runtime: "builtin",
+      provider: { kind: "gateway", providerId: "openai-compatible", baseUrl: "http://localhost:9876/v1", apiKey: "k", supportsImageInput: false },
+      model: { kind: "custom", name: "test-model" },
+      mode: { kind: "default" },
+      ...MOBILE_NULLS,
+    },
+  });
+  assert.equal(builtin.ok, true, JSON.stringify(builtin));
+  if (!builtin.ok || builtin.config.runtime !== "builtin") throw new Error("Expected Built-in config");
+  // A null never turns local extensions on.
+  assert.equal(builtin.config.loadLocalPlugins, undefined);
+  assert.equal(builtin.config.hostUserState, "forbidden");
+});
+
+test("only null is read as unset: wrong types for the two optional fields are still refused", () => {
+  const base = {
+    version: 1,
+    runtime: "builtin",
+    provider: { kind: "gateway", providerId: "openai-compatible", baseUrl: "http://localhost:9876/v1", apiKey: "k" },
+    model: { kind: "custom", name: "test-model" },
+    mode: { kind: "default" },
+  };
+  for (const bad of ["true", 1, 0, {}]) {
+    assert.equal(parseRuntimeConfig({ runtimeConfig: { ...base, loadLocalPlugins: bad } }).ok, false, JSON.stringify(bad));
+  }
+  assert.equal(parseRuntimeConfig({ runtimeConfig: { ...base, hostUserState: "allowed" } }).ok, false);
+  assert.equal(parseRuntimeConfig({ runtimeConfig: { ...base, runtime: "claude", provider: { kind: "default" }, model: { kind: "preset", id: "sonnet" }, loadLocalPlugins: false } }).ok, false);
 });

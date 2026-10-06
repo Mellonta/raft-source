@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { Task } from "../src/store/taskStore.js";
-import { getTaskStatusOptions } from "../src/components/task/taskStatusUi.js";
+import type { Task } from "../src/store/taskStore";
+import { getTaskStatusOptions } from "../src/components/task/taskStatusUi";
 
 const closedTask: Task = {
   id: "task-85",

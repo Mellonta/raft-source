@@ -1,13 +1,13 @@
 import { and, eq } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 
-import type { DatabaseExecutor } from "../db/index.js";
+import type { DatabaseExecutor } from "../db/index";
 import {
   channels,
   jointChannels,
   jointChannelServers,
   messages,
-} from "../db/schema.js";
+} from "../db/schema";
 
 export type ExternalConversationTarget =
   | {

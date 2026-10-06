@@ -53,12 +53,16 @@ test.describe("thread search lazy hydration", () => {
       seeded.totalMessageRows,
     );
 
-    await page.getByTestId("thread-search-open").click();
+    await page.getByTestId("thread-overflow-trigger").click();
+    await page.getByTestId("thread-overflow-search").click();
     await page.getByTestId("thread-search-input").fill(seeded.olderNeedle);
 
     await expect(page.getByTestId("thread-search-count")).toHaveText("1/1", { timeout: 10_000 });
     await expect(scroller.getByText(seeded.olderNeedle)).toBeVisible();
-    await expect(scroller.locator(".bg-brutal-cyan\\/25.shadow-brutal").filter({ hasText: seeded.olderNeedle })).toBeVisible();
+    // RUI migration (#7347): the highlighted reply row no longer carries bare
+    // `.bg-brutal-cyan/25.shadow-brutal` classes — the highlight state is
+    // `data-highlighted="true"` on the row (MessageItem.tsx).
+    await expect(scroller.locator('[data-highlighted="true"]').filter({ hasText: seeded.olderNeedle })).toBeVisible();
     const highlightedCodeMatch = scroller
       .locator("code")
       .getByTestId("thread-search-fragment-highlight")

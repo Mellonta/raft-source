@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   ProductFeedbackConfigurationError,
   ProductFeedbackUpstreamError,
   ProductFeedbackValidationError,
+  asFeedbackReportId,
   isProductFeedbackConfigured,
   normalizeProductFeedbackMetadata,
   productFeedbackReporterId,
   submitProductFeedback,
-} from "./productFeedbackService.js";
+} from "./productFeedbackService";
 
 const ENV = {
   HANDS_FEEDBACK_BASE_URL: "https://hands.example/",
@@ -307,4 +307,49 @@ test("reporter ids are stable per account, isolated across accounts, and irrever
   assert.notEqual(first, productFeedbackReporterId("user-1", "secret-b"));
   assert.match(first, /^[A-Za-z0-9_-]{43}$/);
   assert.doesNotMatch(first, /user-1/);
+});
+
+test("an agent Report Issue ticket carries the report id and its own surface, and nothing else changes", async () => {
+  let body: FormData | undefined;
+  const feedbackReportId = asFeedbackReportId("0d9b2c4e-6f1a-4b3c-9d8e-7f6a5b4c3d2e");
+  assert.ok(feedbackReportId);
+  await submitProductFeedback({
+    submissionId: "77777777-7777-4777-8777-777777777777",
+    kind: "problem",
+    message: "Issue report for Helper",
+    contact: null,
+    userId: "user-1",
+    metadata: normalizeProductFeedbackMetadata({ webVersion: "server-v1.1.0" }),
+    attachments: [],
+    feedbackReportId,
+  }, {
+    env: ENV,
+    fetchImpl: async (_input, init) => {
+      body = init?.body as FormData;
+      return new Response(JSON.stringify({ id: "ticket-1", status: "open" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+
+  assert.deepEqual(JSON.parse(String(body?.get("metadata"))), {
+    product_type: "web",
+    client_kind: "web",
+    platform: "web",
+    surface: "agent.report_issue",
+    feedback_type: "problem",
+    contact_consent: false,
+    feedback_report_id: "0d9b2c4e-6f1a-4b3c-9d8e-7f6a5b4c3d2e",
+    client_version: "server-v1.1.0",
+    web_version: "server-v1.1.0",
+  });
+  assert.equal(body?.getAll("attachments").length, 0);
+});
+
+test("asFeedbackReportId only mints canonical UUIDs", () => {
+  assert.equal(asFeedbackReportId("0d9b2c4e-6f1a-4b3c-9d8e-7f6a5b4c3d2e"), "0d9b2c4e-6f1a-4b3c-9d8e-7f6a5b4c3d2e");
+  for (const value of ["", "report-1", "0d9b2c4e6f1a4b3c9d8e7f6a5b4c3d2e", " 0d9b2c4e-6f1a-4b3c-9d8e-7f6a5b4c3d2e", 42, null, undefined, ["0d9b2c4e-6f1a-4b3c-9d8e-7f6a5b4c3d2e"]]) {
+    assert.equal(asFeedbackReportId(value), null, JSON.stringify(value));
+  }
 });

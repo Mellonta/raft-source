@@ -1,16 +1,16 @@
 import { createHash, createHmac } from "node:crypto";
 import { z } from "zod";
-import { assertTranslationPlaceholders } from "../placeholderValidator.js";
-import type { TranslationPlaceholderPolicy } from "../placeholderPolicy.js";
+import { assertTranslationPlaceholders } from "../placeholderValidator";
+import type { TranslationPlaceholderPolicy } from "../placeholderPolicy";
 import type {
   TranslationBatchItem,
   TranslationBatchResult,
   TranslationProvider,
   TranslationProviderVersion,
   TranslationResultItem,
-} from "../types.js";
-import { translationBatchItemSchema, translationBatchResultSchema } from "../types.js";
-import { TranslationProviderError } from "../errors.js";
+} from "../types";
+import { translationBatchItemSchema, translationBatchResultSchema } from "../types";
+import { TranslationProviderError } from "../errors";
 
 const DEFAULT_VOLCENGINE_API_VERSION = "2020-06-01";
 const DEFAULT_VOLCENGINE_POLICY_VERSION = "volcengine-translate-v1";

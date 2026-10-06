@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 
-import { renderOpenApiArtifacts } from "./openapi-artifacts.js";
+import { renderOpenApiArtifacts } from "./openapi-artifacts";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const first = await renderOpenApiArtifacts();

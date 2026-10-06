@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { dbTest } from "../test/integration/dbTest.js";
-import { requireFlexAuth, respondInvalidOrExpiredToken, signAccessToken } from "./auth.js";
+import { dbTest } from "../test/integration/dbTest";
+import { requireFlexAuth, respondInvalidOrExpiredToken, signAccessToken } from "./auth";
 
 dbTest("requireFlexAuth accepts access token from query string fallback", async ({ seed }) => {
   process.env.JWT_SECRET = "test-secret";

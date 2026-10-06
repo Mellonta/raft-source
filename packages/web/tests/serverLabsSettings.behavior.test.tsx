@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -720,7 +719,8 @@ test("server Labs disables every enrollment switch with the master-off reason wh
   assert.equal(pausedSwitch.getAttribute("aria-disabled"), "true");
   assert.equal(composerSwitch.getAttribute("aria-checked"), "false");
   assert.equal(pausedSwitch.getAttribute("aria-checked"), "false");
-  assert.equal(composerSwitch.getAttribute("title"), "需先开启 Server Labs 访问权限");
+  assert.equal(composerSwitch.getAttribute("title"), null);
+  assert.ok(composerSwitch.hasAttribute("data-base-ui-tooltip-trigger"), "lab disabled reason now rides the RUI tooltip trigger");
   const labRows = screen.getAllByTestId("server-lab-row");
   assert.equal(labRows.length, 2);
   for (const row of labRows) {

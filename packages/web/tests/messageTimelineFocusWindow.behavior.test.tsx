@@ -1,22 +1,26 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { createRef, useContext, useState } from "react";
 import type { RefObject } from "react";
 import { flushSync } from "react-dom";
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import MessageTimeline, {
   MessageTimelineKeepMessageVisibleContext,
   MessageTimelinePreserveViewportContext,
   recallPersistedScrollMessageId,
 } from "../src/components/message/MessageTimeline";
+import MessageItem from "../src/components/message/MessageItem";
 import type {
   MessageTimelineHandle,
   MessageTimelineSource,
 } from "../src/components/message/MessageTimeline";
 import type { Message } from "../src/store/messageStore";
+import { useThreadStore } from "../src/store/threadStore";
+import type { ThreadReplyPreview } from "../src/store/threadRepliesReadModel";
+import { TestIntlProvider } from "./helpers/intl";
 
-const SERIAL = { concurrency: false };
+const SERIAL = {};
 
 let intersectionCallback: IntersectionObserverCallback | null = null;
 let observedTargets: Element[] = [];
@@ -53,6 +57,7 @@ const originalGetBoundingClientRect = Element.prototype.getBoundingClientRect;
 const originalScrollHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollHeight");
 const originalClientHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientHeight");
 const originalPerformanceNow = Object.getOwnPropertyDescriptor(performance, "now");
+const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
 
 function makeMessage(id: string, seq: number): Message {
   return {
@@ -263,6 +268,7 @@ afterEach(() => {
   intersectionCallback = null;
   observedTargets = [];
   resizeCallbacks = [];
+  useThreadStore.setState({ replyScopes: {} });
   window.sessionStorage.clear();
   Element.prototype.scrollIntoView = originalScrollIntoView;
   Element.prototype.scrollTo = originalScrollTo;
@@ -270,6 +276,8 @@ afterEach(() => {
   if (originalScrollHeight) Object.defineProperty(HTMLElement.prototype, "scrollHeight", originalScrollHeight);
   if (originalClientHeight) Object.defineProperty(HTMLElement.prototype, "clientHeight", originalClientHeight);
   if (originalPerformanceNow) Object.defineProperty(performance, "now", originalPerformanceNow);
+  if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
+  else delete (window as { matchMedia?: unknown }).matchMedia;
 });
 
 test("duplicate resize observers apply one anchor compensation per layout", SERIAL, async () => {
@@ -375,6 +383,108 @@ test("explicit thread-open anchor survives a delayed pre-open scroll frame", SER
   assert.equal(anchor.getBoundingClientRect().top, -20, "the thread width reflow must not move the reading row");
 });
 
+test("the real inline reply button does not turn its layout scroll into user takeover", SERIAL, async () => {
+  const timelineRef = createRef<MessageTimelineHandle>();
+  let layoutDelta = 0;
+  let scrollerNode: HTMLElement | null = null;
+
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
+    configurable: true,
+    get() { return 2000 + layoutDelta; },
+  });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
+    configurable: true,
+    get() { return 500; },
+  });
+  Element.prototype.getBoundingClientRect = function getBoundingClientRect() {
+    const element = this as HTMLElement;
+    if (element.dataset.testid === "focus-window-scroller") {
+      return { top: 0, bottom: 500, left: 0, right: 500, width: 500, height: 500, x: 0, y: 0, toJSON() {} };
+    }
+    if (element.dataset.timelineMessageId === "parent") {
+      const top = 280 + layoutDelta - (scrollerNode?.scrollTop ?? 0);
+      return { top, bottom: top + 100, left: 0, right: 500, width: 500, height: 100, x: 0, y: top, toJSON() {} };
+    }
+    return originalGetBoundingClientRect.call(this);
+  };
+
+  const reply: ThreadReplyPreview = {
+    messageId: "reply-1",
+    seq: 2,
+    preview: "Open the real thread surface",
+    senderId: "external-1",
+    senderType: "external_projection",
+    senderName: "External",
+    senderAvatarUrl: null,
+    createdAt: "2026-09-15T00:00:00.000Z",
+  };
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: ((query: string) => ({
+      matches: true,
+      media: query,
+      onchange: null,
+      addEventListener() {},
+      removeEventListener() {},
+      addListener() {},
+      removeListener() {},
+      dispatchEvent: () => false,
+    })) as typeof window.matchMedia,
+  });
+  useThreadStore.getState().hydrateReplyScope("parent", [reply], 1);
+  const view = render(
+    <TestIntlProvider>
+      <MemoryRouter>
+        <MessageTimeline
+          ref={timelineRef}
+          source={makeSource([makeMessage("parent", 1)])}
+          renderItem={(message) => (
+            <MessageItem
+              message={message}
+              mentionMap={{}}
+              channels={[]}
+              parentChannelId="channel-1"
+              onBeforeOpenThread={() => timelineRef.current?.preserveAnchorOnNextLayoutChange()}
+              onOpenThread={() => {}}
+            />
+          )}
+          testId="focus-window-scroller"
+          className="h-full"
+          sparseAnchor="bottom"
+        />
+      </MemoryRouter>
+    </TestIntlProvider>,
+  );
+  const scroller = view.getByTestId("focus-window-scroller");
+  const replyButton = view.container.querySelector<HTMLButtonElement>(
+    '[data-message-affordance="inline-thread-replies"]',
+  );
+  const row = view.container.querySelector<HTMLElement>('[data-timeline-message-id="parent"]');
+  scrollerNode = scroller;
+  scroller.scrollTop = 300;
+  assert.ok(replyButton, "the mounted affordance must be the real inline reply button");
+  assert.ok(row);
+  assert.equal(row.getBoundingClientRect().top, -20);
+
+  fireEvent.pointerDown(replyButton);
+  fireEvent.click(replyButton);
+  layoutDelta = 200;
+  await act(async () => {
+    fireEvent.scroll(scroller);
+    await flushAnimationFrames(1);
+  });
+  await act(async () => {
+    for (const callback of resizeCallbacks) callback([], {} as ResizeObserver);
+  });
+
+  assert.equal(
+    scroller.scrollTop,
+    500,
+    "the button pointerdown must not revoke the anchor captured by its own thread-open click",
+  );
+  assert.equal(row.getBoundingClientRect().top, -20);
+});
+
 test("explicit thread-open anchor waits for the first layout observer before expiring", SERIAL, async () => {
   const timelineRef = createRef<MessageTimelineHandle>();
   let now = 100;
@@ -443,7 +553,9 @@ test("explicit thread-open anchor waits for the first layout observer before exp
   );
 });
 
-test("unconsumed thread-open anchor yields to synchronous user scroll ownership", SERIAL, async () => {
+async function assertUnconsumedAnchorYieldsToUserGesture(
+  startGesture: (scroller: HTMLElement) => void,
+) {
   const timelineRef = createRef<MessageTimelineHandle>();
   let now = 100;
   let layoutDelta = 0;
@@ -488,7 +600,7 @@ test("unconsumed thread-open anchor yields to synchronous user scroll ownership"
   timelineRef.current?.preserveAnchorOnNextLayoutChange();
   now = 1500;
   await act(async () => {
-    fireEvent.wheel(scroller);
+    startGesture(scroller);
     scroller.scrollTop = 700;
     fireEvent.scroll(scroller);
     await flushAnimationFrames();
@@ -505,6 +617,18 @@ test("unconsumed thread-open anchor yields to synchronous user scroll ownership"
 
   assert.equal(scroller.scrollTop, 900, "later layout must preserve the user's new reading row");
   assert.equal(row.getBoundingClientRect().top, -20);
+}
+
+test("unconsumed thread-open anchor yields to wheel scroll ownership", SERIAL, async () => {
+  await assertUnconsumedAnchorYieldsToUserGesture((scroller) => fireEvent.wheel(scroller));
+});
+
+test("unconsumed thread-open anchor yields to touch scroll ownership", SERIAL, async () => {
+  await assertUnconsumedAnchorYieldsToUserGesture((scroller) => fireEvent.touchStart(scroller));
+});
+
+test("unconsumed thread-open anchor yields to scroller-target pointer ownership", SERIAL, async () => {
+  await assertUnconsumedAnchorYieldsToUserGesture((scroller) => fireEvent.pointerDown(scroller));
 });
 
 test("newer explicit message jump supersedes expired unconsumed snapshot", SERIAL, async () => {

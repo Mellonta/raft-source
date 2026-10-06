@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
 import type { Duplex } from "node:stream";
-import { test } from "vitest";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { Agent, ProxyAgent } from "undici";
 import {
@@ -12,8 +11,8 @@ import {
   validateProviderProxyEnv,
   evictFetchDispatcher,
   evictIsolatedFetchDispatcher,
-} from "./proxy.js";
-import { daemonFetch } from "./daemonFetch.js";
+} from "./proxy";
+import { daemonFetch } from "./daemonFetch";
 
 test("buildWebSocketOptions returns a proxy agent when wss proxy env is configured", () => {
   const options = buildWebSocketOptions("wss://api.slock.ai/daemon/connect?key=test", {
@@ -252,7 +251,9 @@ test("daemonFetch: CONNECT-establish leg is bounded (UND_ERR_CONNECT_TIMEOUT)", 
       // undici 10s default, not that it fires at an exact millisecond.
       SLOCK_DAEMON_FETCH_PRE_RESPONSE_TIMEOUT_MS: "300",
     };
-    const url = "https://api.slock.ai/internal/agent-api/send";
+    // A proxied request hands the name to the proxy unresolved, so an `.invalid`
+    // target exercises the same CONNECT leg and can never reach a real host.
+    const url = "https://api.slock.invalid/internal/agent-api/send";
 
     assert.ok(buildFetchDispatcher(url, env) instanceof ProxyAgent);
 
@@ -442,7 +443,9 @@ test("daemonFetch EVICTS the cached dispatcher on a transport reject (black-hole
       HTTPS_PROXY: sink.url,
       SLOCK_DAEMON_FETCH_PRE_RESPONSE_TIMEOUT_MS: "300",
     };
-    const url = "https://api.slock.ai/internal/agent-api/send";
+    // A proxied request hands the name to the proxy unresolved, so an `.invalid`
+    // target exercises the same CONNECT leg and can never reach a real host.
+    const url = "https://api.slock.invalid/internal/agent-api/send";
 
     const before = buildFetchDispatcher(url, env);
     assert.ok(before instanceof ProxyAgent);

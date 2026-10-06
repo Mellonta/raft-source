@@ -35,9 +35,15 @@
  * with the device-code grant; deployments that don't want `sk_agent_*`
  * to be mintable via web session simply don't flip the flag.
  *
- * Request body: { scopes?: string[], name?: string }
- *   - scopes: subset of ALLOWED_AGENT_CAPABILITIES. Defaults to ALL.
+ * Request body: { scopes?: string[], name?: string, replacesCredentialId?: string }
+ *   - scopes: subset of ALLOWED_AGENT_CAPABILITIES. Defaults to the
+ *     least-privilege DEFAULT_EXTERNAL_AGENT_CAPABILITIES (no `server`, no
+ *     `mcp`); elevated scopes must be named explicitly.
  *   - name: optional human-readable label for the credential row.
+ *   - replacesCredentialId: rotation — the credential this client's profile
+ *     held until now (`raft agent login` re-login). It is revoked in the
+ *     same transaction as the mint. Other credentials of the agent (other
+ *     devices/profiles) are left alone.
  *
  * Error contract (anti-enumeration):
  *   - 404 `agent_missing` covers BOTH "agent id does not exist" AND
@@ -48,25 +54,33 @@
  *     member of the agent's server but is neither the creator nor a holder of
  *     `issueAgentCredentials`. This is
  *     the standard "you're authenticated but not authorized" signal.
- *   - 400 `scopes_invalid` / `scopes_empty` / `name_invalid` for body
- *     validation failures.
+ *   - 400 `scopes_invalid` / `scopes_empty` / `name_invalid` /
+ *     `replaces_credential_invalid` for body validation failures.
+ *   - 400 `agent_not_external` when the agent is managed: its credentials
+ *     come only from its Computer (`/internal/computer/runners/...`).
  *   - 404 `device_login_disabled` when the feature gate is off.
  */
 
 import type { Request, Response } from "express";
 
-import * as agentService from "../services/agentService.js";
+import * as agentService from "../services/agentService";
 import {
-  ALLOWED_AGENT_CAPABILITIES,
+  DEFAULT_EXTERNAL_AGENT_CAPABILITIES,
   mintAgentCredential,
   listAgentCredentials,
   revokeAgentCredential,
-  normalizeAgentCapabilities,
-  type AgentCapability,
-} from "../services/agentCredentialService.js";
-import { isDeviceAuthSurfaceEnabled } from "../services/deviceAuthService.js";
-import { addTraceEvent } from "../tracing/semanticTrace.js";
-import { resolveActorContext, userCanActOnAgentResource } from "../lib/actorPermissions.js";
+  resolveRequestedAgentCapabilities,
+} from "../services/agentCredentialService";
+import { isExternalAgentRuntime } from "@botiverse/raft-shared";
+import { broadcastAgentCredentialRevocation } from "../replicaRouter";
+import { isDeviceAuthSurfaceEnabled } from "../services/deviceAuthService";
+import { addTraceEvent } from "../tracing/semanticTrace";
+import { resolveActorContext, userCanActOnAgentResource } from "../lib/actorPermissions";
+import { sendJsonServerError } from "./errorResponse";
+import { and, eq, isNull } from "drizzle-orm";
+import { agents as agentsTable } from "../db/schema";
+import type { DatabaseTransaction } from "../db/index";
+import { FencedAuthorizationDeniedError, ServerMembershipRevokedError, withActorMembershipFence } from "../lib/actorMembershipFence";
 
 // Shared 404 response for both "agent does not exist" and "user is not a
 // member of the agent's server". Going through one helper keeps the two
@@ -76,6 +90,22 @@ import { resolveActorContext, userCanActOnAgentResource } from "../lib/actorPerm
 // addressed here.
 function respondAgentMissing(res: Response): void {
   res.status(404).json({ error: "Agent not found", code: "agent_missing" });
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function respondAgentNotExternal(res: Response): void {
+  res.status(400).json({
+    error: "Credentials can only be issued for external agents; a managed agent's credentials come from its computer",
+    code: "agent_not_external",
+  });
+}
+
+function respondReplacesCredentialInvalid(res: Response): void {
+  res.status(400).json({
+    error: "replacesCredentialId must be the id of one of this agent's credentials",
+    code: "replaces_credential_invalid",
+  });
 }
 
 // Mint, list and revoke use the same subject-derived authority boundary.
@@ -92,6 +122,49 @@ async function authorizedAgent(req: Request<{ id: string }>, res: Response) {
     return null;
   }
   return agent;
+}
+
+// Task #91: credential writes re-authorize inside the write transaction under a share lock on the caller's membership
+// row (member row first), then a share lock on the agent row (agent row second).
+async function withFencedCredentialAuthority<T>(
+  agent: { id: string; serverId: string },
+  userId: string,
+  run: (tx: DatabaseTransaction) => Promise<T>,
+): Promise<T> {
+  return withActorMembershipFence(agent.serverId, userId, async (tx, lockedRole) => {
+    const [locked] = await tx
+      .select({
+        id: agentsTable.id,
+        serverId: agentsTable.serverId,
+        creatorType: agentsTable.creatorType,
+        creatorId: agentsTable.creatorId,
+      })
+      .from(agentsTable)
+      .where(and(eq(agentsTable.id, agent.id), isNull(agentsTable.deletedAt)))
+      .for("share");
+    if (!locked || locked.serverId !== agent.serverId) throw new FencedAuthorizationDeniedError("not_found");
+    if (!userCanActOnAgentResource(lockedRole, userId, locked, "issueAgentCredentials")) {
+      throw new FencedAuthorizationDeniedError("forbidden");
+    }
+    return run(tx);
+  });
+}
+
+// Keeps this surface's anti-enumeration contract: membership lost mid-request is byte-identical to "agent does not exist".
+function respondFencedCredentialError(error: unknown, res: Response): boolean {
+  if (error instanceof ServerMembershipRevokedError
+    || (error instanceof FencedAuthorizationDeniedError && error.reason === "not_found")) {
+    respondAgentMissing(res);
+    return true;
+  }
+  if (error instanceof FencedAuthorizationDeniedError) {
+    res.status(403).json({
+      error: "The `issueAgentCredentials` capability or human creator authority is required to manage agent credentials",
+      code: "insufficient_role",
+    });
+    return true;
+  }
+  return false;
 }
 
 // Listing and revocation must still work when new issuance is disabled.
@@ -111,18 +184,22 @@ export async function revokeAgentCredentialHandler(req: Request<{ id: string; cr
     const agent = await authorizedAgent(req, res);
     if (!agent) return;
     const credentialId = req.params.credentialId;
-    const validId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(credentialId);
-    if (!validId || !await revokeAgentCredential({
+    const validId = UUID_RE.test(credentialId);
+    const revoked = validId && await withFencedCredentialAuthority(agent, req.userId!, (tx) => revokeAgentCredential({
       credentialId, agentId: agent.id, serverId: agent.serverId,
       reason: "user_revoked", revokedByUserId: req.userId!,
-    })) {
+    }, { executor: tx }));
+    if (!revoked) {
       res.status(404).json({ error: "Credential not found", code: "credential_missing" });
       return;
     }
+    // After commit: close this agent's open streams on every replica now.
+    await broadcastAgentCredentialRevocation(agent.id);
     addTraceEvent("agents.credentials.revoked", { agent_id: agent.id, server_id: agent.serverId, credential_id: credentialId, user_id: req.userId! });
     res.setHeader("Cache-Control", "no-store");
     res.status(204).end();
-  } catch {
+  } catch (error) {
+    if (respondFencedCredentialError(error, res)) return;
     res.status(500).json({ error: "Failed to revoke agent credential" });
   }
 }
@@ -155,34 +232,29 @@ export async function agentCredentialsHandler(
       return;
     }
 
-    const body = (req.body ?? {}) as { scopes?: unknown; name?: unknown };
-
-    let scopes: AgentCapability[];
-    if (body.scopes === undefined) {
-      scopes = [...ALLOWED_AGENT_CAPABILITIES];
-    } else if (!Array.isArray(body.scopes)) {
-      res.status(400).json({
-        error: "scopes must be an array of capability literals",
-        code: "scopes_invalid",
-      });
+    // Managed agents get credentials only from their Computer; a key minted
+    // here could drain/ack the daemon's delivery buffer via `/events`.
+    if (!isExternalAgentRuntime(agent.runtime)) {
+      respondAgentNotExternal(res);
       return;
-    } else {
-      try {
-        scopes = normalizeAgentCapabilities(body.scopes as readonly string[]);
-      } catch {
-        res.status(400).json({
-          error: `scopes must each be one of: ${ALLOWED_AGENT_CAPABILITIES.join(", ")}`,
-          code: "scopes_invalid",
-        });
+    }
+
+    const body = (req.body ?? {}) as { scopes?: unknown; name?: unknown; replacesCredentialId?: unknown };
+
+    const requested = resolveRequestedAgentCapabilities(body.scopes, DEFAULT_EXTERNAL_AGENT_CAPABILITIES);
+    if (!requested.ok) {
+      res.status(400).json({ error: requested.error, code: requested.code });
+      return;
+    }
+    const scopes = requested.scopes;
+
+    let replacesCredentialId: string | null = null;
+    if (body.replacesCredentialId !== undefined && body.replacesCredentialId !== null) {
+      if (typeof body.replacesCredentialId !== "string" || !UUID_RE.test(body.replacesCredentialId)) {
+        respondReplacesCredentialInvalid(res);
         return;
       }
-      if (scopes.length === 0) {
-        res.status(400).json({
-          error: "scopes must include at least one capability",
-          code: "scopes_empty",
-        });
-        return;
-      }
+      replacesCredentialId = body.replacesCredentialId;
     }
 
     let name: string | null = null;
@@ -197,12 +269,24 @@ export async function agentCredentialsHandler(
       name = body.name;
     }
 
-    const minted = await mintAgentCredential({
+    // The raw key is generated inside the fenced transaction and returned only after it commits.
+    const minted = await withFencedCredentialAuthority(agent, req.userId!, (tx) => mintAgentCredential({
       agentId: agent.id,
       scopes,
       createdByUserId: req.userId!,
+      requireExternalRuntime: true,
+      replacesCredentialId,
       ...(name !== null ? { name } : {}),
-    });
+    }, { executor: tx }));
+    if (minted.replacedCredentialId) {
+      await broadcastAgentCredentialRevocation(minted.agentId);
+      addTraceEvent("agents.credentials.revoked", {
+        agent_id: minted.agentId,
+        server_id: minted.serverId,
+        credential_id: minted.replacedCredentialId,
+        user_id: req.userId!,
+      });
+    }
 
     // Request-path audit trace event (sister to `credential_issued`
     // domain lifecycle event emitted inside the service). XX msg=2cb5b485:
@@ -232,11 +316,19 @@ export async function agentCredentialsHandler(
       serverId: minted.serverId,
     });
   } catch (err) {
+    if (respondFencedCredentialError(err, res)) return;
     if (err instanceof Error && err.message === "agent_missing") {
       res.status(404).json({ error: "Agent not found", code: "agent_missing" });
       return;
     }
-    console.error("agents.credentials.mint error:", err);
-    res.status(500).json({ error: "Failed to mint agent credential" });
+    if (err instanceof Error && err.message === "agent_not_external") {
+      respondAgentNotExternal(res);
+      return;
+    }
+    if (err instanceof Error && err.message === "replaces_credential_invalid") {
+      respondReplacesCredentialInvalid(res);
+      return;
+    }
+    sendJsonServerError(req, res, { error: "Failed to mint agent credential", logPrefix: "agents.credentials.mint error:", err });
   }
 }

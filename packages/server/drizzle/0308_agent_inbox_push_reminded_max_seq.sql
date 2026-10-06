@@ -1,0 +1,1 @@
+ALTER TABLE "agent_inbox_push_registrations" ADD COLUMN "reminded_max_seq" bigint;

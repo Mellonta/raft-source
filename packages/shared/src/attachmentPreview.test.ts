@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { isTextPreviewCandidate } from "./attachmentPreview.js";
+import { isTextPreviewCandidate } from "./attachmentPreview";
 
 test("isTextPreviewCandidate classifies shared text preview formats", () => {
   assert.equal(isTextPreviewCandidate("notes.txt", "application/octet-stream"), true);

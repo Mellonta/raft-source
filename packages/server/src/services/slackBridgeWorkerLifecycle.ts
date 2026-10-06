@@ -1,4 +1,5 @@
-import { clearClockInterval, currentTimeMs, setClockInterval } from "@botiverse/raft-shared";
+import { clearClockInterval, currentTimeMs, setClockInterval, type Tracer } from "@botiverse/raft-shared";
+import { withTraceRoot } from "../tracing/semanticTrace";
 
 export type SlackBridgeBindingMode = "active" | "paused" | "disconnected";
 export type SlackBridgeWorkerState = "not_running" | "starting" | "running" | "stopping" | "failed";
@@ -191,6 +192,7 @@ export interface SlackBridgePersistentWorkerDependencies {
   runProbe(request: SlackBridgeProbeRequest, context: SlackBridgeLifecycleProbeContext): Promise<SlackBridgeProbeObservation>;
   persistReceipt(receipt: SlackBridgeLifecycleExecutionReceipt, context: SlackBridgeLifecyclePersistContext): Promise<void>;
   onError?(error: unknown): void;
+  tracer?: Tracer;
 }
 
 export interface SlackBridgePersistentWorkerClock {
@@ -590,17 +592,26 @@ export function startSlackBridgePersistentWorker(
 
     running = true;
     try {
-      let currentTrigger: SlackBridgeProbeTrigger | null = trigger;
-      let lastResult: SlackBridgePersistentWorkerRunResult = { kind: "completed", trigger, bindingCount: 0 };
-      while (currentTrigger && !stopped) {
-        pendingTrigger = null;
-        lastResult = await runOnce(currentTrigger);
-        currentTrigger = pendingTrigger;
-      }
-      return stopped ? { kind: "stopped" } : lastResult;
-    } catch (error) {
-      dependencies.onError?.(error);
-      throw error;
+      // Each drain is a root span, so the onError report is tied to it.
+      return await withTraceRoot(dependencies.tracer, "server.slack_bridge.lifecycle.drain", {
+        surface: "server",
+        kind: "internal",
+        attrs: { trigger },
+      }, async () => {
+        try {
+          let currentTrigger: SlackBridgeProbeTrigger | null = trigger;
+          let lastResult: SlackBridgePersistentWorkerRunResult = { kind: "completed", trigger, bindingCount: 0 };
+          while (currentTrigger && !stopped) {
+            pendingTrigger = null;
+            lastResult = await runOnce(currentTrigger);
+            currentTrigger = pendingTrigger;
+          }
+          return stopped ? { kind: "stopped" } : lastResult;
+        } catch (error) {
+          dependencies.onError?.(error);
+          throw error;
+        }
+      });
     } finally {
       running = false;
     }

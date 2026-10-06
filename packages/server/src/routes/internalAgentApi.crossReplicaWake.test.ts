@@ -1,5 +1,5 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 // Option C (#wg-external-agent:00fcc8f7, 2026-06-11): cross-replica wake
 // signal for external agents. Fan-out publishes a content-free
 // `{agentId, from}` broadcast; other replicas re-emit locally so a connected
@@ -18,23 +18,28 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { openTestApp } from "../test/integration/app.js";
-import { createServer } from "../services/serverService.js";
-import { createAgent } from "../services/agentService.js";
-import { createChannel, addAgent, addHuman, markAgentLegacyRead } from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { mintAgentCredential } from "../services/agentCredentialService.js";
-import { AgentOrchestrator } from "../services/agentOrchestrator.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { openTestApp } from "../test/integration/app";
+import { createServer } from "../services/serverService";
+import { createAgent } from "../services/agentService";
+import { createChannel, addAgent, addHuman, markAgentLegacyRead } from "../services/channelService";
+import { createMessage, __setExternalAgentInboxChainSelectorForTests } from "../services/messageService";
+import { referenceAgentInboxChain } from "../test/agentInboxChainReference";
+import { mintAgentCredential } from "../services/agentCredentialService";
+import { AgentOrchestrator } from "../services/agentOrchestrator";
 import {
   REPLICA_ID,
   handleReplicaMessage,
   __setExternalWakeSignalHandlerForTests,
   __setMachinePrincipalFenceHandlerForTests,
-} from "../replicaRouter.js";
+} from "../replicaRouter";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
+
+// CI has no RisingWave: the external agent inbox pull reads the test-only
+// reference derivation of the agent inbox chain.
+__setExternalAgentInboxChainSelectorForTests(async (agentId: string) => ({ source: "chain", rows: await referenceAgentInboxChain(agentId) }));
 
 class PublishSpyOrchestrator extends AgentOrchestrator {
   published: string[] = [];

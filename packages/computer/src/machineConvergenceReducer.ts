@@ -4,7 +4,7 @@ import type {
   MachineEffectIntent,
   MachineOperationRecord,
   MachineProcessIdentity,
-} from "./machineOperationStore.js";
+} from "./machineOperationStore";
 
 /** Pure, side-effect-free machine convergence reducer. */
 

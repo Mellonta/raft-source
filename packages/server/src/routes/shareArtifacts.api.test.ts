@@ -1,19 +1,19 @@
-import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { openTestApp } from "../test/integration/app.js";
-import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness.js";
-import { getDb } from "../db/index.js";
-import { shareArtifacts, users } from "../db/schema.js";
-import { createChannel } from "../services/channelService.js";
-import { createServer } from "../services/serverService.js";
+import { openTestApp } from "../test/integration/app";
+import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness";
+import { getDb } from "../db/index";
+import { serverMembers, shareArtifacts, users } from "../db/schema";
+import { addHuman, createChannel } from "../services/channelService";
+import { createServer } from "../services/serverService";
 import {
   __setCdnStorageForTests,
   resetStorageForTests,
-} from "../services/storageService.js";
+} from "../services/storageService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -45,6 +45,33 @@ function pngForm(channelId: string) {
   form.append("image", new Blob([PNG_1X1], { type: "image/png" }), "raft-thread.png");
   return form;
 }
+
+test("Guest cannot persist a public share artifact from readable messages", async ({ app }) => {
+  const owner = await createVerifiedUser("share-guest-owner@slock.test", "Share Guest Owner");
+  const guest = await createVerifiedUser("share-guest@slock.test", "Share Guest");
+  const server = await createServer("Share Guest Server", "share-guest-server", owner.id);
+  await getDb().insert(serverMembers).values({ serverId: server.id, userId: guest.id, role: "guest" });
+  const channel = await createChannel(server.id, "guest-private", undefined, "private");
+  await addHuman(channel.id, guest.id);
+  const guestToken = await tokenForHuman(guest.email);
+  const before = await getDb().select({ id: shareArtifacts.id }).from(shareArtifacts);
+
+  const response = await fetch(`${app.baseUrl}/api/share-artifacts/message-selection`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${guestToken}`,
+      "X-Server-Id": server.id,
+    },
+    body: pngForm(channel.id),
+  });
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(
+    await getDb().select({ id: shareArtifacts.id }).from(shareArtifacts),
+    before,
+    "denied Guest share creation must not persist a public artifact",
+  );
+});
 
 test("share artifact creation is auth-gated and public URL serves OG metadata + non-expiring PNG", async () => {
   const uploadsDir = fs.mkdtempSync(path.join(os.tmpdir(), "share-artifacts-"));

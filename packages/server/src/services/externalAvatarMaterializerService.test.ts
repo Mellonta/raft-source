@@ -2,35 +2,26 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 
-import { afterEach, beforeEach, test } from "vitest";
 import { and, eq } from "drizzle-orm";
 import sharp from "sharp";
 import express from "express";
 
-import { closeDatabase, getDb, initDatabase } from "../db/index.js";
+import { closeDatabase, getDb, initDatabase } from "../db/index";
 import {
   externalActorProjections,
-  externalAuthorPolicies,
   externalProjectionAvatarArtifacts,
   servers,
   users,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   materializeExternalProjectionAvatar,
   normalizeExternalAvatarRaster,
   type ExternalAvatarSourceAdapter,
-} from "./externalAvatarMaterializerService.js";
-import { materializeCurrentRaftAuthorPolicyAvatar } from "./raftAvatarSourceAdapter.js";
-import { syncCurrentRaftAuthorAvatar } from "./raftAvatarSourceAdapter.js";
-import { createSlackAvatarSourceAdapter } from "./slackAvatarSourceAdapter.js";
-import type { StorageBackend } from "./storageService.js";
-import { __setCdnStorageForTests, resetStorageForTests } from "./storageService.js";
-import { externalAvatarPublicRouter } from "../routes/externalAvatars.js";
-import {
-  __resetExternalAuthorAvatarSyncHandlersForTests,
-  installExternalAuthorAvatarSyncHandler,
-} from "./externalAuthorAvatarSyncRuntime.js";
-import { updateUser } from "./userService.js";
+} from "./externalAvatarMaterializerService";
+import { createSlackAvatarSourceAdapter } from "./slackAvatarSourceAdapter";
+import type { StorageBackend } from "./storageService";
+import { __setCdnStorageForTests, resetStorageForTests } from "./storageService";
+import { externalAvatarPublicRouter } from "../routes/externalAvatars";
 
 const NOW = new Date("2026-09-05T03:00:00.000Z");
 
@@ -51,7 +42,6 @@ class MemoryStorage implements StorageBackend {
 
 beforeEach(async () => { await initDatabase("pglite://"); });
 afterEach(async () => {
-  __resetExternalAuthorAvatarSyncHandlersForTests();
   resetStorageForTests();
   await closeDatabase();
 });
@@ -303,56 +293,6 @@ test("Slack avatar redirect and declared oversize are rejected without following
     signal: new AbortController().signal,
   }), /avatar_source_size_invalid/u);
 });
-
-test("Raft uploaded avatar is copied behind revocable public authority and bound to every granted policy", async () => {
-  const db = getDb();
-  const original = await normalizeExternalAvatarRaster(await raster({ r: 9, g: 8, b: 7 }));
-  const originalKey = `avatars/users/${"c".repeat(32)}.webp`;
-  const storage = new MemoryStorage();
-  storage.objects.set(originalKey, original.bytes);
-  const [owner] = await db.insert(users).values({
-    email: `avatar-owner-${randomUUID()}@raft.test`,
-    name: `avatar-owner-${randomUUID()}`,
-    avatarUrl: `/api/avatars/users/${"c".repeat(32)}.webp`,
-    passwordHash: "test",
-  }).returning();
-  const [server] = await db.insert(servers).values({
-    name: "Avatar server",
-    slug: `avatar-${randomUUID()}`,
-    ownerId: owner.id,
-  }).returning();
-  const policies = await db.insert(externalAuthorPolicies).values([1, 2].map((revision) => ({
-    serverId: server.id,
-    provider: "slack",
-    appRegistrationId: "registration-1",
-    installId: "install-1",
-    bindingId: `binding-${revision}`,
-    bindingEpoch: 1,
-    authorType: "user" as const,
-    authorId: owner.id,
-    displayName: "Avatar Owner",
-    fallbackKind: "human" as const,
-    consentRevision: 1,
-    state: "granted" as const,
-  }))).returning();
-  const result = await materializeCurrentRaftAuthorPolicyAvatar({
-    db,
-    storage,
-    policyId: policies[0]!.id,
-    publicOrigin: "https://api.raft.test",
-    now: () => NOW,
-  });
-  assert.equal(result.kind, "activated");
-  const updated = await db.select().from(externalAuthorPolicies)
-    .where(eq(externalAuthorPolicies.authorId, owner.id));
-  assert.ok(updated[0]!.avatarArtifactId);
-  assert.equal(updated[1]!.avatarArtifactId, updated[0]!.avatarArtifactId);
-  const [artifact] = await db.select().from(externalProjectionAvatarArtifacts)
-    .where(eq(externalProjectionAvatarArtifacts.id, updated[0]!.avatarArtifactId!));
-  assert.match(artifact.publicUrl, /^https:\/\/api\.raft\.test\/api\/external-avatars\//u);
-  assert.notEqual(artifact.publicUrl, owner.avatarUrl);
-});
-
 test("explicit external avatar removal clears the projection and serving authority while transient failure preserves it", async () => {
   const state = await externalFixture();
   const locator = "https://avatars.slack-edge.com/served.png";
@@ -412,63 +352,4 @@ test("explicit external avatar removal clears the projection and serving authori
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
-});
-
-test("a Raft profile change refreshes future author policies and explicit removal revokes the public artifact", async () => {
-  const db = getDb();
-  const storage = new MemoryStorage();
-  const firstKey = `avatars/users/${"d".repeat(32)}.webp`;
-  const secondKey = `avatars/users/${"e".repeat(32)}.webp`;
-  storage.objects.set(firstKey, (await normalizeExternalAvatarRaster(await raster({ r: 5, g: 6, b: 7 }))).bytes);
-  storage.objects.set(secondKey, (await normalizeExternalAvatarRaster(await raster({ r: 8, g: 9, b: 10 }))).bytes);
-  const [owner] = await db.insert(users).values({
-    email: `avatar-refresh-${randomUUID()}@raft.test`,
-    name: `avatar-refresh-${randomUUID()}`,
-    avatarUrl: `/api/avatars/users/${"d".repeat(32)}.webp`,
-    passwordHash: "test",
-  }).returning();
-  const [server] = await db.insert(servers).values({
-    name: "Avatar refresh server",
-    slug: `avatar-refresh-${randomUUID()}`,
-    ownerId: owner.id,
-  }).returning();
-  const [policy] = await db.insert(externalAuthorPolicies).values({
-    serverId: server.id,
-    provider: "slack",
-    appRegistrationId: "registration-1",
-    installId: "install-1",
-    bindingId: "binding-1",
-    bindingEpoch: 1,
-    authorType: "user",
-    authorId: owner.id,
-    displayName: "Avatar Refresh",
-    fallbackKind: "human",
-    consentRevision: 1,
-    state: "granted",
-  }).returning();
-  await materializeCurrentRaftAuthorPolicyAvatar({
-    db, storage, policyId: policy.id, publicOrigin: "https://api.raft.test", now: () => NOW,
-  });
-  installExternalAuthorAvatarSyncHandler(({ authorType, authorId }) => syncCurrentRaftAuthorAvatar({
-    db, storage, authorType, authorId, publicOrigin: "https://api.raft.test", now: () => NOW,
-  }));
-  await updateUser(owner.id, { avatarUrl: `/api/avatars/users/${"e".repeat(32)}.webp` });
-  const afterChange = await db.select().from(externalProjectionAvatarArtifacts)
-    .where(eq(externalProjectionAvatarArtifacts.ownerId, owner.id))
-    .orderBy(externalProjectionAvatarArtifacts.artifactRevision);
-  assert.deepEqual(afterChange.map((artifact) => artifact.state), ["revoked", "active"]);
-  const [updatedPolicy] = await db.select().from(externalAuthorPolicies)
-    .where(eq(externalAuthorPolicies.id, policy.id));
-  assert.equal(updatedPolicy.avatarArtifactId, afterChange[1]!.id);
-
-  await updateUser(owner.id, { avatarUrl: null });
-  const [removedPolicy] = await db.select().from(externalAuthorPolicies)
-    .where(eq(externalAuthorPolicies.id, policy.id));
-  const active = await db.select().from(externalProjectionAvatarArtifacts).where(and(
-    eq(externalProjectionAvatarArtifacts.ownerId, owner.id),
-    eq(externalProjectionAvatarArtifacts.state, "active"),
-  ));
-  assert.equal(removedPolicy.avatarArtifactId, null);
-  assert.equal(active.length, 0);
-  assert.ok(afterChange[1]!.storageKey && storage.deleted.includes(afterChange[1]!.storageKey));
 });

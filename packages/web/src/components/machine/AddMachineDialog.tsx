@@ -1,3 +1,5 @@
+import CloseButton from "../ui/CloseButton";
+import { Input, Card, Checkbox, Button, Status } from "raft-ui";
 import { useState, useEffect, useRef } from "react";
 import { X, CheckCircle, Monitor, Cloud } from "lucide-react";
 import { useIntl } from "react-intl";
@@ -8,11 +10,10 @@ import { useAppNavigate } from "../../hooks/useAppNavigate";
 import { getServerUrl } from "../../utils/server";
 // The baseline/resolver import staging still carries is gone here: this dialog's
 // connect state machine lives in useComputerConnectionWatch now, shared with onboarding.
-import { getComputerCommands, getDaemonConnectCommand } from "../../utils/computerSetupCommand";
+import { getComputerCommands } from "../../utils/computerSetupCommand";
 import { PLAN_CONFIG, getEffectiveLimits } from "@botiverse/raft-shared";
 import type { ServerPlan } from "@botiverse/raft-shared";
 import Modal from "../Modal";
-import StatusDot from "../ui/StatusDot";
 import FormField from "../ui/FormField";
 import Banner from "../ui/Banner";
 import ComputerCommandGuide from "./ComputerCommandGuide";
@@ -41,7 +42,6 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
 
   const registerMachine = useMachineStore((s) => s.registerMachine);
   const renameMachine = useMachineStore((s) => s.renameMachine);
-  const serverName = useServerStore((s) => s.current?.name) || "server";
   const serverSlug = useServerStore((s) => s.current?.slug);
   const deleteMachine = useMachineStore((s) => s.deleteMachine);
   const machines = useMachineStore((s) => s.machines);
@@ -172,21 +172,6 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
   };
 
   const deploymentEnv = import.meta.env?.VITE_DEPLOYMENT_ENV;
-  const daemonDistTag = deploymentEnv === "staging" ? "staging" : "latest";
-  const macLinuxDaemonCommand = getDaemonConnectCommand({
-    apiKey,
-    distTag: daemonDistTag,
-    platform: "mac-linux",
-    serverName,
-    serverUrl,
-  });
-  const windowsDaemonCommand = getDaemonConnectCommand({
-    apiKey,
-    distTag: daemonDistTag,
-    platform: "windows",
-    serverName,
-    serverUrl,
-  });
   const computerCommands = getComputerCommands(serverSlug, deploymentEnv, serverUrl, {
     legacyApiKey: apiKey,
   });
@@ -201,7 +186,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <Modal onClose={canFinishConnectedStep ? handleDone : handleCancel}>
-      <div className="w-full max-w-lg card-brutal p-6">
+      <Card className="w-full max-w-lg p-6">
         {/* Header */}
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-bold uppercase">
@@ -209,12 +194,13 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
             {step === "waiting" && formatMessage({ id: "machine.add.title.connect" })}
             {step === "connected" && formatMessage({ id: "machine.add.title.connected" })}
           </h2>
-          <button
+          <CloseButton
+            aria-label={formatMessage({ id: "common.close" })}
             onClick={canFinishConnectedStep ? handleDone : handleCancel}
-            className="btn-brutal-sm bg-white p-1"
+            className="p-1"
           >
             <X size={20} />
-          </button>
+          </CloseButton>
         </div>
 
         {atLimit && step === "type" && (
@@ -229,7 +215,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
                 onClose();
                 nav.toSettings("billing");
               }}
-              className="font-bold text-black underline"
+              className="font-bold text-foreground-strong theme-brutal:text-black underline"
             >
               {formatMessage({ id: "machine.add.upgradeForMore" })}
             </button>
@@ -247,7 +233,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
                     onClose();
                     nav.toSettings("billing");
                   }}
-                  className="font-bold text-black underline"
+                  className="font-bold text-foreground-strong theme-brutal:text-black underline"
                 >
                   {formatMessage({ id: "machine.add.viewPlans" })}
                 </button>
@@ -259,55 +245,59 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
         {/* Step 1: Choose machine type */}
         {step === "type" && (
           <div>
-            <div className="flex gap-2 mb-4">
+            <div className="mb-4 flex gap-2">
               <button
                 type="button"
+                aria-pressed={machineType === "local"}
                 onClick={() => setMachineType("local")}
-                className={`flex-1 flex items-center gap-2 border-2 p-3 text-left transition-colors ${
+                className={`flex-1 flex items-center gap-2 border p-3 text-left transition-colors rounded-md theme-brutal:rounded-none theme-brutal:border-2 ${
                   machineType === "local"
-                    ? "border-black bg-soft-signal font-bold shadow-brutal-sm"
-                    : "border-black/30 bg-white hover:border-black"
+                    ? "border-line-muted theme-brutal:border-black bg-primary-soft text-primary-strong font-bold shadow-[0_0_0_1px_var(--primary-edge)] theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm"
+                    : "border-line-muted theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white hover:border-line-strong theme-brutal:hover:border-black"
                 }`}
               >
-                <Monitor size={18} className="text-black" />
+                <Monitor size={18} className={`shrink-0 ${machineType === "local" ? "text-primary-strong theme-brutal:text-black" : "text-foreground-strong theme-brutal:text-black"}`} />
                 <div>
                   <div className="text-sm font-bold uppercase">
                     {formatMessage({ id: "machine.add.yourComputer" })}
                   </div>
-                  <div className="text-xs text-black/50 font-normal normal-case">
+                  <div className={`text-xs font-normal normal-case ${machineType === "local" ? "text-primary-strong/70 theme-brutal:text-black/50" : "text-foreground-muted theme-brutal:text-black/50"}`}>
                     {formatMessage({ id: "machine.add.yourComputerDescription" })}
                   </div>
                 </div>
               </button>
               <div
-                className="flex-1 flex items-center gap-2 border-2 border-dashed border-black/30 bg-white p-3 text-left cursor-not-allowed"
+                className="flex-1 flex items-center gap-2 border border-dashed border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white p-3 text-left cursor-not-allowed rounded-md theme-brutal:rounded-none"
               >
-                <Cloud size={18} className="text-black/25" />
+                <Cloud size={18} className="text-foreground-muted theme-brutal:text-black/25 shrink-0" />
                 <div>
-                  <div className="text-sm font-bold uppercase text-black/30">{formatMessage({ id: "machine.add.cloudComputer" })}</div>
-                  <div className="text-xs text-black/25 font-normal normal-case">{formatMessage({ id: "machine.add.comingSoon" })}</div>
+                  <div className="text-sm font-bold uppercase text-foreground-muted theme-brutal:text-black/30">{formatMessage({ id: "machine.add.cloudComputer" })}</div>
+                  <div className="text-xs text-foreground-muted theme-brutal:text-black/25 font-normal normal-case">{formatMessage({ id: "machine.add.comingSoon" })}</div>
                 </div>
               </div>
             </div>
 
             <div className="flex justify-end gap-3">
-              <button
+              <Button
+                size="md"
+                variant="outline"
                 type="button"
                 onClick={handleCancel}
-                className="btn-brutal bg-white px-4 py-2 text-sm"
               >
                 {formatMessage({ id: "common.confirm.cancel" })}
-              </button>
-              <button
+              </Button>
+              <Button
+                size="md"
+                variant="accent"
                 type="button"
                 onClick={handleSelectType}
                 disabled={registering || atLimit}
-                className="btn-brutal bg-brutal-pink px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                className="disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {registering
                   ? formatMessage({ id: "machine.add.settingUp" })
                   : formatMessage({ id: "common.announcement.next" })}
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -321,36 +311,41 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
               computerInstallCommand={computerInstall}
               windowsComputerCommand={windowsComputerSetupCommand}
               windowsComputerInstallCommand={windowsComputerInstall}
-              macLinuxDaemonCommand={macLinuxDaemonCommand}
-              windowsDaemonCommand={windowsDaemonCommand}
             />
 
             {/* Waiting indicator */}
             <Banner
               intent="info"
               className="mb-4"
-              icon={<StatusDot tone="bg-brutal-orange" pulse className="self-center" />}
+              // rui Banner only lays out a leading indicator that is an <svg> or a
+              // `data-slot="status"` element (its own Status). The old custom
+              // StatusDot was a plain <span>, so the grid put the text in row 1 and
+              // the dot underneath it (task #665).
+              icon={<Status variant="warning" pulse />}
             >
-              <span className="font-bold text-black">
+              <span className="font-bold text-foreground-strong theme-brutal:text-black">
                 {formatMessage({ id: "machine.add.waitingForConnect" })}
               </span>
             </Banner>
 
             <div className="flex justify-end gap-3">
-              <button
+              <Button
+                size="md"
+                variant="outline"
                 type="button"
                 onClick={handleCancel}
-                className="btn-brutal bg-white px-4 py-2 text-sm"
               >
                 {formatMessage({ id: "common.confirm.cancel" })}
-              </button>
-              <button
+              </Button>
+              <Button
+                size="md"
+                variant="success"
                 type="button"
                 disabled
-                className="btn-brutal bg-brutal-lime/50 px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                className="disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {formatMessage({ id: "machine.add.done" })}
-              </button>
+              </Button>
             </div>
           </div>
         )}
@@ -358,14 +353,14 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
         {/* Step 3: Connected — name the machine */}
         {step === "connected" && (
           <div>
-            <div className="mb-4 flex items-center gap-3 border-2 border-black bg-brutal-lime/30 p-4">
-              <CheckCircle size={24} className="text-black shrink-0" />
+            <div className="mb-4 flex items-center gap-3 rounded-md border border-line-muted bg-success-soft p-4 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black">
+              <CheckCircle size={24} className="text-foreground-strong theme-brutal:text-black shrink-0" />
               <div>
-                <div className="font-bold text-sm text-black">
+                <div className="font-bold text-sm text-foreground-strong theme-brutal:text-black">
                   {formatMessage({ id: "machine.add.connectedSuccessfully" })}
                 </div>
                 {pendingMachine?.hostname && (
-                  <div className="text-xs text-black/60 font-mono mt-0.5">
+                  <div className="text-xs text-foreground-muted theme-brutal:text-black/60 font-mono mt-0.5">
                     {pendingMachine.hostname} — {pendingMachine.os || formatMessage({ id: "machine.add.unknownOs" })}
                   </div>
                 )}
@@ -377,23 +372,23 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
               hint={formatMessage({ id: "machine.add.computerNameHint" })}
               className="mb-4"
             >
-              <input
+              <Input
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="input-brutal w-full text-sm"
+                className="w-full text-sm"
                 placeholder={pendingMachine?.hostname || formatMessage({ id: "machine.add.computerNamePlaceholder" })}
                 autoFocus
               />
             </FormField>
 
             {needsComputerMatchConfirmation && (
-              <label className="mb-4 flex items-start gap-2 border-2 border-black bg-white p-3 text-sm font-bold">
-                <input
-                  type="checkbox"
+              <label className="mb-4 flex items-start gap-2 border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white p-3 text-sm font-bold">
+                <Checkbox
                   checked={confirmedComputerMatch}
-                  onChange={(event) => setConfirmedComputerMatch(event.target.checked)}
-                  className="mt-0.5 h-4 w-4 accent-black"
+                  onCheckedChange={(event) => setConfirmedComputerMatch(event)}
+                  className="mt-0.5"
+                  aria-label={formatMessage({ id: "machine.add.confirmComputerMatch" }, { hostname: pendingMachine?.hostname ? ` (${pendingMachine.hostname})` : "" })}
                 />
                 <span>
                   {formatMessage(
@@ -405,20 +400,22 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
             )}
 
             <div className="flex justify-end">
-              <button
+              <Button
+                size="md"
+                variant="success"
                 type="button"
                 onClick={handleDone}
                 disabled={saving || (needsComputerMatchConfirmation && !confirmedComputerMatch)}
-                className="btn-brutal bg-brutal-lime px-4 py-2 text-sm disabled:opacity-50"
+                className="disabled:opacity-50"
               >
                 {saving
                   ? formatMessage({ id: "machine.add.saving" })
                   : formatMessage({ id: "machine.add.done" })}
-              </button>
+              </Button>
             </div>
           </div>
         )}
-      </div>
+      </Card>
     </Modal>
   );
 }

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import { routeFamilyForPath } from "./transportTrace.js";
+import { routeFamilyForPath } from "./transportTrace";
 
 // Locks the attachment-comments classifier ordering (PR3 review finding):
 // the comments-specific family must win over the generic attachment families
@@ -29,6 +28,13 @@ test("routeFamilyForPath classifies attachment comments ahead of generic attachm
 test("routeFamilyForPath classifies agent-api activity ingest", () => {
   assert.equal(routeFamilyForPath("/internal/agent-api/activity"), "agent-api/activity");
   assert.equal(routeFamilyForPath("/internal/agent-api/activity?batch=1"), "agent-api/activity");
+});
+
+test("routeFamilyForPath classifies thread list separately from thread unfollow", () => {
+  assert.equal(routeFamilyForPath("/internal/agent-api/threads"), "threads");
+  assert.equal(routeFamilyForPath("/internal/agent-api/threads/unfollow"), "threads/unfollow");
+  assert.equal(routeFamilyForPath("/internal/agent/agent-1/threads"), "threads");
+  assert.equal(routeFamilyForPath("/internal/agent/agent-1/threads/unfollow"), "threads/unfollow");
 });
 
 test("routeFamilyForPath classifies direct attachment upload control-plane calls", () => {

@@ -22,7 +22,6 @@ import { strict as assert } from "node:assert";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 const vectorsDir = resolve(import.meta.dirname, "../../shared/src/testVectors");
 const vectorsPath = resolve(vectorsDir, "threadRepliesReadModel.vectors.json");

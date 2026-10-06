@@ -21,23 +21,23 @@
 //     normally).
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { ComputerAttachClient } from "../apiClient.js";
+import { ComputerAttachClient } from "../apiClient";
 import {
   deriveDefaultComputerName,
   serverAttachmentPath,
   userSessionPath,
-} from "../paths.js";
-import { formatServerSlugDisplay, normalizeServerSlug, resolveAttachedServerSlug } from "../serverState.js";
-import { canonicalizeServerUrl, resolveServerUrl, resolveServerUrlEnv } from "../serverUrl.js";
-import type { ComputerApiEvent } from "../lib/events.js";
-import { ComputerServiceError } from "./errors.js";
+} from "../paths";
+import { formatServerSlugDisplay, normalizeServerSlug, resolveAttachedServerSlug } from "../serverState";
+import { canonicalizeServerUrl, resolveServerUrl, resolveServerUrlEnv } from "../serverUrl";
+import type { ComputerApiEvent } from "../lib/events";
+import { ComputerServiceError } from "./errors";
 import {
   ensureUsableUserSession,
   readUserSessionIdentity,
   refreshUserSession,
   type UserSessionIdentity,
-} from "../lib/userSession.js";
-import { accountUnavailableMessage } from "../accountUnavailable.js";
+} from "../lib/userSession";
+import { accountUnavailableMessage } from "../accountUnavailable";
 
 export interface AttachInput {
   serverSlug: string;

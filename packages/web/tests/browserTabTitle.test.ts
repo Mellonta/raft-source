@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   genericAppDocumentTitle,
   getServerRouteDocumentTitle,
   hostShellFallbackDocumentTitle,
+  serverRouteChannelId,
+  serverRouteDmId,
   serverRouteAgentId,
   serverRouteMachineId,
 } from "../src/utils/browserDocumentTitle";
@@ -24,10 +25,58 @@ test("server routes keep the server label first by default", () => {
   assert.equal(genericAppDocumentTitle(), "Raft");
 });
 
+test("browser titles prefer the active channel label on channel and DM routes", () => {
+  assert.equal(
+    getServerRouteDocumentTitle("/s/botiverse/channel/channel-1", server, { channelLabel: "#wg-drafts-build" }),
+    "#wg-drafts-build | Botiverse | Raft",
+  );
+  assert.equal(
+    getServerRouteDocumentTitle("/s/other/channel/channel-1", { name: "Other server", slug: "other" }, { channelLabel: "#wg-drafts-build" }),
+    "#wg-drafts-build | Other server | Raft",
+  );
+  assert.equal(serverRouteChannelId("/s/botiverse/channel/channel-1", server.slug), "channel-1");
+
+  assert.equal(
+    getServerRouteDocumentTitle("/s/botiverse/dm/dm-1", server, { channelLabel: "@Cindy" }),
+    "@Cindy | Botiverse | Raft",
+  );
+  assert.equal(serverRouteDmId("/s/botiverse/dm/dm-1", server.slug), "dm-1");
+});
+
+test("browser thread titles retain the parent channel context", () => {
+  assert.equal(
+    getServerRouteDocumentTitle(
+      "/s/botiverse/channel/channel-1",
+      server,
+      { channelLabel: "#wg-drafts-build", threadChannelLabel: "#wg-drafts-build" },
+    ),
+    "#wg-drafts-build - Thread | Botiverse | Raft",
+  );
+
+  assert.equal(
+    getServerRouteDocumentTitle(
+      "/s/botiverse/dm/dm-1",
+      server,
+      { channelLabel: "@Cindy", threadChannelLabel: "@Cindy" },
+    ),
+    "@Cindy - Thread | Botiverse | Raft",
+  );
+});
+
 test("host-shell Computers routes publish only the native header title", () => {
   assert.equal(hostShellFallbackDocumentTitle(fallbacks), "Computers");
   assert.equal(
     getServerRouteDocumentTitle("/s/botiverse/computers", server, {}, true, fallbacks),
+    "Computers",
+  );
+  assert.equal(
+    getServerRouteDocumentTitle(
+      "/s/botiverse/channel/channel-1",
+      server,
+      { channelLabel: "#wg-drafts-build", threadChannelLabel: "#wg-drafts-build" },
+      true,
+      fallbacks,
+    ),
     "Computers",
   );
   assert.equal(

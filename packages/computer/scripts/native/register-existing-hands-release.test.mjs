@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { test } from "vitest";
 import {
   prepareVerifiedCandidate,
   registerExistingHandsRelease,
@@ -32,7 +31,7 @@ function jsonBytes(value) {
   return Buffer.from(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-function makeFixture({ wrongExpandedTarget = null } = {}) {
+function makeFixture({ wrongExpandedTarget = null, version: fixtureVersion = version, featureChannel = null } = {}) {
   const files = new Map();
   const put = (name, bytes) => {
     const body = Buffer.from(bytes);
@@ -77,7 +76,7 @@ function makeFixture({ wrongExpandedTarget = null } = {}) {
     }
     targets[target] = row;
   }
-  const manifest = { version, nodeVersion: "24.15.0", photonWasm: photon, targets };
+  const manifest = { version: fixtureVersion, nodeVersion: "24.15.0", photonWasm: photon, targets };
   const manifestBytes = jsonBytes(manifest);
   files.set("manifest.json", manifestBytes);
   const inventory = [...files.entries()]
@@ -87,8 +86,8 @@ function makeFixture({ wrongExpandedTarget = null } = {}) {
   const receipt = {
     schemaVersion: 1,
     sourceSha: sourceCommit,
-    rcTag: `computer-v${version}-rc.1`,
-    version,
+    ...(featureChannel ? { featureChannel } : { rcTag: `computer-v${fixtureVersion}-rc.1` }),
+    version: fixtureVersion,
     nodeVersion: "24.15.0",
     manifestSha256: sha256(manifestBytes),
     inventorySha256: sha256(inventoryBytes),
@@ -253,10 +252,95 @@ test("alpha is an exact supported channel and reaches the publisher with channel
   assert.equal(published.mode, "register-or-exact-reuse");
 });
 
+// task #816 — a named feature channel is an exact supported channel; its
+// version must carry the channel's own suffix.
+test("a named feature channel reaches the publisher with its slug and a channel-stamped version", async () => {
+  const fixture = makeFixture({ version: "1.0.33-constructed-wake-context.1", featureChannel: "constructed-wake-context" });
+  let published;
+  const result = await registerExistingHandsRelease({
+    ...verifierOptions(fixture, fixtureFetch(fixture, [])),
+    version: "1.0.33-constructed-wake-context.1",
+    channel: "constructed-wake-context",
+    confirmation: "REGISTER-EXACT-RAFT-COMPUTER-CLI-CONSTRUCTED-WAKE-CONTEXT",
+    runId: "run-1",
+    runUrl: "https://github.com/botiverse/slock/actions/runs/run-1",
+    publishImpl: async (options) => {
+      published = options;
+      return { channel_id: "channel-cwc" };
+    },
+  });
+  assert.equal(result.channel_id, "channel-cwc");
+  assert.equal(published.channel, "constructed-wake-context");
+  assert.equal(published.mode, "register-or-exact-reuse");
+});
+
+test("a feature channel refuses a plain semver, a version stamped for another channel, and reserved cohort words", async () => {
+  const fixture = makeFixture();
+  for (const options of [
+    { channel: "constructed-wake-context", version: "1.0.33", confirmation: "REGISTER-EXACT-RAFT-COMPUTER-CLI-CONSTRUCTED-WAKE-CONTEXT", expected: /must be <major>\.<minor>\.<patch>-constructed-wake-context/ },
+    { channel: "constructed-wake-context", version: "1.0.33-other-feature.1", confirmation: "REGISTER-EXACT-RAFT-COMPUTER-CLI-CONSTRUCTED-WAKE-CONTEXT", expected: /must be <major>\.<minor>\.<patch>-constructed-wake-context/ },
+    { channel: "main", version: "1.0.33-constructed-wake-context.1", confirmation: "REGISTER-EXACT-RAFT-COMPUTER-CLI-MAIN", expected: /exact stable semver/ },
+    { channel: "stable", version: "1.0.33-stable.1", confirmation: "REGISTER-EXACT-RAFT-COMPUTER-CLI-STABLE", expected: /named feature channel/ },
+    { channel: "Constructed-Wake-Context", version: "1.0.33-constructed-wake-context.1", confirmation: "REGISTER-EXACT-RAFT-COMPUTER-CLI-CONSTRUCTED-WAKE-CONTEXT", expected: /named feature channel/ },
+  ]) {
+    let candidateCalls = 0;
+    let publishCalls = 0;
+    const { expected, ...rest } = options;
+    await assert.rejects(
+      registerExistingHandsRelease({
+        ...verifierOptions(fixture, async () => {
+          candidateCalls += 1;
+          throw new Error("candidate network must not be called");
+        }),
+        ...rest,
+        runId: "run-1",
+        runUrl: "https://github.com/botiverse/slock/actions/runs/run-1",
+        publishImpl: async () => {
+          publishCalls += 1;
+          throw new Error("Hands must not be called");
+        },
+      }),
+      expected,
+    );
+    assert.equal(candidateCalls, 0, `${options.channel}/${options.version}: no candidate access`);
+    assert.equal(publishCalls, 0, `${options.channel}/${options.version}: no Hands access`);
+  }
+});
+
+test("receipt identity is channel-bound: an RC receipt cannot register to a feature channel and vice versa", async () => {
+  // RC receipt (rcTag) presented for a feature channel with a matching stamped version.
+  const rcFixture = makeFixture({ version: "1.0.33-constructed-wake-context.1" });
+  let publishCalls = 0;
+  await assert.rejects(
+    registerExistingHandsRelease({
+      ...verifierOptions(rcFixture, fixtureFetch(rcFixture, [])),
+      version: "1.0.33-constructed-wake-context.1",
+      channel: "constructed-wake-context",
+      confirmation: "REGISTER-EXACT-RAFT-COMPUTER-CLI-CONSTRUCTED-WAKE-CONTEXT",
+      runId: "run-1",
+      runUrl: "https://github.com/botiverse/slock/actions/runs/run-1",
+      publishImpl: async () => { publishCalls += 1; throw new Error("Hands must not be called"); },
+    }),
+    /candidate receipt identity mismatch/,
+  );
+  // Feature receipt presented for main.
+  const featureFixture = makeFixture({ featureChannel: "constructed-wake-context" });
+  await assert.rejects(
+    registerExistingHandsRelease({
+      ...verifierOptions(featureFixture, fixtureFetch(featureFixture, [])),
+      runId: "run-1",
+      runUrl: "https://github.com/botiverse/slock/actions/runs/run-1",
+      publishImpl: async () => { publishCalls += 1; throw new Error("Hands must not be called"); },
+    }),
+    /candidate receipt identity mismatch/,
+  );
+  assert.equal(publishCalls, 0);
+});
+
 test("unsupported or confirmation-mismatched channel fails before candidate and Hands access", async () => {
   const fixture = makeFixture();
   for (const options of [
-    { channel: "beta", confirmation: "REGISTER-EXACT-RAFT-COMPUTER-CLI-BETA" },
+    { channel: "rc", confirmation: "REGISTER-EXACT-RAFT-COMPUTER-CLI-RC" },
     { channel: "alpha", confirmation: "REGISTER-EXACT-RAFT-COMPUTER-CLI-MAIN" },
   ]) {
     let candidateCalls = 0;
@@ -275,7 +359,7 @@ test("unsupported or confirmation-mismatched channel fails before candidate and 
           throw new Error("Hands must not be called");
         },
       }),
-      /--channel must be exactly main or alpha|channel-bound exact phrase/,
+      /--channel must be exactly main, alpha, or a named feature channel|channel-bound exact phrase/,
     );
     assert.equal(candidateCalls, 0);
     assert.equal(publishCalls, 0);

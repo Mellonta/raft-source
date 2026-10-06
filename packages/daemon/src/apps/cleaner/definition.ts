@@ -1,7 +1,7 @@
 /**
  * daemon app-owned <system.cleaner> definition (task #203).
  *
- * Registers the Cleaner's memory_size_hint notification class on the generic
+ * Registers the Cleaner's memory and disk notification classes on the generic
  * #201 typed-Inbox seam via the injected registry. No app name enters OS core —
  * this file IS the app-owned package the substrate registry imports. The closed
  * source-ref schema + bounded preview/action come from here (never freeform
@@ -15,12 +15,13 @@ import {
 import {
   CLEANER_APP_ID,
   CLEANER_NOTIFICATION_CLASS,
-} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol.js";
+  CLEANER_DISK_NOTIFICATION_CLASS,
+} from "@botiverse/raft-shared/src/apps/cleaner/configProtocol";
 import {
   createAgentAppInboxStore,
   type AgentAppInboxStore,
   type AgentAppNotificationClassDefinition,
-} from "../../agentAppInbox.js";
+} from "../../agentAppInbox";
 
 /**
  * Closed source-ref schema for a Cleaner measurement item. id = owning agent.
@@ -46,7 +47,7 @@ function isSafeOwnerId(value: string): boolean {
 }
 
 /** Normalize untrusted raw into the closed source-ref shape (fail closed). */
-function normalizeMemoryHintSourceRef(raw: unknown): { ok: true; ref: AgentInboxSourceRef } | { ok: false; message: string } {
+function normalizeCleanerSourceRef(raw: unknown, kind: "memory_hint" | "disk_hint"): { ok: true; ref: AgentInboxSourceRef } | { ok: false; message: string } {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { ok: false, message: "cleaner sourceRef must be an object" };
   }
@@ -56,8 +57,8 @@ function normalizeMemoryHintSourceRef(raw: unknown): { ok: true; ref: AgentInbox
       return { ok: false, message: `cleaner sourceRef rejects field: ${key}` };
     }
   }
-  if (cand.kind !== "memory_hint") {
-    return { ok: false, message: `cleaner sourceRef kind must be memory_hint: ${String(cand.kind)}` };
+  if (cand.kind !== kind) {
+    return { ok: false, message: `cleaner sourceRef kind must be ${kind}: ${String(cand.kind)}` };
   }
   if (typeof cand.agentId !== "string" || !isSafeOwnerId(cand.agentId)) {
     return { ok: false, message: "cleaner sourceRef.agentId must be a safe owner id" };
@@ -65,7 +66,7 @@ function normalizeMemoryHintSourceRef(raw: unknown): { ok: true; ref: AgentInbox
   // Stable owner identity: config apply removes an obsolete current item before
   // the next measurement. Config revision/threshold must NOT create parallel
   // identities for the same owner.
-  return { ok: true, ref: { kind: "memory_hint", id: cand.agentId } };
+  return { ok: true, ref: { kind, id: cand.agentId } };
 }
 
 export interface CleanerAppliedActionConfig {
@@ -126,13 +127,13 @@ export function createSystemCleanerNotificationClassDefinition(
   return {
     retention: "transient",
     primaryAction: { kind: "run_command", commandId: "cleaner.configure" },
-    normalizeSourceRef: normalizeMemoryHintSourceRef,
+    normalizeSourceRef: (raw) => normalizeCleanerSourceRef(raw, "memory_hint"),
     materializeActionCli: ({ sourceRef }) => materializeCleanerActionCli(sourceRef, resolveAppliedConfig),
   };
 }
 
 /**
- * #203 injected registry fragment ({ system.cleaner : { memory_size_hint : def } }).
+ * Injected registry fragment for memory and disk hints.
  * OS core stays app-name free; this is imported only when wiring the Cleaner app.
  */
 export function createSystemCleanerAppRegistry(
@@ -141,6 +142,15 @@ export function createSystemCleanerAppRegistry(
   return {
     [CLEANER_APP_ID]: {
       [CLEANER_NOTIFICATION_CLASS]: createSystemCleanerNotificationClassDefinition(resolveAppliedConfig),
+      [CLEANER_DISK_NOTIFICATION_CLASS]: {
+        retention: "transient",
+        primaryAction: { kind: "run_command", commandId: "cleaner.disk_guidance" },
+        normalizeSourceRef: (raw: unknown) => normalizeCleanerSourceRef(raw, "disk_hint"),
+        materializeActionCli: ({ sourceRef }: { sourceRef: AgentInboxSourceRef }) =>
+          resolveAppliedConfig(sourceRef.id)
+            ? 'raft manual get app --intent "Free disk space safely" --reason "Cleaner reported low disk space"'
+            : null,
+      },
     },
   } as const;
 }

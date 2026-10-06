@@ -19,11 +19,10 @@ import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { createServer as nodeCreateServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { test } from "vitest";
 
-import { connectService } from "../lib/ipc-client.js";
-import { ServiceClientError, type RequestMethodMap } from "../lib/types.js";
-import { createIpcServer, type IpcServer, type RequestHandlerMap } from "./ipc-server.js";
+import { connectService } from "../lib/ipc-client";
+import { ServiceClientError, type RequestMethodMap } from "../lib/types";
+import { createIpcServer, type IpcServer, type RequestHandlerMap } from "./ipc-server";
 
 // Canonical `ComputerStatusReport` fixture — matches the lib/types.ts
 // `ServiceStatusResult` shape exactly so handler return types
@@ -56,8 +55,6 @@ const STATUS_FIXTURE: RequestMethodMap["service-status"]["result"] = {
     shellEnvironment: null,
     },
   },
-  upgrade: null,
-  hostLifecycle: null,
   servers: [],
 };
 

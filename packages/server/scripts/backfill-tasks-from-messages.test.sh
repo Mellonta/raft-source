@@ -27,7 +27,7 @@ trap cleanup EXIT
 fail() { echo "FAIL: $1" >&2; exit 1; }
 psql_q() { docker exec -i "$container" psql -U postgres -d x -t -A -c "$1"; }
 run_script() { DATABASE_URL="$DB" NO_PROXY="127.0.0.1,localhost,::1" \
-  pnpm --filter @botiverse/raft-server exec tsx scripts/backfill-tasks-from-messages.ts "$@"; }
+  pnpm --filter @botiverse/raft-server exec node --import @oxc-node/core/register scripts/backfill-tasks-from-messages.ts "$@"; }
 
 echo "starting throwaway postgres on :${port}"
 docker run -d --rm --name "$container" -e POSTGRES_PASSWORD=x -e POSTGRES_DB=x \

@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 
-import type { ApiResponse } from "../../client.js";
-import type { AgentContext } from "../../auth/env.js";
-import { createCommandContext } from "../../core/context.js";
-import type { CliIo } from "../../core/io.js";
-import { reminderLogCommand } from "./log.js";
+import type { ApiResponse } from "../../client";
+import type { AgentContext } from "../../auth/env";
+import { createCommandContext } from "../../core/context";
+import type { CliIo } from "../../core/io";
+import { reminderLogCommand } from "./log";
 
 const reminderId = "12345678-1234-4123-8123-123456789abc";
 

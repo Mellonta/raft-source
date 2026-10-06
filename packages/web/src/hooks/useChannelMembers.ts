@@ -54,6 +54,8 @@ interface ChannelMembersPayload {
 export type AddChannelMembersBatchInput = {
   userIds: string[];
   agentIds: string[];
+  actionCardMessageId?: string;
+  actionCardConfirmationVersion?: number;
 };
 
 export type AddChannelMembersBatchResult = {
@@ -188,9 +190,13 @@ export function useChannelMembers(channelId: string, { enabled = true }: { enabl
     });
   }, [channelId, enabled, loadMembers]);
 
-  const addAgent = useCallback(async (agentId: string) => {
+  const addAgent = useCallback(async (agentId: string, context?: { actionCardMessageId?: string; actionCardConfirmationVersion?: number }) => {
     try {
-      await api.post(`/channels/${channelId}/members`, { agentId });
+      await api.post(`/channels/${channelId}/members`, {
+        agentId,
+        ...(context?.actionCardMessageId ? { actionCardMessageId: context.actionCardMessageId } : {}),
+        ...(context?.actionCardConfirmationVersion !== undefined ? { actionCardConfirmationVersion: context.actionCardConfirmationVersion } : {}),
+      });
       notifyChannelMembersChanged(channelId);
       await loadMembers();
     } catch (err) {
@@ -212,9 +218,13 @@ export function useChannelMembers(channelId: string, { enabled = true }: { enabl
     }
   }, [channelId, loadMembers]);
 
-  const addHuman = useCallback(async (userId: string) => {
+  const addHuman = useCallback(async (userId: string, context?: { actionCardMessageId?: string; actionCardConfirmationVersion?: number }) => {
     try {
-      await api.post(`/channels/${channelId}/members`, { userId });
+      await api.post(`/channels/${channelId}/members`, {
+        userId,
+        ...(context?.actionCardMessageId ? { actionCardMessageId: context.actionCardMessageId } : {}),
+        ...(context?.actionCardConfirmationVersion !== undefined ? { actionCardConfirmationVersion: context.actionCardConfirmationVersion } : {}),
+      });
       notifyChannelMembersChanged(channelId);
       await loadMembers();
     } catch (err) {

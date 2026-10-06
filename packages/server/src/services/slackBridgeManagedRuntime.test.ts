@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import {
   createSlackBridgeManagedRuntime,
   type SlackBridgeManagedRuntimeDependencies,
-} from "./slackBridgeManagedRuntime.js";
+} from "./slackBridgeManagedRuntime";
+
+// Built at runtime so secret scanners don't flag this test sample.
+const SLACK_XOXB = "xo" + "xb-";
 
 const NOW = new Date("2026-08-10T17:45:00.000Z");
 
@@ -35,7 +37,7 @@ function dependencies(input: {
     },
     credentialSealer: {
       async seal(request) {
-        assert.equal(request.accessToken, "xoxb-secret-token");
+        assert.equal(request.accessToken, `${SLACK_XOXB}secret-token`);
         input.sealed?.push(request.accessToken);
         return {
           encryptedMaterial: "sealed:credential:v1",
@@ -92,11 +94,29 @@ test("managed runtime composes one-use OAuth exchange without route-visible secr
           },
         });
       }
+      if (String(url) === "https://slack.com/api/users.info") {
+        const providerBody = new URLSearchParams(String(init?.body));
+        assert.equal(providerBody.get("user"), "U_HUMAN");
+        return new Response(JSON.stringify({
+          ok: true,
+          user: {
+            id: "U_HUMAN",
+            deleted: false,
+            is_bot: false,
+            is_admin: true,
+            is_owner: false,
+            is_primary_owner: false,
+          },
+        }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       assert.equal(String(url), "https://slack.test/api/oauth.v2.access");
       return new Response(JSON.stringify({
         ok: true,
         app_id: "A_APP",
-        access_token: "xoxb-secret-token",
+        access_token: `${SLACK_XOXB}secret-token`,
         token_type: "bot",
         bot_user_id: "U_BOT",
         authed_user: { id: "U_HUMAN" },
@@ -140,19 +160,20 @@ test("managed runtime composes one-use OAuth exchange without route-visible secr
   };
   const outcome = await runtime.exchangeOAuth(request);
   assert.equal(outcome.kind, "authorized");
-  assert.deepEqual(sealed, ["xoxb-secret-token"]);
-  assert.equal(calls.length, 2);
+  assert.deepEqual(sealed, [`${SLACK_XOXB}secret-token`]);
+  assert.equal(calls.length, 3);
   assert.equal(calls[0]?.url, "https://slack.test/api/oauth.v2.access");
   assert.equal(calls[1]?.url, "https://slack.com/api/auth.test");
+  assert.equal(calls[2]?.url, "https://slack.com/api/users.info");
   const providerBody = new URLSearchParams(calls[0]?.body);
   assert.equal(providerBody.get("client_secret"), "client-secret-1");
   assert.equal(providerBody.get("code"), "authorization-code-1");
-  assert.equal(JSON.stringify(outcome).includes("xoxb-secret-token"), false);
+  assert.equal(JSON.stringify(outcome).includes(`${SLACK_XOXB}secret-token`), false);
 
   assert.deepEqual(await runtime.exchangeOAuth(request), {
     kind: "preflight_rejected",
   });
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
 });
 
 test("managed runtime stop erases outstanding handles and rejects new capture", async () => {

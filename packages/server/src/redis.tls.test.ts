@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import Redis from "ioredis";
-import { test } from "vitest";
-import { initRedis, getRedis, getRedisPub, getRedisSub, getRedisReplicaSub, resetRedisReplicaSub } from "./redis.js";
+import { initRedis, getRedis, getRedisPub, getRedisSub, getRedisReplicaSub, resetRedisReplicaSub } from "./redis";
 
 // Only the disposable loopback fixture from test:redis-tls may be used here.
 const fixtureUrl = process.env.RAFT_TEST_REDIS_TLS_URL;

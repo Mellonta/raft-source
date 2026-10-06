@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, eq, isNotNull, isNull, ne, sql } from "drizzle-orm";
 import { currentDate } from "@botiverse/raft-shared";
-import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index.js";
+import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
 import {
   agents,
   labDefinitions,
@@ -11,11 +11,11 @@ import {
   serverLabEnrollments,
   serverMembers,
   servers,
-} from "../db/schema.js";
+} from "../db/schema";
 import {
   actorRoleHasServerCapability,
   getActorServerRoleInServer,
-} from "../lib/actorPermissions.js";
+} from "../lib/actorPermissions";
 
 export type ServerLabActor = {
   type: "human" | "agent";

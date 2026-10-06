@@ -23,10 +23,10 @@
 import { mkdir, readFile, writeFile, appendFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { serviceStatePath, serviceLogPath, CURRENT_SCHEMA_VERSION } from "./paths.js";
-import type { CrashEntry } from "./health.js";
-import type { ServiceState } from "./lib/state.js";
-import { isServiceState } from "./lib/state.js";
+import { serviceStatePath, serviceLogPath, CURRENT_SCHEMA_VERSION } from "./paths";
+import type { CrashEntry } from "./health";
+import type { ServiceState } from "./lib/state";
+import { isServiceState } from "./lib/state";
 
 export interface ServiceStateFile {
   /**

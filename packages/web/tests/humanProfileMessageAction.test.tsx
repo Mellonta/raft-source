@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import HumanDetailPanel from "../src/components/member/HumanDetailPanel";
@@ -67,7 +66,12 @@ function renderPanel(profile: HumanProfile) {
 test("human profile Message action allows self-DM while still blocking remote joint humans", () => {
   seedViewer("member", "user-self");
   renderPanel(human({ userId: "user-self" }));
-  assert.ok(screen.getByRole("button", { name: "Message" }), "self profile keeps the Message entry");
+  const messageButton = screen.getByRole("button", { name: "Message" });
+  assert.ok(messageButton, "self profile keeps the Message entry");
+  // Since raft-ui 0.5.18 the DM affordance is the package-owned
+  // DirectMessageIcon — member panel and agent panel must read alike.
+  assert.equal(messageButton.querySelector("svg")?.getAttribute("viewBox"), "0 0 18 18");
+  assert.match(messageButton.querySelector("path")?.getAttribute("d") ?? "", /^M16\.25 5V4\.25/);
   cleanup();
 
   seedViewer("member", "user-self");

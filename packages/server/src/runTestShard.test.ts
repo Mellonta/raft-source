@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { assignOrphans } from "../scripts/runTestShard.js";
+import { assignOrphans } from "../scripts/runTestShard";
 
 // assignOrphans must be a pure function of (manifest shards, sorted orphan
 // paths, per-orphan estimate). Every shard runner computes the same Map

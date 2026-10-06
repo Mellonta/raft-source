@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { recoverSocketAuthWithLatestToken } from "../src/utils/socketAuthRecovery.js";
+import { recoverSocketAuthWithLatestToken } from "../src/utils/socketAuthRecovery";
 
 class FakeSocket {
   public auth: Record<string, unknown> = { token: "access-old", serverId: "server-1" };

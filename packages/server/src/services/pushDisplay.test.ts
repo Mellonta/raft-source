@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
-import { test } from "vitest";
 
 import {
   formatPushBody,
@@ -8,7 +7,7 @@ import {
   formatPushSurfaceTitle,
   summarizePushBody,
   toNotificationPlainText,
-} from "./pushDisplay.js";
+} from "./pushDisplay";
 
 test("push display preview normalizes and bounds message content", () => {
   assert.equal(summarizePushBody("  hello\n\nworld  ", 0), "hello world");

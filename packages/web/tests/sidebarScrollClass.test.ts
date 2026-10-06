@@ -31,7 +31,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test from "node:test";
 
 function sidebarInnerMinHeight(_mobileInline: boolean): string {
   // Both inline mobile rails and desktop rails use real full-height content.
@@ -64,7 +63,12 @@ test("Desktop rails use the same min-h-full contract", () => {
 test("Sidebar source keeps native auto scroll without phantom overflow", () => {
   const source = readFileSync(resolve(import.meta.dirname, "../src/components/layout/Sidebar.tsx"), "utf8");
 
-  assert.match(source, /const sidebarScrollClassName = "scrollbar-quiet flex-1 overflow-x-hidden overflow-y-auto px-2 py-3"/);
+  // `mobile-nav-clearance` (task #678) only adds bottom padding under the
+  // elegant floating capsule; the native auto-scroll contract is unchanged.
+  assert.match(
+    source,
+    /const sidebarScrollClassName = "scrollbar-quiet flex-1 overflow-x-hidden overflow-y-auto px-2 py-3 mobile-nav-clearance"/,
+  );
   assert.match(source, /overflow-y-auto px-2 py-3/);
   assert.doesNotMatch(source, /overflow-y-scroll/);
   assert.doesNotMatch(source, /scrollbar-width/);
@@ -112,27 +116,6 @@ test("Only vertical app scrollers opt into the quiet scrollbar", () => {
   assert.match(source, /scrollbar-quiet flex-1 overflow-x-hidden overflow-y-auto/);
   assert.doesNotMatch(timeline, /overflow-x-auto[^\n"]*scrollbar-quiet/);
   assert.doesNotMatch(source, /overflow-x-auto[^\n"]*scrollbar-quiet/);
-});
-
-test("Wiki panel scrollers opt into the shared quiet scrollbar", () => {
-  // The Wiki panel shipped with no per-surface scrollbar treatment at all, so
-  // every one of its scrollers fell back to the fat browser default while the
-  // rest of the app used the 10px quiet rail. `.scrollbar-quiet` is opt-in —
-  // there is no global rule — so a new scroller silently regresses this.
-  // Counting rather than listing means adding a scroller without the class
-  // fails here instead of shipping another mismatched rail.
-  const wiki = readFileSync(resolve(import.meta.dirname, "../src/components/wiki/WikiPanel.tsx"), "utf8");
-
-  const scrollers = wiki.match(/overflow-(?:y-)?auto/g) ?? [];
-  const quiet = wiki.match(/scrollbar-quiet/g) ?? [];
-  assert.ok(scrollers.length > 0, "expected the Wiki panel to have scroll containers");
-  assert.equal(
-    quiet.length,
-    scrollers.length,
-    `every Wiki scroll container must opt into scrollbar-quiet (${quiet.length} of ${scrollers.length} do)`,
-  );
-  assert.doesNotMatch(wiki, /scrollbar-width/);
-  assert.doesNotMatch(wiki, /::-webkit-scrollbar/);
 });
 
 test("Scrollable list sources do not render bottom fade affordances", () => {

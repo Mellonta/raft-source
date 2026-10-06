@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { validateAgentName, validateAgentNameReason, validateName } from "./index.js";
+import { validateAgentName, validateAgentNameReason, validateName } from "./index";
 
 test("validateAgentName rejects reserved mention-like handles case-insensitively", () => {
-  for (const name of ["all", "Human", "HUMANS", "agent", "Agents", "here", "Idle", "BUSY", "system"]) {
+  for (const name of ["all", "Human", "HUMANS", "agent", "Agents", "here", "Idle", "BUSY", "system", "reminders", "Reminders"]) {
     assert.match(validateAgentName(name) ?? "", /is reserved\. Choose another name\./i);
   }
 });

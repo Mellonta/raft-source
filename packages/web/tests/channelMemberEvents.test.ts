@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   notifyAllChannelMembersChanged,
   notifyChannelMembersChanged,
   subscribeChannelMembersChanged,
-} from "../src/store/channelMemberEvents.js";
+} from "../src/store/channelMemberEvents";
 
 test("channel member change notifications fan out by channel id", () => {
   const seen: Array<string | null> = [];

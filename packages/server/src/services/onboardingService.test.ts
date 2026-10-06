@@ -1,4 +1,3 @@
-import { afterEach, test } from "vitest";
 import assert from "node:assert/strict";
 import {
   ONBOARDING_OPENER_V2_FEATURE_FLAG_KEY,
@@ -15,7 +14,7 @@ import {
   triggerNewAgentAllChannelGreeting,
   triggerNewMemberOnboarding,
   triggerOwnerOnboardingOnAgentActivation,
-} from "./onboardingService.js";
+} from "./onboardingService";
 
 const OPENER_V2_ON = {
   key: ONBOARDING_OPENER_V2_FEATURE_FLAG_KEY,

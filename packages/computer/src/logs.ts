@@ -9,10 +9,10 @@
 // still cannot surface it via this command. The api throws `NO_DAEMON_LOG`
 // when the target log is absent; `present()` maps it to the shared stderr
 // error contract.
-import { resolveRaftHome } from "./paths.js";
-import { resolveTargetServerId } from "./targetServer.js";
-import { info, present } from "./output.js";
-import { createComputerApi } from "./lib/api.js";
+import { resolveRaftHome } from "./paths";
+import { resolveTargetServerId } from "./targetServer";
+import { info, present } from "./output";
+import { createComputerApi } from "./lib/api";
 
 export async function runLogs(opts: {
   lines?: number;

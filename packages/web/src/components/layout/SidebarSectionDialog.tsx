@@ -1,3 +1,5 @@
+import { Card, InputGroup, InputGroupAddon, InputGroupInput, Button } from "raft-ui";
+import CloseButton from "../ui/CloseButton";
 import { useState } from "react";
 import { X } from "lucide-react";
 import { useIntl } from "react-intl";
@@ -26,12 +28,12 @@ export default function SidebarSectionDialog({
 
   return (
     <Modal onClose={onClose} closeOnBackdrop>
-      <div className="card-brutal w-full max-w-sm bg-white p-5">
+      <Card className="w-full max-w-sm p-5">
         <div className="mb-4 flex items-center justify-between gap-3">
           <h2 className="text-base font-bold uppercase">{title}</h2>
-          <button type="button" onClick={onClose} className="btn-brutal-sm bg-white p-1" aria-label={formatMessage({ id: "common.close" })}>
+          <CloseButton type="button" onClick={onClose} className="" aria-label={formatMessage({ id: "common.close" })}>
             <X size={18} />
-          </button>
+          </CloseButton>
         </div>
         <form
           onSubmit={(event) => {
@@ -45,29 +47,31 @@ export default function SidebarSectionDialog({
             <div className="mb-1 text-xs font-bold uppercase">
               {formatMessage({ id: "layout.sidebar.sectionName" })}
             </div>
-            <div className="flex items-stretch border-2 border-black bg-white shadow-brutal-sm focus-within:shadow-brutal">
+            <InputGroup>
+              <InputGroupAddon className="p-0">
               <SidebarSectionEmojiPicker value={emoji} onChange={setEmoji} />
-              <input
+              </InputGroupAddon>
+              <InputGroupInput
                 autoFocus
                 aria-label={formatMessage({ id: "layout.sidebar.sectionName" })}
                 maxLength={80}
                 value={name}
                 onChange={(event) => setName(event.target.value)}
-                className="min-w-0 flex-1 bg-white px-3 py-2 font-display normal-case focus:outline-none"
+                className="min-w-0 flex-1 normal-case"
                 placeholder={formatMessage({ id: "layout.sidebar.sectionNamePlaceholder" })}
               />
-            </div>
+            </InputGroup>
           </div>
           <div className="flex justify-end gap-2">
-            <button type="button" onClick={onClose} className="btn-brutal bg-white px-3 py-2 text-sm">
+            <Button size="sm" variant="outline" type="button" onClick={onClose} className="px-3 py-2 text-sm">
               {formatMessage({ id: "layout.sidebar.cancelSection" })}
-            </button>
-            <button type="submit" disabled={!trimmedName} className="btn-brutal bg-brutal-pink px-3 py-2 text-sm disabled:opacity-50">
+            </Button>
+            <Button size="sm" variant="accent" type="submit" disabled={!trimmedName} className="px-3 py-2 text-sm disabled:opacity-50">
               {submitLabel}
-            </button>
+            </Button>
           </div>
         </form>
-      </div>
+      </Card>
     </Modal>
   );
 }

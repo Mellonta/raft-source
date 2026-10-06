@@ -1,22 +1,21 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   createMessageWindowHarness,
   flushAsyncWork,
-} from "../messageWindowHarness.js";
+} from "../messageWindowHarness";
 import {
   buildMainLayoutSocketBindings,
-} from "../../src/store/socketBridge.js";
+} from "../../src/store/socketBridge";
 import type {
   MainLayoutSocketBridgeSocket,
   SocketBinding,
-} from "../../src/store/socketBridge.js";
-import { useInboxStore } from "../../src/store/inboxStore.js";
-import { useMessageStore } from "../../src/store/messageStore.js";
-import type { Message } from "../../src/store/messageStore.js";
+} from "../../src/store/socketBridge";
+import { useInboxStore } from "../../src/store/inboxStore";
+import { useMessageStore } from "../../src/store/messageStore";
+import type { Message } from "../../src/store/messageStore";
 
 const CHANNEL_ID = "channel-1";
-const SERIAL = { concurrency: false };
+const SERIAL = {};
 const originalEvent = globalThis.Event;
 
 class FakeSocket implements MainLayoutSocketBridgeSocket {

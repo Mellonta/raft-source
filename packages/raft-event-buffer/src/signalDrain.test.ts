@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import test from "node:test";
 import {
   TRACE_EVENT_ROW_V2_SCHEMA_FINGERPRINT,
   TRACE_EVENT_ROW_V2_TABLE,
 } from "@botiverse/raft-shared";
-import { EventBuffer, type EventBufferDrainReceipt } from "./core.js";
-import { installEventBufferSignalDrain, type EventBufferSignalProcess } from "./signalDrain.js";
+import { EventBuffer, type EventBufferDrainReceipt } from "./core";
+import { installEventBufferSignalDrain, type EventBufferSignalProcess } from "./signalDrain";
 
 test("SIGTERM performs a bounded drain before exiting", async () => {
   const emitter = new EventEmitter();

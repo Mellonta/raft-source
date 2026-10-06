@@ -1,5 +1,5 @@
-import type { ExternalAvatarSourceAdapter } from "./externalAvatarMaterializerService.js";
-import { EXTERNAL_AVATAR_MAX_SOURCE_BYTES } from "./externalAvatarMaterializerService.js";
+import type { ExternalAvatarSourceAdapter } from "./externalAvatarMaterializerService";
+import { EXTERNAL_AVATAR_MAX_SOURCE_BYTES } from "./externalAvatarMaterializerService";
 
 const SLACK_AVATAR_HOSTS = new Set([
   "avatars.slack-edge.com",

@@ -69,6 +69,10 @@ export type ProbeHealth =
 
 export interface DomNodeRowMetric {
   selector: string;
+  /** Stable sidebar identity captured from the same DOM node as the fiber
+   *  metric. Keeping identity and metrics in one traversal prevents a
+   *  concurrently arriving row from shifting the two result sets. */
+  rowId: string | null;
   matched: boolean;
   componentName: string | null;
   /** Render count for the specific row fiber instance attached to this DOM
@@ -265,30 +269,54 @@ function recordCommit(root: FiberRoot): void {
   }
 }
 
-// Walk up from a DOM node to its owning React fiber. React stores the fiber
+// React fiber work-in-progress tags for memo boundaries. ChannelRow/DmRow are
+// `memo(...)` leaves: 14 = MemoComponent (custom compare), 15 =
+// SimpleMemoComponent (default shallow compare). Both are the "owning row
+// fiber" the #2640 gate is defined against.
+const MEMO_FIBER_TAGS = new Set([14, 15]);
+
+// Walk up from a DOM node to its owning row fiber. React stores the fiber
 // reference on the DOM element under a key that starts with `__reactFiber$`
-// (DOM-to-fiber link), and we then climb `fiber.return` until we hit a
-// composite fiber (skipping host elements like the <button>'s host fiber).
+// (DOM-to-fiber link), and we then climb `fiber.return`.
+//
+// The anchor MUST be the nearest memo() boundary above the node, not just the
+// nearest composite: bippy's didFiberRender reads the PerformedWork flag, and
+// when a memo fiber bails out React clones ONLY that fiber (clearing its flag)
+// while leaving descendant fibers untouched — descendants keep a STALE
+// PerformedWork flag from their last real render, which this probe would then
+// count once per commit. Pre-#7347 the row's DOM node was rendered directly by
+// the memo'd ChannelRow, so first-composite == memo boundary and counts were
+// exact. #7347 interposed unmemoized composites (SidebarItem → SidebarItemRoot
+// → BaseButton) below the memo boundary; counting those misreads every commit
+// as a row render (task #637). If no memo boundary exists (future unmemo'd
+// row), fall back to the first composite fiber — the pre-#637 behavior.
 function fiberFromDomNode(node: Element): Fiber | null {
   const key = Object.keys(node).find((k) => k.startsWith("__reactFiber$"));
   if (!key) return null;
   const hostFiber = (node as unknown as Record<string, Fiber>)[key];
   if (!hostFiber) return null;
   let f: Fiber | null = hostFiber;
-  while (f && !isCompositeFiber(f)) {
+  let firstComposite: Fiber | null = null;
+  while (f) {
+    if (isCompositeFiber(f)) {
+      if (!firstComposite) firstComposite = f;
+      if (MEMO_FIBER_TAGS.has(f.tag)) return f;
+    }
     f = f.return;
   }
-  return f;
+  return firstComposite;
 }
 
 function queryDomRows(selector: string): DomNodeRowMetric[] {
   const nodes = document.querySelectorAll(selector);
   const result: DomNodeRowMetric[] = [];
   nodes.forEach((node) => {
+    const rowId = node.getAttribute("data-sidebar-channel-id");
     const fiber = fiberFromDomNode(node);
     if (!fiber) {
       result.push({
         selector,
+        rowId,
         matched: false,
         componentName: null,
         renderCount: 0,
@@ -299,6 +327,7 @@ function queryDomRows(selector: string): DomNodeRowMetric[] {
     const rec = lookupInstanceRecord(fiber);
     result.push({
       selector,
+      rowId,
       matched: true,
       componentName: getDisplayName(fiber.type) ?? "Anonymous",
       renderCount: rec?.renderCount ?? 0,

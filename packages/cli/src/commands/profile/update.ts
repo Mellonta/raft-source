@@ -3,12 +3,12 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import type { Command } from "commander";
 import type { ProfileView } from "@botiverse/raft-shared";
 
-import { defineCommand, registerCliCommand } from "../../core/command.js";
-import type { CommandRuntimeOptions } from "../../core/context.js";
-import { cliError } from "../../core/errors.js";
-import { writeJson, writeText, NL } from "../../core/renderer.js";
-import { createAgentApiSurfaceClient } from "../../agentApiPath.js";
-import { formatProfile } from "./_format.js";
+import { defineCommand, registerCliCommand } from "../../core/command";
+import type { CommandRuntimeOptions } from "../../core/context";
+import { cliError } from "../../core/errors";
+import { writeJson, writeText, NL } from "../../core/renderer";
+import { createAgentApiSurfaceClient } from "../../agentApiPath";
+import { formatProfile } from "./_format";
 
 const MAX_PROFILE_AVATAR_BYTES = 2 * 1024 * 1024;
 const PROFILE_AVATAR_MIME_TYPES = new Set([

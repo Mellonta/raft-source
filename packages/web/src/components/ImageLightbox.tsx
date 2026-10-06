@@ -1,12 +1,13 @@
+import { Badge, Spinner, Button } from "raft-ui";
+import CloseButton from "./ui/CloseButton";
 import { useEffect, useState, useCallback } from "react";
 import { useIntl } from "react-intl";
 import { X, ChevronLeft, ChevronRight, Download, ImageOff, MessageSquareMore } from "lucide-react";
 import { useImageLightboxStore } from "../store/imageLightboxStore";
 import { transparentImageBackgroundClass } from "../utils/imagePreviewStyles";
 import api from "../api/client";
-import Spinner from "./ui/Spinner";
 import Lightbox from "./ui/Lightbox";
-import Button from "./ui/Button";
+import Tooltip from "./ui/Tooltip";
 import { AttachmentCommentsPanel } from "./message/AttachmentCommentsPanel";
 import { useImageZoom } from "./ImageZoom";
 
@@ -183,12 +184,6 @@ export default function ImageLightbox() {
     }).catch(() => {});
   };
 
-  // Arrow button: always visible for symmetry, but disabled style when at boundary
-  const arrowBtn = (disabled: boolean) =>
-    disabled
-      ? "flex items-center justify-center size-12 border-2 border-white/10 bg-white/5 text-white/20 cursor-default"
-      : `flex items-center justify-center size-12 border-2 border-black bg-white text-black transition-colors duration-100 hover:bg-soft-signal`;
-
   return (
     <Lightbox
       onClose={close}
@@ -197,59 +192,62 @@ export default function ImageLightbox() {
     >
       {/* Title bar — in normal flow so image stage naturally starts below it */}
       <div
-        className="safe-top safe-left safe-right pointer-events-auto shrink-0 border-b-2 border-black bg-white"
+        className="safe-top safe-left safe-right pointer-events-auto shrink-0 border-b-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex h-14 items-center gap-3 px-4">
-          <div className="min-w-0 flex-1 truncate text-sm font-bold font-display text-black">
+          <div className="min-w-0 flex-1 truncate text-sm font-bold font-display text-foreground-strong theme-brutal:text-black">
             {current.filename}
           </div>
           {hasMultiple && (
-            <div className="shrink-0 border-2 border-black bg-soft-signal px-3 py-1 text-xs font-bold font-display text-black">
+            <Badge variant="primary" className="shrink-0">
               {currentIndex + 1} / {images.length}
-            </div>
+            </Badge>
           )}
           <div className="flex shrink-0 items-center gap-1.5">
             {currentCommentContext ? (
               /* Same iconText pattern as the preview-shell comments toggle. */
+              <Tooltip content={commentsOpen
+                ? formatMessage({ id: "common.lightbox.hideComments" })
+                : formatMessage({ id: "common.lightbox.comments" })}>
+                <Button
+                  type="button"
+                  onClick={toggleComments}
+                  size="icon-sm"
+                  variant={commentsOpen ? "primary" : "outline"}
+                  aria-label={
+                    commentsOpen
+                      ? formatMessage({ id: "common.lightbox.hideComments" })
+                      : formatMessage({ id: "common.lightbox.comments" })
+                  }
+                  aria-pressed={commentsOpen}
+                  data-comments-open={commentsOpen ? "true" : "false"}
+                  data-message-affordance="attachment-comments-toggle"
+                >
+                  <MessageSquareMore size={14} aria-hidden="true" />
+                </Button>
+              </Tooltip>
+            ) : null}
+            <Tooltip content={formatMessage({ id: "common.lightbox.download" })}>
               <Button
                 type="button"
-                onClick={toggleComments}
-                shape="icon"
-                tone={commentsOpen ? "yellow" : "white"}
-                title={
-                  commentsOpen
-                    ? formatMessage({ id: "common.lightbox.hideComments" })
-                    : formatMessage({ id: "common.lightbox.comments" })
-                }
-                aria-label={
-                  commentsOpen
-                    ? formatMessage({ id: "common.lightbox.hideComments" })
-                    : formatMessage({ id: "common.lightbox.comments" })
-                }
-                aria-pressed={commentsOpen}
-                data-comments-open={commentsOpen ? "true" : "false"}
-                data-message-affordance="attachment-comments-toggle"
+                onClick={handleDownload}
+                size="icon-sm"
+                variant="outline"
+                aria-label={formatMessage({ id: "common.lightbox.download" })}
               >
-                <MessageSquareMore size={14} aria-hidden="true" />
+                <Download size={14} />
               </Button>
-            ) : null}
-            <Button
-              type="button"
-              onClick={handleDownload}
-              shape="icon"
-              title={formatMessage({ id: "common.lightbox.download" })}
-            >
-              <Download size={14} />
-            </Button>
-            <Button
-              type="button"
-              onClick={close}
-              shape="icon"
-              title={formatMessage({ id: "common.close" })}
-            >
-              <X size={14} />
-            </Button>
+            </Tooltip>
+            <Tooltip content={formatMessage({ id: "common.close" })}>
+              <CloseButton
+                type="button"
+                onClick={close}
+
+              >
+                <X size={14} />
+              </CloseButton>
+            </Tooltip>
           </div>
         </div>
       </div>
@@ -281,37 +279,51 @@ export default function ImageLightbox() {
       >
         {/* Left arrow */}
         {hasMultiple && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              if (!isFirst) prev();
-            }}
-            className={`${arrowBtn(isFirst)} absolute left-8 z-10`}
-            title={formatMessage({ id: "common.lightbox.previousImage" })}
-          >
-            <ChevronLeft size={24} />
-          </button>
+          <Tooltip content={formatMessage({ id: "common.lightbox.previousImage" })}>
+            <span
+              className="absolute left-8 z-10 inline-flex"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Button size="icon-lg"
+                type="button"
+                disabled={isFirst}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!isFirst) prev();
+                }}
+                aria-label={formatMessage({ id: "common.lightbox.previousImage" })}
+              >
+                <ChevronLeft size={24} />
+              </Button>
+            </span>
+          </Tooltip>
         )}
 
         {/* Right arrow */}
         {hasMultiple && (
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              if (!isLast) next();
-            }}
-            className={`${arrowBtn(isLast)} absolute right-8 z-10`}
-            title={formatMessage({ id: "common.lightbox.nextImage" })}
-          >
-            <ChevronRight size={24} />
-          </button>
+          <Tooltip content={formatMessage({ id: "common.lightbox.nextImage" })}>
+            <span
+              className="absolute right-8 z-10 inline-flex"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Button size="icon-lg"
+                type="button"
+                disabled={isLast}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!isLast) next();
+                }}
+                aria-label={formatMessage({ id: "common.lightbox.nextImage" })}
+              >
+                <ChevronRight size={24} />
+              </Button>
+            </span>
+          </Tooltip>
         )}
 
         {loading && !displaySrc ? (
           <div className="flex size-64 items-center justify-center">
-            <Spinner size="lg" variant="inverse" />
+            <Spinner size="lg" variant="inverse"  aria-label={formatMessage({ id: "common.loadingLabel" })} />
           </div>
         ) : error && !displaySrc ? (
           <div className="flex size-64 flex-col items-center justify-center gap-3 text-white/40">
@@ -350,7 +362,7 @@ export default function ImageLightbox() {
         <aside
           // inert while collapsed: controls leave tab order + a11y tree.
           inert={!commentsOpen}
-          className={`pointer-events-auto hidden h-full shrink-0 overflow-hidden border-black bg-white transition-[width] duration-300 ease-in-out sm:block ${
+          className={`pointer-events-auto hidden h-full shrink-0 overflow-hidden border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white transition-[width] duration-300 ease-in-out sm:block ${
             commentsOpen ? "w-80 border-l-2" : "w-0 border-l-0"
           }`}
         >
@@ -375,7 +387,7 @@ export default function ImageLightbox() {
         <div
           inert={!commentsOpen}
           onClick={(e) => e.stopPropagation()}
-          className={`pointer-events-auto fixed bottom-0 right-0 z-20 w-full border-l-2 border-t-2 border-black bg-white transition-transform duration-300 ease-in-out sm:hidden ${
+          className={`pointer-events-auto fixed bottom-0 right-0 z-20 w-full border-l-2 border-t-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white transition-transform duration-300 ease-in-out sm:hidden ${
             commentsOpen ? "translate-x-0" : "translate-x-full"
           }`}
           style={{ top: "calc(56px + env(safe-area-inset-top, 0px))" }}
@@ -406,7 +418,7 @@ export default function ImageLightbox() {
                 onClick={() => goTo(idx)}
                 className={`pointer-events-auto size-12 border-2 transition-all duration-100 overflow-hidden ${
                   isActive
-                    ? "border-soft-signal shadow-brutal-sm"
+                    ? "border-accent-strong shadow-raft-sm theme-brutal:border-soft-signal theme-brutal:shadow-brutal-sm"
                     : "border-white/30 opacity-60 hover:opacity-100 hover:border-white/60"
                 }`}
               >

@@ -1,16 +1,15 @@
-import { fixturePasswordHash } from "../test/integration/credentials.js";
-import { createApiTest } from "../test/integration/apiTest.js";
+import { fixturePasswordHash } from "../test/integration/credentials";
+import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { afterEach, beforeEach } from "vitest";
 
-import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
+import { BasicTracer, hasAgentMessageIdentity, MemoryTraceSink } from "@botiverse/raft-shared";
 import { desc, eq } from "drizzle-orm";
 
-import { openTestApp } from "../test/integration/app.js";
-import { getDb } from "../db/index.js";
-import { agentActivityEvents, attestedSendEvents, messages, users } from "../db/schema.js";
-import { createAgent, assignMachine } from "../services/agentService.js";
+import { openTestApp } from "../test/integration/app";
+import { getDb } from "../db/index";
+import { agentActivityEvents, attestedSendEvents, messages, users } from "../db/schema";
+import { createAgent, assignMachine } from "../services/agentService";
 import {
   addAgent,
   addHuman,
@@ -20,12 +19,12 @@ import {
   getOrCreateThread,
   markAgentLegacyRead,
   setInboxTargetActivityMuteState,
-} from "../services/channelService.js";
-import { createMessage } from "../services/messageService.js";
-import { registerMachine } from "../services/machineService.js";
-import * as attestedSendService from "../services/attestedSendService.js";
-import { listRecentAgentTrajectory } from "../services/agentActivityLogService.js";
-import { createServer } from "../services/serverService.js";
+} from "../services/channelService";
+import { createMessage } from "../services/messageService";
+import { registerMachine } from "../services/machineService";
+import * as attestedSendService from "../services/attestedSendService";
+import { listRecentAgentTrajectory } from "../services/agentActivityLogService";
+import { createServer } from "../services/serverService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -1042,9 +1041,9 @@ test("attested send: send-draft re-hold suppresses only target messages and leav
   ]);
 });
 
-test("attested send: held response shows only the latest bounded context and suppresses the full held batch", async ({ app }) => {
+test("attested send: held response shows only the latest bounded context and suppresses only what it showed", async ({ app }) => {
   const fixture = await seedFixture(app.baseUrl);
-  const acknowledged: Array<{ agentId: string; channelId: string; maxSeq: number }> = [];
+  const acknowledged: Array<{ agentId: string; channelId: string; seqs: number[] }> = [];
   app.app.set("agentOrchestrator", {
     deliverMessage: async () => {},
     receiveMessages: async () => {
@@ -1053,12 +1052,12 @@ test("attested send: held response shows only the latest bounded context and sup
     acknowledgeDeliveredMessages: () => {
       throw new Error("held context must use target-scoped delivery suppression");
     },
-    acknowledgeDeliveredMessagesForChannel: () => {
-      throw new Error("held context should suppress target delivery by latest seen seq");
+    acknowledgeDeliveredMessagesForChannel: (agentId: string, channelId: string, seqs: number[]) => {
+      acknowledged.push({ agentId, channelId, seqs });
+      return { removedCount: seqs.length };
     },
-    acknowledgeDeliveredMessagesForChannelUpToSeq: (agentId: string, channelId: string, maxSeq: number) => {
-      acknowledged.push({ agentId, channelId, maxSeq });
-      return { removedCount: 5 };
+    acknowledgeDeliveredMessagesForChannelUpToSeq: () => {
+      throw new Error("omitted held messages were not shown: they must stay queued");
     },
     getActivity: async () => ({ activity: "offline", activityDetail: "" }),
     getMachineStatus: async () => "offline",
@@ -1091,9 +1090,12 @@ test("attested send: held response shows only the latest bounded context and sup
     held.body.heldMessages.map((message: { content: string }) => message.content),
     ["unread-3", "unread-4", "unread-5"],
   );
+  // Only the three shown messages leave the delivery queue; the two omitted
+  // ones were never handed over, so they stay queued and unread.
   assert.deepEqual(acknowledged, [
-    { agentId: fixture.agentId, channelId: fixture.channelId, maxSeq: unreadMessages[4]!.seq },
+    { agentId: fixture.agentId, channelId: fixture.channelId, seqs: unreadMessages.slice(2).map((message) => message.seq) },
   ]);
+  assert.equal(await getAgentLegacyReadCursor(fixture.agentId, fixture.channelId), baseline.seq);
 });
 
 test("attested send: send-draft re-check uses explicit seenUpToSeq instead of old draft attestation", async ({ app }) => {
@@ -1205,4 +1207,73 @@ test("attested send: send-draft --anyway is suggested after 3 reholds and commit
   assertActivityContains(activityEntries, "Send draft held", "action: review the synced context before sending");
   assertActivityContains(activityEntries, "Send draft sent anyway", "freshness updates:");
   assertActivityContains(activityEntries, "Send draft sent anyway", "decision: sent anyway after reviewing freshness context");
+});
+
+/**
+ * The legacy daemon send path renders the same held context as the agent API.
+ * Each held row must name its conversation, or clients filtering through
+ * hasAgentMessageIdentity drop every held message.
+ */
+function assertLegacyHeldIdentity(
+  heldMessages: Array<Record<string, unknown>>,
+  expected: Record<string, unknown>,
+) {
+  assert.ok(heldMessages.length > 0, "expected held context");
+  for (const message of heldMessages) {
+    for (const [key, value] of Object.entries(expected)) {
+      assert.equal(message[key], value, `held envelope ${key}`);
+    }
+    assert.equal(hasAgentMessageIdentity(message), true, "held envelope must carry a conversation identity");
+  }
+}
+
+test("legacy agent send held context carries channel, DM and thread identity", async ({ app }) => {
+  const fixture = await seedFixture(app.baseUrl);
+  const [owner] = await getDb().select({ name: users.name }).from(users).where(eq(users.id, fixture.ownerId));
+
+  const baseline = await sendHumanMessage(app.baseUrl, fixture, "legacy baseline");
+  await sendHumanMessage(app.baseUrl, fixture, "legacy fresh");
+  const heldChannel = await sendAgent(app.baseUrl, fixture, {
+    target: `#${fixture.channelName}`,
+    content: "legacy stale channel reply",
+    seenUpToSeq: baseline.seq,
+  });
+  assert.equal(heldChannel.status, 200);
+  assert.equal(heldChannel.body.state, "held");
+  assertLegacyHeldIdentity(heldChannel.body.heldMessages, {
+    channel_type: "channel",
+    channel_name: fixture.channelName,
+  });
+
+  const dm = await findOrCreateDM(fixture.serverId, fixture.ownerId, fixture.agentId);
+  assert.ok(dm, "expected owner-agent DM to exist");
+  const dmBaseline = await sendHumanMessageToChannel(app.baseUrl, fixture, dm.id, "legacy dm baseline");
+  await sendHumanMessageToChannel(app.baseUrl, fixture, dm.id, "legacy dm fresh");
+  const heldDm = await sendAgent(app.baseUrl, fixture, {
+    target: `dm:@${owner!.name}`,
+    content: "legacy stale dm reply",
+    seenUpToSeq: dmBaseline.seq,
+  });
+  assert.equal(heldDm.status, 200);
+  assert.equal(heldDm.body.state, "held");
+  assertLegacyHeldIdentity(heldDm.body.heldMessages, {
+    channel_type: "dm",
+    channel_name: owner!.name,
+  });
+
+  const parent = await sendHumanMessage(app.baseUrl, fixture, "legacy thread parent");
+  const thread = await getOrCreateThread(parent.id, fixture.ownerId, "user");
+  await createMessage(thread.id, "user", fixture.ownerId, "legacy thread reply");
+  const heldThread = await sendAgent(app.baseUrl, fixture, {
+    target: `#${fixture.channelName}:${parent.id.slice(0, 8)}`,
+    content: "legacy stale thread reply",
+    seenUpToSeq: parent.seq,
+  });
+  assert.equal(heldThread.status, 200);
+  assert.equal(heldThread.body.state, "held");
+  assertLegacyHeldIdentity(heldThread.body.heldMessages, {
+    channel_type: "thread",
+    parent_channel_type: "channel",
+    parent_channel_name: fixture.channelName,
+  });
 });

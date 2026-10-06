@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { eq, and, isNull, sql, inArray } from "drizzle-orm";
-import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index.js";
-import { servers, agents, machines, channels, jointChannels, jointChannelServers, messages, serverMembers, subscriptions } from "../db/schema.js";
+import { eq, and, isNull, sql, inArray, ne } from "drizzle-orm";
+import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
+import { isChannelReadOnlyByJointLimit } from "./jointChannelLimitState";
+import { servers, agents, machines, channels, channelHumans, serverMembers, subscriptions } from "../db/schema";
 import {
   PLAN_CONFIG,
   canUseProBillingFeatures,
@@ -16,6 +17,33 @@ import {
   type BillingUsage,
   type ServerPlan,
 } from "@botiverse/raft-shared";
+
+type ServerResourceLockProbeForTest = (event: {
+  phase: "arrival" | "requested" | "acquired";
+  serverId: string;
+  namespace: number;
+  resourceKey: string;
+  mode: "exclusive" | "shared";
+}) => Promise<void> | void;
+
+let serverResourceLockProbeForTest: ServerResourceLockProbeForTest | null = null;
+let beforeServerResourceLockQueryForTest: ServerResourceLockProbeForTest | null = null;
+
+export function setServerResourceLockProbeForTest(probe: ServerResourceLockProbeForTest | null): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("server resource lock probes are test-only");
+  }
+  serverResourceLockProbeForTest = probe;
+}
+
+export function setBeforeServerResourceLockQueryForTest(
+  hook: ServerResourceLockProbeForTest | null,
+): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("server resource lock hooks are test-only");
+  }
+  beforeServerResourceLockQueryForTest = hook;
+}
 
 /** Get the plan for a server. */
 export async function getServerPlan(serverId: string): Promise<ServerPlan> {
@@ -135,7 +163,7 @@ export async function getServerBillingUsage(
   const [humanRow] = await executor
     .select({ count: sql<number>`count(*)::int` })
     .from(serverMembers)
-    .where(eq(serverMembers.serverId, serverId));
+    .where(and(eq(serverMembers.serverId, serverId), ne(serverMembers.role, "guest")));
   const [agentRow] = await executor
     .select({ count: sql<number>`count(*)::int` })
     .from(agents)
@@ -149,8 +177,49 @@ export function assertHumanCapacityAvailable(
 ): void {
   const limitState = getBillingCapacityLimitState(entitlement.capacity, usage, "human");
   if (limitState.reached) {
-    throw new Error(formatBillingCapacityLimitMessage("human", limitState, PLAN_CONFIG[entitlement.plan].displayName));
+    throw new HumanSeatLimitError(
+      formatBillingCapacityLimitMessage("human", limitState, PLAN_CONFIG[entitlement.plan].displayName),
+    );
   }
+}
+
+export class HumanSeatLimitError extends Error {
+  readonly code = "human_seat_limit_reached";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "HumanSeatLimitError";
+  }
+}
+
+export class GuestJoinableChannelLimitError extends Error {
+  readonly code = "guest_joinable_channel_limit_reached";
+
+  constructor(public readonly limit: number) {
+    super(`Server already has ${limit} Guest-joinable channels; disable Guest Join on another channel first`);
+    this.name = "GuestJoinableChannelLimitError";
+  }
+}
+
+export async function assertGuestJoinableChannelCapacityAvailable(
+  executor: DatabaseExecutor,
+  serverId: string,
+  additionalChannels = 1,
+): Promise<void> {
+  const entitlement = await getServerBillingEntitlement(executor, serverId);
+  const limit = getEffectiveLimits(entitlement.plan).maxGuestJoinableChannelsPerServer;
+  if (limit < 0) return;
+  const [usage] = await executor
+    .select({ count: sql<number>`count(*)::int` })
+    .from(channels)
+    .where(and(
+      eq(channels.serverId, serverId),
+      eq(channels.guestJoinable, true),
+      ne(channels.name, "all"),
+      isNull(channels.archivedAt),
+      isNull(channels.deletedAt),
+    ));
+  if ((usage?.count ?? 0) + additionalChannels > limit) throw new GuestJoinableChannelLimitError(limit);
 }
 
 export function assertAgentCapacityAvailable(
@@ -164,73 +233,8 @@ export function assertAgentCapacityAvailable(
 }
 
 async function refreshSubscriptionBeforeEntitlementGate(serverId: string, now: Date): Promise<void> {
-  const { refreshSubscriptionForServerIfStale } = await import("./billingService.js");
+  const { refreshSubscriptionForServerIfStale } = await import("./billingService");
   await refreshSubscriptionForServerIfStale(serverId, now);
-}
-
-async function hasEntitledJointChannelParticipant(
-  executor: DatabaseExecutor,
-  jointChannelId: string,
-  now: Date,
-): Promise<boolean> {
-  const [jointChannel] = await executor
-    .select({ createdByServerId: jointChannels.createdByServerId })
-    .from(jointChannels)
-    .where(and(
-      eq(jointChannels.id, jointChannelId),
-      eq(jointChannels.status, "active"),
-    ))
-    .limit(1);
-  if (jointChannel) {
-    const [freeJointChannel] = await executor
-      .select({ id: jointChannels.id })
-      .from(jointChannels)
-      .where(and(
-        eq(jointChannels.createdByServerId, jointChannel.createdByServerId),
-        eq(jointChannels.status, "active"),
-      ))
-      .orderBy(jointChannels.createdAt, jointChannels.id)
-      .limit(1);
-    if (freeJointChannel?.id === jointChannelId) return true;
-  }
-
-  const activeParticipants = await executor
-    .select({ serverId: jointChannelServers.serverId })
-    .from(jointChannelServers)
-    .innerJoin(jointChannels, eq(jointChannels.id, jointChannelServers.jointChannelId))
-    .where(and(
-      eq(jointChannelServers.jointChannelId, jointChannelId),
-      eq(jointChannelServers.status, "active"),
-      eq(jointChannels.status, "active"),
-    ));
-
-  for (const participant of activeParticipants) {
-    await refreshSubscriptionBeforeEntitlementGate(participant.serverId, now);
-    const entitlement = await getServerBillingEntitlement(executor, participant.serverId, now);
-    if (canUseProBillingFeatures(entitlement.plan, now)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-async function getActiveJointChannelIdForLocalProjection(
-  executor: DatabaseExecutor,
-  localChannelId: string,
-  serverId: string,
-): Promise<string | null> {
-  const [projection] = await executor
-    .select({ jointChannelId: jointChannelServers.jointChannelId })
-    .from(jointChannelServers)
-    .innerJoin(jointChannels, eq(jointChannels.id, jointChannelServers.jointChannelId))
-    .where(and(
-      eq(jointChannelServers.localChannelId, localChannelId),
-      eq(jointChannelServers.serverId, serverId),
-      eq(jointChannelServers.status, "active"),
-      eq(jointChannels.status, "active"),
-    ))
-    .limit(1);
-  return projection?.jointChannelId ?? null;
 }
 
 export async function requireTeamBillingFeature(
@@ -243,41 +247,6 @@ export async function requireTeamBillingFeature(
   const entitlement = await getServerBillingEntitlement(executor, serverId, now);
   if (!canUseProBillingFeatures(entitlement.plan, now)) {
     throw new Error(`${featureName} requires the Pro plan.`);
-  }
-}
-
-export type JointChannelCreationEntitlement = "plan" | "free";
-
-/** Resolve whether a server may create unlimited or one free active Joint Channel. */
-export async function getJointChannelCreationEntitlement(
-  executor: DatabaseExecutor,
-  serverId: string,
-  now: Date = currentDate(),
-): Promise<JointChannelCreationEntitlement> {
-  await refreshSubscriptionBeforeEntitlementGate(serverId, now);
-  const entitlement = await getServerBillingEntitlement(executor, serverId, now);
-  if (canUseProBillingFeatures(entitlement.plan, now)) {
-    return "plan";
-  }
-  return "free";
-}
-
-/** Enforce the single active host-created Joint Channel limit for Free servers. */
-export async function assertJointChannelCreationCapacity(
-  executor: DatabaseExecutor,
-  serverId: string,
-  entitlement: JointChannelCreationEntitlement,
-): Promise<void> {
-  if (entitlement === "plan") return;
-  const [row] = await executor
-    .select({ count: sql<number>`count(*)::int` })
-    .from(jointChannels)
-    .where(and(
-      eq(jointChannels.createdByServerId, serverId),
-      eq(jointChannels.status, "active"),
-    ));
-  if ((row?.count ?? 0) >= 1) {
-    throw new Error("Creating a second Joint Channel requires the Pro plan.");
   }
 }
 
@@ -326,58 +295,15 @@ export async function isChannelReadOnlyByQuota(channelId: string, serverId: stri
   return !writableIds.has(channelId);
 }
 
+/**
+ * Joint channels are read-only once the parent joint's over-limit grace has
+ * passed (contract v0.3 §18.8). The name is kept because every write path
+ * (messages, uploads, attachments, comments, channels, internal, agent API)
+ * already calls it; the rule itself lives in jointChannelLimitState and reads
+ * one stored field, with no per-message billing lookups.
+ */
 export async function isChannelReadOnlyByBillingFeature(channelId: string, serverId: string, now: Date = new Date()): Promise<boolean> {
-  const db = getDb();
-  const [channel] = await db
-    .select({
-      id: channels.id,
-      type: channels.type,
-      parentMessageId: channels.parentMessageId,
-    })
-    .from(channels)
-    .where(and(eq(channels.id, channelId), eq(channels.serverId, serverId)));
-
-  if (!channel) {
-    const [jointStorage] = await db
-      .select({ jointChannelId: jointChannels.id })
-      .from(jointChannels)
-      .innerJoin(jointChannelServers, and(
-        eq(jointChannelServers.jointChannelId, jointChannels.id),
-        eq(jointChannelServers.serverId, serverId),
-        eq(jointChannelServers.status, "active"),
-      ))
-      .where(and(
-        eq(jointChannels.canonicalChannelId, channelId),
-        eq(jointChannels.status, "active"),
-      ))
-      .limit(1);
-    if (!jointStorage) return false;
-
-    return !(await hasEntitledJointChannelParticipant(db, jointStorage.jointChannelId, now));
-  }
-
-  let gatedJointChannelId: string | null = channel.type === "joint"
-    ? await getActiveJointChannelIdForLocalProjection(db, channel.id, serverId)
-    : null;
-  if (!gatedJointChannelId && channel.type === "thread" && channel.parentMessageId) {
-    const [parent] = await db
-      .select({
-        parentChannelId: channels.id,
-        parentChannelType: channels.type,
-      })
-      .from(messages)
-      .innerJoin(channels, and(
-        eq(channels.id, messages.channelId),
-        eq(channels.serverId, serverId),
-      ))
-      .where(eq(messages.id, channel.parentMessageId));
-    if (parent?.parentChannelType === "joint") {
-      gatedJointChannelId = await getActiveJointChannelIdForLocalProjection(db, parent.parentChannelId, serverId);
-    }
-  }
-
-  if (!gatedJointChannelId) return false;
-  return !(await hasEntitledJointChannelParticipant(db, gatedJointChannelId, now));
+  return isChannelReadOnlyByJointLimit(channelId, serverId, now);
 }
 
 /** Count machines in a server. */
@@ -408,6 +334,7 @@ export function getHistoryCutoff(plan: ServerPlan, now: Date = new Date()): Date
 // server-level question, so they must never drift onto different advisory namespaces.
 // The numeric value is intentionally unimportant; sharing this symbol is the contract.
 export const AGENT_CREATE_LOCK_NAMESPACE = 1;
+export const GUEST_JOINABLE_CHANNEL_LOCK_NAMESPACE = 4;
 
 /**
  * Convert a UUID string to a stable int for pg_advisory_xact_lock.
@@ -442,6 +369,14 @@ export async function withServerLock<T>(
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${serverIdToLockKey(serverId)}, ${namespace})`);
     return fn(tx);
   });
+}
+
+export async function acquireServerLock(
+  executor: DatabaseExecutor,
+  serverId: string,
+  namespace: number,
+): Promise<void> {
+  await executor.execute(sql`SELECT pg_advisory_xact_lock(${serverIdToLockKey(serverId)}, ${namespace})`);
 }
 
 /**
@@ -480,9 +415,39 @@ export async function withServerResourceLock<T>(
 ): Promise<T> {
   const db = getDb();
   return db.transaction(async (tx) => {
-    await tx.execute(sql`
-      SELECT pg_advisory_xact_lock(${serverIdToLockKey(serverId)}, ${resourceToLockKey(namespace, resourceKey)})
-    `);
+    await lockServerResourceInTransaction(tx, serverId, namespace, resourceKey);
     return fn(tx);
   });
+}
+
+/**
+ * Acquire a per-server resource lock inside an existing transaction.
+ *
+ * `mode: "shared"` takes the shared form of the same advisory key: shared
+ * holders never block each other and only conflict with an exclusive holder.
+ * A transaction must not take a key shared and later exclusive — two such
+ * transactions deadlock on the upgrade.
+ */
+export async function lockServerResourceInTransaction(
+  tx: DatabaseExecutor,
+  serverId: string,
+  namespace: number,
+  resourceKey: string,
+  mode: "exclusive" | "shared" = "exclusive",
+): Promise<void> {
+  const probe = serverResourceLockProbeForTest;
+  const event = { serverId, namespace, resourceKey, mode };
+  await probe?.({ phase: "arrival", ...event });
+  await beforeServerResourceLockQueryForTest?.({ phase: "arrival", ...event });
+  const serverKey = serverIdToLockKey(serverId);
+  const resourceLockKey = resourceToLockKey(namespace, resourceKey);
+  const lock = mode === "shared"
+    ? tx.execute(sql`SELECT pg_advisory_xact_lock_shared(${serverKey}, ${resourceLockKey})`)
+    : tx.execute(sql`SELECT pg_advisory_xact_lock(${serverKey}, ${resourceLockKey})`);
+  // `requested` belongs to the lower primitive and is emitted only after the
+  // real advisory SQL call has returned its in-flight promise. A wrapper may
+  // observe arrival, but it cannot attest that PostgreSQL has been asked.
+  await probe?.({ phase: "requested", ...event });
+  await lock;
+  await probe?.({ phase: "acquired", ...event });
 }

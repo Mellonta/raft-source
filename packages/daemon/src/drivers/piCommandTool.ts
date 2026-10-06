@@ -12,8 +12,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
 
-import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv.js";
-import type { PiToolExecutionObserver } from "./piToolExecutionObservability.js";
+import { createWindowsPowerShellChildEnv } from "./windowsPowerShellEnv";
+import type { PiToolExecutionObserver } from "./piToolExecutionObservability";
 
 const POWERSHELL_STDIN_LOADER = [
   "$raftReader = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::ASCII, $false)",
@@ -160,7 +160,10 @@ function waitForChildProcess(child: ChildProcess): Promise<number | null> {
 export function buildPiPowerShellScript(command: string): string {
   return [
     "$ErrorActionPreference = 'Stop'",
-    "$utf8NoBom = New-Object System.Text.UTF8Encoding($false)",
+    // `::new`, not `New-Object`: Windows PowerShell 5.1 ignores a
+    // PSObject-wrapped $OutputEncoding when piping into a native command and
+    // falls back to ASCII, so CJK reached e.g. `node`/`git` as "????".
+    "$utf8NoBom = [System.Text.UTF8Encoding]::new($false)",
     "[Console]::OutputEncoding = $utf8NoBom",
     "$OutputEncoding = $utf8NoBom",
     "$global:LASTEXITCODE = 0",

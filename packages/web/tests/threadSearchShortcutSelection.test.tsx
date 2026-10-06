@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
@@ -498,10 +497,11 @@ test("workspace tab double-click commands are scoped to thread tab hitboxes", ()
   }
 });
 
-test("thread search header button opens with an empty query when no text is selected", async () => {
+test("thread search menu command opens with an empty query when no text is selected", async () => {
   renderThreadSearchPanel();
 
-  fireEvent.click(await screen.findByTestId("thread-search-open"));
+  fireEvent.click(await screen.findByTestId("thread-overflow-trigger"));
+  fireEvent.click(await screen.findByTestId("thread-overflow-search"));
 
   const input = await screen.findByTestId("thread-search-input") as HTMLInputElement;
   await waitFor(() => {
@@ -517,10 +517,12 @@ test("a bounded thread-search context blocks both history sentinels until a new 
   let intersectionCallback: IntersectionObserverCallback | null = null;
   const observedTargets: Element[] = [];
   globalThis.IntersectionObserver = class {
-    constructor(callback: IntersectionObserverCallback) {
-      intersectionCallback = callback;
+    constructor(private callback: IntersectionObserverCallback) {}
+    observe(target: Element) {
+      if (!target.closest('[data-testid="thread-message-scroller"]')) return;
+      intersectionCallback = this.callback;
+      observedTargets.push(target);
     }
-    observe(target: Element) { observedTargets.push(target); }
     unobserve() {}
     disconnect() {}
     takeRecords() { return []; }
@@ -543,7 +545,8 @@ test("a bounded thread-search context blocks both history sentinels until a new 
 
   try {
     renderThreadSearchPanel({ boundedSearchRequests: requests });
-    fireEvent.click(await screen.findByTestId("thread-search-open"));
+    fireEvent.click(await screen.findByTestId("thread-overflow-trigger"));
+    fireEvent.click(await screen.findByTestId("thread-overflow-search"));
     fireEvent.change(await screen.findByTestId("thread-search-input"), {
       target: { value: "hidden bounded needle" },
     });
@@ -601,7 +604,8 @@ test("appending a thread reply does not reapply the active search-match scroll",
   try {
     renderThreadSearchPanel();
 
-    fireEvent.click(await screen.findByTestId("thread-search-open"));
+    fireEvent.click(await screen.findByTestId("thread-overflow-trigger"));
+    fireEvent.click(await screen.findByTestId("thread-overflow-search"));
     fireEvent.change(await screen.findByTestId("thread-search-input"), {
       target: { value: "selected" },
     });
@@ -656,7 +660,8 @@ test("closing thread search removes the active result and text highlights", asyn
   try {
     renderThreadSearchPanel();
 
-    fireEvent.click(await screen.findByTestId("thread-search-open"));
+    fireEvent.click(await screen.findByTestId("thread-overflow-trigger"));
+    fireEvent.click(await screen.findByTestId("thread-overflow-search"));
     fireEvent.change(await screen.findByTestId("thread-search-input"), {
       target: { value: "selected" },
     });
@@ -664,7 +669,7 @@ test("closing thread search removes the active result and text highlights", asyn
     const matchedMessage = document.getElementById("message-reply-message");
     assert.ok(matchedMessage);
     await waitFor(() => {
-      assert.ok(matchedMessage.className.includes("bg-brutal-cyan/25"));
+      assert.ok(matchedMessage.className.includes("theme-brutal:bg-brutal-cyan/25"));
       assert.ok(matchedMessage.querySelector("mark"));
     });
 
@@ -672,7 +677,7 @@ test("closing thread search removes the active result and text highlights", asyn
 
     await waitFor(() => {
       assert.equal(screen.queryByTestId("thread-search-bar"), null);
-      assert.equal(matchedMessage.className.includes("bg-brutal-cyan/25"), false);
+      assert.equal(matchedMessage.className.includes("theme-brutal:bg-brutal-cyan/25"), false);
       assert.equal(matchedMessage.querySelector("mark"), null);
     });
   } finally {
@@ -695,7 +700,8 @@ test("thread search highlights a match rendered inside inline code", async () =>
       replyMessage: { content: "Flag `read_receipts_v0` is enabled" },
     });
 
-    fireEvent.click(await screen.findByTestId("thread-search-open"));
+    fireEvent.click(await screen.findByTestId("thread-overflow-trigger"));
+    fireEvent.click(await screen.findByTestId("thread-overflow-search"));
     fireEvent.change(await screen.findByTestId("thread-search-input"), {
       target: { value: "read_receipts_v0" },
     });
@@ -709,7 +715,7 @@ test("thread search highlights a match rendered inside inline code", async () =>
         "[data-testid='thread-search-fragment-highlight']",
       );
       assert.equal(highlight?.textContent, "read_receipts_v0");
-      assert.equal(highlight?.classList.contains("bg-soft-signal/70"), true);
+      assert.equal(highlight?.classList.contains("bg-primary-soft"), true);
     });
   } finally {
     HTMLElement.prototype.scrollIntoView = originalScrollIntoView;
@@ -1103,7 +1109,10 @@ test("thread fallback task badge opens the canonical task from followed-thread m
 
   await waitFor(() => {
     const thread = useThreadStore.getState();
-    assert.equal(thread.openIntent, "task", "the badge declares the task intent");
+    // task #699: the badge's task intent lands in the independent modal slot
+    // and leaves the side thread's open* identity untouched.
+    assert.equal(thread.taskModal?.parentMessageId, "parent-message", "the badge declares the task intent");
+    assert.equal(thread.taskModal?.parentChannelId, "parent-channel");
     assert.equal(thread.openParentMessageId, "parent-message");
     assert.equal(thread.openParentChannelId, "parent-channel");
   });

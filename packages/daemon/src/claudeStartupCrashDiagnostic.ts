@@ -7,7 +7,7 @@ import {
   buildBoundedVisibleCrashDetail,
   buildRuntimeErrorActivityDiagnostic,
   MAX_VISIBLE_CRASH_DETAIL_CHARS,
-} from "./runtimeErrorDiagnostics.js";
+} from "./runtimeErrorDiagnostics";
 import type { RuntimeErrorActivityDiagnostic } from "@botiverse/raft-shared";
 
 export { buildBoundedVisibleCrashDetail, MAX_VISIBLE_CRASH_DETAIL_CHARS };

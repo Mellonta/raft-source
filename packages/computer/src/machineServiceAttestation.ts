@@ -1,18 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { currentDate, setClockTimeout } from "@botiverse/raft-shared";
-import { COMPUTER_VERSION } from "./version.js";
-import { connectService } from "./lib/ipc-client.js";
-import type { MachineServiceAttestation } from "./lib/types.js";
-import { isProcessAlive, readPidfileAt } from "./internal/process-primitives.js";
+import { COMPUTER_VERSION } from "./version";
+import { liveSeaExecutablePath } from "./liveExecutable";
+import { connectService } from "./lib/ipc-client";
+import type { MachineServiceAttestation } from "./lib/types";
+import { isProcessAlive, readPidfileAt } from "./internal/process-primitives";
 import {
   serverRunnerPidPath,
   serverRunnerVersionPath,
   servicePidPath,
   serviceVersionPath,
-} from "./paths.js";
-import { listManagedServerIds, readServerAttachment } from "./serverState.js";
-import { readProcessVersionEvidence } from "./versionEvidence.js";
-import { readPendingRestartMarker, type PendingRestartMarker } from "./restartMarker.js";
+} from "./paths";
+import { listManagedServerIds, readServerAttachment } from "./serverState";
+import { readProcessVersionEvidence } from "./versionEvidence";
+import { readPendingRestartMarker, type PendingRestartMarker } from "./restartMarker";
 
 export const MACHINE_ATTESTATION_TIMEOUT_MS = 1_000;
 
@@ -172,7 +173,8 @@ export function createMachineAttestationHandler(
       computerVersion: COMPUTER_VERSION,
       serviceGeneration,
       servicePid: process.pid,
-      serviceExecutablePath: process.execPath,
+      // The startup path can vanish after a K promotion; report the live one.
+      serviceExecutablePath: liveSeaExecutablePath(),
       ...(sourceServicePid !== undefined ? { sourceServicePid } : {}),
       managedServerIds,
       managedMachineIdentities,

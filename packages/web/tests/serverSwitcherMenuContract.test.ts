@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import test, { afterEach } from "node:test";
 import "./helpers/domSetup";
+import "./helpers/installResizeObserver";
 import { createElement } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
@@ -156,7 +156,10 @@ test("server switcher unread count is loud unless the server is muted", () => {
     },
   });
   const loud = within(screen.getByRole("link", { name: /Beta/ })).getByText("5");
-  assert.match(loud.className, /text-white/);
+  assert.equal(loud.getAttribute("data-slot"), "badge");
+  assert.equal(loud.getAttribute("data-variant"), "accent");
+  assert.match(loud.className, /text-accent-950/);
+  assert.doesNotMatch(loud.className, /text-white/);
   assert.doesNotMatch(loud.className, /text-black\/50/);
   cleanup();
 
@@ -212,19 +215,33 @@ test("Activity counts are independent of server notification mute state", () => 
 test("muted joined channels still show quiet numeric unread counts", () => {
   assert.deepEqual(
     getChannelUnreadIndicatorState({ unread: 3, joined: true, showMutedIcon: false }),
-    { showLoudUnreadBadge: true, showQuietUnreadCount: false },
+    { showLoudUnreadBadge: true, showQuietUnreadCount: false, showQuietNewDot: false },
   );
   assert.deepEqual(
     getChannelUnreadIndicatorState({ unread: 3, joined: true, showMutedIcon: true }),
-    { showLoudUnreadBadge: false, showQuietUnreadCount: true },
+    { showLoudUnreadBadge: false, showQuietUnreadCount: true, showQuietNewDot: false },
   );
   assert.deepEqual(
     getChannelUnreadIndicatorState({ unread: 3, joined: false, showMutedIcon: false }),
-    { showLoudUnreadBadge: false, showQuietUnreadCount: true },
+    { showLoudUnreadBadge: false, showQuietUnreadCount: true, showQuietNewDot: false },
   );
   assert.deepEqual(
     getChannelUnreadIndicatorState({ unread: 0, joined: true, showMutedIcon: true }),
-    { showLoudUnreadBadge: false, showQuietUnreadCount: false },
+    { showLoudUnreadBadge: false, showQuietUnreadCount: false, showQuietNewDot: false },
+  );
+  // hasNew (non-joined public channel with messages past the cursor, no count):
+  // a quiet dot on a non-joined row only; a count, when present, wins.
+  assert.deepEqual(
+    getChannelUnreadIndicatorState({ unread: 0, joined: false, showMutedIcon: false, hasNew: true }),
+    { showLoudUnreadBadge: false, showQuietUnreadCount: false, showQuietNewDot: true },
+  );
+  assert.deepEqual(
+    getChannelUnreadIndicatorState({ unread: 0, joined: true, showMutedIcon: false, hasNew: true }),
+    { showLoudUnreadBadge: false, showQuietUnreadCount: false, showQuietNewDot: false },
+  );
+  assert.deepEqual(
+    getChannelUnreadIndicatorState({ unread: 2, joined: false, showMutedIcon: false, hasNew: true }),
+    { showLoudUnreadBadge: false, showQuietUnreadCount: true, showQuietNewDot: false },
   );
   assert.equal(shouldShowActivityMutedIcon({ activityMuted: true, joined: true }), true);
   assert.equal(shouldShowActivityMutedIcon({ activityMuted: true, joined: false }), false);

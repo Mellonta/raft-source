@@ -18,8 +18,9 @@ export type ServerSetupPreviewView =
   // They connected a computer and it is simply switched off. The screen they used to get
   // was "install + setup" — i.e. we asked a returning user who they were.
   | "offline-recovery"
-  // Same, but a legacy daemon machine that has not migrated to Computer:
-  // `raft-computer start` does not exist on that box, so it gets its daemon command.
+  // Same, but a machine connected with the retired standalone daemon that has not
+  // migrated: `raft-computer start` does not exist on that box, so it gets the
+  // Computer install + setup commands.
   | "offline-recovery-daemon"
   // Several sleeping machines and no new connection: list them, one command, no chooser.
   | "offline-recovery-many";

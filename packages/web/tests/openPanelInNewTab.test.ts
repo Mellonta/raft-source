@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
 import "global-jsdom/register";
-import { buildTaskChannelUrl, closeThreadWindow } from "../src/components/window/closeThreadWindow.js";
+import { buildTaskChannelUrl, closeThreadWindow } from "../src/components/window/closeThreadWindow";
 
 const {
   buildLegacyTaskWindowUrl,
   buildThreadWindowUrl,
   openPanelInNewTab,
-} = await import("../src/utils/openPanelInNewTab.js");
+} = await import("../src/utils/openPanelInNewTab");
 
 const threadWindowRouteSource = readFileSync(
   new URL("../src/components/window/ThreadWindowRoute.tsx", import.meta.url),
@@ -124,13 +123,13 @@ test("thread-window route supplies the host-owned close callback to ThreadPanel"
   assert.match(threadWindowRouteSource, /closeThreadWindow\(\{/);
 });
 
-test("task page header keeps identity compact and exposes title through a white tooltip", () => {
-  assert.match(threadWindowRouteSource, /<Tooltip\s+content=\{task\.title\}\s+disableHoverablePopup\s+contentProps=\{\{ className: "pointer-events-none bg-white" \}\}\s*>/);
+test("task page header keeps identity compact and exposes title through a themed tooltip", () => {
+  assert.match(threadWindowRouteSource, /<Tooltip\s+content=\{task\.title\}\s+disableHoverablePopup\s+contentProps=\{\{ className: "pointer-events-none" \}\}\s*>/);
   assert.match(threadWindowRouteSource, /data-testid="task-page-identity"/);
   assert.match(threadWindowRouteSource, /task\.modal\.taskWithNumber/);
   assert.match(threadWindowRouteSource, /channelType === "dm" \? "dm"/);
   assert.match(threadWindowRouteSource, /h-dvh max-h-dvh min-h-0.*overflow-hidden/);
-  assert.match(threadWindowRouteSource, /sm:border-2 sm:border-black sm:shadow-brutal/);
+  assert.match(threadWindowRouteSource, /sm:border sm:border-line-muted sm:shadow-raft-md theme-brutal:sm:border-2 theme-brutal:sm:border-black theme-brutal:sm:bg-white theme-brutal:sm:shadow-brutal/);
   assert.match(threadWindowRouteSource, /data-testid="thread-window-surface"/);
   assert.match(threadWindowRouteSource, /parentSlot=\{taskPageSlot\}/);
 });

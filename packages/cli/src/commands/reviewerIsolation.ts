@@ -1,4 +1,4 @@
-import { cliError } from "../core/errors.js";
+import { cliError } from "../core/errors";
 
 export const REVIEWER_ISOLATION_ENV = "RAFT_REVIEWER_ISOLATION";
 

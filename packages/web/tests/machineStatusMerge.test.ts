@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { mergeMachineStatus } from "../src/utils/machineStatusMerge.js";
-import type { Machine } from "../src/store/machineStore.js";
+import { mergeMachineStatus } from "../src/utils/machineStatusMerge";
+import type { Machine } from "../src/store/machineStore";
 
 function makeMachine(overrides: Partial<Machine> = {}): Machine {
   return {

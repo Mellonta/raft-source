@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
 import "./helpers/domSetup";
 import { act } from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -99,6 +98,22 @@ function seedRoute() {
       },
     },
     openThread: async ({ serverSlug, parentChannelId, parentMessageId, focusedMessageId, intent = "thread" }) => {
+      // Mirror the production delegation (task #699): a task intent fills the
+      // independent modal slot and never touches the side-thread open* fields.
+      if (intent === "task") {
+        useThreadStore.setState({
+          taskModal: {
+            parentMessageId,
+            parentChannelId,
+            threadChannelId: "thread-channel",
+            serverSlug: serverSlug ?? "acme",
+            focusedMessageId: focusedMessageId ?? null,
+            loading: false,
+            error: null,
+          },
+        });
+        return;
+      }
       useThreadStore.setState({
         openParentMessageId: parentMessageId, openParentChannelId: parentChannelId,
         openThreadChannelId: "thread-channel", openServerSlug: serverSlug ?? "acme",
@@ -187,6 +202,24 @@ test("mounted thread route executes direct-tab close callback and returns to ser
   await waitFor(() => assert.ok(screen.getByTestId("thread-close")));
   await act(async () => { fireEvent.keyDown(screen.getByTestId("thread-close"), { key: "Escape" }); });
   await waitFor(() => assert.equal(screen.getByTestId("route-location").textContent, "/s/acme"));
+});
+
+test("thread route shows a terminal failure when channel hydration is denied", async () => {
+  seedRoute();
+  let openCalls = 0;
+  useChannelStore.setState({
+    channels: [],
+    dmChannels: [],
+    ensureChannel: async () => null,
+  });
+  useThreadStore.setState({
+    openThread: async () => { openCalls += 1; },
+  });
+
+  renderRoute();
+  assert.ok(await screen.findByText("Couldn't load this thread"));
+  assert.equal(screen.queryByText(/Loading/), null, "permission denial must not leave an unbounded spinner");
+  assert.equal(openCalls, 0, "a denied parent channel must not advance into thread loading");
 });
 
 test("task route exposes icon-only view-in-channel and close actions", async () => {

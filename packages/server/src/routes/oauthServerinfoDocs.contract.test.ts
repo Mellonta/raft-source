@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { test } from "vitest";
 
 /**
  * Instruction-lockstep tooth (Cardy task #233; wording Maggie, canonical

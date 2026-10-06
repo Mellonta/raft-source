@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { getServerSettings } from "./serverSettingsService.js";
+import { getServerSettings } from "./serverSettingsService";
 
 test("general settings uses each existing onboarding reader once and adds feedback without another reader", async () => {
   const calls = { onboard: 0, member: 0, feedback: 0 };

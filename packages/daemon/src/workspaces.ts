@@ -1,8 +1,8 @@
 import { access, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { RUNTIME_OUTCOME_OUTBOX_DIR_NAME } from "./runtimeOutcomeOutbox";
 import path from "node:path";
 import type { WorkspaceDirectoryInfo } from "@botiverse/raft-shared";
-import { logger } from "./logger.js";
-import { ensureWikiWorkspaceIfConfigured } from "./wikiAgentWorkspace.js";
+import { logger } from "./logger";
 
 export interface AgentWorkspaceSeedFile {
   relativePath: string;
@@ -33,18 +33,27 @@ export async function initializeAgentWorkspace(
       await writeFile(fullPath, content);
     }
   }
-  await ensureWikiWorkspaceIfConfigured(workspacePath, envVars);
 }
 
-function isValidWorkspaceDirectoryName(directoryName: string): boolean {
-  return !directoryName.includes("/") && !directoryName.includes("\\") && !directoryName.includes("..");
-}
-
+// Containment, not a blocklist. The previous guard rejected "/", "\\" and ".." -- every
+// traversal string and nothing else -- so it let through "." and "", which path.join
+// collapses to `dataDir` itself. A request naming one workspace then deleted the root
+// holding every agent workspace on the machine, and reported ordinary success.
+//
+// A blocklist can only reject the inputs its author anticipated. Resolving the path and
+// asserting it is strictly below `dataDir` rejects the whole class instead, including
+// the members nobody has thought of yet.
 export function resolveWorkspaceDirectoryPath(dataDir: string, directoryName: string): string | null {
-  if (!isValidWorkspaceDirectoryName(directoryName)) {
+  const root = path.resolve(dataDir);
+  const target = path.resolve(root, directoryName);
+  // Exactly one level below the root. `dirname === root` rejects the root itself
+  // ("." and ""), anything above it ("..", "../x"), and any nested path
+  // ("nested/agent-1") in a single comparison -- workspace names are agent ids and
+  // are always a single segment.
+  if (path.dirname(target) !== root) {
     return null;
   }
-  return path.join(dataDir, directoryName);
+  return target;
 }
 
 interface WorkspaceDirectorySummary {
@@ -130,7 +139,8 @@ export async function scanWorkspaceDirectories(dataDir: string): Promise<Workspa
 
   const results = await Promise.all(
     entries.map(async (entry) => {
-      if (!entry.isDirectory()) {
+      // RFC 071: the runtime-outcome outbox lives beside the workspaces; it is not one.
+      if (!entry.isDirectory() || entry.name === RUNTIME_OUTCOME_OUTBOX_DIR_NAME) {
         return null;
       }
 

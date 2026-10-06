@@ -1,3 +1,4 @@
+import { InputGroup, InputGroupAddon, InputGroupInput } from "raft-ui";
 import type { InputHTMLAttributes } from "react";
 
 type SlugInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, "className"> & {
@@ -16,20 +17,12 @@ export function PrefixedInput({
   ...props
 }: PrefixedInputProps) {
   return (
-    <div
-      className={`input-brutal flex w-full items-stretch overflow-hidden px-0 py-0 focus-within:shadow-brutal ${className}`.trim()}
-    >
-      <span
-        aria-hidden="true"
-        className="flex shrink-0 items-center border-r-2 border-black bg-soft-signal/30 px-3 font-display font-bold text-black/70"
-      >
+    <InputGroup className={`w-full ${className}`.trim()}>
+      <InputGroupAddon.Text aria-hidden="true" variant="container">
         {prefix}
-      </span>
-      <input
-        {...props}
-        className={`min-w-0 flex-1 bg-transparent px-3 py-2 font-display outline-none ${inputClassName}`.trim()}
-      />
-    </div>
+      </InputGroupAddon.Text>
+      <InputGroupInput {...props} data-invalid={props["aria-invalid"] === true || props["aria-invalid"] === "true"} className={inputClassName} />
+    </InputGroup>
   );
 }
 

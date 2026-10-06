@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildOpenCodeConfig, buildOpenCodeLaunchOptions, detectOpenCodeModelSource, detectOpenCodeModels, isSupportedOpenCodeVersion, MIN_SUPPORTED_OPENCODE_VERSION, OpenCodeDriver, parseOpenCodeModelsOutput, requiresAgentCliFlag, resolveOpenCodeSpawn, runOpenCodeModelsCommand, unsupportedOpenCodeVersionMessage } from "./opencode.js";
-import type { SpawnContext } from "./types.js";
+import { buildOpenCodeConfig, buildOpenCodeLaunchOptions, detectOpenCodeModelSource, detectOpenCodeModels, isSupportedOpenCodeVersion, MIN_SUPPORTED_OPENCODE_VERSION, OpenCodeDriver, parseOpenCodeModelsOutput, requiresAgentCliFlag, resolveOpenCodeSpawn, runOpenCodeModelsCommand, unsupportedOpenCodeVersionMessage } from "./opencode";
+import type { SpawnContext } from "./types";
 
 function withTempDir(cb: (dir: string) => void) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "slock-opencode-"));
@@ -416,10 +415,16 @@ test("detectOpenCodeModels uses opencode models output as source of truth", () =
   });
 });
 
-test("runOpenCodeModelsCommand uses shell on Windows for npm shim resolution", () => {
+test("runOpenCodeModelsCommand on Windows runs the resolved executable without a shell", () => {
+  const resolvedExe = "C:\\Users\\tester\\AppData\\Local\\opencode\\bin\\opencode.exe";
   const calls: Array<{ command: string; args: string[]; options: Record<string, unknown> }> = [];
   const result = runOpenCodeModelsCommand("/tmp/opencode-home", {
     platform: "win32",
+    windowsEnvironmentReaderFn: () => ({}),
+    execFileSyncFn: ((command: string) => {
+      assert.equal(command, "powershell.exe");
+      return Buffer.from(`${resolvedExe}\r\n`);
+    }) as any,
     spawnSyncFn: ((command: string, args: readonly string[], options?: Record<string, unknown>) => {
       calls.push({ command, args: [...args], options: options ?? {} });
       return {
@@ -431,9 +436,9 @@ test("runOpenCodeModelsCommand uses shell on Windows for npm shim resolution", (
   });
 
   assert.equal(calls.length, 1);
-  assert.equal(calls[0]?.command, "opencode");
+  assert.equal(calls[0]?.command, resolvedExe);
   assert.deepEqual(calls[0]?.args, ["models"]);
-  assert.equal(calls[0]?.options.shell, true);
+  assert.equal(calls[0]?.options.shell, false);
   assert.equal(result.status, 0);
   assert.equal(result.stdout, "mimo/mimo-v2.5-pro\n");
 });

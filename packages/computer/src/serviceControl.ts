@@ -1,18 +1,16 @@
-import { isProcessAlive } from "./internal/process-primitives.js";
+import { isProcessAlive } from "./internal/process-primitives";
 import { currentTimeMs, setClockTimeout } from "@botiverse/raft-shared";
-import { connectService } from "./lib/ipc-client.js";
+import { connectService } from "./lib/ipc-client";
 import {
   ServiceClientError,
   type RestartServiceParams,
   type RestartServiceResult,
-  type UpgradeCompletedEvent,
-  type UpgradeProgressEvent,
-} from "./lib/types.js";
+} from "./lib/types";
 import {
   readMachineServiceAttestation,
   readManagedMachineIdentities,
-} from "./machineServiceAttestation.js";
-import { listManagedServerIds } from "./serverState.js";
+} from "./machineServiceAttestation";
+import { listManagedServerIds } from "./serverState";
 
 interface ReplacementSpawnOptions {
   parentMutationLockHeld?: boolean;
@@ -252,52 +250,30 @@ export async function requestServiceRestartViaIpc(
   }
 }
 
-export interface ManagedUpgradeRelayContext {
-  emitUpgradeProgress(event: Omit<UpgradeProgressEvent, "requestId">): void;
-  emitUpgradeDone(event: Omit<UpgradeCompletedEvent, "requestId">): void;
-}
-
 export interface ManagedUpgradeRelayDeps {
   connectServiceFn?: typeof connectService;
 }
 
-export async function requestServiceUpgradeViaIpc(
+/** Remote upgrade v2 (task #873): ask the supervisor to launch the installer and return. */
+export async function requestServiceUpgradeStartViaIpc(
   slockHome: string,
-  originServerId: string,
-  requestId: string,
-  ctx: ManagedUpgradeRelayContext,
+  params: { requestId: string; originServerId: string; targetVersion?: string },
   deps: ManagedUpgradeRelayDeps = {},
 ): Promise<void> {
-  let client: Awaited<ReturnType<typeof connectService>> | null = null;
+  const client = await (deps.connectServiceFn ?? connectService)(slockHome);
   try {
-    client = await (deps.connectServiceFn ?? connectService)(slockHome);
     const result = await client.request("upgrade-start", {
       scope: "remote",
-      requestId,
-      originServerId,
+      requestId: params.requestId,
+      originServerId: params.originServerId,
       trigger: "web",
+      ...(params.targetVersion ? { targetVersion: params.targetVersion } : {}),
     });
-    if (result.status === "already-running" && result.upgradeId !== requestId) {
-      ctx.emitUpgradeDone({
-        ok: false,
-        error: `UPGRADE_ALREADY_RUNNING: upgrade ${result.upgradeId} to ${result.targetVersion} is already running`,
-      });
-      return;
+    if (result.status === "already-running" && result.upgradeId !== params.requestId) {
+      throw new Error(`UPGRADE_ALREADY_RUNNING: upgrade ${result.upgradeId} is already running`);
     }
-    for await (const event of client.events) {
-      if (event.kind === "upgrade-progressed" && event.payload.requestId === requestId) {
-        const { requestId: _requestId, ...progress } = event.payload;
-        ctx.emitUpgradeProgress(progress);
-      }
-      if (event.kind === "upgrade-completed" && event.payload.requestId === requestId) {
-        const { requestId: _requestId, ...completed } = event.payload;
-        ctx.emitUpgradeDone(completed);
-        return;
-      }
-    }
-  } catch (err) {
-    ctx.emitUpgradeDone({ ok: false, error: err instanceof Error ? err.message : String(err) });
   } finally {
-    await client?.close();
+    await client.close();
   }
 }
+

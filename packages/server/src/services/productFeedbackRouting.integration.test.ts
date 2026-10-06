@@ -1,15 +1,14 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase, openTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
-import { getDb } from "../db/index.js";
-import { users } from "../db/schema.js";
-import { productFeedbackReporterId } from "./productFeedbackService.js";
+import { getDb } from "../db/index";
+import { users } from "../db/schema";
+import { productFeedbackReporterId } from "./productFeedbackService";
 import {
   ensureProductFeedbackRouteBinding,
   ProductFeedbackRouteBindingError,
   resetProductFeedbackRouteBindingCacheForTest,
-} from "./productFeedbackRouteBindingService.js";
+} from "./productFeedbackRouteBindingService";
 
 
 const APP_ID = "11111111-1111-4111-8111-111111111111";

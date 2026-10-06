@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vitest";
-import { extractPiUsageAttrs, buildPiTokenUsageEvent } from "./piEventNormalizer.js";
+import { extractPiUsageAttrs, buildPiTokenUsageEvent } from "./piEventNormalizer";
 
 const FULL_USAGE = {
   input: 100,

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "node:test";
 import {
   getCreatableRuntimeOptions,
   getExistingAgentRuntimeOptions,
@@ -8,7 +7,7 @@ import {
   RUNTIMES,
   runtimeAvailabilitySuffix,
   type RuntimeInfo,
-} from "./index.js";
+} from "./index";
 
 const builtin = RUNTIMES.find((r) => r.id === "builtin")!;
 const kimiSdk = RUNTIMES.find((r) => r.id === "kimi-sdk")!;

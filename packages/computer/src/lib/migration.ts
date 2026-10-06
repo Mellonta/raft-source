@@ -52,9 +52,9 @@ import { createHash } from "node:crypto";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import type { LegacyMachineRosterEntry, LegacyMachineRosterResult } from "../apiClient.js";
-import { listServerAttachments } from "../serverState.js";
-import { canonicalizeServerUrl } from "../serverUrl.js";
+import type { LegacyMachineRosterEntry, LegacyMachineRosterResult } from "../apiClient";
+import { listServerAttachments } from "../serverState";
+import { canonicalizeServerUrl } from "../serverUrl";
 import type {
   ExcludedCandidate,
   ExclusionReason,
@@ -62,7 +62,7 @@ import type {
   LocalCandidateEvidence,
   MigrationDetection,
   OwnerFileState,
-} from "./types.js";
+} from "./types";
 
 const MACHINE_DIR_PREFIX = "machine-";
 const FINGERPRINT_HEX_RE = /^[0-9a-f]{16}$/;

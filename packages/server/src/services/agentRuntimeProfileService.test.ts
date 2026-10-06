@@ -1,11 +1,10 @@
-import { dbTest as test } from "../test/integration/dbTest.js";
-import { closeTestDatabase } from "../test/integration/database.js";
+import { dbTest as test } from "../test/integration/dbTest";
+import { closeTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
-import { afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
-import { getDb } from "../db/index.js";
-import { agentRuntimeProfiles, agents, machines, servers, users } from "../db/schema.js";
+import { getDb } from "../db/index";
+import { agentRuntimeProfiles, agents, machines, servers, users } from "../db/schema";
 import {
   getAgentRuntimeProfileSummary,
   getPendingRuntimeProfileNotice,
@@ -18,8 +17,8 @@ import {
   recordAgentRuntimeProfile,
   renderRuntimeProfileMigrationMessage,
   disableRuntimeProfileWriteCooldownForTests,
-} from "./agentRuntimeProfileService.js";
-import { runWithTraceSpan } from "../tracing/semanticTrace.js";
+} from "./agentRuntimeProfileService";
+import { runWithTraceSpan } from "../tracing/semanticTrace";
 
 
 // The production write-cooldown (#2566) silently no-ops the second

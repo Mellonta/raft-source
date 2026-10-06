@@ -1,10 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
 import {
   runSlackBridgeOAuthIdentityReconcileCli,
   SLACK_BRIDGE_OAUTH_IDENTITY_RECONCILE_CLI_DEPENDENCIES,
   slackBridgeOAuthIdentityReconcileDirection,
   type SlackBridgeOAuthIdentityReconcileCliDependencies,
-} from "./reconcile-slack-bridge-oauth-identity.js";
+} from "./reconcile-slack-bridge-oauth-identity";
 
 const ENV: NodeJS.ProcessEnv = {
   DATABASE_URL: "postgres://staging.example.invalid/raft",

@@ -1,7 +1,7 @@
 import { useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
-import type { ReactNode } from "react";
+import { Button, Input } from "raft-ui";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 import { useAuthStore } from "../../store/authStore";
 import type { AuthProvider, SocialAuthProviderId } from "../../hooks/useAuthProviders";
@@ -14,7 +14,6 @@ import {
   PENDING_INVITE_STORAGE_KEY,
 } from "../../utils/socialAuth";
 import AuthPageFrame, { AuthPageIntro } from "./AuthPageFrame";
-import Button from "../ui/Button";
 import TextLink from "../ui/TextLink";
 import Banner from "../ui/Banner";
 import FormField from "../ui/FormField";
@@ -98,7 +97,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
 
         <form onSubmit={handleSubmit} className="space-y-4" autoComplete="on" noValidate>
           <FormField label={formatMessage({ id: "pages.register.emailLabel" })} labelStyle="plain" error={fieldErrors.email} htmlFor="register-email">
-            <input
+            <Input
               id="register-email"
               name="email"
               type="email"
@@ -107,14 +106,14 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
                 setEmail(event.target.value);
                 if (fieldErrors.email) setFieldErrors((current) => ({ ...current, email: undefined }));
               }}
-              className="w-full border-2 border-black p-2 text-base shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+              data-invalid={fieldErrors.email ? true : undefined}
               autoComplete="email"
               required
             />
           </FormField>
 
           <FormField label={formatMessage({ id: "pages.register.passwordLabel" })} labelStyle="plain" error={fieldErrors.password} htmlFor="register-password">
-            <input
+            <Input
               id="register-password"
               name="new-password"
               type="password"
@@ -123,7 +122,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
                 setPassword(event.target.value);
                 if (fieldErrors.password) setFieldErrors((current) => ({ ...current, password: undefined }));
               }}
-              className="w-full border-2 border-black p-2 text-base shadow-brutal-sm focus:shadow-brutal focus:outline-none"
+              data-invalid={fieldErrors.password ? true : undefined}
               placeholder={formatMessage({ id: "pages.register.passwordPlaceholder" })}
               autoComplete="new-password"
               required
@@ -140,7 +139,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
             type="submit"
             disabled={loading || !acceptedLegal}
             size="lg"
-            tone="pink"
+            variant="accent"
             className="w-full"
           >
             {loading
@@ -152,11 +151,11 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
         {enabledProviders.length > 0 ? (
           <>
             <div className="my-4 flex items-center gap-3">
-              <div className="h-0.5 flex-1 bg-black" />
-              <span className="text-xs font-bold uppercase tracking-widest text-black/45">
+              <div className="h-0.5 flex-1 bg-line-strong theme-brutal:bg-black" />
+              <span className="text-xs font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/45">
                 {formatMessage({ id: "pages.register.or" })}
               </span>
-              <div className="h-0.5 flex-1 bg-black" />
+              <div className="h-0.5 flex-1 bg-line-strong theme-brutal:bg-black" />
             </div>
             <div className="space-y-2">
               {enabledProviders.map((provider) => (

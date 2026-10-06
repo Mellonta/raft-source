@@ -1,7 +1,6 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
 import { createIntl } from "react-intl";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -227,6 +226,25 @@ test("Guest ChatPanel only offers Join when the channel is guest-joinable", () =
   }));
   renderChat(joinableChannel, false);
   assert.ok(screen.getByRole("button", { name: /加入 #guest-joinable/ }));
+  assert.match(screen.getByTestId("guest-join-explanation").textContent ?? "", /不会获得发言或添加回应/);
+});
+
+test("joined Guest ChatPanel is read-only even though the channel membership remains", () => {
+  const joinedChannel = makeChannel({
+    joined: true,
+    name: "guest-joined",
+    guestVisible: true,
+    guestJoinable: true,
+  });
+  seedChat(joinedChannel);
+  useServerStore.setState((state) => ({
+    current: state.current ? { ...state.current, role: "guest" } : null,
+  }));
+  renderChat(joinedChannel, false);
+
+  assert.ok(screen.getByTestId("guest-readonly-channel-banner"));
+  assert.match(document.body.textContent ?? "", /不能发言或添加回应/);
+  assert.equal(screen.queryByRole("textbox"), null);
 });
 
 test("mounted AttachmentCommentRefChip jump title is Chinese", () => {
@@ -247,7 +265,8 @@ test("mounted AttachmentCommentRefChip jump title is Chinese", () => {
     </TestIntlProvider>,
   );
 
-  const expected = zh["message.attachmentComment.jumpTitle"].replace("{detail}", "notes.txt");
-  assert.ok(screen.getByTitle(expected));
+  const chip = document.querySelector('[data-message-affordance="attachment-comment-ref-chip"]');
+  assert.ok(chip, "ref chip renders");
+  assert.ok(chip.hasAttribute("data-base-ui-tooltip-trigger"), "jump hint now rides the RUI tooltip trigger");
   assert.equal(screen.queryByTitle(/Jump to the message with/), null);
 });

@@ -8,7 +8,7 @@ import {
   type ZodOpenApiResponsesObject,
 } from "zod-openapi";
 
-import { attachmentUploadContract } from "./attachmentUploadContract.js";
+import { attachmentUploadContract } from "./attachmentUploadContract";
 
 type ResponseDefinition = Readonly<{
   description: string;

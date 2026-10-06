@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, test } from "node:test";
 import "./helpers/domSetup";
 import { memo, useLayoutEffect, useRef } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
@@ -16,19 +15,19 @@ import {
 } from "../src/components/message/MessageTimeline";
 import { expandClonedMessageContentForScreenshot } from "../src/utils/selectScreenshot";
 import { TestIntlProvider } from "./helpers/intl";
+import { installForwardFoldMeasurementStub } from "./helpers/forwardFoldMeasurement";
 import type { Locale } from "../src/i18n/locale";
 import type { User } from "../src/store/authStore";
 import type { Channel } from "../src/store/channelStore";
 import { useChannelStore } from "../src/store/channelStore";
 import type { Message } from "../src/store/messageStore";
 import type { Server } from "../src/store/serverStore";
-import { TOPBAR_OVERFLOW_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
 import {
   resetServerFeatureFlagsForTests,
-  setServerFeatureFlagForTests,
 } from "../src/store/serverFeatureFlags";
 
 let renderedContentHeight = 0;
+let restoreForwardFoldMeasurement: (() => void) | null = null;
 let scrollHeightReadCount = 0;
 let originalScrollHeightDescriptor: PropertyDescriptor | undefined;
 let originalResizeObserver: typeof ResizeObserver | undefined;
@@ -164,13 +163,11 @@ async function renderMessage(
     actionMetadata,
     attachments,
     locale,
-    topbarOverflowEnabled = true,
   }: {
     parentMessageId?: string;
     actionMetadata?: Message["actionMetadata"];
     attachments?: Message["attachments"];
     locale?: Locale;
-    topbarOverflowEnabled?: boolean;
   } = {},
 ) {
   const { default: MessageItem } = await import("../src/components/message/MessageItem");
@@ -188,11 +185,6 @@ async function renderMessage(
   if (actionMetadata?.kind === "action-card") {
     useChannelStore.setState({ channels: [makeChannel()], dmChannels: [] });
   }
-  setServerFeatureFlagForTests(
-    "server-1",
-    TOPBAR_OVERFLOW_FEATURE_FLAG_KEY,
-    topbarOverflowEnabled,
-  );
 
   return render(
     <MessageTimelinePreserveViewportContext.Provider value={() => { preserveViewportRequests += 1; }}>
@@ -239,6 +231,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  restoreForwardFoldMeasurement?.();
+  restoreForwardFoldMeasurement = null;
   __resetMessageContentCollapseStateForTests();
   if (originalResizeObserver) {
     globalThis.ResizeObserver = originalResizeObserver;
@@ -440,9 +434,15 @@ test("long channel and thread messages collapse by rendered height and remember 
   assert.equal(content.dataset.messageCollapsed, "true");
   assert.equal(content.style.maxHeight, "320px");
   assert.match(content.className, /overflow-clip/);
+  const fade = channelView.container.querySelector<HTMLElement>("[data-message-collapse-fade]");
+  assert.ok(fade);
+  assert.match(fade.className, /from-layer-panel/);
+  assert.match(fade.className, /theme-brutal:from-white/);
 
   const showMore = screen.getByRole("button", { name: "Show more" });
   assert.equal(showMore.getAttribute("aria-expanded"), "false");
+  assert.match(showMore.className, /text-foreground-muted/);
+  assert.match(showMore.className, /theme-brutal:text-black\/60/);
   fireEvent.click(showMore);
   assert.equal(preserveViewportRequests, 1);
   assert.equal(content.dataset.messageCollapsed, "false");
@@ -558,34 +558,16 @@ test("channel collapse preference ON keeps long messages collapsed behind the di
   assert.ok(screen.getByRole("button", { name: "Show more" }));
 });
 
-test("flag off ignores a persisted channel expansion preference and restores legacy collapsing", async () => {
-  renderedContentHeight = 640;
-  useChannelStore.setState({
-    channels: [makeChannel({ collapseLongMessages: false, displayPrefsVersion: 1 })],
-    dmChannels: [],
-  });
-  const view = await renderMessage("flag-off-channel-long-message", {
-    topbarOverflowEnabled: false,
-  });
-
-  const content = view.container.querySelector<HTMLElement>("[data-message-collapsible-content='true']");
-  assert.equal(content?.dataset.messageCollapsed, "true");
-  assert.ok(screen.getByRole("button", { name: "Show more" }));
-});
-
-test("flag off ignores a persisted DM expansion preference and restores legacy collapsing", async () => {
+test("DM expansion preference survives a missing retired topbar flag", async () => {
   renderedContentHeight = 640;
   useChannelStore.setState({
     channels: [],
     dmChannels: [makeChannel({ type: "dm", collapseLongMessages: false, displayPrefsVersion: 1 })],
   });
-  const view = await renderMessage("flag-off-dm-long-message", {
-    topbarOverflowEnabled: false,
-  });
-
-  const content = view.container.querySelector<HTMLElement>("[data-message-collapsible-content='true']");
-  assert.equal(content?.dataset.messageCollapsed, "true");
-  assert.ok(screen.getByRole("button", { name: "Show more" }));
+  const view = await renderMessage("retired-flag-dm-long-message");
+  assert.equal(view.container.querySelector("[data-message-collapsible]"), null);
+  assert.equal(screen.queryByRole("button", { name: "Show more" }), null);
+  assert.ok(screen.getByRole("link", { name: "detail" }));
 });
 
 test("flipping the channel collapse preference ON at runtime re-measures and collapses the long message", async () => {
@@ -715,6 +697,9 @@ test("action cards stay fully interactive instead of entering message collapse",
 });
 
 test("forwarded bundles keep only their card-level disclosure instead of nesting message collapse", async () => {
+  // The card's own fold measures rendered heights; jsdom reports zero, so the
+  // stub gives the item body the tall box a real browser would.
+  restoreForwardFoldMeasurement = installForwardFoldMeasurementStub();
   renderedContentHeight = 640;
   await renderMessage("forwarded-message", {
     actionMetadata: {

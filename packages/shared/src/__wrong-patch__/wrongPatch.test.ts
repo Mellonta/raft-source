@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { extractRaftMentionHandles } from "../raftRefs.js";
-import { TASK_92_ROWS, rowsViolatedBy } from "./criteria.js";
+import { extractRaftMentionHandles } from "../raftRefs";
+import { TASK_92_ROWS, rowsViolatedBy } from "./criteria";
 import {
   wrongExtractRaftMentionHandles,
   wrongReplaceOutsideMarkdownCode,
-} from "./mergeOverlappingSpans.js";
+} from "./mergeOverlappingSpans";
 
 // Gate for the task #92 acceptance criteria.
 //

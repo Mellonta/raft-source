@@ -4,10 +4,14 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "vitest";
 
 const serverDir = fileURLToPath(new URL("../../..", import.meta.url));
 const probeFile = fileURLToPath(new URL("./lifecycle.probe.ts", import.meta.url));
+// The probe boots a full integration fixture in a fresh Vitest. On a loaded
+// machine that alone has taken over 30s, so the limits only bound a hang; the
+// contract asserts outcomes, never timing.
+const PROBE_CASE_TIMEOUT_MS = 120_000;
+const PROBE_RUN_TIMEOUT_MS = 4 * PROBE_CASE_TIMEOUT_MS;
 
 for (const mode of ["assertion", "setup", "afterEach", "cleanup", "skip", "background"]) {
   test(`integration lifecycle contains ${mode} work/failure in its owning case`, async () => {
@@ -17,11 +21,11 @@ for (const mode of ["assertion", "setup", "afterEach", "cleanup", "skip", "backg
       const report = path.join(dir, "report.json");
       const witness = path.join(dir, "closed.txt");
       await writeFile(config, `export default ${JSON.stringify({
-        test: { include: [probeFile], pool: "forks", maxWorkers: 1, minWorkers: 1, testTimeout: 30000, hookTimeout: 30000 },
+        test: { include: [probeFile], globals: true, pool: "forks", maxWorkers: 1, testTimeout: PROBE_CASE_TIMEOUT_MS, hookTimeout: PROBE_CASE_TIMEOUT_MS },
       })}`);
       const outcome = await new Promise<{ code: number; output: string }>(resolve => {
         execFile(process.execPath, [path.join(serverDir, "node_modules/vitest/vitest.mjs"), "run", "--config", config, "--reporter=json", `--outputFile=${report}`], {
-          cwd: serverDir, env: { ...process.env, INTEGRATION_PROBE: mode, INTEGRATION_WITNESS: witness }, timeout: 75000, maxBuffer: 2 * 1024 * 1024,
+          cwd: serverDir, env: { ...process.env, INTEGRATION_PROBE: mode, INTEGRATION_WITNESS: witness }, timeout: PROBE_RUN_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024,
         }, (error, stdout, stderr) => resolve({ code: error ? 1 : 0, output: stdout + stderr }));
       });
       const result: { testResults: Array<{ assertionResults: Array<{ title: string; status: string; failureMessages: string[] }> }> } = JSON.parse(await readFile(report, "utf8").catch(() => { throw new Error(outcome.output); }));
@@ -37,5 +41,5 @@ for (const mode of ["assertion", "setup", "afterEach", "cleanup", "skip", "backg
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  }, 90000);
+  }, PROBE_RUN_TIMEOUT_MS + 30_000);
 }
