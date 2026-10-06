@@ -13,6 +13,7 @@ permissions:
 jobs:
   migration:
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:16
@@ -20,9 +21,9 @@ jobs:
           POSTGRES_USER: raft
           POSTGRES_PASSWORD: disposable-ci-password
           POSTGRES_DB: raft
-        ports: ['5432:5432']
+        ports: ['5432']
         options: >-
-          --health-cmd 'pg_isready -U raft'
+          --health-cmd "pg_isready -U raft"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -33,5 +34,14 @@ jobs:
       - run: pnpm --filter @botiverse/raft-server... install --frozen-lockfile
       - name: Upgrade the exact old public snapshot schema on real PostgreSQL
         env:
-          MELLONTA_MIGRATION_TEST_URL: postgresql://raft:disposable-ci-password@127.0.0.1:5432/raft
-        run: pnpm --filter @botiverse/raft-server exec vitest run src/db/mellontaMigrationBridge.realPg.test.ts --maxWorkers=1
+          MELLONTA_MIGRATION_TEST_URL: postgresql://raft:disposable-ci-password@127.0.0.1:${{ job.services.postgres.ports[5432] }}/raft
+        run: |
+          set -o pipefail
+          if ! pnpm --filter @botiverse/raft-server exec vitest run src/db/mellontaMigrationBridge.realPg.test.ts --maxWorkers=1 2>&1 | tee "$RUNNER_TEMP/migration-test.log"; then
+            python3 - "$RUNNER_TEMP/migration-test.log" <<'PY'
+          import pathlib, sys
+          message = '\n'.join(pathlib.Path(sys.argv[1]).read_text(errors='replace').splitlines()[-50:])
+          print('::error title=Database upgrade check failed::' + message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+          PY
+            exit 1
+          fi

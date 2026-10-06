@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 origin = "http://127.0.0.1:8080"
 with urlopen(origin + "/health") as response:
@@ -61,6 +62,11 @@ if os.environ.get("GITHUB_ACTIONS") == "true":
             "privacyVersion": re.search(r'CURRENT_PRIVACY_VERSION = "([^"]+)"', legal)[1],
         })
         account["token"] = registration["accessToken"]
+        # Raft 1.21 defers identity setup until after registration. Complete the
+        # same onboarding step as the portal before calling workspace routes.
+        api("me/complete-profile", {
+            "name": "deploy" + secrets.token_hex(6), "displayName": "Deployment smoke",
+        }, token=account["token"])
         saved.write_text(json.dumps(account))
         saved.chmod(0o600)
     login = api("login", {"email": account["email"], "password": account["password"]})
@@ -74,8 +80,11 @@ if os.environ.get("GITHUB_ACTIONS") == "true":
             headers["X-Server-Id"] = account["workspace"]
         request = Request(origin + "/api/" + path, headers=headers,
                           data=json.dumps(body).encode() if body is not None else None)
-        with urlopen(request) as response:
-            return json.load(response)
+        try:
+            with urlopen(request) as response:
+                return json.load(response)
+        except HTTPError as error:
+            raise AssertionError(f"{path}: HTTP {error.code}: {error.read(2048).decode(errors='replace')}") from error
 
     if not account.get("workspace"):
         workspace = workspace_api("servers", {"name": "Deployment smoke", "slug": "deploy-" + secrets.token_hex(6)})
