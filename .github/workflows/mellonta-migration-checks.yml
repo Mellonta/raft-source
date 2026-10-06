@@ -1,0 +1,37 @@
+name: Mellonta database upgrade checks
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/server/src/db/mellontaMigration*'
+      - 'packages/server/scripts/mellonta-migration-bridge.ts'
+      - 'packages/server/drizzle/**'
+      - '.github/workflows/mellonta-migration-checks.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  migration:
+    runs-on: ubuntu-22.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: raft
+          POSTGRES_PASSWORD: disposable-ci-password
+          POSTGRES_DB: raft
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U raft'
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - run: npm install --global pnpm@10.29.3
+      - run: pnpm --filter @botiverse/raft-server... install --frozen-lockfile
+      - name: Upgrade the exact old public snapshot schema on real PostgreSQL
+        env:
+          MELLONTA_MIGRATION_TEST_URL: postgresql://raft:disposable-ci-password@127.0.0.1:5432/raft
+        run: pnpm --filter @botiverse/raft-server exec vitest run src/db/mellontaMigrationBridge.realPg.test.ts --maxWorkers=1

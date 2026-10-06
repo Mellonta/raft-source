@@ -28,6 +28,7 @@
     "db:generate": "drizzle-kit generate",
     "db:backfill-users-trace-user-id": "node --import @oxc-node/core/register scripts/backfill-users-trace-user-id.ts",
     "db:migrate": "drizzle-kit migrate",
+    "db:migrate:mellonta": "node --import @oxc-node/core/register scripts/mellonta-migration-bridge.ts && pnpm db:migrate:deploy",
     "db:migrate:deploy": "node --import @oxc-node/core/register scripts/migration-preflight.ts && node --import @oxc-node/core/register scripts/migrate-deploy.ts && node --import @oxc-node/core/register scripts/verify-feature-flag-admin-privileges.ts",
     "db:push": "drizzle-kit push",
     "db:create-message-random-id-index": "node --import @oxc-node/core/register scripts/create-message-random-id-index.ts",

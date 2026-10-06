@@ -39,6 +39,11 @@ recommendations still refer to upstream; use the Mellonta setup script below.
 The new `channel versions` command is also upstream discovery; the fork's
 published versions are on GitHub Releases. No upstream installer is executed.
 
+The old public snapshot's final migration was renumbered upstream from 0266 to
+0273. Deployment takes its normal backup, then reconciles only the exact known
+1.13 journal in one transaction before applying later migrations. Unknown or
+partially modified histories are refused; user data and session tokens are retained.
+
 The production Docker and Enroot images use Node 24.21 and the new oxc loader.
 Enroot setup still needs no sudo or Docker on the cluster and keeps all state
 under `~/park`. Upstream now requires RisingWave but omits its bootstrap SQL from the public

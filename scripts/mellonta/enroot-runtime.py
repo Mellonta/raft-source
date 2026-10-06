@@ -205,7 +205,7 @@ def main():
                             archive.add(STATE / name, arcname=name)
                 migration_env = {**env, 'DATABASE_URL': env['DATABASE_URL'] + '?options=-c%20statement_timeout%3D60000',
                                  'SERVER_MIGRATION_EXPECTED_STATEMENT_TIMEOUT_MS': '60000'}
-                supervisor.run('migrate', ['pnpm', '--filter', '@botiverse/raft-server', 'db:migrate:deploy'], migration_env)
+                supervisor.run('migrate', ['pnpm', '--filter', '@botiverse/raft-server', 'db:migrate:mellonta'], migration_env)
                 write(stamp, revision + '\n')
             supervisor.spawn('server', ['node', '--import', '@oxc-node/core/register', 'packages/server/src/server.ts'])
 
