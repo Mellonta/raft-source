@@ -41,8 +41,14 @@ published versions are on GitHub Releases. No upstream installer is executed.
 
 The production Docker and Enroot images use Node 24.21 and the new oxc loader.
 Enroot setup still needs no sudo or Docker on the cluster and keeps all state
-under `~/park`. Optional RisingWave bootstrap is not supported by this public
-snapshot: upstream omitted its required `infra/risingwave/sql` files.
+under `~/park`. Upstream now requires RisingWave but omits its bootstrap SQL from the public
+snapshot. Mellonta deployments explicitly select `RAFT_READ_BACKEND=postgres`:
+Activity, sidebar unread, followed threads, and agent inbox/recovery use the
+canonical PostgreSQL implementations retained in upstream's reference suite.
+No extra database service is needed. This runs queries at read time instead of
+using RisingWave's continuously maintained views, so large workspaces can use
+more PostgreSQL CPU. Configured RisingWave installations retain upstream behavior;
+there is no automatic fallback after a read failure.
 
 ## Install or replace the upstream client
 

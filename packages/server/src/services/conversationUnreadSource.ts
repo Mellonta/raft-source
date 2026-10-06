@@ -1,13 +1,6 @@
-/**
- * Row shapes of the sidebar unread reader (rw_conversation_unread_v2, see
- * infra/risingwave/sql/068-chain-mention-v6-consumers.sql) and its test seam.
- *
- * This module is deliberately tiny and dependency-free so the server test setup
- * can install the Postgres reference (src/test/conversationUnreadReference.ts)
- * without importing channelService. Production never sets the override: the
- * reader in channelService queries RisingWave, and with no RisingWave (or a
- * failed read) the request fails -- there is no second source.
- */
+import { usesPostgresReadBackend } from "../db/readBackend";
+import { referenceConversationUnreadSource } from "./postgresConversationUnread";
+/** Sidebar read source, selected explicitly for the deployment or by a test. */
 
 /** One (user, conversation) row of the sidebar unread read. */
 export type ConversationUnreadRow = {
@@ -65,5 +58,5 @@ export function __setConversationUnreadSourceForTests(source: ConversationUnread
 }
 
 export function getConversationUnreadSourceOverride(): ConversationUnreadSource | null {
-  return testSource;
+  return testSource ?? (usesPostgresReadBackend() ? referenceConversationUnreadSource : null);
 }

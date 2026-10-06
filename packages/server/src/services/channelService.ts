@@ -1,3 +1,5 @@
+import { usesPostgresReadBackend } from "../db/readBackend";
+import { referenceAgentInboxChain } from "./postgresAgentInbox";
 import { revokeSocketAccess } from "../socket/accessRevocation";
 import { createHash, randomInt, randomUUID } from "crypto";
 import { performance } from "node:perf_hooks";
@@ -13685,7 +13687,7 @@ function toNullableNumber(value: unknown): number | null {
  */
 export async function selectAgentInboxChainRows(agentId: string): Promise<AgentInboxChainSelection> {
   const pool = getRisingWaveInboxPool();
-  if (!pool) return { source: "unavailable", reason: "rw_unconfigured" };
+  if (!pool && !usesPostgresReadBackend()) return { source: "unavailable", reason: "rw_unconfigured" };
   try {
     return { source: "chain", rows: await readAgentInboxChainRows(pool, agentId) };
   } catch (error) {
@@ -13708,10 +13710,23 @@ export type AgentInboxChainReadOptions = {
 
 /** Read one agent's rows from the agent inbox view. Throws on query failure. */
 export async function readAgentInboxChainRows(
-  pool: NonNullable<ReturnType<typeof getRisingWavePool>>,
+  pool: ReturnType<typeof getRisingWavePool>,
   agentId: string,
   opts: AgentInboxChainReadOptions = {},
 ): Promise<AgentInboxChainRow[]> {
+  if (usesPostgresReadBackend()) {
+    let rows = await referenceAgentInboxChain(agentId);
+    if (opts.kind !== undefined) rows = rows.filter(row => row.kind === opts.kind);
+    if (opts.beforeSeq !== undefined) rows = rows.filter(row => row.activitySeq < opts.beforeSeq!);
+    if (opts.mentionsOnly) rows = rows.filter(row => row.mentionUnread > 0);
+    if (opts.limit !== undefined) {
+      const limit = Math.trunc(opts.limit);
+      if (!Number.isSafeInteger(limit) || limit < 0) throw new Error(`invalid agent inbox page limit: ${opts.limit}`);
+      rows = rows.sort((a, b) => b.activitySeq - a.activitySeq).slice(0, limit);
+    }
+    return rows;
+  }
+  if (!pool) throw new RisingWaveNotConfiguredError("agent inbox");
   const values: unknown[] = [agentId];
   const where = ["agent_id = $1"];
   if (opts.kind !== undefined) {
@@ -13769,9 +13784,18 @@ export type AgentInboxTotals = { conversations: number; dms: number; mentions: n
 
 /** The agent's inbox totals, counted in the view. Throws on query failure. */
 export async function readAgentInboxChainTotals(
-  pool: NonNullable<ReturnType<typeof getRisingWavePool>>,
+  pool: ReturnType<typeof getRisingWavePool>,
   agentId: string,
 ): Promise<AgentInboxTotals> {
+  if (usesPostgresReadBackend()) {
+    const rows = await referenceAgentInboxChain(agentId);
+    return {
+      conversations: rows.length,
+      dms: rows.filter(row => row.kind === "dm").length,
+      mentions: rows.filter(row => row.mentionUnread > 0).length,
+    };
+  }
+  if (!pool) throw new RisingWaveNotConfiguredError("agent inbox totals");
   const read = await queryRisingWaveInbox(pool, `SELECT
       count(*) AS conversations,
       count(*) FILTER (WHERE kind = 'dm') AS dms,
@@ -14012,7 +14036,7 @@ export async function listAgentInbox(
   opts: { view: AgentInboxView; beforeSeq?: number; limit: number },
 ): Promise<AgentInboxList> {
   const pool = getRisingWaveInboxPool();
-  if (!pool) throw new AgentInboxUnavailableError("Agent inbox source is not configured");
+  if (!pool && !usesPostgresReadBackend()) throw new AgentInboxUnavailableError("Agent inbox source is not configured");
   let totals: AgentInboxTotals;
   let dmRows: AgentInboxChainRow[];
   try {

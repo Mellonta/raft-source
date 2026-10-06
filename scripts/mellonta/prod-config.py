@@ -64,7 +64,7 @@ def configure(source, root, public_url=None, port=None, bind=None):
                       "# RESEND_API_KEY=...\n# FROM_EMAIL=Raft <you@example.com>\n")
     database_url = f"postgresql://raft:{settings['postgres_password']}@postgres:5432/raft"
     environment = {
-        "NODE_ENV": "production", "DEPLOYMENT_ENV": "production", "PORT": "3001",
+        "RAFT_READ_BACKEND": "postgres", "NODE_ENV": "production", "DEPLOYMENT_ENV": "production", "PORT": "3001",
         "DATABASE_URL": database_url, "REDIS_URL": "redis://redis:6379",
         "JWT_SECRET": settings["jwt_secret"], "AGENT_BOOTSTRAP_TOKEN_PEPPER": settings["bootstrap_pepper"],
         "SLOCK_MCP_CREDENTIAL_KEY": settings["mcp_key"],

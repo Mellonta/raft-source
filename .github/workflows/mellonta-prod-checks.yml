@@ -41,6 +41,8 @@ jobs:
           exec > >(tee "$RUNNER_TEMP/prod-check.log") 2>&1
           trap 'report_failure "$BASH_COMMAND"' ERR
           cd /data/raft
+          mkdir -p /data/.raft-prod
+          printf 'SLOCK_E2E_AUTO_VERIFY_EMAIL=1\n' > /data/.raft-prod/server-extra.env
           bash scripts/mellonta/deploy-prod.sh --url http://127.0.0.1:8080 --bind 127.0.0.1
           python3 scripts/mellonta/prod-smoke.py
           compose=(docker compose -p raft-prod -f /data/.raft-prod/compose.json)

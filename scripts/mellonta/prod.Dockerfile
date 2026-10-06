@@ -21,6 +21,7 @@ COPY packages/server/ packages/server/
 COPY packages/web/ packages/web/
 COPY packages/visual-testing/shared/ packages/visual-testing/shared/
 COPY manual/ manual/
+RUN pnpm --filter @botiverse/raft-server exec vitest run src/services/mellontaPostgresReads.test.ts src/services/conversationUnread.test.ts src/services/jointMentionV6.test.ts src/services/channelService.risingwaveNoFallback.test.ts --maxWorkers=2
 # Setup uses umask 077. Image code must remain readable when the API runs as
 # the host account's UID, which need not equal the image's node UID.
 RUN chmod -R a+rX /app

@@ -22,6 +22,7 @@ COPY packages/server/ packages/server/
 COPY packages/web/ packages/web/
 COPY packages/visual-testing/shared/ packages/visual-testing/shared/
 COPY manual/ manual/
+RUN pnpm --filter @botiverse/raft-server exec vitest run src/services/mellontaPostgresReads.test.ts src/services/conversationUnread.test.ts src/services/jointMentionV6.test.ts src/services/channelService.risingwaveNoFallback.test.ts --maxWorkers=2
 ARG RELEASE_SHA
 # An empty compiled API origin uses the browser's origin, so one image works
 # with any --url, without building software on the cluster.

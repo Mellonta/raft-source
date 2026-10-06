@@ -1,3 +1,4 @@
+import { usesPostgresReadBackend } from "./db/readBackend";
 import { getChannelConversionAudienceCutover, applyChannelConversionAudienceRealtimeCutover } from "./services/channelConversionService";
 import { startChannelConversionWorker } from "./services/channelConversionWorker";
 import { emitChannelConversionCompletion, emitChannelConversionState, emitJointLimitStateChange } from "./routes/channels";
@@ -81,10 +82,9 @@ if (!process.env.JWT_SECRET) {
   process.exit(1);
 }
 
-// RisingWave is a hard dependency: Activity, followed-thread stats and sidebar
-// unread are served from it only, with no Postgres fallback. A production server
-// without it would fail those reads on every request, so refuse to start.
-if (process.env.NODE_ENV === "production" && !isRisingWaveConfigured()) {
+// Upstream requires RisingWave. Mellonta deployments explicitly select the
+// PostgreSQL backend; both choices serve all inbox and unread read paths.
+if (process.env.NODE_ENV === "production" && !usesPostgresReadBackend() && !isRisingWaveConfigured()) {
   console.error("RISINGWAVE_DATABASE_URL environment variable is required in production (RisingWave is a hard dependency)");
   process.exit(1);
 }
