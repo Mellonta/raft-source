@@ -207,7 +207,7 @@ def main():
                                  'SERVER_MIGRATION_EXPECTED_STATEMENT_TIMEOUT_MS': '60000'}
                 supervisor.run('migrate', ['pnpm', '--filter', '@botiverse/raft-server', 'db:migrate:deploy'], migration_env)
                 write(stamp, revision + '\n')
-            supervisor.spawn('server', ['node', '--import', 'tsx', 'packages/server/src/server.ts'])
+            supervisor.spawn('server', ['node', '--import', '@oxc-node/core/register', 'packages/server/src/server.ts'])
 
             def healthy(port):
                 with urlopen(f'http://127.0.0.1:{port}/health', timeout=2) as response:

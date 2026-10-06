@@ -1,16 +1,19 @@
-ARG NODE_VERSION=24.15.0
+ARG NODE_VERSION=24.21.0
 FROM node:${NODE_VERSION}-bookworm-slim AS source
 WORKDIR /app
 RUN npm install --global pnpm@10.29.3
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY patches/ patches/
+COPY packages/runtime-form/package.json packages/runtime-form/
+COPY packages/trace-client/package.json packages/trace-client/
 COPY packages/sync-core/package.json packages/sync-core/
 COPY packages/shared/package.json packages/shared/
 COPY packages/desktop-contract/package.json packages/desktop-contract/
 COPY packages/server/package.json packages/server/
 COPY packages/web/package.json packages/web/
 RUN pnpm --filter @botiverse/raft-server... --filter @botiverse/raft-web... install --frozen-lockfile
+COPY packages/runtime-form/ packages/runtime-form/
+COPY packages/trace-client/ packages/trace-client/
 COPY packages/sync-core/ packages/sync-core/
 COPY packages/shared/ packages/shared/
 COPY packages/desktop-contract/ packages/desktop-contract/
@@ -28,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV NODE_ENV=production
 # Match the upstream server image: execute TypeScript once, without a watcher.
 # Its shared workspace packages export TypeScript, and its tsc config is noEmit.
-CMD ["node", "--import", "tsx", "packages/server/src/server.ts"]
+CMD ["node", "--import", "@oxc-node/core/register", "packages/server/src/server.ts"]
 
 FROM source AS web-build
 ARG PUBLIC_URL

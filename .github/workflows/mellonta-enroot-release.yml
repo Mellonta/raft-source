@@ -10,6 +10,8 @@ on:
       - 'packages/server/**'
       - 'packages/web/**'
       - 'packages/shared/**'
+      - 'packages/runtime-form/**'
+      - 'packages/trace-client/**'
       - 'packages/sync-core/**'
       - 'packages/desktop-contract/**'
       - 'packages/visual-testing/shared/**'
