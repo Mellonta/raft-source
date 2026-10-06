@@ -1,3 +1,5 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
+import { mellontaInstallerCommand } from "./mellontaInstaller";
 // The external installer is the only thing that installs, upgrades or
 // repairs Computer. Computer resolves one immutable installer, verifies its
 // bytes and executes it directly. Shell/PowerShell bootstraps are only for
@@ -57,6 +59,7 @@ export function installerArgs(input: { targetVersion?: string; channel?: Channel
 /** Resolve once, verify, and return a direct executable invocation (never a shell). */
 export async function installerCommand(args: string[], env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform, arch: string = process.arch): Promise<{ command: string; args: string[] }> {
+  if (DISTRIBUTION_POLICY.forkReleases) return mellontaInstallerCommand(args, env, platform, arch);
   const target = `${platform}-${arch}`;
   if (!["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64"].includes(target)) {
     throw new Error("unsupported_installer_target");
@@ -126,6 +129,9 @@ export async function runInstallerAttended(args: string[], env: NodeJS.ProcessEn
 /** A detached native installer survives service replacement. Acceptance is not completion. */
 export async function launchInstallerDetached(slockHome: string, args: string[], requestId: string,
   env: NodeJS.ProcessEnv = process.env): Promise<number | null> {
+  if (DISTRIBUTION_POLICY.forkReleases) {
+    throw new Error("Remote upgrades are disabled in the Mellonta build. On the client, run raft-computer upgrade --target-version X.Y.Z-mellonta.N, or rerun scripts/mellonta/setup-client.sh.");
+  }
   const childEnv = { ...env, RAFT_COMPUTER_INSTALLER_CALLER: undefined, RAFT_HOME: slockHome, SLOCK_HOME: slockHome, RAFT_COMPUTER_NON_INTERACTIVE: "1",
     RAFT_COMPUTER_OPERATION_ID: requestId, RAFT_COMPUTER_APPROVED_BY: `remote:${requestId}` };
   const invocation = await installerCommand(args, childEnv);
