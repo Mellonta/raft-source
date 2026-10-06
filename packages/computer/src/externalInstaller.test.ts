@@ -1,3 +1,8 @@
+import { vi } from "vitest";
+vi.mock("@botiverse/raft-shared", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@botiverse/raft-shared")>(),
+  DISTRIBUTION_POLICY: { managedMcp: false, diagnosticUploads: false, forkReleases: false },
+}));
 import assert from "node:assert/strict";
 import * as externalInstaller from "./externalInstaller";
 import { runService } from "./service";

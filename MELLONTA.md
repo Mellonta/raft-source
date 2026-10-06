@@ -1,7 +1,7 @@
 # Mellonta's self-hosted Raft Computer
 
 This fork builds Raft Computer and its bundled daemon/agent CLI from the same
-public source snapshot as Raft server 1.13.0 (`v1.13.0-source.1`). Computer and
+public source snapshot as Raft server 1.21.0 (`v1.21.0-source.1`). Computer and
 server have independent version numbers. This release is for Linux x86-64
 (Ubuntu 22.04 or newer), with Node embedded; Node, npm and pnpm are not required
 on the machine where you install it. Your agent runtime is still installed separately.
@@ -17,6 +17,32 @@ on the machine where you install it. Your agent runtime is still installed separ
   or the model providers you use.
 - Default update lookups use this fork's GitHub Releases, not Botiverse's CDN
   or Hands. Explicit environment overrides can still choose another update source.
+
+## Updating from the 1.13 fork
+
+This integration preserves the existing fork history and release tags. The
+client version is now **1.0.43-mellonta.1**, based on upstream Computer 1.0.43;
+server images are still identified separately by `enroot-server-<commit>`.
+
+Upstream replaced its K updater with a separately downloaded Hands installer.
+This fork keeps a Linux installer in `scripts/mellonta/install-client.sh` and
+verifies its release checksum before a local upgrade. Run the saved client
+wrapper with `upgrade --target-version 1.0.43-mellonta.1`, or rerun
+`setup-client.sh` without `--reset` to retain credentials and workspaces.
+The installer verifies binary and WASM files before stopping Computer, updates
+the saved version pin, and restarts a previously running service.
+
+**Portal-triggered remote upgrades are disabled** in this distribution because
+upstream's remote completion protocol belongs to its external installer. Use
+the local command above. The portal's installer commands and server version
+recommendations still refer to upstream; use the Mellonta setup script below.
+The new `channel versions` command is also upstream discovery; the fork's
+published versions are on GitHub Releases. No upstream installer is executed.
+
+The production Docker and Enroot images use Node 24.21 and the new oxc loader.
+Enroot setup still needs no sudo or Docker on the cluster and keeps all state
+under `~/park`. Optional RisingWave bootstrap is not supported by this public
+snapshot: upstream omitted its required `infra/risingwave/sql` files.
 
 ## Install or replace the upstream client
 

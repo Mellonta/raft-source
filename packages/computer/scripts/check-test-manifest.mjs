@@ -2,7 +2,7 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const EXPECTED_TEST_FILE_COUNT = 62;
+const EXPECTED_TEST_FILE_COUNT = 63;
 
 const root = new URL("..", import.meta.url);
 const srcDir = fileURLToPath(new URL("src", root));

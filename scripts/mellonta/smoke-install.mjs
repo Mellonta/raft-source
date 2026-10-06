@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createReadStream } from "node:fs";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,13 @@ try {
   assert.equal(await run(join(home, "bin/raft-computer"), ["--version"]), version);
   assert.equal((await readFile(join(home, "state/computer/channel"), "utf8")).trim(), `pinned:${version}`);
   assert.ok((await stat(join(home, "bin/photon_rs_bg.wasm"))).size > 0);
+  // An attended reinstall must update an old pin even without legacy K state.
+  await writeFile(join(home, "state/computer/channel"), "pinned:1.0.28-mellonta.1\n");
+  await writeFile(join(home, "state/retained"), "keep credentials and workspaces");
+  await run("sh", [join(out, "install.sh"), "--version", version]);
+  assert.equal((await readFile(join(home, "state/computer/channel"), "utf8")).trim(), `pinned:${version}`);
+  assert.equal(await readFile(join(home, "state/retained"), "utf8"), "keep credentials and workspaces");
+  assert.equal(await run(join(home, "bin/raft-computer"), ["--version"]), version);
   console.log(`Installer smoke passed: ${version}`);
 } finally {
   await new Promise((done) => server.close(done));

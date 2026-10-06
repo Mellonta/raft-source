@@ -3,6 +3,19 @@ name: Mellonta Linux release
 on:
   push:
     tags: ['*-mellonta.*']
+    branches: [main]
+    paths:
+      - 'packages/computer/**'
+      - 'packages/daemon/**'
+      - 'packages/cli/**'
+      - 'packages/shared/**'
+      - 'packages/trace-client/**'
+      - 'scripts/mellonta/install-client.sh'
+      - 'scripts/mellonta/prepare-release.mjs'
+      - 'scripts/mellonta/smoke-install.mjs'
+      - '.github/workflows/mellonta-linux-release.yml'
+      - 'pnpm-lock.yaml'
+      - '.node-version'
   workflow_dispatch:
 
 permissions:
@@ -14,7 +27,7 @@ concurrency:
 
 jobs:
   release:
-    if: github.repository == 'Mellonta/raft-source' && startsWith(github.ref, 'refs/tags/')
+    if: github.repository == 'Mellonta/raft-source'
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
@@ -26,22 +39,25 @@ jobs:
           node-version-file: .node-version
       - name: Check tag and install dependencies
         run: |
-          test "$GITHUB_REF_NAME" = "$(node -p "require('./packages/computer/package.json').version")"
+          version=$(node -p "require('./packages/computer/package.json').version")
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then test "$GITHUB_REF_NAME" = "$version"; fi
           npm install --global pnpm@10.29.3
           pnpm --filter @botiverse/raft-computer... install --frozen-lockfile
       - name: Verify privacy and release behavior
         run: |
           pnpm --filter @botiverse/raft-computer --filter @botiverse/raft-daemon --filter @botiverse/raft-shared typecheck
-          pnpm --filter @botiverse/raft-daemon exec vitest run src/mellontaPrivacy.test.ts src/managedMcpRuntimeProxy.test.ts src/traceBundleUpload.test.ts src/directUploadCapability.test.ts src/agentProcessManager.sessionTranscript.test.ts --maxWorkers=2 --minWorkers=1
-          pnpm --filter @botiverse/raft-computer exec vitest run src/services/mellontaPrivacy.test.ts src/services/diagnosticsPush.test.ts src/mellontaRelease.test.ts src/kReleaseSource.test.ts src/kReleaseGzip.test.ts src/nativePublish.contract.test.ts --maxWorkers=2 --minWorkers=1
+          pnpm --filter @botiverse/raft-daemon exec vitest run src/mellontaPrivacy.test.ts src/managedMcpRuntimeProxy.test.ts src/traceBundleUpload.test.ts src/directUploadCapability.test.ts src/agentProcessManager.sessionTranscript.test.ts --maxWorkers=2
+          pnpm --filter @botiverse/raft-computer exec vitest run src/services/mellontaPrivacy.test.ts src/services/diagnosticsPush.test.ts src/mellontaRelease.test.ts src/mellontaInstaller.test.ts src/externalInstaller.test.ts src/nativePublish.contract.test.ts --maxWorkers=2
           pnpm --filter @botiverse/raft-computer test:manifest
       - name: Build native Linux x64 executable
         run: |
           pnpm --filter @botiverse/raft-computer build:native --platform linux --arch x64 --node-version "$(cat .node-version)"
-          node packages/computer/scripts/native/produce-manifest.mjs --dir packages/computer/dist-native --version "$GITHUB_REF_NAME" --node-version "$(cat .node-version)" --required-targets linux-x64
+          node packages/computer/scripts/native/produce-manifest.mjs --dir packages/computer/dist-native --version "$RELEASE_VERSION" --node-version "$(cat .node-version)" --required-targets linux-x64
           node scripts/mellonta/prepare-release.mjs
           node scripts/mellonta/smoke-install.mjs
       - name: Publish verified release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
