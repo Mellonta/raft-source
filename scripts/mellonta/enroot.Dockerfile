@@ -1,17 +1,20 @@
 # Built in GitHub Actions. The deployment machine uses only Enroot.
-ARG NODE_VERSION=24.15.0
+ARG NODE_VERSION=24.21.0
 FROM node:${NODE_VERSION}-bookworm-slim AS build
 WORKDIR /app
 RUN npm install --global pnpm@10.29.3
 ENV ELECTRON_SKIP_BINARY_DOWNLOAD=1
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY patches/ patches/
+COPY packages/runtime-form/package.json packages/runtime-form/
+COPY packages/trace-client/package.json packages/trace-client/
 COPY packages/sync-core/package.json packages/sync-core/
 COPY packages/shared/package.json packages/shared/
 COPY packages/desktop-contract/package.json packages/desktop-contract/
 COPY packages/server/package.json packages/server/
 COPY packages/web/package.json packages/web/
 RUN pnpm --filter @botiverse/raft-server... --filter @botiverse/raft-web... install --frozen-lockfile
+COPY packages/runtime-form/ packages/runtime-form/
+COPY packages/trace-client/ packages/trace-client/
 COPY packages/sync-core/ packages/sync-core/
 COPY packages/shared/ packages/shared/
 COPY packages/desktop-contract/ packages/desktop-contract/

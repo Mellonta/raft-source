@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import { test } from "vitest";
 import { raftdevStoragePaths } from "./raftdev-paths";
 
 test("legacy state and seed locations are unchanged when unset", () => {

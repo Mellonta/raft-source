@@ -3,8 +3,9 @@
 !package.json
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
-!patches/**
 !packages/
+!packages/runtime-form/**
+!packages/trace-client/**
 !packages/sync-core/**
 !packages/shared/**
 !packages/desktop-contract/**

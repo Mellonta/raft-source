@@ -52,5 +52,5 @@ jobs:
           cmp "$RUNNER_TEMP/docker-root-before" "$RUNNER_TEMP/docker-root-after"
           bash /data/.raft-config/raftdev ports raft
           node --test scripts/mellonta/setup-ubuntu.test.mjs
-          env -u RAFTDEV_STATE_DIR -u RAFTDEV_PERSISTENT_DATA -u RAFTDEV_SHELL_INIT -u SLOCKDEV_HOME -u VITE_DEV_ALLOWED_HOSTS node --import tsx --test scripts/dev/raftdev-entry.test.ts scripts/dev/raftdev-paths.test.ts scripts/dev/raftdev-state.test.ts scripts/dev/raftdev-risingwave.test.ts scripts/dev/raftdev-trace.test.ts
+          env -u RAFTDEV_STATE_DIR -u RAFTDEV_PERSISTENT_DATA -u RAFTDEV_SHELL_INIT -u SLOCKDEV_HOME -u VITE_DEV_ALLOWED_HOSTS pnpm exec vitest run --globals scripts/dev/raftdev-entry.test.ts scripts/dev/raftdev-paths.test.ts scripts/dev/raftdev-state.test.ts scripts/dev/raftdev-risingwave.test.ts scripts/dev/raftdev-trace.test.ts
           pnpm typecheck:raftdev

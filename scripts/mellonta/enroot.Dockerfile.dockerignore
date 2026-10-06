@@ -5,8 +5,9 @@
 !pnpm-workspace.yaml
 !LICENSE
 !MELLONTA.md
-!patches/**
 !packages/
+!packages/runtime-form/**
+!packages/trace-client/**
 !packages/sync-core/**
 !packages/shared/**
 !packages/desktop-contract/**
