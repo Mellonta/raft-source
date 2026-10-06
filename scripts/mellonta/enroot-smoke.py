@@ -46,6 +46,9 @@ def smoke():
 
 
 try:
+    state.mkdir(parents=True, exist_ok=True)
+    # Only the disposable CI deployment can auto-verify synthetic accounts.
+    (state / "server-extra.env").write_text("SLOCK_E2E_AUTO_VERIFY_EMAIL=1\n")
     run(setup + ['--url', 'http://127.0.0.1:8080', '--bind', '127.0.0.1', *image_args])
     smoke()
     before = hashlib.sha256((state / 'settings.json').read_bytes()).hexdigest()

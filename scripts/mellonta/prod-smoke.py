@@ -56,7 +56,7 @@ if os.environ.get("GITHUB_ACTIONS") == "true":
         account = {"email": f"deploy-{secrets.token_hex(6)}@example.invalid", "password": secrets.token_hex(24)}
         legal = (Path(__file__).parents[2] / "packages/shared/src/legalAcceptance.ts").read_text()
         registration = api("register", {
-            **account, "acceptTerms": True,
+            **account, "acceptTerms": True, "__e2eAutoVerify": True,
             "termsVersion": re.search(r'CURRENT_TERMS_VERSION = "([^"]+)"', legal)[1],
             "privacyVersion": re.search(r'CURRENT_PRIVACY_VERSION = "([^"]+)"', legal)[1],
         })
@@ -65,4 +65,22 @@ if os.environ.get("GITHUB_ACTIONS") == "true":
         saved.chmod(0o600)
     login = api("login", {"email": account["email"], "password": account["password"]})
     assert login["accessToken"]
+
+    # Exercise real PostgreSQL-backed Activity/sidebar/followed-thread routes.
+    # A green /health alone missed upstream's new hard RisingWave dependency.
+    def workspace_api(path, body=None):
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer " + account["token"]}
+        if account.get("workspace"):
+            headers["X-Server-Id"] = account["workspace"]
+        request = Request(origin + "/api/" + path, headers=headers,
+                          data=json.dumps(body).encode() if body is not None else None)
+        with urlopen(request) as response:
+            return json.load(response)
+
+    if not account.get("workspace"):
+        workspace = workspace_api("servers", {"name": "Deployment smoke", "slug": "deploy-" + secrets.token_hex(6)})
+        account["workspace"] = workspace["id"]
+        saved.write_text(json.dumps(account))
+    for path in ("channels/inbox", "channels/unread?summary=1", "channels/threads/followed", "servers/unread-summary"):
+        assert workspace_api(path) is not None, path
 print("Production health, assets, manifest, WebSocket, and CI authentication checks passed.")

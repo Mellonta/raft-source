@@ -2948,6 +2948,7 @@ function cmdStart(args: string[]): void {
       "MOBILE_OAUTH_RETURN_URI",
       "MOBILE_OAUTH_ALLOWED_RETURN_URIS",
       "SLOCK_MCP_CREDENTIAL_KEY",
+      "RAFT_READ_BACKEND",
       "SLOCK_E2E_AUTO_VERIFY_EMAIL",
     ]) serverCmd += `${passthrough(v)} `;
     serverCmd += "pnpm --filter @botiverse/raft-server dev";

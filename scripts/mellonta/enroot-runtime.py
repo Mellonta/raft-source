@@ -143,7 +143,7 @@ def main():
                'XDG_CACHE_HOME': str(STATE / 'cache')}
         env.update(extra_environment(STATE / 'server-extra.env'))
         env.update({
-            'NODE_ENV': 'production', 'DEPLOYMENT_ENV': 'production',
+            'RAFT_READ_BACKEND': 'postgres', 'NODE_ENV': 'production', 'DEPLOYMENT_ENV': 'production',
             'HOST': '127.0.0.1', 'PORT': str(settings['api_port']),
             'METRICS_HOST': '127.0.0.1', 'METRICS_PORT': str(settings['metrics_port']),
             'DATABASE_URL': f"postgresql://raft:{settings['postgres_password']}@127.0.0.1:{settings['postgres_port']}/raft",

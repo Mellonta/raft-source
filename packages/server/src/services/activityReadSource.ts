@@ -1,17 +1,9 @@
+import { usesPostgresReadBackend } from "../db/readBackend";
+import { referenceActivityReadSource } from "./postgresActivityReads";
 /**
- * Test seam for the RisingWave-served Activity reads: the Activity item list
- * (getInboxItems), the Activity unread totals (getActivityUnreadTotalsBatch),
- * the followed-thread stats and the followed-threads rows (getFollowedThreads).
- *
- * RisingWave is a hard dependency: production reads these from RisingWave only,
- * and with no RisingWave configured (or a failed read) the request fails. There
- * is no Postgres fallback in the product.
- *
- * CI unit tests and e2e run on PGlite without RisingWave, so they explicitly
- * install a Postgres reference (src/test/risingWaveReadReference.ts) through
- * this seam. Like conversationUnreadSource.ts, this module is deliberately tiny
- * (type-only imports) so the test setup can install the reference without
- * loading channelService. Production never sets the override.
+ * Activity read source. Self-hosted deployments explicitly select the canonical
+ * PostgreSQL implementation with RAFT_READ_BACKEND=postgres. Otherwise reads use
+ * RisingWave. Test overrides take precedence; failures never switch backends.
  */
 import type { DbQueryTracer } from "../tracing/dbQueryTrace";
 import type {
@@ -63,5 +55,5 @@ export function __setActivityReadSourceForTests(source: ActivityReadSource | nul
 }
 
 export function getActivityReadSourceOverride(): ActivityReadSource | null {
-  return testSource;
+  return testSource ?? (usesPostgresReadBackend() ? referenceActivityReadSource : null);
 }
