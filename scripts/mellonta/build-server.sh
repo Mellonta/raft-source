@@ -20,9 +20,10 @@ runtime_prefix="$build_root/runtime"
 node_version=$(cat "$source_root/.node-version")
 "$build_root/micromamba" --no-rc create --yes --prefix "$runtime_prefix" --override-channels -c conda-forge \
   "nodejs=$node_version" postgresql=16.15 redis-server=7.4.7 nginx=1.30.0 \
-  python=3.12 conda-pack=0.8.1 fontconfig fonts-conda-ecosystem
+  python=3.12 conda-pack=0.9.2 fontconfig fonts-conda-ecosystem
 export PATH="$runtime_prefix/bin:$runtime_prefix/sbin:$PATH"
 export ELECTRON_SKIP_BINARY_DOWNLOAD=1
+conda-pack --version
 npm install --global --prefix "$runtime_prefix" pnpm@10.29.3
 bundle_root="$build_root/bundle"
 mkdir -p "$bundle_root/app" "$output_dir"
