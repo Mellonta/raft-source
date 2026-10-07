@@ -3,7 +3,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test, vi } from "vitest";
-import { diagnosticsPush } from "./diagnosticsPush.js";
+import { diagnosticsPush } from "./diagnosticsPush";
 
 test("even forced diagnostics push is disabled before filesystem or network work", async () => {
   const slockHome = await mkdtemp(path.join(os.tmpdir(), "mellonta-diagnostics-"));
