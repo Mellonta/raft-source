@@ -31,7 +31,7 @@ mkdir -p "$bundle_root/app" "$output_dir"
 git -C "$source_root" archive HEAD | tar -x -C "$bundle_root/app"
 cd "$bundle_root/app"
 pnpm --filter @botiverse/raft-server... --filter @botiverse/raft-web... install --frozen-lockfile
-pnpm --filter @botiverse/raft-server exec vitest run src/services/mellontaPostgresReads.test.ts src/services/conversationUnread.test.ts src/services/jointMentionV6.test.ts src/services/channelService.risingwaveNoFallback.test.ts --maxWorkers=2
+pnpm --filter @botiverse/raft-server exec vitest run src/services/mellontaPostgresReads.test.ts src/services/followedThreadsRwPath.test.ts src/services/conversationUnread.test.ts src/services/jointMentionV6.test.ts src/services/channelService.risingwaveNoFallback.test.ts --maxWorkers=2
 VITE_API_URL='' VITE_DEPLOYMENT_ENV=production VITE_COMMIT_SHA="$revision" VITE_FRONTEND_RELEASE_ID="$revision" \
   VITE_WEB_TRACE_URL='' VITE_FEEDBACK_EXPORT_URL='' pnpm --filter @botiverse/raft-web build
 cp scripts/mellonta/native-runtime.py scripts/mellonta/native-nginx.conf "$bundle_root/"
