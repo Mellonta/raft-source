@@ -3,11 +3,13 @@ import argparse
 import base64
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import socket
 from pathlib import Path
 import tempfile
+import tarfile
 import unittest
 from unittest.mock import patch
 
@@ -19,8 +21,8 @@ def load(name, filename):
     return module
 
 
-control = load('control', 'enroot-control.py')
-runtime = load('runtime', 'enroot-runtime.py')
+control = load('control', 'native-control.py')
+runtime = load('runtime', 'native-runtime.py')
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -68,57 +70,57 @@ class ConfigurationTests(unittest.TestCase):
             runtime.extra_environment(env)
 
     def test_image_must_match_manifest_before_cache_activation(self):
-        image = self.root / 'raft-server-linux-x64.sqsh'
+        image = self.root / 'raft-server-linux-x64.tar.gz'
         image.write_bytes(b'test-image')
         manifest = self.root / 'manifest.json'
-        metadata = {'schema': 1, 'image': image.name, 'platform': 'linux-x64', 'commit': 'a' * 40, 'sha256': '0' * 64}
+        metadata = {'schema': 1, 'bundle': image.name, 'platform': 'linux-x64', 'commit': 'a' * 40, 'sha256': '0' * 64}
         manifest.write_text(json.dumps(metadata))
-        args = argparse.Namespace(image=image, manifest=manifest)
+        args = argparse.Namespace(bundle=image, manifest=manifest)
         cache = self.root / 'images'
         with self.assertRaisesRegex(ValueError, 'checksum'):
-            control.get_image(args, cache)
+            control.get_bundle(args, cache)
         self.assertEqual(list(cache.iterdir()), [])
         metadata['sha256'] = hashlib.sha256(image.read_bytes()).hexdigest()
         manifest.write_text(json.dumps(metadata))
-        target, actual = control.get_image(args, cache)
+        target, actual = control.get_bundle(args, cache)
         self.assertEqual(target.read_bytes(), image.read_bytes())
         self.assertEqual(actual, metadata)
 
     def test_server_release_selection_ignores_the_computer_latest_release(self):
         sha = 'b' * 40
-        metadata = {'schema': 1, 'image': 'raft-server-linux-x64.sqsh', 'platform': 'linux-x64', 'commit': sha,
+        metadata = {'schema': 1, 'bundle': 'raft-server-linux-x64.tar.gz', 'platform': 'linux-x64', 'commit': sha,
                     'sha256': hashlib.sha256(b'cached').hexdigest()}
         cache = self.root / 'images'
         cache.mkdir()
-        (cache / (sha + '-linux-x64.sqsh')).write_bytes(b'cached')
+        (cache / (sha + '-linux-x64.tar.gz')).write_bytes(b'cached')
         releases = [{'draft': False, 'tag_name': '1.0.28-mellonta.1'},
                     {'draft': False, 'tag_name': control.RELEASE_PREFIX + sha}]
         with patch.object(control, 'request_json', side_effect=[releases, metadata]):
-            target, _ = control.get_image(argparse.Namespace(image=None, release=None), cache)
-        self.assertEqual(target.name, sha + '-linux-x64.sqsh')
+            target, _ = control.get_bundle(argparse.Namespace(bundle=None, release=None), cache)
+        self.assertEqual(target.name, sha + '-linux-x64.tar.gz')
 
     def test_arm_uses_its_manifest_and_distinct_image_cache(self):
         sha = 'c' * 40
-        metadata = {'schema': 1, 'image': 'raft-server-linux-arm64.sqsh', 'platform': 'linux-arm64',
+        metadata = {'schema': 1, 'bundle': 'raft-server-linux-arm64.tar.gz', 'platform': 'linux-arm64',
                     'commit': sha, 'sha256': hashlib.sha256(b'arm-image').hexdigest()}
         cache = self.root / 'images'
         cache.mkdir()
-        (cache / (sha + '-linux-arm64.sqsh')).write_bytes(b'arm-image')
+        (cache / (sha + '-linux-arm64.tar.gz')).write_bytes(b'arm-image')
         with patch.object(control.platform, 'machine', return_value='aarch64'), \
                 patch.object(control, 'request_json', return_value=metadata) as request:
-            target, _ = control.get_image(argparse.Namespace(image=None, release=control.RELEASE_PREFIX + sha), cache)
-            self.assertTrue(request.call_args.args[0].endswith('/enroot-manifest-linux-arm64.json'))
+            target, _ = control.get_bundle(argparse.Namespace(bundle=None, release=control.RELEASE_PREFIX + sha), cache)
+            self.assertTrue(request.call_args.args[0].endswith('/server-manifest-linux-arm64.json'))
             self.assertEqual(target.read_bytes(), b'arm-image')
-            self.assertEqual(target.name, sha + '-linux-arm64.sqsh')
+            self.assertEqual(target.name, sha + '-linux-arm64.tar.gz')
 
     def test_wrong_architecture_is_rejected_even_with_a_matching_checksum(self):
-        image = self.root / 'raft-server-linux-x64.sqsh'
+        image = self.root / 'raft-server-linux-x64.tar.gz'
         image.write_bytes(b'x64-image')
         manifest = self.root / 'manifest.json'
-        manifest.write_text(json.dumps({'schema': 1, 'image': image.name, 'platform': 'linux-x64',
+        manifest.write_text(json.dumps({'schema': 1, 'bundle': image.name, 'platform': 'linux-x64',
                                        'commit': 'a' * 40, 'sha256': hashlib.sha256(image.read_bytes()).hexdigest()}))
         with patch.object(control.platform, 'machine', return_value='aarch64'), self.assertRaisesRegex(ValueError, 'architecture mismatch'):
-            control.get_image(argparse.Namespace(image=image, manifest=manifest), self.root / 'images')
+            control.get_bundle(argparse.Namespace(bundle=image, manifest=manifest), self.root / 'images')
         self.assertFalse((self.root / 'images').exists())
 
     def test_supported_architecture_aliases(self):
@@ -128,6 +130,50 @@ class ConfigurationTests(unittest.TestCase):
                 self.assertEqual(control.linux_target(), expected)
         with patch.object(control.platform, 'machine', return_value='armv7l'), self.assertRaisesRegex(ValueError, 'ARM64'):
             control.linux_target()
+
+    def test_extraction_rejects_traversal_and_escaping_symlinks(self):
+        for name, link in [('../escape', None), ('/absolute', None), ('link', '../../escape')]:
+            archive = self.root / 'unsafe.tar.gz'
+            with tarfile.open(archive, 'w:gz') as stream:
+                member = tarfile.TarInfo(name)
+                if link:
+                    member.type = tarfile.SYMTYPE
+                    member.linkname = link
+                stream.addfile(member)
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                control.extract_archive(archive, self.root / 'extract')
+        self.assertFalse((self.root / 'escape').exists())
+
+    def test_extraction_preserves_internal_relative_package_links(self):
+        archive = self.root / 'safe.tar.gz'
+        with tarfile.open(archive, 'w:gz') as stream:
+            data = tarfile.TarInfo('app/packages/example')
+            data.size = 3
+            stream.addfile(data, io.BytesIO(b'ok!'))
+            link = tarfile.TarInfo('app/node_modules/example')
+            link.type = tarfile.SYMTYPE
+            link.linkname = '../packages/example'
+            stream.addfile(link)
+        control.extract_archive(archive, self.root / 'extract')
+        self.assertEqual((self.root / 'extract/app/node_modules/example').read_bytes(), b'ok!')
+
+    def test_prefix_relocation_runs_at_the_final_path_and_completed_bundles_are_reused(self):
+        runtime_archive = self.root / 'runtime.tar.gz'
+        with tarfile.open(runtime_archive, 'w:gz'):
+            pass
+        revision = self.root / 'revision'
+        revision.write_text('d' * 40)
+        archive = self.root / 'bundle.tar.gz'
+        with tarfile.open(archive, 'w:gz') as stream:
+            stream.add(runtime_archive, arcname='runtime.tar.gz')
+            stream.add(revision, arcname='revision')
+        manifest = {'commit': 'd' * 40, 'platform': 'linux-x64', 'sha256': 'e' * 64}
+        with patch.object(control.subprocess, 'run') as run:
+            target = control.prepare_bundle(archive, manifest, self.root / 'releases')
+            self.assertEqual(run.call_args.args[0], [str(target / 'runtime/bin/python'), str(target / 'runtime/bin/conda-unpack')])
+            self.assertEqual((target / '.ready').read_text().strip(), manifest['sha256'])
+            self.assertEqual(control.prepare_bundle(archive, manifest, self.root / 'releases'), target)
+            self.assertEqual(run.call_count, 1)
 
     @unittest.skipUnless(Path('/proc/self/stat').exists(), 'Linux /proc identity test')
     def test_reused_pid_does_not_receive_a_stop_signal(self):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""User-owned Enroot deployment. Host requirements: Python 3.9+ and working Enroot."""
+"""Native user-owned deployment. Host requirements: Linux, Bash and Python 3.9+."""
 import argparse
 import base64
 import fcntl
@@ -17,12 +17,14 @@ import signal
 import socket
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 REPOSITORY = 'Mellonta/raft-source'
-RELEASE_PREFIX = 'enroot-server-'
+RELEASE_PREFIX = 'server-'
 
 
 def linux_target():
@@ -31,18 +33,17 @@ def linux_target():
         return 'linux-x64'
     if machine in ('aarch64', 'arm64'):
         return 'linux-arm64'
-    raise ValueError('This image requires Linux x86-64 or ARM64')
+    raise ValueError('This bundle requires Linux x86-64 or ARM64')
 
 
 def manifest_name(target):
-    # Keep the original x64 name compatible with existing deployments/releases.
-    return 'enroot-manifest.json' if target == 'linux-x64' else 'enroot-manifest-linux-arm64.json'
+    return f'server-manifest-{target}.json'
 
 
 def validate_platform(manifest):
     target = linux_target()
-    if manifest.get('platform') != target or manifest.get('image') != f'raft-server-{target}.sqsh':
-        raise ValueError(f'Image architecture mismatch: this machine requires {target}')
+    if manifest.get('platform') != target or manifest.get('bundle') != f'raft-server-{target}.tar.gz':
+        raise ValueError(f'Bundle architecture mismatch: this machine requires {target}')
 
 
 def write(path, text):
@@ -66,17 +67,17 @@ def request_json(url):
         return json.load(response)
 
 
-def get_image(args, images):
+def get_bundle(args, downloads):
     target_platform = linux_target()
-    image_name = f'raft-server-{target_platform}.sqsh'
-    if args.image:
+    bundle_name = f'raft-server-{target_platform}.tar.gz'
+    if args.bundle:
         if not args.manifest:
-            raise ValueError('--image requires --manifest from the same build')
+            raise ValueError('--bundle requires --manifest from the same build')
         manifest = json.loads(Path(args.manifest).expanduser().read_text())
     else:
         tag = args.release
         if not tag:
-            # Keep the Computer /releases/latest pointer independent of server images.
+            # Keep the Computer /releases/latest pointer independent of server bundles.
             for page in range(1, 11):
                 releases = request_json(f'https://api.github.com/repos/{REPOSITORY}/releases?per_page=100&page={page}')
                 matches = [r for r in releases if not r['draft'] and r['tag_name'].startswith(RELEASE_PREFIX)]
@@ -86,33 +87,86 @@ def get_image(args, images):
                 if len(releases) < 100:
                     break
         if not tag or not re.fullmatch(RELEASE_PREFIX + '[0-9a-f]{40}', tag):
-            raise ValueError('No published Enroot server image found; check the Mellonta Enroot release workflow')
+            raise ValueError('No published native server bundle found; check the Mellonta server release workflow')
         base = f'https://github.com/{REPOSITORY}/releases/download/{tag}'
         manifest = request_json(base + '/' + manifest_name(target_platform))
         if tag != RELEASE_PREFIX + manifest.get('commit', ''):
-            raise ValueError('Image manifest does not match the requested release')
+            raise ValueError('Bundle manifest does not match the requested release')
     validate_platform(manifest)
     if (manifest.get('schema') != 1
             or not re.fullmatch('[0-9a-f]{40}', manifest.get('commit', ''))
             or not re.fullmatch('[0-9a-f]{64}', manifest.get('sha256', ''))):
-        raise ValueError('Invalid Enroot image manifest')
-    images.mkdir(parents=True, exist_ok=True)
-    target = images / (manifest['commit'] + '-' + target_platform + '.sqsh')
+        raise ValueError('Invalid server bundle manifest')
+    downloads.mkdir(parents=True, exist_ok=True)
+    target = downloads / (manifest['commit'] + '-' + target_platform + '.tar.gz')
     if target.exists() and digest(target) == manifest['sha256']:
         return target, manifest
     temporary = target.with_suffix('.download')
     try:
-        if args.image:
-            shutil.copyfile(Path(args.image).expanduser(), temporary)
+        if args.bundle:
+            shutil.copyfile(Path(args.bundle).expanduser(), temporary)
         else:
-            with urlopen(base + '/' + image_name, timeout=120) as response, temporary.open('wb') as out:
+            with urlopen(base + '/' + bundle_name, timeout=120) as response, temporary.open('wb') as out:
                 shutil.copyfileobj(response, out)
         if digest(temporary) != manifest['sha256']:
-            raise ValueError('Image checksum mismatch; installation has not been activated')
+            raise ValueError('Bundle checksum mismatch; installation has not been activated')
         temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
     return target, manifest
+
+
+def extract_archive(archive, destination):
+    """Reject traversal, escaping links, devices and special modes on Python 3.9+."""
+    destination.mkdir(parents=True, exist_ok=True)
+    root = destination.resolve()
+    def contained(path):
+        if path != root and root not in path.parents:
+            raise ValueError('Archive path escapes its destination')
+    with tarfile.open(archive, 'r:gz') as source:
+        for member in source:
+            if Path(member.name).is_absolute() or '..' in Path(member.name).parts:
+                raise ValueError('Unsafe archive path')
+            path = (root / member.name).resolve()
+            contained(path)
+            if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+                raise ValueError('Unsupported archive entry')
+            if member.issym() or member.islnk():
+                link = Path(member.linkname)
+                if link.is_absolute():
+                    raise ValueError('Absolute archive link')
+                contained(((path.parent if member.issym() else root) / link).resolve())
+            member.mode &= 0o777
+            # Validated above rather than relying on filters absent in Python 3.9.
+            source.extract(member, root)
+
+
+def prepare_bundle(archive, manifest, releases):
+    target = releases / (manifest['commit'] + '-' + manifest['platform'])
+    marker = target / '.ready'
+    if marker.is_file() and marker.read_text().strip() == manifest['sha256']:
+        return target
+    if target.exists():
+        raise ValueError(f'Incomplete runtime at {target}; remove that extracted directory and rerun setup')
+    releases.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix='.extract-', dir=releases))
+    try:
+        extract_archive(archive, staging)
+        if (staging / 'revision').read_text().strip() != manifest['commit']:
+            raise ValueError('Extracted revision does not match the manifest')
+        extract_archive(staging / 'runtime.tar.gz', staging / 'runtime')
+        (staging / 'runtime.tar.gz').unlink()
+        staging.rename(target)
+        # Conda's prefix rewriting must happen at the final path. The packed
+        # runtime includes its own Python; no conda/mamba is used on the host.
+        runtime = target / 'runtime'
+        subprocess.run([str(runtime / 'bin/python'), str(runtime / 'bin/conda-unpack')],
+                       env={'PATH': str(runtime / 'bin') + ':/usr/bin:/bin', 'HOME': str(target)}, check=True)
+        write(marker, manifest['sha256'] + '\n')
+        return target
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
 
 
 def configure(state, args):
@@ -194,19 +248,6 @@ def stop(state):
     raise RuntimeError('Graceful shutdown timed out; inspect logs before restarting')
 
 
-def enroot_env(root):
-    result = os.environ.copy()
-    for name, subdir in [('ENROOT_DATA_PATH', 'data'), ('ENROOT_CACHE_PATH', 'cache'),
-                         ('ENROOT_RUNTIME_PATH', 'run'), ('ENROOT_CONFIG_PATH', 'config'), ('TMPDIR', 'tmp')]:
-        path = root / '.enroot' / subdir
-        path.mkdir(parents=True, exist_ok=True)
-        path.chmod(0o700)
-        result[name] = str(path)
-    result.update(ENROOT_REMAP_ROOT='n', ENROOT_LOGIN_SHELL='n', ENROOT_MOUNT_HOME='n',
-                  NVIDIA_VISIBLE_DEVICES='void')
-    return result
-
-
 def probe_port(address, port):
     with socket.socket() as probe:
         # Match the real services: TIME_WAIT connections from a clean stop do
@@ -228,10 +269,9 @@ def start(root, state, foreground=False, operation_lock=None):
             probe_port(address, settings[key])
         except OSError as error:
             raise RuntimeError(f'{key} {settings[key]} is unavailable on {address}; rerun setup with a different --{key.replace("_", "-")}') from error
-    env = enroot_env(root)
-    command = ['enroot', 'start', '--conf', str(state / 'enroot.conf'),
-               '--mount', str(state) + ':/raft/state', installation['container'],
-               'python3', '/opt/raft/enroot-runtime.py']
+    bundle = Path(installation['directory'])
+    command = [str(bundle / 'runtime/bin/python'), str(bundle / 'native-runtime.py'), str(state)]
+    env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(state / 'home')}
     log = state / 'logs/bootstrap.log'
     if log.exists() and log.stat().st_size > 10 * 1024**2:
         log.replace(log.with_suffix('.log.1'))
@@ -254,7 +294,7 @@ def start(root, state, foreground=False, operation_lock=None):
         host = '127.0.0.1' if settings['bind'] == '0.0.0.0' else settings['bind']
         while time.monotonic() < deadline:
             if child.poll() is not None:
-                raise RuntimeError('Enroot server exited during startup; inspect logs/bootstrap.log and logs/migrate.log')
+                raise RuntimeError('Server exited during startup; inspect logs/bootstrap.log and logs/migrate.log')
             ready = state / 'run/ready.json'
             if ready.exists() and live(state):
                 try:
@@ -271,7 +311,7 @@ def start(root, state, foreground=False, operation_lock=None):
         if foreground and operation_lock is not None:
             fcntl.flock(operation_lock, fcntl.LOCK_UN)
         if foreground and child.wait() != 0:
-            raise RuntimeError('Enroot exited with an error; inspect logs/')
+            raise RuntimeError('Server exited with an error; inspect logs/')
     finally:
         for sig, handler in previous.items():
             signal.signal(sig, handler)
@@ -287,24 +327,22 @@ def main():
     parser.add_argument('--bind')
     for name in ['port', 'api-port', 'metrics-port', 'postgres-port', 'redis-port']:
         parser.add_argument('--' + name, type=int)
-    parser.add_argument('--release', help='Exact enroot-server-COMMIT release (default latest server release)')
-    parser.add_argument('--image', type=Path, help='Use a local .sqsh image with --manifest (offline install/CI)')
+    parser.add_argument('--release', help='Exact server-COMMIT release (default latest server release)')
+    parser.add_argument('--bundle', type=Path, help='Use a local .tar.gz bundle with --manifest (offline install/CI)')
     parser.add_argument('--manifest', type=Path)
     parser.add_argument('--no-start', action='store_true', help='Prepare deployment; start.sh initializes it later')
     parser.add_argument('--foreground', action='store_true', help='Keep running in the current scheduler job/terminal')
     parser.add_argument('--service', choices=['bootstrap', 'server', 'postgres', 'redis', 'web', 'migrate'], default='server')
     args = parser.parse_args()
     if platform.system() != 'Linux':
-        parser.error('This image requires Linux')
+        parser.error('This bundle requires Linux')
     linux_target()
     if os.geteuid() == 0:
         parser.error('Run as your normal cluster user, without sudo')
-    if not shutil.which('enroot'):
-        parser.error('Enroot must already be installed and working for your account')
     os.umask(0o077)
     root = args.root.expanduser().resolve()
     if re.search(r'[:\s\\]', str(root)):
-        parser.error('Enroot mount paths must not contain whitespace, colons, or backslashes')
+        parser.error('Runtime paths must not contain whitespace, colons, or backslashes')
     state = root / '.raft-prod'
     if state.is_symlink():
         parser.error('State directory must not be a symlink')
@@ -312,7 +350,7 @@ def main():
     if state.stat().st_uid != os.getuid():
         parser.error('State directory must belong to the current user')
     state.chmod(0o700)
-    for name in ['run', 'logs', 'images']:
+    for name in ['run', 'logs', 'downloads']:
         (state / name).mkdir(exist_ok=True)
     if args.command == 'logs':
         os.execvp('tail', ['tail', '-n', '100', '-F', str(state / 'logs' / (args.service + '.log'))])
@@ -328,40 +366,33 @@ def main():
             stop(state)
             return
         if args.command == 'deploy':
+            saved_install = state / 'installation.json'
+            if saved_install.exists() and 'container' in json.loads(saved_install.read_text()):
+                raise ValueError('This directory belongs to a retired Enroot deployment; use a fresh --root for native setup')
             settings = configure(state, args)
-            image, manifest = get_image(args, state / 'images')
-            env = enroot_env(root)
-            name = 'raft-server-' + manifest['commit'] + '-' + manifest['platform']
-            container = Path(env['ENROOT_DATA_PATH']) / name
-            if not container.exists():
-                staging_name = name + '-staging-' + str(os.getpid())
-                subprocess.run(['enroot', 'create', '--name', staging_name, str(image)], env=env, check=True)
-                staging = Path(env['ENROOT_DATA_PATH']) / staging_name
-                if (staging / 'opt/raft/revision').read_text().strip() != manifest['commit']:
-                    raise ValueError('Extracted image revision does not match the manifest')
-                staging.rename(container)
+            archive, manifest = get_bundle(args, state / 'downloads')
+            bundle = prepare_bundle(archive, manifest, state / 'releases')
             # Complete the download and extraction before stopping the old server.
             stop(state)
             write(state / 'settings.json', json.dumps(settings, indent=2) + '\n')
-            write(state / 'installation.json', json.dumps({'container': name, **manifest}, indent=2) + '\n')
+            write(state / 'installation.json', json.dumps({'directory': str(bundle), **manifest}, indent=2) + '\n')
             extra = state / 'server-extra.env'
             if not extra.exists():
                 write(extra, '# Optional server environment, preserved by setup. No shell commands.\n# RESEND_API_KEY=...\n')
-            write(state / 'enroot.conf', '#ENROOT_REMAP_ROOT=n\n#ENROOT_LOGIN_SHELL=n\n#ENROOT_MOUNT_HOME=n\nrc() { exec "$@"; }\n')
             # Keep management commands independent of the checkout's location.
             write(state / 'control.py', Path(__file__).read_text())
             for filename, command in [('start.sh', 'start'), ('raftprod', '')]:
                 prefix = 'exec python3 ' + shlex.quote(str(state / 'control.py'))
                 write(state / filename, '#!/usr/bin/env bash\n' + prefix + ' ' + command +
                       ' --root ' + shlex.quote(str(root)) + ' "$@"\n')
-            print('Installed server image from commit ' + manifest['commit'], flush=True)
+            print('Installed native server from commit ' + manifest['commit'], flush=True)
             print('Start: bash ' + str(state / 'start.sh'), flush=True)
             if args.no_start:
                 return
         elif args.command == 'restart':
             stop(state)
         if not (state / 'installation.json').exists():
-            raise RuntimeError('Run setup-enroot.sh --url URL first')
+            raise RuntimeError('Run setup-server.sh --url URL first')
         start(root, state, args.foreground, lock)
 
 
