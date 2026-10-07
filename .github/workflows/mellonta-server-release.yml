@@ -1,0 +1,116 @@
+name: Mellonta native server release
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/mellonta/native*'
+      - 'scripts/mellonta/setup-server.sh'
+      - 'scripts/mellonta/build-server.sh'
+      - 'scripts/mellonta/prod-security-headers.conf'
+      - 'scripts/mellonta/prod-smoke.py'
+      - 'packages/server/**'
+      - 'packages/web/**'
+      - 'packages/shared/**'
+      - 'packages/runtime-form/**'
+      - 'packages/trace-client/**'
+      - 'packages/sync-core/**'
+      - 'packages/desktop-contract/**'
+      - 'packages/visual-testing/shared/**'
+      - 'manual/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.node-version'
+      - '.github/workflows/mellonta-server-release.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: mellonta-native-server-release
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.repository == 'Mellonta/raft-source'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Validate configuration, extraction, and lifecycle helpers
+        run: |
+          bash -n scripts/mellonta/setup-server.sh scripts/mellonta/build-server.sh
+          python3 scripts/mellonta/native.test.py
+      - name: Build and test the native deployment without containers or root
+        shell: bash
+        run: |
+          set -E
+          report_failure() {
+            python3 - "$1" "$RUNNER_TEMP/native-check.log" <<'PY'
+          import pathlib, re, sys
+          output = pathlib.Path(sys.argv[2]).read_text(errors='replace')
+          output = re.sub(r'postgresql://[^\s]+', '[database URL]', output)
+          message = 'Failed command: ' + sys.argv[1] + '\n' + '\n'.join(output.splitlines()[-55:])
+          print('::error title=Native server deployment failed::' + message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+          PY
+          }
+          exec > >(tee "$RUNNER_TEMP/native-check.log") 2>&1
+          trap 'report_failure "$BASH_COMMAND"' ERR
+          bash scripts/mellonta/build-server.sh "$RUNNER_TEMP/server-release"
+          python3 scripts/mellonta/native-smoke.py "$RUNNER_TEMP/server-release"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: server-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/server-release/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: server-linux-*
+          path: server-release
+          merge-multiple: true
+      - name: Verify both native bundles
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path('server-release')
+          for arch in ['x64', 'arm64']:
+              meta = json.loads((root / f'server-manifest-linux-{arch}.json').read_text())
+              assert meta['commit'] == os.environ['GITHUB_SHA'] and meta['platform'] == f'linux-{arch}'
+              assert meta['bundle'] == f'raft-server-linux-{arch}.tar.gz'
+              sha = hashlib.sha256()
+              with (root / meta['bundle']).open('rb') as stream:
+                  for chunk in iter(lambda: stream.read(1024**2), b''): sha.update(chunk)
+              assert sha.hexdigest() == meta['sha256']
+          PY
+      - name: Publish both verified native server bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="server-$GITHUB_SHA"
+          cat > "$RUNNER_TEMP/server-notes.md" <<'EOF'
+          Native Raft production server for Linux x86-64 and ARM64, tested on Ubuntu 22.04.
+          Includes Node, PostgreSQL 16, Redis, nginx, Python, and the production web build.
+          Run scripts/mellonta/setup-server.sh --url YOUR_PORTAL_ORIGIN from the matching source checkout.
+          Default deployment root: ~/park. No sudo, Docker, Enroot, conda, or host Node installation is required.
+          Use --foreground inside scheduler allocations. Client releases are published separately.
+          See MELLONTA.md for storage, ports, lifecycle commands, and update instructions.
+          EOF
+          gh release create "$tag" --target "$GITHUB_SHA" --draft --title "Raft native server ${GITHUB_SHA:0:12}" --notes-file "$RUNNER_TEMP/server-notes.md"
+          gh release upload "$tag" server-release/* LICENSE MELLONTA.md
+          gh release edit "$tag" --draft=false --latest=false

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the production services as the invoking Enroot user, without systemd."""
+"""Run bundled production services as an ordinary user, without systemd."""
 import fcntl
 import hashlib
 import json
@@ -16,8 +16,11 @@ import threading
 import time
 from urllib.request import urlopen
 
-STATE = Path('/raft/state')
-PG_BIN = '/usr/lib/postgresql/16/bin/'
+BUNDLE = Path(__file__).resolve().parent
+APP = BUNDLE / 'app'
+RUNTIME = BUNDLE / 'runtime'
+STATE = BUNDLE / 'state'
+PG_BIN = str(RUNTIME / 'bin') + '/'
 
 
 def write(path, text):
@@ -58,7 +61,7 @@ class Supervisor:
         logger.setLevel(logging.INFO)
         handler = RotatingFileHandler(STATE / 'logs' / (name + '.log'), maxBytes=10 * 1024**2, backupCount=3)
         logger.addHandler(handler)
-        child = subprocess.Popen(command, cwd='/app', env=env or self.env,
+        child = subprocess.Popen(command, cwd=APP, env=env or self.env,
                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                  text=True, errors='replace', start_new_session=True)
         self.children.append((name, child))
@@ -126,21 +129,27 @@ class Supervisor:
 
 
 def main():
+    global STATE
+    if len(sys.argv) != 2:
+        raise ValueError('Expected the state directory argument')
+    STATE = Path(sys.argv[1]).resolve()
     if os.geteuid() == 0:
-        raise RuntimeError('Run Enroot as your normal user, without --root or root remapping.')
+        raise RuntimeError('Run the server as your normal user, without sudo.')
     os.umask(0o077)
     for name in ['run', 'logs', 'postgres', 'redis', 'uploads', 'tmp', 'home', 'cache', 'backups']:
         (STATE / name).mkdir(parents=True, exist_ok=True)
     with (STATE / 'service.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         settings = json.loads((STATE / 'settings.json').read_text())
-        revision = Path('/opt/raft/revision').read_text().strip()
+        revision = (BUNDLE / 'revision').read_text().strip()
         own_identity = identity()
         write(STATE / 'run/runtime.json', json.dumps(own_identity))
         (STATE / 'run/ready.json').unlink(missing_ok=True)
-        env = {'PATH': PG_BIN + ':/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', 'LANG': 'C.UTF-8',
+        env = {'PATH': PG_BIN + ':' + str(RUNTIME / 'sbin') + ':' + os.environ.get('PATH', '/usr/bin:/bin'), 'LANG': 'C.UTF-8',
                'HOME': str(STATE / 'home'), 'TMPDIR': str(STATE / 'tmp'),
-               'XDG_CACHE_HOME': str(STATE / 'cache')}
+               'XDG_CACHE_HOME': str(STATE / 'cache'), 'CONDA_PREFIX': str(RUNTIME),
+               'SSL_CERT_FILE': str(RUNTIME / 'ssl/cert.pem'),
+               'FONTCONFIG_PATH': str(RUNTIME / 'etc/fonts')}
         env.update(extra_environment(STATE / 'server-extra.env'))
         env.update({
             'RAFT_READ_BACKEND': 'postgres', 'NODE_ENV': 'production', 'DEPLOYMENT_ENV': 'production',
@@ -213,13 +222,14 @@ def main():
                 with urlopen(f'http://127.0.0.1:{port}/health', timeout=2) as response:
                     return json.load(response)['status'] == 'ok'
             supervisor.wait_for(lambda: healthy(settings['api_port']))
-            nginx = Path('/opt/raft/enroot-nginx.conf').read_text()
+            nginx = (BUNDLE / 'native-nginx.conf').read_text()
             substitutions = {'BIND': settings['bind'], 'WEB_PORT': settings['port'], 'API_PORT': settings['api_port'],
-                             'MANIFEST_SHA': hashlib.sha256(Path('/app/packages/web/dist/desktop-manifest.json').read_bytes()).hexdigest()}
+                             'MANIFEST_SHA': hashlib.sha256((APP / 'packages/web/dist/desktop-manifest.json').read_bytes()).hexdigest(),
+                             'STATE': STATE, 'APP': APP, 'BUNDLE': BUNDLE, 'RUNTIME': RUNTIME}
             for key, value in substitutions.items():
                 nginx = nginx.replace('@' + key + '@', str(value))
             write(STATE / 'run/nginx.conf', nginx)
-            supervisor.spawn('web', ['nginx', '-c', str(STATE / 'run/nginx.conf')])
+            supervisor.spawn('web', ['nginx', '-p', str(STATE / 'run') + '/', '-e', 'stderr', '-c', str(STATE / 'run/nginx.conf')])
             supervisor.wait_for(lambda: (STATE / 'run/nginx.pid').exists())
             write(STATE / 'run/ready.json', json.dumps({**own_identity, 'revision': revision}))
             print('Raft is ready at ' + settings['public_url'], flush=True)
