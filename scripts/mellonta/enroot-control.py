@@ -22,8 +22,27 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 REPOSITORY = 'Mellonta/raft-source'
-IMAGE_NAME = 'raft-server-linux-x64.sqsh'
 RELEASE_PREFIX = 'enroot-server-'
+
+
+def linux_target():
+    machine = platform.machine().lower()
+    if machine in ('x86_64', 'amd64'):
+        return 'linux-x64'
+    if machine in ('aarch64', 'arm64'):
+        return 'linux-arm64'
+    raise ValueError('This image requires Linux x86-64 or ARM64')
+
+
+def manifest_name(target):
+    # Keep the original x64 name compatible with existing deployments/releases.
+    return 'enroot-manifest.json' if target == 'linux-x64' else 'enroot-manifest-linux-arm64.json'
+
+
+def validate_platform(manifest):
+    target = linux_target()
+    if manifest.get('platform') != target or manifest.get('image') != f'raft-server-{target}.sqsh':
+        raise ValueError(f'Image architecture mismatch: this machine requires {target}')
 
 
 def write(path, text):
@@ -48,6 +67,8 @@ def request_json(url):
 
 
 def get_image(args, images):
+    target_platform = linux_target()
+    image_name = f'raft-server-{target_platform}.sqsh'
     if args.image:
         if not args.manifest:
             raise ValueError('--image requires --manifest from the same build')
@@ -67,15 +88,16 @@ def get_image(args, images):
         if not tag or not re.fullmatch(RELEASE_PREFIX + '[0-9a-f]{40}', tag):
             raise ValueError('No published Enroot server image found; check the Mellonta Enroot release workflow')
         base = f'https://github.com/{REPOSITORY}/releases/download/{tag}'
-        manifest = request_json(base + '/enroot-manifest.json')
+        manifest = request_json(base + '/' + manifest_name(target_platform))
         if tag != RELEASE_PREFIX + manifest.get('commit', ''):
             raise ValueError('Image manifest does not match the requested release')
-    if (manifest.get('schema') != 1 or manifest.get('image') != IMAGE_NAME
+    validate_platform(manifest)
+    if (manifest.get('schema') != 1
             or not re.fullmatch('[0-9a-f]{40}', manifest.get('commit', ''))
             or not re.fullmatch('[0-9a-f]{64}', manifest.get('sha256', ''))):
         raise ValueError('Invalid Enroot image manifest')
     images.mkdir(parents=True, exist_ok=True)
-    target = images / (manifest['commit'] + '.sqsh')
+    target = images / (manifest['commit'] + '-' + target_platform + '.sqsh')
     if target.exists() and digest(target) == manifest['sha256']:
         return target, manifest
     temporary = target.with_suffix('.download')
@@ -83,7 +105,7 @@ def get_image(args, images):
         if args.image:
             shutil.copyfile(Path(args.image).expanduser(), temporary)
         else:
-            with urlopen(base + '/' + IMAGE_NAME, timeout=120) as response, temporary.open('wb') as out:
+            with urlopen(base + '/' + image_name, timeout=120) as response, temporary.open('wb') as out:
                 shutil.copyfileobj(response, out)
         if digest(temporary) != manifest['sha256']:
             raise ValueError('Image checksum mismatch; installation has not been activated')
@@ -198,6 +220,7 @@ def start(root, state, foreground=False, operation_lock=None):
         print('Raft is already running. Use restart to reload settings.')
         return
     installation = json.loads((state / 'installation.json').read_text())
+    validate_platform(installation)
     settings = json.loads((state / 'settings.json').read_text())
     for key in ['port', 'api_port', 'metrics_port', 'postgres_port', 'redis_port']:
         address = settings['bind'] if key == 'port' else '127.0.0.1'
@@ -271,8 +294,9 @@ def main():
     parser.add_argument('--foreground', action='store_true', help='Keep running in the current scheduler job/terminal')
     parser.add_argument('--service', choices=['bootstrap', 'server', 'postgres', 'redis', 'web', 'migrate'], default='server')
     args = parser.parse_args()
-    if platform.system() != 'Linux' or platform.machine() != 'x86_64':
-        parser.error('This image requires Linux x86-64')
+    if platform.system() != 'Linux':
+        parser.error('This image requires Linux')
+    linux_target()
     if os.geteuid() == 0:
         parser.error('Run as your normal cluster user, without sudo')
     if not shutil.which('enroot'):
@@ -307,7 +331,7 @@ def main():
             settings = configure(state, args)
             image, manifest = get_image(args, state / 'images')
             env = enroot_env(root)
-            name = 'raft-server-' + manifest['commit']
+            name = 'raft-server-' + manifest['commit'] + '-' + manifest['platform']
             container = Path(env['ENROOT_DATA_PATH']) / name
             if not container.exists():
                 staging_name = name + '-staging-' + str(os.getpid())
