@@ -22,7 +22,7 @@ on the machine where you install it. Your agent runtime is still installed separ
 
 This integration preserves the existing fork history and release tags. The
 client version is now **1.0.43-mellonta.2**, based on upstream Computer 1.0.43;
-server images are still identified separately by `enroot-server-<commit>`.
+server images are still identified separately by `server-<commit>`.
 Both client and server releases include Linux x64 and ARM64 artifacts; the same
 setup commands work on both architectures, with no emulation.
 
@@ -46,9 +46,9 @@ The old public snapshot's final migration was renumbered upstream from 0266 to
 1.13 journal in one transaction before applying later migrations. Unknown or
 partially modified histories are refused; user data and session tokens are retained.
 
-The production Docker and Enroot images use Node 24.21 and the new oxc loader.
-Enroot setup still needs no sudo or Docker on the cluster and keeps all state
-under `~/park`. Upstream now requires RisingWave but omits its bootstrap SQL from the public
+The production deployments use Node 24.21 and the new oxc loader.
+Native setup needs no sudo, Docker, Enroot, conda, or host Node installation and
+keeps all state under `~/park`. Upstream now requires RisingWave but omits its bootstrap SQL from the public
 snapshot. Mellonta deployments explicitly select `RAFT_READ_BACKEND=postgres`:
 Activity, sidebar unread, followed threads, and agent inbox/recovery use the
 canonical PostgreSQL implementations retained in upstream's reference suite.
@@ -152,55 +152,43 @@ The value is read when the web process starts. Setting it in another shell
 does not change an already-running process. This is a server checkout setting;
 updating the Computer binary is not required.
 
-## Enroot server setup without sudo
+## Native server setup without root
 
-For a cluster account with Enroot already installed, use the Enroot production
-deployment. All host files default to `~/park`; this setup never invokes sudo,
-apt, Docker, or systemd on the cluster. It needs Linux x86-64 or ARM64, Python 3.9+, and a
-working Enroot 3.5+ installation. Git is needed only to obtain this checkout.
+This is the default setup for an unprivileged Linux account. It requires Bash,
+Python 3.9+, and a glibc-based Linux x86-64 or ARM64 machine (tested on Ubuntu
+22.04). Git is needed only to obtain the checkout. It never invokes sudo, Docker,
+Enroot, apt, conda, or systemd on the target machine. Node, PostgreSQL 16, Redis,
+nginx, Python, and application dependencies are included in a verified bundle.
 
 ```bash
 mkdir -p "$HOME/park"
 git clone https://github.com/Mellonta/raft-source.git "$HOME/park/raft"
-bash "$HOME/park/raft/scripts/mellonta/setup-enroot.sh" --url http://a.b.com:8080
+bash "$HOME/park/raft/scripts/mellonta/setup-server.sh" --url http://a.b.com:8080
 ```
 
-Use your actual portal origin in `--url`. If the fork checkout already exists,
-update it with `git -C "$HOME/park/raft" pull --ff-only` instead of cloning again.
-There is no host nvm/Node/npm installation: the verified image contains Node,
-the Raft API, the production web build, nginx, PostgreSQL 16, and Redis. The
-frontend uses the portal's own origin, so changing the URL needs no web rebuild.
-The image runs as your ordinary host user, without Enroot root remapping.
-
-Setup detects the host architecture and downloads the matching image from the
-latest **Enroot server** release, verifies its SHA-256,
-extracts it, generates private settings, initializes/migrates the database, and
-waits for the portal to become healthy. `--release enroot-server-COMMIT` pins an
-exact published build. `--image /path/raft-server-linux-x64.sqsh --manifest
-/path/enroot-manifest.json` installs previously downloaded artifacts offline. For ARM64, use `raft-server-linux-arm64.sqsh` with
-`enroot-manifest-linux-arm64.json`; x64 keeps `enroot-manifest.json`. A manifest
-for the wrong architecture is rejected before extraction. Image caches and
-extracted container names include the architecture.
-Server images have separate releases and do not change the Computer installer's
-`releases/latest` pointer or require a new Computer version.
+Replace the URL with the portal origin reachable from your browser and clients.
+For an existing checkout, use `git -C "$HOME/park/raft" pull --ff-only`. Setup
+automatically selects the host architecture, verifies the download, extracts and
+relocates its runtime, generates private settings, initializes the database,
+and starts the production portal. No host dependency installation is performed.
 
 | Path | Contents |
 | --- | --- |
-| `~/park/raft` | Fork checkout and deployment tools |
-| `~/park/.raft-prod/settings.json` | Saved public URL, ports, and generated secrets |
-| `~/park/.raft-prod/postgres`, `redis`, `uploads` | Persistent database, cache, and uploaded files |
-| `~/park/.raft-prod/server-extra.env` | Optional API environment, such as email delivery settings |
-| `~/park/.raft-prod/logs` | Service logs, rotated at 10 MiB with three retained rotations |
-| `~/park/.raft-prod/images` | Verified SquashFS downloads |
-| `~/park/.raft-prod/backups` | Database/files/settings snapshots before changing the migration revision |
-| `~/park/.enroot` | Extracted container filesystems, Enroot cache, runtime files, and temporary files |
+| `~/park/raft` | Fork checkout and setup tools |
+| `~/park/.raft-prod/settings.json` | Public URL, ports, and generated secrets |
+| `~/park/.raft-prod/postgres`, `redis`, `uploads` | Persistent data |
+| `~/park/.raft-prod/server-extra.env` | Optional API environment, such as email settings |
+| `~/park/.raft-prod/logs` | Rotating service logs |
+| `~/park/.raft-prod/releases` | Extracted application and userspace runtimes |
+| `~/park/.raft-prod/downloads` | Verified release archives |
+| `~/park/.raft-prod/backups` | Database/files/settings snapshots before schema updates |
 
-`--root PATH` changes the `~/park` root. The directory must be writable by your
-user, persistent between jobs, and on storage suitable for PostgreSQL (including
-working file locks). Enroot mount paths cannot contain whitespace or colons.
-This creates a fresh deployment; it does not import or erase old `/data` or
-raftdev state. Preserve `settings.json` with the database: setup will not silently
-regenerate credentials if a database exists without its settings.
+The directory must be writable, allow executing binaries, and provide PostgreSQL
+file-locking semantics. `--root PATH` changes the default `~/park` root. Runtime
+paths cannot contain whitespace, colons, or backslashes. Do not move an extracted
+runtime after setup: its paths are rewritten for that location. Reinstall the
+bundle at the destination instead. This is an ordinary process deployment, not a
+container or sandbox; services run with your account's filesystem permissions.
 
 After setup, start with one command:
 
@@ -208,7 +196,7 @@ After setup, start with one command:
 bash "$HOME/park/.raft-prod/start.sh"
 ```
 
-Other commands use the saved state and image:
+Other commands use the saved settings and runtime:
 
 ```bash
 bash "$HOME/park/.raft-prod/raftprod" status
@@ -218,45 +206,54 @@ bash "$HOME/park/.raft-prod/raftprod" restart
 bash "$HOME/park/.raft-prod/raftprod" stop
 ```
 
-Run setup again to download a newer image. It finishes downloading/extracting
-before stopping the previous instance. Secrets, database files, and uploads are
-retained. Startup runs journaled migrations on a changed image revision, making
-a backup if the database already exists. Failed initialization/migrations leave
-the service stopped; logs explain the failure. The supervisor shuts all services
-down if one fails; use `restart` after resolving the failure. It does not install
-an automatic boot service. Old images remain available under `.enroot/data` and
-`.raft-prod/images`; setup does not erase them or roll back database migrations.
+Register your account and create a workspace in the portal. Without email
+delivery configuration, verification links appear in the API logs. Install the
+Computer client using this fork's setup script above; the portal's upstream
+installer command has not been replaced.
 
-For a scheduler allocation, keep the supervisor in the foreground:
+Run setup again to install a newer server bundle. Downloads and runtime
+preparation finish before the current server is stopped. Settings, credentials,
+database files and uploads are retained. Startup backs up an existing database
+before applying migrations on a changed release; migration failures leave the
+service stopped. The supervisor shuts all services down if one exits. It does
+not install an automatic boot service, delete old releases, or roll back database
+migrations. Preserve settings.json with the database: missing credentials are
+never silently regenerated over existing data.
+
+For scheduler allocations, keep the supervisor in the foreground:
 
 ```bash
 bash "$HOME/park/.raft-prod/start.sh" --foreground
 ```
 
-To prepare files before submitting a job, add `--no-start` to setup; the first
-`start.sh --foreground` inside the allocation initializes the database. Enroot
-does not extend a Slurm time limit or make a compute node reachable outside the
-cluster. Run on a node/allocation where persistent services are permitted. Only
-one instance may use a given data directory at a time.
+Add `--no-start` to setup to prepare the bundle before entering an allocation.
+The first foreground start initializes the database. The process is still subject
+to scheduler job limits and cluster networking rules. Only one instance may use
+a data directory at a time.
 
-Enroot shares host networking. The portal listens on `0.0.0.0:8080` by default;
-`--bind 127.0.0.1` is suitable for a local TLS proxy or SSH tunnel. PostgreSQL,
-Redis, the API, and metrics listen on loopback. PostgreSQL and Redis require
-generated passwords. All five ports are configurable to avoid conflicts on
-shared nodes: `--port 8080 --api-port 3001 --metrics-port 9090 --postgres-port
-5432 --redis-port 6379`. A configured public URL must include the appropriate
-portal port unless an existing reverse proxy provides it. No certificates or
-cluster firewall changes are installed.
+The portal listens on `0.0.0.0:8080`; use `--bind 127.0.0.1` for a local reverse
+proxy or tunnel. PostgreSQL, Redis, the API and metrics listen only on loopback;
+the database and cache have generated passwords. All ports are configurable:
+`--port 8080 --api-port 3001 --metrics-port 9090 --postgres-port 5432 --redis-port
+6379`. Ports must be distinct and at least 1024. Setup does not configure TLS or
+firewalls. Use the correct port in `--url` unless a proxy supplies it.
 
-Register your account and workspace in the portal, then connect your separately
-installed Computer client. Without email delivery configuration, verification
-links appear in the API logs. Continue to use this fork's client setup script;
-the portal's upstream CDN installation link has not been replaced.
+Server bundles use separate `server-COMMIT` releases and do not change the
+Computer installer's latest-release pointer. `--release server-COMMIT` pins a
+build. Offline setup accepts `--bundle /path/raft-server-linux-arm64.tar.gz
+--manifest /path/server-manifest-linux-arm64.json` (use `linux-x64` on x86-64).
+The manifest binds architecture, commit and SHA-256 before extraction.
 
-The `Mellonta Enroot server release` workflow builds images in CI, tests actual
-unprivileged Enroot deployment with host sudo/Docker/apt commands blocked, checks
-account/session and file persistence, then publishes the image and manifest.
-Docker and sudo are used only to prepare the disposable CI builder.
+CI builds both architectures without root or containers. It uses checksum-pinned
+micromamba and conda-forge packages to produce a packed userspace runtime; those
+build tools are not needed on the deployment machine. Bundles include dependency
+records and license notices. Both architectures must pass native startup, real
+HTTP reads, private-listener, persistence, restart, redeployment and foreground
+shutdown checks before either is published.
+
+Enroot support has been removed. Historical Enroot releases remain available,
+but the current scripts do not launch or migrate them. Use a fresh root for a
+native deployment rather than reusing an active Enroot data directory.
 
 ## Ubuntu server setup with Docker (development)
 
