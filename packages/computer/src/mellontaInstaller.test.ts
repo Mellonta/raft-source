@@ -11,7 +11,7 @@ vi.mock("./proxy", () => ({ computerFetch: fetchMock }));
 afterEach(() => vi.resetAllMocks());
 const version = "1.0.43-mellonta.1";
 
-test("upgrade verifies a fork installer and pins its authority despite inherited upstream settings", async () => {
+test.each(["x64", "arm64"])("%s upgrade verifies a fork installer and pins its authority despite inherited upstream settings", async (arch) => {
   const home = await mkdtemp(join(tmpdir(), "mellonta-upgrade-"));
   const bytes = "#!/bin/sh\necho fixture\n";
   const hash = createHash("sha256").update(bytes).digest("hex");
@@ -26,7 +26,7 @@ test("upgrade verifies a fork installer and pins its authority despite inherited
       RAFT_HOME: home, RAFT_COMPUTER_RELEASE_BASE: "https://upstream.invalid",
       RAFT_COMPUTER_RELEASE_BACKEND: "hands", RAFT_COMPUTER_INSTALLER_DL_BASE: "https://hands.invalid",
       RAFT_COMPUTER_INSTALL_DIR: join(home, "bin with spaces"),
-    }, "linux", "x64");
+    }, "linux", arch);
     expect(result.command).toBe("/usr/bin/env");
     expect(result.args).toContain(`RAFT_COMPUTER_RELEASE_BASE=${DEFAULT_UPGRADE_BASE_URL}`);
     expect(result.args).toContain(`RAFT_COMPUTER_INSTALL_CHANNEL=pinned:${version}`);

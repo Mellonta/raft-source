@@ -6,7 +6,7 @@ usage() {
   cat <<'EOF'
 Usage: bash setup-client.sh --server-url URL --workspace SLUG [options]
 
-Installs the latest published Mellonta Linux x86-64 release, then logs in,
+Installs the latest published Mellonta Linux x86-64 or ARM64 release, then logs in,
 attaches to your workspace, and starts Computer. Run as your agent user, without
 sudo. Node, npm, Docker, and a source checkout are not required.
 
@@ -115,7 +115,11 @@ main() {
   [[ "$server_url" =~ ^https?://[^/?#@[:space:]]+/?$ ]] || fail "--server-url must be an http(s) origin, e.g. http://a.b.com:8080."
   server_url=${server_url%/}
   [[ "$workspace" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || fail "--workspace must be the workspace slug from your portal URL, not a URL or UUID."
-  [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || fail "The published Mellonta client supports Linux x86-64 only."
+  [[ "$(uname -s)" == Linux ]] || fail "The published Mellonta client supports Linux only."
+  case "$(uname -m)" in
+    x86_64|amd64|aarch64|arm64) ;;
+    *) fail "The published Mellonta client supports x86-64 and ARM64 only." ;;
+  esac
   if (( ! install_only )) && [[ ! -t 0 || ! -t 1 ]]; then
     fail "Login needs an interactive terminal. Use --install-only, then run the saved connect.sh in a terminal."
   fi

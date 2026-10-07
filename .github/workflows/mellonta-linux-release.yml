@@ -12,6 +12,7 @@ on:
       - 'packages/trace-client/**'
       - 'scripts/mellonta/install-client.sh'
       - 'scripts/mellonta/prepare-release.mjs'
+      - 'scripts/mellonta/merge-client-artifacts*'
       - 'scripts/mellonta/smoke-install.mjs'
       - '.github/workflows/mellonta-linux-release.yml'
       - 'pnpm-lock.yaml'
@@ -26,12 +27,18 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     if: github.repository == 'Mellonta/raft-source'
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -50,17 +57,45 @@ jobs:
           pnpm --filter @botiverse/raft-daemon exec vitest run src/mellontaPrivacy.test.ts src/managedMcpRuntimeProxy.test.ts src/traceBundleUpload.test.ts src/directUploadCapability.test.ts src/agentProcessManager.sessionTranscript.test.ts --maxWorkers=2
           pnpm --filter @botiverse/raft-computer exec vitest run src/services/mellontaPrivacy.test.ts src/services/diagnosticsPush.test.ts src/mellontaRelease.test.ts src/mellontaInstaller.test.ts src/externalInstaller.test.ts src/nativePublish.contract.test.ts --maxWorkers=2
           pnpm --filter @botiverse/raft-computer test:manifest
-      - name: Build native Linux x64 executable
+          node --test scripts/mellonta/merge-client-artifacts.test.mjs scripts/mellonta/setup-client.test.mjs
+      - name: Build and install the native Linux executable
         run: |
-          pnpm --filter @botiverse/raft-computer build:native --platform linux --arch x64 --node-version "$(cat .node-version)"
-          node packages/computer/scripts/native/produce-manifest.mjs --dir packages/computer/dist-native --version "$RELEASE_VERSION" --node-version "$(cat .node-version)" --required-targets linux-x64
+          test "$(node -p process.arch)" = "${{ matrix.arch }}"
+          pnpm --filter @botiverse/raft-computer build:native --platform linux --arch "${{ matrix.arch }}" --node-version "$(cat .node-version)"
+          node packages/computer/scripts/native/produce-manifest.mjs --dir packages/computer/dist-native --version "$RELEASE_VERSION" --node-version "$(cat .node-version)" --required-targets "linux-${{ matrix.arch }}"
           node scripts/mellonta/prepare-release.mjs
           node scripts/mellonta/smoke-install.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: packages/computer/dist-native/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: linux-*
+          path: artifacts
+      - name: Verify both architectures and prepare the combined release
+        run: |
+          node scripts/mellonta/merge-client-artifacts.mjs artifacts packages/computer/dist-native
+          node scripts/mellonta/prepare-release.mjs
       - name: Publish verified release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Raft Computer $GITHUB_REF_NAME (Linux x64)" --notes-file MELLONTA.md
-          gh release upload "$GITHUB_REF_NAME" packages/computer/dist-native/raft-computer-linux-x64 packages/computer/dist-native/raft-computer-linux-x64.gz packages/computer/dist-native/photon_rs_bg.wasm packages/computer/dist-native/manifest.json packages/computer/dist-native/install.sh packages/computer/dist-native/SHA256SUMS packages/computer/dist-native/LICENSE packages/computer/dist-native/MELLONTA.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag --draft --title "Raft Computer $GITHUB_REF_NAME (Linux x64 + ARM64)" --notes-file MELLONTA.md
+          gh release upload "$GITHUB_REF_NAME" packages/computer/dist-native/*
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest

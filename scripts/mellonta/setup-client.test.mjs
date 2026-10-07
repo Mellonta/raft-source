@@ -24,7 +24,7 @@ function fixture(t) {
     chmodSync(path, 0o755);
   }
   const nodeScript = (body) => `#!${process.execPath}\n${body}\n`;
-  executable(join(tools, "uname"), '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo x86_64;; esac\n');
+  executable(join(tools, "uname"), '#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo "${MOCK_MACHINE:-x86_64}";; esac\n');
   // GNU realpath -m is present on Linux; emulate it for the macOS unit run.
   executable(join(tools, "realpath"), nodeScript(`console.log(require('node:path').resolve(process.argv.at(-1)));`));
   executable(join(tools, "sha256sum"), nodeScript(`
@@ -97,6 +97,24 @@ printf 'pinned:%s\\n' "$RAFT_COMPUTER_VERSION" > "$RAFT_HOME/computer/channel"
 }
 
 function success(result) { assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`); }
+
+for (const machine of ["aarch64", "arm64"]) {
+  test(`setup accepts Linux ${machine} and writes working launchers`, (t) => {
+    const f = fixture(t);
+    success(f.run([], { MOCK_MACHINE: machine }));
+    assert.equal(readFileSync(join(f.state, "computer/channel"), "utf8"), `pinned:${version}\n`);
+  });
+}
+
+test("32-bit ARM is rejected before downloading or modifying state", (t) => {
+  const f = fixture(t);
+  f.existing();
+  const result = f.run(["--reset"], { MOCK_MACHINE: "armv7l" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /x86-64 and ARM64/);
+  assert.equal(existsSync(f.env.MOCK_DOWNLOADS), false);
+  assert.equal(readFileSync(join(f.state, "computer/old-session"), "utf8"), "old credentials");
+});
 
 test("help does not require Linux or a configured server", () => {
   const result = spawnSync("bash", [script, "--help"], { encoding: "utf8" });

@@ -122,7 +122,10 @@ detect_target() {
     *) err "unsupported arch: $machine" ;;
   esac
   TARGET="${PLAT}-${ARCH}"
-[ "$TARGET" = linux-x64 ] || err "Mellonta releases support Linux x86-64 only"
+case "$TARGET" in
+  linux-x64|linux-arm64) ;;
+  *) err "Mellonta releases support Linux x86-64 and ARM64 only" ;;
+esac
 }
 detect_target
 

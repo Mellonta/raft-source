@@ -33,7 +33,7 @@ async function read(url: string, maximum: number): Promise<Buffer> {
 
 export async function mellontaInstallerCommand(args: string[], env: NodeJS.ProcessEnv,
   platform: NodeJS.Platform, arch: string): Promise<{ command: string; args: string[] }> {
-  if (platform !== "linux" || arch !== "x64") throw new Error("Mellonta releases support Linux x86-64 only");
+  if (platform !== "linux" || !["x64", "arm64"].includes(arch)) throw new Error("Mellonta releases support Linux x86-64 and ARM64 only");
   if (args[0] !== "upgrade") throw new Error("Unsupported Mellonta installer operation");
   let version: string | undefined;
   let channel: string | undefined;
