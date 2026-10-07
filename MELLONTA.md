@@ -1,7 +1,7 @@
 # Mellonta's self-hosted Raft Computer
 
 This fork builds Raft Computer and its bundled daemon/agent CLI from the same
-public source snapshot as Raft server 1.21.0 (`v1.21.0-source.1`). Computer and
+public source snapshot as Raft server 1.21.2 (`v1.21.2-source.1`). Computer and
 server have independent version numbers. This release is for Linux x86-64 and ARM64 (aarch64)
 (Ubuntu 22.04 or newer), with Node embedded; Node, npm and pnpm are not required
 on the machine where you install it. Your agent runtime is still installed separately.
@@ -21,15 +21,15 @@ on the machine where you install it. Your agent runtime is still installed separ
 ## Updating from the 1.13 fork
 
 This integration preserves the existing fork history and release tags. The
-client version is now **1.0.43-mellonta.2**, based on upstream Computer 1.0.43;
-server images are still identified separately by `server-<commit>`.
+client version is now **1.0.43-mellonta.3**, based on upstream Computer 1.0.43;
+server bundles are still identified separately by `server-<commit>`.
 Both client and server releases include Linux x64 and ARM64 artifacts; the same
 setup commands work on both architectures, with no emulation.
 
 Upstream replaced its K updater with a separately downloaded Hands installer.
 This fork keeps a Linux installer in `scripts/mellonta/install-client.sh` and
 verifies its release checksum before a local upgrade. Run the saved client
-wrapper with `upgrade --target-version 1.0.43-mellonta.2`, or rerun
+wrapper with `upgrade --target-version 1.0.43-mellonta.3`, or rerun
 `setup-client.sh` without `--reset` to retain credentials and workspaces.
 The installer verifies binary and WASM files before stopping Computer, updates
 the saved version pin, and restarts a previously running service.
@@ -48,8 +48,9 @@ partially modified histories are refused; user data and session tokens are retai
 
 The production deployments use Node 24.21 and the new oxc loader.
 Native setup needs no sudo, Docker, Enroot, conda, or host Node installation and
-keeps all state under `~/park`. Upstream now requires RisingWave but omits its bootstrap SQL from the public
-snapshot. Mellonta deployments explicitly select `RAFT_READ_BACKEND=postgres`:
+keeps all state under `~/park`. Upstream 1.21.2 now includes the RisingWave SQL
+in its public snapshot. Mellonta deployments continue to select
+`RAFT_READ_BACKEND=postgres`, keeping the native deployment self-contained:
 Activity, sidebar unread, followed threads, and agent inbox/recovery use the
 canonical PostgreSQL implementations retained in upstream's reference suite.
 No extra database service is needed. This runs queries at read time instead of
@@ -122,7 +123,7 @@ RAFT_COMPUTER_FORCE=1 sh /tmp/raft-mellonta-install.sh
 ```
 
 `RAFT_COMPUTER_FORCE=1` permits an intentional downgrade, including from an
-upstream version newer than this fork's 1.0.43-mellonta.2. It does not bypass checksum verification. Fresh installations
+upstream version newer than this fork's 1.0.43-mellonta.3. It does not bypass checksum verification. Fresh installations
 can omit it. Set `RAFT_COMPUTER_INSTALL_DIR` if your existing binary is installed
 elsewhere. Ensure that this binary is first on PATH, and restart existing agent
 sessions after replacement so they receive the patched runtime configuration.

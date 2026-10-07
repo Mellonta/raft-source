@@ -1,6 +1,6 @@
 {
   "name": "@botiverse/raft-computer",
-  "version": "1.0.43-mellonta.2",
+  "version": "1.0.43-mellonta.3",
   "license": "FSL-1.1-ALv2",
   "description": "Canonical Raft Computer — standalone human/local-machine control-plane CLI (login + attach); distinct from the agent-facing @botiverse/raft CLI.",
   "type": "module",
