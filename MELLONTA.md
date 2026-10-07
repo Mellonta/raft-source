@@ -2,7 +2,7 @@
 
 This fork builds Raft Computer and its bundled daemon/agent CLI from the same
 public source snapshot as Raft server 1.21.0 (`v1.21.0-source.1`). Computer and
-server have independent version numbers. This release is for Linux x86-64
+server have independent version numbers. This release is for Linux x86-64 and ARM64 (aarch64)
 (Ubuntu 22.04 or newer), with Node embedded; Node, npm and pnpm are not required
 on the machine where you install it. Your agent runtime is still installed separately.
 
@@ -21,13 +21,15 @@ on the machine where you install it. Your agent runtime is still installed separ
 ## Updating from the 1.13 fork
 
 This integration preserves the existing fork history and release tags. The
-client version is now **1.0.43-mellonta.1**, based on upstream Computer 1.0.43;
+client version is now **1.0.43-mellonta.2**, based on upstream Computer 1.0.43;
 server images are still identified separately by `enroot-server-<commit>`.
+Both client and server releases include Linux x64 and ARM64 artifacts; the same
+setup commands work on both architectures, with no emulation.
 
 Upstream replaced its K updater with a separately downloaded Hands installer.
 This fork keeps a Linux installer in `scripts/mellonta/install-client.sh` and
 verifies its release checksum before a local upgrade. Run the saved client
-wrapper with `upgrade --target-version 1.0.43-mellonta.1`, or rerun
+wrapper with `upgrade --target-version 1.0.43-mellonta.2`, or rerun
 `setup-client.sh` without `--reset` to retain credentials and workspaces.
 The installer verifies binary and WASM files before stopping Computer, updates
 the saved version pin, and restarts a previously running service.
@@ -57,7 +59,7 @@ there is no automatic fallback after a read failure.
 
 ## Install or replace the upstream client
 
-For guided setup on each Linux x86-64 client machine, run as the account that
+For guided setup on each Linux x86-64 or ARM64 client machine, run as the account that
 will run agents. First create your account and workspace in your own portal.
 Install and authenticate the agent runtime (Claude Code, Codex, etc.) separately.
 The client includes Node; it does not need Node, npm, Docker, or a source checkout.
@@ -120,7 +122,7 @@ RAFT_COMPUTER_FORCE=1 sh /tmp/raft-mellonta-install.sh
 ```
 
 `RAFT_COMPUTER_FORCE=1` permits an intentional downgrade, including from an
-upstream version newer than this fork's 1.0.43-mellonta.1. It does not bypass checksum verification. Fresh installations
+upstream version newer than this fork's 1.0.43-mellonta.2. It does not bypass checksum verification. Fresh installations
 can omit it. Set `RAFT_COMPUTER_INSTALL_DIR` if your existing binary is installed
 elsewhere. Ensure that this binary is first on PATH, and restart existing agent
 sessions after replacement so they receive the patched runtime configuration.
@@ -154,7 +156,7 @@ updating the Computer binary is not required.
 
 For a cluster account with Enroot already installed, use the Enroot production
 deployment. All host files default to `~/park`; this setup never invokes sudo,
-apt, Docker, or systemd on the cluster. It needs Linux x86-64, Python 3.9+, and a
+apt, Docker, or systemd on the cluster. It needs Linux x86-64 or ARM64, Python 3.9+, and a
 working Enroot 3.5+ installation. Git is needed only to obtain this checkout.
 
 ```bash
@@ -170,11 +172,15 @@ the Raft API, the production web build, nginx, PostgreSQL 16, and Redis. The
 frontend uses the portal's own origin, so changing the URL needs no web rebuild.
 The image runs as your ordinary host user, without Enroot root remapping.
 
-Setup downloads the latest **Enroot server** release, verifies its SHA-256,
+Setup detects the host architecture and downloads the matching image from the
+latest **Enroot server** release, verifies its SHA-256,
 extracts it, generates private settings, initializes/migrates the database, and
 waits for the portal to become healthy. `--release enroot-server-COMMIT` pins an
 exact published build. `--image /path/raft-server-linux-x64.sqsh --manifest
-/path/enroot-manifest.json` installs previously downloaded artifacts offline.
+/path/enroot-manifest.json` installs previously downloaded artifacts offline. For ARM64, use `raft-server-linux-arm64.sqsh` with
+`enroot-manifest-linux-arm64.json`; x64 keeps `enroot-manifest.json`. A manifest
+for the wrong architecture is rejected before extraction. Image caches and
+extracted container names include the architecture.
 Server images have separate releases and do not change the Computer installer's
 `releases/latest` pointer or require a new Computer version.
 
@@ -388,8 +394,10 @@ Use Node from `.node-version` and pnpm 10.29.3. Bump the Computer package versio
 to the next `1.0.43-mellonta.N`, update these installation notes, commit, and push
 a tag exactly matching that version. The `Mellonta Linux release` workflow tests
 the privacy/update policy, builds the executable and manifest, smoke-tests the
-installer on Ubuntu, then publishes the assets. One release covers Linux x64
-machines; ARM64 and other operating systems need separate builds.
+installer on native Ubuntu 22.04 x64 and ARM64 runners, then publishes both
+architectures in one release only after both pass. The setup and upgrade commands
+automatically select the host architecture. 32-bit ARM and other operating systems
+are not included in these releases.
 
 The original FSL-1.1-ALv2 license and copyright notice are preserved in `LICENSE`.
 This is an independently modified distribution, not an official Botiverse release.
