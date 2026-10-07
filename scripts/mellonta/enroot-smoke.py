@@ -2,6 +2,7 @@
 """Run the real image as an ordinary CI user with sudo/Docker/apt blocked."""
 import hashlib
 import os
+import platform
 from pathlib import Path
 import socket
 import subprocess
@@ -22,8 +23,10 @@ for name in ['sudo', 'docker', 'apt', 'apt-get', 'systemctl']:
 env = {**os.environ, 'HOME': str(home), 'PATH': str(guard) + ':' + os.environ['PATH']}
 state = home / 'park/.raft-prod'
 setup = ['bash', str(source / 'scripts/mellonta/setup-enroot.sh')]
-image_args = ['--image', str(assets / 'raft-server-linux-x64.sqsh'),
-              '--manifest', str(assets / 'enroot-manifest.json')]
+target = 'linux-arm64' if platform.machine() in ('aarch64', 'arm64') else 'linux-x64'
+manifest = 'enroot-manifest-linux-arm64.json' if target == 'linux-arm64' else 'enroot-manifest.json'
+image_args = ['--image', str(assets / f'raft-server-{target}.sqsh'),
+              '--manifest', str(assets / manifest)]
 
 
 def run(command):

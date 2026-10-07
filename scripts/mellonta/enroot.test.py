@@ -28,6 +28,9 @@ class ConfigurationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        machine = patch.object(control.platform, 'machine', return_value='x86_64')
+        machine.start()
+        self.addCleanup(machine.stop)
 
     def args(self, **values):
         return argparse.Namespace(public_url='http://raft.example:8080', **values)
@@ -65,10 +68,10 @@ class ConfigurationTests(unittest.TestCase):
             runtime.extra_environment(env)
 
     def test_image_must_match_manifest_before_cache_activation(self):
-        image = self.root / control.IMAGE_NAME
+        image = self.root / 'raft-server-linux-x64.sqsh'
         image.write_bytes(b'test-image')
         manifest = self.root / 'manifest.json'
-        metadata = {'schema': 1, 'image': image.name, 'commit': 'a' * 40, 'sha256': '0' * 64}
+        metadata = {'schema': 1, 'image': image.name, 'platform': 'linux-x64', 'commit': 'a' * 40, 'sha256': '0' * 64}
         manifest.write_text(json.dumps(metadata))
         args = argparse.Namespace(image=image, manifest=manifest)
         cache = self.root / 'images'
@@ -83,16 +86,48 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_server_release_selection_ignores_the_computer_latest_release(self):
         sha = 'b' * 40
-        metadata = {'schema': 1, 'image': control.IMAGE_NAME, 'commit': sha,
+        metadata = {'schema': 1, 'image': 'raft-server-linux-x64.sqsh', 'platform': 'linux-x64', 'commit': sha,
                     'sha256': hashlib.sha256(b'cached').hexdigest()}
         cache = self.root / 'images'
         cache.mkdir()
-        (cache / (sha + '.sqsh')).write_bytes(b'cached')
+        (cache / (sha + '-linux-x64.sqsh')).write_bytes(b'cached')
         releases = [{'draft': False, 'tag_name': '1.0.28-mellonta.1'},
                     {'draft': False, 'tag_name': control.RELEASE_PREFIX + sha}]
         with patch.object(control, 'request_json', side_effect=[releases, metadata]):
             target, _ = control.get_image(argparse.Namespace(image=None, release=None), cache)
-        self.assertEqual(target.name, sha + '.sqsh')
+        self.assertEqual(target.name, sha + '-linux-x64.sqsh')
+
+    def test_arm_uses_its_manifest_and_distinct_image_cache(self):
+        sha = 'c' * 40
+        metadata = {'schema': 1, 'image': 'raft-server-linux-arm64.sqsh', 'platform': 'linux-arm64',
+                    'commit': sha, 'sha256': hashlib.sha256(b'arm-image').hexdigest()}
+        cache = self.root / 'images'
+        cache.mkdir()
+        (cache / (sha + '-linux-arm64.sqsh')).write_bytes(b'arm-image')
+        with patch.object(control.platform, 'machine', return_value='aarch64'), \
+                patch.object(control, 'request_json', return_value=metadata) as request:
+            target, _ = control.get_image(argparse.Namespace(image=None, release=control.RELEASE_PREFIX + sha), cache)
+            self.assertTrue(request.call_args.args[0].endswith('/enroot-manifest-linux-arm64.json'))
+            self.assertEqual(target.read_bytes(), b'arm-image')
+            self.assertEqual(target.name, sha + '-linux-arm64.sqsh')
+
+    def test_wrong_architecture_is_rejected_even_with_a_matching_checksum(self):
+        image = self.root / 'raft-server-linux-x64.sqsh'
+        image.write_bytes(b'x64-image')
+        manifest = self.root / 'manifest.json'
+        manifest.write_text(json.dumps({'schema': 1, 'image': image.name, 'platform': 'linux-x64',
+                                       'commit': 'a' * 40, 'sha256': hashlib.sha256(image.read_bytes()).hexdigest()}))
+        with patch.object(control.platform, 'machine', return_value='aarch64'), self.assertRaisesRegex(ValueError, 'architecture mismatch'):
+            control.get_image(argparse.Namespace(image=image, manifest=manifest), self.root / 'images')
+        self.assertFalse((self.root / 'images').exists())
+
+    def test_supported_architecture_aliases(self):
+        for machine, expected in [('x86_64', 'linux-x64'), ('amd64', 'linux-x64'),
+                                  ('aarch64', 'linux-arm64'), ('arm64', 'linux-arm64')]:
+            with patch.object(control.platform, 'machine', return_value=machine):
+                self.assertEqual(control.linux_target(), expected)
+        with patch.object(control.platform, 'machine', return_value='armv7l'), self.assertRaisesRegex(ValueError, 'ARM64'):
+            control.linux_target()
 
     @unittest.skipUnless(Path('/proc/self/stat').exists(), 'Linux /proc identity test')
     def test_reused_pid_does_not_receive_a_stop_signal(self):
