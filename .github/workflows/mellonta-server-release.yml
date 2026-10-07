@@ -56,7 +56,8 @@ jobs:
           import pathlib, re, sys
           output = pathlib.Path(sys.argv[2]).read_text(errors='replace')
           output = re.sub(r'postgresql://[^\s]+', '[database URL]', output)
-          message = 'Failed command: ' + sys.argv[1] + '\n' + '\n'.join(output.splitlines()[-55:])
+          output = re.sub(r'\x1b\[[0-9;]*m', '', output)
+          message = 'Failed command: ' + sys.argv[1] + '\n' + output[-3000:]
           print('::error title=Native server deployment failed::' + message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
           PY
           }

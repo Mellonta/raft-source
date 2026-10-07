@@ -6,6 +6,7 @@ output_dir=$(realpath -m -- "${1:?Pass the release output directory}")
 revision=$(git -C "$source_root" rev-parse HEAD)
 build_root=$(mktemp -d "${RUNNER_TEMP:-/tmp}/raft-native-build.XXXXXXXX")
 trap 'rm -rf -- "$build_root"' EXIT
+trap 'printf "::error title=Native bundle build failed::Command: %s\n" "$BASH_COMMAND"' ERR
 case "$(uname -m)" in
   x86_64) target=linux-x64; conda_platform=linux-64; mamba_sha=366cd9cd8be14df1ab8ed50352a82111082a36686b2d389fdb79a92c3fafb3e3 ;;
   aarch64) target=linux-arm64; conda_platform=linux-aarch64; mamba_sha=9f93b974adcb4d166996af969b6cd371287d1a3e52733704727884d9b74cb7a7 ;;
