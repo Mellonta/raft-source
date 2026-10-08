@@ -19,12 +19,50 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 REPOSITORY = 'Mellonta/raft-source'
 RELEASE_PREFIX = 'server-'
+
+
+def report(message):
+    print('[raft setup] ' + message, file=sys.stderr, flush=True)
+
+
+class Progress:
+    """Keep blocking work visible, including when output is redirected or piped."""
+    def __init__(self, label, interval=5):
+        self.label = label
+        self.interval = interval
+        self.detail = ''
+        self.finished = threading.Event()
+
+    def __enter__(self):
+        self.started = time.monotonic()
+        report(self.label)
+
+        def heartbeat():
+            while not self.finished.wait(self.interval):
+                detail = ': ' + self.detail if self.detail else ''
+                report(f'{self.label}{detail} ({time.monotonic() - self.started:.0f}s elapsed)')
+        self.thread = threading.Thread(target=heartbeat, daemon=True)
+        self.thread.start()
+        return self
+
+    def transferred(self, count, total=None):
+        self.detail = f'{count / 1024**2:.1f} MiB'
+        if total:
+            self.detail += f' / {total / 1024**2:.1f} MiB ({count / total:.0%})'
+
+    def __exit__(self, kind, value, traceback):
+        self.finished.set()
+        self.thread.join()
+        outcome = 'done' if kind is None else 'interrupted' if kind is KeyboardInterrupt else 'failed'
+        detail = ': ' + self.detail if self.detail else ''
+        report(f'{self.label}{detail} — {outcome} ({time.monotonic() - self.started:.1f}s)')
 
 
 def linux_target():
@@ -56,15 +94,19 @@ def write(path, text):
 
 def digest(path):
     value = hashlib.sha256()
-    with path.open('rb') as stream:
+    with Progress('Verifying bundle SHA-256') as progress, path.open('rb') as stream:
+        count, total = 0, path.stat().st_size
         for block in iter(lambda: stream.read(1024**2), b''):
             value.update(block)
+            count += len(block)
+            progress.transferred(count, total)
     return value.hexdigest()
 
 
 def request_json(url):
-    with urlopen(Request(url, headers={'User-Agent': 'mellonta-raft-setup', 'Accept': 'application/json'}), timeout=60) as response:
-        return json.load(response)
+    with Progress('Fetching release metadata'):
+        with urlopen(Request(url, headers={'User-Agent': 'mellonta-raft-setup', 'Accept': 'application/json'}), timeout=60) as response:
+            return json.load(response)
 
 
 def get_bundle(args, downloads):
@@ -76,6 +118,7 @@ def get_bundle(args, downloads):
         manifest = json.loads(Path(args.manifest).expanduser().read_text())
     else:
         tag = args.release
+        report(f'Selecting {tag or "latest native server release"} for {target_platform}')
         if not tag:
             # Keep the Computer /releases/latest pointer independent of server bundles.
             for page in range(1, 11):
@@ -98,16 +141,29 @@ def get_bundle(args, downloads):
             or not re.fullmatch('[0-9a-f]{64}', manifest.get('sha256', ''))):
         raise ValueError('Invalid server bundle manifest')
     downloads.mkdir(parents=True, exist_ok=True)
+    report('Server revision: ' + manifest['commit'])
     target = downloads / (manifest['commit'] + '-' + target_platform + '.tar.gz')
     if target.exists() and digest(target) == manifest['sha256']:
+        report('Using verified cached bundle: ' + str(target))
         return target, manifest
     temporary = target.with_suffix('.download')
     try:
         if args.bundle:
-            shutil.copyfile(Path(args.bundle).expanduser(), temporary)
+            with Progress('Copying local server bundle'):
+                shutil.copyfile(Path(args.bundle).expanduser(), temporary)
         else:
-            with urlopen(base + '/' + bundle_name, timeout=120) as response, temporary.open('wb') as out:
-                shutil.copyfileobj(response, out)
+            with Progress('Downloading ' + bundle_name) as progress:
+                with urlopen(base + '/' + bundle_name, timeout=120) as response, temporary.open('wb') as out:
+                    length = response.headers.get('Content-Length', '')
+                    total = int(length) if length.isdigit() else None
+                    count = 0
+                    progress.transferred(count, total)
+                    for block in iter(lambda: response.read(1024**2), b''):
+                        out.write(block)
+                        count += len(block)
+                        progress.transferred(count, total)
+                    if total is not None and count != total:
+                        raise ValueError('Incomplete bundle download; rerun setup to retry')
         if digest(temporary) != manifest['sha256']:
             raise ValueError('Bundle checksum mismatch; installation has not been activated')
         temporary.replace(target)
@@ -116,15 +172,15 @@ def get_bundle(args, downloads):
     return target, manifest
 
 
-def extract_archive(archive, destination):
+def extract_archive(archive, destination, label='Extracting archive'):
     """Reject traversal, escaping links, devices and special modes on Python 3.9+."""
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
     def contained(path):
         if path != root and root not in path.parents:
             raise ValueError('Archive path escapes its destination')
-    with tarfile.open(archive, 'r:gz') as source:
-        for member in source:
+    with Progress(label) as progress, tarfile.open(archive, 'r:gz') as source:
+        for count, member in enumerate(source, 1):
             if Path(member.name).is_absolute() or '..' in Path(member.name).parts:
                 raise ValueError('Unsafe archive path')
             path = (root / member.name).resolve()
@@ -139,29 +195,32 @@ def extract_archive(archive, destination):
             member.mode &= 0o777
             # Validated above rather than relying on filters absent in Python 3.9.
             source.extract(member, root)
+            progress.detail = f'{count:,} entries extracted'
 
 
 def prepare_bundle(archive, manifest, releases):
     target = releases / (manifest['commit'] + '-' + manifest['platform'])
     marker = target / '.ready'
     if marker.is_file() and marker.read_text().strip() == manifest['sha256']:
+        report('Using prepared runtime: ' + str(target))
         return target
     if target.exists():
         raise ValueError(f'Incomplete runtime at {target}; remove that extracted directory and rerun setup')
     releases.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix='.extract-', dir=releases))
     try:
-        extract_archive(archive, staging)
+        extract_archive(archive, staging, 'Extracting application bundle')
         if (staging / 'revision').read_text().strip() != manifest['commit']:
             raise ValueError('Extracted revision does not match the manifest')
-        extract_archive(staging / 'runtime.tar.gz', staging / 'runtime')
+        extract_archive(staging / 'runtime.tar.gz', staging / 'runtime', 'Extracting bundled runtime')
         (staging / 'runtime.tar.gz').unlink()
         staging.rename(target)
         # Conda's prefix rewriting must happen at the final path. The packed
         # runtime includes its own Python; no conda/mamba is used on the host.
         runtime = target / 'runtime'
-        subprocess.run([str(runtime / 'bin/python'), str(runtime / 'bin/conda-unpack')],
-                       env={'PATH': str(runtime / 'bin') + ':/usr/bin:/bin', 'HOME': str(target)}, check=True)
+        with Progress('Configuring runtime paths'):
+            subprocess.run([str(runtime / 'bin/python'), str(runtime / 'bin/conda-unpack')],
+                           env={'PATH': str(runtime / 'bin') + ':/usr/bin:/bin', 'HOME': str(target)}, check=True)
         write(marker, manifest['sha256'] + '\n')
         return target
     finally:
@@ -236,16 +295,17 @@ def live(state, name='runtime'):
 def stop(state):
     record = live(state) or live(state, 'launcher')
     if not record:
-        print('Raft is stopped.')
+        print('Raft is stopped.', flush=True)
         return
-    os.kill(record['pid'], signal.SIGTERM)
-    deadline = time.monotonic() + 150
-    while time.monotonic() < deadline:
-        if not live(state) and not live(state, 'launcher'):
-            print('Raft stopped; data retained.')
-            return
-        time.sleep(.25)
-    raise RuntimeError('Graceful shutdown timed out; inspect logs before restarting')
+    with Progress('Stopping existing Raft services'):
+        os.kill(record['pid'], signal.SIGTERM)
+        deadline = time.monotonic() + 150
+        while time.monotonic() < deadline:
+            if not live(state) and not live(state, 'launcher'):
+                print('Raft stopped; data retained.', flush=True)
+                return
+            time.sleep(.25)
+        raise RuntimeError('Graceful shutdown timed out; inspect logs before restarting')
 
 
 def probe_port(address, port):
@@ -258,7 +318,7 @@ def probe_port(address, port):
 
 def start(root, state, foreground=False, operation_lock=None):
     if live(state) or live(state, 'launcher'):
-        print('Raft is already running. Use restart to reload settings.')
+        print('Raft is already running. Use restart to reload settings.', flush=True)
         return
     installation = json.loads((state / 'installation.json').read_text())
     validate_platform(installation)
@@ -273,6 +333,8 @@ def start(root, state, foreground=False, operation_lock=None):
     command = [str(bundle / 'runtime/bin/python'), str(bundle / 'native-runtime.py'), str(state)]
     env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(state / 'home')}
     log = state / 'logs/bootstrap.log'
+    report('Starting Raft services; logs: ' + str(state / 'logs'))
+    report('Startup details: tail -F ' + shlex.quote(str(log)) + ' ' + shlex.quote(str(state / 'logs/migrate.log')))
     if log.exists() and log.stat().st_size > 10 * 1024**2:
         log.replace(log.with_suffix('.log.1'))
     with log.open('a') as output:
@@ -290,23 +352,24 @@ def start(root, state, foreground=False, operation_lock=None):
             os.killpg(child.pid, sig)
     previous = {sig: signal.signal(sig, forward) for sig in [signal.SIGTERM, signal.SIGINT]}
     try:
-        deadline = time.monotonic() + 300
-        host = '127.0.0.1' if settings['bind'] == '0.0.0.0' else settings['bind']
-        while time.monotonic() < deadline:
-            if child.poll() is not None:
-                raise RuntimeError('Server exited during startup; inspect logs/bootstrap.log and logs/migrate.log')
-            ready = state / 'run/ready.json'
-            if ready.exists() and live(state):
-                try:
-                    with urlopen(f"http://{host}:{settings['port']}/health", timeout=2) as response:
-                        if json.load(response)['status'] == 'ok':
-                            break
-                except (OSError, ValueError):
-                    pass
-            time.sleep(.5)
-        else:
-            stop(state)
-            raise RuntimeError('Startup exceeded five minutes; inspect logs/')
+        with Progress('Waiting for database initialization, migrations, and portal health'):
+            deadline = time.monotonic() + 300
+            host = '127.0.0.1' if settings['bind'] == '0.0.0.0' else settings['bind']
+            while time.monotonic() < deadline:
+                if child.poll() is not None:
+                    raise RuntimeError(f'Server exited during startup; inspect {log} and {state / "logs/migrate.log"}')
+                ready = state / 'run/ready.json'
+                if ready.exists() and live(state):
+                    try:
+                        with urlopen(f"http://{host}:{settings['port']}/health", timeout=2) as response:
+                            if json.load(response)['status'] == 'ok':
+                                break
+                    except (OSError, ValueError):
+                        pass
+                time.sleep(.5)
+            else:
+                stop(state)
+                raise RuntimeError(f'Startup exceeded five minutes; inspect {state / "logs"}')
         print('Raft is healthy at ' + settings['public_url'], flush=True)
         if foreground and operation_lock is not None:
             fcntl.flock(operation_lock, fcntl.LOCK_UN)
@@ -354,6 +417,8 @@ def main():
         (state / name).mkdir(exist_ok=True)
     if args.command == 'logs':
         os.execvp('tail', ['tail', '-n', '100', '-F', str(state / 'logs' / (args.service + '.log'))])
+    if args.command == 'deploy':
+        report(f'Setting up Raft for {linux_target()}. State: {state}')
     # The foreground runtime holds service.lock; do not hold the operation lock
     # throughout a foreground job, otherwise a separate stop could never run.
     with (state / 'operation.lock').open('a') as lock:

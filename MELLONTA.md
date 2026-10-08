@@ -172,6 +172,9 @@ For an existing checkout, use `git -C "$HOME/park/raft" pull --ff-only`. Setup
 automatically selects the host architecture, verifies the download, extracts and
 relocates its runtime, generates private settings, initializes the database,
 and starts the production portal. No host dependency installation is performed.
+Setup prints each stage immediately, with download bytes/percentage and an update
+every five seconds during long operations, including extraction and startup.
+Startup also prints the paths to its bootstrap and migration logs.
 
 | Path | Contents |
 | --- | --- |

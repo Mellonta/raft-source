@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+from contextlib import redirect_stderr
 import hashlib
 import importlib.util
 import io
@@ -98,6 +99,37 @@ class ConfigurationTests(unittest.TestCase):
         with patch.object(control, 'request_json', side_effect=[releases, metadata]):
             target, _ = control.get_bundle(argparse.Namespace(bundle=None, release=None), cache)
         self.assertEqual(target.name, sha + '-linux-x64.tar.gz')
+
+    def test_streamed_download_reports_before_network_io_and_never_caches_a_partial_transfer(self):
+        data = b'bundle' * 200_000
+        sha = 'f' * 40
+        metadata = {'schema': 1, 'bundle': 'raft-server-linux-x64.tar.gz', 'platform': 'linux-x64',
+                    'commit': sha, 'sha256': hashlib.sha256(data).hexdigest()}
+        for length in [None, len(data), len(data) + 1]:
+            with self.subTest(length=length), tempfile.TemporaryDirectory(dir=self.root) as folder:
+                cache = Path(folder)
+                output = io.StringIO()
+                response = io.BytesIO(data)
+                response.headers = {} if length is None else {'Content-Length': str(length)}
+
+                def connect(*args, **kwargs):
+                    self.assertIn('Downloading raft-server-linux-x64.tar.gz', output.getvalue())
+                    return response
+
+                with redirect_stderr(output), patch.object(control, 'request_json', return_value=metadata), \
+                        patch.object(control, 'urlopen', side_effect=connect):
+                    args = argparse.Namespace(bundle=None, release=control.RELEASE_PREFIX + sha)
+                    if length == len(data) + 1:
+                        with self.assertRaisesRegex(ValueError, 'Incomplete bundle download'):
+                            control.get_bundle(args, cache)
+                        self.assertEqual(list(cache.iterdir()), [])
+                    else:
+                        target, _ = control.get_bundle(args, cache)
+                        self.assertEqual(target.read_bytes(), data)
+                        self.assertIn('MiB', output.getvalue())
+                        self.assertIn('Verifying bundle SHA-256', output.getvalue())
+                        if length is not None:
+                            self.assertIn('(100%)', output.getvalue())
 
     def test_arm_uses_its_manifest_and_distinct_image_cache(self):
         sha = 'c' * 40
