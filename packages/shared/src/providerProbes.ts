@@ -14,6 +14,7 @@
 // - the closed category enum is complete: transport, carrier, authority and
 //   validity failures are distinct members; `success` is an outcome, never a
 //   category.
+import { hash as sha256 } from "fast-sha256";
 import { randomUuid } from "./randomUuid";
 import type { Brand } from "./brandedIds";
 
@@ -138,12 +139,12 @@ export function canonicalJson(value: unknown): string {
 }
 
 /**
- * Isomorphic SHA-256 (WebCrypto) so this module stays loadable from the Web
- * bundle; digest helpers are async everywhere for the same reason.
+ * The same SHA-256 implementation in browsers and Node, including HTTP origins
+ * where WebCrypto is unavailable. Keep the existing asynchronous API.
  */
 export async function sha256Hex(payload: string): Promise<string> {
   const bytes = new TextEncoder().encode(payload);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  const digest = sha256(bytes);
   return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 

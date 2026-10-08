@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { useEffect, useState } from "react";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
@@ -460,7 +461,7 @@ export function DeveloperAppNotifications({
   const copySecret = async () => {
     if (!signingSecret) return;
     try {
-      await navigator.clipboard.writeText(signingSecret);
+      await copyTextToClipboard(signingSecret);
       setSecretState((current) => current?.clientId === clientId
         ? { ...current, copied: true }
         : current);

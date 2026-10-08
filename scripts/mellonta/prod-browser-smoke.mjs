@@ -65,16 +65,60 @@ try {
   await page.locator("#login-password").fill(account.password);
   const loginResponse = page.waitForResponse((response) => response.url() === origin + "/api/auth/login");
   await page.locator('form button[type="submit"]').click();
-  assert.equal((await loginResponse).status(), 200, "Browser login must reach the same-origin API");
+  const login = await loginResponse;
+  assert.equal(login.status(), 200, "Browser login must reach the same-origin API");
+  const headers = {
+    Authorization: `Bearer ${(await login.json()).accessToken}`,
+    "X-Server-Id": account.workspace,
+  };
+  // Complete the disposable fixture's onboarding so it cannot cover the chat.
+  const onboarding = await page.request.patch(`${origin}/api/servers/${account.workspace}/onboarding-settings`, {
+    headers, data: {
+      setupModalReminderOptOut: true, dismissedAddComputerStep: true,
+      dismissedCreateAgentStep: true, dismissedInviteStep: true,
+      dismissedCommunityStep: true, dismissedNotificationStep: true,
+    },
+  });
+  assert.ok(onboarding.ok(), `Onboarding fixture: HTTP ${onboarding.status()}`);
   // A fresh browser has no remembered workspace; select the CI-created one.
   await page.getByTestId("server-selector-option").filter({ hasText: "Deployment smoke" }).click();
   await page.getByTestId("sidebar-root").waitFor({ state: "visible" });
   await assertUnmodifiedCrypto();
+  const channelResponse = await page.request.post(`${origin}/api/channels`, {
+    headers, data: { name: `http-smoke-${Date.now()}` },
+  });
+  assert.ok(channelResponse.ok(), `Create channel: HTTP ${channelResponse.status()}`);
+  const channel = await channelResponse.json();
+  const workspacePath = new URL(page.url()).pathname.match(/^\/s\/[^/]+/)[0];
+  await page.goto(`${origin}${workspacePath}/channel/${channel.id}`);
+  const composer = page.getByPlaceholder(`Message #${channel.name}`);
+  await composer.fill("HTTP production message 🛶");
+  const sentResponse = page.waitForResponse((response) => response.url() === `${origin}/api/messages` && response.request().method() === "POST");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const sent = await sentResponse;
+  assert.ok(sent.ok(), `Send message: HTTP ${sent.status()}`);
+  const sentMessage = page.getByTestId("message-scroller").getByText("HTTP production message 🛶", { exact: true });
+  await sentMessage.waitFor({ state: "visible" });
+  // Copy through the application's context menu and paste into its composer.
+  // This verifies the HTTP fallback at a real callsite, with no Clipboard API.
+  await sentMessage.click({ button: "right" });
+  await page.getByText("Copy Markdown", { exact: true }).click();
+  await composer.focus();
+  await composer.press("ControlOrMeta+V");
+  assert.equal(await composer.inputValue(), "HTTP production message 🛶");
+  await composer.fill("");
+  const incoming = await page.request.post(`${origin}/api/messages`, {
+    headers, data: { channelId: channel.id, content: "HTTP realtime arrival" },
+  });
+  assert.ok(incoming.ok(), `Incoming message: HTTP ${incoming.status()}`);
+  await page.getByTestId("message-scroller").getByText("HTTP realtime arrival", { exact: true }).waitFor({ state: "visible" });
   await page.reload();
   await page.getByTestId("sidebar-root").waitFor({ state: "visible" });
+  await page.getByTestId("message-scroller").getByText("HTTP production message 🛶", { exact: true }).waitFor({ state: "visible" });
+  await page.getByTestId("message-scroller").getByText("HTTP realtime arrival", { exact: true }).waitFor({ state: "visible" });
   await assertUnmodifiedCrypto();
   assert.deepEqual(errors, [], "Login and session restoration must not crash");
-  console.log("Remote HTTP browser checks passed with unmodified crypto: sign-in, workspace, and session restoration.");
+  console.log("Remote HTTP browser checks passed: sign-in, workspace, sending, real copy/paste, realtime delivery, and persistence after reload; no crypto mutation or telemetry.");
 } catch (error) {
   // Never print the account's credentials or response bodies.
   console.error("Browser errors:", errors);

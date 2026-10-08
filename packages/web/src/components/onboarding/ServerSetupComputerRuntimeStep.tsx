@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { useEffect, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
@@ -525,9 +526,10 @@ function OfflineComputerRecovery({
   const { formatMessage, locale } = useIntl();
   const [copied, setCopied] = useState<string | null>(null);
   const copy = (command: string) => {
-    void navigator.clipboard?.writeText(command);
-    setCopied(command);
-    setClockTimeout(() => setCopied(null), 1_500);
+    void copyTextToClipboard(command).then(() => {
+      setCopied(command);
+      setClockTimeout(() => setCopied(null), 1_500);
+    }).catch(() => setCopied(null));
   };
 
   const many = computers.length > 1;

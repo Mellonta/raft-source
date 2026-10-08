@@ -46,36 +46,7 @@ export function selectionToMarkdown(
     .join("\n\n");
 }
 
-export async function copyTextToClipboard(
-  text: string,
-  formatMessage?: FormatMessage,
-): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  // Fallback for older WebKit / non-secure contexts. Insert a hidden
-  // textarea, select its contents, run document.execCommand("copy"). This
-  // is intentionally minimal — Slock targets modern browsers.
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.style.position = "fixed";
-  ta.style.left = "-9999px";
-  document.body.appendChild(ta);
-  ta.focus();
-  ta.select();
-  try {
-    if (!document.execCommand("copy")) {
-      throw new Error(
-        formatMessage
-          ? formatMessage({ id: "message.share.clipboardRejected" })
-          : "The browser rejected the clipboard copy command",
-      );
-    }
-  } finally {
-    ta.remove();
-  }
-}
+export { copyTextToClipboard } from "./clipboard";
 
 /**
  * Copy a rendered PNG data URL to the system clipboard.

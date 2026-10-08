@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { composerHostClassName } from "./composerHost";
 import CloseButton from "../ui/CloseButton";
 import Tooltip from "../ui/Tooltip";
@@ -1075,7 +1076,7 @@ function AuthenticatedThreadPanel({
         threadParentMessageId: selectedMessage.channelId === threadChannelId ? parentMessageId : null,
       })
     );
-    void navigator.clipboard.writeText(links.join("\n")).then(() => {
+    void copyTextToClipboard(links.join("\n")).then(() => {
       toast.success(formatCopyLinksToast(links.length, formatMessageRef.current), SELECTION_TOAST_OPTIONS);
     }).catch(() => {
       toast.error(formatMessageRef.current({ id: "message.chatPanel.clipboardBlocked" }), SELECTION_TOAST_OPTIONS);

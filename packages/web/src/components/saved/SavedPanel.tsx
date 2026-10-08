@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { memo, useCallback, useEffect, useRef } from "react";
 import { useIntl } from "react-intl";
 import { Bookmark, Copy, Link, MessageSquare } from "lucide-react";
@@ -63,11 +64,11 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
       routeKind,
       threadParentMessageId: isThread ? entry.parentMessageId : null,
     });
-    navigator.clipboard.writeText(url);
+    copyTextToClipboard(url);
   }, [serverSlug, isDm, isThread, entry.parentChannelId, entry.parentMessageId, entry.channelId, entry.messageId]);
 
   const handleCopyMarkdown = useCallback(() => {
-    navigator.clipboard.writeText(entry.content);
+    copyTextToClipboard(entry.content);
   }, [entry.content]);
 
   const handleRemove = useCallback(() => {

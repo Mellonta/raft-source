@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import CloseButton from "../ui/CloseButton";
 import { useCallback, useEffect, useState } from "react";
 import { useIntl } from "react-intl";
@@ -248,7 +249,7 @@ export default function PwaInstallPrompt() {
 
   const copyLink = () => {
     if (typeof window === "undefined") return;
-    void navigator.clipboard?.writeText(window.location.href);
+    void copyTextToClipboard(window.location.href);
     track("pwa_install_cta_clicked", "ios_instruction_sheet");
   };
 

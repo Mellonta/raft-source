@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { useState } from "react";
 import { useIntl } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
@@ -18,7 +19,7 @@ export default function OpenInBrowserSignInGuide({
 
   const copyLink = async () => {
     try {
-      await navigator.clipboard.writeText(loginUrl);
+      await copyTextToClipboard(loginUrl);
       setCopyStatus("auth.openInBrowser.copied");
     } catch {
       setCopyStatus("auth.openInBrowser.copyFailed");

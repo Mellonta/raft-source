@@ -162,7 +162,7 @@ import { getServerUrl } from "../../utils/server";
 import { canViewMachineRuntimeAccountUsage } from "../../utils/machineRuntimeUsageVisibility";
 import StatusDot from "../ui/StatusDot";
 import { buildAgentDiagnosticInfo } from "../../utils/agentDiagnosticInfo";
-import { copyTextToClipboard } from "../../utils/selectMarkdown";
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { ExternalAgentToken } from "./ExternalAgentToken";
 import { DEFAULT_COPY_FEEDBACK_TIMEOUT_MS, useCopyText } from "../../hooks/useCopyText";
 import CopyButton from "../ui/CopyButton";

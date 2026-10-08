@@ -206,3 +206,38 @@ test("clipboard fallback rejects execCommand false and removes its textarea", as
     document.execCommand = originalExecCommand;
   }
 });
+
+test("HTTP copy inside a dialog preserves its focus and input selection", async () => {
+  const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+  const originalExecCommand = document.execCommand;
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
+  const dialog = document.createElement("div");
+  dialog.setAttribute("role", "dialog");
+  const input = document.createElement("input");
+  input.value = "draft message";
+  dialog.appendChild(input);
+  document.body.appendChild(dialog);
+  input.focus();
+  input.setSelectionRange(2, 5);
+  document.execCommand = (command) => {
+    assert.equal(command, "copy");
+    const selected = document.activeElement as HTMLTextAreaElement;
+    assert.equal(selected.parentElement, dialog);
+    assert.equal(selected.value, "raft-computer start\n中文");
+    assert.equal(selected.selectionStart, 0);
+    assert.equal(selected.selectionEnd, selected.value.length);
+    return true;
+  };
+  try {
+    await copyTextToClipboard("raft-computer start\n中文");
+    assert.equal(document.activeElement, input);
+    assert.equal(input.selectionStart, 2);
+    assert.equal(input.selectionEnd, 5);
+    assert.equal(dialog.querySelector("textarea"), null);
+  } finally {
+    dialog.remove();
+    if (clipboardDescriptor) Object.defineProperty(navigator, "clipboard", clipboardDescriptor);
+    else Reflect.deleteProperty(navigator, "clipboard");
+    document.execCommand = originalExecCommand;
+  }
+});

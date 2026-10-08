@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Copy, TextQuote } from "lucide-react";
@@ -251,7 +252,7 @@ export default function MessageSelectionShortcut() {
 
   const handleCopy = useCallback(() => {
     if (!target) return;
-    void navigator.clipboard.writeText(target.text);
+    void copyTextToClipboard(target.text);
     dismissCurrentSelection();
     window.getSelection()?.removeAllRanges();
   }, [dismissCurrentSelection, target]);

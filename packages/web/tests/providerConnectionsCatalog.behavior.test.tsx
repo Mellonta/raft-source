@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { MemoryRouter } from "react-router-dom";
@@ -9,12 +10,45 @@ import api from "../src/api/client";
 import { __testInternals } from "../src/components/settings/ProviderConnectionsSettings";
 import { useServerStore } from "../src/store/serverStore";
 import { useProfileStore } from "../src/store/profileStore";
+import { useMachineStore } from "../src/store/machineStore";
 import { setServerFeatureFlagForTests } from "../src/store/serverFeatureFlags";
 import { TestIntlProvider } from "./helpers/intl";
 
 const { ConnectionRow, CreateProviderConnectionModal, EditProviderConnectionModal, ProviderConnectionTestModal } = __testInternals;
 
 afterEach(cleanup);
+
+test("provider verification reaches the API on HTTP without subtle or randomUUID", async () => {
+  const connection = assignedConnection();
+  const previousMachines = useMachineStore.getState().machines;
+  useMachineStore.setState({ machines: [{
+    id: "http-computer", name: "HTTP computer", status: "online", runtimes: ["builtin"],
+    description: null, statusVersion: 1, apiKeyPrefix: null, hostname: null,
+    os: "linux", daemonVersion: null, lastHeartbeat: null, createdAt: "2026-10-07T00:00:00Z",
+  }] });
+  const httpCrypto = Object.freeze({ getRandomValues: crypto.getRandomValues.bind(crypto) });
+  vi.stubGlobal("crypto", httpCrypto);
+  const post = vi.spyOn(api, "post").mockImplementation(async (url, body) => {
+    assert.equal(url, `/provider-connections/${connection.id}/probes`);
+    const { probeRequestId, requestDigest, ...payload } = body as Record<string, string>;
+    assert.match(probeRequestId, /^[0-9a-f-]{36}$/);
+    const canonical = Object.fromEntries(Object.entries({ ...payload, connectionId: connection.id, schema: "provider-probe-request.v1" }).sort(([a], [b]) => a.localeCompare(b)));
+    assert.equal(requestDigest, createHash("sha256").update(JSON.stringify(canonical)).digest("hex"));
+    return { data: { probe: { outcome: "success", latencyMs: 5, verifiedAt: "2026-10-07T00:00:00Z" }, reply: "probe reply" } };
+  });
+  try {
+    const { VerifyProviderConnectionModal } = __testInternals;
+    render(<TestIntlProvider><VerifyProviderConnectionModal connection={connection} onClose={() => undefined} /></TestIntlProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "Start verification" }));
+    await screen.findByTestId("provider-connection-verify-success");
+    assert.equal(post.mock.calls.length, 1);
+    assert.equal("subtle" in httpCrypto, false);
+    assert.equal("randomUUID" in httpCrypto, false);
+  } finally {
+    vi.unstubAllGlobals();
+    useMachineStore.setState({ machines: previousMachines });
+  }
+});
 
 test("create-provider picker renders the complete server-projected builtin schema catalog", () => {
   const providerOptions: ProviderConnectionProviderOption[] = [
@@ -640,4 +674,3 @@ test("ProviderConnectionsSettings opens assigned agent in the right-side profile
   assert.equal(useProfileStore.getState().profileType, "agent");
   assert.equal(useProfileStore.getState().profileId, "agent-active");
 });
-

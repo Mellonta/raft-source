@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
@@ -434,7 +435,7 @@ export default function ServerSetupProjectionGate({
 
   // Copying says so where the click happened: the button turns into a tick.
   const handleCopyInstallCommand = async (_runtimeId: string, command: string) => {
-    await navigator.clipboard.writeText(command).catch(() => undefined);
+    await copyTextToClipboard(command).catch(() => undefined);
   };
 
   const serverUrl = getServerUrl();

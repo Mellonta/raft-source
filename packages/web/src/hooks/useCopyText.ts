@@ -1,6 +1,6 @@
 import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { copyTextToClipboard } from "../utils/selectMarkdown";
+import { copyTextToClipboard } from "../utils/clipboard";
 
 export const DEFAULT_COPY_FEEDBACK_TIMEOUT_MS = 1_400;
 

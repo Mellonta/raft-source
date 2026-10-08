@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import Tooltip from "../ui/Tooltip";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, Children } from "react";
 import type { ChangeEvent, MouseEvent, PointerEvent as ReactPointerEvent, ReactNode, TouchEvent } from "react";
@@ -4081,7 +4082,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
       routeKind,
       threadParentMessageId: parentMessageId ?? null,
     });
-    navigator.clipboard.writeText(url).then(() => {
+    copyTextToClipboard(url).then(() => {
       setCtxMenu(null);
     });
   }, [serverSlug, parentChannelId, parentMessageId, message.channelId, message.id, navigableChannels]);
@@ -5160,7 +5161,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           </MenuItem>
           <MenuItem
             icon={<Copy size={14} />}
-            onClick={() => { navigator.clipboard.writeText(message.content).then(() => setCtxMenu(null)); }}
+            onClick={() => { copyTextToClipboard(message.content).then(() => setCtxMenu(null)); }}
           >
             {formatMessage({ id: "message.messageItem.copyMarkdown" })}
           </MenuItem>
@@ -5300,7 +5301,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           <MenuItem
             icon={<Copy size={14} />}
             onClick={() => {
-              void navigator.clipboard.writeText(senderDisplayName);
+              void copyTextToClipboard(senderDisplayName);
               setSenderCtxMenu(null);
             }}
           >
@@ -5310,7 +5311,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             <MenuItem
               icon={<Copy size={14} />}
               onClick={() => {
-                void navigator.clipboard.writeText(senderHandleText);
+                void copyTextToClipboard(senderHandleText);
                 setSenderCtxMenu(null);
               }}
             >

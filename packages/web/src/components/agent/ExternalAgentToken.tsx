@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { Button } from "raft-ui";
 import api from "../../api/client";
-import { copyTextToClipboard } from "../../utils/selectMarkdown";
+import { copyTextToClipboard } from "../../utils/clipboard";
 
 type Credential = {
   id: string;

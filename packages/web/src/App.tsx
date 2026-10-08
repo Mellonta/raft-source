@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "./utils/clipboard";
 import { Button, Card } from "raft-ui";
 import { useEffect, useRef, useState, useMemo } from "react";
 import { usePreviewApiTarget } from "./hooks/usePreviewApiTarget";
@@ -244,7 +245,7 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
 
   const copySeedCommand = async () => {
     try {
-      await navigator.clipboard.writeText(seedCommand);
+      await copyTextToClipboard(seedCommand);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1200);
     } catch (err) {

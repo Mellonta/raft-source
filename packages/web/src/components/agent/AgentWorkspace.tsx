@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { Button, InlineCode, SegmentedControl, SegmentedControlItem, SegmentedControlLabel, Spinner } from "raft-ui";
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
@@ -430,7 +431,7 @@ export default function AgentWorkspace({ agentId, compact, hosted }: { agentId: 
   const [copied, setCopied] = useState(false);
 
   const handleCopyPath = useCallback(() => {
-    navigator.clipboard.writeText(workspacePath).then(() => {
+    copyTextToClipboard(workspacePath).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });

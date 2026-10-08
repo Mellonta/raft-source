@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared/src/distributionPolicy";
 import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import { Checkbox, Textarea, Button } from "raft-ui";
@@ -466,7 +467,7 @@ export default function ReportIssueDialog({
       `serverId: ${submittedReport.serverId}`,
       submittedReport.issueDescription ? `issueDescription:\n${submittedReport.issueDescription}` : null,
     ].filter(Boolean);
-    await navigator.clipboard.writeText(lines.join("\n"));
+    await copyTextToClipboard(lines.join("\n"));
     setReportRefCopied(true);
   };
 

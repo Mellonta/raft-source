@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { Check, Copy, Link2, Mail, Plus, Trash2 } from "lucide-react";
@@ -247,7 +248,7 @@ export default function InviteHumanDialog({
 
   const handleCopy = async () => {
     if (!joinUrl) return;
-    await navigator.clipboard.writeText(joinUrl);
+    await copyTextToClipboard(joinUrl);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1500);
   };

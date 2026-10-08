@@ -52,6 +52,20 @@ external requests and telemetry requests during login and session restoration.
 Upstream mechanism tests use an explicit test-only policy mock; the privacy
 regressions always use the real distribution policy.
 
+## HTTP portal support
+
+The portal supports plain HTTP on a domain or IP address, including login,
+chat, text copying, and provider verification. UUIDs use the browser's native
+`getRandomValues`; provider probes use SHA-256 without requiring WebCrypto.
+Text copying uses an application helper with a selection-based fallback on HTTP.
+No global browser crypto or clipboard object is patched.
+
+Browser push notifications, service workers/offline installation, and copying
+images require a secure browser context. Those features remain capability-gated;
+ordinary portal use does not require them. Using `--url http://HOST:8001` publishes
+port 8001 unless an explicit `--port` overrides it. Redeploy to rebuild the web
+assets; restarting existing containers does not pick up source changes.
+
 ## Updating from the 1.13 fork
 
 This integration preserves the existing fork history and release tags. The

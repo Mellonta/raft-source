@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'scripts/mellonta/prod*'
+      - 'scripts/mellonta/http-browser-features.mjs'
       - 'scripts/mellonta/deploy-prod.sh'
       - 'packages/server/**'
       - 'packages/web/**'
@@ -41,10 +42,12 @@ jobs:
         run: |
           npm install --global pnpm@10.29.3
           pnpm --filter @botiverse/raft-web... --filter @botiverse/raft-server... install --frozen-lockfile
-          pnpm --filter @botiverse/raft-shared exec vitest run src/randomUuid.test.ts --maxWorkers=2
+          pnpm --filter @botiverse/raft-shared exec vitest run src/randomUuid.test.ts src/providerProbes.test.ts --maxWorkers=2
           pnpm --filter @botiverse/raft-web exec vitest run tests/browserCrypto.test.ts tests/mellontaPrivacy.test.ts tests/appThemeBootstrapWiring.test.ts --maxWorkers=2
           pnpm --filter @botiverse/raft-server exec vitest run src/services/mellontaPrivacy.test.ts --maxWorkers=2
+          node packages/web/scripts/run-vitest-tests.mjs --dom tests/copyText.behavior.test.tsx tests/providerConnectionsCatalog.behavior.test.tsx --maxWorkers=2
           pnpm exec playwright install --with-deps chromium
+          node scripts/mellonta/http-browser-features.mjs
           printf '127.0.0.1 raft-http.test\n' | sudo tee -a /etc/hosts
       - name: Prepare isolated deployment
         run: |

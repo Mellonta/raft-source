@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { composerHostClassName } from "./composerHost";
 import CloseButton from "../ui/CloseButton";
 import { createContext, lazy, Suspense, useContext, useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
@@ -1196,7 +1197,7 @@ export default function ChatPanel({
       return;
     }
     const links = buildSelectedMessagePermalinks({ serverSlug, channel, messages: selected });
-    void navigator.clipboard.writeText(links.join("\n")).then(() => {
+    void copyTextToClipboard(links.join("\n")).then(() => {
       toast.success(formatCopyLinksToast(links.length, formatMessageRef.current), SELECTION_TOAST_OPTIONS);
     }).catch(() => {
       toast.error(formatMessageRef.current({ id: "message.chatPanel.clipboardBlocked" }), SELECTION_TOAST_OPTIONS);

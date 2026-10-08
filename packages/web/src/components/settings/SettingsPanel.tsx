@@ -1,3 +1,4 @@
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { Progress, ProgressTrack, ProgressIndicator, Status, ToggleGroup, ToggleGroupItem, Checkbox, Textarea, TextareaCounter, Skeleton,
   Badge,
   Button,
@@ -3057,7 +3058,7 @@ function JoinLinksSection() {
   const buildJoinLinkUrl = (token: string) => `${shareableWebOrigin()}/join/${token}`;
 
   const handleCopy = async (linkId: string, token: string) => {
-    await navigator.clipboard.writeText(buildJoinLinkUrl(token));
+    await copyTextToClipboard(buildJoinLinkUrl(token));
     setCopiedLinkId(linkId);
     window.setTimeout(() => setCopiedLinkId((current) => current === linkId ? null : current), 1500);
   };
@@ -5929,7 +5930,7 @@ export function IntegrationsSection() {
     if (!createdSecret) return;
     setError("");
     try {
-      await navigator.clipboard.writeText(createdSecret);
+      await copyTextToClipboard(createdSecret);
       setSecretCopied(true);
       if (secretCopyResetRef.current) {
         window.clearTimeout(secretCopyResetRef.current);
@@ -5996,7 +5997,7 @@ export function IntegrationsSection() {
     if (!shareUrl) return;
     setError("");
     try {
-      await navigator.clipboard.writeText(shareUrl);
+      await copyTextToClipboard(shareUrl);
       setShareCopied(true);
       if (shareCopyResetRef.current) {
         window.clearTimeout(shareCopyResetRef.current);

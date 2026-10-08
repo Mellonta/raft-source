@@ -4,7 +4,7 @@ import { Button } from "raft-ui";
 import { Check, Clipboard } from "lucide-react";
 import { setClockTimeout } from "@botiverse/raft-shared";
 import Tooltip from "../ui/Tooltip";
-import { copyTextToClipboard } from "../../utils/selectMarkdown";
+import { copyTextToClipboard } from "../../utils/clipboard";
 import { migrationSupportRef } from "./presentation";
 import type { AgentMigrationNotice } from "./realtime";
 
