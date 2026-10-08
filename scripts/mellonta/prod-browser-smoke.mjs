@@ -16,8 +16,10 @@ const browser = await chromium.launch({
   args: ["--host-resolver-rules=MAP raft-http.test 127.0.0.1", "--no-proxy-server"],
 });
 const errors = [];
+const mutations = [];
+let page;
 try {
-  const page = await browser.newPage();
+  page = await browser.newPage();
   page.setDefaultTimeout(30_000);
   // The application must boot without the previous standalone crypto patch.
   await page.route("**/browser-crypto-bootstrap.js", (route) => route.abort());
@@ -33,6 +35,9 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("response", (response) => {
     const url = new URL(response.url());
+    if (url.origin === origin && response.request().method() === "POST") {
+      mutations.push(`${url.pathname}: ${response.status()}`);
+    }
     if (url.origin === origin && url.pathname.startsWith("/assets/") && response.status() >= 400) {
       errors.push(`Asset ${url.pathname}: HTTP ${response.status()}`);
     }
@@ -93,9 +98,10 @@ try {
   await page.goto(`${origin}${workspacePath}/channel/${channel.id}`);
   const composer = page.getByPlaceholder(`Message #${channel.name}`);
   await composer.fill("HTTP production message 🛶");
-  const sentResponse = page.waitForResponse((response) => response.url() === `${origin}/api/v2/messages` && response.request().method() === "POST");
-  await page.getByRole("button", { name: "Send", exact: true }).click();
-  const sent = await sentResponse;
+  const [sent] = await Promise.all([
+    page.waitForResponse((response) => response.url() === `${origin}/api/v2/messages` && response.request().method() === "POST"),
+    page.getByRole("button", { name: "Send", exact: true }).click({ timeout: 10_000 }),
+  ]);
   assert.ok(sent.ok(), `Send message: HTTP ${sent.status()}`);
   const sentMessage = page.getByTestId("message-scroller").getByText("HTTP production message 🛶", { exact: true });
   await sentMessage.waitFor({ state: "visible" });
@@ -122,6 +128,15 @@ try {
 } catch (error) {
   // Never print the account's credentials or response bodies.
   console.error("Browser errors:", errors);
+  console.error("POST responses:", mutations);
+  if (page && !page.isClosed()) {
+    console.error("Visible controls:", await page.locator('button:visible, [role="dialog"]:visible, [role="alert"]:visible').evaluateAll((elements) => elements.map((element) => ({
+      tag: element.tagName, role: element.getAttribute("role"),
+      label: element.getAttribute("aria-label"),
+      text: element.tagName === "BUTTON" ? element.textContent?.slice(0, 80) : null,
+      testId: element.getAttribute("data-testid"), disabled: element.hasAttribute("disabled"),
+    }))).catch(() => "Page unavailable"));
+  }
   throw error;
 } finally {
   await browser.close();
