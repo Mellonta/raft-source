@@ -76,15 +76,9 @@ try {
     Authorization: `Bearer ${(await login.json()).accessToken}`,
     "X-Server-Id": account.workspace,
   };
-  // Complete the disposable fixture's onboarding so it cannot cover the chat.
-  const onboarding = await page.request.patch(`${origin}/api/servers/${account.workspace}/onboarding-settings`, {
-    headers, data: {
-      setupModalReminderOptOut: true, dismissedAddComputerStep: true,
-      dismissedCreateAgentStep: true, dismissedInviteStep: true,
-      dismissedCommunityStep: true, dismissedNotificationStep: true,
-    },
-  });
+  const onboarding = await page.request.get(`${origin}/api/servers/${account.workspace}/setup-projection`, { headers });
   assert.ok(onboarding.ok(), `Onboarding fixture: HTTP ${onboarding.status()}`);
+  assert.equal((await onboarding.json()).blocksChat, false, "CI must seed completed onboarding before exercising chat");
   // A fresh browser has no remembered workspace; select the CI-created one.
   await page.getByTestId("server-selector-option").filter({ hasText: "Deployment smoke" }).click();
   await page.getByTestId("sidebar-root").waitFor({ state: "visible" });

@@ -81,6 +81,24 @@ jobs:
           printf 'SLOCK_E2E_AUTO_VERIFY_EMAIL=1\n' > /data/.raft-prod/server-extra.env
           bash scripts/mellonta/deploy-prod.sh --url "$RAFT_SMOKE_ORIGIN" --bind 127.0.0.1
           python3 scripts/mellonta/prod-smoke.py
+          # Chat tests need a completed workspace, just like upstream's
+          # grandfatherPlaywrightFixtures. This disposable account has no AI
+          # credentials/Computer with which to finish mandatory owner setup.
+          python3 - "$RUNNER_TEMP/raft-production-test-account.json" <<'PY'
+          import json, subprocess, sys, uuid
+          workspace = str(uuid.UUID(json.load(open(sys.argv[1]))['workspace']))
+          sql = f"""
+          BEGIN;
+          UPDATE users SET signup_survey_completed_at = now(), first_onboarding_completed_at = now()
+            WHERE id IN (SELECT user_id FROM server_members WHERE server_id = '{workspace}');
+          UPDATE server_members SET setup_status = 'complete', setup_completion_reason = 'grandfathered'
+            WHERE server_id = '{workspace}';
+          COMMIT;
+          """
+          subprocess.run(['docker', 'compose', '-p', 'raft-prod', '-f', '/data/.raft-prod/compose.json',
+                          'exec', '-T', 'postgres', 'psql', '-U', 'raft', '-d', 'raft',
+                          '-v', 'ON_ERROR_STOP=1', '-c', sql], check=True)
+          PY
           node "$GITHUB_WORKSPACE/scripts/mellonta/prod-browser-smoke.mjs" "$RUNNER_TEMP/raft-production-test-account.json"
           compose=(docker compose -p raft-prod -f /data/.raft-prod/compose.json)
           "${compose[@]}" exec -T postgres psql -U raft -d raft -c 'CREATE TABLE mellonta_deploy_probe (value text); INSERT INTO mellonta_deploy_probe VALUES ($$retained$$);'
