@@ -30,6 +30,8 @@ try {
   });
   await page.addInitScript(() => {
     // Observe the real browser environment before any application scripts run.
+    window.__initialCrypto = window.crypto;
+    window.__initialGetRandomValues = window.crypto.getRandomValues;
     window.__initialCryptoContext = {
       secure: window.isSecureContext,
       randomUUID: typeof window.crypto.randomUUID,
@@ -41,9 +43,14 @@ try {
   assert.deepEqual(await page.evaluate(() => window.__initialCryptoContext), {
     secure: false, randomUUID: "undefined",
   });
-  const uuids = await page.evaluate(() => [crypto.randomUUID(), crypto.randomUUID()]);
-  for (const uuid of uuids) assert.match(uuid, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-  assert.notEqual(uuids[0], uuids[1]);
+  async function assertUnmodifiedCrypto() {
+    assert.deepEqual(await page.evaluate(() => ({
+      sameObject: window.crypto === window.__initialCrypto,
+      sameEntropySource: window.crypto.getRandomValues === window.__initialGetRandomValues,
+      randomUUID: typeof window.crypto.randomUUID,
+    })), { sameObject: true, sameEntropySource: true, randomUUID: "undefined" });
+  }
+  await assertUnmodifiedCrypto();
   assert.deepEqual(errors, [], "The sign-in screen must render without JavaScript errors");
   await page.locator("#login-email").fill(account.email);
   await page.locator("#login-password").fill(account.password);
@@ -53,10 +60,12 @@ try {
   // A fresh browser has no remembered workspace; select the CI-created one.
   await page.getByTestId("server-selector-option").filter({ hasText: "Deployment smoke" }).click();
   await page.getByTestId("sidebar-root").waitFor({ state: "visible" });
+  await assertUnmodifiedCrypto();
   await page.reload();
   await page.getByTestId("sidebar-root").waitFor({ state: "visible" });
+  await assertUnmodifiedCrypto();
   assert.deepEqual(errors, [], "Login and session restoration must not crash");
-  console.log("Remote HTTP browser checks passed without a standalone UUID script: sign-in, workspace, and session restoration.");
+  console.log("Remote HTTP browser checks passed with unmodified crypto: sign-in, workspace, and session restoration.");
 } catch (error) {
   // Never print the account's credentials or response bodies.
   console.error("Browser errors:", errors);

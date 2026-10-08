@@ -350,9 +350,9 @@ listening port unchanged for your reverse proxy. The browser sends API and WebSo
 requests to its own origin; `--url` configures the server's public links and allowed
 origin. Rerun deployment to apply changed settings. The portal can start on plain
 HTTP, generating UUIDs inside the application bundle with `crypto.getRandomValues`.
-Startup does not depend on a separate script to patch the browser's UUID API.
-Browser features that require a secure context, such as clipboard access and push
-notifications, still require HTTPS.
+The application does not modify the browser's crypto object. Clipboard access,
+push notifications and the third-party feedback SDK's submission flow still
+require HTTPS. Use HTTPS for the complete production feature set.
 
 CI exercises the built Docker deployment on both Linux architectures, including
 a real browser on a non-localhost HTTP origin: sign-in, workspace rendering and
