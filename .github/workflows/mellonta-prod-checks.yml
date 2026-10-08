@@ -48,6 +48,7 @@ jobs:
       - name: Prepare isolated deployment
         run: |
           python3 scripts/mellonta/prod-config.test.py
+          python3 scripts/mellonta/prod-verify.test.py
           bash -n scripts/mellonta/deploy-prod.sh
           mkdir -p "$RUNNER_TEMP/raft-data"
           sudo mkdir -p /data

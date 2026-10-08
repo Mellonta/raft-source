@@ -377,6 +377,8 @@ you explicitly stopped them. Logs use Docker's rotated local log storage.
 Builds finish before the previous application is stopped. Deployment then takes
 a database dump and uploads/config archive, applies the repository's journaled
 migrations with its production preflight, and waits for database/API/web health.
+It also checks that the published HTTP listener serves the expected frontend
+commit and JavaScript files; a healthy API alone is not deployment success.
 It never runs dev seeding or `drizzle-kit push --force`. A migration failure leaves
 the app stopped and the backup available; no automatic database rollback occurs.
 Backups are on the same disk, so copy them elsewhere if you need disk-failure recovery.

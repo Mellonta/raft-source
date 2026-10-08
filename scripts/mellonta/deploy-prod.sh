@@ -87,6 +87,8 @@ PY
   "${compose[@]}" config --quiet
   case "$command" in
     deploy)
+      local revision
+      revision=$(git -C "$source_dir" rev-parse HEAD)
       # Build before stopping the old application. A failed build leaves it running.
       "${compose[@]}" build server web
       "${compose[@]}" up -d --wait --wait-timeout 180 postgres redis
@@ -99,8 +101,9 @@ PY
       echo "Backup saved: $backup"
       "${compose[@]}" run --rm --no-deps migrate
       "${compose[@]}" up -d --no-build --wait --wait-timeout 180 server web
+      python3 "$source_dir/scripts/mellonta/prod-verify.py" --settings "$root/settings.json" --revision "$revision"
       touch "$root/deployed"
-      echo "Production is healthy. Start: bash $root/start.sh"
+      echo "API is healthy and the current frontend is served. Start: bash $root/start.sh"
       echo "Logs: bash $root/raftprod logs"
       ;;
     start|restart)
