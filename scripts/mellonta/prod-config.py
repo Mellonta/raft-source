@@ -43,8 +43,12 @@ def configure(source, root, public_url=None, port=None, bind=None):
             or url.username or url.password or url.path not in ("", "/")
             or url.query or url.fragment or re.search(r"[\s$'\"\\]", settings["public_url"])):
         raise ValueError("First deployment requires --url with a public HTTP(S) origin, e.g. http://a.b.com:8080")
-    # Accessing .port also rejects malformed/out-of-range URL ports.
-    _ = url.port
+    # A direct HTTP origin's explicit port is the default published port.
+    # --port still allows a different internal port behind a reverse proxy;
+    # HTTPS origins leave that proxy-facing port unchanged.
+    url_port = url.port  # Also rejects malformed/out-of-range ports.
+    if public_url is not None and port is None and url.scheme == "http" and url_port is not None:
+        settings["port"] = url_port
     settings["public_url"] = settings["public_url"].rstrip("/")
     if not 1 <= int(settings["port"]) <= 65535:
         raise ValueError("--port must be between 1 and 65535")

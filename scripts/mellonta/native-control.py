@@ -248,7 +248,9 @@ def configure(state, args):
             or url.path not in ('', '/') or url.query or url.fragment
             or re.search(r'[\s\x00-\x1f]', settings['public_url'])):
         raise ValueError('First setup requires --url with the portal origin, e.g. http://a.b.com:8080')
-    _ = url.port
+    url_port = url.port
+    if getattr(args, 'public_url', None) is not None and getattr(args, 'port', None) is None and url.scheme == 'http' and url_port is not None:
+        settings['port'] = url_port
     settings['public_url'] = settings['public_url'].rstrip('/')
     ipaddress.IPv4Address(settings['bind'])
     ports = [settings[key] for key in ['port', 'api_port', 'metrics_port', 'postgres_port', 'redis_port']]

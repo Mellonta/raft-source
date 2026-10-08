@@ -14,7 +14,7 @@ Commands: deploy (default), start, stop, restart, status, logs [SERVICE]
 
 Deployment options:
   --url URL    Public origin, required the first time (e.g. http://a.b.com:8080).
-  --port PORT  Published HTTP port; default 8080.
+  --port PORT  Published HTTP port; defaults to an explicit HTTP --url port, otherwise 8080 on first setup.
   --bind IP    Published interface; default 0.0.0.0, or 127.0.0.1 behind a local proxy.
 
 Source: /data/raft. Data, secrets, launchers, backups: /data/.raft-prod.
@@ -76,6 +76,12 @@ main() {
   flock -n 9 || { echo 'Another production operation is running.' >&2; return 1; }
   if [[ "$command" == deploy ]]; then
     python3 "$source_dir/scripts/mellonta/prod-config.py" --source "$source_dir" --root "$root" "${options[@]}"
+    python3 - "$root/settings.json" <<'PY'
+import json, sys
+settings = json.load(open(sys.argv[1]))
+print('Portal URL: ' + settings['public_url'], flush=True)
+print(f"HTTP listener: {settings['bind']}:{settings['port']}", flush=True)
+PY
   fi
   local -a compose=(docker compose --project-name raft-prod --project-directory "$root" --env-file /dev/null -f "$root/compose.json")
   "${compose[@]}" config --quiet

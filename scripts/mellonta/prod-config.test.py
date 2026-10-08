@@ -59,6 +59,25 @@ class ProductionConfigTest(unittest.TestCase):
             self.configure(bind="arbitrary-host")
         self.assertEqual((self.root / "compose.json").read_bytes(), original)
 
+    def test_http_url_port_is_published_and_repairs_previously_mismatched_settings(self):
+        self.configure(public_url="http://raft.example:8001", port=8080)
+        before = json.loads((self.root / "settings.json").read_text())
+        self.configure(public_url="http://raft.example:8001")
+        settings = json.loads((self.root / "settings.json").read_text())
+        compose = json.loads((self.root / "compose.json").read_text())
+        self.assertEqual(settings["port"], 8001)
+        self.assertEqual(compose["services"]["web"]["ports"][0]["published"], "8001")
+        self.assertEqual(compose["services"]["server"]["environment"]["SERVER_URL"], settings["public_url"])
+        self.assertEqual(settings["jwt_secret"], before["jwt_secret"])
+        self.configure()
+        self.assertEqual(json.loads((self.root / "settings.json").read_text())["port"], 8001)
+
+    def test_explicit_port_and_https_reverse_proxy_settings_are_preserved(self):
+        self.configure(public_url="http://raft.example:8001", port=18080)
+        self.assertEqual(json.loads((self.root / "settings.json").read_text())["port"], 18080)
+        self.configure(public_url="https://raft.example:8443")
+        self.assertEqual(json.loads((self.root / "settings.json").read_text())["port"], 18080)
+
     def test_missing_secrets_on_populated_database_are_not_regenerated(self):
         (self.root / "postgres" / "PG_VERSION").write_text("16")
         with self.assertRaisesRegex(ValueError, "restore its original secrets"):

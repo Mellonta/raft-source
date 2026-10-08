@@ -62,6 +62,18 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'without settings'):
             control.configure(self.root, self.args())
 
+    def test_http_url_port_is_inferred_unless_a_proxy_port_is_explicit(self):
+        for values, expected in [({'public_url': 'http://raft.example:8001'}, 8001),
+                                 ({'public_url': 'http://raft.example:8001', 'port': 18080}, 18080),
+                                 ({'public_url': 'https://raft.example:8443'}, 8080)]:
+            with self.subTest(values=values):
+                self.assertEqual(control.configure(self.root, argparse.Namespace(**values))['port'], expected)
+        original = control.configure(self.root, argparse.Namespace(public_url='http://raft.example:8001', port=8080))
+        control.write(self.root / 'settings.json', json.dumps(original))
+        corrected = control.configure(self.root, argparse.Namespace(public_url='http://raft.example:8001'))
+        self.assertEqual(corrected['port'], 8001)
+        self.assertEqual(corrected['jwt_secret'], original['jwt_secret'])
+
     def test_environment_file_is_data_not_shell_code(self):
         env = self.root / 'server-extra.env'
         env.write_text('# comment\nFROM_EMAIL="Raft <me@example.test>"\nVALUE=$(touch /not-executed)\n')
