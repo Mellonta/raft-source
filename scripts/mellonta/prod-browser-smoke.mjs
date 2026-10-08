@@ -47,6 +47,8 @@ try {
   const loginResponse = page.waitForResponse((response) => response.url() === origin + "/api/auth/login");
   await page.locator('form button[type="submit"]').click();
   assert.equal((await loginResponse).status(), 200, "Browser login must reach the same-origin API");
+  // A fresh browser has no remembered workspace; select the CI-created one.
+  await page.getByTestId("server-selector-option").filter({ hasText: "Deployment smoke" }).click();
   await page.getByTestId("sidebar-root").waitFor({ state: "visible" });
   await page.reload();
   await page.getByTestId("sidebar-root").waitFor({ state: "visible" });
