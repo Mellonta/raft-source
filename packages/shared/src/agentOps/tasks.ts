@@ -4,6 +4,7 @@
 // hold as an `interrupted` outcome (interrupt.ts): the resume is the identical
 // command, and there is nothing to cancel.
 
+import { randomUuid } from "../randomUuid";
 import { z } from "zod";
 
 import type { AgentApiClient } from "../agentApiClient";
@@ -249,7 +250,7 @@ export interface CreateTasksRequest {
   /** `@handle`; yourself to start in_progress, or (owner/admin) someone else to reserve a todo. */
   assignee?: string;
   /**
-   * One key per logical create. Generated with `crypto.randomUUID()` when
+   * One key per logical create. Generated with `randomUuid()` when
    * omitted and returned as `data.idempotencyKey` (and, on a retryable
    * failure, as `next.args.idempotencyKey`). Repeating the same request with
    * the same key returns the first result (same task numbers) and creates
@@ -288,7 +289,7 @@ export async function createTasks(
   if (!request.target?.trim() || !request.tasks?.length) {
     return failureOutcome(opError("INVALID_REQUEST", { message: "A channel target and at least one task title are required." }));
   }
-  const idempotencyKey = request.idempotencyKey?.trim() || globalThis.crypto.randomUUID();
+  const idempotencyKey = request.idempotencyKey?.trim() || randomUuid();
   const result = await client.tasks.create({
     channel: request.target,
     tasks: request.tasks.map((t) => ({ title: t.title, ...(t.createsResource ? { creates_resource: true } : {}) })),

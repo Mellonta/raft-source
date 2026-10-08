@@ -19,6 +19,8 @@ const errors = [];
 try {
   const page = await browser.newPage();
   page.setDefaultTimeout(30_000);
+  // The application must boot without the previous standalone crypto patch.
+  await page.route("**/browser-crypto-bootstrap.js", (route) => route.abort());
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("response", (response) => {
     const url = new URL(response.url());
@@ -35,6 +37,7 @@ try {
   });
   await page.goto(origin);
   await page.locator("#login-email").waitFor({ state: "visible" });
+  assert.equal(await page.locator('script[src*="browser-crypto-bootstrap.js"]').count(), 0);
   assert.deepEqual(await page.evaluate(() => window.__initialCryptoContext), {
     secure: false, randomUUID: "undefined",
   });
@@ -53,7 +56,7 @@ try {
   await page.reload();
   await page.getByTestId("sidebar-root").waitFor({ state: "visible" });
   assert.deepEqual(errors, [], "Login and session restoration must not crash");
-  console.log("Remote HTTP browser checks passed: UUID bootstrap, sign-in, workspace, and session restoration.");
+  console.log("Remote HTTP browser checks passed without a standalone UUID script: sign-in, workspace, and session restoration.");
 } catch (error) {
   // Never print the account's credentials or response bodies.
   console.error("Browser errors:", errors);

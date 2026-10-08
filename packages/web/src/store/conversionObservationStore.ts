@@ -1,3 +1,4 @@
+import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import { useCallback, useSyncExternalStore } from "react";
 import { currentTimeMs } from "@botiverse/raft-shared";
 
@@ -64,7 +65,7 @@ export function beginConversionObservation(
   const existing = readPendingConversionCommand(scope);
   if (existing && (kind !== "cancel" || existing.kind === "cancel")) return null;
   const value: PendingConversionCommand = {
-    token: crypto.randomUUID() as ConversionObservationToken,
+    token: randomUuid() as ConversionObservationToken,
     kind,
     jobId: baseline?.id ?? null,
     baseline,

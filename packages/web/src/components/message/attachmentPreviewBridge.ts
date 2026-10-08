@@ -1,3 +1,4 @@
+import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 // Parent half of the untrusted measurement bridge for sandboxed HTML
@@ -84,7 +85,7 @@ export function parseExternalLinkHotspots(value: unknown): ExternalLinkHotspot[]
 
 export function useAttachmentPreviewBridge() {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  const [nonce] = useState(() => crypto.randomUUID());
+  const [nonce] = useState(() => randomUuid());
   const activeDocumentEpochRef = useRef<string | null>(null);
   const [state, setState] = useState<BridgeState | null>(null);
   const [externalLinkState, setExternalLinkState] = useState<{
@@ -111,7 +112,7 @@ export function useAttachmentPreviewBridge() {
   // activate the current reporter with it, and require the epoch on every
   // subsequent report. The unloaded document never learns the new value.
   const activateDocument = useCallback(() => {
-    const documentEpoch = crypto.randomUUID();
+    const documentEpoch = randomUuid();
     activeDocumentEpochRef.current = documentEpoch;
     stateRef.current = null;
     setState(null);

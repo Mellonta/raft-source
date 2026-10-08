@@ -103,6 +103,10 @@
       "types": "./src/unreadActivityDiagnostic.ts",
       "default": "./src/unreadActivityDiagnostic.ts"
     },
+    "./src/randomUuid": {
+      "types": "./src/randomUuid.ts",
+      "default": "./src/randomUuid.ts"
+    },
     "./src/clock": {
       "types": "./src/clock.ts",
       "default": "./src/clock.ts"

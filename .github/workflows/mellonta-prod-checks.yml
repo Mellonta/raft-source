@@ -41,7 +41,8 @@ jobs:
         run: |
           npm install --global pnpm@10.29.3
           pnpm --filter @botiverse/raft-web... install --frozen-lockfile
-          pnpm --filter @botiverse/raft-web exec vitest run tests/browserCryptoBootstrap.test.ts tests/appThemeBootstrapWiring.test.ts --maxWorkers=2
+          pnpm --filter @botiverse/raft-shared exec vitest run src/randomUuid.test.ts --maxWorkers=2
+          pnpm --filter @botiverse/raft-web exec vitest run tests/browserCrypto.test.ts tests/appThemeBootstrapWiring.test.ts --maxWorkers=2
           pnpm exec playwright install --with-deps chromium
           printf '127.0.0.1 raft-http.test\n' | sudo tee -a /etc/hosts
       - name: Prepare isolated deployment

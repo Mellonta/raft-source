@@ -1,3 +1,4 @@
+import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { useNavigate } from "react-router-dom";
@@ -310,7 +311,7 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
     // Stage 2 — open the DM and send the briefing; retry re-runs only this.
     // The random id is stable across retries so an uncertain first send (e.g.
     // network cut after the server accepted) deduplicates instead of doubling.
-    if (!briefingRandomIdRef.current) briefingRandomIdRef.current = crypto.randomUUID();
+    if (!briefingRandomIdRef.current) briefingRandomIdRef.current = randomUuid();
     try {
       const dm = await openDM(agent.id);
       await sendMessage(dm.id, briefing, undefined, undefined, undefined, briefingRandomIdRef.current);

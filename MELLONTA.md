@@ -349,7 +349,8 @@ The script does not provision TLS certificates. An HTTPS `--url` leaves the HTTP
 listening port unchanged for your reverse proxy. The browser sends API and WebSocket
 requests to its own origin; `--url` configures the server's public links and allowed
 origin. Rerun deployment to apply changed settings. The portal can start on plain
-HTTP, using `crypto.getRandomValues` for UUIDs when `crypto.randomUUID` is unavailable.
+HTTP, generating UUIDs inside the application bundle with `crypto.getRandomValues`.
+Startup does not depend on a separate script to patch the browser's UUID API.
 Browser features that require a secure context, such as clipboard access and push
 notifications, still require HTTPS.
 

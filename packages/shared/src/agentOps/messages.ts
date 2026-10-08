@@ -8,6 +8,7 @@
 // `interrupted` outcome (interrupt.ts) the caller can act on, never an
 // exception. `replyTo` sends to the target a received message came from.
 
+import { randomUuid } from "../randomUuid";
 import { z } from "zod";
 
 import type { AgentApiClient } from "../agentApiClient";
@@ -235,7 +236,7 @@ export interface SendMessageRequest {
   content: string;
   attachmentIds?: string[];
   /**
-   * One key per logical message. Generated with `crypto.randomUUID()` when
+   * One key per logical message. Generated with `randomUuid()` when
    * omitted, so a response lost after the Server committed can be retried
    * without posting twice; sending again after an interrupt reuses the same
    * key (`interrupt.resume.idempotencyKey`).
@@ -371,7 +372,7 @@ export async function sendMessage(
   if (typeof request.content !== "string" || (!request.content.trim() && !(request.attachmentIds?.length))) {
     return failureOutcome(opError("INVALID_REQUEST", { message: "Message content (or an attachment) is required." }));
   }
-  const idempotencyKey = request.idempotencyKey?.trim() || crypto.randomUUID();
+  const idempotencyKey = request.idempotencyKey?.trim() || randomUuid();
   const attestation = request.seen
     ? { ...(request.seen.upToSeq === undefined ? {} : { seenUpToSeq: request.seen.upToSeq }), seenExactSeqs: request.seen.exactSeqs ?? [] }
     : frontier?.attestation(request.target) ?? { seenExactSeqs: [] };

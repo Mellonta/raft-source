@@ -36,7 +36,9 @@ import { installDesktopServerWindowBinding } from "./desktopServerWindow";
 import { installDesktopServerTitleBinding } from "./desktopServerTitle";
 import "./testHooks"; // attaches window.__SLOCK_E2E__ only when built with VITE_E2E=true
 import { trackVisualViewport } from "./utils/visualViewport";
+import { installBrowserUuidCompatibility } from "./utils/browserCrypto";
 
+installBrowserUuidCompatibility();
 const desktopHandshake = bootstrapDesktopHandshake();
 installDesktopServerWindowBinding(desktopHandshake);
 installDesktopServerTitleBinding(desktopHandshake);

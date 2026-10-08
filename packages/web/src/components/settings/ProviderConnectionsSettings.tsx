@@ -1,3 +1,4 @@
+import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import {
   Button,
   Checkbox,
@@ -846,7 +847,7 @@ function VerifyProviderConnectionModal({
       };
       const requestDigest = await providerProbeRequestDigest({ connectionId: connection.id, ...payload });
       const { data } = await api.post<ProviderProbeCreatedView>(`/provider-connections/${connection.id}/probes`, {
-        probeRequestId: globalThis.crypto.randomUUID(),
+        probeRequestId: randomUuid(),
         requestDigest,
         ...payload,
       });

@@ -1,3 +1,4 @@
+import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import type { FollowedThread, ThreadSummary } from "../store/threadStore";
 
 type ThreadRefFollowedThread = Pick<FollowedThread, "parentMessageId" | "parentChannelId">
@@ -83,7 +84,7 @@ export function buildThreadRefHandoffPath(intent: ThreadRefIntent): string {
   const params = new URLSearchParams({
     [THREAD_REF_CHANNEL_PARAM]: intent.parentChannelName,
     [THREAD_REF_SHORT_PARAM]: intent.shortId,
-    [THREAD_REF_NONCE_PARAM]: crypto.randomUUID(),
+    [THREAD_REF_NONCE_PARAM]: randomUuid(),
   });
   if (intent.focusedMessageId) params.set(THREAD_REF_FOCUS_PARAM, intent.focusedMessageId);
   if (intent.parentChannelType === "dm") params.set(THREAD_REF_KIND_PARAM, "dm");

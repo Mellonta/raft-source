@@ -1,3 +1,4 @@
+import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useIntl } from "react-intl";
@@ -383,7 +384,7 @@ export default function ForwardComposerDialog({
 
       let response: ForwardBatchResponse;
       try {
-        forwardRequestIdRef.current ??= crypto.randomUUID();
+        forwardRequestIdRef.current ??= randomUuid();
         const res = await api.post<ForwardBatchResponse>("/messages/forward", {
           destinationChannelIds: [...entriesByChannelId.keys()],
           requestId: forwardRequestIdRef.current,

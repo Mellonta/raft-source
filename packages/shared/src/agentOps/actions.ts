@@ -6,6 +6,7 @@
 // write operation (`raft.<op>.prepare`) are designed separately and will build
 // on this outcome shape.
 
+import { randomUuid } from "../randomUuid";
 import type { AgentApiClient } from "../agentApiClient";
 import { agentApiActionPrepareBodySchema, type AgentApiActionPrepareBody } from "../agentApiContract";
 import { agentTaskThreadTarget } from "../agentText/tasks";
@@ -15,7 +16,7 @@ import { getParentTargetForThread } from "./seenPolicy/consumedSeqs";
 
 /**
  * `idempotencyKey`: one key per logical prepare. Generated with
- * `crypto.randomUUID()` when omitted and returned as `data.idempotencyKey`
+ * `randomUuid()` when omitted and returned as `data.idempotencyKey`
  * (and, on a retryable failure, as `next.args.idempotencyKey`). Repeating the
  * same request with the same key returns the first card (same `messageId`)
  * and posts nothing; the same key with a different request fails with
@@ -86,7 +87,7 @@ export async function prepareActionCard(
   // One key per logical prepare (generated when omitted): a repeat with the
   // same key and request returns the same card instead of posting another.
   // Never retried here: Servers without keyed prepare ignore the key.
-  const idempotencyKey = request.idempotencyKey?.trim() || globalThis.crypto.randomUUID();
+  const idempotencyKey = request.idempotencyKey?.trim() || randomUuid();
   const result = await client.actions.prepare({ ...request, idempotencyKey });
   if (!result.ok) return keyedWriteFailure(failureFromClientResult(result), idempotencyKey);
   const card: RaftPreparedCard = { target: request.target, messageId: result.data.messageId, idempotencyKey };

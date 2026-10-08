@@ -14,6 +14,7 @@
 // - the closed category enum is complete: transport, carrier, authority and
 //   validity failures are distinct members; `success` is an outcome, never a
 //   category.
+import { randomUuid } from "./randomUuid";
 import type { Brand } from "./brandedIds";
 
 /** Daemon capability advertising the probe carrier. Absence is decidable. */
@@ -108,7 +109,7 @@ export const isProviderProbeRuntime = (value: unknown): value is ProviderProbeRu
 /** Server-minted probe identity. Mint with {@link mintProviderProbeId} only. */
 export type ProviderProbeId = Brand<string, "ProviderProbeId">;
 export const mintProviderProbeId = (): ProviderProbeId => (
-  globalThis.crypto.randomUUID() as ProviderProbeId
+  randomUuid() as ProviderProbeId
 );
 export const asProviderProbeId = (value: string): ProviderProbeId => value as ProviderProbeId;
 export const isProviderProbeId = (value: unknown): value is ProviderProbeId => (

@@ -1,3 +1,4 @@
+import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
@@ -1586,7 +1587,7 @@ export default function MessageInput({
       preview: isPreviewableImageFile(file) ? URL.createObjectURL(file) : null,
       uploadStatus: "validating",
       uploadProgress: 0,
-      uploadClientRequestId: crypto.randomUUID(),
+      uploadClientRequestId: randomUuid(),
     }));
     const provisionalIds = new Set(provisionalFiles.map((file) => file.id));
     const selectionGeneration = attachmentSelectionGenerationRef.current;

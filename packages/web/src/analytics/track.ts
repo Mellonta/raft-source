@@ -12,6 +12,7 @@
 // workspace switch); if not, events for that server are dropped here and never
 // leave the browser. Nothing is retried: a failed batch is dropped.
 
+import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import type { ProductEventName, ProductEventProperties } from "@botiverse/raft-shared";
 import { assertValidDesktopRuntimeEnvironment, hasDesktopBridge, RUNTIME_API_BASE } from "../desktopRuntimeEnvironment";
 import { WEB_APP_VERSION } from "../utils/webAppVersion";
@@ -37,7 +38,7 @@ type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 // This tab's product-analytics session: random per page load and deliberately
 // NOT the trace tabId, so product events cannot be joined to traces (which
 // carry a stable per-user id) and re-linked after the user stops sharing.
-const productSessionId: string = crypto.randomUUID();
+const productSessionId: string = randomUuid();
 
 let queue: QueuedEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -66,7 +67,7 @@ export function trackEvent<E extends ProductEventName>(
   queue.push({
     serverId,
     body: {
-      uuid: crypto.randomUUID(),
+      uuid: randomUuid(),
       event,
       timestamp: new Date().toISOString(),
       client_session_id: productSessionId,

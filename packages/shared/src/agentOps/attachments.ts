@@ -5,6 +5,7 @@
 // the JSON transport. The Server still requires a `channelId`, so the target
 // is resolved first through `POST /resolve-channel`, exactly as the CLI does.
 
+import { randomUuid } from "../randomUuid";
 import { z } from "zod";
 
 import type { AgentApiClient } from "../agentApiClient";
@@ -191,7 +192,7 @@ async function uploadThroughSession(
     filename: request.filename,
     mimeType,
     sizeBytes: request.bytes.byteLength,
-    clientRequestId: crypto.randomUUID(),
+    clientRequestId: randomUuid(),
   });
   if (!created.ok) return failureFromClientResult(created);
   const { uploadId, upload } = created.data;

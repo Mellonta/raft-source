@@ -1,3 +1,4 @@
+import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import { Checkbox, Textarea, Button } from "raft-ui";
 import { useMemo, useState } from "react";
 import { Bug, CheckCircle } from "lucide-react";
@@ -423,7 +424,7 @@ export default function ReportIssueDialog({
       const ticketRequest = {
         message: [agentTitle, description.trim()].filter(Boolean).join("\n\n"),
         feedbackReportId: report.id,
-        submissionId: crypto.randomUUID(),
+        submissionId: randomUuid(),
         // The same react-intl locale that formatted agentTitle above.
         locale,
       };

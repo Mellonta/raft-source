@@ -1,3 +1,4 @@
+import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import { Badge, Card, ContextMenuPopup, SidebarItem, SidebarItemCount, SidebarItemMetaIcon, SidebarRoot, toast, DirectMessageIcon } from "raft-ui";
 import Tooltip from "../ui/Tooltip";
 import { createContext, useState, useEffect, useCallback, useContext, useLayoutEffect, useRef, useMemo, useSyncExternalStore, memo } from "react";
@@ -3084,7 +3085,7 @@ export default function Sidebar({ mobileInline, bottomSlot, workspaceRailMode }:
   }, [sectionPlacements, updateSidebarOrder]);
 
   const createCustomSection = useCallback((value: { name: string; emoji: string | null }, moveItem?: SidebarMovableItem) => {
-    const id = crypto.randomUUID();
+    const id = randomUuid();
     const section: SidebarCustomSection = { id, name: value.name, emoji: value.emoji, sortMode: "manual" };
     const nextSectionPlacements = moveItem
       ? moveSidebarItemToCustomSection(sectionPlacements, moveItem, id)
