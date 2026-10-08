@@ -38,6 +38,23 @@ connection.request("GET", "/socket.io/?EIO=4&transport=websocket", headers={
 assert connection.getresponse().status == 101, "WebSocket upgrade failed"
 connection.close()
 
+# These routes live outside /api. They must reach the server, not the SPA or
+# nginx's dotfile deny rule. Signing keys are optional in a fresh deployment.
+for path in ("/.well-known/openid-configuration", "/oidc/deploy-smoke/.well-known/openid-configuration"):
+    try:
+        with urlopen(origin + path) as response:
+            document = json.load(response)
+            assert document["authorization_endpoint"].startswith(origin + "/"), document
+    except HTTPError as error:
+        assert error.code == 503 and json.load(error)["error"] == "oidc_not_configured", path
+
+for path in ("/.env", "/.git/config"):
+    try:
+        urlopen(origin + path)
+        raise AssertionError(f"Private path exposed: {path}")
+    except HTTPError as error:
+        assert error.code in (403, 404), path
+
 # On the disposable CI runner, verify real account/session tables as well as
 # health's SELECT 1. Reuse the account and old JWT after stop/start/redeployment.
 if os.environ.get("GITHUB_ACTIONS") == "true":
