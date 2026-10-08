@@ -35,9 +35,8 @@ ENV NODE_ENV=production
 CMD ["node", "--import", "@oxc-node/core/register", "packages/server/src/server.ts"]
 
 FROM source AS web-build
-ARG PUBLIC_URL
 ARG RELEASE_SHA
-ENV VITE_API_URL=$PUBLIC_URL \
+ENV VITE_API_URL="" \
     VITE_DEPLOYMENT_ENV=production \
     VITE_COMMIT_SHA=$RELEASE_SHA \
     VITE_FRONTEND_RELEASE_ID=$RELEASE_SHA \

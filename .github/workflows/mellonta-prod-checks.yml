@@ -5,6 +5,19 @@ on:
     paths:
       - 'scripts/mellonta/prod*'
       - 'scripts/mellonta/deploy-prod.sh'
+      - 'packages/server/**'
+      - 'packages/web/**'
+      - 'packages/shared/**'
+      - 'packages/runtime-form/**'
+      - 'packages/trace-client/**'
+      - 'packages/sync-core/**'
+      - 'packages/desktop-contract/**'
+      - 'packages/visual-testing/shared/**'
+      - 'manual/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.node-version'
       - '.github/workflows/mellonta-prod-checks.yml'
   workflow_dispatch:
 permissions:
@@ -17,8 +30,20 @@ jobs:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    env:
+      RAFT_SMOKE_ORIGIN: http://raft-http.test:8001
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - name: Prepare browser regression test
+        run: |
+          npm install --global pnpm@10.29.3
+          pnpm --filter @botiverse/raft-web... install --frozen-lockfile
+          pnpm --filter @botiverse/raft-web exec vitest run tests/browserCryptoBootstrap.test.ts tests/appThemeBootstrapWiring.test.ts --maxWorkers=2
+          pnpm exec playwright install --with-deps chromium
+          printf '127.0.0.1 raft-http.test\n' | sudo tee -a /etc/hosts
       - name: Prepare isolated deployment
         run: |
           python3 scripts/mellonta/prod-config.test.py
@@ -38,7 +63,8 @@ jobs:
           output = pathlib.Path(sys.argv[2]).read_text(errors="replace")
           # CI uses disposable generated secrets; still redact them from diagnostics.
           output = re.sub(r'postgresql://[^\s]+', '[database URL]', output)
-          message = "Failed command: " + sys.argv[1] + "\n" + "\n".join(output.splitlines()[-35:])
+          output = re.sub(r'\x1b\[[0-9;]*m', '', output)
+          message = "Failed command: " + sys.argv[1] + "\n" + output[-3000:]
           print("::error title=Production deployment failed::" + message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
           PY
           }
@@ -47,8 +73,9 @@ jobs:
           cd /data/raft
           mkdir -p /data/.raft-prod
           printf 'SLOCK_E2E_AUTO_VERIFY_EMAIL=1\n' > /data/.raft-prod/server-extra.env
-          bash scripts/mellonta/deploy-prod.sh --url http://127.0.0.1:8080 --bind 127.0.0.1
+          bash scripts/mellonta/deploy-prod.sh --url "$RAFT_SMOKE_ORIGIN" --bind 127.0.0.1
           python3 scripts/mellonta/prod-smoke.py
+          node "$GITHUB_WORKSPACE/scripts/mellonta/prod-browser-smoke.mjs" "$RUNNER_TEMP/raft-production-test-account.json"
           compose=(docker compose -p raft-prod -f /data/.raft-prod/compose.json)
           "${compose[@]}" exec -T postgres psql -U raft -d raft -c 'CREATE TABLE mellonta_deploy_probe (value text); INSERT INTO mellonta_deploy_probe VALUES ($$retained$$);'
           printf retained > /data/.raft-prod/uploads/persistence-probe

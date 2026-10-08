@@ -235,8 +235,10 @@ The first foreground start initializes the database. The process is still subjec
 to scheduler job limits and cluster networking rules. Only one instance may use
 a data directory at a time.
 
-The portal listens on `0.0.0.0:8080`; use `--bind 127.0.0.1` for a local reverse
-proxy or tunnel. PostgreSQL, Redis, the API and metrics listen only on loopback;
+The portal listens on all interfaces. An explicit port in an HTTP `--url`
+(for example `http://a.b.com:8001`) also sets the listening port, unless `--port`
+overrides it. Otherwise the first setup defaults to 8080. Use `--bind 127.0.0.1`
+for a local reverse proxy or tunnel. PostgreSQL, Redis, the API and metrics listen only on loopback;
 the database and cache have generated passwords. All ports are configurable:
 `--port 8080 --api-port 3001 --metrics-port 9090 --postgres-port 5432 --redis-port
 6379`. Ports must be distinct and at least 1024. Setup does not configure TLS or
@@ -332,8 +334,10 @@ Node with `@oxc-node/core/register` loading TypeScript once, without `watch`; th
 `tsc` configuration does not emit a standalone JavaScript build. Both run with
 production settings. This deployment does not use `raftdev` or tmux.
 
-By default nginx publishes HTTP on all interfaces at port 8080. `--port` changes
-the port; for a direct HTTP URL, include that port in `--url` as appropriate.
+By default nginx publishes HTTP on all interfaces. An explicit port in an HTTP
+`--url` also sets the published port: `--url http://a.b.com:8001` listens on 8001.
+An explicit `--port` takes precedence, allowing a different backend port behind a
+proxy. Otherwise the first deployment defaults to 8080; reruns retain saved settings.
 For an existing local TLS reverse proxy, forward to `127.0.0.1:8080`, including
 WebSocket upgrades and `X-Forwarded-Proto`, then deploy with:
 
@@ -341,8 +345,18 @@ WebSocket upgrades and `X-Forwarded-Proto`, then deploy with:
 bash scripts/mellonta/deploy-prod.sh --url https://a.b.com --bind 127.0.0.1
 ```
 
-The script does not provision TLS certificates. `--url` and the saved settings
-are baked into the web build; rerun deployment to change them.
+The script does not provision TLS certificates. An HTTPS `--url` leaves the HTTP
+listening port unchanged for your reverse proxy. The browser sends API and WebSocket
+requests to its own origin; `--url` configures the server's public links and allowed
+origin. Rerun deployment to apply changed settings. The portal can start on plain
+HTTP, using `crypto.getRandomValues` for UUIDs when `crypto.randomUUID` is unavailable.
+Browser features that require a secure context, such as clipboard access and push
+notifications, still require HTTPS.
+
+CI exercises the built Docker deployment on both Linux architectures, including
+a real browser on a non-localhost HTTP origin: sign-in, workspace rendering and
+session restoration after refresh. This catches frontend boot errors that an
+HTTP health check cannot detect.
 
 All application data is separate from dev state:
 

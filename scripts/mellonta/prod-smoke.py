@@ -9,8 +9,9 @@ import re
 import secrets
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 
-origin = "http://127.0.0.1:8080"
+origin = os.environ.get("RAFT_SMOKE_ORIGIN", "http://127.0.0.1:8080")
 with urlopen(origin + "/health") as response:
     assert json.load(response)["status"] == "ok"
 with urlopen(origin + "/") as response:
@@ -27,7 +28,8 @@ for asset in assets:
 with urlopen(origin + "/desktop-manifest.json") as response:
     assert response.headers["ETag"].startswith('"sha256-')
     assert isinstance(json.load(response), dict)
-connection = http.client.HTTPConnection("127.0.0.1", 8080, timeout=10)
+address = urlsplit(origin)
+connection = http.client.HTTPConnection(address.hostname, address.port or 80, timeout=10)
 connection.request("GET", "/socket.io/?EIO=4&transport=websocket", headers={
     "Connection": "Upgrade", "Upgrade": "websocket", "Sec-WebSocket-Version": "13",
     "Sec-WebSocket-Key": base64.b64encode(os.urandom(16)).decode(),

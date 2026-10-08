@@ -81,7 +81,7 @@ def configure(source, root, public_url=None, port=None, bind=None):
     logging = {"driver": "local", "options": {"max-size": "10m", "max-file": "3"}}
     common = {"restart": "unless-stopped", "logging": logging}
     build = {"context": str(source), "dockerfile": "scripts/mellonta/prod.Dockerfile",
-             "args": {"NODE_VERSION": node_version, "PUBLIC_URL": settings["public_url"], "RELEASE_SHA": revision}}
+             "args": {"NODE_VERSION": node_version, "RELEASE_SHA": revision}}
 
     def mount(name, target):
         return {"type": "bind", "source": str(root / name), "target": target,

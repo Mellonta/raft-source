@@ -80,7 +80,8 @@ export default function GravatarAvatar({ avatarUrl, gravatarHash, email, size = 
     }
 
     applyHash(null);
-    sha256Hex(email.trim().toLowerCase()).then(applyHash);
+    // Remote HTTP lacks SubtleCrypto; keep the avatar placeholder in that case.
+    sha256Hex(email.trim().toLowerCase()).then(applyHash, () => applyHash(null));
     return () => { cancelled = true; };
   }, [uploadedAvatarUrl, gravatarHash, email]);
 
