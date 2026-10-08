@@ -93,7 +93,7 @@ try {
   await page.goto(`${origin}${workspacePath}/channel/${channel.id}`);
   const composer = page.getByPlaceholder(`Message #${channel.name}`);
   await composer.fill("HTTP production message 🛶");
-  const sentResponse = page.waitForResponse((response) => response.url() === `${origin}/api/messages` && response.request().method() === "POST");
+  const sentResponse = page.waitForResponse((response) => response.url() === `${origin}/api/v2/messages` && response.request().method() === "POST");
   await page.getByRole("button", { name: "Send", exact: true }).click();
   const sent = await sentResponse;
   assert.ok(sent.ok(), `Send message: HTTP ${sent.status()}`);
@@ -107,7 +107,7 @@ try {
   await composer.press("ControlOrMeta+V");
   assert.equal(await composer.inputValue(), "HTTP production message 🛶");
   await composer.fill("");
-  const incoming = await page.request.post(`${origin}/api/messages`, {
+  const incoming = await page.request.post(`${origin}/api/v2/messages`, {
     headers, data: { channelId: channel.id, content: "HTTP realtime arrival" },
   });
   assert.ok(incoming.ok(), `Incoming message: HTTP ${incoming.status()}`);
