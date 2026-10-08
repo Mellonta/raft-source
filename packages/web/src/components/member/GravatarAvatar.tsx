@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared/src/distributionPolicy";
 import { useEffect, useState } from "react";
 import { User } from "lucide-react";
 import { isRaftUploadedHumanAvatarUrl } from "../../utils/humanAvatar";
@@ -31,7 +32,7 @@ const failedGravatarHashes = new Set<string>();
  * Falls back to User icon if neither image exists.
  */
 export default function GravatarAvatar({ avatarUrl, gravatarHash, email, size = 80, iconSize = 16 }: GravatarAvatarProps) {
-  const initialHash = gravatarHash || null;
+  const initialHash = DISTRIBUTION_POLICY.externalAvatars ? gravatarHash || null : null;
   const [hash, setHash] = useState<string | null>(initialHash);
   const [uploadedFailed, setUploadedFailed] = useState(false);
   const [failed, setFailed] = useState(() => initialHash ? failedGravatarHashes.has(initialHash) : false);
@@ -69,6 +70,10 @@ export default function GravatarAvatar({ avatarUrl, gravatarHash, email, size = 
 
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
     setUploadedFailed(false);
+    if (!DISTRIBUTION_POLICY.externalAvatars) {
+      applyHash(null);
+      return;
+    }
     if (gravatarHash) {
       applyHash(gravatarHash);
       return;

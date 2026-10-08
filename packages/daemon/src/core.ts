@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import {
   DISTRIBUTION_POLICY,
+  assertNoVendorServiceUrl,
   createTraceScopeTracer,
   AGENT_MIGRATION_CAPABILITY,
   COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS,
@@ -1714,6 +1715,7 @@ export class DaemonCore {
   private static readonly START_DISPATCH_RECEIPT_CACHE_SIZE = 1_024;
 
   constructor(options: DaemonCoreOptions) {
+    assertNoVendorServiceUrl(options.serverUrl);
     this.options = options;
     this.daemonVersion = options.daemonVersion ?? readDaemonVersion();
     this.computerVersion = options.computerVersion?.trim() || null;
@@ -1880,7 +1882,7 @@ export class DaemonCore {
 
   private shouldEnableLocalTrace(): boolean {
     if (this.injectedTracer) return false;
-    if (!this.options.localTrace) return false;
+    if (!DISTRIBUTION_POLICY.tracing || !this.options.localTrace) return false;
     return process.env.SLOCK_DAEMON_LOCAL_TRACE !== "0";
   }
 

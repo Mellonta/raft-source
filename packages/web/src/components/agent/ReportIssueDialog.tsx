@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared/src/distributionPolicy";
 import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
 import { Checkbox, Textarea, Button } from "raft-ui";
 import { useMemo, useState } from "react";
@@ -207,7 +208,7 @@ export default function ReportIssueDialog({
 
   const handleSubmit = async () => {
     if (!consented || loading) return;
-    if (!feedbackExportUrl) {
+    if (!DISTRIBUTION_POLICY.diagnosticUploads || !feedbackExportUrl) {
       setError(formatMessage({ id: "agent.reportIssue.exportNotConfigured" }));
       return;
     }

@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared/src/distributionPolicy";
 import api from "../api/client";
 import { resolveNotificationChannel } from "./notificationChannel";
 import { mayUseServiceWorker } from "./offlineBundleHost";
@@ -18,6 +19,7 @@ export async function recordWebPushPromptEvent(input: {
   detail?: string;
 }) {
   try {
+    if (!DISTRIBUTION_POLICY.productAnalytics) return;
     await api.post("/push/prompt-events", input);
   } catch {
     // Instrumentation must never block the permission flow.

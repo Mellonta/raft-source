@@ -1,0 +1,13 @@
+/* Self-hosted: use locally installed fonts or system fallbacks, without a remote font stylesheet. */
+:where(:root),
+[data-theme="brutal"] {
+  --heading-font: "Hanken Grotesk", system-ui, sans-serif;
+  --sans-font: "Hanken Grotesk", system-ui, sans-serif;
+  --mono-font: "Geist Mono", ui-monospace, monospace;
+}
+
+[data-theme="elegant"] {
+  --heading-font: "Inter", system-ui, sans-serif;
+  --sans-font: "Geist", system-ui, sans-serif;
+  --mono-font: "Geist Mono", ui-monospace, monospace;
+}

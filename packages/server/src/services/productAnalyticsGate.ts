@@ -12,6 +12,7 @@
 // (scripts/ci/check-branded-mint-sites.mjs).
 
 import { randomUUID } from "node:crypto";
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 import { eq, inArray } from "drizzle-orm";
 import { SHARE_USAGE_DATA_DEFAULT, type AnalyticsId, type ServerId } from "@botiverse/raft-shared";
 import type { Database, DatabaseExecutor } from "../db/index";
@@ -47,6 +48,7 @@ export interface ProductAnalyticsGate {
 // usage data, nothing is linked to them — not client events, not server-derived
 // facts. Their activity then counts only toward workspace totals.
 export function decideProductAnalyticsGate(facts: ProductAnalyticsFacts): ProductAnalyticsGate {
+  if (!DISTRIBUTION_POLICY.productAnalytics) return { recordAllowed: false, analyticsId: null, clientEventsAllowed: false };
   const workspaceOff = facts.workspaceEnabled === false;
   const recordAllowed = !workspaceOff || DISABLED_WORKSPACE_KEEPS_COUNTS;
   const sharing = facts.shareUsageData ?? SHARE_USAGE_DATA_DEFAULT;
@@ -74,6 +76,9 @@ export async function loadProductAnalyticsGateBatch(
   db: DatabaseExecutor,
   input: { userIds: readonly string[]; serverIds: readonly ServerId[] },
 ): Promise<ProductAnalyticsGateBatch> {
+  if (!DISTRIBUTION_POLICY.productAnalytics) {
+    return { gate: () => ({ recordAllowed: false, analyticsId: null, clientEventsAllowed: false }) };
+  }
   const userIds = [...new Set(input.userIds)];
   const serverIds = [...new Set(input.serverIds)];
   const userRows = userIds.length === 0 ? [] : await db
@@ -127,6 +132,7 @@ export async function legacyProductEventsAllowed(
   db: DatabaseExecutor,
   input: { userId: string; serverId: ServerId },
 ): Promise<boolean> {
+  if (!DISTRIBUTION_POLICY.productAnalytics) return false;
   const [user] = await db
     .select({ shareUsageData: users.shareUsageData })
     .from(users)
@@ -151,6 +157,7 @@ export async function setProductAnalyticsOptOut(
   optedOut: boolean,
   now: Date = new Date(),
 ): Promise<void> {
+  if (!DISTRIBUTION_POLICY.productAnalytics) return;
   await db.transaction(async (tx) => {
     await tx
       .update(users)

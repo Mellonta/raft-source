@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared/src/distributionPolicy";
 import { useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { trackEvent } from "../analytics/track";
@@ -39,6 +40,7 @@ export default function ChineseCommunityPage() {
   useBrowserDocumentTitle(formatMessage({ id: "pages.chineseCommunity.title" }));
 
   const fetchConfig = async (url: string) => {
+    if (!DISTRIBUTION_POLICY.upstreamServices) return null;
     try {
       const response = await fetch(url, { cache: "no-store" });
       if (!response.ok) return null;

@@ -19,7 +19,7 @@ import type {
   ServerBoundDueReceiptMessage,
 } from "./apps/reminder/protocol";
 
-export { DISTRIBUTION_POLICY } from "./distributionPolicy";
+export { DISTRIBUTION_POLICY, assertNoVendorServiceUrl } from "./distributionPolicy";
 export { formatUtcTimestamp } from "./utcTimestamp";
 
 export {

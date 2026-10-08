@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 import { Router } from "express";
 import { getAppUrl } from "../config/appUrl";
 
@@ -178,6 +179,7 @@ export async function lookupLatestAsset(
   platform: MobilePlatform,
   deps: { fetch: typeof fetch; baseUrl?: string; channel?: string },
 ): Promise<LatestLookup> {
+  if (!DISTRIBUTION_POLICY.upstreamServices) return { outcome: "not_configured", detail: "Upstream downloads are disabled in this self-hosted build" };
   const base = deps.baseUrl ?? HANDS_BASE;
   const channel = deps.channel ?? HANDS_CHANNEL;
   const slug = APP_SLUG_BY_PLATFORM[platform];
@@ -225,6 +227,10 @@ export async function lookupLatestAsset(
 export const mobileDownloadRouter: Router = Router();
 
 mobileDownloadRouter.get("/", async (req, res) => {
+  if (!DISTRIBUTION_POLICY.upstreamServices) {
+    res.status(404).json({ error: "Upstream downloads are disabled in this self-hosted build" });
+    return;
+  }
   const requested = req.query.platform;
   const platform = isMobilePlatform(requested)
     ? requested

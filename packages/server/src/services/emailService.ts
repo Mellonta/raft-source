@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 import { Resend } from "resend";
 import {
   DISPLAY_LOCALES,
@@ -23,7 +24,7 @@ const PRIVACY_URL = "https://raft.build/privacy";
 const NEWSLETTER_LEGAL_ADDRESS = "Botiverse, Inc. · 1111B S Governors Ave, Suite 95905, Dover, DE 19904, US";
 const ONBOARDING_AGENT_DOCS_URL = "https://docs.raft.build/meet-your-onboarding-agent/";
 export const MOBILE_APP_DOWNLOAD_URL = "https://app.raft.build/download";
-export const DEFAULT_APP_REVIEW_NOTIFICATION_RECIPIENTS = ["august@botiverse.dev"] as const;
+export const DEFAULT_APP_REVIEW_NOTIFICATION_RECIPIENTS: readonly string[] = DISTRIBUTION_POLICY.upstreamServices ? ["august@botiverse.dev"] : [];
 export const APP_ADMIN_REVIEW_URL = "https://slock-internal-app-admin.botiverse.dev/reviews";
 
 const SIMPLE_EMAIL_ADDRESS_PATTERN = /^[^\s@,]+@[^\s@,]+\.[^\s@,]+$/u;
@@ -329,6 +330,7 @@ export async function sendAppReviewRequestEmail(
   input: AppReviewRequestEmailInput,
   options: Pick<SendEmailOptions, "idempotencyKey"> = {},
 ): Promise<string | null> {
+  if (!DISTRIBUTION_POLICY.upstreamServices) return null;
   const requestLabel = input.requestKind === "publish" ? "Public review" : "Offline review";
   const safeName = safeEmailSubjectText(input.appName) || "Unnamed app";
   return sendEmail(
@@ -438,6 +440,7 @@ export async function sendOnboardingWelcomeEmail(
   } = {},
   options: Pick<SendEmailOptions, "idempotencyKey"> = {},
 ): Promise<string | null> {
+  if (!DISTRIBUTION_POLICY.upstreamServices) return null;
   const html = renderOnboardingWelcomeEmailHtml(input);
   return sendEmail(to, "Welcome to Raft", html, {
     from: onboardingEmailFromEmail(),
@@ -468,6 +471,7 @@ export async function sendOnboardingDayOneCheckInEmail(
   } = {},
   options: Pick<SendEmailOptions, "idempotencyKey" | "scheduledAt"> = {},
 ): Promise<string | null> {
+  if (!DISTRIBUTION_POLICY.upstreamServices) return null;
   const html = renderOnboardingDayOneCheckInEmailHtml(input);
   return sendEmail(to, "How's it going with Raft?", html, {
     from: onboardingEmailFromEmail(),
@@ -610,6 +614,7 @@ export async function sendMobileAppDownloadEmail(
     unsubscribeUrl: string;
   },
 ): Promise<string | null> {
+  if (!DISTRIBUTION_POLICY.upstreamServices) return null;
   const copy = mobileAppEmailCopy(options.locale);
   return sendEmail(to, copy.subject, renderMobileAppDownloadEmailHtml(options.locale, options.unsubscribeUrl), {
     from: mobileAppEmailFromEmail(),

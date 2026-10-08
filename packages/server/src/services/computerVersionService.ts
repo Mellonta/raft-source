@@ -16,6 +16,7 @@
 // version's notes.
 
 import {
+  DISTRIBUTION_POLICY,
   bothComputerVersionsKnown,
   isComputerOutdated,
   normalizeComputerReleaseNotes,
@@ -38,6 +39,7 @@ const HANDS_LATEST_BUILD_URL =
   "https://hands.build/public/v2/apps/raft-computer-cli/latest?channel=main";
 
 export function getLatestComputerVersion(): Promise<string | null> {
+  if (!DISTRIBUTION_POLICY.upstreamServices) return Promise.resolve(null);
   const now = Date.now();
   if (cachedLatestComputerVersion && now - lastFetchTime < REFRESH_INTERVAL_MS) {
     return Promise.resolve(cachedLatestComputerVersion);

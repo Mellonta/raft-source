@@ -73,7 +73,6 @@ import {
 import { ComputerServiceError } from "./services/errors";
 import { resolveRaftHome } from "./paths";
 import { resolveTargetServerId } from "./targetServer";
-import { DEFAULT_SLOCK_SERVER_URL } from "./serverUrl";
 import { BUNDLED_CLI_VERSION, BUNDLED_DAEMON_VERSION, COMPUTER_VERSION } from "./version";
 import { listAttachedServerIds, setServerManaged } from "./serverState";
 import { prepareLocalLifecycleOperations, type PreparedLocalLifecycleOperation } from "./localLifecycleIntents";
@@ -139,7 +138,7 @@ const SERVER_SLUG_TARGET_DESC =
   "target Raft server slug (canonical form `/myserver`; bare `myserver` accepted)";
 const SERVER_SLUG_OPTIONAL_DESC =
   "optional: scope to one attached server (canonical `/myserver`; bare accepted; default: all attached)";
-const SERVER_URL_ENV_DESC = `SLOCK_SERVER_URL/RAFT_SERVER_URL or ${DEFAULT_SLOCK_SERVER_URL}`;
+const SERVER_URL_ENV_DESC = "SLOCK_SERVER_URL/RAFT_SERVER_URL (required when --server-url is omitted)";
 const RELEASE_CHANNEL_DESC =
   "`latest` installs production releases; `alpha` follows staging builds; `pinned:<semver>` stays on one version; "
   + "a named channel (lowercase letters, digits, hyphens, e.g. `constructed-wake-context`) follows one feature branch's builds";

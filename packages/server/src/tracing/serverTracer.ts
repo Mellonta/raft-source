@@ -1,4 +1,5 @@
 import {
+  DISTRIBUTION_POLICY,
   BasicTracer,
   isTraceEventRowV2CompatibleIngestStatement,
   noopTracer,
@@ -38,6 +39,7 @@ export function createServerTracerFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   deploymentIdentity: TraceDeploymentIdentity = createGeneratedTraceDeploymentIdentity("non_ecs"),
 ): ServerTracerRuntime {
+  if (!DISTRIBUTION_POLICY.tracing) return { tracer: noopTracer, shutdown: async () => {} };
   const endpoint = env.SLOCK_TRACE_OTLP_ENDPOINT?.trim();
   const deploymentResource = traceDeploymentResourceOptions(deploymentIdentity);
   const traceEventSink = createTraceEventSinkFromEnv(env, deploymentResource);

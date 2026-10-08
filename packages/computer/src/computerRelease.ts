@@ -1,4 +1,4 @@
-import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
+import { assertNoVendorServiceUrl, clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
 
 /** This distribution updates from the fork, never the upstream release channel. */
 export const DEFAULT_UPGRADE_BASE_URL = "https://github.com/Mellonta/raft-source/releases/download";
@@ -29,6 +29,7 @@ export async function fetchCdnLatestVersionResult(
   baseUrl: string,
   fetchFn: typeof fetch = fetch,
 ): Promise<ComputerLatestVersionResolveResult> {
+  assertNoVendorServiceUrl(baseUrl);
   const url = latestManifestUrl(baseUrl);
   const controller = new AbortController();
   const timeoutId = setClockTimeout(() => controller.abort(), 10_000);

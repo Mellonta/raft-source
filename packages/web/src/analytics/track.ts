@@ -13,6 +13,7 @@
 // leave the browser. Nothing is retried: a failed batch is dropped.
 
 import { randomUuid } from "@botiverse/raft-shared/src/randomUuid";
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared/src/distributionPolicy";
 import type { ProductEventName, ProductEventProperties } from "@botiverse/raft-shared";
 import { assertValidDesktopRuntimeEnvironment, hasDesktopBridge, RUNTIME_API_BASE } from "../desktopRuntimeEnvironment";
 import { WEB_APP_VERSION } from "../utils/webAppVersion";
@@ -38,7 +39,7 @@ type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 // This tab's product-analytics session: random per page load and deliberately
 // NOT the trace tabId, so product events cannot be joined to traces (which
 // carry a stable per-user id) and re-linked after the user stops sharing.
-const productSessionId: string = randomUuid();
+const productSessionId: string = DISTRIBUTION_POLICY.productAnalytics ? randomUuid() : "";
 
 let queue: QueuedEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -57,6 +58,7 @@ export function trackEvent<E extends ProductEventName>(
   event: E,
   props?: ProductEventProperties<E>,
 ): void {
+  if (!DISTRIBUTION_POLICY.productAnalytics) return;
   const serverId = serverIdGetter();
   if (!serverId || allowedByServer.get(serverId) === false) return;
   if (queue.length >= MAX_QUEUED_EVENTS) return;
@@ -113,6 +115,7 @@ async function askAllowed(serverId: string, token: string): Promise<boolean> {
  * request could answer.
  */
 export async function flushProductEvents(options: { onPageHide?: boolean } = {}): Promise<void> {
+  if (!DISTRIBUTION_POLICY.productAnalytics) return;
   if (flushing && !options.onPageHide) return;
   const token = globalThis.localStorage?.getItem(TOKEN_KEY) ?? null;
   if (!token) {
@@ -161,7 +164,7 @@ export async function flushProductEvents(options: { onPageHide?: boolean } = {})
   }
 }
 
-if (typeof window !== "undefined" && typeof document !== "undefined") {
+if (DISTRIBUTION_POLICY.productAnalytics && typeof window !== "undefined" && typeof document !== "undefined") {
   const flushOnHide = () => {
     if (queue.length > 0) void flushProductEvents({ onPageHide: true });
   };

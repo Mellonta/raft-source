@@ -13,10 +13,44 @@ on the machine where you install it. Your agent runtime is still installed separ
   are left alone. Raft's local credential proxy and messaging CLI still work.
 - Disable daemon trace-bundle uploads, session-transcript uploads, and Computer
   diagnostics uploads in the build, including forced/manual diagnostics pushes.
-  Local logs remain available. This does not disable traffic to your Raft server
-  or the model providers you use.
+  Browser, server, daemon, and Computer diagnostic tracing and product-usage
+  analytics are also disabled. Ordinary application logs and operational state
+  remain local. Traffic to your Raft server and configured model providers remains.
 - Default update lookups use this fork's GitHub Releases, not Botiverse's CDN
-  or Hands. Explicit environment overrides can still choose another update source.
+  or Hands. Old vendor server URLs and vendor update-source overrides are rejected.
+
+## Privacy policy
+
+These restrictions are built into `packages/shared/src/distributionPolicy.ts`;
+configuration flags, saved sharing preferences, and export credentials cannot
+turn them on:
+
+- No product-usage collection or analytics exports, browser error/auth traces,
+  server OTLP/ScopeDB traces, or daemon/Computer trace recording and uploads.
+- No Hands feedback submissions, conversation polling, reporter registration,
+  or feedback debug/transcript uploads. The server refuses upload capabilities
+  requested by older clients as well.
+- No automatic Hands release/version queries, vendor mobile-download redirects,
+  community QR fetches, newsletter contact synchronization, vendor review emails,
+  or vendor onboarding/marketing emails.
+- No Gravatar email-hash lookup; uploaded avatars and local placeholders remain.
+  UI fonts use local/system fallbacks; the quote font is a bundled local asset.
+- Computer requires your server URL and rejects known vendor endpoints in old
+  connection settings and update overrides. Fork downloads still use GitHub.
+
+This is an application policy, not an operating-system network firewall. Your
+configured AI runtimes, integrations, mail delivery, and user-opened external
+links retain their own network behavior. Application data, authentication,
+agent activity needed by the UI, and ordinary local logs are not deleted.
+The policy does not change already-installed upstream binaries: rebuild/redeploy
+the server and install a Computer build containing these changes. Restart alone
+does not rebuild either artifact.
+
+Privacy regression tests attempt exports with configured endpoints and keys and
+assert that no request is made. The production browser smoke test rejects
+external requests and telemetry requests during login and session restoration.
+Upstream mechanism tests use an explicit test-only policy mock; the privacy
+regressions always use the real distribution policy.
 
 ## Updating from the 1.13 fork
 
@@ -36,10 +70,10 @@ the saved version pin, and restarts a previously running service.
 
 **Portal-triggered remote upgrades are disabled** in this distribution because
 upstream's remote completion protocol belongs to its external installer. Use
-the local command above. The portal's installer commands and server version
-recommendations still refer to upstream; use the Mellonta setup script below.
-The new `channel versions` command is also upstream discovery; the fork's
-published versions are on GitHub Releases. No upstream installer is executed.
+the local command above. The portal's Linux installer command uses this fork's GitHub Releases. Upstream
+version recommendations, remote upgrade broadcasts, mobile downloads, and
+`channel versions` discovery are disabled. Use GitHub Releases and the Mellonta
+setup script below. No upstream installer is executed.
 
 The old public snapshot's final migration was renumbered upstream from 0266 to
 0273. Deployment takes its normal backup, then reconciles only the exact known
@@ -212,8 +246,7 @@ bash "$HOME/park/.raft-prod/raftprod" stop
 
 Register your account and create a workspace in the portal. Without email
 delivery configuration, verification links appear in the API logs. Install the
-Computer client using this fork's setup script above; the portal's upstream
-installer command has not been replaced.
+Computer client using this fork's setup script above or the portal's fork installer.
 
 Run setup again to install a newer server bundle. Downloads and runtime
 preparation finish before the current server is stopped. Settings, credentials,
@@ -351,8 +384,8 @@ requests to its own origin; `--url` configures the server's public links and all
 origin. Rerun deployment to apply changed settings. The portal can start on plain
 HTTP, generating UUIDs inside the application bundle with `crypto.getRandomValues`.
 The application does not modify the browser's crypto object. Clipboard access,
-push notifications and the third-party feedback SDK's submission flow still
-require HTTPS. Use HTTPS for the complete production feature set.
+push notifications, and provider-verification hashing still require HTTPS.
+Vendor feedback is disabled by the distribution policy.
 
 CI exercises the built Docker deployment on both Linux architectures, including
 a real browser on a non-localhost HTTP origin: sign-in, workspace rendering and
@@ -402,9 +435,8 @@ are printed in server logs; alternatively configure email delivery in
 This is a fresh production database. Existing raftdev data is not automatically
 converted or copied, and raftdev keeps running until you stop it. Agent execution
 still uses your separately installed custom Computer client; use this fork's
-GitHub installer above, because the portal's install command still points upstream.
-Web analytics, web trace uploads, and server trace exports are off by default in
-these images; this is not a guarantee of zero outbound network traffic.
+GitHub installer above or the portal's fork installer. The built-in privacy
+policy above disables analytics, diagnostics, and vendor service integrations.
 
 ## Build and publish another Linux release
 

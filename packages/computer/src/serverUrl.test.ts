@@ -10,8 +10,8 @@ import {
   SLOCK_SERVER_URL_ENV,
 } from "./serverUrl";
 
-test("resolveServerUrl falls back to the production API", () => {
-  assert.equal(resolveServerUrl(undefined, "", "   "), DEFAULT_SLOCK_SERVER_URL);
+test("resolveServerUrl requires an explicit self-hosted server", () => {
+  assert.throws(() => resolveServerUrl(undefined, "", "   "), /self-hosted server URL is required/);
 });
 
 test("resolveServerUrl preserves explicit precedence", () => {
@@ -25,11 +25,11 @@ test("resolveServerUrl preserves explicit precedence", () => {
   );
 });
 
-test("resolveServerUrl canonicalizes the legacy production API domain", () => {
-  assert.equal(canonicalizeServerUrl(LEGACY_PRODUCTION_SERVER_URL), DEFAULT_SLOCK_SERVER_URL);
-  assert.equal(canonicalizeServerUrl(`${LEGACY_PRODUCTION_SERVER_URL}/`), DEFAULT_SLOCK_SERVER_URL);
-  assert.equal(resolveServerUrl(LEGACY_PRODUCTION_SERVER_URL), DEFAULT_SLOCK_SERVER_URL);
-  assert.equal(resolveServerUrl(undefined, LEGACY_PRODUCTION_SERVER_URL), DEFAULT_SLOCK_SERVER_URL);
+test("old production endpoints cannot reconnect to Botiverse", () => {
+  for (const url of [LEGACY_PRODUCTION_SERVER_URL, DEFAULT_SLOCK_SERVER_URL, "https://api-aws-staging.botiverse.dev"]) {
+    assert.throws(() => canonicalizeServerUrl(url), /Botiverse-hosted services are disabled/);
+    assert.throws(() => resolveServerUrl(url), /Botiverse-hosted services are disabled/);
+  }
 });
 
 test("resolveServerUrlEnv accepts RAFT alias while preserving SLOCK precedence", () => {

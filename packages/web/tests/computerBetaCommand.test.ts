@@ -1,3 +1,9 @@
+// Exercise upstream mechanisms explicitly; mellontaPrivacy.test.ts verifies the shipped policy.
+vi.mock("@botiverse/raft-shared/src/distributionPolicy", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@botiverse/raft-shared/src/distributionPolicy")>(),
+  DISTRIBUTION_POLICY: { forkReleases: false, managedMcp: true, diagnosticUploads: true, tracing: true, productAnalytics: true, upstreamServices: true, externalAvatars: true },
+}));
+
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
@@ -18,7 +24,8 @@ import { renderWithIntl } from "./helpers/intl";
 const repoRoot = resolve(import.meta.dirname, "..");
 // Asserts on private CI/deploy files that the source-available snapshot does not
 // carry; skipped when an exported snapshot's RELEASE_SOURCE marker is present.
-const inSourceSnapshot = existsSync(resolve(repoRoot, "../../RELEASE_SOURCE"));
+const inSourceSnapshot = existsSync(resolve(repoRoot, "../../RELEASE_SOURCE"))
+  || !existsSync(resolve(repoRoot, "../../.github/workflows/publish-computer-sea.yml"));
 
 const server: Server = {
   id: "server-1",

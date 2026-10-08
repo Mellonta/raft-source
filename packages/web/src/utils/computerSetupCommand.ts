@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared/src/distributionPolicy";
 export const STAGING_COMPUTER_SERVER_URL = "https://api-aws-staging.botiverse.dev";
 export const DEFAULT_COMPUTER_SERVER_URL = "https://api.raft.build";
 export const LEGACY_DEFAULT_COMPUTER_SERVER_URL = "https://api.slock.ai";
@@ -24,6 +25,11 @@ export function computerInstallCommand(
   deploymentEnv?: string,
   version?: string | null,
 ): string {
+  if (DISTRIBUTION_POLICY.forkReleases) {
+    const pin = normalizeComputerVersionPin(version);
+    const release = pin?.includes("-mellonta.") ? `download/${pin}` : "latest/download";
+    return `curl -fsSL https://github.com/Mellonta/raft-source/releases/${release}/install.sh | sh`;
+  }
   const base = deploymentEnv === "staging" ? COMPUTER_CDN_BASE_STAGING : COMPUTER_CDN_BASE_PROD;
   const versionPin = normalizeComputerVersionPin(version);
   const installEnv = [
@@ -42,6 +48,7 @@ export function windowsComputerInstallCommand(
   deploymentEnv?: string,
   version?: string | null,
 ): string {
+  if (DISTRIBUTION_POLICY.forkReleases) return 'Write-Error "This self-hosted distribution provides Linux x64 and ARM64 clients only."';
   const base = deploymentEnv === "staging" ? COMPUTER_CDN_BASE_STAGING : COMPUTER_CDN_BASE_PROD;
   const versionPin = normalizeComputerVersionPin(version);
   const installEnv = [
@@ -115,7 +122,9 @@ export function getComputerCommands(
 
   const platform = options.platform ?? "mac-linux";
 
-  const commandServerUrl = deploymentEnv === "production"
+  const commandServerUrl = DISTRIBUTION_POLICY.forkReleases
+    ? serverUrl || (typeof window !== "undefined" ? window.location.origin : undefined)
+    : deploymentEnv === "production"
     ? isDefaultComputerServerUrl(serverUrl) ? null : serverUrl
     : deploymentEnv === "staging"
     ? STAGING_COMPUTER_SERVER_URL

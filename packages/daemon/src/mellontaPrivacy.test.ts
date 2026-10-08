@@ -56,5 +56,10 @@ test("trace and session-transcript uploads cannot obtain an upload capability", 
     workerUrl: "https://worker.test", scope: "daemon-trace-bundle:create",
     createBody: {}, uploadBody: "private transcript", fetchImpl,
   }), /Diagnostic uploads are disabled/);
+  await assert.rejects(uploadWithSignedCapability({
+    serverUrl: "https://server.test", apiKey: "sk_machine_test",
+    workerUrl: "https://worker.test", scope: "feedback-report:create",
+    createBody: {}, uploadBody: "private report", fetchImpl,
+  }), /Diagnostic uploads are disabled/);
   assert.equal(fetchImpl.mock.calls.length, 0);
 });

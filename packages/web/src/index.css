@@ -1,4 +1,4 @@
-@import "raft-ui/fonts.css";
+@import "./assets/fonts/runtime-fonts.css";
 
 @import "tailwindcss";
 @import "raft-ui/styles.css";
@@ -27,7 +27,7 @@
   font-style: normal;
   font-weight: 400 700;
   font-display: swap;
-  src: url('https://fonts.gstatic.com/s/hankengrotesk/v12/ieVn2YZDLWuGJpnzaiwFXS9tYtpd59CxCis4.woff2') format('woff2');
+  src: url('./assets/fonts/hanken-grotesk-quotes.woff2') format('woff2');
   unicode-range: U+0022;
 }
 

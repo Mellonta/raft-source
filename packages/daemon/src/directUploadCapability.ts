@@ -124,7 +124,7 @@ export async function requestDaemonScopeAttestation({
   fetchImpl = daemonFetch,
   timeoutMs = DEFAULT_CHAT_BRIDGE_TOOL_TIMEOUT_MS,
 }: RequestDaemonScopeAttestationOptions): Promise<DaemonScopeAttestation> {
-  if (!DISTRIBUTION_POLICY.diagnosticUploads && scope === "daemon-trace-bundle:create") {
+  if (!DISTRIBUTION_POLICY.diagnosticUploads) {
     throw new Error("Diagnostic uploads are disabled in this self-hosted build");
   }
   const { data } = await executeJsonRequest<DaemonScopeAttestation>(

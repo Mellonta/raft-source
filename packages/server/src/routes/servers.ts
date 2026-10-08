@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 import { Router, type Request, type RequestHandler, type Router as RouterType } from "express";
 import { kickAppNotificationDelivery } from "../services/appNotificationDeliveryService";
 import multer from "multer";
@@ -1723,6 +1724,10 @@ serverRouter.patch("/:id/notification-settings", async (req, res) => {
 
 // Create a short-lived server-scoped scope attestation
 serverRouter.post("/:id/scope-attestation", async (req, res) => {
+  if (!DISTRIBUTION_POLICY.diagnosticUploads) {
+    res.status(403).json({ error: "Diagnostic uploads are disabled in this self-hosted build" });
+    return;
+  }
   try {
     const { scope } = parseCreateScopeAttestationRequest(req.body);
     const allowed = await canCreateScopeAttestation(req.params.id, req.userId!, scope);

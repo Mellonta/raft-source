@@ -5,6 +5,7 @@
 // Node/undici fetch does not reliably behave like curl here unless we pass an
 // explicit dispatcher, so Computer login/attach must do it at the request seam.
 import { fetch, ProxyAgent, type Dispatcher } from "undici";
+import { assertNoVendorServiceUrl } from "@botiverse/raft-shared";
 
 const fetchDispatcherCache = new Map<string, Dispatcher>();
 type UndiciRequestInit = NonNullable<Parameters<typeof fetch>[1]>;
@@ -78,6 +79,7 @@ export function buildFetchDispatcher(
 }
 
 export function computerFetch(input: string, init: UndiciRequestInit = {}): ReturnType<typeof fetch> {
+  assertNoVendorServiceUrl(input);
   const dispatcher = buildFetchDispatcher(input);
   const proxyInit: ProxyAwareRequestInit = dispatcher ? { ...init, dispatcher } : init;
   return fetch(input, proxyInit);

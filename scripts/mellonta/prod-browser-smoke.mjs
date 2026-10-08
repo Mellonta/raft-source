@@ -21,6 +21,15 @@ try {
   page.setDefaultTimeout(30_000);
   // The application must boot without the previous standalone crypto patch.
   await page.route("**/browser-crypto-bootstrap.js", (route) => route.abort());
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (["http:", "https:"].includes(url.protocol) && url.origin !== origin) {
+      errors.push(`Unexpected external browser request: ${url.origin}${url.pathname}`);
+    }
+    if (/\/(product-events|scope-attestation|prompt-events)(\/|$)/.test(url.pathname)) {
+      errors.push(`Unexpected telemetry request: ${url.pathname}`);
+    }
+  });
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("response", (response) => {
     const url = new URL(response.url());

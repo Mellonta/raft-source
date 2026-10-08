@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 
@@ -11,6 +12,10 @@ export interface OtlpRelayConfig {
 }
 
 export async function otlpRelayHandler(req: Request, res: Response, config: OtlpRelayConfig = {}): Promise<void> {
+  if (!DISTRIBUTION_POLICY.tracing) {
+    res.status(403).json({ error: "Trace export is disabled in this self-hosted build" });
+    return;
+  }
   const expectedAuthorization = config.authorization ?? process.env.OTLP_RELAY_AUTHORIZATION;
   if (!expectedAuthorization) {
     res.status(500).json({ error: "OTLP relay authorization is not configured" });

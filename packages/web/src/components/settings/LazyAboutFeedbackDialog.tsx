@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared/src/distributionPolicy";
 import { lazy, Suspense } from "react";
 import type { ComponentType, LazyExoticComponent } from "react";
 import { useIntl } from "react-intl";
@@ -35,6 +36,7 @@ export function LazyAboutFeedbackPanel({
 }: {
   panel?: ComponentType | LazyExoticComponent<ComponentType>;
 }) {
+  if (!DISTRIBUTION_POLICY.upstreamServices) return <p className="p-4">Vendor feedback is disabled in this self-hosted build.</p>;
   return (
     <Suspense fallback={<FeedbackWorkspacePending />}>
       <Panel />

@@ -10,6 +10,7 @@
 // insert, so ScopeDB sees a few large writes instead of one per request.
 
 import { Client } from "scopedb";
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 import type { AnalyticsId, ProductEventSource, ServerId } from "@botiverse/raft-shared";
 import { productEventIngestTotal } from "../metrics";
 import { errorClassOf } from "../tracing/semanticTrace";
@@ -147,6 +148,7 @@ export class ScopeDbProductEventSink implements ProductEventSink {
 
 /** Null until the product workspace's endpoint and key are configured. */
 export function createProductEventSinkFromEnv(env: NodeJS.ProcessEnv = process.env): ProductEventSink | null {
+  if (!DISTRIBUTION_POLICY.productAnalytics) return null;
   const endpoint = env.SCOPEDB_PRODUCT_ENDPOINT;
   const apiKey = env.SCOPEDB_PRODUCT_WRITE_KEY;
   if (!endpoint || !apiKey) return null;

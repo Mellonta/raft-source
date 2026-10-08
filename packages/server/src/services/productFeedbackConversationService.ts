@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { clearClockTimeout, currentTimeMs, setClockTimeout } from "@botiverse/raft-shared";
 
@@ -145,6 +146,9 @@ type Config = {
 };
 
 function readConfig(env: NodeJS.ProcessEnv): Config {
+  if (!DISTRIBUTION_POLICY.upstreamServices) {
+    throw new ProductFeedbackConversationError(503, "feedback_integration_unavailable", null, conversationDiagnostic("configuration"));
+  }
   const baseUrl = env.HANDS_FEEDBACK_BASE_URL?.trim();
   const appId = env.HANDS_FEEDBACK_APP_ID?.trim();
   const appToken = env.HANDS_FEEDBACK_CONVERSATION_APP_TOKEN?.trim();

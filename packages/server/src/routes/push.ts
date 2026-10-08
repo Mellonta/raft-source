@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 import { Router, type Router as RouterType } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { requireAuth, requireServer, requireVerified } from "../middleware/auth";
@@ -75,6 +76,10 @@ pushRouter.get("/vapid-key", (_req, res) => {
 });
 
 pushRouter.post("/prompt-events", requireAuth, async (req, res) => {
+  if (!DISTRIBUTION_POLICY.productAnalytics) {
+    res.status(204).end();
+    return;
+  }
   const userId = req.userId;
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });

@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared/src/distributionPolicy";
 // RFC-067 product analytics controls: the personal "Share usage data" switch
 // (Settings → Account) and the workspace switch (Settings → Administration).
 // Both stay hidden behind PRODUCT_ANALYTICS_SETTINGS_FLAG_KEY until the default
@@ -101,8 +102,8 @@ function UsageDataSettingsCardContent() {
             </a>
           </>
         )}
-        checked={shareUsageData ?? SHARE_USAGE_DATA_DEFAULT}
-        disabled={saving}
+        checked={DISTRIBUTION_POLICY.productAnalytics && (shareUsageData ?? SHARE_USAGE_DATA_DEFAULT)}
+        disabled={!DISTRIBUTION_POLICY.productAnalytics || saving}
         onCheckedChange={(checked) => void handleChange(checked)}
         footer={failed && (
           <Banner intent="warning" density="sm" className="mt-3 font-bold">
@@ -177,8 +178,8 @@ function WorkspaceProductAnalyticsSectionContent() {
         idPrefix={idPrefix}
         title={formatMessage({ id: "settings.workspaceProductAnalytics.title" })}
         description={formatMessage({ id: "settings.workspaceProductAnalytics.description" })}
-        checked={settings?.productAnalyticsEnabled ?? true}
-        disabled={saving || settings === null || !settings.canManageProductAnalytics}
+        checked={DISTRIBUTION_POLICY.productAnalytics && (settings?.productAnalyticsEnabled ?? true)}
+        disabled={!DISTRIBUTION_POLICY.productAnalytics || saving || settings === null || !settings.canManageProductAnalytics}
         onCheckedChange={(checked) => void handleChange(checked)}
         footer={failed && (
           <Banner intent="warning" density="sm" className="mt-3 font-bold">

@@ -1,3 +1,9 @@
+// Exercise upstream mechanisms explicitly; mellontaPrivacy.test.ts verifies the shipped policy.
+vi.mock("@botiverse/raft-shared", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@botiverse/raft-shared")>(),
+  DISTRIBUTION_POLICY: { forkReleases: false, managedMcp: true, diagnosticUploads: true, tracing: true, productAnalytics: true, upstreamServices: true, externalAvatars: true },
+}));
+
 // The server must never sign a token the worker's shared length gate
 // (SCOPE_ATTESTATION_MAX_CHARS) would refuse before even checking it.
 import assert from "node:assert/strict";

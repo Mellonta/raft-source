@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 // `raft-computer channel show|set` — CLI presenters over the ComputerApi.
 // The channel STATE core (parse/read/write, v6 §11 enum) lives in
 // lib/channelState.ts so the facade and upgrade/service internals consume it
@@ -168,6 +169,9 @@ export async function listChannelVersions(
   limit: number,
   deps: ChannelVersionsDeps = {},
 ): Promise<ChannelVersionsResult> {
+  if (!DISTRIBUTION_POLICY.upstreamServices) {
+    throw new ComputerError("UPSTREAM_DISABLED", "Use https://github.com/Mellonta/raft-source/releases for this fork. Upstream release discovery is disabled.");
+  }
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > CHANNEL_VERSIONS_MAX_LIMIT) {
     throw new ComputerError(
       "CHANNEL_VERSIONS_LIMIT_INVALID",

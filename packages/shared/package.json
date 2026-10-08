@@ -121,7 +121,11 @@
     },
     "./src/testVectors/messageRepliesDiscussionGraph.vectors.json": "./src/testVectors/messageRepliesDiscussionGraph.vectors.json",
     "./src/testVectors/threadRepliesReadModel.vectors.json": "./src/testVectors/threadRepliesReadModel.vectors.json",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./src/distributionPolicy": {
+      "types": "./src/distributionPolicy.ts",
+      "default": "./src/distributionPolicy.ts"
+    }
   },
   "scripts": {
     "generate:openapi": "node --import @oxc-node/core/register scripts/generate-openapi.ts",

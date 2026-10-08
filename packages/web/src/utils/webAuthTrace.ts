@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared/src/distributionPolicy";
 // L4 web auth tracing producer (transport layer).
 //
 // Contract: rfcs/016-auth-session-contract.md §"Observability Contract".
@@ -36,7 +37,7 @@ const TRACE_URL_FROM_ENV = (import.meta.env?.VITE_WEB_TRACE_URL as string | unde
 // flip it deterministically to exercise the transport paths that would
 // otherwise no-op under an unset `VITE_WEB_TRACE_URL`.
 let TRACE_URL: string = TRACE_URL_FROM_ENV;
-let ENABLED: boolean = Boolean(TRACE_URL);
+let ENABLED: boolean = DISTRIBUTION_POLICY.tracing && Boolean(TRACE_URL);
 const DEPLOYMENT_ENV = (import.meta.env?.VITE_DEPLOYMENT_ENV as string | undefined) || "unknown";
 const RELEASE_SHA = ((import.meta.env?.VITE_COMMIT_SHA as string | undefined) ?? "").trim() || "unknown";
 const APP_VERSION = ((import.meta.env?.VITE_APP_VERSION as string | undefined) ?? "").trim() || "unknown";
@@ -420,6 +421,7 @@ function randomHex(bytes: number): string {
 }
 
 const tabId: string = (() => {
+  if (!DISTRIBUTION_POLICY.tracing) return "";
   try {
     return crypto.randomUUID();
   } catch {
@@ -490,6 +492,7 @@ export function buildWebTraceRecord(
  * Never throws.
  */
 export function startWebSpan(name: WebSpanName): WebSpanHandle {
+  if (!DISTRIBUTION_POLICY.tracing) return { traceId: "", spanId: "", end() {} };
   const traceId = randomHex(16);
   const spanId = randomHex(8);
   const startTime = new Date().toISOString();
@@ -919,6 +922,7 @@ export function emitWebEvent(
   options: EmitWebEventOptions = {},
 ): void {
   try {
+    if (!DISTRIBUTION_POLICY.tracing) return;
     enqueueWebRecord(buildWebEventRecord(name, attrs, options));
   } catch {
     // Swallow: emitting a trace must never affect auth control flow.
@@ -1055,9 +1059,9 @@ export function __resetAuthTraceForTest(opts: { traceUrl?: string | null } = {})
   injectedFetch = null;
   if (opts.traceUrl === undefined || opts.traceUrl === null) {
     TRACE_URL = TRACE_URL_FROM_ENV;
-    ENABLED = Boolean(TRACE_URL);
+    ENABLED = DISTRIBUTION_POLICY.tracing && Boolean(TRACE_URL);
   } else {
     TRACE_URL = opts.traceUrl.replace(/\/+$/, "");
-    ENABLED = Boolean(TRACE_URL);
+    ENABLED = DISTRIBUTION_POLICY.tracing && Boolean(TRACE_URL);
   }
 }

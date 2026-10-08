@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 import type { Brand } from "@botiverse/raft-shared";
 
 export type ProductFeedbackKind = "idea" | "problem";
@@ -174,6 +175,7 @@ type ProductFeedbackServiceConfig = {
 };
 
 export function isProductFeedbackConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (!DISTRIBUTION_POLICY.upstreamServices) return false;
   return Boolean(
     env.HANDS_FEEDBACK_BASE_URL?.trim()
     && env.HANDS_FEEDBACK_APP_SLUG?.trim()
@@ -184,6 +186,7 @@ export function isProductFeedbackConfigured(env: NodeJS.ProcessEnv = process.env
 }
 
 function readConfig(env: NodeJS.ProcessEnv): ProductFeedbackServiceConfig {
+  if (!DISTRIBUTION_POLICY.upstreamServices) throw new ProductFeedbackConfigurationError();
   const baseUrl = env.HANDS_FEEDBACK_BASE_URL?.trim();
   const appSlug = env.HANDS_FEEDBACK_APP_SLUG?.trim();
   const clientKey = env.HANDS_FEEDBACK_CLIENT_KEY?.trim();

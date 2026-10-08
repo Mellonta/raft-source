@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 import { z } from "zod";
 import { isDeepStrictEqual } from "node:util";
 import { clearClockTimeout, compareComputerVersions, isComputerSemver, setClockTimeout } from "@botiverse/raft-shared";
@@ -150,6 +151,7 @@ async function readBroadcastGate(
   serverId: string | null,
   deps: ComputerHandsResolutionDependencies,
 ): Promise<BroadcastGate> {
+  if (!DISTRIBUTION_POLICY.upstreamServices) return { enabled: false, reasonCode: "broadcast_disabled" };
   try {
     const enabled = deps.isBroadcastEnabled
       ? await deps.isBroadcastEnabled(serverId)

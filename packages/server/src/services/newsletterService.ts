@@ -1,3 +1,4 @@
+import { DISTRIBUTION_POLICY } from "@botiverse/raft-shared";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { getDb } from "../db/index";
@@ -283,12 +284,12 @@ async function upsertAudienceContact(
 
 export function isNewsletterSyncConfigured() {
   const config = getNewsletterConfig();
-  return Boolean(config.apiKey && config.segmentId);
+  return DISTRIBUTION_POLICY.upstreamServices && Boolean(config.apiKey && config.segmentId);
 }
 
 export async function syncNewsletterSignup(user: NewsletterUser, options: SignupSyncOptions = {}): Promise<SignupSyncResult> {
   const config = getNewsletterConfig();
-  if (!config.apiKey || !config.segmentId) {
+  if (!DISTRIBUTION_POLICY.upstreamServices || !config.apiKey || !config.segmentId) {
     return { status: "skipped", reason: "not_configured" };
   }
 
@@ -493,7 +494,7 @@ async function listBackfillCandidates(batchSize: number, afterEmail: string | nu
 
 export async function backfillNewsletterAudience(options: BackfillOptions = {}): Promise<BackfillResult> {
   const config = getNewsletterConfig();
-  if (!config.apiKey || !config.segmentId) {
+  if (!DISTRIBUTION_POLICY.upstreamServices || !config.apiKey || !config.segmentId) {
     throw new Error("RESEND_API_KEY and RESEND_NEWSLETTER_SEGMENT_ID are required");
   }
 
