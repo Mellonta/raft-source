@@ -42,6 +42,7 @@
     "src/logs.test.ts",
     "src/machineReadiness.test.ts",
     "src/macosLoginCarrier.test.ts",
+    "src/mellontaInstaller.test.ts",
     "src/nativePublish.contract.test.ts",
     "src/osSupervisor.test.ts",
     "src/osSupervisorWindowsAbsence.test.ts",

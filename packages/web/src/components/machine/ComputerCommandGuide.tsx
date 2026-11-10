@@ -2,7 +2,7 @@ import { Badge, SegmentedControl, SegmentedControlItem, SegmentedControlLabel } 
 import { useCallback, useMemo, useState } from "react";
 import { Terminal } from "lucide-react";
 import { useIntl } from "react-intl";
-import type { ComputerCommandPlatform } from "../../utils/computerSetupCommand";
+import { mellontaComputerVersion, type ComputerCommandPlatform } from "../../utils/computerSetupCommand";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import { CommandRow } from "./CommandRow";
 
@@ -116,6 +116,7 @@ export default function ComputerCommandGuide({
   const [copiedCommand, setCopiedCommand] = useState<CopyTarget | null>(null);
   const [showConnectOnly, setShowConnectOnly] = useState(false);
 
+  const linuxDistribution = Boolean(mellontaComputerVersion());
   const isComputerGuide = Boolean(
     computerCommand || computerInstallCommand || windowsComputerCommand || windowsComputerInstallCommand,
   );
@@ -178,32 +179,36 @@ export default function ComputerCommandGuide({
           <Terminal size={16} className="text-foreground-muted" aria-hidden="true" />
           <SectionEyebrow as="div">{formatMessage({ id: "machine.commandGuide.connectCommand" })}</SectionEyebrow>
         </div>
-        <SegmentedControl<ComputerCommandPlatform>
-          value={platform}
-          onValueChange={handlePlatformChange}
-          aria-label={formatMessage({ id: "machine.commandGuide.choosePlatform" })}
-          className="shrink-0"
-        >
-          <SegmentedControlItem value="mac-linux" data-testid="computer-command-platform-mac-linux">
-            <SegmentedControlLabel>{formatMessage({ id: "machine.detail.macLinux" })}</SegmentedControlLabel>
-          </SegmentedControlItem>
-          <SegmentedControlItem value="windows" data-testid="computer-command-platform-windows">
-            <SegmentedControlLabel>
-              {isComputerGuide
-                ? formatMessage({ id: "machine.commandGuide.windowsX64" })
-                : formatMessage({ id: "machine.commandGuide.windows" })}
-            </SegmentedControlLabel>
-          </SegmentedControlItem>
-        </SegmentedControl>
+        {linuxDistribution ? <span className="text-footnote">Linux x86-64 / ARM64</span> : (
+          <SegmentedControl<ComputerCommandPlatform>
+            value={platform}
+            onValueChange={handlePlatformChange}
+            aria-label={formatMessage({ id: "machine.commandGuide.choosePlatform" })}
+            className="shrink-0"
+          >
+            <SegmentedControlItem value="mac-linux" data-testid="computer-command-platform-mac-linux">
+              <SegmentedControlLabel>{formatMessage({ id: "machine.detail.macLinux" })}</SegmentedControlLabel>
+            </SegmentedControlItem>
+            <SegmentedControlItem value="windows" data-testid="computer-command-platform-windows">
+              <SegmentedControlLabel>
+                {isComputerGuide
+                  ? formatMessage({ id: "machine.commandGuide.windowsX64" })
+                  : formatMessage({ id: "machine.commandGuide.windows" })}
+              </SegmentedControlLabel>
+            </SegmentedControlItem>
+          </SegmentedControl>
+        )}
       </div>
 
-      <p className="mb-3 text-footnote text-foreground-muted">
-        {isComputerGuide && platform === "windows"
-          ? formatMessage({ id: "machine.commandGuide.windowsComputerDescription" })
-          : isComputerGuide && computerCommand
-            ? formatMessage({ id: "machine.commandGuide.macLinuxComputerDescription" })
-            : formatMessage({ id: "machine.commandGuide.generateFreshConnect" })}
-      </p>
+      {!linuxDistribution && (
+        <p className="mb-3 text-footnote text-foreground-muted">
+          {isComputerGuide && platform === "windows"
+            ? formatMessage({ id: "machine.commandGuide.windowsComputerDescription" })
+            : isComputerGuide && computerCommand
+              ? formatMessage({ id: "machine.commandGuide.macLinuxComputerDescription" })
+              : formatMessage({ id: "machine.commandGuide.generateFreshConnect" })}
+        </p>
+      )}
 
       {isComputerGuide && platform === "windows" ? (
         <div className="space-y-3" data-testid="windows-computer-command-block">

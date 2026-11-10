@@ -1,8 +1,22 @@
 import { assertPrivacyServiceUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
+import { COMPUTER_VERSION } from "./version";
 import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
 
 /** Public CDN root for published Computer SEA binaries. */
 export const DEFAULT_UPGRADE_BASE_URL = "https://cdn.raft.build/computer";
+
+export const MELLONTA_RELEASE_BASE = "https://github.com/Mellonta/raft-source/releases/download";
+
+export function usesMellontaReleases(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^\d+\.\d+\.\d+-mellonta\.\d+$/.test(COMPUTER_VERSION) || env.RAFT_COMPUTER_RELEASE_BACKEND === "mellonta";
+}
+
+export function latestManifestUrl(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, "");
+  return base === MELLONTA_RELEASE_BASE
+    ? "https://github.com/Mellonta/raft-source/releases/latest/download/manifest.json"
+    : `${base}/manifest.json`;
+}
 
 /** Test/staging override for the Computer release source. */
 export const UPGRADE_BASE_URL_ENV = "RAFT_COMPUTER_UPGRADE_BASE_URL";
@@ -11,7 +25,7 @@ export function resolveUpgradeBaseUrl(env: NodeJS.ProcessEnv = process.env): str
   const override = env[UPGRADE_BASE_URL_ENV];
   return typeof override === "string" && override.trim().length > 0
     ? override.trim().replace(/\/+$/, "")
-    : DEFAULT_UPGRADE_BASE_URL;
+    : usesMellontaReleases(env) ? MELLONTA_RELEASE_BASE : DEFAULT_UPGRADE_BASE_URL;
 }
 
 export type ComputerLatestVersionResolveResult =
@@ -24,7 +38,7 @@ export async function fetchCdnLatestVersionResult(
   fetchFn: typeof fetch = fetch,
 ): Promise<ComputerLatestVersionResolveResult> {
   assertPrivacyServiceUrl(baseUrl);
-  const url = `${baseUrl.replace(/\/$/, "")}/manifest.json`;
+  const url = latestManifestUrl(baseUrl);
   const controller = new AbortController();
   const timeoutId = setClockTimeout(() => controller.abort(), 10_000);
   try {

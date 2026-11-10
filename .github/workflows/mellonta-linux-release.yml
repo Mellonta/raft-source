@@ -1,0 +1,108 @@
+name: Mellonta Linux release
+
+on:
+  push:
+    tags: ['*-mellonta.*']
+    branches: [main, privacy-opt-out]
+    paths:
+      - 'packages/computer/**'
+      - 'packages/daemon/**'
+      - 'packages/cli/**'
+      - 'packages/shared/**'
+      - 'packages/trace-client/**'
+      - 'scripts/mellonta/build-client.sh'
+      - 'scripts/mellonta/client-version'
+      - 'scripts/mellonta/setup-client*'
+      - 'MELLONTA.md'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'scripts/mellonta/install-client.sh'
+      - 'scripts/mellonta/prepare-release.mjs'
+      - 'scripts/mellonta/publish-release.sh'
+      - 'scripts/mellonta/merge-client-artifacts*'
+      - 'scripts/mellonta/smoke-install.mjs'
+      - '.github/workflows/mellonta-linux-release.yml'
+      - 'pnpm-lock.yaml'
+      - '.node-version'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mellonta-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  pnpm_config_verify_deps_before_run: "false"
+jobs:
+  build:
+    if: github.repository == 'Mellonta/raft-source'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-22.04
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Check tag and install dependencies
+        run: |
+          version=$(cat scripts/mellonta/client-version)
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then test "$GITHUB_REF_NAME" = "$version"; fi
+          npm install --global "$(node -p "require('./package.json').packageManager")"
+          pnpm --filter @botiverse/raft-computer... install --frozen-lockfile
+      - name: Verify privacy and release behavior
+        run: |
+          pnpm --filter @botiverse/raft-computer --filter @botiverse/raft-daemon --filter @botiverse/raft-shared typecheck
+          pnpm --filter @botiverse/raft-daemon exec vitest run src/privacyMode.test.ts src/managedMcpRuntimeProxy.test.ts src/traceBundleUpload.test.ts src/directUploadCapability.test.ts src/agentProcessManager.sessionTranscript.test.ts --maxWorkers=2
+          pnpm --filter @botiverse/raft-computer exec vitest run src/proxy.test.ts src/services/diagnosticsPush.test.ts src/mellontaInstaller.test.ts src/externalInstaller.test.ts src/nativePublish.contract.test.ts --maxWorkers=2
+          pnpm --filter @botiverse/raft-computer test:manifest
+          pnpm --filter @botiverse/raft-shared exec vitest run src/privacyMode.test.ts
+          node --test scripts/mellonta/merge-client-artifacts.test.mjs scripts/mellonta/setup-client.test.mjs
+      - name: Build and install the native Linux executable
+        run: |
+          test "$(node -p process.arch)" = "${{ matrix.arch }}"
+          bash scripts/mellonta/build-client.sh "$RUNNER_TEMP/client-release"
+      - name: Exercise the matching setup script with this candidate
+        run: node scripts/mellonta/smoke-install.mjs "$RUNNER_TEMP/client-release" --setup
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/client-release/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: linux-*
+          path: artifacts
+      - name: Verify both architectures and prepare the combined release
+        run: |
+          node scripts/mellonta/merge-client-artifacts.mjs artifacts packages/computer/dist-native
+          node scripts/mellonta/prepare-release.mjs
+      - name: Publish verified release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/mellonta/publish-release.sh "$GITHUB_REF_NAME" MELLONTA.md packages/computer/dist-native/*

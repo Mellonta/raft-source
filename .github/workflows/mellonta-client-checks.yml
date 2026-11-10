@@ -1,0 +1,27 @@
+name: Mellonta client setup checks
+on:
+  push:
+    branches: [main, privacy-opt-out]
+    paths:
+      - 'scripts/mellonta/setup-client*'
+      - '.github/workflows/mellonta-client-checks.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  client:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+      - name: Check argument handling, state protection, and saved launchers
+        run: |
+          bash -n scripts/mellonta/setup-client.sh
+          node --test scripts/mellonta/setup-client.test.mjs
