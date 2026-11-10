@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 // What became of RFC-067 product events on this replica, in otel.logs.
 //
 // The per-outcome counter (slock_product_event_ingest_total) is only in AMP,
@@ -31,7 +32,7 @@ export function startProductEventIngestSummary(
   store: ProductScopeDbStore,
   options: { intervalMs?: number; now?: () => number } = {},
 ): void {
-  if (summary) return;
+  if (privacyModeEnabled() || summary) return;
   const now = options.now ?? Date.now;
   summary = { tracer, store, windowStartMs: now(), timer: null };
   tracer.emitEvent("server.product_events.store", { surface: "server", attrs: { store } });

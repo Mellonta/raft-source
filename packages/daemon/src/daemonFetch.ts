@@ -1,4 +1,5 @@
 import { fetch as undiciFetch, type Dispatcher } from "undici";
+import { assertPrivacyServiceUrl, privacyModeEnabled, rejectVendorDispatch } from "@botiverse/raft-shared/src/privacyMode";
 import { providerRequestFetch, type ProviderRequestObserver } from "./providerRequestFetch";
 import {
   buildDirectFetchDispatcher,
@@ -152,6 +153,7 @@ export async function daemonFetch(
   options: DaemonFetchOptions = {},
 ): Promise<Response> {
   const targetUrl = daemonFetchTargetUrl(input);
+  assertPrivacyServiceUrl(targetUrl);
   const fetchInit = options.isolationKey
     ? {
         ...init,
@@ -164,6 +166,7 @@ export async function daemonFetch(
         ),
       }
     : withDaemonFetchProxy(input, init, env);
+  if (privacyModeEnabled()) fetchInit.dispatcher = fetchInit.dispatcher!.compose(rejectVendorDispatch);
   try {
     // A resolved Response (ANY status, including 4xx/5xx) means the dispatcher
     // worked at the transport layer — keep it cached.

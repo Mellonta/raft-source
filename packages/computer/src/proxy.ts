@@ -1,10 +1,11 @@
+import { assertPrivacyServiceUrl, privacyModeEnabled, rejectVendorDispatch } from "@botiverse/raft-shared/src/privacyMode";
 // Proxy support for Raft Computer HTTP requests.
 //
 // This intentionally mirrors the daemon/agent CLI env contract for outbound
 // server calls: HTTPS_PROXY / HTTP_PROXY / ALL_PROXY with NO_PROXY bypass.
 // Node/undici fetch does not reliably behave like curl here unless we pass an
 // explicit dispatcher, so Computer login/attach must do it at the request seam.
-import { fetch, ProxyAgent, type Dispatcher } from "undici";
+import { fetch, getGlobalDispatcher, ProxyAgent, type Dispatcher } from "undici";
 
 const fetchDispatcherCache = new Map<string, Dispatcher>();
 type UndiciRequestInit = NonNullable<Parameters<typeof fetch>[1]>;
@@ -68,6 +69,7 @@ export function buildFetchDispatcher(
   const proxyUrl = getProxyUrlForTarget(targetUrl, env);
   if (!proxyUrl) return undefined;
   if (shouldBypassProxy(targetUrl, env)) return undefined;
+  assertPrivacyServiceUrl(proxyUrl);
 
   const cached = fetchDispatcherCache.get(proxyUrl);
   if (cached) return cached;
@@ -83,7 +85,9 @@ export function buildFetchDispatcher(
 }
 
 export function computerFetch(input: string, init: UndiciRequestInit = {}): ReturnType<typeof fetch> {
-  const dispatcher = buildFetchDispatcher(input);
+  assertPrivacyServiceUrl(input);
+  let dispatcher = buildFetchDispatcher(input) ?? init.dispatcher;
+  if (privacyModeEnabled()) dispatcher = (dispatcher ?? getGlobalDispatcher()).compose(rejectVendorDispatch);
   const proxyInit: ProxyAwareRequestInit = dispatcher ? { ...init, dispatcher } : init;
   return fetch(input, proxyInit);
 }

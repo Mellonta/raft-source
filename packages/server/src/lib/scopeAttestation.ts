@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { SCOPE_ATTESTATION_MAX_CHARS } from "@botiverse/raft-shared";
 
@@ -48,6 +49,7 @@ export class ScopeAttestationOverBudgetError extends Error {
  * token before verifying it, so signing it would only move the failure.
  */
 export function createScopeAttestation(claims: ScopeAttestationClaims) {
+  if (privacyModeEnabled()) throw new Error("Diagnostic uploads are disabled in privacy mode");
   const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");
   const signature = createHmac("sha256", getScopeAttestationSecret())
     .update(payload)

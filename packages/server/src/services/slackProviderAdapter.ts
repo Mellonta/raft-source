@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isRaftVendorUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
+import { getAppUrl } from "../config/appUrl";
 import {
   clearClockTimeout,
   currentDate,
@@ -614,14 +616,19 @@ function buildPostMessageRequest(input: {
         delivery_id: input.dispatch.deliveryId,
         reconciliation_marker: input.dispatch.reconciliationMarker,
         source_message_id: snapshot.sourceMessageId,
-        source_permalink: snapshot.sourcePermalink,
+        // Previously queued snapshots carry the upstream origin. Never hand
+        // Slack a vendor URL containing private channel and message IDs.
+        source_permalink: privacyModeEnabled()
+          ? snapshot.sourcePermalink.replace("https://app.slock.ai/", getAppUrl() + "/")
+          : snapshot.sourcePermalink,
         source_sender_type: snapshot.senderType,
         connection_epoch: authority.connectionEpoch,
         binding_epoch: authority.bindingEpoch,
       },
     },
   };
-  if (snapshot.authorPresentation.avatar) {
+  if (snapshot.authorPresentation.avatar &&
+      !(privacyModeEnabled() && isRaftVendorUrl(new URL(snapshot.authorPresentation.avatar.publicUrl)))) {
     body.icon_url = snapshot.authorPresentation.avatar.publicUrl;
   } else {
     body.icon_emoji = snapshot.senderType === "agent" ? ":robot_face:" : ":bust_in_silhouette:";

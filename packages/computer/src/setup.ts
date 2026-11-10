@@ -72,8 +72,9 @@ import { CliExit, info, present } from "./output";
 import { ComputerError } from "./lib/errors";
 import type { ComputerTraceContext, ComputerTracer } from "./lib/traceTypes";
 import { formatUpgradeLogTimestamp, resolveRaftHome, serverAttachmentPath } from "./paths";
-import { resolveServerUrl, resolveServerUrlEnv } from "./serverUrl";
+import { computerPortalOrigin, resolveServerUrl, resolveServerUrlEnv } from "./serverUrl";
 import { formatServerSlugDisplay, migrateKnownServerUrl, normalizeServerSlug, resolveAttachedServerSlug } from "./serverState";
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import {
   adoptLegacyByDaemonId as adoptLegacyByDaemonIdService,
   adoptLegacyByFingerprint as adoptLegacyByFingerprintService,
@@ -355,10 +356,6 @@ function shortDate(raw: string | null | undefined): string {
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return raw;
   return date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-}
-
-function appServerUrl(serverSlug: string): string {
-  return `https://app.raft.build/${normalizeServerSlug(serverSlug)}`;
 }
 
 function serverUrlHost(raw: unknown): string | null {
@@ -1191,9 +1188,11 @@ async function attachFromSetup(
   }
 }
 
-function emitSetupRunningSummary(emit: (line: string) => void, opts: SetupOptions): void {
+function emitSetupRunningSummary(emit: (line: string) => void, opts: SetupOptions, baseUrl: string): void {
   emit("Raft Computer is running. Agents can now use this computer.");
-  emit(`Next: chat with your agents at ${appServerUrl(opts.serverSlug)}`);
+  const slug = normalizeServerSlug(opts.serverSlug);
+  const chatUrl = computerPortalOrigin(baseUrl) + (privacyModeEnabled() ? `/s/${encodeURIComponent(slug)}/` : `/${slug}`);
+  emit(`Next: chat with your agents at ${chatUrl}`);
   emit("(check this computer anytime with `raft-computer status`)");
 }
 
@@ -1383,7 +1382,7 @@ export async function setupCore(
         if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(machineId)) {
           throw new ComputerError(
             "SETUP_MACHINE_INVALID",
-            `--machine expects the machine id shown on the web Computers page (a UUID), got: ${machineId}. Open https://app.raft.build/s/${encodeURIComponent(opts.serverSlug)}/computers and copy the id from your computer's Migrate command.`,
+            `--machine expects the machine id shown on the web Computers page (a UUID), got: ${machineId}. Open ${computerPortalOrigin(baseUrl)}/s/${encodeURIComponent(opts.serverSlug)}/computers and copy the id from your computer's Migrate command.`,
           );
         }
         recordMigrationDecision(migrationTracer, migrationAttemptId, {
@@ -1736,7 +1735,7 @@ export async function setupCore(
   if (shouldPushMigrationDiagnosticsAfterStart) {
     await forceMigrationDiagnostics(slockHome, diagnosticsPush, emit, migrationAttemptId);
   }
-  emitSetupRunningSummary(emit, opts);
+  emitSetupRunningSummary(emit, opts, baseUrl);
   return;
   }
 }

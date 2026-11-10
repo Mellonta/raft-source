@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { Router } from "express";
 import { getAppUrl } from "../config/appUrl";
 
@@ -179,6 +180,7 @@ export async function lookupLatestAsset(
   platform: MobilePlatform,
   deps: { fetch: typeof fetch; baseUrl?: string; channel?: string },
 ): Promise<LatestLookup> {
+  if (privacyModeEnabled()) return { outcome: "not_configured", detail: "Upstream downloads are disabled in privacy mode" };
   const base = deps.baseUrl ?? HANDS_BASE;
   const channel = deps.channel ?? HANDS_CHANNEL;
   const slug = APP_SLUG_BY_PLATFORM[platform];
@@ -242,6 +244,10 @@ export async function lookupLatestAsset(
 export const mobileDownloadRouter: Router = Router();
 
 mobileDownloadRouter.get("/", async (req, res) => {
+  if (privacyModeEnabled()) {
+    res.status(404).json({ error: "Upstream downloads are disabled in privacy mode" });
+    return;
+  }
   const requested = req.query.platform;
   const platform = isMobilePlatform(requested)
     ? requested

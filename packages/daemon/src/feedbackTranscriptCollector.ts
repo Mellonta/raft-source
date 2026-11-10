@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { createHash, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import {
@@ -170,6 +171,7 @@ export async function collectFeedbackTranscriptAttachment(input: {
   tracer: Tracer;
   fetchImpl: FetchLike;
 }): Promise<FeedbackTranscriptCollectionResult> {
+  if (privacyModeEnabled()) return { reachable: false, fallbackReason: "Diagnostics are disabled in privacy mode" };
   const transcriptResult = await input.getSessionTranscript();
   // Only bytes the reader itself classified as the runtime's own file are
   // ever uploaded. A placeholder, or bytes whose kind nobody decided, are not.

@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/agentCliSurface";
 import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
@@ -79,6 +80,7 @@ export function emitCliTransportNormalizedError(
   env: NodeJS.ProcessEnv = process.env,
 ): void {
   try {
+    if (privacyModeEnabled(env)) return;
     traceSinkForTest?.("cli.transport.normalized_error", attrs);
     const traceDir = env[CLI_TRACE_DIR_ENV];
     if (!traceDir) return;

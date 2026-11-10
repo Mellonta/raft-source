@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import {
   BasicTracer,
   isTraceEventRowV2CompatibleIngestStatement,
@@ -39,6 +40,7 @@ export function createServerTracerFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   deploymentIdentity: TraceDeploymentIdentity = createGeneratedTraceDeploymentIdentity("non_ecs"),
 ): ServerTracerRuntime {
+  if (privacyModeEnabled(env)) return { tracer: noopTracer, shutdown: async () => {} };
   const endpoint = env.SLOCK_TRACE_OTLP_ENDPOINT?.trim();
   const deploymentResource = traceDeploymentResourceOptions(deploymentIdentity);
   const traceEventSink = createTraceEventSinkFromEnv(env, deploymentResource);

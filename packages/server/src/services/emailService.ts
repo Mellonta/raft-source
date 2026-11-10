@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { Resend } from "resend";
 import {
   DISPLAY_LOCALES,
@@ -329,6 +330,7 @@ export async function sendAppReviewRequestEmail(
   input: AppReviewRequestEmailInput,
   options: Pick<SendEmailOptions, "idempotencyKey"> = {},
 ): Promise<string | null> {
+  if (privacyModeEnabled()) return null;
   const requestLabel = input.requestKind === "publish" ? "Public review" : "Offline review";
   const safeName = safeEmailSubjectText(input.appName) || "Unnamed app";
   return sendEmail(
@@ -438,6 +440,7 @@ export async function sendOnboardingWelcomeEmail(
   } = {},
   options: Pick<SendEmailOptions, "idempotencyKey"> = {},
 ): Promise<string | null> {
+  if (privacyModeEnabled()) return null;
   const html = renderOnboardingWelcomeEmailHtml(input);
   return sendEmail(to, "Welcome to Raft", html, {
     from: onboardingEmailFromEmail(),
@@ -468,6 +471,7 @@ export async function sendOnboardingDayOneCheckInEmail(
   } = {},
   options: Pick<SendEmailOptions, "idempotencyKey" | "scheduledAt"> = {},
 ): Promise<string | null> {
+  if (privacyModeEnabled()) return null;
   const html = renderOnboardingDayOneCheckInEmailHtml(input);
   return sendEmail(to, "How's it going with Raft?", html, {
     from: onboardingEmailFromEmail(),
@@ -610,6 +614,7 @@ export async function sendMobileAppDownloadEmail(
     unsubscribeUrl: string;
   },
 ): Promise<string | null> {
+  if (privacyModeEnabled()) return null;
   const copy = mobileAppEmailCopy(options.locale);
   return sendEmail(to, copy.subject, renderMobileAppDownloadEmailHtml(options.locale, options.unsubscribeUrl), {
     from: mobileAppEmailFromEmail(),

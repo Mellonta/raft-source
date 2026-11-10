@@ -4,6 +4,7 @@
 // users installing Computer for the first time. Installer behavior:
 // https://botiverse.github.io/k-carrier/installer.html
 import { createHash } from "node:crypto";
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync } from "node:fs";
@@ -58,6 +59,11 @@ export function installerArgs(input: { targetVersion?: string; channel?: Channel
 /** Resolve once, verify, and return a direct executable invocation (never a shell). */
 export async function installerCommand(args: string[], env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform, arch: string = process.arch): Promise<{ command: string; args: string[] }> {
+  // The upstream installer is a separate executable with its own Hands client.
+  // Even a local download mirror cannot constrain its subsequent requests.
+  if (privacyModeEnabled() || privacyModeEnabled(env)) {
+    throw new Error("The upstream Computer installer is disabled in privacy mode. Update from your deployment's build.");
+  }
   const target = `${platform}-${arch}`;
   if (!["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64"].includes(target)) {
     throw new Error("unsupported_installer_target");

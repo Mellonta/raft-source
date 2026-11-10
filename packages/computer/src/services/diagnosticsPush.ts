@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 // DiagnosticsPushService — V0 Sync diagnostics surface for the menu-bar
 // (#wg-raft-computer:f2a02081 task #97 → deferred to task #11 → re-opened
 // 2026-06-22 by tygg). Yingjun interface lock msg=2753a3ad: b2 semantic —
@@ -641,7 +642,7 @@ export async function diagnosticsPush(
   // If the tracer is disabled, the menu-bar's altKey-revealed action has
   // nothing to attach to anyway. Honest closed-reason instead of writing
   // a marker that will sit on disk forever.
-  if (process.env.RAFT_COMPUTER_LOCAL_TRACE === "0") {
+  if (privacyModeEnabled() || process.env.RAFT_COMPUTER_LOCAL_TRACE === "0") {
     return { status: "failed", reason: "UPLOAD_DISABLED" };
   }
 

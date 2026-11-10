@@ -1,3 +1,5 @@
+import { assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyMode";
+
 export const DEFAULT_APP_URL = "http://localhost:5173";
 
 export const LEGACY_SLOCK_APP_HOSTNAMES = [
@@ -22,7 +24,9 @@ export function normalizeAppUrl(raw: string | undefined | null): string | null {
 }
 
 export function getConfiguredAppUrl(): string | null {
-  return normalizeAppUrl(process.env.APP_URL);
+  const url = normalizeAppUrl(process.env.APP_URL);
+  if (url) assertPrivacyServiceUrl(url);
+  return url;
 }
 
 export function getAppUrl(): string {

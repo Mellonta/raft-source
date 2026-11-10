@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 // Public Server visit counts (RFC-067 registry: public_page_viewed,
 // public_page_channel_opened, public_page_thread_opened). Design reviewed in #proj-analytics (Tenny,
 // 2026-10-14); see docs/analytics/public-server-visits.md.
@@ -267,7 +268,7 @@ export async function recordPublicVisit(
   now: number = Date.now(),
   visitorSink: PublicVisitorSink | null = null,
 ): Promise<PublicVisitOutcome> {
-  if (sink === null) return "unconfigured";
+  if (privacyModeEnabled() || sink === null) return "unconfigured";
   const target = await resolveVisitTarget(input.slug, now);
   if (typeof target === "string") return target;
   const anonymousGate = decideProductAnalyticsGate({
@@ -334,6 +335,7 @@ export async function recordPublicVisit(
 
 /** Whether a public page should offer the cookie banner (GET /api/public/servers/:slug). */
 export async function publicVisitorIdOffered(slug: string, now: number = Date.now()): Promise<boolean> {
+  if (privacyModeEnabled()) return false;
   const target = await resolveVisitTarget(slug, now);
   return typeof target !== "string" && target.workspaceEnabled && target.visitorIdEnabled;
 }
@@ -355,7 +357,7 @@ export async function recordPublicServerJoin(
   visitorSink: PublicVisitorSink | null,
   now: number = Date.now(),
 ): Promise<PublicServerJoinOutcome> {
-  if (sink === null) return "unconfigured";
+  if (privacyModeEnabled() || sink === null) return "unconfigured";
   const target = await resolveVisitTarget(input.slug, now);
   if (typeof target === "string") return "no_target";
   const { analyticsId } = await resolveProductAnalyticsGate(getDb(), { userId: input.userId, serverId: target.serverId });

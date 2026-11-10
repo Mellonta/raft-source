@@ -141,6 +141,14 @@
     "./announcement-audience": {
       "types": "./announcement-audience.ts",
       "default": "./announcement-audience.ts"
+    },
+    "./src/privacyMode": {
+      "types": "./src/privacyMode.ts",
+      "default": "./src/privacyMode.ts"
+    },
+    "./src/browserPrivacy": {
+      "types": "./src/browserPrivacy.ts",
+      "default": "./src/browserPrivacy.ts"
     }
   },
   "scripts": {

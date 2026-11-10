@@ -18,7 +18,7 @@ import { formatServerSlugDisplay, listServerAttachments } from "./serverState";
 import { formatRaftHomeForDisplay, resolveRaftHome } from "./paths";
 import { info, present } from "./output";
 import { createComputerApi } from "./lib/api";
-import { resolveServerUrl, resolveServerUrlEnv } from "./serverUrl";
+import { computerPortalOrigin, resolveServerUrl, resolveServerUrlEnv } from "./serverUrl";
 import { redactSecrets } from "./doctor";
 import { ComputerError } from "./lib/errors";
 import {
@@ -255,6 +255,7 @@ export async function runDoctorMigrationDetails(opts: { serverLabel?: string }):
       (attachment) => attachment.serverSlug?.replace(/^\//, "") === normalizedLabel,
     );
     for (const line of renderMigrationDetailsBody({
+      serverUrl: session?.serverUrl ?? resolveServerUrlEnv(),
       label,
       evidence,
       machines,
@@ -285,6 +286,7 @@ export async function runDoctorMigrationDetails(opts: { serverLabel?: string }):
  *     evidence (update-daemon-and-run-once recovery, task #239 ③).
  */
 export function renderMigrationDetailsBody(input: {
+  serverUrl?: string;
   label: string;
   evidence: Awaited<ReturnType<typeof collectDetectionEvidence>>;
   machines: ServerMachineEntry[] | null;
@@ -329,7 +331,7 @@ export function renderMigrationDetailsBody(input: {
       `      if the current runner is unhealthy, follow \`raft-computer doctor ${label}\`; recovery must be driven by the failing current attachment, not by hostname alone`,
     );
   } else {
-    const computersUrl = `https://app.raft.build/s/${encodeURIComponent(label.replace(/^\//, ""))}/computers`;
+    const computersUrl = `${computerPortalOrigin(input.serverUrl)}/s/${encodeURIComponent(label.replace(/^\//, ""))}/computers`;
     lines.push(
       `Next: one of these should be this computer → find the legacy row by hostname at ${computersUrl}, then use its “Migrate to Computer” setup command (\`raft-computer setup ${label} --machine <machineId>\`)`,
     );

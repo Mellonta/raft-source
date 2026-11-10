@@ -1,6 +1,7 @@
 import { dbTest as test } from "../test/integration/dbTest";
 import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import assert from "node:assert/strict";
+import { vi } from "vitest";
 import { createHash, randomUUID } from "node:crypto";
 
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
@@ -342,6 +343,17 @@ test("managed runtime selection is explicit, complete, and mutually exclusive wi
   const missing = { ...MANAGED_ENV };
   delete missing.SLACK_BRIDGE_PAYLOAD_ENCRYPTION_KEY;
   await assert.rejects(createSlackBridgeServerRuntimeFromEnv(missing), /SLACK_BRIDGE_PAYLOAD_ENCRYPTION_KEY/);
+});
+
+test("private Slack setup rejects a vendor callback before binding or registering the integration", async () => {
+  vi.stubEnv("RAFT_PRIVACY_MODE", "1");
+  try {
+    await assert.rejects(createSlackBridgeServerRuntimeFromEnv({
+      ...MANAGED_ENV, SLACK_BRIDGE_OAUTH_REDIRECT_URI: "https://api.raft.build/api/slack-bridge/oauth/callback",
+    }), /vendor services/);
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });
 
 test("managed test runtime requires an explicit credential-free HTTP(S) app origin", async () => {

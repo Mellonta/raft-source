@@ -41,3 +41,18 @@
   font-display: swap;
   src: url(./space-mono-5.ttf) format('truetype');
 }
+
+@font-face {
+  font-family: 'Raft Quote Glyphs';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('./hanken-grotesk-quotes.woff2') format('woff2');
+  unicode-range: U+0022;
+}
+
+:where(:root) {
+  --heading-font: "Space Grotesk", system-ui, sans-serif;
+  --sans-font: "Space Grotesk", system-ui, sans-serif;
+  --mono-font: "Space Mono", ui-monospace, monospace;
+}

@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import express, { type Express, type Request, type RequestHandler } from "express";
 import helmet from "helmet";
 import cors from "cors";
@@ -837,6 +838,12 @@ export function createApp(options: CreateAppOptions = {}): Express {
     const verdict = getDbLivenessTracker().verdict();
     const status = livezStatus(verdict);
     res.status(status).json({ status: status === 200 ? "ok" : "error", ...verdict });
+  });
+
+  // Public bootstrap setting; contains no account or installation information.
+  app.get("/api/privacy-mode", (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ enabled: privacyModeEnabled() });
   });
 
   // Health check (readiness) — verifies DB connectivity right now. Deploy

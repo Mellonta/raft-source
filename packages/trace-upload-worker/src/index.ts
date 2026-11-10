@@ -1,6 +1,7 @@
 // HTTP entry: routes each request to the trace or feedback handlers. See README.md
 // for what the service does; src/node.ts is the runtime entry point.
 import type { ExecutionContextLike, TraceUploadWorkerEnv } from "./env";
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import {
   completeFeedbackReport,
   createFeedbackReportUpload,
@@ -15,12 +16,11 @@ import { createTraceBundleUpload, putTraceBundleObject } from "./traces/bundles"
 import { OtlpSinkError } from "./traces/otlpSink";
 import { ingestWebTraceBatch, webTraceCorsHeaders, webTraceCorsResponse } from "./traces/web";
 
-export async function handleRequest(request: Request, env: TraceUploadWorkerEnv, ctx?: ExecutionContextLike): Promise<Response> {
+export async function handleRequest(request: Request, env: TraceUploadWorkerEnv | null, ctx?: ExecutionContextLike): Promise<Response> {
   const url = new URL(request.url);
+  if (request.method === "GET" && url.pathname === "/healthz") return jsonResponse({ ok: true });
+  if (!env || privacyModeEnabled()) return jsonResponse({ error: "Diagnostic ingestion is disabled in privacy mode" }, 403);
   try {
-    if (request.method === "GET" && url.pathname === "/healthz") {
-      return jsonResponse({ ok: true });
-    }
     if (request.method === "POST" && url.pathname === "/api/trace-bundles") {
       return await createTraceBundleUpload(request, env);
     }

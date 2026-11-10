@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { Router, type NextFunction, type Request, type Response, type Router as RouterType } from "express";
 import { UUID_RE } from "../lib/messageId";
 import {
@@ -629,6 +630,19 @@ export function buildAttachmentInlinePreviewContentSecurityPolicy(frameAncestorO
 
 export function buildHtmlPreviewContentSecurityPolicy(frameAncestorOrigins = getPreviewFrameAncestorOrigins()): string {
   const frameAncestors = ["'self'", ...frameAncestorOrigins].join(" ");
+  if (privacyModeEnabled()) {
+    // An opaque origin protects Raft credentials, but does not stop an HTML
+    // file from sending its own confidential contents in image/script URLs or
+    // a script-driven navigation. Self-hosted previews are therefore static
+    // and self-contained, including when opened outside the preview iframe.
+    return [
+      "default-src 'none'", "sandbox", "script-src 'none'",
+      "style-src 'unsafe-inline'", "img-src data: blob:", "font-src data:",
+      "media-src data: blob:", "connect-src 'none'", "object-src 'none'",
+      "base-uri 'none'", "form-action 'none'", "worker-src 'none'",
+      `frame-ancestors ${frameAncestors}`,
+    ].join("; ");
+  }
   return [
     "default-src 'none'",
     // Opaque origin even when the preview URL is opened directly (not only

@@ -1,3 +1,4 @@
+import { privacyModeEnabled, assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyMode";
 export { verifyBundledPiOAuth } from "./bundledPiOAuth";
 export { verifyBundledKimiSdk } from "./drivers/index";
 import {
@@ -1868,6 +1869,7 @@ export class DaemonCore {
   private static readonly START_DISPATCH_RECEIPT_CACHE_SIZE = 1_024;
 
   constructor(options: DaemonCoreOptions) {
+    assertPrivacyServiceUrl(options.serverUrl);
     this.options = options;
     this.daemonVersion = options.daemonVersion ?? readDaemonVersion();
     this.computerVersion = options.computerVersion?.trim() || null;
@@ -1902,7 +1904,8 @@ export class DaemonCore {
     let connection!: DaemonConnection;
 
     this.agentsDataDir = options.dataDir ?? resolveRaftHomePath("agents", this.slockHome);
-    const traceUploadDisabled = process.env.SLOCK_DAEMON_TRACE_UPLOAD_DISABLED === "1";
+    const traceUploadDisabled = privacyModeEnabled()
+      || process.env.SLOCK_DAEMON_TRACE_UPLOAD_DISABLED === "1";
     const agentManagerOptions = {
       dataDir: this.agentsDataDir,
       serverUrl: options.serverUrl,
@@ -2042,7 +2045,7 @@ export class DaemonCore {
 
   private shouldEnableLocalTrace(): boolean {
     if (this.injectedTracer) return false;
-    if (!this.options.localTrace) return false;
+    if (privacyModeEnabled() || !this.options.localTrace) return false;
     return process.env.SLOCK_DAEMON_LOCAL_TRACE !== "0";
   }
 
@@ -2088,6 +2091,7 @@ export class DaemonCore {
   }
 
   private installTraceBundleUploader(machineDir: string): void {
+    if (privacyModeEnabled()) return;
     if (!this.shouldEnableLocalTrace()) return;
     if (this.traceBundleUploader) return;
 

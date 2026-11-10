@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 // Fetch latest Raft Computer version from the Hands release authority.
 // Refreshes hourly in the background; returns the cached value immediately so
 // the REST path never blocks on a network call. Hands is the same authority
@@ -38,6 +39,7 @@ const HANDS_LATEST_BUILD_URL =
   "https://hands.build/public/v2/apps/raft-computer-cli/latest?channel=main";
 
 export function getLatestComputerVersion(): Promise<string | null> {
+  if (privacyModeEnabled()) return Promise.resolve(null);
   const now = Date.now();
   if (cachedLatestComputerVersion && now - lastFetchTime < REFRESH_INTERVAL_MS) {
     return Promise.resolve(cachedLatestComputerVersion);

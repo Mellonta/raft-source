@@ -12,6 +12,7 @@ import {
   validateExternalAgentWakeEventEnvelope,
   validateExternalRuntimeIntegrationManifest,
 } from "@botiverse/raft-shared/src/agentCliSurface";
+import { fetchWithVendorPolicy } from "../proxy";
 
 export const RAFT_CHANNEL_WAKE_PROTOCOL = "raft-channel.v0" as const;
 
@@ -71,7 +72,7 @@ export function createRaftChannelWakeAdapter(
         });
       }
 
-      const request = options.fetchImpl ?? fetch;
+      const request = options.fetchImpl ?? fetchWithVendorPolicy;
       let response: Response;
       try {
         response = await request(options.endpointUrl, {

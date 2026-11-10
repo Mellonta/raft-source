@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { Router, type NextFunction, type Request, type Response, type Router as RouterType } from "express";
 import { UUID_RE } from "../lib/messageId";
 import multer from "multer";
@@ -44,6 +45,15 @@ import {
 import { sendJsonServerError } from "./errorResponse";
 
 export const productFeedbackRouter: RouterType = Router();
+
+// Also reject old clients before multipart parsing or reporter identity lookup.
+productFeedbackRouter.use((_req, res, next) => {
+  if (privacyModeEnabled()) {
+    res.status(503).json({ error: "Feedback is disabled in privacy mode", code: "feedback_integration_unavailable" });
+    return;
+  }
+  next();
+});
 
 export const PRODUCT_FEEDBACK_MAX_ATTACHMENTS = 3;
 export const PRODUCT_FEEDBACK_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;

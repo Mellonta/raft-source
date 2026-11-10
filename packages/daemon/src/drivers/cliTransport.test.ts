@@ -1,6 +1,7 @@
 // Tests for prepareCliTransport wrapper generation across platforms.
 
 import { withProcessEnvPatch } from "../processEnvPatch";
+import { vi } from "vitest";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -164,6 +165,25 @@ test("prepareCliTransport keeps an agent-configured PATH behind the wrapper dir 
     assert.equal(driver.spawnEnv.PATH, `${driver.slockDir}${path.delimiter}/driver/bin`);
   } finally {
     if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("the service privacy setting survives agent overrides, shell wrappers and a concurrent Pi session", async () => {
+  vi.stubEnv("RAFT_PRIVACY_MODE", "true");
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "raft-private-launch-"));
+  try {
+    await withProcessEnvPatch({ RAFT_PRIVACY_MODE: "0" }, async () => {
+      assert.equal(process.env.RAFT_PRIVACY_MODE, "true");
+      const result = await prepareCliTransport(makeCtx(tmp), { RAFT_PRIVACY_MODE: "0", raft_privacy_mode: "0" }, "win32");
+      assert.equal(result.spawnEnv.RAFT_PRIVACY_MODE, "1");
+      assert.equal(result.spawnEnv.raft_privacy_mode, undefined);
+      for (const file of ["raft", "raft.cmd", "raft.ps1"]) {
+        assert.match(readFileSync(path.join(result.slockDir, file), "utf8"), /RAFT_PRIVACY_MODE="?1/);
+      }
+    }, { removeFirst: ["RAFT_PRIVACY_MODE"] });
+  } finally {
+    vi.unstubAllEnvs();
     rmSync(tmp, { recursive: true, force: true });
   }
 });

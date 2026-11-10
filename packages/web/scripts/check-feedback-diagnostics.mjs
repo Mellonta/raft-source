@@ -83,6 +83,7 @@ try {
             } }),
           } }));
         }, type);
+        await page.route('**/api/privacy-mode', r => r.fulfill({ json: { enabled: false }, headers: { 'access-control-allow-origin': '*' } }));
         await page.goto(origin + '/feedback/');
         await page.getByRole('button', { name: 'New feedback', exact: true }).click();
         // FeedbackWorkspace schedules focus on the new form's heading. Let

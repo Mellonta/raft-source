@@ -47,7 +47,8 @@ function sign(metadata: Record<string, unknown>): string {
   return `${payload}.${createHmac("sha256", SECRET).update(payload).digest("base64url")}`;
 }
 
-async function upload(worker: typeof handleRequest, e: TraceUploadWorkerEnv, metadata: Record<string, unknown>, body: Uint8Array<ArrayBuffer>) {
+// Exercise the common, configured-worker contract of both generations.
+async function upload(worker: typeof legacyHandleRequest, e: TraceUploadWorkerEnv, metadata: Record<string, unknown>, body: Uint8Array<ArrayBuffer>) {
   const create = await worker(new Request("https://worker.test/api/trace-bundles", {
     method: "POST",
     body: JSON.stringify({ attestation: sign({ ...metadata, bundleSha256: sha(body), bundleSizeBytes: body.byteLength }), bundleSha256: sha(body), bundleSizeBytes: body.byteLength }),

@@ -24,6 +24,7 @@
  */
 
 import { undiciFetch as fetch } from "../proxy";
+import { assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/agentCliSurface";
 
 export interface DeviceCodeLoginUserAction {
   verificationUri: string;
@@ -207,7 +208,11 @@ export async function authorizeDeviceCode(options: {
   }
 
   // URIs may be server-relative — compose against the base.
-  const absolutize = (uri: string): string => (uri.startsWith("http") ? uri : `${base}${uri}`);
+  const absolutize = (uri: string): string => {
+    const url = uri.startsWith("http") ? uri : `${base}${uri}`;
+    assertPrivacyServiceUrl(url);
+    return url;
+  };
 
   return {
     deviceCode: authorizeBody.deviceCode,

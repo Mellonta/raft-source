@@ -1,5 +1,6 @@
 // Parse daemon trace bundles and forward their spans/events to Telescope as OTLP.
 import type { TraceUploadWorkerEnv } from "../env";
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { sha256Hex } from "../shared/auth";
 import { isJsonObject, maybeDecompressStream, readStreamWithLimit, type JsonObject } from "../shared/http";
 import type { TraceBundleMetadata } from "./bundles";
@@ -119,6 +120,7 @@ export async function ingestTraceBundleObject(
   spans_dropped_rate_cap?: number;
   events_dropped_rate_cap?: number;
 }> {
+  if (privacyModeEnabled()) throw new Error("Diagnostic ingestion is disabled in privacy mode");
   if (!env.TRACE_INGEST_OTLP_ENDPOINT) {
     const v2 = projectorDisabledByMissingCanonicalSink(env);
     return {

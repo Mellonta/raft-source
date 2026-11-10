@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { readFileSync } from "node:fs";
 import type { TraceUploadWorkerEnv } from "./env";
 import { writeTraceUploadLedger, type TraceBundleMetadata } from "./traces/bundles";
@@ -147,6 +148,7 @@ export async function reingestCandidates(
   manifest: ReingestManifest | undefined,
   dryRun: boolean,
 ): Promise<{ outcomes: CandidateOutcome[]; failures: number }> {
+  if (privacyModeEnabled()) throw new Error("Diagnostic reingestion is disabled in privacy mode");
   const outcomes: CandidateOutcome[] = [];
   let failures = 0;
 
@@ -339,6 +341,7 @@ if (isMain) {
     console.error("Live runs require --manifest/--manifest-key (dry-run may omit it)");
     process.exit(2);
   }
+  if (privacyModeEnabled()) throw new Error("Diagnostic reingestion is disabled in privacy mode");
   const env = createNodeTraceUploadEnv();
   (async () => ({
     candidates: parseCandidatesJson(await readInputText(env, args.candidates)),

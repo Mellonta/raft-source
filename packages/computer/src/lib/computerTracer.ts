@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { createTraceClient, LocalRotatingTraceSink } from "@botiverse/raft-trace-client";
 import { noopTracer } from "@botiverse/raft-shared";
 import { computerDir } from "../paths";
@@ -11,7 +12,7 @@ import type { ComputerTraceClientSource, ComputerTracer } from "./traceTypes";
  * any setup failure falls back to noop.
  */
 export function computerLocalTraceDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.RAFT_COMPUTER_LOCAL_TRACE === "0";
+  return privacyModeEnabled(env) || env.RAFT_COMPUTER_LOCAL_TRACE === "0";
 }
 
 export function createComputerTracer(slockHome: string, source: ComputerTraceClientSource): ComputerTracer {

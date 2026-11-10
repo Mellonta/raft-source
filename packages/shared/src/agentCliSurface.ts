@@ -151,3 +151,5 @@ export { parseRaftRefTarget, structuredRaftMentionStillAppears } from "./raftRef
 export { TASK_CLAIM_REASON_ALREADY_CLAIMED_BY_YOU } from "./taskClaimReason";
 export { errorClassOf } from "./tracing/index";
 export { formatUtcTimestamp } from "./utcTimestamp";
+
+export { assertPrivacyServiceUrl, privacyModeEnabled, rejectVendorDispatch } from "./privacyMode";

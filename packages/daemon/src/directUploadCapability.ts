@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { executeJsonRequest, executeResponseRequest, ChatBridgeToolTimeoutError, DEFAULT_CHAT_BRIDGE_TOOL_TIMEOUT_MS, HttpStatusError } from "./chatBridgeRequest";
 import { daemonFetch } from "./daemonFetch";
 
@@ -130,6 +131,9 @@ export async function requestDaemonScopeAttestation({
   timeoutMs = DEFAULT_CHAT_BRIDGE_TOOL_TIMEOUT_MS,
   signal,
 }: RequestDaemonScopeAttestationOptions): Promise<DaemonScopeAttestation> {
+  if (privacyModeEnabled()) {
+    throw new Error("Diagnostic uploads are disabled in privacy mode");
+  }
   const { data } = await executeJsonRequest<DaemonScopeAttestation>(
     joinUrl(serverUrl, "/internal/machine/scope-attestation"),
     {

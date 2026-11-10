@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { createHmac } from "node:crypto";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { evaluateFeatureFlag } from "./featureFlagService";
@@ -237,6 +238,7 @@ export async function resolveProductFeedbackEnv(input: {
   apps?: CachedProductFeedbackApps;
   evaluateFlag?: typeof evaluateFeatureFlag;
 }): Promise<NodeJS.ProcessEnv> {
+  if (privacyModeEnabled()) return {};
   const evaluation = await (input.evaluateFlag ?? evaluateFeatureFlag)({
     key: PRODUCT_FEEDBACK_MULTI_APP_FLAG,
     userId: input.userId,

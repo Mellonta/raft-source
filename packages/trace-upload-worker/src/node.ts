@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
 import { handleRequest, type TraceUploadWorkerEnv } from "./index";
@@ -9,7 +10,7 @@ const DEFAULT_PORT = 3000;
 
 const port = Number.parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
 
-const env: TraceUploadWorkerEnv = createNodeTraceUploadEnv();
+const env: TraceUploadWorkerEnv | null = privacyModeEnabled() ? null : createNodeTraceUploadEnv();
 
 const backgroundCtx = createNodeExecutionContext();
 installUnhandledRejectionGuard();

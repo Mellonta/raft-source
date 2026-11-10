@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import express, { Router, type ErrorRequestHandler, type RequestHandler, type Router as ExpressRouter } from "express";
 import { z } from "zod";
 import { PUBLIC_SERVER_VISIT_ENTRIES } from "@botiverse/raft-shared";
@@ -28,7 +29,7 @@ export const publicVisitsBodyParser: RequestHandler = express.json({ limit: PUBL
 
 /** Too large or not JSON: the same empty 204 as every other outcome. */
 export const publicVisitsBodyErrorHandler: ErrorRequestHandler = (_err, _req, res, _next) => {
-  countIngest("rejected_malformed", 1);
+  if (!privacyModeEnabled()) countIngest("rejected_malformed", 1);
   res.set("Cache-Control", "no-store");
   res.status(204).end();
 };
@@ -57,6 +58,7 @@ const ACCEPTED_FETCH_SITES = new Set(["same-origin", "same-site"]);
 
 publicVisitsRouter.post("/:slug", async (req, res) => {
   try {
+    if (privacyModeEnabled()) return;
     if (!ACCEPTED_FETCH_SITES.has(req.get("sec-fetch-site") ?? "")) {
       countIngest("public_visit_not_same_site", 1);
       return;

@@ -1,5 +1,6 @@
 import { and, asc, eq, inArray, isNotNull, or } from "drizzle-orm";
 import { currentDate } from "@botiverse/raft-shared";
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { getDb } from "../db/index";
 import {
   computers,
@@ -138,7 +139,7 @@ export async function enqueueComputerMobileAppEmailJourney(input: {
 > {
   testConfig?.beforeEnqueue?.();
   const config = getConfig();
-  if (config.mode === "disabled") return { status: "skipped", reason: "disabled" };
+  if (privacyModeEnabled() || config.mode === "disabled") return { status: "skipped", reason: "disabled" };
 
   const [computer] = await getDb().select({
     id: computers.id,
@@ -305,6 +306,7 @@ export async function suppressScheduledComputerMobileAppEmailJourneys(input: {
   email: string;
   status: SuppressionStatus;
 }): Promise<{ canceled: number }> {
+  if (privacyModeEnabled()) return { canceled: 0 };
   if (!SUPPRESSION_STATUSES.includes(input.status)) {
     throw new Error("Unsupported mobile lifecycle suppression status");
   }

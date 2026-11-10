@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 
 export type TraceDeploymentIdentitySource = "aws_ecs_task" | "fly_machine" | "generated_process";
-export type TraceDeploymentIdentityState = "resolved" | "ecs_metadata_unavailable" | "non_ecs";
+export type TraceDeploymentIdentityState = "resolved" | "ecs_metadata_unavailable" | "non_ecs" | "privacy_mode";
 
 export interface TraceDeploymentIdentity {
   serviceInstanceId: string;
@@ -40,6 +41,7 @@ export async function resolveTraceDeploymentIdentity(
   env: NodeJS.ProcessEnv = process.env,
   options: TraceDeploymentIdentityOptions = {},
 ): Promise<TraceDeploymentIdentity> {
+  if (privacyModeEnabled(env)) return createGeneratedTraceDeploymentIdentity("privacy_mode", options.processIdFactory);
   const metadataUri = env.ECS_CONTAINER_METADATA_URI_V4?.trim();
   if (metadataUri) {
     const resolved = await resolveEcsTaskIdentity(metadataUri, options);

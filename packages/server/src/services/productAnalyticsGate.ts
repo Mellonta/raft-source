@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 // Product-analytics gate (RFC-067 §3.6).
 //
 // The one place that decides, for a user acting in a server, whether the
@@ -47,6 +48,7 @@ export interface ProductAnalyticsGate {
 // usage data, nothing is linked to them — not client events, not server-derived
 // facts. Their activity then counts only toward workspace totals.
 export function decideProductAnalyticsGate(facts: ProductAnalyticsFacts): ProductAnalyticsGate {
+  if (privacyModeEnabled()) return { recordAllowed: false, analyticsId: null, clientEventsAllowed: false };
   const workspaceOff = facts.workspaceEnabled === false;
   const recordAllowed = !workspaceOff || DISABLED_WORKSPACE_KEEPS_COUNTS;
   const sharing = facts.shareUsageData ?? SHARE_USAGE_DATA_DEFAULT;
@@ -74,6 +76,9 @@ export async function loadProductAnalyticsGateBatch(
   db: DatabaseExecutor,
   input: { userIds: readonly string[]; serverIds: readonly ServerId[] },
 ): Promise<ProductAnalyticsGateBatch> {
+  if (privacyModeEnabled()) {
+    return { gate: () => ({ recordAllowed: false, analyticsId: null, clientEventsAllowed: false }) };
+  }
   const userIds = [...new Set(input.userIds)];
   const serverIds = [...new Set(input.serverIds)];
   const userRows = userIds.length === 0 ? [] : await db
@@ -127,6 +132,7 @@ export async function legacyProductEventsAllowed(
   db: DatabaseExecutor,
   input: { userId: string; serverId: ServerId },
 ): Promise<boolean> {
+  if (privacyModeEnabled()) return false;
   const [user] = await db
     .select({ shareUsageData: users.shareUsageData })
     .from(users)
@@ -151,6 +157,7 @@ export async function setProductAnalyticsOptOut(
   optedOut: boolean,
   now: Date = new Date(),
 ): Promise<void> {
+  if (privacyModeEnabled()) return;
   await db.transaction(async (tx) => {
     await tx
       .update(users)

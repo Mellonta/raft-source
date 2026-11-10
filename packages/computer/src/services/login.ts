@@ -1,3 +1,4 @@
+import { assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyMode";
 // LoginService — Computer domain service seam for user identity (RFC v0.8
 // contract v3 §6, "device-code login"). CLI and Electron main are both
 // adapters over this surface; the service itself never touches
@@ -98,6 +99,7 @@ export async function login(input: LoginInput, options: LoginOptions = {}): Prom
 
   const verificationUri = grant.verificationUriComplete || grant.verificationUri;
   const verifyUrl = new URL(verificationUri, baseUrl).toString();
+  assertPrivacyServiceUrl(verifyUrl);
   const expiresAt = new Date(Date.now() + grant.expiresIn * 1000).toISOString();
   emit(options, {
     kind: "login.device-code",

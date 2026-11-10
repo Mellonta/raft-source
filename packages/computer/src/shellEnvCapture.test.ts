@@ -83,6 +83,17 @@ test("applyCapturedEnv replaces: parent-only keys die, snapshot wins, protected 
   assert.equal(target.RAFT_COMPUTER_SUPERVISOR_OWNER, "owner-token");
 });
 
+test("privacy mode survives shell capture and can be supplied by the login shell", () => {
+  for (const captured of [{}, { RAFT_PRIVACY_MODE: "0" }]) {
+    const env = { RAFT_PRIVACY_MODE: "1" };
+    applyCapturedEnv(env, captured as Record<string, string>);
+    assert.equal(env.RAFT_PRIVACY_MODE, "1");
+  }
+  const env: NodeJS.ProcessEnv = {};
+  applyCapturedEnv(env, { RAFT_PRIVACY_MODE: "1" });
+  assert.equal(env.RAFT_PRIVACY_MODE, "1");
+});
+
 test("applyCapturedEnv omission cannot resurrect protected keys the parent never had", () => {
   const target: NodeJS.ProcessEnv = { SLOCK_HOME: "/home" };
   applyCapturedEnv(target, { RAFT_COMPUTER_SUPERVISOR_OWNER: "rc-injected" });

@@ -1,3 +1,4 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 import { Card, Checkbox, Textarea, Button } from "@botiverse/raft-ui";
 import { useCallback, useMemo, useState } from "react";
 import { Bug, CheckCircle } from "lucide-react";
@@ -206,7 +207,7 @@ export default function ReportIssueDialog({
 
   const handleSubmit = useCallback(async () => {
     if (!consented || loading) return;
-    if (!feedbackExportUrl) {
+    if (browserPrivacyMode() || !feedbackExportUrl) {
       setError(formatMessage({ id: "agent.reportIssue.exportNotConfigured" }));
       return;
     }

@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { Router } from "express";
 import { mobileDownloadChooserUrl } from "./mobileDownload";
 
@@ -96,6 +97,7 @@ const FEED_ERROR_TTL_MS = 10_000;
 const FEED_TIMEOUT_MS = 10_000;
 
 async function readFeed(feed: Feed, deps: Deps): Promise<FeedRead> {
+  if (privacyModeEnabled()) return { outcome: "no_feed" };
   const base = (deps.releasesBase ?? RELEASES).replace(/\/$/, "");
   const key = `${base}/${feed}`;
   const now = (deps.now ?? Date.now)();
@@ -191,6 +193,10 @@ desktopDownloadRouter.get("/platforms", async (_req, res) => {
 });
 
 desktopDownloadRouter.get("/", async (req, res) => {
+  if (privacyModeEnabled()) {
+    res.status(404).json({ error: "Upstream downloads are disabled in privacy mode" });
+    return;
+  }
   const target = req.query.target;
   if (!isDesktopTarget(target)) {
     res.setHeader("Cache-Control", "private, max-age=300");

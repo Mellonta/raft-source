@@ -35,7 +35,7 @@ test("web app installs raft-ui global CSS and providers", () => {
 test("web typography follows raft-ui/fonts.css font definition contract", () => {
   const css = read("src/index.css");
 
-  assert.match(css, /@import "@botiverse\/raft-ui\/fonts\.css";/);
+  assert.match(read("src/assets/fonts/portal-online.css"), /@import "@botiverse\/raft-ui\/fonts\.css";/);
   assert.doesNotMatch(css, /@import[^;]*assets\/fonts\/fonts\.css/);
   assert.doesNotMatch(css, /family=Space\+Grotesk/);
 

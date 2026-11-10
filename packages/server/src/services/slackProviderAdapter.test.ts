@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { vi } from "vitest";
 import type { SlackBridgeRenderSnapshot } from "./externalDeliveryOutboxService";
 import {
   createSlackEventsHttpAdapter,
@@ -285,6 +286,30 @@ test("typed outbound adapter prefers a frozen Raft avatar over generic emoji", a
   assert.equal((await prepared.dispatch()).kind, "accepted");
   assert.equal(calls[0]?.body.icon_url, withAvatar.authorPresentation.avatar?.publicUrl);
   assert.equal("icon_emoji" in (calls[0]?.body ?? {}), false);
+});
+
+test("private Slack deliveries link back to the local portal even for an already queued message", async () => {
+  vi.stubEnv("RAFT_PRIVACY_MODE", "1");
+  vi.stubEnv("APP_URL", "http://portal.company.example:8001");
+  try {
+    const calls: SlackWebApiRequest[] = [];
+    const prepare = createSlackProviderPreparation({
+      transport: transportDouble([{ kind: "response", status: 200, headers: {},
+        body: { ok: true, channel: "C_CHANNEL", ts: "1753865100.000100" },
+        observedAuthority: { providerAppId: "A_APP", providerAuthorityId: "T_TEAM" },
+      }], calls),
+      quarantineSink: quarantineDouble(),
+      now: () => NOW,
+    });
+    const prepared = await prepare(dispatchInput());
+    if (!prepared.ready) assert.fail("expected provider preparation");
+    await prepared.dispatch();
+    assert.equal(calls.length, 1);
+    assert.match(JSON.stringify(calls[0].body), /portal\.company\.example:8001\/s\/test\/channel\/channel-1\?msg=message-1/);
+    assert.doesNotMatch(JSON.stringify(calls[0].body), /app\.slock\.ai/);
+  } finally {
+    vi.unstubAllEnvs();
+  }
 });
 
 test("outbound reconciliation finds exactly one Slack metadata marker", async () => {

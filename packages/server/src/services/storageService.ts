@@ -1,3 +1,4 @@
+import { assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyMode";
 import path from "node:path";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -515,6 +516,8 @@ class S3Storage implements StorageBackend {
     });
     const bucket = opts.bucket;
     const endpoint_host = endpointHost(opts.endpoint);
+    assertPrivacyServiceUrl(opts.endpoint);
+    if (opts.publicUrl) assertPrivacyServiceUrl(opts.publicUrl);
     this.client = new S3Client({
       endpoint: opts.endpoint,
       region: opts.region || "auto",

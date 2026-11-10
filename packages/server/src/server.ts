@@ -14,6 +14,7 @@ import { initDatabase, prewarmPrimaryPool, setDbTracer, startPoolMetricsReportin
 import { startMachineLivenessMetrics } from "./services/machineLivenessMetrics";
 import { getDbLivenessTracker } from "./dbLiveness";
 import { installAuditedGlobalFetch } from "./db/ambientTransaction";
+import { installServerPrivacyTransport } from "./config/privacyTransport";
 import { createApp } from "./app";
 import { setupSocket } from "./socket/index";
 import { setupMachineWebSocket } from "./routes/daemon";
@@ -115,6 +116,7 @@ async function bootstrap() {
   // Install the audited global fetch BEFORE any request path runs. No-op unless
   // RAFT_TX_POOL_AUDIT_FILE is set, so production fetch is untouched.
   installAuditedGlobalFetch();
+  installServerPrivacyTransport();
 
   // Translation configuration is loaded before the HTTP server starts. In
   // deployed SSM mode a missing/invalid parameter set must fail closed rather

@@ -1,4 +1,5 @@
 import { and, eq, inArray, or } from "drizzle-orm";
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { getDb } from "../db/index";
 import { newsletterAudienceContacts, onboardingEmailJourneys } from "../db/schema";
 import { normalizeEmail } from "./emailNormalization";
@@ -149,7 +150,7 @@ export async function enqueueOnboardingEmailJourneyForUser(user: OnboardingUser)
   | { status: "dry_run" | "started" | "already_started" }
 > {
   const config = getConfig();
-  if (config.mode === "disabled") return { status: "skipped", reason: "disabled" };
+  if (privacyModeEnabled() || config.mode === "disabled") return { status: "skipped", reason: "disabled" };
   if (!user.emailVerified) return { status: "skipped", reason: "unverified" };
   if (!user.email?.trim()) return { status: "skipped", reason: "missing_email" };
 

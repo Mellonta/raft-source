@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 // ScopeDB adapter for RFC-067 product events.
 //
 // Product events are their own table (product.events) in the trace events'
@@ -304,6 +305,7 @@ export type ProductScopeDbStore = "product" | "trace_events" | "none";
 
 /** Which env pair resolveProductScopeDbConfig takes, for the startup event. Never the values. */
 export function productScopeDbStore(env: NodeJS.ProcessEnv): ProductScopeDbStore {
+  if (privacyModeEnabled(env)) return "none";
   if (env.SCOPEDB_PRODUCT_ENDPOINT?.trim() && env.SCOPEDB_PRODUCT_WRITE_KEY?.trim()) return "product";
   if (env.SCOPEDB_TRACE_EVENTS_ENDPOINT?.trim() && env.SCOPEDB_TRACE_EVENTS_WRITE_KEY?.trim()) return "trace_events";
   return "none";
@@ -313,6 +315,7 @@ export function resolveProductScopeDbConfig(
   env: NodeJS.ProcessEnv,
   warn: (message: string) => void = (message) => console.warn(message),
 ): { endpoint: string; apiKey: string } | null {
+  if (privacyModeEnabled(env)) return null;
   const productEndpoint = env.SCOPEDB_PRODUCT_ENDPOINT?.trim();
   const productKey = env.SCOPEDB_PRODUCT_WRITE_KEY?.trim();
   if (productEndpoint && productKey) return { endpoint: productEndpoint, apiKey: productKey };

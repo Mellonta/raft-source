@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { respondToTaskWriteError } from "../lib/taskWriteErrorResponse";
 import { serializeErrorForLog } from "../tracing/safeErrorLog";
 import { refuseIfRemindersMovedToApp } from "./reminderAppRollout";
@@ -1880,6 +1881,10 @@ internalRouter.post("/agent/:id/integrations/app/prepare", async (req, res) => {
 // The server signs authorization metadata only; upload/data bytes must go to the
 // requested third-party worker directly from the daemon.
 internalRouter.post("/machine/scope-attestation", async (req, res) => {
+  if (privacyModeEnabled()) {
+    res.status(403).json({ error: "Diagnostic uploads are disabled in privacy mode" });
+    return;
+  }
   try {
     if (!req.machineId || !req.serverId) {
       res.status(401).json({ error: "Machine authentication required" });

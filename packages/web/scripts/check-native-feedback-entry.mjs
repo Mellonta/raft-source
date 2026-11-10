@@ -26,6 +26,7 @@ try {
       if(r.request().method()==='POST') {postCount++; await r.fulfill({status:401,json:{code:'auth_required'}});return;}
       await r.fulfill({json:{tickets:[{id:'fixture',kind:'feedback',status:'open',message:'A long synthetic feedback title that must wrap inside a narrow phone screen '+ 'x'.repeat(100),created_at:1700000000000,updated_at:1700000000000,unread:false,unread_count:0,attachment_count:0,comment_count:0}],next_cursor:null,unread_total:0}});
     });
+    await page.route('**/api/privacy-mode', r => r.fulfill({ json: { enabled: false }, headers: { 'access-control-allow-origin': '*' } }));
     await page.goto(origin+'/feedback/');
     await page.locator('.hands-feedback-ticket-card').waitFor();
     const bounds=await page.locator('.hands-feedback-ticket-card').boundingBox();assert(bounds.x+ bounds.width<=390);
@@ -48,6 +49,7 @@ try {
   const missing = await browser.newPage({locale: 'zh-CN', colorScheme: 'dark'});
   let requests = 0;
   await missing.route('**/api/**', r => { requests++; return r.abort(); });
+  await missing.route('**/api/privacy-mode', r => r.fulfill({ json: { enabled: false }, headers: { 'access-control-allow-origin': '*' } }));
   await missing.goto(origin + '/feedback/');
   await missing.getByText('请从 Raft App 打开反馈页。', {exact: true}).waitFor();
   assert.equal(requests, 0);

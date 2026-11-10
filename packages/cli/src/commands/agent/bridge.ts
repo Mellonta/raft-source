@@ -31,6 +31,7 @@ import {
   type AgentCommsWakeHintFetchResult,
 } from "../../agentCommsCore/bridge";
 import { createRaftChannelWakeAdapter } from "../../external/raftChannelWakeAdapter";
+import { fetchWithVendorPolicy } from "../../proxy";
 
 interface BridgeOptions {
   expectedAgent?: string;
@@ -579,7 +580,7 @@ function createActivityDrainSource(
       const url = new URL(endpointUrl);
       url.searchParams.set("max", String(input.max));
       const signal = typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(3000) : undefined;
-      const response = await fetch(url, {
+      const response = await fetchWithVendorPolicy(url, {
         method: "GET",
         signal,
         headers: {

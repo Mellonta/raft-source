@@ -1,3 +1,4 @@
+import { assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyMode";
 import http2 from "node:http2";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { Agent as HttpsAgent } from "node:https";
@@ -132,6 +133,7 @@ export function webPushEndpointHostname(raw: unknown): string | null {
  * propagates so transient DNS trouble is not mistaken for a bad endpoint.
  */
 async function resolvePublicWebPushAddress(endpoint: string): Promise<WebPushResolvedAddress | null> {
+  assertPrivacyServiceUrl(endpoint);
   const hostname = webPushEndpointHostname(endpoint);
   if (!hostname) return null;
   const addresses = await webPushRuntime.lookup(hostname, { all: true, verbatim: true });

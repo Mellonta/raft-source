@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -311,6 +312,7 @@ export class DaemonTraceBundleUploader {
   }
 
   start(): void {
+    if (privacyModeEnabled()) return;
     if (this.stopped) return;
     if (this.initialDelayTimer || this.intervalTimer) return;
 
@@ -384,6 +386,7 @@ export class DaemonTraceBundleUploader {
    * we can distinguish startup drain vs steady-state ticks in ScopeDB.
    */
   async uploadOnce(trigger: UploadTrigger = "manual"): Promise<{ attempted: number; uploaded: number; deferred: number }> {
+    if (privacyModeEnabled()) return { attempted: 0, uploaded: 0, deferred: 0 };
     // A span for the PASS, not just for each file. Today a pass that finds
     // nothing emits no span at all, so "scanned and found zero" and "never ran"
     // are the same absence — and #408 is a machine that quietly stopped

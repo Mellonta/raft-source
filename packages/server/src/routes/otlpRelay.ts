@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import type { Request, Response } from "express";
 
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
@@ -11,6 +12,10 @@ export interface OtlpRelayConfig {
 }
 
 export async function otlpRelayHandler(req: Request, res: Response, config: OtlpRelayConfig = {}): Promise<void> {
+  if (privacyModeEnabled()) {
+    res.status(403).json({ error: "Trace export is disabled in privacy mode" });
+    return;
+  }
   const expectedAuthorization = config.authorization ?? process.env.OTLP_RELAY_AUTHORIZATION;
   if (!expectedAuthorization) {
     res.status(500).json({ error: "OTLP relay authorization is not configured" });

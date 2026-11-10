@@ -1,3 +1,4 @@
+import { assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyMode";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import {
   Agent,
@@ -155,9 +156,11 @@ export function buildWebSocketOptions(
   wsUrl: string,
   env: NodeJS.ProcessEnv,
 ): WebSocketOptions | undefined {
+  assertPrivacyServiceUrl(wsUrl);
   const proxyUrl = getProxyUrlForTarget(wsUrl, env);
   if (!proxyUrl) return undefined;
   if (shouldBypassProxy(wsUrl, env)) return undefined;
+  assertPrivacyServiceUrl(proxyUrl);
 
   return {
     agent: new HttpsProxyAgent(proxyUrl),
@@ -171,6 +174,7 @@ function resolveProxyUrl(targetUrl: string, env: NodeJS.ProcessEnv): string | un
   const proxyUrl = getProxyUrlForTarget(targetUrl, env);
   if (!proxyUrl) return undefined;
   if (shouldBypassProxy(targetUrl, env)) return undefined;
+  assertPrivacyServiceUrl(proxyUrl);
   return proxyUrl;
 }
 

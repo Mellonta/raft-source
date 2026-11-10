@@ -1,3 +1,6 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
+import { getServerUrl } from "./server";
+
 export const STAGING_COMPUTER_SERVER_URL = "https://api-aws-staging.botiverse.dev";
 export const DEFAULT_COMPUTER_SERVER_URL = "https://api.raft.build";
 export const LEGACY_DEFAULT_COMPUTER_SERVER_URL = "https://api.slock.ai";
@@ -120,7 +123,12 @@ export function getComputerCommands(
 
   const platform = options.platform ?? "mac-linux";
 
-  const commandServerUrl = deploymentEnv === "production"
+  const privateMode = browserPrivacyMode();
+  const privacyEnv = privateMode
+    ? (platform === "windows" ? '$env:RAFT_PRIVACY_MODE = "1"; ' : "RAFT_PRIVACY_MODE=1 ")
+    : "";
+  const commandServerUrl = privateMode ? serverUrl || getServerUrl()
+    : deploymentEnv === "production"
     ? isDefaultComputerServerUrl(serverUrl) ? null : serverUrl
     : deploymentEnv === "staging"
     ? STAGING_COMPUTER_SERVER_URL
@@ -139,10 +147,10 @@ export function getComputerCommands(
     // `RAFT_HOME || SLOCK_HOME`, so RAFT_HOME alone carries the state root.
     if (platform === "windows") {
       const home = `$env:USERPROFILE\\.raft-computer-${slug}`;
-      const environment = `$env:RAFT_HOME = "${home}"; $env:RAFT_COMPUTER_INSTALL_DIR = "$env:RAFT_HOME\\bin";`;
+      const environment = `${privacyEnv}$env:RAFT_HOME = "${home}"; $env:RAFT_COMPUTER_INSTALL_DIR = "$env:RAFT_HOME\\bin";`;
       const binary = `& "$env:RAFT_COMPUTER_INSTALL_DIR\\raft-computer.exe"`;
       return {
-        install: `${environment} ${windowsComputerInstallCommand(deploymentEnv, options.version)}`,
+        install: privateMode ? "" : `${environment} ${windowsComputerInstallCommand(deploymentEnv, options.version)}`,
         setup: `${environment} ${binary} setup /${slug}${setupArgs}`,
         installAndSetup: null,
         status: `${environment} ${binary} status`,
@@ -155,10 +163,10 @@ export function getComputerCommands(
     }
 
     const home = `$HOME/.raft-computer-${slug}`;
-    const environment = `RAFT_HOME="${home}" RAFT_COMPUTER_INSTALL_DIR="${home}/bin"`;
+    const environment = `${privacyEnv}RAFT_HOME="${home}" RAFT_COMPUTER_INSTALL_DIR="${home}/bin"`;
     const binary = `"${home}/bin/raft-computer"`;
     return {
-      install: `${environment} sh -c '${computerInstallCommand(deploymentEnv, options.version)}'`,
+      install: privateMode ? "" : `${environment} sh -c '${computerInstallCommand(deploymentEnv, options.version)}'`,
       setup: `${environment} ${binary} setup /${slug}${setupArgs}`,
       installAndSetup: null,
       status: `${environment} ${binary} status`,
@@ -171,19 +179,19 @@ export function getComputerCommands(
   }
 
   return {
-    install: platform === "windows"
+    install: privateMode ? "" : platform === "windows"
       ? windowsComputerInstallCommand(deploymentEnv, options.version)
       : computerInstallCommand(deploymentEnv, options.version),
-    setup: `raft-computer setup /${slug}${setupArgs}`,
-    installAndSetup: platform === "windows"
+    setup: `${privacyEnv}raft-computer setup /${slug}${setupArgs}`,
+    installAndSetup: privateMode || platform === "windows"
       ? null
       : `${computerInstallCommand(deploymentEnv, options.version)} -s -- --setup /${slug}${setupArgs}`,
-    status: "raft-computer status",
-    doctor: "raft-computer doctor",
-    restartService: "raft-computer restart",
-    restart: `raft-computer restart /${slug}`,
-    stop: "raft-computer stop",
-    start: "raft-computer start",
+    status: `${privacyEnv}raft-computer status`,
+    doctor: `${privacyEnv}raft-computer doctor`,
+    restartService: `${privacyEnv}raft-computer restart`,
+    restart: `${privacyEnv}raft-computer restart /${slug}`,
+    stop: `${privacyEnv}raft-computer stop`,
+    start: `${privacyEnv}raft-computer start`,
   };
 }
 

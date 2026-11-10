@@ -1,3 +1,4 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 /**
  * slock.client_error — client crash/exception reporting into the existing
  * web trace pipeline (L5 schema v0.1, field table by Manjusaka, assigned by
@@ -151,6 +152,7 @@ export function reportClientError(
   input: ClientErrorReport,
   nowMs: number = Date.now(),
 ): void {
+  if (browserPrivacyMode()) return;
   try {
     const errorName = normalizeClientErrorName(input.error);
     const errorClass = classifyClientError(input.error, input.source);
@@ -179,7 +181,7 @@ let globalReportersInstalled = false;
  * (for tests; production installs for the page lifetime).
  */
 export function installGlobalClientErrorReporters(): () => void {
-  if (globalReportersInstalled || typeof window === "undefined") return () => {};
+  if (browserPrivacyMode() || globalReportersInstalled || typeof window === "undefined") return () => {};
   globalReportersInstalled = true;
 
   const onError = (event: ErrorEvent) => {

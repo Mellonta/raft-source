@@ -402,6 +402,9 @@ export function applyCapturedEnv(
 ): void {
   const protectedValues: Array<[string, string | undefined]> =
     SHELL_ENV_PROTECTED_KEYS.map((key) => [key, target[key]]);
+  // An explicitly configured service setting wins; otherwise import the
+  // login shell's value as usual (including on an OS-supervised startup).
+  if (target.RAFT_PRIVACY_MODE !== undefined) protectedValues.push(["RAFT_PRIVACY_MODE", target.RAFT_PRIVACY_MODE]);
   for (const key of Object.keys(target)) {
     if (!(key in captured)) delete target[key];
   }

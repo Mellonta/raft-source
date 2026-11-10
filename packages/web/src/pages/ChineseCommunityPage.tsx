@@ -1,3 +1,4 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { Card } from "@botiverse/raft-ui";
@@ -28,6 +29,7 @@ function qrUnavailableMessageId(state: QrState, expired: boolean, imageLoadFaile
 }
 
 async function fetchConfig(url: string) {
+  if (browserPrivacyMode()) return null;
   try {
     const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) return null;

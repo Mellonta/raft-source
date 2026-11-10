@@ -12,7 +12,7 @@ import {
   type CliTransportNormalizedErrorAttrs,
 } from "./transportTrace";
 import { globalFetchJsonTransport, setJsonTransportForTests } from "./client";
-import { afterEach, beforeEach } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
 // These tests stub globalThis.fetch; route the client's JSON transport (node:http
 // in production) through it.
 let previousJsonTransport: ReturnType<typeof setJsonTransportForTests>;
@@ -822,4 +822,12 @@ test("ApiClient forwards the caller abort signal to canonical JSON transport", a
   try {
     await new ApiClient(ctx).request("POST", "/internal/agent-api/integrations/token", { service: "test-rp" }, { signal: controller.signal });
   } finally { globalThis.fetch = original; }
+});
+
+test("privacy mode refuses a hosted profile before it can send a credential", () => {
+  vi.stubEnv("RAFT_PRIVACY_MODE", "1");
+  try {
+    assert.throws(() => new ApiClient({ ...ctx, serverUrl: "https://api.raft.build" }), /RAFT_PRIVACY_MODE/);
+    assert.doesNotThrow(() => new ApiClient({ ...ctx, serverUrl: "https://raft.company.example" }));
+  } finally { vi.unstubAllEnvs(); }
 });

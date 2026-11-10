@@ -3,6 +3,7 @@ import path from "node:path";
 
 import type { UserSessionIdentity } from "./lib/userSession";
 import { resolveDefaultRaftHome } from "./paths";
+import { computerPortalOrigin } from "./serverUrl";
 
 export type AccountUnavailableLocale = "en" | "zh-cn";
 
@@ -26,6 +27,7 @@ export const ACCOUNT_UNAVAILABLE_MESSAGES: Record<AccountUnavailableLocale, Reco
 };
 
 export interface AccountUnavailableMessageInput {
+  serverUrl?: string;
   serverLabel: string;
   serverSlug: string;
   slockHome: string;
@@ -54,7 +56,7 @@ export function accountUnavailableMessage(
   const profileCommand = markdownCodeSpan(
     profileRecoveryCommand(alternateHome, input.serverLabel, platform, homeDir),
   );
-  const webUrl = `https://app.raft.build/s/${encodeURIComponent(input.serverSlug)}/`;
+  const webUrl = `${computerPortalOrigin(input.serverUrl)}/s/${encodeURIComponent(input.serverSlug)}/`;
 
   return interpolate(ACCOUNT_UNAVAILABLE_MESSAGES[locale].serverUnavailable, {
     server: input.serverLabel,

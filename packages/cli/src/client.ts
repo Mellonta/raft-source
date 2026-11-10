@@ -22,6 +22,7 @@
 
 import type { Dispatcher } from "undici";
 import {
+  assertPrivacyServiceUrl,
   MANUAL_CONTEXT_CAPABILITY,
   RAFT_CLIENT_CAPABILITIES_HEADER,
 } from "@botiverse/raft-shared/src/agentCliSurface";
@@ -29,7 +30,7 @@ import { buildAgentApiEventsPath } from "./agentApiPath";
 import type { AgentContext } from "./auth/env";
 import { apiFailureError } from "./core/apiFailure";
 import { isHttpRedirect, requestJsonOverHttp, type JsonTransportInit, type TransportResponse } from "./httpTransport";
-import { buildFetchDispatcher } from "./proxy";
+import { buildFetchDispatcher, fetchWithVendorPolicy } from "./proxy";
 import {
   boundedOriginalMessage,
   emitCliTransportNormalizedError,
@@ -100,7 +101,9 @@ export interface BinaryResponse {
 }
 
 export class ApiClient {
-  constructor(private readonly ctx: AgentContext) {}
+  constructor(private readonly ctx: AgentContext) {
+    assertPrivacyServiceUrl(ctx.serverUrl);
+  }
 
   private usesAgentApiSurface(): boolean {
     return this.ctx.clientMode === "managed-runner" || this.ctx.clientMode === "self-hosted-runner";
@@ -287,7 +290,7 @@ export class ApiClient {
   }
 
   private fetchWithTransportTrace(url: URL, pathname: string, init: ProxyAwareRequestInit): Promise<Response> {
-    return this.sendWithTransportTrace(url, pathname, () => fetch(url, init));
+    return this.sendWithTransportTrace(url, pathname, () => fetchWithVendorPolicy(url, init));
   }
 
   // Plain JSON requests go over node:http (see httpTransport.ts). A redirect is
@@ -303,6 +306,7 @@ export class ApiClient {
     pathname: string,
     send: () => Promise<R>,
   ): Promise<R> {
+    assertPrivacyServiceUrl(url);
     try {
       const res = await send();
       if (res.status >= 500) {

@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import type { AgentApiHistoryConsumptionScope } from "@botiverse/raft-shared";
 import { finishToolCall, noteToolCallStart } from "./toolCallOutcome";
 import { TurnSummaryTracker, turnOutcomeForActivity, turnTriggerFromMessages } from "./turnSummaryTracker";
@@ -1752,7 +1753,7 @@ export class AgentProcessManager {
     this.daemonInstanceId = opts.daemonInstanceId?.trim() || null;
     this.runtimeProcessGate = opts.runtimeProcessGate ?? null;
     this.computerVersion = opts.computerVersion?.trim() || null;
-    this.workerUrl = opts.workerUrl?.trim() || null;
+    this.workerUrl = privacyModeEnabled() ? null : opts.workerUrl?.trim() || null;
     this.fetchImpl = opts.fetchImpl ?? (daemonFetch as FetchLike);
     this.serverConnected = opts.serverConnected ?? (() => true);
     this.stdinNotificationRetryMs = Math.max(

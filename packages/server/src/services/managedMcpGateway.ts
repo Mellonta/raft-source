@@ -1,3 +1,4 @@
+import { isRaftVendorUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import dns from "node:dns";
 import { BlockList, isIP } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -102,6 +103,9 @@ export function validateManagedMcpEndpoint(raw: string): URL {
   }
   if (url.protocol !== "https:" || url.username || url.password || url.hash) {
     throw new ManagedMcpGatewayError("MCP endpoint must be an HTTPS URL without credentials or a fragment", "managed_mcp_endpoint_invalid");
+  }
+  if (privacyModeEnabled() && isRaftVendorUrl(url)) {
+    throw new ManagedMcpGatewayError("Vendor services are disabled in privacy mode", "managed_mcp_endpoint_blocked");
   }
   const hostname = url.hostname.toLowerCase().replace(/\.$/u, "").replace(/^\[|\]$/gu, "");
   if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local") || hostname.endsWith(".internal")) {

@@ -1,3 +1,4 @@
+import { assertPrivacyServiceUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 // `raft-computer channel show|set` — CLI presenters over the ComputerApi.
 // The channel STATE core (parse/read/write, v6 §11 enum) lives in
 // lib/channelState.ts so the facade and upgrade/service internals consume it
@@ -178,6 +179,7 @@ export async function listChannelVersions(
   const arch = deps.arch ?? process.arch;
   const apiChannel = mapListedChannel(channel);
   const origin = (deps.apiOrigin ?? HANDS_API_ORIGIN).replace(/\/+$/u, "");
+  assertPrivacyServiceUrl(origin);
   const appSlug = deps.appSlug ?? HANDS_COMPUTER_APP_SLUG;
   const url = new URL(`/public/v2/apps/${encodeURIComponent(appSlug)}/versions`, `${origin}/`);
   url.searchParams.set("channel", apiChannel);
@@ -190,6 +192,7 @@ export async function listChannelVersions(
   let response: Response;
   try {
     response = await (deps.fetchFn ?? fetch)(url, {
+      ...(privacyModeEnabled() ? { redirect: "error" as const } : {}),
       signal: controller.signal,
       headers: { accept: "application/json" },
     });

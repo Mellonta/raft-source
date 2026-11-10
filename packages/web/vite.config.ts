@@ -338,6 +338,13 @@ export default defineConfig({
       output: {
         codeSplitting: {
           groups: [
+            // These bootstrap modules run before the privacy decision.
+            // Pulling them into app-shell causes Vite to preload its external
+            // font stylesheet (and run telemetry initializers) too early.
+            { name: "privacy-bootstrap", priority: 100, test: id =>
+              id === resolve(webRoot, "../shared/src/browserPrivacy.ts")
+              || id === resolve(webRoot, "../shared/src/vendorUrl.ts")
+              || id === resolve(webRoot, "src/desktopRuntimeEnvironment.ts") },
             // react-router-dom only re-exports react-router, so name the package that
             // holds the code.
             { name: "vendor-react", test: vendorPackages(["react", "react-dom", "react-router", "react-router-dom"]) },

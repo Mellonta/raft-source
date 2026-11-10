@@ -172,6 +172,31 @@ function submitForm(clientKind: string): FormData {
   return form;
 }
 
+test("privacy mode refuses a signed-in client's report and inbox without contacting even a configured collector", async ({ app }) => {
+  await withUpstream(async (baseUrl, requests) => withEnv(baseUrl, async () => {
+    const previous = process.env.RAFT_PRIVACY_MODE;
+    process.env.RAFT_PRIVACY_MODE = "1";
+    try {
+      await enableMultiAppFlag();
+      const token = await seedToken();
+      const headers = { Authorization: `Bearer ${token}`, "X-Raft-Client-Kind": "android" };
+      const report = submitForm("android");
+      report.set("attachments", new Blob(["private test attachment"], { type: "image/png" }), "private.png");
+      for (const response of [
+        await fetch(`${app.baseUrl}/api/product-feedback`, { method: "POST", headers, body: report }),
+        await fetch(`${app.baseUrl}/api/product-feedback/tickets`, { headers }),
+      ]) {
+        assert.equal(response.status, 503);
+        assert.equal((await response.json()).code, "feedback_integration_unavailable");
+      }
+      assert.equal(requests.length, 0);
+    } finally {
+      if (previous === undefined) delete process.env.RAFT_PRIVACY_MODE;
+      else process.env.RAFT_PRIVACY_MODE = previous;
+    }
+  }));
+});
+
 test("flag on: an Android submit and list reach the Android app with its own token and route root", async ({ app }) => {
   await withUpstream(async (baseUrl, requests) => withEnv(baseUrl, async () => {
     await enableMultiAppFlag();

@@ -1,3 +1,4 @@
+import { assertPrivacyServiceUrl, privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { clearClockTimeout, setClockTimeout } from "@botiverse/raft-shared";
 
 /** Public CDN root for published Computer SEA binaries. */
@@ -22,11 +23,13 @@ export async function fetchCdnLatestVersionResult(
   baseUrl: string,
   fetchFn: typeof fetch = fetch,
 ): Promise<ComputerLatestVersionResolveResult> {
+  assertPrivacyServiceUrl(baseUrl);
   const url = `${baseUrl.replace(/\/$/, "")}/manifest.json`;
   const controller = new AbortController();
   const timeoutId = setClockTimeout(() => controller.abort(), 10_000);
   try {
     const response = await fetchFn(url, {
+      ...(privacyModeEnabled() ? { redirect: "error" as const } : {}),
       signal: controller.signal,
       headers: { accept: "application/json" },
     });

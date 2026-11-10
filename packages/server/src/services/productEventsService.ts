@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 // Product events — typed write-side for the `product_events` table.
 //
 // **Owners:** @Dozy (schema + product event contract) + @meichen (data /
@@ -189,6 +190,7 @@ function cleanShortField(value: string | undefined): string | undefined {
 export async function recordActionCardEvent(
   args: RecordActionCardEventArgs,
 ): Promise<void> {
+  if (privacyModeEnabled()) return;
   try {
     const db = args.executor ?? getDb();
     // Defensive cap on `error_code` length — should always be a short
@@ -234,6 +236,7 @@ export async function recordActionCardEvent(
 export async function recordOnboardingWizardEvent(
   args: RecordOnboardingWizardEventArgs,
 ): Promise<void> {
+  if (privacyModeEnabled()) return;
   try {
     if (!ONBOARDING_WIZARD_STEPS.has(args.metadata.step_id)) {
       throw new Error(`unsupported onboarding wizard step: ${args.metadata.step_id}`);
@@ -298,6 +301,7 @@ export async function recordSecondAgentCreatedEvent(
   tx: DatabaseTransaction,
   args: RecordSecondAgentCreatedEventArgs,
 ): Promise<void> {
+  if (privacyModeEnabled()) return;
   await tx
     .insert(productEvents)
     .values({

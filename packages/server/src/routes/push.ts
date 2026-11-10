@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyMode";
 import { Router, type Router as RouterType } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { requireAuth, requireServer, requireVerified } from "../middleware/auth";
@@ -80,6 +81,10 @@ pushRouter.get("/vapid-key", (_req, res) => {
 });
 
 pushRouter.post("/prompt-events", requireAuth, async (req, res) => {
+  if (privacyModeEnabled()) {
+    res.status(204).end();
+    return;
+  }
   const userId = req.userId;
   if (!userId) {
     res.status(401).json({ error: "Unauthorized" });
