@@ -1,3 +1,4 @@
+import { assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyTransport";
 /**
  * Web Push transport (docs/contracts/notifications.md §4.4): the envelope
  * with an absolute `url`, plus `title` / `body` / `tag` for older service
@@ -120,6 +121,7 @@ export function webPushEndpointHostname(raw: unknown): string | null {
 export async function resolvePublicWebPushAddress(endpoint: string): Promise<WebPushResolvedAddress | null> {
   const hostname = webPushEndpointHostname(endpoint);
   if (!hostname) return null;
+  assertPrivacyServiceUrl(endpoint);
   const addresses = await lookupWithDeadline(hostname);
   if (addresses.length === 0 || addresses.some((entry) => !isPublicWebhookAddress(entry.address))) return null;
   return addresses[0];

@@ -1,3 +1,4 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 // Cookie consent on public Server pages (cindyz / Tenny, 2026-10-14). A
 // logged-out visitor who accepts gets a random visitor id in localStorage, sent
 // with public visit counts (publicVisits.ts) and with a guest join, so return
@@ -41,6 +42,7 @@ function storage(): Storage | null {
 }
 
 function read(now: number): StoredConsent | null {
+  if (browserPrivacyMode()) return null;
   const raw = storage()?.getItem(CONSENT_KEY);
   if (!raw) return null;
   try {
@@ -74,6 +76,7 @@ export function publicVisitorId(now: number = Date.now()): string | null {
  * deletes it.
  */
 export function setPublicVisitorConsent(choice: PublicVisitorChoice, now: number = Date.now()): void {
+  if (browserPrivacyMode()) return;
   const current = read(now);
   write(choice === "accepted"
     ? { choice, decidedAt: now, visitorId: current?.visitorId ?? crypto.randomUUID() }
@@ -87,6 +90,7 @@ export function setPublicVisitorConsent(choice: PublicVisitorChoice, now: number
  * banner). An explicit choice always stands.
  */
 export function applyPublicVisitorIdMode(mode: PublicVisitorIdMode, now: number = Date.now()): void {
+  if (browserPrivacyMode()) return;
   const current = read(now);
   if (mode === "default_on" && current === null) {
     write({ choice: "default", decidedAt: now, visitorId: crypto.randomUUID() });

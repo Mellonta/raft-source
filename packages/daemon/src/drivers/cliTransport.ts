@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { ambientProcessEnv } from "../processEnvPatch";
@@ -939,9 +940,11 @@ export async function prepareCliTransport(
   // path a few lines down, so it must not be stopped here for lacking a
   // separate Node host.
   const hostKind = detectNodeHostKind({ execIsElectron, seaProbe });
+  const daemonEnv = ambientProcessEnv();
+  const privateLaunch = privacyModeEnabled(daemonEnv);
   const nodeHost = hostKind === "electron" || hostKind === "node"
-    ? resolveNodeHostLaunch({ env: ambientProcessEnv(), execIsElectron, seaProbe })
-    : { command: liveHostExecutablePath(), env: ambientProcessEnv() };
+    ? resolveNodeHostLaunch({ env: daemonEnv, execIsElectron, seaProbe })
+    : { command: liveHostExecutablePath(), env: daemonEnv };
   const electronNodeMode = execIsElectron && nodeHost.env.ELECTRON_RUN_AS_NODE === "1";
   // slockCliPath is the path to the bundled `slock` CLI script, OR the literal
   // `__cli` sentinel for a SEA single-binary Computer (the daemon re-execs
@@ -1074,7 +1077,7 @@ export async function prepareCliTransport(
   // We never inline raw token *contents* — only the path to the proxy token
   // file (file mode 0o600, written above).
   const posixIdentityPrefix = `SLOCK_AGENT_ID=${shellSingleQuote(ctx.agentId)} SLOCK_SERVER_URL=${shellSingleQuote(ctx.config.serverUrl)} `;
-  const posixCredentialPrefix = posixIdentityPrefix + (agentCredentialProxy
+  const posixCredentialPrefix = (privateLaunch ? "RAFT_PRIVACY_MODE=1 " : "") + posixIdentityPrefix + (agentCredentialProxy
     ? `SLOCK_AGENT_PROXY_URL=${shellSingleQuote(agentCredentialProxy.proxyUrl)} SLOCK_AGENT_PROXY_TOKEN_FILE=${shellSingleQuote(agentCredentialProxyTokenFile!)} SLOCK_AGENT_ACTIVE_CAPABILITIES=${shellSingleQuote(DEFAULT_ACTIVE_CAPABILITIES)} `
     : "");
   // Exec-time fallback mirrors the spawn-time one: the tree can mutate AFTER
@@ -1119,6 +1122,7 @@ export async function prepareCliTransport(
     const cmdWrapper = path.join(slockDir, "slock.cmd");
     const cmdRaftWrapper = path.join(slockDir, "raft.cmd");
     const cmdIdentityLines =
+      (privateLaunch ? 'set "RAFT_PRIVACY_MODE=1"\r\n' : "") +
       `set "SLOCK_AGENT_ID=${ctx.agentId}"\r\nset "SLOCK_SERVER_URL=${ctx.config.serverUrl}"\r\n`;
     const cmdCredentialLine = cmdIdentityLines + (agentCredentialProxy
       ? `set "SLOCK_AGENT_PROXY_URL=${agentCredentialProxy.proxyUrl}"\r\nset "SLOCK_AGENT_PROXY_TOKEN_FILE=${agentCredentialProxyTokenFile!}"\r\nset "SLOCK_AGENT_ACTIVE_CAPABILITIES=${DEFAULT_ACTIVE_CAPABILITIES}"\r\n`
@@ -1164,6 +1168,7 @@ export async function prepareCliTransport(
     const psWrapper = path.join(slockDir, "slock.ps1");
     const psRaftWrapper = path.join(slockDir, "raft.ps1");
     const psIdentityLines = [
+      ...(privateLaunch ? ['$env:RAFT_PRIVACY_MODE="1"'] : []),
       `$env:SLOCK_AGENT_ID=${powershellSingleQuote(ctx.agentId)}`,
       `$env:SLOCK_SERVER_URL=${powershellSingleQuote(ctx.config.serverUrl)}`,
     ];
@@ -1272,7 +1277,6 @@ export async function prepareCliTransport(
   // process.env.PATH unconditionally discarded an agent-configured PATH — the
   // documented workaround for a minimal service PATH (slock#8610).
   // The daemon's own env, never a Pi session-create patch in flight (task #28).
-  const daemonEnv = ambientProcessEnv();
   // Windows env names are case-insensitive, but ambientProcessEnv() is a plain
   // copy whose key is usually `Path`: reading `.PATH` there found nothing and
   // left the runtime with only the wrapper dir on its PATH.
@@ -1286,6 +1290,7 @@ export async function prepareCliTransport(
     FORCE_COLOR: "0",
     ...(launchRuntimeFields.envVars || {}),
     ...extraEnv,
+    ...(privateLaunch ? { RAFT_PRIVACY_MODE: "1" } : {}),
     ...(platform === "win32" ? windowsUtf8Env() : {}),
     ...runtimeContextEnv(ctx.config),
     // After the agent's configured env vars: the daemon's value wins.
@@ -1308,6 +1313,7 @@ export async function prepareCliTransport(
     // sorts first, which is `PATH` here, but leave no second copy to pick.
     for (const key of Object.keys(spawnEnv)) {
       if (key !== "PATH" && key.toLowerCase() === "path") delete spawnEnv[key];
+      if (privateLaunch && key !== "RAFT_PRIVACY_MODE" && key.toUpperCase() === "RAFT_PRIVACY_MODE") delete spawnEnv[key];
     }
   }
   delete spawnEnv.SLOCK_AGENT_TOKEN;

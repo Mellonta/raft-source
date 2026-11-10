@@ -271,3 +271,5 @@ export { checkTaskStatusReason } from "./taskStatusReason";
 export { checkTaskAssignReason } from "./taskAssignReason";
 export { MAX_PROFILE_AVATAR_BYTES } from "./profileAvatar";
 export { CONTINUATIONS_DRAFT_FLOW_RUNTIMES } from "./featureFlags";
+
+export { assertPrivacyServiceUrl, privacyModeEnabled, rejectVendorDispatch } from "./privacyTransport";

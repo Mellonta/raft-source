@@ -2,9 +2,44 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
 
-import { fetch } from "undici";
+import { fetch, MockAgent } from "undici";
+import { vi } from "vitest";
 
-import { buildFetchDispatcher } from "./proxy";
+import { buildFetchDispatcher, computerFetch } from "./proxy";
+import { installerCommand } from "./externalInstaller";
+
+test("redirected POST bodies never reach a Raft vendor in privacy mode", async () => {
+  const mock = new MockAgent();
+  mock.disableNetConnect();
+  vi.stubEnv("NO_PROXY", "*");
+  const vendor = "https://slock-trace-upload.botiverse.dev";
+  const records: string[] = [];
+  const endpoint = mock.get("https://raft.internal");
+  const body = "confidential-test-payload";
+  const redirect = (path: string, location: string) => endpoint.intercept({ method: "POST", path })
+    .reply(307, "", { headers: { location } }).persist();
+  redirect("/report", vendor + "/capture");
+  redirect("/model", "https://provider.example/model");
+  mock.get(vendor).intercept({ method: "POST", path: "/capture", body })
+    .reply(() => { records.push("vendor"); return { statusCode: 200, data: "ok" }; });
+  mock.get("https://provider.example").intercept({ method: "POST", path: "/model", body })
+    .reply(() => { records.push("provider"); return { statusCode: 200, data: "ok" }; });
+  const send = (path: string) => computerFetch("https://raft.internal" + path, { method: "POST", body, dispatcher: mock });
+  try {
+    vi.stubEnv("RAFT_PRIVACY_MODE", "1");
+    await assert.rejects(send("/report"), (error: TypeError) => /vendor services/.test(String(error.cause)));
+    assert.deepEqual(records, []);
+    assert.equal(await (await send("/model")).text(), "ok");
+    assert.deepEqual(records, ["provider"]);
+    await assert.rejects(installerCommand(["upgrade"], { RAFT_COMPUTER_INSTALLER_DL_BASE: "https://mirror.internal" }), /installer is disabled/);
+    vi.stubEnv("RAFT_PRIVACY_MODE", "0");
+    assert.equal(await (await send("/report")).text(), "ok");
+    assert.deepEqual(records, ["provider", "vendor"]);
+  } finally {
+    vi.unstubAllEnvs();
+    await mock.close();
+  }
+});
 
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve, reject) => {

@@ -1,3 +1,5 @@
+import { afterEach, expect, vi } from "vitest";
+import { assertPrivacyServiceUrl } from "./privacyTransport";
 import assert from "node:assert/strict";
 import { PRIVACY_MODE_ENV, PrivacyModeConfigError, parsePrivacyMode, privacyModeFromEnv } from "./privacyMode";
 
@@ -24,4 +26,19 @@ test("privacyModeFromEnv reads RAFT_PRIVACY_MODE", () => {
   assert.equal(privacyModeFromEnv({}), false);
   assert.equal(privacyModeFromEnv({ RAFT_PRIVACY_MODE: "on" }), true);
   assert.throws(() => privacyModeFromEnv({ RAFT_PRIVACY_MODE: "maybe" }), /RAFT_PRIVACY_MODE/);
+});
+
+afterEach(() => vi.unstubAllEnvs());
+
+test("a stale vendor endpoint is rejected only in private mode, without matching unrelated domains", () => {
+  vi.stubEnv("RAFT_PRIVACY_MODE", "1");
+  expect(() => assertPrivacyServiceUrl("https://API.raft.build./agent")).toThrow(/vendor/);
+  expect(() => assertPrivacyServiceUrl("https://raft.build.example.org")).not.toThrow();
+  expect(() => assertPrivacyServiceUrl("https://github.com/Botiverse/desktop-beta/releases")).toThrow(/vendor/);
+  expect(() => assertPrivacyServiceUrl("https://github.com/%62otiverse/desktop-beta/releases")).toThrow(/vendor/);
+  expect(() => assertPrivacyServiceUrl("https://github.com/Mellonta/raft-source/releases")).not.toThrow();
+  expect(() => assertPrivacyServiceUrl("https://api.openai.com/v1/responses")).not.toThrow();
+  expect(() => assertPrivacyServiceUrl("https://api.anthropic.com/v1/messages")).not.toThrow();
+  vi.stubEnv("RAFT_PRIVACY_MODE", "0");
+  expect(() => assertPrivacyServiceUrl("https://api.raft.build")).not.toThrow();
 });

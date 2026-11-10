@@ -451,12 +451,16 @@ test("the boot prefetch reads the root's conversation where and as rootConversat
   assert.equal(BOOT_ROOT_REDIRECT_MEDIA_QUERY, ROOT_REDIRECT_MEDIA_QUERY);
 });
 
-test("the build gives the boot prefetch the API client's base and version, and preconnects to an API on another origin", () => {
+test("boot can prefetch a configured deployment; a vendor API waits for the privacy decision", () => {
   const env = { VITE_API_URL: "https://api.raft.build/", VITE_APP_VERSION: "1.2.3" };
   assert.deepEqual(bootPrefetchConfig(env), {
-    api: deriveRuntimeEndpoints("https://api.raft.build", "").apiBase,
+    api: "",
     version: resolveWebAppVersion(env),
-    preconnect: "https://api.raft.build",
+    preconnect: null,
+  });
+  assert.deepEqual(bootPrefetchConfig({ ...env, VITE_API_URL: "https://api.example.test" }), {
+    api: deriveRuntimeEndpoints("https://api.example.test", "").apiBase,
+    version: resolveWebAppVersion(env), preconnect: "https://api.example.test",
   });
   assert.deepEqual(bootPrefetchConfig({}), { api: "/api", version: resolveWebAppVersion({}), preconnect: null }, "same origin: no preconnect");
   const html = '<html><head><meta charset="UTF-8" />\n    <script src="/app-theme-bootstrap.js"></script></head></html>';

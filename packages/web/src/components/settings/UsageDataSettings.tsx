@@ -1,3 +1,4 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 // RFC-067 product analytics controls: the personal "Share usage data" switch
 // (Settings → Account) and the workspace switch (Settings → Administration).
 // Always shown: "Share usage data" is on by default (2026-10-21), so the way
@@ -101,8 +102,8 @@ export function UsageDataSettingsCard() {
             </TextLink>
           </>
         )}
-        checked={shareUsageData ?? SHARE_USAGE_DATA_DEFAULT}
-        disabled={saving}
+        checked={!browserPrivacyMode() && (shareUsageData ?? SHARE_USAGE_DATA_DEFAULT)}
+        disabled={browserPrivacyMode() || saving}
         onCheckedChange={handleChange}
         footer={failed && (
           <Banner intent="warning" density="sm">
@@ -170,8 +171,8 @@ export function WorkspaceProductAnalyticsSection() {
         idPrefix={idPrefix}
         title={formatMessage({ id: "settings.workspaceProductAnalytics.title" })}
         description={formatMessage({ id: "settings.workspaceProductAnalytics.description" })}
-        checked={settings?.productAnalyticsEnabled ?? true}
-        disabled={saving || settings === null || !settings.canManageProductAnalytics}
+        checked={!browserPrivacyMode() && (settings?.productAnalyticsEnabled ?? true)}
+        disabled={browserPrivacyMode() || saving || settings === null || !settings.canManageProductAnalytics}
         onCheckedChange={handleChange}
         footer={failed && (
           <Banner intent="warning" density="sm">

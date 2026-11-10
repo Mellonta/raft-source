@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import { computerAttentionForViewer, computerReadinessForViewer, loadComputerReadinessInputs, loadMemberDisplayNames, loadReadinessAgentsByMachine, readinessAgentOwnerUserId, readinessViewerForRole, type ReadinessOwnedAgent } from "../services/runtimeReadinessService";
 import { objectActivityUnreadBatch } from "../services/objectActivity";
 import { hideUnfindableAgentsByParam } from "./unfindableAgentGate";
@@ -2086,6 +2087,10 @@ serverRouter.patch("/:id/appearance-settings", async (req, res) => {
 
 // Create a short-lived server-scoped scope attestation
 serverRouter.post("/:id/scope-attestation", async (req, res) => {
+  if (privacyModeEnabled()) {
+    res.status(403).json({ error: "Diagnostic uploads are disabled in privacy mode" });
+    return;
+  }
   try {
     const { scope } = parseCreateScopeAttestationRequest(req.body);
     const allowed = await canCreateScopeAttestation(req.params.id, req.userId!, scope);

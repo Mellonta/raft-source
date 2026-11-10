@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { currentTimeMs } from "@botiverse/raft-shared";
 import { eq } from "drizzle-orm";
@@ -183,6 +184,7 @@ export function resetProductFeedbackRouteBindingCacheForTest(): void {
 }
 
 export function readProductFeedbackRouteConfig(env: NodeJS.ProcessEnv = process.env): ProductFeedbackRouteConfig {
+  if (privacyModeEnabled()) throw new ProductFeedbackRouteBindingError();
   const baseUrl = env.HANDS_FEEDBACK_BASE_URL?.trim();
   const appId = env.HANDS_FEEDBACK_APP_ID?.trim();
   const appToken = env.HANDS_FEEDBACK_CONVERSATION_APP_TOKEN?.trim();

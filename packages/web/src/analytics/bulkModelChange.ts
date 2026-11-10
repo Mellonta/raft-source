@@ -1,3 +1,4 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 // Bulk "Change model" usage events (RFC-067 registry: bulk_model_change_*).
 // Contract agreed with John in #raft-botiverse-user-analytics (2026-10-14).
 // One operation_id per dialog open links opened / closed / submitted /
@@ -28,7 +29,7 @@ export interface BulkModelChangeOperation {
 }
 
 export function newBulkModelChangeOperation(serverId: string | undefined): BulkModelChangeOperation {
-  return { id: crypto.randomUUID(), serverId };
+  return { id: browserPrivacyMode() ? "" : crypto.randomUUID(), serverId };
 }
 
 function trackOperationEvent<E extends ProductEventName>(

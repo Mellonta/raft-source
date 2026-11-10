@@ -1,3 +1,4 @@
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 // Product events — typed write-side for the `product_events` table.
 //
 // **Owners:** @Dozy (schema + product event contract) + @meichen (data /
@@ -265,6 +266,7 @@ async function mirrorActionCardEvent(args: RecordActionCardEventArgs, meta: Acti
 export async function recordActionCardEvent(
   args: RecordActionCardEventArgs,
 ): Promise<void> {
+  if (privacyModeEnabled()) return;
   try {
     const db = args.executor ?? getDb();
     const [card] = await db.select({ requesterUserId: actionCards.requesterUserId })
@@ -321,6 +323,7 @@ export async function recordActionCardEvent(
 export async function recordOnboardingWizardEvent(
   args: RecordOnboardingWizardEventArgs,
 ): Promise<void> {
+  if (privacyModeEnabled()) return;
   try {
     if (!ONBOARDING_WIZARD_STEPS.has(args.metadata.step_id)) {
       throw new Error(`unsupported onboarding wizard step: ${args.metadata.step_id}`);
@@ -385,6 +388,7 @@ export async function recordSecondAgentCreatedEvent(
   tx: DatabaseTransaction,
   args: RecordSecondAgentCreatedEventArgs,
 ): Promise<void> {
+  if (privacyModeEnabled()) return;
   await tx
     .insert(productEvents)
     .values({

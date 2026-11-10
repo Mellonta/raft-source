@@ -26,6 +26,7 @@ import { initDatabase, prewarmPrimaryPool, setDbTracer, startPoolMetricsReportin
 import { startMachineLivenessMetrics } from "./services/machineLivenessMetrics";
 import { getDbLivenessTracker } from "./dbLiveness";
 import { installAuditedGlobalFetch } from "./db/ambientTransaction";
+import { installServerPrivacyTransport } from "./config/privacyTransport";
 import { createApp } from "./app";
 import { countSocketClients, setupSocket } from "./socket/index";
 import { setupMachineWebSocket } from "./routes/daemon";
@@ -213,6 +214,7 @@ async function bootstrap() {
   // Install the audited global fetch BEFORE any request path runs. No-op unless
   // RAFT_TX_POOL_AUDIT_FILE is set, so production fetch is untouched.
   installAuditedGlobalFetch();
+  installServerPrivacyTransport();
 
   // Initialize PostgreSQL database
   await initDatabase(DATABASE_URL!, DATABASE_URL_READ_REPLICA);

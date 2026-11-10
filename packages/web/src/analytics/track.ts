@@ -1,3 +1,4 @@
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 // Product analytics call surface (RFC-067).
 //
 // Events and their properties are declared in the shared registry
@@ -48,7 +49,7 @@ type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 // This tab's product-analytics session: random per page load and deliberately
 // NOT the trace tabId, so product events cannot be joined to traces (which
 // carry a stable per-user id) and re-linked after the user stops sharing.
-const productSessionId: string = crypto.randomUUID();
+const productSessionId: string = browserPrivacyMode() ? "" : crypto.randomUUID();
 
 let queue: QueuedEvent[] = [];
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -94,6 +95,7 @@ export function trackEvent<E extends ProductEventName>(
     ? [props?: ProductEventProperties<E>, options?: TrackEventOptions]
     : [props: ProductEventProperties<E>, options?: TrackEventOptions]
 ): void {
+  if (browserPrivacyMode()) return;
   const serverId = options.serverId ?? serverIdGetter();
   if (isPrivacyModeOn() || !serverId || allowedByServer.get(serverId) === false || queue.length >= MAX_QUEUED_EVENTS) {
     options.onDelivery?.(false);
@@ -195,6 +197,7 @@ async function askAllowed(serverId: string, token: string, keepalive = false): P
  * keepalive because the page may disappear while they finish.
  */
 export async function flushProductEvents(options: { onPageHide?: boolean; allowConsentLookup?: boolean } = {}): Promise<void> {
+  if (browserPrivacyMode()) return;
   if (flushing && !options.onPageHide) return;
   const token = globalThis.localStorage?.getItem(TOKEN_KEY) ?? null;
   // RAFT_PRIVACY_MODE: events queued before the client config said so are dropped, unsent.
@@ -298,7 +301,7 @@ subscribePrivacyMode((state) => {
   if (queue.length > 0) scheduleFlush();
 });
 
-if (typeof window !== "undefined" && typeof document !== "undefined") {
+if (!browserPrivacyMode() && typeof window !== "undefined" && typeof document !== "undefined") {
   const flushOnHide = () => {
     if (queue.length > 0) void flushProductEvents({ onPageHide: true });
   };

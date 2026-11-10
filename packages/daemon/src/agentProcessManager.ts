@@ -1,4 +1,5 @@
 import { shellCommandHeadCategory } from "./runtimeTraceCategories";
+import { privacyModeEnabled } from "@botiverse/raft-shared/src/privacyTransport";
 import type { AgentApiHistoryConsumptionScope } from "@botiverse/raft-shared";
 import { finishToolCall, noteToolCallStart } from "./toolCallOutcome";
 import { listWorkspaceDirectory, readWorkspaceFile, type WorkspaceFileRead } from "./agentWorkspaceViewer";
@@ -2344,7 +2345,7 @@ export class AgentProcessManager {
     this.readRuntimeDescendants = opts.readRuntimeDescendants ?? defaultRuntimeDescendantReader;
     this.readSessionResumeFacts = opts.readSessionResumeFacts ?? readRuntimeSessionResumeFacts;
     this.computerVersion = opts.computerVersion?.trim() || null;
-    this.workerUrl = opts.workerUrl?.trim() || null;
+    this.workerUrl = privacyModeEnabled() ? null : opts.workerUrl?.trim() || null;
     this.fetchImpl = opts.fetchImpl ?? (daemonFetch as FetchLike);
     this.contextView = new AgentContextViewService({
       raftHome: this.slockHome,

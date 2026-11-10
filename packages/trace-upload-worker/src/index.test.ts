@@ -2,6 +2,7 @@ import { createHash, createHmac } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import assert from "node:assert/strict";
 import { fakeScopeDbTraceEventClient } from "./testing/fakeScopeDbTraceEventClient";
+import { vi } from "vitest";
 import { handleRequest, ingestTraceBundleObject, type TraceUploadWorkerEnv } from "./index";
 import { resetTraceUploadBudgetsForTest } from "./traces/uploadRateLimit";
 
@@ -66,6 +67,25 @@ function baseEnv() {
   };
   return { env, bucket };
 }
+
+test("private mode refuses all ingestion and replay entry points before accessing stored bundles", async () => {
+  vi.stubEnv("RAFT_PRIVACY_MODE", "1");
+  try {
+    const { env, bucket } = baseEnv();
+    const read = vi.spyOn(bucket, "get");
+    for (const path of ["/api/trace-bundles", "/api/web-traces", "/api/feedback-reports", "/api/external/github-refresh"]) {
+      const response = await handleRequest(new Request("https://worker.test" + path, { method: "POST", body: "test" }), env);
+      assert.equal(response.status, 403);
+    }
+    await assert.rejects(ingestTraceBundleObject(env, {} as never), /disabled in privacy mode/);
+    const { reingestCandidates } = await import("./reingest");
+    await assert.rejects(reingestCandidates(env, [], undefined, false), /disabled in privacy mode/);
+    assert.equal(read.mock.calls.length, 0);
+    assert.equal(bucket.putAttempts, 0);
+  } finally {
+    vi.unstubAllEnvs();
+  }
+});
 
 function signAttestation(claims: Record<string, unknown>, secret = SECRET): string {
   const payload = Buffer.from(JSON.stringify(claims)).toString("base64url");

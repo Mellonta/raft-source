@@ -1,3 +1,4 @@
+import { assertPrivacyServiceUrl } from "@botiverse/raft-shared/src/privacyTransport";
 import { createHmac, randomUUID } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -581,6 +582,7 @@ async function renderEventData(
  */
 export async function postPublicHttps(input: Parameters<WebhookPost>[0]): Promise<WebhookPostResponse> {
   const url = new URL(input.endpointUrl);
+  assertPrivacyServiceUrl(url);
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   const startedAt = performance.now();
   const sinceStart = () => Math.round(performance.now() - startedAt);

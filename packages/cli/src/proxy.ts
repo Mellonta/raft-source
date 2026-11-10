@@ -2,6 +2,7 @@
 // Ported from packages/daemon/src/proxy.ts — only the fetch dispatcher
 // parts; WebSocket proxy is not needed in the CLI.
 
+import { assertPrivacyServiceUrl, privacyModeEnabled, rejectVendorDispatch } from "@botiverse/raft-shared/src/agentCliSurface";
 import type { Dispatcher } from "undici";
 import { shouldBypassProxy } from "@botiverse/raft-shared/src/noProxy";
 
@@ -14,7 +15,15 @@ function loadUndici(): Promise<typeof import("undici")> {
 }
 
 /** undici's `fetch`, loading undici on the first call. */
-export const undiciFetch: typeof import("undici").fetch = async (...args) => (await loadUndici()).fetch(...args);
+export const undiciFetch: typeof import("undici").fetch = async (...args) => {
+  const [input] = args;
+  const url = typeof input === "object" && "url" in input ? input.url : input.toString();
+  assertPrivacyServiceUrl(url);
+  const undici = await loadUndici();
+  if (!privacyModeEnabled()) return undici.fetch(...args);
+  const dispatcher = args[1]?.dispatcher ?? undici.getGlobalDispatcher();
+  return undici.fetch(input, { ...args[1], dispatcher: dispatcher.compose(rejectVendorDispatch) });
+};
 
 const fetchDispatcherCache = new Map<string, Dispatcher>();
 
@@ -37,6 +46,11 @@ const packageFetch: typeof fetch = (input, init) => undiciFetch(
   init as Parameters<typeof undiciFetch>[1],
 ) as unknown as Promise<Response>;
 let canonicalFetchImpl = packageFetch;
+
+/** Preserve the caller's direct/proxy selection and validate redirect hops in private mode. */
+export function fetchWithVendorPolicy(url: string | URL, init?: RequestInit): Promise<Response> {
+  return privacyModeEnabled() ? packageFetch(url, init) : fetch(url, init);
+}
 
 /** Test-only transport seam; does not replace the process-global fetch. */
 export function setCanonicalFetchImplForTests(impl: typeof fetch): typeof fetch {
@@ -216,6 +230,7 @@ export async function buildFetchDispatcher(
   const proxyUrl = getProxyUrlForTarget(targetUrl, env);
   if (!proxyUrl) return undefined;
   if (shouldBypassProxy(targetUrl, env)) return undefined;
+  assertPrivacyServiceUrl(proxyUrl);
 
   const cached = fetchDispatcherCache.get(proxyUrl);
   if (cached) return cached;
@@ -259,7 +274,7 @@ export async function proxyAwareFetch(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Response> {
   const dispatcher = await buildFetchDispatcher(url.toString(), env);
-  return dispatcher ? fetchWithDispatcher(url, { ...init, dispatcher }) : fetch(url, init);
+  return dispatcher ? fetchWithDispatcher(url, { ...init, dispatcher }) : fetchWithVendorPolicy(url, init);
 }
 
 /** Host and nested error code of a failed fetch, without the URL's path or query. */

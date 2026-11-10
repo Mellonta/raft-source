@@ -245,6 +245,14 @@
     "./src/appLinkPreview": {
       "types": "./src/appLinkPreview.ts",
       "default": "./src/appLinkPreview.ts"
+    },
+    "./src/privacyTransport": {
+      "types": "./src/privacyTransport.ts",
+      "default": "./src/privacyTransport.ts"
+    },
+    "./src/browserPrivacy": {
+      "types": "./src/browserPrivacy.ts",
+      "default": "./src/browserPrivacy.ts"
     }
   },
   "scripts": {

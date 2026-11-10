@@ -1,4 +1,5 @@
 import { feedbackTicketPath } from "../../feedback/feedbackPaths";
+import { browserPrivacyMode } from "@botiverse/raft-shared/src/browserPrivacy";
 import { Card, Checkbox, Textarea, Button } from "@botiverse/raft-ui";
 import { FEEDBACK_REPORT_SESSION_RECORD_EVENT } from "@botiverse/raft-shared";
 import type { FeedbackReportSessionRecordEvent } from "@botiverse/raft-shared";
@@ -235,7 +236,7 @@ export default function ReportIssueDialog({
 
   const handleSubmit = useCallback(async () => {
     if (!consented || loading) return;
-    if (!feedbackExportUrl) {
+    if (browserPrivacyMode() || !feedbackExportUrl) {
       setError(formatMessage({ id: "agent.reportIssue.exportNotConfigured" }));
       return;
     }

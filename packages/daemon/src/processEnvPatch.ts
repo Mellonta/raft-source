@@ -34,6 +34,11 @@ export async function withProcessEnvPatch<T>(
   opts: { removeFirst?: readonly string[] } = {},
 ): Promise<T> {
   const keys = new Set([...(opts.removeFirst ?? []), ...Object.keys(patch ?? {})]);
+  // This flag belongs to the Computer service. A Pi session's temporary
+  // process-wide environment must never change the daemon's reporting policy.
+  for (const key of keys) {
+    if (key.toUpperCase() === "RAFT_PRIVACY_MODE") keys.delete(key);
+  }
   if (keys.size === 0) return fn();
 
   return runWithProcessEnvPatchLock(async () => {
@@ -43,7 +48,7 @@ export async function withProcessEnvPatch<T>(
       delete process.env[key];
     }
     for (const [key, value] of Object.entries(patch ?? {})) {
-      process.env[key] = value;
+      if (keys.has(key)) process.env[key] = value;
     }
     activePatchPrevious = previous;
     try {
