@@ -358,11 +358,11 @@ test("the retired standalone daemon connect command is not exported", async () =
 });
 
 test("self-hosted Linux portals install their pinned fork and connect to their own server", () => {
-  vi.stubEnv("VITE_MELLONTA_COMPUTER_VERSION", "1.0.49-mellonta.2");
+  vi.stubEnv("VITE_MELLONTA_COMPUTER_VERSION", "1.0.49-mellonta.1");
   try {
     const result = getComputerCommands("team", "production", "http://raft.example:8001", { machineId: "m-1" });
     assert.ok(result && result.installAndSetup);
-    assert.match(result.install, /Mellonta\/raft-source\/releases\/download\/1\.0\.49-mellonta\.2\/setup-client.sh/);
+    assert.match(result.install, /Mellonta\/raft-source\/releases\/download\/1\.0\.49-mellonta\.1\/setup-client.sh/);
     assert.match(result.installAndSetup, /--server-url 'http:\/\/raft.example:8001'/);
     assert.match(result.setup, /--machine 'm-1'/);
     assert.equal(getComputerCommands("team", "production", "http://raft.example", { platform: "windows" })?.install, "");
