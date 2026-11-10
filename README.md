@@ -70,6 +70,11 @@ If neither fits, run `which pnpm`: the `pnpm` on your `PATH` may be a copy
 managed by another tool rather than Corepack or your own install. A branch that
 predates the pnpm 12 upgrade still declares pnpm 10 and correctly runs it.
 
+## Self-hosted Linux deployment
+
+For the Docker production server and the matching Computer client on Linux
+x86-64 and ARM64, see [Mellonta deployment](MELLONTA.md).
+
 ## Optional privacy mode
 
 With the server, portal and Computers built from this branch, set
