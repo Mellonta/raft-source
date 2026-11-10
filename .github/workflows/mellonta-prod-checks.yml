@@ -1,0 +1,160 @@
+name: Mellonta production deployment checks
+on:
+  push:
+    branches: [main, privacy-opt-out]
+    paths:
+      - 'scripts/mellonta/prod*'
+      - 'scripts/dev/raftdev-risingwave-bootstrap.ts'
+      - 'infra/risingwave/sql/**'
+      - 'scripts/mellonta/privacy-browser.mjs'
+      - 'scripts/mellonta/deploy-prod.sh'
+      - 'scripts/mellonta/client-version'
+      - 'packages/server/**'
+      - 'packages/web/**'
+      - 'packages/shared/**'
+      - 'packages/runtime-form/**'
+      - 'packages/trace-client/**'
+      - 'packages/sync-core/**'
+      - 'packages/desktop-contract/**'
+      - 'packages/visual-testing/shared/**'
+      - 'manual/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.node-version'
+      - '.github/workflows/mellonta-prod-checks.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  pnpm_config_verify_deps_before_run: "false"
+jobs:
+  deployment:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      RAFT_SMOKE_ORIGIN: http://raft-http.test:8001
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: .node-version
+      - name: Prepare browser regression test
+        run: |
+          npm install --global "$(node -p "require('./package.json').packageManager")"
+          pnpm --filter @botiverse/raft-web... --filter @botiverse/raft-server... install --frozen-lockfile
+          pnpm --filter @botiverse/raft-web exec vitest run tests/computerSetupCommand.test.ts tests/privacyMode.test.ts tests/appThemeBootstrapWiring.test.ts --maxWorkers=2
+          pnpm --filter @botiverse/raft-server exec vitest run src/services/privacyMode.test.ts src/services/conversationUnread.test.ts src/services/jointMentionV6.test.ts src/services/channelService.risingwaveNoFallback.test.ts --maxWorkers=2
+          pnpm exec playwright install --with-deps chromium
+          RAFT_PRIVACY_MODE=1 node --import @oxc-node/core/register scripts/mellonta/privacy-browser.mjs
+          printf '127.0.0.1 raft-http.test\n' | sudo tee -a /etc/hosts
+      - name: Prepare isolated deployment
+        run: |
+          python3 scripts/mellonta/prod-config.test.py
+          python3 scripts/mellonta/prod-verify.test.py
+          bash -n scripts/mellonta/deploy-prod.sh
+          if [[ "$(uname -m)" == aarch64 ]]; then
+            state_dir="$RUNNER_TEMP/raft state"
+            mkdir -p "$state_dir"
+          else
+            state_dir=/data/.raft-prod
+            sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$state_dir"
+          fi
+          echo "TEST_STATE_DIR=$state_dir" >> "$GITHUB_ENV"
+          (umask 077; git clone "$GITHUB_WORKSPACE" "$RUNNER_TEMP/raft-checkout")
+          docker info --format '{{.DockerRootDir}}' > "$RUNNER_TEMP/docker-root-before"
+      - name: Check out the old deployed fork for the upgrade rehearsal
+        if: matrix.runner == 'ubuntu-24.04'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 191663c17da6222657ba2a1fc2aa0177b2a7d034
+          path: old-release
+      - name: Populate the old release using its own images, migrations and API
+        if: matrix.runner == 'ubuntu-24.04'
+        working-directory: old-release
+        run: |
+          mkdir -p "$TEST_STATE_DIR"/{postgres,redis,uploads,backups}
+          printf 'SLOCK_E2E_AUTO_VERIFY_EMAIL=1\n' > "$TEST_STATE_DIR/server-extra.env"
+          python3 scripts/mellonta/prod-config.py --source "$PWD" --root "$TEST_STATE_DIR" --url "$RAFT_SMOKE_ORIGIN" --bind 127.0.0.1
+          compose=(docker compose --env-file /dev/null -f "$TEST_STATE_DIR/compose.json")
+          "${compose[@]}" build server web
+          "${compose[@]}" up -d --wait postgres redis
+          "${compose[@]}" run --rm --no-deps migrate
+          "${compose[@]}" up -d --wait server web
+          python3 scripts/mellonta/prod-smoke.py
+          python3 "$GITHUB_WORKSPACE/scripts/mellonta/prod-migration-smoke.py" seed
+          sha256sum "$TEST_STATE_DIR/settings.json" > "$RUNNER_TEMP/old-settings"
+      - name: Build, migrate, and exercise production
+        run: |
+          set -E
+          report_failure() {
+            python3 - "$1" "$RUNNER_TEMP/prod-check.log" <<'PY'
+          import pathlib, re, sys
+          output = pathlib.Path(sys.argv[2]).read_text(errors="replace")
+          # CI uses disposable generated secrets; still redact them from diagnostics.
+          output = re.sub(r'postgresql://[^\s]+', '[database URL]', output)
+          output = re.sub(r'\x1b\[[0-9;]*m', '', output)
+          message = "Failed command: " + sys.argv[1] + "\n" + output[-3000:]
+          print("::error title=Production deployment failed::" + message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A"))
+          PY
+          }
+          exec > >(tee "$RUNNER_TEMP/prod-check.log") 2>&1
+          trap 'report_failure "$BASH_COMMAND"' ERR
+          cd "$RUNNER_TEMP/raft-checkout"
+          options=()
+          if [[ "$TEST_STATE_DIR" != /data/.raft-prod ]]; then options+=(--state-dir "$TEST_STATE_DIR"); fi
+          printf 'SLOCK_E2E_AUTO_VERIFY_EMAIL=1\n' > "$TEST_STATE_DIR/server-extra.env"
+          bash scripts/mellonta/deploy-prod.sh "${options[@]}" --url "$RAFT_SMOKE_ORIGIN" --bind 127.0.0.1
+          compose=(docker compose --env-file /dev/null -f "$TEST_STATE_DIR/compose.json")
+          python3 scripts/mellonta/prod-smoke.py
+          if [[ -f "$RUNNER_TEMP/old-settings" ]]; then
+            sha256sum --check "$RUNNER_TEMP/old-settings"
+            python3 scripts/mellonta/prod-migration-smoke.py verify
+            dump=("$TEST_STATE_DIR"/backups/*/database.dump)
+            "${compose[@]}" exec -T postgres createdb -U raft rehearsal_restore
+            "${compose[@]}" exec -T postgres pg_restore -U raft --exit-on-error -d rehearsal_restore < "${dump[0]}"
+            "${compose[@]}" exec -T postgres psql -U raft -d rehearsal_restore -Atc 'SELECT count(*) FROM drizzle.__drizzle_migrations' | grep -qx 324
+            "${compose[@]}" exec -T postgres psql -U raft -d rehearsal_restore -Atc "SELECT count(*) FROM messages WHERE content='History from the old production release'" | grep -qx 1
+          fi
+          # Chat tests need a completed workspace, just like upstream's
+          # grandfatherPlaywrightFixtures. This disposable account has no AI
+          # credentials/Computer with which to finish mandatory owner setup.
+          python3 - "$RUNNER_TEMP/raft-production-test-account.json" "${compose[@]}" <<'PY'
+          import json, subprocess, sys, uuid
+          workspace = str(uuid.UUID(json.load(open(sys.argv[1]))['workspace']))
+          sql = f"""
+          BEGIN;
+          UPDATE users SET signup_survey_completed_at = now(), first_onboarding_completed_at = now()
+            WHERE id IN (SELECT user_id FROM server_members WHERE server_id = '{workspace}');
+          UPDATE server_members SET setup_status = 'complete', setup_completion_reason = 'grandfathered'
+            WHERE server_id = '{workspace}';
+          COMMIT;
+          """
+          subprocess.run([*sys.argv[2:], 'exec', '-T', 'postgres', 'psql', '-U', 'raft', '-d', 'raft',
+                          '-v', 'ON_ERROR_STOP=1', '-c', sql], check=True)
+          PY
+          node "$GITHUB_WORKSPACE/scripts/mellonta/prod-browser-smoke.mjs" "$RUNNER_TEMP/raft-production-test-account.json"
+          "${compose[@]}" exec -T postgres psql -U raft -d raft -c 'CREATE TABLE mellonta_deploy_probe (value text); INSERT INTO mellonta_deploy_probe VALUES ($$retained$$);'
+          printf retained > "$TEST_STATE_DIR/uploads/persistence-probe"
+          sha256sum "$TEST_STATE_DIR/settings.json" > "$RUNNER_TEMP/settings-before"
+          RAFT_PROD_STATE_DIR="$TEST_STATE_DIR" bash scripts/mellonta/deploy-prod.sh stop
+          "${compose[@]}" rm -f risingwave
+          bash "$TEST_STATE_DIR/start.sh"
+          bash "$TEST_STATE_DIR/raftprod" deploy
+          python3 scripts/mellonta/prod-smoke.py
+          "${compose[@]}" exec -T postgres psql -U raft -d raft -Atc 'SELECT value FROM mellonta_deploy_probe' | grep -qx retained
+          test "$(cat "$TEST_STATE_DIR/uploads/persistence-probe")" = retained
+          if [[ -f "$RUNNER_TEMP/old-settings" ]]; then python3 scripts/mellonta/prod-migration-smoke.py recheck; fi
+          sha256sum --check "$RUNNER_TEMP/settings-before"
+          docker info --format '{{.DockerRootDir}}' > "$RUNNER_TEMP/docker-root-after"
+          cmp "$RUNNER_TEMP/docker-root-before" "$RUNNER_TEMP/docker-root-after"
+      - name: Clean up test containers
+        if: always()
+        run: |
+          if [[ -n "${TEST_STATE_DIR:-}" && -f "$TEST_STATE_DIR/compose.json" ]]; then
+            docker compose --env-file /dev/null -f "$TEST_STATE_DIR/compose.json" down
+          fi
