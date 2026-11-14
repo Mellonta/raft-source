@@ -1,17 +1,27 @@
-# Deploying self-hosted Raft on Linux
+# Deploying self-hosted Raft
 
 Use a checkout of this branch for all commands. The server is based on Raft
 1.24.0. The Computer release pin in `scripts/mellonta/client-version` is
-independent of the server version. Both Linux x86-64 and ARM64 are supported.
+independent of the server version. The production server runs with Docker on
+Linux and macOS. The Mellonta Computer installer supports Linux x86-64 and ARM64.
 Run these scripts with Bash. Installation or publication of the corresponding
 release is a separate operation from editing the source.
 
 ## Production server with Docker
 
-On Linux, use the account that owns your deployment and can run `docker ps`.
-The script builds images from this checkout using Docker Compose v2. Setup
-uses sudo only to install missing host tools or create a state directory under
-a protected parent. If you use a separate storage disk, mount it before deploying.
+Use the account that owns the deployment and can run `docker ps`. The script
+uses Git, Python 3 and Docker Compose v2 to deploy from this checkout. On macOS,
+start Docker Desktop and run the script directly in Terminal. These commands
+deploy on localhost and show the status of each service.
+
+```bash
+bash scripts/mellonta/deploy-prod.sh --url http://localhost:8001 --bind 127.0.0.1
+bash ~/.raft-prod/raftprod status
+```
+
+On Linux, the script uses sudo only to install missing host tools or create a
+state directory under a protected parent. If you use a separate storage disk,
+mount it before deploying.
 
 ```bash
 bash scripts/mellonta/deploy-prod.sh --url http://raft.company.example:8001
@@ -19,8 +29,9 @@ bash /data/.raft-prod/raftprod status
 bash /data/.raft-prod/raftprod logs server
 ```
 
-The default state directory is `/data/.raft-prod`. To store PostgreSQL, RisingWave, Redis,
-uploads, settings, backups and launchers elsewhere, pass the exact directory:
+The default state directory is `/data/.raft-prod` on Linux and `~/.raft-prod` on macOS.
+Use `--state-dir` to keep PostgreSQL, RisingWave, Redis, uploads, settings,
+backups and launchers in another directory.
 
 ```bash
 bash scripts/mellonta/deploy-prod.sh --state-dir /srv/raft --url http://raft.company.example:8001
@@ -33,7 +44,7 @@ The saved launchers remember their directory. For example, run
 `bash /srv/raft/raftprod restart` to reload `server-extra.env`.
 For direct calls to `deploy-prod.sh`, all commands accept `--state-dir` or
 the environment variable `RAFT_PROD_STATE_DIR`. The flag takes precedence.
-The default directory uses the existing Compose project `raft-prod`. A different
+The Linux default directory uses the existing Compose project `raft-prod`. Any other
 directory gets a separate project. To reuse existing data, select its directory.
 
 Deployment backs up existing data, migrates PostgreSQL and verifies the portal
@@ -91,10 +102,11 @@ published port and telemetry disabled.
 ### Upgrade an existing Docker installation
 
 From the new checkout, run this during a maintenance window against the
-**same state directory** that the old release used.
+**same state directory** that the old release used. If you chose a custom
+directory, pass it again with `--state-dir` or use its saved `raftprod deploy` launcher.
 
 ```bash
-bash scripts/mellonta/deploy-prod.sh --state-dir /data/.raft-prod
+bash scripts/mellonta/deploy-prod.sh
 ```
 
 The script reuses the saved URL, credentials and mounts. It builds the images

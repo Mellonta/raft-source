@@ -111,7 +111,6 @@ class ProductionConfigTest(unittest.TestCase):
                                     env=env, cwd=self.source, capture_output=True, text=True)
             self.assertEqual(result.stdout.splitlines(), [str(self.root.resolve()), *expected])
 
-    @unittest.skipUnless(sys.platform.startswith("linux"), "deployment requires Linux")
     def test_cli_directory_precedence_for_existing_deployment(self):
         self.configure(public_url="http://raft.example:8001")
         docker = self.source / "docker"
@@ -136,7 +135,40 @@ class ProductionConfigTest(unittest.TestCase):
             self.assertNotEqual(busy.returncode, 0)
             self.assertIn("Another production operation", busy.stderr)
 
-    @unittest.skipUnless(sys.platform.startswith("linux"), "deployment requires Linux")
+    def test_shell_holds_operation_lock_until_docker_exits(self):
+        self.configure(public_url="http://raft.example:8001")
+        docker = self.source / "docker"
+        docker.write_text("""#!/usr/bin/env python3
+import fcntl, os, sys
+if sys.argv[-1] == 'stop':
+    with open(os.path.join(os.environ['RAFT_PROD_STATE_DIR'], 'deploy.lock')) as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit(0)
+        sys.exit('deploy.lock was released before Docker finished')
+""")
+        docker.chmod(0o755)
+        env = {**os.environ, "PATH": str(self.source) + ":" + os.environ["PATH"],
+               "RAFT_PROD_STATE_DIR": str(self.root)}
+        subprocess.run(["/bin/bash", str(Path(__file__).with_name("deploy-prod.sh")), "stop"], env=env, check=True)
+        with (self.root / "deploy.lock").open() as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS user state directory")
+    def test_mac_default_uses_current_users_home(self):
+        root = self.source / ".raft-prod"
+        env = {**os.environ, "HOME": str(self.source)}
+        env.pop("RAFT_PROD_STATE_DIR", None)
+        docker = self.source / "docker"
+        docker.write_text('#!/bin/sh\nexit 0\n')
+        docker.chmod(0o755)
+        env["PATH"] = str(self.source) + ":" + env["PATH"]
+        result = subprocess.run(["/bin/bash", str(Path(__file__).with_name("deploy-prod.sh")), "status"],
+                                env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"No production deployment in {root.resolve()}.", result.stderr)
+
     def test_deploy_prepares_user_owned_state_without_sudo(self):
         target = self.root / "new state"
         scripts = Path(__file__).resolve().parent
@@ -188,7 +220,7 @@ class ProductionConfigTest(unittest.TestCase):
             self.configure(public_url="https://raft.example")
         self.assertFalse((self.root / "settings.json").exists())
 
-    def test_help_needs_no_docker_or_linux(self):
+    def test_help_needs_no_docker(self):
         # Help can be inspected safely on the Mac before deployment.
         result = subprocess.run(["bash", str(Path(__file__).with_name("deploy-prod.sh")), "--help"], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

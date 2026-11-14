@@ -30,6 +30,16 @@ permissions:
 env:
   pnpm_config_verify_deps_before_run: "false"
 jobs:
+  macos-host:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Check deployment with macOS system tools
+        run: |
+          export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+          /bin/bash -n scripts/mellonta/deploy-prod.sh
+          python3 scripts/mellonta/prod-config.test.py
+          python3 scripts/mellonta/prod-verify.test.py
   deployment:
     strategy:
       fail-fast: false
